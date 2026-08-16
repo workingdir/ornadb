@@ -6,7 +6,15 @@ use std::{
     time::{Duration, UNIX_EPOCH},
 };
 
+#[cfg(feature = "test-hooks")]
+use orna_artifact::server_parameter_echo::ServerParameterEcho;
 use orna_client::evaluate_client_function;
+#[cfg(feature = "test-hooks")]
+use orna_compiler::{
+    STD_INTEGER_TYPE_ID, STD_INVOKE_ECHO_FUNCTION_ID, STD_INVOKE_ECHO_FUNCTION_REVISION_ID,
+    STD_INVOKE_ECHO_PARAMETER_ID, STD_INVOKE_ECHO_REVISION_NUMBER, STD_INVOKE_SCHEMA_ID,
+    STD_INVOKE_SOURCE_UNIT_ID, STD_TYPES_SOURCE_UNIT_ID,
+};
 use orna_compiler::{
     StandardApplicationCheckContext, check, check_standard_application, prepare,
     prepare_standard_application,
@@ -45,6 +53,14 @@ use orna_core::{
     },
     types::{ResolvedType, StandardScalar, TypeDescriptor, TypeDescriptorKind},
     value::RuntimeValue,
+};
+#[cfg(feature = "test-hooks")]
+use orna_core::{
+    StandardLibraryRevisionId,
+    canonical_hash::verify_standard_library_v2_snapshot,
+    catalogue::{PreludeTypeName, ValueTypeDefinition},
+    revision::{DeployableRevisionContent, DeployableRevisionInput, StandardExecutable},
+    security::SecurityFunctionTarget,
 };
 use orna_postgres::{PostgresKernel, PostgresKernelError};
 use support::{TestDatabase, TestResult, failure, with_test_database};
@@ -2637,6 +2653,661 @@ fn require_execute_audit(
     )
 }
 
+#[cfg(feature = "test-hooks")]
+#[tokio::test]
+#[ignore = "requires the Compose PostgreSQL development service"]
+async fn recovers_the_two_class_security_target_union_with_standard_targets() -> TestResult<()> {
+    const USER: PrincipalId = PrincipalId::from_bytes([0x31; 16]);
+
+    with_test_database(|database| async move {
+        let fixture = install_v2_standard_fixture(&database).await?;
+        let kernel = kernel(&database)?;
+        let snapshot = kernel.recover_security_snapshot().await?;
+        let executable = &fixture.standard.executables()[0];
+        let echo = executable.function();
+        let echo_target = SecurityFunctionTarget::verified_standard(
+            echo,
+            fixture.standard.revision(),
+            executable.revision().id(),
+        );
+        let mut targets = snapshot.function_targets().collect::<Vec<_>>();
+        require(
+            targets
+                .iter()
+                .filter(|target| {
+                    target.class() == orna_core::security::TargetClass::VerifiedStandard
+                })
+                .count()
+                == 1
+                && targets.contains(&echo_target),
+            "recovered security snapshot lost the verified standard target",
+        )?;
+        require(
+            snapshot
+                .function_targets()
+                .any(|target| target.function() == fixture.app_function),
+            "recovered security snapshot lost the application target",
+        )?;
+        targets.sort_unstable();
+        let mut expected = vec![
+            echo_target,
+            SecurityFunctionTarget::application(fixture.app_function),
+        ];
+        expected.sort_unstable();
+        require(
+            targets == expected,
+            "recovered security snapshot returned the wrong two-class target union",
+        )?;
+        require(
+            snapshot
+                .functions()
+                .eq(expected.iter().map(|target| target.function())),
+            "recovered security snapshot changed the canonical identity order",
+        )?;
+
+        // An EXECUTE grant on the standard target authorises only through the
+        // protected boundary with the exact immutable pins.
+        let granted = SecuritySnapshot::new_with_function_targets(
+            fixture.active.pair(),
+            snapshot.function_targets().collect(),
+            vec![Principal::new(
+                USER,
+                PrincipalKind::User,
+                PrincipalStatus::Active,
+            )],
+            vec![],
+            vec![ExecuteGrant::new(USER, echo)],
+        )?;
+        kernel.replace_security_snapshot(&granted).await?;
+        let recovered = kernel.recover_security_snapshot().await?;
+        let session = recovered.bind_authenticated_session(USER, vec![])?;
+        let protected = InvocationTarget::verified_standard(
+            echo,
+            fixture.active.pair(),
+            fixture.standard.revision(),
+            executable.revision().id(),
+        );
+        require(
+            matches!(
+                recovered.authorise_execute(&session, protected),
+                ExecuteDecision::Allowed(evidence)
+                    if evidence.authorising_principal() == USER
+            ),
+            "the protected standard target was not authorised by its exact grant",
+        )?;
+
+        // The ordinary raw dispatcher stays closed to the standard target even
+        // when its grant exists for the protected gateway.
+        let denied = kernel
+            .dispatch_authenticated_raw_call(&session, echo)
+            .await
+            .expect_err("raw dispatch of a standard target must deny");
+        require(
+            matches!(
+                denied,
+                PostgresKernelError::RawExecuteDenied {
+                    pair,
+                    function,
+                    reason: ExecuteDenial::UnknownFunction,
+                } if pair == fixture.active.pair() && function == echo
+            ),
+            "raw dispatch of a standard target returned the wrong denial",
+        )?;
+        let events = kernel.recover_security_audit_events().await?;
+        let target = InvocationTarget::new(echo, fixture.active.pair());
+        require(
+            events.len() == 1,
+            "raw standard target denial did not record exactly one EXECUTE decision",
+        )?;
+        require_execute_audit(
+            &events[0],
+            SecurityAuditOutcome::Denied,
+            USER,
+            None,
+            None,
+            target,
+            Some(ExecuteDenial::UnknownFunction),
+        )?;
+        require_no_session_leaks(&database).await
+    })
+    .await
+}
+
+#[cfg(feature = "test-hooks")]
+#[tokio::test]
+#[ignore = "requires the Compose PostgreSQL development service"]
+async fn recovery_rejects_a_standard_authority_target_absent_from_the_pinned_snapshot()
+-> TestResult<()> {
+    with_test_database(|database| async move {
+        let fixture = install_v2_standard_fixture(&database).await?;
+        let kernel = kernel(&database)?;
+        let catalogue = fixture.active.pair().catalogue().to_bytes().to_vec();
+        require(
+            kernel.recover_security_snapshot().await.is_ok(),
+            "the intact two-class fixture must recover its security snapshot",
+        )?;
+
+        // A standard authority row whose function revision is absent from the
+        // exact pinned standard executable fails recovery closed.
+        run_single_row_statement(
+            &database,
+            &format!(
+                "UPDATE _orna_kernel.invocation_target_authorities
+                 SET function_revision_id = decode(repeat('77', 16), 'hex')
+                 WHERE catalogue_revision_id = decode('{}', 'hex')
+                   AND function_id = decode('{}', 'hex')",
+                raw_id_hex(
+                    fixture.active.pair().catalogue().to_bytes(),
+                ),
+                raw_id_hex(
+                    fixture.standard.executables()[0].function().to_bytes(),
+                ),
+            ),
+        )
+        .await?;
+        let wrong_revision = kernel
+            .recover_security_snapshot()
+            .await
+            .expect_err("a standard target with the wrong executable revision must fail");
+        require(
+            matches!(
+                wrong_revision,
+                PostgresKernelError::DurableInvariant {
+                    relation: "_orna_kernel.invocation_target_authorities",
+                    rule: "standard invocation target must resolve exactly once in the pinned verified standard snapshot",
+                    ..
+                }
+            ),
+            "wrong standard executable revision returned the wrong durable invariant",
+        )?;
+        run_single_row_statement(
+            &database,
+            &format!(
+                "UPDATE _orna_kernel.invocation_target_authorities
+                 SET function_revision_id = decode('{}', 'hex')
+                 WHERE catalogue_revision_id = decode('{}', 'hex')
+                   AND function_id = decode('{}', 'hex')",
+                raw_id_hex(fixture.standard.executables()[0].revision().id().to_bytes()),
+                raw_id_hex(fixture.active.pair().catalogue().to_bytes()),
+                raw_id_hex(fixture.standard.executables()[0].function().to_bytes()),
+            ),
+        )
+        .await?;
+
+        // A missing standard authority row fails recovery without repair.
+        run_single_row_statement(
+            &database,
+            &format!(
+                "DELETE FROM _orna_kernel.invocation_target_authorities
+                 WHERE catalogue_revision_id = decode('{}', 'hex')
+                   AND function_id = decode('{}', 'hex')",
+                raw_id_hex(fixture.active.pair().catalogue().to_bytes()),
+                raw_id_hex(fixture.standard.executables()[0].function().to_bytes()),
+            ),
+        )
+        .await?;
+        let missing = kernel
+            .recover_security_snapshot()
+            .await
+            .expect_err("a missing standard authority target must fail recovery");
+        require(
+            matches!(
+                missing,
+                PostgresKernelError::DurableInvariant {
+                    relation: "_orna_kernel.invocation_target_authorities",
+                    rule: "standard invocation targets must exactly match the pinned verified standard executables",
+                    ..
+                }
+            ),
+            "missing standard authority target returned the wrong durable invariant",
+        )?;
+        let retained: i64 = {
+            let session = database.open().await?;
+            let count = session
+                .client()
+                .query_one(
+                    "SELECT count(*) FROM _orna_kernel.invocation_target_authorities
+                     WHERE catalogue_revision_id = $1 AND target_class = 'standard'",
+                    &[&catalogue],
+                )
+                .await?
+                .get(0);
+            finish_session(
+                Ok(count),
+                session.shutdown().await,
+                "standard authority retention check",
+            )?
+        };
+        require(
+            retained == 0,
+            "rejected standard authority tamper was repaired",
+        )?;
+        require_no_session_leaks(&database).await
+    })
+    .await
+}
+
+#[cfg(feature = "test-hooks")]
+#[tokio::test]
+#[ignore = "requires the Compose PostgreSQL development service"]
+async fn recovery_rejects_an_application_standard_duplicate_target() -> TestResult<()> {
+    with_test_database(|database| async move {
+        let fixture = install_v2_standard_fixture(&database).await?;
+        let kernel = kernel(&database)?;
+        let catalogue = fixture.active.pair().catalogue().to_bytes().to_vec();
+
+        // A standard authority row that is re-classified as an application row
+        // no longer resolves in the pinned application catalogue: the same
+        // function identity cannot belong to both classes.
+        run_batch(
+            &database,
+            &format!(
+                "ALTER TABLE _orna_kernel.invocation_target_authorities
+                     DROP CONSTRAINT invocation_target_authorities_target_class_check,
+                     DROP CONSTRAINT invocation_target_authorities_class_shape_check;
+                 UPDATE _orna_kernel.invocation_target_authorities
+                 SET target_class = 'application', standard_library_revision_id = NULL
+                 WHERE catalogue_revision_id = decode('{}', 'hex')
+                   AND function_id = decode('{}', 'hex');",
+                raw_id_hex(fixture.active.pair().catalogue().to_bytes()),
+                raw_id_hex(fixture.standard.executables()[0].function().to_bytes()),
+            ),
+        )
+        .await?;
+        let ambiguous = kernel
+            .recover_security_snapshot()
+            .await
+            .expect_err("an application-class authority row without a catalogue function must fail");
+        require(
+            matches!(
+                ambiguous,
+                PostgresKernelError::DurableInvariant {
+                    relation: "_orna_kernel.invocation_target_authorities",
+                    rule: "application invocation targets must resolve in the pinned application catalogue",
+                    ..
+                }
+            ),
+            "ambiguous application authority row returned the wrong durable invariant",
+        )?;
+        run_batch(
+            &database,
+            &format!(
+                "UPDATE _orna_kernel.invocation_target_authorities
+                 SET target_class = 'standard', standard_library_revision_id = decode('{}', 'hex')
+                 WHERE catalogue_revision_id = decode('{}', 'hex')
+                   AND function_id = decode('{}', 'hex');
+                 ALTER TABLE _orna_kernel.invocation_target_authorities
+                     ADD CONSTRAINT invocation_target_authorities_target_class_check
+                     CHECK (target_class IN ('application', 'standard')),
+                     ADD CONSTRAINT invocation_target_authorities_class_shape_check
+                     CHECK (
+                        (target_class = 'application' AND standard_library_revision_id IS NULL)
+                        OR (target_class = 'standard' AND standard_library_revision_id IS NOT NULL)
+                     );",
+                raw_id_hex(fixture.standard.revision().to_bytes()),
+                raw_id_hex(fixture.active.pair().catalogue().to_bytes()),
+                raw_id_hex(fixture.standard.executables()[0].function().to_bytes()),
+            ),
+        )
+        .await?;
+        require(
+            kernel.recover_security_snapshot().await.is_ok(),
+            "restored authority rows did not recover the two-class union",
+        )?;
+
+        // The same function identity present in both the application catalogue
+        // and the standard authority rows is an application-and-standard
+        // duplicate. The duplicate changes the catalogue itself, so full
+        // recovery fails closed without writing or repairing any row.
+        let session = database.open().await?;
+        let schema = session
+            .client()
+            .query_one(
+                "SELECT schema_id FROM _orna_kernel.catalogue_schemas
+                 WHERE catalogue_revision_id = $1 LIMIT 1",
+                &[&catalogue],
+            )
+            .await?
+            .get::<_, Vec<u8>>(0);
+        let duplicate: TestResult<()> = async {
+            let function_id = fixture.standard.executables()[0].function().to_bytes().to_vec();
+            let revision = fixture.standard.executables()[0].revision().id().to_bytes().to_vec();
+            let content_hash = vec![0x77_u8; 32];
+            let unit = vec![0xa1_u8; 16];
+            session
+                .client()
+                .batch_execute("BEGIN; SET CONSTRAINTS ALL DEFERRED")
+                .await?;
+            session
+                .client()
+                .execute(
+                    "INSERT INTO _orna_kernel.function_revisions
+                        (id, introduced_catalogue_revision_id, function_id,
+                         revision_number, content_hash, semantic_ir_hash,
+                         language_version, status)
+                     VALUES ($1, $2, $3, 1, $4, $4, 'orna.language/1', 'active')",
+                    &[&revision, &catalogue, &function_id, &content_hash],
+                )
+                .await?;
+            session
+                .client()
+                .execute(
+                    "INSERT INTO _orna_kernel.function_artifacts
+                        (function_revision_id, artifact_kind, format,
+                         format_version, payload, content_hash)
+                     VALUES ($1, 'server_plan', 'orna.server-parameter-echo', 1,
+                             decode('4f524e4150450000000000000001000000000000000000000000000000000000000000000000000000000000000000', 'hex'), $2)",
+                    &[&revision, &content_hash],
+                )
+                .await?;
+            session
+                .client()
+                .execute(
+                    "INSERT INTO _orna_kernel.catalogue_functions
+                        (catalogue_revision_id, function_id, schema_id, name_parts,
+                         domain, security_mode, transaction_mode, volatility,
+                         return_shape, return_type_kind, return_scalar_type,
+                         current_function_revision_id, source_unit_id, source_start, source_end)
+                     VALUES ($1, $2, $3, ARRAY['std', 'invoke', 'echo'], 'server',
+                             'invoker', 'read_only', 'stable', 'single',
+                             'scalar', 'integer', $4, $5, 0, 1)",
+                    &[&catalogue, &function_id, &schema, &revision, &unit],
+                )
+                .await?;
+            session.client().batch_execute("COMMIT").await?;
+            Ok(())
+        }
+        .await;
+        finish_session(
+            duplicate,
+            session.shutdown().await,
+            "application and standard duplicate fixture",
+        )?;
+        let error = kernel
+            .recover()
+            .await
+            .expect_err("an application and standard duplicate must fail recovery");
+        require(
+            matches!(
+                error,
+                PostgresKernelError::DurableInvariant { .. }
+                    | PostgresKernelError::RevisionInvariant(_)
+                    | PostgresKernelError::CatalogueSnapshot(_)
+            ),
+            "application and standard duplicate returned the wrong fail-closed error",
+        )?;
+        require_no_session_leaks(&database).await
+    })
+    .await
+}
+
+#[cfg(feature = "test-hooks")]
+#[tokio::test]
+#[ignore = "requires the Compose PostgreSQL development service"]
+async fn recovery_rejects_a_grant_naming_a_removed_standard_function() -> TestResult<()> {
+    const USER: PrincipalId = PrincipalId::from_bytes([0x31; 16]);
+
+    with_test_database(|database| async move {
+        let fixture = install_v2_standard_fixture(&database).await?;
+        let kernel = kernel(&database)?;
+        let echo = fixture.standard.executables()[0].function();
+
+        // The grant on the standard target is valid while the target exists.
+        run_batch(
+            &database,
+            &format!(
+                "INSERT INTO _orna_kernel.security_principals (id, kind, status)
+                 VALUES (decode('{}', 'hex'), 'user', 'active');
+                 INSERT INTO _orna_kernel.security_execute_grants (grantee_id, function_id)
+                 VALUES (decode('{}', 'hex'), decode('{}', 'hex'));",
+                raw_id_hex(USER.to_bytes()),
+                raw_id_hex(USER.to_bytes()),
+                raw_id_hex(echo.to_bytes()),
+            ),
+        )
+        .await?;
+        require(
+            kernel.recover_security_snapshot().await.is_ok(),
+            "the granted standard target must recover before the upgrade",
+        )?;
+
+        // A later standard upgrade removes the granted function from the
+        // target union. Recovery must fail closed and must not drop, translate,
+        // or keep the unknown grant.
+        install_later_standard_upgrade_without_echo(&database, &fixture).await?;
+        let error = kernel
+            .recover_security_snapshot()
+            .await
+            .expect_err("a grant naming a removed standard function must fail recovery");
+        require(
+            matches!(
+                error,
+                PostgresKernelError::SecuritySnapshot(SecuritySnapshotError::UnknownGrantFunction)
+            ),
+            "removed standard function grant returned the wrong fail-closed error",
+        )?;
+        let retained: bool = {
+            let session = database.open().await?;
+            let exists = session
+                .client()
+                .query_one(
+                    "SELECT count(*) > 0 FROM _orna_kernel.security_execute_grants
+                     WHERE grantee_id = $1 AND function_id = $2",
+                    &[&USER.to_bytes().to_vec(), &echo.to_bytes().to_vec()],
+                )
+                .await?
+                .get(0);
+            finish_session(
+                Ok(exists),
+                session.shutdown().await,
+                "removed standard function grant retention check",
+            )?
+        };
+        require(
+            retained,
+            "recovery repaired the grant naming the removed standard function",
+        )?;
+        require_no_session_leaks(&database).await
+    })
+    .await
+}
+
+#[cfg(feature = "test-hooks")]
+#[tokio::test]
+#[ignore = "requires the Compose PostgreSQL development service"]
+async fn recovers_invocation_audit_standard_targets_through_the_historical_pin() -> TestResult<()> {
+    const SESSION: PrincipalId = PrincipalId::from_bytes([0x71; 16]);
+    const EFFECTIVE: PrincipalId = PrincipalId::from_bytes([0x72; 16]);
+    const AUTHORISING: PrincipalId = PrincipalId::from_bytes([0x73; 16]);
+
+    with_test_database(|database| async move {
+        let fixture = install_v2_standard_fixture(&database).await?;
+        let kernel = kernel(&database)?;
+        let echo = fixture.standard.executables()[0].function();
+        let pair = fixture.active.pair();
+        {
+            let database_session = database.open().await?;
+            let insertion = database_session
+                .client()
+                .batch_execute(&format!(
+                    "INSERT INTO _orna_kernel.security_audit_events
+                         (event_id, event_kind, outcome, session_principal_id,
+                          effective_principal_id, authorising_principal_id, function_id,
+                          source_revision_id, catalogue_revision_id)
+                     VALUES (decode(repeat('a1', 16), 'hex'), 'execute', 'allowed',
+                             decode('{}', 'hex'), decode('{}', 'hex'), decode('{}', 'hex'),
+                             decode('{}', 'hex'), decode('{}', 'hex'), decode('{}', 'hex'));
+                     INSERT INTO _orna_kernel.invocation_audit_events
+                         (event_id, invocation_id, outcome, session_principal_id,
+                          effective_principal_id, authorising_principal_id, function_id,
+                          source_revision_id, catalogue_revision_id, security_audit_event_id)
+                     VALUES (decode(repeat('b1', 16), 'hex'), decode(repeat('c1', 16), 'hex'),
+                             'allowed', decode('{}', 'hex'), decode('{}', 'hex'), decode('{}', 'hex'),
+                             decode('{}', 'hex'), decode('{}', 'hex'), decode('{}', 'hex'),
+                             decode(repeat('a1', 16), 'hex'));",
+                    raw_id_hex(SESSION.to_bytes()),
+                    raw_id_hex(EFFECTIVE.to_bytes()),
+                    raw_id_hex(AUTHORISING.to_bytes()),
+                    raw_id_hex(echo.to_bytes()),
+                    raw_id_hex(pair.source().to_bytes()),
+                    raw_id_hex(pair.catalogue().to_bytes()),
+                    raw_id_hex(SESSION.to_bytes()),
+                    raw_id_hex(EFFECTIVE.to_bytes()),
+                    raw_id_hex(AUTHORISING.to_bytes()),
+                    raw_id_hex(echo.to_bytes()),
+                    raw_id_hex(pair.source().to_bytes()),
+                    raw_id_hex(pair.catalogue().to_bytes()),
+                ))
+                .await
+                .map_err(Into::into);
+            finish_session(
+                insertion,
+                database_session.shutdown().await,
+                "standard invocation audit fixture insertion",
+            )?;
+        }
+        kernel.recover().await?;
+
+        // The application RevisionPair in the audit row is the durable pin:
+        // the standard target must resolve through the authority relation and
+        // the historical catalogue revision's exact verified standard snapshot.
+        run_single_row_statement(
+            &database,
+            &format!(
+                "UPDATE _orna_kernel.invocation_target_authorities
+                 SET function_revision_id = decode(repeat('77', 16), 'hex')
+                 WHERE catalogue_revision_id = decode('{}', 'hex')
+                   AND function_id = decode('{}', 'hex')",
+                raw_id_hex(pair.catalogue().to_bytes()),
+                raw_id_hex(echo.to_bytes()),
+            ),
+        )
+        .await?;
+        let wrong_executable = recovery_error(&database).await?;
+        require(
+            matches!(
+                wrong_executable,
+                PostgresKernelError::DurableInvariant {
+                    relation: "_orna_kernel.invocation_audit_events",
+                    rule: "target function and pinned revision must exist together",
+                    ..
+                }
+            ),
+            "wrong standard executable revision did not fail audit recovery closed",
+        )?;
+        run_single_row_statement(
+            &database,
+            &format!(
+                "UPDATE _orna_kernel.invocation_target_authorities
+                 SET function_revision_id = decode('{}', 'hex')
+                 WHERE catalogue_revision_id = decode('{}', 'hex')
+                   AND function_id = decode('{}', 'hex')",
+                raw_id_hex(fixture.standard.executables()[0].revision().id().to_bytes()),
+                raw_id_hex(pair.catalogue().to_bytes()),
+                raw_id_hex(echo.to_bytes()),
+            ),
+        )
+        .await?;
+        kernel.recover().await?;
+
+        run_batch(
+            &database,
+            &format!(
+                "ALTER TABLE _orna_kernel.invocation_audit_events
+                     DROP CONSTRAINT invocation_audit_events_target_fk;
+                 DELETE FROM _orna_kernel.invocation_target_authorities
+                 WHERE catalogue_revision_id = decode('{}', 'hex')
+                   AND function_id = decode('{}', 'hex');",
+                raw_id_hex(pair.catalogue().to_bytes()),
+                raw_id_hex(echo.to_bytes()),
+            ),
+        )
+        .await?;
+        let absent = recovery_error(&database).await?;
+        require(
+            matches!(
+                absent,
+                PostgresKernelError::DurableInvariant {
+                    relation: "_orna_kernel.invocation_audit_events",
+                    rule: "target function and pinned revision must exist together",
+                    ..
+                }
+            ),
+            "absent standard authority target did not fail audit recovery closed",
+        )?;
+        run_batch(
+            &database,
+            &format!(
+                "INSERT INTO _orna_kernel.invocation_target_authorities
+                    (catalogue_revision_id, function_id, target_class,
+                     function_revision_id, standard_library_revision_id)
+                 VALUES (decode('{}', 'hex'), decode('{}', 'hex'), 'standard',
+                         decode('{}', 'hex'), decode('{}', 'hex'));
+                 ALTER TABLE _orna_kernel.invocation_audit_events
+                     ADD CONSTRAINT invocation_audit_events_target_fk
+                     FOREIGN KEY (catalogue_revision_id, function_id)
+                     REFERENCES _orna_kernel.invocation_target_authorities(
+                         catalogue_revision_id,
+                         function_id
+                     );",
+                raw_id_hex(pair.catalogue().to_bytes()),
+                raw_id_hex(echo.to_bytes()),
+                raw_id_hex(fixture.standard.executables()[0].revision().id().to_bytes()),
+                raw_id_hex(fixture.standard.revision().to_bytes()),
+            ),
+        )
+        .await?;
+        kernel.recover().await?;
+
+        run_batch(
+            &database,
+            &format!(
+                "ALTER TABLE _orna_kernel.invocation_target_authorities
+                     DROP CONSTRAINT invocation_target_authorities_standard_pin_fk;
+                 UPDATE _orna_kernel.invocation_target_authorities
+                 SET standard_library_revision_id = decode(repeat('66', 16), 'hex')
+                 WHERE catalogue_revision_id = decode('{}', 'hex')
+                   AND function_id = decode('{}', 'hex');",
+                raw_id_hex(pair.catalogue().to_bytes()),
+                raw_id_hex(echo.to_bytes()),
+            ),
+        )
+        .await?;
+        let wrong_pin = recovery_error(&database).await?;
+        require(
+            matches!(
+                wrong_pin,
+                PostgresKernelError::DurableInvariant {
+                    relation: "_orna_kernel.invocation_audit_events",
+                    rule: "target function and pinned revision must exist together",
+                    ..
+                }
+            ),
+            "wrong standard revision pin did not fail audit recovery closed",
+        )?;
+        run_batch(
+            &database,
+            &format!(
+                "UPDATE _orna_kernel.invocation_target_authorities
+                 SET standard_library_revision_id = decode('{}', 'hex')
+                 WHERE catalogue_revision_id = decode('{}', 'hex')
+                   AND function_id = decode('{}', 'hex');
+                 ALTER TABLE _orna_kernel.invocation_target_authorities
+                     ADD CONSTRAINT invocation_target_authorities_standard_pin_fk
+                     FOREIGN KEY (catalogue_revision_id, standard_library_revision_id)
+                     REFERENCES _orna_kernel.catalogue_revisions(id, standard_library_revision_id);",
+                raw_id_hex(fixture.standard.revision().to_bytes()),
+                raw_id_hex(pair.catalogue().to_bytes()),
+                raw_id_hex(echo.to_bytes()),
+            ),
+        )
+        .await?;
+        kernel.recover().await?;
+        require_no_session_leaks(&database).await
+    })
+    .await
+}
+
 #[tokio::test]
 #[ignore = "requires the Compose PostgreSQL development service"]
 async fn rejects_the_offline_application_catalogue_identity_without_repair() -> TestResult<()> {
@@ -5164,6 +5835,22 @@ async fn install_function_revision(database: &TestDatabase) -> TestResult<Functi
         for reference in &references {
             insert_reference_record(session.client(), catalogue_id, reference).await?;
         }
+        for function in &functions {
+            session
+                .client()
+                .execute(
+                    "INSERT INTO _orna_kernel.invocation_target_authorities
+                        (catalogue_revision_id, function_id, target_class,
+                         function_revision_id, standard_library_revision_id)
+                     VALUES ($1, $2, 'application', $3, NULL)",
+                    &[
+                        &catalogue_id.to_bytes().to_vec(),
+                        &function.id().to_bytes().to_vec(),
+                        &function.current_revision().to_bytes().to_vec(),
+                    ],
+                )
+                .await?;
+        }
         session
             .client()
             .execute(
@@ -5475,6 +6162,598 @@ fn standard_origin(
                 "standard fixture origin is missing for {identity:?}"
             ))
         })
+}
+
+// The version-2 standard source constants below are the exact retained
+// `std/types.orna` and `std/invoke.orna` shapes from the compiler reconcile
+// fixtures. The fixture uses the same fixed identities, source, catalogue,
+// executable, and origins, so its canonical digest is the compiled
+// STANDARD_V2_CANONICAL_DIGEST golden.
+#[cfg(feature = "test-hooks")]
+const STD_INVOKE_SOURCE: &str = "CREATE SCHEMA std.invoke;\n\
+    CREATE SERVER FUNCTION std.invoke.echo(\n\
+    \x20   p_value INTEGER\n\
+    )\n\
+    RETURNS INTEGER\n\
+    SECURITY INVOKER\n\
+    TRANSACTION READ ONLY\n\
+    VOLATILITY STABLE\n\
+    AS\n\
+    \x20   SELECT p_value;";
+
+#[cfg(feature = "test-hooks")]
+const STANDARD_V2_TYPES_SOURCE: &str = "CREATE SCHEMA std;CREATE SCHEMA std.types;\
+    CREATE TYPE std.types.INTEGER AS VALUE PRIMITIVE KERNEL CONTRACT \
+    'orna.kernel.value.integer@1' IMMUTABLE PERSISTABLE;\
+    EXPORT TYPE std.types.INTEGER AS std.INTEGER;\
+    EXPORT TYPE std.INTEGER TO PRELUDE AS INTEGER;";
+
+#[cfg(feature = "test-hooks")]
+const STANDARD_V2_CANONICAL_DIGEST: [u8; 32] = [
+    115, 202, 159, 209, 255, 174, 218, 69, 195, 114, 168, 108, 210, 7, 50, 127, 176, 149, 134, 145,
+    229, 113, 139, 179, 237, 228, 75, 75, 94, 20, 52, 52,
+];
+
+/// The complete V2 standard fixture with the exact compiler-reconcile
+/// identities and the compiled canonical digest golden. Its source revision
+/// parent must exist as a durable source revision before the upgrade applies.
+#[cfg(feature = "test-hooks")]
+fn verified_standard_v2_fixture() -> TestResult<VerifiedStandardLibrarySnapshot> {
+    let types_unit = StoredSourceUnit::new(
+        STD_TYPES_SOURCE_UNIT_ID,
+        0,
+        "std/types.orna",
+        STANDARD_V2_TYPES_SOURCE,
+        source_unit_content_digest(STANDARD_V2_TYPES_SOURCE)?,
+    )?;
+    let invoke_unit = StoredSourceUnit::new(
+        STD_INVOKE_SOURCE_UNIT_ID,
+        1,
+        "std/invoke.orna",
+        STD_INVOKE_SOURCE,
+        source_unit_content_digest(STD_INVOKE_SOURCE)?,
+    )?;
+    let units = vec![types_unit, invoke_unit];
+    let bundle = SourceBundleId::from_bytes([0x41; 16]);
+    let bundle_hash = source_bundle_digest(&units)?;
+    let source = StoredSourceRevision::new(
+        bundle,
+        SourceRevisionId::from_bytes([0x42; 16]),
+        Some(SourceRevisionId::from_bytes([0x43; 16])),
+        units,
+        bundle_hash,
+        source_revision_record_digest(
+            bundle,
+            Some(SourceRevisionId::from_bytes([0x43; 16])),
+            bundle_hash,
+        )?,
+    )?;
+
+    let integer = ValueTypeDefinition::primitive(
+        STD_INTEGER_TYPE_ID,
+        QualifiedSemanticName::new(["std", "types", "integer"])?,
+        ValueTypeMutability::Immutable,
+        ValueTypePersistence::Persistable,
+        "orna.kernel.value.integer@1",
+    );
+    let qualified = TypeBinding::qualified(
+        QualifiedSemanticName::new(["std", "integer"])?,
+        integer.id(),
+    )?;
+    let prelude = TypeBinding::prelude(PreludeTypeName::new(["integer"])?, integer.id())?;
+    let echo = FunctionDefinition::new(
+        STD_INVOKE_ECHO_FUNCTION_ID,
+        QualifiedSemanticName::new(["std", "invoke", "echo"])?,
+        FunctionDomain::Server,
+        vec![ParameterDefinition::new(
+            STD_INVOKE_ECHO_PARAMETER_ID,
+            "p_value",
+            0,
+            ResolvedType::scalar(StandardScalar::Integer),
+            None,
+        )],
+        FunctionReturn::Single(ResolvedType::scalar(StandardScalar::Integer)),
+        STD_INVOKE_ECHO_FUNCTION_REVISION_ID,
+        FunctionSecurity::Invoker,
+        Some(FunctionTransaction::ReadOnly),
+        FunctionVolatility::Stable,
+    );
+    let catalogue = CatalogueSnapshot::new_with_functions_and_types(
+        CatalogueRevisionId::from_bytes([0x21; 16]),
+        vec![
+            SchemaDefinition::new(
+                SchemaId::from_bytes([1; 16]),
+                QualifiedSemanticName::new(["std"])?,
+            ),
+            SchemaDefinition::new(
+                SchemaId::from_bytes([2; 16]),
+                QualifiedSemanticName::new(["std", "types"])?,
+            ),
+            SchemaDefinition::new(
+                STD_INVOKE_SCHEMA_ID,
+                QualifiedSemanticName::new(["std", "invoke"])?,
+            ),
+        ],
+        vec![],
+        vec![integer],
+        vec![qualified, prelude],
+        vec![echo],
+    )?;
+
+    let origins = standard_v2_origins(&catalogue, STD_INVOKE_SOURCE)?;
+    let executable = standard_v2_executable(&catalogue, &origins)?;
+
+    let provisional = StandardLibrarySnapshot::new_with_executables(
+        StandardLibraryRevisionId::from_bytes([0x44; 16]),
+        StandardLibraryDigestVersion::Version2,
+        source,
+        "orna.language/1",
+        catalogue,
+        vec![executable],
+        origins,
+        Sha256Digest::from_bytes(STANDARD_V2_CANONICAL_DIGEST),
+    )?;
+    Ok(verify_standard_library_v2_snapshot(provisional)?)
+}
+
+/// Builds the exact origin sequence for both retained V2 source units. The
+/// byte ranges match the parsed declaration spans of the compiler fixture.
+#[cfg(feature = "test-hooks")]
+fn standard_v2_origins(
+    catalogue: &CatalogueSnapshot,
+    invoke_source: &str,
+) -> TestResult<Vec<DefinitionOrigin>> {
+    let mut origins = Vec::new();
+    let types = STANDARD_V2_TYPES_SOURCE;
+    let schema_std_end = "CREATE SCHEMA std;".len();
+    let schema_types_end = schema_std_end + "CREATE SCHEMA std.types;".len();
+    let type_declaration = "CREATE TYPE std.types.INTEGER AS VALUE PRIMITIVE KERNEL CONTRACT 'orna.kernel.value.integer@1' IMMUTABLE PERSISTABLE;";
+    let type_start = types
+        .find("CREATE TYPE")
+        .ok_or_else(|| failure("missing type"))?;
+    let type_end = type_start + type_declaration.len();
+    let qualified_declaration = "EXPORT TYPE std.types.INTEGER AS std.INTEGER;";
+    let qualified_start = types
+        .find("EXPORT TYPE std.types.INTEGER AS std.INTEGER")
+        .ok_or_else(|| failure("missing qualified binding"))?;
+    let qualified_end = qualified_start + qualified_declaration.len();
+    let prelude_declaration = "EXPORT TYPE std.INTEGER TO PRELUDE AS INTEGER;";
+    let prelude_start = types
+        .find("EXPORT TYPE std.INTEGER TO PRELUDE")
+        .ok_or_else(|| failure("missing prelude binding"))?;
+    let prelude_end = prelude_start + prelude_declaration.len();
+    let types_unit = STD_TYPES_SOURCE_UNIT_ID;
+    let qualified_binding = catalogue
+        .type_bindings()
+        .first()
+        .ok_or_else(|| failure("missing qualified binding"))?;
+    let prelude_binding = catalogue
+        .type_bindings()
+        .last()
+        .ok_or_else(|| failure("missing prelude binding"))?;
+    origins.push(DefinitionOrigin::new(
+        DefinitionIdentity::Schema(SchemaId::from_bytes([1; 16])),
+        SourceOrigin::new(types_unit, 0, u32::try_from(schema_std_end)?)?,
+    ));
+    origins.push(DefinitionOrigin::new(
+        DefinitionIdentity::Schema(SchemaId::from_bytes([2; 16])),
+        SourceOrigin::new(
+            types_unit,
+            u32::try_from(schema_std_end)?,
+            u32::try_from(schema_types_end)?,
+        )?,
+    ));
+    origins.push(DefinitionOrigin::new(
+        DefinitionIdentity::ValueType(STD_INTEGER_TYPE_ID),
+        SourceOrigin::new(
+            types_unit,
+            u32::try_from(type_start)?,
+            u32::try_from(type_end)?,
+        )?,
+    ));
+    origins.push(DefinitionOrigin::new(
+        DefinitionIdentity::TypeBinding(qualified_binding.id()),
+        SourceOrigin::new(
+            types_unit,
+            u32::try_from(qualified_start)?,
+            u32::try_from(qualified_end)?,
+        )?,
+    ));
+    origins.push(DefinitionOrigin::new(
+        DefinitionIdentity::TypeBinding(prelude_binding.id()),
+        SourceOrigin::new(
+            types_unit,
+            u32::try_from(prelude_start)?,
+            u32::try_from(prelude_end)?,
+        )?,
+    ));
+
+    let function_start = invoke_source
+        .find("CREATE SERVER FUNCTION")
+        .ok_or_else(|| failure("missing function declaration"))?;
+    let function_end = invoke_source.len();
+    let parameter_start = invoke_source
+        .find("p_value")
+        .ok_or_else(|| failure("missing parameter declaration"))?;
+    let parameter_end = parameter_start + "p_value INTEGER".len();
+    let schema_end = "CREATE SCHEMA std.invoke;".len();
+    origins.push(DefinitionOrigin::new(
+        DefinitionIdentity::Schema(STD_INVOKE_SCHEMA_ID),
+        SourceOrigin::new(STD_INVOKE_SOURCE_UNIT_ID, 0, u32::try_from(schema_end)?)?,
+    ));
+    origins.push(DefinitionOrigin::new(
+        DefinitionIdentity::Function(STD_INVOKE_ECHO_FUNCTION_ID),
+        SourceOrigin::new(
+            STD_INVOKE_SOURCE_UNIT_ID,
+            u32::try_from(function_start)?,
+            u32::try_from(function_end)?,
+        )?,
+    ));
+    origins.push(DefinitionOrigin::new(
+        DefinitionIdentity::Parameter {
+            owner: STD_INVOKE_ECHO_FUNCTION_ID,
+            parameter: STD_INVOKE_ECHO_PARAMETER_ID,
+        },
+        SourceOrigin::new(
+            STD_INVOKE_SOURCE_UNIT_ID,
+            u32::try_from(parameter_start)?,
+            u32::try_from(parameter_end)?,
+        )?,
+    ));
+    Ok(origins)
+}
+
+/// Builds the exact V2 executable: the immutable echo revision, the 44-byte
+/// server parameter-echo artifact, and the three ordered references.
+#[cfg(feature = "test-hooks")]
+fn standard_v2_executable(
+    catalogue: &CatalogueSnapshot,
+    origins: &[DefinitionOrigin],
+) -> TestResult<StandardExecutable> {
+    let function = catalogue
+        .function_by_id(STD_INVOKE_ECHO_FUNCTION_ID)
+        .ok_or_else(|| failure("missing echo function"))?;
+    let function_origin = origins
+        .iter()
+        .find(|origin| {
+            origin.identity() == DefinitionIdentity::Function(STD_INVOKE_ECHO_FUNCTION_ID)
+        })
+        .ok_or_else(|| failure("missing echo function origin"))?
+        .source();
+    let declaration_content_hash = function_declaration_digest(
+        &STD_INVOKE_SOURCE.as_bytes()
+            [function_origin.byte_start() as usize..function_origin.byte_end() as usize],
+    )?;
+    let payload =
+        ServerParameterEcho::new(STD_INVOKE_ECHO_PARAMETER_ID, STD_INTEGER_TYPE_ID)?.encode()?;
+    let content_hash = artifact_payload_digest(&payload)?;
+    let artifact = ExecutableArtifact::new(
+        ExecutableArtifactKind::Server,
+        "orna.server-parameter-echo",
+        1,
+        payload,
+        content_hash,
+    )?;
+    let parameter_integer_start = STD_INVOKE_SOURCE
+        .find("INTEGER")
+        .ok_or_else(|| failure("missing parameter type"))? as u32;
+    let result_integer_start = STD_INVOKE_SOURCE
+        .rfind("INTEGER")
+        .ok_or_else(|| failure("missing result type"))? as u32;
+    let body_p_value_start = STD_INVOKE_SOURCE
+        .rfind("p_value")
+        .ok_or_else(|| failure("missing body identifier"))? as u32;
+    let integer_origin = |start: u32| -> TestResult<SourceOrigin> {
+        Ok(SourceOrigin::new(
+            STD_INVOKE_SOURCE_UNIT_ID,
+            start,
+            start + 7,
+        )?)
+    };
+    let references = vec![
+        DefinitionReference::new(
+            STD_INVOKE_ECHO_FUNCTION_ID,
+            STD_INVOKE_ECHO_FUNCTION_REVISION_ID,
+            0,
+            DefinitionReferenceTarget::ValueType(STD_INTEGER_TYPE_ID),
+            DefinitionReferenceKind::NamedType,
+            integer_origin(parameter_integer_start)?,
+        ),
+        DefinitionReference::new(
+            STD_INVOKE_ECHO_FUNCTION_ID,
+            STD_INVOKE_ECHO_FUNCTION_REVISION_ID,
+            1,
+            DefinitionReferenceTarget::ValueType(STD_INTEGER_TYPE_ID),
+            DefinitionReferenceKind::NamedType,
+            integer_origin(result_integer_start)?,
+        ),
+        DefinitionReference::new(
+            STD_INVOKE_ECHO_FUNCTION_ID,
+            STD_INVOKE_ECHO_FUNCTION_REVISION_ID,
+            2,
+            DefinitionReferenceTarget::Parameter {
+                owner: STD_INVOKE_ECHO_FUNCTION_ID,
+                parameter: STD_INVOKE_ECHO_PARAMETER_ID,
+            },
+            DefinitionReferenceKind::ParameterRead,
+            integer_origin(body_p_value_start)?,
+        ),
+    ];
+    let semantic = function_semantic_digest_with_version(
+        FunctionSemanticHashVersion::Version2,
+        function,
+        "orna.language/1",
+        &artifact,
+        &[],
+        &references,
+    )?;
+    let revision = FunctionRevisionRecord::new(
+        STD_INVOKE_ECHO_FUNCTION_ID,
+        STD_INVOKE_ECHO_FUNCTION_REVISION_ID,
+        STD_INVOKE_ECHO_REVISION_NUMBER,
+        function_origin,
+        declaration_content_hash,
+        semantic,
+        "orna.language/1",
+        artifact,
+    )?
+    .with_semantic_hash_version(FunctionSemanticHashVersion::Version2);
+    Ok(StandardExecutable::new(
+        STD_INVOKE_ECHO_FUNCTION_ID,
+        revision,
+        references,
+    )?)
+}
+
+/// Installs the durable source-revision parent of the fixture V2 standard
+/// source before the upgrade applies.
+#[cfg(feature = "test-hooks")]
+async fn install_standard_v2_parent_revision(database: &TestDatabase) -> TestResult<()> {
+    let session = database.open().await?;
+    let bundle = vec![0x99_u8; 16];
+    let parent = vec![0x43_u8; 16];
+    let content_hash = vec![0x98_u8; 32];
+    session
+        .client()
+        .execute(
+            "INSERT INTO _orna_kernel.source_bundles
+                (id, content_hash, hash_algorithm, hash_contract_version)
+             VALUES ($1, $2, 'sha256', 1)",
+            &[&bundle, &content_hash],
+        )
+        .await?;
+    session
+        .client()
+        .execute(
+            "INSERT INTO _orna_kernel.source_revisions
+                (id, parent_source_revision_id, bundle_id, content_hash,
+                 hash_algorithm, hash_contract_version)
+             VALUES ($1, NULL, $2, $3, 'sha256', 1)",
+            &[&parent, &bundle, &content_hash],
+        )
+        .await?;
+    session.shutdown().await
+}
+
+/// The companion application revision for the V2 standard upgrade: one
+/// application CLIENT function under the pinned version-two context. Its
+/// identity is distinct from every standard and system function, so the
+/// upgrade scan admits it without a collision. The single upgrade installs
+/// the application and standard authority rows under one catalogue revision.
+#[cfg(feature = "test-hooks")]
+fn v2_standard_and_application_candidate(
+    active: &ActiveDatabaseRevision,
+    standard: &VerifiedStandardLibrarySnapshot,
+) -> TestResult<DeployableRevision> {
+    let content = "CREATE SCHEMA app;\n";
+    let unit = StoredSourceUnit::new(
+        SourceUnitId::from_bytes([0xa1; 16]),
+        0,
+        "main.orna",
+        content,
+        source_unit_content_digest(content)?,
+    )?;
+    let bundle = SourceBundleId::from_bytes([0xa2; 16]);
+    let bundle_hash = source_bundle_digest(std::slice::from_ref(&unit))?;
+    let source = StoredSourceRevision::new(
+        bundle,
+        SourceRevisionId::from_bytes([0xa3; 16]),
+        Some(active.pair().source()),
+        vec![unit.clone()],
+        bundle_hash,
+        source_revision_record_digest(bundle, Some(active.pair().source()), bundle_hash)?,
+    )?;
+    let schema = SchemaDefinition::new(
+        SchemaId::from_bytes([0xa4; 16]),
+        QualifiedSemanticName::new(["app"])?,
+    );
+    let function = FunctionDefinition::new(
+        FunctionId::from_bytes([0xa5; 16]),
+        QualifiedSemanticName::new(["app", "answer"])?,
+        FunctionDomain::Client,
+        Vec::new(),
+        FunctionReturn::Single(ResolvedType::value(STD_INTEGER_TYPE_ID)),
+        FunctionRevisionId::from_bytes([0xa6; 16]),
+        FunctionSecurity::Invoker,
+        None,
+        FunctionVolatility::Immutable,
+    );
+    let catalogue = CatalogueSnapshot::new_with_functions(
+        CatalogueRevisionId::from_bytes([0xa7; 16]),
+        vec![schema.clone()],
+        vec![],
+        vec![function.clone()],
+    )?;
+    let origin = SourceOrigin::new(unit.id(), 0, u32::try_from(content.len())?)?;
+    let origins = vec![
+        DefinitionOrigin::new(DefinitionIdentity::Schema(schema.id()), origin),
+        DefinitionOrigin::new(DefinitionIdentity::Function(function.id()), origin),
+    ];
+    let artifact = executable_artifact(
+        ExecutableArtifactKind::Client,
+        "orna.client-bytecode",
+        b"ORNACB\0\0\0\0\0\x01answer".to_vec(),
+    )?;
+    let declaration_hash = function_declaration_digest(content.as_bytes())?;
+    let semantic_hash = function_semantic_digest_with_version(
+        FunctionSemanticHashVersion::Version2,
+        &function,
+        "orna.language/1",
+        &artifact,
+        &[],
+        &[],
+    )?;
+    let revision = FunctionRevisionRecord::new(
+        function.id(),
+        function.current_revision(),
+        1,
+        origin,
+        declaration_hash,
+        semantic_hash,
+        "orna.language/1",
+        artifact,
+    )?
+    .with_semantic_hash_version(FunctionSemanticHashVersion::Version2);
+    let context = CatalogueHashContext::version_two(standard.clone());
+    let catalogue_hash = catalogue_digest_with_context(
+        &context,
+        &catalogue,
+        std::slice::from_ref(&revision),
+        &[],
+        &origins,
+        &[],
+    )?;
+    Ok(DeployableRevision::new_with_catalogue_hash_context(
+        DeployableRevisionInput::new(
+            active.pair(),
+            source,
+            active.pair().catalogue(),
+            catalogue,
+            catalogue_hash,
+            DeployableRevisionContent::new(origins, vec![], vec![revision.clone()], vec![])
+                .with_current_function_revisions(vec![revision]),
+        ),
+        context,
+    )?)
+}
+
+/// The complete live fixture: the executable V2 standard and one application
+/// CLIENT function installed atomically through the production apply path.
+/// The active catalogue therefore owns one application target and one standard
+/// target under one catalogue revision.
+#[cfg(feature = "test-hooks")]
+struct V2Fixture {
+    standard: VerifiedStandardLibrarySnapshot,
+    active: ActiveDatabaseRevision,
+    app_function: FunctionId,
+}
+
+#[cfg(feature = "test-hooks")]
+async fn install_v2_standard_fixture(database: &TestDatabase) -> TestResult<V2Fixture> {
+    let kernel = kernel(database)?;
+    kernel.bootstrap().await?;
+    install_standard_v2_parent_revision(database).await?;
+    let active = kernel.recover().await?;
+    let standard = verified_standard_v2_fixture()?;
+    let candidate = v2_standard_and_application_candidate(&active, &standard)?;
+    let applied = kernel
+        .apply_test_standard_upgrade(&candidate, &standard)
+        .await?;
+    let app_function = applied.catalogue().functions()[0].id();
+    require(
+        applied
+            .catalogue_hash_context()
+            .standard()
+            .is_some_and(|selected| selected.revision() == standard.revision()),
+        "fixture active revision must pin the executable standard snapshot",
+    )?;
+    Ok(V2Fixture {
+        standard,
+        active: applied,
+        app_function,
+    })
+}
+
+/// Re-pins the active catalogue revision to the retained version-one standard
+/// snapshot and rewrites its target-authority rows without the standard
+/// executable, simulating a later standard upgrade that removed the granted
+/// function. The application catalogue content is unchanged, so the re-pin is
+/// a valid version-two catalogue whose union has no standard target.
+#[cfg(feature = "test-hooks")]
+async fn install_later_standard_upgrade_without_echo(
+    database: &TestDatabase,
+    fixture: &V2Fixture,
+) -> TestResult<()> {
+    let retained = orna_standard::verify_standard_library_snapshot(
+        orna_standard::retained_standard_library_snapshot()?,
+    )?;
+    insert_standard_snapshot(database, &retained).await?;
+    let session = database.open().await?;
+    let operation_result: TestResult<()> = async {
+        let active = fixture.active.clone();
+        let catalogue_bytes = active.pair().catalogue().to_bytes().to_vec();
+        let context = CatalogueHashContext::version_two(retained.clone());
+        let catalogue_hash = catalogue_digest_with_context(
+            &context,
+            active.catalogue(),
+            active.function_revisions(),
+            active.expressions(),
+            active.origins(),
+            active.references(),
+        )?;
+        session
+            .client()
+            .batch_execute("BEGIN; SET CONSTRAINTS ALL DEFERRED")
+            .await?;
+        // Remove the standard authority row and re-pin the carried application
+        // function's resolved standard value type before re-pinning the
+        // catalogue revision so the non-deferrable foreign keys stay valid.
+        session
+            .client()
+            .execute(
+                "DELETE FROM _orna_kernel.invocation_target_authorities
+                 WHERE catalogue_revision_id = $1 AND function_id = $2",
+                &[
+                    &catalogue_bytes,
+                    &STD_INVOKE_ECHO_FUNCTION_ID.to_bytes().to_vec(),
+                ],
+            )
+            .await?;
+        session
+            .client()
+            .execute(
+                "UPDATE _orna_kernel.catalogue_functions
+                 SET return_standard_library_revision_id = $2
+                 WHERE catalogue_revision_id = $1 AND function_id = $3",
+                &[
+                    &catalogue_bytes,
+                    &retained.revision().to_bytes().to_vec(),
+                    &fixture.app_function.to_bytes().to_vec(),
+                ],
+            )
+            .await?;
+        session
+            .client()
+            .execute(
+                "UPDATE _orna_kernel.catalogue_revisions
+                 SET standard_library_revision_id = $2, content_hash = $3
+                 WHERE id = $1",
+                &[
+                    &catalogue_bytes,
+                    &retained.revision().to_bytes().to_vec(),
+                    &catalogue_hash.to_bytes().to_vec(),
+                ],
+            )
+            .await?;
+        session.client().batch_execute("COMMIT").await?;
+        Ok(())
+    }
+    .await;
+    finish_session(
+        operation_result,
+        session.shutdown().await,
+        "later standard upgrade fixture",
+    )
 }
 
 async fn insert_standard_schema(
