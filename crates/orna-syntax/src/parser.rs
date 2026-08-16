@@ -1577,9 +1577,7 @@ impl<'source> Parser<'source> {
     /// Parses one `DOCUMENTATION '...'` modifier and returns its string text.
     fn parse_documentation_modifier(&mut self) -> Option<SourceSlice> {
         self.skip_trivia();
-        if self.take_word("DOCUMENTATION").is_none() {
-            return None;
-        }
+        self.take_word("DOCUMENTATION")?;
         self.skip_trivia();
         let Some(literal) = self
             .current()
