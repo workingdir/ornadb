@@ -340,6 +340,39 @@ pub const STD_UI_CONTRACT: &str = "orna.std.value.ui@1";
 /// `u32` body length and the body bytes (work ADR 0062 provisional frame).
 pub const UI_MAGIC: &str = "ORNA-UI/1 ";
 
+const RETAINED_STANDARD_UI_SOURCE: &str = include_str!("../../../stdlib/std/ui.orna");
+
+// The V4 digest goldens below are computed by the canonical encoders from the
+// retained source and canonical records (never copied from a handwritten
+// encoder). The digest-golden tests recompute every value from the retained
+// units and compare against these constants, so any retained-source edit fails
+// loudly at build time. `orna.std/4` retains the exact V1-V3 types unit, the
+// exact V2/V3 invoke unit, and the exact V3 output unit unchanged, so those
+// content digests are the earlier goldens; the ui content, V4 bundle, V4
+// source revision, V4 artifact, and V4 standard-library digests are computed
+// by the canonical encoders.
+const ACCEPTED_V4_TYPES_CONTENT_DIGEST: Sha256Digest = ACCEPTED_V2_TYPES_CONTENT_DIGEST;
+const ACCEPTED_V4_INVOKE_CONTENT_DIGEST: Sha256Digest = ACCEPTED_V2_INVOKE_CONTENT_DIGEST;
+const ACCEPTED_V4_OUTPUT_CONTENT_DIGEST: Sha256Digest = ACCEPTED_V3_OUTPUT_CONTENT_DIGEST;
+const ACCEPTED_V4_UI_CONTENT_DIGEST: Sha256Digest = Sha256Digest::from_bytes([
+    0xe0, 0x86, 0x9a, 0xe3, 0xd4, 0x7e, 0xcb, 0xb6, 0x22, 0x30, 0x05, 0xd5, 0x56, 0x8c, 0x39, 0x0f,
+    0xad, 0xe2, 0x75, 0x6d, 0x45, 0xde, 0xb9, 0xa1, 0x83, 0x02, 0xd5, 0xe8, 0x4c, 0x2e, 0x5f, 0xd1,
+]);
+const ACCEPTED_V4_SOURCE_BUNDLE_DIGEST: Sha256Digest = Sha256Digest::from_bytes([
+    0x3d, 0x26, 0x40, 0x9b, 0x61, 0xab, 0x0f, 0xd5, 0xb7, 0xb3, 0x14, 0xf4, 0x4d, 0x0b, 0xc6, 0x21,
+    0xeb, 0xce, 0xa0, 0x76, 0x8d, 0xa6, 0x33, 0xc9, 0x4a, 0xd2, 0x96, 0x4c, 0x99, 0xde, 0xc6, 0xfe,
+]);
+const ACCEPTED_V4_SOURCE_REVISION_DIGEST: Sha256Digest = Sha256Digest::from_bytes([
+    0xab, 0x6d, 0xba, 0x9d, 0xfc, 0x42, 0x35, 0x39, 0xc8, 0xea, 0x90, 0x55, 0xf5, 0xbf, 0x40, 0x6f,
+    0x45, 0xb0, 0xd3, 0x36, 0x2c, 0x06, 0x35, 0x7e, 0x34, 0x13, 0x23, 0x88, 0xff, 0x51, 0x41, 0xdd,
+]);
+const ACCEPTED_V4_ARTIFACT_DIGEST: Sha256Digest = ACCEPTED_V3_ARTIFACT_DIGEST;
+const ACCEPTED_V4_SEMANTIC_DIGEST: Sha256Digest = ACCEPTED_V3_SEMANTIC_DIGEST;
+const ACCEPTED_V4_STANDARD_LIBRARY_DIGEST: Sha256Digest = Sha256Digest::from_bytes([
+    0xdc, 0xff, 0xa5, 0x23, 0x16, 0x43, 0xf4, 0x73, 0x29, 0xd3, 0x00, 0x34, 0x1f, 0xba, 0xa2, 0x4f,
+    0x5a, 0xbf, 0xa6, 0xbc, 0xed, 0x77, 0x56, 0x5c, 0xd3, 0x82, 0x74, 0xce, 0xa4, 0x83, 0x8f, 0xb9,
+]);
+
 #[derive(Clone, Copy)]
 struct ValueTypeFact {
     id: TypeId,
@@ -1650,6 +1683,288 @@ pub fn verify_standard_library_v3_snapshot(
         .map_err(|source| StandardLibraryError::CanonicalHash { source })
 }
 
+/// Retains the canonical UI standard source as an unverified snapshot.
+///
+/// This function parses all four embedded units directly with `orna_syntax`,
+/// reconciles every declaration with the source-independent V4 manifest, and
+/// verifies the accepted source and standard-library hash goldens. It retains
+/// the V2 `std.invoke.echo` executable unchanged through the canonical
+/// compiler checker and canonical digest encoders (work ADR 0062). It does
+/// not run the compiler pipeline and does not grant standard-library
+/// authority.
+pub fn retained_standard_library_v4_snapshot()
+-> Result<StandardLibrarySnapshot, StandardLibraryError> {
+    retained_standard_library_v4_snapshot_from_source(
+        RETAINED_STANDARD_SOURCE,
+        RETAINED_STANDARD_INVOKE_SOURCE,
+        RETAINED_STANDARD_OUTPUT_SOURCE,
+        RETAINED_STANDARD_UI_SOURCE,
+    )
+}
+
+/// Verifies a retained UI standard snapshot and returns the authority
+/// capability.
+///
+/// The wrapper first checks the reserved V4 catalogue identity, then the
+/// accepted V4 standard digest, and only then invokes the core canonical V2
+/// verifier. `orna.std/4` reuses the V2 digest contract (work ADR 0062); the
+/// V4 catalogue, revision, source, and goldens are all new.
+pub fn verify_standard_library_v4_snapshot(
+    snapshot: StandardLibrarySnapshot,
+) -> Result<VerifiedStandardLibrarySnapshot, StandardLibraryError> {
+    let actual_catalogue = snapshot.catalogue().revision();
+    if actual_catalogue != STANDARD_CATALOGUE_V4_REVISION_ID {
+        return Err(StandardLibraryError::CatalogueIdentityMismatch {
+            expected: STANDARD_CATALOGUE_V4_REVISION_ID,
+            actual: actual_catalogue,
+        });
+    }
+
+    let actual_digest = snapshot.digest();
+    if actual_digest != ACCEPTED_V4_STANDARD_LIBRARY_DIGEST {
+        return Err(StandardLibraryError::AcceptedDigestMismatch {
+            expected: ACCEPTED_V4_STANDARD_LIBRARY_DIGEST,
+            actual: actual_digest,
+        });
+    }
+
+    verify_canonical_standard_library_v2_snapshot(snapshot)
+        .map_err(|source| StandardLibraryError::CanonicalHash { source })
+}
+
+fn retained_standard_library_v4_snapshot_from_source(
+    types_source: &str,
+    invoke_source: &str,
+    output_source: &str,
+    ui_source: &str,
+) -> Result<StandardLibrarySnapshot, StandardLibraryError> {
+    let manifest = standard_library_v4_manifest()
+        .map_err(|source| StandardLibraryError::Manifest { source })?;
+    let types_manifest =
+        standard_library_manifest().map_err(|source| StandardLibraryError::Manifest { source })?;
+    let catalogue = manifest.catalogue();
+
+    let mut origins = reconcile_retained_source_with_unit(
+        types_source,
+        &types_manifest,
+        STD_TYPES_SOURCE_UNIT_ID,
+    )?;
+    let invoke_origins = reconcile_retained_invoke_source(invoke_source, catalogue)?;
+    origins.extend(invoke_origins.iter().cloned());
+    let output_origins = reconcile_retained_output_source(output_source, catalogue)?;
+    origins.extend(output_origins.iter().cloned());
+    let ui_origins = reconcile_retained_ui_source(ui_source, catalogue)?;
+    origins.extend(ui_origins.iter().cloned());
+
+    let types_content_hash = source_unit_content_digest(types_source)
+        .map_err(|source| StandardLibraryError::CanonicalHash { source })?;
+    if types_content_hash != ACCEPTED_V4_TYPES_CONTENT_DIGEST {
+        return Err(StandardLibraryError::RetainedSourceMismatch);
+    }
+    let invoke_content_hash = source_unit_content_digest(invoke_source)
+        .map_err(|source| StandardLibraryError::CanonicalHash { source })?;
+    if invoke_content_hash != ACCEPTED_V4_INVOKE_CONTENT_DIGEST {
+        return Err(StandardLibraryError::RetainedSourceMismatch);
+    }
+    let output_content_hash = source_unit_content_digest(output_source)
+        .map_err(|source| StandardLibraryError::CanonicalHash { source })?;
+    if output_content_hash != ACCEPTED_V4_OUTPUT_CONTENT_DIGEST {
+        return Err(StandardLibraryError::RetainedSourceMismatch);
+    }
+    let ui_content_hash = source_unit_content_digest(ui_source)
+        .map_err(|source| StandardLibraryError::CanonicalHash { source })?;
+    if ui_content_hash != ACCEPTED_V4_UI_CONTENT_DIGEST {
+        return Err(StandardLibraryError::RetainedSourceMismatch);
+    }
+    let types_unit = StoredSourceUnit::new(
+        STD_TYPES_SOURCE_UNIT_ID,
+        0,
+        SOURCE_LOGICAL_PATH,
+        types_source,
+        types_content_hash,
+    )
+    .map_err(|source| StandardLibraryError::Revision { source })?;
+    let invoke_unit = StoredSourceUnit::new(
+        STD_INVOKE_SOURCE_UNIT_ID,
+        1,
+        STD_INVOKE_SOURCE_LOGICAL_PATH,
+        invoke_source,
+        invoke_content_hash,
+    )
+    .map_err(|source| StandardLibraryError::Revision { source })?;
+    let output_unit = StoredSourceUnit::new(
+        STD_OUTPUT_SOURCE_UNIT_ID,
+        2,
+        STD_OUTPUT_SOURCE_LOGICAL_PATH,
+        output_source,
+        output_content_hash,
+    )
+    .map_err(|source| StandardLibraryError::Revision { source })?;
+    let ui_unit = StoredSourceUnit::new(
+        STD_UI_SOURCE_UNIT_ID,
+        3,
+        STD_UI_SOURCE_LOGICAL_PATH,
+        ui_source,
+        ui_content_hash,
+    )
+    .map_err(|source| StandardLibraryError::Revision { source })?;
+    let units = vec![types_unit, invoke_unit, output_unit, ui_unit];
+    let bundle_hash = source_bundle_digest(&units)
+        .map_err(|source| StandardLibraryError::CanonicalHash { source })?;
+    if bundle_hash != ACCEPTED_V4_SOURCE_BUNDLE_DIGEST {
+        return Err(StandardLibraryError::RetainedSourceMismatch);
+    }
+    let revision_hash = source_revision_record_digest(
+        STANDARD_SOURCE_V4_BUNDLE_ID,
+        Some(STANDARD_SOURCE_V3_REVISION_ID),
+        bundle_hash,
+    )
+    .map_err(|source| StandardLibraryError::CanonicalHash { source })?;
+    if revision_hash != ACCEPTED_V4_SOURCE_REVISION_DIGEST {
+        return Err(StandardLibraryError::RetainedSourceMismatch);
+    }
+    let retained_source = StoredSourceRevision::new(
+        STANDARD_SOURCE_V4_BUNDLE_ID,
+        STANDARD_SOURCE_V4_REVISION_ID,
+        Some(STANDARD_SOURCE_V3_REVISION_ID),
+        units,
+        bundle_hash,
+        revision_hash,
+    )
+    .map_err(|source| StandardLibraryError::Revision { source })?;
+
+    // `orna.std/4` retains the exact V2 parameter-echo executable unchanged;
+    // its artifact and semantic digests are the V3 goldens, pinned here as the
+    // V4 goldens so the retained path fails closed on any drift.
+    let executable = retained_v2_executable(invoke_source, catalogue, &invoke_origins)?;
+    if executable.revision().artifact().content_hash() != ACCEPTED_V4_ARTIFACT_DIGEST
+        || executable.revision().semantic_hash() != ACCEPTED_V4_SEMANTIC_DIGEST
+    {
+        return Err(StandardLibraryError::RetainedSourceMismatch);
+    }
+    let snapshot = StandardLibrarySnapshot::new_with_executables(
+        STANDARD_LIBRARY_V4_REVISION_ID,
+        StandardLibraryDigestVersion::Version2,
+        retained_source,
+        LANGUAGE_VERSION_IDENTITY,
+        catalogue.clone(),
+        vec![executable],
+        origins,
+        ACCEPTED_V4_STANDARD_LIBRARY_DIGEST,
+    )
+    .map_err(|source| StandardLibraryError::Revision { source })?;
+    let _ = standard_library_digest(&snapshot)
+        .map_err(|source| StandardLibraryError::CanonicalHash { source })?;
+
+    Ok(snapshot)
+}
+
+/// Reconciles the retained `std/ui.orna` unit against the V4 catalogue.
+///
+/// The unit must round-trip exactly and contain nothing besides the
+/// `std.ui` schema declaration, the single opaque UI value type declaration
+/// (`std.ui.UI` with the `orna.std.value.ui@1` kernel contract and the
+/// `IMMUTABLE TRANSIENT` catalogue facts), and the single `std.ui` qualified
+/// export. The complete origin set is exactly those three declarations at
+/// their exact byte ranges in the retained unit.
+fn reconcile_retained_ui_source(
+    source: &str,
+    catalogue: &CatalogueSnapshot,
+) -> Result<Vec<DefinitionOrigin>, StandardLibraryError> {
+    let parsed = orna_syntax::parse(source);
+    if !parsed.diagnostics().is_empty()
+        || parsed.syntax().text() != source
+        || !parsed.object_types().is_empty()
+        || !parsed.field_renames().is_empty()
+        || !parsed.server_functions().is_empty()
+        || !parsed.client_functions().is_empty()
+        || !parsed.primitive_value_types().is_empty()
+        || !parsed.record_value_types().is_empty()
+        || !parsed.enum_types().is_empty()
+        || parsed.schemas().len() != 1
+        || parsed.opaque_value_types().len() != 1
+        || parsed.type_exports().len() != 1
+    {
+        return Err(StandardLibraryError::RetainedSourceMismatch);
+    }
+
+    let ui_schema = catalogue
+        .schema_by_id(STD_UI_SCHEMA_ID)
+        .ok_or(StandardLibraryError::RetainedSourceMismatch)?;
+    if !matches_qualified_name(&parsed.schemas()[0].name, ui_schema.name()) {
+        return Err(StandardLibraryError::RetainedSourceMismatch);
+    }
+
+    let ui_definition = catalogue
+        .type_definition_by_id(STD_UI_TYPE_ID)
+        .ok_or(StandardLibraryError::RetainedSourceMismatch)?
+        .as_opaque_value()
+        .ok_or(StandardLibraryError::RetainedSourceMismatch)?;
+    let declaration = &parsed.opaque_value_types()[0];
+    if !matches_qualified_name(&declaration.name, ui_definition.name())
+        || decode_sql_string_literal(&declaration.kernel_contract.text).as_deref()
+            != Some(ui_definition.representation_contract())
+        || ui_definition.persistence() != ValueTypePersistence::Transient
+    {
+        return Err(StandardLibraryError::RetainedSourceMismatch);
+    }
+
+    let ui_binding = catalogue
+        .type_bindings()
+        .get(33)
+        .ok_or(StandardLibraryError::RetainedSourceMismatch)?;
+    if !matches_qualified_export(
+        &parsed.type_exports()[0],
+        ui_definition.name(),
+        STD_UI_TYPE_ID,
+        ui_binding,
+    ) {
+        return Err(StandardLibraryError::RetainedSourceMismatch);
+    }
+
+    let origin = |span: &orna_syntax::SourceSpan| -> Result<SourceOrigin, StandardLibraryError> {
+        let start =
+            u32::try_from(span.start).map_err(|_| StandardLibraryError::RetainedSourceMismatch)?;
+        let end =
+            u32::try_from(span.end).map_err(|_| StandardLibraryError::RetainedSourceMismatch)?;
+        SourceOrigin::new(STD_UI_SOURCE_UNIT_ID, start, end)
+            .map_err(|source| StandardLibraryError::Revision { source })
+    };
+
+    let expected_identities = [
+        DefinitionIdentity::Schema(STD_UI_SCHEMA_ID),
+        DefinitionIdentity::ValueType(STD_UI_TYPE_ID),
+        DefinitionIdentity::TypeBinding(ui_binding.id()),
+    ];
+    let mut declarations = vec![
+        (
+            parsed.schemas()[0].span.clone(),
+            DefinitionIdentity::Schema(STD_UI_SCHEMA_ID),
+        ),
+        (
+            parsed.opaque_value_types()[0].span.clone(),
+            DefinitionIdentity::ValueType(STD_UI_TYPE_ID),
+        ),
+        (
+            parsed.type_exports()[0].span.clone(),
+            DefinitionIdentity::TypeBinding(ui_binding.id()),
+        ),
+    ];
+    declarations.sort_by_key(|(span, _)| span.start);
+    if declarations
+        .iter()
+        .map(|(_, identity)| *identity)
+        .ne(expected_identities.iter().copied())
+    {
+        return Err(StandardLibraryError::RetainedSourceMismatch);
+    }
+
+    declarations
+        .into_iter()
+        .map(|(span, identity)| Ok(DefinitionOrigin::new(identity, origin(&span)?)))
+        .collect()
+}
+
 fn retained_standard_library_v3_snapshot_from_source(
     types_source: &str,
     invoke_source: &str,
@@ -2640,10 +2955,11 @@ mod tests {
         prepare_standard_upgrade_with, registered_opaque_codecs,
         retained_standard_library_snapshot, retained_standard_library_snapshot_from_source,
         retained_standard_library_v2_snapshot, retained_standard_library_v2_snapshot_from_source,
-        retained_standard_library_v3_snapshot, standard_library_manifest,
-        standard_library_v2_manifest, standard_library_v3_manifest, standard_library_v4_manifest,
-        verify_standard_library_snapshot, verify_standard_library_v2_snapshot,
-        verify_standard_library_v3_snapshot,
+        retained_standard_library_v3_snapshot, retained_standard_library_v4_snapshot,
+        standard_library_manifest, standard_library_v2_manifest, standard_library_v3_manifest,
+        standard_library_v4_manifest, verify_standard_library_snapshot,
+        verify_standard_library_v2_snapshot, verify_standard_library_v3_snapshot,
+        verify_standard_library_v4_snapshot,
     };
 
     const EXPECTED_RETAINED_STANDARD_SOURCE: &str = r#"CREATE SCHEMA std;
@@ -5196,6 +5512,92 @@ CREATE TYPE std.io.ByteStream AS VALUE OPAQUE
 EXPORT TYPE std.io.ByteStream AS std.ByteStream;
 "#;
 
+    const EXPECTED_RETAINED_UI_SOURCE: &str = r#"CREATE SCHEMA std.ui;
+
+CREATE TYPE std.ui.UI AS VALUE
+    OPAQUE
+    KERNEL CONTRACT 'orna.std.value.ui@1'
+    IMMUTABLE
+    TRANSIENT;
+
+EXPORT TYPE std.ui.UI AS std.UI;
+"#;
+
+    fn tampered_v4_snapshot(
+        types: &str,
+        invoke: &str,
+        output: &str,
+        ui: &str,
+    ) -> StandardLibrarySnapshot {
+        // A structurally valid V4 snapshot whose unit content differs from the
+        // retained source. The catalogue, origins, executable, and retained
+        // digest are the accepted ones; only the source bytes and the
+        // recomputed source hashes change, so the canonical digest encoder
+        // must reject the resulting snapshot.
+        let snapshot = retained_standard_library_v4_snapshot()
+            .expect("the retained V4 standard source is valid");
+        let types_unit = StoredSourceUnit::new(
+            STD_TYPES_SOURCE_UNIT_ID,
+            0,
+            SOURCE_LOGICAL_PATH,
+            types,
+            source_unit_content_digest(types).expect("the tampered types digest is valid"),
+        )
+        .expect("the tampered types unit is valid");
+        let invoke_unit = StoredSourceUnit::new(
+            STD_INVOKE_SOURCE_UNIT_ID,
+            1,
+            STD_INVOKE_SOURCE_LOGICAL_PATH,
+            invoke,
+            source_unit_content_digest(invoke).expect("the tampered invoke digest is valid"),
+        )
+        .expect("the tampered invoke unit is valid");
+        let output_unit = StoredSourceUnit::new(
+            STD_OUTPUT_SOURCE_UNIT_ID,
+            2,
+            STD_OUTPUT_SOURCE_LOGICAL_PATH,
+            output,
+            source_unit_content_digest(output).expect("the tampered output digest is valid"),
+        )
+        .expect("the tampered output unit is valid");
+        let ui_unit = StoredSourceUnit::new(
+            STD_UI_SOURCE_UNIT_ID,
+            3,
+            STD_UI_SOURCE_LOGICAL_PATH,
+            ui,
+            source_unit_content_digest(ui).expect("the tampered ui digest is valid"),
+        )
+        .expect("the tampered ui unit is valid");
+        let units = vec![types_unit, invoke_unit, output_unit, ui_unit];
+        let bundle_hash =
+            source_bundle_digest(&units).expect("the tampered bundle digest is valid");
+        let source = StoredSourceRevision::new(
+            STANDARD_SOURCE_V4_BUNDLE_ID,
+            STANDARD_SOURCE_V4_REVISION_ID,
+            Some(STANDARD_SOURCE_V3_REVISION_ID),
+            units,
+            bundle_hash,
+            source_revision_record_digest(
+                STANDARD_SOURCE_V4_BUNDLE_ID,
+                Some(STANDARD_SOURCE_V3_REVISION_ID),
+                bundle_hash,
+            )
+            .expect("the tampered source revision digest is valid"),
+        )
+        .expect("the tampered stored source revision is valid");
+        StandardLibrarySnapshot::new_with_executables(
+            STANDARD_LIBRARY_V4_REVISION_ID,
+            StandardLibraryDigestVersion::Version2,
+            source,
+            LANGUAGE_VERSION_IDENTITY,
+            snapshot.catalogue().clone(),
+            snapshot.executables().to_vec(),
+            snapshot.origins().to_vec(),
+            snapshot.digest(),
+        )
+        .expect("the tampered V4 snapshot remains structurally valid")
+    }
+
     fn tampered_v3_snapshot(types: &str, invoke: &str, output: &str) -> StandardLibrarySnapshot {
         // A structurally valid V3 snapshot whose unit content differs from the
         // retained source. The catalogue, origins, executable, and retained
@@ -5835,6 +6237,347 @@ EXPORT TYPE std.io.ByteStream AS std.ByteStream;
     }
 
     #[test]
+    fn retains_the_v4_ui_standard_snapshot() {
+        let snapshot = retained_standard_library_v4_snapshot()
+            .expect("the retained V4 standard source is valid");
+
+        assert_eq!(snapshot.revision(), STANDARD_LIBRARY_V4_REVISION_ID);
+        assert_eq!(
+            snapshot.digest_version(),
+            StandardLibraryDigestVersion::Version2,
+            "orna.std/4 reuses the V2 digest contract (work ADR 0062)"
+        );
+        assert_eq!(snapshot.language_version(), LANGUAGE_VERSION_IDENTITY);
+        assert_eq!(
+            snapshot.catalogue().revision(),
+            STANDARD_CATALOGUE_V4_REVISION_ID
+        );
+        assert_eq!(snapshot.source().id(), STANDARD_SOURCE_V4_REVISION_ID);
+        assert_eq!(snapshot.source().bundle(), STANDARD_SOURCE_V4_BUNDLE_ID);
+        assert_eq!(
+            snapshot.source().parent(),
+            Some(STANDARD_SOURCE_V3_REVISION_ID),
+            "orna.std/4 must be the append-only child of orna.std/3"
+        );
+        assert_eq!(snapshot.source().units().len(), 4);
+        assert_eq!(snapshot.source().units()[0].id(), STD_TYPES_SOURCE_UNIT_ID);
+        assert_eq!(snapshot.source().units()[0].ordinal(), 0);
+        assert_eq!(
+            snapshot.source().units()[0].logical_path(),
+            SOURCE_LOGICAL_PATH
+        );
+        assert_eq!(snapshot.source().units()[1].id(), STD_INVOKE_SOURCE_UNIT_ID);
+        assert_eq!(snapshot.source().units()[1].ordinal(), 1);
+        assert_eq!(
+            snapshot.source().units()[1].logical_path(),
+            STD_INVOKE_SOURCE_LOGICAL_PATH
+        );
+        assert_eq!(snapshot.source().units()[2].id(), STD_OUTPUT_SOURCE_UNIT_ID);
+        assert_eq!(snapshot.source().units()[2].ordinal(), 2);
+        assert_eq!(
+            snapshot.source().units()[2].logical_path(),
+            STD_OUTPUT_SOURCE_LOGICAL_PATH
+        );
+        assert_eq!(snapshot.source().units()[3].id(), STD_UI_SOURCE_UNIT_ID);
+        assert_eq!(snapshot.source().units()[3].ordinal(), 3);
+        assert_eq!(
+            snapshot.source().units()[3].logical_path(),
+            STD_UI_SOURCE_LOGICAL_PATH
+        );
+        assert_eq!(snapshot.catalogue().schemas().len(), 6);
+        assert_eq!(snapshot.catalogue().value_types().len(), 17);
+        assert_eq!(snapshot.catalogue().type_bindings().len(), 34);
+        assert_eq!(snapshot.catalogue().functions().len(), 1);
+        assert_eq!(snapshot.origins().len(), 59);
+
+        let [executable] = snapshot.executables() else {
+            panic!("the V4 snapshot must retain exactly one executable");
+        };
+        assert_eq!(executable.function(), STD_INVOKE_ECHO_FUNCTION_ID);
+        assert_eq!(
+            executable.revision().id(),
+            STD_INVOKE_ECHO_FUNCTION_REVISION_ID
+        );
+        assert_eq!(
+            executable.revision().revision_number(),
+            STD_INVOKE_ECHO_REVISION_NUMBER
+        );
+    }
+
+    #[test]
+    fn v4_ui_source_has_the_exact_literal_bytes_and_parse() {
+        let snapshot = retained_standard_library_v4_snapshot()
+            .expect("the retained V4 standard source is valid");
+        let types = snapshot.source().units()[0].content();
+        let invoke = snapshot.source().units()[1].content();
+        let output = snapshot.source().units()[2].content();
+        let ui = snapshot.source().units()[3].content();
+
+        assert_eq!(ui, EXPECTED_RETAINED_UI_SOURCE);
+        assert!(ui.is_ascii());
+        assert!(!ui.as_bytes().starts_with(&[0xef, 0xbb, 0xbf]));
+        assert!(!ui.contains('\r'));
+        assert!(ui.ends_with('\n'));
+        assert!(!ui[..ui.len() - 1].ends_with('\n'));
+        assert_eq!(ui.matches(';').count(), 3);
+        assert_eq!(types, super::RETAINED_STANDARD_SOURCE);
+        assert_eq!(invoke, super::RETAINED_STANDARD_INVOKE_SOURCE);
+        assert_eq!(output, super::RETAINED_STANDARD_OUTPUT_SOURCE);
+
+        let parsed = orna_syntax::parse(ui);
+        assert!(parsed.diagnostics().is_empty());
+        assert_eq!(parsed.syntax().text(), ui);
+        assert_eq!(parsed.schemas().len(), 1);
+        assert!(super::matches_qualified_name(
+            &parsed.schemas()[0].name,
+            &QualifiedSemanticName::new(["std", "ui"]).expect("the fixed schema name is valid")
+        ));
+        assert_eq!(parsed.opaque_value_types().len(), 1);
+        assert_eq!(
+            super::decode_sql_string_literal(&parsed.opaque_value_types()[0].kernel_contract.text)
+                .as_deref(),
+            Some(STD_UI_CONTRACT)
+        );
+        assert_eq!(parsed.type_exports().len(), 1);
+        assert!(parsed.object_types().is_empty());
+        assert!(parsed.field_renames().is_empty());
+        assert!(parsed.primitive_value_types().is_empty());
+        assert!(parsed.record_value_types().is_empty());
+        assert!(parsed.enum_types().is_empty());
+        assert!(parsed.server_functions().is_empty());
+        assert!(parsed.client_functions().is_empty());
+    }
+
+    #[test]
+    fn v4_ui_origins_cover_the_exact_declaration_ranges() {
+        let snapshot = retained_standard_library_v4_snapshot()
+            .expect("the retained V4 standard source is valid");
+        let ui = snapshot.source().units()[3].content();
+        let ui_origins = snapshot
+            .origins()
+            .iter()
+            .filter(|origin| origin.source().source_unit() == STD_UI_SOURCE_UNIT_ID)
+            .collect::<Vec<_>>();
+        assert_eq!(ui_origins.len(), 3);
+
+        let schema = ui_origins
+            .iter()
+            .find(|origin| origin.identity() == DefinitionIdentity::Schema(STD_UI_SCHEMA_ID))
+            .expect("the schema origin is retained")
+            .source();
+        assert_eq!(schema.byte_start(), 0);
+        assert_eq!(schema.byte_end(), "CREATE SCHEMA std.ui;".len() as u32);
+
+        let type_origin = ui_origins
+            .iter()
+            .find(|origin| origin.identity() == DefinitionIdentity::ValueType(STD_UI_TYPE_ID))
+            .expect("the type origin is retained")
+            .source();
+        let type_start = ui
+            .find("CREATE TYPE std.ui.UI")
+            .expect("the ui type is retained");
+        let type_end = ui
+            .find("TRANSIENT;")
+            .expect("the ui type is retained")
+            + "TRANSIENT;".len();
+        assert_eq!(type_origin.byte_start(), type_start as u32);
+        assert_eq!(type_origin.byte_end(), type_end as u32);
+
+        let binding_origin = ui_origins
+            .iter()
+            .find(|origin| {
+                origin.identity()
+                    == DefinitionIdentity::TypeBinding(
+                        snapshot
+                            .catalogue()
+                            .type_bindings()
+                            .get(33)
+                            .expect("the ui binding is retained")
+                            .id(),
+                    )
+            })
+            .expect("the binding origin is retained")
+            .source();
+        let binding_start = ui
+            .find("EXPORT TYPE std.ui.UI AS std.UI;")
+            .expect("the ui binding is retained");
+        assert_eq!(binding_origin.byte_start(), binding_start as u32);
+        assert_eq!(
+            binding_origin.byte_end(),
+            (binding_start + "EXPORT TYPE std.ui.UI AS std.UI;".len()) as u32
+        );
+    }
+
+    #[test]
+    fn v4_digest_goldens_are_computed_from_the_retained_source() {
+        let snapshot = retained_standard_library_v4_snapshot()
+            .expect("the retained V4 standard source is valid");
+        let types = snapshot.source().units()[0].content();
+        let invoke = snapshot.source().units()[1].content();
+        let output = snapshot.source().units()[2].content();
+        let ui = snapshot.source().units()[3].content();
+        let units = snapshot.source().units().to_vec();
+        let executable = &snapshot.executables()[0];
+        let function = snapshot
+            .catalogue()
+            .function_by_id(STD_INVOKE_ECHO_FUNCTION_ID)
+            .expect("the echo function is retained");
+        let artifact = executable.revision().artifact();
+        let references = executable.references();
+
+        assert_eq!(
+            source_unit_content_digest(types).expect("the types content digest is valid"),
+            super::ACCEPTED_V4_TYPES_CONTENT_DIGEST
+        );
+        assert_eq!(
+            source_unit_content_digest(invoke).expect("the invoke content digest is valid"),
+            super::ACCEPTED_V4_INVOKE_CONTENT_DIGEST
+        );
+        assert_eq!(
+            source_unit_content_digest(output).expect("the output content digest is valid"),
+            super::ACCEPTED_V4_OUTPUT_CONTENT_DIGEST
+        );
+        assert_eq!(
+            source_unit_content_digest(ui).expect("the ui content digest is valid"),
+            super::ACCEPTED_V4_UI_CONTENT_DIGEST
+        );
+        assert_eq!(
+            source_bundle_digest(&units).expect("the bundle digest is valid"),
+            super::ACCEPTED_V4_SOURCE_BUNDLE_DIGEST
+        );
+        assert_eq!(
+            source_revision_record_digest(
+                STANDARD_SOURCE_V4_BUNDLE_ID,
+                Some(STANDARD_SOURCE_V3_REVISION_ID),
+                snapshot.source().bundle_hash(),
+            )
+            .expect("the source revision digest is valid"),
+            super::ACCEPTED_V4_SOURCE_REVISION_DIGEST
+        );
+        assert_eq!(
+            artifact_payload_digest(artifact.payload()).expect("the artifact digest is valid"),
+            super::ACCEPTED_V4_ARTIFACT_DIGEST,
+            "orna.std/4 retains the exact V2 parameter-echo artifact"
+        );
+        assert_eq!(
+            function_semantic_digest_with_version(
+                FunctionSemanticHashVersion::Version2,
+                function,
+                LANGUAGE_VERSION_IDENTITY,
+                artifact,
+                &[],
+                references,
+            )
+            .expect("the semantic digest is valid"),
+            super::ACCEPTED_V4_SEMANTIC_DIGEST,
+            "orna.std/4 retains the exact V3 semantic digest"
+        );
+        assert_eq!(
+            snapshot.digest(),
+            super::ACCEPTED_V4_STANDARD_LIBRARY_DIGEST
+        );
+        assert_eq!(
+            standard_library_digest(&snapshot).expect("the retained digest recomputes"),
+            super::ACCEPTED_V4_STANDARD_LIBRARY_DIGEST
+        );
+    }
+
+    #[test]
+    fn v4_standard_digest_binds_every_retained_byte() {
+        let snapshot = retained_standard_library_v4_snapshot()
+            .expect("the retained V4 standard source is valid");
+        let types = snapshot.source().units()[0].content();
+        let invoke = snapshot.source().units()[1].content();
+        let output = snapshot.source().units()[2].content();
+        let ui = snapshot.source().units()[3].content();
+
+        let tampered_types = format!("{types} ");
+        let tampered_invoke = format!("{invoke} ");
+        let tampered_output = format!("{output} ");
+        let tampered_ui = format!("{ui} ");
+        for tampered in [
+            tampered_v4_snapshot(&tampered_types, invoke, output, ui),
+            tampered_v4_snapshot(types, &tampered_invoke, output, ui),
+            tampered_v4_snapshot(types, invoke, &tampered_output, ui),
+            tampered_v4_snapshot(types, invoke, output, &tampered_ui),
+        ] {
+            assert_eq!(
+                tampered.digest(),
+                super::ACCEPTED_V4_STANDARD_LIBRARY_DIGEST
+            );
+            assert!(matches!(
+                standard_library_digest(&tampered),
+                Err(
+                    orna_core::canonical_hash::CanonicalHashError::StandardLibraryDigestMismatch { .. }
+                )
+            ));
+            assert!(verify_standard_library_v4_snapshot(tampered).is_err());
+        }
+    }
+
+    #[test]
+    fn v4_snapshot_verifies_and_rejects_and_is_rejected_by_the_other_verifiers() {
+        let version_one =
+            retained_standard_library_snapshot().expect("the retained V1 source is valid");
+        let version_two =
+            retained_standard_library_v2_snapshot().expect("the retained V2 source is valid");
+        let version_three =
+            retained_standard_library_v3_snapshot().expect("the retained V3 source is valid");
+        let version_four =
+            retained_standard_library_v4_snapshot().expect("the retained V4 source is valid");
+
+        assert!(verify_standard_library_v4_snapshot(version_four.clone()).is_ok());
+        assert!(matches!(
+            verify_standard_library_v4_snapshot(version_one.clone()),
+            Err(super::StandardLibraryError::CatalogueIdentityMismatch {
+                expected,
+                actual
+            }) if expected == STANDARD_CATALOGUE_V4_REVISION_ID
+                && actual == STANDARD_CATALOGUE_REVISION_ID
+        ));
+        assert!(matches!(
+            verify_standard_library_v4_snapshot(version_two.clone()),
+            Err(super::StandardLibraryError::CatalogueIdentityMismatch {
+                expected,
+                actual
+            }) if expected == STANDARD_CATALOGUE_V4_REVISION_ID
+                && actual == STANDARD_CATALOGUE_V2_REVISION_ID
+        ));
+        assert!(matches!(
+            verify_standard_library_v4_snapshot(version_three.clone()),
+            Err(super::StandardLibraryError::CatalogueIdentityMismatch {
+                expected,
+                actual
+            }) if expected == STANDARD_CATALOGUE_V4_REVISION_ID
+                && actual == STANDARD_CATALOGUE_V3_REVISION_ID
+        ));
+        assert!(matches!(
+            verify_standard_library_snapshot(version_four.clone()),
+            Err(super::StandardLibraryError::CatalogueIdentityMismatch {
+                expected,
+                actual
+            }) if expected == STANDARD_CATALOGUE_REVISION_ID
+                && actual == STANDARD_CATALOGUE_V4_REVISION_ID
+        ));
+        assert!(matches!(
+            verify_standard_library_v2_snapshot(version_four.clone()),
+            Err(super::StandardLibraryError::CatalogueIdentityMismatch {
+                expected,
+                actual
+            }) if expected == STANDARD_CATALOGUE_V2_REVISION_ID
+                && actual == STANDARD_CATALOGUE_V4_REVISION_ID
+        ));
+        assert!(matches!(
+            verify_standard_library_v3_snapshot(version_four.clone()),
+            Err(super::StandardLibraryError::CatalogueIdentityMismatch {
+                expected,
+                actual
+            }) if expected == STANDARD_CATALOGUE_V3_REVISION_ID
+                && actual == STANDARD_CATALOGUE_V4_REVISION_ID
+        ));
+    }
+
+#[test]
     fn v3_registered_opaque_codecs_construct_the_output_payloads() {
         let verified = verify_standard_library_v3_snapshot(
             retained_standard_library_v3_snapshot()
