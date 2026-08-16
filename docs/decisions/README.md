@@ -109,3 +109,5 @@ source-of-truth or authority rules.
   [Sealed `sys.invoke` Carriers Use Three ORV5 Codecs](0053-sealed-sys-invoke-carriers.md)
 * **work ADR 0054:**
   [`sys.invoke` Has One Sealed Request Stream](0054-sealed-sys-invoke-signature-event-stream.md)
+* **work ADR 0055:**
+  [`orna.std/2` Is an Immutable Executable Source Snapshot](0055-standard-executable-source-units.md)
