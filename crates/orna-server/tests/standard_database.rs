@@ -7,8 +7,9 @@ use std::{
 
 use orna_artifact::client_plan::{OPAQUE_FORMAT_VERSION, OpaqueClientPlan};
 use orna_compiler::{
-    StandardApplicationCheckContext, check, check_standard_application, prepare,
-    prepare_standard_application,
+    STD_INVOKE_ECHO_FUNCTION_ID, STD_INVOKE_ECHO_FUNCTION_REVISION_ID,
+    STD_INVOKE_ECHO_PARAMETER_ID, StandardApplicationCheckContext, check,
+    check_standard_application, prepare, prepare_standard_application,
 };
 use orna_core::{
     CatalogueRevisionId, FunctionId, FunctionRevisionId, InvocationId, ObjectId, ParameterId,
@@ -19,7 +20,13 @@ use orna_core::{
     },
     catalogue::{
         CatalogueSnapshot, FunctionDefinition, FunctionDomain, FunctionReturn, FunctionSecurity,
-        FunctionVolatility,
+        FunctionVolatility, QualifiedSemanticName,
+    },
+    invocation::{
+        InvocationArgument, InvocationCallerContext, InvocationCallerKind, InvocationClientOffer,
+        InvocationEventBody, InvocationEventKind, InvocationParameterSelector,
+        InvocationTarget as InvocationRequestTarget, InvocationTracePolicy, InvokeRequest,
+        InvokeRequestInput, InvokeValue,
     },
     revision::{
         DefinitionIdentity, DefinitionReference, DefinitionReferenceKind,
@@ -31,22 +38,23 @@ use orna_core::{
         AuthenticatedSession, ExecuteDenial, ExecuteGrant, InvocationTarget,
         LocalPeerAuthenticationError, LocalPeerCredential, Principal, PrincipalKind,
         PrincipalStatus, SecurityAuditDenial, SecurityAuditKind, SecurityAuditOutcome,
-        SecuritySnapshot,
+        SecurityFunctionTarget, SecuritySnapshot,
     },
     source::{SourceBundle, SourceUnit},
     system::SYS_INVOKE_FUNCTION_ID,
     types::{ResolvedType, TypeDescriptor},
-    value::{EnumValue, OpaqueValue, RecordValue, RuntimeValue},
+    value::{EnumValue, FunctionArgument, OpaqueValue, RecordValue, RuntimeValue},
 };
 use orna_postgres::{
-    AuthenticatedRawCallResult, PostgresKernel, PostgresKernelError, ServerInsertError,
-    ServerMutationError, ServerUpdateError,
+    AuthenticatedRawCallResult, PostgresKernel, PostgresKernelError, SealedInvocationResult,
+    ServerInsertError, ServerMutationError, ServerUpdateError,
 };
 use orna_protocol::{
     CallFailure, Channel, ClientFrame, ConnectionError, Event, ProtocolConnection, RawCall,
     ServerAction, ServerFrame, decode_active_server_frame, decode_constructed_server_frame,
-    decode_registered_server_frame, decode_server_frame, encode_active_client_frame,
-    encode_active_server_frame, encode_client_frame, encode_constructed_client_frame,
+    decode_invocation_event_batch, decode_registered_server_frame, decode_server_frame,
+    encode_active_client_frame, encode_active_server_frame, encode_client_frame,
+    encode_constructed_client_frame, encode_invocation_event_batch, encode_invoke_request,
     encode_registered_client_frame,
 };
 use orna_server::{
@@ -802,6 +810,445 @@ async fn sealed_sys_invoke_entry_is_unavailable_after_system_authorisation() -> 
                     == Some(SecurityAuditDenial::Execute(ExecuteDenial::UnknownFunction)),
             "sealed system entry changed the exact durable audit sequence",
         )?;
+        require_no_database_sessions(&database).await
+    })
+    .await
+}
+
+#[tokio::test]
+#[ignore = "requires the Compose PostgreSQL development service"]
+async fn proves_standard_invocation_dogfooding_through_sealed_sys_invoke() -> TestResult<()> {
+    const ECHO_BY_NAME: i32 = 41;
+    const ECHO_BY_IDENTITY: i32 = 42;
+    const RAW_DENIED_VALUE: i32 = 7;
+    const CONNECTION_PROTOCOL_MAJOR: u16 = 5;
+
+    with_test_database(|database| async move {
+        let kernel = kernel(&database)?;
+
+        // Install orna.std/2 through the normal installed-source path: the
+        // V1-to-V2 upgrade retains and verifies V1 first, then atomically
+        // applies the executable V2 snapshot and its companion application
+        // revision.
+        kernel.bootstrap().await?;
+        let empty = kernel.recover().await?;
+        let upgrade = orna_standard::prepare_standard_upgrade_v1_to_v2(&empty)?;
+        let active = kernel.apply_standard_upgrade(&upgrade).await?;
+        let standard = active.catalogue_hash_context().standard().ok_or_else(|| {
+            failure("the V1-to-V2 upgrade did not pin a verified standard snapshot")
+        })?;
+        require(
+            standard.revision() == orna_standard::STANDARD_LIBRARY_V2_REVISION_ID
+                && standard
+                    .catalogue()
+                    .function_by_id(STD_INVOKE_ECHO_FUNCTION_ID)
+                    .is_some()
+                && standard.executables().iter().any(|executable| {
+                    executable.function() == STD_INVOKE_ECHO_FUNCTION_ID
+                        && executable.revision().id() == STD_INVOKE_ECHO_FUNCTION_REVISION_ID
+                }),
+            "the installed V2 snapshot did not retain the exact std.invoke.echo executable",
+        )?;
+        let pair = active.pair();
+        let standard_revision = standard.revision();
+        let registry = orna_standard::registered_opaque_codecs(standard)?;
+
+        // Grant EXECUTE on std.invoke.echo (FunctionId ...10) to the caller.
+        let security = SecuritySnapshot::new_with_function_targets(
+            pair,
+            vec![SecurityFunctionTarget::verified_standard(
+                STD_INVOKE_ECHO_FUNCTION_ID,
+                standard_revision,
+                STD_INVOKE_ECHO_FUNCTION_REVISION_ID,
+            )],
+            vec![Principal::new(
+                RAW_CLIENT_USER,
+                PrincipalKind::User,
+                PrincipalStatus::Active,
+            )],
+            vec![],
+            vec![ExecuteGrant::new(RAW_CLIENT_USER, STD_INVOKE_ECHO_FUNCTION_ID)],
+        )?;
+        let security = kernel.replace_security_snapshot(&security).await?;
+        let session = security.bind_authenticated_session(RAW_CLIENT_USER, vec![])?;
+
+        // Invoke through sys.invoke by qualified name and parameter name.
+        let by_name = sealed_echo_request(
+            InvocationRequestTarget::qualified_name(QualifiedSemanticName::new([
+                "std", "invoke", "echo",
+            ])?)?,
+            InvocationParameterSelector::name("p_value")?,
+            ECHO_BY_NAME,
+        )?;
+        let retained_name = encode_invoke_request(&active, &registry, &by_name)?;
+        let result_name = kernel
+            .dispatch_sealed_sys_invoke(&session, CONNECTION_PROTOCOL_MAJOR, &retained_name)
+            .await?;
+        let invocation_name = require_echo_completion(&result_name, ECHO_BY_NAME)?;
+        let events_name = match &result_name {
+            SealedInvocationResult::Completed { events, .. } => events,
+            _ => return Err(failure("the name-addressed sealed invocation did not complete")),
+        };
+
+        // The completed kernel result carries the exact RESULT_VALUES Event
+        // batch a server adapter delivers before CALL_COMPLETED; prove the
+        // payload round-trips the sealed protocol bytes.
+        let payload = encode_invocation_event_batch(&active, &registry, events_name)?;
+        let decoded = decode_invocation_event_batch(&active, &registry, &payload)?;
+        require(
+            decoded == *events_name,
+            "the completed Event batch did not round-trip the sealed RESULT_VALUES payload",
+        )?;
+
+        // Repeat the invocation by the fixed function and parameter
+        // identities (FunctionId ...10 and ParameterId ...10).
+        let by_identity = sealed_echo_request(
+            InvocationRequestTarget::function_id(STD_INVOKE_ECHO_FUNCTION_ID),
+            InvocationParameterSelector::parameter_id(STD_INVOKE_ECHO_PARAMETER_ID),
+            ECHO_BY_IDENTITY,
+        )?;
+        let retained_identity = encode_invoke_request(&active, &registry, &by_identity)?;
+        let result_identity = kernel
+            .dispatch_sealed_sys_invoke(&session, CONNECTION_PROTOCOL_MAJOR, &retained_identity)
+            .await?;
+        let invocation_identity = require_echo_completion(&result_identity, ECHO_BY_IDENTITY)?;
+        require(
+            invocation_name != invocation_identity,
+            "the two sealed invocations reused one invocation identity",
+        )?;
+
+        // A direct raw call to the same standard target returns EXECUTE_DENIED,
+        // records exactly one denied decision, and executes no artifact.
+        let security_events_before = kernel.recover_security_audit_events().await?;
+        let raw = kernel
+            .dispatch_authenticated_raw_call_with_arguments(
+                &session,
+                STD_INVOKE_ECHO_FUNCTION_ID,
+                &[FunctionArgument::new(
+                    STD_INVOKE_ECHO_PARAMETER_ID,
+                    RuntimeValue::Integer(RAW_DENIED_VALUE),
+                )?],
+            )
+            .await;
+        require(
+            matches!(
+                &raw,
+                Err(PostgresKernelError::RawExecuteDenied {
+                    pair: denied_pair,
+                    function,
+                    reason: ExecuteDenial::UnknownFunction,
+                }) if *denied_pair == pair && *function == STD_INVOKE_ECHO_FUNCTION_ID
+            ),
+            "the direct raw call to the standard target did not return EXECUTE_DENIED",
+        )?;
+        let security_events_after = kernel.recover_security_audit_events().await?;
+        require(
+            security_events_after.len() == security_events_before.len() + 1
+                && security_events_after
+                    .last()
+                    .map(|event| event.decision().outcome())
+                    == Some(SecurityAuditOutcome::Denied)
+                && security_events_after.last().map(|event| event.decision().target())
+                    == Some(Some(InvocationTarget::new(STD_INVOKE_ECHO_FUNCTION_ID, pair)))
+                && security_events_after.last().map(|event| event.decision().denial())
+                    == Some(Some(SecurityAuditDenial::Execute(ExecuteDenial::UnknownFunction))),
+            "the raw denial did not record exactly one denied EXECUTE decision",
+        )?;
+        require(
+            invocation_audit_count(&database).await? == 2,
+            "the raw denial executed an artifact or recorded an invocation decision",
+        )?;
+
+        // The allowed protected security and invocation audit events both
+        // link to the exact historical application RevisionPair whose
+        // catalogue hash context pins orna.std/2.
+        let security_events = kernel.recover_security_audit_events().await?;
+        let allowed = security_events
+            .iter()
+            .filter(|event| event.decision().outcome() == SecurityAuditOutcome::Allowed)
+            .collect::<Vec<_>>();
+        require(
+            allowed.len() == 2
+                && allowed.iter().all(|event| {
+                    event.decision().kind() == SecurityAuditKind::Execute
+                        && event.decision().session_principal() == Some(RAW_CLIENT_USER)
+                        && event.decision().target()
+                            == Some(InvocationTarget::verified_standard(
+                                STD_INVOKE_ECHO_FUNCTION_ID,
+                                pair,
+                                standard_revision,
+                                STD_INVOKE_ECHO_FUNCTION_REVISION_ID,
+                            ))
+                }),
+            "the allowed EXECUTE evidence did not pin the verified standard target to the historical pair",
+        )?;
+        let allowed_security_ids = allowed.iter().map(|event| event.id()).collect::<Vec<_>>();
+        let invocation_rows = invocation_audit_rows(&database).await?;
+        require(
+            invocation_rows.len() == 2
+                && invocation_rows.iter().all(|row| {
+                    row.outcome == "allowed"
+                        && row.function == STD_INVOKE_ECHO_FUNCTION_ID.to_bytes().to_vec()
+                        && row.source == pair.source().to_bytes().to_vec()
+                        && row.catalogue == pair.catalogue().to_bytes().to_vec()
+                        && row.security_event.is_some()
+                })
+                && invocation_rows
+                    .iter()
+                    .map(|row| row.security_event.clone())
+                    .collect::<Vec<_>>()
+                    == allowed_security_ids
+                        .iter()
+                        .map(|id| Some(id.to_bytes().to_vec()))
+                        .collect::<Vec<_>>(),
+            "the invocation audit rows did not link the exact historical RevisionPair and EXECUTE evidence",
+        )?;
+        let authority = standard_authority_row(
+            &database,
+            pair.catalogue(),
+            STD_INVOKE_ECHO_FUNCTION_ID,
+        )
+        .await?;
+        require(
+            authority.as_ref().is_some_and(|row| {
+                row.target_class == "standard"
+                    && row.function_revision
+                        == STD_INVOKE_ECHO_FUNCTION_REVISION_ID.to_bytes().to_vec()
+                    && row.standard_revision == Some(standard_revision.to_bytes().to_vec())
+            }),
+            "the durable invocation target authority did not pin the standard target",
+        )?;
+
+        // Restart/reopen succeeds with the valid rows and the same pair.
+        let reopened = PostgresKernel::new(database.config()?);
+        let reopened_active = reopened.recover().await?;
+        require(
+            reopened_active.pair() == pair
+                && reopened_active
+                    .catalogue_hash_context()
+                    .standard()
+                    .map(|snapshot| snapshot.revision())
+                    == Some(standard_revision),
+            "reopening the installed database changed its active pair or pinned standard",
+        )?;
+
+        // The tamper fixtures below each fail recovery without writing or
+        // changing prior history. The three invocation-audit foreign keys are
+        // dropped only so the tamper statements can express the corrupted
+        // durable state; recovery validation does not depend on them.
+        run_database_statement(
+            &database,
+            "ALTER TABLE _orna_kernel.invocation_audit_events
+                 DROP CONSTRAINT invocation_audit_events_target_fk,
+                 DROP CONSTRAINT invocation_audit_events_revision_pair_fk,
+                 DROP CONSTRAINT invocation_audit_events_security_evidence_fk;",
+        )
+        .await?;
+
+        // 1. Absent standard target: the authority row for std.invoke.echo is
+        //    deleted, so recovery cannot resolve the standard target.
+        run_database_statement(
+            &database,
+            &format!(
+                "DELETE FROM _orna_kernel.invocation_target_authorities
+                 WHERE catalogue_revision_id = decode('{}', 'hex')
+                   AND function_id = decode('{}', 'hex');",
+                id_hex(pair.catalogue().to_bytes()),
+                id_hex(STD_INVOKE_ECHO_FUNCTION_ID.to_bytes()),
+            ),
+        )
+        .await?;
+        let absent = recovery_error(&database).await?;
+        require(
+            matches!(
+                &absent,
+                PostgresKernelError::DurableInvariant {
+                    relation: "_orna_kernel.invocation_target_authorities",
+                    record,
+                    rule: "standard invocation targets must exactly match the pinned verified standard executables",
+                } if record == "active catalogue"
+            ),
+            "the absent standard target did not fail recovery closed",
+        )?;
+        run_database_statement(
+            &database,
+            &format!(
+                "INSERT INTO _orna_kernel.invocation_target_authorities
+                     (catalogue_revision_id, function_id, target_class,
+                      function_revision_id, standard_library_revision_id)
+                 VALUES (decode('{}', 'hex'), decode('{}', 'hex'), 'standard',
+                         decode('{}', 'hex'), decode('{}', 'hex'));",
+                id_hex(pair.catalogue().to_bytes()),
+                id_hex(STD_INVOKE_ECHO_FUNCTION_ID.to_bytes()),
+                id_hex(STD_INVOKE_ECHO_FUNCTION_REVISION_ID.to_bytes()),
+                id_hex(standard_revision.to_bytes()),
+            ),
+        )
+        .await?;
+        PostgresKernel::new(database.config()?).recover().await?;
+
+        // 2. Wrong standard executable revision: the authority row pins an
+        //    executable revision that the verified standard does not contain.
+        run_database_statement(
+            &database,
+            &format!(
+                "UPDATE _orna_kernel.invocation_target_authorities
+                 SET function_revision_id = decode(repeat('aa', 16), 'hex')
+                 WHERE catalogue_revision_id = decode('{}', 'hex')
+                   AND function_id = decode('{}', 'hex');",
+                id_hex(pair.catalogue().to_bytes()),
+                id_hex(STD_INVOKE_ECHO_FUNCTION_ID.to_bytes()),
+            ),
+        )
+        .await?;
+        let wrong_revision = recovery_error(&database).await?;
+        require(
+            matches!(
+                &wrong_revision,
+                PostgresKernelError::DurableInvariant {
+                    relation: "_orna_kernel.invocation_target_authorities",
+                    record,
+                    rule: "standard invocation target must resolve exactly once in the pinned verified standard snapshot",
+                } if *record == STD_INVOKE_ECHO_FUNCTION_ID.canonical()
+            ),
+            "the wrong standard executable revision did not fail recovery closed",
+        )?;
+        run_database_statement(
+            &database,
+            &format!(
+                "UPDATE _orna_kernel.invocation_target_authorities
+                 SET function_revision_id = decode('{}', 'hex')
+                 WHERE catalogue_revision_id = decode('{}', 'hex')
+                   AND function_id = decode('{}', 'hex');",
+                id_hex(STD_INVOKE_ECHO_FUNCTION_REVISION_ID.to_bytes()),
+                id_hex(pair.catalogue().to_bytes()),
+                id_hex(STD_INVOKE_ECHO_FUNCTION_ID.to_bytes()),
+            ),
+        )
+        .await?;
+        PostgresKernel::new(database.config()?).recover().await?;
+
+        // 3. Unlinked security evidence: the invocation audit row points at a
+        //    security audit event that does not exist.
+        let original_security_event = allowed_security_ids[1];
+        run_database_statement(
+            &database,
+            &format!(
+                "UPDATE _orna_kernel.invocation_audit_events
+                 SET security_audit_event_id = decode(repeat('bb', 16), 'hex')
+                 WHERE invocation_id = decode('{}', 'hex');",
+                id_hex(invocation_identity.to_bytes()),
+            ),
+        )
+        .await?;
+        let unlinked = recovery_error(&database).await?;
+        require(
+            matches!(
+                &unlinked,
+                PostgresKernelError::DurableInvariant {
+                    relation: "_orna_kernel.invocation_audit_events",
+                    rule: "linked security audit evidence is missing",
+                    ..
+                }
+            ),
+            "the unlinked security evidence did not fail recovery closed",
+        )?;
+        require(
+            invocation_audit_security_link(
+                &database,
+                invocation_identity,
+                Some([0xbb; 16]),
+            )
+            .await?,
+            "the failed recovery repaired the unlinked security evidence",
+        )?;
+        run_database_statement(
+            &database,
+            &format!(
+                "UPDATE _orna_kernel.invocation_audit_events
+                 SET security_audit_event_id = decode('{}', 'hex')
+                 WHERE invocation_id = decode('{}', 'hex');",
+                id_hex(original_security_event.to_bytes()),
+                id_hex(invocation_identity.to_bytes()),
+            ),
+        )
+        .await?;
+        PostgresKernel::new(database.config()?).recover().await?;
+
+        // 4. Mismatched application revision pair: both protected rows point
+        //    at a revision pair that does not pin orna.std/2, so recovery
+        //    cannot resolve the standard target through the historical pin.
+        run_database_statement(
+            &database,
+            &format!(
+                "UPDATE _orna_kernel.security_audit_events
+                 SET source_revision_id = decode(repeat('cc', 16), 'hex'),
+                     catalogue_revision_id = decode(repeat('dd', 16), 'hex')
+                 WHERE function_id = decode('{}', 'hex');
+                 UPDATE _orna_kernel.invocation_audit_events
+                 SET source_revision_id = decode(repeat('cc', 16), 'hex'),
+                     catalogue_revision_id = decode(repeat('dd', 16), 'hex')
+                 WHERE function_id = decode('{}', 'hex');",
+                id_hex(STD_INVOKE_ECHO_FUNCTION_ID.to_bytes()),
+                id_hex(STD_INVOKE_ECHO_FUNCTION_ID.to_bytes()),
+            ),
+        )
+        .await?;
+        let mismatched = recovery_error(&database).await?;
+        require(
+            matches!(
+                &mismatched,
+                PostgresKernelError::DurableInvariant {
+                    relation: "_orna_kernel.invocation_audit_events",
+                    rule: "target function and pinned revision must exist together",
+                    ..
+                }
+            ),
+            "the mismatched application revision pair did not fail recovery closed",
+        )?;
+        run_database_statement(
+            &database,
+            &format!(
+                "UPDATE _orna_kernel.security_audit_events
+                 SET source_revision_id = decode('{}', 'hex'),
+                     catalogue_revision_id = decode('{}', 'hex')
+                 WHERE function_id = decode('{}', 'hex');
+                 UPDATE _orna_kernel.invocation_audit_events
+                 SET source_revision_id = decode('{}', 'hex'),
+                     catalogue_revision_id = decode('{}', 'hex')
+                 WHERE function_id = decode('{}', 'hex');",
+                id_hex(pair.source().to_bytes()),
+                id_hex(pair.catalogue().to_bytes()),
+                id_hex(STD_INVOKE_ECHO_FUNCTION_ID.to_bytes()),
+                id_hex(pair.source().to_bytes()),
+                id_hex(pair.catalogue().to_bytes()),
+                id_hex(STD_INVOKE_ECHO_FUNCTION_ID.to_bytes()),
+            ),
+        )
+        .await?;
+        PostgresKernel::new(database.config()?).recover().await?;
+
+        // 5. Extra disclosure-bearing audit column: recovery rejects the
+        //    relation shape before it trusts any audit row.
+        run_database_statement(
+            &database,
+            "ALTER TABLE _orna_kernel.invocation_audit_events
+                 ADD COLUMN request_payload bytea;",
+        )
+        .await?;
+        let disclosure = recovery_error(&database).await?;
+        require(
+            matches!(
+                &disclosure,
+                PostgresKernelError::DurableInvariant {
+                    relation: "_orna_kernel.invocation_audit_events",
+                    rule: "invocation audit relation has unsupported disclosure-bearing columns",
+                    ..
+                }
+            ),
+            "the disclosure-bearing audit column did not fail recovery closed",
+        )?;
+
         require_no_database_sessions(&database).await
     })
     .await
@@ -6439,6 +6886,242 @@ async fn require_no_database_sessions(database: &TestDatabase) -> TestResult<()>
         session.shutdown().await,
         "database session leak check",
     )
+}
+
+/// Builds one complete checked `sys.invoke` Request for `std.invoke.echo`.
+fn sealed_echo_request(
+    target: InvocationRequestTarget,
+    selector: InvocationParameterSelector,
+    value: i32,
+) -> TestResult<InvokeRequest> {
+    Ok(InvokeRequest::new(InvokeRequestInput {
+        target,
+        arguments: vec![InvocationArgument::new(
+            selector,
+            InvokeValue::new(RuntimeValue::Integer(value))?,
+        )],
+        caller_context: InvocationCallerContext::new(
+            InvocationCallerKind::TestRunner,
+            false,
+            false,
+            None,
+            None,
+            "en-GB",
+            "UTC",
+            None,
+        )?,
+        client_offer: InvocationClientOffer::new(
+            5,
+            "en-GB",
+            "UTC",
+            Vec::new(),
+            Vec::new(),
+            1_024,
+            0,
+            None,
+            None,
+        )?,
+        output_requirement: None,
+        state_profile: None,
+        trace_policy: InvocationTracePolicy::Off,
+        idempotency_key: None,
+        parent_invocation_id: None,
+        observer_context: None,
+    })?)
+}
+
+/// Asserts one completed sealed echo invocation carried exactly
+/// `InvocationStarted(0)`, `ValueBatch(1)` with the typed integer, and
+/// `InvocationCompleted(2)`, and returns its invocation identity.
+fn require_echo_completion(
+    result: &SealedInvocationResult,
+    expected: i32,
+) -> TestResult<InvocationId> {
+    let SealedInvocationResult::Completed { invocation, events } = result else {
+        return Err(failure(
+            "the sealed echo invocation did not complete with its Event batch",
+        ));
+    };
+    let records = events.records();
+    require(
+        records.len() == 3
+            && records[0].outer_sequence() == 1
+            && records[1].outer_sequence() == 2
+            && records[2].outer_sequence() == 3
+            && records[0].event().sequence() == 0
+            && records[1].event().sequence() == 1
+            && records[2].event().sequence() == 2,
+        "the sealed echo stream did not carry contiguous outer and inner sequences",
+    )?;
+    require(
+        records[0].event().kind() == InvocationEventKind::InvocationStarted
+            && records[1].event().kind() == InvocationEventKind::ValueBatch
+            && records[2].event().kind() == InvocationEventKind::InvocationCompleted,
+        "the sealed echo stream did not carry InvocationStarted(0), ValueBatch(1), InvocationCompleted(2)",
+    )?;
+    let InvocationEventBody::ValueBatch {
+        schema: None,
+        values,
+    } = records[1].event().body()
+    else {
+        return Err(failure(
+            "the sealed ValueBatch event did not carry a plain typed batch",
+        ));
+    };
+    require(
+        values.len() == 1 && values[0].value() == &RuntimeValue::Integer(expected),
+        "the sealed ValueBatch did not carry the exact typed integer",
+    )?;
+    require(
+        records[0].event().invocation_id() == *invocation
+            && records[1].event().invocation_id() == *invocation
+            && records[2].event().invocation_id() == *invocation,
+        "the sealed events did not share one invocation identity",
+    )?;
+    Ok(*invocation)
+}
+
+struct InvocationAuditRow {
+    outcome: String,
+    function: Vec<u8>,
+    source: Vec<u8>,
+    catalogue: Vec<u8>,
+    security_event: Option<Vec<u8>>,
+}
+
+async fn invocation_audit_rows(database: &TestDatabase) -> TestResult<Vec<InvocationAuditRow>> {
+    let session = database.open().await?;
+    let operation = async {
+        let rows = session
+            .client()
+            .query(
+                "SELECT outcome, function_id, source_revision_id,
+                        catalogue_revision_id, security_audit_event_id
+                 FROM _orna_kernel.invocation_audit_events
+                 ORDER BY sequence",
+                &[],
+            )
+            .await?;
+        let mut result = Vec::with_capacity(rows.len());
+        for row in rows {
+            result.push(InvocationAuditRow {
+                outcome: row.try_get("outcome")?,
+                function: row.try_get("function_id")?,
+                source: row.try_get("source_revision_id")?,
+                catalogue: row.try_get("catalogue_revision_id")?,
+                security_event: row.try_get("security_audit_event_id")?,
+            });
+        }
+        Ok(result)
+    }
+    .await;
+    finish_session(
+        operation,
+        session.shutdown().await,
+        "invocation audit row read",
+    )
+}
+
+async fn invocation_audit_count(database: &TestDatabase) -> TestResult<i64> {
+    let session = database.open().await?;
+    let operation = async {
+        let row = session
+            .client()
+            .query_one(
+                "SELECT count(*) FROM _orna_kernel.invocation_audit_events",
+                &[],
+            )
+            .await?;
+        Ok(row.try_get(0)?)
+    }
+    .await;
+    finish_session(
+        operation,
+        session.shutdown().await,
+        "invocation audit count",
+    )
+}
+
+/// Returns whether one invocation audit row links exactly the supplied
+/// security audit event identity.
+async fn invocation_audit_security_link(
+    database: &TestDatabase,
+    invocation: InvocationId,
+    expected: Option<[u8; 16]>,
+) -> TestResult<bool> {
+    let session = database.open().await?;
+    let operation = async {
+        let row = session
+            .client()
+            .query_one(
+                "SELECT security_audit_event_id
+                 FROM _orna_kernel.invocation_audit_events
+                 WHERE invocation_id = $1",
+                &[&invocation.to_bytes().to_vec()],
+            )
+            .await?;
+        let actual: Option<Vec<u8>> = row.try_get(0)?;
+        Ok(actual == expected.map(|bytes| bytes.to_vec()))
+    }
+    .await;
+    finish_session(
+        operation,
+        session.shutdown().await,
+        "invocation audit security link read",
+    )
+}
+
+struct StandardAuthorityRow {
+    target_class: String,
+    function_revision: Vec<u8>,
+    standard_revision: Option<Vec<u8>>,
+}
+
+async fn standard_authority_row(
+    database: &TestDatabase,
+    catalogue: CatalogueRevisionId,
+    function: FunctionId,
+) -> TestResult<Option<StandardAuthorityRow>> {
+    let session = database.open().await?;
+    let operation = async {
+        let row = session
+            .client()
+            .query_opt(
+                "SELECT target_class, function_revision_id, standard_library_revision_id
+                 FROM _orna_kernel.invocation_target_authorities
+                 WHERE catalogue_revision_id = $1 AND function_id = $2",
+                &[
+                    &catalogue.to_bytes().to_vec(),
+                    &function.to_bytes().to_vec(),
+                ],
+            )
+            .await?;
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        Ok(Some(StandardAuthorityRow {
+            target_class: row.try_get("target_class")?,
+            function_revision: row.try_get("function_revision_id")?,
+            standard_revision: row.try_get("standard_library_revision_id")?,
+        }))
+    }
+    .await;
+    finish_session(
+        operation,
+        session.shutdown().await,
+        "standard authority row read",
+    )
+}
+
+async fn recovery_error(database: &TestDatabase) -> TestResult<PostgresKernelError> {
+    match kernel(database)?.recover().await {
+        Ok(_) => Err(failure("tampered durable state recovered successfully")),
+        Err(error) => Ok(error),
+    }
+}
+
+fn id_hex(bytes: [u8; 16]) -> String {
+    format!("{:032x}", u128::from_be_bytes(bytes))
 }
 
 fn kernel(database: &TestDatabase) -> TestResult<PostgresKernel> {
