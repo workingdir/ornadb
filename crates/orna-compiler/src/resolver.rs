@@ -25,21 +25,22 @@ pub use model::{
     CheckedStandardLibrary, CheckedStandardParameterEcho, CheckedStandardSchema,
     CheckedStandardTerminalPresentTable, CheckedStandardTypeBinding, CheckedStandardTypeReference,
     CheckedStandardValueType, CheckedTypeUseKind, CheckedValueTypeUse, ConstantValue,
-    STANDARD_LIBRARY_V3_REVISION_ID, STD_DATA_ROWS_TYPE_ID, STD_DATA_SCHEMA_ID,
-    STD_INTEGER_TYPE_ID, STD_INVOKE_ECHO_FUNCTION_ID, STD_INVOKE_ECHO_FUNCTION_REVISION_ID,
-    STD_INVOKE_ECHO_PARAMETER_ID, STD_INVOKE_ECHO_REVISION_NUMBER, STD_INVOKE_SCHEMA_ID,
-    STD_INVOKE_SOURCE_UNIT_ID, STD_IO_BYTE_STREAM_TYPE_ID, STD_IO_SCHEMA_ID,
-    STD_JSON_ENCODE_FUNCTION_ID, STD_JSON_ENCODE_FUNCTION_REVISION_ID,
-    STD_JSON_ENCODE_PARAMETER_ID, STD_JSON_SCHEMA_ID, STD_JSON_VALUE_TYPE_ID,
-    STD_OUTPUT_SOURCE_UNIT_ID, STD_TERMINAL_DOCUMENT_TYPE_ID,
+    STANDARD_LIBRARY_V3_REVISION_ID, STANDARD_LIBRARY_V4_REVISION_ID, STD_DATA_ROWS_TYPE_ID,
+    STD_DATA_SCHEMA_ID, STD_INTEGER_TYPE_ID, STD_INVOKE_ECHO_FUNCTION_ID,
+    STD_INVOKE_ECHO_FUNCTION_REVISION_ID, STD_INVOKE_ECHO_PARAMETER_ID,
+    STD_INVOKE_ECHO_REVISION_NUMBER, STD_INVOKE_SCHEMA_ID, STD_INVOKE_SOURCE_UNIT_ID,
+    STD_IO_BYTE_STREAM_TYPE_ID, STD_IO_SCHEMA_ID, STD_JSON_ENCODE_FUNCTION_ID,
+    STD_JSON_ENCODE_FUNCTION_REVISION_ID, STD_JSON_ENCODE_PARAMETER_ID, STD_JSON_SCHEMA_ID,
+    STD_JSON_VALUE_TYPE_ID, STD_OUTPUT_SOURCE_UNIT_ID, STD_TERMINAL_DOCUMENT_TYPE_ID,
     STD_TERMINAL_PRESENT_TABLE_FUNCTION_ID, STD_TERMINAL_PRESENT_TABLE_FUNCTION_REVISION_ID,
     STD_TERMINAL_PRESENT_TABLE_PARAMETER_ID, STD_TERMINAL_SCHEMA_ID, STD_TYPES_SOURCE_UNIT_ID,
-    SemanticType, StandardApplicationCheckContext, StandardApplicationCheckReport,
+    STD_UI_SCHEMA_ID, STD_UI_SOURCE_UNIT_ID, STD_UI_TYPE_ID, SemanticType,
+    StandardApplicationCheckContext, StandardApplicationCheckReport,
     StandardApplicationContextError, StandardLibraryCheckError,
 };
 pub(crate) use model::{
     CheckedClientFunctionBody, CheckedFieldRename, CheckedServerFunctionBody, QueryCatalogue,
-    QueryField, QueryObjectType, ResolutionCatalogue,
+    QueryField, QueryObjectType, ResolutionCatalogue, STD_UI_CONTRACT,
 };
 use model::{CheckedEnumType, CheckedRecordValueField, CheckedRecordValueType};
 
@@ -358,14 +359,20 @@ pub fn check_standard_application(
 /// first two units exactly as V2 does and additionally reconciles the output
 /// unit closed against the `std.terminal` and `std.io` schemas, the two
 /// opaque output value types, their exports, and every origin on the
-/// retained unit. The checker does not trust a source file because its path
-/// looks standard.
+/// retained unit. The V4 standard revision (ADR 0062) carries the ordered
+/// four-unit bundle (`std/types.orna`, `std/invoke.orna`,
+/// `std/output.orna`, then `std/ui.orna`); its branch reconciles the first
+/// three units exactly as V3 does and additionally reconciles the ui unit
+/// closed against the `std.ui` schema, the opaque `std.ui.ui` value type,
+/// its export, and every origin on the retained unit. The checker does not
+/// trust a source file because its path looks standard.
 pub fn check_standard_library_source(
     snapshot: &VerifiedStandardLibrarySnapshot,
 ) -> Result<CheckedStandardLibrary, StandardLibraryCheckError> {
     match snapshot.digest_version() {
         StandardLibraryDigestVersion::Version1 => check_standard_library_source_v1(snapshot),
         StandardLibraryDigestVersion::Version2 => match snapshot.revision() {
+            STANDARD_LIBRARY_V4_REVISION_ID => check_standard_library_source_v4(snapshot),
             STANDARD_LIBRARY_V3_REVISION_ID => check_standard_library_source_v3(snapshot),
             _ => check_standard_library_source_v2(snapshot),
         },
@@ -602,6 +609,106 @@ fn check_standard_library_source_v3_parts(
     Ok((families, checked_executable))
 }
 
+/// Checks one retained V4 UI standard source bundle.
+///
+/// The ordered bundle must be exactly `std/types.orna` (`...02`),
+/// `std/invoke.orna` (`...03`), `std/output.orna` (`...04`), then
+/// `std/ui.orna` (`...05`). Units zero to two reconcile exactly as the V3
+/// checker does, including the unchanged `std.invoke.echo` executable. The
+/// ui unit must declare exactly the `std.ui` (`...08`) schema, the single
+/// opaque value type `std.ui.UI` (`...19`) with its ADR 0062 kernel contract
+/// and `IMMUTABLE TRANSIENT` catalogue facts, and the single qualified
+/// export (`std.UI`); every origin must sit on the retained ui unit at the
+/// exact declaration byte ranges, and any extra, missing, or mismatched
+/// declaration, identity, contract, binding, or origin fails closed.
+fn check_standard_library_source_v4(
+    snapshot: &VerifiedStandardLibrarySnapshot,
+) -> Result<CheckedStandardLibrary, StandardLibraryCheckError> {
+    let (families, checked_executable) = check_standard_library_source_v4_parts(
+        snapshot.source(),
+        snapshot.catalogue(),
+        snapshot.origins(),
+        snapshot.executables(),
+    )?;
+    Ok(CheckedStandardLibrary {
+        verified_snapshot: snapshot.clone(),
+        schemas: families.schemas,
+        value_types: families.value_types,
+        type_bindings: families.type_bindings,
+        checked_executable: Some(checked_executable),
+    })
+}
+
+/// Checks the retained V4 source bundle, catalogue, origins, and executable
+/// evidence without a retained digest.
+///
+/// The digest gate is a separate, prior verification step
+/// (`verify_standard_library_v4_snapshot`); this function reconciles the
+/// source facts against the supplied stored facts and fails closed on any
+/// disagreement, exactly as [`check_standard_library_source_v3_parts`] does
+/// for the first three units, then reconciles the ui unit.
+fn check_standard_library_source_v4_parts(
+    source: &StoredSourceRevision,
+    catalogue: &CatalogueSnapshot,
+    origins: &[DefinitionOrigin],
+    executables: &[StandardExecutable],
+) -> Result<(StandardSourceFamilies, CheckedStandardExecutable), StandardLibraryCheckError> {
+    let source_units = source.units();
+    let [types_unit, invoke_unit, output_unit, ui_unit] = source_units else {
+        return Err(StandardLibraryCheckError::SourceUnitCount {
+            actual: source_units.len(),
+        });
+    };
+    if types_unit.id() != STD_TYPES_SOURCE_UNIT_ID
+        || types_unit.logical_path() != "std/types.orna"
+        || types_unit.ordinal() != 0
+        || invoke_unit.id() != STD_INVOKE_SOURCE_UNIT_ID
+        || invoke_unit.logical_path() != "std/invoke.orna"
+        || invoke_unit.ordinal() != 1
+        || output_unit.id() != STD_OUTPUT_SOURCE_UNIT_ID
+        || output_unit.logical_path() != "std/output.orna"
+        || output_unit.ordinal() != 2
+        || ui_unit.id() != STD_UI_SOURCE_UNIT_ID
+        || ui_unit.logical_path() != "std/ui.orna"
+        || ui_unit.ordinal() != 3
+    {
+        return Err(StandardLibraryCheckError::SourceMismatch);
+    }
+
+    let bundle = SourceBundle::new([
+        SourceUnit::new(types_unit.logical_path(), types_unit.content()),
+        SourceUnit::new(invoke_unit.logical_path(), invoke_unit.content()),
+        SourceUnit::new(output_unit.logical_path(), output_unit.content()),
+        SourceUnit::new(ui_unit.logical_path(), ui_unit.content()),
+    ])
+    .map_err(|_| StandardLibraryCheckError::SourceMismatch)?;
+    let report = parse_bundle(&bundle);
+    if !report.diagnostics().is_empty() {
+        return Err(StandardLibraryCheckError::Diagnostics {
+            diagnostics: report.diagnostics().to_vec(),
+        });
+    }
+    let [parsed_types, parsed_invoke, parsed_output, parsed_ui] = report.units() else {
+        return Err(StandardLibraryCheckError::SourceMismatch);
+    };
+
+    let (types_origins, invoke_origins, output_origins, ui_origins) =
+        partition_standard_v4_origins(origins)?;
+    let types_catalogue = standard_v4_types_catalogue(catalogue)?;
+    let families =
+        reconcile_standard_source(types_unit, parsed_types, &types_catalogue, &types_origins)?;
+    let checked_executable = reconcile_standard_invoke_executable(
+        catalogue,
+        &invoke_origins,
+        executables,
+        invoke_unit,
+        parsed_invoke,
+    )?;
+    reconcile_standard_output_unit(output_unit, parsed_output, catalogue, &output_origins)?;
+    reconcile_standard_ui_unit(ui_unit, parsed_ui, catalogue, &ui_origins)?;
+    Ok((families, checked_executable))
+}
+
 /// Scopes the V2 catalogue to the declarations retained in `std/types.orna`:
 /// the standard schemas, value types, and type bindings only.
 ///
@@ -634,6 +741,33 @@ fn standard_v3_types_catalogue(
             STD_IO_SCHEMA_ID,
         ],
         &[STD_TERMINAL_DOCUMENT_TYPE_ID, STD_IO_BYTE_STREAM_TYPE_ID],
+    )
+}
+
+/// Scopes the V4 catalogue to the declarations retained in `std/types.orna`:
+/// the standard schemas, value types, and type bindings only.
+///
+/// The `std.invoke`, `std.terminal`, `std.io`, and `std.ui` schemas, the
+/// three opaque output and ui value types, and their exports are declared in
+/// the other retained units and are reconciled by their own paths; the V1
+/// type-only reconcile contract must not see them. Any other catalogue
+/// schema, function, object, enum, or record type fails closed.
+fn standard_v4_types_catalogue(
+    catalogue: &CatalogueSnapshot,
+) -> Result<CatalogueSnapshot, StandardLibraryCheckError> {
+    scope_standard_catalogue(
+        catalogue,
+        &[
+            STD_INVOKE_SCHEMA_ID,
+            STD_TERMINAL_SCHEMA_ID,
+            STD_IO_SCHEMA_ID,
+            STD_UI_SCHEMA_ID,
+        ],
+        &[
+            STD_TERMINAL_DOCUMENT_TYPE_ID,
+            STD_IO_BYTE_STREAM_TYPE_ID,
+            STD_UI_TYPE_ID,
+        ],
     )
 }
 
@@ -862,6 +996,126 @@ fn reconcile_standard_output_unit(
     Ok(())
 }
 
+/// Reconciles the retained `std/ui.orna` unit against the snapshot catalogue
+/// and origins.
+///
+/// The unit must round-trip exactly and contain nothing besides the
+/// `std.ui` schema declaration, the single opaque ui value type declaration
+/// (`std.ui.UI` `...19`, with its ADR 0062 kernel contract
+/// `orna.std.value.ui@1` and its `IMMUTABLE TRANSIENT` catalogue facts), and
+/// the single qualified export (std.UI). Every catalogue definition must sit
+/// at the fixed identity and agree with the declaration, and the snapshot
+/// origins must cover exactly those three declarations at their exact byte
+/// ranges on the retained unit; any extra, missing, or mismatched
+/// declaration, identity, contract, binding, or origin fails closed.
+fn reconcile_standard_ui_unit(
+    stored_unit: &StoredSourceUnit,
+    parsed_unit: &ParsedSourceUnit,
+    catalogue: &CatalogueSnapshot,
+    origins: &[DefinitionOrigin],
+) -> Result<(), StandardLibraryCheckError> {
+    if parsed_unit.source_text() != stored_unit.content()
+        || parsed_unit.source_text() != parsed_unit.syntax_text()
+        || !parsed_unit.parsed().object_types().is_empty()
+        || !parsed_unit.parsed().enum_types().is_empty()
+        || !parsed_unit.parsed().primitive_value_types().is_empty()
+        || !parsed_unit.parsed().record_value_types().is_empty()
+        || !parsed_unit.parsed().field_renames().is_empty()
+        || !parsed_unit.parsed().server_functions().is_empty()
+        || !parsed_unit.parsed().client_functions().is_empty()
+    {
+        return Err(StandardLibraryCheckError::SourceMismatch);
+    }
+    let [ui_declaration] = parsed_unit.parsed().schemas() else {
+        return Err(StandardLibraryCheckError::SourceMismatch);
+    };
+    let [ui_type_declaration] = parsed_unit.parsed().opaque_value_types() else {
+        return Err(StandardLibraryCheckError::SourceMismatch);
+    };
+    let [ui_export] = parsed_unit.parsed().type_exports() else {
+        return Err(StandardLibraryCheckError::SourceMismatch);
+    };
+
+    let expected_ui_name =
+        QualifiedSemanticName::new(["std", "ui"]).expect("the fixed standard schema is valid");
+    let ui_name = unquoted_semantic_name(&ui_declaration.name)?;
+    if ui_name != expected_ui_name {
+        return Err(StandardLibraryCheckError::SourceMismatch);
+    }
+    let ui_schema = catalogue
+        .schema_by_id(STD_UI_SCHEMA_ID)
+        .ok_or(StandardLibraryCheckError::MissingSchema)?;
+    if ui_schema.name() != &ui_name {
+        return Err(StandardLibraryCheckError::SourceMismatch);
+    }
+
+    let expected_ui_type_name = QualifiedSemanticName::new(["std", "ui", "ui"])
+        .expect("the fixed standard value type is valid");
+    let ui_type_name = unquoted_semantic_name(&ui_type_declaration.name)?;
+    if ui_type_name != expected_ui_type_name {
+        return Err(StandardLibraryCheckError::SourceMismatch);
+    }
+    let ui_contract = decode_string_literal(&ui_type_declaration.kernel_contract)
+        .ok_or(StandardLibraryCheckError::SourceMismatch)?;
+    if ui_contract != STD_UI_CONTRACT {
+        return Err(StandardLibraryCheckError::SourceMismatch);
+    }
+    let ui_definition = catalogue
+        .value_type_by_id(STD_UI_TYPE_ID)
+        .ok_or(StandardLibraryCheckError::SourceMismatch)?;
+    if ui_definition.name() != &ui_type_name
+        || ui_definition.kind() != ValueTypeKind::Opaque
+        || ui_definition.mutability() != ValueTypeMutability::Immutable
+        || ui_definition.persistence() != ValueTypePersistence::Transient
+        || ui_definition.representation_contract() != ui_contract
+    {
+        return Err(StandardLibraryCheckError::SourceMismatch);
+    }
+
+    let expected_ui_binding_name =
+        QualifiedSemanticName::new(["std", "ui"]).expect("the fixed standard export is valid");
+    let ui_binding = catalogue
+        .type_binding_by_name(&TypeLookupName::qualified(expected_ui_binding_name.clone()))
+        .ok_or(StandardLibraryCheckError::SourceMismatch)?;
+    let ui_export_source = unquoted_semantic_name(&ui_export.source_type)?;
+    if ui_export_source != ui_type_name {
+        return Err(StandardLibraryCheckError::SourceMismatch);
+    }
+    let TypeExportTarget::Qualified { name } = &ui_export.target else {
+        return Err(StandardLibraryCheckError::SourceMismatch);
+    };
+    if unquoted_semantic_name(name)? != expected_ui_binding_name
+        || !matches!(ui_binding.kind(), TypeBindingKind::Qualified)
+        || ui_binding.name() != &TypeLookupName::qualified(expected_ui_binding_name.clone())
+        || ui_binding.target() != STD_UI_TYPE_ID
+    {
+        return Err(StandardLibraryCheckError::SourceMismatch);
+    }
+
+    let mut origins_by_identity = origin_map(origins)?;
+    for (identity, span) in [
+        (
+            DefinitionIdentity::Schema(STD_UI_SCHEMA_ID),
+            &ui_declaration.span,
+        ),
+        (
+            DefinitionIdentity::ValueType(STD_UI_TYPE_ID),
+            &ui_type_declaration.span,
+        ),
+        (
+            DefinitionIdentity::TypeBinding(ui_binding.id()),
+            &ui_export.span,
+        ),
+    ] {
+        take_origin(&mut origins_by_identity, identity, stored_unit.id(), span)?;
+    }
+    if !origins_by_identity.is_empty() {
+        return Err(StandardLibraryCheckError::SourceMismatch);
+    }
+
+    Ok(())
+}
+
 /// Splits the snapshot origins into the `std/types.orna` origins (schemas,
 /// value types, and bindings) and the `std/invoke.orna` origins (the
 /// `std.invoke` schema, the `std.invoke.echo` function, and its parameter).
@@ -920,6 +1174,46 @@ fn partition_standard_v3_origins(
         }
     }
     Ok((types_origins, invoke_origins, output_origins))
+}
+
+/// The four ordered origin partitions of a V4 standard bundle: the types,
+/// invoke, output, and ui unit origins.
+type StandardV4OriginPartitions = (
+    Vec<DefinitionOrigin>,
+    Vec<DefinitionOrigin>,
+    Vec<DefinitionOrigin>,
+    Vec<DefinitionOrigin>,
+);
+
+/// Splits the snapshot origins into the four retained V4 units: the
+/// `std/types.orna` origins, the `std/invoke.orna` origins, the
+/// `std/output.orna` origins, and the `std/ui.orna` origins (the ui schema,
+/// the opaque ui value type, and its export).
+///
+/// Every origin must belong to one of the four retained V4 units; any other
+/// source unit fails closed.
+fn partition_standard_v4_origins(
+    origins: &[DefinitionOrigin],
+) -> Result<StandardV4OriginPartitions, StandardLibraryCheckError> {
+    let mut types_origins = Vec::new();
+    let mut invoke_origins = Vec::new();
+    let mut output_origins = Vec::new();
+    let mut ui_origins = Vec::new();
+    for origin in origins {
+        let source_unit = origin.source().source_unit();
+        if source_unit == STD_TYPES_SOURCE_UNIT_ID {
+            types_origins.push(origin.clone());
+        } else if source_unit == STD_INVOKE_SOURCE_UNIT_ID {
+            invoke_origins.push(origin.clone());
+        } else if source_unit == STD_OUTPUT_SOURCE_UNIT_ID {
+            output_origins.push(origin.clone());
+        } else if source_unit == STD_UI_SOURCE_UNIT_ID {
+            ui_origins.push(origin.clone());
+        } else {
+            return Err(StandardLibraryCheckError::SourceMismatch);
+        }
+    }
+    Ok((types_origins, invoke_origins, output_origins, ui_origins))
 }
 
 /// Checks one parsed declaration against the closed ADR 0055 standard
@@ -6416,21 +6710,24 @@ mod tests {
         CheckedStandardExecutable, CheckedStandardJsonEncode, CheckedStandardParameterEcho,
         CheckedStandardTerminalPresentTable, CheckedTypeId, CheckedTypeUseKind,
         CheckedValueTypeUse, ConstantValue, DiagnosticCode, IdentityAssignments,
-        NewApplicationCheckError, STANDARD_LIBRARY_V3_REVISION_ID, STD_DATA_ROWS_TYPE_ID,
-        STD_DATA_SCHEMA_ID, STD_INTEGER_TYPE_ID, STD_INVOKE_ECHO_FUNCTION_ID,
-        STD_INVOKE_ECHO_FUNCTION_REVISION_ID, STD_INVOKE_ECHO_PARAMETER_ID,
-        STD_INVOKE_ECHO_REVISION_NUMBER, STD_INVOKE_SCHEMA_ID, STD_INVOKE_SOURCE_UNIT_ID,
-        STD_IO_BYTE_STREAM_TYPE_ID, STD_IO_SCHEMA_ID, STD_JSON_ENCODE_FUNCTION_ID,
-        STD_JSON_ENCODE_FUNCTION_REVISION_ID, STD_JSON_ENCODE_PARAMETER_ID, STD_JSON_SCHEMA_ID,
-        STD_JSON_VALUE_TYPE_ID, STD_OUTPUT_SOURCE_UNIT_ID, STD_TERMINAL_DOCUMENT_TYPE_ID,
+        NewApplicationCheckError, STANDARD_LIBRARY_V3_REVISION_ID, STANDARD_LIBRARY_V4_REVISION_ID,
+        STD_DATA_ROWS_TYPE_ID, STD_DATA_SCHEMA_ID, STD_INTEGER_TYPE_ID,
+        STD_INVOKE_ECHO_FUNCTION_ID, STD_INVOKE_ECHO_FUNCTION_REVISION_ID,
+        STD_INVOKE_ECHO_PARAMETER_ID, STD_INVOKE_ECHO_REVISION_NUMBER, STD_INVOKE_SCHEMA_ID,
+        STD_INVOKE_SOURCE_UNIT_ID, STD_IO_BYTE_STREAM_TYPE_ID, STD_IO_SCHEMA_ID,
+        STD_JSON_ENCODE_FUNCTION_ID, STD_JSON_ENCODE_FUNCTION_REVISION_ID,
+        STD_JSON_ENCODE_PARAMETER_ID, STD_JSON_SCHEMA_ID, STD_JSON_VALUE_TYPE_ID,
+        STD_OUTPUT_SOURCE_UNIT_ID, STD_TERMINAL_DOCUMENT_TYPE_ID,
         STD_TERMINAL_PRESENT_TABLE_FUNCTION_ID, STD_TERMINAL_PRESENT_TABLE_FUNCTION_REVISION_ID,
         STD_TERMINAL_PRESENT_TABLE_PARAMETER_ID, STD_TERMINAL_SCHEMA_ID, STD_TYPES_SOURCE_UNIT_ID,
-        SemanticType, StandardApplicationCheckContext, StandardApplicationContextError,
+        STD_UI_CONTRACT, STD_UI_SCHEMA_ID, STD_UI_SOURCE_UNIT_ID, STD_UI_TYPE_ID, SemanticType,
+        StandardApplicationCheckContext, StandardApplicationContextError,
         StandardLibraryCheckError, StandardSourceFamilies, check, check_new_application,
         check_new_application_with_catalogue, check_standard_application,
         check_standard_json_encode, check_standard_library_source,
         check_standard_library_source_v2_parts, check_standard_library_source_v3_parts,
-        check_standard_parameter_echo, check_standard_terminal_present_table,
+        check_standard_library_source_v4_parts, check_standard_parameter_echo,
+        check_standard_terminal_present_table,
         checked_standard_library_with_contract_overrides_for_test, location,
         reconcile_standard_executable, reconcile_standard_source, sort_standard_type_uses,
         supports_record_value_scalar, unquoted_prelude_name, unquoted_semantic_name,
@@ -18217,5 +18514,562 @@ mod tests {
             error,
             StandardLibraryCheckError::ExecutableMismatch
         ));
+    }
+
+    /// The exact retained ADR 0062 `std/ui.orna` source: the single `std.ui`
+    /// schema declaration, the single opaque UI value type declaration, and
+    /// its single qualified export.
+    const STANDARD_V4_UI_SOURCE: &str = "CREATE SCHEMA std.ui;\n\nCREATE TYPE std.ui.UI AS VALUE\n    OPAQUE\n    KERNEL CONTRACT 'orna.std.value.ui@1'\n    IMMUTABLE\n    TRANSIENT;\n\nEXPORT TYPE std.ui.UI AS std.UI;";
+
+    fn standard_v4_catalogue(with_invoke: bool) -> CatalogueSnapshot {
+        let catalogue = standard_v3_catalogue(with_invoke);
+        let mut schemas = catalogue.schemas().to_vec();
+        schemas.push(SchemaDefinition::new(
+            STD_UI_SCHEMA_ID,
+            QualifiedSemanticName::new(["std", "ui"]).unwrap(),
+        ));
+        let mut value_types = catalogue.value_types().to_vec();
+        value_types.push(ValueTypeDefinition::opaque(
+            STD_UI_TYPE_ID,
+            QualifiedSemanticName::new(["std", "ui", "ui"]).unwrap(),
+            STD_UI_CONTRACT,
+        ));
+        let mut type_bindings = catalogue.type_bindings().to_vec();
+        type_bindings.push(
+            TypeBinding::qualified(
+                QualifiedSemanticName::new(["std", "ui"]).unwrap(),
+                STD_UI_TYPE_ID,
+            )
+            .unwrap(),
+        );
+        CatalogueSnapshot::new_with_functions_and_types(
+            catalogue.revision(),
+            schemas,
+            vec![],
+            value_types,
+            type_bindings,
+            catalogue.functions().to_vec(),
+        )
+        .unwrap()
+    }
+
+    fn standard_v4_catalogue_with_ui_value_type(
+        index: usize,
+        definition: ValueTypeDefinition,
+    ) -> CatalogueSnapshot {
+        let catalogue = standard_v4_catalogue(true);
+        let mut value_types = catalogue.value_types().to_vec();
+        value_types[index] = definition;
+        CatalogueSnapshot::new_with_functions_and_types(
+            catalogue.revision(),
+            catalogue.schemas().to_vec(),
+            vec![],
+            value_types,
+            catalogue.type_bindings().to_vec(),
+            catalogue.functions().to_vec(),
+        )
+        .unwrap()
+    }
+
+    fn standard_v4_units() -> (
+        StoredSourceUnit,
+        StoredSourceUnit,
+        StoredSourceUnit,
+        StoredSourceUnit,
+    ) {
+        let (types_unit, invoke_unit, output_unit) = standard_v3_units();
+        (
+            types_unit,
+            invoke_unit,
+            output_unit,
+            stored_v2_unit(
+                STD_UI_SOURCE_UNIT_ID,
+                3,
+                "std/ui.orna",
+                STANDARD_V4_UI_SOURCE,
+            ),
+        )
+    }
+
+    fn standard_v4_ui_origins(
+        catalogue: &CatalogueSnapshot,
+        source: &str,
+    ) -> Vec<DefinitionOrigin> {
+        let report =
+            parse_bundle(&SourceBundle::new([SourceUnit::new("std/ui.orna", source)]).unwrap());
+        assert!(report.diagnostics().is_empty(), "{source}");
+        let parsed = &report.units()[0];
+        let origin = |identity: DefinitionIdentity, span: &SourceSpan| -> DefinitionOrigin {
+            DefinitionOrigin::new(
+                identity,
+                SourceOrigin::new(
+                    STD_UI_SOURCE_UNIT_ID,
+                    u32::try_from(span.start).unwrap(),
+                    u32::try_from(span.end).unwrap(),
+                )
+                .unwrap(),
+            )
+        };
+        let ui_binding = catalogue.type_binding_by_name(&TypeLookupName::qualified(
+            QualifiedSemanticName::new(["std", "ui"]).unwrap(),
+        ));
+        let mut origins = Vec::with_capacity(3);
+        if let Some(schema) = parsed.parsed().schemas().first() {
+            origins.push(origin(
+                DefinitionIdentity::Schema(STD_UI_SCHEMA_ID),
+                &schema.span,
+            ));
+        }
+        if let Some(value_type) = parsed.parsed().opaque_value_types().first() {
+            origins.push(origin(
+                DefinitionIdentity::ValueType(STD_UI_TYPE_ID),
+                &value_type.span,
+            ));
+        }
+        if let (Some(binding), Some(export)) = (ui_binding, parsed.parsed().type_exports().first())
+        {
+            origins.push(origin(
+                DefinitionIdentity::TypeBinding(binding.id()),
+                &export.span,
+            ));
+        }
+        origins
+    }
+
+    fn standard_v4_parts() -> (
+        Vec<StoredSourceUnit>,
+        CatalogueSnapshot,
+        Vec<DefinitionOrigin>,
+        Vec<StandardExecutable>,
+    ) {
+        let (types_unit, invoke_unit, output_unit, ui_unit) = standard_v4_units();
+        let catalogue = standard_v4_catalogue(true);
+        let parsed_types = parsed_standard_unit(STANDARD_V2_TYPES_SOURCE);
+        let mut origins = standard_v2_types_origins(&catalogue, &parsed_types);
+        origins.extend(standard_v2_invoke_origins(STD_INVOKE_SOURCE));
+        origins.extend(standard_v3_output_origins(
+            &catalogue,
+            STANDARD_V3_OUTPUT_SOURCE,
+        ));
+        origins.extend(standard_v4_ui_origins(&catalogue, STANDARD_V4_UI_SOURCE));
+        let executable = standard_v2_executable(&catalogue, &origins);
+        (
+            vec![types_unit, invoke_unit, output_unit, ui_unit],
+            catalogue,
+            origins,
+            vec![executable],
+        )
+    }
+
+    fn standard_v4_source(units: Vec<StoredSourceUnit>) -> StoredSourceRevision {
+        let bundle_hash = source_bundle_digest(&units).unwrap();
+        StoredSourceRevision::new(
+            SourceBundleId::from_bytes([0x61; 16]),
+            SourceRevisionId::from_bytes([0x62; 16]),
+            Some(SourceRevisionId::from_bytes([0x63; 16])),
+            units,
+            bundle_hash,
+            source_revision_record_digest(
+                SourceBundleId::from_bytes([0x61; 16]),
+                Some(SourceRevisionId::from_bytes([0x63; 16])),
+                bundle_hash,
+            )
+            .unwrap(),
+        )
+        .unwrap()
+    }
+
+    /// Runs the V4 source reconcile directly on raw stored facts, without the
+    /// separate digest-verification gate.
+    fn check_v4_parts(
+        units: Vec<StoredSourceUnit>,
+        catalogue: &CatalogueSnapshot,
+        origins: &[DefinitionOrigin],
+        executables: &[StandardExecutable],
+    ) -> Result<(StandardSourceFamilies, CheckedStandardExecutable), StandardLibraryCheckError>
+    {
+        check_standard_library_source_v4_parts(
+            &standard_v4_source(units),
+            catalogue,
+            origins,
+            executables,
+        )
+    }
+
+    fn build_standard_v4_snapshot(
+        units: Vec<StoredSourceUnit>,
+        catalogue: CatalogueSnapshot,
+        origins: Vec<DefinitionOrigin>,
+        executables: Vec<StandardExecutable>,
+        digest: Sha256Digest,
+    ) -> StandardLibrarySnapshot {
+        StandardLibrarySnapshot::new_with_executables(
+            STANDARD_LIBRARY_V4_REVISION_ID,
+            StandardLibraryDigestVersion::Version2,
+            standard_v4_source(units),
+            "orna.language/1",
+            catalogue,
+            executables,
+            origins,
+            digest,
+        )
+        .unwrap()
+    }
+
+    /// The compiled canonical V4 standard-library digest for the exact test
+    /// inputs (`STANDARD_V2_TYPES_SOURCE`, `STD_INVOKE_SOURCE`,
+    /// `STANDARD_V3_OUTPUT_SOURCE`, `STANDARD_V4_UI_SOURCE`, the fixed
+    /// identities, catalogue, executable, and origins). Computed by the
+    /// canonical encoder.
+    const STANDARD_V4_CANONICAL_DIGEST: Sha256Digest = Sha256Digest::from_bytes([
+        0xc3, 0xc4, 0x05, 0x29, 0xba, 0x69, 0xe3, 0x4e, 0x6d, 0x44, 0x1a, 0x83, 0x86, 0x9f, 0x5a,
+        0x9e, 0x30, 0xc8, 0x71, 0x4d, 0x20, 0x55, 0x06, 0xfa, 0xa0, 0x5c, 0xd3, 0x96, 0x47, 0x09,
+        0xb5, 0xfc,
+    ]);
+
+    fn verified_standard_v4_snapshot() -> VerifiedStandardLibrarySnapshot {
+        let (units, catalogue, origins, executables) = standard_v4_parts();
+        verify_standard_library_v2_snapshot(build_standard_v4_snapshot(
+            units,
+            catalogue,
+            origins,
+            executables,
+            STANDARD_V4_CANONICAL_DIGEST,
+        ))
+        .unwrap()
+    }
+
+    /// Reconciles the exact retained V4 bundle (types, invoke, output, ui)
+    /// against the source-independent V4 catalogue and proves the ui unit
+    /// contributes its schema, opaque value type, and qualified export at the
+    /// exact declaration byte ranges.
+    #[test]
+    fn reconciles_the_exact_v4_standard_bundle_with_the_ui_unit() {
+        let verified = verified_standard_v4_snapshot();
+        assert_eq!(verified.revision(), STANDARD_LIBRARY_V4_REVISION_ID);
+        assert_eq!(
+            verified.digest_version(),
+            StandardLibraryDigestVersion::Version2
+        );
+        let checked = check_standard_library_source(&verified).unwrap();
+
+        // The types/invoke reconcile surfaces the V2 schema, value type, and
+        // binding facts unchanged; the output and ui units are reconciled
+        // closed without contributing to the families.
+        assert_eq!(checked.schemas().len(), 2);
+        assert_eq!(checked.value_types().len(), 1);
+        assert_eq!(checked.type_bindings().len(), 2);
+
+        let executable = checked.checked_executable().unwrap();
+        assert_eq!(executable.function_id(), STD_INVOKE_ECHO_FUNCTION_ID);
+
+        // The ui unit contributes exactly -one- additional schema, the opaque
+        // std.ui.ui value type, and the std.UI qualified binding; all present
+        // in the retained snapshot at the exact declaration byte ranges.
+        let ui_schema_origin = verified
+            .origins()
+            .iter()
+            .find(|origin| {
+                origin.source().source_unit() == STD_UI_SOURCE_UNIT_ID
+                    && origin.identity() == DefinitionIdentity::Schema(STD_UI_SCHEMA_ID)
+            })
+            .unwrap();
+        assert_eq!(
+            &STANDARD_V4_UI_SOURCE[ui_schema_origin.source().byte_start() as usize
+                ..ui_schema_origin.source().byte_end() as usize],
+            "CREATE SCHEMA std.ui;"
+        );
+        let ui_type_origin = verified
+            .origins()
+            .iter()
+            .find(|origin| {
+                origin.source().source_unit() == STD_UI_SOURCE_UNIT_ID
+                    && origin.identity() == DefinitionIdentity::ValueType(STD_UI_TYPE_ID)
+            })
+            .unwrap();
+        assert_eq!(
+            &STANDARD_V4_UI_SOURCE[ui_type_origin.source().byte_start() as usize
+                ..ui_type_origin.source().byte_end() as usize],
+            "CREATE TYPE std.ui.UI AS VALUE\n    OPAQUE\n    KERNEL CONTRACT 'orna.std.value.ui@1'\n    IMMUTABLE\n    TRANSIENT;"
+        );
+        let ui_binding_origin = verified
+            .origins()
+            .iter()
+            .find(|origin| {
+                origin.source().source_unit() == STD_UI_SOURCE_UNIT_ID
+                    && matches!(origin.identity(), DefinitionIdentity::TypeBinding(_))
+            })
+            .unwrap();
+        assert_eq!(
+            &STANDARD_V4_UI_SOURCE[ui_binding_origin.source().byte_start() as usize
+                ..ui_binding_origin.source().byte_end() as usize],
+            "EXPORT TYPE std.ui.UI AS std.UI;"
+        );
+        assert_eq!(verified.origins().len(), 17);
+    }
+
+    #[test]
+    fn rejects_a_v4_bundle_with_the_wrong_ui_unit_identity_order_or_path() {
+        let (types_unit, invoke_unit, output_unit, _ui_unit) = standard_v4_units();
+        let catalogue = standard_v4_catalogue(true);
+        let parsed_types = parsed_standard_unit(STANDARD_V2_TYPES_SOURCE);
+        let mut origins = standard_v2_types_origins(&catalogue, &parsed_types);
+        origins.extend(standard_v2_invoke_origins(STD_INVOKE_SOURCE));
+        origins.extend(standard_v3_output_origins(
+            &catalogue,
+            STANDARD_V3_OUTPUT_SOURCE,
+        ));
+        origins.extend(standard_v4_ui_origins(&catalogue, STANDARD_V4_UI_SOURCE));
+        let executable = standard_v2_executable(&catalogue, &origins);
+        let rejects = |units: Vec<StoredSourceUnit>, label: &str| {
+            let error = check_v4_parts(
+                units,
+                &catalogue,
+                &origins,
+                std::slice::from_ref(&executable),
+            )
+            .unwrap_err();
+            assert!(
+                matches!(error, StandardLibraryCheckError::SourceMismatch),
+                "{label}: unexpected rejection: {error}"
+            );
+        };
+
+        rejects(
+            vec![
+                types_unit.clone(),
+                invoke_unit.clone(),
+                output_unit.clone(),
+                stored_v2_unit(
+                    SourceUnitId::from_bytes([0x79; 16]),
+                    3,
+                    "std/ui.orna",
+                    STANDARD_V4_UI_SOURCE,
+                ),
+            ],
+            "wrong ui unit identity",
+        );
+        // The ui content placed in the output slot (ordinal 2) with the output
+        // unit displaced to ordinal 3 keeps the ordinals in sequence so the
+        // parts checker sees a ui unit whose identity/ordinal do not match.
+        rejects(
+            vec![
+                types_unit.clone(),
+                invoke_unit.clone(),
+                stored_v2_unit(
+                    STD_UI_SOURCE_UNIT_ID,
+                    2,
+                    "std/ui.orna",
+                    STANDARD_V4_UI_SOURCE,
+                ),
+                stored_v2_unit(
+                    STD_OUTPUT_SOURCE_UNIT_ID,
+                    3,
+                    "std/output.orna",
+                    STANDARD_V3_OUTPUT_SOURCE,
+                ),
+            ],
+            "ui unit at wrong ordinal",
+        );
+        rejects(
+            vec![
+                types_unit,
+                invoke_unit,
+                output_unit,
+                stored_v2_unit(
+                    STD_UI_SOURCE_UNIT_ID,
+                    3,
+                    "std/display.orna",
+                    STANDARD_V4_UI_SOURCE,
+                ),
+            ],
+            "wrong ui unit path",
+        );
+    }
+
+    #[test]
+    fn rejects_a_v4_bundle_with_a_missing_or_extra_unit() {
+        let (types_unit, invoke_unit, output_unit, ui_unit) = standard_v4_units();
+        let catalogue = standard_v4_catalogue(true);
+        let parsed_types = parsed_standard_unit(STANDARD_V2_TYPES_SOURCE);
+        let mut origins = standard_v2_types_origins(&catalogue, &parsed_types);
+        origins.extend(standard_v2_invoke_origins(STD_INVOKE_SOURCE));
+        let executable = standard_v2_executable(&catalogue, &origins);
+
+        let error = check_v4_parts(
+            vec![types_unit.clone(), invoke_unit.clone(), output_unit.clone()],
+            &catalogue,
+            &origins,
+            std::slice::from_ref(&executable),
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            StandardLibraryCheckError::SourceUnitCount { actual: 3 }
+        ));
+
+        let extra = stored_v2_unit(
+            SourceUnitId::from_bytes([0x78; 16]),
+            4,
+            "std/extra.orna",
+            "CREATE SCHEMA std.extra;",
+        );
+        let full_origins = {
+            let mut o = origins.clone();
+            o.extend(standard_v3_output_origins(
+                &catalogue,
+                STANDARD_V3_OUTPUT_SOURCE,
+            ));
+            o.extend(standard_v4_ui_origins(&catalogue, STANDARD_V4_UI_SOURCE));
+            o
+        };
+        let full_executable = standard_v2_executable(&catalogue, &full_origins);
+        let error = check_v4_parts(
+            vec![types_unit, invoke_unit, output_unit.clone(), ui_unit, extra],
+            &catalogue,
+            &full_origins,
+            &[full_executable],
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            StandardLibraryCheckError::SourceUnitCount { actual: 5 }
+        ));
+    }
+
+    #[test]
+    fn rejects_every_ui_unit_content_variation_closed() {
+        let (types_unit, invoke_unit, output_unit, _ui_unit) = standard_v4_units();
+        let catalogue = standard_v4_catalogue(true);
+        let parsed_types = parsed_standard_unit(STANDARD_V2_TYPES_SOURCE);
+        let mut base_origins = standard_v2_types_origins(&catalogue, &parsed_types);
+        base_origins.extend(standard_v2_invoke_origins(STD_INVOKE_SOURCE));
+        base_origins.extend(standard_v3_output_origins(
+            &catalogue,
+            STANDARD_V3_OUTPUT_SOURCE,
+        ));
+        let rejects_ui = |source: &str, label: &str| {
+            let ui_unit = stored_v2_unit(STD_UI_SOURCE_UNIT_ID, 3, "std/ui.orna", source);
+            let mut origins = base_origins.clone();
+            origins.extend(standard_v4_ui_origins(&catalogue, source));
+            let executable = standard_v2_executable(&catalogue, &origins);
+            let error = check_v4_parts(
+                vec![
+                    types_unit.clone(),
+                    invoke_unit.clone(),
+                    output_unit.clone(),
+                    ui_unit,
+                ],
+                &catalogue,
+                &origins,
+                &[executable],
+            )
+            .unwrap_err();
+            assert!(
+                matches!(error, StandardLibraryCheckError::SourceMismatch),
+                "{label}: unexpected rejection: {error}"
+            );
+        };
+
+        rejects_ui(
+            &STANDARD_V4_UI_SOURCE.replace("CREATE SCHEMA std.ui;", "CREATE SCHEMA std.ux;"),
+            "wrong ui schema name",
+        );
+        rejects_ui(
+            &STANDARD_V4_UI_SOURCE.replace(
+                "CREATE TYPE std.ui.UI AS VALUE",
+                "CREATE TYPE std.ui.Window AS VALUE",
+            ),
+            "wrong ui type local name",
+        );
+        rejects_ui(
+            &STANDARD_V4_UI_SOURCE.replace(
+                "KERNEL CONTRACT 'orna.std.value.ui@1'",
+                "KERNEL CONTRACT 'orna.std.value.window@1'",
+            ),
+            "wrong ui kernel contract",
+        );
+        rejects_ui(
+            &STANDARD_V4_UI_SOURCE.replace(
+                "EXPORT TYPE std.ui.UI AS std.UI;",
+                "EXPORT TYPE std.ui.UI AS std.Window;",
+            ),
+            "wrong ui export binding",
+        );
+    }
+
+    #[test]
+    fn rejects_wrong_v4_ui_catalogue_definition_closed() {
+        let (types_unit, invoke_unit, output_unit, _ui_unit) = standard_v4_units();
+        let parsed_types = parsed_standard_unit(STANDARD_V2_TYPES_SOURCE);
+        let rejects_catalogue = |catalogue: CatalogueSnapshot, label: &str| {
+            let mut origins = standard_v2_types_origins(&catalogue, &parsed_types);
+            origins.extend(standard_v2_invoke_origins(STD_INVOKE_SOURCE));
+            origins.extend(standard_v3_output_origins(
+                &catalogue,
+                STANDARD_V3_OUTPUT_SOURCE,
+            ));
+            origins.extend(standard_v4_ui_origins(&catalogue, STANDARD_V4_UI_SOURCE));
+            let executable = standard_v2_executable(&catalogue, &origins);
+            let error = check_v4_parts(
+                vec![
+                    types_unit.clone(),
+                    invoke_unit.clone(),
+                    output_unit.clone(),
+                    stored_v2_unit(
+                        STD_UI_SOURCE_UNIT_ID,
+                        3,
+                        "std/ui.orna",
+                        STANDARD_V4_UI_SOURCE,
+                    ),
+                ],
+                &catalogue,
+                &origins,
+                &[executable],
+            )
+            .unwrap_err();
+            assert!(
+                matches!(
+                    error,
+                    StandardLibraryCheckError::SourceMismatch
+                        | StandardLibraryCheckError::MissingSchema
+                ),
+                "{label}: unexpected rejection: {error}"
+            );
+        };
+
+        // The opaque ui value type at the fixed identity with a wrong kernel
+        // contract is rejected by the reconcile.
+        let ui_index = standard_v4_catalogue(true)
+            .value_types()
+            .iter()
+            .position(|value_type| value_type.id() == STD_UI_TYPE_ID)
+            .unwrap();
+        rejects_catalogue(
+            standard_v4_catalogue_with_ui_value_type(
+                ui_index,
+                ValueTypeDefinition::opaque(
+                    STD_UI_TYPE_ID,
+                    QualifiedSemanticName::new(["std", "ui", "ui"]).unwrap(),
+                    "orna.std.value.window@1",
+                ),
+            ),
+            "wrong ui contract",
+        );
+        // The ui value type defined as a persistable primitive at the fixed
+        // identity, not the opaque IMMUTABLE TRANSIENT ui contract.
+        rejects_catalogue(
+            standard_v4_catalogue_with_ui_value_type(
+                ui_index,
+                ValueTypeDefinition::primitive(
+                    STD_UI_TYPE_ID,
+                    QualifiedSemanticName::new(["std", "ui", "ui"]).unwrap(),
+                    ValueTypeMutability::Immutable,
+                    ValueTypePersistence::Persistable,
+                    STD_UI_CONTRACT,
+                ),
+            ),
+            "wrong ui mutability and persistence",
+        );
     }
 }
