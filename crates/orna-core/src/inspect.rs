@@ -375,9 +375,11 @@ pub struct CallRow {
 impl CallRow {
     /// Creates one checked call row.
     ///
-    /// The batch rule is closed: a row without a captured schema cannot name
-    /// captured values (no batch was captured), and a row with a schema names
-    /// at least one value (batches are non-empty). Violations fail closed.
+    /// The batch rule is closed: a row whose schema names captured values
+    /// must name at least one value (batches are non-empty), and a row
+    /// without a schema may still carry captured values because the sealed
+    /// v1 route emits value batches with no schema metadata. Violations fail
+    /// closed.
     pub fn new(
         invocation_id: InvocationId,
         schema: Option<InvokeValue>,
@@ -387,10 +389,7 @@ impl CallRow {
         match (&schema, value_count) {
             (None, 0) => {}
             (Some(_), 0) => return Err(InspectError::EmptyValueBatch),
-            (None, _) => {
-                return Err(InspectError::InvalidCallRow { invocation_id });
-            }
-            (Some(_), _) => {}
+            (None, _) | (Some(_), _) => {}
         }
         Ok(Self {
             invocation_id,
@@ -1261,11 +1260,6 @@ pub enum InspectError {
     },
     /// A value batch must be non-empty.
     EmptyValueBatch,
-    /// A call row names captured values without a captured schema.
-    InvalidCallRow {
-        /// The invocation of the rejected call row.
-        invocation_id: InvocationId,
-    },
     /// An invocation node violates the root/nested parent rule.
     InvalidInvocationNodeParent {
         /// The rejected node identity.
@@ -1326,11 +1320,6 @@ impl fmt::Display for InspectError {
             Self::EmptyValueBatch => {
                 formatter.write_str("an inspection value batch must not be empty")
             }
-            Self::InvalidCallRow { invocation_id } => write!(
-                formatter,
-                "inspection call row for {invocation_id} names captured values without a \
-                 captured schema"
-            ),
             Self::InvalidInvocationNodeParent { id } => write!(
                 formatter,
                 "inspection invocation node {id} violates the root/nested parent rule"
@@ -1776,15 +1765,15 @@ mod tests {
     }
 
     #[test]
-    fn call_row_requires_a_schema_when_values_are_captured() {
-        let error = CallRow::new(invocation_id(INVOCATION), None, 1, 42)
-            .expect_err("captured values require a captured schema");
-        assert_eq!(
-            error,
-            InspectError::InvalidCallRow {
-                invocation_id: invocation_id(INVOCATION)
-            }
-        );
+    fn call_row_accepts_captured_values_without_a_schema() {
+        // The sealed v1 route emits value batches with values but no schema
+        // metadata, so a captured batch must be valid without a schema.
+        let call = CallRow::new(invocation_id(INVOCATION), None, 1, 42)
+            .expect("captured values without a schema are valid");
+        assert_eq!(call.invocation_id(), invocation_id(INVOCATION));
+        assert_eq!(call.schema(), None);
+        assert_eq!(call.value_count(), 1);
+        assert_eq!(call.duration_nanoseconds(), 42);
     }
 
     #[test]
@@ -2244,9 +2233,6 @@ mod tests {
                 id: epoch_id(EPOCH),
             },
             InspectError::EmptyValueBatch,
-            InspectError::InvalidCallRow {
-                invocation_id: invocation_id(INVOCATION),
-            },
             InspectError::InvalidInvocationNodeParent {
                 id: invocation_id(INVOCATION),
             },
