@@ -5,7 +5,8 @@ use std::{
 };
 
 use orna_core::{
-    FunctionId, ParameterId as RawCallParameterId, StateSlotId, TypeId,
+    FunctionId, InspectEpochId, InvocationId, ParameterId as RawCallParameterId, StateSlotId,
+    TypeId,
     catalogue::QualifiedSemanticName,
     invocation::{InvocationTarget, InvocationTracePolicy},
     invocation_binding::CliArgumentInput,
@@ -17,7 +18,7 @@ mod package_maintenance;
 mod security_admin;
 mod source_check;
 
-const USAGE: &str = "Usage:\n  orna --version\n  orna server run\n  orna server upgrade\n  orna server backend-shell\n  orna source check <file.orna>\n  orna source apply <file.orna>\n  orna security grant-execute <canonical-function-id>\n  orna raw-call <canonical-function-id>\n  orna raw-call <canonical-function-id> <canonical-parameter-id>\n  orna [--runtime <family>] invoke <qualified-name | canonical-function-id> [options]\n  orna state get <root-function-id> [options]\n  orna state set <root-function-id> [options]";
+const USAGE: &str = "Usage:\n  orna --version\n  orna server run\n  orna server upgrade\n  orna server backend-shell\n  orna source check <file.orna>\n  orna source apply <file.orna>\n  orna security grant-execute <canonical-function-id>\n  orna raw-call <canonical-function-id>\n  orna raw-call <canonical-function-id> <canonical-parameter-id>\n  orna [--runtime <family>] invoke <qualified-name | canonical-function-id> [options]\n  orna state get <root-function-id> [options]\n  orna state set <root-function-id> [options]\n  orna inspect <invocation-id> [options]";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum RawCallParameters {
@@ -62,6 +63,7 @@ enum Command {
     RawCall(FunctionId, RawCallParameters),
     Invoke(InvokeArguments),
     State(orna_server::InstalledUserStateRequest),
+    Inspect(orna_server::InstalledInspectRequest),
 }
 
 fn main() -> ExitCode {
@@ -230,6 +232,19 @@ fn main() -> ExitCode {
                 }
             }
         }
+        Command::Inspect(request) => {
+            let stdout = io::stdout();
+            let mut stdout = stdout.lock();
+            match orna_server::run_installed_inspect(request, &mut stdout) {
+                Ok(orna_server::InstalledInspectOutcome::Completed) => ExitCode::SUCCESS,
+                // A future closed outcome falls back to internal.
+                Ok(_) => ExitCode::from(7),
+                Err(error) => {
+                    write_stderr_line(&error.to_string());
+                    ExitCode::from(inspect_error_exit_code(&error))
+                }
+            }
+        }
     }
 }
 
@@ -329,6 +344,7 @@ where
             Some(command)
         }
         Some(value) if value == OsStr::new("state") => parse_state_command(args),
+        Some(value) if value == OsStr::new("inspect") => parse_inspect_command(args),
         Some(value) if value == OsStr::new("security") => {
             if args.next().as_deref() != Some(OsStr::new("grant-execute")) {
                 return None;
@@ -486,6 +502,69 @@ where
             value_bytes,
         },
     })
+}
+
+/// Parses one `orna inspect <invocation-id> [options]` command (ADR 0064
+/// wave 3).
+///
+/// The invocation identity is exactly one positional in its canonical
+/// `type:base32` text form. Options are the optional `--projection <name>`
+/// selector (one of the eight closed projection names), the value-less
+/// `--trace` switch, the optional `--after <n>` resume sequence, the four
+/// value-less classifier flags `--include-values`, `--include-source`,
+/// `--include-security`, and `--include-runtime`, and the optional `--epoch
+/// <epoch-id>` exact override. A missing or malformed identity, an unknown
+/// projection name, a non-numeric `--after`, a malformed epoch identity, an
+/// unknown flag, or a trailing positional is a usage error (`None`).
+fn parse_inspect_command<I>(args: I) -> Option<Command>
+where
+    I: IntoIterator<Item = OsString>,
+{
+    let mut args = args.into_iter();
+    let invocation = InvocationId::from_canonical(&args.next()?.into_string().ok()?).ok()?;
+    let mut epoch = None;
+    let mut projection = None;
+    let mut trace = false;
+    let mut after_sequence = 0_u64;
+    let mut include_values = false;
+    let mut include_source = false;
+    let mut include_security = false;
+    let mut include_runtime = false;
+    loop {
+        match args.next().as_deref() {
+            None => break,
+            Some(flag) if flag == OsStr::new("--epoch") => {
+                epoch =
+                    Some(InspectEpochId::from_canonical(&args.next()?.into_string().ok()?).ok()?);
+            }
+            Some(flag) if flag == OsStr::new("--projection") => {
+                projection = Some(orna_server::InstalledInspectProjection::parse(
+                    &args.next()?.into_string().ok()?,
+                )?);
+            }
+            Some(flag) if flag == OsStr::new("--trace") => trace = true,
+            Some(flag) if flag == OsStr::new("--after") => {
+                after_sequence = args.next()?.into_string().ok()?.parse::<u64>().ok()?;
+            }
+            Some(flag) if flag == OsStr::new("--include-values") => include_values = true,
+            Some(flag) if flag == OsStr::new("--include-source") => include_source = true,
+            Some(flag) if flag == OsStr::new("--include-security") => include_security = true,
+            Some(flag) if flag == OsStr::new("--include-runtime") => include_runtime = true,
+            Some(_) => return None,
+        }
+    }
+    Some(Command::Inspect(orna_server::InstalledInspectRequest::new(
+        invocation,
+        epoch,
+        projection,
+        trace,
+        after_sequence,
+        include_values,
+        include_source,
+        include_security,
+        include_runtime,
+        None,
+    )))
 }
 
 /// Parses one `orna invoke <target> [options]` command (ADR 0056 step 4).
@@ -661,6 +740,18 @@ const fn state_error_exit_code(error: &orna_server::InstalledUserStateError) -> 
         orna_server::InstalledUserStateErrorKind::State => 1,
         orna_server::InstalledUserStateErrorKind::Presentation => 5,
         orna_server::InstalledUserStateErrorKind::Internal => 7,
+        // A future closed kind falls back to internal.
+        _ => 7,
+    }
+}
+
+/// Maps one installed inspect failure to its closed exit code.
+const fn inspect_error_exit_code(error: &orna_server::InstalledInspectError) -> u8 {
+    match error.kind() {
+        orna_server::InstalledInspectErrorKind::Usage => 2,
+        orna_server::InstalledInspectErrorKind::Kernel => 1,
+        orna_server::InstalledInspectErrorKind::Rendering => 5,
+        orna_server::InstalledInspectErrorKind::Internal => 7,
         // A future closed kind falls back to internal.
         _ => 7,
     }
@@ -1659,10 +1750,190 @@ mod tests {
     }
 
     #[test]
+    fn accepts_an_exact_inspect_command() {
+        let invocation = InvocationId::from_bytes([0x11; 16]);
+        assert_eq!(
+            parse_command(arguments(&["orna", "inspect", &invocation.canonical()])),
+            Some(Command::Inspect(orna_server::InstalledInspectRequest::new(
+                invocation, None, None, false, 0, false, false, false, false, None,
+            )))
+        );
+    }
+
+    #[test]
+    fn accepts_inspect_projection_trace_and_classifiers() {
+        let invocation = InvocationId::from_bytes([0x11; 16]);
+        let epoch = InspectEpochId::from_bytes([0x22; 16]);
+        assert_eq!(
+            parse_command(arguments(&[
+                "orna",
+                "inspect",
+                &invocation.canonical(),
+                "--projection",
+                "state_cells",
+                "--trace",
+                "--after",
+                "3",
+                "--include-values",
+                "--include-source",
+                "--include-security",
+                "--include-runtime",
+                "--epoch",
+                &epoch.canonical(),
+            ])),
+            Some(Command::Inspect(orna_server::InstalledInspectRequest::new(
+                invocation,
+                Some(epoch),
+                Some(orna_server::InstalledInspectProjection::StateCells),
+                true,
+                3,
+                true,
+                true,
+                true,
+                true,
+                None,
+            )))
+        );
+    }
+
+    #[test]
+    fn accepts_every_inspect_projection_name() {
+        for (name, projection) in [
+            (
+                "invocation_nodes",
+                orna_server::InstalledInspectProjection::InvocationNodes,
+            ),
+            ("calls", orna_server::InstalledInspectProjection::Calls),
+            (
+                "resources",
+                orna_server::InstalledInspectProjection::Resources,
+            ),
+            (
+                "state_cells",
+                orna_server::InstalledInspectProjection::StateCells,
+            ),
+            ("ui_nodes", orna_server::InstalledInspectProjection::UiNodes),
+            (
+                "presentation_candidates",
+                orna_server::InstalledInspectProjection::PresentationCandidates,
+            ),
+            (
+                "runtime_bindings",
+                orna_server::InstalledInspectProjection::RuntimeBindings,
+            ),
+            (
+                "security_decisions",
+                orna_server::InstalledInspectProjection::SecurityDecisions,
+            ),
+        ] {
+            let invocation = InvocationId::from_bytes([0x11; 16]);
+            let parsed = parse_command(arguments(&[
+                "orna",
+                "inspect",
+                &invocation.canonical(),
+                "--projection",
+                name,
+            ]));
+            assert_eq!(
+                parsed,
+                Some(Command::Inspect(orna_server::InstalledInspectRequest::new(
+                    invocation,
+                    None,
+                    Some(projection),
+                    false,
+                    0,
+                    false,
+                    false,
+                    false,
+                    false,
+                    None,
+                ))),
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_malformed_inspect_shapes() {
+        let invocation = InvocationId::from_bytes([0x11; 16]);
+        let invocation_text = invocation.canonical();
+        let epoch_text = InspectEpochId::from_bytes([0x22; 16]).canonical();
+        for values in [
+            vec!["orna", "inspect"],
+            vec!["orna", "inspect", "not-an-id"],
+            vec!["orna", "inspect", "invocation:x"],
+            vec!["orna", "inspect", invocation_text.as_str(), "extra"],
+            vec![
+                "orna",
+                "inspect",
+                invocation_text.as_str(),
+                "--projection",
+                "unknown",
+            ],
+            vec!["orna", "inspect", invocation_text.as_str(), "--projection"],
+            vec![
+                "orna",
+                "inspect",
+                invocation_text.as_str(),
+                "--after",
+                "seven",
+            ],
+            vec!["orna", "inspect", invocation_text.as_str(), "--after"],
+            vec!["orna", "inspect", invocation_text.as_str(), "--after", "-1"],
+            vec![
+                "orna",
+                "inspect",
+                invocation_text.as_str(),
+                "--epoch",
+                "not-an-epoch",
+            ],
+            vec![
+                "orna",
+                "inspect",
+                invocation_text.as_str(),
+                "--epoch",
+                epoch_text.as_str(),
+                "extra",
+            ],
+            vec![
+                "orna",
+                "inspect",
+                invocation_text.as_str(),
+                "--unknown",
+                "value",
+            ],
+            vec![
+                "orna",
+                "inspect",
+                invocation_text.as_str(),
+                "--trace",
+                "extra",
+            ],
+        ] {
+            assert_eq!(parse_command(arguments(&values)), None, "{values:?}");
+        }
+    }
+
+    #[test]
+    fn inspect_error_exit_codes_follow_the_closed_table() {
+        use orna_server::{InstalledInspectError, InstalledInspectErrorKind};
+
+        for (kind, expected) in [
+            (InstalledInspectErrorKind::Usage, 2),
+            (InstalledInspectErrorKind::Kernel, 1),
+            (InstalledInspectErrorKind::Rendering, 5),
+            (InstalledInspectErrorKind::Internal, 7),
+        ] {
+            let error = InstalledInspectError::new(kind, "message".to_owned());
+            assert_eq!(inspect_error_exit_code(&error), expected, "{kind:?}");
+        }
+    }
+
+    #[test]
     fn usage_diagnostic_is_exact() {
         assert_eq!(
             USAGE,
-            "Usage:\n  orna --version\n  orna server run\n  orna server upgrade\n  orna server backend-shell\n  orna source check <file.orna>\n  orna source apply <file.orna>\n  orna security grant-execute <canonical-function-id>\n  orna raw-call <canonical-function-id>\n  orna raw-call <canonical-function-id> <canonical-parameter-id>\n  orna [--runtime <family>] invoke <qualified-name | canonical-function-id> [options]\n  orna state get <root-function-id> [options]\n  orna state set <root-function-id> [options]"
+            "Usage:\n  orna --version\n  orna server run\n  orna server upgrade\n  orna server backend-shell\n  orna source check <file.orna>\n  orna source apply <file.orna>\n  orna security grant-execute <canonical-function-id>\n  orna raw-call <canonical-function-id>\n  orna raw-call <canonical-function-id> <canonical-parameter-id>\n  orna [--runtime <family>] invoke <qualified-name | canonical-function-id> [options]\n  orna state get <root-function-id> [options]\n  orna state set <root-function-id> [options]\n  orna inspect <invocation-id> [options]"
         );
     }
 }
