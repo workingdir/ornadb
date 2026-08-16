@@ -118,4 +118,8 @@ source-of-truth or authority rules.
 * **work ADR 0058:**
   [`orna.std/3` Standard Output Value Types](0058-orna-std-3-output-value-types.md)
 * **work ADR 0059:**
+  [Compiler-Backed `orna.std/3` Standard Upgrade](0059-compiler-backed-v3-standard-upgrade.md)
+* **work ADR 0058:**
+  [`orna.std/3` Standard Output Value Types](0058-orna-std-3-output-value-types.md)
+* **work ADR 0059:**
   [Offline LSP and Editor Tooling for `.orna` Source](0059-offline-lsp-editor-tooling.md)
