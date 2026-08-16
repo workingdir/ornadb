@@ -30,8 +30,7 @@ use orna_core::{
     },
     inspect::{
         InspectOutcomeKind, InspectPrivilege, InspectSecurityDecisionKind,
-        InspectSecurityDecisionOutcome, InspectSnapshotOptions, InspectTraceEventKind,
-        InspectTracePayload,
+        InspectSecurityDecisionOutcome, InspectTraceEventKind, InspectTracePayload,
     },
     revision::{
         ActiveDatabaseRevision, CatalogueHashContext, CatalogueHashVersion, DefinitionIdentity,
@@ -6765,7 +6764,10 @@ async fn proves_sealed_echo_invocation_and_rejects_tampered_v3_rows() -> TestRes
         let security_events = kernel.recover_security_audit_events().await?;
         let allowed = security_events
             .iter()
-            .filter(|event| event.decision().outcome() == SecurityAuditOutcome::Allowed)
+            .filter(|event| {
+                event.decision().outcome() == SecurityAuditOutcome::Allowed
+                    && event.decision().kind() == SecurityAuditKind::Execute
+            })
             .collect::<Vec<_>>();
         require(
             allowed.len() == 2
@@ -6947,28 +6949,16 @@ async fn proves_inspect_capture_and_projections_after_sealed_echo() -> TestResul
             .dispatch_sealed_sys_invoke(&session, CONNECTION_PROTOCOL_MAJOR, &retained)
             .await?;
         let invocation = require_echo_completion(&result, ECHO_VALUE)?;
-        let events = match &result {
-            SealedInvocationResult::Completed { events, .. } => events,
-            _ => {
-                return Err(failure(
-                    "the sealed echo invocation did not complete with its Event batch",
-                ));
-            }
-        };
 
-        let epoch_id = kernel
-            .capture_inspect_snapshot(
-                &session,
-                invocation,
-                InspectSnapshotOptions::new(true, true, true, true),
-                V3_PROOF_CLIENT_USER,
-                orna_compiler::STD_INVOKE_ECHO_FUNCTION_ID,
-                InspectOutcomeKind::Allowed,
-                events,
-                by_name.client_offer(),
-                None,
-            )
-            .await?;
+        // The dispatch auto-captures one structural epoch for the completed
+        // invocation (ADR 0064), so the proof consumes that epoch rather than
+        // capturing a second one (which would rewrite the invocation's trace
+        // rows and violate the trace primary key).
+        let resolved = kernel
+            .find_latest_inspect_epoch(&session, invocation)
+            .await?
+            .ok_or_else(|| failure("the dispatch auto-captured epoch did not resolve"))?;
+        let epoch_id = resolved;
 
         // The epoch round-trips through the canonical ORV5 payload and
         // agrees with the invocation, the pinned pair, and the owner.
@@ -7094,26 +7084,29 @@ async fn proves_inspect_capture_and_projections_after_sealed_echo() -> TestResul
                 "trace rows 0..3 are not exact: {trace_rows:?}"
             )));
         }
-        // `p_after_sequence` filters `sequence > $after`, so the default
-        // `after = 0` stream starts at the ValueBatch event (sequence 1)
-        // and excludes the Started marker at sequence 0.
+        // `p_after_sequence` is a resume cursor: `after = 0` (the spec
+        // default) means "from the start" and returns the full stream
+        // including the Started marker at sequence 0; a positive value
+        // returns only rows strictly after it.
         let stream = kernel
             .stream_inspect_trace(invocation, 0, None, false)
             .await?;
         require(
-            stream.len() == 2
-                && stream[0].sequence() == 1
-                && stream[0].kind() == InspectTraceEventKind::ValueBatch
+            stream.len() == 3
+                && stream[0].sequence() == 0
+                && stream[0].kind() == InspectTraceEventKind::InvocationStarted
+                && stream[1].sequence() == 1
+                && stream[1].kind() == InspectTraceEventKind::ValueBatch
                 && matches!(
-                    stream[0].payload(),
+                    stream[1].payload(),
                     InspectTracePayload::ValueBatch {
                         schema: None,
                         values,
                     } if values.len() == 1
                         && values[0].value() == &RuntimeValue::Integer(ECHO_VALUE)
                 )
-                && stream[1].sequence() == 2
-                && stream[1].kind() == InspectTraceEventKind::InvocationCompleted,
+                && stream[2].sequence() == 2
+                && stream[2].kind() == InspectTraceEventKind::InvocationCompleted,
             "the trace stream did not return the model lifecycle events",
         )?;
         let resumed = kernel
@@ -7278,11 +7271,18 @@ async fn proves_find_latest_inspect_epoch_resolves_the_dispatch_epoch() -> TestR
                 standard_revision,
                 orna_compiler::STD_INVOKE_ECHO_FUNCTION_REVISION_ID,
             )],
-            vec![Principal::new(
-                V3_PROOF_CLIENT_USER,
-                PrincipalKind::User,
-                PrincipalStatus::Active,
-            )],
+            vec![
+                Principal::new(
+                    V3_PROOF_CLIENT_USER,
+                    PrincipalKind::User,
+                    PrincipalStatus::Active,
+                ),
+                Principal::new(
+                    FOREIGN_PRINCIPAL,
+                    PrincipalKind::User,
+                    PrincipalStatus::Active,
+                ),
+            ],
             vec![],
             vec![ExecuteGrant::new(
                 V3_PROOF_CLIENT_USER,
