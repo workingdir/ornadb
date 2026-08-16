@@ -5,13 +5,16 @@
 
 use std::{collections::BTreeMap, error::Error, fmt};
 
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use futures_util::TryStreamExt;
+use orna_artifact::server_json_encode::{self, JsonEncodePlan, JsonEncodePlanError};
 use orna_artifact::server_parameter_echo::{self, ServerParameterEcho, ServerParameterEchoError};
 use orna_artifact::server_plan::{
     self, DistinctServerPlan, Expression, ExpressionKind, FieldStep, IdentitySelectedServerPlan,
     Ordering, SelectBindValue as UniqueTextSelectBindValue, ServerPlan, SortDirection,
     UniqueTextSelectedServerPlan,
 };
+use orna_artifact::server_terminal_table::{self, TerminalTablePlan, TerminalTablePlanError};
 use orna_core::{
     FieldId, FunctionId, FunctionRevisionId, ObjectId, ParameterId, TypeId,
     catalogue::{
@@ -26,12 +29,16 @@ use orna_core::{
     security::{AuthorisedInvocation, InvocationTarget},
     types::{ResolvedType, StandardScalar},
     value::{
-        EnumValue, FunctionArgument, ResultColumn, ResultRow, ResultRows, ResultRowsError,
+        ConstructedValueKind, EnumValue, FunctionArgument, OpaqueCodecRegistry, OpaqueValue,
+        OpaqueValueError, RecordValue, ResultColumn, ResultRow, ResultRows, ResultRowsError,
         RuntimeFloat, RuntimeType, RuntimeValue,
     },
 };
 use orna_protocol::{ValueCodecError, decode_active_value, encode_active_value};
-use orna_standard::INTEGER_TYPE_ID;
+use orna_standard::{
+    BYTE_STREAM_MAGIC, INTEGER_TYPE_ID, STD_IO_BYTE_STREAM_TYPE_ID, STD_TERMINAL_DOCUMENT_TYPE_ID,
+    TERMINAL_DOCUMENT_MAGIC,
+};
 use tokio_postgres::{
     Client, IsolationLevel, Row, Statement, Transaction,
     types::{ToSql, Type},
@@ -70,6 +77,13 @@ const DISTINCT_PROJECTION_RULE: &str =
 const DISTINCT_REFERENCE_COUNT_RULE: &str = "its dependencies do not match its signature and query";
 const DISTINCT_REFERENCE_SEQUENCE_RULE: &str =
     "its dependencies are not in the same order as its signature and query";
+
+/// The fixed ADR 0057 `std.json.Value` value-type identity: `...11` (ADR 0058).
+const STD_JSON_VALUE_TYPE_ID: TypeId =
+    TypeId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x11]);
+/// The fixed ADR 0057 `std.data.Rows` value-type identity: `...12` (ADR 0058).
+const STD_DATA_ROWS_TYPE_ID: TypeId =
+    TypeId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x12]);
 
 #[cfg(feature = "test-hooks")]
 struct SelectTestBarrier {
@@ -232,6 +246,17 @@ pub enum ServerSelectError {
     PlanDecode(orna_artifact::server_plan::ServerPlanError),
     /// The pinned standard parameter-echo artifact cannot decode.
     ParameterEchoDecode(ServerParameterEchoError),
+    /// The pinned standard json-encode artifact cannot decode.
+    JsonEncodeDecode(JsonEncodePlanError),
+    /// The pinned standard terminal-table artifact cannot decode.
+    TerminalTableDecode(TerminalTablePlanError),
+    /// A standard presenter cannot convert the bound value without loss.
+    Presenter {
+        /// The exact rejected presenter rule.
+        rule: &'static str,
+    },
+    /// A standard presenter built an invalid opaque value payload.
+    PresenterOpaque(OpaqueValueError),
     /// The plan does not agree with the recovered active catalogue.
     PlanInvariant { rule: &'static str },
     /// A saved `SELECT DISTINCT` function is outside the accepted runtime form.
@@ -387,6 +412,27 @@ impl fmt::Display for ServerSelectError {
                     "cannot decode server parameter-echo artifact: {error}"
                 )
             }
+            Self::JsonEncodeDecode(error) => {
+                write!(
+                    formatter,
+                    "cannot decode server json-encode artifact: {error}"
+                )
+            }
+            Self::TerminalTableDecode(error) => {
+                write!(
+                    formatter,
+                    "cannot decode server terminal-table artifact: {error}"
+                )
+            }
+            Self::Presenter { rule } => {
+                write!(formatter, "standard presenter execution failed: {rule}")
+            }
+            Self::PresenterOpaque(error) => {
+                write!(
+                    formatter,
+                    "standard presenter built an invalid opaque value: {error}"
+                )
+            }
             Self::PlanInvariant { rule } => {
                 write!(formatter, "server plan invariant failed: {rule}")
             }
@@ -471,6 +517,9 @@ impl Error for ServerSelectError {
             Self::Kernel { source } => Some(source),
             Self::PlanDecode(error) => Some(error),
             Self::ParameterEchoDecode(error) => Some(error),
+            Self::JsonEncodeDecode(error) => Some(error),
+            Self::TerminalTableDecode(error) => Some(error),
+            Self::PresenterOpaque(error) => Some(error),
             Self::ResultRows(error) => Some(error),
             Self::ReturnedRows(error) => Some(error),
             Self::RowDecode { source, .. } => Some(source),
@@ -484,6 +533,7 @@ impl Error for ServerSelectError {
             | Self::Artifact { .. }
             | Self::PlanInvariant { .. }
             | Self::Distinct { .. }
+            | Self::Presenter { .. }
             | Self::ReferenceEvidence { .. }
             | Self::Argument { .. }
             | Self::Cardinality { .. }
@@ -1032,6 +1082,8 @@ pub(crate) const fn raw_server_target_is_unavailable(error: &ServerSelectError) 
         | ServerSelectError::Artifact { .. }
         | ServerSelectError::PlanDecode(_)
         | ServerSelectError::ParameterEchoDecode(_)
+        | ServerSelectError::JsonEncodeDecode(_)
+        | ServerSelectError::TerminalTableDecode(_)
         | ServerSelectError::PlanInvariant { .. }
         | ServerSelectError::Distinct { .. }
         | ServerSelectError::ReferenceEvidence { .. }
@@ -1049,6 +1101,8 @@ pub(crate) const fn raw_server_target_is_unavailable(error: &ServerSelectError) 
         | ServerSelectError::CurrentRevision { .. }
         | ServerSelectError::PreparedResult { .. }
         | ServerSelectError::ReturnedRows(_)
+        | ServerSelectError::Presenter { .. }
+        | ServerSelectError::PresenterOpaque(_)
         | ServerSelectError::RowDecode { .. }
         | ServerSelectError::ValueInvariant { .. }
         | ServerSelectError::ValueCodec { .. } => false,
@@ -1466,6 +1520,599 @@ fn validate_standard_parameter_echo_argument(
             Some(parameter),
             "standard parameter echo arguments must be one non-null INTEGER value",
         )),
+    }
+}
+
+/// Executes one closed standard `orna.server-json-encode` artifact.
+///
+/// This engine is reachable only from a pinned standard
+/// [`FunctionRevisionRecord`], its already bound [`FunctionArgument`], the
+/// active revision it executes against, and the opaque codec registry of the
+/// active verified standard. It dispatches purely by checked artifact kind,
+/// format, and version, then validates the artifact against the pinned
+/// standard presenter signature: decode pins the function's parameter
+/// identity and the resolved `std.json.Value` value type, and the signature
+/// validator requires the fixed ADR 0057 `std.json.encode` shape. It never
+/// matches a function by Rust name or [`FunctionId`], executes SQL, or opens
+/// a PostgreSQL row.
+///
+/// The bound value converts to JSON without loss (integers, bigints, floats,
+/// booleans, text, bytes as base64, references as an explicit
+/// `$ref`/`$type` object, lists, maps, and null), and the result is one
+/// `std.io.ByteStream` opaque value whose payload follows the ADR 0058 codec
+/// framing (`ORNA-BYTE-STREAM/1 <media-type-len:u32 be> <media-type>
+/// <len:u32 be> <bytes>`) with media type `application/json`.
+///
+/// ADR 0057 step 7 wires the presenter engines into the sealed output
+/// resolution; until then they are reachable only from tests, so the closed
+/// engines and every helper they call stay live under the dead-code lint.
+#[allow(dead_code)]
+pub(crate) fn execute_standard_json_encode(
+    function: &FunctionDefinition,
+    revision: &FunctionRevisionRecord,
+    arguments: &[FunctionArgument],
+    active: &ActiveDatabaseRevision,
+    registry: &OpaqueCodecRegistry,
+) -> Result<RuntimeValue, PostgresKernelError> {
+    let artifact = revision.artifact();
+    if artifact.kind() != ExecutableArtifactKind::Server {
+        return Err(artifact_error(
+            function.id(),
+            "current revision must contain a SERVER artifact",
+        ));
+    }
+    if artifact.format() != server_json_encode::FORMAT_IDENTITY {
+        return Err(artifact_error(
+            function.id(),
+            "current SERVER artifact must use orna.server-json-encode",
+        ));
+    }
+    if artifact.version() != server_json_encode::FORMAT_VERSION {
+        return Err(artifact_error(
+            function.id(),
+            "current SERVER artifact must use orna.server-json-encode version 1",
+        ));
+    }
+    if revision.language_version() != server_json_encode::LANGUAGE_VERSION_IDENTITY {
+        return Err(artifact_error(
+            function.id(),
+            "current SERVER revision must use the json-encode language version",
+        ));
+    }
+    let parameter = validate_standard_json_encode_signature(function)?;
+    JsonEncodePlan::decode(artifact.payload(), parameter, STD_JSON_VALUE_TYPE_ID)
+        .map_err(ServerSelectError::JsonEncodeDecode)
+        .map_err(server_error)?;
+    let value = validate_standard_json_encode_argument(parameter, arguments)?;
+    let json = encode_json_value(active, value)
+        .map_err(|rule| ServerSelectError::Presenter { rule })
+        .map_err(server_error)?;
+    let json_bytes = serde_json::to_vec(&json).map_err(|_| {
+        server_error(ServerSelectError::Presenter {
+            rule: "std.json.encode produced an unrepresentable JSON document",
+        })
+    })?;
+    let payload = frame_byte_stream(b"application/json", &json_bytes);
+    let opaque = OpaqueValue::new(active, registry, STD_IO_BYTE_STREAM_TYPE_ID, &payload)
+        .map_err(ServerSelectError::PresenterOpaque)
+        .map_err(server_error)?;
+    Ok(RuntimeValue::Opaque(opaque))
+}
+
+/// Executes one closed standard `orna.server-terminal-table` artifact.
+///
+/// This engine is reachable only from a pinned standard
+/// [`FunctionRevisionRecord`], the bound `std.data.Rows` input (the validated
+/// [`ResultRows`] result set itself, which cannot ride the value channel),
+/// the active revision it executes against, and the opaque codec registry of
+/// the active verified standard. It dispatches purely by checked artifact
+/// kind, format, and version, then validates the artifact against the pinned
+/// standard presenter signature: decode pins the function's parameter
+/// identity and the resolved `std.data.Rows` value type, and the signature
+/// validator requires the fixed ADR 0057 `std.terminal.present_table` shape.
+/// It never matches a function by Rust name or [`FunctionId`], executes SQL,
+/// or opens a PostgreSQL row.
+///
+/// The bound rows render as the fixed plain-text table (column headers,
+/// aligned values, and a trailing row count), and the result is one
+/// `std.terminal.Document` opaque value whose payload follows the ADR 0058
+/// codec framing (`ORNA-TERMINAL-DOCUMENT/1 <len:u32 be> <utf-8>`).
+///
+/// ADR 0057 step 7 wires the presenter engines into the sealed output
+/// resolution; until then they are reachable only from tests, so the closed
+/// engines and every helper they call stay live under the dead-code lint.
+#[allow(dead_code)]
+pub(crate) fn execute_standard_terminal_table(
+    function: &FunctionDefinition,
+    revision: &FunctionRevisionRecord,
+    rows: &ResultRows,
+    active: &ActiveDatabaseRevision,
+    registry: &OpaqueCodecRegistry,
+) -> Result<RuntimeValue, PostgresKernelError> {
+    let artifact = revision.artifact();
+    if artifact.kind() != ExecutableArtifactKind::Server {
+        return Err(artifact_error(
+            function.id(),
+            "current revision must contain a SERVER artifact",
+        ));
+    }
+    if artifact.format() != server_terminal_table::FORMAT_IDENTITY {
+        return Err(artifact_error(
+            function.id(),
+            "current SERVER artifact must use orna.server-terminal-table",
+        ));
+    }
+    if artifact.version() != server_terminal_table::FORMAT_VERSION {
+        return Err(artifact_error(
+            function.id(),
+            "current SERVER artifact must use orna.server-terminal-table version 1",
+        ));
+    }
+    if revision.language_version() != server_terminal_table::LANGUAGE_VERSION_IDENTITY {
+        return Err(artifact_error(
+            function.id(),
+            "current SERVER revision must use the terminal-table language version",
+        ));
+    }
+    let parameter = validate_standard_terminal_present_table_signature(function)?;
+    TerminalTablePlan::decode(artifact.payload(), parameter, STD_DATA_ROWS_TYPE_ID)
+        .map_err(ServerSelectError::TerminalTableDecode)
+        .map_err(server_error)?;
+    let document = render_terminal_table(active, rows)
+        .map_err(|rule| ServerSelectError::Presenter { rule })
+        .map_err(server_error)?;
+    let payload = frame_terminal_document(&document);
+    let opaque = OpaqueValue::new(active, registry, STD_TERMINAL_DOCUMENT_TYPE_ID, &payload)
+        .map_err(ServerSelectError::PresenterOpaque)
+        .map_err(server_error)?;
+    Ok(RuntimeValue::Opaque(opaque))
+}
+
+/// Validates one pinned function against the fixed ADR 0057
+/// `std.json.encode` presenter signature.
+///
+/// The accepted shape is exactly: SERVER domain, one required non-null
+/// `std.json.Value` parameter with no default expression, one single
+/// `std.io.ByteStream` result, `SECURITY INVOKER`, `TRANSACTION READ ONLY`,
+/// and `VOLATILITY STABLE`. Both the parameter and the result must resolve to
+/// the fixed value types. Returns the pinned parameter identity the artifact
+/// must carry.
+fn validate_standard_json_encode_signature(
+    function: &FunctionDefinition,
+) -> Result<ParameterId, PostgresKernelError> {
+    validate_standard_presenter_signature(
+        function,
+        STD_JSON_VALUE_TYPE_ID,
+        STD_IO_BYTE_STREAM_TYPE_ID,
+        "standard json-encode presenters must declare exactly one required non-null std.json.Value parameter",
+        "standard json-encode presenters must return a single std.io.ByteStream value",
+        "standard json-encode presenters must declare one std.json.Value parameter and one std.io.ByteStream result",
+    )
+}
+
+/// Validates one pinned function against the fixed ADR 0057
+/// `std.terminal.present_table` presenter signature.
+///
+/// The accepted shape is exactly: SERVER domain, one required non-null
+/// `std.data.Rows` parameter with no default expression, one single
+/// `std.terminal.Document` result, `SECURITY INVOKER`, `TRANSACTION READ
+/// ONLY`, and `VOLATILITY STABLE`. Both the parameter and the result must
+/// resolve to the fixed value types. Returns the pinned parameter identity
+/// the artifact must carry.
+fn validate_standard_terminal_present_table_signature(
+    function: &FunctionDefinition,
+) -> Result<ParameterId, PostgresKernelError> {
+    validate_standard_presenter_signature(
+        function,
+        STD_DATA_ROWS_TYPE_ID,
+        STD_TERMINAL_DOCUMENT_TYPE_ID,
+        "standard terminal-table presenters must declare exactly one required non-null std.data.Rows parameter",
+        "standard terminal-table presenters must return a single std.terminal.Document value",
+        "standard terminal-table presenters must declare one std.data.Rows parameter and one std.terminal.Document result",
+    )
+}
+
+/// Validates one pinned function against the fixed ADR 0057 presenter shape.
+///
+/// The accepted shape is exactly: SERVER domain, one required non-null
+/// parameter with no default expression, one single result, `SECURITY
+/// INVOKER`, `TRANSACTION READ ONLY`, and `VOLATILITY STABLE`. The parameter
+/// must resolve to `parameter_type` and the result to `result_type`; both
+/// the retained named spelling and the durable value-type identity are
+/// admitted (the retained standard catalogue spells the parameter and result
+/// as resolved named types, while the pinned artifacts carry the durable
+/// value-type identities). Returns the pinned parameter identity the artifact
+/// must carry.
+fn validate_standard_presenter_signature(
+    function: &FunctionDefinition,
+    parameter_type: TypeId,
+    result_type: TypeId,
+    parameter_rule: &'static str,
+    result_rule: &'static str,
+    types_rule: &'static str,
+) -> Result<ParameterId, PostgresKernelError> {
+    if function.domain() != FunctionDomain::Server {
+        return Err(server_error(ServerSelectError::FunctionDomain {
+            function: function.id(),
+        }));
+    }
+    let [parameter] = function.parameters() else {
+        return Err(function_signature_error(function.id(), parameter_rule));
+    };
+    if parameter.default_expression().is_some() {
+        return Err(function_signature_error(function.id(), parameter_rule));
+    }
+    let FunctionReturn::Single(result) = function.return_type() else {
+        return Err(function_signature_error(function.id(), result_rule));
+    };
+    if !is_standard_presenter_type(&parameter.resolved_type(), parameter_type)
+        || !is_standard_presenter_type(result, result_type)
+    {
+        return Err(function_signature_error(function.id(), types_rule));
+    }
+    if function.security() != FunctionSecurity::Invoker {
+        return Err(function_signature_error(
+            function.id(),
+            "standard presenter functions must use INVOKER security",
+        ));
+    }
+    if function.transaction() != Some(FunctionTransaction::ReadOnly) {
+        return Err(function_signature_error(
+            function.id(),
+            "standard presenter functions must use READ ONLY transactions",
+        ));
+    }
+    if function.volatility() != FunctionVolatility::Stable {
+        return Err(function_signature_error(
+            function.id(),
+            "standard presenter functions must use STABLE volatility",
+        ));
+    }
+    Ok(parameter.id())
+}
+
+/// Returns whether one resolved type is the fixed ADR 0057 presenter type.
+///
+/// The retained standard catalogue spells presenter parameters and results as
+/// resolved named types, while the pinned presenter artifacts carry the
+/// durable `Value(type_id)` identities; both denote the same fixed value
+/// type, so the closed signature validator admits exactly these two forms and
+/// nothing else.
+fn is_standard_presenter_type(resolved_type: &ResolvedType, type_id: TypeId) -> bool {
+    *resolved_type == ResolvedType::value(type_id) || *resolved_type == ResolvedType::named(type_id)
+}
+
+/// Validates the exact bound argument of one standard json-encode call.
+///
+/// The engine accepts exactly one argument bound to the pinned parameter. A
+/// typed null cannot cross the [`FunctionArgument`] boundary; the explicit
+/// null arm keeps the closed-engine invariant independent of that boundary.
+/// The returned value is the already bound typed value, whose conversion to
+/// JSON is the presenter's closed lossless rule.
+fn validate_standard_json_encode_argument(
+    parameter: ParameterId,
+    arguments: &[FunctionArgument],
+) -> Result<&RuntimeValue, PostgresKernelError> {
+    let [argument] = arguments else {
+        return Err(argument_error(
+            None,
+            "standard json-encode calls require exactly one argument",
+        ));
+    };
+    if argument.parameter() != parameter {
+        return Err(argument_error(
+            Some(argument.parameter()),
+            "standard json-encode arguments must bind the pinned parameter identity",
+        ));
+    }
+    match argument.value() {
+        RuntimeValue::Null(_) => Err(argument_error(
+            Some(parameter),
+            "standard json-encode arguments cannot be NULL",
+        )),
+        value => Ok(value),
+    }
+}
+
+/// Converts one bound runtime value to JSON without loss.
+///
+/// The closed ADR 0057 conversion matrix accepts exactly: null, booleans,
+/// integers, bigints, floats, text, bytes (base64), references (an explicit
+/// `{"$ref": "orna://<type-name>/<object-id>", "$type": "<type-name>"}`
+/// object), lists (arrays), and maps (objects). Every other runtime form
+/// (enums, records, opaque values, options, and invocation carriers) cannot
+/// be represented without loss and is rejected.
+fn encode_json_value(
+    active: &ActiveDatabaseRevision,
+    value: &RuntimeValue,
+) -> Result<serde_json::Value, &'static str> {
+    match value {
+        RuntimeValue::Null(_) => Ok(serde_json::Value::Null),
+        RuntimeValue::Boolean(value) => Ok(serde_json::Value::Bool(*value)),
+        RuntimeValue::Integer(value) => Ok(serde_json::Value::from(*value)),
+        RuntimeValue::BigInt(value) => Ok(serde_json::Value::from(*value)),
+        RuntimeValue::Float(value) => serde_json::Number::from_f64(value.value())
+            .map(serde_json::Value::Number)
+            .ok_or("std.json.encode cannot represent a non-finite FLOAT value"),
+        RuntimeValue::Text(value) => Ok(serde_json::Value::String(value.clone())),
+        RuntimeValue::Bytes(value) => Ok(serde_json::Value::String(BASE64_STANDARD.encode(value))),
+        RuntimeValue::Reference { target, object } => {
+            let Some(definition) = active.catalogue().object_type_by_id(*target) else {
+                return Err(
+                    "std.json.encode cannot encode a reference outside the active catalogue",
+                );
+            };
+            let type_name = definition.name().to_string();
+            Ok(serde_json::json!({
+                "$ref": format!("orna://{type_name}/{}", object.canonical()),
+                "$type": type_name,
+            }))
+        }
+        RuntimeValue::Constructed(value) => match value.kind() {
+            ConstructedValueKind::List(values) => values
+                .iter()
+                .map(|value| encode_json_value(active, value))
+                .collect::<Result<Vec<_>, _>>()
+                .map(serde_json::Value::Array),
+            ConstructedValueKind::Map(entries) => entries
+                .iter()
+                .map(|(key, value)| {
+                    Ok((
+                        encode_json_object_key(active, key)?,
+                        encode_json_value(active, value)?,
+                    ))
+                })
+                .collect::<Result<serde_json::Map<String, serde_json::Value>, _>>()
+                .map(serde_json::Value::Object),
+            ConstructedValueKind::Option(_) => {
+                Err("std.json.encode cannot convert an OPTION value to JSON without loss")
+            }
+            _ => Err(
+                "std.json.encode cannot convert an unknown constructed value to JSON without loss",
+            ),
+        },
+        RuntimeValue::Enum(_) => {
+            Err("std.json.encode cannot convert an ENUM value to JSON without loss")
+        }
+        RuntimeValue::Record(_) => {
+            Err("std.json.encode cannot convert a RECORD value to JSON without loss")
+        }
+        RuntimeValue::Opaque(_) => {
+            Err("std.json.encode cannot convert an OPAQUE value to JSON without loss")
+        }
+        RuntimeValue::InvokeValue(_)
+        | RuntimeValue::InvokeRequest(_)
+        | RuntimeValue::InvokeEvent(_) => {
+            Err("std.json.encode cannot convert an invocation carrier to JSON without loss")
+        }
+        _ => Err("std.json.encode cannot convert an unknown runtime value to JSON without loss"),
+    }
+}
+
+/// Converts one map key to its canonical JSON object-key text.
+///
+/// JSON object keys are strings, so each lossless scalar form renders in its
+/// canonical text: text verbatim, booleans and numbers in decimal, bytes as
+/// base64, enums as their declared label, and references as their canonical
+/// `orna://` URI. Every other form cannot be reduced to a JSON string key
+/// without loss and is rejected.
+fn encode_json_object_key(
+    active: &ActiveDatabaseRevision,
+    key: &RuntimeValue,
+) -> Result<String, &'static str> {
+    match key {
+        RuntimeValue::Text(value) => Ok(value.clone()),
+        RuntimeValue::Boolean(value) => Ok(value.to_string()),
+        RuntimeValue::Integer(value) => Ok(value.to_string()),
+        RuntimeValue::BigInt(value) => Ok(value.to_string()),
+        RuntimeValue::Float(value) => Ok(value.value().to_string()),
+        RuntimeValue::Bytes(value) => Ok(BASE64_STANDARD.encode(value)),
+        RuntimeValue::Enum(value) => Ok(value.label().to_owned()),
+        RuntimeValue::Reference { target, object } => {
+            let Some(definition) = active.catalogue().object_type_by_id(*target) else {
+                return Err(
+                    "std.json.encode cannot encode a reference outside the active catalogue",
+                );
+            };
+            Ok(format!(
+                "orna://{}/{}",
+                definition.name(),
+                object.canonical()
+            ))
+        }
+        _ => Err("std.json.encode map keys must be losslessly encodable JSON strings"),
+    }
+}
+
+/// Frames one media-typed byte payload as the canonical ADR 0058
+/// `std.io.ByteStream` payload: `ORNA-BYTE-STREAM/1 <media-type-len:u32 be>
+/// <media-type> <len:u32 be> <bytes>`.
+fn frame_byte_stream(media_type: &[u8], bytes: &[u8]) -> Vec<u8> {
+    let mut payload =
+        Vec::with_capacity(BYTE_STREAM_MAGIC.len() + 4 + media_type.len() + 4 + bytes.len());
+    payload.extend_from_slice(BYTE_STREAM_MAGIC.as_bytes());
+    payload.extend_from_slice(
+        &u32::try_from(media_type.len())
+            .expect("the presenter media type length fits u32")
+            .to_be_bytes(),
+    );
+    payload.extend_from_slice(media_type);
+    payload.extend_from_slice(
+        &u32::try_from(bytes.len())
+            .expect("the presenter byte payload length fits u32")
+            .to_be_bytes(),
+    );
+    payload.extend_from_slice(bytes);
+    payload
+}
+
+/// Frames one UTF-8 document as the canonical ADR 0058 `std.terminal.Document`
+/// payload: `ORNA-TERMINAL-DOCUMENT/1 <len:u32 be> <utf-8 bytes>`.
+fn frame_terminal_document(text: &str) -> Vec<u8> {
+    let bytes = text.as_bytes();
+    let mut payload = Vec::with_capacity(TERMINAL_DOCUMENT_MAGIC.len() + 4 + bytes.len());
+    payload.extend_from_slice(TERMINAL_DOCUMENT_MAGIC.as_bytes());
+    payload.extend_from_slice(
+        &u32::try_from(bytes.len())
+            .expect("the presenter document length fits u32")
+            .to_be_bytes(),
+    );
+    payload.extend_from_slice(bytes);
+    payload
+}
+
+/// Renders one validated [`ResultRows`] as the fixed plain-text terminal
+/// table.
+///
+/// The fixed layout is one header line (column names padded to their column
+/// width), one separator line (`-` repeated to the width of each column), one
+/// line per row (cells padded to their column width), and a trailing row
+/// count line. Columns are joined by a single space, every line ends with
+/// `\n`, and the document carries no control characters: any rendered cell or
+/// column name containing a control character is rejected.
+fn render_terminal_table(
+    active: &ActiveDatabaseRevision,
+    rows: &ResultRows,
+) -> Result<String, &'static str> {
+    let columns = rows.columns();
+    let mut widths = Vec::with_capacity(columns.len());
+    let mut header = Vec::with_capacity(columns.len());
+    for column in columns {
+        reject_control_characters(
+            column.name(),
+            "terminal table column names cannot contain control characters",
+        )?;
+        widths.push(column.name().chars().count());
+        header.push(column.name().to_owned());
+    }
+    let mut body = Vec::with_capacity(rows.rows().len());
+    for row in rows.rows() {
+        let mut cells = Vec::with_capacity(columns.len());
+        for (index, value) in row.values().iter().enumerate() {
+            let cell = render_terminal_cell(active, value)?;
+            let width = cell.chars().count();
+            if width > widths[index] {
+                widths[index] = width;
+            }
+            cells.push(cell);
+        }
+        body.push(cells);
+    }
+    let mut document = String::new();
+    push_table_line(&mut document, &header, &widths, false);
+    push_table_line(&mut document, &header, &widths, true);
+    for cells in &body {
+        push_table_line(&mut document, cells, &widths, false);
+    }
+    let count = rows.rows().len();
+    if count == 1 {
+        document.push_str("(1 row)\n");
+    } else {
+        document.push_str(&format!("({count} rows)\n"));
+    }
+    Ok(document)
+}
+
+/// Appends one aligned table line to the document.
+///
+/// Data lines left-pad every cell to its column width (the final column is
+/// not padded, so lines carry no trailing whitespace); the separator line
+/// repeats `-` to the width of each column. Columns are joined by one space.
+fn push_table_line(document: &mut String, cells: &[String], widths: &[usize], separator: bool) {
+    for (index, cell) in cells.iter().enumerate() {
+        if index > 0 {
+            document.push(' ');
+        }
+        if separator {
+            document.extend(std::iter::repeat_n('-', widths[index]));
+        } else {
+            document.push_str(cell);
+            if index + 1 < cells.len() {
+                let width = cell.chars().count();
+                document.extend(std::iter::repeat_n(' ', widths[index] - width));
+            }
+        }
+    }
+    document.push('\n');
+}
+
+/// Renders one terminal-table cell as plain text.
+///
+/// Nulls render as `NULL`, scalars in their canonical text, bytes as base64,
+/// references as their canonical object id, enums as their declared label,
+/// and records as `type-name{field=value, ...}` in declaration order. Opaque
+/// values, constructed values, and invocation carriers cannot appear in a
+/// validated [`ResultRows`]; the explicit arms keep the renderer closed.
+fn render_terminal_cell(
+    active: &ActiveDatabaseRevision,
+    value: &RuntimeValue,
+) -> Result<String, &'static str> {
+    let cell = match value {
+        RuntimeValue::Null(_) => "NULL".to_owned(),
+        RuntimeValue::Boolean(value) => value.to_string(),
+        RuntimeValue::Integer(value) => value.to_string(),
+        RuntimeValue::BigInt(value) => value.to_string(),
+        RuntimeValue::Float(value) => value.value().to_string(),
+        RuntimeValue::Text(value) => value.clone(),
+        RuntimeValue::Bytes(value) => BASE64_STANDARD.encode(value),
+        RuntimeValue::Reference { object, .. } => object.canonical(),
+        RuntimeValue::Enum(value) => value.label().to_owned(),
+        RuntimeValue::Record(value) => render_record_cell(active, value)?,
+        RuntimeValue::Opaque(_) => {
+            return Err("terminal tables cannot render OPAQUE values");
+        }
+        RuntimeValue::Constructed(_) => {
+            return Err("terminal tables cannot render constructed values");
+        }
+        RuntimeValue::InvokeValue(_)
+        | RuntimeValue::InvokeRequest(_)
+        | RuntimeValue::InvokeEvent(_) => {
+            return Err("terminal tables cannot render invocation carriers");
+        }
+        _ => return Err("terminal tables cannot render an unknown runtime value"),
+    };
+    reject_control_characters(
+        &cell,
+        "terminal table cells cannot contain control characters",
+    )?;
+    Ok(cell)
+}
+
+/// Renders one record cell as `type-name{field=value, ...}`.
+///
+/// Field names and the record type name come from the active catalogue;
+/// field values render with the same closed cell rules and are never null
+/// (the record constructor rejects null fields).
+fn render_record_cell(
+    active: &ActiveDatabaseRevision,
+    record: &RecordValue,
+) -> Result<String, &'static str> {
+    let Some(definition) = active
+        .catalogue()
+        .record_value_type_by_id(record.record_type())
+    else {
+        return Err("terminal tables cannot render a record outside the active catalogue");
+    };
+    let mut cell = definition.name().to_string();
+    cell.push('{');
+    for (index, (field, value)) in definition.fields().iter().zip(record.fields()).enumerate() {
+        if index > 0 {
+            cell.push_str(", ");
+        }
+        cell.push_str(field.name());
+        cell.push('=');
+        cell.push_str(&render_terminal_cell(active, value)?);
+    }
+    cell.push('}');
+    Ok(cell)
+}
+
+/// Rejects any control character in one rendered table text fragment.
+fn reject_control_characters(text: &str, rule: &'static str) -> Result<(), &'static str> {
+    if text.chars().any(char::is_control) {
+        Err(rule)
+    } else {
+        Ok(())
     }
 }
 
@@ -3592,21 +4239,30 @@ fn reference_error(function: FunctionId, rule: &'static str) -> PostgresKernelEr
 
 #[cfg(test)]
 mod tests {
+    use orna_artifact::server_json_encode::{self, JsonEncodePlan, JsonEncodePlanError};
     use orna_artifact::server_parameter_echo::{
         self, ServerParameterEcho, ServerParameterEchoError,
     };
     use orna_artifact::server_plan::{IdentitySelector, Scan, ValueType};
+    use orna_artifact::server_terminal_table::{self, TerminalTablePlan, TerminalTablePlanError};
     use orna_core::{
-        CatalogueRevisionId, ExpressionId, FieldId, ParameterId, SchemaId, SourceUnitId,
-        canonical_hash::artifact_payload_digest,
+        CatalogueRevisionId, ExpressionId, FieldId, ParameterId, SchemaId, SourceBundleId,
+        SourceRevisionId, SourceUnitId,
+        canonical_hash::{
+            artifact_payload_digest, catalogue_digest_with_context, source_bundle_digest,
+            source_revision_record_digest, source_unit_content_digest,
+        },
         catalogue::{
             CatalogueSnapshot, EnumTypeDefinition, FieldDefinition, FunctionReturnColumnDefinition,
             ObjectTypeDefinition, ParameterDefinition, QualifiedSemanticName,
             RecordValueFieldDefinition, RecordValueTypeDefinition, SchemaDefinition,
         },
+        invocation::InvokeValue,
         revision::{
-            CatalogueHashContext, ExecutableArtifact, ExecutableArtifactKind,
-            FunctionRevisionRecord, Sha256Digest, SourceOrigin,
+            ActiveDatabaseRevisionInput, ActiveRevisionContent, CatalogueHashContext,
+            DefinitionIdentity, DefinitionOrigin, ExecutableArtifact, ExecutableArtifactKind,
+            FunctionRevisionRecord, Sha256Digest, SourceOrigin, StoredSourceRevision,
+            StoredSourceUnit, VerifiedStandardLibrarySnapshot,
         },
         types::TypeDescriptor,
     };
@@ -3694,6 +4350,365 @@ mod tests {
 
     fn echo_revision(function: FunctionId, parameter: ParameterId) -> FunctionRevisionRecord {
         revision_with_artifact(function, echo_artifact(parameter))
+    }
+
+    /// The fixed ADR 0057 `std.json.encode` function identity: `...11`.
+    const STD_JSON_ENCODE_FUNCTION_ID: FunctionId =
+        FunctionId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x11]);
+    /// The fixed ADR 0057 `std.json.encode.p_value` parameter identity: `...11`.
+    const STD_JSON_ENCODE_PARAMETER_ID: ParameterId =
+        ParameterId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x11]);
+    /// The fixed ADR 0057 `std.json.encode` function-revision identity: `...11`.
+    const STD_JSON_ENCODE_FUNCTION_REVISION_ID: FunctionRevisionId =
+        FunctionRevisionId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x11]);
+    /// The fixed ADR 0057 `std.terminal.present_table` function identity: `...12`.
+    const STD_TERMINAL_PRESENT_TABLE_FUNCTION_ID: FunctionId =
+        FunctionId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x12]);
+    /// The fixed ADR 0057 `std.terminal.present_table.p_rows` parameter identity: `...12`.
+    const STD_TERMINAL_PRESENT_TABLE_PARAMETER_ID: ParameterId =
+        ParameterId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x12]);
+    /// The fixed ADR 0057 `std.terminal.present_table` function-revision identity: `...12`.
+    const STD_TERMINAL_PRESENT_TABLE_FUNCTION_REVISION_ID: FunctionRevisionId =
+        FunctionRevisionId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x12]);
+
+    /// The active-catalogue object type targeted by presenter reference tests.
+    const PRESENTER_OBJECT_TYPE: TypeId = TypeId::from_bytes([0x91; 16]);
+    /// The active-catalogue enum type rendered by table cells.
+    const PRESENTER_ENUM_TYPE: TypeId = TypeId::from_bytes([0x92; 16]);
+    /// The active-catalogue record type rendered by table cells.
+    const PRESENTER_RECORD_TYPE: TypeId = TypeId::from_bytes([0x93; 16]);
+    const PRESENTER_RECORD_X_FIELD: FieldId = FieldId::from_bytes([0x94; 16]);
+    const PRESENTER_RECORD_Y_FIELD: FieldId = FieldId::from_bytes([0x95; 16]);
+
+    /// Verifies the retained `orna.std/3` standard snapshot.
+    fn presenter_standard() -> VerifiedStandardLibrarySnapshot {
+        orna_standard::verify_standard_library_v3_snapshot(
+            orna_standard::retained_standard_library_v3_snapshot()
+                .expect("the retained V3 standard source is valid"),
+        )
+        .expect("the retained V3 standard source verifies")
+    }
+
+    /// Builds the active revision the presenter tests execute against: an
+    /// application catalogue holding one object type, one enum type, and one
+    /// record type, pinned to the verified V3 standard snapshot.
+    fn presenter_active(standard: &VerifiedStandardLibrarySnapshot) -> ActiveDatabaseRevision {
+        let schema = SchemaId::from_bytes([0x81; 16]);
+        let catalogue_revision = CatalogueRevisionId::from_bytes([0x82; 16]);
+        let catalogue = CatalogueSnapshot::new_with_record_value_types(
+            catalogue_revision,
+            vec![SchemaDefinition::new(schema, name(&["app"]))],
+            vec![ObjectTypeDefinition::new(
+                PRESENTER_OBJECT_TYPE,
+                name(&["app", "item"]),
+                vec![],
+            )],
+            vec![],
+            vec![EnumTypeDefinition::new(
+                PRESENTER_ENUM_TYPE,
+                name(&["app", "stage"]),
+                ["lead", "qualified"],
+            )],
+            vec![RecordValueTypeDefinition::new(
+                PRESENTER_RECORD_TYPE,
+                name(&["app", "status"]),
+                vec![
+                    RecordValueFieldDefinition::try_new_descriptor(
+                        PRESENTER_RECORD_X_FIELD,
+                        "x",
+                        0,
+                        TypeDescriptor::named(orna_standard::INTEGER_TYPE_ID),
+                    )
+                    .expect("the record field descriptor is valid"),
+                    RecordValueFieldDefinition::try_new_descriptor(
+                        PRESENTER_RECORD_Y_FIELD,
+                        "y",
+                        1,
+                        TypeDescriptor::named(orna_standard::CHARACTER_LARGE_OBJECT_TYPE_ID),
+                    )
+                    .expect("the record field descriptor is valid"),
+                ],
+            )],
+            vec![],
+        )
+        .expect("the presenter test catalogue is valid");
+        let context = CatalogueHashContext::version_two(standard.clone());
+        let source_content = "abcdef";
+        let source_unit = StoredSourceUnit::new(
+            SourceUnitId::from_bytes([0x83; 16]),
+            0,
+            "app/types.orna",
+            source_content,
+            source_unit_content_digest(source_content).expect("the source unit digests"),
+        )
+        .expect("the source unit is valid");
+        let bundle_hash = source_bundle_digest(std::slice::from_ref(&source_unit))
+            .expect("the source bundle digests");
+        let source_revision = SourceRevisionId::from_bytes([0x84; 16]);
+        let source = StoredSourceRevision::new(
+            SourceBundleId::from_bytes([0x85; 16]),
+            source_revision,
+            None,
+            vec![source_unit],
+            bundle_hash,
+            source_revision_record_digest(
+                SourceBundleId::from_bytes([0x85; 16]),
+                None,
+                bundle_hash,
+            )
+            .expect("the source revision record digests"),
+        )
+        .expect("the stored source revision is valid");
+        let source_unit = SourceUnitId::from_bytes([0x83; 16]);
+        let origins = vec![
+            DefinitionOrigin::new(
+                DefinitionIdentity::Schema(schema),
+                SourceOrigin::new(source_unit, 0, 1).expect("the test origin is valid"),
+            ),
+            DefinitionOrigin::new(
+                DefinitionIdentity::ObjectType(PRESENTER_OBJECT_TYPE),
+                SourceOrigin::new(source_unit, 1, 2).expect("the test origin is valid"),
+            ),
+            DefinitionOrigin::new(
+                DefinitionIdentity::ValueType(PRESENTER_ENUM_TYPE),
+                SourceOrigin::new(source_unit, 2, 3).expect("the test origin is valid"),
+            ),
+            DefinitionOrigin::new(
+                DefinitionIdentity::ValueType(PRESENTER_RECORD_TYPE),
+                SourceOrigin::new(source_unit, 3, 4).expect("the test origin is valid"),
+            ),
+            DefinitionOrigin::new(
+                DefinitionIdentity::Field {
+                    owner: PRESENTER_RECORD_TYPE,
+                    field: PRESENTER_RECORD_X_FIELD,
+                },
+                SourceOrigin::new(source_unit, 4, 5).expect("the test origin is valid"),
+            ),
+            DefinitionOrigin::new(
+                DefinitionIdentity::Field {
+                    owner: PRESENTER_RECORD_TYPE,
+                    field: PRESENTER_RECORD_Y_FIELD,
+                },
+                SourceOrigin::new(source_unit, 5, 6).expect("the test origin is valid"),
+            ),
+        ];
+        let catalogue_hash =
+            catalogue_digest_with_context(&context, &catalogue, &[], &[], &origins, &[])
+                .expect("the active catalogue digests");
+        ActiveDatabaseRevision::new_with_catalogue_hash_context(
+            ActiveDatabaseRevisionInput::new(
+                RevisionPair::new(source_revision, catalogue_revision),
+                source,
+                catalogue,
+                catalogue_hash,
+                ActiveRevisionContent::new(vec![], vec![], origins, vec![]),
+            ),
+            context,
+        )
+        .expect("the presenter active revision is valid")
+    }
+
+    fn json_encode_parameter(parameter: ParameterId) -> ParameterDefinition {
+        ParameterDefinition::new(
+            parameter,
+            "p_value",
+            0,
+            ResolvedType::named(STD_JSON_VALUE_TYPE_ID),
+            None,
+        )
+    }
+
+    fn json_encode_function(
+        function: FunctionId,
+        parameter: ParameterId,
+        revision: FunctionRevisionId,
+    ) -> FunctionDefinition {
+        FunctionDefinition::new(
+            function,
+            name(&["std", "json", "encode"]),
+            FunctionDomain::Server,
+            vec![json_encode_parameter(parameter)],
+            FunctionReturn::Single(ResolvedType::named(
+                orna_standard::STD_IO_BYTE_STREAM_TYPE_ID,
+            )),
+            revision,
+            FunctionSecurity::Invoker,
+            Some(FunctionTransaction::ReadOnly),
+            FunctionVolatility::Stable,
+        )
+    }
+
+    fn terminal_table_parameter(parameter: ParameterId) -> ParameterDefinition {
+        ParameterDefinition::new(
+            parameter,
+            "p_rows",
+            0,
+            ResolvedType::named(STD_DATA_ROWS_TYPE_ID),
+            None,
+        )
+    }
+
+    fn terminal_table_function(
+        function: FunctionId,
+        parameter: ParameterId,
+        revision: FunctionRevisionId,
+    ) -> FunctionDefinition {
+        FunctionDefinition::new(
+            function,
+            name(&["std", "terminal", "present_table"]),
+            FunctionDomain::Server,
+            vec![terminal_table_parameter(parameter)],
+            FunctionReturn::Single(ResolvedType::named(
+                orna_standard::STD_TERMINAL_DOCUMENT_TYPE_ID,
+            )),
+            revision,
+            FunctionSecurity::Invoker,
+            Some(FunctionTransaction::ReadOnly),
+            FunctionVolatility::Stable,
+        )
+    }
+
+    fn json_encode_payload(parameter: ParameterId) -> Vec<u8> {
+        JsonEncodePlan::new(parameter, STD_JSON_VALUE_TYPE_ID)
+            .expect("any identities form a valid json-encode model")
+            .encode()
+            .expect("the canonical json-encode model encodes")
+    }
+
+    fn terminal_table_payload(parameter: ParameterId) -> Vec<u8> {
+        TerminalTablePlan::new(parameter, STD_DATA_ROWS_TYPE_ID)
+            .expect("any identities form a valid terminal-table model")
+            .encode()
+            .expect("the canonical terminal-table model encodes")
+    }
+
+    fn json_encode_artifact(parameter: ParameterId) -> ExecutableArtifact {
+        artifact(
+            ExecutableArtifactKind::Server,
+            server_json_encode::FORMAT_IDENTITY,
+            server_json_encode::FORMAT_VERSION,
+            json_encode_payload(parameter),
+        )
+    }
+
+    fn terminal_table_artifact(parameter: ParameterId) -> ExecutableArtifact {
+        artifact(
+            ExecutableArtifactKind::Server,
+            server_terminal_table::FORMAT_IDENTITY,
+            server_terminal_table::FORMAT_VERSION,
+            terminal_table_payload(parameter),
+        )
+    }
+
+    fn presenter_revision(
+        function: FunctionId,
+        revision_id: FunctionRevisionId,
+        language_version: &str,
+        artifact: ExecutableArtifact,
+    ) -> FunctionRevisionRecord {
+        FunctionRevisionRecord::new(
+            function,
+            revision_id,
+            1,
+            SourceOrigin::new(SourceUnitId::from_bytes([0x91; 16]), 0, 1)
+                .expect("a test source origin is valid"),
+            Sha256Digest::from_bytes([0x42; 32]),
+            Sha256Digest::from_bytes([0x43; 32]),
+            language_version,
+            artifact,
+        )
+        .expect("the test revision is valid")
+    }
+
+    fn json_encode_revision(
+        function: FunctionId,
+        parameter: ParameterId,
+    ) -> FunctionRevisionRecord {
+        presenter_revision(
+            function,
+            STD_JSON_ENCODE_FUNCTION_REVISION_ID,
+            server_json_encode::LANGUAGE_VERSION_IDENTITY,
+            json_encode_artifact(parameter),
+        )
+    }
+
+    fn terminal_table_revision(
+        function: FunctionId,
+        parameter: ParameterId,
+    ) -> FunctionRevisionRecord {
+        presenter_revision(
+            function,
+            STD_TERMINAL_PRESENT_TABLE_FUNCTION_REVISION_ID,
+            server_terminal_table::LANGUAGE_VERSION_IDENTITY,
+            terminal_table_artifact(parameter),
+        )
+    }
+
+    fn json_encode_argument(parameter: ParameterId, value: RuntimeValue) -> FunctionArgument {
+        FunctionArgument::new(parameter, value).expect("the bound json argument is valid")
+    }
+
+    fn assert_presenter_artifact_rule(
+        result: Result<RuntimeValue, PostgresKernelError>,
+        function: FunctionId,
+        expected: &'static str,
+    ) {
+        let Err(PostgresKernelError::ServerSelect(ServerSelectError::Artifact {
+            function: actual_function,
+            rule,
+        })) = result
+        else {
+            panic!("expected an artifact rejection");
+        };
+        assert_eq!(actual_function, function);
+        assert_eq!(rule, expected);
+    }
+
+    fn assert_json_encode_decode_rule(
+        result: Result<RuntimeValue, PostgresKernelError>,
+        expected: JsonEncodePlanError,
+    ) {
+        let Err(PostgresKernelError::ServerSelect(ServerSelectError::JsonEncodeDecode(actual))) =
+            result
+        else {
+            panic!("expected a json-encode decode rejection");
+        };
+        assert_eq!(actual, expected);
+    }
+
+    fn assert_terminal_table_decode_rule(
+        result: Result<RuntimeValue, PostgresKernelError>,
+        expected: TerminalTablePlanError,
+    ) {
+        let Err(PostgresKernelError::ServerSelect(ServerSelectError::TerminalTableDecode(actual))) =
+            result
+        else {
+            panic!("expected a terminal-table decode rejection");
+        };
+        assert_eq!(actual, expected);
+    }
+
+    fn assert_presenter_rule<T>(result: Result<T, PostgresKernelError>, expected: &'static str) {
+        let Err(PostgresKernelError::ServerSelect(ServerSelectError::Presenter { rule })) = result
+        else {
+            panic!("expected a presenter conversion rejection");
+        };
+        assert_eq!(rule, expected);
+    }
+
+    fn assert_presenter_domain_rule(result: Result<RuntimeValue, PostgresKernelError>) {
+        let Err(PostgresKernelError::ServerSelect(ServerSelectError::FunctionDomain { .. })) =
+            result
+        else {
+            panic!("expected a function-domain rejection");
+        };
+    }
+
+    fn assert_presenter_opaque_rule(result: Result<RuntimeValue, PostgresKernelError>) {
+        let Err(PostgresKernelError::ServerSelect(ServerSelectError::PresenterOpaque(_))) = result
+        else {
+            panic!("expected an opaque-value rejection");
+        };
     }
 
     fn assert_echo_artifact_rule(
@@ -6494,5 +7509,1446 @@ mod tests {
         };
         assert_eq!(function, STD_INVOKE_ECHO_FUNCTION_ID);
         assert_eq!(rule, "current SERVER artifact must use orna.server-plan");
+    }
+
+    #[test]
+    fn standard_json_encode_executes_and_returns_the_framed_byte_stream() {
+        let standard = presenter_standard();
+        let registry = orna_standard::registered_opaque_codecs(&standard)
+            .expect("the V3 opaque codecs register");
+        let active = presenter_active(&standard);
+        let function = json_encode_function(
+            STD_JSON_ENCODE_FUNCTION_ID,
+            STD_JSON_ENCODE_PARAMETER_ID,
+            STD_JSON_ENCODE_FUNCTION_REVISION_ID,
+        );
+        let revision =
+            json_encode_revision(STD_JSON_ENCODE_FUNCTION_ID, STD_JSON_ENCODE_PARAMETER_ID);
+        let argument = json_encode_argument(
+            STD_JSON_ENCODE_PARAMETER_ID,
+            RuntimeValue::Text("hello".to_owned()),
+        );
+        let RuntimeValue::Opaque(value) =
+            execute_standard_json_encode(&function, &revision, &[argument], &active, &registry)
+                .expect("the exact standard artifact must execute")
+        else {
+            panic!("the json-encode presenter must return one opaque value");
+        };
+        assert_eq!(
+            value.opaque_type(),
+            orna_standard::STD_IO_BYTE_STREAM_TYPE_ID
+        );
+        let mut expected = Vec::from(BYTE_STREAM_MAGIC.as_bytes());
+        expected.extend_from_slice(&16_u32.to_be_bytes());
+        expected.extend_from_slice(b"application/json");
+        expected.extend_from_slice(&7_u32.to_be_bytes());
+        expected.extend_from_slice(b"\"hello\"");
+        assert_eq!(value.canonical_payload(), expected);
+    }
+
+    #[test]
+    fn standard_json_encode_dispatches_without_function_name_or_id_matching() {
+        // A different function identity, revision identity, and name with the
+        // same closed artifact shape executes identically: the engine
+        // dispatches only on artifact kind, format, and version, then
+        // validates the pinned signature and decodes the artifact.
+        let standard = presenter_standard();
+        let registry = orna_standard::registered_opaque_codecs(&standard)
+            .expect("the V3 opaque codecs register");
+        let active = presenter_active(&standard);
+        let other_function = FunctionId::from_bytes([0x41; 16]);
+        let other_revision = FunctionRevisionId::from_bytes([0x43; 16]);
+        let function = FunctionDefinition::new(
+            other_function,
+            name(&["other", "encode"]),
+            FunctionDomain::Server,
+            vec![json_encode_parameter(STD_JSON_ENCODE_PARAMETER_ID)],
+            FunctionReturn::Single(ResolvedType::named(
+                orna_standard::STD_IO_BYTE_STREAM_TYPE_ID,
+            )),
+            other_revision,
+            FunctionSecurity::Invoker,
+            Some(FunctionTransaction::ReadOnly),
+            FunctionVolatility::Stable,
+        );
+        let revision = json_encode_revision(other_function, STD_JSON_ENCODE_PARAMETER_ID);
+        let argument = json_encode_argument(STD_JSON_ENCODE_PARAMETER_ID, RuntimeValue::Integer(3));
+        let RuntimeValue::Opaque(value) =
+            execute_standard_json_encode(&function, &revision, &[argument], &active, &registry)
+                .expect("the same artifact shape must execute identically")
+        else {
+            panic!("the json-encode presenter must return one opaque value");
+        };
+        assert_eq!(
+            value.opaque_type(),
+            orna_standard::STD_IO_BYTE_STREAM_TYPE_ID
+        );
+        let mut expected = Vec::from(BYTE_STREAM_MAGIC.as_bytes());
+        expected.extend_from_slice(&16_u32.to_be_bytes());
+        expected.extend_from_slice(b"application/json");
+        expected.extend_from_slice(&1_u32.to_be_bytes());
+        expected.extend_from_slice(b"3");
+        assert_eq!(value.canonical_payload(), expected);
+    }
+
+    #[test]
+    fn json_encoding_converts_each_scalar_and_reference_form_without_loss() {
+        let standard = presenter_standard();
+        let active = presenter_active(&standard);
+
+        assert_eq!(
+            encode_json_value(
+                &active,
+                &RuntimeValue::null(ResolvedType::scalar(StandardScalar::Integer))
+                    .expect("a typed INTEGER null is valid"),
+            )
+            .expect("a null encodes"),
+            serde_json::json!(null)
+        );
+        assert_eq!(
+            encode_json_value(&active, &RuntimeValue::Boolean(true)).expect("a boolean encodes"),
+            serde_json::json!(true)
+        );
+        assert_eq!(
+            encode_json_value(&active, &RuntimeValue::Integer(-41)).expect("an integer encodes"),
+            serde_json::json!(-41)
+        );
+        assert_eq!(
+            encode_json_value(&active, &RuntimeValue::BigInt(i64::MAX)).expect("a bigint encodes"),
+            serde_json::json!(i64::MAX)
+        );
+        assert_eq!(
+            encode_json_value(
+                &active,
+                &RuntimeValue::Float(RuntimeFloat::new(1.5).expect("1.5 is finite")),
+            )
+            .expect("a float encodes"),
+            serde_json::json!(1.5)
+        );
+        assert_eq!(
+            encode_json_value(&active, &RuntimeValue::Text("a\"b\\c\n".to_owned()))
+                .expect("text encodes"),
+            serde_json::json!("a\"b\\c\n")
+        );
+        assert_eq!(
+            encode_json_value(&active, &RuntimeValue::Bytes(vec![0x00, 0xff, 0x10]))
+                .expect("bytes encode as base64"),
+            serde_json::json!("AP8Q")
+        );
+
+        let object = ObjectId::from_bytes([0x55; 16]);
+        assert_eq!(
+            encode_json_value(
+                &active,
+                &RuntimeValue::Reference {
+                    target: PRESENTER_OBJECT_TYPE,
+                    object,
+                },
+            )
+            .expect("a reference encodes"),
+            serde_json::json!({
+                "$ref": format!("orna://app.item/{}", object.canonical()),
+                "$type": "app.item",
+            })
+        );
+    }
+
+    #[test]
+    fn json_encoding_converts_lists_and_maps_without_loss() {
+        let standard = presenter_standard();
+        let active = presenter_active(&standard);
+
+        let integer = TypeDescriptor::named(orna_standard::INTEGER_TYPE_ID);
+        let list = RuntimeValue::list(
+            &active,
+            TypeDescriptor::list(integer.clone()).expect("a list descriptor is valid"),
+            vec![
+                RuntimeValue::Integer(1),
+                RuntimeValue::Integer(2),
+                RuntimeValue::Integer(3),
+            ],
+        )
+        .expect("the integer list is valid");
+        assert_eq!(
+            encode_json_value(&active, &list).expect("a list encodes"),
+            serde_json::json!([1, 2, 3])
+        );
+
+        let map = RuntimeValue::map(
+            &active,
+            TypeDescriptor::map(integer.clone(), integer.clone())
+                .expect("a map descriptor is valid"),
+            vec![
+                (RuntimeValue::Integer(2), RuntimeValue::Integer(20)),
+                (RuntimeValue::Integer(1), RuntimeValue::Integer(10)),
+            ],
+        )
+        .expect("the integer map is valid");
+        assert_eq!(
+            encode_json_value(&active, &map).expect("a map encodes"),
+            serde_json::json!({ "1": 10, "2": 20 })
+        );
+
+        let nested = RuntimeValue::list(
+            &active,
+            TypeDescriptor::list(
+                TypeDescriptor::list(integer).expect("a list descriptor is valid"),
+            )
+            .expect("a list descriptor is valid"),
+            vec![list],
+        )
+        .expect("the nested list is valid");
+        assert_eq!(
+            encode_json_value(&active, &nested).expect("a nested list encodes"),
+            serde_json::json!([[1, 2, 3]])
+        );
+    }
+
+    #[test]
+    fn json_encoding_rejects_every_non_lossless_runtime_form() {
+        let standard = presenter_standard();
+        let registry = orna_standard::registered_opaque_codecs(&standard)
+            .expect("the V3 opaque codecs register");
+        let active = presenter_active(&standard);
+
+        let enum_value = RuntimeValue::Enum(
+            EnumValue::new(active.catalogue(), PRESENTER_ENUM_TYPE, "lead")
+                .expect("the enum label is declared"),
+        );
+        assert_presenter_conversion_rule(&active, enum_value, "ENUM");
+
+        let record_value = RuntimeValue::Record(
+            RecordValue::new(
+                &active,
+                PRESENTER_RECORD_TYPE,
+                vec![
+                    ("x".to_owned(), RuntimeValue::Integer(1)),
+                    ("y".to_owned(), RuntimeValue::Text("a".to_owned())),
+                ],
+            )
+            .expect("the record value is valid"),
+        );
+        assert_presenter_conversion_rule(&active, record_value, "RECORD");
+
+        let mut byte_stream_payload = Vec::from(BYTE_STREAM_MAGIC.as_bytes());
+        byte_stream_payload.extend_from_slice(&16_u32.to_be_bytes());
+        byte_stream_payload.extend_from_slice(b"application/json");
+        byte_stream_payload.extend_from_slice(&2_u32.to_be_bytes());
+        byte_stream_payload.extend_from_slice(b"{}");
+        let opaque_value = RuntimeValue::Opaque(
+            OpaqueValue::new(
+                &active,
+                &registry,
+                orna_standard::STD_IO_BYTE_STREAM_TYPE_ID,
+                &byte_stream_payload,
+            )
+            .expect("the byte-stream payload constructs"),
+        );
+        assert_presenter_conversion_rule(&active, opaque_value, "OPAQUE");
+
+        let option_value = RuntimeValue::option(
+            &active,
+            TypeDescriptor::option(TypeDescriptor::named(orna_standard::INTEGER_TYPE_ID))
+                .expect("an option descriptor is valid"),
+            Some(RuntimeValue::Integer(1)),
+        )
+        .expect("the option value is valid");
+        assert_presenter_conversion_rule(&active, option_value, "OPTION");
+
+        let carrier = RuntimeValue::InvokeValue(
+            InvokeValue::new(RuntimeValue::Integer(1)).expect("the invoke value is valid"),
+        );
+        assert_presenter_conversion_rule(&active, carrier, "invocation carrier");
+
+        let foreign_reference = RuntimeValue::Reference {
+            target: TypeId::from_bytes([0x61; 16]),
+            object: ObjectId::from_bytes([0x62; 16]),
+        };
+        assert_presenter_conversion_rule(
+            &active,
+            foreign_reference,
+            "outside the active catalogue",
+        );
+    }
+
+    #[test]
+    fn standard_json_encode_rejects_wrong_kind_format_and_version() {
+        let standard = presenter_standard();
+        let registry = orna_standard::registered_opaque_codecs(&standard)
+            .expect("the V3 opaque codecs register");
+        let active = presenter_active(&standard);
+        let function = json_encode_function(
+            STD_JSON_ENCODE_FUNCTION_ID,
+            STD_JSON_ENCODE_PARAMETER_ID,
+            STD_JSON_ENCODE_FUNCTION_REVISION_ID,
+        );
+        let parameter = STD_JSON_ENCODE_PARAMETER_ID;
+        let argument = || json_encode_argument(parameter, RuntimeValue::Integer(1));
+
+        let wrong_kind = presenter_revision(
+            function.id(),
+            STD_JSON_ENCODE_FUNCTION_REVISION_ID,
+            server_json_encode::LANGUAGE_VERSION_IDENTITY,
+            artifact(
+                ExecutableArtifactKind::Client,
+                server_json_encode::FORMAT_IDENTITY,
+                server_json_encode::FORMAT_VERSION,
+                json_encode_payload(parameter),
+            ),
+        );
+        assert_presenter_artifact_rule(
+            execute_standard_json_encode(&function, &wrong_kind, &[argument()], &active, &registry),
+            function.id(),
+            "current revision must contain a SERVER artifact",
+        );
+
+        let wrong_format = presenter_revision(
+            function.id(),
+            STD_JSON_ENCODE_FUNCTION_REVISION_ID,
+            server_json_encode::LANGUAGE_VERSION_IDENTITY,
+            artifact(
+                ExecutableArtifactKind::Server,
+                server_parameter_echo::FORMAT_IDENTITY,
+                server_json_encode::FORMAT_VERSION,
+                json_encode_payload(parameter),
+            ),
+        );
+        assert_presenter_artifact_rule(
+            execute_standard_json_encode(
+                &function,
+                &wrong_format,
+                &[argument()],
+                &active,
+                &registry,
+            ),
+            function.id(),
+            "current SERVER artifact must use orna.server-json-encode",
+        );
+
+        let wrong_version = presenter_revision(
+            function.id(),
+            STD_JSON_ENCODE_FUNCTION_REVISION_ID,
+            server_json_encode::LANGUAGE_VERSION_IDENTITY,
+            artifact(
+                ExecutableArtifactKind::Server,
+                server_json_encode::FORMAT_IDENTITY,
+                server_json_encode::FORMAT_VERSION + 1,
+                json_encode_payload(parameter),
+            ),
+        );
+        assert_presenter_artifact_rule(
+            execute_standard_json_encode(
+                &function,
+                &wrong_version,
+                &[argument()],
+                &active,
+                &registry,
+            ),
+            function.id(),
+            "current SERVER artifact must use orna.server-json-encode version 1",
+        );
+
+        let wrong_language = presenter_revision(
+            function.id(),
+            STD_JSON_ENCODE_FUNCTION_REVISION_ID,
+            "orna.language/9",
+            json_encode_artifact(parameter),
+        );
+        assert_presenter_artifact_rule(
+            execute_standard_json_encode(
+                &function,
+                &wrong_language,
+                &[argument()],
+                &active,
+                &registry,
+            ),
+            function.id(),
+            "current SERVER revision must use the json-encode language version",
+        );
+
+        assert_eq!(
+            execute_standard_json_encode(
+                &function,
+                &json_encode_revision(function.id(), parameter),
+                &[argument()],
+                &active,
+                &registry
+            )
+            .expect("the exact artifact must execute"),
+            RuntimeValue::Opaque(
+                OpaqueValue::new(
+                    &active,
+                    &registry,
+                    orna_standard::STD_IO_BYTE_STREAM_TYPE_ID,
+                    frame_byte_stream(b"application/json", b"1"),
+                )
+                .expect("the framed byte stream constructs"),
+            )
+        );
+    }
+
+    #[test]
+    fn standard_json_encode_artifacts_reject_each_decode_deviation() {
+        let standard = presenter_standard();
+        let registry = orna_standard::registered_opaque_codecs(&standard)
+            .expect("the V3 opaque codecs register");
+        let active = presenter_active(&standard);
+        let function = json_encode_function(
+            STD_JSON_ENCODE_FUNCTION_ID,
+            STD_JSON_ENCODE_PARAMETER_ID,
+            STD_JSON_ENCODE_FUNCTION_REVISION_ID,
+        );
+        let parameter = STD_JSON_ENCODE_PARAMETER_ID;
+        let argument = || json_encode_argument(parameter, RuntimeValue::Integer(1));
+
+        let mut invalid_magic = json_encode_payload(parameter);
+        invalid_magic[0] = b'X';
+        let revision = presenter_revision(
+            function.id(),
+            STD_JSON_ENCODE_FUNCTION_REVISION_ID,
+            server_json_encode::LANGUAGE_VERSION_IDENTITY,
+            artifact(
+                ExecutableArtifactKind::Server,
+                server_json_encode::FORMAT_IDENTITY,
+                server_json_encode::FORMAT_VERSION,
+                invalid_magic,
+            ),
+        );
+        assert_json_encode_decode_rule(
+            execute_standard_json_encode(&function, &revision, &[argument()], &active, &registry),
+            JsonEncodePlanError::InvalidMagic,
+        );
+
+        let other_parameter = ParameterId::from_bytes([0x51; 16]);
+        let revision = presenter_revision(
+            function.id(),
+            STD_JSON_ENCODE_FUNCTION_REVISION_ID,
+            server_json_encode::LANGUAGE_VERSION_IDENTITY,
+            artifact(
+                ExecutableArtifactKind::Server,
+                server_json_encode::FORMAT_IDENTITY,
+                server_json_encode::FORMAT_VERSION,
+                json_encode_payload(other_parameter),
+            ),
+        );
+        assert_json_encode_decode_rule(
+            execute_standard_json_encode(&function, &revision, &[argument()], &active, &registry),
+            JsonEncodePlanError::UnexpectedParameter {
+                actual: other_parameter,
+                expected: parameter,
+            },
+        );
+
+        let other_type = orna_standard::BIGINT_TYPE_ID;
+        let revision = presenter_revision(
+            function.id(),
+            STD_JSON_ENCODE_FUNCTION_REVISION_ID,
+            server_json_encode::LANGUAGE_VERSION_IDENTITY,
+            artifact(
+                ExecutableArtifactKind::Server,
+                server_json_encode::FORMAT_IDENTITY,
+                server_json_encode::FORMAT_VERSION,
+                JsonEncodePlan::new(parameter, other_type)
+                    .expect("any identities form a valid json-encode model")
+                    .encode()
+                    .expect("the canonical json-encode model encodes"),
+            ),
+        );
+        assert_json_encode_decode_rule(
+            execute_standard_json_encode(&function, &revision, &[argument()], &active, &registry),
+            JsonEncodePlanError::UnexpectedType {
+                actual: other_type,
+                expected: STD_JSON_VALUE_TYPE_ID,
+            },
+        );
+
+        let truncated = json_encode_payload(parameter)[..40].to_vec();
+        let revision = presenter_revision(
+            function.id(),
+            STD_JSON_ENCODE_FUNCTION_REVISION_ID,
+            server_json_encode::LANGUAGE_VERSION_IDENTITY,
+            artifact(
+                ExecutableArtifactKind::Server,
+                server_json_encode::FORMAT_IDENTITY,
+                server_json_encode::FORMAT_VERSION,
+                truncated,
+            ),
+        );
+        assert_json_encode_decode_rule(
+            execute_standard_json_encode(&function, &revision, &[argument()], &active, &registry),
+            JsonEncodePlanError::Truncated,
+        );
+
+        let mut trailing = json_encode_payload(parameter);
+        trailing.push(0);
+        let revision = presenter_revision(
+            function.id(),
+            STD_JSON_ENCODE_FUNCTION_REVISION_ID,
+            server_json_encode::LANGUAGE_VERSION_IDENTITY,
+            artifact(
+                ExecutableArtifactKind::Server,
+                server_json_encode::FORMAT_IDENTITY,
+                server_json_encode::FORMAT_VERSION,
+                trailing,
+            ),
+        );
+        assert_json_encode_decode_rule(
+            execute_standard_json_encode(&function, &revision, &[argument()], &active, &registry),
+            JsonEncodePlanError::TrailingBytes,
+        );
+    }
+
+    #[test]
+    fn standard_json_encode_signature_rejects_each_shape_deviation() {
+        let standard = presenter_standard();
+        let registry = orna_standard::registered_opaque_codecs(&standard)
+            .expect("the V3 opaque codecs register");
+        let active = presenter_active(&standard);
+        let parameter = STD_JSON_ENCODE_PARAMETER_ID;
+        let revision = json_encode_revision(STD_JSON_ENCODE_FUNCTION_ID, parameter);
+        let argument = || json_encode_argument(parameter, RuntimeValue::Integer(1));
+        let run = |function: &FunctionDefinition| {
+            execute_standard_json_encode(function, &revision, &[argument()], &active, &registry)
+        };
+
+        let client = FunctionDefinition::new(
+            STD_JSON_ENCODE_FUNCTION_ID,
+            name(&["std", "json", "encode"]),
+            FunctionDomain::Client,
+            vec![json_encode_parameter(parameter)],
+            FunctionReturn::Single(ResolvedType::named(
+                orna_standard::STD_IO_BYTE_STREAM_TYPE_ID,
+            )),
+            STD_JSON_ENCODE_FUNCTION_REVISION_ID,
+            FunctionSecurity::Invoker,
+            Some(FunctionTransaction::ReadOnly),
+            FunctionVolatility::Stable,
+        );
+        assert_presenter_domain_rule(run(&client));
+
+        let mut missing = json_encode_function(
+            STD_JSON_ENCODE_FUNCTION_ID,
+            parameter,
+            STD_JSON_ENCODE_FUNCTION_REVISION_ID,
+        );
+        missing = FunctionDefinition::new(
+            missing.id(),
+            name(&["std", "json", "encode"]),
+            FunctionDomain::Server,
+            vec![],
+            FunctionReturn::Single(ResolvedType::named(
+                orna_standard::STD_IO_BYTE_STREAM_TYPE_ID,
+            )),
+            STD_JSON_ENCODE_FUNCTION_REVISION_ID,
+            FunctionSecurity::Invoker,
+            Some(FunctionTransaction::ReadOnly),
+            FunctionVolatility::Stable,
+        );
+        assert_signature_rule(
+            run(&missing),
+            STD_JSON_ENCODE_FUNCTION_ID,
+            "standard json-encode presenters must declare exactly one required non-null std.json.Value parameter",
+        );
+
+        let defaulted = FunctionDefinition::new(
+            STD_JSON_ENCODE_FUNCTION_ID,
+            name(&["std", "json", "encode"]),
+            FunctionDomain::Server,
+            vec![ParameterDefinition::new(
+                parameter,
+                "p_value",
+                0,
+                ResolvedType::named(STD_JSON_VALUE_TYPE_ID),
+                Some(ExpressionId::from_bytes([0x72; 16])),
+            )],
+            FunctionReturn::Single(ResolvedType::named(
+                orna_standard::STD_IO_BYTE_STREAM_TYPE_ID,
+            )),
+            STD_JSON_ENCODE_FUNCTION_REVISION_ID,
+            FunctionSecurity::Invoker,
+            Some(FunctionTransaction::ReadOnly),
+            FunctionVolatility::Stable,
+        );
+        assert_signature_rule(
+            run(&defaulted),
+            STD_JSON_ENCODE_FUNCTION_ID,
+            "standard json-encode presenters must declare exactly one required non-null std.json.Value parameter",
+        );
+
+        let rows_result = FunctionDefinition::new(
+            STD_JSON_ENCODE_FUNCTION_ID,
+            name(&["std", "json", "encode"]),
+            FunctionDomain::Server,
+            vec![json_encode_parameter(parameter)],
+            FunctionReturn::Rows(vec![FunctionReturnColumnDefinition::new(
+                "value",
+                0,
+                ResolvedType::scalar(StandardScalar::Integer),
+            )]),
+            STD_JSON_ENCODE_FUNCTION_REVISION_ID,
+            FunctionSecurity::Invoker,
+            Some(FunctionTransaction::ReadOnly),
+            FunctionVolatility::Stable,
+        );
+        assert_signature_rule(
+            run(&rows_result),
+            STD_JSON_ENCODE_FUNCTION_ID,
+            "standard json-encode presenters must return a single std.io.ByteStream value",
+        );
+
+        let wrong_parameter_type = FunctionDefinition::new(
+            STD_JSON_ENCODE_FUNCTION_ID,
+            name(&["std", "json", "encode"]),
+            FunctionDomain::Server,
+            vec![ParameterDefinition::new(
+                parameter,
+                "p_value",
+                0,
+                ResolvedType::named(orna_standard::BIGINT_TYPE_ID),
+                None,
+            )],
+            FunctionReturn::Single(ResolvedType::named(
+                orna_standard::STD_IO_BYTE_STREAM_TYPE_ID,
+            )),
+            STD_JSON_ENCODE_FUNCTION_REVISION_ID,
+            FunctionSecurity::Invoker,
+            Some(FunctionTransaction::ReadOnly),
+            FunctionVolatility::Stable,
+        );
+        assert_signature_rule(
+            run(&wrong_parameter_type),
+            STD_JSON_ENCODE_FUNCTION_ID,
+            "standard json-encode presenters must declare one std.json.Value parameter and one std.io.ByteStream result",
+        );
+
+        let wrong_result_type = FunctionDefinition::new(
+            STD_JSON_ENCODE_FUNCTION_ID,
+            name(&["std", "json", "encode"]),
+            FunctionDomain::Server,
+            vec![json_encode_parameter(parameter)],
+            FunctionReturn::Single(ResolvedType::named(
+                orna_standard::STD_TERMINAL_DOCUMENT_TYPE_ID,
+            )),
+            STD_JSON_ENCODE_FUNCTION_REVISION_ID,
+            FunctionSecurity::Invoker,
+            Some(FunctionTransaction::ReadOnly),
+            FunctionVolatility::Stable,
+        );
+        assert_signature_rule(
+            run(&wrong_result_type),
+            STD_JSON_ENCODE_FUNCTION_ID,
+            "standard json-encode presenters must declare one std.json.Value parameter and one std.io.ByteStream result",
+        );
+
+        let definer = FunctionDefinition::new(
+            STD_JSON_ENCODE_FUNCTION_ID,
+            name(&["std", "json", "encode"]),
+            FunctionDomain::Server,
+            vec![json_encode_parameter(parameter)],
+            FunctionReturn::Single(ResolvedType::named(
+                orna_standard::STD_IO_BYTE_STREAM_TYPE_ID,
+            )),
+            STD_JSON_ENCODE_FUNCTION_REVISION_ID,
+            FunctionSecurity::Definer,
+            Some(FunctionTransaction::ReadOnly),
+            FunctionVolatility::Stable,
+        );
+        assert_signature_rule(
+            run(&definer),
+            STD_JSON_ENCODE_FUNCTION_ID,
+            "standard presenter functions must use INVOKER security",
+        );
+
+        let manual = FunctionDefinition::new(
+            STD_JSON_ENCODE_FUNCTION_ID,
+            name(&["std", "json", "encode"]),
+            FunctionDomain::Server,
+            vec![json_encode_parameter(parameter)],
+            FunctionReturn::Single(ResolvedType::named(
+                orna_standard::STD_IO_BYTE_STREAM_TYPE_ID,
+            )),
+            STD_JSON_ENCODE_FUNCTION_REVISION_ID,
+            FunctionSecurity::Invoker,
+            Some(FunctionTransaction::Atomic),
+            FunctionVolatility::Stable,
+        );
+        assert_signature_rule(
+            run(&manual),
+            STD_JSON_ENCODE_FUNCTION_ID,
+            "standard presenter functions must use READ ONLY transactions",
+        );
+
+        let volatile = FunctionDefinition::new(
+            STD_JSON_ENCODE_FUNCTION_ID,
+            name(&["std", "json", "encode"]),
+            FunctionDomain::Server,
+            vec![json_encode_parameter(parameter)],
+            FunctionReturn::Single(ResolvedType::named(
+                orna_standard::STD_IO_BYTE_STREAM_TYPE_ID,
+            )),
+            STD_JSON_ENCODE_FUNCTION_REVISION_ID,
+            FunctionSecurity::Invoker,
+            Some(FunctionTransaction::ReadOnly),
+            FunctionVolatility::Immutable,
+        );
+        assert_signature_rule(
+            run(&volatile),
+            STD_JSON_ENCODE_FUNCTION_ID,
+            "standard presenter functions must use STABLE volatility",
+        );
+
+        // The exact pinned shape still executes after every rejection.
+        assert_eq!(
+            execute_standard_json_encode(
+                &json_encode_function(
+                    STD_JSON_ENCODE_FUNCTION_ID,
+                    parameter,
+                    STD_JSON_ENCODE_FUNCTION_REVISION_ID
+                ),
+                &revision,
+                &[argument()],
+                &active,
+                &registry,
+            )
+            .expect("the pinned shape must execute"),
+            RuntimeValue::Opaque(
+                OpaqueValue::new(
+                    &active,
+                    &registry,
+                    orna_standard::STD_IO_BYTE_STREAM_TYPE_ID,
+                    frame_byte_stream(b"application/json", b"1"),
+                )
+                .expect("the framed byte stream constructs"),
+            )
+        );
+    }
+
+    #[test]
+    fn standard_json_encode_rejects_a_mismatched_opaque_codec_registry() {
+        // The engine constructs its ByteStream against the codec registry of
+        // the active verified standard. A registry bound to a different
+        // standard snapshot (here the version-one registry, which registers
+        // only the opaque-token codec) cannot validate the presented opaque
+        // value and is rejected without producing a value.
+        let standard = presenter_standard();
+        let active = presenter_active(&standard);
+        let version_one = orna_standard::verify_standard_library_snapshot(
+            orna_standard::retained_standard_library_snapshot()
+                .expect("the retained V1 standard source is valid"),
+        )
+        .expect("the retained V1 standard source verifies");
+        let mismatched_registry = orna_standard::registered_opaque_codecs(&version_one)
+            .expect("the V1 opaque codecs register");
+        let function = json_encode_function(
+            STD_JSON_ENCODE_FUNCTION_ID,
+            STD_JSON_ENCODE_PARAMETER_ID,
+            STD_JSON_ENCODE_FUNCTION_REVISION_ID,
+        );
+        let revision =
+            json_encode_revision(STD_JSON_ENCODE_FUNCTION_ID, STD_JSON_ENCODE_PARAMETER_ID);
+        let argument = json_encode_argument(STD_JSON_ENCODE_PARAMETER_ID, RuntimeValue::Integer(1));
+        assert_presenter_opaque_rule(execute_standard_json_encode(
+            &function,
+            &revision,
+            &[argument],
+            &active,
+            &mismatched_registry,
+        ));
+    }
+
+    #[test]
+    fn standard_json_encode_arguments_are_exact_complete_and_typed() {
+        let standard = presenter_standard();
+        let registry = orna_standard::registered_opaque_codecs(&standard)
+            .expect("the V3 opaque codecs register");
+        let active = presenter_active(&standard);
+        let function = json_encode_function(
+            STD_JSON_ENCODE_FUNCTION_ID,
+            STD_JSON_ENCODE_PARAMETER_ID,
+            STD_JSON_ENCODE_FUNCTION_REVISION_ID,
+        );
+        let revision =
+            json_encode_revision(STD_JSON_ENCODE_FUNCTION_ID, STD_JSON_ENCODE_PARAMETER_ID);
+        let parameter = STD_JSON_ENCODE_PARAMETER_ID;
+
+        // Missing argument.
+        assert_argument_rule(
+            execute_standard_json_encode(&function, &revision, &[], &active, &registry),
+            None,
+            "standard json-encode calls require exactly one argument",
+        );
+
+        // Extra argument.
+        let first = json_encode_argument(parameter, RuntimeValue::Integer(1));
+        let second = json_encode_argument(parameter, RuntimeValue::Integer(2));
+        assert_argument_rule(
+            execute_standard_json_encode(
+                &function,
+                &revision,
+                &[first, second],
+                &active,
+                &registry,
+            ),
+            None,
+            "standard json-encode calls require exactly one argument",
+        );
+
+        // Argument bound to a different parameter identity.
+        let other = ParameterId::from_bytes([0x46; 16]);
+        let wrong = json_encode_argument(other, RuntimeValue::Integer(1));
+        assert_argument_rule(
+            execute_standard_json_encode(&function, &revision, &[wrong], &active, &registry),
+            Some(other),
+            "standard json-encode arguments must bind the pinned parameter identity",
+        );
+
+        // A typed null cannot cross the bound-argument boundary, so the engine
+        // can never receive one: FunctionArgument::new rejects it.
+        let null = RuntimeValue::null(ResolvedType::scalar(StandardScalar::Integer))
+            .expect("a typed INTEGER null is valid");
+        assert!(matches!(
+            FunctionArgument::new(parameter, null),
+            Err(orna_core::value::FunctionArgumentError::NullValue {
+                parameter: actual,
+                ..
+            }) if actual == parameter
+        ));
+    }
+
+    #[test]
+    fn standard_terminal_table_executes_and_returns_the_framed_document() {
+        let standard = presenter_standard();
+        let registry = orna_standard::registered_opaque_codecs(&standard)
+            .expect("the V3 opaque codecs register");
+        let active = presenter_active(&standard);
+        let function = terminal_table_function(
+            STD_TERMINAL_PRESENT_TABLE_FUNCTION_ID,
+            STD_TERMINAL_PRESENT_TABLE_PARAMETER_ID,
+            STD_TERMINAL_PRESENT_TABLE_FUNCTION_REVISION_ID,
+        );
+        let revision = terminal_table_revision(
+            STD_TERMINAL_PRESENT_TABLE_FUNCTION_ID,
+            STD_TERMINAL_PRESENT_TABLE_PARAMETER_ID,
+        );
+        let rows = ResultRows::new(
+            [
+                ResultColumn::new("id", ResolvedType::scalar(StandardScalar::Integer), false)
+                    .expect("the id column is valid"),
+                ResultColumn::new(
+                    "name",
+                    ResolvedType::scalar(StandardScalar::CharacterLargeObject),
+                    true,
+                )
+                .expect("the name column is valid"),
+            ],
+            [
+                ResultRow::new([
+                    RuntimeValue::Integer(1),
+                    RuntimeValue::Text("alpha".to_owned()),
+                ]),
+                ResultRow::new([
+                    RuntimeValue::Integer(2),
+                    RuntimeValue::null(ResolvedType::scalar(StandardScalar::CharacterLargeObject))
+                        .expect("a typed TEXT null is valid"),
+                ]),
+            ],
+        )
+        .expect("the presenter rows are valid");
+        let RuntimeValue::Opaque(value) =
+            execute_standard_terminal_table(&function, &revision, &rows, &active, &registry)
+                .expect("the exact standard artifact must execute")
+        else {
+            panic!("the terminal-table presenter must return one opaque value");
+        };
+        assert_eq!(
+            value.opaque_type(),
+            orna_standard::STD_TERMINAL_DOCUMENT_TYPE_ID
+        );
+        let document = "id name\n-- -----\n1  alpha\n2  NULL\n(2 rows)\n";
+        assert_eq!(value.canonical_payload(), frame_terminal_document(document));
+    }
+
+    #[test]
+    fn standard_terminal_table_dispatches_without_function_name_or_id_matching() {
+        let standard = presenter_standard();
+        let registry = orna_standard::registered_opaque_codecs(&standard)
+            .expect("the V3 opaque codecs register");
+        let active = presenter_active(&standard);
+        let other_function = FunctionId::from_bytes([0x41; 16]);
+        let other_revision = FunctionRevisionId::from_bytes([0x43; 16]);
+        let function = FunctionDefinition::new(
+            other_function,
+            name(&["other", "table"]),
+            FunctionDomain::Server,
+            vec![terminal_table_parameter(
+                STD_TERMINAL_PRESENT_TABLE_PARAMETER_ID,
+            )],
+            FunctionReturn::Single(ResolvedType::named(
+                orna_standard::STD_TERMINAL_DOCUMENT_TYPE_ID,
+            )),
+            other_revision,
+            FunctionSecurity::Invoker,
+            Some(FunctionTransaction::ReadOnly),
+            FunctionVolatility::Stable,
+        );
+        let revision =
+            terminal_table_revision(other_function, STD_TERMINAL_PRESENT_TABLE_PARAMETER_ID);
+        let rows = ResultRows::new(
+            [ResultColumn::new(
+                "value",
+                ResolvedType::scalar(StandardScalar::Integer),
+                false,
+            )
+            .expect("the value column is valid")],
+            [ResultRow::new([RuntimeValue::Integer(3)])],
+        )
+        .expect("the presenter rows are valid");
+        let RuntimeValue::Opaque(value) =
+            execute_standard_terminal_table(&function, &revision, &rows, &active, &registry)
+                .expect("the same artifact shape must execute identically")
+        else {
+            panic!("the terminal-table presenter must return one opaque value");
+        };
+        assert_eq!(
+            value.opaque_type(),
+            orna_standard::STD_TERMINAL_DOCUMENT_TYPE_ID
+        );
+        assert_eq!(
+            value.canonical_payload(),
+            frame_terminal_document("value\n-----\n3\n(1 row)\n")
+        );
+    }
+
+    #[test]
+    fn terminal_table_renders_each_cell_form_and_the_fixed_layout() {
+        let standard = presenter_standard();
+        let active = presenter_active(&standard);
+
+        let status = ResultRows::new(
+            [
+                ResultColumn::new("b", ResolvedType::scalar(StandardScalar::Boolean), false)
+                    .expect("the boolean column is valid"),
+                ResultColumn::new("n", ResolvedType::scalar(StandardScalar::BigInt), false)
+                    .expect("the bigint column is valid"),
+                ResultColumn::new("f", ResolvedType::scalar(StandardScalar::Float), false)
+                    .expect("the float column is valid"),
+                ResultColumn::new(
+                    "t",
+                    ResolvedType::scalar(StandardScalar::CharacterLargeObject),
+                    false,
+                )
+                .expect("the text column is valid"),
+                ResultColumn::new(
+                    "x",
+                    ResolvedType::scalar(StandardScalar::BinaryLargeObject),
+                    false,
+                )
+                .expect("the bytes column is valid"),
+                ResultColumn::new("r", ResolvedType::reference(PRESENTER_OBJECT_TYPE), false)
+                    .expect("the reference column is valid"),
+                ResultColumn::new("e", ResolvedType::named(PRESENTER_ENUM_TYPE), false)
+                    .expect("the enum column is valid"),
+                ResultColumn::new("c", ResolvedType::named(PRESENTER_RECORD_TYPE), false)
+                    .expect("the record column is valid"),
+            ],
+            [ResultRow::new([
+                RuntimeValue::Boolean(true),
+                RuntimeValue::BigInt(-9_007_199_254_740_993),
+                RuntimeValue::Float(RuntimeFloat::new(10.5).expect("10.5 is finite")),
+                RuntimeValue::Text("héllo".to_owned()),
+                RuntimeValue::Bytes(vec![0x00, 0xff]),
+                RuntimeValue::Reference {
+                    target: PRESENTER_OBJECT_TYPE,
+                    object: ObjectId::from_bytes([0x55; 16]),
+                },
+                RuntimeValue::Enum(
+                    EnumValue::new(active.catalogue(), PRESENTER_ENUM_TYPE, "qualified")
+                        .expect("the enum label is declared"),
+                ),
+                RuntimeValue::Record(
+                    RecordValue::new(
+                        &active,
+                        PRESENTER_RECORD_TYPE,
+                        vec![
+                            ("x".to_owned(), RuntimeValue::Integer(7)),
+                            ("y".to_owned(), RuntimeValue::Text("z".to_owned())),
+                        ],
+                    )
+                    .expect("the record value is valid"),
+                ),
+            ])],
+        )
+        .expect("the presenter rows are valid");
+        let document = render_terminal_table(&active, &status).expect("the table renders");
+        let object = ObjectId::from_bytes([0x55; 16]).canonical();
+        let expected = format!(
+            "b    n                 f    t     x    r                                 e         c\n\
+             ---- ----------------- ---- ----- ---- --------------------------------- --------- --------------------\n\
+             true -9007199254740993 10.5 héllo AP8= {object} qualified app.status{{x=7, y=z}}\n\
+             (1 row)\n"
+        );
+        assert_eq!(document, expected);
+    }
+
+    #[test]
+    fn terminal_table_rejects_control_characters_in_cells_and_headers() {
+        let standard = presenter_standard();
+        let active = presenter_active(&standard);
+
+        let newline_text = ResultRows::new(
+            [ResultColumn::new(
+                "value",
+                ResolvedType::scalar(StandardScalar::CharacterLargeObject),
+                false,
+            )
+            .expect("the value column is valid")],
+            [ResultRow::new([RuntimeValue::Text("a\nb".to_owned())])],
+        )
+        .expect("the presenter rows are valid");
+        assert_presenter_rule(
+            render_terminal_table(&active, &newline_text)
+                .map(RuntimeValue::Text)
+                .map_err(|rule| server_error(ServerSelectError::Presenter { rule })),
+            "terminal table cells cannot contain control characters",
+        );
+
+        let tab_header = ResultRows::new(
+            [ResultColumn::new(
+                "val\tue",
+                ResolvedType::scalar(StandardScalar::Integer),
+                false,
+            )
+            .expect("the value column is valid")],
+            [ResultRow::new([RuntimeValue::Integer(1)])],
+        )
+        .expect("the presenter rows are valid");
+        assert_presenter_rule(
+            render_terminal_table(&active, &tab_header)
+                .map(RuntimeValue::Text)
+                .map_err(|rule| server_error(ServerSelectError::Presenter { rule })),
+            "terminal table column names cannot contain control characters",
+        );
+    }
+
+    #[test]
+    fn standard_terminal_table_rejects_wrong_kind_format_and_version() {
+        let standard = presenter_standard();
+        let registry = orna_standard::registered_opaque_codecs(&standard)
+            .expect("the V3 opaque codecs register");
+        let active = presenter_active(&standard);
+        let function = terminal_table_function(
+            STD_TERMINAL_PRESENT_TABLE_FUNCTION_ID,
+            STD_TERMINAL_PRESENT_TABLE_PARAMETER_ID,
+            STD_TERMINAL_PRESENT_TABLE_FUNCTION_REVISION_ID,
+        );
+        let parameter = STD_TERMINAL_PRESENT_TABLE_PARAMETER_ID;
+        let rows = ResultRows::new(
+            [ResultColumn::new(
+                "value",
+                ResolvedType::scalar(StandardScalar::Integer),
+                false,
+            )
+            .expect("the value column is valid")],
+            [ResultRow::new([RuntimeValue::Integer(1)])],
+        )
+        .expect("the presenter rows are valid");
+
+        let wrong_kind = presenter_revision(
+            function.id(),
+            STD_TERMINAL_PRESENT_TABLE_FUNCTION_REVISION_ID,
+            server_terminal_table::LANGUAGE_VERSION_IDENTITY,
+            artifact(
+                ExecutableArtifactKind::Client,
+                server_terminal_table::FORMAT_IDENTITY,
+                server_terminal_table::FORMAT_VERSION,
+                terminal_table_payload(parameter),
+            ),
+        );
+        assert_presenter_artifact_rule(
+            execute_standard_terminal_table(&function, &wrong_kind, &rows, &active, &registry),
+            function.id(),
+            "current revision must contain a SERVER artifact",
+        );
+
+        let wrong_format = presenter_revision(
+            function.id(),
+            STD_TERMINAL_PRESENT_TABLE_FUNCTION_REVISION_ID,
+            server_terminal_table::LANGUAGE_VERSION_IDENTITY,
+            artifact(
+                ExecutableArtifactKind::Server,
+                server_json_encode::FORMAT_IDENTITY,
+                server_terminal_table::FORMAT_VERSION,
+                terminal_table_payload(parameter),
+            ),
+        );
+        assert_presenter_artifact_rule(
+            execute_standard_terminal_table(&function, &wrong_format, &rows, &active, &registry),
+            function.id(),
+            "current SERVER artifact must use orna.server-terminal-table",
+        );
+
+        let wrong_version = presenter_revision(
+            function.id(),
+            STD_TERMINAL_PRESENT_TABLE_FUNCTION_REVISION_ID,
+            server_terminal_table::LANGUAGE_VERSION_IDENTITY,
+            artifact(
+                ExecutableArtifactKind::Server,
+                server_terminal_table::FORMAT_IDENTITY,
+                server_terminal_table::FORMAT_VERSION + 1,
+                terminal_table_payload(parameter),
+            ),
+        );
+        assert_presenter_artifact_rule(
+            execute_standard_terminal_table(&function, &wrong_version, &rows, &active, &registry),
+            function.id(),
+            "current SERVER artifact must use orna.server-terminal-table version 1",
+        );
+
+        let wrong_language = presenter_revision(
+            function.id(),
+            STD_TERMINAL_PRESENT_TABLE_FUNCTION_REVISION_ID,
+            "orna.language/9",
+            terminal_table_artifact(parameter),
+        );
+        assert_presenter_artifact_rule(
+            execute_standard_terminal_table(&function, &wrong_language, &rows, &active, &registry),
+            function.id(),
+            "current SERVER revision must use the terminal-table language version",
+        );
+
+        assert_eq!(
+            execute_standard_terminal_table(
+                &function,
+                &terminal_table_revision(function.id(), parameter),
+                &rows,
+                &active,
+                &registry,
+            )
+            .expect("the exact artifact must execute"),
+            RuntimeValue::Opaque(
+                OpaqueValue::new(
+                    &active,
+                    &registry,
+                    orna_standard::STD_TERMINAL_DOCUMENT_TYPE_ID,
+                    frame_terminal_document("value\n-----\n1\n(1 row)\n"),
+                )
+                .expect("the framed document constructs"),
+            )
+        );
+    }
+
+    #[test]
+    fn standard_terminal_table_artifacts_reject_each_decode_deviation() {
+        let standard = presenter_standard();
+        let registry = orna_standard::registered_opaque_codecs(&standard)
+            .expect("the V3 opaque codecs register");
+        let active = presenter_active(&standard);
+        let function = terminal_table_function(
+            STD_TERMINAL_PRESENT_TABLE_FUNCTION_ID,
+            STD_TERMINAL_PRESENT_TABLE_PARAMETER_ID,
+            STD_TERMINAL_PRESENT_TABLE_FUNCTION_REVISION_ID,
+        );
+        let parameter = STD_TERMINAL_PRESENT_TABLE_PARAMETER_ID;
+        let rows = ResultRows::new(
+            [ResultColumn::new(
+                "value",
+                ResolvedType::scalar(StandardScalar::Integer),
+                false,
+            )
+            .expect("the value column is valid")],
+            [ResultRow::new([RuntimeValue::Integer(1)])],
+        )
+        .expect("the presenter rows are valid");
+
+        let mut invalid_magic = terminal_table_payload(parameter);
+        invalid_magic[0] = b'X';
+        let revision = presenter_revision(
+            function.id(),
+            STD_TERMINAL_PRESENT_TABLE_FUNCTION_REVISION_ID,
+            server_terminal_table::LANGUAGE_VERSION_IDENTITY,
+            artifact(
+                ExecutableArtifactKind::Server,
+                server_terminal_table::FORMAT_IDENTITY,
+                server_terminal_table::FORMAT_VERSION,
+                invalid_magic,
+            ),
+        );
+        assert_terminal_table_decode_rule(
+            execute_standard_terminal_table(&function, &revision, &rows, &active, &registry),
+            TerminalTablePlanError::InvalidMagic,
+        );
+
+        let other_parameter = ParameterId::from_bytes([0x51; 16]);
+        let revision = presenter_revision(
+            function.id(),
+            STD_TERMINAL_PRESENT_TABLE_FUNCTION_REVISION_ID,
+            server_terminal_table::LANGUAGE_VERSION_IDENTITY,
+            artifact(
+                ExecutableArtifactKind::Server,
+                server_terminal_table::FORMAT_IDENTITY,
+                server_terminal_table::FORMAT_VERSION,
+                terminal_table_payload(other_parameter),
+            ),
+        );
+        assert_terminal_table_decode_rule(
+            execute_standard_terminal_table(&function, &revision, &rows, &active, &registry),
+            TerminalTablePlanError::UnexpectedParameter {
+                actual: other_parameter,
+                expected: parameter,
+            },
+        );
+
+        let other_type = orna_standard::BIGINT_TYPE_ID;
+        let revision = presenter_revision(
+            function.id(),
+            STD_TERMINAL_PRESENT_TABLE_FUNCTION_REVISION_ID,
+            server_terminal_table::LANGUAGE_VERSION_IDENTITY,
+            artifact(
+                ExecutableArtifactKind::Server,
+                server_terminal_table::FORMAT_IDENTITY,
+                server_terminal_table::FORMAT_VERSION,
+                TerminalTablePlan::new(parameter, other_type)
+                    .expect("any identities form a valid terminal-table model")
+                    .encode()
+                    .expect("the canonical terminal-table model encodes"),
+            ),
+        );
+        assert_terminal_table_decode_rule(
+            execute_standard_terminal_table(&function, &revision, &rows, &active, &registry),
+            TerminalTablePlanError::UnexpectedType {
+                actual: other_type,
+                expected: STD_DATA_ROWS_TYPE_ID,
+            },
+        );
+
+        let truncated = terminal_table_payload(parameter)[..40].to_vec();
+        let revision = presenter_revision(
+            function.id(),
+            STD_TERMINAL_PRESENT_TABLE_FUNCTION_REVISION_ID,
+            server_terminal_table::LANGUAGE_VERSION_IDENTITY,
+            artifact(
+                ExecutableArtifactKind::Server,
+                server_terminal_table::FORMAT_IDENTITY,
+                server_terminal_table::FORMAT_VERSION,
+                truncated,
+            ),
+        );
+        assert_terminal_table_decode_rule(
+            execute_standard_terminal_table(&function, &revision, &rows, &active, &registry),
+            TerminalTablePlanError::Truncated,
+        );
+
+        let mut trailing = terminal_table_payload(parameter);
+        trailing.push(0);
+        let revision = presenter_revision(
+            function.id(),
+            STD_TERMINAL_PRESENT_TABLE_FUNCTION_REVISION_ID,
+            server_terminal_table::LANGUAGE_VERSION_IDENTITY,
+            artifact(
+                ExecutableArtifactKind::Server,
+                server_terminal_table::FORMAT_IDENTITY,
+                server_terminal_table::FORMAT_VERSION,
+                trailing,
+            ),
+        );
+        assert_terminal_table_decode_rule(
+            execute_standard_terminal_table(&function, &revision, &rows, &active, &registry),
+            TerminalTablePlanError::TrailingBytes,
+        );
+    }
+
+    #[test]
+    fn standard_terminal_table_signature_rejects_each_shape_deviation() {
+        let standard = presenter_standard();
+        let registry = orna_standard::registered_opaque_codecs(&standard)
+            .expect("the V3 opaque codecs register");
+        let active = presenter_active(&standard);
+        let parameter = STD_TERMINAL_PRESENT_TABLE_PARAMETER_ID;
+        let revision = terminal_table_revision(STD_TERMINAL_PRESENT_TABLE_FUNCTION_ID, parameter);
+        let rows = ResultRows::new(
+            [ResultColumn::new(
+                "value",
+                ResolvedType::scalar(StandardScalar::Integer),
+                false,
+            )
+            .expect("the value column is valid")],
+            [ResultRow::new([RuntimeValue::Integer(1)])],
+        )
+        .expect("the presenter rows are valid");
+        let run = |function: &FunctionDefinition| {
+            execute_standard_terminal_table(function, &revision, &rows, &active, &registry)
+        };
+
+        let client = FunctionDefinition::new(
+            STD_TERMINAL_PRESENT_TABLE_FUNCTION_ID,
+            name(&["std", "terminal", "present_table"]),
+            FunctionDomain::Client,
+            vec![terminal_table_parameter(parameter)],
+            FunctionReturn::Single(ResolvedType::named(
+                orna_standard::STD_TERMINAL_DOCUMENT_TYPE_ID,
+            )),
+            STD_TERMINAL_PRESENT_TABLE_FUNCTION_REVISION_ID,
+            FunctionSecurity::Invoker,
+            Some(FunctionTransaction::ReadOnly),
+            FunctionVolatility::Stable,
+        );
+        assert_presenter_domain_rule(run(&client));
+
+        let missing = FunctionDefinition::new(
+            STD_TERMINAL_PRESENT_TABLE_FUNCTION_ID,
+            name(&["std", "terminal", "present_table"]),
+            FunctionDomain::Server,
+            vec![],
+            FunctionReturn::Single(ResolvedType::named(
+                orna_standard::STD_TERMINAL_DOCUMENT_TYPE_ID,
+            )),
+            STD_TERMINAL_PRESENT_TABLE_FUNCTION_REVISION_ID,
+            FunctionSecurity::Invoker,
+            Some(FunctionTransaction::ReadOnly),
+            FunctionVolatility::Stable,
+        );
+        assert_signature_rule(
+            run(&missing),
+            STD_TERMINAL_PRESENT_TABLE_FUNCTION_ID,
+            "standard terminal-table presenters must declare exactly one required non-null std.data.Rows parameter",
+        );
+
+        let wrong_parameter_type = FunctionDefinition::new(
+            STD_TERMINAL_PRESENT_TABLE_FUNCTION_ID,
+            name(&["std", "terminal", "present_table"]),
+            FunctionDomain::Server,
+            vec![ParameterDefinition::new(
+                parameter,
+                "p_rows",
+                0,
+                ResolvedType::named(orna_standard::BIGINT_TYPE_ID),
+                None,
+            )],
+            FunctionReturn::Single(ResolvedType::named(
+                orna_standard::STD_TERMINAL_DOCUMENT_TYPE_ID,
+            )),
+            STD_TERMINAL_PRESENT_TABLE_FUNCTION_REVISION_ID,
+            FunctionSecurity::Invoker,
+            Some(FunctionTransaction::ReadOnly),
+            FunctionVolatility::Stable,
+        );
+        assert_signature_rule(
+            run(&wrong_parameter_type),
+            STD_TERMINAL_PRESENT_TABLE_FUNCTION_ID,
+            "standard terminal-table presenters must declare one std.data.Rows parameter and one std.terminal.Document result",
+        );
+
+        let wrong_result_type = FunctionDefinition::new(
+            STD_TERMINAL_PRESENT_TABLE_FUNCTION_ID,
+            name(&["std", "terminal", "present_table"]),
+            FunctionDomain::Server,
+            vec![terminal_table_parameter(parameter)],
+            FunctionReturn::Single(ResolvedType::named(
+                orna_standard::STD_IO_BYTE_STREAM_TYPE_ID,
+            )),
+            STD_TERMINAL_PRESENT_TABLE_FUNCTION_REVISION_ID,
+            FunctionSecurity::Invoker,
+            Some(FunctionTransaction::ReadOnly),
+            FunctionVolatility::Stable,
+        );
+        assert_signature_rule(
+            run(&wrong_result_type),
+            STD_TERMINAL_PRESENT_TABLE_FUNCTION_ID,
+            "standard terminal-table presenters must declare one std.data.Rows parameter and one std.terminal.Document result",
+        );
+
+        let definer = FunctionDefinition::new(
+            STD_TERMINAL_PRESENT_TABLE_FUNCTION_ID,
+            name(&["std", "terminal", "present_table"]),
+            FunctionDomain::Server,
+            vec![terminal_table_parameter(parameter)],
+            FunctionReturn::Single(ResolvedType::named(
+                orna_standard::STD_TERMINAL_DOCUMENT_TYPE_ID,
+            )),
+            STD_TERMINAL_PRESENT_TABLE_FUNCTION_REVISION_ID,
+            FunctionSecurity::Definer,
+            Some(FunctionTransaction::ReadOnly),
+            FunctionVolatility::Stable,
+        );
+        assert_signature_rule(
+            run(&definer),
+            STD_TERMINAL_PRESENT_TABLE_FUNCTION_ID,
+            "standard presenter functions must use INVOKER security",
+        );
+
+        let manual = FunctionDefinition::new(
+            STD_TERMINAL_PRESENT_TABLE_FUNCTION_ID,
+            name(&["std", "terminal", "present_table"]),
+            FunctionDomain::Server,
+            vec![terminal_table_parameter(parameter)],
+            FunctionReturn::Single(ResolvedType::named(
+                orna_standard::STD_TERMINAL_DOCUMENT_TYPE_ID,
+            )),
+            STD_TERMINAL_PRESENT_TABLE_FUNCTION_REVISION_ID,
+            FunctionSecurity::Invoker,
+            Some(FunctionTransaction::Atomic),
+            FunctionVolatility::Stable,
+        );
+        assert_signature_rule(
+            run(&manual),
+            STD_TERMINAL_PRESENT_TABLE_FUNCTION_ID,
+            "standard presenter functions must use READ ONLY transactions",
+        );
+
+        let volatile = FunctionDefinition::new(
+            STD_TERMINAL_PRESENT_TABLE_FUNCTION_ID,
+            name(&["std", "terminal", "present_table"]),
+            FunctionDomain::Server,
+            vec![terminal_table_parameter(parameter)],
+            FunctionReturn::Single(ResolvedType::named(
+                orna_standard::STD_TERMINAL_DOCUMENT_TYPE_ID,
+            )),
+            STD_TERMINAL_PRESENT_TABLE_FUNCTION_REVISION_ID,
+            FunctionSecurity::Invoker,
+            Some(FunctionTransaction::ReadOnly),
+            FunctionVolatility::Immutable,
+        );
+        assert_signature_rule(
+            run(&volatile),
+            STD_TERMINAL_PRESENT_TABLE_FUNCTION_ID,
+            "standard presenter functions must use STABLE volatility",
+        );
+
+        // The exact pinned shape still executes after every rejection.
+        assert_eq!(
+            execute_standard_terminal_table(
+                &terminal_table_function(
+                    STD_TERMINAL_PRESENT_TABLE_FUNCTION_ID,
+                    parameter,
+                    STD_TERMINAL_PRESENT_TABLE_FUNCTION_REVISION_ID,
+                ),
+                &revision,
+                &rows,
+                &active,
+                &registry,
+            )
+            .expect("the pinned shape must execute"),
+            RuntimeValue::Opaque(
+                OpaqueValue::new(
+                    &active,
+                    &registry,
+                    orna_standard::STD_TERMINAL_DOCUMENT_TYPE_ID,
+                    frame_terminal_document("value\n-----\n1\n(1 row)\n"),
+                )
+                .expect("the framed document constructs"),
+            )
+        );
+    }
+
+    fn assert_presenter_conversion_rule(
+        active: &ActiveDatabaseRevision,
+        value: RuntimeValue,
+        fragment: &str,
+    ) {
+        let error = encode_json_value(active, &value).expect_err("the value must be rejected");
+        assert!(
+            error.contains(fragment),
+            "expected a rule mentioning {fragment:?}, got {error:?}"
+        );
     }
 }
