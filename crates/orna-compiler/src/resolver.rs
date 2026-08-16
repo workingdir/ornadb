@@ -20,13 +20,14 @@ pub use model::{
     CheckedStandardApplicationField, CheckedStandardApplicationObjectType,
     CheckedStandardApplicationParameter, CheckedStandardApplicationRecordValueField,
     CheckedStandardApplicationRecordValueType, CheckedStandardApplicationReturnColumn,
-    CheckedStandardApplicationServerFunction, CheckedStandardLibrary, CheckedStandardParameterEcho,
-    CheckedStandardSchema, CheckedStandardTypeBinding, CheckedStandardTypeReference,
-    CheckedStandardValueType, CheckedTypeUseKind, CheckedValueTypeUse, ConstantValue,
-    STD_INVOKE_ECHO_FUNCTION_ID, STD_INVOKE_ECHO_FUNCTION_REVISION_ID,
-    STD_INVOKE_ECHO_PARAMETER_ID, STD_INVOKE_ECHO_REVISION_NUMBER, STD_INVOKE_SCHEMA_ID,
-    SemanticType, StandardApplicationCheckContext, StandardApplicationCheckReport,
-    StandardApplicationContextError, StandardLibraryCheckError,
+    CheckedStandardApplicationServerFunction, CheckedStandardExecutable, CheckedStandardLibrary,
+    CheckedStandardParameterEcho, CheckedStandardSchema, CheckedStandardTypeBinding,
+    CheckedStandardTypeReference, CheckedStandardValueType, CheckedTypeUseKind,
+    CheckedValueTypeUse, ConstantValue, STD_INTEGER_TYPE_ID, STD_INVOKE_ECHO_FUNCTION_ID,
+    STD_INVOKE_ECHO_FUNCTION_REVISION_ID, STD_INVOKE_ECHO_PARAMETER_ID,
+    STD_INVOKE_ECHO_REVISION_NUMBER, STD_INVOKE_SCHEMA_ID, STD_INVOKE_SOURCE_UNIT_ID,
+    STD_TYPES_SOURCE_UNIT_ID, SemanticType, StandardApplicationCheckContext,
+    StandardApplicationCheckReport, StandardApplicationContextError, StandardLibraryCheckError,
 };
 pub(crate) use model::{
     CheckedClientFunctionBody, CheckedFieldRename, CheckedServerFunctionBody, QueryCatalogue,
@@ -43,7 +44,9 @@ use std::{
 use orna_artifact::server_parameter_echo::{self, ServerParameterEcho};
 use orna_core::{
     ExpressionId, TypeId,
-    canonical_hash::artifact_payload_digest,
+    canonical_hash::{
+        artifact_payload_digest, function_declaration_digest, function_semantic_digest_with_version,
+    },
     catalogue::{
         CatalogueSnapshot, CatalogueSnapshotError, FunctionDomain,
         FunctionSecurity as CatalogueFunctionSecurity,
@@ -55,7 +58,9 @@ use orna_core::{
     revision::{
         DefinitionIdentity, DefinitionOrigin, DefinitionReference, DefinitionReferenceKind,
         DefinitionReferenceTarget, EMPTY_APPLICATION_CATALOGUE_REVISION_ID, ExecutableArtifact,
-        ExecutableArtifactKind, SourceOrigin, StoredSourceUnit, VerifiedStandardLibrarySnapshot,
+        ExecutableArtifactKind, FunctionSemanticHashVersion, SourceOrigin, StandardExecutable,
+        StandardLibraryDigestVersion, StoredSourceRevision, StoredSourceUnit,
+        VerifiedStandardLibrarySnapshot,
     },
     source::{SourceBundle, SourceUnit},
     types::StandardScalar,
@@ -332,7 +337,29 @@ pub fn check_standard_application(
 }
 
 /// Checks retained standard source against its verified catalogue and origins.
+///
+/// Version 1 keeps the original one-unit, type-only reconcile contract. The
+/// V2 contract (`StandardLibraryDigestVersion::Version2`) additionally
+/// reconciles the ordered two-unit bundle (`std/types.orna` then
+/// `std/invoke.orna`), the fixed identities, the exact `std.invoke.echo`
+/// executable (artifact, semantic digest, and three durable references), and
+/// every schema, function, and parameter origin against the retained units.
+/// The checker does not trust a source file because its path looks standard.
 pub fn check_standard_library_source(
+    snapshot: &VerifiedStandardLibrarySnapshot,
+) -> Result<CheckedStandardLibrary, StandardLibraryCheckError> {
+    match snapshot.digest_version() {
+        StandardLibraryDigestVersion::Version1 => check_standard_library_source_v1(snapshot),
+        StandardLibraryDigestVersion::Version2 => check_standard_library_source_v2(snapshot),
+        _ => Err(StandardLibraryCheckError::SourceMismatch),
+    }
+}
+
+/// Checks one retained version-1 type-only standard source unit.
+///
+/// This is the original `orna.std/1` contract: exactly one source unit, no
+/// functions, and the full schema/value-type/binding reconcile.
+fn check_standard_library_source_v1(
     snapshot: &VerifiedStandardLibrarySnapshot,
 ) -> Result<CheckedStandardLibrary, StandardLibraryCheckError> {
     let source_units = snapshot.source().units();
@@ -369,7 +396,155 @@ pub fn check_standard_library_source(
         schemas: families.schemas,
         value_types: families.value_types,
         type_bindings: families.type_bindings,
+        checked_executable: None,
     })
+}
+
+/// Checks one retained V2 executable standard source bundle.
+///
+/// The ordered bundle must be exactly `std/types.orna` (`...02`) followed by
+/// `std/invoke.orna` (`...03`). The types unit reconciles exactly as V1 does.
+/// The invoke unit must contain exactly the `std.invoke` schema declaration
+/// and the `std.invoke.echo` server function; the function is checked closed
+/// by [`check_standard_parameter_echo`], and every stored executable fact
+/// (function and revision identities, revision number, semantic-hash
+/// contract, declaration origin and content hash, semantic digest, language
+/// version, artifact, and the three ordered references) plus every origin
+/// must agree with the checked source facts or the snapshot fails closed.
+fn check_standard_library_source_v2(
+    snapshot: &VerifiedStandardLibrarySnapshot,
+) -> Result<CheckedStandardLibrary, StandardLibraryCheckError> {
+    let (families, checked_executable) = check_standard_library_source_v2_parts(
+        snapshot.source(),
+        snapshot.catalogue(),
+        snapshot.origins(),
+        snapshot.executables(),
+    )?;
+    Ok(CheckedStandardLibrary {
+        verified_snapshot: snapshot.clone(),
+        schemas: families.schemas,
+        value_types: families.value_types,
+        type_bindings: families.type_bindings,
+        checked_executable: Some(checked_executable),
+    })
+}
+
+/// Checks the retained V2 source bundle, catalogue, origins, and executable
+/// evidence without a retained digest.
+///
+/// The digest gate is a separate, prior verification step
+/// (`verify_standard_library_v2_snapshot`); this function reconciles the
+/// source facts against the supplied stored facts and fails closed on any
+/// disagreement. The checked executable facts fix the ADR 0055 language
+/// version `orna.language/1`; a snapshot that retained any other label fails
+/// the stored-executable cross-check.
+fn check_standard_library_source_v2_parts(
+    source: &StoredSourceRevision,
+    catalogue: &CatalogueSnapshot,
+    origins: &[DefinitionOrigin],
+    executables: &[StandardExecutable],
+) -> Result<(StandardSourceFamilies, CheckedStandardExecutable), StandardLibraryCheckError> {
+    let source_units = source.units();
+    let [types_unit, invoke_unit] = source_units else {
+        return Err(StandardLibraryCheckError::SourceUnitCount {
+            actual: source_units.len(),
+        });
+    };
+    if types_unit.id() != STD_TYPES_SOURCE_UNIT_ID
+        || types_unit.logical_path() != "std/types.orna"
+        || types_unit.ordinal() != 0
+        || invoke_unit.id() != STD_INVOKE_SOURCE_UNIT_ID
+        || invoke_unit.logical_path() != "std/invoke.orna"
+        || invoke_unit.ordinal() != 1
+    {
+        return Err(StandardLibraryCheckError::SourceMismatch);
+    }
+
+    let bundle = SourceBundle::new([
+        SourceUnit::new(types_unit.logical_path(), types_unit.content()),
+        SourceUnit::new(invoke_unit.logical_path(), invoke_unit.content()),
+    ])
+    .map_err(|_| StandardLibraryCheckError::SourceMismatch)?;
+    let report = parse_bundle(&bundle);
+    if !report.diagnostics().is_empty() {
+        return Err(StandardLibraryCheckError::Diagnostics {
+            diagnostics: report.diagnostics().to_vec(),
+        });
+    }
+    let [parsed_types, parsed_invoke] = report.units() else {
+        return Err(StandardLibraryCheckError::SourceMismatch);
+    };
+
+    let (types_origins, invoke_origins) = partition_standard_origins(origins)?;
+    let types_catalogue = standard_types_catalogue(catalogue)?;
+    let families =
+        reconcile_standard_source(types_unit, parsed_types, &types_catalogue, &types_origins)?;
+    let checked_executable = reconcile_standard_invoke_executable(
+        catalogue,
+        &invoke_origins,
+        executables,
+        invoke_unit,
+        parsed_invoke,
+    )?;
+    Ok((families, checked_executable))
+}
+
+/// Scopes the V2 catalogue to the declarations retained in `std/types.orna`:
+/// the standard schemas, value types, and type bindings only.
+///
+/// The `std.invoke` schema and the standard functions are declared in
+/// `std/invoke.orna` and are reconciled by the invoke path; the V1 type-only
+/// reconcile contract must not see them. Any other catalogue schema, function,
+/// object, enum, or record type fails closed.
+fn standard_types_catalogue(
+    catalogue: &CatalogueSnapshot,
+) -> Result<CatalogueSnapshot, StandardLibraryCheckError> {
+    if !catalogue.object_types().is_empty()
+        || !catalogue.enum_types().is_empty()
+        || !catalogue.record_value_types().is_empty()
+    {
+        return Err(StandardLibraryCheckError::SourceMismatch);
+    }
+    let mut schemas = Vec::with_capacity(catalogue.schemas().len());
+    for schema in catalogue.schemas() {
+        if schema.id() == STD_INVOKE_SCHEMA_ID {
+            continue;
+        }
+        schemas.push(schema.clone());
+    }
+    CatalogueSnapshot::new_with_functions_and_types(
+        catalogue.revision(),
+        schemas,
+        vec![],
+        catalogue.value_types().to_vec(),
+        catalogue.type_bindings().to_vec(),
+        vec![],
+    )
+    .map_err(|_| StandardLibraryCheckError::SourceMismatch)
+}
+
+/// Splits the snapshot origins into the `std/types.orna` origins (schemas,
+/// value types, and bindings) and the `std/invoke.orna` origins (the
+/// `std.invoke` schema, the `std.invoke.echo` function, and its parameter).
+///
+/// Every origin must belong to one of the two retained V2 units; any other
+/// source unit fails closed.
+fn partition_standard_origins(
+    origins: &[DefinitionOrigin],
+) -> Result<(Vec<DefinitionOrigin>, Vec<DefinitionOrigin>), StandardLibraryCheckError> {
+    let mut types_origins = Vec::new();
+    let mut invoke_origins = Vec::new();
+    for origin in origins {
+        let source_unit = origin.source().source_unit();
+        if source_unit == STD_TYPES_SOURCE_UNIT_ID {
+            types_origins.push(origin.clone());
+        } else if source_unit == STD_INVOKE_SOURCE_UNIT_ID {
+            invoke_origins.push(origin.clone());
+        } else {
+            return Err(StandardLibraryCheckError::SourceMismatch);
+        }
+    }
+    Ok((types_origins, invoke_origins))
 }
 
 /// Checks one parsed declaration against the closed ADR 0055 standard
@@ -585,6 +760,183 @@ pub fn check_standard_parameter_echo(
         artifact,
         references,
     })
+}
+
+/// Reconciles the retained `std/invoke.orna` unit against the snapshot
+/// catalogue, origins, and verified executable evidence.
+///
+/// The unit must round-trip exactly and contain nothing besides the
+/// `CREATE SCHEMA std.invoke;` declaration and the one `std.invoke.echo`
+/// server function. The function is checked closed by
+/// [`check_standard_parameter_echo`], the three invoke origins must cover the
+/// exact schema, function, and parameter declaration ranges, and the stored
+/// `StandardExecutable` must agree with every checked fact.
+fn reconcile_standard_invoke_executable(
+    catalogue: &CatalogueSnapshot,
+    invoke_origins: &[DefinitionOrigin],
+    executables: &[StandardExecutable],
+    stored_unit: &StoredSourceUnit,
+    parsed_unit: &ParsedSourceUnit,
+) -> Result<CheckedStandardExecutable, StandardLibraryCheckError> {
+    if parsed_unit.source_text() != stored_unit.content()
+        || parsed_unit.source_text() != parsed_unit.syntax_text()
+        || !parsed_unit.parsed().object_types().is_empty()
+        || !parsed_unit.parsed().enum_types().is_empty()
+        || !parsed_unit.parsed().primitive_value_types().is_empty()
+        || !parsed_unit.parsed().opaque_value_types().is_empty()
+        || !parsed_unit.parsed().record_value_types().is_empty()
+        || !parsed_unit.parsed().field_renames().is_empty()
+        || !parsed_unit.parsed().type_exports().is_empty()
+        || !parsed_unit.parsed().client_functions().is_empty()
+    {
+        return Err(StandardLibraryCheckError::SourceMismatch);
+    }
+    let [schema_declaration] = parsed_unit.parsed().schemas() else {
+        return Err(StandardLibraryCheckError::SourceMismatch);
+    };
+    let [function_declaration] = parsed_unit.parsed().server_functions() else {
+        return Err(StandardLibraryCheckError::SourceMismatch);
+    };
+    let expected_schema_name =
+        QualifiedSemanticName::new(["std", "invoke"]).expect("the fixed standard schema is valid");
+    let schema_name = unquoted_semantic_name(&schema_declaration.name)?;
+    if schema_name != expected_schema_name {
+        return Err(StandardLibraryCheckError::SchemaNameMismatch {
+            actual: schema_name,
+        });
+    }
+
+    let checked = check_standard_parameter_echo(
+        function_declaration,
+        catalogue,
+        invoke_origins,
+        STD_INTEGER_TYPE_ID,
+    )?;
+
+    let source_origin = |span: &SourceSpan| -> Result<SourceOrigin, StandardLibraryCheckError> {
+        let start =
+            u32::try_from(span.start).map_err(|_| StandardLibraryCheckError::SourceMismatch)?;
+        let end = u32::try_from(span.end).map_err(|_| StandardLibraryCheckError::SourceMismatch)?;
+        SourceOrigin::new(stored_unit.id(), start, end)
+            .map_err(|_| StandardLibraryCheckError::SourceMismatch)
+    };
+    let expected_schema_origin = source_origin(&schema_declaration.span)?;
+    let expected_function_origin = source_origin(&function_declaration.span)?;
+    let expected_parameter_origin = source_origin(&function_declaration.parameters[0].span)?;
+
+    let schema_origin = expect_invoke_origin(
+        invoke_origins,
+        DefinitionIdentity::Schema(STD_INVOKE_SCHEMA_ID),
+        expected_schema_origin,
+        StandardLibraryCheckError::MissingSchemaOrigin,
+    )?;
+    let function_origin = expect_invoke_origin(
+        invoke_origins,
+        DefinitionIdentity::Function(STD_INVOKE_ECHO_FUNCTION_ID),
+        expected_function_origin,
+        StandardLibraryCheckError::MissingFunctionOrigin,
+    )?;
+    let parameter_origin = expect_invoke_origin(
+        invoke_origins,
+        DefinitionIdentity::Parameter {
+            owner: STD_INVOKE_ECHO_FUNCTION_ID,
+            parameter: STD_INVOKE_ECHO_PARAMETER_ID,
+        },
+        expected_parameter_origin,
+        StandardLibraryCheckError::MissingParameterOrigin,
+    )?;
+    if invoke_origins.len() != 3 {
+        return Err(StandardLibraryCheckError::SourceMismatch);
+    }
+
+    let declaration_bytes = &stored_unit.content().as_bytes()[expected_function_origin.byte_start()
+        as usize
+        ..expected_function_origin.byte_end() as usize];
+    let declaration_content_hash = function_declaration_digest(declaration_bytes)
+        .map_err(|source| StandardLibraryCheckError::Digest { source })?;
+    let function = catalogue
+        .function_by_id(STD_INVOKE_ECHO_FUNCTION_ID)
+        .ok_or(StandardLibraryCheckError::MissingFunction)?;
+    let semantic_hash = function_semantic_digest_with_version(
+        FunctionSemanticHashVersion::Version2,
+        function,
+        server_parameter_echo::LANGUAGE_VERSION_IDENTITY,
+        checked.artifact(),
+        &[],
+        checked.references(),
+    )
+    .map_err(|source| StandardLibraryCheckError::Digest { source })?;
+
+    let checked_executable = CheckedStandardExecutable {
+        function_id: checked.function_id(),
+        parameter_id: checked.parameter_id(),
+        revision_id: checked.revision_id(),
+        revision_number: STD_INVOKE_ECHO_REVISION_NUMBER,
+        declaration_origin: expected_function_origin,
+        declaration_content_hash,
+        semantic_hash,
+        semantic_hash_version: FunctionSemanticHashVersion::Version2,
+        language_version: server_parameter_echo::LANGUAGE_VERSION_IDENTITY.to_owned(),
+        artifact: checked.artifact().clone(),
+        references: checked.references().to_vec(),
+        schema_origin,
+        function_origin,
+        parameter_origin,
+    };
+
+    let [stored_executable] = executables else {
+        return Err(StandardLibraryCheckError::ExecutableCount {
+            actual: executables.len(),
+        });
+    };
+    reconcile_standard_executable(stored_executable, &checked_executable)?;
+    Ok(checked_executable)
+}
+
+/// Cross-checks one stored standard executable against the checked source
+/// facts. Every stored fact must agree exactly, or the snapshot fails closed.
+fn reconcile_standard_executable(
+    stored: &StandardExecutable,
+    checked: &CheckedStandardExecutable,
+) -> Result<(), StandardLibraryCheckError> {
+    if stored.function() != checked.function_id()
+        || stored.revision().id() != checked.revision_id()
+        || stored.revision().revision_number() != checked.revision_number()
+        || stored.revision().semantic_hash_version() != checked.semantic_hash_version()
+        || stored.revision().language_version() != checked.language_version()
+        || stored.revision().declaration_origin() != checked.declaration_origin()
+        || stored.revision().declaration_content_hash() != checked.declaration_content_hash()
+        || stored.revision().semantic_hash() != checked.semantic_hash()
+        || stored.revision().artifact() != checked.artifact()
+        || stored.references() != checked.references()
+    {
+        return Err(StandardLibraryCheckError::ExecutableMismatch);
+    }
+    Ok(())
+}
+
+/// Requires exactly one origin with the fixed identity and the exact expected
+/// range. A missing, duplicated, or range-mismatched origin fails closed.
+fn expect_invoke_origin(
+    origins: &[DefinitionOrigin],
+    identity: DefinitionIdentity,
+    expected: SourceOrigin,
+    missing: StandardLibraryCheckError,
+) -> Result<SourceOrigin, StandardLibraryCheckError> {
+    let mut matches = 0;
+    for origin in origins {
+        if origin.identity() == identity {
+            matches += 1;
+            if origin.source() != expected {
+                return Err(StandardLibraryCheckError::SourceMismatch);
+            }
+        }
+    }
+    if matches == 1 {
+        Ok(expected)
+    } else {
+        Err(missing)
+    }
 }
 
 /// Resolves one written type specification to its durable type identity in
@@ -5020,9 +5372,10 @@ mod tests {
         SchemaId, SourceBundleId, SourceRevisionId, SourceUnitId, StandardLibraryRevisionId,
         TypeId,
         canonical_hash::{
-            artifact_payload_digest, catalogue_digest_with_context, source_bundle_digest,
+            artifact_payload_digest, catalogue_digest_with_context, function_declaration_digest,
+            function_semantic_digest_with_version, source_bundle_digest,
             source_revision_record_digest, source_unit_content_digest,
-            verify_standard_library_snapshot,
+            verify_standard_library_snapshot, verify_standard_library_v2_snapshot,
         },
         catalogue::{
             CatalogueSnapshot, CatalogueSnapshotError, EnumTypeDefinition, FieldDefinition,
@@ -5034,10 +5387,12 @@ mod tests {
         },
         revision::{
             ActiveDatabaseRevision, ActiveDatabaseRevisionInput, ActiveRevisionContent,
-            CatalogueHashContext, DefinitionIdentity, DefinitionOrigin, DefinitionReferenceKind,
-            DefinitionReferenceTarget, DeployableRevision, ExecutableArtifactKind, RevisionPair,
-            Sha256Digest, SourceOrigin, StandardLibraryDigestVersion, StandardLibrarySnapshot,
-            StoredSourceRevision, StoredSourceUnit,
+            CatalogueHashContext, DefinitionIdentity, DefinitionOrigin, DefinitionReference,
+            DefinitionReferenceKind, DefinitionReferenceTarget, DeployableRevision,
+            ExecutableArtifact, ExecutableArtifactKind, FunctionRevisionRecord,
+            FunctionSemanticHashVersion, RevisionPair, Sha256Digest, SourceOrigin,
+            StandardExecutable, StandardLibraryDigestVersion, StandardLibrarySnapshot,
+            StoredSourceRevision, StoredSourceUnit, VerifiedStandardLibrarySnapshot,
         },
         source::{SourceBundle, SourceUnit},
         types::{ResolvedType, StandardScalar},
@@ -5048,21 +5403,24 @@ mod tests {
         FunctionSecurity as SyntaxFunctionSecurity,
         FunctionTransaction as SyntaxFunctionTransaction,
         FunctionVolatility as SyntaxFunctionVolatility, ServerFunctionDeclaration, SourceSpan,
-        TypeSpecification, parse,
+        TypeExportTarget, TypeSpecification, parse,
     };
 
     use super::{
         CheckAssignments, CheckedApplicationTypeUse, CheckedDefinitionReferenceTarget,
-        CheckedStandardParameterEcho, CheckedTypeId, CheckedTypeUseKind, CheckedValueTypeUse,
-        ConstantValue, DiagnosticCode, IdentityAssignments, NewApplicationCheckError,
-        STD_INVOKE_ECHO_FUNCTION_ID, STD_INVOKE_ECHO_FUNCTION_REVISION_ID,
-        STD_INVOKE_ECHO_PARAMETER_ID, STD_INVOKE_SCHEMA_ID, SemanticType,
-        StandardApplicationCheckContext, StandardApplicationContextError,
-        StandardLibraryCheckError, check, check_new_application,
-        check_new_application_with_catalogue, check_standard_application,
-        check_standard_library_source, check_standard_parameter_echo,
-        checked_standard_library_with_contract_overrides_for_test, location,
-        reconcile_standard_source, sort_standard_type_uses, supports_record_value_scalar,
+        CheckedStandardExecutable, CheckedStandardParameterEcho, CheckedTypeId, CheckedTypeUseKind,
+        CheckedValueTypeUse, ConstantValue, DiagnosticCode, IdentityAssignments,
+        NewApplicationCheckError, STD_INTEGER_TYPE_ID, STD_INVOKE_ECHO_FUNCTION_ID,
+        STD_INVOKE_ECHO_FUNCTION_REVISION_ID, STD_INVOKE_ECHO_PARAMETER_ID,
+        STD_INVOKE_ECHO_REVISION_NUMBER, STD_INVOKE_SCHEMA_ID, STD_INVOKE_SOURCE_UNIT_ID,
+        STD_TYPES_SOURCE_UNIT_ID, SemanticType, StandardApplicationCheckContext,
+        StandardApplicationContextError, StandardLibraryCheckError, StandardSourceFamilies, check,
+        check_new_application, check_new_application_with_catalogue, check_standard_application,
+        check_standard_library_source, check_standard_library_source_v2_parts,
+        check_standard_parameter_echo, checked_standard_library_with_contract_overrides_for_test,
+        location, reconcile_standard_executable, reconcile_standard_source,
+        sort_standard_type_uses, supports_record_value_scalar, unquoted_prelude_name,
+        unquoted_semantic_name,
     };
     use crate::mutation::{MutationExpressionKind, MutationRecordFieldExpressionKind};
     use crate::{
@@ -13224,12 +13582,9 @@ mod tests {
     }
 
     const STD_INVOKE_SOURCE: &str = "CREATE SCHEMA std.invoke;\nCREATE SERVER FUNCTION std.invoke.echo(\n    p_value INTEGER\n)\nRETURNS INTEGER\nSECURITY INVOKER\nTRANSACTION READ ONLY\nVOLATILITY STABLE\nAS\n    SELECT p_value;";
-    /// The fixed ADR 0055 INTEGER value-type identity: `...02`.
-    const STD_INTEGER_TYPE_ID: TypeId =
-        TypeId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x02]);
-    /// The fixed ADR 0055 `std/invoke.orna` source-unit identity: `...03`.
-    const STD_INVOKE_SOURCE_UNIT_ID: SourceUnitId =
-        SourceUnitId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x03]);
+    /// The exact retained V2 `std/types.orna` source: the retained
+    /// `orna.std/1`-shape type declarations for the fixed INTEGER value type.
+    const STANDARD_V2_TYPES_SOURCE: &str = "CREATE SCHEMA std;CREATE SCHEMA std.types;CREATE TYPE std.types.INTEGER AS VALUE PRIMITIVE KERNEL CONTRACT 'orna.kernel.value.integer@1' IMMUTABLE PERSISTABLE;EXPORT TYPE std.types.INTEGER AS std.INTEGER;EXPORT TYPE std.INTEGER TO PRELUDE AS INTEGER;";
 
     fn standard_parameter_echo_declaration(source: &str) -> ServerFunctionDeclaration {
         let report =
@@ -13775,5 +14130,1200 @@ mod tests {
             "SERVER functions do not yet support this body form"
         );
         assert_no_checked_bundle(&report);
+    }
+
+    fn stored_v2_unit(
+        id: SourceUnitId,
+        ordinal: u32,
+        path: &str,
+        content: &str,
+    ) -> StoredSourceUnit {
+        StoredSourceUnit::new(
+            id,
+            ordinal,
+            path,
+            content,
+            source_unit_content_digest(content).unwrap(),
+        )
+        .unwrap()
+    }
+
+    fn standard_v2_types_catalogue() -> CatalogueSnapshot {
+        let integer = ValueTypeDefinition::primitive(
+            STD_INTEGER_TYPE_ID,
+            QualifiedSemanticName::new(["std", "types", "integer"]).unwrap(),
+            ValueTypeMutability::Immutable,
+            ValueTypePersistence::Persistable,
+            "orna.kernel.value.integer@1",
+        );
+        let qualified = TypeBinding::qualified(
+            QualifiedSemanticName::new(["std", "integer"]).unwrap(),
+            integer.id(),
+        )
+        .unwrap();
+        let prelude =
+            TypeBinding::prelude(PreludeTypeName::new(["integer"]).unwrap(), integer.id()).unwrap();
+        CatalogueSnapshot::new_with_types(
+            CatalogueRevisionId::from_bytes([0x21; 16]),
+            vec![
+                SchemaDefinition::new(
+                    SchemaId::from_bytes([1; 16]),
+                    QualifiedSemanticName::new(["std"]).unwrap(),
+                ),
+                SchemaDefinition::new(
+                    SchemaId::from_bytes([2; 16]),
+                    QualifiedSemanticName::new(["std", "types"]).unwrap(),
+                ),
+            ],
+            vec![],
+            vec![integer],
+            vec![qualified, prelude],
+        )
+        .unwrap()
+    }
+
+    fn standard_v2_catalogue(with_invoke: bool) -> CatalogueSnapshot {
+        let catalogue = standard_v2_types_catalogue();
+        if !with_invoke {
+            return catalogue;
+        }
+        let echo = FunctionDefinition::new(
+            STD_INVOKE_ECHO_FUNCTION_ID,
+            QualifiedSemanticName::new(["std", "invoke", "echo"]).unwrap(),
+            FunctionDomain::Server,
+            vec![ParameterDefinition::new(
+                STD_INVOKE_ECHO_PARAMETER_ID,
+                "p_value",
+                0,
+                ResolvedType::scalar(StandardScalar::Integer),
+                None,
+            )],
+            FunctionReturn::Single(ResolvedType::scalar(StandardScalar::Integer)),
+            STD_INVOKE_ECHO_FUNCTION_REVISION_ID,
+            FunctionSecurity::Invoker,
+            Some(FunctionTransaction::ReadOnly),
+            FunctionVolatility::Stable,
+        );
+        let mut schemas = catalogue.schemas().to_vec();
+        schemas.push(SchemaDefinition::new(
+            STD_INVOKE_SCHEMA_ID,
+            QualifiedSemanticName::new(["std", "invoke"]).unwrap(),
+        ));
+        CatalogueSnapshot::new_with_functions_and_types(
+            CatalogueRevisionId::from_bytes([0x21; 16]),
+            schemas,
+            vec![],
+            catalogue.value_types().to_vec(),
+            catalogue.type_bindings().to_vec(),
+            vec![echo],
+        )
+        .unwrap()
+    }
+
+    fn standard_v2_types_origins(
+        catalogue: &CatalogueSnapshot,
+        parsed: &ParsedSourceUnit,
+    ) -> Vec<DefinitionOrigin> {
+        let origin = |identity: DefinitionIdentity, span: &SourceSpan| -> DefinitionOrigin {
+            DefinitionOrigin::new(
+                identity,
+                SourceOrigin::new(
+                    STD_TYPES_SOURCE_UNIT_ID,
+                    u32::try_from(span.start).unwrap(),
+                    u32::try_from(span.end).unwrap(),
+                )
+                .unwrap(),
+            )
+        };
+        let mut origins = Vec::new();
+        for declaration in parsed.parsed().schemas() {
+            let name = unquoted_semantic_name(&declaration.name).unwrap();
+            let definition = catalogue.schema_by_name(&name).unwrap();
+            origins.push(origin(
+                DefinitionIdentity::Schema(definition.id()),
+                &declaration.span,
+            ));
+        }
+        for declaration in parsed.parsed().primitive_value_types() {
+            let name = unquoted_semantic_name(&declaration.name).unwrap();
+            let definition = catalogue.value_type_by_name(&name).unwrap();
+            origins.push(origin(
+                DefinitionIdentity::ValueType(definition.id()),
+                &declaration.span,
+            ));
+        }
+        for declaration in parsed.parsed().type_exports() {
+            let target = match &declaration.target {
+                TypeExportTarget::Qualified { name } => {
+                    TypeLookupName::qualified(unquoted_semantic_name(name).unwrap())
+                }
+                TypeExportTarget::Prelude { words, .. } => {
+                    TypeLookupName::prelude(unquoted_prelude_name(words).unwrap())
+                }
+            };
+            let binding = catalogue.type_binding_by_name(&target).unwrap();
+            origins.push(origin(
+                DefinitionIdentity::TypeBinding(binding.id()),
+                &declaration.span,
+            ));
+        }
+        origins
+    }
+
+    fn standard_v2_invoke_origins(source: &str) -> Vec<DefinitionOrigin> {
+        let report =
+            parse_bundle(&SourceBundle::new([SourceUnit::new("std/invoke.orna", source)]).unwrap());
+        assert!(report.diagnostics().is_empty());
+        let parsed = &report.units()[0];
+        let schema_span = &parsed.parsed().schemas()[0].span;
+        let mut origins = standard_parameter_echo_origins(source);
+        origins.push(DefinitionOrigin::new(
+            DefinitionIdentity::Schema(STD_INVOKE_SCHEMA_ID),
+            SourceOrigin::new(
+                STD_INVOKE_SOURCE_UNIT_ID,
+                u32::try_from(schema_span.start).unwrap(),
+                u32::try_from(schema_span.end).unwrap(),
+            )
+            .unwrap(),
+        ));
+        origins
+    }
+
+    fn standard_v2_executable(
+        catalogue: &CatalogueSnapshot,
+        origins: &[DefinitionOrigin],
+    ) -> StandardExecutable {
+        let checked = check_echo(STD_INVOKE_SOURCE).unwrap();
+        let function = catalogue
+            .function_by_id(STD_INVOKE_ECHO_FUNCTION_ID)
+            .unwrap();
+        let function_origin = origins
+            .iter()
+            .find(|origin| {
+                origin.identity() == DefinitionIdentity::Function(STD_INVOKE_ECHO_FUNCTION_ID)
+            })
+            .unwrap()
+            .source();
+        let declaration_content_hash = function_declaration_digest(
+            &STD_INVOKE_SOURCE.as_bytes()
+                [function_origin.byte_start() as usize..function_origin.byte_end() as usize],
+        )
+        .unwrap();
+        let semantic = function_semantic_digest_with_version(
+            FunctionSemanticHashVersion::Version2,
+            function,
+            "orna.language/1",
+            checked.artifact(),
+            &[],
+            checked.references(),
+        )
+        .unwrap();
+        let revision = FunctionRevisionRecord::new(
+            checked.function_id(),
+            checked.revision_id(),
+            STD_INVOKE_ECHO_REVISION_NUMBER,
+            function_origin,
+            declaration_content_hash,
+            semantic,
+            "orna.language/1",
+            checked.artifact().clone(),
+        )
+        .unwrap()
+        .with_semantic_hash_version(FunctionSemanticHashVersion::Version2);
+        StandardExecutable::new(
+            checked.function_id(),
+            revision,
+            checked.references().to_vec(),
+        )
+        .unwrap()
+    }
+
+    fn standard_v2_units() -> (StoredSourceUnit, StoredSourceUnit) {
+        (
+            stored_v2_unit(
+                STD_TYPES_SOURCE_UNIT_ID,
+                0,
+                "std/types.orna",
+                STANDARD_V2_TYPES_SOURCE,
+            ),
+            stored_v2_unit(
+                STD_INVOKE_SOURCE_UNIT_ID,
+                1,
+                "std/invoke.orna",
+                STD_INVOKE_SOURCE,
+            ),
+        )
+    }
+
+    /// The compiled canonical V2 standard-library digest for the exact test
+    /// inputs (`STANDARD_V2_TYPES_SOURCE`, `STD_INVOKE_SOURCE`, the fixed
+    /// identities, catalogue, executable, and origins). Computed by the
+    /// canonical encoder.
+    const STANDARD_V2_CANONICAL_DIGEST: Sha256Digest = Sha256Digest::from_bytes([
+        115, 202, 159, 209, 255, 174, 218, 69, 195, 114, 168, 108, 210, 7, 50, 127, 176, 149, 134,
+        145, 229, 113, 139, 179, 237, 228, 75, 75, 94, 20, 52, 52,
+    ]);
+
+    fn standard_v2_source(units: Vec<StoredSourceUnit>) -> StoredSourceRevision {
+        let bundle_hash = source_bundle_digest(&units).unwrap();
+        StoredSourceRevision::new(
+            SourceBundleId::from_bytes([0x41; 16]),
+            SourceRevisionId::from_bytes([0x42; 16]),
+            Some(SourceRevisionId::from_bytes([0x43; 16])),
+            units,
+            bundle_hash,
+            source_revision_record_digest(
+                SourceBundleId::from_bytes([0x41; 16]),
+                Some(SourceRevisionId::from_bytes([0x43; 16])),
+                bundle_hash,
+            )
+            .unwrap(),
+        )
+        .unwrap()
+    }
+
+    fn build_standard_v2_snapshot(
+        units: Vec<StoredSourceUnit>,
+        catalogue: CatalogueSnapshot,
+        origins: Vec<DefinitionOrigin>,
+        executables: Vec<StandardExecutable>,
+        digest: Sha256Digest,
+    ) -> StandardLibrarySnapshot {
+        StandardLibrarySnapshot::new_with_executables(
+            StandardLibraryRevisionId::from_bytes([0x44; 16]),
+            StandardLibraryDigestVersion::Version2,
+            standard_v2_source(units),
+            "orna.language/1",
+            catalogue,
+            executables,
+            origins,
+            digest,
+        )
+        .unwrap()
+    }
+
+    fn standard_v2_parts() -> (
+        Vec<StoredSourceUnit>,
+        CatalogueSnapshot,
+        Vec<DefinitionOrigin>,
+        Vec<StandardExecutable>,
+    ) {
+        let (types_unit, invoke_unit) = standard_v2_units();
+        let catalogue = standard_v2_catalogue(true);
+        let parsed_types = parsed_standard_unit(STANDARD_V2_TYPES_SOURCE);
+        let mut origins = standard_v2_types_origins(&catalogue, &parsed_types);
+        origins.extend(standard_v2_invoke_origins(STD_INVOKE_SOURCE));
+        let executable = standard_v2_executable(&catalogue, &origins);
+        (
+            vec![types_unit, invoke_unit],
+            catalogue,
+            origins,
+            vec![executable],
+        )
+    }
+
+    /// Runs the V2 source reconcile directly on raw stored facts, without the
+    /// separate digest-verification gate.
+    fn check_v2_parts(
+        units: Vec<StoredSourceUnit>,
+        catalogue: &CatalogueSnapshot,
+        origins: &[DefinitionOrigin],
+        executables: &[StandardExecutable],
+    ) -> Result<(StandardSourceFamilies, CheckedStandardExecutable), StandardLibraryCheckError>
+    {
+        check_standard_library_source_v2_parts(
+            &standard_v2_source(units),
+            catalogue,
+            origins,
+            executables,
+        )
+    }
+
+    fn verified_standard_v2_snapshot() -> VerifiedStandardLibrarySnapshot {
+        let (units, catalogue, origins, executables) = standard_v2_parts();
+        verify_standard_library_v2_snapshot(build_standard_v2_snapshot(
+            units,
+            catalogue,
+            origins,
+            executables,
+            STANDARD_V2_CANONICAL_DIGEST,
+        ))
+        .unwrap()
+    }
+
+    #[test]
+    fn reconciles_the_exact_v2_standard_executable_bundle() {
+        let verified = verified_standard_v2_snapshot();
+        let checked = check_standard_library_source(&verified).unwrap();
+
+        assert_eq!(checked.schemas().len(), 2);
+        assert_eq!(checked.value_types().len(), 1);
+        assert_eq!(checked.type_bindings().len(), 2);
+
+        let executable = checked.checked_executable().unwrap();
+        assert_eq!(executable.function_id(), STD_INVOKE_ECHO_FUNCTION_ID);
+        assert_eq!(executable.parameter_id(), STD_INVOKE_ECHO_PARAMETER_ID);
+        assert_eq!(
+            executable.revision_id(),
+            STD_INVOKE_ECHO_FUNCTION_REVISION_ID
+        );
+        assert_eq!(
+            executable.revision_number(),
+            STD_INVOKE_ECHO_REVISION_NUMBER
+        );
+        assert_eq!(
+            executable.semantic_hash_version(),
+            FunctionSemanticHashVersion::Version2
+        );
+        assert_eq!(executable.language_version(), "orna.language/1");
+
+        let stored = &verified.executables()[0];
+        assert_eq!(executable.function_id(), stored.function());
+        assert_eq!(executable.revision_id(), stored.revision().id());
+        assert_eq!(
+            executable.revision_number(),
+            stored.revision().revision_number()
+        );
+        assert_eq!(
+            executable.semantic_hash_version(),
+            stored.revision().semantic_hash_version()
+        );
+        assert_eq!(
+            executable.language_version(),
+            stored.revision().language_version()
+        );
+        assert_eq!(executable.artifact(), stored.revision().artifact());
+        assert_eq!(executable.references(), stored.references());
+        assert_eq!(
+            executable.declaration_origin(),
+            stored.revision().declaration_origin()
+        );
+        assert_eq!(
+            executable.declaration_content_hash(),
+            stored.revision().declaration_content_hash()
+        );
+        assert_eq!(
+            executable.semantic_hash(),
+            stored.revision().semantic_hash()
+        );
+
+        assert_eq!(
+            executable.schema_origin().source_unit(),
+            STD_INVOKE_SOURCE_UNIT_ID
+        );
+        assert_eq!(
+            executable.function_origin(),
+            executable.declaration_origin()
+        );
+        assert_eq!(
+            executable.parameter_origin().source_unit(),
+            STD_INVOKE_SOURCE_UNIT_ID
+        );
+        let stored_schema_origin = verified
+            .origins()
+            .iter()
+            .find(|origin| origin.identity() == DefinitionIdentity::Schema(STD_INVOKE_SCHEMA_ID))
+            .unwrap()
+            .source();
+        assert_eq!(executable.schema_origin(), stored_schema_origin);
+        assert_eq!(verified.origins().len(), 8);
+        assert_eq!(
+            &STD_INVOKE_SOURCE[executable.schema_origin().byte_start() as usize
+                ..executable.schema_origin().byte_end() as usize],
+            "CREATE SCHEMA std.invoke;"
+        );
+    }
+
+    #[test]
+    fn version_one_keeps_the_type_only_contract_without_executable_facts() {
+        let verified = verified_standard_library_for_relational_test();
+        let checked = check_standard_library_source(&verified).unwrap();
+        assert!(checked.checked_executable().is_none());
+        assert_eq!(checked.schemas().len(), 2);
+        assert_eq!(checked.value_types().len(), 1);
+        assert_eq!(checked.type_bindings().len(), 2);
+    }
+
+    #[test]
+    fn rejects_a_v2_bundle_with_the_wrong_unit_identity() {
+        let (_, invoke_unit) = standard_v2_units();
+        let catalogue = standard_v2_catalogue(true);
+        let parsed_types = parsed_standard_unit(STANDARD_V2_TYPES_SOURCE);
+        let mut origins = standard_v2_types_origins(&catalogue, &parsed_types);
+        origins.extend(standard_v2_invoke_origins(STD_INVOKE_SOURCE));
+        let executable = standard_v2_executable(&catalogue, &origins);
+        let types_unit = stored_v2_unit(
+            SourceUnitId::from_bytes([0x77; 16]),
+            0,
+            "std/types.orna",
+            STANDARD_V2_TYPES_SOURCE,
+        );
+        let error = check_v2_parts(
+            vec![types_unit, invoke_unit],
+            &catalogue,
+            &origins,
+            &[executable],
+        )
+        .unwrap_err();
+        assert!(
+            matches!(error, StandardLibraryCheckError::SourceMismatch),
+            "unexpected rejection: {error}"
+        );
+    }
+
+    #[test]
+    fn rejects_a_v2_bundle_with_swapped_unit_order() {
+        let catalogue = standard_v2_catalogue(true);
+        let parsed_types = parsed_standard_unit(STANDARD_V2_TYPES_SOURCE);
+        let mut origins = standard_v2_types_origins(&catalogue, &parsed_types);
+        origins.extend(standard_v2_invoke_origins(STD_INVOKE_SOURCE));
+        let executable = standard_v2_executable(&catalogue, &origins);
+        let types_unit = stored_v2_unit(
+            STD_TYPES_SOURCE_UNIT_ID,
+            1,
+            "std/types.orna",
+            STANDARD_V2_TYPES_SOURCE,
+        );
+        let invoke_unit = stored_v2_unit(
+            STD_INVOKE_SOURCE_UNIT_ID,
+            0,
+            "std/invoke.orna",
+            STD_INVOKE_SOURCE,
+        );
+        let error = check_v2_parts(
+            vec![invoke_unit, types_unit],
+            &catalogue,
+            &origins,
+            &[executable],
+        )
+        .unwrap_err();
+        assert!(
+            matches!(error, StandardLibraryCheckError::SourceMismatch),
+            "unexpected rejection: {error}"
+        );
+    }
+
+    #[test]
+    fn rejects_a_v2_bundle_with_the_wrong_logical_path() {
+        let (types_unit, _) = standard_v2_units();
+        let catalogue = standard_v2_catalogue(true);
+        let parsed_types = parsed_standard_unit(STANDARD_V2_TYPES_SOURCE);
+        let mut origins = standard_v2_types_origins(&catalogue, &parsed_types);
+        origins.extend(standard_v2_invoke_origins(STD_INVOKE_SOURCE));
+        let executable = standard_v2_executable(&catalogue, &origins);
+        let invoke_unit = stored_v2_unit(
+            STD_INVOKE_SOURCE_UNIT_ID,
+            1,
+            "std/invocation.orna",
+            STD_INVOKE_SOURCE,
+        );
+        let error = check_v2_parts(
+            vec![types_unit, invoke_unit],
+            &catalogue,
+            &origins,
+            &[executable],
+        )
+        .unwrap_err();
+        assert!(
+            matches!(error, StandardLibraryCheckError::SourceMismatch),
+            "unexpected rejection: {error}"
+        );
+    }
+
+    #[test]
+    fn rejects_a_v2_bundle_with_a_missing_or_extra_unit() {
+        let (types_unit, _) = standard_v2_units();
+        let catalogue = standard_v2_catalogue(true);
+        let parsed_types = parsed_standard_unit(STANDARD_V2_TYPES_SOURCE);
+        let mut origins = standard_v2_types_origins(&catalogue, &parsed_types);
+        origins.extend(standard_v2_invoke_origins(STD_INVOKE_SOURCE));
+        let executable = standard_v2_executable(&catalogue, &origins);
+        let error = check_v2_parts(
+            vec![types_unit],
+            &catalogue,
+            &origins,
+            std::slice::from_ref(&executable),
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            StandardLibraryCheckError::SourceUnitCount { actual: 1 }
+        ));
+
+        let (types_unit, invoke_unit) = standard_v2_units();
+        let extra = stored_v2_unit(
+            SourceUnitId::from_bytes([0x78; 16]),
+            2,
+            "std/extra.orna",
+            "CREATE SCHEMA std.extra;",
+        );
+        let error = check_v2_parts(
+            vec![types_unit, invoke_unit, extra],
+            &catalogue,
+            &origins,
+            &[executable],
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            StandardLibraryCheckError::SourceUnitCount { actual: 3 }
+        ));
+    }
+
+    #[test]
+    fn rejects_a_byte_modified_invoke_unit_closed() {
+        let (types_unit, _) = standard_v2_units();
+        let catalogue = standard_v2_catalogue(true);
+        let parsed_types = parsed_standard_unit(STANDARD_V2_TYPES_SOURCE);
+        let mut origins = standard_v2_types_origins(&catalogue, &parsed_types);
+        origins.extend(standard_v2_invoke_origins(STD_INVOKE_SOURCE));
+        let executable = standard_v2_executable(&catalogue, &origins);
+
+        // Whitespace-only modification: tokens identical, declaration byte
+        // ranges shift, so the stored origins and declaration content hash no
+        // longer agree with the retained source.
+        let modified = STD_INVOKE_SOURCE.replacen("RETURNS INTEGER", "RETURNS  INTEGER", 1);
+        assert_ne!(modified, STD_INVOKE_SOURCE);
+        let invoke_unit =
+            stored_v2_unit(STD_INVOKE_SOURCE_UNIT_ID, 1, "std/invoke.orna", &modified);
+        let error = check_v2_parts(
+            vec![types_unit.clone(), invoke_unit],
+            &catalogue,
+            &origins,
+            std::slice::from_ref(&executable),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(error, StandardLibraryCheckError::SourceMismatch),
+            "unexpected rejection: {error}"
+        );
+
+        // Semantic modification: the echo shape itself is rejected.
+        let modified = STD_INVOKE_SOURCE.replacen("p_value INTEGER", "p_value BIGINT", 1);
+        let invoke_unit =
+            stored_v2_unit(STD_INVOKE_SOURCE_UNIT_ID, 1, "std/invoke.orna", &modified);
+        let error = check_v2_parts(
+            vec![types_unit, invoke_unit],
+            &catalogue,
+            &origins,
+            &[executable],
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            StandardLibraryCheckError::UnexpectedParameterType
+        ));
+    }
+
+    #[test]
+    fn rejects_a_v2_bundle_with_the_wrong_source_or_catalogue_names() {
+        let (types_unit, _) = standard_v2_units();
+        let catalogue = standard_v2_catalogue(true);
+        let parsed_types = parsed_standard_unit(STANDARD_V2_TYPES_SOURCE);
+        let mut origins = standard_v2_types_origins(&catalogue, &parsed_types);
+        origins.extend(standard_v2_invoke_origins(STD_INVOKE_SOURCE));
+        let executable = standard_v2_executable(&catalogue, &origins);
+
+        // Source schema renamed.
+        let invoke_unit = stored_v2_unit(
+            STD_INVOKE_SOURCE_UNIT_ID,
+            1,
+            "std/invoke.orna",
+            &STD_INVOKE_SOURCE.replacen("CREATE SCHEMA std.invoke;", "CREATE SCHEMA std.other;", 1),
+        );
+        let error = check_v2_parts(
+            vec![types_unit.clone(), invoke_unit],
+            &catalogue,
+            &origins,
+            std::slice::from_ref(&executable),
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            StandardLibraryCheckError::SchemaNameMismatch { .. }
+        ));
+
+        // Source function renamed.
+        let invoke_unit = stored_v2_unit(
+            STD_INVOKE_SOURCE_UNIT_ID,
+            1,
+            "std/invoke.orna",
+            &STD_INVOKE_SOURCE.replacen("std.invoke.echo(", "std.invoke.echo2(", 1),
+        );
+        let error = check_v2_parts(
+            vec![types_unit.clone(), invoke_unit],
+            &catalogue,
+            &origins,
+            std::slice::from_ref(&executable),
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            StandardLibraryCheckError::UnexpectedName { .. }
+        ));
+
+        // Catalogue schema renamed at the fixed identity (the function name
+        // must follow so the catalogue constructor stays valid).
+        let mut renamed_schemas = catalogue.schemas().to_vec();
+        renamed_schemas[2] = SchemaDefinition::new(
+            STD_INVOKE_SCHEMA_ID,
+            QualifiedSemanticName::new(["std", "other"]).unwrap(),
+        );
+        let function = catalogue
+            .function_by_id(STD_INVOKE_ECHO_FUNCTION_ID)
+            .unwrap();
+        let renamed_function = FunctionDefinition::new(
+            function.id(),
+            QualifiedSemanticName::new(["std", "other", "echo"]).unwrap(),
+            function.domain(),
+            function.parameters().to_vec(),
+            function.return_type().clone(),
+            function.current_revision(),
+            function.security(),
+            function.transaction(),
+            function.volatility(),
+        );
+        let renamed_catalogue = CatalogueSnapshot::new_with_functions_and_types(
+            CatalogueRevisionId::from_bytes([0x21; 16]),
+            renamed_schemas,
+            vec![],
+            catalogue.value_types().to_vec(),
+            catalogue.type_bindings().to_vec(),
+            vec![renamed_function],
+        )
+        .unwrap();
+        let error = check_v2_parts(
+            vec![types_unit.clone(), standard_v2_units().1],
+            &renamed_catalogue,
+            &origins,
+            std::slice::from_ref(&executable),
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            StandardLibraryCheckError::SchemaNameMismatch { .. }
+        ));
+
+        // Catalogue function renamed at the fixed identity.
+        let function = catalogue
+            .function_by_id(STD_INVOKE_ECHO_FUNCTION_ID)
+            .unwrap();
+        let renamed_function = FunctionDefinition::new(
+            function.id(),
+            QualifiedSemanticName::new(["std", "invoke", "other"]).unwrap(),
+            function.domain(),
+            function.parameters().to_vec(),
+            function.return_type().clone(),
+            function.current_revision(),
+            function.security(),
+            function.transaction(),
+            function.volatility(),
+        );
+        let renamed_catalogue = CatalogueSnapshot::new_with_functions_and_types(
+            CatalogueRevisionId::from_bytes([0x21; 16]),
+            catalogue.schemas().to_vec(),
+            vec![],
+            catalogue.value_types().to_vec(),
+            catalogue.type_bindings().to_vec(),
+            vec![renamed_function],
+        )
+        .unwrap();
+        let error = check_v2_parts(
+            vec![types_unit.clone(), standard_v2_units().1],
+            &renamed_catalogue,
+            &origins,
+            std::slice::from_ref(&executable),
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            StandardLibraryCheckError::FunctionNameMismatch { .. }
+        ));
+
+        // Catalogue parameter renamed at the fixed identity.
+        let parameter = function
+            .parameter_by_id(STD_INVOKE_ECHO_PARAMETER_ID)
+            .unwrap();
+        let renamed_function = FunctionDefinition::new(
+            function.id(),
+            function.name().clone(),
+            function.domain(),
+            vec![ParameterDefinition::new(
+                parameter.id(),
+                "p_other",
+                parameter.ordinal(),
+                parameter.resolved_type(),
+                parameter.default_expression(),
+            )],
+            function.return_type().clone(),
+            function.current_revision(),
+            function.security(),
+            function.transaction(),
+            function.volatility(),
+        );
+        let renamed_catalogue = CatalogueSnapshot::new_with_functions_and_types(
+            CatalogueRevisionId::from_bytes([0x21; 16]),
+            catalogue.schemas().to_vec(),
+            vec![],
+            catalogue.value_types().to_vec(),
+            catalogue.type_bindings().to_vec(),
+            vec![renamed_function],
+        )
+        .unwrap();
+        let error = check_v2_parts(
+            vec![types_unit, standard_v2_units().1],
+            &renamed_catalogue,
+            &origins,
+            &[executable],
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            StandardLibraryCheckError::ParameterNameMismatch { .. }
+        ));
+    }
+
+    #[test]
+    fn rejects_wrong_v2_origin_ranges_closed() {
+        let (types_unit, invoke_unit) = standard_v2_units();
+        let catalogue = standard_v2_catalogue(true);
+        let parsed_types = parsed_standard_unit(STANDARD_V2_TYPES_SOURCE);
+        let assert_rejected = |error: StandardLibraryCheckError| {
+            assert!(
+                matches!(error, StandardLibraryCheckError::SourceMismatch),
+                "unexpected rejection: {error}"
+            );
+        };
+        let base_origins = standard_v2_types_origins(&catalogue, &parsed_types);
+
+        // Wrong schema origin range.
+        let mut origins = base_origins.clone();
+        let mut invoke_origins = standard_v2_invoke_origins(STD_INVOKE_SOURCE);
+        let schema_origin = invoke_origins
+            .iter_mut()
+            .find(|origin| origin.identity() == DefinitionIdentity::Schema(STD_INVOKE_SCHEMA_ID))
+            .unwrap();
+        *schema_origin = DefinitionOrigin::new(
+            schema_origin.identity(),
+            SourceOrigin::new(
+                STD_INVOKE_SOURCE_UNIT_ID,
+                schema_origin.source().byte_start() + 1,
+                schema_origin.source().byte_end(),
+            )
+            .unwrap(),
+        );
+        origins.extend(invoke_origins);
+        let executable = standard_v2_executable(&catalogue, &origins);
+        assert_rejected(
+            check_v2_parts(
+                vec![types_unit.clone(), invoke_unit.clone()],
+                &catalogue,
+                &origins,
+                &[executable],
+            )
+            .unwrap_err(),
+        );
+
+        // Wrong function origin range.
+        let mut origins = base_origins.clone();
+        let mut invoke_origins = standard_v2_invoke_origins(STD_INVOKE_SOURCE);
+        let function_origin = invoke_origins
+            .iter_mut()
+            .find(|origin| {
+                origin.identity() == DefinitionIdentity::Function(STD_INVOKE_ECHO_FUNCTION_ID)
+            })
+            .unwrap();
+        *function_origin = DefinitionOrigin::new(
+            function_origin.identity(),
+            SourceOrigin::new(
+                STD_INVOKE_SOURCE_UNIT_ID,
+                function_origin.source().byte_start(),
+                function_origin.source().byte_end() - 1,
+            )
+            .unwrap(),
+        );
+        origins.extend(invoke_origins);
+        let executable = standard_v2_executable(&catalogue, &origins);
+        assert_rejected(
+            check_v2_parts(
+                vec![types_unit.clone(), invoke_unit.clone()],
+                &catalogue,
+                &origins,
+                &[executable],
+            )
+            .unwrap_err(),
+        );
+
+        // Wrong parameter origin range.
+        let mut origins = base_origins;
+        let mut invoke_origins = standard_v2_invoke_origins(STD_INVOKE_SOURCE);
+        let parameter_origin = invoke_origins
+            .iter_mut()
+            .find(|origin| {
+                origin.identity()
+                    == DefinitionIdentity::Parameter {
+                        owner: STD_INVOKE_ECHO_FUNCTION_ID,
+                        parameter: STD_INVOKE_ECHO_PARAMETER_ID,
+                    }
+            })
+            .unwrap();
+        *parameter_origin = DefinitionOrigin::new(
+            parameter_origin.identity(),
+            SourceOrigin::new(
+                STD_INVOKE_SOURCE_UNIT_ID,
+                parameter_origin.source().byte_start(),
+                parameter_origin.source().byte_end() - 1,
+            )
+            .unwrap(),
+        );
+        origins.extend(invoke_origins);
+        let executable = standard_v2_executable(&catalogue, &origins);
+        assert_rejected(
+            check_v2_parts(
+                vec![types_unit, invoke_unit],
+                &catalogue,
+                &origins,
+                &[executable],
+            )
+            .unwrap_err(),
+        );
+    }
+
+    #[test]
+    fn rejects_a_wrong_stored_revision_identity_closed() {
+        let (types_unit, invoke_unit) = standard_v2_units();
+        let catalogue = standard_v2_catalogue(true);
+        let parsed_types = parsed_standard_unit(STANDARD_V2_TYPES_SOURCE);
+        let mut origins = standard_v2_types_origins(&catalogue, &parsed_types);
+        origins.extend(standard_v2_invoke_origins(STD_INVOKE_SOURCE));
+        let executable = standard_v2_executable(&catalogue, &origins);
+
+        // Rebuild the executable with a different revision identity.
+        let wrong_revision = FunctionRevisionId::from_bytes([0x11; 16]);
+        let revision = executable.revision().clone();
+        let references = executable
+            .references()
+            .iter()
+            .map(|reference| {
+                DefinitionReference::new(
+                    reference.source_function(),
+                    wrong_revision,
+                    reference.ordinal(),
+                    reference.target(),
+                    reference.kind(),
+                    reference.source_origin(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let revision = FunctionRevisionRecord::new(
+            revision.function(),
+            wrong_revision,
+            revision.revision_number(),
+            revision.declaration_origin(),
+            revision.declaration_content_hash(),
+            revision.semantic_hash(),
+            revision.language_version(),
+            revision.artifact().clone(),
+        )
+        .unwrap()
+        .with_semantic_hash_version(revision.semantic_hash_version());
+        let executable =
+            StandardExecutable::new(revision.function(), revision, references).unwrap();
+
+        let error = check_v2_parts(
+            vec![types_unit, invoke_unit],
+            &catalogue,
+            &origins,
+            &[executable],
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            StandardLibraryCheckError::ExecutableMismatch
+        ));
+    }
+
+    #[test]
+    fn rejects_every_stored_executable_fact_mismatch_closed() {
+        let verified = verified_standard_v2_snapshot();
+        let checked = check_standard_library_source(&verified)
+            .unwrap()
+            .checked_executable()
+            .unwrap()
+            .clone();
+        let stored = verified.executables()[0].clone();
+        let revision = stored.revision().clone();
+        let artifact = revision.artifact().clone();
+        let references = stored.references().to_vec();
+        let fails = |stored: &StandardExecutable| {
+            assert!(
+                matches!(
+                    reconcile_standard_executable(stored, &checked),
+                    Err(StandardLibraryCheckError::ExecutableMismatch)
+                ),
+                "expected ExecutableMismatch"
+            );
+        };
+
+        // Wrong stored function identity.
+        let wrong_function = FunctionId::from_bytes([0x55; 16]);
+        let mutated = FunctionRevisionRecord::new(
+            wrong_function,
+            revision.id(),
+            revision.revision_number(),
+            revision.declaration_origin(),
+            revision.declaration_content_hash(),
+            revision.semantic_hash(),
+            revision.language_version(),
+            artifact.clone(),
+        )
+        .unwrap()
+        .with_semantic_hash_version(revision.semantic_hash_version());
+        fails(&StandardExecutable::new(wrong_function, mutated, references.clone()).unwrap());
+
+        // Wrong stored revision identity.
+        let wrong_revision = FunctionRevisionId::from_bytes([0x66; 16]);
+        let mutated = FunctionRevisionRecord::new(
+            revision.function(),
+            wrong_revision,
+            revision.revision_number(),
+            revision.declaration_origin(),
+            revision.declaration_content_hash(),
+            revision.semantic_hash(),
+            revision.language_version(),
+            artifact.clone(),
+        )
+        .unwrap()
+        .with_semantic_hash_version(revision.semantic_hash_version());
+        fails(&StandardExecutable::new(revision.function(), mutated, references.clone()).unwrap());
+
+        // Wrong stored revision number.
+        let mutated = FunctionRevisionRecord::new(
+            revision.function(),
+            revision.id(),
+            revision.revision_number() + 1,
+            revision.declaration_origin(),
+            revision.declaration_content_hash(),
+            revision.semantic_hash(),
+            revision.language_version(),
+            artifact.clone(),
+        )
+        .unwrap()
+        .with_semantic_hash_version(revision.semantic_hash_version());
+        fails(&StandardExecutable::new(revision.function(), mutated, references.clone()).unwrap());
+
+        // Wrong stored semantic-hash version.
+        let mutated = FunctionRevisionRecord::new(
+            revision.function(),
+            revision.id(),
+            revision.revision_number(),
+            revision.declaration_origin(),
+            revision.declaration_content_hash(),
+            revision.semantic_hash(),
+            revision.language_version(),
+            artifact.clone(),
+        )
+        .unwrap()
+        .with_semantic_hash_version(FunctionSemanticHashVersion::Version1);
+        fails(&StandardExecutable::new(revision.function(), mutated, references.clone()).unwrap());
+
+        // Wrong stored language version.
+        let mutated = FunctionRevisionRecord::new(
+            revision.function(),
+            revision.id(),
+            revision.revision_number(),
+            revision.declaration_origin(),
+            revision.declaration_content_hash(),
+            revision.semantic_hash(),
+            "orna.language/2",
+            artifact.clone(),
+        )
+        .unwrap()
+        .with_semantic_hash_version(revision.semantic_hash_version());
+        fails(&StandardExecutable::new(revision.function(), mutated, references.clone()).unwrap());
+
+        // Wrong stored declaration origin.
+        let mutated = FunctionRevisionRecord::new(
+            revision.function(),
+            revision.id(),
+            revision.revision_number(),
+            SourceOrigin::new(STD_INVOKE_SOURCE_UNIT_ID, 0, 1).unwrap(),
+            revision.declaration_content_hash(),
+            revision.semantic_hash(),
+            revision.language_version(),
+            artifact.clone(),
+        )
+        .unwrap()
+        .with_semantic_hash_version(revision.semantic_hash_version());
+        fails(&StandardExecutable::new(revision.function(), mutated, references.clone()).unwrap());
+
+        // Wrong stored declaration content hash.
+        let mutated = FunctionRevisionRecord::new(
+            revision.function(),
+            revision.id(),
+            revision.revision_number(),
+            revision.declaration_origin(),
+            Sha256Digest::from_bytes([0x11; 32]),
+            revision.semantic_hash(),
+            revision.language_version(),
+            artifact.clone(),
+        )
+        .unwrap()
+        .with_semantic_hash_version(revision.semantic_hash_version());
+        fails(&StandardExecutable::new(revision.function(), mutated, references.clone()).unwrap());
+
+        // Wrong stored semantic hash.
+        let mutated = FunctionRevisionRecord::new(
+            revision.function(),
+            revision.id(),
+            revision.revision_number(),
+            revision.declaration_origin(),
+            revision.declaration_content_hash(),
+            Sha256Digest::from_bytes([0x22; 32]),
+            revision.language_version(),
+            artifact.clone(),
+        )
+        .unwrap()
+        .with_semantic_hash_version(revision.semantic_hash_version());
+        fails(&StandardExecutable::new(revision.function(), mutated, references.clone()).unwrap());
+
+        // Wrong stored artifact format.
+        let mutated_artifact = ExecutableArtifact::new(
+            artifact.kind(),
+            "orna.server-parameter-echo2",
+            artifact.version(),
+            artifact.payload().to_vec(),
+            artifact.content_hash(),
+        )
+        .unwrap();
+        let mutated = FunctionRevisionRecord::new(
+            revision.function(),
+            revision.id(),
+            revision.revision_number(),
+            revision.declaration_origin(),
+            revision.declaration_content_hash(),
+            revision.semantic_hash(),
+            revision.language_version(),
+            mutated_artifact,
+        )
+        .unwrap()
+        .with_semantic_hash_version(revision.semantic_hash_version());
+        fails(&StandardExecutable::new(revision.function(), mutated, references.clone()).unwrap());
+
+        // Wrong stored artifact version.
+        let mutated_artifact = ExecutableArtifact::new(
+            artifact.kind(),
+            artifact.format(),
+            artifact.version() + 1,
+            artifact.payload().to_vec(),
+            artifact.content_hash(),
+        )
+        .unwrap();
+        let mutated = FunctionRevisionRecord::new(
+            revision.function(),
+            revision.id(),
+            revision.revision_number(),
+            revision.declaration_origin(),
+            revision.declaration_content_hash(),
+            revision.semantic_hash(),
+            revision.language_version(),
+            mutated_artifact,
+        )
+        .unwrap()
+        .with_semantic_hash_version(revision.semantic_hash_version());
+        fails(&StandardExecutable::new(revision.function(), mutated, references.clone()).unwrap());
+
+        // Wrong stored artifact payload.
+        let mut payload = artifact.payload().to_vec();
+        let last = payload.last_mut().unwrap();
+        *last ^= 0xff;
+        let mutated_artifact = ExecutableArtifact::new(
+            artifact.kind(),
+            artifact.format(),
+            artifact.version(),
+            payload.clone(),
+            artifact_payload_digest(&payload).unwrap(),
+        )
+        .unwrap();
+        let mutated = FunctionRevisionRecord::new(
+            revision.function(),
+            revision.id(),
+            revision.revision_number(),
+            revision.declaration_origin(),
+            revision.declaration_content_hash(),
+            revision.semantic_hash(),
+            revision.language_version(),
+            mutated_artifact,
+        )
+        .unwrap()
+        .with_semantic_hash_version(revision.semantic_hash_version());
+        fails(&StandardExecutable::new(revision.function(), mutated, references.clone()).unwrap());
+
+        // Missing reference.
+        fails(
+            &StandardExecutable::new(
+                revision.function(),
+                revision.clone(),
+                references[..2].to_vec(),
+            )
+            .unwrap(),
+        );
+
+        // Extra reference.
+        let mut extra = references.clone();
+        extra.push(DefinitionReference::new(
+            STD_INVOKE_ECHO_FUNCTION_ID,
+            STD_INVOKE_ECHO_FUNCTION_REVISION_ID,
+            3,
+            DefinitionReferenceTarget::ValueType(STD_INTEGER_TYPE_ID),
+            DefinitionReferenceKind::NamedType,
+            references[0].source_origin(),
+        ));
+        fails(&StandardExecutable::new(revision.function(), revision.clone(), extra).unwrap());
+
+        // Reordered references.
+        let mut reordered = references.clone();
+        reordered.swap(0, 1);
+        fails(&StandardExecutable::new(revision.function(), revision.clone(), reordered).unwrap());
+
+        // Wrong reference kind.
+        let mut wrong_kind = references.clone();
+        wrong_kind[0] = DefinitionReference::new(
+            wrong_kind[0].source_function(),
+            wrong_kind[0].source_revision(),
+            wrong_kind[0].ordinal(),
+            wrong_kind[0].target(),
+            DefinitionReferenceKind::FunctionCall,
+            wrong_kind[0].source_origin(),
+        );
+        fails(&StandardExecutable::new(revision.function(), revision.clone(), wrong_kind).unwrap());
+
+        // Wrong reference target.
+        let mut wrong_target = references.clone();
+        wrong_target[1] = DefinitionReference::new(
+            wrong_target[1].source_function(),
+            wrong_target[1].source_revision(),
+            wrong_target[1].ordinal(),
+            DefinitionReferenceTarget::ValueType(TypeId::from_bytes([0x77; 16])),
+            wrong_target[1].kind(),
+            wrong_target[1].source_origin(),
+        );
+        fails(
+            &StandardExecutable::new(revision.function(), revision.clone(), wrong_target).unwrap(),
+        );
+
+        // Wrong reference origin.
+        let mut wrong_origin = references.clone();
+        wrong_origin[2] = DefinitionReference::new(
+            wrong_origin[2].source_function(),
+            wrong_origin[2].source_revision(),
+            wrong_origin[2].ordinal(),
+            wrong_origin[2].target(),
+            wrong_origin[2].kind(),
+            SourceOrigin::new(STD_INVOKE_SOURCE_UNIT_ID, 0, 1).unwrap(),
+        );
+        fails(
+            &StandardExecutable::new(revision.function(), revision.clone(), wrong_origin).unwrap(),
+        );
     }
 }
