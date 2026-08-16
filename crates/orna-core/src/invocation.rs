@@ -6,9 +6,10 @@
 use std::{cmp::Ordering, collections::BTreeSet, error::Error, fmt};
 
 use crate::{
-    FunctionId, InvocationId, ParameterId, PrincipalId, TypeId,
+    FunctionId, FunctionRevisionId, InvocationId, ParameterId, PrincipalId,
+    StandardLibraryRevisionId, TypeId,
     catalogue::{CatalogueSnapshot, FunctionDefinition, FunctionSecurity, QualifiedSemanticName},
-    revision::ActiveDatabaseRevision,
+    revision::{ActiveDatabaseRevision, VerifiedStandardLibrarySnapshot},
     security::{
         AuthenticatedSession, ExecuteDecision, InvocationTarget as SecurityInvocationTarget,
         SecuritySnapshot,
@@ -76,7 +77,22 @@ pub fn decide_protected_invocation(
     let Some(target) = resolve_target_privately(active, request.target()) else {
         return ProtectedInvocationDecision::Denied;
     };
-    let security_target = SecurityInvocationTarget::new(target.id(), active.pair());
+    let security_target = match target.class() {
+        PrivateTargetClass::Application => {
+            SecurityInvocationTarget::new(target.id(), active.pair())
+        }
+        PrivateTargetClass::VerifiedStandard => {
+            let Some(standard_revision) = target.standard_revision() else {
+                return ProtectedInvocationDecision::Denied;
+            };
+            SecurityInvocationTarget::verified_standard(
+                target.id(),
+                active.pair(),
+                standard_revision,
+                target.executable_revision(),
+            )
+        }
+    };
     if !matches!(
         security.authorise_execute(session, security_target),
         ExecuteDecision::Allowed(_)
@@ -84,8 +100,8 @@ pub fn decide_protected_invocation(
         return ProtectedInvocationDecision::Denied;
     }
 
-    let prebind = prebind_privately(&target, request);
-    if target.security() != FunctionSecurity::Invoker {
+    let prebind = prebind_privately(target.definition(), request);
+    if target.definition().security() != FunctionSecurity::Invoker {
         return ProtectedInvocationDecision::Denied;
     }
 
@@ -101,34 +117,124 @@ enum PrivatePrebind {
     Failed,
 }
 
+/// The closed target class of one privately resolved invocation target.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PrivateTargetClass {
+    /// A function in the pinned application catalogue.
+    Application,
+    /// A function in the exact verified standard snapshot pinned by the
+    /// active application revision.
+    VerifiedStandard,
+}
+
+/// One privately resolved invocation target with its immutable executable pin.
+///
+/// The application target is pinned to the current function revision of its
+/// application catalogue definition. A verified-standard target is pinned to
+/// the exact `StandardExecutable` (function identity and executable revision)
+/// of the verified standard snapshot selected by the active application
+/// revision; a current, different, or unverified standard snapshot cannot
+/// authorise it. This record stays private to the protected boundary: the
+/// public decision result never carries a target, signature, selector, value,
+/// binding, or security evidence.
+#[derive(Clone, Debug)]
+struct PrivateResolvedTarget {
+    definition: FunctionDefinition,
+    class: PrivateTargetClass,
+    executable_revision: FunctionRevisionId,
+    standard_revision: Option<StandardLibraryRevisionId>,
+}
+
+impl PrivateResolvedTarget {
+    fn new_application(definition: FunctionDefinition) -> Self {
+        Self {
+            executable_revision: definition.current_revision(),
+            class: PrivateTargetClass::Application,
+            standard_revision: None,
+            definition,
+        }
+    }
+
+    fn new_verified_standard(
+        definition: FunctionDefinition,
+        standard_revision: StandardLibraryRevisionId,
+        executable_revision: FunctionRevisionId,
+    ) -> Self {
+        Self {
+            executable_revision,
+            class: PrivateTargetClass::VerifiedStandard,
+            standard_revision: Some(standard_revision),
+            definition,
+        }
+    }
+
+    /// Returns the stable target function identity.
+    fn id(&self) -> FunctionId {
+        self.definition.id()
+    }
+
+    /// Returns the complete catalogue function definition.
+    fn definition(&self) -> &FunctionDefinition {
+        &self.definition
+    }
+
+    /// Returns the closed target class.
+    fn class(&self) -> PrivateTargetClass {
+        self.class
+    }
+
+    /// Returns the exact pinned executable function revision.
+    fn executable_revision(&self) -> FunctionRevisionId {
+        self.executable_revision
+    }
+
+    /// Returns the exact verified standard snapshot revision for a standard target.
+    fn standard_revision(&self) -> Option<StandardLibraryRevisionId> {
+        self.standard_revision
+    }
+}
+
 fn resolve_target_privately(
     active: &ActiveDatabaseRevision,
     selector: &InvocationTarget,
-) -> Option<FunctionDefinition> {
+) -> Option<PrivateResolvedTarget> {
     let application = active.catalogue();
-    let standard = active
-        .catalogue_hash_context()
-        .standard()
-        .map(|snapshot| snapshot.catalogue());
+    let standard = active.catalogue_hash_context().standard();
     resolve_target_in_catalogues(application, standard, selector)
 }
 
 fn resolve_target_in_catalogues(
     application: &CatalogueSnapshot,
-    standard: Option<&CatalogueSnapshot>,
+    standard: Option<&VerifiedStandardLibrarySnapshot>,
     selector: &InvocationTarget,
-) -> Option<FunctionDefinition> {
+) -> Option<PrivateResolvedTarget> {
     let application_target = match selector {
         InvocationTarget::FunctionId(id) => application.function_by_id(*id),
         InvocationTarget::QualifiedName(name) => application.function_by_name(name),
     };
-    let standard_target = standard.and_then(|catalogue| match selector {
-        InvocationTarget::FunctionId(id) => catalogue.function_by_id(*id),
-        InvocationTarget::QualifiedName(name) => catalogue.function_by_name(name),
+    let standard_target = standard.and_then(|snapshot| match selector {
+        InvocationTarget::FunctionId(id) => snapshot.catalogue().function_by_id(*id),
+        InvocationTarget::QualifiedName(name) => snapshot.catalogue().function_by_name(name),
     });
     match (application_target, standard_target) {
+        // A function in both catalogues is ambiguous and resolves to neither.
         (Some(_), Some(_)) | (None, None) => None,
-        (Some(function), None) | (None, Some(function)) => Some(function.clone()),
+        (Some(function), None) => Some(PrivateResolvedTarget::new_application(function.clone())),
+        (None, Some(function)) => {
+            let standard = standard.expect("a standard target requires the pinned snapshot");
+            let executable = standard
+                .executables()
+                .iter()
+                .find(|executable| executable.function() == function.id())?;
+            if executable.revision().id() != function.current_revision() {
+                return None;
+            }
+            Some(PrivateResolvedTarget::new_verified_standard(
+                function.clone(),
+                standard.revision(),
+                executable.revision().id(),
+            ))
+        }
     }
 }
 
@@ -1445,24 +1551,27 @@ mod tests {
     use crate::catalogue::{
         CatalogueSnapshot, FunctionDefinition, FunctionDomain, FunctionReturn, FunctionSecurity,
         FunctionTransaction, FunctionVolatility, ObjectTypeDefinition, ParameterDefinition,
-        SchemaDefinition,
+        SchemaDefinition, ValueTypeDefinition, ValueTypeMutability, ValueTypePersistence,
     };
     use crate::revision::{
-        ActiveDatabaseRevision, DefinitionIdentity, DefinitionOrigin, ExecutableArtifact,
-        ExecutableArtifactKind, FunctionRevisionRecord, RevisionPair, Sha256Digest, SourceOrigin,
-        StoredSourceRevision, StoredSourceUnit,
+        ActiveDatabaseRevision, ActiveDatabaseRevisionInput, ActiveRevisionContent,
+        CatalogueHashContext, DefinitionIdentity, DefinitionOrigin, ExecutableArtifact,
+        ExecutableArtifactKind, FunctionRevisionRecord, FunctionSemanticHashVersion, RevisionPair,
+        Sha256Digest, SourceOrigin, StandardExecutable, StandardLibraryDigestVersion,
+        StandardLibrarySnapshot, StoredSourceRevision, StoredSourceUnit,
+        VerifiedStandardLibrarySnapshot,
     };
     use crate::value::{
         FunctionArgument, FunctionArgumentError, ResultColumn, ResultRow, ResultRows, RuntimeType,
     };
     use crate::{
         CatalogueRevisionId, FunctionId, FunctionRevisionId, ObjectId, SchemaId, SourceBundleId,
-        SourceRevisionId, SourceUnitId,
+        SourceRevisionId, SourceUnitId, TypeId,
     };
     use crate::{
         security::{
             ExecuteGrant, InvocationTarget as SecurityInvocationTarget, Principal, PrincipalKind,
-            PrincipalStatus, SecuritySnapshot,
+            PrincipalStatus, SecurityFunctionTarget, SecuritySnapshot,
         },
         system::{CATALOGUE_HEALTH_FUNCTION_ID, SYS_INVOKE_FUNCTION_ID},
         types::{ResolvedType, StandardScalar},
@@ -1684,6 +1793,331 @@ mod tests {
 
     fn decision_request(arguments: Vec<InvocationArgument>) -> InvokeRequest {
         request(arguments)
+    }
+
+    fn standard_function_with(security: FunctionSecurity) -> FunctionDefinition {
+        FunctionDefinition::new(
+            FunctionId::from_bytes([0x30; 16]),
+            QualifiedSemanticName::new(["std", "invoke", "echo"]).expect("a standard name"),
+            FunctionDomain::Server,
+            vec![],
+            FunctionReturn::Single(ResolvedType::scalar(StandardScalar::Integer)),
+            FunctionRevisionId::from_bytes([0x31; 16]),
+            security,
+            Some(FunctionTransaction::ReadOnly),
+            FunctionVolatility::Stable,
+        )
+    }
+
+    fn standard_function() -> FunctionDefinition {
+        standard_function_with(FunctionSecurity::Invoker)
+    }
+
+    fn standard_executable_snapshot_with(
+        function: &FunctionDefinition,
+    ) -> VerifiedStandardLibrarySnapshot {
+        let invoke_unit = SourceUnitId::from_bytes([0x42; 16]);
+        let source = StoredSourceRevision::new(
+            SourceBundleId::from_bytes([0x44; 16]),
+            SourceRevisionId::from_bytes([0x45; 16]),
+            Some(SourceRevisionId::from_bytes([0x46; 16])),
+            vec![
+                StoredSourceUnit::new(
+                    SourceUnitId::from_bytes([0x40; 16]),
+                    0,
+                    "std/types.orna",
+                    "CREATE SCHEMA std;\n",
+                    Sha256Digest::from_bytes([0x41; 32]),
+                )
+                .expect("a types source unit"),
+                StoredSourceUnit::new(
+                    invoke_unit,
+                    1,
+                    "std/invoke.orna",
+                    "CREATE SERVER FUNCTION std.invoke.echo() RETURNS INTEGER SECURITY INVOKER TRANSACTION READ ONLY VOLATILITY STABLE AS SELECT 1;\n",
+                    Sha256Digest::from_bytes([0x43; 32]),
+                )
+                .expect("an invoke source unit"),
+            ],
+            Sha256Digest::from_bytes([0x47; 32]),
+            Sha256Digest::from_bytes([0x48; 32]),
+        )
+        .expect("a standard source revision");
+        let integer_type = ValueTypeDefinition::primitive(
+            TypeId::from_bytes([0x7c; 16]),
+            QualifiedSemanticName::new(["std", "invoke", "integer"]).expect("a value type name"),
+            ValueTypeMutability::Immutable,
+            ValueTypePersistence::Persistable,
+            "orna.kernel.value.integer@1",
+        );
+        let catalogue = CatalogueSnapshot::new_with_functions_and_types(
+            CatalogueRevisionId::from_bytes([0x49; 16]),
+            vec![SchemaDefinition::new(
+                SchemaId::from_bytes([0x4a; 16]),
+                QualifiedSemanticName::new(["std", "invoke"]).expect("a schema name"),
+            )],
+            vec![],
+            vec![integer_type.clone()],
+            vec![],
+            vec![function.clone()],
+        )
+        .expect("a standard catalogue");
+        let declaration = SourceOrigin::new(invoke_unit, 0, 0).expect("a source origin");
+        let revision = FunctionRevisionRecord::new(
+            function.id(),
+            function.current_revision(),
+            1,
+            declaration,
+            Sha256Digest::from_bytes([0x4c; 32]),
+            Sha256Digest::from_bytes([0x4d; 32]),
+            "orna.language/1",
+            ExecutableArtifact::new(
+                ExecutableArtifactKind::Server,
+                "orna.server-parameter-echo",
+                1,
+                vec![1],
+                Sha256Digest::from_bytes([0x4b; 32]),
+            )
+            .expect("an executable artifact"),
+        )
+        .expect("a standard function revision")
+        .with_semantic_hash_version(FunctionSemanticHashVersion::Version2);
+        let standard = StandardLibrarySnapshot::new_with_executables(
+            StandardLibraryRevisionId::from_bytes([0x4e; 16]),
+            StandardLibraryDigestVersion::Version2,
+            source,
+            "orna.language/1",
+            catalogue,
+            vec![
+                StandardExecutable::new(function.id(), revision, vec![])
+                    .expect("a standard executable"),
+            ],
+            vec![
+                DefinitionOrigin::new(
+                    DefinitionIdentity::Schema(SchemaId::from_bytes([0x4a; 16])),
+                    SourceOrigin::new(SourceUnitId::from_bytes([0x40; 16]), 0, 0)
+                        .expect("a schema origin"),
+                ),
+                DefinitionOrigin::new(
+                    DefinitionIdentity::ValueType(integer_type.id()),
+                    SourceOrigin::new(SourceUnitId::from_bytes([0x40; 16]), 0, 0)
+                        .expect("a value type origin"),
+                ),
+                DefinitionOrigin::new(DefinitionIdentity::Function(function.id()), declaration),
+            ],
+            Sha256Digest::from_bytes([0x4f; 32]),
+        )
+        .expect("a version-2 standard snapshot");
+        VerifiedStandardLibrarySnapshot::new(standard)
+    }
+
+    fn standard_executable_snapshot() -> VerifiedStandardLibrarySnapshot {
+        standard_executable_snapshot_with(&standard_function())
+    }
+
+    fn standard_decision_active_revision_with(
+        standard: VerifiedStandardLibrarySnapshot,
+    ) -> ActiveDatabaseRevision {
+        let source_unit = SourceUnitId::from_bytes([0x50; 16]);
+        let source = StoredSourceRevision::new(
+            SourceBundleId::from_bytes([0x51; 16]),
+            SourceRevisionId::from_bytes([0x52; 16]),
+            None,
+            vec![
+                StoredSourceUnit::new(
+                    source_unit,
+                    0,
+                    "app.orna",
+                    "",
+                    Sha256Digest::from_bytes([0x53; 32]),
+                )
+                .expect("a source unit"),
+            ],
+            Sha256Digest::from_bytes([0x54; 32]),
+            Sha256Digest::from_bytes([0x55; 32]),
+        )
+        .expect("an application source revision");
+        let catalogue = CatalogueSnapshot::new(
+            CatalogueRevisionId::from_bytes([0x56; 16]),
+            vec![SchemaDefinition::new(
+                SchemaId::from_bytes([0x57; 16]),
+                QualifiedSemanticName::new(["app"]).expect("a schema name"),
+            )],
+            vec![],
+        )
+        .expect("an application catalogue");
+        let origin = SourceOrigin::new(source_unit, 0, 0).expect("a source origin");
+        let input = ActiveDatabaseRevisionInput::new(
+            RevisionPair::new(source.id(), catalogue.revision()),
+            source,
+            catalogue,
+            Sha256Digest::from_bytes([0x58; 32]),
+            ActiveRevisionContent::new(
+                Vec::new(),
+                Vec::new(),
+                vec![DefinitionOrigin::new(
+                    DefinitionIdentity::Schema(SchemaId::from_bytes([0x57; 16])),
+                    origin,
+                )],
+                Vec::new(),
+            ),
+        );
+        ActiveDatabaseRevision::new_with_catalogue_hash_context(
+            input,
+            CatalogueHashContext::version_two(standard),
+        )
+        .expect("an active revision pinned to a verified standard snapshot")
+    }
+
+    fn standard_decision_active_revision() -> ActiveDatabaseRevision {
+        standard_decision_active_revision_with(standard_executable_snapshot())
+    }
+
+    fn standard_security_for(
+        active: &ActiveDatabaseRevision,
+        grants: Vec<ExecuteGrant>,
+    ) -> SecuritySnapshot {
+        let standard = active
+            .catalogue_hash_context()
+            .standard()
+            .expect("a pinned standard snapshot");
+        let function = standard.catalogue().functions()[0].clone();
+        SecuritySnapshot::new_with_function_targets(
+            active.pair(),
+            vec![SecurityFunctionTarget::verified_standard(
+                function.id(),
+                standard.revision(),
+                standard.executables()[0].revision().id(),
+            )],
+            vec![Principal::new(
+                PrincipalId::from_bytes([25; 16]),
+                PrincipalKind::User,
+                PrincipalStatus::Active,
+            )],
+            vec![],
+            grants,
+        )
+        .expect("a standard-class security snapshot")
+    }
+
+    fn ambiguous_standard_active_revision() -> ActiveDatabaseRevision {
+        let source_unit = SourceUnitId::from_bytes([0x70; 16]);
+        let source = StoredSourceRevision::new(
+            SourceBundleId::from_bytes([0x71; 16]),
+            SourceRevisionId::from_bytes([0x72; 16]),
+            None,
+            vec![
+                StoredSourceUnit::new(
+                    source_unit,
+                    0,
+                    "app.orna",
+                    "",
+                    Sha256Digest::from_bytes([0x73; 32]),
+                )
+                .expect("a source unit"),
+            ],
+            Sha256Digest::from_bytes([0x74; 32]),
+            Sha256Digest::from_bytes([0x75; 32]),
+        )
+        .expect("an application source revision");
+        let function = FunctionDefinition::new(
+            FunctionId::from_bytes([0x30; 16]),
+            QualifiedSemanticName::new(["std", "invoke", "echo"]).expect("a standard name"),
+            FunctionDomain::Server,
+            vec![],
+            FunctionReturn::Single(ResolvedType::Value(TypeId::from_bytes([0x7c; 16]))),
+            FunctionRevisionId::from_bytes([0x31; 16]),
+            FunctionSecurity::Invoker,
+            Some(FunctionTransaction::ReadOnly),
+            FunctionVolatility::Stable,
+        );
+        let catalogue = CatalogueSnapshot::new_with_functions(
+            CatalogueRevisionId::from_bytes([0x76; 16]),
+            vec![
+                SchemaDefinition::new(
+                    SchemaId::from_bytes([0x57; 16]),
+                    QualifiedSemanticName::new(["app"]).expect("a schema name"),
+                ),
+                SchemaDefinition::new(
+                    SchemaId::from_bytes([0x4a; 16]),
+                    QualifiedSemanticName::new(["std", "invoke"]).expect("a schema name"),
+                ),
+            ],
+            vec![],
+            vec![function.clone()],
+        )
+        .expect("an application catalogue that duplicates a standard function");
+        let origin = SourceOrigin::new(source_unit, 0, 0).expect("a source origin");
+        let revision = FunctionRevisionRecord::new(
+            function.id(),
+            function.current_revision(),
+            1,
+            origin,
+            Sha256Digest::from_bytes([0x77; 32]),
+            Sha256Digest::from_bytes([0x78; 32]),
+            "orna.language/1",
+            ExecutableArtifact::new(
+                ExecutableArtifactKind::Server,
+                "orna.server-parameter-echo",
+                1,
+                vec![1],
+                Sha256Digest::from_bytes([0x79; 32]),
+            )
+            .expect("an executable artifact"),
+        )
+        .expect("an application function revision")
+        .with_semantic_hash_version(FunctionSemanticHashVersion::Version2);
+        let input = ActiveDatabaseRevisionInput::new(
+            RevisionPair::new(source.id(), catalogue.revision()),
+            source,
+            catalogue,
+            Sha256Digest::from_bytes([0x7a; 32]),
+            ActiveRevisionContent::new(
+                Vec::new(),
+                vec![revision],
+                vec![
+                    DefinitionOrigin::new(
+                        DefinitionIdentity::Schema(SchemaId::from_bytes([0x57; 16])),
+                        origin,
+                    ),
+                    DefinitionOrigin::new(
+                        DefinitionIdentity::Schema(SchemaId::from_bytes([0x4a; 16])),
+                        origin,
+                    ),
+                    DefinitionOrigin::new(DefinitionIdentity::Function(function.id()), origin),
+                ],
+                Vec::new(),
+            ),
+        );
+        ActiveDatabaseRevision::new_with_catalogue_hash_context(
+            input,
+            CatalogueHashContext::version_two(standard_executable_snapshot()),
+        )
+        .expect("an ambiguous active revision")
+    }
+
+    fn unknown_request() -> InvokeRequest {
+        InvokeRequest::new(InvokeRequestInput {
+            target: InvocationTarget::qualified_name(
+                QualifiedSemanticName::new(["app", "missing"]).expect("a qualified name"),
+            )
+            .expect("a qualified target"),
+            arguments: Vec::new(),
+            ..request_input(Vec::new(), None)
+        })
+        .expect("a checked unknown request")
+    }
+
+    fn standard_request() -> InvokeRequest {
+        InvokeRequest::new(InvokeRequestInput {
+            target: InvocationTarget::qualified_name(
+                QualifiedSemanticName::new(["std", "invoke", "echo"]).expect("a qualified name"),
+            )
+            .expect("a qualified target"),
+            arguments: Vec::new(),
+            ..request_input(Vec::new(), None)
+        })
+        .expect("a checked standard request")
     }
 
     fn list_value(active: &ActiveDatabaseRevision, element_count: usize) -> InvokeValue {
@@ -2107,31 +2541,23 @@ mod tests {
 
     #[test]
     fn protected_decision_resolves_ambiguity_privately_and_fails_closed_for_definer() {
+        let verified = standard_executable_snapshot();
+        let standard_function = verified.catalogue().functions()[0].clone();
         let application = CatalogueSnapshot::new_with_functions(
             CatalogueRevisionId::from_bytes([26; 16]),
             vec![SchemaDefinition::new(
-                SchemaId::from_bytes([27; 16]),
-                QualifiedSemanticName::new(["app"]).expect("a schema name"),
+                SchemaId::from_bytes([0x5b; 16]),
+                QualifiedSemanticName::new(["std", "invoke"]).expect("a schema name"),
             )],
             vec![],
-            vec![decision_function(FunctionSecurity::Invoker)],
+            vec![standard_function],
         )
-        .expect("an application catalogue");
-        let standard = CatalogueSnapshot::new_with_functions(
-            CatalogueRevisionId::from_bytes([28; 16]),
-            vec![SchemaDefinition::new(
-                SchemaId::from_bytes([29; 16]),
-                QualifiedSemanticName::new(["app"]).expect("a schema name"),
-            )],
-            vec![],
-            vec![decision_function(FunctionSecurity::Invoker)],
-        )
-        .expect("a standard catalogue fixture");
+        .expect("an application catalogue that duplicates a standard function");
         assert!(
             resolve_target_in_catalogues(
                 &application,
-                Some(&standard),
-                &InvocationTarget::function_id(FunctionId::from_bytes([10; 16])),
+                Some(&verified),
+                &InvocationTarget::function_id(FunctionId::from_bytes([0x30; 16])),
             )
             .is_none()
         );
@@ -2162,5 +2588,268 @@ mod tests {
             ),
             ProtectedInvocationDecision::Denied
         );
+    }
+
+    #[test]
+    fn private_resolution_pins_class_and_executable_for_both_target_classes() {
+        let verified = standard_executable_snapshot();
+        let standard_function = verified.catalogue().functions()[0].clone();
+        let application = CatalogueSnapshot::new_with_functions(
+            CatalogueRevisionId::from_bytes([0x5a; 16]),
+            vec![SchemaDefinition::new(
+                SchemaId::from_bytes([0x5b; 16]),
+                QualifiedSemanticName::new(["app"]).expect("a schema name"),
+            )],
+            vec![],
+            vec![decision_function(FunctionSecurity::Invoker)],
+        )
+        .expect("an application catalogue");
+        let both = CatalogueSnapshot::new_with_functions(
+            CatalogueRevisionId::from_bytes([0x5c; 16]),
+            vec![SchemaDefinition::new(
+                SchemaId::from_bytes([0x5d; 16]),
+                QualifiedSemanticName::new(["std", "invoke"]).expect("a schema name"),
+            )],
+            vec![],
+            vec![standard_function.clone()],
+        )
+        .expect("an application catalogue that duplicates a standard function");
+        let application_selector = InvocationTarget::function_id(FunctionId::from_bytes([10; 16]));
+        let standard_selector = InvocationTarget::function_id(standard_function.id());
+        let unknown_selector = InvocationTarget::function_id(FunctionId::from_bytes([0x60; 16]));
+
+        let application_target =
+            resolve_target_in_catalogues(&application, None, &application_selector)
+                .expect("an application function must resolve");
+        assert_eq!(application_target.class(), PrivateTargetClass::Application);
+        assert_eq!(
+            application_target.executable_revision(),
+            FunctionRevisionId::from_bytes([12; 16])
+        );
+        assert_eq!(application_target.standard_revision(), None);
+        assert_eq!(application_target.id(), FunctionId::from_bytes([10; 16]));
+
+        let standard_target =
+            resolve_target_in_catalogues(&application, Some(&verified), &standard_selector)
+                .expect("a verified-standard function must resolve");
+        assert_eq!(
+            standard_target.class(),
+            PrivateTargetClass::VerifiedStandard
+        );
+        assert_eq!(
+            standard_target.executable_revision(),
+            standard_function.current_revision()
+        );
+        assert_eq!(
+            standard_target.standard_revision(),
+            Some(verified.revision())
+        );
+        assert_eq!(standard_target.id(), standard_function.id());
+        assert_eq!(
+            standard_target.executable_revision(),
+            verified.executables()[0].revision().id()
+        );
+
+        assert!(
+            resolve_target_in_catalogues(&both, Some(&verified), &standard_selector).is_none(),
+            "a function in both catalogues must be ambiguous and resolve to neither"
+        );
+        assert!(
+            resolve_target_in_catalogues(&application, None, &standard_selector).is_none(),
+            "a function in no catalogue must not resolve"
+        );
+        assert!(
+            resolve_target_in_catalogues(&application, Some(&verified), &unknown_selector)
+                .is_none(),
+            "an unknown function must not resolve"
+        );
+    }
+
+    #[test]
+    fn protected_decision_allows_application_and_verified_standard_and_denies_closed() {
+        let system_target = |active: &ActiveDatabaseRevision| {
+            SecurityInvocationTarget::new(SYS_INVOKE_FUNCTION_ID, active.pair())
+        };
+
+        let active = decision_active_revision(FunctionSecurity::Invoker);
+        let security = decision_security(
+            &active,
+            vec![ExecuteGrant::new(
+                PrincipalId::from_bytes([25; 16]),
+                FunctionId::from_bytes([10; 16]),
+            )],
+        );
+        let session = security
+            .bind_authenticated_session(PrincipalId::from_bytes([25; 16]), vec![])
+            .expect("an active user session");
+        let application_request = decision_request(vec![InvocationArgument::new(
+            InvocationParameterSelector::parameter_id(ParameterId::from_bytes([11; 16])),
+            value(7),
+        )]);
+        assert_eq!(
+            decide_protected_invocation(
+                &security,
+                &session,
+                system_target(&active),
+                &active,
+                5,
+                &application_request,
+            ),
+            ProtectedInvocationDecision::Allowed
+        );
+
+        let active = standard_decision_active_revision();
+        let standard = active
+            .catalogue_hash_context()
+            .standard()
+            .expect("a pinned standard snapshot");
+        let function = standard.catalogue().functions()[0].clone();
+        let grant = ExecuteGrant::new(PrincipalId::from_bytes([25; 16]), function.id());
+        let security = standard_security_for(&active, vec![grant]);
+        let session = security
+            .bind_authenticated_session(PrincipalId::from_bytes([25; 16]), vec![])
+            .expect("an active user session");
+        let standard_request = standard_request();
+        assert_eq!(
+            decide_protected_invocation(
+                &security,
+                &session,
+                system_target(&active),
+                &active,
+                5,
+                &standard_request,
+            ),
+            ProtectedInvocationDecision::Allowed
+        );
+
+        let missing = unknown_request();
+        assert_eq!(
+            decide_protected_invocation(
+                &security,
+                &session,
+                system_target(&active),
+                &active,
+                5,
+                &missing,
+            ),
+            ProtectedInvocationDecision::Denied
+        );
+
+        let ambiguous = ambiguous_standard_active_revision();
+        let ambiguous_security = standard_security_for(&ambiguous, vec![grant]);
+        let session = ambiguous_security
+            .bind_authenticated_session(PrincipalId::from_bytes([25; 16]), vec![])
+            .expect("an active user session");
+        assert_eq!(
+            decide_protected_invocation(
+                &ambiguous_security,
+                &session,
+                system_target(&ambiguous),
+                &ambiguous,
+                5,
+                &standard_request,
+            ),
+            ProtectedInvocationDecision::Denied
+        );
+
+        let wrong_pin = SecuritySnapshot::new_with_function_targets(
+            active.pair(),
+            vec![SecurityFunctionTarget::verified_standard(
+                function.id(),
+                standard.revision(),
+                FunctionRevisionId::from_bytes([0x7b; 16]),
+            )],
+            vec![Principal::new(
+                PrincipalId::from_bytes([25; 16]),
+                PrincipalKind::User,
+                PrincipalStatus::Active,
+            )],
+            vec![],
+            vec![grant],
+        )
+        .expect("a wrong-pin security snapshot");
+        let session = wrong_pin
+            .bind_authenticated_session(PrincipalId::from_bytes([25; 16]), vec![])
+            .expect("an active user session");
+        assert_eq!(
+            decide_protected_invocation(
+                &wrong_pin,
+                &session,
+                system_target(&active),
+                &active,
+                5,
+                &standard_request,
+            ),
+            ProtectedInvocationDecision::Denied
+        );
+
+        let definer_active = standard_decision_active_revision_with(
+            standard_executable_snapshot_with(&standard_function_with(FunctionSecurity::Definer)),
+        );
+        let definer_security = standard_security_for(&definer_active, vec![grant]);
+        let session = definer_security
+            .bind_authenticated_session(PrincipalId::from_bytes([25; 16]), vec![])
+            .expect("an active user session");
+        assert_eq!(
+            decide_protected_invocation(
+                &definer_security,
+                &session,
+                system_target(&definer_active),
+                &definer_active,
+                5,
+                &standard_request,
+            ),
+            ProtectedInvocationDecision::Denied
+        );
+    }
+
+    #[test]
+    fn protected_decision_never_exposes_target_or_binding_evidence() {
+        let active = standard_decision_active_revision();
+        let standard = active
+            .catalogue_hash_context()
+            .standard()
+            .expect("a pinned standard snapshot");
+        let function = standard.catalogue().functions()[0].clone();
+        let security = standard_security_for(
+            &active,
+            vec![ExecuteGrant::new(
+                PrincipalId::from_bytes([25; 16]),
+                function.id(),
+            )],
+        );
+        let session = security
+            .bind_authenticated_session(PrincipalId::from_bytes([25; 16]), vec![])
+            .expect("an active user session");
+        let secret_selector = "private-standard-selector";
+        let request = InvokeRequest::new(InvokeRequestInput {
+            target: InvocationTarget::qualified_name(
+                QualifiedSemanticName::new(["std", "invoke", "echo"]).expect("a qualified name"),
+            )
+            .expect("a qualified target"),
+            arguments: vec![InvocationArgument::new(
+                InvocationParameterSelector::name(secret_selector).expect("a selector"),
+                value(7),
+            )],
+            ..request_input(Vec::new(), None)
+        })
+        .expect("a checked request with a private selector");
+        let decision = decide_protected_invocation(
+            &security,
+            &session,
+            SecurityInvocationTarget::new(SYS_INVOKE_FUNCTION_ID, active.pair()),
+            &active,
+            5,
+            &request,
+        );
+        assert_eq!(
+            decision,
+            ProtectedInvocationDecision::AllowedWithBindFailure
+        );
+        let debug = format!("{decision:?}");
+        assert!(!debug.contains(secret_selector), "{debug}");
+        assert!(!debug.contains("std"), "{debug}");
+        assert!(!debug.contains("echo"), "{debug}");
+        assert!(!debug.contains("0x30"), "{debug}");
     }
 }
