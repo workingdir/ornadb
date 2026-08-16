@@ -1,0 +1,115 @@
+====================
+create user and role
+====================
+
+CREATE USER alice;
+CREATE USER bot DISABLED;
+CREATE ROLE analyst;
+
+---
+
+(source_file
+  (create_user_statement
+    (kw_create)
+    (kw_user)
+    name: (identifier)
+    (semicolon))
+  (create_user_statement
+    (kw_create)
+    (kw_user)
+    name: (identifier)
+    (kw_disabled)
+    (semicolon))
+  (create_role_statement
+    (kw_create)
+    (kw_role)
+    name: (identifier)
+    (semicolon)))
+
+====================
+grant role and grant privilege
+====================
+
+GRANT analyst TO alice;
+GRANT EXECUTE ON FUNCTION tasks.overdue TO analyst;
+GRANT app.role ON app.table TO app.other;
+
+---
+
+(source_file
+  (grant_statement
+    (grant_role_statement
+      (kw_grant)
+      role: (qualified_name
+        (identifier))
+      (kw_to)
+      grantee: (qualified_name
+        (identifier))
+      (semicolon)))
+  (grant_statement
+    (grant_privilege_statement
+      (kw_grant)
+      privilege: (privilege_spec
+        (kw_execute))
+      (kw_on)
+      securable: (securable_spec
+        (kw_function)
+        (qualified_name
+          (qualified_name
+            (identifier))
+          (dot)
+          (identifier)))
+      (kw_to)
+      grantee: (qualified_name
+        (identifier))
+      (semicolon)))
+  (grant_statement
+    (grant_privilege_statement
+      (kw_grant)
+      privilege: (privilege_spec
+        (qualified_name
+          (qualified_name
+            (identifier))
+          (dot)
+          (kw_role)))
+      (kw_on)
+      securable: (securable_spec
+        (qualified_name
+          (qualified_name
+            (identifier))
+          (dot)
+          (kw_table)))
+      (kw_to)
+      grantee: (qualified_name
+        (qualified_name
+          (identifier))
+        (dot)
+        (identifier))
+      (semicolon))))
+
+====================
+revoke privilege
+====================
+
+REVOKE EXECUTE ON TYPE app.account FROM bot;
+
+---
+
+(source_file
+  (revoke_statement
+    (kw_revoke)
+    privilege: (privilege_spec
+      (kw_execute))
+    (kw_on)
+    securable: (securable_spec
+      (kw_type)
+      (qualified_name
+        (qualified_name
+          (identifier))
+        (dot)
+        (identifier)))
+    (kw_from)
+    grantee: (qualified_name
+      (identifier))
+    (semicolon)))
+
