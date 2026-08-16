@@ -1,71 +1,71 @@
 {
-  "comments": {
-    "lineComment": "--",
-    "blockComment": [
-      "/*",
-      "*/"
-    ]
-  },
-  "brackets": [
-    [
-      "{",
-      "}"
+    "comments": {
+        "lineComment": "--",
+        "blockComment": [
+            "/*",
+            "*/"
+        ]
+    },
+    "brackets": [
+        [
+            "{",
+            "}"
+        ],
+        [
+            "[",
+            "]"
+        ],
+        [
+            "(",
+            ")"
+        ]
     ],
-    [
-      "[",
-      "]"
+    "autoClosingPairs": [
+        {
+            "open": "{",
+            "close": "}"
+        },
+        {
+            "open": "[",
+            "close": "]"
+        },
+        {
+            "open": "(",
+            "close": ")"
+        },
+        {
+            "open": "'",
+            "close": "'"
+        },
+        {
+            "open": "\"",
+            "close": "\""
+        }
     ],
-    [
-      "(",
-      ")"
-    ]
-  ],
-  "autoClosingPairs": [
-    {
-      "open": "{",
-      "close": "}"
-    },
-    {
-      "open": "[",
-      "close": "]"
-    },
-    {
-      "open": "(",
-      "close": ")"
-    },
-    {
-      "open": "'",
-      "close": "'"
-    },
-    {
-      "open": "\"",
-      "close": "\""
+    "surroundingPairs": [
+        [
+            "{",
+            "}"
+        ],
+        [
+            "[",
+            "]"
+        ],
+        [
+            "(",
+            ")"
+        ],
+        [
+            "'",
+            "'"
+        ],
+        [
+            "\"",
+            "\""
+        ]
+    ],
+    "indentationRules": {
+        "increaseIndentPattern": "^\\s*(?:BEGIN|CASE|ELSE|ELSIF|IF|LOOP|WHEN)\\b.*$",
+        "decreaseIndentPattern": "^\\s*(?:END|ELSE|ELSIF)\\b.*$"
     }
-  ],
-  "surroundingPairs": [
-    [
-      "{",
-      "}"
-    ],
-    [
-      "[",
-      "]"
-    ],
-    [
-      "(",
-      ")"
-    ],
-    [
-      "'",
-      "'"
-    ],
-    [
-      "\"",
-      "\""
-    ]
-  ],
-  "indentationRules": {
-    "increaseIndentPattern": "^\\s*(?:BEGIN|CASE|ELSE|ELSIF|IF|LOOP|WHEN)\\b.*$",
-    "decreaseIndentPattern": "^\\s*(?:END|ELSE|ELSIF)\\b.*$"
-  }
 }
