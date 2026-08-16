@@ -4,24 +4,30 @@ use std::collections::{BTreeMap, BTreeSet, HashSet};
 mod functions;
 
 use orna_core::{
-    CatalogueRevisionId, ExpressionId, FieldId, SchemaId, SourceBundleId, SourceRevisionId,
-    SourceUnitId, StandardLibraryRevisionId, TypeBindingId, TypeId,
+    CatalogueRevisionId, ExpressionId, FieldId, FunctionId, FunctionRevisionId, ParameterId,
+    SchemaId, SourceBundleId, SourceRevisionId, SourceUnitId, StandardLibraryRevisionId,
+    TypeBindingId, TypeId,
     canonical_hash::{
         artifact_payload_digest, catalogue_digest_with_context, source_bundle_digest,
         source_revision_digest, source_unit_content_digest, verify_standard_library_snapshot,
+        verify_standard_library_v2_snapshot,
     },
     catalogue::{
-        CatalogueSnapshot, EnumTypeDefinition, FieldDefinition, ObjectTypeDefinition,
-        OnDeleteAction, PreludeTypeName, QualifiedSemanticName, RecordValueFieldDefinition,
-        RecordValueTypeDefinition, SchemaDefinition, TypeBinding, TypeBindingKind,
-        ValueTypeDefinition, ValueTypeKind, ValueTypeMutability, ValueTypePersistence,
+        CatalogueSnapshot, EnumTypeDefinition, FieldDefinition, FunctionDefinition, FunctionDomain,
+        FunctionReturn, FunctionSecurity, FunctionTransaction, FunctionVolatility,
+        ObjectTypeDefinition, OnDeleteAction, ParameterDefinition, PreludeTypeName,
+        QualifiedSemanticName, RecordValueFieldDefinition, RecordValueTypeDefinition,
+        SchemaDefinition, TypeBinding, TypeBindingKind, ValueTypeDefinition, ValueTypeKind,
+        ValueTypeMutability, ValueTypePersistence,
     },
     revision::{
         ActiveDatabaseRevision, ActiveDatabaseRevisionInput, ActiveRevisionContent,
         CatalogueHashContext, CatalogueHashVersion, DefinitionIdentity, DefinitionOrigin,
-        ExpressionArtifact, RevisionPair, Sha256Digest, SourceOrigin, StandardLibraryDigestVersion,
-        StandardLibrarySnapshot, StoredSourceRevision, StoredSourceUnit,
-        VerifiedStandardLibrarySnapshot,
+        DefinitionReference, DefinitionReferenceKind, DefinitionReferenceTarget,
+        ExecutableArtifact, ExecutableArtifactKind, ExpressionArtifact, FunctionRevisionRecord,
+        FunctionSemanticHashVersion, RevisionPair, Sha256Digest, SourceOrigin, StandardExecutable,
+        StandardLibraryDigestVersion, StandardLibrarySnapshot, StoredSourceRevision,
+        StoredSourceUnit, VerifiedStandardLibrarySnapshot,
     },
     types::{ResolvedType, StandardScalar, TypeDescriptor},
 };
@@ -32,7 +38,7 @@ use crate::{
     bootstrap::require_current_migrations,
     decode::{
         DurableRecord, digest_bytes, exact_enum, identity_bytes, optional_identity_bytes,
-        u32_from_i64,
+        u32_from_i64, u64_from_i64,
     },
     physical::{establish_trusted_search_path, verify_physical_catalogue},
 };
@@ -96,6 +102,26 @@ struct RecoveredStandardEnumType {
 
 struct RecoveredStandardTypeBinding {
     binding: TypeBinding,
+    origin: DefinitionOrigin,
+}
+
+struct RecoveredStandardFunction {
+    schema: SchemaId,
+    id: FunctionId,
+    name: QualifiedSemanticName,
+    domain: FunctionDomain,
+    security: FunctionSecurity,
+    transaction: Option<FunctionTransaction>,
+    volatility: FunctionVolatility,
+    return_type: FunctionReturn,
+    current_revision: FunctionRevisionId,
+    origin: DefinitionOrigin,
+}
+
+#[derive(Clone)]
+struct RecoveredStandardParameter {
+    function: FunctionId,
+    definition: ParameterDefinition,
     origin: DefinitionOrigin,
 }
 
@@ -713,17 +739,44 @@ async fn load_verified_standard_library(
     }
 
     let (catalogue, origins) = load_standard_catalogue(transaction, &header).await?;
-    let snapshot = StandardLibrarySnapshot::new(
-        header.revision,
-        header.digest_version,
-        source,
-        header.language_version,
-        catalogue,
-        origins,
-        header.digest,
-    )
-    .map_err(PostgresKernelError::RevisionInvariant)?;
-    verify_standard_library_snapshot(snapshot).map_err(PostgresKernelError::CanonicalHash)
+    match header.digest_version {
+        StandardLibraryDigestVersion::Version1 => {
+            require_no_standard_executable_rows(transaction, header.revision).await?;
+            let snapshot = StandardLibrarySnapshot::new(
+                header.revision,
+                header.digest_version,
+                source,
+                header.language_version,
+                catalogue,
+                origins,
+                header.digest,
+            )
+            .map_err(PostgresKernelError::RevisionInvariant)?;
+            verify_standard_library_snapshot(snapshot).map_err(PostgresKernelError::CanonicalHash)
+        }
+        StandardLibraryDigestVersion::Version2 => {
+            let executables =
+                load_standard_executable_facts(transaction, header.revision, &catalogue).await?;
+            let snapshot = StandardLibrarySnapshot::new_with_executables(
+                header.revision,
+                header.digest_version,
+                source,
+                header.language_version,
+                catalogue,
+                executables,
+                origins,
+                header.digest,
+            )
+            .map_err(PostgresKernelError::RevisionInvariant)?;
+            verify_standard_library_v2_snapshot(snapshot)
+                .map_err(PostgresKernelError::CanonicalHash)
+        }
+        _ => Err(DurableRecord::new(
+            "_orna_kernel.standard_library_revisions",
+            header.revision.canonical(),
+        )
+        .invariant("standard library digest version is unsupported")),
+    }
 }
 
 async fn load_standard_header(
@@ -959,13 +1012,21 @@ async fn load_standard_catalogue(
     let value_types = load_standard_value_types(transaction, header.revision).await?;
     let enum_types = load_standard_enum_types(transaction, header.revision).await?;
     let bindings = load_standard_type_bindings(transaction, header.revision).await?;
+    let functions = load_standard_functions(transaction, header.revision).await?;
+    let parameters = load_standard_parameters(transaction, header.revision).await?;
 
     let schema_names = schemas
         .iter()
         .map(|schema| (schema.definition.id(), schema.definition.name().clone()))
         .collect::<BTreeMap<_, _>>();
-    let mut origins =
-        Vec::with_capacity(schemas.len() + value_types.len() + enum_types.len() + bindings.len());
+    let mut origins = Vec::with_capacity(
+        schemas.len()
+            + value_types.len()
+            + enum_types.len()
+            + bindings.len()
+            + functions.len()
+            + parameters.len(),
+    );
     let schemas = schemas
         .into_iter()
         .map(|schema| {
@@ -1016,13 +1077,54 @@ async fn load_standard_catalogue(
             binding.binding
         })
         .collect::<Vec<_>>();
-    let catalogue = CatalogueSnapshot::new_with_enum_types(
+    let function_definitions = functions
+        .into_iter()
+        .map(|function| {
+            let record = DurableRecord::new(
+                "_orna_kernel.standard_catalogue_functions",
+                function.id.canonical(),
+            );
+            require_standard_definition_schema(
+                &record,
+                &schema_names,
+                function.schema,
+                &function.name,
+                "standard function schema identity must identify a recovered schema",
+                "standard function qualified name must contain a schema namespace",
+                "standard function schema identity must equal the schema named by its namespace",
+            )?;
+            let recovered_parameters = parameters.get(&function.id).cloned().unwrap_or_default();
+            let definition = FunctionDefinition::new(
+                function.id,
+                function.name,
+                function.domain,
+                recovered_parameters
+                    .iter()
+                    .map(|parameter| parameter.definition.clone())
+                    .collect(),
+                function.return_type,
+                function.current_revision,
+                function.security,
+                function.transaction,
+                function.volatility,
+            );
+            origins.push(function.origin);
+            origins.extend(
+                recovered_parameters
+                    .into_iter()
+                    .map(|parameter| parameter.origin),
+            );
+            Ok(definition)
+        })
+        .collect::<Result<Vec<_>, PostgresKernelError>>()?;
+    let catalogue = CatalogueSnapshot::new_with_functions_and_enum_types(
         header.catalogue,
         schemas,
         Vec::new(),
         definitions,
         enum_definitions,
         bindings,
+        function_definitions,
     )
     .map_err(PostgresKernelError::CatalogueSnapshot)?;
     Ok((catalogue, origins))
@@ -1050,6 +1152,1014 @@ fn require_standard_definition_schema(
         return Err(record.invariant(mismatch_rule));
     }
     Ok(())
+}
+
+/// A version-one standard revision must have no row in any new executable
+/// relation. The version-one digest contract covers no executable fact, so
+/// stray executable rows would otherwise survive recovery unverified.
+async fn require_no_standard_executable_rows(
+    transaction: &Transaction<'_>,
+    standard: StandardLibraryRevisionId,
+) -> Result<(), PostgresKernelError> {
+    const EXECUTABLE_RELATIONS: &[&str] = &[
+        "standard_catalogue_functions",
+        "standard_catalogue_function_parameters",
+        "standard_function_revisions",
+        "standard_function_artifacts",
+        "standard_definition_references",
+    ];
+    for relation in EXECUTABLE_RELATIONS {
+        let rows = transaction
+            .query(
+                &format!(
+                    "SELECT 1 FROM _orna_kernel.{relation}
+                     WHERE standard_library_revision_id = $1 LIMIT 1"
+                ),
+                &[&standard.to_bytes().to_vec()],
+            )
+            .await
+            .map_err(PostgresKernelError::Database)?;
+        if !rows.is_empty() {
+            return Err(DurableRecord::new(relation, standard.canonical())
+                .invariant("a version-one standard revision must have no executable rows"));
+        }
+    }
+    Ok(())
+}
+
+async fn load_standard_functions(
+    transaction: &Transaction<'_>,
+    standard: StandardLibraryRevisionId,
+) -> Result<Vec<RecoveredStandardFunction>, PostgresKernelError> {
+    const RELATION: &str = "_orna_kernel.standard_catalogue_functions";
+    let rows = transaction
+        .query(
+            "SELECT standard_library_revision_id, function_id, schema_id, name_parts,
+                    domain, security_mode, transaction_mode, volatility, return_shape,
+                    return_type_kind, return_scalar_type, return_value_type_id,
+                    current_function_revision_id, source_unit_id, source_start, source_end
+             FROM _orna_kernel.standard_catalogue_functions
+             WHERE standard_library_revision_id = $1
+             ORDER BY function_id",
+            &[&standard.to_bytes().to_vec()],
+        )
+        .await
+        .map_err(PostgresKernelError::Database)?;
+    let mut functions = Vec::with_capacity(rows.len());
+    for (index, row) in rows.iter().enumerate() {
+        functions.push(decode_standard_function(row, index, standard, RELATION)?);
+    }
+    Ok(functions)
+}
+
+fn decode_standard_function(
+    row: &Row,
+    index: usize,
+    expected_standard: StandardLibraryRevisionId,
+    relation: &'static str,
+) -> Result<RecoveredStandardFunction, PostgresKernelError> {
+    let row_record = DurableRecord::new(relation, format!("row={index}"));
+    require_standard_library_revision(row, &row_record, expected_standard, "function")?;
+    let id = FunctionId::from_bytes(identity_bytes(
+        row_record.column(
+            row,
+            "function_id",
+            "standard function identity must be 16 bytes",
+        )?,
+        &row_record,
+        "standard function identity must be 16 bytes",
+    )?);
+    let record = DurableRecord::new(relation, id.canonical());
+    let schema = SchemaId::from_bytes(identity_bytes(
+        record.column(
+            row,
+            "schema_id",
+            "standard function schema identity must be 16 bytes",
+        )?,
+        &record,
+        "standard function schema identity must be 16 bytes",
+    )?);
+    let name_parts: Vec<String> = record.column(
+        row,
+        "name_parts",
+        "standard function name parts must be an exact PostgreSQL text array",
+    )?;
+    let name = QualifiedSemanticName::new(name_parts).map_err(|_| {
+        record.invariant("standard function name parts must form one exact semantic name")
+    })?;
+    let domain_name: String =
+        record.column(row, "domain", "standard function domain must decode")?;
+    let domain = exact_enum(
+        &domain_name,
+        &[
+            ("server", FunctionDomain::Server),
+            ("client", FunctionDomain::Client),
+        ],
+        &record,
+        "standard function domain must be server or client",
+    )?;
+    let security_name: String = record.column(
+        row,
+        "security_mode",
+        "standard function security must decode",
+    )?;
+    let security = exact_enum(
+        &security_name,
+        &[
+            ("invoker", FunctionSecurity::Invoker),
+            ("definer", FunctionSecurity::Definer),
+        ],
+        &record,
+        "standard function security must be invoker or definer",
+    )?;
+    let transaction_name: Option<String> = record.column(
+        row,
+        "transaction_mode",
+        "standard function transaction mode must decode",
+    )?;
+    let transaction = transaction_name
+        .map(|name| {
+            exact_enum(
+                &name,
+                &[
+                    ("atomic", FunctionTransaction::Atomic),
+                    ("read_only", FunctionTransaction::ReadOnly),
+                ],
+                &record,
+                "standard function transaction mode must be atomic or read_only",
+            )
+        })
+        .transpose()?;
+    let volatility_name: String = record.column(
+        row,
+        "volatility",
+        "standard function volatility must decode",
+    )?;
+    let volatility = exact_enum(
+        &volatility_name,
+        &[
+            ("immutable", FunctionVolatility::Immutable),
+            ("stable", FunctionVolatility::Stable),
+            ("volatile", FunctionVolatility::Volatile),
+        ],
+        &record,
+        "standard function volatility must be immutable, stable, or volatile",
+    )?;
+    let return_type = decode_standard_function_return(row, &record)?;
+    let current_revision = FunctionRevisionId::from_bytes(identity_bytes(
+        record.column(
+            row,
+            "current_function_revision_id",
+            "standard function current revision identity must be 16 bytes",
+        )?,
+        &record,
+        "standard function current revision identity must be 16 bytes",
+    )?);
+    let origin = decode_origin(row, &record, DefinitionIdentity::Function(id))?;
+    Ok(RecoveredStandardFunction {
+        schema,
+        id,
+        name,
+        domain,
+        security,
+        transaction,
+        volatility,
+        return_type,
+        current_revision,
+        origin,
+    })
+}
+
+fn decode_standard_function_return(
+    row: &Row,
+    record: &DurableRecord,
+) -> Result<FunctionReturn, PostgresKernelError> {
+    let shape: String = record.column(
+        row,
+        "return_shape",
+        "standard function return shape must decode",
+    )?;
+    if shape != "single" {
+        return Err(record.invariant(
+            "standard catalogue functions with ROWS results are not supported by standard persistence",
+        ));
+    }
+    let kind: Option<String> = record.column(
+        row,
+        "return_type_kind",
+        "standard function return type kind must decode",
+    )?;
+    let scalar: Option<String> = record.column(
+        row,
+        "return_scalar_type",
+        "standard function return scalar type must decode",
+    )?;
+    let value_type: Option<Vec<u8>> = record.column(
+        row,
+        "return_value_type_id",
+        "standard function return value type identity must be null or exact bytes",
+    )?;
+    let resolved = decode_standard_resolved_type(kind, scalar, value_type, None, true, record)?;
+    Ok(FunctionReturn::Single(resolved))
+}
+
+/// Decodes the closed scalar-or-value resolved type persisted for standard
+/// catalogue functions and parameters. `catalogue` is required for the value
+/// shape so the type must identify one standard value type.
+fn decode_standard_resolved_type(
+    kind: Option<String>,
+    scalar_name: Option<String>,
+    value_type: Option<Vec<u8>>,
+    catalogue: Option<&CatalogueSnapshot>,
+    allow_void: bool,
+    record: &DurableRecord,
+) -> Result<ResolvedType, PostgresKernelError> {
+    match kind.as_deref() {
+        Some("scalar") => {
+            if value_type.is_some() {
+                return Err(record.invariant(
+                    "standard resolved type columns must form one exact scalar or value tuple",
+                ));
+            }
+            let Some(scalar_name) = scalar_name else {
+                return Err(record.invariant(
+                    "standard resolved type columns must form one exact scalar or value tuple",
+                ));
+            };
+            let scalar = exact_enum(
+                &scalar_name,
+                &[
+                    ("boolean", StandardScalar::Boolean),
+                    ("integer", StandardScalar::Integer),
+                    ("bigint", StandardScalar::BigInt),
+                    ("float", StandardScalar::Float),
+                    ("decimal", StandardScalar::Decimal),
+                    (
+                        "character_large_object",
+                        StandardScalar::CharacterLargeObject,
+                    ),
+                    ("binary_large_object", StandardScalar::BinaryLargeObject),
+                    ("uuid", StandardScalar::Uuid),
+                    ("date", StandardScalar::Date),
+                    ("time", StandardScalar::Time),
+                    ("timestamp", StandardScalar::Timestamp),
+                    ("duration", StandardScalar::Duration),
+                    ("void", StandardScalar::Void),
+                ],
+                record,
+                "standard resolved scalar type must be one exact supported scalar",
+            )?;
+            if scalar == StandardScalar::Void && !allow_void {
+                return Err(record.invariant(
+                    "void is valid only as a SINGLE function return, never as a parameter",
+                ));
+            }
+            Ok(ResolvedType::scalar(scalar))
+        }
+        Some("value") => {
+            if scalar_name.is_some() {
+                return Err(record.invariant(
+                    "standard resolved type columns must form one exact scalar or value tuple",
+                ));
+            }
+            let Some(bytes) = value_type else {
+                return Err(record.invariant(
+                    "standard resolved type columns must form one exact scalar or value tuple",
+                ));
+            };
+            let id = TypeId::from_bytes(identity_bytes(
+                bytes,
+                record,
+                "standard resolved value type identity must be 16 bytes",
+            )?);
+            if catalogue.is_none_or(|catalogue| catalogue.value_type_by_id(id).is_none()) {
+                return Err(record.invariant(
+                    "standard resolved value type must identify one standard catalogue value type",
+                ));
+            }
+            Ok(ResolvedType::value(id))
+        }
+        _ => Err(record.invariant("standard resolved type kind must be scalar or value")),
+    }
+}
+
+async fn load_standard_parameters(
+    transaction: &Transaction<'_>,
+    standard: StandardLibraryRevisionId,
+) -> Result<BTreeMap<FunctionId, Vec<RecoveredStandardParameter>>, PostgresKernelError> {
+    const RELATION: &str = "_orna_kernel.standard_catalogue_function_parameters";
+    let rows = transaction
+        .query(
+            "SELECT standard_library_revision_id, function_id, parameter_id, name, ordinal,
+                    type_kind, scalar_type, value_type_id,
+                    source_unit_id, source_start, source_end
+             FROM _orna_kernel.standard_catalogue_function_parameters
+             WHERE standard_library_revision_id = $1
+             ORDER BY function_id, ordinal, parameter_id",
+            &[&standard.to_bytes().to_vec()],
+        )
+        .await
+        .map_err(PostgresKernelError::Database)?;
+    let mut parameters = BTreeMap::<FunctionId, Vec<RecoveredStandardParameter>>::new();
+    for (index, row) in rows.iter().enumerate() {
+        let parameter = decode_standard_parameter(row, index, standard, RELATION)?;
+        parameters
+            .entry(parameter.function)
+            .or_default()
+            .push(parameter);
+    }
+    Ok(parameters)
+}
+
+fn decode_standard_parameter(
+    row: &Row,
+    index: usize,
+    expected_standard: StandardLibraryRevisionId,
+    relation: &'static str,
+) -> Result<RecoveredStandardParameter, PostgresKernelError> {
+    let row_record = DurableRecord::new(relation, format!("row={index}"));
+    require_standard_library_revision(row, &row_record, expected_standard, "parameter")?;
+    let function = FunctionId::from_bytes(identity_bytes(
+        row_record.column(
+            row,
+            "function_id",
+            "standard parameter owner identity must be 16 bytes",
+        )?,
+        &row_record,
+        "standard parameter owner identity must be 16 bytes",
+    )?);
+    let id = ParameterId::from_bytes(identity_bytes(
+        row_record.column(
+            row,
+            "parameter_id",
+            "standard parameter identity must be 16 bytes",
+        )?,
+        &row_record,
+        "standard parameter identity must be 16 bytes",
+    )?);
+    let record = DurableRecord::new(
+        relation,
+        format!(
+            "function={} parameter={}",
+            function.canonical(),
+            id.canonical()
+        ),
+    );
+    let name: String = record.column(
+        row,
+        "name",
+        "standard parameter name must be PostgreSQL text",
+    )?;
+    if name.is_empty() {
+        return Err(record.invariant("standard parameter name must not be empty"));
+    }
+    let ordinal = u32_from_i64(
+        record.column(row, "ordinal", "standard parameter ordinal must fit u32")?,
+        &record,
+        "standard parameter ordinal must fit u32",
+    )?;
+    let kind: Option<String> =
+        record.column(row, "type_kind", "standard parameter type kind must decode")?;
+    let scalar: Option<String> = record.column(
+        row,
+        "scalar_type",
+        "standard parameter scalar type must decode",
+    )?;
+    let value_type: Option<Vec<u8>> = record.column(
+        row,
+        "value_type_id",
+        "standard parameter value type identity must be null or exact bytes",
+    )?;
+    let resolved = decode_standard_resolved_type(kind, scalar, value_type, None, false, &record)?;
+    let origin = decode_origin(
+        row,
+        &record,
+        DefinitionIdentity::Parameter {
+            owner: function,
+            parameter: id,
+        },
+    )?;
+    Ok(RecoveredStandardParameter {
+        function,
+        definition: ParameterDefinition::new(id, name, ordinal, resolved, None),
+        origin,
+    })
+}
+
+/// Reconstructs the complete version-2 standard executable sequence: the
+/// immutable function revisions with their artifacts and the ordered
+/// definition references, aligned one-to-one with the catalogue functions.
+async fn load_standard_executable_facts(
+    transaction: &Transaction<'_>,
+    standard: StandardLibraryRevisionId,
+    catalogue: &CatalogueSnapshot,
+) -> Result<Vec<StandardExecutable>, PostgresKernelError> {
+    let artifacts = load_standard_artifacts(transaction, standard).await?;
+    let revisions = load_standard_revisions(transaction, standard, &artifacts).await?;
+    let references = load_standard_references(transaction, standard, &revisions).await?;
+    build_standard_executables(catalogue, revisions, references)
+}
+
+async fn load_standard_artifacts(
+    transaction: &Transaction<'_>,
+    standard: StandardLibraryRevisionId,
+) -> Result<BTreeMap<FunctionRevisionId, Vec<ExecutableArtifact>>, PostgresKernelError> {
+    const RELATION: &str = "_orna_kernel.standard_function_artifacts";
+    let rows = transaction
+        .query(
+            "SELECT standard_library_revision_id, function_revision_id, artifact_kind,
+                    format, format_version::bigint AS format_version, payload, content_hash,
+                    hash_algorithm, hash_contract_version
+             FROM _orna_kernel.standard_function_artifacts
+             WHERE standard_library_revision_id = $1
+             ORDER BY function_revision_id, artifact_kind",
+            &[&standard.to_bytes().to_vec()],
+        )
+        .await
+        .map_err(PostgresKernelError::Database)?;
+    let mut artifacts = BTreeMap::<FunctionRevisionId, Vec<ExecutableArtifact>>::new();
+    for (index, row) in rows.iter().enumerate() {
+        let (revision, artifact) = decode_standard_artifact(row, index, standard, RELATION)?;
+        artifacts.entry(revision).or_default().push(artifact);
+    }
+    Ok(artifacts)
+}
+
+fn decode_standard_artifact(
+    row: &Row,
+    index: usize,
+    expected_standard: StandardLibraryRevisionId,
+    relation: &'static str,
+) -> Result<(FunctionRevisionId, ExecutableArtifact), PostgresKernelError> {
+    let row_record = DurableRecord::new(relation, format!("row={index}"));
+    require_standard_library_revision(row, &row_record, expected_standard, "function artifact")?;
+    let revision = FunctionRevisionId::from_bytes(identity_bytes(
+        row_record.column(
+            row,
+            "function_revision_id",
+            "standard artifact function revision identity must be 16 bytes",
+        )?,
+        &row_record,
+        "standard artifact function revision identity must be 16 bytes",
+    )?);
+    let record = DurableRecord::new(relation, revision.canonical());
+    require_hash_contract(
+        row,
+        &record,
+        "hash_algorithm",
+        "hash_contract_version",
+        "standard function artifact hash algorithm must be sha256",
+        "standard function artifact hash contract version must be 1",
+    )?;
+    let kind_name: String =
+        record.column(row, "artifact_kind", "standard artifact kind must decode")?;
+    let kind = exact_enum(
+        &kind_name,
+        &[
+            ("server_plan", ExecutableArtifactKind::Server),
+            ("client_bytecode", ExecutableArtifactKind::Client),
+        ],
+        &record,
+        "standard artifact kind must be server_plan or client_bytecode",
+    )?;
+    let format: String = record.column(row, "format", "standard artifact format must be text")?;
+    let version = u32_from_i64(
+        record.column(
+            row,
+            "format_version",
+            "standard artifact format version must fit u32",
+        )?,
+        &record,
+        "standard artifact format version must fit u32",
+    )?;
+    let payload: Vec<u8> = record.column(
+        row,
+        "payload",
+        "standard artifact payload must be exact bytes",
+    )?;
+    let content_hash = Sha256Digest::from_bytes(digest_bytes(
+        record.column(
+            row,
+            "content_hash",
+            "standard artifact content hash must be 32 bytes",
+        )?,
+        &record,
+        "standard artifact content hash must be 32 bytes",
+    )?);
+    let computed = artifact_payload_digest(&payload).map_err(PostgresKernelError::CanonicalHash)?;
+    if computed != content_hash {
+        return Err(record.invariant("standard artifact digest must match its exact payload"));
+    }
+    let artifact = ExecutableArtifact::new(kind, format, version, payload, content_hash)
+        .map_err(PostgresKernelError::RevisionInvariant)?;
+    Ok((revision, artifact))
+}
+
+async fn load_standard_revisions(
+    transaction: &Transaction<'_>,
+    standard: StandardLibraryRevisionId,
+    artifacts: &BTreeMap<FunctionRevisionId, Vec<ExecutableArtifact>>,
+) -> Result<Vec<FunctionRevisionRecord>, PostgresKernelError> {
+    const RELATION: &str = "_orna_kernel.standard_function_revisions";
+    let rows = transaction
+        .query(
+            "SELECT standard_library_revision_id, function_revision_id, function_id,
+                    revision_number, declaration_source_unit_id, declaration_source_start,
+                    declaration_source_end, declaration_content_hash, semantic_hash,
+                    semantic_hash_version, language_version, hash_contract_version
+             FROM _orna_kernel.standard_function_revisions
+             WHERE standard_library_revision_id = $1
+             ORDER BY function_revision_id",
+            &[&standard.to_bytes().to_vec()],
+        )
+        .await
+        .map_err(PostgresKernelError::Database)?;
+    let mut revisions = Vec::with_capacity(rows.len());
+    for (index, row) in rows.iter().enumerate() {
+        revisions.push(decode_standard_revision(
+            row, index, standard, RELATION, artifacts,
+        )?);
+    }
+    Ok(revisions)
+}
+
+fn decode_standard_revision(
+    row: &Row,
+    index: usize,
+    expected_standard: StandardLibraryRevisionId,
+    relation: &'static str,
+    artifacts: &BTreeMap<FunctionRevisionId, Vec<ExecutableArtifact>>,
+) -> Result<FunctionRevisionRecord, PostgresKernelError> {
+    let row_record = DurableRecord::new(relation, format!("row={index}"));
+    require_standard_library_revision(row, &row_record, expected_standard, "function revision")?;
+    let id = FunctionRevisionId::from_bytes(identity_bytes(
+        row_record.column(
+            row,
+            "function_revision_id",
+            "standard function revision identity must be 16 bytes",
+        )?,
+        &row_record,
+        "standard function revision identity must be 16 bytes",
+    )?);
+    let record = DurableRecord::new(relation, id.canonical());
+    let contract_version: i16 = record.column(
+        row,
+        "hash_contract_version",
+        "standard function revision hash contract version must be 1",
+    )?;
+    if contract_version != 1 {
+        return Err(record.invariant("standard function revision hash contract version must be 1"));
+    }
+    let function = FunctionId::from_bytes(identity_bytes(
+        record.column(
+            row,
+            "function_id",
+            "standard function revision owner identity must be 16 bytes",
+        )?,
+        &record,
+        "standard function revision owner identity must be 16 bytes",
+    )?);
+    let revision_number = u64_from_i64(
+        record.column(
+            row,
+            "revision_number",
+            "standard function revision number must be a positive bigint",
+        )?,
+        &record,
+        "standard function revision number must be a positive u64",
+    )?;
+    if revision_number == 0 {
+        return Err(record.invariant("standard function revision number must be positive"));
+    }
+    let declaration_origin = decode_required_source_origin_columns(row, &record)?;
+    let declaration_content_hash = Sha256Digest::from_bytes(digest_bytes(
+        record.column(
+            row,
+            "declaration_content_hash",
+            "standard function declaration hash must be 32 bytes",
+        )?,
+        &record,
+        "standard function declaration hash must be 32 bytes",
+    )?);
+    let semantic_hash = Sha256Digest::from_bytes(digest_bytes(
+        record.column(
+            row,
+            "semantic_hash",
+            "standard function semantic hash must be 32 bytes",
+        )?,
+        &record,
+        "standard function semantic hash must be 32 bytes",
+    )?);
+    let semantic_hash_version = decode_durable_version(
+        record.column(
+            row,
+            "semantic_hash_version",
+            "standard function semantic hash version must be a supported smallint",
+        )?,
+        &record,
+        "standard function semantic hash version must be a supported smallint",
+    )?;
+    let semantic_hash_version = FunctionSemanticHashVersion::try_from(semantic_hash_version)
+        .map_err(|_| record.invariant("standard function semantic hash version must be 1 or 2"))?;
+    let language_version: String = record.column(
+        row,
+        "language_version",
+        "standard function language version must be PostgreSQL text",
+    )?;
+    let revision_artifacts = artifacts.get(&id).ok_or_else(|| {
+        record.invariant("standard function revision must own exactly one artifact")
+    })?;
+    if revision_artifacts.len() != 1 {
+        return Err(record.invariant("standard function revision must own exactly one artifact"));
+    }
+    FunctionRevisionRecord::new(
+        function,
+        id,
+        revision_number,
+        declaration_origin,
+        declaration_content_hash,
+        semantic_hash,
+        language_version,
+        revision_artifacts[0].clone(),
+    )
+    .map_err(PostgresKernelError::RevisionInvariant)
+    .map(|revision| revision.with_semantic_hash_version(semantic_hash_version))
+}
+
+fn decode_required_source_origin_columns(
+    row: &Row,
+    record: &DurableRecord,
+) -> Result<SourceOrigin, PostgresKernelError> {
+    let unit = SourceUnitId::from_bytes(identity_bytes(
+        record.column(
+            row,
+            "declaration_source_unit_id",
+            "standard function declaration source unit identity must be 16 bytes",
+        )?,
+        record,
+        "standard function declaration source unit identity must be 16 bytes",
+    )?);
+    let start = u32_from_i64(
+        record.column(
+            row,
+            "declaration_source_start",
+            "standard function declaration source start must fit u32",
+        )?,
+        record,
+        "standard function declaration source start must fit u32",
+    )?;
+    let end = u32_from_i64(
+        record.column(
+            row,
+            "declaration_source_end",
+            "standard function declaration source end must fit u32",
+        )?,
+        record,
+        "standard function declaration source end must fit u32",
+    )?;
+    SourceOrigin::new(unit, start, end).map_err(PostgresKernelError::RevisionInvariant)
+}
+
+async fn load_standard_references(
+    transaction: &Transaction<'_>,
+    standard: StandardLibraryRevisionId,
+    revisions: &[FunctionRevisionRecord],
+) -> Result<Vec<DefinitionReference>, PostgresKernelError> {
+    const RELATION: &str = "_orna_kernel.standard_definition_references";
+    let rows = transaction
+        .query(
+            "SELECT standard_library_revision_id, function_revision_id, ordinal,
+                    target_definition_id, target_kind, target_owner_type_id,
+                    target_owner_function_id, target_standard_library_revision_id,
+                    reference_kind, source_unit_id, source_start, source_end
+             FROM _orna_kernel.standard_definition_references
+             WHERE standard_library_revision_id = $1
+             ORDER BY function_revision_id, ordinal",
+            &[&standard.to_bytes().to_vec()],
+        )
+        .await
+        .map_err(PostgresKernelError::Database)?;
+    let mut references = Vec::with_capacity(rows.len());
+    for (index, row) in rows.iter().enumerate() {
+        references.push(decode_standard_reference(
+            row, index, standard, RELATION, revisions,
+        )?);
+    }
+    Ok(references)
+}
+
+fn decode_standard_reference(
+    row: &Row,
+    index: usize,
+    expected_standard: StandardLibraryRevisionId,
+    relation: &'static str,
+    revisions: &[FunctionRevisionRecord],
+) -> Result<DefinitionReference, PostgresKernelError> {
+    let row_record = DurableRecord::new(relation, format!("row={index}"));
+    require_standard_library_revision(row, &row_record, expected_standard, "definition reference")?;
+    let source_revision = FunctionRevisionId::from_bytes(identity_bytes(
+        row_record.column(
+            row,
+            "function_revision_id",
+            "standard reference source revision identity must be 16 bytes",
+        )?,
+        &row_record,
+        "standard reference source revision identity must be 16 bytes",
+    )?);
+    let ordinal = u32_from_i64(
+        row_record.column(row, "ordinal", "standard reference ordinal must fit u32")?,
+        &row_record,
+        "standard reference ordinal must fit u32",
+    )?;
+    let record = DurableRecord::new(
+        relation,
+        format!("revision={} ordinal={ordinal}", source_revision.canonical()),
+    );
+    let source_function = revisions
+        .iter()
+        .find(|revision| revision.id() == source_revision)
+        .map(FunctionRevisionRecord::function)
+        .ok_or_else(|| {
+            record.invariant(
+                "standard reference source revision must identify one recovered function revision",
+            )
+        })?;
+    let target_bytes = identity_bytes(
+        record.column(
+            row,
+            "target_definition_id",
+            "standard reference target identity must be 16 bytes",
+        )?,
+        &record,
+        "standard reference target identity must be 16 bytes",
+    )?;
+    let owner_type = optional_identity_bytes(
+        record.column(
+            row,
+            "target_owner_type_id",
+            "standard reference target type owner must be null or 16 bytes",
+        )?,
+        &record,
+        "standard reference target type owner must be null or 16 bytes",
+    )?
+    .map(TypeId::from_bytes);
+    let owner_function = optional_identity_bytes(
+        record.column(
+            row,
+            "target_owner_function_id",
+            "standard reference target function owner must be null or 16 bytes",
+        )?,
+        &record,
+        "standard reference target function owner must be null or 16 bytes",
+    )?
+    .map(FunctionId::from_bytes);
+    let target_standard_library_revision = optional_identity_bytes(
+        record.column(
+            row,
+            "target_standard_library_revision_id",
+            "standard reference target standard library revision identity must be null or 16 bytes",
+        )?,
+        &record,
+        "standard reference target standard library revision identity must be null or 16 bytes",
+    )?
+    .map(StandardLibraryRevisionId::from_bytes);
+    let target_kind: String = record.column(
+        row,
+        "target_kind",
+        "standard reference target kind must decode",
+    )?;
+    let target = match (
+        target_kind.as_str(),
+        owner_type,
+        owner_function,
+        target_standard_library_revision,
+    ) {
+        ("object_type", None, None, None) => {
+            DefinitionReferenceTarget::ObjectType(TypeId::from_bytes(target_bytes))
+        }
+        ("field", Some(owner), None, None) => DefinitionReferenceTarget::Field {
+            owner,
+            field: FieldId::from_bytes(target_bytes),
+        },
+        ("function", None, None, None) => {
+            DefinitionReferenceTarget::Function(FunctionId::from_bytes(target_bytes))
+        }
+        ("parameter", None, Some(owner), None) => DefinitionReferenceTarget::Parameter {
+            owner,
+            parameter: ParameterId::from_bytes(target_bytes),
+        },
+        ("value_type", None, None, Some(revision)) if revision == expected_standard => {
+            DefinitionReferenceTarget::ValueType(TypeId::from_bytes(target_bytes))
+        }
+        ("expression", None, None, None) => {
+            DefinitionReferenceTarget::Expression(ExpressionId::from_bytes(target_bytes))
+        }
+        _ => {
+            return Err(record.invariant(
+                "standard reference target kind and owner columns must form one exact owner-qualified target",
+            ));
+        }
+    };
+    let kind_name: String =
+        record.column(row, "reference_kind", "standard reference kind must decode")?;
+    let kind = decode_standard_reference_kind(&kind_name, &record)?;
+    if !standard_reference_kind_matches_target(kind, target) {
+        return Err(record
+            .invariant("standard reference kind must be compatible with its exact target kind"));
+    }
+    let source_origin = decode_standard_reference_origin(row, &record)?;
+    Ok(DefinitionReference::new(
+        source_function,
+        source_revision,
+        ordinal,
+        target,
+        kind,
+        source_origin,
+    ))
+}
+
+fn decode_standard_reference_kind(
+    name: &str,
+    record: &DurableRecord,
+) -> Result<DefinitionReferenceKind, PostgresKernelError> {
+    exact_enum(
+        name,
+        STANDARD_REFERENCE_KINDS,
+        record,
+        "standard reference kind must be one exact supported semantic relation",
+    )
+}
+
+const STANDARD_REFERENCE_KINDS: &[(&str, DefinitionReferenceKind)] = &[
+    ("function_call", DefinitionReferenceKind::FunctionCall),
+    ("named_type", DefinitionReferenceKind::NamedType),
+    ("object_reference", DefinitionReferenceKind::ObjectReference),
+    ("parameter_read", DefinitionReferenceKind::ParameterRead),
+    ("query_object", DefinitionReferenceKind::QueryObject),
+    ("query_field", DefinitionReferenceKind::QueryField),
+    ("expression", DefinitionReferenceKind::Expression),
+    ("write_object", DefinitionReferenceKind::WriteObject),
+    ("write_field", DefinitionReferenceKind::WriteField),
+];
+
+const fn standard_reference_kind_matches_target(
+    kind: DefinitionReferenceKind,
+    target: DefinitionReferenceTarget,
+) -> bool {
+    matches!(
+        (kind, target),
+        (
+            DefinitionReferenceKind::FunctionCall,
+            DefinitionReferenceTarget::Function(_)
+        ) | (
+            DefinitionReferenceKind::NamedType
+                | DefinitionReferenceKind::ObjectReference
+                | DefinitionReferenceKind::QueryObject,
+            DefinitionReferenceTarget::ObjectType(_)
+        ) | (
+            DefinitionReferenceKind::NamedType,
+            DefinitionReferenceTarget::ValueType(_)
+        ) | (
+            DefinitionReferenceKind::ObjectReference
+                | DefinitionReferenceKind::QueryObject
+                | DefinitionReferenceKind::QueryField,
+            DefinitionReferenceTarget::Field { .. }
+        ) | (
+            DefinitionReferenceKind::ParameterRead,
+            DefinitionReferenceTarget::Parameter { .. }
+        ) | (
+            DefinitionReferenceKind::Expression,
+            DefinitionReferenceTarget::Expression(_)
+        ) | (
+            DefinitionReferenceKind::WriteObject,
+            DefinitionReferenceTarget::ObjectType(_)
+        ) | (
+            DefinitionReferenceKind::WriteField,
+            DefinitionReferenceTarget::Field { .. }
+        )
+    )
+}
+
+fn decode_standard_reference_origin(
+    row: &Row,
+    record: &DurableRecord,
+) -> Result<SourceOrigin, PostgresKernelError> {
+    let unit = SourceUnitId::from_bytes(identity_bytes(
+        record.column(
+            row,
+            "source_unit_id",
+            "standard reference source unit identity must be 16 bytes",
+        )?,
+        record,
+        "standard reference source unit identity must be 16 bytes",
+    )?);
+    let start = u32_from_i64(
+        record.column(
+            row,
+            "source_start",
+            "standard reference source start must fit u32",
+        )?,
+        record,
+        "standard reference source start must fit u32",
+    )?;
+    let end = u32_from_i64(
+        record.column(
+            row,
+            "source_end",
+            "standard reference source end must fit u32",
+        )?,
+        record,
+        "standard reference source end must fit u32",
+    )?;
+    SourceOrigin::new(unit, start, end).map_err(PostgresKernelError::RevisionInvariant)
+}
+
+/// Aligns the recovered immutable revisions and references one-to-one with the
+/// recovered standard catalogue functions and validates the complete
+/// executable sequence before the canonical digest is verified.
+fn build_standard_executables(
+    catalogue: &CatalogueSnapshot,
+    revisions: Vec<FunctionRevisionRecord>,
+    references: Vec<DefinitionReference>,
+) -> Result<Vec<StandardExecutable>, PostgresKernelError> {
+    let relation = "_orna_kernel.standard_function_revisions";
+    for revision in &revisions {
+        if catalogue.function_by_id(revision.function()).is_none() {
+            return Err(
+                DurableRecord::new(relation, revision.id().canonical()).invariant(
+                    "standard function revision must identify one standard catalogue function",
+                ),
+            );
+        }
+    }
+    let mut executables = Vec::with_capacity(catalogue.functions().len());
+    let mut consumed_references = 0usize;
+    for function in catalogue.functions() {
+        let mut owned = revisions
+            .iter()
+            .filter(|revision| revision.function() == function.id());
+        let revision = owned.next().ok_or_else(|| {
+            DurableRecord::new(relation, function.id().canonical()).invariant(
+                "standard catalogue function must own exactly one current function revision",
+            )
+        })?;
+        if owned.next().is_some() {
+            return Err(
+                DurableRecord::new(relation, function.id().canonical()).invariant(
+                    "standard catalogue function must own exactly one current function revision",
+                ),
+            );
+        }
+        if revision.id() != function.current_revision() {
+            return Err(DurableRecord::new(relation, revision.id().canonical()).invariant(
+                "standard catalogue function current revision must equal its recovered revision",
+            ));
+        }
+        let mut owned_references = references
+            .iter()
+            .filter(|reference| {
+                reference.source_function() == function.id()
+                    && reference.source_revision() == revision.id()
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        owned_references.sort_by_key(|reference| reference.ordinal());
+        for (index, reference) in owned_references.iter().enumerate() {
+            let expected = u32::try_from(index).map_err(|_| {
+                DurableRecord::new(relation, revision.id().canonical())
+                    .invariant("standard executable reference ordinal count must fit u32")
+            })?;
+            if reference.ordinal() != expected {
+                return Err(DurableRecord::new(
+                    "_orna_kernel.standard_definition_references",
+                    revision.id().canonical(),
+                )
+                .invariant("standard executable reference ordinals must be contiguous from zero"));
+            }
+        }
+        consumed_references += owned_references.len();
+        executables.push(
+            StandardExecutable::new(function.id(), revision.clone(), owned_references)
+                .map_err(PostgresKernelError::RevisionInvariant)?,
+        );
+    }
+    if consumed_references != references.len() {
+        return Err(DurableRecord::new(
+            "_orna_kernel.standard_definition_references",
+            "unowned".to_owned(),
+        )
+        .invariant(
+            "standard definition reference must belong to one recovered executable revision",
+        ));
+    }
+    if executables.len() != 1 {
+        return Err(DurableRecord::new(
+            "_orna_kernel.standard_library_revisions",
+            catalogue.revision().canonical(),
+        )
+        .invariant("version-two standard snapshot must carry exactly one executable"));
+    }
+    Ok(executables)
 }
 
 async fn load_standard_schemas(
@@ -1491,6 +2601,21 @@ fn require_standard_library_revision(
             }
             "enum type" => {
                 "standard enum type must belong to the selected standard library revision"
+            }
+            "function" => {
+                "standard function must belong to the selected standard library revision"
+            }
+            "parameter" => {
+                "standard parameter must belong to the selected standard library revision"
+            }
+            "function revision" => {
+                "standard function revision must belong to the selected standard library revision"
+            }
+            "function artifact" => {
+                "standard function artifact must belong to the selected standard library revision"
+            }
+            "definition reference" => {
+                "standard definition reference must belong to the selected standard library revision"
             }
             _ => "standard type binding must belong to the selected standard library revision",
         }));
