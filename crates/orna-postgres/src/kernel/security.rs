@@ -4,8 +4,8 @@ use orna_client::{
     ClientExecutionResult, evaluate_client_function as evaluate_authorised_client_function,
 };
 use orna_core::{
-    CatalogueRevisionId, FunctionId, InvocationAuditEventId, InvocationId, PrincipalId,
-    SecurityAuditEventId, SourceRevisionId,
+    CatalogueRevisionId, FunctionId, FunctionRevisionId, InvocationAuditEventId, InvocationId,
+    PrincipalId, SecurityAuditEventId, SourceRevisionId, StandardLibraryRevisionId,
     catalogue::FunctionDomain,
     revision::{ActiveDatabaseRevision, RevisionPair},
     security::{
@@ -13,8 +13,8 @@ use orna_core::{
         ExecuteDecision, ExecuteDenial, ExecuteGrant, InvocationTarget,
         LocalPeerAuthenticationError, LocalPeerCredential, Principal, PrincipalKind,
         PrincipalStatus, RoleMembership, SecurityAuditDecision, SecurityAuditDenial,
-        SecurityAuditEvent, SecurityAuditKind, SecurityAuditOutcome, SecuritySnapshot,
-        SessionBindingError,
+        SecurityAuditEvent, SecurityAuditKind, SecurityAuditOutcome, SecurityFunctionTarget,
+        SecuritySnapshot, SessionBindingError, TargetClass,
     },
     system::{SYS_INVOKE_FUNCTION_ID, system_function_by_id},
     value::{FunctionArgument, RecordValue, RuntimeValue},
@@ -25,7 +25,7 @@ use tokio_postgres::{IsolationLevel, Row, Transaction, types::FromSqlOwned};
 use crate::{
     PostgresKernel, PostgresKernelError, RawServerTargetError,
     bootstrap::require_current_migrations,
-    recovery::recover_active_revision,
+    recovery::{load_verified_standard_library, recover_active_revision},
     server_execution::{
         ServerSelectResult, execute_authorised_raw_server_select, execute_authorised_server_select,
         raw_identity_selected_server_select_target_is_selected, raw_server_target_is_unavailable,
@@ -981,9 +981,9 @@ impl PostgresKernel {
             if !grants.contains(&requested_grant) {
                 grants.push(requested_grant);
             }
-            let candidate = SecuritySnapshot::new_with_local_peer_credentials(
+            let candidate = SecuritySnapshot::new_with_function_targets_and_local_peer_credentials(
                 active.pair(),
-                current.functions().collect(),
+                current.function_targets().collect(),
                 current.principals().collect(),
                 current.memberships().collect(),
                 grants,
@@ -1708,21 +1708,198 @@ async fn recover_security_snapshot_for_active(
     transaction: &Transaction<'_>,
     active: &ActiveDatabaseRevision,
 ) -> Result<SecuritySnapshot, PostgresKernelError> {
-    let functions = security_function_targets(active);
+    let function_targets = load_invocation_target_authorities(transaction, active).await?;
     let principals = load_principals(transaction).await?;
     let memberships = load_memberships(transaction).await?;
     let grants = load_grants(transaction).await?;
     let local_peer_credentials = load_local_peer_credentials(transaction).await?;
 
-    SecuritySnapshot::new_with_local_peer_credentials(
+    SecuritySnapshot::new_with_function_targets_and_local_peer_credentials(
         active.pair(),
-        functions,
+        function_targets,
         principals,
         memberships,
         grants,
         local_peer_credentials,
     )
     .map_err(PostgresKernelError::SecuritySnapshot)
+}
+
+/// Loads the closed two-class `EXECUTE` target union for the active catalogue
+/// revision from the durable target-authority relation.
+///
+/// Apply is the only writer of this relation, so every row carries the exact
+/// pinned executable revision and, for a standard target, the exact standard
+/// snapshot revision from the owning application catalogue hash context.
+/// Recovery validates the standard rows against the already-verified active
+/// standard snapshot and fails closed on any absent, duplicated, mismatched,
+/// or unverified standard target.
+async fn load_invocation_target_authorities(
+    transaction: &Transaction<'_>,
+    active: &ActiveDatabaseRevision,
+) -> Result<Vec<SecurityFunctionTarget>, PostgresKernelError> {
+    const RELATION: &str = "_orna_kernel.invocation_target_authorities";
+    let catalogue = active.pair().catalogue().to_bytes().to_vec();
+    let rows = transaction
+        .query(
+            "SELECT authority.function_id AS function_id,
+                    authority.target_class AS target_class,
+                    authority.function_revision_id AS function_revision_id,
+                    authority.standard_library_revision_id AS standard_library_revision_id,
+                    function.current_function_revision_id AS catalogue_current_revision_id
+             FROM _orna_kernel.invocation_target_authorities AS authority
+             LEFT JOIN _orna_kernel.catalogue_functions AS function
+               ON function.catalogue_revision_id = authority.catalogue_revision_id
+              AND function.function_id = authority.function_id
+             WHERE authority.catalogue_revision_id = $1
+             ORDER BY authority.function_id",
+            &[&catalogue],
+        )
+        .await
+        .map_err(PostgresKernelError::Database)?;
+    let mut targets = Vec::with_capacity(rows.len());
+    for row in &rows {
+        let function = FunctionId::from_bytes(exact_id(
+            row,
+            "function_id",
+            "invocation target function identity is not exactly 16 bytes",
+        )?);
+        let executable = FunctionRevisionId::from_bytes(exact_id(
+            row,
+            "function_revision_id",
+            "invocation target function revision identity is not exactly 16 bytes",
+        )?);
+        let class: String = row
+            .try_get("target_class")
+            .map_err(|source| row_decode(RELATION, function.canonical(), "target_class", source))?;
+        let standard: Option<Vec<u8>> =
+            row.try_get("standard_library_revision_id")
+                .map_err(|source| {
+                    row_decode(
+                        RELATION,
+                        function.canonical(),
+                        "standard_library_revision_id",
+                        source,
+                    )
+                })?;
+        let catalogue_revision: Option<Vec<u8>> = row
+            .try_get("catalogue_current_revision_id")
+            .map_err(|source| {
+                row_decode(
+                    RELATION,
+                    function.canonical(),
+                    "catalogue_current_revision_id",
+                    source,
+                )
+            })?;
+        let missing = || PostgresKernelError::DurableInvariant {
+            relation: RELATION,
+            record: function.canonical(),
+            rule: "application invocation targets must resolve in the pinned application catalogue",
+        };
+        match class.as_str() {
+            "application" => {
+                if catalogue_revision.as_deref() != Some(executable.to_bytes().as_slice()) {
+                    return Err(missing());
+                }
+                targets.push(SecurityFunctionTarget::application(function));
+            }
+            "standard" => {
+                if catalogue_revision.is_some() {
+                    // The same function identity cannot be both an application
+                    // catalogue function and a standard executable target.
+                    return Err(PostgresKernelError::DurableInvariant {
+                        relation: RELATION,
+                        record: function.canonical(),
+                        rule: "standard invocation targets must not duplicate an application catalogue function",
+                    });
+                }
+                let bytes = standard.ok_or_else(|| PostgresKernelError::DurableInvariant {
+                    relation: RELATION,
+                    record: function.canonical(),
+                    rule: "standard invocation target must pin an exact standard library revision",
+                })?;
+                let standard_revision = StandardLibraryRevisionId::from_bytes(
+                    bytes.try_into().map_err(|_| PostgresKernelError::DurableInvariant {
+                        relation: RELATION,
+                        record: function.canonical(),
+                        rule: "standard invocation target standard revision identity is not exactly 16 bytes",
+                    })?,
+                );
+                targets.push(SecurityFunctionTarget::verified_standard(
+                    function,
+                    standard_revision,
+                    executable,
+                ));
+            }
+            _ => {
+                return Err(PostgresKernelError::DurableInvariant {
+                    relation: RELATION,
+                    record: function.canonical(),
+                    rule: "invocation target class must be application or standard",
+                });
+            }
+        }
+    }
+    require_authorised_standard_targets(active, &targets)?;
+    Ok(targets)
+}
+
+/// Fails closed unless every standard target resolves exactly once in the
+/// exact verified standard snapshot pinned by the active application revision.
+///
+/// The active catalogue hash context already verified one standard snapshot.
+/// A standard authority row must select that exact snapshot, name a function
+/// present exactly once among its executables, and pin the executable revision
+/// stored by that snapshot. The set of standard targets must also cover every
+/// executable in that snapshot; a missing standard target fails recovery
+/// closed, exactly as a duplicated or unverified one does.
+fn require_authorised_standard_targets(
+    active: &ActiveDatabaseRevision,
+    targets: &[SecurityFunctionTarget],
+) -> Result<(), PostgresKernelError> {
+    const RELATION: &str = "_orna_kernel.invocation_target_authorities";
+    let standard_targets = targets
+        .iter()
+        .filter(|target| target.class() == TargetClass::VerifiedStandard)
+        .collect::<Vec<_>>();
+    let Some(standard) = active.catalogue_hash_context().standard() else {
+        if standard_targets.is_empty() {
+            return Ok(());
+        }
+        return Err(PostgresKernelError::DurableInvariant {
+            relation: RELATION,
+            record: "active catalogue".to_owned(),
+            rule: "standard invocation targets require a pinned verified standard snapshot",
+        });
+    };
+    let standard_revision = standard.revision();
+    let mut executable_functions = standard
+        .executables()
+        .iter()
+        .map(|executable| (executable.function(), executable.revision().id()))
+        .collect::<Vec<_>>();
+    executable_functions.sort_unstable_by_key(|(function, _)| *function);
+    if standard_targets.len() != executable_functions.len() {
+        return Err(PostgresKernelError::DurableInvariant {
+            relation: RELATION,
+            record: "active catalogue".to_owned(),
+            rule: "standard invocation targets must exactly match the pinned verified standard executables",
+        });
+    }
+    for (target, (function, executable)) in standard_targets.iter().zip(executable_functions) {
+        if target.function() != function
+            || target.standard_revision() != Some(standard_revision)
+            || target.executable_revision() != Some(executable)
+        {
+            return Err(PostgresKernelError::DurableInvariant {
+                relation: RELATION,
+                record: target.function().canonical(),
+                rule: "standard invocation target must resolve exactly once in the pinned verified standard snapshot",
+            });
+        }
+    }
+    Ok(())
 }
 
 async fn load_principals(
@@ -2042,6 +2219,17 @@ fn validate_invocation_audit_evidence(
     Ok(())
 }
 
+/// Validates one protected invocation-audit target through the durable
+/// target-authority relation without writing or repairing any row.
+///
+/// The audited `RevisionPair` stays the durable standard pin: an `application`
+/// authority row must resolve the function and its pinned executable revision
+/// in that historical application catalogue, and a `standard` authority row
+/// must resolve the audited function and its executable revision exactly once
+/// in the exact verified standard snapshot pinned by that historical catalogue
+/// revision. An absent authority row, mismatched revision pair, wrong standard
+/// pin, absent or duplicate standard executable, or a row whose class cannot
+/// resolve fails closed.
 async fn require_invocation_audit_target(
     transaction: &Transaction<'_>,
     target: InvocationTarget,
@@ -2052,22 +2240,148 @@ async fn require_invocation_audit_target(
     let catalogue = target.revision().catalogue().to_bytes().to_vec();
     let row = transaction
         .query_opt(
-            "SELECT 1
-             FROM _orna_kernel.catalogue_functions AS function
+            "SELECT authority.target_class AS target_class,
+                    authority.function_revision_id AS pinned_function_revision_id,
+                    authority.standard_library_revision_id AS pinned_standard_library_revision_id,
+                    revision.source_revision_id AS catalogue_source_revision_id,
+                    revision.standard_library_revision_id AS catalogue_standard_library_revision_id,
+                    function.current_function_revision_id AS catalogue_current_function_revision_id
+             FROM _orna_kernel.invocation_target_authorities AS authority
              JOIN _orna_kernel.catalogue_revisions AS revision
-               ON revision.id = function.catalogue_revision_id
-             WHERE function.catalogue_revision_id = $1
-               AND function.function_id = $2
-               AND revision.source_revision_id = $3",
-            &[&catalogue, &function, &source],
+               ON revision.id = authority.catalogue_revision_id
+             LEFT JOIN _orna_kernel.catalogue_functions AS function
+               ON function.catalogue_revision_id = authority.catalogue_revision_id
+              AND function.function_id = authority.function_id
+             WHERE authority.catalogue_revision_id = $1
+               AND authority.function_id = $2",
+            &[&catalogue, &function],
         )
         .await
         .map_err(PostgresKernelError::Database)?;
-    if row.is_none() {
+    let Some(row) = row else {
         return Err(invocation_audit_invariant(
             record,
             "target function and pinned revision must exist together",
         ));
+    };
+    let relation = "_orna_kernel.invocation_audit_events";
+    let catalogue_source: Vec<u8> =
+        row.try_get("catalogue_source_revision_id")
+            .map_err(|source| {
+                row_decode(
+                    relation,
+                    record.to_owned(),
+                    "catalogue_source_revision_id",
+                    source,
+                )
+            })?;
+    if catalogue_source != source {
+        return Err(invocation_audit_invariant(
+            record,
+            "target function and pinned revision must exist together",
+        ));
+    }
+    let class: String = row
+        .try_get("target_class")
+        .map_err(|source| row_decode(relation, record.to_owned(), "target_class", source))?;
+    let pinned_revision: Vec<u8> =
+        row.try_get("pinned_function_revision_id")
+            .map_err(|source| {
+                row_decode(
+                    relation,
+                    record.to_owned(),
+                    "pinned_function_revision_id",
+                    source,
+                )
+            })?;
+    match class.as_str() {
+        "application" => {
+            let current: Option<Vec<u8>> = row
+                .try_get("catalogue_current_function_revision_id")
+                .map_err(|source| {
+                    row_decode(
+                        relation,
+                        record.to_owned(),
+                        "catalogue_current_function_revision_id",
+                        source,
+                    )
+                })?;
+            if current.as_deref() != Some(pinned_revision.as_slice()) {
+                return Err(invocation_audit_invariant(
+                    record,
+                    "target function and pinned revision must exist together",
+                ));
+            }
+        }
+        "standard" => {
+            let pinned_standard: Option<Vec<u8>> = row
+                .try_get("pinned_standard_library_revision_id")
+                .map_err(|source| {
+                    row_decode(
+                        relation,
+                        record.to_owned(),
+                        "pinned_standard_library_revision_id",
+                        source,
+                    )
+                })?;
+            let catalogue_standard: Option<Vec<u8>> = row
+                .try_get("catalogue_standard_library_revision_id")
+                .map_err(|source| {
+                    row_decode(
+                        relation,
+                        record.to_owned(),
+                        "catalogue_standard_library_revision_id",
+                        source,
+                    )
+                })?;
+            if pinned_standard.as_deref() != catalogue_standard.as_deref() {
+                return Err(invocation_audit_invariant(
+                    record,
+                    "target function and pinned revision must exist together",
+                ));
+            }
+            let bytes = catalogue_standard.ok_or_else(|| {
+                invocation_audit_invariant(
+                    record,
+                    "target function and pinned revision must exist together",
+                )
+            })?;
+            let standard_revision =
+                StandardLibraryRevisionId::from_bytes(bytes.try_into().map_err(|_| {
+                    invocation_audit_invariant(
+                        record,
+                        "target function and pinned revision must exist together",
+                    )
+                })?);
+            let standard = load_verified_standard_library(transaction, standard_revision)
+                .await
+                .map_err(|_| {
+                    invocation_audit_invariant(
+                        record,
+                        "target function and pinned revision must exist together",
+                    )
+                })?;
+            let mut matches = standard
+                .executables()
+                .iter()
+                .filter(|executable| executable.function() == target.function())
+                .map(|executable| executable.revision().id().to_bytes().to_vec())
+                .collect::<Vec<_>>();
+            matches.sort_unstable();
+            matches.dedup();
+            if matches.len() != 1 || matches[0] != pinned_revision {
+                return Err(invocation_audit_invariant(
+                    record,
+                    "target function and pinned revision must exist together",
+                ));
+            }
+        }
+        _ => {
+            return Err(invocation_audit_invariant(
+                record,
+                "target function and pinned revision must exist together",
+            ));
+        }
     }
     Ok(())
 }
