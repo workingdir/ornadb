@@ -6,6 +6,14 @@ use std::{
 };
 
 use orna_artifact::client_plan::{OPAQUE_FORMAT_VERSION, OpaqueClientPlan};
+use orna_client::{
+    ClientExecutionError,
+    capability::{
+        LocalCapabilityArgumentSource, LocalCapabilityDeclaration, LocalCapabilityGrant,
+        LocalCapabilityGrantSet, LocalCapabilityName, LocalCapabilityScope,
+    },
+    evaluate_client_function, evaluate_client_function_with_grants,
+};
 use orna_compiler::{
     STD_INVOKE_ECHO_FUNCTION_ID, STD_INVOKE_ECHO_FUNCTION_REVISION_ID,
     STD_INVOKE_ECHO_PARAMETER_ID, StandardApplicationCheckContext, check,
@@ -37,10 +45,10 @@ use orna_core::{
         StoredSourceRevision, VerifiedStandardLibrarySnapshot,
     },
     security::{
-        AuthenticatedSession, ExecuteDenial, ExecuteGrant, InvocationTarget,
+        AuthenticatedSession, ExecuteDecision, ExecuteDenial, ExecuteGrant, InvocationTarget,
         LocalPeerAuthenticationError, LocalPeerCredential, Principal, PrincipalKind,
-        PrincipalStatus, SecurityAuditDenial, SecurityAuditKind, SecurityAuditOutcome,
-        SecurityFunctionTarget, SecuritySnapshot,
+        PrincipalStatus, SecurityAuditDecision, SecurityAuditDenial, SecurityAuditKind,
+        SecurityAuditOutcome, SecurityFunctionTarget, SecuritySnapshot,
     },
     source::{SourceBundle, SourceUnit},
     system::SYS_INVOKE_FUNCTION_ID,
@@ -212,6 +220,8 @@ const RAW_UNIQUE_TEXT_SELECT_SOCKET_SOURCE: &str = "CREATE SCHEMA raw_unique_tex
     SECURITY INVOKER TRANSACTION READ ONLY VOLATILITY STABLE\n\
     AS SELECT REF(person) FROM raw_unique_text_select_socket.person person;\n";
 const RAW_CLIENT_USER: PrincipalId = PrincipalId::from_bytes([0x71; 16]);
+/// The CLIENT-authoritative principal for the ADR 0060 capability gate proof.
+const CAPABILITY_GATE_USER: PrincipalId = PrincipalId::from_bytes([0x6a; 16]);
 const RAW_CLIENT_UNGRANTED_USER: PrincipalId = PrincipalId::from_bytes([0x72; 16]);
 const RAW_CLIENT_STALE_USER: PrincipalId = PrincipalId::from_bytes([0x73; 16]);
 const BOOLEAN_EVENT_CREDIT: u64 = 42;
@@ -730,6 +740,213 @@ async fn dispatches_raw_client_calls_through_security_audit_and_evaluation() -> 
                 }),
             "raw dispatch snapshot race did not bind its audit decision to the recovered revision",
         )?;
+        require_no_database_sessions(&database).await
+    })
+    .await
+}
+
+#[tokio::test]
+#[ignore = "requires the Compose PostgreSQL development service"]
+async fn proves_the_capability_gate_end_to_end() -> TestResult<()> {
+    with_test_database(|database| async move {
+        let kernel = kernel(&database)?;
+
+        // Bootstrap the standard snapshot and install one zero-capability
+        // CLIENT function (`app.enabled`, Boolean body) through the accepted
+        // V1-to-V2 standard pipeline.
+        let (active, _standard_upgrade, client_function, _server_function) =
+            install_raw_client_fixture(&kernel).await?;
+
+        // The CLIENT-authoritative security snapshot grants EXECUTE on the
+        // CLIENT function to a fresh principal. The allow evidence becomes
+        // the `AuthorisedInvocation` the gate evaluates under, exactly as
+        // the client-authoritative ADR 0060 path supplies it.
+        let functions = active
+            .catalogue()
+            .functions()
+            .iter()
+            .map(|function| function.id())
+            .collect::<Vec<_>>();
+        let security = SecuritySnapshot::new(
+            active.pair(),
+            functions,
+            vec![Principal::new(
+                CAPABILITY_GATE_USER,
+                PrincipalKind::User,
+                PrincipalStatus::Active,
+            )],
+            vec![],
+            vec![ExecuteGrant::new(CAPABILITY_GATE_USER, client_function)],
+        )?;
+        let security = kernel.replace_security_snapshot(&security).await?;
+        let session = security.bind_authenticated_session(CAPABILITY_GATE_USER, vec![])?;
+        let authorisation = match security.authorise_execute(
+            &session,
+            InvocationTarget::new(client_function, active.pair()),
+        ) {
+            ExecuteDecision::Allowed(authorisation) => authorisation,
+            ExecuteDecision::Denied(_) => {
+                return Err(failure(
+                    "the live security grant did not allow the CLIENT function",
+                ));
+            }
+        };
+        require(
+            authorisation.target().revision() == active.pair()
+                && authorisation.target().function() == client_function,
+            "the live authorisation did not pin the recovered active CLIENT function",
+        )?;
+
+        // The accepted Boolean CLIENT bodies declare zero capabilities, so
+        // the live proof supplies the gate's requirements as caller-supplied
+        // declarations (ADR 0060 defers durable persistence of requirements
+        // on the function revision). The declared path argument is the
+        // unredacted value; only the qualified name may ever escape the gate.
+        let declaration = LocalCapabilityDeclaration::new(
+            LocalCapabilityName::StdFsRead,
+            LocalCapabilityArgumentSource::Text("/home/bob".to_owned()),
+        );
+
+        // Case A: the granted capability admits evaluation.
+        let grant = LocalCapabilityGrant::new(
+            LocalCapabilityName::StdFsRead,
+            LocalCapabilityScope::path("/home/bob").unwrap(),
+        )
+        .unwrap();
+        let grants = LocalCapabilityGrantSet::from_grants([grant]).unwrap();
+        let result = evaluate_client_function_with_grants(
+            &active,
+            &authorisation,
+            std::slice::from_ref(&declaration),
+            &grants,
+        )
+        .map_err(|source| failure(source.to_string()))?;
+        require(
+            result.value() == &RuntimeValue::Boolean(true),
+            "the granted CLIENT function did not evaluate to its Boolean value",
+        )?;
+
+        // The allowed capability decision is audited with the redacted name.
+        let allowed = SecurityAuditDecision::capability_allowed(
+            &session,
+            InvocationTarget::new(client_function, active.pair()),
+            "std.fs.read",
+        )?;
+        insert_capability_audit_decision(&database, &allowed).await?;
+        let events = kernel.recover_security_audit_events().await?;
+        require(
+            events.last().is_some_and(|event| {
+                event.decision() == &allowed
+                    && event.decision().kind() == SecurityAuditKind::Capability
+                    && event.decision().outcome() == SecurityAuditOutcome::Allowed
+                    && event.decision().session_principal() == Some(CAPABILITY_GATE_USER)
+                    && event.decision().target()
+                        == Some(InvocationTarget::new(client_function, active.pair()))
+                    && event.decision().capability_name() == Some("std.fs.read")
+                    && event.decision().denial().is_none()
+            }),
+            "the allowed capability decision did not persist redacted with its exact evidence",
+        )?;
+
+        // Case B: the missing grant denies closed with only the qualified
+        // name — no path, host, or secret argument value escapes.
+        let empty = LocalCapabilityGrantSet::new();
+        let denied = match evaluate_client_function_with_grants(
+            &active,
+            &authorisation,
+            std::slice::from_ref(&declaration),
+            &empty,
+        ) {
+            Ok(_) => {
+                return Err(failure(
+                    "the missing grant did not deny the CLIENT function",
+                ));
+            }
+            Err(error) => error,
+        };
+        require(
+            matches!(
+                &denied,
+                ClientExecutionError::CapabilityDenied { context, capability }
+                    if context.function() == client_function
+                        && context.pair() == active.pair()
+                        && capability == "std.fs.read"
+            ),
+            "the denied capability did not carry only the qualified name and context",
+        )?;
+        require(
+            !denied.to_string().contains("/home/bob"),
+            "the closed denial leaked the path-scope argument",
+        )?;
+
+        // The denied capability decision is audited with the redacted name.
+        let denied_decision = SecurityAuditDecision::capability_denied(
+            &session,
+            InvocationTarget::new(client_function, active.pair()),
+            "std.fs.read",
+        )?;
+        insert_capability_audit_decision(&database, &denied_decision).await?;
+        let events = kernel.recover_security_audit_events().await?;
+        require(
+            events.last().is_some_and(|event| {
+                event.decision() == &denied_decision
+                    && event.decision().kind() == SecurityAuditKind::Capability
+                    && event.decision().outcome() == SecurityAuditOutcome::Denied
+                    && event.decision().denial()
+                        == Some(SecurityAuditDenial::Capability {
+                            capability: "std.fs.read".to_owned(),
+                        })
+                    && event.decision().session_principal() == Some(CAPABILITY_GATE_USER)
+                    && event.decision().target()
+                        == Some(InvocationTarget::new(client_function, active.pair()))
+                    && event.decision().capability_name() == Some("std.fs.read")
+            }),
+            "the denied capability decision did not persist redacted with its exact evidence",
+        )?;
+
+        // The durable audit rows carry exactly the redacted
+        // `capability:<name>` encoding — never the argument value.
+        let session = database.open().await?;
+        let stored: Vec<String> = session
+            .client()
+            .query(
+                "SELECT denial_reason FROM _orna_kernel.security_audit_events
+                 ORDER BY sequence",
+                &[],
+            )
+            .await?
+            .iter()
+            .map(|row| row.get(0))
+            .collect();
+        session.shutdown().await?;
+        require(
+            stored == ["capability:std.fs.read", "capability:std.fs.read"],
+            "the durable capability audit rows changed their redacted encoding",
+        )?;
+
+        // Case C: the same zero-declaration CLIENT function evaluates
+        // unchanged through the unguarded entry (which delegates with empty
+        // declarations and an empty grant set) and through the granted entry
+        // with an empty declaration list.
+        let unguarded = evaluate_client_function(&active, &authorisation)
+            .map_err(|source| failure(source.to_string()))?;
+        let granted_unguarded =
+            evaluate_client_function_with_grants(&active, &authorisation, &[], &empty)
+                .map_err(|source| failure(source.to_string()))?;
+        require(
+            unguarded.value() == &RuntimeValue::Boolean(true)
+                && granted_unguarded.value() == &RuntimeValue::Boolean(true),
+            "the zero-declaration CLIENT function changed through the gate",
+        )?;
+        let events = kernel.recover_security_audit_events().await?;
+        require(
+            events.len() == 2
+                && events
+                    .iter()
+                    .all(|event| event.decision().kind() == SecurityAuditKind::Capability),
+            "the zero-declaration evaluations appended audit evidence",
+        )?;
+
         require_no_database_sessions(&database).await
     })
     .await
@@ -6524,6 +6741,61 @@ fn raw_call(function: FunctionId) -> RawCall {
         function,
         arguments: vec![],
     }
+}
+
+/// Persists one CLIENT capability audit decision through the same protected
+/// table encoding the kernel's `append_security_audit_event` uses.
+///
+/// The orna-client gate entry is a pure evaluator: it performs no database
+/// operation, so the decision it implies is appended by the enforcement
+/// layer. That layer is the crate-private `append_security_audit_event` (no
+/// public kernel entry appends an arbitrary decision), so the live proof
+/// writes the row directly with the kernel's exact column encoding — the
+/// `capability:<qualified-name>` denial-reason detail for both outcomes —
+/// and recovers it through the public `recover_security_audit_events` entry.
+async fn insert_capability_audit_decision(
+    database: &TestDatabase,
+    decision: &SecurityAuditDecision,
+) -> TestResult<()> {
+    let session = database.open().await?;
+    let event_id = orna_core::SecurityAuditEventId::new();
+    let outcome = match decision.outcome() {
+        SecurityAuditOutcome::Allowed => "allowed",
+        SecurityAuditOutcome::Denied => "denied",
+    };
+    let session_principal = decision
+        .session_principal()
+        .ok_or_else(|| failure("capability audit decision must carry a session principal"))?
+        .to_bytes()
+        .to_vec();
+    let target = decision
+        .target()
+        .ok_or_else(|| failure("capability audit decision must pin its target"))?;
+    let capability = decision
+        .capability_name()
+        .ok_or_else(|| failure("capability audit decision must carry the redacted name"))?;
+    let insertion = session
+        .client()
+        .execute(
+            "INSERT INTO _orna_kernel.security_audit_events
+                 (event_id, event_kind, outcome, session_principal_id,
+                  function_id, source_revision_id, catalogue_revision_id, denial_reason)
+             VALUES ($1, 'capability', $2, $3, $4, $5, $6, $7)",
+            &[
+                &event_id.to_bytes().to_vec(),
+                &outcome,
+                &session_principal,
+                &target.function().to_bytes().to_vec(),
+                &target.revision().source().to_bytes().to_vec(),
+                &target.revision().catalogue().to_bytes().to_vec(),
+                &format!("capability:{capability}"),
+            ],
+        )
+        .await
+        .map_err(Box::<dyn Error + Send + Sync>::from);
+    session.shutdown().await?;
+    insertion?;
+    Ok(())
 }
 
 async fn create_flag_reference(
