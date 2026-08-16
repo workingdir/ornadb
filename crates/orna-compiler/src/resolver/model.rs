@@ -1529,6 +1529,9 @@ impl CheckedStandardLibrary {
     }
 }
 
+/// The fixed ADR 0058 `orna.std/3` standard-library revision identity: `...03`.
+pub const STANDARD_LIBRARY_V3_REVISION_ID: StandardLibraryRevisionId =
+    StandardLibraryRevisionId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x03]);
 /// The fixed ADR 0055 `std.invoke` schema identity: 15 zero bytes then `0x03`.
 pub const STD_INVOKE_SCHEMA_ID: SchemaId =
     SchemaId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x03]);
@@ -1549,6 +1552,9 @@ pub const STD_TYPES_SOURCE_UNIT_ID: SourceUnitId =
 /// The fixed ADR 0055 `std/invoke.orna` source-unit identity: `...03`.
 pub const STD_INVOKE_SOURCE_UNIT_ID: SourceUnitId =
     SourceUnitId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x03]);
+/// The fixed ADR 0058 `std/output.orna` source-unit identity: `...04`.
+pub const STD_OUTPUT_SOURCE_UNIT_ID: SourceUnitId =
+    SourceUnitId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x04]);
 /// The fixed ADR 0055 INTEGER value-type identity: `...02`.
 pub const STD_INTEGER_TYPE_ID: TypeId =
     TypeId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x02]);
