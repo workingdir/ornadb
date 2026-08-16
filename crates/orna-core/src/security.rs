@@ -10,7 +10,7 @@ use std::{
 };
 
 use crate::{
-    FunctionId, PrincipalId, SecurityAuditEventId,
+    FunctionId, FunctionRevisionId, PrincipalId, SecurityAuditEventId, StandardLibraryRevisionId,
     revision::RevisionPair,
     system::{SYS_INVOKE_FUNCTION_ID, system_function_by_id},
 };
@@ -143,17 +143,123 @@ impl LocalPeerCredential {
     }
 }
 
+/// The closed class of one invocation target function.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub enum TargetClass {
+    /// A function in the pinned application catalogue.
+    Application,
+    /// A function in the exact verified standard snapshot pinned by the
+    /// application revision that owns the deciding security snapshot.
+    VerifiedStandard,
+}
+
+/// One function in the closed two-class `EXECUTE` target union.
+///
+/// The canonical security snapshot is the identity-ordered union of the
+/// pinned application catalogue functions and the functions of the exact
+/// verified standard snapshot pinned by that application revision. Every
+/// member carries its closed class. A verified-standard member also carries
+/// the exact immutable standard snapshot revision and executable function
+/// revision that pin it; a current, different, or unverified standard
+/// snapshot cannot authorise it.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct SecurityFunctionTarget {
+    function: FunctionId,
+    class: TargetClass,
+    standard_revision: Option<StandardLibraryRevisionId>,
+    executable_revision: Option<FunctionRevisionId>,
+}
+
+impl SecurityFunctionTarget {
+    /// Creates one application-catalogue function target.
+    pub const fn application(function: FunctionId) -> Self {
+        Self {
+            function,
+            class: TargetClass::Application,
+            standard_revision: None,
+            executable_revision: None,
+        }
+    }
+
+    /// Creates one verified-standard function target pinned to one immutable
+    /// standard snapshot and one immutable executable function revision.
+    pub const fn verified_standard(
+        function: FunctionId,
+        standard_revision: StandardLibraryRevisionId,
+        executable_revision: FunctionRevisionId,
+    ) -> Self {
+        Self {
+            function,
+            class: TargetClass::VerifiedStandard,
+            standard_revision: Some(standard_revision),
+            executable_revision: Some(executable_revision),
+        }
+    }
+
+    /// Returns the stable function identity.
+    pub const fn function(self) -> FunctionId {
+        self.function
+    }
+
+    /// Returns the closed target class.
+    pub const fn class(self) -> TargetClass {
+        self.class
+    }
+
+    /// Returns the exact standard snapshot revision that pins this target.
+    pub const fn standard_revision(self) -> Option<StandardLibraryRevisionId> {
+        self.standard_revision
+    }
+
+    /// Returns the exact pinned executable function revision.
+    pub const fn executable_revision(self) -> Option<FunctionRevisionId> {
+        self.executable_revision
+    }
+}
+
 /// A function and revision pair selected by the server for one invocation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct InvocationTarget {
     function: FunctionId,
     revision: RevisionPair,
+    class: Option<TargetClass>,
+    standard_revision: Option<StandardLibraryRevisionId>,
+    executable_revision: Option<FunctionRevisionId>,
 }
 
 impl InvocationTarget {
-    /// Creates a pinned function target.
+    /// Creates a pinned application function target.
+    ///
+    /// A class-less target names only an application-catalogue function. It
+    /// never authorises a verified-standard function; the protected
+    /// `sys.invoke` boundary adds the class and immutable pins for standard
+    /// targets. The raw dispatcher therefore remains closed to every standard
+    /// target even when a grant exists for the protected gateway.
     pub const fn new(function: FunctionId, revision: RevisionPair) -> Self {
-        Self { function, revision }
+        Self {
+            function,
+            revision,
+            class: None,
+            standard_revision: None,
+            executable_revision: None,
+        }
+    }
+
+    /// Pins one target to one immutable executable in the exact verified
+    /// standard snapshot selected by the application revision pair.
+    pub const fn verified_standard(
+        function: FunctionId,
+        revision: RevisionPair,
+        standard_revision: StandardLibraryRevisionId,
+        executable_revision: FunctionRevisionId,
+    ) -> Self {
+        Self {
+            function,
+            revision,
+            class: Some(TargetClass::VerifiedStandard),
+            standard_revision: Some(standard_revision),
+            executable_revision: Some(executable_revision),
+        }
     }
 
     /// Returns the selected function identity.
@@ -164,6 +270,21 @@ impl InvocationTarget {
     /// Returns the exact pinned revision pair.
     pub const fn revision(self) -> RevisionPair {
         self.revision
+    }
+
+    /// Returns the closed target class when the caller pinned one.
+    pub const fn class(self) -> Option<TargetClass> {
+        self.class
+    }
+
+    /// Returns the exact verified standard snapshot revision pin, when present.
+    pub const fn standard_revision(self) -> Option<StandardLibraryRevisionId> {
+        self.standard_revision
+    }
+
+    /// Returns the exact pinned executable function revision, when present.
+    pub const fn executable_revision(self) -> Option<FunctionRevisionId> {
+        self.executable_revision
     }
 }
 
@@ -353,7 +474,9 @@ impl AuthorisedInvocation {
 pub enum ExecuteDenial {
     /// The session was not valid in this snapshot.
     InvalidSession,
-    /// The snapshot does not contain the requested function.
+    /// The snapshot does not contain the requested function, the target class
+    /// does not match the union member, or a verified-standard target is not
+    /// pinned to the exact verified standard snapshot.
     UnknownFunction,
     /// The requested revision pair is not the snapshot's active pair.
     RevisionMismatch,
@@ -648,10 +771,14 @@ impl SecurityAuditEvent {
 }
 
 /// An immutable, validated view of security and function identities.
+///
+/// The known function set is the canonical, identity-ordered two-class union
+/// of the pinned application catalogue functions and the exact verified
+/// standard snapshot functions pinned by that application revision.
 #[derive(Clone, Debug)]
 pub struct SecuritySnapshot {
     revision: RevisionPair,
-    functions: BTreeSet<FunctionId>,
+    function_targets: BTreeMap<FunctionId, SecurityFunctionTarget>,
     principals: BTreeMap<PrincipalId, Principal>,
     memberships: Vec<RoleMembership>,
     grants: BTreeSet<ExecuteGrant>,
@@ -705,7 +832,11 @@ fn role_graph_has_cycle(
 }
 
 impl SecuritySnapshot {
-    /// Creates a security snapshot.
+    /// Creates a security snapshot from an application-only function set.
+    ///
+    /// Every listed function is an `Application` target. Use
+    /// [`Self::new_with_function_targets`] when the exact verified standard
+    /// snapshot pinned by the revision contributes functions to the union.
     pub fn new(
         revision: RevisionPair,
         functions: Vec<FunctionId>,
@@ -724,6 +855,10 @@ impl SecuritySnapshot {
     }
 
     /// Creates a security snapshot with protected local peer credentials.
+    ///
+    /// Every listed function is an `Application` target. Use
+    /// [`Self::new_with_function_targets_and_local_peer_credentials`] when the
+    /// exact verified standard snapshot contributes functions to the union.
     pub fn new_with_local_peer_credentials(
         revision: RevisionPair,
         functions: Vec<FunctionId>,
@@ -732,9 +867,57 @@ impl SecuritySnapshot {
         grants: Vec<ExecuteGrant>,
         local_peer_credentials: Vec<LocalPeerCredential>,
     ) -> Result<Self, SecuritySnapshotError> {
-        let mut known_functions = BTreeSet::new();
+        Self::new_with_function_targets_and_local_peer_credentials(
+            revision,
+            functions
+                .into_iter()
+                .map(SecurityFunctionTarget::application)
+                .collect(),
+            principals,
+            memberships,
+            grants,
+            local_peer_credentials,
+        )
+    }
+
+    /// Creates a security snapshot from the closed two-class target union.
+    pub fn new_with_function_targets(
+        revision: RevisionPair,
+        functions: Vec<SecurityFunctionTarget>,
+        principals: Vec<Principal>,
+        memberships: Vec<RoleMembership>,
+        grants: Vec<ExecuteGrant>,
+    ) -> Result<Self, SecuritySnapshotError> {
+        Self::new_with_function_targets_and_local_peer_credentials(
+            revision,
+            functions,
+            principals,
+            memberships,
+            grants,
+            vec![],
+        )
+    }
+
+    /// Creates a two-class security snapshot with protected local peer credentials.
+    ///
+    /// The function set is the canonical, identity-ordered union of the pinned
+    /// application catalogue and the exact verified standard snapshot. A
+    /// function identity repeated across the two classes, or twice in either
+    /// class, is a duplicate and fails construction closed.
+    pub fn new_with_function_targets_and_local_peer_credentials(
+        revision: RevisionPair,
+        functions: Vec<SecurityFunctionTarget>,
+        principals: Vec<Principal>,
+        memberships: Vec<RoleMembership>,
+        grants: Vec<ExecuteGrant>,
+        local_peer_credentials: Vec<LocalPeerCredential>,
+    ) -> Result<Self, SecuritySnapshotError> {
+        let mut known_functions = BTreeMap::new();
         for function in functions {
-            if !known_functions.insert(function) {
+            if known_functions
+                .insert(function.function, function)
+                .is_some()
+            {
                 return Err(SecuritySnapshotError::DuplicateFunction);
             }
         }
@@ -780,7 +963,7 @@ impl SecuritySnapshot {
             if !principals_by_id.contains_key(&grant.grantee) {
                 return Err(SecuritySnapshotError::UnknownGrantPrincipal);
             }
-            if !known_functions.contains(&grant.function) {
+            if !known_functions.contains_key(&grant.function) {
                 return Err(SecuritySnapshotError::UnknownGrantFunction);
             }
         }
@@ -804,7 +987,7 @@ impl SecuritySnapshot {
 
         Ok(Self {
             revision,
-            functions: known_functions,
+            function_targets: known_functions,
             principals: principals_by_id,
             memberships: validated_memberships,
             grants: validated_grants,
@@ -819,7 +1002,12 @@ impl SecuritySnapshot {
 
     /// Iterates over known functions in canonical identity order.
     pub fn functions(&self) -> impl Iterator<Item = FunctionId> + '_ {
-        self.functions.iter().copied()
+        self.function_targets.keys().copied()
+    }
+
+    /// Iterates over the closed two-class function targets in canonical identity order.
+    pub fn function_targets(&self) -> impl Iterator<Item = SecurityFunctionTarget> + '_ {
+        self.function_targets.values().copied()
     }
 
     /// Iterates over principals in canonical identity order.
@@ -919,6 +1107,14 @@ impl SecuritySnapshot {
     }
 
     /// Decides whether the authenticated session may execute the pinned target.
+    ///
+    /// The target must name a function in the canonical two-class union with a
+    /// matching closed class. A class-less target is an `Application` target,
+    /// so the raw dispatcher stays closed to every verified-standard function.
+    /// A verified-standard target must carry the exact immutable standard
+    /// snapshot revision and executable function revision recorded by this
+    /// snapshot; a current, different, or unverified standard snapshot is
+    /// denied before any grant is considered.
     pub fn authorise_execute(
         &self,
         session: &AuthenticatedSession,
@@ -927,7 +1123,17 @@ impl SecuritySnapshot {
         if let Err(reason) = self.validate_session_and_revision(session, target) {
             return ExecuteDecision::Denied(reason);
         }
-        if !self.functions.contains(&target.function) {
+        let Some(function_target) = self.function_targets.get(&target.function) else {
+            return ExecuteDecision::Denied(ExecuteDenial::UnknownFunction);
+        };
+        let target_class = target.class().unwrap_or(TargetClass::Application);
+        if function_target.class != target_class {
+            return ExecuteDecision::Denied(ExecuteDenial::UnknownFunction);
+        }
+        if target_class == TargetClass::VerifiedStandard
+            && (function_target.executable_revision != target.executable_revision()
+                || function_target.standard_revision != target.standard_revision())
+        {
             return ExecuteDecision::Denied(ExecuteDenial::UnknownFunction);
         }
         let direct_grant = ExecuteGrant::new(session.principal, target.function);
@@ -1061,6 +1267,13 @@ mod tests {
         SourceRevisionId::from_bytes([8; 16]),
         CatalogueRevisionId::from_bytes([9; 16]),
     );
+    const STD_FUNCTION: FunctionId = FunctionId::from_bytes([0x30; 16]);
+    const STD_REVISION: StandardLibraryRevisionId =
+        StandardLibraryRevisionId::from_bytes([0x4e; 16]);
+    const OTHER_STANDARD_REVISION: StandardLibraryRevisionId =
+        StandardLibraryRevisionId::from_bytes([0x5e; 16]);
+    const STD_EXECUTABLE: FunctionRevisionId = FunctionRevisionId::from_bytes([0x31; 16]);
+    const OTHER_STD_EXECUTABLE: FunctionRevisionId = FunctionRevisionId::from_bytes([0x7b; 16]);
 
     fn active(id: PrincipalId, kind: PrincipalKind) -> Principal {
         Principal::new(id, kind, PrincipalStatus::Active)
@@ -2021,5 +2234,220 @@ mod tests {
         assert_eq!(event.sequence(), -7);
         assert_eq!(event.recorded_at(), recorded_at);
         assert_eq!(event.decision(), &decision);
+    }
+
+    #[test]
+    fn two_class_union_admits_standard_grants_only_from_the_pinned_snapshot() {
+        let standard_target =
+            SecurityFunctionTarget::verified_standard(STD_FUNCTION, STD_REVISION, STD_EXECUTABLE);
+
+        let snapshot = SecuritySnapshot::new_with_function_targets(
+            REVISION,
+            vec![standard_target],
+            vec![active(USER, PrincipalKind::User)],
+            vec![],
+            vec![ExecuteGrant::new(USER, STD_FUNCTION)],
+        )
+        .expect("a grant naming a function in the pinned standard snapshot must be admitted");
+        assert!(
+            snapshot
+                .function_targets()
+                .any(|target| target == standard_target)
+        );
+
+        assert!(matches!(
+            SecuritySnapshot::new_with_function_targets(
+                REVISION,
+                vec![],
+                vec![active(USER, PrincipalKind::User)],
+                vec![],
+                vec![ExecuteGrant::new(USER, STD_FUNCTION)],
+            ),
+            Err(SecuritySnapshotError::UnknownGrantFunction)
+        ));
+
+        assert!(matches!(
+            SecuritySnapshot::new_with_function_targets(
+                REVISION,
+                vec![
+                    SecurityFunctionTarget::verified_standard(
+                        STD_FUNCTION,
+                        STD_REVISION,
+                        STD_EXECUTABLE,
+                    ),
+                    SecurityFunctionTarget::verified_standard(
+                        STD_FUNCTION,
+                        STD_REVISION,
+                        STD_EXECUTABLE,
+                    ),
+                ],
+                vec![active(USER, PrincipalKind::User)],
+                vec![],
+                vec![],
+            ),
+            Err(SecuritySnapshotError::DuplicateFunction)
+        ));
+
+        assert!(matches!(
+            SecuritySnapshot::new_with_function_targets(
+                REVISION,
+                vec![
+                    SecurityFunctionTarget::application(STD_FUNCTION),
+                    SecurityFunctionTarget::verified_standard(
+                        STD_FUNCTION,
+                        STD_REVISION,
+                        STD_EXECUTABLE,
+                    ),
+                ],
+                vec![active(USER, PrincipalKind::User)],
+                vec![],
+                vec![],
+            ),
+            Err(SecuritySnapshotError::DuplicateFunction)
+        ));
+
+        assert_eq!(snapshot.functions().collect::<Vec<_>>(), [STD_FUNCTION]);
+    }
+
+    #[test]
+    fn authorise_execute_enforces_class_and_immutable_standard_pins() {
+        let snapshot = SecuritySnapshot::new_with_function_targets(
+            REVISION,
+            vec![
+                SecurityFunctionTarget::application(FUNCTION),
+                SecurityFunctionTarget::verified_standard(
+                    STD_FUNCTION,
+                    STD_REVISION,
+                    STD_EXECUTABLE,
+                ),
+            ],
+            vec![active(USER, PrincipalKind::User)],
+            vec![],
+            vec![
+                ExecuteGrant::new(USER, FUNCTION),
+                ExecuteGrant::new(USER, STD_FUNCTION),
+            ],
+        )
+        .expect("a two-class snapshot with grants");
+        let session = snapshot
+            .bind_authenticated_session(USER, vec![])
+            .expect("an active user session");
+
+        assert_eq!(
+            snapshot.functions().collect::<Vec<_>>(),
+            [FUNCTION, STD_FUNCTION],
+            "the two-class union is canonical and identity-ordered"
+        );
+        assert_eq!(
+            snapshot.function_targets().collect::<Vec<_>>(),
+            [
+                SecurityFunctionTarget::application(FUNCTION),
+                SecurityFunctionTarget::verified_standard(
+                    STD_FUNCTION,
+                    STD_REVISION,
+                    STD_EXECUTABLE,
+                ),
+            ]
+        );
+
+        assert!(matches!(
+            snapshot.authorise_execute(
+                &session,
+                InvocationTarget::verified_standard(
+                    STD_FUNCTION,
+                    REVISION,
+                    STD_REVISION,
+                    STD_EXECUTABLE,
+                ),
+            ),
+            ExecuteDecision::Allowed(_)
+        ));
+        assert!(matches!(
+            snapshot.authorise_execute(&session, InvocationTarget::new(FUNCTION, REVISION)),
+            ExecuteDecision::Allowed(_)
+        ));
+
+        assert_eq!(
+            snapshot.authorise_execute(&session, InvocationTarget::new(STD_FUNCTION, REVISION)),
+            ExecuteDecision::Denied(ExecuteDenial::UnknownFunction),
+            "a class-less raw target never authorises a verified-standard function"
+        );
+        assert_eq!(
+            snapshot.authorise_execute(
+                &session,
+                InvocationTarget::verified_standard(
+                    FUNCTION,
+                    REVISION,
+                    STD_REVISION,
+                    STD_EXECUTABLE,
+                ),
+            ),
+            ExecuteDecision::Denied(ExecuteDenial::UnknownFunction),
+            "a verified-standard claim never authorises an application function"
+        );
+        assert_eq!(
+            snapshot.authorise_execute(
+                &session,
+                InvocationTarget::verified_standard(
+                    STD_FUNCTION,
+                    REVISION,
+                    STD_REVISION,
+                    OTHER_STD_EXECUTABLE,
+                ),
+            ),
+            ExecuteDecision::Denied(ExecuteDenial::UnknownFunction),
+            "a wrong executable pin must be denied closed"
+        );
+        assert_eq!(
+            snapshot.authorise_execute(
+                &session,
+                InvocationTarget::verified_standard(
+                    STD_FUNCTION,
+                    REVISION,
+                    OTHER_STANDARD_REVISION,
+                    STD_EXECUTABLE,
+                ),
+            ),
+            ExecuteDecision::Denied(ExecuteDenial::UnknownFunction),
+            "a wrong standard snapshot pin must be denied closed"
+        );
+        assert_eq!(
+            snapshot.authorise_execute(&session, InvocationTarget::new(OTHER_FUNCTION, REVISION)),
+            ExecuteDecision::Denied(ExecuteDenial::UnknownFunction),
+            "a function absent from the union is unknown"
+        );
+    }
+
+    #[test]
+    fn flat_constructor_stays_application_only_and_rejects_standard_class_claims() {
+        let snapshot = SecuritySnapshot::new(
+            REVISION,
+            vec![STD_FUNCTION, FUNCTION],
+            vec![active(USER, PrincipalKind::User)],
+            vec![],
+            vec![],
+        )
+        .expect("the flat application constructor remains valid");
+        assert_eq!(
+            snapshot.functions().collect::<Vec<_>>(),
+            [FUNCTION, STD_FUNCTION],
+            "the flat function set is canonical and identity-ordered"
+        );
+        let session = snapshot
+            .bind_authenticated_session(USER, vec![])
+            .expect("an active user session");
+        assert_eq!(
+            snapshot.authorise_execute(
+                &session,
+                InvocationTarget::verified_standard(
+                    STD_FUNCTION,
+                    REVISION,
+                    STD_REVISION,
+                    STD_EXECUTABLE,
+                ),
+            ),
+            ExecuteDecision::Denied(ExecuteDenial::UnknownFunction),
+            "the flat constructor admits only Application targets"
+        );
     }
 }
