@@ -1,0 +1,265 @@
+====================
+server function with update body
+====================
+
+CREATE SERVER FUNCTION reference_mutation_test.update_false(p_entry REF reference_mutation_test.entry)
+RETURNS ROWS (updated REF reference_mutation_test.entry)
+SECURITY INVOKER TRANSACTION ATOMIC VOLATILITY VOLATILE
+AS UPDATE reference_mutation_test.entry AS alias
+SET stored = FALSE
+WHERE REF(alias) = p_entry
+RETURNING REF(alias);
+
+---
+
+(source_file
+  (create_server_function_statement
+    (kw_create)
+    (kw_server)
+    (kw_function)
+    name: (qualified_name
+      (qualified_name
+        (identifier))
+      (dot)
+      (identifier))
+    parameters: (parameter_list
+      (lparen)
+      (parameter_definition
+        name: (identifier)
+        type: (type_spec
+          (kw_ref)
+          (type_spec
+            (qualified_name
+              (qualified_name
+                (identifier))
+              (dot)
+              (identifier)))))
+      (rparen))
+    (kw_returns)
+    returns: (return_type_spec
+      (kw_rows)
+      (lparen)
+      (table_column_definition
+        name: (identifier)
+        type: (type_spec
+          (kw_ref)
+          (type_spec
+            (qualified_name
+              (qualified_name
+                (identifier))
+              (dot)
+              (identifier)))))
+      (rparen))
+    (security_clause
+      (kw_security)
+      (kw_invoker))
+    (transaction_clause
+      (kw_transaction)
+      (kw_atomic))
+    (volatility_clause
+      (kw_volatility)
+      (kw_volatile))
+    body: (function_body
+      (kw_as)
+      (sql_body
+        (update_statement
+          (kw_update)
+          table: (qualified_name
+            (qualified_name
+              (identifier))
+            (dot)
+            (identifier))
+          (alias
+            (kw_as)
+            name: (identifier))
+          (kw_set)
+          column: (identifier)
+          value: (expression
+            (logical_expression
+              (comparison_expression
+                (additive_expression
+                  (multiplicative_expression
+                    (unary_expression
+                      (postfix_expression
+                        (primary_expression
+                          (literal
+                            (boolean_literal
+                              (kw_false)))))))))))
+          (kw_where)
+          condition: (expression
+            (logical_expression
+              (comparison_expression
+                (comparison_expression
+                  (additive_expression
+                    (multiplicative_expression
+                      (unary_expression
+                        (postfix_expression
+                          (primary_expression
+                            (qualified_name
+                              (kw_ref)))
+                          (lparen)
+                          (argument_list
+                            (argument
+                              value: (expression
+                                (logical_expression
+                                  (comparison_expression
+                                    (additive_expression
+                                      (multiplicative_expression
+                                        (unary_expression
+                                          (postfix_expression
+                                            (primary_expression
+                                              (qualified_name
+                                                (identifier))))))))))))
+                          (rparen))))))
+                (comparison_operator)
+                (additive_expression
+                  (multiplicative_expression
+                    (unary_expression
+                      (postfix_expression
+                        (primary_expression
+                          (qualified_name
+                            (identifier))))))))))
+          (kw_returning)
+          (expression
+            (logical_expression
+              (comparison_expression
+                (additive_expression
+                  (multiplicative_expression
+                    (unary_expression
+                      (postfix_expression
+                        (primary_expression
+                          (qualified_name
+                            (kw_ref)))
+                        (lparen)
+                        (argument_list
+                          (argument
+                            value: (expression
+                              (logical_expression
+                                (comparison_expression
+                                  (additive_expression
+                                    (multiplicative_expression
+                                      (unary_expression
+                                        (postfix_expression
+                                          (primary_expression
+                                            (qualified_name
+                                              (identifier))))))))))))
+                        (rparen)))))))))))
+    (semicolon)))
+
+====================
+server function with delete body
+====================
+
+CREATE SERVER FUNCTION reference_mutation_test.delete_entry(p_entry REF reference_mutation_test.entry)
+RETURNS ROWS (deleted BOOLEAN)
+SECURITY INVOKER TRANSACTION ATOMIC VOLATILITY VOLATILE
+AS DELETE FROM reference_mutation_test.entry AS alias
+WHERE REF(alias) = p_entry
+RETURNING TRUE;
+
+---
+
+(source_file
+  (create_server_function_statement
+    (kw_create)
+    (kw_server)
+    (kw_function)
+    name: (qualified_name
+      (qualified_name
+        (identifier))
+      (dot)
+      (identifier))
+    parameters: (parameter_list
+      (lparen)
+      (parameter_definition
+        name: (identifier)
+        type: (type_spec
+          (kw_ref)
+          (type_spec
+            (qualified_name
+              (qualified_name
+                (identifier))
+              (dot)
+              (identifier)))))
+      (rparen))
+    (kw_returns)
+    returns: (return_type_spec
+      (kw_rows)
+      (lparen)
+      (table_column_definition
+        name: (identifier)
+        type: (type_spec
+          (qualified_name
+            (identifier))))
+      (rparen))
+    (security_clause
+      (kw_security)
+      (kw_invoker))
+    (transaction_clause
+      (kw_transaction)
+      (kw_atomic))
+    (volatility_clause
+      (kw_volatility)
+      (kw_volatile))
+    body: (function_body
+      (kw_as)
+      (sql_body
+        (delete_statement
+          (kw_delete)
+          (kw_from)
+          table: (qualified_name
+            (qualified_name
+              (identifier))
+            (dot)
+            (identifier))
+          (alias
+            (kw_as)
+            name: (identifier))
+          (kw_where)
+          condition: (expression
+            (logical_expression
+              (comparison_expression
+                (comparison_expression
+                  (additive_expression
+                    (multiplicative_expression
+                      (unary_expression
+                        (postfix_expression
+                          (primary_expression
+                            (qualified_name
+                              (kw_ref)))
+                          (lparen)
+                          (argument_list
+                            (argument
+                              value: (expression
+                                (logical_expression
+                                  (comparison_expression
+                                    (additive_expression
+                                      (multiplicative_expression
+                                        (unary_expression
+                                          (postfix_expression
+                                            (primary_expression
+                                              (qualified_name
+                                                (identifier))))))))))))
+                          (rparen))))))
+                (comparison_operator)
+                (additive_expression
+                  (multiplicative_expression
+                    (unary_expression
+                      (postfix_expression
+                        (primary_expression
+                          (qualified_name
+                            (identifier))))))))))
+          (kw_returning)
+          (expression
+            (logical_expression
+              (comparison_expression
+                (additive_expression
+                  (multiplicative_expression
+                    (unary_expression
+                      (postfix_expression
+                        (primary_expression
+                          (literal
+                            (boolean_literal
+                              (kw_true))))))))))))))
+    (semicolon)))
+
