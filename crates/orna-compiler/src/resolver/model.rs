@@ -1552,6 +1552,48 @@ pub const STD_INVOKE_SOURCE_UNIT_ID: SourceUnitId =
 /// The fixed ADR 0055 INTEGER value-type identity: `...02`.
 pub const STD_INTEGER_TYPE_ID: TypeId =
     TypeId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x02]);
+/// The fixed ADR 0058 `std.terminal.Document` value-type identity: `...15`.
+pub const STD_TERMINAL_DOCUMENT_TYPE_ID: TypeId =
+    TypeId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x0f]);
+/// The fixed ADR 0058 `std.io.ByteStream` value-type identity: `...16`.
+pub const STD_IO_BYTE_STREAM_TYPE_ID: TypeId =
+    TypeId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x10]);
+/// The fixed ADR 0057 `std.terminal` schema identity: `...04` (ADR 0058).
+pub const STD_TERMINAL_SCHEMA_ID: SchemaId =
+    SchemaId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x04]);
+/// The fixed ADR 0057 `std.io` schema identity: `...05` (ADR 0058).
+pub const STD_IO_SCHEMA_ID: SchemaId =
+    SchemaId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x05]);
+/// The fixed ADR 0057 `std.json` schema identity: 15 zero bytes then `0x06`.
+pub const STD_JSON_SCHEMA_ID: SchemaId =
+    SchemaId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x06]);
+/// The fixed ADR 0057 `std.data` schema identity: 15 zero bytes then `0x07`.
+pub const STD_DATA_SCHEMA_ID: SchemaId =
+    SchemaId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x07]);
+/// The fixed ADR 0057 `std.json.Value` value-type identity: `...17`.
+pub const STD_JSON_VALUE_TYPE_ID: TypeId =
+    TypeId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x11]);
+/// The fixed ADR 0057 `std.data.Rows` value-type identity: `...18`.
+pub const STD_DATA_ROWS_TYPE_ID: TypeId =
+    TypeId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x12]);
+/// The fixed ADR 0057 `std.json.encode` function identity: 15 zero bytes then `0x11`.
+pub const STD_JSON_ENCODE_FUNCTION_ID: FunctionId =
+    FunctionId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x11]);
+/// The fixed ADR 0057 `std.json.encode.p_value` parameter identity: `...11`.
+pub const STD_JSON_ENCODE_PARAMETER_ID: ParameterId =
+    ParameterId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x11]);
+/// The fixed ADR 0057 `std.json.encode` function-revision identity: `...11`.
+pub const STD_JSON_ENCODE_FUNCTION_REVISION_ID: FunctionRevisionId =
+    FunctionRevisionId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x11]);
+/// The fixed ADR 0057 `std.terminal.present_table` function identity: `...12`.
+pub const STD_TERMINAL_PRESENT_TABLE_FUNCTION_ID: FunctionId =
+    FunctionId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x12]);
+/// The fixed ADR 0057 `std.terminal.present_table.p_rows` parameter identity: `...12`.
+pub const STD_TERMINAL_PRESENT_TABLE_PARAMETER_ID: ParameterId =
+    ParameterId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x12]);
+/// The fixed ADR 0057 `std.terminal.present_table` function-revision identity: `...12`.
+pub const STD_TERMINAL_PRESENT_TABLE_FUNCTION_REVISION_ID: FunctionRevisionId =
+    FunctionRevisionId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x12]);
 
 /// The checked executable facts for the one accepted standard parameter-echo
 /// function (`std.invoke.echo`, ADR 0055).
@@ -1600,6 +1642,72 @@ impl CheckedStandardParameterEcho {
     /// Returns the ordered durable reference sequence for this executable.
     pub fn references(&self) -> &[DefinitionReference] {
         &self.references
+    }
+}
+
+/// The checked declaration facts for the one accepted ADR 0057 JSON
+/// presenter function (`std.json.encode`).
+///
+/// The model carries the fixed function, parameter, and version-1 revision
+/// identities. The exact-shape check rejects every variation of the closed
+/// declaration before any artifact is constructed; ADR 0057 step 4
+/// (`feat(artifact): encode terminal and json presenter plans`) consumes
+/// these facts to build the 44-byte `orna.server-json-encode` artifact and
+/// its ordered durable references.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CheckedStandardJsonEncode {
+    pub(super) function_id: FunctionId,
+    pub(super) parameter_id: ParameterId,
+    pub(super) revision_id: FunctionRevisionId,
+}
+
+impl CheckedStandardJsonEncode {
+    /// Returns the fixed `std.json.encode` function identity.
+    pub const fn function_id(&self) -> FunctionId {
+        self.function_id
+    }
+
+    /// Returns the fixed `std.json.encode.p_value` parameter identity.
+    pub const fn parameter_id(&self) -> ParameterId {
+        self.parameter_id
+    }
+
+    /// Returns the fixed version-1 function-revision identity.
+    pub const fn revision_id(&self) -> FunctionRevisionId {
+        self.revision_id
+    }
+}
+
+/// The checked declaration facts for the one accepted ADR 0057 terminal
+/// table presenter function (`std.terminal.present_table`).
+///
+/// The model carries the fixed function, parameter, and version-1 revision
+/// identities. The exact-shape check rejects every variation of the closed
+/// declaration before any artifact is constructed; ADR 0057 step 4
+/// (`feat(artifact): encode terminal and json presenter plans`) consumes
+/// these facts to build the `orna.server-terminal-table` artifact and its
+/// ordered durable references.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CheckedStandardTerminalPresentTable {
+    pub(super) function_id: FunctionId,
+    pub(super) parameter_id: ParameterId,
+    pub(super) revision_id: FunctionRevisionId,
+}
+
+impl CheckedStandardTerminalPresentTable {
+    /// Returns the fixed `std.terminal.present_table` function identity.
+    pub const fn function_id(&self) -> FunctionId {
+        self.function_id
+    }
+
+    /// Returns the fixed `std.terminal.present_table.p_rows` parameter identity.
+    pub const fn parameter_id(&self) -> ParameterId {
+        self.parameter_id
+    }
+
+    /// Returns the fixed version-1 function-revision identity.
+    pub const fn revision_id(&self) -> FunctionRevisionId {
+        self.revision_id
     }
 }
 
@@ -1808,6 +1916,108 @@ pub enum StandardLibraryCheckError {
     MissingSchemaOrigin,
     /// The function and parameter origins do not belong to the same source unit.
     OriginSourceUnitMismatch,
+    /// The declared presenter function name is not the fixed presenter name.
+    PresenterUnexpectedName {
+        /// The exact expected presenter function name.
+        expected: QualifiedSemanticName,
+        /// The declared semantic function name.
+        actual: QualifiedSemanticName,
+    },
+    /// The presenter declaration does not declare exactly one parameter.
+    PresenterUnexpectedParameterCount {
+        /// The declared parameter count.
+        actual: usize,
+    },
+    /// The single presenter parameter is not the fixed parameter name.
+    PresenterUnexpectedParameterName {
+        /// The exact expected presenter parameter name.
+        expected: String,
+        /// The declared semantic parameter name.
+        actual: String,
+    },
+    /// The single presenter parameter declares a default expression.
+    PresenterParameterDefault,
+    /// The presenter parameter does not resolve to the fixed value type.
+    PresenterUnexpectedParameterType {
+        /// The exact expected value-type identity.
+        expected: TypeId,
+    },
+    /// The presenter result is not one single value.
+    PresenterUnexpectedResultShape,
+    /// The presenter result does not resolve to the fixed value type.
+    PresenterUnexpectedResultType {
+        /// The exact expected value-type identity.
+        expected: TypeId,
+    },
+    /// The presenter declaration omits the security mode.
+    PresenterMissingSecurity,
+    /// The presenter security mode is not exactly `SECURITY INVOKER`.
+    PresenterUnexpectedSecurity {
+        /// The declared security mode.
+        actual: SyntaxFunctionSecurity,
+    },
+    /// The presenter declaration omits the transaction mode.
+    PresenterMissingTransaction,
+    /// The presenter transaction mode is not exactly `TRANSACTION READ ONLY`.
+    PresenterUnexpectedTransaction {
+        /// The declared transaction mode.
+        actual: SyntaxFunctionTransaction,
+    },
+    /// The presenter declaration omits the volatility mode.
+    PresenterMissingVolatility,
+    /// The presenter volatility mode is not exactly `VOLATILITY STABLE`.
+    PresenterUnexpectedVolatility {
+        /// The declared volatility mode.
+        actual: SyntaxFunctionVolatility,
+    },
+    /// The presenter declaration requires a capability clause.
+    PresenterCapabilityClause,
+    /// The presenter body is not the exact closed parameter-select form.
+    PresenterUnexpectedBody,
+    /// The presenter parameter select names an identifier other than the
+    /// fixed presenter parameter.
+    PresenterUnexpectedBodyIdentifier {
+        /// The exact expected body identifier.
+        expected: String,
+        /// The identifier selected by the body.
+        actual: String,
+    },
+    /// The catalogue does not contain the fixed presenter schema identity.
+    PresenterMissingSchema,
+    /// The schema at the fixed presenter identity has a different name.
+    PresenterSchemaNameMismatch {
+        /// The exact expected schema name.
+        expected: QualifiedSemanticName,
+        /// The name of the schema at the fixed identity.
+        actual: QualifiedSemanticName,
+    },
+    /// The catalogue does not contain the fixed presenter function identity.
+    PresenterMissingFunction,
+    /// The function at the fixed identity has a different name.
+    PresenterFunctionNameMismatch {
+        /// The exact expected function name.
+        expected: QualifiedSemanticName,
+        /// The name of the function at the fixed identity.
+        actual: QualifiedSemanticName,
+    },
+    /// The function at the fixed identity is not a SERVER function.
+    PresenterUnexpectedDomain {
+        /// The declared function domain.
+        actual: FunctionDomain,
+    },
+    /// The fixed presenter function has no parameter at the fixed identity.
+    PresenterMissingParameter,
+    /// The parameter at the fixed identity has a different name.
+    PresenterParameterNameMismatch {
+        /// The exact expected parameter name.
+        expected: String,
+        /// The name of the parameter at the fixed identity.
+        actual: String,
+    },
+    /// The origins do not contain the fixed presenter function origin.
+    PresenterMissingFunctionOrigin,
+    /// The origins do not contain the fixed presenter parameter origin.
+    PresenterMissingParameterOrigin,
     /// The verified executable standard snapshot does not carry exactly one
     /// executable record.
     ExecutableCount {
@@ -1929,6 +2139,87 @@ impl fmt::Display for StandardLibraryCheckError {
             Self::OriginSourceUnitMismatch => formatter.write_str(
                 "the standard function and parameter origins must belong to the same source unit",
             ),
+            Self::PresenterUnexpectedName { expected, actual } => write!(
+                formatter,
+                "the standard presenter declaration must be named {expected}, not {actual}"
+            ),
+            Self::PresenterUnexpectedParameterCount { actual } => write!(
+                formatter,
+                "the standard presenter declaration must declare exactly one parameter, not {actual}"
+            ),
+            Self::PresenterUnexpectedParameterName { expected, actual } => write!(
+                formatter,
+                "the standard presenter parameter must be {expected}, not {actual}"
+            ),
+            Self::PresenterParameterDefault => formatter.write_str(
+                "the standard presenter parameter must not declare a default expression",
+            ),
+            Self::PresenterUnexpectedParameterType { expected } => write!(
+                formatter,
+                "the standard presenter parameter must resolve to the value type {expected:?}"
+            ),
+            Self::PresenterUnexpectedResultShape => formatter
+                .write_str("the standard presenter declaration must return one single value"),
+            Self::PresenterUnexpectedResultType { expected } => write!(
+                formatter,
+                "the standard presenter result must resolve to the value type {expected:?}"
+            ),
+            Self::PresenterMissingSecurity => formatter
+                .write_str("the standard presenter declaration must declare SECURITY INVOKER"),
+            Self::PresenterUnexpectedSecurity { actual } => write!(
+                formatter,
+                "the standard presenter declaration must declare SECURITY INVOKER, not {actual:?}"
+            ),
+            Self::PresenterMissingTransaction => formatter.write_str(
+                "the standard presenter declaration must declare TRANSACTION READ ONLY",
+            ),
+            Self::PresenterUnexpectedTransaction { actual } => write!(
+                formatter,
+                "the standard presenter declaration must declare TRANSACTION READ ONLY, not {actual:?}"
+            ),
+            Self::PresenterMissingVolatility => formatter.write_str(
+                "the standard presenter declaration must declare VOLATILITY STABLE",
+            ),
+            Self::PresenterUnexpectedVolatility { actual } => write!(
+                formatter,
+                "the standard presenter declaration must declare VOLATILITY STABLE, not {actual:?}"
+            ),
+            Self::PresenterCapabilityClause => formatter
+                .write_str("the standard presenter declaration must not require a capability"),
+            Self::PresenterUnexpectedBody => formatter.write_str(
+                "the standard presenter body must be the exact closed parameter-select form",
+            ),
+            Self::PresenterUnexpectedBodyIdentifier { expected, actual } => write!(
+                formatter,
+                "the standard presenter body must select {expected}, not {actual}"
+            ),
+            Self::PresenterMissingSchema => formatter
+                .write_str("the catalogue does not contain the fixed presenter schema identity"),
+            Self::PresenterSchemaNameMismatch { expected, actual } => write!(
+                formatter,
+                "the schema at the fixed identity is named {actual}, not {expected}"
+            ),
+            Self::PresenterMissingFunction => formatter.write_str(
+                "the catalogue does not contain the fixed presenter function identity",
+            ),
+            Self::PresenterFunctionNameMismatch { expected, actual } => write!(
+                formatter,
+                "the function at the fixed identity is named {actual}, not {expected}"
+            ),
+            Self::PresenterUnexpectedDomain { actual } => write!(
+                formatter,
+                "the function at the fixed identity must be a SERVER function, not {actual:?}"
+            ),
+            Self::PresenterMissingParameter => formatter
+                .write_str("the fixed function has no parameter at the fixed presenter identity"),
+            Self::PresenterParameterNameMismatch { expected, actual } => write!(
+                formatter,
+                "the parameter at the fixed identity is named {actual}, not {expected}"
+            ),
+            Self::PresenterMissingFunctionOrigin => formatter
+                .write_str("the origins do not contain the fixed presenter function origin"),
+            Self::PresenterMissingParameterOrigin => formatter
+                .write_str("the origins do not contain the fixed presenter parameter origin"),
             Self::ExecutableCount { actual } => write!(
                 formatter,
                 "the verified executable standard library has {actual} executable records, expected exactly one"
