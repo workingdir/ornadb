@@ -4,16 +4,16 @@ use crate::{
     CapabilitySpecification, ClientFunctionBody, ClientFunctionDeclaration, DeleteStatement,
     Diagnostic, EnumLabelDeclaration, EnumTypeDeclaration, FieldRenameDeclaration,
     FunctionReturnType, FunctionSecurity, FunctionTransaction, FunctionVolatility, InsertStatement,
-    MutationValue, NamePart, NullOrdering, ObjectFieldDeclaration, ObjectSource,
-    ObjectTypeDeclaration, OnDeletePolicy, OpaqueValueTypeDeclaration, OptionTypeSpelling,
-    OrderingDirection, OrderingExpression, Parse, PrimitiveValueTypeDeclaration,
-    PrimitiveValueTypePersistence, QualifiedName, QueryExpression, RecordConstructor,
-    RecordConstructorField, RecordConstructorFieldValue, RecordValueTypeDeclaration,
-    RowsColumnDeclaration, SchemaDeclaration, SelectQuantifier, SelectQuery, ServerFunctionBody,
-    ServerFunctionDeclaration, ServerFunctionParameter, SourceSlice, SourceSpan, SqlDeleteBody,
-    SqlInsertBody, SqlQueryBody, SqlUpdateBody, StandardLargeObjectKind, SyntaxTree,
-    TypeExportDeclaration, TypeExportTarget, TypeSpecification, UpdateAssignment, UpdateStatement,
-    ValueFieldDeclaration,
+    MutationValue, NamePart, NoInputParameterSelectBody, NullOrdering, ObjectFieldDeclaration,
+    ObjectSource, ObjectTypeDeclaration, OnDeletePolicy, OpaqueValueTypeDeclaration,
+    OptionTypeSpelling, OrderingDirection, OrderingExpression, Parse,
+    PrimitiveValueTypeDeclaration, PrimitiveValueTypePersistence, QualifiedName, QueryExpression,
+    RecordConstructor, RecordConstructorField, RecordConstructorFieldValue,
+    RecordValueTypeDeclaration, RowsColumnDeclaration, SchemaDeclaration, SelectQuantifier,
+    SelectQuery, ServerFunctionBody, ServerFunctionDeclaration, ServerFunctionParameter,
+    SourceSlice, SourceSpan, SqlDeleteBody, SqlInsertBody, SqlQueryBody, SqlUpdateBody,
+    StandardLargeObjectKind, SyntaxTree, TypeExportDeclaration, TypeExportTarget,
+    TypeSpecification, UpdateAssignment, UpdateStatement, ValueFieldDeclaration,
     lexer::{Token, TokenKind, lex},
 };
 
@@ -1221,6 +1221,16 @@ impl<'source> Parser<'source> {
                     source,
                     delete,
                 }))
+            } else if let Some(identifier) = no_input_parameter_identifier(body_tokens) {
+                Some(ServerFunctionBody::NoInputParameterSelect(
+                    NoInputParameterSelectBody {
+                        source,
+                        parameter: NamePart {
+                            text: identifier.text.to_owned(),
+                            span: identifier.span(),
+                        },
+                    },
+                ))
             } else {
                 let query = match parse_select_query(body_tokens) {
                     Ok(query) => query,
@@ -2966,6 +2976,119 @@ impl<'tokens, 'source> SqlBodyParser<'tokens, 'source> {
             .map_or("this SELECT query syntax", |token| token.text);
         self.implementation_gap(feature, "the end of the implemented SELECT query slice")
     }
+}
+
+/// The words the grammar reserves as keywords anywhere in a statement.
+///
+/// A reserved word can never be the bare parameter identifier of a
+/// `NoInputParameterSelect` body; such bodies keep their existing
+/// implementation-gap diagnostics instead.
+const RESERVED_WORDS: &[&str] = &[
+    "ALL",
+    "ALTER",
+    "AS",
+    "ASC",
+    "ATOMIC",
+    "BINARY",
+    "BY",
+    "CAPABILITY",
+    "CASCADE",
+    "CHARACTER",
+    "CHECK",
+    "CLIENT",
+    "CONTRACT",
+    "CREATE",
+    "DEFAULT",
+    "DEFINER",
+    "DELETE",
+    "DESC",
+    "DISTINCT",
+    "DOCUMENTATION",
+    "END",
+    "ENUM",
+    "EXPORT",
+    "FALSE",
+    "FIELD",
+    "FROM",
+    "FUNCTION",
+    "IMMUTABLE",
+    "INSERT",
+    "INTO",
+    "INVOKER",
+    "IS",
+    "KERNEL",
+    "KEY",
+    "LARGE",
+    "LIST",
+    "MANUAL",
+    "MAP",
+    "NOT",
+    "NULL",
+    "NULLS",
+    "OBJECT",
+    "OF",
+    "ON",
+    "ONLY",
+    "OPAQUE",
+    "OPTION",
+    "ORDER",
+    "PERSISTABLE",
+    "PRIMARY",
+    "PRIMITIVE",
+    "READ",
+    "REF",
+    "RENAME",
+    "REQUIRES",
+    "RESTRICT",
+    "RETURN",
+    "RETURNING",
+    "RETURNS",
+    "ROWS",
+    "SCHEMA",
+    "SECURITY",
+    "SELECT",
+    "SERVER",
+    "SET",
+    "STABLE",
+    "STREAM",
+    "TABLE",
+    "TO",
+    "TRANSACTION",
+    "TRANSIENT",
+    "TRUE",
+    "TYPE",
+    "UNIQUE",
+    "UPDATE",
+    "VALUE",
+    "VALUES",
+    "VOLATILE",
+    "VOLATILITY",
+    "WHERE",
+];
+
+fn is_reserved_word(token: &Token<'_>) -> bool {
+    token.kind == TokenKind::Word
+        && RESERVED_WORDS
+            .iter()
+            .any(|keyword| token.text.eq_ignore_ascii_case(keyword))
+}
+
+/// The identifier when `tokens` is exactly `SELECT <bare identifier>` with no
+/// other clause, and `None` for every other body slice.
+fn no_input_parameter_identifier<'source>(tokens: &[Token<'source>]) -> Option<Token<'source>> {
+    let mut significant = tokens.iter().filter(|token| !token.kind.is_trivia());
+    let select = significant.next()?;
+    if !select.is_word("SELECT") {
+        return None;
+    }
+    let identifier = significant.next()?;
+    if !identifier.is_identifier() || is_reserved_word(identifier) {
+        return None;
+    }
+    if significant.next().is_some() {
+        return None;
+    }
+    Some(identifier.clone())
 }
 
 fn parse_select_query(tokens: &[Token<'_>]) -> Result<SelectQuery, QueryParseError> {
