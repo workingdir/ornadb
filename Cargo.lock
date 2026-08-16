@@ -526,6 +526,7 @@ dependencies = [
  "orna-core",
  "orna-postgres",
  "orna-protocol",
+ "orna-runtime-tty",
  "orna-standard",
  "rustix",
  "serde",
