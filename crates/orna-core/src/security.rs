@@ -500,6 +500,8 @@ pub enum SecurityAuditKind {
     Authentication,
     /// An authenticated session requested permission to execute a function.
     Execute,
+    /// The local client checked a CLIENT function capability requirement.
+    Capability,
 }
 
 /// Whether a protected security decision allowed or denied its operation.
@@ -512,15 +514,22 @@ pub enum SecurityAuditOutcome {
 }
 
 /// The closed reason carried by a denied security audit decision.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum SecurityAuditDenial {
     /// Local peer authentication failed for the recorded reason.
     Authentication(LocalPeerAuthenticationError),
     /// Function execution was denied for the recorded reason.
     Execute(ExecuteDenial),
+    /// A CLIENT capability requirement was denied. Only the redacted
+    /// qualified capability name is recorded; argument values are never
+    /// written to audit.
+    Capability {
+        /// The redacted qualified capability name (no arguments).
+        capability: String,
+    },
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 enum SecurityAuditDecisionShape {
     AuthenticationAllowed {
         session_principal: PrincipalId,
@@ -540,10 +549,21 @@ enum SecurityAuditDecisionShape {
         target: InvocationTarget,
         reason: ExecuteDenial,
     },
+    CapabilityAllowed {
+        session_principal: PrincipalId,
+        target: InvocationTarget,
+        capability: String,
+    },
+    CapabilityDenied {
+        session_principal: PrincipalId,
+        target: InvocationTarget,
+        capability: String,
+    },
 }
 
-/// An immutable authentication or `EXECUTE` decision prepared for auditing.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+/// An immutable authentication, `EXECUTE`, or CLIENT capability decision
+/// prepared for auditing.
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SecurityAuditDecision(SecurityAuditDecisionShape);
 
 impl SecurityAuditDecision {
@@ -626,6 +646,60 @@ impl SecurityAuditDecision {
         })
     }
 
+    /// Records an allowed CLIENT capability decision for a trusted session.
+    ///
+    /// Only the qualified capability name is recorded; argument values are
+    /// never written to audit.
+    pub fn capability_allowed(
+        session: &AuthenticatedSession,
+        target: InvocationTarget,
+        capability: impl Into<String>,
+    ) -> Result<Self, SecurityAuditDecisionError> {
+        Self::recover_capability_allowed(session.principal, target, capability)
+    }
+
+    /// Recovers an allowed CLIENT capability decision from protected storage.
+    pub fn recover_capability_allowed(
+        session_principal: PrincipalId,
+        target: InvocationTarget,
+        capability: impl Into<String>,
+    ) -> Result<Self, SecurityAuditDecisionError> {
+        let capability = capability.into();
+        validate_capability_name(&capability)?;
+        Ok(Self(SecurityAuditDecisionShape::CapabilityAllowed {
+            session_principal,
+            target,
+            capability,
+        }))
+    }
+
+    /// Records a denied CLIENT capability decision for a trusted session.
+    ///
+    /// Only the redacted qualified capability name is recorded; argument
+    /// values are never written to audit.
+    pub fn capability_denied(
+        session: &AuthenticatedSession,
+        target: InvocationTarget,
+        capability: impl Into<String>,
+    ) -> Result<Self, SecurityAuditDecisionError> {
+        Self::recover_capability_denied(session.principal, target, capability)
+    }
+
+    /// Recovers a denied CLIENT capability decision from protected storage.
+    pub fn recover_capability_denied(
+        session_principal: PrincipalId,
+        target: InvocationTarget,
+        capability: impl Into<String>,
+    ) -> Result<Self, SecurityAuditDecisionError> {
+        let capability = capability.into();
+        validate_capability_name(&capability)?;
+        Ok(Self(SecurityAuditDecisionShape::CapabilityDenied {
+            session_principal,
+            target,
+            capability,
+        }))
+    }
+
     /// Returns the closed event kind.
     pub const fn kind(&self) -> SecurityAuditKind {
         match self.0 {
@@ -635,6 +709,8 @@ impl SecurityAuditDecision {
             }
             SecurityAuditDecisionShape::ExecuteAllowed { .. }
             | SecurityAuditDecisionShape::ExecuteDenied { .. } => SecurityAuditKind::Execute,
+            SecurityAuditDecisionShape::CapabilityAllowed { .. }
+            | SecurityAuditDecisionShape::CapabilityDenied { .. } => SecurityAuditKind::Capability,
         }
     }
 
@@ -642,9 +718,11 @@ impl SecurityAuditDecision {
     pub const fn outcome(&self) -> SecurityAuditOutcome {
         match self.0 {
             SecurityAuditDecisionShape::AuthenticationAllowed { .. }
-            | SecurityAuditDecisionShape::ExecuteAllowed { .. } => SecurityAuditOutcome::Allowed,
+            | SecurityAuditDecisionShape::ExecuteAllowed { .. }
+            | SecurityAuditDecisionShape::CapabilityAllowed { .. } => SecurityAuditOutcome::Allowed,
             SecurityAuditDecisionShape::AuthenticationDenied { .. }
-            | SecurityAuditDecisionShape::ExecuteDenied { .. } => SecurityAuditOutcome::Denied,
+            | SecurityAuditDecisionShape::ExecuteDenied { .. }
+            | SecurityAuditDecisionShape::CapabilityDenied { .. } => SecurityAuditOutcome::Denied,
         }
     }
 
@@ -656,6 +734,12 @@ impl SecurityAuditDecision {
                 session_principal, ..
             }
             | SecurityAuditDecisionShape::ExecuteDenied {
+                session_principal, ..
+            }
+            | SecurityAuditDecisionShape::CapabilityAllowed {
+                session_principal, ..
+            }
+            | SecurityAuditDecisionShape::CapabilityDenied {
                 session_principal, ..
             } => Some(session_principal),
             SecurityAuditDecisionShape::AuthenticationDenied {
@@ -690,23 +774,71 @@ impl SecurityAuditDecision {
     pub const fn target(&self) -> Option<InvocationTarget> {
         match self.0 {
             SecurityAuditDecisionShape::ExecuteAllowed { target, .. }
-            | SecurityAuditDecisionShape::ExecuteDenied { target, .. } => Some(target),
+            | SecurityAuditDecisionShape::ExecuteDenied { target, .. }
+            | SecurityAuditDecisionShape::CapabilityAllowed { target, .. }
+            | SecurityAuditDecisionShape::CapabilityDenied { target, .. } => Some(target),
+            _ => None,
+        }
+    }
+
+    /// Returns the redacted qualified capability name of a CLIENT capability
+    /// decision.
+    ///
+    /// Argument values are never part of the recorded name.
+    pub fn capability_name(&self) -> Option<&str> {
+        match &self.0 {
+            SecurityAuditDecisionShape::CapabilityAllowed { capability, .. }
+            | SecurityAuditDecisionShape::CapabilityDenied { capability, .. } => Some(capability),
             _ => None,
         }
     }
 
     /// Returns the closed denial reason when the decision was denied.
-    pub const fn denial(&self) -> Option<SecurityAuditDenial> {
-        match self.0 {
+    pub fn denial(&self) -> Option<SecurityAuditDenial> {
+        match &self.0 {
             SecurityAuditDecisionShape::AuthenticationDenied { reason, .. } => {
-                Some(SecurityAuditDenial::Authentication(reason))
+                Some(SecurityAuditDenial::Authentication(*reason))
             }
             SecurityAuditDecisionShape::ExecuteDenied { reason, .. } => {
-                Some(SecurityAuditDenial::Execute(reason))
+                Some(SecurityAuditDenial::Execute(*reason))
+            }
+            SecurityAuditDecisionShape::CapabilityDenied { capability, .. } => {
+                Some(SecurityAuditDenial::Capability {
+                    capability: capability.clone(),
+                })
             }
             _ => None,
         }
     }
+}
+
+/// Validates that an audit capability name is a qualified name with no
+/// arguments: at least two dot-separated lowercase identifier segments.
+///
+/// Paths, hosts, secret ids, and any argument form fail this closed shape, so
+/// no disclosure-bearing value can ever be recorded as a capability name.
+fn validate_capability_name(name: &str) -> Result<(), SecurityAuditDecisionError> {
+    let segments = name.split('.');
+    let mut segment_count = 0usize;
+    for segment in segments {
+        segment_count += 1;
+        let mut characters = segment.chars();
+        let Some(first) = characters.next() else {
+            return Err(SecurityAuditDecisionError::CapabilityNameShape);
+        };
+        if !first.is_ascii_lowercase() {
+            return Err(SecurityAuditDecisionError::CapabilityNameShape);
+        }
+        if !characters.all(|character| {
+            character.is_ascii_lowercase() || character.is_ascii_digit() || character == '_'
+        }) {
+            return Err(SecurityAuditDecisionError::CapabilityNameShape);
+        }
+    }
+    if segment_count < 2 {
+        return Err(SecurityAuditDecisionError::CapabilityNameShape);
+    }
+    Ok(())
 }
 
 /// An invalid protected security audit decision.
@@ -714,11 +846,20 @@ impl SecurityAuditDecision {
 pub enum SecurityAuditDecisionError {
     /// Authentication principal evidence does not match its typed denial.
     AuthenticationPrincipalShape,
+    /// The capability name is not a closed qualified name with no arguments.
+    CapabilityNameShape,
 }
 
 impl fmt::Display for SecurityAuditDecisionError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("security audit authentication principal shape is invalid")
+        formatter.write_str(match self {
+            Self::AuthenticationPrincipalShape => {
+                "security audit authentication principal shape is invalid"
+            }
+            Self::CapabilityNameShape => {
+                "security audit capability name must be a qualified name with no arguments"
+            }
+        })
     }
 }
 
@@ -2218,6 +2359,107 @@ mod tests {
     }
 
     #[test]
+    fn capability_audit_decisions_record_redacted_qualified_names() {
+        let snapshot = SecuritySnapshot::new(
+            REVISION,
+            vec![FUNCTION],
+            vec![active(USER, PrincipalKind::User)],
+            vec![],
+            vec![ExecuteGrant::new(USER, FUNCTION)],
+        )
+        .expect("valid capability audit decision snapshot");
+        let session = snapshot
+            .bind_authenticated_session(USER, vec![])
+            .expect("valid capability audit session");
+        let target = InvocationTarget::new(FUNCTION, REVISION);
+
+        let allowed = SecurityAuditDecision::capability_allowed(&session, target, "std.fs.read")
+            .expect("closed capability name is valid");
+        assert_eq!(allowed.kind(), SecurityAuditKind::Capability);
+        assert_eq!(allowed.outcome(), SecurityAuditOutcome::Allowed);
+        assert_eq!(allowed.session_principal(), Some(USER));
+        assert_eq!(allowed.effective_principal(), None);
+        assert_eq!(allowed.authorising_principal(), None);
+        assert_eq!(allowed.target(), Some(target));
+        assert_eq!(allowed.capability_name(), Some("std.fs.read"));
+        assert_eq!(allowed.denial(), None);
+
+        let denied = SecurityAuditDecision::capability_denied(
+            &session,
+            target,
+            "std.net.connect".to_owned(),
+        )
+        .expect("closed capability name is valid");
+        assert_eq!(denied.kind(), SecurityAuditKind::Capability);
+        assert_eq!(denied.outcome(), SecurityAuditOutcome::Denied);
+        assert_eq!(denied.session_principal(), Some(USER));
+        assert_eq!(denied.effective_principal(), None);
+        assert_eq!(denied.authorising_principal(), None);
+        assert_eq!(denied.target(), Some(target));
+        assert_eq!(denied.capability_name(), Some("std.net.connect"));
+        assert_eq!(
+            denied.denial(),
+            Some(SecurityAuditDenial::Capability {
+                capability: "std.net.connect".to_owned(),
+            })
+        );
+    }
+
+    #[test]
+    fn capability_audit_names_are_closed_qualified_names_without_arguments() {
+        let snapshot = SecuritySnapshot::new(
+            REVISION,
+            vec![FUNCTION],
+            vec![active(USER, PrincipalKind::User)],
+            vec![],
+            vec![ExecuteGrant::new(USER, FUNCTION)],
+        )
+        .expect("valid capability name shape snapshot");
+        let session = snapshot
+            .bind_authenticated_session(USER, vec![])
+            .expect("valid capability name shape session");
+        let target = InvocationTarget::new(FUNCTION, REVISION);
+
+        for name in [
+            "std.fs.read",
+            "std.fs.write",
+            "std.net.connect",
+            "std.secret.use",
+            "std.fs.read_2",
+            "std.v1.value",
+        ] {
+            assert_eq!(
+                SecurityAuditDecision::capability_allowed(&session, target, name)
+                    .expect("qualified capability name must record")
+                    .capability_name(),
+                Some(name),
+                "{name:?} is a closed qualified capability name"
+            );
+        }
+
+        for name in [
+            "",
+            "read",
+            "std.fs.read(p)",
+            "std.fs.read(/home/bob)",
+            "/home/bob",
+            "std.secret.my-secret",
+            "std.fs.READ",
+            "std.fs.read.",
+            "std..read",
+            "std fs.read",
+            "Std.fs.read",
+            "std.fs.1read",
+        ] {
+            assert_eq!(
+                SecurityAuditDecision::capability_allowed(&session, target, name),
+                Err(SecurityAuditDecisionError::CapabilityNameShape),
+                "{name:?} must be rejected as an unredacted capability name"
+            );
+        }
+    }
+
+    #[test]
     fn audit_events_preserve_exact_signed_order_and_recording_time() {
         use std::time::{Duration, UNIX_EPOCH};
 
@@ -2228,7 +2470,7 @@ mod tests {
         .expect("valid unknown-peer audit decision");
         let id = SecurityAuditEventId::from_bytes([0x42; 16]);
         let recorded_at = UNIX_EPOCH - Duration::from_secs(1);
-        let event = SecurityAuditEvent::new(id, -7, recorded_at, decision);
+        let event = SecurityAuditEvent::new(id, -7, recorded_at, decision.clone());
 
         assert_eq!(event.id(), id);
         assert_eq!(event.sequence(), -7);
