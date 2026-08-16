@@ -726,6 +726,8 @@ pub struct ClientFunctionDeclaration {
     pub parameter_list_span: SourceSpan,
     /// The declared result shape retained for semantic checking.
     pub return_type: FunctionReturnType,
+    /// The capabilities required by the function, in source order.
+    pub capabilities: Vec<CapabilitySpecification>,
     /// The retained CLIENT function body.
     pub body: ClientFunctionBody,
     /// The declaration span, including its terminating semicolon.
@@ -4700,11 +4702,6 @@ mod tests {
                 "VOLATILITY",
             ),
             (
-                "CREATE CLIENT FUNCTION examples.capabilities() RETURNS BOOLEAN REQUIRES CAPABILITY files.read RETURN TRUE;",
-                "CLIENT functions use RETURN before their result value",
-                "REQUIRES",
-            ),
-            (
                 "CREATE CLIENT FUNCTION examples.table_result() RETURNS TABLE (value BOOLEAN) RETURN TRUE;",
                 "CLIENT functions must name one return type after RETURNS",
                 "TABLE",
@@ -4746,6 +4743,115 @@ mod tests {
                 assert_eq!(diagnostic.span.start, start);
                 assert_eq!(diagnostic.span.end, start + marker.len());
             }
+        }
+    }
+
+    #[test]
+    fn parses_client_function_capability_clauses_with_exact_names_arguments_and_spans() {
+        let source = "CREATE CLIENT FUNCTION examples.hash_file(p_file std.fs.Path)\n\
+            RETURNS BYTES\n\
+            REQUIRES CAPABILITY std.fs.read(p_file), std.fs.write(p_file), std.net.call, std.secret.use()\n\
+            RETURN TRUE;\n\
+            CREATE CLIENT FUNCTION examples.bare() RETURNS BOOLEAN RETURN FALSE;";
+        let parsed = parse(source);
+
+        assert!(parsed.diagnostics().is_empty());
+        assert_eq!(parsed.syntax().text(), source);
+        assert_eq!(parsed.client_functions().len(), 2);
+
+        let hash_file = &parsed.client_functions()[0];
+        let capabilities = &hash_file.capabilities;
+        assert_eq!(capabilities.len(), 4);
+        assert_eq!(capabilities[0].name.parts[0].text, "std");
+        assert_eq!(capabilities[0].name.parts[1].text, "fs");
+        assert_eq!(capabilities[0].name.parts[2].text, "read");
+        assert_eq!(
+            capabilities[0]
+                .arguments
+                .as_ref()
+                .map(|arguments| arguments.text.as_str()),
+            Some("p_file"),
+        );
+        let read_clause = "std.fs.read(p_file)";
+        let read_clause_start = source.find(read_clause).expect("read clause");
+        assert_eq!(
+            capabilities[0].span,
+            SourceSpan {
+                start: read_clause_start,
+                end: read_clause_start + read_clause.len(),
+            }
+        );
+        let read_arguments = capabilities[0].arguments.as_ref().expect("read arguments");
+        assert_eq!(
+            read_arguments.span,
+            SourceSpan {
+                start: read_clause_start + "std.fs.read(".len(),
+                end: read_clause_start + "std.fs.read(p_file".len(),
+            }
+        );
+        assert_eq!(
+            capabilities[1]
+                .arguments
+                .as_ref()
+                .map(|arguments| arguments.text.as_str()),
+            Some("p_file"),
+        );
+        assert!(capabilities[2].arguments.is_none());
+        assert_eq!(
+            capabilities[3]
+                .arguments
+                .as_ref()
+                .map(|arguments| arguments.text.as_str()),
+            Some(""),
+        );
+        let bare = &parsed.client_functions()[1];
+        assert!(bare.capabilities.is_empty());
+    }
+
+    #[test]
+    fn rejects_malformed_client_function_capability_clauses() {
+        let cases = [
+            (
+                "CREATE CLIENT FUNCTION examples.bad() RETURNS BOOLEAN REQUIRES CAPABILITY RETURN TRUE;",
+                "expected a capability after REQUIRES CAPABILITY",
+                "RETURN",
+            ),
+            (
+                "CREATE CLIENT FUNCTION examples.bad() RETURNS BOOLEAN REQUIRES CAPABILITY std.fs.read, RETURN TRUE;",
+                "trailing commas are not allowed in capability requirements",
+                "RETURN",
+            ),
+            (
+                "CREATE CLIENT FUNCTION examples.bad() RETURNS BOOLEAN REQUIRES CAPABILITY std.fs.read REQUIRES CAPABILITY std.fs.write RETURN TRUE;",
+                "expected ',' or a body keyword after a capability requirement",
+                "REQUIRES",
+            ),
+            (
+                "CREATE CLIENT FUNCTION examples.bad() RETURNS BOOLEAN REQUIRES CAPABILITY std.fs.read(p_file RETURN TRUE;",
+                "expected ')' to close capability arguments",
+                ";",
+            ),
+            (
+                "CREATE CLIENT FUNCTION examples.is_form() RETURNS BOOLEAN REQUIRES CAPABILITY std.fs.read(p_file) IS BEGIN RETURN TRUE; END;",
+                "CLIENT functions use RETURN before their result value",
+                "IS",
+            ),
+        ];
+
+        for (source, message, marker) in cases {
+            let parsed = parse(source);
+            assert!(parsed.client_functions().is_empty(), "source: {source}");
+            assert_eq!(parsed.diagnostics().len(), 1, "source: {source}");
+            let diagnostic = &parsed.diagnostics()[0];
+            assert_eq!(diagnostic.code, "ORNA0001");
+            assert_eq!(diagnostic.message, message);
+            let start = source
+                .match_indices(marker)
+                .last()
+                .map(|(index, _)| index)
+                .expect("diagnostic marker");
+            assert_eq!(diagnostic.span.start, start);
+            assert_eq!(diagnostic.span.end, start + marker.len());
         }
     }
 
