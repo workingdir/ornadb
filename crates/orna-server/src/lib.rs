@@ -2,6 +2,7 @@
 
 mod backend_shell;
 mod embedded;
+mod inspect;
 mod invoke;
 mod local_auth;
 mod raw_call;
@@ -17,6 +18,11 @@ pub use embedded::{
     MaterialisedSupport, ReadyEmbeddedHost, initialise_embedded_cluster,
     inspect_ready_embedded_host, materialise_support_data, private_database_config,
     run_embedded_server, start_embedded_postmaster,
+};
+pub use inspect::{
+    InstalledInspectError, InstalledInspectErrorKind, InstalledInspectOutcome,
+    InstalledInspectProjection, InstalledInspectRequest, run_inspect_with_kernel,
+    run_installed_inspect,
 };
 pub use invoke::{
     InstalledInvokeError, InstalledInvokeErrorKind, InstalledInvokeOutcome, InstalledInvokeRequest,
