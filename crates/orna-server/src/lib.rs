@@ -2,6 +2,7 @@
 
 mod backend_shell;
 mod embedded;
+mod invoke;
 mod local_auth;
 mod raw_call;
 mod raw_client_dispatch;
@@ -15,6 +16,10 @@ pub use embedded::{
     MaterialisedSupport, ReadyEmbeddedHost, initialise_embedded_cluster,
     inspect_ready_embedded_host, materialise_support_data, private_database_config,
     run_embedded_server, start_embedded_postmaster,
+};
+pub use invoke::{
+    InstalledInvokeError, InstalledInvokeErrorKind, InstalledInvokeOutcome, InstalledInvokeRequest,
+    run_installed_invoke,
 };
 pub use local_auth::{LocalAuthenticationError, authenticate_local_stream};
 pub use raw_call::{
