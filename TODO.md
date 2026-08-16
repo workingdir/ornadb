@@ -62,6 +62,17 @@ separate release action.
 - [x] Add a separately accepted record value type.
 - [x] Add a separately accepted opaque value type.
 
+## Language tooling
+
+- [x] Expose a context-aware highlight token API from `orna-syntax`.
+- [x] Ship the `orna-lsp` language server binary over stdio.
+- [x] Prove diagnostics, semantic tokens, symbols, hover, navigation,
+  and completion through a framed end-to-end protocol test.
+- [ ] Land the tree-sitter grammar with corpus tests and queries.
+- [ ] Land the TextMate grammar and VS Code extension.
+- [ ] Land the Neovim, vim, Helix, Zed, and Emacs integrations.
+- [ ] Verify the whole tooling surface against the spec examples.
+
 ## Completed foundations
 
 - [x] Implement the accepted SERVER query and mutation slices through required
