@@ -265,7 +265,8 @@ fn request_hover(
         return Ok(serde_json::Value::Null);
     };
     let (parse, mapper) = parse_document(document);
-    let hover: Option<Hover> = analysis::hover(document, &parse, position, &mapper);
+    let hover: Option<Hover> =
+        analysis::hover(document, &parse, state.standard.as_ref(), position, &mapper);
     Ok(serde_json::to_value(hover)?)
 }
 

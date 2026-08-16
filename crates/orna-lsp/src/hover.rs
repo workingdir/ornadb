@@ -59,6 +59,26 @@ pub fn scalar_hover(reference: &ScalarReference, doc_link: Option<&str>) -> Hove
     hover(value)
 }
 
+/// Builds the hover for one standard-library value type.
+pub fn standard_type_hover(
+    name: &str,
+    kind: &str,
+    contract: &str,
+    doc_link: Option<&str>,
+) -> Hover {
+    let mut value =
+        format!("**`{name}`** standard {kind} value type\n\nKernel contract: `{contract}`\n");
+    append_spec_link(&mut value, doc_link);
+    hover(value)
+}
+
+/// Builds the hover for one standard-library schema.
+pub fn standard_schema_hover(name: &str, doc_link: Option<&str>) -> Hover {
+    let mut value = format!("**`{name}`** standard schema\n");
+    append_spec_link(&mut value, doc_link);
+    hover(value)
+}
+
 /// Builds the hover for one declaration.
 pub fn declaration_hover(
     declaration: DeclarationRef<'_>,
