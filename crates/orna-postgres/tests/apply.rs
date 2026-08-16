@@ -5559,11 +5559,8 @@ async fn insert_inactive_application_function(
             ],
         )
         .await?;
-    let artifact_payload = ServerParameterEcho::new(
-        STD_INVOKE_ECHO_PARAMETER_ID,
-        STD_INTEGER_TYPE_ID,
-    )?
-    .encode()?;
+    let artifact_payload =
+        ServerParameterEcho::new(STD_INVOKE_ECHO_PARAMETER_ID, STD_INTEGER_TYPE_ID)?.encode()?;
     let artifact_hash = artifact_payload_digest(&artifact_payload)?;
     client
         .execute(
@@ -5571,7 +5568,11 @@ async fn insert_inactive_application_function(
                 (function_revision_id, artifact_kind, format, format_version, payload,
                  content_hash, hash_algorithm, hash_contract_version)
              VALUES ($1, 'server_plan', 'orna.server-parameter-echo', 1, $2, $3, 'sha256', 1)",
-            &[&revision_id.to_vec(), &artifact_payload, &artifact_hash.to_bytes().to_vec()],
+            &[
+                &revision_id.to_vec(),
+                &artifact_payload,
+                &artifact_hash.to_bytes().to_vec(),
+            ],
         )
         .await?;
     client
