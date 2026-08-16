@@ -1,0 +1,271 @@
+====================
+list, map and record literals, lambda
+====================
+
+CREATE CLIENT FUNCTION demo.collect()
+RETURNS std.ui.UI
+AS
+    std.ui.render(
+        items => [
+            1,
+            2,
+        ],
+        mapping => { 'a': 1, 'b': 2 },
+        point => std.geo.Point { x: 1, y: 2 },
+        transform => (x, y) => x + y,
+        inc => n => n + 1
+    );
+
+---
+
+(source_file
+  (create_client_function_statement
+    (kw_create)
+    (kw_client)
+    (kw_function)
+    name: (qualified_name
+      (qualified_name
+        (identifier))
+      (dot)
+      (identifier))
+    parameters: (parameter_list
+      (lparen)
+      (rparen))
+    (kw_returns)
+    returns: (return_type_spec
+      (type_spec
+        (qualified_name
+          (qualified_name
+            (qualified_name
+              (identifier))
+            (dot)
+            (identifier))
+          (dot)
+          (identifier))))
+    body: (function_body
+      (kw_as)
+      (expression
+        (logical_expression
+          (comparison_expression
+            (additive_expression
+              (multiplicative_expression
+                (unary_expression
+                  (postfix_expression
+                    (primary_expression
+                      (qualified_name
+                        (qualified_name
+                          (qualified_name
+                            (identifier))
+                          (dot)
+                          (identifier))
+                        (dot)
+                        (identifier)))
+                    (lparen)
+                    (argument_list
+                      (argument
+                        name: (identifier)
+                        (arrow_operator)
+                        value: (expression
+                          (logical_expression
+                            (comparison_expression
+                              (additive_expression
+                                (multiplicative_expression
+                                  (unary_expression
+                                    (postfix_expression
+                                      (primary_expression
+                                        (list_literal
+                                          (lbracket)
+                                          (expression
+                                            (logical_expression
+                                              (comparison_expression
+                                                (additive_expression
+                                                  (multiplicative_expression
+                                                    (unary_expression
+                                                      (postfix_expression
+                                                        (primary_expression
+                                                          (literal
+                                                            (number))))))))))
+                                          (comma)
+                                          (expression
+                                            (logical_expression
+                                              (comparison_expression
+                                                (additive_expression
+                                                  (multiplicative_expression
+                                                    (unary_expression
+                                                      (postfix_expression
+                                                        (primary_expression
+                                                          (literal
+                                                            (number))))))))))
+                                          (comma)
+                                          (rbracket)))))))))))
+                      (comma)
+                      (argument
+                        name: (identifier)
+                        (arrow_operator)
+                        value: (expression
+                          (logical_expression
+                            (comparison_expression
+                              (additive_expression
+                                (multiplicative_expression
+                                  (unary_expression
+                                    (postfix_expression
+                                      (primary_expression
+                                        (map_literal
+                                          (lbrace)
+                                          (map_entry
+                                            key: (expression
+                                              (logical_expression
+                                                (comparison_expression
+                                                  (additive_expression
+                                                    (multiplicative_expression
+                                                      (unary_expression
+                                                        (postfix_expression
+                                                          (primary_expression
+                                                            (literal
+                                                              (string_literal))))))))))
+                                            (colon)
+                                            value: (expression
+                                              (logical_expression
+                                                (comparison_expression
+                                                  (additive_expression
+                                                    (multiplicative_expression
+                                                      (unary_expression
+                                                        (postfix_expression
+                                                          (primary_expression
+                                                            (literal
+                                                              (number)))))))))))
+                                          (comma)
+                                          (map_entry
+                                            key: (expression
+                                              (logical_expression
+                                                (comparison_expression
+                                                  (additive_expression
+                                                    (multiplicative_expression
+                                                      (unary_expression
+                                                        (postfix_expression
+                                                          (primary_expression
+                                                            (literal
+                                                              (string_literal))))))))))
+                                            (colon)
+                                            value: (expression
+                                              (logical_expression
+                                                (comparison_expression
+                                                  (additive_expression
+                                                    (multiplicative_expression
+                                                      (unary_expression
+                                                        (postfix_expression
+                                                          (primary_expression
+                                                            (literal
+                                                              (number)))))))))))
+                                          (rbrace)))))))))))
+                      (comma)
+                      (argument
+                        name: (identifier)
+                        (arrow_operator)
+                        value: (expression
+                          (logical_expression
+                            (comparison_expression
+                              (additive_expression
+                                (multiplicative_expression
+                                  (unary_expression
+                                    (postfix_expression
+                                      (primary_expression
+                                        (record_literal
+                                          (qualified_name
+                                            (qualified_name
+                                              (qualified_name
+                                                (identifier))
+                                              (dot)
+                                              (identifier))
+                                            (dot)
+                                            (identifier))
+                                          (lbrace)
+                                          (record_field
+                                            name: (identifier)
+                                            (colon)
+                                            value: (expression
+                                              (logical_expression
+                                                (comparison_expression
+                                                  (additive_expression
+                                                    (multiplicative_expression
+                                                      (unary_expression
+                                                        (postfix_expression
+                                                          (primary_expression
+                                                            (literal
+                                                              (number)))))))))))
+                                          (comma)
+                                          (record_field
+                                            name: (identifier)
+                                            (colon)
+                                            value: (expression
+                                              (logical_expression
+                                                (comparison_expression
+                                                  (additive_expression
+                                                    (multiplicative_expression
+                                                      (unary_expression
+                                                        (postfix_expression
+                                                          (primary_expression
+                                                            (literal
+                                                              (number)))))))))))
+                                          (rbrace)))))))))))
+                      (comma)
+                      (argument
+                        name: (identifier)
+                        (arrow_operator)
+                        value: (expression
+                          (lambda_expression
+                            pattern: (parameter_pattern
+                              (lparen)
+                              (identifier)
+                              (comma)
+                              (identifier)
+                              (rparen))
+                            (arrow_operator)
+                            body: (expression
+                              (logical_expression
+                                (comparison_expression
+                                  (additive_expression
+                                    (additive_expression
+                                      (multiplicative_expression
+                                        (unary_expression
+                                          (postfix_expression
+                                            (primary_expression
+                                              (qualified_name
+                                                (identifier)))))))
+                                    (additive_operator)
+                                    (multiplicative_expression
+                                      (unary_expression
+                                        (postfix_expression
+                                          (primary_expression
+                                            (qualified_name
+                                              (identifier)))))))))))))
+                      (comma)
+                      (argument
+                        name: (identifier)
+                        (arrow_operator)
+                        value: (expression
+                          (lambda_expression
+                            pattern: (parameter_pattern
+                              (identifier))
+                            (arrow_operator)
+                            body: (expression
+                              (logical_expression
+                                (comparison_expression
+                                  (additive_expression
+                                    (additive_expression
+                                      (multiplicative_expression
+                                        (unary_expression
+                                          (postfix_expression
+                                            (primary_expression
+                                              (qualified_name
+                                                (identifier)))))))
+                                    (additive_operator)
+                                    (multiplicative_expression
+                                      (unary_expression
+                                        (postfix_expression
+                                          (primary_expression
+                                            (literal
+                                              (number))))))))))))))
+                    (rparen)))))))))
+    (semicolon)))
+

@@ -1,0 +1,53 @@
+====================
+string escapes and quoted identifiers
+====================
+
+CREATE TYPE "Demo Schema"."odd type" AS OBJECT (
+    "field name" TEXT DEFAULT 'it''s escaped',
+    "other ""quoted""" INT
+);
+
+---
+
+(source_file
+  (create_type_statement
+    (create_object_type_statement
+      (kw_create)
+      (kw_type)
+      name: (qualified_name
+        (qualified_name
+          (identifier
+            (quoted_identifier)))
+        (dot)
+        (identifier
+          (quoted_identifier)))
+      (kw_as)
+      (kw_object)
+      (lparen)
+      (field_definition
+        name: (identifier
+          (quoted_identifier))
+        type: (type_spec
+          (scalar_type
+            (kw_text)))
+        (kw_default)
+        (expression
+          (logical_expression
+            (comparison_expression
+              (additive_expression
+                (multiplicative_expression
+                  (unary_expression
+                    (postfix_expression
+                      (primary_expression
+                        (literal
+                          (string_literal)))))))))))
+      (comma)
+      (field_definition
+        name: (identifier
+          (quoted_identifier))
+        type: (type_spec
+          (scalar_type
+            (kw_int))))
+      (rparen)
+      (semicolon))))
+
