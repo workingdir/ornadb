@@ -1,0 +1,310 @@
+====================
+server function with select body
+====================
+
+CREATE SERVER FUNCTION tasks.overdue (
+    p_principal REF sys.security.principal,
+    p_before TIMESTAMP DEFAULT sys.time.now()
+)
+RETURNS TABLE (
+    task    REF tasks.task,
+    title   TEXT
+)
+SECURITY INVOKER
+TRANSACTION READ ONLY
+VOLATILITY STABLE
+AS
+    SELECT
+        REF(t),
+        t.title
+    FROM tasks.task t
+    WHERE t.completed = FALSE
+      AND t.due_at < p_before
+    ORDER BY t.due_at;
+
+---
+
+(source_file
+  (create_server_function_statement
+    (kw_create)
+    (kw_server)
+    (kw_function)
+    name: (qualified_name
+      (qualified_name
+        (identifier))
+      (dot)
+      (identifier))
+    parameters: (parameter_list
+      (lparen)
+      (parameter_definition
+        name: (identifier)
+        type: (type_spec
+          (kw_ref)
+          (type_spec
+            (qualified_name
+              (qualified_name
+                (qualified_name
+                  (identifier))
+                (dot)
+                (kw_security))
+              (dot)
+              (identifier)))))
+      (comma)
+      (parameter_definition
+        name: (identifier)
+        type: (type_spec
+          (scalar_type
+            (kw_timestamp)))
+        (kw_default)
+        default: (expression
+          (logical_expression
+            (comparison_expression
+              (additive_expression
+                (multiplicative_expression
+                  (unary_expression
+                    (postfix_expression
+                      (primary_expression
+                        (qualified_name
+                          (qualified_name
+                            (qualified_name
+                              (identifier))
+                            (dot)
+                            (kw_time))
+                          (dot)
+                          (identifier)))
+                      (lparen)
+                      (rparen)))))))))
+      (rparen))
+    (kw_returns)
+    returns: (return_type_spec
+      (type_spec
+        (kw_table)
+        (lparen)
+        (table_column_definition
+          name: (identifier)
+          type: (type_spec
+            (kw_ref)
+            (type_spec
+              (qualified_name
+                (qualified_name
+                  (identifier))
+                (dot)
+                (identifier)))))
+        (comma)
+        (table_column_definition
+          name: (identifier)
+          type: (type_spec
+            (scalar_type
+              (kw_text))))
+        (rparen)))
+    (security_clause
+      (kw_security)
+      (kw_invoker))
+    (transaction_clause
+      (kw_transaction)
+      (kw_read)
+      (kw_only))
+    (volatility_clause
+      (kw_volatility)
+      (kw_stable))
+    body: (function_body
+      (kw_as)
+      (sql_body
+        (select_statement
+          (kw_select)
+          (expression
+            (logical_expression
+              (comparison_expression
+                (additive_expression
+                  (multiplicative_expression
+                    (unary_expression
+                      (postfix_expression
+                        (primary_expression
+                          (qualified_name
+                            (kw_ref)))
+                        (lparen)
+                        (argument_list
+                          (argument
+                            value: (expression
+                              (logical_expression
+                                (comparison_expression
+                                  (additive_expression
+                                    (multiplicative_expression
+                                      (unary_expression
+                                        (postfix_expression
+                                          (primary_expression
+                                            (qualified_name
+                                              (identifier))))))))))))
+                        (rparen))))))))
+          (comma)
+          (expression
+            (logical_expression
+              (comparison_expression
+                (additive_expression
+                  (multiplicative_expression
+                    (unary_expression
+                      (postfix_expression
+                        (primary_expression
+                          (qualified_name
+                            (qualified_name
+                              (identifier))
+                            (dot)
+                            (identifier))))))))))
+          (kw_from)
+          table: (qualified_name
+            (qualified_name
+              (identifier))
+            (dot)
+            (identifier))
+          (alias
+            name: (identifier))
+          (kw_where)
+          condition: (expression
+            (logical_expression
+              (logical_expression
+                (comparison_expression
+                  (comparison_expression
+                    (additive_expression
+                      (multiplicative_expression
+                        (unary_expression
+                          (postfix_expression
+                            (primary_expression
+                              (qualified_name
+                                (qualified_name
+                                  (identifier))
+                                (dot)
+                                (identifier))))))))
+                  (comparison_operator)
+                  (additive_expression
+                    (multiplicative_expression
+                      (unary_expression
+                        (postfix_expression
+                          (primary_expression
+                            (literal
+                              (boolean_literal
+                                (kw_false))))))))))
+              (kw_and)
+              (comparison_expression
+                (comparison_expression
+                  (additive_expression
+                    (multiplicative_expression
+                      (unary_expression
+                        (postfix_expression
+                          (primary_expression
+                            (qualified_name
+                              (qualified_name
+                                (identifier))
+                              (dot)
+                              (identifier))))))))
+                (lt)
+                (additive_expression
+                  (multiplicative_expression
+                    (unary_expression
+                      (postfix_expression
+                        (primary_expression
+                          (qualified_name
+                            (identifier))))))))))
+          (kw_order)
+          (kw_by)
+          (expression
+            (logical_expression
+              (comparison_expression
+                (additive_expression
+                  (multiplicative_expression
+                    (unary_expression
+                      (postfix_expression
+                        (primary_expression
+                          (qualified_name
+                            (qualified_name
+                              (identifier))
+                            (dot)
+                            (identifier)))))))))))))
+    (semicolon)))
+
+====================
+server function with rows return and select distinct
+====================
+
+CREATE SERVER FUNCTION product_test.read_probes()
+RETURNS ROWS (stored BOOLEAN)
+SECURITY INVOKER TRANSACTION READ ONLY VOLATILITY STABLE
+AS SELECT DISTINCT entry.marker FROM predicate_test.entry entry WHERE entry.visible;
+
+---
+
+(source_file
+  (create_server_function_statement
+    (kw_create)
+    (kw_server)
+    (kw_function)
+    name: (qualified_name
+      (qualified_name
+        (identifier))
+      (dot)
+      (identifier))
+    parameters: (parameter_list
+      (lparen)
+      (rparen))
+    (kw_returns)
+    returns: (return_type_spec
+      (kw_rows)
+      (lparen)
+      (table_column_definition
+        name: (identifier)
+        type: (type_spec
+          (qualified_name
+            (identifier))))
+      (rparen))
+    (security_clause
+      (kw_security)
+      (kw_invoker))
+    (transaction_clause
+      (kw_transaction)
+      (kw_read)
+      (kw_only))
+    (volatility_clause
+      (kw_volatility)
+      (kw_stable))
+    body: (function_body
+      (kw_as)
+      (sql_body
+        (select_statement
+          (kw_select)
+          (kw_distinct)
+          (expression
+            (logical_expression
+              (comparison_expression
+                (additive_expression
+                  (multiplicative_expression
+                    (unary_expression
+                      (postfix_expression
+                        (primary_expression
+                          (qualified_name
+                            (qualified_name
+                              (identifier))
+                            (dot)
+                            (identifier))))))))))
+          (kw_from)
+          table: (qualified_name
+            (qualified_name
+              (identifier))
+            (dot)
+            (identifier))
+          (alias
+            name: (identifier))
+          (kw_where)
+          condition: (expression
+            (logical_expression
+              (comparison_expression
+                (additive_expression
+                  (multiplicative_expression
+                    (unary_expression
+                      (postfix_expression
+                        (primary_expression
+                          (qualified_name
+                            (qualified_name
+                              (identifier))
+                            (dot)
+                            (identifier)))))))))))))
+    (semicolon)))
+
