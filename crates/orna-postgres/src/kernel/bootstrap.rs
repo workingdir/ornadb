@@ -159,6 +159,12 @@ const MIGRATIONS: &[Migration] = &[
         sql: include_str!("../../migrations/0023_executable_standard_snapshots.sql"),
         data_step: None,
     },
+    Migration {
+        version: 24,
+        name: "capability audit decisions",
+        sql: include_str!("../../migrations/0024_capability_audit.sql"),
+        data_step: None,
+    },
 ];
 const MIGRATION_DATA_STEP_SEPARATOR: &[u8] = b"\0orna.kernel.migration-step\0";
 const CANONICAL_HASH_V1_EMPTY_SEED_STEP: &[u8] = b"canonical-hash-v1-empty-seed/v1";
@@ -837,7 +843,7 @@ mod tests {
             validated_migration_registry()
                 .expect("registry is valid")
                 .len(),
-            23
+            24
         );
         assert_eq!(MIGRATIONS[0].version, 1);
         assert_eq!(MIGRATIONS[1].version, 2);
@@ -862,6 +868,7 @@ mod tests {
         assert_eq!(MIGRATIONS[20].version, 21);
         assert_eq!(MIGRATIONS[21].version, 22);
         assert_eq!(MIGRATIONS[22].version, 23);
+        assert_eq!(MIGRATIONS[23].version, 24);
         assert_eq!(MIGRATIONS[5].name, "definition reference write evidence");
         assert_eq!(MIGRATIONS[6].name, "standard catalogue type storage");
         assert_eq!(MIGRATIONS[7].name, "resolved value type storage");
@@ -880,6 +887,7 @@ mod tests {
         assert_eq!(MIGRATIONS[20].name, "nested record field targets");
         assert_eq!(MIGRATIONS[21].name, "protected invocation audit");
         assert_eq!(MIGRATIONS[22].name, "executable standard relations");
+        assert_eq!(MIGRATIONS[23].name, "capability audit decisions");
         assert!(MIGRATIONS[6].data_step.is_none());
         assert!(MIGRATIONS[7].data_step.is_none());
         assert!(MIGRATIONS[8].data_step.is_none());
@@ -897,6 +905,7 @@ mod tests {
         assert!(MIGRATIONS[20].data_step.is_none());
         assert!(MIGRATIONS[21].data_step.is_none());
         assert!(MIGRATIONS[22].data_step.is_none());
+        assert!(MIGRATIONS[23].data_step.is_none());
     }
 
     #[test]
@@ -981,6 +990,32 @@ mod tests {
             migration
                 .sql
                 .contains("invocation_audit_events_security_evidence_fk")
+        );
+    }
+
+    #[test]
+    fn capability_audit_decisions_is_the_registered_version_twenty_four() {
+        let migration = &MIGRATIONS[23];
+
+        assert_eq!(migration.version, 24);
+        assert_eq!(migration.name, "capability audit decisions");
+        assert!(migration.data_step.is_none());
+        assert!(
+            migration
+                .sql
+                .contains("ALTER TABLE _orna_kernel.security_audit_events")
+        );
+        assert!(
+            migration
+                .sql
+                .contains("event_kind IN ('authentication', 'execute', 'capability')")
+        );
+        assert!(migration.sql.contains("denial_reason LIKE 'capability:%'"));
+        assert!(migration.sql.contains("event_kind = 'capability'"));
+        assert!(
+            migration
+                .sql
+                .contains("DROP CONSTRAINT security_audit_events_shape_check")
         );
     }
 

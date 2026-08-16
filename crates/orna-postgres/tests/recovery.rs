@@ -2196,6 +2196,165 @@ async fn recovers_closed_security_audit_history_and_rejects_tamper() -> TestResu
 
 #[tokio::test]
 #[ignore = "requires the Compose PostgreSQL development service"]
+async fn recovers_closed_capability_audit_history_and_rejects_unredacted_tamper() -> TestResult<()>
+{
+    const USER: PrincipalId = PrincipalId::from_bytes([0x41; 16]);
+    const FUNCTION: FunctionId = FunctionId::from_bytes([0xf2; 16]);
+    const PAIR: RevisionPair = RevisionPair::new(
+        SourceRevisionId::from_bytes([0x52; 16]),
+        CatalogueRevisionId::from_bytes([0xc2; 16]),
+    );
+
+    with_test_database(|database| async move {
+        let kernel = kernel(&database)?;
+        kernel.bootstrap().await?;
+        let session = database.open().await?;
+        let insertion = session
+            .client()
+            .batch_execute(
+                "INSERT INTO _orna_kernel.security_audit_events
+                     (event_id, recorded_at, event_kind, outcome,
+                      session_principal_id, function_id, source_revision_id,
+                      catalogue_revision_id, denial_reason)
+                 VALUES
+                     (decode(repeat('a5', 16), 'hex'),
+                      TIMESTAMP '1970-01-01 00:00:03',
+                      'capability', 'allowed',
+                      decode(repeat('41', 16), 'hex'),
+                      decode(repeat('f2', 16), 'hex'),
+                      decode(repeat('52', 16), 'hex'),
+                      decode(repeat('c2', 16), 'hex'),
+                      'capability:std.fs.read');
+                 INSERT INTO _orna_kernel.security_audit_events
+                     (event_id, recorded_at, event_kind, outcome,
+                      session_principal_id, function_id, source_revision_id,
+                      catalogue_revision_id, denial_reason)
+                 VALUES
+                     (decode(repeat('a6', 16), 'hex'),
+                      TIMESTAMP '1970-01-01 00:00:04',
+                      'capability', 'denied',
+                      decode(repeat('41', 16), 'hex'),
+                      decode(repeat('f2', 16), 'hex'),
+                      decode(repeat('52', 16), 'hex'),
+                      decode(repeat('c2', 16), 'hex'),
+                      'capability:std.net.connect');",
+            )
+            .await
+            .map_err(Into::into);
+        finish_session(
+            insertion,
+            session.shutdown().await,
+            "capability audit fixture insertion",
+        )?;
+
+        let target = InvocationTarget::new(FUNCTION, PAIR);
+        let expected = vec![
+            SecurityAuditEvent::new(
+                orna_core::SecurityAuditEventId::from_bytes([0xa5; 16]),
+                1,
+                UNIX_EPOCH + Duration::from_secs(3),
+                SecurityAuditDecision::recover_capability_allowed(
+                    USER,
+                    target,
+                    "std.fs.read".to_owned(),
+                )?,
+            ),
+            SecurityAuditEvent::new(
+                orna_core::SecurityAuditEventId::from_bytes([0xa6; 16]),
+                2,
+                UNIX_EPOCH + Duration::from_secs(4),
+                SecurityAuditDecision::recover_capability_denied(
+                    USER,
+                    target,
+                    "std.net.connect".to_owned(),
+                )?,
+            ),
+        ];
+        let recovered = PostgresKernel::new(database.config()?)
+            .recover_security_audit_events()
+            .await?;
+        require(
+            recovered == expected,
+            "capability audit recovery changed order, time, identity, or decision evidence",
+        )?;
+
+        let session = database.open().await?;
+        session
+            .client()
+            .batch_execute(
+                "UPDATE _orna_kernel.security_audit_events
+                 SET denial_reason = 'capability:std.fs.read(/home/bob)'
+                 WHERE sequence = 1;",
+            )
+            .await?;
+        let error = kernel
+            .recover_security_audit_events()
+            .await
+            .expect_err("unredacted capability audit evidence must fail recovery");
+        require(
+            matches!(
+                error,
+                PostgresKernelError::DurableInvariant {
+                    relation: "_orna_kernel.security_audit_events",
+                    ref record,
+                    rule: "capability audit name must be a qualified name with no arguments",
+                } if record == "1"
+            ),
+            "unredacted capability tamper returned the wrong durable invariant",
+        )?;
+
+        session
+            .client()
+            .batch_execute(
+                "ALTER TABLE _orna_kernel.security_audit_events
+                     DROP CONSTRAINT security_audit_events_shape_check,
+                     DROP CONSTRAINT security_audit_events_denial_reason_check;
+                 UPDATE _orna_kernel.security_audit_events
+                 SET denial_reason = 'execute_missing_grant'
+                 WHERE sequence = 1;",
+            )
+            .await?;
+        let error = kernel
+            .recover_security_audit_events()
+            .await
+            .expect_err("unsupported capability audit evidence must fail recovery");
+        require(
+            matches!(
+                error,
+                PostgresKernelError::DurableInvariant {
+                    relation: "_orna_kernel.security_audit_events",
+                    ref record,
+                    rule: "capability denial reason is unsupported",
+                } if record == "1"
+            ),
+            "unsupported capability tamper returned the wrong durable invariant",
+        )?;
+
+        let retained: String = session
+            .client()
+            .query_one(
+                "SELECT denial_reason
+                 FROM _orna_kernel.security_audit_events
+                 WHERE sequence = 1",
+                &[],
+            )
+            .await?
+            .get(0);
+        finish_session(
+            require(
+                retained == "execute_missing_grant",
+                "rejected capability audit tamper was repaired",
+            ),
+            session.shutdown().await,
+            "capability audit tamper retention checks",
+        )?;
+        require_no_session_leaks(&database).await
+    })
+    .await
+}
+
+#[tokio::test]
+#[ignore = "requires the Compose PostgreSQL development service"]
 async fn recovery_rejects_tampered_protected_invocation_audit_evidence() -> TestResult<()> {
     const SESSION: PrincipalId = PrincipalId::from_bytes([0x71; 16]);
     const EFFECTIVE: PrincipalId = PrincipalId::from_bytes([0x72; 16]);

@@ -166,6 +166,21 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         "nested record field targets",
         include_str!("../migrations/0021_nested_record_field_targets.sql"),
     ),
+    (
+        22,
+        "protected invocation audit",
+        include_str!("../migrations/0022_invocation_audit.sql"),
+    ),
+    (
+        23,
+        "executable standard relations",
+        include_str!("../migrations/0023_executable_standard_snapshots.sql"),
+    ),
+    (
+        24,
+        "capability audit decisions",
+        include_str!("../migrations/0024_capability_audit.sql"),
+    ),
 ];
 const MIGRATION_DATA_STEP_SEPARATOR: &[u8] = b"\0orna.kernel.migration-step\0";
 const CANONICAL_HASH_V1_EMPTY_SEED_STEP: &[u8] = b"canonical-hash-v1-empty-seed/v1";
@@ -1756,7 +1771,7 @@ async fn bootstrap_rejects_tampered_gapped_and_newer_migration_history() -> Test
         Sha256::digest(MIGRATIONS[1].2.as_bytes()).to_vec(),
     )
     .await?;
-    reject_migration_history(22, "future migration", vec![0; 32]).await
+    reject_migration_history(25, "future migration", vec![0; 32]).await
 }
 
 async fn inspect_bootstrap_state(database: &TestDatabase) -> TestResult<()> {
