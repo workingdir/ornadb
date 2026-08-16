@@ -14,8 +14,9 @@ use orna_core::{
     physical::PhysicalPlanError,
     revision::{CatalogueHashVersion, RevisionInvariantError, RevisionPair},
     security::{ExecuteDenial, LocalPeerAuthenticationError, SecuritySnapshotError},
+    state::UserStateError,
 };
-use orna_protocol::FrameCodecError;
+use orna_protocol::{FrameCodecError, ValueCodecError};
 use orna_standard::StandardUpgradeIdentity;
 
 use tokio::task::{JoinError, JoinHandle};
@@ -39,6 +40,8 @@ pub(crate) mod server_execution;
 pub(crate) mod server_mutation_execution;
 #[path = "kernel/server_runtime.rs"]
 pub(crate) mod server_runtime;
+#[path = "kernel/state.rs"]
+pub(crate) mod state;
 #[path = "kernel/storage.rs"]
 pub(crate) mod storage;
 
@@ -52,6 +55,7 @@ pub use server_mutation_execution::{
     ServerMutationCommitState, ServerMutationContext, ServerMutationError, ServerUpdateCommitState,
     ServerUpdateContext, ServerUpdateError, ServerUpdateResult,
 };
+pub use state::UserStateInstanceRequest;
 
 /// The typed source for an unavailable authenticated raw SERVER target.
 ///
@@ -231,6 +235,10 @@ pub enum PostgresKernelError {
     },
     /// An authorised CLIENT function could not be evaluated.
     ClientExecution(ClientExecutionError),
+    /// A USER state model validation failed with a closed ORNA09 error.
+    UserState(UserStateError),
+    /// A USER state value failed the canonical ORV5 codec.
+    UserStateValueCodec(ValueCodecError),
     /// A kernel-supplied local peer UID could not establish an Orna session.
     LocalPeerAuthentication(LocalPeerAuthenticationError),
     /// The candidate was prepared against a revision pair that is no longer active.
@@ -369,6 +377,12 @@ impl fmt::Display for PostgresKernelError {
             Self::ClientExecution(error) => {
                 write!(formatter, "CLIENT function execution failed: {error}")
             }
+            Self::UserState(error) => {
+                write!(formatter, "USER state operation failed: {error}")
+            }
+            Self::UserStateValueCodec(error) => {
+                write!(formatter, "USER state value codec failed: {error}")
+            }
             Self::LocalPeerAuthentication(error) => {
                 write!(formatter, "local peer authentication failed: {error}")
             }
@@ -426,6 +440,8 @@ impl Error for PostgresKernelError {
             Self::CatalogueSnapshot(error) => Some(error),
             Self::SecuritySnapshot(error) => Some(error),
             Self::ClientExecution(error) => Some(error),
+            Self::UserState(error) => Some(error),
+            Self::UserStateValueCodec(error) => Some(error),
             Self::LocalPeerAuthentication(error) => Some(error),
             Self::InvocationCarrier(error) => Some(error),
             Self::SealedInvocation(error) => Some(error),
