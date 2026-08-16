@@ -2999,7 +2999,7 @@ fn exact_standard_catalogue_constraint_definition(constraint: &str) -> Option<&'
             "CHECK ((octet_length(catalogue_revision_id) = 16))"
         }
         "std_lib_rev_catalogue_revision_key" => "UNIQUE (catalogue_revision_id)",
-        "std_lib_rev_digest_version_check" => "CHECK ((digest_version = 1))",
+        "std_lib_rev_digest_version_check" => "CHECK ((digest_version = ANY (ARRAY[1, 2])))",
         "std_lib_rev_language_version_check" => "CHECK ((length(language_version) > 0))",
         "std_lib_rev_content_hash_length" => "CHECK ((octet_length(content_hash) = 32))",
         "std_lib_rev_hash_algorithm_check" => "CHECK ((hash_algorithm = 'sha256'::text))",
@@ -3186,7 +3186,7 @@ async fn inspect_standard_catalogue_constraints(client: &Client) -> TestResult<(
         (
             "standard_library_revisions",
             "std_lib_rev_digest_version_check",
-            "digest_version = 1",
+            "digest_version = ANY (ARRAY[1, 2])",
         ),
         (
             "standard_library_revisions",
