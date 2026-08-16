@@ -9,6 +9,7 @@ mod raw_client_dispatch;
 mod raw_socket;
 mod source_apply;
 mod upgrade;
+mod user_state;
 
 pub use backend_shell::{BackendShellError, run_backend_shell};
 pub use embedded::{
@@ -36,6 +37,12 @@ pub use source_apply::{
     InstalledSourceApplyOutcome, InstalledSourceApplySuccess, run_installed_source_apply,
 };
 pub use upgrade::{EmbeddedUpgradeError, run_embedded_upgrade};
+pub use user_state::{
+    InstalledUserStateChange, InstalledUserStateError, InstalledUserStateErrorKind,
+    InstalledUserStateExpectedType, InstalledUserStateInstance, InstalledUserStateOperation,
+    InstalledUserStateOutcome, InstalledUserStateRequest, run_installed_user_state,
+    run_user_state_with_kernel,
+};
 
 use std::fmt;
 
