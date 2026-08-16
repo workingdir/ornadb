@@ -239,9 +239,9 @@ fn require_echo_completion(
 async fn proves_installed_inspect_end_to_end() -> TestResult<()> {
     with_test_database(|database| async move {
         install_standard(&database).await?;
-        let kernel = kernel(&database);
+        let db_kernel = kernel(&database);
         let uid = nix::unistd::geteuid().as_raw();
-        let active = kernel.recover().await?;
+        let active = db_kernel.recover().await?;
         let pair = active.pair();
         let standard = active
             .catalogue_hash_context()
@@ -272,7 +272,7 @@ async fn proves_installed_inspect_end_to_end() -> TestResult<()> {
             )],
             vec![LocalPeerCredential::new(uid, INSPECT_PRINCIPAL)],
         )?;
-        kernel.replace_security_snapshot(&security).await?;
+        db_kernel.replace_security_snapshot(&security).await?;
 
         // One cell under the echo root for the state_cells redaction proof.
         let write = write_cell(&database, ECHO_VALUE).await?;
@@ -287,7 +287,7 @@ async fn proves_installed_inspect_end_to_end() -> TestResult<()> {
         let request = sealed_echo_request(ECHO_VALUE)?;
         let retained = encode_invoke_request(&active, &registry, &request)?;
         let session = security.bind_authenticated_session(INSPECT_PRINCIPAL, vec![])?;
-        let result = kernel
+        let result = db_kernel
             .dispatch_sealed_sys_invoke(&session, CONNECTION_PROTOCOL_MAJOR, &retained)
             .await?;
         let invocation = require_echo_completion(&result, ECHO_VALUE)?;
@@ -407,7 +407,9 @@ async fn proves_installed_inspect_end_to_end() -> TestResult<()> {
                     .collect::<Vec<_>>()
                     == [0, 1, 2]
                 && trace[1]["payload"]["value_count"] == 1,
-            "the trace did not stream started(0), value_batch(1), completed(2): {trace_text}",
+            format!(
+                "the trace did not stream started(0), value_batch(1), completed(2): {trace_text}"
+            ),
         )?;
 
         let (outcome, stdout) = inspect_run(
