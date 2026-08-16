@@ -5757,27 +5757,31 @@ EXPORT TYPE std.io.ByteStream AS std.ByteStream;
             format!("standard library {STANDARD_LIBRARY_V3_REVISION_ID} is already installed")
         );
 
-        // A V2-pinned base reaches the shared prepare machinery, which closes
-        // the upgrade because the companion revision must be prepared from a
-        // standard-free application base.
+        // A V2-pinned base is the exact append-only parent (work ADR 0059
+        // upgrade pipeline): the shared machinery admits the source child and
+        // prepares the V3 companion application revision on the V2 pair.
         let version_two = verify_standard_library_v2_snapshot(
             retained_standard_library_v2_snapshot().expect("the retained V2 source is valid"),
         )
         .expect("the retained V2 standard source verifies");
         let pinned_two = empty_version_two_active_revision(&version_two);
-        let error = prepare_standard_upgrade_v2_to_v3(&pinned_two)
-            .expect_err("an installed V2 standard must close the upgrade");
-        assert!(matches!(
-            &error,
-            StandardUpgradeError::Prepare {
-                source: orna_compiler::PrepareStandardUpgradeError::StandardLibraryAlreadyInstalled {
-                    revision
-                }
-            } if *revision == STANDARD_LIBRARY_V2_REVISION_ID
-        ));
+        let upgrade = prepare_standard_upgrade_v2_to_v3(&pinned_two)
+            .expect("the installed V2 parent prepares the append-only V3 upgrade");
         assert_eq!(
-            error.to_string(),
-            format!("standard library {STANDARD_LIBRARY_V2_REVISION_ID} is already installed")
+            upgrade.verified_standard_snapshot().revision(),
+            STANDARD_LIBRARY_V3_REVISION_ID
+        );
+        assert_eq!(
+            upgrade.application_revision().expected_base(),
+            pinned_two.pair()
+        );
+        assert_eq!(
+            upgrade
+                .application_revision()
+                .catalogue_hash_context()
+                .standard()
+                .map(|snapshot| snapshot.revision()),
+            Some(STANDARD_LIBRARY_V3_REVISION_ID)
         );
     }
 }
