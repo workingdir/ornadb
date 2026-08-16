@@ -216,6 +216,91 @@ const ACCEPTED_V2_SEMANTIC_DIGEST: Sha256Digest = Sha256Digest::from_bytes([
     0x82, 0x49, 0x07, 0xd4, 0x25, 0xb4, 0x62, 0x0c, 0x27, 0x35, 0x13, 0x75, 0x74, 0xff, 0x9b, 0x8d,
 ]);
 
+/// The standard-library version represented by the V3 manifest (work ADR 0058).
+pub const STANDARD_LIBRARY_V3_VERSION_IDENTITY: &str = "orna.std/3";
+
+/// The stable identity of `orna.std/3`.
+pub const STANDARD_LIBRARY_V3_REVISION_ID: StandardLibraryRevisionId =
+    StandardLibraryRevisionId::from_bytes(reserved_id(3));
+
+/// The stable identity of the V3 standard catalogue revision.
+pub const STANDARD_CATALOGUE_V3_REVISION_ID: CatalogueRevisionId =
+    CatalogueRevisionId::from_bytes(reserved_id(3));
+
+/// The stable identity reserved for the V3 standard source bundle.
+pub const STANDARD_SOURCE_V3_BUNDLE_ID: SourceBundleId = SourceBundleId::from_bytes(reserved_id(3));
+
+/// The stable identity reserved for the V3 standard source revision.
+pub const STANDARD_SOURCE_V3_REVISION_ID: SourceRevisionId =
+    SourceRevisionId::from_bytes(reserved_id(3));
+
+/// The logical path reserved for the retained V3 output source unit.
+pub const STD_OUTPUT_SOURCE_LOGICAL_PATH: &str = "std/output.orna";
+
+/// The stable identity of the retained `std/output.orna` unit in the V3 bundle.
+pub const STD_OUTPUT_SOURCE_UNIT_ID: SourceUnitId = SourceUnitId::from_bytes(reserved_id(4));
+
+/// The stable identity of the `std.terminal` schema.
+pub const STD_TERMINAL_SCHEMA_ID: SchemaId = SchemaId::from_bytes(reserved_id(4));
+
+/// The stable identity of the `std.io` schema.
+pub const STD_IO_SCHEMA_ID: SchemaId = SchemaId::from_bytes(reserved_id(5));
+
+/// The stable identity of `std.terminal.Document`.
+pub const STD_TERMINAL_DOCUMENT_TYPE_ID: TypeId = TypeId::from_bytes(reserved_id(15));
+
+/// The stable identity of `std.io.ByteStream`.
+pub const STD_IO_BYTE_STREAM_TYPE_ID: TypeId = TypeId::from_bytes(reserved_id(16));
+
+/// The kernel representation contract of `std.terminal.Document`.
+pub const STD_TERMINAL_DOCUMENT_CONTRACT: &str = "orna.std.value.terminal-document@1";
+
+/// The kernel representation contract of `std.io.ByteStream`.
+pub const STD_IO_BYTE_STREAM_CONTRACT: &str = "orna.std.value.byte-stream@1";
+
+/// The canonical ASCII magic prefix of a `std.terminal.Document` payload.
+///
+/// The canonical payload is exactly `ORNA-TERMINAL-DOCUMENT/1 ` followed by a
+/// big-endian `u32` body length and the body bytes.
+pub const TERMINAL_DOCUMENT_MAGIC: &str = "ORNA-TERMINAL-DOCUMENT/1 ";
+
+/// The canonical ASCII magic prefix of a `std.io.ByteStream` payload.
+///
+/// The canonical payload is exactly `ORNA-BYTE-STREAM/1 ` followed by a
+/// big-endian `u32` media-type length, the media type, a big-endian `u32`
+/// body length, and the body bytes.
+pub const BYTE_STREAM_MAGIC: &str = "ORNA-BYTE-STREAM/1 ";
+
+const RETAINED_STANDARD_OUTPUT_SOURCE: &str = include_str!("../../../stdlib/std/output.orna");
+
+// The V3 digest goldens below are computed by the canonical encoders from the
+// retained source and canonical records (never copied from a handwritten
+// encoder). The digest-golden tests recompute every value from the retained
+// units and compare against these constants, so any retained-source edit fails
+// loudly at build time. The V3 artifact and semantic digests are the V2
+// goldens because `orna.std/3` retains the exact V2 parameter-echo executable
+// unchanged.
+const ACCEPTED_V3_TYPES_CONTENT_DIGEST: Sha256Digest = ACCEPTED_V2_TYPES_CONTENT_DIGEST;
+const ACCEPTED_V3_INVOKE_CONTENT_DIGEST: Sha256Digest = ACCEPTED_V2_INVOKE_CONTENT_DIGEST;
+const ACCEPTED_V3_OUTPUT_CONTENT_DIGEST: Sha256Digest = Sha256Digest::from_bytes([
+    0x8f, 0x16, 0x21, 0x4d, 0x9c, 0x4d, 0xee, 0x06, 0x6f, 0x24, 0x7b, 0x24, 0x15, 0xe9, 0xaf, 0xa7,
+    0x0f, 0xcf, 0x5f, 0xb2, 0x66, 0x47, 0x3b, 0xb0, 0xfd, 0x6d, 0x72, 0x87, 0x98, 0xa2, 0xaf, 0x35,
+]);
+const ACCEPTED_V3_SOURCE_BUNDLE_DIGEST: Sha256Digest = Sha256Digest::from_bytes([
+    0x28, 0x69, 0x41, 0x4f, 0x3b, 0xbc, 0xb9, 0x14, 0x60, 0x5b, 0xf4, 0x79, 0x4d, 0x2d, 0x4d, 0xd3,
+    0xe4, 0x3f, 0x43, 0xc9, 0x72, 0xc7, 0x50, 0x53, 0xc7, 0xeb, 0xc3, 0xdf, 0xb9, 0x19, 0xb1, 0x5f,
+]);
+const ACCEPTED_V3_SOURCE_REVISION_DIGEST: Sha256Digest = Sha256Digest::from_bytes([
+    0x60, 0xb7, 0xba, 0xdc, 0x70, 0x1c, 0xf6, 0x2c, 0x2c, 0xd2, 0x83, 0xd3, 0xae, 0x5e, 0x5b, 0xc5,
+    0x01, 0xc4, 0xff, 0x8f, 0x7b, 0x1d, 0x75, 0x7e, 0xa1, 0xdc, 0x0d, 0xf6, 0x48, 0xa2, 0x29, 0x44,
+]);
+const ACCEPTED_V3_STANDARD_LIBRARY_DIGEST: Sha256Digest = Sha256Digest::from_bytes([
+    0x9e, 0xf4, 0xcb, 0x13, 0xb7, 0x5e, 0xaf, 0x81, 0x40, 0x51, 0xd0, 0x37, 0x47, 0x9c, 0x34, 0x5c,
+    0x0e, 0x3b, 0x1d, 0x4e, 0xe0, 0x70, 0x32, 0x3e, 0x36, 0x31, 0x59, 0xe2, 0x79, 0x2c, 0x7d, 0xcd,
+]);
+const ACCEPTED_V3_ARTIFACT_DIGEST: Sha256Digest = ACCEPTED_V2_ARTIFACT_DIGEST;
+const ACCEPTED_V3_SEMANTIC_DIGEST: Sha256Digest = ACCEPTED_V2_SEMANTIC_DIGEST;
+
 #[derive(Clone, Copy)]
 struct ValueTypeFact {
     id: TypeId,
@@ -671,6 +756,138 @@ pub fn standard_library_v2_manifest()
     Ok(StandardLibraryV2Manifest { catalogue })
 }
 
+/// The source-independent facts required to recognise the output
+/// `orna.std/3` standard library (work ADR 0058).
+///
+/// This value does not contain standard source, origins, hashes, a digest, or
+/// authority to install or use a standard-library snapshot.
+#[derive(Clone, Debug)]
+pub struct StandardLibraryV3Manifest {
+    catalogue: CatalogueSnapshot,
+}
+
+impl StandardLibraryV3Manifest {
+    /// Returns the standard-library version label.
+    pub const fn standard_library_version(&self) -> &'static str {
+        STANDARD_LIBRARY_V3_VERSION_IDENTITY
+    }
+
+    /// Returns the standard-library revision identity.
+    pub const fn standard_library_revision(&self) -> StandardLibraryRevisionId {
+        STANDARD_LIBRARY_V3_REVISION_ID
+    }
+
+    /// Returns the associated language version label.
+    pub const fn language_version(&self) -> &'static str {
+        LANGUAGE_VERSION_IDENTITY
+    }
+
+    /// Returns the identity reserved for the later retained V3 source bundle.
+    pub const fn source_bundle(&self) -> SourceBundleId {
+        STANDARD_SOURCE_V3_BUNDLE_ID
+    }
+
+    /// Returns the identity reserved for the later retained V3 source revision.
+    pub const fn source_revision(&self) -> SourceRevisionId {
+        STANDARD_SOURCE_V3_REVISION_ID
+    }
+
+    /// Returns the identity of the retained `std/types.orna` unit in the V3 bundle.
+    pub const fn types_source_unit(&self) -> SourceUnitId {
+        STD_TYPES_SOURCE_UNIT_ID
+    }
+
+    /// Returns the identity of the retained `std/invoke.orna` unit in the V3 bundle.
+    pub const fn invoke_source_unit(&self) -> SourceUnitId {
+        STD_INVOKE_SOURCE_UNIT_ID
+    }
+
+    /// Returns the identity of the retained `std/output.orna` unit in the V3 bundle.
+    pub const fn output_source_unit(&self) -> SourceUnitId {
+        STD_OUTPUT_SOURCE_UNIT_ID
+    }
+
+    /// Returns the logical path of the retained `std/types.orna` unit.
+    pub const fn types_source_logical_path(&self) -> &'static str {
+        SOURCE_LOGICAL_PATH
+    }
+
+    /// Returns the logical path of the retained `std/invoke.orna` unit.
+    pub const fn invoke_source_logical_path(&self) -> &'static str {
+        STD_INVOKE_SOURCE_LOGICAL_PATH
+    }
+
+    /// Returns the logical path of the retained `std/output.orna` unit.
+    pub const fn output_source_logical_path(&self) -> &'static str {
+        STD_OUTPUT_SOURCE_LOGICAL_PATH
+    }
+
+    /// Returns the validated source-independent V3 standard catalogue.
+    pub const fn catalogue(&self) -> &CatalogueSnapshot {
+        &self.catalogue
+    }
+}
+
+/// Builds and validates the accepted source-independent output standard manifest.
+///
+/// The V3 catalogue extends the V2 catalogue with the `std.terminal` and
+/// `std.io` schemas and the two opaque output value types
+/// `std.terminal.document` and `std.io.bytestream`. It reuses the V2 schemas,
+/// value types, type bindings, and the single `std.invoke.echo` function
+/// unchanged.
+pub fn standard_library_v3_manifest()
+-> Result<StandardLibraryV3Manifest, StandardLibraryManifestError> {
+    let version_two = standard_library_v2_manifest()?;
+    let mut schemas = version_two.catalogue().schemas().to_vec();
+    schemas.push(SchemaDefinition::new(
+        STD_TERMINAL_SCHEMA_ID,
+        semantic_name("std.terminal", ["std", "terminal"])?,
+    ));
+    schemas.push(SchemaDefinition::new(
+        STD_IO_SCHEMA_ID,
+        semantic_name("std.io", ["std", "io"])?,
+    ));
+    let mut value_types = version_two.catalogue().value_types().to_vec();
+    value_types.push(ValueTypeDefinition::opaque(
+        STD_TERMINAL_DOCUMENT_TYPE_ID,
+        semantic_name("std.terminal.document", ["std", "terminal", "document"])?,
+        STD_TERMINAL_DOCUMENT_CONTRACT,
+    ));
+    value_types.push(ValueTypeDefinition::opaque(
+        STD_IO_BYTE_STREAM_TYPE_ID,
+        semantic_name("std.io.bytestream", ["std", "io", "bytestream"])?,
+        STD_IO_BYTE_STREAM_CONTRACT,
+    ));
+    let mut type_bindings = version_two.catalogue().type_bindings().to_vec();
+    let document_name = semantic_name("std.document", ["std", "document"])?;
+    let document_lookup = TypeLookupName::qualified(document_name.clone());
+    let document_binding = TypeBinding::qualified(document_name, STD_TERMINAL_DOCUMENT_TYPE_ID)
+        .map_err(|source| StandardLibraryManifestError::TypeBinding {
+            name: document_lookup,
+            source,
+        })?;
+    type_bindings.push(document_binding);
+    let bytestream_name = semantic_name("std.bytestream", ["std", "bytestream"])?;
+    let bytestream_lookup = TypeLookupName::qualified(bytestream_name.clone());
+    let bytestream_binding = TypeBinding::qualified(bytestream_name, STD_IO_BYTE_STREAM_TYPE_ID)
+        .map_err(|source| StandardLibraryManifestError::TypeBinding {
+            name: bytestream_lookup,
+            source,
+        })?;
+    type_bindings.push(bytestream_binding);
+    let catalogue = CatalogueSnapshot::new_with_functions_and_types(
+        STANDARD_CATALOGUE_V3_REVISION_ID,
+        schemas,
+        Vec::new(),
+        value_types,
+        type_bindings,
+        version_two.catalogue().functions().to_vec(),
+    )
+    .map_err(|source| StandardLibraryManifestError::Catalogue { source })?;
+
+    Ok(StandardLibraryV3Manifest { catalogue })
+}
+
 fn build_type_bindings(
     expected_ids: &[[u8; 16]],
 ) -> Result<Vec<TypeBinding>, StandardLibraryManifestError> {
@@ -987,6 +1204,14 @@ pub enum StandardUpgradeError {
         /// The compiler preparation error.
         source: PrepareStandardUpgradeError,
     },
+    /// The standard upgrade is registered but its install pipeline is not yet
+    /// accepted by this build.
+    UnsupportedStandardUpgrade {
+        /// The accepted base standard revision of the upgrade.
+        from: StandardLibraryRevisionId,
+        /// The registered target standard revision of the upgrade.
+        to: StandardLibraryRevisionId,
+    },
 }
 
 impl fmt::Display for StandardUpgradeError {
@@ -995,6 +1220,10 @@ impl fmt::Display for StandardUpgradeError {
             Self::StandardLibrary { source } => source.fmt(formatter),
             Self::StandardSource { source } => source.fmt(formatter),
             Self::Prepare { source } => source.fmt(formatter),
+            Self::UnsupportedStandardUpgrade { from, to } => write!(
+                formatter,
+                "the {from} to {to} standard upgrade is not supported by this build"
+            ),
         }
     }
 }
@@ -1005,6 +1234,7 @@ impl Error for StandardUpgradeError {
             Self::StandardLibrary { source } => Some(source),
             Self::StandardSource { source } => Some(source),
             Self::Prepare { source } => Some(source),
+            Self::UnsupportedStandardUpgrade { .. } => None,
         }
     }
 }
@@ -1053,6 +1283,39 @@ pub fn prepare_standard_upgrade_v1_to_v2(
         check_standard_library_source,
         prepare_checked_standard_upgrade,
     )
+}
+
+/// The fail-closed seam for the append-only `orna.std/2` to `orna.std/3`
+/// standard upgrade (work ADR 0058).
+///
+/// The compiler-backed install pipeline is V1-to-V2 shaped and work ADR 0055
+/// defers upgrades after `orna.std/2` to a later standard-upgrade decision,
+/// so this build registers the V3 snapshot but cannot install it. The
+/// function fails closed when the active revision pins a standard other than
+/// `orna.std/2`, retains and verifies the V3 snapshot (proving the
+/// registration is coherent), and then reports `UnsupportedStandardUpgrade`.
+pub fn prepare_standard_upgrade_v2_to_v3(
+    active: &ActiveDatabaseRevision,
+) -> Result<StandardUpgrade, StandardUpgradeError> {
+    if let Some(installed) = active.catalogue_hash_context().standard()
+        && installed.revision() != STANDARD_LIBRARY_V2_REVISION_ID
+    {
+        return Err(StandardUpgradeError::Prepare {
+            source: PrepareStandardUpgradeError::StandardLibraryAlreadyInstalled {
+                revision: installed.revision(),
+            },
+        });
+    }
+
+    let version_three = retained_standard_library_v3_snapshot()
+        .map_err(|source| StandardUpgradeError::StandardLibrary { source })?;
+    verify_standard_library_v3_snapshot(version_three)
+        .map_err(|source| StandardUpgradeError::StandardLibrary { source })?;
+
+    Err(StandardUpgradeError::UnsupportedStandardUpgrade {
+        from: STANDARD_LIBRARY_V2_REVISION_ID,
+        to: STANDARD_LIBRARY_V3_REVISION_ID,
+    })
 }
 
 fn prepare_standard_upgrade_with<Retain, Verify, Check, Prepare>(
@@ -1168,6 +1431,302 @@ pub fn verify_standard_library_v2_snapshot(
         .map_err(|source| StandardLibraryError::CanonicalHash { source })
 }
 
+/// Retains the canonical output standard source as an unverified snapshot.
+///
+/// This function parses all three embedded units directly with `orna_syntax`,
+/// reconciles every declaration with the source-independent V3 manifest, and
+/// verifies the accepted source and standard-library hash goldens. It retains
+/// the V2 `std.invoke.echo` executable unchanged through the canonical
+/// compiler checker and canonical digest encoders. It does not run the
+/// compiler pipeline and does not grant standard-library authority.
+pub fn retained_standard_library_v3_snapshot()
+-> Result<StandardLibrarySnapshot, StandardLibraryError> {
+    retained_standard_library_v3_snapshot_from_source(
+        RETAINED_STANDARD_SOURCE,
+        RETAINED_STANDARD_INVOKE_SOURCE,
+        RETAINED_STANDARD_OUTPUT_SOURCE,
+    )
+}
+
+/// Verifies a retained output standard snapshot and returns the authority
+/// capability.
+///
+/// The wrapper first checks the reserved V3 catalogue identity, then the
+/// accepted V3 standard digest, and only then invokes the core canonical V2
+/// verifier. `orna.std/3` reuses the V2 digest contract (work ADR 0058); the
+/// V3 catalogue, revision, source, and goldens are all new.
+pub fn verify_standard_library_v3_snapshot(
+    snapshot: StandardLibrarySnapshot,
+) -> Result<VerifiedStandardLibrarySnapshot, StandardLibraryError> {
+    let actual_catalogue = snapshot.catalogue().revision();
+    if actual_catalogue != STANDARD_CATALOGUE_V3_REVISION_ID {
+        return Err(StandardLibraryError::CatalogueIdentityMismatch {
+            expected: STANDARD_CATALOGUE_V3_REVISION_ID,
+            actual: actual_catalogue,
+        });
+    }
+
+    let actual_digest = snapshot.digest();
+    if actual_digest != ACCEPTED_V3_STANDARD_LIBRARY_DIGEST {
+        return Err(StandardLibraryError::AcceptedDigestMismatch {
+            expected: ACCEPTED_V3_STANDARD_LIBRARY_DIGEST,
+            actual: actual_digest,
+        });
+    }
+
+    verify_canonical_standard_library_v2_snapshot(snapshot)
+        .map_err(|source| StandardLibraryError::CanonicalHash { source })
+}
+
+fn retained_standard_library_v3_snapshot_from_source(
+    types_source: &str,
+    invoke_source: &str,
+    output_source: &str,
+) -> Result<StandardLibrarySnapshot, StandardLibraryError> {
+    let manifest = standard_library_v3_manifest()
+        .map_err(|source| StandardLibraryError::Manifest { source })?;
+    let types_manifest =
+        standard_library_manifest().map_err(|source| StandardLibraryError::Manifest { source })?;
+    let catalogue = manifest.catalogue();
+
+    let mut origins = reconcile_retained_source_with_unit(
+        types_source,
+        &types_manifest,
+        STD_TYPES_SOURCE_UNIT_ID,
+    )?;
+    let invoke_origins = reconcile_retained_invoke_source(invoke_source, catalogue)?;
+    origins.extend(invoke_origins.iter().cloned());
+    let output_origins = reconcile_retained_output_source(output_source, catalogue)?;
+    origins.extend(output_origins.iter().cloned());
+
+    let types_content_hash = source_unit_content_digest(types_source)
+        .map_err(|source| StandardLibraryError::CanonicalHash { source })?;
+    if types_content_hash != ACCEPTED_V3_TYPES_CONTENT_DIGEST {
+        return Err(StandardLibraryError::RetainedSourceMismatch);
+    }
+    let invoke_content_hash = source_unit_content_digest(invoke_source)
+        .map_err(|source| StandardLibraryError::CanonicalHash { source })?;
+    if invoke_content_hash != ACCEPTED_V3_INVOKE_CONTENT_DIGEST {
+        return Err(StandardLibraryError::RetainedSourceMismatch);
+    }
+    let output_content_hash = source_unit_content_digest(output_source)
+        .map_err(|source| StandardLibraryError::CanonicalHash { source })?;
+    if output_content_hash != ACCEPTED_V3_OUTPUT_CONTENT_DIGEST {
+        return Err(StandardLibraryError::RetainedSourceMismatch);
+    }
+    let types_unit = StoredSourceUnit::new(
+        STD_TYPES_SOURCE_UNIT_ID,
+        0,
+        SOURCE_LOGICAL_PATH,
+        types_source,
+        types_content_hash,
+    )
+    .map_err(|source| StandardLibraryError::Revision { source })?;
+    let invoke_unit = StoredSourceUnit::new(
+        STD_INVOKE_SOURCE_UNIT_ID,
+        1,
+        STD_INVOKE_SOURCE_LOGICAL_PATH,
+        invoke_source,
+        invoke_content_hash,
+    )
+    .map_err(|source| StandardLibraryError::Revision { source })?;
+    let output_unit = StoredSourceUnit::new(
+        STD_OUTPUT_SOURCE_UNIT_ID,
+        2,
+        STD_OUTPUT_SOURCE_LOGICAL_PATH,
+        output_source,
+        output_content_hash,
+    )
+    .map_err(|source| StandardLibraryError::Revision { source })?;
+    let units = vec![types_unit, invoke_unit, output_unit];
+    let bundle_hash = source_bundle_digest(&units)
+        .map_err(|source| StandardLibraryError::CanonicalHash { source })?;
+    if bundle_hash != ACCEPTED_V3_SOURCE_BUNDLE_DIGEST {
+        return Err(StandardLibraryError::RetainedSourceMismatch);
+    }
+    let revision_hash = source_revision_record_digest(
+        STANDARD_SOURCE_V3_BUNDLE_ID,
+        Some(STANDARD_SOURCE_V2_REVISION_ID),
+        bundle_hash,
+    )
+    .map_err(|source| StandardLibraryError::CanonicalHash { source })?;
+    if revision_hash != ACCEPTED_V3_SOURCE_REVISION_DIGEST {
+        return Err(StandardLibraryError::RetainedSourceMismatch);
+    }
+    let retained_source = StoredSourceRevision::new(
+        STANDARD_SOURCE_V3_BUNDLE_ID,
+        STANDARD_SOURCE_V3_REVISION_ID,
+        Some(STANDARD_SOURCE_V2_REVISION_ID),
+        units,
+        bundle_hash,
+        revision_hash,
+    )
+    .map_err(|source| StandardLibraryError::Revision { source })?;
+
+    // `orna.std/3` retains the exact V2 parameter-echo executable unchanged;
+    // its artifact and semantic digests are the V2 goldens, pinned here as the
+    // V3 goldens so the retained path fails closed on any drift.
+    let executable = retained_v2_executable(invoke_source, catalogue, &invoke_origins)?;
+    if executable.revision().artifact().content_hash() != ACCEPTED_V3_ARTIFACT_DIGEST
+        || executable.revision().semantic_hash() != ACCEPTED_V3_SEMANTIC_DIGEST
+    {
+        return Err(StandardLibraryError::RetainedSourceMismatch);
+    }
+    let snapshot = StandardLibrarySnapshot::new_with_executables(
+        STANDARD_LIBRARY_V3_REVISION_ID,
+        StandardLibraryDigestVersion::Version2,
+        retained_source,
+        LANGUAGE_VERSION_IDENTITY,
+        catalogue.clone(),
+        vec![executable],
+        origins,
+        ACCEPTED_V3_STANDARD_LIBRARY_DIGEST,
+    )
+    .map_err(|source| StandardLibraryError::Revision { source })?;
+    let _ = standard_library_digest(&snapshot)
+        .map_err(|source| StandardLibraryError::CanonicalHash { source })?;
+
+    Ok(snapshot)
+}
+
+/// Reconciles the retained `std/output.orna` unit against the V3 catalogue.
+///
+/// The unit must round-trip exactly and contain nothing besides the
+/// `std.terminal` and `std.io` schema declarations, the two opaque output
+/// value type declarations, and their two qualified exports. The complete
+/// origin set is exactly those six declarations at their exact byte ranges in
+/// the retained unit.
+fn reconcile_retained_output_source(
+    source: &str,
+    catalogue: &CatalogueSnapshot,
+) -> Result<Vec<DefinitionOrigin>, StandardLibraryError> {
+    let parsed = orna_syntax::parse(source);
+    if !parsed.diagnostics().is_empty()
+        || parsed.syntax().text() != source
+        || !parsed.object_types().is_empty()
+        || !parsed.field_renames().is_empty()
+        || !parsed.server_functions().is_empty()
+        || !parsed.client_functions().is_empty()
+        || !parsed.primitive_value_types().is_empty()
+        || !parsed.record_value_types().is_empty()
+        || !parsed.enum_types().is_empty()
+        || parsed.schemas().len() != 2
+        || parsed.opaque_value_types().len() != 2
+        || parsed.type_exports().len() != 2
+    {
+        return Err(StandardLibraryError::RetainedSourceMismatch);
+    }
+
+    let terminal_schema = catalogue
+        .schema_by_id(STD_TERMINAL_SCHEMA_ID)
+        .ok_or(StandardLibraryError::RetainedSourceMismatch)?;
+    let io_schema = catalogue
+        .schema_by_id(STD_IO_SCHEMA_ID)
+        .ok_or(StandardLibraryError::RetainedSourceMismatch)?;
+    if !matches_qualified_name(&parsed.schemas()[0].name, terminal_schema.name())
+        || !matches_qualified_name(&parsed.schemas()[1].name, io_schema.name())
+    {
+        return Err(StandardLibraryError::RetainedSourceMismatch);
+    }
+
+    let document_definition = catalogue
+        .type_definition_by_id(STD_TERMINAL_DOCUMENT_TYPE_ID)
+        .ok_or(StandardLibraryError::RetainedSourceMismatch)?
+        .as_opaque_value()
+        .ok_or(StandardLibraryError::RetainedSourceMismatch)?;
+    let bytestream_definition = catalogue
+        .type_definition_by_id(STD_IO_BYTE_STREAM_TYPE_ID)
+        .ok_or(StandardLibraryError::RetainedSourceMismatch)?
+        .as_opaque_value()
+        .ok_or(StandardLibraryError::RetainedSourceMismatch)?;
+    let output_definitions = [document_definition, bytestream_definition];
+    for (declaration, definition) in parsed.opaque_value_types().iter().zip(output_definitions) {
+        if !matches_qualified_name(&declaration.name, definition.name())
+            || decode_sql_string_literal(&declaration.kernel_contract.text).as_deref()
+                != Some(definition.representation_contract())
+            || definition.persistence() != ValueTypePersistence::Transient
+        {
+            return Err(StandardLibraryError::RetainedSourceMismatch);
+        }
+    }
+
+    let document_binding = catalogue
+        .type_bindings()
+        .get(31)
+        .ok_or(StandardLibraryError::RetainedSourceMismatch)?;
+    let bytestream_binding = catalogue
+        .type_bindings()
+        .get(32)
+        .ok_or(StandardLibraryError::RetainedSourceMismatch)?;
+    let output_bindings = [document_binding, bytestream_binding];
+    for (export, (definition, binding)) in parsed
+        .type_exports()
+        .iter()
+        .zip(output_definitions.iter().zip(output_bindings))
+    {
+        if !matches_qualified_export(export, definition.name(), definition.id(), binding) {
+            return Err(StandardLibraryError::RetainedSourceMismatch);
+        }
+    }
+
+    let origin = |span: &orna_syntax::SourceSpan| -> Result<SourceOrigin, StandardLibraryError> {
+        let start =
+            u32::try_from(span.start).map_err(|_| StandardLibraryError::RetainedSourceMismatch)?;
+        let end =
+            u32::try_from(span.end).map_err(|_| StandardLibraryError::RetainedSourceMismatch)?;
+        SourceOrigin::new(STD_OUTPUT_SOURCE_UNIT_ID, start, end)
+            .map_err(|source| StandardLibraryError::Revision { source })
+    };
+
+    let expected_identities = [
+        DefinitionIdentity::Schema(STD_TERMINAL_SCHEMA_ID),
+        DefinitionIdentity::Schema(STD_IO_SCHEMA_ID),
+        DefinitionIdentity::ValueType(STD_TERMINAL_DOCUMENT_TYPE_ID),
+        DefinitionIdentity::TypeBinding(document_binding.id()),
+        DefinitionIdentity::ValueType(STD_IO_BYTE_STREAM_TYPE_ID),
+        DefinitionIdentity::TypeBinding(bytestream_binding.id()),
+    ];
+    let mut declarations = vec![
+        (
+            parsed.schemas()[0].span.clone(),
+            DefinitionIdentity::Schema(STD_TERMINAL_SCHEMA_ID),
+        ),
+        (
+            parsed.schemas()[1].span.clone(),
+            DefinitionIdentity::Schema(STD_IO_SCHEMA_ID),
+        ),
+        (
+            parsed.opaque_value_types()[0].span.clone(),
+            DefinitionIdentity::ValueType(STD_TERMINAL_DOCUMENT_TYPE_ID),
+        ),
+        (
+            parsed.type_exports()[0].span.clone(),
+            DefinitionIdentity::TypeBinding(document_binding.id()),
+        ),
+        (
+            parsed.opaque_value_types()[1].span.clone(),
+            DefinitionIdentity::ValueType(STD_IO_BYTE_STREAM_TYPE_ID),
+        ),
+        (
+            parsed.type_exports()[1].span.clone(),
+            DefinitionIdentity::TypeBinding(bytestream_binding.id()),
+        ),
+    ];
+    declarations.sort_by_key(|(span, _)| span.start);
+    if declarations
+        .iter()
+        .map(|(_, identity)| *identity)
+        .ne(expected_identities.iter().copied())
+    {
+        return Err(StandardLibraryError::RetainedSourceMismatch);
+    }
+
+    declarations
+        .into_iter()
+        .map(|(span, identity)| Ok(DefinitionOrigin::new(identity, origin(&span)?)))
+        .collect()
+}
+
 fn retained_standard_library_v2_snapshot_from_source(
     types_source: &str,
     invoke_source: &str,
@@ -1258,14 +1817,14 @@ fn retained_standard_library_v2_snapshot_from_source(
 /// Builds the immutable opaque codec registry for the accepted standard snapshot.
 ///
 /// The registration is compiled into this crate. The supplied snapshot can
-/// validate it, but cannot add or select a codec.
+/// validate it, but cannot add or select a codec. The accepted V1 and V2
+/// snapshots bind only the fixed-length `std.types.opaque_token` codec; the
+/// accepted `orna.std/3` snapshot additionally binds the two framed output
+/// codecs for `std.terminal.Document` and `std.io.ByteStream` (work ADR 0058).
 pub fn registered_opaque_codecs(
     standard: &VerifiedStandardLibrarySnapshot,
 ) -> Result<OpaqueCodecRegistry, RegisteredOpaqueCodecsError> {
-    if !accepted_standard_snapshot(standard) {
-        return Err(RegisteredOpaqueCodecsError::UnacceptedStandardSnapshot);
-    }
-    let registration = OpaqueCodecRegistration::fixed_length_identity(
+    let opaque_token = OpaqueCodecRegistration::fixed_length_identity(
         OPAQUE_TOKEN_TYPE_ID,
         semantic_name(
             "std.types.opaque_token",
@@ -1276,7 +1835,32 @@ pub fn registered_opaque_codecs(
         16,
     )
     .map_err(|source| RegisteredOpaqueCodecsError::Registry { source })?;
-    OpaqueCodecRegistry::new(standard, [registration])
+
+    let registrations = if is_accepted_v3_standard(standard) {
+        let document = OpaqueCodecRegistration::length_prefixed_utf8(
+            STD_TERMINAL_DOCUMENT_TYPE_ID,
+            semantic_name("std.terminal.document", ["std", "terminal", "document"])
+                .map_err(|source| RegisteredOpaqueCodecsError::Manifest { source })?,
+            STD_TERMINAL_DOCUMENT_CONTRACT,
+            TERMINAL_DOCUMENT_MAGIC,
+        )
+        .map_err(|source| RegisteredOpaqueCodecsError::Registry { source })?;
+        let byte_stream = OpaqueCodecRegistration::media_type_framed(
+            STD_IO_BYTE_STREAM_TYPE_ID,
+            semantic_name("std.io.bytestream", ["std", "io", "bytestream"])
+                .map_err(|source| RegisteredOpaqueCodecsError::Manifest { source })?,
+            STD_IO_BYTE_STREAM_CONTRACT,
+            BYTE_STREAM_MAGIC,
+        )
+        .map_err(|source| RegisteredOpaqueCodecsError::Registry { source })?;
+        vec![opaque_token, document, byte_stream]
+    } else if is_accepted_v1_or_v2_standard(standard) {
+        vec![opaque_token]
+    } else {
+        return Err(RegisteredOpaqueCodecsError::UnacceptedStandardSnapshot);
+    };
+
+    OpaqueCodecRegistry::new(standard, registrations)
         .map_err(|source| RegisteredOpaqueCodecsError::Registry { source })
 }
 
@@ -1286,7 +1870,7 @@ pub fn registered_opaque_codecs(
 /// Version two retains the version-one types byte-for-byte and adds no new
 /// opaque type or codec, so both accepted snapshots bind the same opaque-token
 /// codec.
-fn accepted_standard_snapshot(standard: &VerifiedStandardLibrarySnapshot) -> bool {
+fn is_accepted_v1_or_v2_standard(standard: &VerifiedStandardLibrarySnapshot) -> bool {
     (standard.revision() == STANDARD_LIBRARY_REVISION_ID
         && standard.catalogue().revision() == STANDARD_CATALOGUE_REVISION_ID
         && standard.source().bundle() == STANDARD_SOURCE_BUNDLE_ID
@@ -1299,6 +1883,18 @@ fn accepted_standard_snapshot(standard: &VerifiedStandardLibrarySnapshot) -> boo
             && standard.source().id() == STANDARD_SOURCE_V2_REVISION_ID
             && standard.source().revision_hash() == ACCEPTED_V2_SOURCE_REVISION_DIGEST
             && standard.digest() == ACCEPTED_V2_STANDARD_LIBRARY_DIGEST)
+}
+
+/// Returns whether one verified snapshot is exactly the accepted `orna.std/3`
+/// standard library (work ADR 0058).
+fn is_accepted_v3_standard(standard: &VerifiedStandardLibrarySnapshot) -> bool {
+    standard.revision() == STANDARD_LIBRARY_V3_REVISION_ID
+        && standard.catalogue().revision() == STANDARD_CATALOGUE_V3_REVISION_ID
+        && standard.source().bundle() == STANDARD_SOURCE_V3_BUNDLE_ID
+        && standard.source().id() == STANDARD_SOURCE_V3_REVISION_ID
+        && standard.source().parent() == Some(STANDARD_SOURCE_V2_REVISION_ID)
+        && standard.source().revision_hash() == ACCEPTED_V3_SOURCE_REVISION_DIGEST
+        && standard.digest() == ACCEPTED_V3_STANDARD_LIBRARY_DIGEST
 }
 
 /// An error from binding checked-in opaque codecs to a standard snapshot.
@@ -1840,30 +2436,38 @@ mod tests {
             StandardLibraryDigestVersion, StandardLibrarySnapshot, StoredSourceRevision,
             StoredSourceUnit,
         },
-        value::OpaqueValue,
+        value::{OpaqueValue, OpaqueValueError},
     };
 
     use super::{
-        BIGINT_TYPE_ID, BINARY_LARGE_OBJECT_TYPE_ID, BOOLEAN_TYPE_ID,
+        BIGINT_TYPE_ID, BINARY_LARGE_OBJECT_TYPE_ID, BOOLEAN_TYPE_ID, BYTE_STREAM_MAGIC,
         CHARACTER_LARGE_OBJECT_TYPE_ID, DATE_TYPE_ID, DECIMAL_TYPE_ID, DURATION_TYPE_ID,
         EXPECTED_TYPE_BINDING_IDS, FLOAT_TYPE_ID, INTEGER_TYPE_ID, LANGUAGE_VERSION_IDENTITY,
         OPAQUE_TOKEN_TYPE_ID, SOURCE_LOGICAL_PATH, STANDARD_CATALOGUE_REVISION_ID,
-        STANDARD_CATALOGUE_V2_REVISION_ID, STANDARD_LIBRARY_REVISION_ID,
-        STANDARD_LIBRARY_V2_REVISION_ID, STANDARD_LIBRARY_V2_VERSION_IDENTITY,
-        STANDARD_LIBRARY_VERSION_IDENTITY, STANDARD_SOURCE_BUNDLE_ID, STANDARD_SOURCE_REVISION_ID,
-        STANDARD_SOURCE_UNIT_ID, STANDARD_SOURCE_V2_BUNDLE_ID, STANDARD_SOURCE_V2_REVISION_ID,
-        STANDARD_TYPE_IDS, STD_INTEGER_TYPE_ID, STD_INVOKE_ECHO_FUNCTION_ID,
-        STD_INVOKE_ECHO_FUNCTION_REVISION_ID, STD_INVOKE_ECHO_PARAMETER_ID,
-        STD_INVOKE_ECHO_REVISION_NUMBER, STD_INVOKE_SCHEMA_ID, STD_INVOKE_SOURCE_LOGICAL_PATH,
-        STD_INVOKE_SOURCE_UNIT_ID, STD_SCHEMA_ID, STD_TYPES_SCHEMA_ID, STD_TYPES_SOURCE_UNIT_ID,
-        StandardLibraryError, StandardLibraryManifestError, StandardUpgradeError, TIME_TYPE_ID,
-        TIMESTAMP_TYPE_ID, UUID_TYPE_ID, VOID_TYPE_ID, build_type_bindings,
-        prepare_standard_upgrade, prepare_standard_upgrade_v1_to_v2, prepare_standard_upgrade_with,
-        registered_opaque_codecs, retained_standard_library_snapshot,
-        retained_standard_library_snapshot_from_source, retained_standard_library_v2_snapshot,
-        retained_standard_library_v2_snapshot_from_source, standard_library_manifest,
-        standard_library_v2_manifest, verify_standard_library_snapshot,
-        verify_standard_library_v2_snapshot,
+        STANDARD_CATALOGUE_V2_REVISION_ID, STANDARD_CATALOGUE_V3_REVISION_ID,
+        STANDARD_LIBRARY_REVISION_ID, STANDARD_LIBRARY_V2_REVISION_ID,
+        STANDARD_LIBRARY_V2_VERSION_IDENTITY, STANDARD_LIBRARY_V3_REVISION_ID,
+        STANDARD_LIBRARY_V3_VERSION_IDENTITY, STANDARD_LIBRARY_VERSION_IDENTITY,
+        STANDARD_SOURCE_BUNDLE_ID, STANDARD_SOURCE_REVISION_ID, STANDARD_SOURCE_UNIT_ID,
+        STANDARD_SOURCE_V2_BUNDLE_ID, STANDARD_SOURCE_V2_REVISION_ID, STANDARD_SOURCE_V3_BUNDLE_ID,
+        STANDARD_SOURCE_V3_REVISION_ID, STANDARD_TYPE_IDS, STD_INTEGER_TYPE_ID,
+        STD_INVOKE_ECHO_FUNCTION_ID, STD_INVOKE_ECHO_FUNCTION_REVISION_ID,
+        STD_INVOKE_ECHO_PARAMETER_ID, STD_INVOKE_ECHO_REVISION_NUMBER, STD_INVOKE_SCHEMA_ID,
+        STD_INVOKE_SOURCE_LOGICAL_PATH, STD_INVOKE_SOURCE_UNIT_ID, STD_IO_BYTE_STREAM_CONTRACT,
+        STD_IO_BYTE_STREAM_TYPE_ID, STD_IO_SCHEMA_ID, STD_OUTPUT_SOURCE_LOGICAL_PATH,
+        STD_OUTPUT_SOURCE_UNIT_ID, STD_SCHEMA_ID, STD_TERMINAL_DOCUMENT_CONTRACT,
+        STD_TERMINAL_DOCUMENT_TYPE_ID, STD_TERMINAL_SCHEMA_ID, STD_TYPES_SCHEMA_ID,
+        STD_TYPES_SOURCE_UNIT_ID, StandardLibraryError, StandardLibraryManifestError,
+        StandardUpgradeError, TERMINAL_DOCUMENT_MAGIC, TIME_TYPE_ID, TIMESTAMP_TYPE_ID,
+        UUID_TYPE_ID, VOID_TYPE_ID, build_type_bindings, prepare_standard_upgrade,
+        prepare_standard_upgrade_v1_to_v2, prepare_standard_upgrade_v2_to_v3,
+        prepare_standard_upgrade_with, registered_opaque_codecs,
+        retained_standard_library_snapshot, retained_standard_library_snapshot_from_source,
+        retained_standard_library_v2_snapshot, retained_standard_library_v2_snapshot_from_source,
+        retained_standard_library_v3_snapshot, standard_library_manifest,
+        standard_library_v2_manifest, standard_library_v3_manifest,
+        verify_standard_library_snapshot, verify_standard_library_v2_snapshot,
+        verify_standard_library_v3_snapshot,
     };
 
     const EXPECTED_RETAINED_STANDARD_SOURCE: &str = r#"CREATE SCHEMA std;
@@ -4395,6 +4999,723 @@ AS
             StandardUpgradeError::Prepare {
                 source: orna_compiler::PrepareStandardUpgradeError::ReservedIdentity { .. }
             }
+        ));
+    }
+
+    const EXPECTED_RETAINED_OUTPUT_SOURCE: &str = r#"CREATE SCHEMA std.terminal;
+CREATE SCHEMA std.io;
+
+CREATE TYPE std.terminal.Document AS VALUE OPAQUE
+    KERNEL CONTRACT 'orna.std.value.terminal-document@1'
+    IMMUTABLE
+    TRANSIENT;
+
+EXPORT TYPE std.terminal.Document AS std.Document;
+
+CREATE TYPE std.io.ByteStream AS VALUE OPAQUE
+    KERNEL CONTRACT 'orna.std.value.byte-stream@1'
+    IMMUTABLE
+    TRANSIENT;
+
+EXPORT TYPE std.io.ByteStream AS std.ByteStream;
+"#;
+
+    fn tampered_v3_snapshot(types: &str, invoke: &str, output: &str) -> StandardLibrarySnapshot {
+        // A structurally valid V3 snapshot whose unit content differs from the
+        // retained source. The catalogue, origins, executable, and retained
+        // digest are the accepted ones; only the source bytes and the
+        // recomputed source hashes change, so the canonical digest encoder
+        // must reject the resulting snapshot.
+        let snapshot = retained_standard_library_v3_snapshot()
+            .expect("the retained V3 standard source is valid");
+        let types_unit = StoredSourceUnit::new(
+            STD_TYPES_SOURCE_UNIT_ID,
+            0,
+            SOURCE_LOGICAL_PATH,
+            types,
+            source_unit_content_digest(types).expect("the tampered types digest is valid"),
+        )
+        .expect("the tampered types unit is valid");
+        let invoke_unit = StoredSourceUnit::new(
+            STD_INVOKE_SOURCE_UNIT_ID,
+            1,
+            STD_INVOKE_SOURCE_LOGICAL_PATH,
+            invoke,
+            source_unit_content_digest(invoke).expect("the tampered invoke digest is valid"),
+        )
+        .expect("the tampered invoke unit is valid");
+        let output_unit = StoredSourceUnit::new(
+            STD_OUTPUT_SOURCE_UNIT_ID,
+            2,
+            STD_OUTPUT_SOURCE_LOGICAL_PATH,
+            output,
+            source_unit_content_digest(output).expect("the tampered output digest is valid"),
+        )
+        .expect("the tampered output unit is valid");
+        let units = vec![types_unit, invoke_unit, output_unit];
+        let bundle_hash =
+            source_bundle_digest(&units).expect("the tampered bundle digest is valid");
+        let source = StoredSourceRevision::new(
+            STANDARD_SOURCE_V3_BUNDLE_ID,
+            STANDARD_SOURCE_V3_REVISION_ID,
+            Some(STANDARD_SOURCE_V2_REVISION_ID),
+            units,
+            bundle_hash,
+            source_revision_record_digest(
+                STANDARD_SOURCE_V3_BUNDLE_ID,
+                Some(STANDARD_SOURCE_V2_REVISION_ID),
+                bundle_hash,
+            )
+            .expect("the tampered source revision digest is valid"),
+        )
+        .expect("the tampered stored source revision is valid");
+        StandardLibrarySnapshot::new_with_executables(
+            STANDARD_LIBRARY_V3_REVISION_ID,
+            StandardLibraryDigestVersion::Version2,
+            source,
+            LANGUAGE_VERSION_IDENTITY,
+            snapshot.catalogue().clone(),
+            snapshot.executables().to_vec(),
+            snapshot.origins().to_vec(),
+            snapshot.digest(),
+        )
+        .expect("the tampered V3 snapshot remains structurally valid")
+    }
+
+    #[test]
+    fn manifest_v3_exposes_the_reserved_output_standard_facts() {
+        let manifest = standard_library_v3_manifest().expect("the accepted V3 manifest is valid");
+        let cloned = manifest.clone();
+
+        assert_eq!(STANDARD_LIBRARY_V3_VERSION_IDENTITY, "orna.std/3");
+        assert_eq!(
+            manifest.standard_library_version(),
+            STANDARD_LIBRARY_V3_VERSION_IDENTITY
+        );
+        assert_eq!(
+            manifest.standard_library_revision(),
+            STANDARD_LIBRARY_V3_REVISION_ID
+        );
+        assert_eq!(manifest.language_version(), LANGUAGE_VERSION_IDENTITY);
+        assert_eq!(manifest.source_bundle(), STANDARD_SOURCE_V3_BUNDLE_ID);
+        assert_eq!(manifest.source_revision(), STANDARD_SOURCE_V3_REVISION_ID);
+        assert_eq!(manifest.types_source_unit(), STD_TYPES_SOURCE_UNIT_ID);
+        assert_eq!(manifest.invoke_source_unit(), STD_INVOKE_SOURCE_UNIT_ID);
+        assert_eq!(manifest.output_source_unit(), STD_OUTPUT_SOURCE_UNIT_ID);
+        assert_eq!(manifest.types_source_logical_path(), SOURCE_LOGICAL_PATH);
+        assert_eq!(
+            manifest.invoke_source_logical_path(),
+            STD_INVOKE_SOURCE_LOGICAL_PATH
+        );
+        assert_eq!(
+            manifest.output_source_logical_path(),
+            STD_OUTPUT_SOURCE_LOGICAL_PATH
+        );
+        assert_eq!(
+            manifest.catalogue().revision(),
+            STANDARD_CATALOGUE_V3_REVISION_ID
+        );
+        assert_eq!(manifest.catalogue().schemas().len(), 5);
+        assert_eq!(
+            manifest.catalogue().schemas()[3].id(),
+            STD_TERMINAL_SCHEMA_ID
+        );
+        assert_eq!(manifest.catalogue().schemas()[4].id(), STD_IO_SCHEMA_ID);
+        assert_eq!(manifest.catalogue().value_types().len(), 16);
+        assert_eq!(manifest.catalogue().type_bindings().len(), 33);
+        assert_eq!(manifest.catalogue().functions().len(), 1);
+        assert_eq!(
+            manifest.catalogue().functions()[0].id(),
+            STD_INVOKE_ECHO_FUNCTION_ID
+        );
+        assert_eq!(
+            cloned.catalogue().revision(),
+            STANDARD_CATALOGUE_V3_REVISION_ID
+        );
+
+        let document = manifest
+            .catalogue()
+            .type_definition_by_id(STD_TERMINAL_DOCUMENT_TYPE_ID)
+            .expect("the document type is retained")
+            .as_opaque_value()
+            .expect("the document type is opaque");
+        assert_eq!(document.name().to_string(), "std.terminal.document");
+        assert_eq!(
+            document.representation_contract(),
+            STD_TERMINAL_DOCUMENT_CONTRACT
+        );
+        let byte_stream = manifest
+            .catalogue()
+            .type_definition_by_id(STD_IO_BYTE_STREAM_TYPE_ID)
+            .expect("the byte-stream type is retained")
+            .as_opaque_value()
+            .expect("the byte-stream type is opaque");
+        assert_eq!(byte_stream.name().to_string(), "std.io.bytestream");
+        assert_eq!(
+            byte_stream.representation_contract(),
+            STD_IO_BYTE_STREAM_CONTRACT
+        );
+
+        for (actual, expected) in [
+            (
+                STANDARD_LIBRARY_V3_REVISION_ID.to_bytes(),
+                [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3],
+            ),
+            (
+                STANDARD_CATALOGUE_V3_REVISION_ID.to_bytes(),
+                [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3],
+            ),
+            (
+                STANDARD_SOURCE_V3_BUNDLE_ID.to_bytes(),
+                [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3],
+            ),
+            (
+                STANDARD_SOURCE_V3_REVISION_ID.to_bytes(),
+                [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3],
+            ),
+            (
+                STD_OUTPUT_SOURCE_UNIT_ID.to_bytes(),
+                [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 4],
+            ),
+            (
+                STD_TERMINAL_SCHEMA_ID.to_bytes(),
+                [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 4],
+            ),
+            (
+                STD_IO_SCHEMA_ID.to_bytes(),
+                [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 5],
+            ),
+            (
+                STD_TERMINAL_DOCUMENT_TYPE_ID.to_bytes(),
+                [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x0f],
+            ),
+            (
+                STD_IO_BYTE_STREAM_TYPE_ID.to_bytes(),
+                [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x10],
+            ),
+        ] {
+            assert_eq!(actual, expected);
+        }
+        assert_eq!(
+            STD_TERMINAL_DOCUMENT_CONTRACT,
+            "orna.std.value.terminal-document@1"
+        );
+        assert_eq!(STD_IO_BYTE_STREAM_CONTRACT, "orna.std.value.byte-stream@1");
+        assert_eq!(TERMINAL_DOCUMENT_MAGIC, "ORNA-TERMINAL-DOCUMENT/1 ");
+        assert_eq!(BYTE_STREAM_MAGIC, "ORNA-BYTE-STREAM/1 ");
+        assert_eq!(STD_OUTPUT_SOURCE_LOGICAL_PATH, "std/output.orna");
+    }
+
+    #[test]
+    fn retains_the_v3_output_standard_snapshot() {
+        let snapshot = retained_standard_library_v3_snapshot()
+            .expect("the retained V3 standard source is valid");
+
+        assert_eq!(snapshot.revision(), STANDARD_LIBRARY_V3_REVISION_ID);
+        assert_eq!(
+            snapshot.digest_version(),
+            StandardLibraryDigestVersion::Version2,
+            "orna.std/3 reuses the V2 digest contract (work ADR 0058)"
+        );
+        assert_eq!(snapshot.language_version(), LANGUAGE_VERSION_IDENTITY);
+        assert_eq!(
+            snapshot.catalogue().revision(),
+            STANDARD_CATALOGUE_V3_REVISION_ID
+        );
+        assert_eq!(snapshot.source().id(), STANDARD_SOURCE_V3_REVISION_ID);
+        assert_eq!(snapshot.source().bundle(), STANDARD_SOURCE_V3_BUNDLE_ID);
+        assert_eq!(
+            snapshot.source().parent(),
+            Some(STANDARD_SOURCE_V2_REVISION_ID),
+            "orna.std/3 must be the append-only child of orna.std/2"
+        );
+        assert_eq!(snapshot.source().units().len(), 3);
+        assert_eq!(snapshot.source().units()[0].id(), STD_TYPES_SOURCE_UNIT_ID);
+        assert_eq!(snapshot.source().units()[0].ordinal(), 0);
+        assert_eq!(
+            snapshot.source().units()[0].logical_path(),
+            SOURCE_LOGICAL_PATH
+        );
+        assert_eq!(snapshot.source().units()[1].id(), STD_INVOKE_SOURCE_UNIT_ID);
+        assert_eq!(snapshot.source().units()[1].ordinal(), 1);
+        assert_eq!(
+            snapshot.source().units()[1].logical_path(),
+            STD_INVOKE_SOURCE_LOGICAL_PATH
+        );
+        assert_eq!(snapshot.source().units()[2].id(), STD_OUTPUT_SOURCE_UNIT_ID);
+        assert_eq!(snapshot.source().units()[2].ordinal(), 2);
+        assert_eq!(
+            snapshot.source().units()[2].logical_path(),
+            STD_OUTPUT_SOURCE_LOGICAL_PATH
+        );
+        assert_eq!(snapshot.catalogue().schemas().len(), 5);
+        assert_eq!(snapshot.catalogue().value_types().len(), 16);
+        assert_eq!(snapshot.catalogue().type_bindings().len(), 33);
+        assert_eq!(snapshot.catalogue().functions().len(), 1);
+        assert_eq!(snapshot.origins().len(), 56);
+
+        let [executable] = snapshot.executables() else {
+            panic!("the V3 snapshot must retain exactly one executable");
+        };
+        assert_eq!(executable.function(), STD_INVOKE_ECHO_FUNCTION_ID);
+        assert_eq!(
+            executable.revision().id(),
+            STD_INVOKE_ECHO_FUNCTION_REVISION_ID
+        );
+        assert_eq!(
+            executable.revision().revision_number(),
+            STD_INVOKE_ECHO_REVISION_NUMBER
+        );
+    }
+
+    #[test]
+    fn v3_output_source_has_the_exact_literal_bytes_and_parse() {
+        let snapshot = retained_standard_library_v3_snapshot()
+            .expect("the retained V3 standard source is valid");
+        let types = snapshot.source().units()[0].content();
+        let invoke = snapshot.source().units()[1].content();
+        let output = snapshot.source().units()[2].content();
+
+        assert_eq!(output, EXPECTED_RETAINED_OUTPUT_SOURCE);
+        assert!(output.is_ascii());
+        assert!(!output.as_bytes().starts_with(&[0xef, 0xbb, 0xbf]));
+        assert!(!output.contains('\r'));
+        assert!(output.ends_with('\n'));
+        assert!(!output[..output.len() - 1].ends_with('\n'));
+        assert_eq!(output.matches(';').count(), 6);
+        assert_eq!(types, super::RETAINED_STANDARD_SOURCE);
+        assert_eq!(invoke, super::RETAINED_STANDARD_INVOKE_SOURCE);
+
+        let parsed = orna_syntax::parse(output);
+        assert!(parsed.diagnostics().is_empty());
+        assert_eq!(parsed.syntax().text(), output);
+        assert_eq!(parsed.schemas().len(), 2);
+        assert_eq!(parsed.opaque_value_types().len(), 2);
+        assert_eq!(parsed.type_exports().len(), 2);
+        assert!(parsed.object_types().is_empty());
+        assert!(parsed.field_renames().is_empty());
+        assert!(parsed.primitive_value_types().is_empty());
+        assert!(parsed.record_value_types().is_empty());
+        assert!(parsed.enum_types().is_empty());
+        assert!(parsed.server_functions().is_empty());
+        assert!(parsed.client_functions().is_empty());
+    }
+
+    #[test]
+    fn v3_output_origins_cover_the_exact_declaration_ranges() {
+        let snapshot = retained_standard_library_v3_snapshot()
+            .expect("the retained V3 standard source is valid");
+        let output = snapshot.source().units()[2].content();
+        let output_origins = snapshot
+            .origins()
+            .iter()
+            .filter(|origin| origin.source().source_unit() == STD_OUTPUT_SOURCE_UNIT_ID)
+            .collect::<Vec<_>>();
+        assert_eq!(output_origins.len(), 6);
+
+        let terminal_schema_end = "CREATE SCHEMA std.terminal;".len();
+        let io_schema_start = output
+            .find("CREATE SCHEMA std.io;")
+            .expect("the io schema is retained");
+        let document_start = output
+            .find("CREATE TYPE std.terminal.Document")
+            .expect("the document type is retained");
+        let document_end = output
+            .find("TRANSIENT;")
+            .expect("the document type is retained")
+            + "TRANSIENT;".len();
+        let document_binding_start = output
+            .find("EXPORT TYPE std.terminal.Document AS std.Document;")
+            .expect("the document binding is retained");
+        let bytestream_start = output
+            .find("CREATE TYPE std.io.ByteStream")
+            .expect("the byte-stream type is retained");
+        let bytestream_end = output
+            .rfind("TRANSIENT;")
+            .expect("the byte-stream type is retained")
+            + "TRANSIENT;".len();
+
+        let schema_origin = |id: orna_core::SchemaId| {
+            output_origins
+                .iter()
+                .find(|origin| origin.identity() == DefinitionIdentity::Schema(id))
+                .expect("the schema origin is retained")
+                .source()
+        };
+        let type_origin = |id: orna_core::TypeId| {
+            output_origins
+                .iter()
+                .find(|origin| origin.identity() == DefinitionIdentity::ValueType(id))
+                .expect("the type origin is retained")
+                .source()
+        };
+        let binding_origin = |id: orna_core::TypeBindingId| {
+            output_origins
+                .iter()
+                .find(|origin| origin.identity() == DefinitionIdentity::TypeBinding(id))
+                .expect("the binding origin is retained")
+                .source()
+        };
+
+        let terminal_schema = schema_origin(STD_TERMINAL_SCHEMA_ID);
+        assert_eq!(terminal_schema.byte_start(), 0);
+        assert_eq!(terminal_schema.byte_end(), terminal_schema_end as u32);
+        let io_schema = schema_origin(STD_IO_SCHEMA_ID);
+        assert_eq!(io_schema.byte_start(), io_schema_start as u32);
+        assert_eq!(
+            io_schema.byte_end(),
+            (io_schema_start + "CREATE SCHEMA std.io;".len()) as u32
+        );
+
+        let document = type_origin(STD_TERMINAL_DOCUMENT_TYPE_ID);
+        assert_eq!(document.byte_start(), document_start as u32);
+        assert_eq!(document.byte_end(), document_end as u32);
+        let document_binding = binding_origin(
+            snapshot
+                .catalogue()
+                .type_bindings()
+                .get(31)
+                .expect("the document binding is retained")
+                .id(),
+        );
+        assert_eq!(document_binding.byte_start(), document_binding_start as u32);
+        assert_eq!(
+            document_binding.byte_end(),
+            (document_binding_start + "EXPORT TYPE std.terminal.Document AS std.Document;".len())
+                as u32
+        );
+
+        let bytestream = type_origin(STD_IO_BYTE_STREAM_TYPE_ID);
+        assert_eq!(bytestream.byte_start(), bytestream_start as u32);
+        assert_eq!(bytestream.byte_end(), bytestream_end as u32);
+        let bytestream_binding = binding_origin(
+            snapshot
+                .catalogue()
+                .type_bindings()
+                .get(32)
+                .expect("the byte-stream binding is retained")
+                .id(),
+        );
+        let bytestream_binding_start = output
+            .find("EXPORT TYPE std.io.ByteStream AS std.ByteStream;")
+            .expect("the byte-stream binding is retained");
+        assert_eq!(
+            bytestream_binding.byte_start(),
+            bytestream_binding_start as u32
+        );
+        assert_eq!(
+            bytestream_binding.byte_end(),
+            (bytestream_binding_start + "EXPORT TYPE std.io.ByteStream AS std.ByteStream;".len())
+                as u32
+        );
+    }
+
+    #[test]
+    fn v3_digest_goldens_are_computed_from_the_retained_source() {
+        let snapshot = retained_standard_library_v3_snapshot()
+            .expect("the retained V3 standard source is valid");
+        let types = snapshot.source().units()[0].content();
+        let invoke = snapshot.source().units()[1].content();
+        let output = snapshot.source().units()[2].content();
+        let units = snapshot.source().units().to_vec();
+        let executable = &snapshot.executables()[0];
+        let function = snapshot
+            .catalogue()
+            .function_by_id(STD_INVOKE_ECHO_FUNCTION_ID)
+            .expect("the echo function is retained");
+        let artifact = executable.revision().artifact();
+        let references = executable.references();
+
+        assert_eq!(
+            source_unit_content_digest(types).expect("the types content digest is valid"),
+            super::ACCEPTED_V3_TYPES_CONTENT_DIGEST
+        );
+        assert_eq!(
+            source_unit_content_digest(invoke).expect("the invoke content digest is valid"),
+            super::ACCEPTED_V3_INVOKE_CONTENT_DIGEST
+        );
+        assert_eq!(
+            source_unit_content_digest(output).expect("the output content digest is valid"),
+            super::ACCEPTED_V3_OUTPUT_CONTENT_DIGEST
+        );
+        assert_eq!(
+            source_bundle_digest(&units).expect("the bundle digest is valid"),
+            super::ACCEPTED_V3_SOURCE_BUNDLE_DIGEST
+        );
+        assert_eq!(
+            source_revision_record_digest(
+                STANDARD_SOURCE_V3_BUNDLE_ID,
+                Some(STANDARD_SOURCE_V2_REVISION_ID),
+                snapshot.source().bundle_hash(),
+            )
+            .expect("the source revision digest is valid"),
+            super::ACCEPTED_V3_SOURCE_REVISION_DIGEST
+        );
+        assert_eq!(
+            artifact_payload_digest(artifact.payload()).expect("the artifact digest is valid"),
+            super::ACCEPTED_V3_ARTIFACT_DIGEST,
+            "orna.std/3 retains the exact V2 parameter-echo artifact"
+        );
+        assert_eq!(
+            function_semantic_digest_with_version(
+                FunctionSemanticHashVersion::Version2,
+                function,
+                LANGUAGE_VERSION_IDENTITY,
+                artifact,
+                &[],
+                references,
+            )
+            .expect("the semantic digest is valid"),
+            super::ACCEPTED_V3_SEMANTIC_DIGEST,
+            "orna.std/3 retains the exact V2 semantic digest"
+        );
+        assert_eq!(
+            snapshot.digest(),
+            super::ACCEPTED_V3_STANDARD_LIBRARY_DIGEST
+        );
+        assert_eq!(
+            standard_library_digest(&snapshot).expect("the retained digest recomputes"),
+            super::ACCEPTED_V3_STANDARD_LIBRARY_DIGEST
+        );
+    }
+
+    #[test]
+    fn v3_standard_digest_binds_every_retained_byte() {
+        let snapshot = retained_standard_library_v3_snapshot()
+            .expect("the retained V3 standard source is valid");
+        let types = snapshot.source().units()[0].content();
+        let invoke = snapshot.source().units()[1].content();
+        let output = snapshot.source().units()[2].content();
+
+        let tampered_types = format!("{types} ");
+        let tampered_invoke = format!("{invoke} ");
+        let tampered_output = format!("{output} ");
+        for tampered in [
+            tampered_v3_snapshot(&tampered_types, invoke, output),
+            tampered_v3_snapshot(types, &tampered_invoke, output),
+            tampered_v3_snapshot(types, invoke, &tampered_output),
+        ] {
+            assert_eq!(
+                tampered.digest(),
+                super::ACCEPTED_V3_STANDARD_LIBRARY_DIGEST
+            );
+            assert!(matches!(
+                standard_library_digest(&tampered),
+                Err(
+                    orna_core::canonical_hash::CanonicalHashError::StandardLibraryDigestMismatch { .. }
+                )
+            ));
+            assert!(verify_standard_library_v3_snapshot(tampered).is_err());
+        }
+    }
+
+    #[test]
+    fn v3_snapshot_verifies_and_rejects_and_is_rejected_by_the_other_verifiers() {
+        let version_one =
+            retained_standard_library_snapshot().expect("the retained V1 source is valid");
+        let version_two =
+            retained_standard_library_v2_snapshot().expect("the retained V2 source is valid");
+        let version_three =
+            retained_standard_library_v3_snapshot().expect("the retained V3 source is valid");
+
+        assert!(verify_standard_library_v3_snapshot(version_three.clone()).is_ok());
+        assert!(matches!(
+            verify_standard_library_v3_snapshot(version_one.clone()),
+            Err(super::StandardLibraryError::CatalogueIdentityMismatch {
+                expected,
+                actual
+            }) if expected == STANDARD_CATALOGUE_V3_REVISION_ID
+                && actual == STANDARD_CATALOGUE_REVISION_ID
+        ));
+        assert!(matches!(
+            verify_standard_library_v3_snapshot(version_two.clone()),
+            Err(super::StandardLibraryError::CatalogueIdentityMismatch {
+                expected,
+                actual
+            }) if expected == STANDARD_CATALOGUE_V3_REVISION_ID
+                && actual == STANDARD_CATALOGUE_V2_REVISION_ID
+        ));
+        assert!(matches!(
+            verify_standard_library_snapshot(version_three.clone()),
+            Err(super::StandardLibraryError::CatalogueIdentityMismatch {
+                expected,
+                actual
+            }) if expected == STANDARD_CATALOGUE_REVISION_ID
+                && actual == STANDARD_CATALOGUE_V3_REVISION_ID
+        ));
+        assert!(matches!(
+            verify_standard_library_v2_snapshot(version_three.clone()),
+            Err(super::StandardLibraryError::CatalogueIdentityMismatch {
+                expected,
+                actual
+            }) if expected == STANDARD_CATALOGUE_V2_REVISION_ID
+                && actual == STANDARD_CATALOGUE_V3_REVISION_ID
+        ));
+    }
+
+    #[test]
+    fn v3_registered_opaque_codecs_construct_the_output_payloads() {
+        let verified = verify_standard_library_v3_snapshot(
+            retained_standard_library_v3_snapshot()
+                .expect("the retained V3 standard source is valid"),
+        )
+        .expect("the retained V3 standard source verifies");
+        let registry = registered_opaque_codecs(&verified).expect("the V3 opaque codecs register");
+        let active = empty_version_two_active_revision(&verified);
+
+        let mut document_payload = Vec::from(TERMINAL_DOCUMENT_MAGIC.as_bytes());
+        document_payload.extend_from_slice(&5_u32.to_be_bytes());
+        document_payload.extend_from_slice(b"hello");
+        let document = OpaqueValue::new(
+            &active,
+            &registry,
+            STD_TERMINAL_DOCUMENT_TYPE_ID,
+            &document_payload,
+        )
+        .expect("the terminal document payload constructs");
+        assert_eq!(document.opaque_type(), STD_TERMINAL_DOCUMENT_TYPE_ID);
+        assert_eq!(document.canonical_payload(), document_payload);
+
+        let mut byte_stream_payload = Vec::from(BYTE_STREAM_MAGIC.as_bytes());
+        byte_stream_payload.extend_from_slice(&16_u32.to_be_bytes());
+        byte_stream_payload.extend_from_slice(b"application/json");
+        byte_stream_payload.extend_from_slice(&2_u32.to_be_bytes());
+        byte_stream_payload.extend_from_slice(b"{}");
+        let byte_stream = OpaqueValue::new(
+            &active,
+            &registry,
+            STD_IO_BYTE_STREAM_TYPE_ID,
+            &byte_stream_payload,
+        )
+        .expect("the byte-stream payload constructs");
+        assert_eq!(byte_stream.opaque_type(), STD_IO_BYTE_STREAM_TYPE_ID);
+        assert_eq!(byte_stream.canonical_payload(), byte_stream_payload);
+
+        assert_eq!(
+            OpaqueValue::new(
+                &active,
+                &registry,
+                STD_TERMINAL_DOCUMENT_TYPE_ID,
+                b"WRONG-DOCUMENT/1 \0\0\0\0",
+            ),
+            Err(OpaqueValueError::InvalidMagic {
+                opaque_type: STD_TERMINAL_DOCUMENT_TYPE_ID,
+            })
+        );
+        let mut empty_media_type = Vec::from(BYTE_STREAM_MAGIC.as_bytes());
+        empty_media_type.extend_from_slice(&0_u32.to_be_bytes());
+        assert_eq!(
+            OpaqueValue::new(
+                &active,
+                &registry,
+                STD_IO_BYTE_STREAM_TYPE_ID,
+                &empty_media_type,
+            ),
+            Err(OpaqueValueError::InvalidMediaType {
+                opaque_type: STD_IO_BYTE_STREAM_TYPE_ID,
+            })
+        );
+
+        // The V3 registry also retains the fixed-length opaque-token codec.
+        let token = OpaqueValue::new(&active, &registry, OPAQUE_TOKEN_TYPE_ID, [0xab; 16])
+            .expect("the opaque-token payload constructs");
+        assert_eq!(token.opaque_type(), OPAQUE_TOKEN_TYPE_ID);
+
+        // The V1 and V2 registries stay unchanged: only the opaque-token codec.
+        let version_one = verify_standard_library_snapshot(
+            retained_standard_library_snapshot().expect("the retained V1 source is valid"),
+        )
+        .expect("the retained V1 standard source verifies");
+        let version_one_registry =
+            registered_opaque_codecs(&version_one).expect("the V1 opaque codecs register");
+        let version_two = verify_standard_library_v2_snapshot(
+            retained_standard_library_v2_snapshot().expect("the retained V2 source is valid"),
+        )
+        .expect("the retained V2 standard source verifies");
+        let version_two_registry =
+            registered_opaque_codecs(&version_two).expect("the V2 opaque codecs register");
+        let active_one = empty_version_two_active_revision(&version_one);
+        let active_two = empty_version_two_active_revision(&version_two);
+        for (active, registry) in [
+            (&active_one, &version_one_registry),
+            (&active_two, &version_two_registry),
+        ] {
+            assert_eq!(
+                OpaqueValue::new(active, registry, OPAQUE_TOKEN_TYPE_ID, [0xab; 16])
+                    .expect("the opaque-token payload constructs"),
+                OpaqueValue::new(active, registry, OPAQUE_TOKEN_TYPE_ID, [0xab; 16])
+                    .expect("the opaque-token payload constructs"),
+            );
+            assert_eq!(
+                OpaqueValue::new(active, registry, STD_TERMINAL_DOCUMENT_TYPE_ID, [0; 16]),
+                Err(OpaqueValueError::UnregisteredType {
+                    opaque_type: STD_TERMINAL_DOCUMENT_TYPE_ID,
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn prepare_standard_upgrade_v2_to_v3_fails_closed() {
+        // A base that pins no standard retains and verifies V3, then reports
+        // that the install pipeline is not yet supported.
+        let empty = empty_active_revision();
+        let error = prepare_standard_upgrade_v2_to_v3(&empty)
+            .expect_err("the V2-to-V3 upgrade is not yet supported");
+        assert!(matches!(
+            &error,
+            StandardUpgradeError::UnsupportedStandardUpgrade { from, to }
+                if *from == STANDARD_LIBRARY_V2_REVISION_ID
+                    && *to == STANDARD_LIBRARY_V3_REVISION_ID
+        ));
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "the {STANDARD_LIBRARY_V2_REVISION_ID} to {STANDARD_LIBRARY_V3_REVISION_ID} standard upgrade is not supported by this build"
+            )
+        );
+
+        // A base that pins V1 or V3 fails closed before retaining V3.
+        let version_one = verify_standard_library_snapshot(
+            retained_standard_library_snapshot().expect("the retained V1 source is valid"),
+        )
+        .expect("the retained V1 standard source verifies");
+        let pinned_one = empty_version_two_active_revision(&version_one);
+        assert!(matches!(
+            prepare_standard_upgrade_v2_to_v3(&pinned_one).expect_err("V1 is not the V2 base"),
+            StandardUpgradeError::Prepare {
+                source: orna_compiler::PrepareStandardUpgradeError::StandardLibraryAlreadyInstalled {
+                    revision
+                }
+            } if revision == STANDARD_LIBRARY_REVISION_ID
+        ));
+
+        let version_three = verify_standard_library_v3_snapshot(
+            retained_standard_library_v3_snapshot().expect("the retained V3 source is valid"),
+        )
+        .expect("the retained V3 standard source verifies");
+        let pinned_three = empty_version_two_active_revision(&version_three);
+        assert!(matches!(
+            prepare_standard_upgrade_v2_to_v3(&pinned_three).expect_err("V3 is not the V2 base"),
+            StandardUpgradeError::Prepare {
+                source: orna_compiler::PrepareStandardUpgradeError::StandardLibraryAlreadyInstalled {
+                    revision
+                }
+            } if revision == STANDARD_LIBRARY_V3_REVISION_ID
+        ));
+
+        // A V2-pinned base reaches the retain-and-verify gate and reports the
+        // unsupported install.
+        let version_two = verify_standard_library_v2_snapshot(
+            retained_standard_library_v2_snapshot().expect("the retained V2 source is valid"),
+        )
+        .expect("the retained V2 standard source verifies");
+        let pinned_two = empty_version_two_active_revision(&version_two);
+        assert!(matches!(
+            prepare_standard_upgrade_v2_to_v3(&pinned_two).expect_err("the install is unsupported"),
+            StandardUpgradeError::UnsupportedStandardUpgrade { from, to }
+                if from == STANDARD_LIBRARY_V2_REVISION_ID
+                    && to == STANDARD_LIBRARY_V3_REVISION_ID
         ));
     }
 }
