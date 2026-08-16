@@ -12,8 +12,11 @@
 //!
 //! - `InvocationStarted` and `InvocationCompleted` are diagnostics to stderr
 //!   unless `--no-progress`;
-//! - every `ValueBatch` value goes to stdout in its canonical ORV5 typed
-//!   encoding, one value per record, without progress or warning interleave;
+//! - every `ValueBatch` value goes to stdout: a `std.terminal.Document`
+//!   renders as the document text and a `std.io.ByteStream` as the raw
+//!   stream bytes through `orna-runtime-tty` (ADR 0057 step 9); every other
+//!   value keeps its canonical ORV5 typed encoding, one value per record,
+//!   without progress or warning interleave;
 //! - a `Denied` result prints one redacted denial line to stderr and exits 4;
 //! - a bind failure prints one redacted bind line to stderr and exits 1.
 //!
@@ -27,22 +30,25 @@ use std::{
 };
 
 use orna_core::{
-    FunctionRevisionId,
+    FunctionRevisionId, TypeId,
     catalogue::{FunctionDefinition, FunctionReturn, QualifiedSemanticName},
+    invocation::InvocationCarrierConstructionError,
     invocation::{
         InvocationArgument, InvocationCallerContext, InvocationCallerKind, InvocationClientOffer,
         InvocationEventBody, InvocationOutputRequirement, InvocationOutputTypeSelector,
-        InvocationStreamingRequirement, InvocationTarget, InvocationTracePolicy, InvokeRequest,
-        InvokeRequestInput,
+        InvocationSinkOffer, InvocationStreamingRequirement, InvocationTarget,
+        InvocationTracePolicy, InvokeRequest, InvokeRequestInput,
     },
     invocation_binding::{CliArgumentInput, bind_cli_arguments},
     revision::{ActiveDatabaseRevision, VerifiedStandardLibrarySnapshot},
-    types::{ResolvedType, StandardScalar},
+    types::{ResolvedType, StandardScalar, TypeDescriptor},
     value::RuntimeValue,
 };
 use orna_postgres::{PostgresKernel, PostgresKernelError, SealedInvocationResult};
 use orna_protocol::{encode_constructed_value, encode_invoke_request};
-use orna_standard::registered_opaque_codecs;
+use orna_standard::{
+    STD_IO_BYTE_STREAM_TYPE_ID, STD_TERMINAL_DOCUMENT_TYPE_ID, registered_opaque_codecs,
+};
 
 use crate::{EmbeddedHostError, inspect_ready_embedded_host};
 
@@ -52,6 +58,13 @@ const CONNECTION_PROTOCOL_MAJOR: u16 = 5;
 const MAXIMUM_FRAME_SIZE: u32 = 1_024;
 /// The first client run offers no artifact budget.
 const MAXIMUM_ARTIFACT_SIZE: u64 = 0;
+
+/// The media type of the `std.terminal.Document` sink: the ADR 0057 document
+/// layout is plain text, so the client sink consumes `text/plain`.
+const DOCUMENT_SINK_MEDIA_TYPE: &str = "text/plain";
+/// The media type of the `std.io.ByteStream` sink: the sink consumes the raw
+/// bytes of any byte stream, so the client offers the generic binary type.
+const BYTE_STREAM_SINK_MEDIA_TYPE: &str = "application/octet-stream";
 
 /// One complete installed `orna invoke` command request (ADR 0056).
 ///
@@ -368,8 +381,9 @@ fn resolve_target<'a>(
 ///
 /// The caller context is `CliTty` when stdout is a terminal and `CliPipe`
 /// otherwise, with locale and timezone from the environment. The client
-/// offer is protocol major 5 with empty sink and runtime offer lists and the
-/// default limits.
+/// offer is protocol major 5 with the two ADR 0057 sink offers
+/// (`std.terminal.Document` and `std.io.ByteStream`), an empty runtime offer
+/// list, and the default limits.
 fn build_sealed_request(
     request: &InstalledInvokeRequest,
     arguments: Vec<InvocationArgument>,
@@ -379,7 +393,7 @@ fn build_sealed_request(
         CONNECTION_PROTOCOL_MAJOR,
         caller_context.locale(),
         caller_context.timezone(),
-        Vec::new(),
+        client_sink_offers()?,
         Vec::new(),
         MAXIMUM_FRAME_SIZE,
         MAXIMUM_ARTIFACT_SIZE,
@@ -411,6 +425,42 @@ fn build_sealed_request(
         observer_context: None,
     })
     .map_err(|error| usage_error(format!("the sealed request is invalid: {error}")))
+}
+
+/// Builds the two sink offers the installed client consumes (ADR 0057 step 9).
+///
+/// The offer names `std.terminal.Document` and `std.io.ByteStream` so the
+/// sealed route's presentation planning sees the sinks the client can
+/// consume. Neither sink streams in this slice, both carry the default
+/// preference rank, and the runtime-offer list stays empty: runtime
+/// selection is the client's own deterministic decision, not a
+/// server-visible negotiation.
+fn client_sink_offers() -> Result<Vec<InvocationSinkOffer>, InstalledInvokeError> {
+    let document = InvocationSinkOffer::new(
+        TypeDescriptor::named(STD_TERMINAL_DOCUMENT_TYPE_ID),
+        [DOCUMENT_SINK_MEDIA_TYPE],
+        false,
+        0,
+        None,
+    )
+    .map_err(|error| sink_offer_error("std.terminal.Document", error))?;
+    let byte_stream = InvocationSinkOffer::new(
+        TypeDescriptor::named(STD_IO_BYTE_STREAM_TYPE_ID),
+        [BYTE_STREAM_SINK_MEDIA_TYPE],
+        false,
+        0,
+        None,
+    )
+    .map_err(|error| sink_offer_error("std.io.ByteStream", error))?;
+    Ok(vec![document, byte_stream])
+}
+
+/// Maps one structurally invalid sink offer to a closed internal error.
+fn sink_offer_error(name: &str, error: InvocationCarrierConstructionError) -> InstalledInvokeError {
+    InstalledInvokeError::new(
+        InstalledInvokeErrorKind::Internal,
+        format!("the {name} client sink offer is invalid: {error}"),
+    )
 }
 
 /// Builds the checked caller context from the live process environment.
@@ -518,8 +568,9 @@ fn build_output_requirement(
 /// Renders one sealed invocation result into the supplied writers.
 ///
 /// Progress diagnostics, denials, and bind failures go to `stderr`; every
-/// `ValueBatch` value goes to `stdout` through the supplied encoder, one
-/// canonical record per value, with no progress or warning interleave.
+/// `ValueBatch` value goes to `stdout` — Document and ByteStream values
+/// through `orna-runtime-tty`, every other value through the supplied
+/// encoder as one canonical record — with no progress or warning interleave.
 fn render_result(
     result: &SealedInvocationResult,
     no_progress: bool,
@@ -563,9 +614,7 @@ fn render_event_stream(
             }
             InvocationEventBody::ValueBatch { values, .. } => {
                 for value in values {
-                    let encoded = encode(value.value())?;
-                    stdout.write_all(&encoded).map_err(presentation_error)?;
-                    stdout.write_all(b"\n").map_err(presentation_error)?;
+                    render_value(value.value(), stdout, encode)?;
                 }
             }
             InvocationEventBody::Completed {
@@ -599,6 +648,74 @@ fn render_event_stream(
         }
     }
     Ok(outcome)
+}
+
+/// Renders one `ValueBatch` value to stdout.
+///
+/// A `std.terminal.Document` value renders as the document text and a
+/// `std.io.ByteStream` value as the raw stream bytes, both through
+/// `orna-runtime-tty` (ADR 0057 step 9); every other value keeps the
+/// milestone-5 rule: the canonical ORV5 typed encoding followed by the
+/// record newline.
+fn render_value(
+    value: &RuntimeValue,
+    stdout: &mut impl Write,
+    encode: &mut impl FnMut(&RuntimeValue) -> Result<Vec<u8>, InstalledInvokeError>,
+) -> Result<(), InstalledInvokeError> {
+    if let RuntimeValue::Opaque(opaque) = value
+        && let Some(sink) = select_runtime_sink(opaque.opaque_type())
+    {
+        render_opaque_payload(sink, opaque.canonical_payload(), stdout)?;
+        return Ok(());
+    }
+    let encoded = encode(value)?;
+    stdout.write_all(&encoded).map_err(presentation_error)?;
+    stdout.write_all(b"\n").map_err(presentation_error)?;
+    Ok(())
+}
+
+/// Returns the deterministic tty runtime sink for one opaque result type
+/// (ADR 0057 step 9), or `None` when the value keeps the ORV5 envelope.
+///
+/// The rule is unconditional for the two sink types: `--output table`
+/// produces a `std.terminal.Document` and `--output json` produces a
+/// `std.io.ByteStream`, and in both cases the bytes must reach stdout
+/// whether stdout is a terminal or piped to a file. The stdout-is-terminal
+/// fact still feeds the caller context (`CliTty` versus `CliPipe`); it does
+/// not gate sink consumption.
+fn select_runtime_sink(opaque_type: TypeId) -> Option<orna_runtime_tty::Sink> {
+    match opaque_type {
+        STD_TERMINAL_DOCUMENT_TYPE_ID => Some(orna_runtime_tty::Sink::Document),
+        STD_IO_BYTE_STREAM_TYPE_ID => Some(orna_runtime_tty::Sink::ByteStream),
+        _ => None,
+    }
+}
+
+/// Renders one presented opaque payload through the selected runtime sink.
+///
+/// The payload is the canonical codec frame the sealed route emitted; the
+/// runtime validates it again before writing anything.
+fn render_opaque_payload(
+    sink: orna_runtime_tty::Sink,
+    payload: &[u8],
+    stdout: &mut impl Write,
+) -> Result<(), InstalledInvokeError> {
+    sink.render(payload, stdout).map_err(map_runtime_tty_error)
+}
+
+/// Maps one runtime rendering failure to a closed installed error.
+///
+/// A write failure is a presentation failure like any other output error; a
+/// frame rejection cannot occur for a registry-validated value and is an
+/// internal inconsistency.
+fn map_runtime_tty_error(error: orna_runtime_tty::RuntimeTtyError) -> InstalledInvokeError {
+    match error {
+        orna_runtime_tty::RuntimeTtyError::Io(error) => presentation_error(error),
+        other => InstalledInvokeError::new(
+            InstalledInvokeErrorKind::Internal,
+            format!("the tty runtime rejected a presented value: {other}"),
+        ),
+    }
 }
 
 /// Renders the `--explain` plan: resolved target identity and revision,
@@ -959,6 +1076,122 @@ mod tests {
         assert_eq!(error.kind(), InstalledInvokeErrorKind::Presentation);
         assert!(stdout.is_empty());
         assert!(stderr.is_empty());
+    }
+
+    /// Builds one canonical `std.terminal.Document` payload frame.
+    fn document_frame(body: &[u8]) -> Vec<u8> {
+        let mut frame = b"ORNA-TERMINAL-DOCUMENT/1 ".to_vec();
+        frame.extend_from_slice(&(body.len() as u32).to_be_bytes());
+        frame.extend_from_slice(body);
+        frame
+    }
+
+    /// Builds one canonical `std.io.ByteStream` payload frame.
+    fn byte_stream_frame(media_type: &[u8], body: &[u8]) -> Vec<u8> {
+        let mut frame = b"ORNA-BYTE-STREAM/1 ".to_vec();
+        frame.extend_from_slice(&(media_type.len() as u32).to_be_bytes());
+        frame.extend_from_slice(media_type);
+        frame.extend_from_slice(&(body.len() as u32).to_be_bytes());
+        frame.extend_from_slice(body);
+        frame
+    }
+
+    #[test]
+    fn selection_rule_maps_document_and_byte_stream_to_the_tty_runtime() {
+        let cases = [
+            (
+                STD_TERMINAL_DOCUMENT_TYPE_ID,
+                Some(orna_runtime_tty::Sink::Document),
+            ),
+            (
+                STD_IO_BYTE_STREAM_TYPE_ID,
+                Some(orna_runtime_tty::Sink::ByteStream),
+            ),
+            (TypeId::from_bytes([0x41; 16]), None),
+        ];
+        for (opaque_type, expected) in cases {
+            assert_eq!(select_runtime_sink(opaque_type), expected);
+        }
+    }
+
+    #[test]
+    fn document_value_renders_as_document_text_on_stdout() {
+        let body = b"name | age\nalice | 41\n";
+        let frame = document_frame(body);
+        let mut stdout = Vec::new();
+        render_opaque_payload(orna_runtime_tty::Sink::Document, &frame, &mut stdout)
+            .expect("rendering a document frame succeeds");
+        assert_eq!(stdout, body);
+    }
+
+    #[test]
+    fn byte_stream_value_renders_as_raw_bytes_on_stdout() {
+        let body = b"{\"ok\":true}";
+        let frame = byte_stream_frame(b"application/json", body);
+        let mut stdout = Vec::new();
+        render_opaque_payload(orna_runtime_tty::Sink::ByteStream, &frame, &mut stdout)
+            .expect("rendering a byte-stream frame succeeds");
+        // The stream bytes go to stdout with no envelope, progress
+        // interleave, or trailing record newline.
+        assert_eq!(stdout, body);
+    }
+
+    #[test]
+    fn a_rejected_runtime_payload_writes_nothing_and_returns_internal() {
+        let mut stdout = Vec::new();
+        let error = render_opaque_payload(
+            orna_runtime_tty::Sink::Document,
+            b"ORNA-TERMINAL-DOCUMENT/1 \0\0\0\x05broken",
+            &mut stdout,
+        )
+        .expect_err("an inconsistent frame is rejected");
+        assert_eq!(error.kind(), InstalledInvokeErrorKind::Internal);
+        assert!(stdout.is_empty());
+    }
+
+    #[test]
+    fn non_sink_values_keep_the_orv5_envelope() {
+        let mut stdout = Vec::new();
+        render_value(&RuntimeValue::Integer(41), &mut stdout, &mut encoder)
+            .expect("rendering a non-sink value succeeds");
+        assert_eq!(stdout, encoded_record());
+    }
+
+    #[test]
+    fn the_client_offer_names_the_two_sinks() {
+        let request = InstalledInvokeRequest::new(
+            InvocationTarget::qualified_name(
+                QualifiedSemanticName::new(["std", "invoke", "echo"]).expect("qualified name"),
+            )
+            .expect("target"),
+            Vec::new(),
+            None,
+            None,
+            false,
+            false,
+        );
+        let sealed = build_sealed_request(&request, Vec::new()).expect("the sealed request builds");
+        let offer = sealed.client_offer();
+        assert_eq!(offer.sink_offers().len(), 2);
+        assert_eq!(
+            offer.sink_offers()[0].descriptor(),
+            &TypeDescriptor::named(STD_TERMINAL_DOCUMENT_TYPE_ID)
+        );
+        assert_eq!(
+            offer.sink_offers()[0].media_types(),
+            &[DOCUMENT_SINK_MEDIA_TYPE.to_owned()]
+        );
+        assert!(!offer.sink_offers()[0].streaming());
+        assert_eq!(
+            offer.sink_offers()[1].descriptor(),
+            &TypeDescriptor::named(STD_IO_BYTE_STREAM_TYPE_ID)
+        );
+        assert_eq!(
+            offer.sink_offers()[1].media_types(),
+            &[BYTE_STREAM_SINK_MEDIA_TYPE.to_owned()]
+        );
+        assert!(!offer.sink_offers()[1].streaming());
+        assert!(offer.runtime_offers().is_empty());
     }
 
     fn echo_definition() -> FunctionDefinition {
