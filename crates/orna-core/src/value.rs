@@ -21,6 +21,9 @@ use crate::{
 
 const MAX_OPAQUE_CODEC_PAYLOAD_LENGTH: usize = 16 * 1024 * 1024;
 
+/// The largest accepted framed-codec magic prefix length in bytes.
+const MAX_OPAQUE_CODEC_MAGIC_LENGTH: usize = 64;
+
 /// The largest accepted number of runtime-value nodes.
 pub const MAX_RUNTIME_VALUE_NODES: usize = 65_536;
 
@@ -951,6 +954,34 @@ fn compare_standard_primitive_map_key(left: &RuntimeValue, right: &RuntimeValue)
     }
 }
 
+/// The canonical payload contract of one checked-in opaque codec.
+///
+/// The contract is inert data supplied by linked code. It fixes the exact
+/// canonical byte form the codec accepts and rejects.
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum OpaquePayloadContract {
+    /// The canonical form is the complete input bytes with exactly this length.
+    FixedLength {
+        /// The exact payload length.
+        payload_length: usize,
+    },
+    /// `MAGIC <len:u32 be> <utf-8 bytes>`: a fixed ASCII magic prefix, then a
+    /// big-endian `u32` body length, then exactly that many UTF-8 bytes and no
+    /// trailing bytes.
+    LengthPrefixedUtf8 {
+        /// The exact ASCII magic prefix, including any separating space.
+        magic: String,
+    },
+    /// `MAGIC <media-type-len:u32 be> <media-type> <len:u32 be> <bytes>`: a
+    /// fixed ASCII magic prefix, a big-endian `u32` media-type length, the
+    /// non-empty media-type bytes, a big-endian `u32` body length, then
+    /// exactly that many bytes and no trailing bytes.
+    MediaTypeFramed {
+        /// The exact ASCII magic prefix, including any separating space.
+        magic: String,
+    },
+}
+
 /// One checked-in identity codec registration for an opaque standard value type.
 ///
 /// The registration is inert data supplied by linked code. It cannot name a
@@ -961,7 +992,7 @@ pub struct OpaqueCodecRegistration {
     opaque_type: TypeId,
     semantic_name: QualifiedSemanticName,
     representation_contract: String,
-    payload_length: usize,
+    contract: OpaquePayloadContract,
 }
 
 impl OpaqueCodecRegistration {
@@ -982,9 +1013,54 @@ impl OpaqueCodecRegistration {
             opaque_type,
             semantic_name,
             representation_contract: representation_contract.into(),
-            payload_length,
+            contract: OpaquePayloadContract::FixedLength { payload_length },
         })
     }
+
+    /// Declares a framed codec whose canonical form is
+    /// `MAGIC <len:u32 be> <utf-8 bytes>` with exactly that many UTF-8 body
+    /// bytes and no trailing bytes.
+    pub fn length_prefixed_utf8(
+        opaque_type: TypeId,
+        semantic_name: QualifiedSemanticName,
+        representation_contract: impl Into<String>,
+        magic: impl Into<String>,
+    ) -> Result<Self, OpaqueCodecRegistryError> {
+        let magic = magic.into();
+        validate_codec_magic(opaque_type, &magic)?;
+        Ok(Self {
+            opaque_type,
+            semantic_name,
+            representation_contract: representation_contract.into(),
+            contract: OpaquePayloadContract::LengthPrefixedUtf8 { magic },
+        })
+    }
+
+    /// Declares a framed codec whose canonical form is
+    /// `MAGIC <media-type-len:u32 be> <media-type> <len:u32 be> <bytes>`.
+    pub fn media_type_framed(
+        opaque_type: TypeId,
+        semantic_name: QualifiedSemanticName,
+        representation_contract: impl Into<String>,
+        magic: impl Into<String>,
+    ) -> Result<Self, OpaqueCodecRegistryError> {
+        let magic = magic.into();
+        validate_codec_magic(opaque_type, &magic)?;
+        Ok(Self {
+            opaque_type,
+            semantic_name,
+            representation_contract: representation_contract.into(),
+            contract: OpaquePayloadContract::MediaTypeFramed { magic },
+        })
+    }
+}
+
+/// Rejects an empty, non-ASCII, or oversized framed-codec magic prefix.
+fn validate_codec_magic(opaque_type: TypeId, magic: &str) -> Result<(), OpaqueCodecRegistryError> {
+    if magic.is_empty() || !magic.is_ascii() || magic.len() > MAX_OPAQUE_CODEC_MAGIC_LENGTH {
+        return Err(OpaqueCodecRegistryError::InvalidMagic { opaque_type });
+    }
+    Ok(())
 }
 
 /// An immutable set of checked-in codecs bound to one verified standard snapshot.
@@ -1068,18 +1144,116 @@ impl OpaqueCodecRegistry {
             .ok_or(OpaqueValueError::UnregisteredType { opaque_type })?;
         validate_opaque_registration(active_standard, registration)
             .map_err(|_| OpaqueValueError::InactiveRegistration { opaque_type })?;
-        if payload.len() != registration.payload_length {
-            return Err(OpaqueValueError::WrongPayloadLength {
-                opaque_type,
-                expected: registration.payload_length,
-                actual: payload.len(),
-            });
-        }
+        validate_opaque_payload(opaque_type, &registration.contract, payload)?;
         Ok(OpaqueValue {
             opaque_type,
             canonical_payload: payload.to_vec(),
         })
     }
+}
+
+/// Validates one complete canonical payload against its codec contract.
+fn validate_opaque_payload(
+    opaque_type: TypeId,
+    contract: &OpaquePayloadContract,
+    payload: &[u8],
+) -> Result<(), OpaqueValueError> {
+    match contract {
+        OpaquePayloadContract::FixedLength { payload_length } => {
+            if payload.len() != *payload_length {
+                return Err(OpaqueValueError::WrongPayloadLength {
+                    opaque_type,
+                    expected: *payload_length,
+                    actual: payload.len(),
+                });
+            }
+            Ok(())
+        }
+        OpaquePayloadContract::LengthPrefixedUtf8 { magic } => {
+            validate_length_prefixed_utf8(opaque_type, magic.as_bytes(), payload)
+        }
+        OpaquePayloadContract::MediaTypeFramed { magic } => {
+            validate_media_type_framed(opaque_type, magic.as_bytes(), payload)
+        }
+    }
+}
+
+/// Validates `MAGIC <len:u32 be> <utf-8 bytes>` with exactly `len` body bytes.
+fn validate_length_prefixed_utf8(
+    opaque_type: TypeId,
+    magic: &[u8],
+    payload: &[u8],
+) -> Result<(), OpaqueValueError> {
+    let prefix_length = magic
+        .len()
+        .checked_add(4)
+        .ok_or(OpaqueValueError::InvalidFrameLength { opaque_type })?;
+    if payload.len() < prefix_length || !payload.starts_with(magic) {
+        return Err(if payload.starts_with(magic) {
+            OpaqueValueError::InvalidFrameLength { opaque_type }
+        } else {
+            OpaqueValueError::InvalidMagic { opaque_type }
+        });
+    }
+    let body_length = u32::from_be_bytes(
+        payload[magic.len()..prefix_length]
+            .try_into()
+            .expect("the length prefix is exactly four bytes"),
+    ) as usize;
+    if payload.len() != prefix_length + body_length {
+        return Err(OpaqueValueError::InvalidFrameLength { opaque_type });
+    }
+    let body = &payload[prefix_length..];
+    if std::str::from_utf8(body).is_err() {
+        return Err(OpaqueValueError::InvalidUtf8Body { opaque_type });
+    }
+    Ok(())
+}
+
+/// Validates
+/// `MAGIC <media-type-len:u32 be> <media-type> <len:u32 be> <bytes>`.
+fn validate_media_type_framed(
+    opaque_type: TypeId,
+    magic: &[u8],
+    payload: &[u8],
+) -> Result<(), OpaqueValueError> {
+    let magic_end = magic
+        .len()
+        .checked_add(4)
+        .ok_or(OpaqueValueError::InvalidFrameLength { opaque_type })?;
+    if payload.len() < magic_end || !payload.starts_with(magic) {
+        return Err(if payload.starts_with(magic) {
+            OpaqueValueError::InvalidFrameLength { opaque_type }
+        } else {
+            OpaqueValueError::InvalidMagic { opaque_type }
+        });
+    }
+    let media_type_length = u32::from_be_bytes(
+        payload[magic.len()..magic_end]
+            .try_into()
+            .expect("the length prefix is exactly four bytes"),
+    ) as usize;
+    if media_type_length == 0 {
+        return Err(OpaqueValueError::InvalidMediaType { opaque_type });
+    }
+    let media_type_end = magic_end
+        .checked_add(media_type_length)
+        .ok_or(OpaqueValueError::InvalidFrameLength { opaque_type })?;
+    let body_length_start = media_type_end
+        .checked_add(4)
+        .ok_or(OpaqueValueError::InvalidFrameLength { opaque_type })?;
+    if payload.len() < body_length_start {
+        return Err(OpaqueValueError::InvalidFrameLength { opaque_type });
+    }
+    let body_length = u32::from_be_bytes(
+        payload[media_type_end..body_length_start]
+            .try_into()
+            .expect("the length prefix is exactly four bytes"),
+    ) as usize;
+    if payload.len() != body_length_start + body_length {
+        return Err(OpaqueValueError::InvalidFrameLength { opaque_type });
+    }
+    Ok(())
 }
 
 fn validate_opaque_registration(
@@ -1173,6 +1347,11 @@ pub enum OpaqueCodecRegistryError {
         /// The invalid exact payload length.
         payload_length: usize,
     },
+    /// A framed codec has an empty, non-ASCII, or oversized magic prefix.
+    InvalidMagic {
+        /// The opaque type named by the invalid registration.
+        opaque_type: TypeId,
+    },
     /// Two registrations name the same type identity.
     DuplicateType {
         /// The duplicated opaque type identity.
@@ -1226,6 +1405,9 @@ impl fmt::Display for OpaqueCodecRegistryError {
             Self::EmptyRegistry => formatter.write_str("opaque codec registry is empty"),
             Self::InvalidPayloadLength { .. } => {
                 formatter.write_str("opaque codec payload length is invalid")
+            }
+            Self::InvalidMagic { .. } => {
+                formatter.write_str("opaque codec magic prefix is invalid")
             }
             Self::DuplicateType { .. } => {
                 formatter.write_str("opaque codec type identity is duplicated")
@@ -1287,6 +1469,26 @@ pub enum OpaqueValueError {
         /// The supplied complete payload length.
         actual: usize,
     },
+    /// A framed payload does not start with the codec's exact magic prefix.
+    InvalidMagic {
+        /// The opaque type whose payload was rejected.
+        opaque_type: TypeId,
+    },
+    /// A framed payload declares a length inconsistent with its remaining bytes.
+    InvalidFrameLength {
+        /// The opaque type whose payload was rejected.
+        opaque_type: TypeId,
+    },
+    /// A length-prefixed UTF-8 payload body is not valid UTF-8.
+    InvalidUtf8Body {
+        /// The opaque type whose payload was rejected.
+        opaque_type: TypeId,
+    },
+    /// A media-type framed payload carries an empty media type.
+    InvalidMediaType {
+        /// The opaque type whose payload was rejected.
+        opaque_type: TypeId,
+    },
 }
 
 impl fmt::Display for OpaqueValueError {
@@ -1306,6 +1508,18 @@ impl fmt::Display for OpaqueValueError {
             }
             Self::WrongPayloadLength { .. } => {
                 formatter.write_str("opaque value payload has the wrong length")
+            }
+            Self::InvalidMagic { .. } => {
+                formatter.write_str("opaque value payload has the wrong magic prefix")
+            }
+            Self::InvalidFrameLength { .. } => {
+                formatter.write_str("opaque value payload has an inconsistent frame length")
+            }
+            Self::InvalidUtf8Body { .. } => {
+                formatter.write_str("opaque value payload body is not valid UTF-8")
+            }
+            Self::InvalidMediaType { .. } => {
+                formatter.write_str("opaque value payload has an empty media type")
             }
         }
     }
@@ -5584,7 +5798,14 @@ mod tests {
     fn verified_standard_with_value_types(
         value_types: Vec<ValueTypeDefinition>,
     ) -> VerifiedStandardLibrarySnapshot {
-        let standard_unit_content = "x".repeat(value_types.len() + 2);
+        verified_standard_with_value_types_and_schemas(value_types, Vec::new())
+    }
+
+    fn verified_standard_with_value_types_and_schemas(
+        value_types: Vec<ValueTypeDefinition>,
+        extra_schemas: Vec<SchemaDefinition>,
+    ) -> VerifiedStandardLibrarySnapshot {
+        let standard_unit_content = "x".repeat(value_types.len() + extra_schemas.len() + 2);
         let standard_unit = StoredSourceUnit::new(
             SourceUnitId::from_bytes([0x50; 16]),
             0,
@@ -5611,36 +5832,41 @@ mod tests {
         .unwrap();
         let standard_schema = SchemaId::from_bytes([0x53; 16]);
         let standard_types_schema = SchemaId::from_bytes([0x54; 16]);
+        let mut schemas = vec![
+            SchemaDefinition::new(
+                standard_schema,
+                QualifiedSemanticName::new(["std"]).unwrap(),
+            ),
+            SchemaDefinition::new(
+                standard_types_schema,
+                QualifiedSemanticName::new(["std", "types"]).unwrap(),
+            ),
+        ];
+        schemas.extend(extra_schemas);
         let standard_catalogue = CatalogueSnapshot::new_with_types(
             CatalogueRevisionId::from_bytes([0x5b; 16]),
-            vec![
-                SchemaDefinition::new(
-                    standard_schema,
-                    QualifiedSemanticName::new(["std"]).unwrap(),
-                ),
-                SchemaDefinition::new(
-                    standard_types_schema,
-                    QualifiedSemanticName::new(["std", "types"]).unwrap(),
-                ),
-            ],
+            schemas,
             vec![],
             value_types,
             vec![],
         )
         .unwrap();
-        let mut standard_origins = vec![
-            DefinitionOrigin::new(
-                DefinitionIdentity::Schema(standard_schema),
-                SourceOrigin::new(SourceUnitId::from_bytes([0x50; 16]), 0, 1).unwrap(),
-            ),
-            DefinitionOrigin::new(
-                DefinitionIdentity::Schema(standard_types_schema),
-                SourceOrigin::new(SourceUnitId::from_bytes([0x50; 16]), 1, 2).unwrap(),
-            ),
-        ];
+        let mut standard_origins = standard_catalogue
+            .schemas()
+            .iter()
+            .enumerate()
+            .map(|(index, schema)| {
+                let start = u32::try_from(index).unwrap();
+                DefinitionOrigin::new(
+                    DefinitionIdentity::Schema(schema.id()),
+                    SourceOrigin::new(SourceUnitId::from_bytes([0x50; 16]), start, start + 1)
+                        .unwrap(),
+                )
+            })
+            .collect::<Vec<_>>();
         standard_origins.extend(standard_catalogue.value_types().iter().enumerate().map(
             |(index, value_type)| {
-                let start = u32::try_from(index + 2).unwrap();
+                let start = u32::try_from(index + standard_catalogue.schemas().len()).unwrap();
                 DefinitionOrigin::new(
                     DefinitionIdentity::ValueType(value_type.id()),
                     SourceOrigin::new(SourceUnitId::from_bytes([0x50; 16]), start, start + 1)
@@ -6035,6 +6261,213 @@ mod tests {
                 opaque_type: OTHER_OPAQUE_TYPE,
                 canonical_payload: vec![0; 16],
             }
+        );
+    }
+
+    #[test]
+    fn framed_codec_constructors_reject_invalid_magic_prefixes() {
+        let name = ["std", "terminal", "document"];
+        for magic in [
+            "",
+            "ORNA-TERMINAL-DOCUMENT/1 \u{00e9}",
+            "x".repeat(65).as_str(),
+        ] {
+            assert_eq!(
+                OpaqueCodecRegistration::length_prefixed_utf8(
+                    OPAQUE_TYPE,
+                    QualifiedSemanticName::new(name).unwrap(),
+                    OPAQUE_CONTRACT,
+                    magic,
+                )
+                .unwrap_err(),
+                OpaqueCodecRegistryError::InvalidMagic {
+                    opaque_type: OPAQUE_TYPE,
+                }
+            );
+            assert_eq!(
+                OpaqueCodecRegistration::media_type_framed(
+                    OPAQUE_TYPE,
+                    QualifiedSemanticName::new(name).unwrap(),
+                    OPAQUE_CONTRACT,
+                    magic,
+                )
+                .unwrap_err(),
+                OpaqueCodecRegistryError::InvalidMagic {
+                    opaque_type: OPAQUE_TYPE,
+                }
+            );
+        }
+        assert!(
+            OpaqueCodecRegistration::length_prefixed_utf8(
+                OPAQUE_TYPE,
+                QualifiedSemanticName::new(name).unwrap(),
+                OPAQUE_CONTRACT,
+                " ",
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn framed_codecs_validate_length_prefixed_utf8_payloads() {
+        const DOCUMENT_TYPE: TypeId = TypeId::from_bytes([0x4d; 16]);
+        const DOCUMENT_MAGIC: &str = "ORNA-TERMINAL-DOCUMENT/1 ";
+        const DOCUMENT_NAME: [&str; 3] = ["std", "terminal", "document"];
+        const DOCUMENT_CONTRACT: &str = "orna.std.value.terminal-document@1";
+
+        let active = active_record_revision_with_standard(
+            RECORD_TYPE,
+            verified_standard_with_value_types_and_schemas(
+                vec![
+                    standard_boolean_definition(),
+                    opaque_definition(OPAQUE_TYPE, OPAQUE_NAME, OPAQUE_CONTRACT),
+                    opaque_definition(DOCUMENT_TYPE, DOCUMENT_NAME, DOCUMENT_CONTRACT),
+                ],
+                vec![SchemaDefinition::new(
+                    SchemaId::from_bytes([0x4f; 16]),
+                    QualifiedSemanticName::new(["std", "terminal"]).unwrap(),
+                )],
+            ),
+        );
+        let standard = active.catalogue_hash_context().standard().unwrap();
+        let registry = OpaqueCodecRegistry::new(
+            standard,
+            [
+                opaque_registration(OPAQUE_TYPE, OPAQUE_NAME, OPAQUE_CONTRACT),
+                OpaqueCodecRegistration::length_prefixed_utf8(
+                    DOCUMENT_TYPE,
+                    QualifiedSemanticName::new(DOCUMENT_NAME).unwrap(),
+                    DOCUMENT_CONTRACT,
+                    DOCUMENT_MAGIC,
+                )
+                .unwrap(),
+            ],
+        )
+        .unwrap();
+
+        let mut payload = Vec::from(DOCUMENT_MAGIC.as_bytes());
+        payload.extend_from_slice(&5_u32.to_be_bytes());
+        payload.extend_from_slice(b"hello");
+        let value = OpaqueValue::new(&active, &registry, DOCUMENT_TYPE, &payload).unwrap();
+        assert_eq!(value.opaque_type(), DOCUMENT_TYPE);
+        assert_eq!(value.canonical_payload(), payload);
+
+        let mut empty_body = Vec::from(DOCUMENT_MAGIC.as_bytes());
+        empty_body.extend_from_slice(&0_u32.to_be_bytes());
+        let value = OpaqueValue::new(&active, &registry, DOCUMENT_TYPE, &empty_body).unwrap();
+        assert_eq!(value.canonical_payload(), empty_body);
+
+        let bad_magic = b"WRONG-DOCUMENT/1 \0\0\0\0".to_vec();
+        assert_eq!(
+            OpaqueValue::new(&active, &registry, DOCUMENT_TYPE, &bad_magic),
+            Err(OpaqueValueError::InvalidMagic {
+                opaque_type: DOCUMENT_TYPE,
+            })
+        );
+
+        let truncated = Vec::from(DOCUMENT_MAGIC.as_bytes());
+        assert_eq!(
+            OpaqueValue::new(&active, &registry, DOCUMENT_TYPE, &truncated),
+            Err(OpaqueValueError::InvalidFrameLength {
+                opaque_type: DOCUMENT_TYPE,
+            })
+        );
+
+        let mut short_body = Vec::from(DOCUMENT_MAGIC.as_bytes());
+        short_body.extend_from_slice(&5_u32.to_be_bytes());
+        short_body.extend_from_slice(b"hi");
+        assert_eq!(
+            OpaqueValue::new(&active, &registry, DOCUMENT_TYPE, &short_body),
+            Err(OpaqueValueError::InvalidFrameLength {
+                opaque_type: DOCUMENT_TYPE,
+            })
+        );
+
+        let mut invalid_utf8 = Vec::from(DOCUMENT_MAGIC.as_bytes());
+        invalid_utf8.extend_from_slice(&2_u32.to_be_bytes());
+        invalid_utf8.extend_from_slice(&[0xff, 0xfe]);
+        assert_eq!(
+            OpaqueValue::new(&active, &registry, DOCUMENT_TYPE, &invalid_utf8),
+            Err(OpaqueValueError::InvalidUtf8Body {
+                opaque_type: DOCUMENT_TYPE,
+            })
+        );
+    }
+
+    #[test]
+    fn framed_codecs_validate_media_type_payloads() {
+        const BYTE_STREAM_TYPE: TypeId = TypeId::from_bytes([0x4e; 16]);
+        const BYTE_STREAM_MAGIC: &str = "ORNA-BYTE-STREAM/1 ";
+        const BYTE_STREAM_NAME: [&str; 3] = ["std", "io", "bytestream"];
+        const BYTE_STREAM_CONTRACT: &str = "orna.std.value.byte-stream@1";
+
+        let active = active_record_revision_with_standard(
+            RECORD_TYPE,
+            verified_standard_with_value_types_and_schemas(
+                vec![
+                    standard_boolean_definition(),
+                    opaque_definition(OPAQUE_TYPE, OPAQUE_NAME, OPAQUE_CONTRACT),
+                    opaque_definition(BYTE_STREAM_TYPE, BYTE_STREAM_NAME, BYTE_STREAM_CONTRACT),
+                ],
+                vec![SchemaDefinition::new(
+                    SchemaId::from_bytes([0x4f; 16]),
+                    QualifiedSemanticName::new(["std", "io"]).unwrap(),
+                )],
+            ),
+        );
+        let standard = active.catalogue_hash_context().standard().unwrap();
+        let registry = OpaqueCodecRegistry::new(
+            standard,
+            [
+                opaque_registration(OPAQUE_TYPE, OPAQUE_NAME, OPAQUE_CONTRACT),
+                OpaqueCodecRegistration::media_type_framed(
+                    BYTE_STREAM_TYPE,
+                    QualifiedSemanticName::new(BYTE_STREAM_NAME).unwrap(),
+                    BYTE_STREAM_CONTRACT,
+                    BYTE_STREAM_MAGIC,
+                )
+                .unwrap(),
+            ],
+        )
+        .unwrap();
+
+        let mut payload = Vec::from(BYTE_STREAM_MAGIC.as_bytes());
+        let media_type = b"application/json";
+        payload.extend_from_slice(&(media_type.len() as u32).to_be_bytes());
+        payload.extend_from_slice(media_type);
+        payload.extend_from_slice(&2_u32.to_be_bytes());
+        payload.extend_from_slice(b"{}");
+        let value = OpaqueValue::new(&active, &registry, BYTE_STREAM_TYPE, &payload).unwrap();
+        assert_eq!(value.opaque_type(), BYTE_STREAM_TYPE);
+        assert_eq!(value.canonical_payload(), payload);
+
+        let mut empty_media_type = Vec::from(BYTE_STREAM_MAGIC.as_bytes());
+        empty_media_type.extend_from_slice(&0_u32.to_be_bytes());
+        assert_eq!(
+            OpaqueValue::new(&active, &registry, BYTE_STREAM_TYPE, &empty_media_type),
+            Err(OpaqueValueError::InvalidMediaType {
+                opaque_type: BYTE_STREAM_TYPE,
+            })
+        );
+
+        let mut truncated = Vec::from(BYTE_STREAM_MAGIC.as_bytes());
+        truncated.extend_from_slice(&3_u32.to_be_bytes());
+        truncated.extend_from_slice(b"abc");
+        truncated.extend_from_slice(&5_u32.to_be_bytes());
+        truncated.extend_from_slice(b"hi");
+        assert_eq!(
+            OpaqueValue::new(&active, &registry, BYTE_STREAM_TYPE, &truncated),
+            Err(OpaqueValueError::InvalidFrameLength {
+                opaque_type: BYTE_STREAM_TYPE,
+            })
+        );
+
+        let bad_magic = b"WRONG-STREAM/1 \0\0\0\0".to_vec();
+        assert_eq!(
+            OpaqueValue::new(&active, &registry, BYTE_STREAM_TYPE, &bad_magic),
+            Err(OpaqueValueError::InvalidMagic {
+                opaque_type: BYTE_STREAM_TYPE,
+            })
         );
     }
 
