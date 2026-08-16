@@ -7251,6 +7251,108 @@ async fn proves_inspect_capture_and_projections_after_sealed_echo() -> TestResul
     .await
 }
 
+/// `find_latest_inspect_epoch` resolves the dispatch-auto-captured epoch for
+/// a completed invocation, returns `None` for an invocation with no epoch,
+/// and fails closed with `InspectDenied` for a caller whose granted ladder
+/// does not reach the epoch's owner scope.
+#[tokio::test]
+#[ignore = "requires the Compose PostgreSQL development service"]
+async fn proves_find_latest_inspect_epoch_resolves_the_dispatch_epoch() -> TestResult<()> {
+    const ECHO_VALUE: i32 = 41;
+    const FOREIGN_PRINCIPAL: PrincipalId = PrincipalId::from_bytes([0xdd; 16]);
+
+    with_test_database(|database| async move {
+        let chain = install_v3_standard_chain(&database).await?;
+        let kernel = kernel(&database)?;
+        let standard = chain.version_three_upgrade.verified_standard_snapshot();
+        let pair = chain.version_three.pair();
+        let standard_revision = standard.revision();
+        let registry = registered_opaque_codecs(standard)?;
+
+        // Grant EXECUTE on std.invoke.echo to the proof principal and bind a
+        // session, mirroring the sealed-echo proof.
+        let security = SecuritySnapshot::new_with_function_targets(
+            pair,
+            vec![SecurityFunctionTarget::verified_standard(
+                orna_compiler::STD_INVOKE_ECHO_FUNCTION_ID,
+                standard_revision,
+                orna_compiler::STD_INVOKE_ECHO_FUNCTION_REVISION_ID,
+            )],
+            vec![Principal::new(
+                V3_PROOF_CLIENT_USER,
+                PrincipalKind::User,
+                PrincipalStatus::Active,
+            )],
+            vec![],
+            vec![ExecuteGrant::new(
+                V3_PROOF_CLIENT_USER,
+                orna_compiler::STD_INVOKE_ECHO_FUNCTION_ID,
+            )],
+        )?;
+        let security = kernel.replace_security_snapshot(&security).await?;
+        let session = security.bind_authenticated_session(V3_PROOF_CLIENT_USER, vec![])?;
+
+        // Invoke through sys.invoke; the sealed dispatch auto-captures one
+        // structural epoch for the completed invocation.
+        let by_name = sealed_echo_request(
+            InvocationRequestTarget::qualified_name(
+                orna_core::catalogue::QualifiedSemanticName::new(["std", "invoke", "echo"])?,
+            )?,
+            InvocationParameterSelector::name("p_value")?,
+            ECHO_VALUE,
+        )?;
+        let retained = encode_invoke_request(&chain.version_three, &registry, &by_name)?;
+        let result = kernel
+            .dispatch_sealed_sys_invoke(&session, CONNECTION_PROTOCOL_MAJOR, &retained)
+            .await?;
+        let invocation = require_echo_completion(&result, ECHO_VALUE)?;
+
+        let found = kernel
+            .find_latest_inspect_epoch(&session, invocation)
+            .await?;
+        let epoch_id = found.ok_or_else(|| failure("the dispatched invocation has no epoch"))?;
+        let loaded = kernel
+            .load_inspect_snapshot(epoch_id)
+            .await?
+            .ok_or_else(|| failure("the resolved epoch did not load"))?;
+        require(
+            loaded.invocation_id() == invocation
+                && loaded.owner() == V3_PROOF_CLIENT_USER
+                && loaded.root_target() == orna_compiler::STD_INVOKE_ECHO_FUNCTION_ID,
+            "find_latest_inspect_epoch resolved the wrong epoch",
+        )?;
+
+        // An invocation with no captured epoch resolves as `None`.
+        let absent = kernel
+            .find_latest_inspect_epoch(&session, InvocationId::from_bytes([0xee; 16]))
+            .await?;
+        require(
+            absent.is_none(),
+            "an invocation without an epoch must resolve as None",
+        )?;
+
+        // A foreign principal whose granted ladder is only OwnInvocation
+        // cannot resolve the proof principal's epoch (required rung is
+        // AnyInvocation) and fails closed with the closed denial reason.
+        let foreign_session = security.bind_authenticated_session(FOREIGN_PRINCIPAL, vec![])?;
+        let denial = kernel
+            .find_latest_inspect_epoch(&foreign_session, invocation)
+            .await;
+        require(
+            matches!(
+                denial,
+                Err(PostgresKernelError::InspectDenied {
+                    reason: orna_core::security::InspectDenial::MissingPrivilege
+                })
+            ),
+            "a foreign principal must fail closed on the ladder",
+        )?;
+
+        Ok(())
+    })
+    .await
+}
+
 /// Returns `(invocation_id, sequence, kind)` for every trace row of one
 /// invocation in sequence order.
 async fn inspect_trace_rows(
