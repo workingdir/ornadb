@@ -488,6 +488,7 @@ dependencies = [
 name = "orna-postgres"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "futures-util",
  "orna-artifact",
  "orna-client",
@@ -495,6 +496,7 @@ dependencies = [
  "orna-core",
  "orna-protocol",
  "orna-standard",
+ "serde_json",
  "sha2",
  "tokio",
  "tokio-postgres",
