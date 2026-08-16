@@ -1,0 +1,35 @@
+# Helix configuration for the Orna language.
+#
+# Place this file (or merge its contents) at:
+#   - user config:  ~/.config/helix/languages.toml
+#   - system wide:  /etc/helix/languages.toml
+#   - or inside a runtime directory added to $HELIX_RUNTIME.
+#
+# The tree-sitter grammar is vendored in this repository at
+# editors/tree-sitter-orna (a sibling of this directory). The `source.path`
+# below is relative to the directory that contains this languages.toml
+# (i.e. the Helix config directory); an absolute path always works. After
+# pointing it at your checkout, build the grammar with:
+#
+#   hx --grammar build
+
+[[language]]
+name = "orna"
+scope = "source.orna"
+injection-regex = "orna"
+file-types = ["orna"]
+comment-tokens = ["--", "/*", "*/"]
+language-servers = ["orna-lsp"]
+
+[[language-server]]
+name = "orna-lsp"
+command = "orna-lsp"
+
+[[grammar]]
+name = "orna"
+source = { path = "editors/tree-sitter-orna" }
+
+# Once the grammar is published, the git source can be used instead:
+# [[grammar]]
+# name = "orna"
+# source = { git = "https://example.invalid/OrnaDB/tree-sitter-orna", rev = "..." }
