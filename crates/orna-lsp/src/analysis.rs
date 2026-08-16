@@ -481,18 +481,7 @@ pub fn field_at(parse: &Parse, byte: usize) -> Option<FieldInfo<'_>> {
     for declaration in parse.object_types() {
         for field in &declaration.fields {
             if byte >= field.name.span.start && byte < field.name.span.end {
-                return Some(FieldInfo {
-                    name: &field.name,
-                    type_specification: &field.type_specification,
-                    nullable: Some(field.nullable),
-                    unique: field.unique,
-                    on_delete: field.on_delete.map(on_delete_text),
-                    documentation: field.documentation.as_ref().map(strip_quotes),
-                    default_text: field
-                        .default_expression
-                        .as_ref()
-                        .map(|default| default.text.as_str()),
-                });
+                return Some(object_field_info(field));
             }
         }
     }
@@ -545,6 +534,95 @@ pub fn parameter_at<'a>(parse: &'a Parse, byte: usize) -> Option<ParameterInfo<'
         })
 }
 
+/// Returns the object or record field whose name covers one byte offset
+/// inside a SQL body, resolved through the body's target object type.
+fn sql_column_at<'a>(parse: &'a Parse, byte: usize, text: &str) -> Option<FieldInfo<'a>> {
+    let (name, kind, _) = token_at(text, parse, byte)?;
+    if kind != HighlightKind::PropertyName {
+        return None;
+    }
+    for declaration in parse.server_functions() {
+        let resolved = match &declaration.body {
+            orna_syntax::ServerFunctionBody::SqlQuery(body)
+                if contains(&body.source.span, byte) =>
+            {
+                field_on_object(parse, &body.query.source_object.object_type, &name)
+            }
+            orna_syntax::ServerFunctionBody::SqlInsert(body)
+                if contains(&body.source.span, byte)
+                    && body
+                        .insert
+                        .target_fields
+                        .iter()
+                        .any(|field| contains(&field.span, byte)) =>
+            {
+                field_on_object(parse, &body.insert.target_object, &name)
+            }
+            orna_syntax::ServerFunctionBody::SqlUpdate(body)
+                if contains(&body.source.span, byte)
+                    && body
+                        .update
+                        .assignments
+                        .iter()
+                        .any(|assignment| contains(&assignment.target_field.span, byte)) =>
+            {
+                field_on_object(parse, &body.update.target_object, &name)
+            }
+            _ => None,
+        };
+        if resolved.is_some() {
+            return resolved;
+        }
+    }
+    None
+}
+
+/// Resolves one field name against a declared object type.
+fn field_on_object<'a>(
+    parse: &'a Parse,
+    object_type: &QualifiedName,
+    field_name: &str,
+) -> Option<FieldInfo<'a>> {
+    let matches = |candidate: &QualifiedName| {
+        candidate.parts.len() == object_type.parts.len()
+            && candidate
+                .parts
+                .iter()
+                .zip(&object_type.parts)
+                .all(|(left, right)| left.text.eq_ignore_ascii_case(&right.text))
+    };
+    let declaration = parse
+        .object_types()
+        .iter()
+        .find(|declaration| matches(&declaration.name))?;
+    let field = declaration
+        .fields
+        .iter()
+        .find(|field| field.name.text.eq_ignore_ascii_case(field_name))?;
+    Some(object_field_info(field))
+}
+
+/// Builds the hover data for one object field.
+fn object_field_info(field: &orna_syntax::ObjectFieldDeclaration) -> FieldInfo<'_> {
+    FieldInfo {
+        name: &field.name,
+        type_specification: &field.type_specification,
+        nullable: Some(field.nullable),
+        unique: field.unique,
+        on_delete: field.on_delete.map(on_delete_text),
+        documentation: field.documentation.as_ref().map(strip_quotes),
+        default_text: field
+            .default_expression
+            .as_ref()
+            .map(|default| default.text.as_str()),
+    }
+}
+
+/// Returns true when one byte lies inside a span.
+fn contains(span: &SourceSpan, byte: usize) -> bool {
+    byte >= span.start && byte < span.end
+}
+
 /// Strips the surrounding apostrophes from a captured string literal.
 fn strip_quotes(slice: &orna_syntax::SourceSlice) -> &str {
     slice
@@ -567,6 +645,7 @@ fn on_delete_text(policy: orna_syntax::OnDeletePolicy) -> &'static str {
 pub fn hover(
     document: &Document,
     parse: &Parse,
+    standard: Option<&StandardLibrary>,
     position: Position,
     mapper: &PositionMapper<'_>,
 ) -> Option<Hover> {
@@ -597,9 +676,22 @@ pub fn hover(
                     &document.text,
                     doc_link.as_deref(),
                 ))
+            } else if let Some(field) = sql_column_at(parse, byte, &document.text) {
+                // A column reference inside a SQL body resolves to the field
+                // of the body's target object type.
+                Some(crate::hover::field_hover(
+                    &field,
+                    &document.text,
+                    doc_link.as_deref(),
+                ))
             } else {
                 crate::reference::scalar_reference(&name)
                     .map(|reference| crate::hover::scalar_hover(reference, doc_link.as_deref()))
+                    .or_else(|| {
+                        standard.and_then(|standard| {
+                            standard_value_hover(standard, &name, doc_link.as_deref())
+                        })
+                    })
             }
         }
     };
@@ -607,6 +699,46 @@ pub fn hover(
         hover.range = Some(mapper.range(&span));
     }
     hover
+}
+
+/// Builds the hover for one standard-library type or schema name.
+fn standard_value_hover(
+    standard: &StandardLibrary,
+    name: &str,
+    doc_link: Option<&str>,
+) -> Option<lsp_types::Hover> {
+    for value_type in standard.checked.value_types() {
+        let parts = value_type.name().parts();
+        if parts
+            .last()
+            .is_some_and(|part| part.eq_ignore_ascii_case(name))
+        {
+            let kind = match value_type.kind() {
+                orna_core::catalogue::ValueTypeKind::Primitive => "primitive",
+                orna_core::catalogue::ValueTypeKind::Opaque => "opaque",
+                _ => "value",
+            };
+            return Some(crate::hover::standard_type_hover(
+                parts.last().expect("nonempty name"),
+                kind,
+                value_type.representation_contract(),
+                doc_link,
+            ));
+        }
+    }
+    for schema in standard.checked.schemas() {
+        let parts = schema.name().parts();
+        if parts
+            .last()
+            .is_some_and(|part| part.eq_ignore_ascii_case(name))
+        {
+            return Some(crate::hover::standard_schema_hover(
+                &parts.join("."),
+                doc_link,
+            ));
+        }
+    }
+    None
 }
 
 /// Returns the declaration location for the identifier at one position.
