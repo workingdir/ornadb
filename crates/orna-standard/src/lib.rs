@@ -927,6 +927,132 @@ pub fn standard_library_v3_manifest()
     Ok(StandardLibraryV3Manifest { catalogue })
 }
 
+/// The source-independent facts required to recognise the UI
+/// `orna.std/4` standard library (work ADR 0062).
+///
+/// This value does not contain standard source, origins, hashes, a digest, or
+/// authority to install or use a standard-library snapshot.
+#[derive(Clone, Debug)]
+pub struct StandardLibraryV4Manifest {
+    catalogue: CatalogueSnapshot,
+}
+
+impl StandardLibraryV4Manifest {
+    /// Returns the standard-library version label.
+    pub const fn standard_library_version(&self) -> &'static str {
+        STANDARD_LIBRARY_V4_VERSION_IDENTITY
+    }
+
+    /// Returns the standard-library revision identity.
+    pub const fn standard_library_revision(&self) -> StandardLibraryRevisionId {
+        STANDARD_LIBRARY_V4_REVISION_ID
+    }
+
+    /// Returns the associated language version label.
+    pub const fn language_version(&self) -> &'static str {
+        LANGUAGE_VERSION_IDENTITY
+    }
+
+    /// Returns the identity reserved for the later retained V4 source bundle.
+    pub const fn source_bundle(&self) -> SourceBundleId {
+        STANDARD_SOURCE_V4_BUNDLE_ID
+    }
+
+    /// Returns the identity reserved for the later retained V4 source revision.
+    pub const fn source_revision(&self) -> SourceRevisionId {
+        STANDARD_SOURCE_V4_REVISION_ID
+    }
+
+    /// Returns the identity of the retained `std/types.orna` unit in the V4 bundle.
+    pub const fn types_source_unit(&self) -> SourceUnitId {
+        STD_TYPES_SOURCE_UNIT_ID
+    }
+
+    /// Returns the identity of the retained `std/invoke.orna` unit in the V4 bundle.
+    pub const fn invoke_source_unit(&self) -> SourceUnitId {
+        STD_INVOKE_SOURCE_UNIT_ID
+    }
+
+    /// Returns the identity of the retained `std/output.orna` unit in the V4 bundle.
+    pub const fn output_source_unit(&self) -> SourceUnitId {
+        STD_OUTPUT_SOURCE_UNIT_ID
+    }
+
+    /// Returns the identity of the retained `std/ui.orna` unit in the V4 bundle.
+    pub const fn ui_source_unit(&self) -> SourceUnitId {
+        STD_UI_SOURCE_UNIT_ID
+    }
+
+    /// Returns the logical path of the retained `std/types.orna` unit.
+    pub const fn types_source_logical_path(&self) -> &'static str {
+        SOURCE_LOGICAL_PATH
+    }
+
+    /// Returns the logical path of the retained `std/invoke.orna` unit.
+    pub const fn invoke_source_logical_path(&self) -> &'static str {
+        STD_INVOKE_SOURCE_LOGICAL_PATH
+    }
+
+    /// Returns the logical path of the retained `std/output.orna` unit.
+    pub const fn output_source_logical_path(&self) -> &'static str {
+        STD_OUTPUT_SOURCE_LOGICAL_PATH
+    }
+
+    /// Returns the logical path of the retained `std/ui.orna` unit.
+    pub const fn ui_source_logical_path(&self) -> &'static str {
+        STD_UI_SOURCE_LOGICAL_PATH
+    }
+
+    /// Returns the validated source-independent V4 standard catalogue.
+    pub const fn catalogue(&self) -> &CatalogueSnapshot {
+        &self.catalogue
+    }
+}
+
+/// Builds and validates the accepted source-independent UI standard manifest.
+///
+/// The V4 catalogue extends the V3 catalogue with the `std.ui` schema, the
+/// opaque UI value type `std.ui.ui` (contract `orna.std.value.ui@1`), and the
+/// single `std.ui` type binding targeting `std.ui.UI`. It reuses the V3
+/// schemas, value types, type bindings, and the single `std.invoke.echo`
+/// function unchanged (work ADR 0062).
+pub fn standard_library_v4_manifest()
+-> Result<StandardLibraryV4Manifest, StandardLibraryManifestError> {
+    let version_three = standard_library_v3_manifest()?;
+    let mut schemas = version_three.catalogue().schemas().to_vec();
+    schemas.push(SchemaDefinition::new(
+        STD_UI_SCHEMA_ID,
+        semantic_name("std.ui", ["std", "ui"])?,
+    ));
+    let mut value_types = version_three.catalogue().value_types().to_vec();
+    value_types.push(ValueTypeDefinition::opaque(
+        STD_UI_TYPE_ID,
+        semantic_name("std.ui.ui", ["std", "ui", "ui"])?,
+        STD_UI_CONTRACT,
+    ));
+    let mut type_bindings = version_three.catalogue().type_bindings().to_vec();
+    let ui_name = semantic_name("std.ui", ["std", "ui"])?;
+    let ui_lookup = TypeLookupName::qualified(ui_name.clone());
+    let ui_binding = TypeBinding::qualified(ui_name, STD_UI_TYPE_ID).map_err(|source| {
+        StandardLibraryManifestError::TypeBinding {
+            name: ui_lookup,
+            source,
+        }
+    })?;
+    type_bindings.push(ui_binding);
+    let catalogue = CatalogueSnapshot::new_with_functions_and_types(
+        STANDARD_CATALOGUE_V4_REVISION_ID,
+        schemas,
+        Vec::new(),
+        value_types,
+        type_bindings,
+        version_three.catalogue().functions().to_vec(),
+    )
+    .map_err(|source| StandardLibraryManifestError::Catalogue { source })?;
+
+    Ok(StandardLibraryV4Manifest { catalogue })
+}
+
 fn build_type_bindings(
     expected_ids: &[[u8; 16]],
 ) -> Result<Vec<TypeBinding>, StandardLibraryManifestError> {
@@ -2491,27 +2617,31 @@ mod tests {
         EXPECTED_TYPE_BINDING_IDS, FLOAT_TYPE_ID, INTEGER_TYPE_ID, LANGUAGE_VERSION_IDENTITY,
         OPAQUE_TOKEN_TYPE_ID, SOURCE_LOGICAL_PATH, STANDARD_CATALOGUE_REVISION_ID,
         STANDARD_CATALOGUE_V2_REVISION_ID, STANDARD_CATALOGUE_V3_REVISION_ID,
-        STANDARD_LIBRARY_REVISION_ID, STANDARD_LIBRARY_V2_REVISION_ID,
-        STANDARD_LIBRARY_V2_VERSION_IDENTITY, STANDARD_LIBRARY_V3_REVISION_ID,
-        STANDARD_LIBRARY_V3_VERSION_IDENTITY, STANDARD_LIBRARY_VERSION_IDENTITY,
-        STANDARD_SOURCE_BUNDLE_ID, STANDARD_SOURCE_REVISION_ID, STANDARD_SOURCE_UNIT_ID,
-        STANDARD_SOURCE_V2_BUNDLE_ID, STANDARD_SOURCE_V2_REVISION_ID, STANDARD_SOURCE_V3_BUNDLE_ID,
-        STANDARD_SOURCE_V3_REVISION_ID, STANDARD_TYPE_IDS, STD_INTEGER_TYPE_ID,
+        STANDARD_CATALOGUE_V4_REVISION_ID, STANDARD_LIBRARY_REVISION_ID,
+        STANDARD_LIBRARY_V2_REVISION_ID, STANDARD_LIBRARY_V2_VERSION_IDENTITY,
+        STANDARD_LIBRARY_V3_REVISION_ID, STANDARD_LIBRARY_V3_VERSION_IDENTITY,
+        STANDARD_LIBRARY_V4_REVISION_ID, STANDARD_LIBRARY_V4_VERSION_IDENTITY,
+        STANDARD_LIBRARY_VERSION_IDENTITY, STANDARD_SOURCE_BUNDLE_ID,
+        STANDARD_SOURCE_REVISION_ID, STANDARD_SOURCE_UNIT_ID, STANDARD_SOURCE_V2_BUNDLE_ID,
+        STANDARD_SOURCE_V2_REVISION_ID, STANDARD_SOURCE_V3_BUNDLE_ID,
+        STANDARD_SOURCE_V3_REVISION_ID, STANDARD_SOURCE_V4_BUNDLE_ID,
+        STANDARD_SOURCE_V4_REVISION_ID, STANDARD_TYPE_IDS, STD_INTEGER_TYPE_ID,
         STD_INVOKE_ECHO_FUNCTION_ID, STD_INVOKE_ECHO_FUNCTION_REVISION_ID,
         STD_INVOKE_ECHO_PARAMETER_ID, STD_INVOKE_ECHO_REVISION_NUMBER, STD_INVOKE_SCHEMA_ID,
         STD_INVOKE_SOURCE_LOGICAL_PATH, STD_INVOKE_SOURCE_UNIT_ID, STD_IO_BYTE_STREAM_CONTRACT,
         STD_IO_BYTE_STREAM_TYPE_ID, STD_IO_SCHEMA_ID, STD_OUTPUT_SOURCE_LOGICAL_PATH,
         STD_OUTPUT_SOURCE_UNIT_ID, STD_SCHEMA_ID, STD_TERMINAL_DOCUMENT_CONTRACT,
         STD_TERMINAL_DOCUMENT_TYPE_ID, STD_TERMINAL_SCHEMA_ID, STD_TYPES_SCHEMA_ID,
-        STD_TYPES_SOURCE_UNIT_ID, StandardLibraryError, StandardLibraryManifestError,
+        STD_TYPES_SOURCE_UNIT_ID, STD_UI_CONTRACT, STD_UI_SCHEMA_ID, STD_UI_SOURCE_LOGICAL_PATH,
+        STD_UI_SOURCE_UNIT_ID, STD_UI_TYPE_ID, StandardLibraryError, StandardLibraryManifestError,
         StandardUpgradeError, TERMINAL_DOCUMENT_MAGIC, TIME_TYPE_ID, TIMESTAMP_TYPE_ID,
-        UUID_TYPE_ID, VOID_TYPE_ID, build_type_bindings, prepare_standard_upgrade,
+        UI_MAGIC, UUID_TYPE_ID, VOID_TYPE_ID, build_type_bindings, prepare_standard_upgrade,
         prepare_standard_upgrade_v1_to_v2, prepare_standard_upgrade_v2_to_v3,
         prepare_standard_upgrade_with, registered_opaque_codecs,
         retained_standard_library_snapshot, retained_standard_library_snapshot_from_source,
         retained_standard_library_v2_snapshot, retained_standard_library_v2_snapshot_from_source,
         retained_standard_library_v3_snapshot, standard_library_manifest,
-        standard_library_v2_manifest, standard_library_v3_manifest,
+        standard_library_v2_manifest, standard_library_v3_manifest, standard_library_v4_manifest,
         verify_standard_library_snapshot, verify_standard_library_v2_snapshot,
         verify_standard_library_v3_snapshot,
     };
@@ -5250,6 +5380,111 @@ EXPORT TYPE std.io.ByteStream AS std.ByteStream;
         assert_eq!(TERMINAL_DOCUMENT_MAGIC, "ORNA-TERMINAL-DOCUMENT/1 ");
         assert_eq!(BYTE_STREAM_MAGIC, "ORNA-BYTE-STREAM/1 ");
         assert_eq!(STD_OUTPUT_SOURCE_LOGICAL_PATH, "std/output.orna");
+    }
+
+    #[test]
+    fn manifest_v4_exposes_the_reserved_ui_standard_facts() {
+        let manifest = standard_library_v4_manifest().expect("the accepted V4 manifest is valid");
+        let cloned = manifest.clone();
+
+        assert_eq!(STANDARD_LIBRARY_V4_VERSION_IDENTITY, "orna.std/4");
+        assert_eq!(
+            manifest.standard_library_version(),
+            STANDARD_LIBRARY_V4_VERSION_IDENTITY
+        );
+        assert_eq!(
+            manifest.standard_library_revision(),
+            STANDARD_LIBRARY_V4_REVISION_ID
+        );
+        assert_eq!(manifest.language_version(), LANGUAGE_VERSION_IDENTITY);
+        assert_eq!(manifest.source_bundle(), STANDARD_SOURCE_V4_BUNDLE_ID);
+        assert_eq!(manifest.source_revision(), STANDARD_SOURCE_V4_REVISION_ID);
+        assert_eq!(manifest.types_source_unit(), STD_TYPES_SOURCE_UNIT_ID);
+        assert_eq!(manifest.invoke_source_unit(), STD_INVOKE_SOURCE_UNIT_ID);
+        assert_eq!(manifest.output_source_unit(), STD_OUTPUT_SOURCE_UNIT_ID);
+        assert_eq!(manifest.ui_source_unit(), STD_UI_SOURCE_UNIT_ID);
+        assert_eq!(manifest.types_source_logical_path(), SOURCE_LOGICAL_PATH);
+        assert_eq!(
+            manifest.invoke_source_logical_path(),
+            STD_INVOKE_SOURCE_LOGICAL_PATH
+        );
+        assert_eq!(
+            manifest.output_source_logical_path(),
+            STD_OUTPUT_SOURCE_LOGICAL_PATH
+        );
+        assert_eq!(
+            manifest.ui_source_logical_path(),
+            STD_UI_SOURCE_LOGICAL_PATH
+        );
+        assert_eq!(
+            manifest.catalogue().revision(),
+            STANDARD_CATALOGUE_V4_REVISION_ID
+        );
+        assert_eq!(manifest.catalogue().schemas().len(), 6);
+        assert_eq!(manifest.catalogue().schemas()[5].id(), STD_UI_SCHEMA_ID);
+        assert_eq!(manifest.catalogue().value_types().len(), 17);
+        assert_eq!(manifest.catalogue().type_bindings().len(), 34);
+        assert_eq!(manifest.catalogue().functions().len(), 1);
+        assert_eq!(
+            manifest.catalogue().functions()[0].id(),
+            STD_INVOKE_ECHO_FUNCTION_ID
+        );
+        assert_eq!(
+            cloned.catalogue().revision(),
+            STANDARD_CATALOGUE_V4_REVISION_ID
+        );
+
+        let ui = manifest
+            .catalogue()
+            .type_definition_by_id(STD_UI_TYPE_ID)
+            .expect("the ui type is retained")
+            .as_opaque_value()
+            .expect("the ui type is opaque");
+        assert_eq!(ui.name().to_string(), "std.ui.ui");
+        assert_eq!(ui.representation_contract(), STD_UI_CONTRACT);
+        let ui_binding = manifest
+            .catalogue()
+            .type_bindings()
+            .get(33)
+            .expect("the ui binding is retained");
+        assert_eq!(ui_binding.target(), STD_UI_TYPE_ID);
+        assert_eq!(ui_binding.name().to_string(), "std.ui");
+
+        for (actual, expected) in [
+            (
+                STANDARD_LIBRARY_V4_REVISION_ID.to_bytes(),
+                [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 4],
+            ),
+            (
+                STANDARD_CATALOGUE_V4_REVISION_ID.to_bytes(),
+                [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 4],
+            ),
+            (
+                STANDARD_SOURCE_V4_BUNDLE_ID.to_bytes(),
+                [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 4],
+            ),
+            (
+                STANDARD_SOURCE_V4_REVISION_ID.to_bytes(),
+                [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 4],
+            ),
+            (
+                STD_UI_SOURCE_UNIT_ID.to_bytes(),
+                [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 5],
+            ),
+            (
+                STD_UI_SCHEMA_ID.to_bytes(),
+                [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 8],
+            ),
+            (
+                STD_UI_TYPE_ID.to_bytes(),
+                [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x13],
+            ),
+        ] {
+            assert_eq!(actual, expected);
+        }
+        assert_eq!(STD_UI_CONTRACT, "orna.std.value.ui@1");
+        assert_eq!(UI_MAGIC, "ORNA-UI/1 ");
+        assert_eq!(STD_UI_SOURCE_LOGICAL_PATH, "std/ui.orna");
     }
 
     #[test]
