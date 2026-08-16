@@ -38,17 +38,13 @@ use orna_core::{
     types::TypeDescriptor,
     value::{OpaqueCodecRegistry, RuntimeValue},
 };
-use orna_protocol::{
-    InvocationEventBatch, decode_constructed_value, encode_constructed_value,
-};
+use orna_protocol::{InvocationEventBatch, decode_constructed_value, encode_constructed_value};
 use orna_standard::registered_opaque_codecs;
 use tokio_postgres::{IsolationLevel, Row, Transaction, types::FromSqlOwned};
 
 use crate::{
-    PostgresKernel, PostgresKernelError,
-    bootstrap::require_current_migrations,
-    security::append_security_audit_event,
-    server_runtime::configure_and_recover,
+    PostgresKernel, PostgresKernelError, bootstrap::require_current_migrations,
+    security::append_security_audit_event, server_runtime::configure_and_recover,
 };
 
 const INSPECT_SNAPSHOT_RELATION: &str = "_orna_kernel.inspect_snapshots";
@@ -271,20 +267,29 @@ impl PostgresKernel {
             let mut cells = Vec::with_capacity(rows.len());
             for row in &rows {
                 let key = decode_state_cell_key(row)?;
-                let value_bytes: Vec<u8> =
-                    inspect_column(row, "value_bytes", "USER state typed value")?;
+                let value_bytes: Vec<u8> = inspect_column(
+                    "_orna_kernel.user_state_cells",
+                    row,
+                    "value_bytes",
+                    "USER state typed value",
+                )?;
                 let value = decode_constructed_value(&active, &registry, &value_bytes)
                     .map_err(PostgresKernelError::InspectValueCodec)?;
-                let value = InvokeValue::new(value)
-                    .map_err(PostgresKernelError::InvocationCarrier)?;
+                let value =
+                    InvokeValue::new(value).map_err(PostgresKernelError::InvocationCarrier)?;
                 let value_type = TypeId::from_bytes(inspect_id(
+                    "_orna_kernel.user_state_cells",
                     row,
                     "value_type_id",
                     "USER state value type",
                 )?);
                 let revision = decode_revision(row)?;
-                let updated_at: SystemTime =
-                    inspect_column(row, "updated_at", "USER state update timestamp")?;
+                let updated_at: SystemTime = inspect_column(
+                    "_orna_kernel.user_state_cells",
+                    row,
+                    "updated_at",
+                    "USER state update timestamp",
+                )?;
                 let value = if include_values { Some(value) } else { None };
                 cells.push(StateCellRow::new(
                     key, value_type, revision, updated_at, value,
@@ -414,13 +419,12 @@ impl PostgresKernel {
         observer_invocation: Option<InvocationId>,
         include_observer: bool,
     ) -> Result<Vec<InspectTraceEvent>, PostgresKernelError> {
-        let after = i64::try_from(after_sequence).map_err(|_| {
-            PostgresKernelError::DurableInvariant {
+        let after =
+            i64::try_from(after_sequence).map_err(|_| PostgresKernelError::DurableInvariant {
                 relation: INSPECT_TRACE_RELATION,
                 record: invocation_id.canonical(),
                 rule: "trace sequence must fit PostgreSQL BIGINT",
-            }
-        })?;
+            })?;
         let mut database_session = self.open().await?;
         let operation = async {
             let transaction = database_session
@@ -451,7 +455,10 @@ impl PostgresKernel {
                 if !include_observer && record.observer_invocation == observer_invocation {
                     continue;
                 }
-                if !matches!(record.kind.as_str(), "started" | "value_batch" | "completed") {
+                if !matches!(
+                    record.kind.as_str(),
+                    "started" | "value_batch" | "completed"
+                ) {
                     // The closed v1 model carries the five lifecycle payloads
                     // only; the richer durable kinds are retained for later
                     // slices and never dropped from the relation.
@@ -467,8 +474,7 @@ impl PostgresKernel {
                         rule: "trace payload must decode as one invocation event",
                     });
                 };
-                if event.invocation_id() != record.invocation
-                    || event.sequence() != record.sequence
+                if event.invocation_id() != record.invocation || event.sequence() != record.sequence
                 {
                     return Err(PostgresKernelError::DurableInvariant {
                         relation: INSPECT_TRACE_RELATION,
@@ -608,16 +614,13 @@ pub(crate) async fn capture_inspect_snapshot_in_transaction(
         epoch_scope: InspectEpochScope::Own,
         requested: InspectPrivilege::OwnInvocation,
     };
-    let audit = SecurityAuditDecision::inspect_allowed(
-        authenticated_session,
-        decision,
-        Some(owner),
-    )
-    .map_err(|_| PostgresKernelError::DurableInvariant {
-        relation: "_orna_kernel.security_audit_events",
-        record: record.clone(),
-        rule: "the capture decision must be an allowed INSPECT decision",
-    })?;
+    let audit =
+        SecurityAuditDecision::inspect_allowed(authenticated_session, decision, Some(owner))
+            .map_err(|_| PostgresKernelError::DurableInvariant {
+                relation: "_orna_kernel.security_audit_events",
+                record: record.clone(),
+                rule: "the capture decision must be an allowed INSPECT decision",
+            })?;
     append_security_audit_event(transaction, audit).await?;
     Ok(epoch_id)
 }
@@ -678,7 +681,10 @@ pub(crate) async fn recover_inspect_relations(
                 rule: "trace payload must not be empty",
             });
         }
-        if !matches!(record.kind.as_str(), "started" | "value_batch" | "completed") {
+        if !matches!(
+            record.kind.as_str(),
+            "started" | "value_batch" | "completed"
+        ) {
             continue;
         }
         let RuntimeValue::InvokeEvent(event) =
@@ -763,13 +769,8 @@ fn build_inspect_epoch(
         0,
     )
     .map_err(PostgresKernelError::Inspect)?;
-    let call = CallRow::new(
-        invocation,
-        schema,
-        value_count,
-        duration_nanoseconds,
-    )
-    .map_err(PostgresKernelError::Inspect)?;
+    let call = CallRow::new(invocation, schema, value_count, duration_nanoseconds)
+        .map_err(PostgresKernelError::Inspect)?;
     let runtime_bindings = runtime_bindings_from_offer(client_offer)?;
     InspectSnapshotEpoch::new(
         InspectEpochId::new(),
@@ -845,21 +846,15 @@ fn durable_trace_kind(body: &InvocationEventBody) -> Option<&'static str> {
 ///
 /// Kinds the closed v1 model cannot express (for example `inspect_snapshot`)
 /// are handled by the caller before this mapping runs.
-fn model_payload_for(
-    kind: &str,
-    body: &InvocationEventBody,
-) -> Option<InspectTracePayload> {
+fn model_payload_for(kind: &str, body: &InvocationEventBody) -> Option<InspectTracePayload> {
     match (kind, body) {
-        ("started", InvocationEventBody::Started { .. }) => {
-            Some(InspectTracePayload::Started)
+        ("started", InvocationEventBody::Started { .. }) => Some(InspectTracePayload::Started),
+        ("value_batch", InvocationEventBody::ValueBatch { schema, values }) => {
+            Some(InspectTracePayload::ValueBatch {
+                schema: schema.clone(),
+                values: values.clone(),
+            })
         }
-        (
-            "value_batch",
-            InvocationEventBody::ValueBatch { schema, values },
-        ) => Some(InspectTracePayload::ValueBatch {
-            schema: schema.clone(),
-            values: values.clone(),
-        }),
         (
             "completed",
             InvocationEventBody::Completed {
@@ -882,12 +877,10 @@ async fn persist_trace_row(
     observer_invocation: Option<InvocationId>,
     recorded_at: SystemTime,
 ) -> Result<(), PostgresKernelError> {
-    let sequence = i64::try_from(sequence).map_err(|_| {
-        PostgresKernelError::DurableInvariant {
-            relation: INSPECT_TRACE_RELATION,
-            record: invocation.canonical(),
-            rule: "trace sequence must fit PostgreSQL BIGINT",
-        }
+    let sequence = i64::try_from(sequence).map_err(|_| PostgresKernelError::DurableInvariant {
+        relation: INSPECT_TRACE_RELATION,
+        record: invocation.canonical(),
+        rule: "trace sequence must fit PostgreSQL BIGINT",
     })?;
     let observer_bytes = observer_invocation.map(|id| id.to_bytes().to_vec());
     transaction
@@ -922,22 +915,30 @@ struct InvocationTraceRecord {
 
 fn row_invocation_record(row: &Row) -> Result<InvocationTraceRecord, PostgresKernelError> {
     let invocation = InvocationId::from_bytes(inspect_id(
+        INSPECT_TRACE_RELATION,
         row,
         "invocation_id",
         "inspection trace invocation identity",
     )?);
     let record = invocation.canonical();
-    let sequence: i64 = inspect_column(row, &record, "sequence")?;
+    let sequence: i64 = inspect_column(INSPECT_TRACE_RELATION, row, &record, "sequence")?;
     let sequence = u64::try_from(sequence).map_err(|_| PostgresKernelError::DurableInvariant {
         relation: INSPECT_TRACE_RELATION,
         record: record.clone(),
         rule: "trace sequence must be a non-negative unsigned integer",
     })?;
-    let kind: String = inspect_column(row, &record, "kind")?;
-    let payload_bytes: Vec<u8> = inspect_column(row, &record, "payload_bytes")?;
-    let observer_invocation =
-        inspect_optional_id(row, &record, "observer_invocation_id")?.map(InvocationId::from_bytes);
-    let recorded_at: SystemTime = inspect_column(row, &record, "recorded_at")?;
+    let kind: String = inspect_column(INSPECT_TRACE_RELATION, row, &record, "kind")?;
+    let payload_bytes: Vec<u8> =
+        inspect_column(INSPECT_TRACE_RELATION, row, &record, "payload_bytes")?;
+    let observer_invocation = inspect_optional_id(
+        INSPECT_TRACE_RELATION,
+        row,
+        &record,
+        "observer_invocation_id",
+    )?
+    .map(InvocationId::from_bytes);
+    let recorded_at: SystemTime =
+        inspect_column(INSPECT_TRACE_RELATION, row, &record, "recorded_at")?;
     Ok(InvocationTraceRecord {
         invocation,
         sequence,
@@ -954,36 +955,42 @@ fn decode_inspect_snapshot_row(
     registry: &OpaqueCodecRegistry,
 ) -> Result<InspectSnapshotEpoch, PostgresKernelError> {
     let epoch_id = InspectEpochId::from_bytes(inspect_id(
+        INSPECT_SNAPSHOT_RELATION,
         row,
         "epoch_id",
         "inspection epoch identity",
     )?);
     let record = epoch_id.canonical();
     let invocation_id = InvocationId::from_bytes(inspect_id(
+        INSPECT_SNAPSHOT_RELATION,
         row,
         &record,
         "inspection epoch invocation identity",
     )?);
     let owner = PrincipalId::from_bytes(inspect_id(
+        INSPECT_SNAPSHOT_RELATION,
         row,
         &record,
         "inspection epoch owner principal",
     )?);
     let source_revision_id = SourceRevisionId::from_bytes(inspect_id(
+        INSPECT_SNAPSHOT_RELATION,
         row,
         &record,
         "inspection epoch source revision",
     )?);
     let catalogue_revision_id = CatalogueRevisionId::from_bytes(inspect_id(
+        INSPECT_SNAPSHOT_RELATION,
         row,
         &record,
         "inspection epoch catalogue revision",
     )?);
-    let _recorded_at: SystemTime = inspect_column(row, &record, "recorded_at")?;
-    let summary_bytes: Vec<u8> = inspect_column(row, &record, "summary_bytes")?;
-    let RuntimeValue::Bytes(payload) =
-        decode_constructed_value(active, registry, &summary_bytes)
-            .map_err(PostgresKernelError::InspectValueCodec)?
+    let _recorded_at: SystemTime =
+        inspect_column(INSPECT_SNAPSHOT_RELATION, row, &record, "recorded_at")?;
+    let summary_bytes: Vec<u8> =
+        inspect_column(INSPECT_SNAPSHOT_RELATION, row, &record, "summary_bytes")?;
+    let RuntimeValue::Bytes(payload) = decode_constructed_value(active, registry, &summary_bytes)
+        .map_err(PostgresKernelError::InspectValueCodec)?
     else {
         return Err(PostgresKernelError::DurableInvariant {
             relation: INSPECT_SNAPSHOT_RELATION,
@@ -1018,16 +1025,20 @@ fn decode_inspect_snapshot_row(
     Ok(epoch)
 }
 
-fn decode_security_decision_row(
-    row: &Row,
-) -> Result<SecurityDecisionRow, PostgresKernelError> {
+fn decode_security_decision_row(row: &Row) -> Result<SecurityDecisionRow, PostgresKernelError> {
     let event_id = SecurityAuditEventId::from_bytes(inspect_id(
+        "_orna_kernel.security_audit_events",
         row,
         "event_id",
         "security decision audit identity",
     )?);
     let record = event_id.canonical();
-    let kind: String = inspect_column(row, &record, "event_kind")?;
+    let kind: String = inspect_column(
+        "_orna_kernel.security_audit_events",
+        row,
+        &record,
+        "event_kind",
+    )?;
     let kind = match kind.as_str() {
         "execute" => InspectSecurityDecisionKind::Execute,
         "capability" => InspectSecurityDecisionKind::Capability,
@@ -1041,7 +1052,12 @@ fn decode_security_decision_row(
             });
         }
     };
-    let outcome: String = inspect_column(row, &record, "outcome")?;
+    let outcome: String = inspect_column(
+        "_orna_kernel.security_audit_events",
+        row,
+        &record,
+        "outcome",
+    )?;
     let outcome = match outcome.as_str() {
         "allowed" => InspectSecurityDecisionOutcome::Allowed,
         "denied" => InspectSecurityDecisionOutcome::Denied,
@@ -1055,10 +1071,27 @@ fn decode_security_decision_row(
     };
     let mut principals = Vec::new();
     for principal in [
-        inspect_optional_id(row, &record, "session_principal_id")?.map(PrincipalId::from_bytes),
-        inspect_optional_id(row, &record, "effective_principal_id")?.map(PrincipalId::from_bytes),
-        inspect_optional_id(row, &record, "authorising_principal_id")?
-            .map(PrincipalId::from_bytes),
+        inspect_optional_id(
+            "_orna_kernel.security_audit_events",
+            row,
+            &record,
+            "session_principal_id",
+        )?
+        .map(PrincipalId::from_bytes),
+        inspect_optional_id(
+            "_orna_kernel.security_audit_events",
+            row,
+            &record,
+            "effective_principal_id",
+        )?
+        .map(PrincipalId::from_bytes),
+        inspect_optional_id(
+            "_orna_kernel.security_audit_events",
+            row,
+            &record,
+            "authorising_principal_id",
+        )?
+        .map(PrincipalId::from_bytes),
     ]
     .into_iter()
     .flatten()
@@ -1067,9 +1100,19 @@ fn decode_security_decision_row(
             principals.push(principal);
         }
     }
-    let target =
-        inspect_optional_id(row, &record, "function_id")?.map(FunctionId::from_bytes);
-    let denial_reason: Option<String> = inspect_column(row, &record, "denial_reason")?;
+    let target = inspect_optional_id(
+        "_orna_kernel.security_audit_events",
+        row,
+        &record,
+        "function_id",
+    )?
+    .map(FunctionId::from_bytes);
+    let denial_reason: Option<String> = inspect_column(
+        "_orna_kernel.security_audit_events",
+        row,
+        &record,
+        "denial_reason",
+    )?;
     let denial_reason = if outcome == InspectSecurityDecisionOutcome::Denied {
         denial_reason
     } else {
@@ -1089,14 +1132,35 @@ fn decode_security_decision_row(
 fn decode_state_cell_key(row: &Row) -> Result<UserStateKeyWithoutPrincipal, PostgresKernelError> {
     let record = "selected row";
     let root_function = FunctionId::from_bytes(inspect_id(
+        "_orna_kernel.user_state_cells",
         row,
         record,
         "USER state root function",
     )?);
-    let state_profile: String = inspect_column(row, record, "root_state_profile")?;
-    let function = FunctionId::from_bytes(inspect_id(row, record, "USER state function")?);
-    let instance_key: String = inspect_column(row, record, "function_instance_key")?;
-    let state_slot = StateSlotId::from_bytes(inspect_id(row, record, "USER state slot")?);
+    let state_profile: String = inspect_column(
+        "_orna_kernel.user_state_cells",
+        row,
+        record,
+        "root_state_profile",
+    )?;
+    let function = FunctionId::from_bytes(inspect_id(
+        "_orna_kernel.user_state_cells",
+        row,
+        record,
+        "USER state function",
+    )?);
+    let instance_key: String = inspect_column(
+        "_orna_kernel.user_state_cells",
+        row,
+        record,
+        "function_instance_key",
+    )?;
+    let state_slot = StateSlotId::from_bytes(inspect_id(
+        "_orna_kernel.user_state_cells",
+        row,
+        record,
+        "USER state slot",
+    )?);
     UserStateKeyWithoutPrincipal::new(
         root_function,
         state_profile,
@@ -1109,7 +1173,7 @@ fn decode_state_cell_key(row: &Row) -> Result<UserStateKeyWithoutPrincipal, Post
 
 fn decode_revision(row: &Row) -> Result<u64, PostgresKernelError> {
     let record = "selected row";
-    let revision: i64 = inspect_column(row, record, "revision")?;
+    let revision: i64 = inspect_column("_orna_kernel.user_state_cells", row, record, "revision")?;
     let revision = u64::try_from(revision).map_err(|_| PostgresKernelError::DurableInvariant {
         relation: "_orna_kernel.user_state_cells",
         record: record.to_owned(),
@@ -1146,7 +1210,9 @@ fn require_inspect_privilege(
 
 /// Builds the verified standard's opaque codec registry, mirroring the USER
 /// state kernel's registry.
-fn inspect_value_registry(active: &ActiveDatabaseRevision) -> Result<OpaqueCodecRegistry, PostgresKernelError> {
+fn inspect_value_registry(
+    active: &ActiveDatabaseRevision,
+) -> Result<OpaqueCodecRegistry, PostgresKernelError> {
     let standard = active.catalogue_hash_context().standard().ok_or_else(|| {
         PostgresKernelError::DurableInvariant {
             relation: "_orna_kernel.active_revision",
@@ -1221,18 +1287,19 @@ async fn relation_columns(
         .await
         .map_err(PostgresKernelError::Database)?;
     rows.iter()
-        .map(|row| inspect_column(row, "relation schema", "attname"))
+        .map(|row| inspect_column(INSPECT_SNAPSHOT_RELATION, row, "relation schema", "attname"))
         .collect()
 }
 
 fn inspect_column<T: FromSqlOwned>(
+    relation: &'static str,
     row: &Row,
     record: &str,
     column: &'static str,
 ) -> Result<T, PostgresKernelError> {
     row.try_get(column)
         .map_err(|source| PostgresKernelError::RowDecode {
-            relation: INSPECT_SNAPSHOT_RELATION,
+            relation,
             record: record.to_owned(),
             column,
             rule: "selected inspection column",
@@ -1241,33 +1308,35 @@ fn inspect_column<T: FromSqlOwned>(
 }
 
 fn inspect_optional_id(
+    relation: &'static str,
     row: &Row,
     record: &str,
     column: &'static str,
 ) -> Result<Option<[u8; 16]>, PostgresKernelError> {
-    let Some(bytes) = inspect_column::<Option<Vec<u8>>>(row, record, column)? else {
+    let Some(bytes) = inspect_column::<Option<Vec<u8>>>(relation, row, record, column)? else {
         return Ok(None);
     };
     bytes
         .try_into()
         .map(Some)
         .map_err(|_| PostgresKernelError::DurableInvariant {
-            relation: INSPECT_SNAPSHOT_RELATION,
+            relation,
             record: record.to_owned(),
             rule: "inspection identity column must carry exactly 16 bytes",
         })
 }
 
 fn inspect_id(
+    relation: &'static str,
     row: &Row,
     record: &str,
     column: &'static str,
 ) -> Result<[u8; 16], PostgresKernelError> {
-    let bytes: Vec<u8> = inspect_column(row, record, column)?;
+    let bytes: Vec<u8> = inspect_column(relation, row, record, column)?;
     bytes
         .try_into()
         .map_err(|_| PostgresKernelError::DurableInvariant {
-            relation: INSPECT_SNAPSHOT_RELATION,
+            relation,
             record: record.to_owned(),
             rule: "inspection identity column must carry exactly 16 bytes",
         })
@@ -1342,7 +1411,8 @@ fn decode_epoch_payload(
     }
     let id = InspectEpochId::from_bytes(reader.take_id("epoch identity")?);
     let invocation_id = InvocationId::from_bytes(reader.take_id("invocation identity")?);
-    let source_revision_id = SourceRevisionId::from_bytes(reader.take_id("source revision identity")?);
+    let source_revision_id =
+        SourceRevisionId::from_bytes(reader.take_id("source revision identity")?);
     let catalogue_revision_id =
         CatalogueRevisionId::from_bytes(reader.take_id("catalogue revision identity")?);
     let owner = PrincipalId::from_bytes(reader.take_id("owner principal identity")?);
@@ -1510,9 +1580,7 @@ impl<'a> PayloadReader<'a> {
 
     fn take_id(&mut self, rule: &'static str) -> Result<[u8; 16], PostgresKernelError> {
         let bytes = self.take_bytes(rule)?;
-        bytes
-            .try_into()
-            .map_err(|_| self.invalid(rule))
+        bytes.try_into().map_err(|_| self.invalid(rule))
     }
 
     fn take_opt_id(&mut self, rule: &'static str) -> Result<Option<[u8; 16]>, PostgresKernelError> {
@@ -1555,7 +1623,10 @@ fn outcome_tag(outcome: InspectOutcomeKind) -> u8 {
     }
 }
 
-fn decode_outcome(tag: u8, reader: &PayloadReader<'_>) -> Result<InspectOutcomeKind, PostgresKernelError> {
+fn decode_outcome(
+    tag: u8,
+    reader: &PayloadReader<'_>,
+) -> Result<InspectOutcomeKind, PostgresKernelError> {
     match tag {
         0 => Ok(InspectOutcomeKind::Allowed),
         1 => Ok(InspectOutcomeKind::Denied),
@@ -1583,7 +1654,9 @@ fn push_summary(writer: &mut PayloadWriter, summary: InspectSnapshotSummary) {
     }
 }
 
-fn take_summary(reader: &mut PayloadReader<'_>) -> Result<InspectSnapshotSummary, PostgresKernelError> {
+fn take_summary(
+    reader: &mut PayloadReader<'_>,
+) -> Result<InspectSnapshotSummary, PostgresKernelError> {
     let event_count = reader.take_u64("summary event count")?;
     let result = if reader.take_flag("summary result flag")? {
         InspectResultSummary::ValueBatch {
@@ -1626,10 +1699,14 @@ fn take_invocation_nodes(
     reader: &mut PayloadReader<'_>,
 ) -> Result<Vec<InvocationNodeRow>, PostgresKernelError> {
     let count = reader.take_u64("invocation node count")?;
-    let mut rows = Vec::with_capacity(usize::try_from(count).map_err(|_| reader.invalid("invocation node count is too large"))?);
+    let mut rows = Vec::with_capacity(
+        usize::try_from(count).map_err(|_| reader.invalid("invocation node count is too large"))?,
+    );
     for _ in 0..count {
         let id = InvocationId::from_bytes(reader.take_id("invocation node identity")?);
-        let parent_id = reader.take_opt_id("invocation node parent identity")?.map(InvocationId::from_bytes);
+        let parent_id = reader
+            .take_opt_id("invocation node parent identity")?
+            .map(InvocationId::from_bytes);
         let kind = match reader.take_u8("invocation node kind")? {
             0 => InspectInvocationNodeKind::Root,
             1 => InspectInvocationNodeKind::Nested,
@@ -1675,7 +1752,9 @@ fn take_calls(
     registry: &OpaqueCodecRegistry,
 ) -> Result<Vec<CallRow>, PostgresKernelError> {
     let count = reader.take_u64("call row count")?;
-    let mut rows = Vec::with_capacity(usize::try_from(count).map_err(|_| reader.invalid("call row count is too large"))?);
+    let mut rows = Vec::with_capacity(
+        usize::try_from(count).map_err(|_| reader.invalid("call row count is too large"))?,
+    );
     for _ in 0..count {
         let invocation_id = InvocationId::from_bytes(reader.take_id("call invocation identity")?);
         let schema = take_optional_invoke_value(reader, active, registry)?;
@@ -1709,7 +1788,9 @@ fn push_resources(writer: &mut PayloadWriter, rows: &[ResourceRow]) {
 fn take_resources(reader: &mut PayloadReader<'_>) -> Result<Vec<ResourceRow>, PostgresKernelError> {
     use orna_core::inspect::{InspectResourceKind, InspectResourceStatus};
     let count = reader.take_u64("resource row count")?;
-    let mut rows = Vec::with_capacity(usize::try_from(count).map_err(|_| reader.invalid("resource row count is too large"))?);
+    let mut rows = Vec::with_capacity(
+        usize::try_from(count).map_err(|_| reader.invalid("resource row count is too large"))?,
+    );
     for _ in 0..count {
         let kind = match reader.take_u8("resource kind")? {
             0 => InspectResourceKind::State,
@@ -1756,9 +1837,12 @@ fn take_state_cells(
     registry: &OpaqueCodecRegistry,
 ) -> Result<Vec<StateCellRow>, PostgresKernelError> {
     let count = reader.take_u64("state cell row count")?;
-    let mut rows = Vec::with_capacity(usize::try_from(count).map_err(|_| reader.invalid("state cell row count is too large"))?);
+    let mut rows = Vec::with_capacity(
+        usize::try_from(count).map_err(|_| reader.invalid("state cell row count is too large"))?,
+    );
     for _ in 0..count {
-        let root_function = FunctionId::from_bytes(reader.take_id("state cell root function identity")?);
+        let root_function =
+            FunctionId::from_bytes(reader.take_id("state cell root function identity")?);
         let state_profile = reader.take_str("state cell state profile")?;
         let function = FunctionId::from_bytes(reader.take_id("state cell function identity")?);
         let instance_key = reader.take_str("state cell instance key")?;
@@ -1775,7 +1859,9 @@ fn take_state_cells(
             state_slot,
         )
         .map_err(|_| reader.invalid("state cell key is not canonical"))?;
-        rows.push(StateCellRow::new(key, value_type, revision, updated_at, value));
+        rows.push(StateCellRow::new(
+            key, value_type, revision, updated_at, value,
+        ));
     }
     Ok(rows)
 }
@@ -1791,7 +1877,9 @@ fn push_ui_nodes(writer: &mut PayloadWriter, rows: &[UiNodeRow]) {
 
 fn take_ui_nodes(reader: &mut PayloadReader<'_>) -> Result<Vec<UiNodeRow>, PostgresKernelError> {
     let count = reader.take_u64("UI node row count")?;
-    let mut rows = Vec::with_capacity(usize::try_from(count).map_err(|_| reader.invalid("UI node row count is too large"))?);
+    let mut rows = Vec::with_capacity(
+        usize::try_from(count).map_err(|_| reader.invalid("UI node row count is too large"))?,
+    );
     for _ in 0..count {
         let function = FunctionId::from_bytes(reader.take_id("UI node function identity")?);
         let call_site = reader.take_str("UI node call site")?;
@@ -1825,7 +1913,10 @@ fn take_presentation_candidates(
     reader: &mut PayloadReader<'_>,
 ) -> Result<Vec<PresentationCandidateRow>, PostgresKernelError> {
     let count = reader.take_u64("presentation candidate row count")?;
-    let mut rows = Vec::with_capacity(usize::try_from(count).map_err(|_| reader.invalid("presentation candidate row count is too large"))?);
+    let mut rows = Vec::with_capacity(
+        usize::try_from(count)
+            .map_err(|_| reader.invalid("presentation candidate row count is too large"))?,
+    );
     for _ in 0..count {
         let presenter = reader.take_str("presentation candidate presenter")?;
         let accepted = reader.take_flag("presentation candidate acceptance")?;
@@ -1875,22 +1966,34 @@ fn take_runtime_bindings(
     reader: &mut PayloadReader<'_>,
 ) -> Result<Vec<RuntimeBindingRow>, PostgresKernelError> {
     let count = reader.take_u64("runtime binding row count")?;
-    let mut rows = Vec::with_capacity(usize::try_from(count).map_err(|_| reader.invalid("runtime binding row count is too large"))?);
+    let mut rows = Vec::with_capacity(
+        usize::try_from(count)
+            .map_err(|_| reader.invalid("runtime binding row count is too large"))?,
+    );
     for _ in 0..count {
         let runtime_name = reader.take_str("runtime binding name")?;
         let version = reader.take_str("runtime binding version")?;
         let descriptor_count = reader.take_u64("runtime binding descriptor count")?;
-        let mut consumed_descriptors = Vec::with_capacity(usize::try_from(descriptor_count).map_err(|_| reader.invalid("runtime binding descriptor count is too large"))?);
+        let mut consumed_descriptors = Vec::with_capacity(
+            usize::try_from(descriptor_count)
+                .map_err(|_| reader.invalid("runtime binding descriptor count is too large"))?,
+        );
         for _ in 0..descriptor_count {
             consumed_descriptors.push(take_descriptor(reader)?);
         }
         let contract_count = reader.take_u64("runtime binding contract count")?;
-        let mut contracts = Vec::with_capacity(usize::try_from(contract_count).map_err(|_| reader.invalid("runtime binding contract count is too large"))?);
+        let mut contracts = Vec::with_capacity(
+            usize::try_from(contract_count)
+                .map_err(|_| reader.invalid("runtime binding contract count is too large"))?,
+        );
         for _ in 0..contract_count {
             let name = reader.take_str("runtime binding contract name")?;
             let version = reader.take_str("runtime binding contract version")?;
             let feature_count = reader.take_u64("runtime binding contract feature count")?;
-            let mut features = Vec::with_capacity(usize::try_from(feature_count).map_err(|_| reader.invalid("runtime binding contract feature count is too large"))?);
+            let mut features =
+                Vec::with_capacity(usize::try_from(feature_count).map_err(|_| {
+                    reader.invalid("runtime binding contract feature count is too large")
+                })?);
             for _ in 0..feature_count {
                 features.push(reader.take_str("runtime binding contract feature")?);
             }
@@ -1946,7 +2049,10 @@ fn take_security_decisions(
     reader: &mut PayloadReader<'_>,
 ) -> Result<Vec<SecurityDecisionRow>, PostgresKernelError> {
     let count = reader.take_u64("security decision row count")?;
-    let mut rows = Vec::with_capacity(usize::try_from(count).map_err(|_| reader.invalid("security decision row count is too large"))?);
+    let mut rows = Vec::with_capacity(
+        usize::try_from(count)
+            .map_err(|_| reader.invalid("security decision row count is too large"))?,
+    );
     for _ in 0..count {
         let kind = match reader.take_u8("security decision kind")? {
             0 => InspectSecurityDecisionKind::Execute,
@@ -1961,9 +2067,14 @@ fn take_security_decisions(
             _ => return Err(reader.invalid("security decision outcome is outside the closed set")),
         };
         let principal_count = reader.take_u64("security decision principal count")?;
-        let mut principals = Vec::with_capacity(usize::try_from(principal_count).map_err(|_| reader.invalid("security decision principal count is too large"))?);
+        let mut principals = Vec::with_capacity(
+            usize::try_from(principal_count)
+                .map_err(|_| reader.invalid("security decision principal count is too large"))?,
+        );
         for _ in 0..principal_count {
-            principals.push(PrincipalId::from_bytes(reader.take_id("security decision principal identity")?));
+            principals.push(PrincipalId::from_bytes(
+                reader.take_id("security decision principal identity")?,
+            ));
         }
         let target = reader
             .take_opt_id("security decision target identity")?
@@ -1974,9 +2085,14 @@ fn take_security_decisions(
             None
         };
         let reference_count = reader.take_u64("security decision audit reference count")?;
-        let mut audit_refs = Vec::with_capacity(usize::try_from(reference_count).map_err(|_| reader.invalid("security decision audit reference count is too large"))?);
+        let mut audit_refs =
+            Vec::with_capacity(usize::try_from(reference_count).map_err(|_| {
+                reader.invalid("security decision audit reference count is too large")
+            })?);
         for _ in 0..reference_count {
-            audit_refs.push(SecurityAuditEventId::from_bytes(reader.take_id("security decision audit reference identity")?));
+            audit_refs.push(SecurityAuditEventId::from_bytes(
+                reader.take_id("security decision audit reference identity")?,
+            ));
         }
         rows.push(
             SecurityDecisionRow::new(kind, outcome, principals, target, denial_reason, audit_refs)
@@ -1994,8 +2110,9 @@ fn push_optional_invoke_value(
 ) -> Result<(), PostgresKernelError> {
     writer.push_flag(value.is_some());
     if let Some(value) = value {
-        let bytes = encode_constructed_value(active, registry, &RuntimeValue::InvokeValue(value.clone()))
-            .map_err(PostgresKernelError::InspectValueCodec)?;
+        let bytes =
+            encode_constructed_value(active, registry, &RuntimeValue::InvokeValue(value.clone()))
+                .map_err(PostgresKernelError::InspectValueCodec)?;
         writer.push_bytes(&bytes);
     }
     Ok(())
@@ -2010,9 +2127,8 @@ fn take_optional_invoke_value(
         return Ok(None);
     }
     let bytes = reader.take_bytes("typed value payload")?;
-    let RuntimeValue::InvokeValue(value) =
-        decode_constructed_value(active, registry, &bytes)
-            .map_err(PostgresKernelError::InspectValueCodec)?
+    let RuntimeValue::InvokeValue(value) = decode_constructed_value(active, registry, &bytes)
+        .map_err(PostgresKernelError::InspectValueCodec)?
     else {
         return Err(reader.invalid("typed value payload must decode as one invoke value"));
     };
