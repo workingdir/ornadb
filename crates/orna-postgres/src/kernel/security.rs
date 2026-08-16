@@ -4,14 +4,15 @@ use orna_client::{
     ClientExecutionResult, evaluate_client_function as evaluate_authorised_client_function,
 };
 use orna_core::{
-    CatalogueRevisionId, FunctionId, FunctionRevisionId, InvocationAuditEventId, InvocationId,
-    PrincipalId, SecurityAuditEventId, SourceRevisionId, StandardLibraryRevisionId,
+    CatalogueRevisionId, FunctionId, FunctionRevisionId, InspectEpochId, InvocationAuditEventId,
+    InvocationId, PrincipalId, SecurityAuditEventId, SourceRevisionId,
+    StandardLibraryRevisionId,
     catalogue::{FunctionDefinition, FunctionDomain},
-    inspect::InspectPrivilege,
+    inspect::{InspectOutcomeKind, InspectPrivilege, InspectSnapshotOptions},
     invocation::{
-        InvocationArgument, InvocationEventBody, InvocationParameterSelector,
-        InvocationTarget as InvocationRequestTarget, InvokeEvent, InvokeValue,
-        ProtectedInvocationDecision, decide_protected_invocation,
+        InvocationArgument, InvocationClientOffer, InvocationEventBody,
+        InvocationParameterSelector, InvocationTarget as InvocationRequestTarget, InvokeEvent,
+        InvokeValue, ProtectedInvocationDecision, decide_protected_invocation,
     },
     revision::{ActiveDatabaseRevision, RevisionPair, StandardExecutable},
     security::{
@@ -24,7 +25,7 @@ use orna_core::{
         UserStateAuditOperation,
     },
     system::{SYS_INVOKE_FUNCTION_ID, system_function_by_id},
-    value::{FunctionArgument, RecordValue, RuntimeValue},
+    value::{FunctionArgument, OpaqueCodecRegistry, RecordValue, RuntimeValue},
 };
 use orna_protocol::{
     InvocationEventBatch, InvocationEventRecord, RetainedInvokeRequest,
@@ -678,6 +679,17 @@ impl PostgresKernel {
                                 authenticated_session,
                                 security_target,
                                 invocation,
+                            )
+                            .await?;
+                            capture_sealed_invocation_snapshot(
+                                &transaction,
+                                &active,
+                                &registry,
+                                authenticated_session,
+                                invocation,
+                                definition.id(),
+                                &events,
+                                decoded.client_offer(),
                             )
                             .await?;
                             SealedInvocationResult::Completed { invocation, events }
@@ -2032,6 +2044,45 @@ pub(crate) fn sealed_completed_events(
         InvocationEventRecord::new(3, completed),
     ])
     .map_err(PostgresKernelError::SealedInvocation)
+}
+
+/// Captures one inspection epoch and its trace rows for a completed sealed
+/// invocation in the caller's protected transaction.
+///
+/// ADR 0064 wires capture into the sealed dispatch: after the protected
+/// decision and at execution, the produced Event batch becomes the durable
+/// trace rows and one immutable snapshot epoch. v1 captures every completed
+/// invocation with structural-only options; the request's observer context
+/// is carried on the wire but never set by any v1 caller, so the observer
+/// invocation is not threaded yet. Denied, bind-failed, and
+/// presentation-failed invocations produce no Event batch and therefore no
+/// epoch.
+#[allow(clippy::too_many_arguments)]
+async fn capture_sealed_invocation_snapshot(
+    transaction: &Transaction<'_>,
+    active: &ActiveDatabaseRevision,
+    registry: &OpaqueCodecRegistry,
+    authenticated_session: &AuthenticatedSession,
+    invocation: InvocationId,
+    root_target: FunctionId,
+    events: &InvocationEventBatch,
+    client_offer: &InvocationClientOffer,
+) -> Result<InspectEpochId, PostgresKernelError> {
+    crate::inspect::capture_inspect_snapshot_in_transaction(
+        transaction,
+        active,
+        registry,
+        authenticated_session,
+        invocation,
+        InspectSnapshotOptions::structural(),
+        authenticated_session.principal(),
+        root_target,
+        InspectOutcomeKind::Allowed,
+        events,
+        client_offer,
+        None,
+    )
+    .await
 }
 
 /// Appends the allowed `EXECUTE` security evidence and the linked allowed
