@@ -18,8 +18,8 @@ use orna_compiler::{
     STD_INVOKE_SOURCE_UNIT_ID, STD_TYPES_SOURCE_UNIT_ID,
 };
 use orna_core::{
-    CatalogueRevisionId, FieldId, ObjectId, SourceBundleId, SourceRevisionId, SourceUnitId,
-    StandardLibraryRevisionId, TypeId,
+    CatalogueRevisionId, FieldId, FunctionId, InvocationId, ObjectId, PrincipalId, SourceBundleId,
+    SourceRevisionId, SourceUnitId, StandardLibraryRevisionId, TypeId,
     canonical_hash::{
         catalogue_digest_with_context, source_bundle_digest, source_revision_record_digest,
         source_unit_content_digest, verify_standard_library_snapshot,
@@ -61,7 +61,29 @@ use orna_core::{
     revision::{DefinitionOrigin, FunctionSemanticHashVersion},
     types::TypeDescriptor,
 };
-use orna_postgres::{PostgresKernel, PostgresKernelError};
+use orna_core::{
+    invocation::{
+        InvocationArgument, InvocationCallerContext, InvocationCallerKind, InvocationClientOffer,
+        InvocationEventBody, InvocationEventKind, InvocationParameterSelector,
+        InvocationTarget as InvocationRequestTarget, InvocationTracePolicy, InvokeRequest,
+        InvokeRequestInput, InvokeValue,
+    },
+    security::{
+        ExecuteGrant, InvocationTarget, Principal, PrincipalKind, PrincipalStatus,
+        SecurityAuditKind, SecurityAuditOutcome, SecurityFunctionTarget, SecuritySnapshot,
+    },
+};
+use orna_postgres::{PostgresKernel, PostgresKernelError, SealedInvocationResult};
+use orna_protocol::{
+    decode_invocation_event_batch, encode_invocation_event_batch, encode_invoke_request,
+};
+use orna_standard::{
+    STANDARD_LIBRARY_REVISION_ID, STANDARD_LIBRARY_V2_REVISION_ID, STANDARD_LIBRARY_V3_REVISION_ID,
+    STANDARD_SOURCE_V2_REVISION_ID, STANDARD_SOURCE_V3_BUNDLE_ID, STANDARD_SOURCE_V3_REVISION_ID,
+    STD_IO_BYTE_STREAM_CONTRACT, STD_IO_BYTE_STREAM_TYPE_ID, STD_IO_SCHEMA_ID,
+    STD_OUTPUT_SOURCE_UNIT_ID, STD_TERMINAL_DOCUMENT_CONTRACT, STD_TERMINAL_DOCUMENT_TYPE_ID,
+    STD_TERMINAL_SCHEMA_ID, registered_opaque_codecs,
+};
 use support::{TestDatabase, TestResult, failure, with_test_database};
 
 const BASIC_SOURCE: &str = "CREATE SCHEMA app;\n\
@@ -6184,4 +6206,1207 @@ async fn migration_twenty_three_aborts_on_revision_mismatched_backfill() -> Test
         Ok(())
     })
     .await
+}
+
+// Work ADR 0059 implementation order item 4: the live production-path V3
+// install proof. The tests below prove that a fresh database installs V1,
+// upgrades to V2, and upgrades to V3 through the normal compiler-backed
+// pipeline (`prepare_standard_upgrade_v2_to_v3` + `apply_standard_upgrade`,
+// never a test-hooks fixture), that the active revision reopens pinned to
+// `orna.std/3` with the exact V3 snapshot facts, that the V1 and V2 pins
+// from the earlier activations remain in the historical revision records,
+// that tampered V3 standard rows fail recovery closed without changing prior
+// history, and that the sealed `sys.invoke` echo dogfooding proof runs
+// against the V3-pinned active revision.
+
+const V3_PROOF_CLIENT_USER: PrincipalId = PrincipalId::from_bytes([0x71; 16]);
+const CONNECTION_PROTOCOL_MAJOR: u16 = 5;
+
+/// Installs the complete production standard chain on a fresh database:
+/// the empty base, the V1 application activation, the V1-to-V2 upgrade
+/// through `prepare_standard_upgrade_v1_to_v2` + `apply_standard_upgrade`,
+/// and the V2-to-V3 upgrade through `prepare_standard_upgrade_v2_to_v3` +
+/// `apply_standard_upgrade`.
+struct V3StandardChain {
+    version_one: ActiveDatabaseRevision,
+    version_two: ActiveDatabaseRevision,
+    version_three: ActiveDatabaseRevision,
+    version_three_upgrade: orna_standard::StandardUpgrade,
+}
+
+async fn install_v3_standard_chain(database: &TestDatabase) -> TestResult<V3StandardChain> {
+    let kernel = kernel(database)?;
+    kernel.bootstrap().await?;
+    let empty = kernel.recover().await?;
+    let version_one_candidate = candidate(STANDARD_APPLICATION_SOURCE, &empty)?;
+    let version_one = kernel.apply(&version_one_candidate).await?;
+
+    let version_two_upgrade = orna_standard::prepare_standard_upgrade_v1_to_v2(&version_one)
+        .map_err(|error| failure(format!("V1-to-V2 upgrade preparation failed: {error}")))?;
+    let version_two = kernel.apply_standard_upgrade(&version_two_upgrade).await?;
+    require(
+        version_two.catalogue_hash_context().version() == CatalogueHashVersion::Version2
+            && version_two
+                .catalogue_hash_context()
+                .standard()
+                .map(|snapshot| snapshot.revision())
+                == Some(STANDARD_LIBRARY_V2_REVISION_ID),
+        "the V1-to-V2 upgrade did not install a version-two context pinned to orna.std/2",
+    )?;
+    require_standard_context(
+        &version_two,
+        version_two_upgrade.verified_standard_snapshot(),
+    )?;
+
+    let version_three_upgrade = orna_standard::prepare_standard_upgrade_v2_to_v3(&version_two)
+        .map_err(|error| failure(format!("V2-to-V3 upgrade preparation failed: {error}")))?;
+    let version_three = kernel
+        .apply_standard_upgrade(&version_three_upgrade)
+        .await?;
+    Ok(V3StandardChain {
+        version_one,
+        version_two,
+        version_three,
+        version_three_upgrade,
+    })
+}
+
+#[tokio::test]
+#[ignore = "requires the Compose PostgreSQL development service"]
+async fn proves_the_v3_standard_install_and_reopen() -> TestResult<()> {
+    with_test_database(|database| async move {
+        let chain = install_v3_standard_chain(&database).await?;
+        let standard = chain.version_three_upgrade.verified_standard_snapshot();
+
+        // The active revision pins `orna.std/3` through a version-two
+        // catalogue hash context, and the recovered snapshot matches the
+        // companion application revision the upgrade prepared.
+        require(
+            chain.version_three.catalogue_hash_context().version()
+                == CatalogueHashVersion::Version2
+                && chain
+                    .version_three
+                    .catalogue_hash_context()
+                    .standard()
+                    .map(|snapshot| snapshot.revision())
+                    == Some(STANDARD_LIBRARY_V3_REVISION_ID),
+            "the V2-to-V3 upgrade did not pin orna.std/3 through the version-two context",
+        )?;
+        require_standard_context(&chain.version_three, standard)?;
+        require_recovered_snapshot(
+            chain.version_three_upgrade.application_revision(),
+            &chain.version_three,
+        )?;
+
+        // The V3 snapshot facts: the three ordered units with their exact
+        // reserved identities and logical paths, the append-only V2 source
+        // parent edge, and the two output value types.
+        let units = standard.source().units();
+        require(
+            units.len() == 3
+                && units[0].ordinal() == 0
+                && units[0].id() == orna_compiler::STD_TYPES_SOURCE_UNIT_ID
+                && units[0].logical_path() == "std/types.orna"
+                && units[1].ordinal() == 1
+                && units[1].id() == orna_compiler::STD_INVOKE_SOURCE_UNIT_ID
+                && units[1].logical_path() == "std/invoke.orna"
+                && units[2].ordinal() == 2
+                && units[2].id() == STD_OUTPUT_SOURCE_UNIT_ID
+                && units[2].logical_path() == "std/output.orna",
+            "the V3 snapshot did not retain the exact three-unit bundle",
+        )?;
+        require(
+            standard.source().bundle() == STANDARD_SOURCE_V3_BUNDLE_ID
+                && standard.source().id() == STANDARD_SOURCE_V3_REVISION_ID
+                && standard.source().parent() == Some(STANDARD_SOURCE_V2_REVISION_ID),
+            "the V3 source revision did not retain its append-only V2 parent edge",
+        )?;
+        let value_types = standard.catalogue().value_types();
+        let document = value_types
+            .iter()
+            .find(|definition| definition.id() == STD_TERMINAL_DOCUMENT_TYPE_ID)
+            .ok_or_else(|| failure("the V3 snapshot is missing std.terminal.Document"))?;
+        let bytestream = value_types
+            .iter()
+            .find(|definition| definition.id() == STD_IO_BYTE_STREAM_TYPE_ID)
+            .ok_or_else(|| failure("the V3 snapshot is missing std.io.ByteStream"))?;
+        require(
+            document.name().parts() == ["std", "terminal", "document"]
+                && document.persistence() == ValueTypePersistence::Transient
+                && document.representation_contract() == STD_TERMINAL_DOCUMENT_CONTRACT
+                && bytestream.name().parts() == ["std", "io", "bytestream"]
+                && bytestream.persistence() == ValueTypePersistence::Transient
+                && bytestream.representation_contract() == STD_IO_BYTE_STREAM_CONTRACT,
+            "the V3 snapshot did not retain the two output value types",
+        )?;
+        require(
+            standard
+                .catalogue()
+                .function_by_id(orna_compiler::STD_INVOKE_ECHO_FUNCTION_ID)
+                .is_some()
+                && standard.executables().iter().any(|executable| {
+                    executable.function() == orna_compiler::STD_INVOKE_ECHO_FUNCTION_ID
+                        && executable.revision().id()
+                            == orna_compiler::STD_INVOKE_ECHO_FUNCTION_REVISION_ID
+                }),
+            "the V3 snapshot did not retain the unchanged std.invoke.echo executable",
+        )?;
+
+        // The durable V3 standard rows: header, three source units, the two
+        // output schemas and value types, the echo function, its immutable
+        // revision, the 44-byte parameter-echo artifact, and the exact
+        // ordered reference sequence.
+        let session = database.open().await?;
+        let client = session.client();
+        let v3_revision = standard.revision().to_bytes().to_vec();
+        let v3_bundle = standard.source().bundle().to_bytes().to_vec();
+        let header = client
+            .query_one(
+                "SELECT id, source_revision_id, catalogue_revision_id, digest_version,
+                        language_version, content_hash
+                 FROM _orna_kernel.standard_library_revisions
+                 WHERE id = $1",
+                &[&v3_revision],
+            )
+            .await?;
+        require(
+            header.try_get::<_, Vec<u8>>(0)? == standard.revision().to_bytes()
+                && header.try_get::<_, Vec<u8>>(1)? == standard.source().id().to_bytes()
+                && header.try_get::<_, Vec<u8>>(2)? == standard.catalogue().revision().to_bytes()
+                && header.try_get::<_, i16>(3)? == 2
+                && header.try_get::<_, String>(4)? == standard.language_version()
+                && header.try_get::<_, Vec<u8>>(5)? == standard.digest().to_bytes(),
+            "the V3 standard header row did not retain the exact digest-version-two facts",
+        )?;
+        let stored_units = client
+            .query(
+                "SELECT ordinal, logical_path, id, content_hash
+                 FROM _orna_kernel.source_units
+                 WHERE bundle_id = $1 ORDER BY ordinal",
+                &[&v3_bundle],
+            )
+            .await?;
+        require(
+            stored_units.len() == 3
+                && stored_units[0].try_get::<_, i64>(0)? == 0
+                && stored_units[0].try_get::<_, String>(1)? == "std/types.orna"
+                && stored_units[0].try_get::<_, Vec<u8>>(2)?
+                    == orna_compiler::STD_TYPES_SOURCE_UNIT_ID.to_bytes()
+                && stored_units[1].try_get::<_, i64>(0)? == 1
+                && stored_units[1].try_get::<_, String>(1)? == "std/invoke.orna"
+                && stored_units[1].try_get::<_, Vec<u8>>(2)?
+                    == orna_compiler::STD_INVOKE_SOURCE_UNIT_ID.to_bytes()
+                && stored_units[2].try_get::<_, i64>(0)? == 2
+                && stored_units[2].try_get::<_, String>(1)? == "std/output.orna"
+                && stored_units[2].try_get::<_, Vec<u8>>(2)?
+                    == STD_OUTPUT_SOURCE_UNIT_ID.to_bytes(),
+            "the V3 source units did not persist the exact ordered bundle",
+        )?;
+        let schemas = client
+            .query(
+                "SELECT schema_id, name_parts FROM _orna_kernel.standard_catalogue_schemas
+                 WHERE standard_library_revision_id = $1 ORDER BY schema_id",
+                &[&v3_revision],
+            )
+            .await?;
+        let terminal_schema = schemas
+            .iter()
+            .find(|row| {
+                row.try_get::<_, Vec<u8>>(0).ok()
+                    == Some(STD_TERMINAL_SCHEMA_ID.to_bytes().to_vec())
+            })
+            .ok_or_else(|| failure("the V3 snapshot is missing the std.terminal schema row"))?;
+        let io_schema = schemas
+            .iter()
+            .find(|row| {
+                row.try_get::<_, Vec<u8>>(0).ok() == Some(STD_IO_SCHEMA_ID.to_bytes().to_vec())
+            })
+            .ok_or_else(|| failure("the V3 snapshot is missing the std.io schema row"))?;
+        require(
+            schemas.len() == 5
+                && terminal_schema.try_get::<_, Vec<String>>(1)? == vec!["std", "terminal"]
+                && io_schema.try_get::<_, Vec<String>>(1)? == vec!["std", "io"],
+            "the V3 snapshot did not persist the std.terminal and std.io schemas",
+        )?;
+        let stored_value_types = client
+            .query(
+                "SELECT type_id, schema_id, name_parts, value_kind, mutability,
+                        persistence, representation_contract, source_unit_id
+                 FROM _orna_kernel.standard_catalogue_value_types
+                 WHERE standard_library_revision_id = $1 ORDER BY type_id",
+                &[&v3_revision],
+            )
+            .await?;
+        let stored_document = stored_value_types
+            .iter()
+            .find(|row| {
+                row.try_get::<_, Vec<u8>>(0).ok()
+                    == Some(STD_TERMINAL_DOCUMENT_TYPE_ID.to_bytes().to_vec())
+            })
+            .ok_or_else(|| failure("the V3 snapshot is missing the Document value type row"))?;
+        let stored_bytestream = stored_value_types
+            .iter()
+            .find(|row| {
+                row.try_get::<_, Vec<u8>>(0).ok()
+                    == Some(STD_IO_BYTE_STREAM_TYPE_ID.to_bytes().to_vec())
+            })
+            .ok_or_else(|| failure("the V3 snapshot is missing the ByteStream value type row"))?;
+        require(
+            stored_value_types.len() == 16
+                && stored_document.try_get::<_, Vec<u8>>(1)? == STD_TERMINAL_SCHEMA_ID.to_bytes()
+                && stored_document.try_get::<_, Vec<String>>(2)?
+                    == vec!["std", "terminal", "document"]
+                && stored_document.try_get::<_, String>(3)? == "opaque"
+                && stored_document.try_get::<_, String>(4)? == "immutable"
+                && stored_document.try_get::<_, String>(5)? == "transient"
+                && stored_document.try_get::<_, String>(6)? == STD_TERMINAL_DOCUMENT_CONTRACT
+                && stored_document.try_get::<_, Vec<u8>>(7)?
+                    == STD_OUTPUT_SOURCE_UNIT_ID.to_bytes()
+                && stored_bytestream.try_get::<_, Vec<u8>>(1)? == STD_IO_SCHEMA_ID.to_bytes()
+                && stored_bytestream.try_get::<_, Vec<String>>(2)?
+                    == vec!["std", "io", "bytestream"]
+                && stored_bytestream.try_get::<_, String>(3)? == "opaque"
+                && stored_bytestream.try_get::<_, String>(4)? == "immutable"
+                && stored_bytestream.try_get::<_, String>(5)? == "transient"
+                && stored_bytestream.try_get::<_, String>(6)? == STD_IO_BYTE_STREAM_CONTRACT
+                && stored_bytestream.try_get::<_, Vec<u8>>(7)?
+                    == STD_OUTPUT_SOURCE_UNIT_ID.to_bytes(),
+            "the V3 snapshot did not persist the two output value types",
+        )?;
+        let function = client
+            .query_one(
+                "SELECT name_parts, current_function_revision_id, source_unit_id
+                 FROM _orna_kernel.standard_catalogue_functions
+                 WHERE standard_library_revision_id = $1 AND function_id = $2",
+                &[
+                    &v3_revision,
+                    &orna_compiler::STD_INVOKE_ECHO_FUNCTION_ID
+                        .to_bytes()
+                        .to_vec(),
+                ],
+            )
+            .await?;
+        require(
+            function.try_get::<_, Vec<String>>(0)? == vec!["std", "invoke", "echo"]
+                && function.try_get::<_, Vec<u8>>(1)?
+                    == orna_compiler::STD_INVOKE_ECHO_FUNCTION_REVISION_ID.to_bytes()
+                && function.try_get::<_, Vec<u8>>(2)?
+                    == orna_compiler::STD_INVOKE_SOURCE_UNIT_ID.to_bytes(),
+            "the V3 snapshot did not retain the exact std.invoke.echo function row",
+        )?;
+        let artifact = client
+            .query_one(
+                "SELECT artifact_kind, format, format_version, octet_length(payload)
+                 FROM _orna_kernel.standard_function_artifacts
+                 WHERE standard_library_revision_id = $1 AND function_revision_id = $2",
+                &[
+                    &v3_revision,
+                    &orna_compiler::STD_INVOKE_ECHO_FUNCTION_REVISION_ID
+                        .to_bytes()
+                        .to_vec(),
+                ],
+            )
+            .await?;
+        require(
+            artifact.try_get::<_, String>(0)? == "server_plan"
+                && artifact.try_get::<_, String>(1)? == "orna.server-parameter-echo"
+                && artifact.try_get::<_, i32>(2)? == 1
+                && artifact.try_get::<_, i32>(3)? == 44,
+            "the V3 snapshot did not retain the exact 44-byte parameter-echo artifact",
+        )?;
+        let references = client
+            .query(
+                "SELECT ordinal FROM _orna_kernel.standard_definition_references
+                 WHERE standard_library_revision_id = $1 AND function_revision_id = $2
+                 ORDER BY ordinal",
+                &[
+                    &v3_revision,
+                    &orna_compiler::STD_INVOKE_ECHO_FUNCTION_REVISION_ID
+                        .to_bytes()
+                        .to_vec(),
+                ],
+            )
+            .await?;
+        require(
+            references.len() == 3
+                && (0..3).all(|ordinal| {
+                    references
+                        .get(ordinal as usize)
+                        .and_then(|row| row.try_get::<_, i64>(0).ok())
+                        == Some(ordinal)
+                }),
+            "the V3 snapshot did not persist the exact three ordered references",
+        )?;
+        let authority = client
+            .query_one(
+                "SELECT target_class, function_revision_id, standard_library_revision_id
+                 FROM _orna_kernel.invocation_target_authorities
+                 WHERE catalogue_revision_id = $1 AND function_id = $2",
+                &[
+                    &chain.version_three.pair().catalogue().to_bytes().to_vec(),
+                    &orna_compiler::STD_INVOKE_ECHO_FUNCTION_ID
+                        .to_bytes()
+                        .to_vec(),
+                ],
+            )
+            .await?;
+        require(
+            authority.try_get::<_, String>(0)? == "standard"
+                && authority.try_get::<_, Vec<u8>>(1)?
+                    == orna_compiler::STD_INVOKE_ECHO_FUNCTION_REVISION_ID.to_bytes()
+                && authority.try_get::<_, Option<Vec<u8>>>(2)?
+                    == Some(standard.revision().to_bytes().to_vec()),
+            "the V3 companion authority row did not pin the exact standard executable",
+        )?;
+        session.shutdown().await?;
+
+        // Historical pins intact: the V1, V2, and V3 standard headers all
+        // remain installed, and the three historical application catalogue
+        // revisions retain their exact pins (V1 activation without a pin,
+        // V2 companion pinned to orna.std/2, V3 companion pinned to orna.std/3).
+        let session = database.open().await?;
+        let client = session.client();
+        let headers = client
+            .query(
+                "SELECT id, digest_version FROM _orna_kernel.standard_library_revisions
+                 ORDER BY id",
+                &[],
+            )
+            .await?;
+        require(
+            headers.len() == 3
+                && headers[0].try_get::<_, Vec<u8>>(0)? == STANDARD_LIBRARY_REVISION_ID.to_bytes()
+                && headers[0].try_get::<_, i16>(1)? == 1
+                && headers[1].try_get::<_, Vec<u8>>(0)?
+                    == STANDARD_LIBRARY_V2_REVISION_ID.to_bytes()
+                && headers[1].try_get::<_, i16>(1)? == 2
+                && headers[2].try_get::<_, Vec<u8>>(0)?
+                    == STANDARD_LIBRARY_V3_REVISION_ID.to_bytes()
+                && headers[2].try_get::<_, i16>(1)? == 2,
+            "the historical V1, V2, and V3 standard headers did not all remain installed",
+        )?;
+        let v1_pin = client
+            .query_one(
+                "SELECT canonical_hash_version, standard_library_revision_id
+                 FROM _orna_kernel.catalogue_revisions WHERE id = $1",
+                &[&chain.version_one.pair().catalogue().to_bytes().to_vec()],
+            )
+            .await?;
+        let v2_pin = client
+            .query_one(
+                "SELECT canonical_hash_version, standard_library_revision_id
+                 FROM _orna_kernel.catalogue_revisions WHERE id = $1",
+                &[&chain.version_two.pair().catalogue().to_bytes().to_vec()],
+            )
+            .await?;
+        let v3_pin = client
+            .query_one(
+                "SELECT canonical_hash_version, standard_library_revision_id
+                 FROM _orna_kernel.catalogue_revisions WHERE id = $1",
+                &[&chain.version_three.pair().catalogue().to_bytes().to_vec()],
+            )
+            .await?;
+        require(
+            v1_pin.try_get::<_, i16>(0)? == 1
+                && v1_pin.try_get::<_, Option<Vec<u8>>>(1)?.is_none()
+                && v2_pin.try_get::<_, i16>(0)? == 2
+                && v2_pin.try_get::<_, Option<Vec<u8>>>(1)?
+                    == Some(STANDARD_LIBRARY_V2_REVISION_ID.to_bytes().to_vec())
+                && v3_pin.try_get::<_, i16>(0)? == 2
+                && v3_pin.try_get::<_, Option<Vec<u8>>>(1)?
+                    == Some(STANDARD_LIBRARY_V3_REVISION_ID.to_bytes().to_vec()),
+            "the historical application revisions did not retain the exact V1, V2, and V3 pins",
+        )?;
+        session.shutdown().await?;
+
+        // Reopening the database recovers the same active pair pinned to V3.
+        let reopened = named_kernel(&database, "orna-v3-reopen")?.recover().await?;
+        require(
+            reopened.pair() == chain.version_three.pair()
+                && reopened
+                    .catalogue_hash_context()
+                    .standard()
+                    .map(|snapshot| snapshot.revision())
+                    == Some(STANDARD_LIBRARY_V3_REVISION_ID),
+            "reopening the installed database changed its active pair or pinned standard",
+        )?;
+        require_standard_context(&reopened, standard)?;
+        require_recovered_snapshot(
+            chain.version_three_upgrade.application_revision(),
+            &reopened,
+        )?;
+
+        // Re-preparing the installed V3 upgrade fails closed with the exact
+        // already-installed compiler error.
+        let repeated = orna_standard::prepare_standard_upgrade_v2_to_v3(&chain.version_three)
+            .expect_err("re-preparing an installed V3 standard unexpectedly succeeded");
+        require(
+            repeated.to_string()
+                == format!(
+                    "standard library {} is already installed",
+                    STANDARD_LIBRARY_V3_REVISION_ID
+                ),
+            "re-preparing the installed V3 did not preserve the exact compiler error",
+        )?;
+        match repeated {
+            orna_standard::StandardUpgradeError::Prepare {
+                source: PrepareStandardUpgradeError::StandardLibraryAlreadyInstalled { revision },
+            } => require(
+                revision == STANDARD_LIBRARY_V3_REVISION_ID,
+                "re-preparation reported the wrong installed standard revision",
+            )?,
+            error => {
+                return Err(failure(format!(
+                    "expected StandardLibraryAlreadyInstalled, got {error}"
+                )));
+            }
+        }
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test]
+#[ignore = "requires the Compose PostgreSQL development service"]
+async fn proves_sealed_echo_invocation_and_rejects_tampered_v3_rows() -> TestResult<()> {
+    const ECHO_BY_NAME: i32 = 41;
+    const ECHO_BY_IDENTITY: i32 = 42;
+
+    with_test_database(|database| async move {
+        let chain = install_v3_standard_chain(&database).await?;
+        let kernel = kernel(&database)?;
+        let standard = chain.version_three_upgrade.verified_standard_snapshot();
+        let pair = chain.version_three.pair();
+        let standard_revision = standard.revision();
+        let registry = registered_opaque_codecs(standard)?;
+
+        // Grant EXECUTE on std.invoke.echo to the proof principal and bind a
+        // session, exactly as the V2 dogfooding proof does.
+        let security = SecuritySnapshot::new_with_function_targets(
+            pair,
+            vec![SecurityFunctionTarget::verified_standard(
+                orna_compiler::STD_INVOKE_ECHO_FUNCTION_ID,
+                standard_revision,
+                orna_compiler::STD_INVOKE_ECHO_FUNCTION_REVISION_ID,
+            )],
+            vec![Principal::new(
+                V3_PROOF_CLIENT_USER,
+                PrincipalKind::User,
+                PrincipalStatus::Active,
+            )],
+            vec![],
+            vec![ExecuteGrant::new(
+                V3_PROOF_CLIENT_USER,
+                orna_compiler::STD_INVOKE_ECHO_FUNCTION_ID,
+            )],
+        )?;
+        let security = kernel.replace_security_snapshot(&security).await?;
+        let session = security.bind_authenticated_session(V3_PROOF_CLIENT_USER, vec![])?;
+
+        // Invoke through sys.invoke by qualified name and parameter name.
+        let by_name = sealed_echo_request(
+            InvocationRequestTarget::qualified_name(
+                orna_core::catalogue::QualifiedSemanticName::new(["std", "invoke", "echo"])?,
+            )?,
+            InvocationParameterSelector::name("p_value")?,
+            ECHO_BY_NAME,
+        )?;
+        let retained_name = encode_invoke_request(&chain.version_three, &registry, &by_name)?;
+        let result_name = kernel
+            .dispatch_sealed_sys_invoke(&session, CONNECTION_PROTOCOL_MAJOR, &retained_name)
+            .await?;
+        let invocation_name = require_echo_completion(&result_name, ECHO_BY_NAME)?;
+        let events_name = match &result_name {
+            SealedInvocationResult::Completed { events, .. } => events,
+            _ => {
+                return Err(failure(
+                    "the name-addressed sealed invocation did not complete",
+                ));
+            }
+        };
+
+        // The completed kernel result carries the exact RESULT_VALUES Event
+        // batch a server adapter delivers before CALL_COMPLETED; prove the
+        // payload round-trips the sealed protocol bytes.
+        let payload = encode_invocation_event_batch(&chain.version_three, &registry, events_name)?;
+        let decoded = decode_invocation_event_batch(&chain.version_three, &registry, &payload)?;
+        require(
+            decoded == *events_name,
+            "the completed Event batch did not round-trip the sealed RESULT_VALUES payload",
+        )?;
+
+        // Repeat the invocation by the fixed function and parameter
+        // identities (FunctionId ...10 and ParameterId ...10).
+        let by_identity = sealed_echo_request(
+            InvocationRequestTarget::function_id(orna_compiler::STD_INVOKE_ECHO_FUNCTION_ID),
+            InvocationParameterSelector::parameter_id(orna_compiler::STD_INVOKE_ECHO_PARAMETER_ID),
+            ECHO_BY_IDENTITY,
+        )?;
+        let retained_identity =
+            encode_invoke_request(&chain.version_three, &registry, &by_identity)?;
+        let result_identity = kernel
+            .dispatch_sealed_sys_invoke(&session, CONNECTION_PROTOCOL_MAJOR, &retained_identity)
+            .await?;
+        let invocation_identity = require_echo_completion(&result_identity, ECHO_BY_IDENTITY)?;
+        require(
+            invocation_name != invocation_identity,
+            "the two sealed invocations reused one invocation identity",
+        )?;
+
+        // The allowed protected security and invocation audit events both
+        // link the exact historical application RevisionPair whose catalogue
+        // hash context pins orna.std/3.
+        let security_events = kernel.recover_security_audit_events().await?;
+        let allowed = security_events
+            .iter()
+            .filter(|event| event.decision().outcome() == SecurityAuditOutcome::Allowed)
+            .collect::<Vec<_>>();
+        require(
+            allowed.len() == 2
+                && allowed.iter().all(|event| {
+                    event.decision().kind() == SecurityAuditKind::Execute
+                        && event.decision().session_principal() == Some(V3_PROOF_CLIENT_USER)
+                        && event.decision().target()
+                            == Some(InvocationTarget::new(
+                                orna_compiler::STD_INVOKE_ECHO_FUNCTION_ID,
+                                pair,
+                            ))
+                }),
+            "the allowed EXECUTE evidence did not link the exact V3-pinned RevisionPair",
+        )?;
+        let allowed_security_ids = allowed.iter().map(|event| event.id()).collect::<Vec<_>>();
+        let invocation_rows = invocation_audit_rows(&database).await?;
+        require(
+            invocation_rows.len() == 2
+                && invocation_rows.iter().all(|row| {
+                    row.outcome == "allowed"
+                        && row.function
+                            == orna_compiler::STD_INVOKE_ECHO_FUNCTION_ID
+                                .to_bytes()
+                                .to_vec()
+                        && row.source == pair.source().to_bytes().to_vec()
+                        && row.catalogue == pair.catalogue().to_bytes().to_vec()
+                        && row.security_event.is_some()
+                })
+                && invocation_rows
+                    .iter()
+                    .map(|row| row.security_event.clone())
+                    .collect::<Vec<_>>()
+                    == allowed_security_ids
+                        .iter()
+                        .map(|id| Some(id.to_bytes().to_vec()))
+                        .collect::<Vec<_>>(),
+            "the invocation audit rows did not link the exact V3-pinned RevisionPair",
+        )?;
+        let authority = standard_authority_row(
+            &database,
+            pair.catalogue(),
+            orna_compiler::STD_INVOKE_ECHO_FUNCTION_ID,
+        )
+        .await?;
+        require(
+            authority.as_ref().is_some_and(|row| {
+                row.target_class == "standard"
+                    && row.function_revision
+                        == orna_compiler::STD_INVOKE_ECHO_FUNCTION_REVISION_ID
+                            .to_bytes()
+                            .to_vec()
+                    && row.standard_revision == Some(standard_revision.to_bytes().to_vec())
+            }),
+            "the durable invocation target authority did not pin the V3 standard target",
+        )?;
+
+        // Reopen with the V3 pin: a fresh kernel recovers the same pair and
+        // the same pinned standard after the sealed invocations.
+        let reopened = named_kernel(&database, "orna-v3-invoke-reopen")?
+            .recover()
+            .await?;
+        require(
+            reopened.pair() == pair
+                && reopened
+                    .catalogue_hash_context()
+                    .standard()
+                    .map(|snapshot| snapshot.revision())
+                    == Some(standard_revision),
+            "reopening the invoked database changed its active pair or pinned standard",
+        )?;
+
+        // The tamper fixtures below each fail recovery without writing or
+        // changing prior history: the exact tampered fact stays tampered, the
+        // active pair and every historical pin stay unchanged, and restoring
+        // the row returns the database to a clean recovery.
+        reject_tampered_output_unit_digest(&database, &chain).await?;
+        reject_tampered_standard_revision(&database, &chain).await?;
+        reject_tampered_executable_authority(&database, &chain).await?;
+        Ok(())
+    })
+    .await
+}
+
+/// Tamper fixture 1: the V3 `std/output.orna` unit's stored content digest is
+/// replaced. Recovery reconstructs the three-unit bundle and must fail closed
+/// with the exact content-hash mismatch without writing or repairing rows.
+async fn reject_tampered_output_unit_digest(
+    database: &TestDatabase,
+    chain: &V3StandardChain,
+) -> TestResult<()> {
+    let standard = chain.version_three_upgrade.verified_standard_snapshot();
+    let original_content_hash: Vec<u8> = {
+        let session = database.open().await?;
+        let row = session
+            .client()
+            .query_one(
+                "SELECT content_hash FROM _orna_kernel.source_units WHERE id = $1",
+                &[&STD_OUTPUT_SOURCE_UNIT_ID.to_bytes().to_vec()],
+            )
+            .await?;
+        let hash = row.try_get(0)?;
+        session.shutdown().await?;
+        hash
+    };
+    require(
+        original_content_hash == standard.source().units()[2].content_hash().to_bytes(),
+        "the stored output unit digest did not match the verified V3 snapshot",
+    )?;
+    let before = v3_durable_state(database).await?;
+
+    let session = database.open().await?;
+    let changed = session
+        .client()
+        .execute(
+            "UPDATE _orna_kernel.source_units SET content_hash = $1 WHERE id = $2",
+            &[
+                &vec![0x77u8; 32],
+                &STD_OUTPUT_SOURCE_UNIT_ID.to_bytes().to_vec(),
+            ],
+        )
+        .await?;
+    session.shutdown().await?;
+    require(
+        changed == 1,
+        "output unit tamper changed the wrong row count",
+    )?;
+
+    let tampered = v3_durable_state(database).await?;
+    let error = recovery_error(database).await?;
+    match error {
+        PostgresKernelError::DurableInvariant { relation, rule, .. } => require(
+            relation == "_orna_kernel.source_units"
+                && rule == "source unit digest must match its exact UTF-8 content",
+            "the wrong output unit digest did not fail with the exact source-unit invariant",
+        )?,
+        other => {
+            return Err(failure(format!(
+                "the wrong output unit digest produced the wrong recovery error: {other}"
+            )));
+        }
+    }
+    require(
+        v3_durable_state(database).await? == tampered,
+        "the rejected output unit tamper repaired or changed durable state",
+    )?;
+
+    let session = database.open().await?;
+    let restored = session
+        .client()
+        .execute(
+            "UPDATE _orna_kernel.source_units SET content_hash = $1 WHERE id = $2",
+            &[
+                &original_content_hash,
+                &STD_OUTPUT_SOURCE_UNIT_ID.to_bytes().to_vec(),
+            ],
+        )
+        .await?;
+    session.shutdown().await?;
+    require(
+        restored == 1,
+        "output unit restore changed the wrong row count",
+    )?;
+    require(
+        v3_durable_state(database).await? == before,
+        "restoring the output unit did not return the exact prior durable state",
+    )?;
+    kernel(database)?.recover().await?;
+    Ok(())
+}
+
+/// Tamper fixture 2: the V3 standard header's source link is replaced with a
+/// hostile source revision. Recovery joins the hostile source and its empty
+/// bundle, cannot reconstruct the three-unit V3 source, and must fail closed
+/// with the source bundle invariant without writing or repairing rows.
+async fn reject_tampered_standard_revision(
+    database: &TestDatabase,
+    chain: &V3StandardChain,
+) -> TestResult<()> {
+    let standard = chain.version_three_upgrade.verified_standard_snapshot();
+    let hostile_source = SourceRevisionId::from_bytes([0xe4; 16]);
+    let hostile_bundle = SourceBundleId::from_bytes([0xe5; 16]);
+    require(
+        hostile_source != standard.source().id() && hostile_bundle != standard.source().bundle(),
+        "the hostile source revision collided with the V3 source",
+    )?;
+    let before = v3_durable_state(database).await?;
+
+    let session = database.open().await?;
+    session
+        .client()
+        .execute(
+            "INSERT INTO _orna_kernel.source_bundles
+                (id, content_hash, hash_algorithm, hash_contract_version)
+             VALUES ($1, $2, 'sha256', 1)",
+            &[&hostile_bundle.to_bytes().to_vec(), &vec![0xe6u8; 32]],
+        )
+        .await?;
+    session
+        .client()
+        .execute(
+            "INSERT INTO _orna_kernel.source_revisions
+                (id, parent_source_revision_id, bundle_id, content_hash,
+                 hash_algorithm, hash_contract_version)
+             VALUES ($1, NULL, $2, $3, 'sha256', 1)",
+            &[
+                &hostile_source.to_bytes().to_vec(),
+                &hostile_bundle.to_bytes().to_vec(),
+                &vec![0xe7u8; 32],
+            ],
+        )
+        .await?;
+    let changed = session
+        .client()
+        .execute(
+            "UPDATE _orna_kernel.standard_library_revisions
+             SET source_revision_id = $1 WHERE id = $2",
+            &[
+                &hostile_source.to_bytes().to_vec(),
+                &standard.revision().to_bytes().to_vec(),
+            ],
+        )
+        .await?;
+    session.shutdown().await?;
+    require(
+        changed == 1,
+        "standard revision tamper changed the wrong row count",
+    )?;
+
+    let tampered = v3_durable_state(database).await?;
+    let error = recovery_error(database).await?;
+    match error {
+        PostgresKernelError::DurableInvariant { relation, rule, .. } => require(
+            relation == "_orna_kernel.source_bundles"
+                && rule
+                    == "standard source bundle digest must match the ordered source unit records",
+            "the wrong standard revision did not fail with the exact source bundle invariant",
+        )?,
+        other => {
+            return Err(failure(format!(
+                "the wrong standard revision produced the wrong recovery error: {other}"
+            )));
+        }
+    }
+    require(
+        v3_durable_state(database).await? == tampered,
+        "the rejected standard revision tamper repaired or changed durable state",
+    )?;
+
+    let session = database.open().await?;
+    let restored = session
+        .client()
+        .execute(
+            "UPDATE _orna_kernel.standard_library_revisions
+             SET source_revision_id = $1 WHERE id = $2",
+            &[
+                &standard.source().id().to_bytes().to_vec(),
+                &standard.revision().to_bytes().to_vec(),
+            ],
+        )
+        .await?;
+    session
+        .client()
+        .execute(
+            "DELETE FROM _orna_kernel.source_revisions WHERE id = $1",
+            &[&hostile_source.to_bytes().to_vec()],
+        )
+        .await?;
+    session
+        .client()
+        .execute(
+            "DELETE FROM _orna_kernel.source_bundles WHERE id = $1",
+            &[&hostile_bundle.to_bytes().to_vec()],
+        )
+        .await?;
+    session.shutdown().await?;
+    require(
+        restored == 1,
+        "standard revision restore changed the wrong row count",
+    )?;
+    require(
+        v3_durable_state(database).await? == before,
+        "restoring the standard revision did not return the exact prior durable state",
+    )?;
+    kernel(database)?.recover().await?;
+    Ok(())
+}
+
+/// Tamper fixture 3: the V3 companion authority row pins an executable
+/// revision the verified standard does not contain. Recovery must reject the
+/// audited standard target with the exact durable invariant without writing
+/// or repairing rows.
+async fn reject_tampered_executable_authority(
+    database: &TestDatabase,
+    chain: &V3StandardChain,
+) -> TestResult<()> {
+    let before = v3_durable_state(database).await?;
+    let session = database.open().await?;
+    let changed = session
+        .client()
+        .execute(
+            "UPDATE _orna_kernel.invocation_target_authorities
+             SET function_revision_id = $1
+             WHERE catalogue_revision_id = $2 AND function_id = $3",
+            &[
+                &vec![0xaau8; 16],
+                &chain.version_three.pair().catalogue().to_bytes().to_vec(),
+                &orna_compiler::STD_INVOKE_ECHO_FUNCTION_ID
+                    .to_bytes()
+                    .to_vec(),
+            ],
+        )
+        .await?;
+    session.shutdown().await?;
+    require(
+        changed == 1,
+        "executable authority tamper changed the wrong row count",
+    )?;
+
+    let tampered = v3_durable_state(database).await?;
+    let error = recovery_error(database).await?;
+    match error {
+        PostgresKernelError::DurableInvariant { relation, rule, .. } => require(
+            relation == "_orna_kernel.invocation_audit_events"
+                && rule == "target function and pinned revision must exist together",
+            "the wrong executable authority did not fail with the exact durable invariant",
+        )?,
+        other => {
+            return Err(failure(format!(
+                "the mismatched executable produced the wrong recovery error: {other}"
+            )));
+        }
+    }
+    require(
+        v3_durable_state(database).await? == tampered,
+        "the rejected executable tamper repaired or changed durable state",
+    )?;
+
+    let session = database.open().await?;
+    let restored = session
+        .client()
+        .execute(
+            "UPDATE _orna_kernel.invocation_target_authorities
+             SET function_revision_id = $1
+             WHERE catalogue_revision_id = $2 AND function_id = $3",
+            &[
+                &orna_compiler::STD_INVOKE_ECHO_FUNCTION_REVISION_ID
+                    .to_bytes()
+                    .to_vec(),
+                &chain.version_three.pair().catalogue().to_bytes().to_vec(),
+                &orna_compiler::STD_INVOKE_ECHO_FUNCTION_ID
+                    .to_bytes()
+                    .to_vec(),
+            ],
+        )
+        .await?;
+    session.shutdown().await?;
+    require(
+        restored == 1,
+        "executable authority restore changed the wrong row count",
+    )?;
+    require(
+        v3_durable_state(database).await? == before,
+        "restoring the executable authority did not return the exact prior durable state",
+    )?;
+    kernel(database)?.recover().await?;
+    Ok(())
+}
+
+/// The exact durable kernel facts a failed recovery must never change: the
+/// active revision pointer, every standard header, every application
+/// catalogue pin, and the protected audit row counts.
+#[derive(Debug, Eq, PartialEq)]
+struct V3DurableState {
+    active_pair: (Vec<u8>, Vec<u8>),
+    standard_headers: Vec<StandardHeaderRow>,
+    catalogue_pins: Vec<CataloguePinRow>,
+    invocation_audit_rows: i64,
+    security_audit_rows: i64,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+struct StandardHeaderRow {
+    id: Vec<u8>,
+    source_revision: Vec<u8>,
+    catalogue_revision: Vec<u8>,
+    digest_version: i16,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+struct CataloguePinRow {
+    id: Vec<u8>,
+    standard_library_revision: Option<Vec<u8>>,
+    canonical_hash_version: i16,
+}
+
+async fn v3_durable_state(database: &TestDatabase) -> TestResult<V3DurableState> {
+    let session = database.open().await?;
+    let operation = async {
+        let active = session
+            .client()
+            .query_one(
+                "SELECT source_revision_id, catalogue_revision_id
+                 FROM _orna_kernel.active_revision",
+                &[],
+            )
+            .await?;
+        let active_pair = (active.try_get(0)?, active.try_get(1)?);
+        let headers = session
+            .client()
+            .query(
+                "SELECT id, source_revision_id, catalogue_revision_id, digest_version
+                 FROM _orna_kernel.standard_library_revisions ORDER BY id",
+                &[],
+            )
+            .await?;
+        let mut standard_headers = Vec::with_capacity(headers.len());
+        for row in headers {
+            standard_headers.push(StandardHeaderRow {
+                id: row.try_get(0)?,
+                source_revision: row.try_get(1)?,
+                catalogue_revision: row.try_get(2)?,
+                digest_version: row.try_get(3)?,
+            });
+        }
+        let pins = session
+            .client()
+            .query(
+                "SELECT id, standard_library_revision_id, canonical_hash_version
+                 FROM _orna_kernel.catalogue_revisions ORDER BY id",
+                &[],
+            )
+            .await?;
+        let mut catalogue_pins = Vec::with_capacity(pins.len());
+        for row in pins {
+            catalogue_pins.push(CataloguePinRow {
+                id: row.try_get(0)?,
+                standard_library_revision: row.try_get(1)?,
+                canonical_hash_version: row.try_get(2)?,
+            });
+        }
+        let invocation_audit_rows: i64 = session
+            .client()
+            .query_one(
+                "SELECT count(*) FROM _orna_kernel.invocation_audit_events",
+                &[],
+            )
+            .await?
+            .try_get(0)?;
+        let security_audit_rows: i64 = session
+            .client()
+            .query_one(
+                "SELECT count(*) FROM _orna_kernel.security_audit_events",
+                &[],
+            )
+            .await?
+            .try_get(0)?;
+        Ok(V3DurableState {
+            active_pair,
+            standard_headers,
+            catalogue_pins,
+            invocation_audit_rows,
+            security_audit_rows,
+        })
+    }
+    .await;
+    finish_test_session(operation, session.shutdown().await, "V3 durable state read")
+}
+
+async fn recovery_error(database: &TestDatabase) -> TestResult<PostgresKernelError> {
+    match kernel(database)?.recover().await {
+        Ok(_) => Err(failure("tampered durable state recovered successfully")),
+        Err(error) => Ok(error),
+    }
+}
+
+/// Builds one complete checked `sys.invoke` Request for `std.invoke.echo`.
+fn sealed_echo_request(
+    target: InvocationRequestTarget,
+    selector: InvocationParameterSelector,
+    value: i32,
+) -> TestResult<InvokeRequest> {
+    Ok(InvokeRequest::new(InvokeRequestInput {
+        target,
+        arguments: vec![InvocationArgument::new(
+            selector,
+            InvokeValue::new(RuntimeValue::Integer(value))?,
+        )],
+        caller_context: InvocationCallerContext::new(
+            InvocationCallerKind::TestRunner,
+            false,
+            false,
+            None,
+            None,
+            "en-GB",
+            "UTC",
+            None,
+        )?,
+        client_offer: InvocationClientOffer::new(
+            5,
+            "en-GB",
+            "UTC",
+            Vec::new(),
+            Vec::new(),
+            1_024,
+            0,
+            None,
+            None,
+        )?,
+        output_requirement: None,
+        state_profile: None,
+        trace_policy: InvocationTracePolicy::Off,
+        idempotency_key: None,
+        parent_invocation_id: None,
+        observer_context: None,
+    })?)
+}
+
+/// Asserts one completed sealed echo invocation carried exactly
+/// `InvocationStarted(0)`, `ValueBatch(1)` with the typed integer, and
+/// `InvocationCompleted(2)`, and returns its invocation identity.
+fn require_echo_completion(
+    result: &SealedInvocationResult,
+    expected: i32,
+) -> TestResult<InvocationId> {
+    let SealedInvocationResult::Completed { invocation, events } = result else {
+        return Err(failure(
+            "the sealed echo invocation did not complete with its Event batch",
+        ));
+    };
+    let records = events.records();
+    require(
+        records.len() == 3
+            && records[0].outer_sequence() == 1
+            && records[1].outer_sequence() == 2
+            && records[2].outer_sequence() == 3
+            && records[0].event().sequence() == 0
+            && records[1].event().sequence() == 1
+            && records[2].event().sequence() == 2,
+        "the sealed echo stream did not carry contiguous outer and inner sequences",
+    )?;
+    require(
+        records[0].event().kind() == InvocationEventKind::InvocationStarted
+            && records[1].event().kind() == InvocationEventKind::ValueBatch
+            && records[2].event().kind() == InvocationEventKind::InvocationCompleted,
+        "the sealed echo stream did not carry InvocationStarted(0), ValueBatch(1), InvocationCompleted(2)",
+    )?;
+    let InvocationEventBody::ValueBatch {
+        schema: None,
+        values,
+    } = records[1].event().body()
+    else {
+        return Err(failure(
+            "the sealed ValueBatch event did not carry a plain typed batch",
+        ));
+    };
+    require(
+        values.len() == 1 && values[0].value() == &RuntimeValue::Integer(expected),
+        "the sealed ValueBatch did not carry the exact typed integer",
+    )?;
+    require(
+        records[0].event().invocation_id() == *invocation
+            && records[1].event().invocation_id() == *invocation
+            && records[2].event().invocation_id() == *invocation,
+        "the sealed events did not share one invocation identity",
+    )?;
+    Ok(*invocation)
+}
+
+struct InvocationAuditRow {
+    outcome: String,
+    function: Vec<u8>,
+    source: Vec<u8>,
+    catalogue: Vec<u8>,
+    security_event: Option<Vec<u8>>,
+}
+
+async fn invocation_audit_rows(database: &TestDatabase) -> TestResult<Vec<InvocationAuditRow>> {
+    let session = database.open().await?;
+    let operation = async {
+        let rows = session
+            .client()
+            .query(
+                "SELECT outcome, function_id, source_revision_id,
+                        catalogue_revision_id, security_audit_event_id
+                 FROM _orna_kernel.invocation_audit_events
+                 ORDER BY sequence",
+                &[],
+            )
+            .await?;
+        let mut result = Vec::with_capacity(rows.len());
+        for row in rows {
+            result.push(InvocationAuditRow {
+                outcome: row.try_get("outcome")?,
+                function: row.try_get("function_id")?,
+                source: row.try_get("source_revision_id")?,
+                catalogue: row.try_get("catalogue_revision_id")?,
+                security_event: row.try_get("security_audit_event_id")?,
+            });
+        }
+        Ok(result)
+    }
+    .await;
+    finish_test_session(
+        operation,
+        session.shutdown().await,
+        "invocation audit row read",
+    )
+}
+
+struct StandardAuthorityRow {
+    target_class: String,
+    function_revision: Vec<u8>,
+    standard_revision: Option<Vec<u8>>,
+}
+
+async fn standard_authority_row(
+    database: &TestDatabase,
+    catalogue: CatalogueRevisionId,
+    function: FunctionId,
+) -> TestResult<Option<StandardAuthorityRow>> {
+    let session = database.open().await?;
+    let operation = async {
+        let row = session
+            .client()
+            .query_opt(
+                "SELECT target_class, function_revision_id, standard_library_revision_id
+                 FROM _orna_kernel.invocation_target_authorities
+                 WHERE catalogue_revision_id = $1 AND function_id = $2",
+                &[
+                    &catalogue.to_bytes().to_vec(),
+                    &function.to_bytes().to_vec(),
+                ],
+            )
+            .await?;
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        Ok(Some(StandardAuthorityRow {
+            target_class: row.try_get("target_class")?,
+            function_revision: row.try_get("function_revision_id")?,
+            standard_revision: row.try_get("standard_library_revision_id")?,
+        }))
+    }
+    .await;
+    finish_test_session(
+        operation,
+        session.shutdown().await,
+        "standard authority row read",
+    )
 }
