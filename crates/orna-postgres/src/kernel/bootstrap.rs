@@ -165,6 +165,12 @@ const MIGRATIONS: &[Migration] = &[
         sql: include_str!("../../migrations/0024_capability_audit.sql"),
         data_step: None,
     },
+    Migration {
+        version: 25,
+        name: "durable user state cells",
+        sql: include_str!("../../migrations/0025_user_state_cells.sql"),
+        data_step: None,
+    },
 ];
 const MIGRATION_DATA_STEP_SEPARATOR: &[u8] = b"\0orna.kernel.migration-step\0";
 const CANONICAL_HASH_V1_EMPTY_SEED_STEP: &[u8] = b"canonical-hash-v1-empty-seed/v1";
@@ -843,7 +849,7 @@ mod tests {
             validated_migration_registry()
                 .expect("registry is valid")
                 .len(),
-            24
+            25
         );
         assert_eq!(MIGRATIONS[0].version, 1);
         assert_eq!(MIGRATIONS[1].version, 2);
@@ -869,6 +875,7 @@ mod tests {
         assert_eq!(MIGRATIONS[21].version, 22);
         assert_eq!(MIGRATIONS[22].version, 23);
         assert_eq!(MIGRATIONS[23].version, 24);
+        assert_eq!(MIGRATIONS[24].version, 25);
         assert_eq!(MIGRATIONS[5].name, "definition reference write evidence");
         assert_eq!(MIGRATIONS[6].name, "standard catalogue type storage");
         assert_eq!(MIGRATIONS[7].name, "resolved value type storage");
@@ -888,6 +895,7 @@ mod tests {
         assert_eq!(MIGRATIONS[21].name, "protected invocation audit");
         assert_eq!(MIGRATIONS[22].name, "executable standard relations");
         assert_eq!(MIGRATIONS[23].name, "capability audit decisions");
+        assert_eq!(MIGRATIONS[24].name, "durable user state cells");
         assert!(MIGRATIONS[6].data_step.is_none());
         assert!(MIGRATIONS[7].data_step.is_none());
         assert!(MIGRATIONS[8].data_step.is_none());
@@ -906,6 +914,7 @@ mod tests {
         assert!(MIGRATIONS[21].data_step.is_none());
         assert!(MIGRATIONS[22].data_step.is_none());
         assert!(MIGRATIONS[23].data_step.is_none());
+        assert!(MIGRATIONS[24].data_step.is_none());
     }
 
     #[test]
@@ -1016,6 +1025,43 @@ mod tests {
             migration
                 .sql
                 .contains("DROP CONSTRAINT security_audit_events_shape_check")
+        );
+    }
+
+    #[test]
+    fn durable_user_state_cells_is_the_registered_version_twenty_five() {
+        let migration = &MIGRATIONS[24];
+
+        assert_eq!(migration.version, 25);
+        assert_eq!(migration.name, "durable user state cells");
+        assert!(migration.data_step.is_none());
+        assert!(
+            migration
+                .sql
+                .contains("CREATE TABLE _orna_kernel.user_state_cells")
+        );
+        assert!(
+            migration.sql.contains("PRIMARY KEY (")
+                && migration.sql.contains("principal_id")
+                && migration.sql.contains("root_function_id")
+                && migration.sql.contains("root_state_profile")
+                && migration.sql.contains("function_id")
+                && migration.sql.contains("function_instance_key")
+                && migration.sql.contains("state_slot_id")
+        );
+        assert!(migration.sql.contains("user_state_cells_identity_lengths"));
+        assert!(migration.sql.contains("octet_length(value_type_id) = 16"));
+        assert!(migration.sql.contains("user_state_cells_revision_check"));
+        assert!(migration.sql.contains("revision > 0"));
+        assert!(
+            migration
+                .sql
+                .contains("updated_at timestamp with time zone")
+        );
+        assert!(
+            migration
+                .sql
+                .contains("REVOKE ALL ON TABLE _orna_kernel.user_state_cells FROM PUBLIC")
         );
     }
 
