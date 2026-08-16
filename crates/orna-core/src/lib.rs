@@ -8,6 +8,7 @@ pub mod catalogue;
 pub mod invocation;
 pub mod invocation_binding;
 pub mod physical;
+pub mod presenter;
 pub mod revision;
 pub mod security;
 pub mod source;
