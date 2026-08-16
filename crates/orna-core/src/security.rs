@@ -11,6 +11,7 @@ use std::{
 
 use crate::{
     FunctionId, FunctionRevisionId, PrincipalId, SecurityAuditEventId, StandardLibraryRevisionId,
+    inspect::InspectPrivilege,
     revision::RevisionPair,
     system::{SYS_INVOKE_FUNCTION_ID, system_function_by_id},
 };
@@ -493,6 +494,116 @@ pub enum ExecuteDecision {
     Denied(ExecuteDenial),
 }
 
+/// The closed ownership classification of one inspection epoch.
+///
+/// The classification drives the INSPECT ladder: an own epoch needs the
+/// `OwnInvocation` rung, a session-scoped epoch needs `SessionInvocations`,
+/// and a foreign epoch needs `AnyInvocation`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum InspectEpochScope {
+    /// The epoch belongs to the session principal itself.
+    Own,
+    /// The epoch is session-scoped with no single owning principal.
+    Session,
+    /// The epoch belongs to another principal.
+    Foreign,
+}
+
+/// The closed reason an INSPECT decision was denied.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum InspectDenial {
+    /// The session principal holds no granted privilege that reaches the
+    /// epoch's required scope or the requested classification dimension.
+    MissingPrivilege,
+    /// The requested epoch does not exist.
+    MissingEpoch,
+    /// The trace is the inspecting invocation's own observation and
+    /// self-observation is suppressed (spec docs/31).
+    ObserverSuppressed,
+}
+
+impl InspectDenial {
+    /// Returns the stable closed audit reason recorded for this denial.
+    pub const fn audit_reason(self) -> &'static str {
+        match self {
+            Self::MissingPrivilege => "inspect:missing-privilege",
+            Self::MissingEpoch => "inspect:missing-epoch",
+            Self::ObserverSuppressed => "inspect:observer-suppressed",
+        }
+    }
+}
+
+/// The complete result of one INSPECT authorisation check.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum InspectDecision {
+    /// Inspection is allowed with the epoch access facts.
+    Allowed {
+        /// The ownership classification the ladder admitted.
+        epoch_scope: InspectEpochScope,
+        /// The privilege that was requested and granted for this epoch.
+        requested: InspectPrivilege,
+    },
+    /// Inspection is denied with a closed reason.
+    Denied(InspectDenial),
+}
+
+/// Decides whether one session principal may apply one INSPECT privilege to
+/// one inspection epoch.
+///
+/// The invocation-scope ladder is closed: `OwnInvocation` reaches only epochs
+/// owned by the session principal, `SessionInvocations` reaches own and
+/// session-scoped epochs, and `AnyInvocation` reaches every epoch. The four
+/// content classifiers (`Values`, `Source`, `SecurityDetails`,
+/// `RuntimeInternals`) are orthogonal: each grants exactly its own redaction
+/// dimension and never a ladder rung, and a ladder rung never grants a
+/// classification dimension.
+///
+/// `epoch_owner` is the principal that owns the epoch; `None` denotes a
+/// session-scoped epoch with no single owning principal (service or
+/// session-level records). An epoch that does not exist at all is denied by
+/// the kernel with [`InspectDenial::MissingEpoch`] before this ladder runs,
+/// and self-observation suppression uses [`InspectDenial::ObserverSuppressed`]
+/// at the trace boundary; both share this closed denial set.
+///
+/// The decision fails closed: a request that the granted set does not cover —
+/// either a ladder rung below the epoch's required scope or the requested
+/// scope, or a classifier that is not granted — is denied with
+/// [`InspectDenial::MissingPrivilege`] without exposing any epoch content.
+pub fn authorise_inspect(
+    session_principal: PrincipalId,
+    requested: InspectPrivilege,
+    epoch_owner: Option<PrincipalId>,
+    granted: &[InspectPrivilege],
+) -> InspectDecision {
+    let (required_rung, epoch_scope) = match epoch_owner {
+        Some(owner) if owner == session_principal => (0, InspectEpochScope::Own),
+        Some(_) => (2, InspectEpochScope::Foreign),
+        None => (1, InspectEpochScope::Session),
+    };
+    let Some(granted_rung) = granted
+        .iter()
+        .filter_map(|privilege| privilege.ladder_rank())
+        .max()
+    else {
+        return InspectDecision::Denied(InspectDenial::MissingPrivilege);
+    };
+    let requested_rung = requested.ladder_rank().unwrap_or(0);
+    if granted_rung < required_rung || granted_rung < requested_rung {
+        return InspectDecision::Denied(InspectDenial::MissingPrivilege);
+    }
+    if let Some(classifier) = requested.classifier()
+        && !granted
+            .iter()
+            .any(|privilege| privilege.classifier() == Some(classifier))
+    {
+        return InspectDecision::Denied(InspectDenial::MissingPrivilege);
+    }
+    InspectDecision::Allowed {
+        epoch_scope,
+        requested,
+    }
+}
+
 /// The closed family of protected security audit events.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SecurityAuditKind {
@@ -504,6 +615,8 @@ pub enum SecurityAuditKind {
     Capability,
     /// An authenticated session loaded or wrote durable USER state cells.
     UserState,
+    /// An authenticated session requested INSPECT access to an inspection epoch.
+    Inspect,
 }
 
 /// The closed USER state operation family recorded in protected audit.
@@ -538,6 +651,8 @@ pub enum SecurityAuditDenial {
         /// The redacted qualified capability name (no arguments).
         capability: String,
     },
+    /// An INSPECT decision was denied for the recorded closed reason.
+    Inspect(InspectDenial),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -575,6 +690,17 @@ enum SecurityAuditDecisionShape {
         operation: UserStateAuditOperation,
         root_function: FunctionId,
         cell_count: u64,
+    },
+    InspectAllowed {
+        session_principal: PrincipalId,
+        requested: InspectPrivilege,
+        epoch_scope: InspectEpochScope,
+        epoch_owner: Option<PrincipalId>,
+    },
+    InspectDenied {
+        session_principal: PrincipalId,
+        epoch_owner: Option<PrincipalId>,
+        reason: InspectDenial,
     },
 }
 
@@ -744,6 +870,70 @@ impl SecurityAuditDecision {
         })
     }
 
+    /// Records an allowed INSPECT decision from its epoch access facts.
+    ///
+    /// The decision must be an `Allowed` decision; a denied decision reaches
+    /// the denied constructor instead and fails closed here.
+    pub fn inspect_allowed(
+        session: &AuthenticatedSession,
+        decision: InspectDecision,
+        epoch_owner: Option<PrincipalId>,
+    ) -> Result<Self, SecurityAuditDecisionError> {
+        let InspectDecision::Allowed {
+            requested,
+            epoch_scope,
+        } = decision
+        else {
+            return Err(SecurityAuditDecisionError::InspectDecisionShape);
+        };
+        Ok(Self(SecurityAuditDecisionShape::InspectAllowed {
+            session_principal: session.principal,
+            requested,
+            epoch_scope,
+            epoch_owner,
+        }))
+    }
+
+    /// Recovers an allowed INSPECT decision from protected storage.
+    pub const fn recover_inspect_allowed(
+        session_principal: PrincipalId,
+        requested: InspectPrivilege,
+        epoch_scope: InspectEpochScope,
+        epoch_owner: Option<PrincipalId>,
+    ) -> Self {
+        Self(SecurityAuditDecisionShape::InspectAllowed {
+            session_principal,
+            requested,
+            epoch_scope,
+            epoch_owner,
+        })
+    }
+
+    /// Records a denied INSPECT decision for a trusted session.
+    ///
+    /// Only the closed denial reason and the epoch owner are retained; no
+    /// epoch content is ever written to audit.
+    pub fn inspect_denied(
+        session: &AuthenticatedSession,
+        epoch_owner: Option<PrincipalId>,
+        reason: InspectDenial,
+    ) -> Self {
+        Self::recover_inspect_denied(session.principal, epoch_owner, reason)
+    }
+
+    /// Recovers a denied INSPECT decision from protected storage.
+    pub const fn recover_inspect_denied(
+        session_principal: PrincipalId,
+        epoch_owner: Option<PrincipalId>,
+        reason: InspectDenial,
+    ) -> Self {
+        Self(SecurityAuditDecisionShape::InspectDenied {
+            session_principal,
+            epoch_owner,
+            reason,
+        })
+    }
+
     /// Returns the USER state operation when this decision records one.
     pub const fn user_state_operation(&self) -> Option<UserStateAuditOperation> {
         match self.0 {
@@ -770,6 +960,31 @@ impl SecurityAuditDecision {
         }
     }
 
+    /// Returns the requested privilege when this decision records INSPECT.
+    pub const fn inspect_requested(&self) -> Option<InspectPrivilege> {
+        match self.0 {
+            SecurityAuditDecisionShape::InspectAllowed { requested, .. } => Some(requested),
+            _ => None,
+        }
+    }
+
+    /// Returns the epoch scope when this decision records INSPECT.
+    pub const fn inspect_epoch_scope(&self) -> Option<InspectEpochScope> {
+        match self.0 {
+            SecurityAuditDecisionShape::InspectAllowed { epoch_scope, .. } => Some(epoch_scope),
+            _ => None,
+        }
+    }
+
+    /// Returns the closed denial reason when this decision records a denied
+    /// INSPECT decision.
+    pub const fn inspect_denial(&self) -> Option<InspectDenial> {
+        match self.0 {
+            SecurityAuditDecisionShape::InspectDenied { reason, .. } => Some(reason),
+            _ => None,
+        }
+    }
+
     /// Returns the closed event kind.
     pub const fn kind(&self) -> SecurityAuditKind {
         match self.0 {
@@ -782,6 +997,8 @@ impl SecurityAuditDecision {
             SecurityAuditDecisionShape::CapabilityAllowed { .. }
             | SecurityAuditDecisionShape::CapabilityDenied { .. } => SecurityAuditKind::Capability,
             SecurityAuditDecisionShape::UserStateAllowed { .. } => SecurityAuditKind::UserState,
+            SecurityAuditDecisionShape::InspectAllowed { .. }
+            | SecurityAuditDecisionShape::InspectDenied { .. } => SecurityAuditKind::Inspect,
         }
     }
 
@@ -791,10 +1008,12 @@ impl SecurityAuditDecision {
             SecurityAuditDecisionShape::AuthenticationAllowed { .. }
             | SecurityAuditDecisionShape::ExecuteAllowed { .. }
             | SecurityAuditDecisionShape::CapabilityAllowed { .. }
-            | SecurityAuditDecisionShape::UserStateAllowed { .. } => SecurityAuditOutcome::Allowed,
+            | SecurityAuditDecisionShape::UserStateAllowed { .. }
+            | SecurityAuditDecisionShape::InspectAllowed { .. } => SecurityAuditOutcome::Allowed,
             SecurityAuditDecisionShape::AuthenticationDenied { .. }
             | SecurityAuditDecisionShape::ExecuteDenied { .. }
-            | SecurityAuditDecisionShape::CapabilityDenied { .. } => SecurityAuditOutcome::Denied,
+            | SecurityAuditDecisionShape::CapabilityDenied { .. }
+            | SecurityAuditDecisionShape::InspectDenied { .. } => SecurityAuditOutcome::Denied,
         }
     }
 
@@ -815,6 +1034,12 @@ impl SecurityAuditDecision {
                 session_principal, ..
             }
             | SecurityAuditDecisionShape::UserStateAllowed {
+                session_principal, ..
+            }
+            | SecurityAuditDecisionShape::InspectAllowed {
+                session_principal, ..
+            }
+            | SecurityAuditDecisionShape::InspectDenied {
                 session_principal, ..
             } => Some(session_principal),
             SecurityAuditDecisionShape::AuthenticationDenied {
@@ -882,6 +1107,9 @@ impl SecurityAuditDecision {
                     capability: capability.clone(),
                 })
             }
+            SecurityAuditDecisionShape::InspectDenied { reason, .. } => {
+                Some(SecurityAuditDenial::Inspect(*reason))
+            }
             _ => None,
         }
     }
@@ -923,6 +1151,8 @@ pub enum SecurityAuditDecisionError {
     AuthenticationPrincipalShape,
     /// The capability name is not a closed qualified name with no arguments.
     CapabilityNameShape,
+    /// A non-allowed INSPECT decision reached an allowed-only constructor.
+    InspectDecisionShape,
 }
 
 impl fmt::Display for SecurityAuditDecisionError {
@@ -933,6 +1163,9 @@ impl fmt::Display for SecurityAuditDecisionError {
             }
             Self::CapabilityNameShape => {
                 "security audit capability name must be a qualified name with no arguments"
+            }
+            Self::InspectDecisionShape => {
+                "security audit INSPECT decision must be an allowed decision"
             }
         })
     }
@@ -2798,6 +3031,293 @@ mod tests {
             ),
             ExecuteDecision::Denied(ExecuteDenial::UnknownFunction),
             "the flat constructor admits only Application targets"
+        );
+    }
+
+    #[test]
+    fn inspect_own_grant_reaches_only_own_epochs() {
+        assert_eq!(
+            authorise_inspect(
+                USER,
+                InspectPrivilege::OwnInvocation,
+                Some(USER),
+                &[InspectPrivilege::OwnInvocation],
+            ),
+            InspectDecision::Allowed {
+                epoch_scope: InspectEpochScope::Own,
+                requested: InspectPrivilege::OwnInvocation,
+            }
+        );
+        assert!(matches!(
+            authorise_inspect(
+                USER,
+                InspectPrivilege::OwnInvocation,
+                None,
+                &[InspectPrivilege::OwnInvocation],
+            ),
+            InspectDecision::Denied(InspectDenial::MissingPrivilege)
+        ));
+        assert!(matches!(
+            authorise_inspect(
+                USER,
+                InspectPrivilege::OwnInvocation,
+                Some(OTHER_PRINCIPAL),
+                &[InspectPrivilege::OwnInvocation],
+            ),
+            InspectDecision::Denied(InspectDenial::MissingPrivilege)
+        ));
+    }
+
+    #[test]
+    fn inspect_session_grant_reaches_own_and_session_epochs() {
+        let granted = [InspectPrivilege::SessionInvocations];
+        assert_eq!(
+            authorise_inspect(
+                USER,
+                InspectPrivilege::SessionInvocations,
+                Some(USER),
+                &granted
+            ),
+            InspectDecision::Allowed {
+                epoch_scope: InspectEpochScope::Own,
+                requested: InspectPrivilege::SessionInvocations,
+            }
+        );
+        assert_eq!(
+            authorise_inspect(USER, InspectPrivilege::SessionInvocations, None, &granted),
+            InspectDecision::Allowed {
+                epoch_scope: InspectEpochScope::Session,
+                requested: InspectPrivilege::SessionInvocations,
+            }
+        );
+        assert!(matches!(
+            authorise_inspect(
+                USER,
+                InspectPrivilege::SessionInvocations,
+                Some(OTHER_PRINCIPAL),
+                &granted
+            ),
+            InspectDecision::Denied(InspectDenial::MissingPrivilege)
+        ));
+        assert!(matches!(
+            authorise_inspect(
+                USER,
+                InspectPrivilege::OwnInvocation,
+                None,
+                &[InspectPrivilege::OwnInvocation]
+            ),
+            InspectDecision::Denied(InspectDenial::MissingPrivilege)
+        ));
+    }
+
+    #[test]
+    fn inspect_any_grant_reaches_every_epoch() {
+        let granted = [InspectPrivilege::AnyInvocation];
+        assert!(matches!(
+            authorise_inspect(
+                USER,
+                InspectPrivilege::AnyInvocation,
+                Some(OTHER_PRINCIPAL),
+                &granted
+            ),
+            InspectDecision::Allowed {
+                epoch_scope: InspectEpochScope::Foreign,
+                ..
+            }
+        ));
+        assert!(matches!(
+            authorise_inspect(USER, InspectPrivilege::AnyInvocation, Some(USER), &granted),
+            InspectDecision::Allowed {
+                epoch_scope: InspectEpochScope::Own,
+                ..
+            }
+        ));
+        assert!(matches!(
+            authorise_inspect(USER, InspectPrivilege::AnyInvocation, None, &granted),
+            InspectDecision::Allowed {
+                epoch_scope: InspectEpochScope::Session,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn inspect_classifiers_are_orthogonal_and_independent() {
+        assert!(matches!(
+            authorise_inspect(
+                USER,
+                InspectPrivilege::Values,
+                Some(USER),
+                &[InspectPrivilege::OwnInvocation, InspectPrivilege::Source],
+            ),
+            InspectDecision::Denied(InspectDenial::MissingPrivilege)
+        ));
+        assert!(matches!(
+            authorise_inspect(
+                USER,
+                InspectPrivilege::OwnInvocation,
+                Some(USER),
+                &[InspectPrivilege::Values],
+            ),
+            InspectDecision::Denied(InspectDenial::MissingPrivilege)
+        ));
+        assert!(matches!(
+            authorise_inspect(
+                USER,
+                InspectPrivilege::Values,
+                Some(USER),
+                &[InspectPrivilege::OwnInvocation, InspectPrivilege::Values],
+            ),
+            InspectDecision::Allowed {
+                epoch_scope: InspectEpochScope::Own,
+                requested: InspectPrivilege::Values,
+            }
+        ));
+        assert!(matches!(
+            authorise_inspect(
+                USER,
+                InspectPrivilege::RuntimeInternals,
+                Some(OTHER_PRINCIPAL),
+                &[
+                    InspectPrivilege::OwnInvocation,
+                    InspectPrivilege::RuntimeInternals,
+                ],
+            ),
+            InspectDecision::Denied(InspectDenial::MissingPrivilege)
+        ));
+    }
+
+    #[test]
+    fn inspect_ladder_denies_when_the_requested_rung_is_not_granted() {
+        assert!(matches!(
+            authorise_inspect(
+                USER,
+                InspectPrivilege::SessionInvocations,
+                Some(USER),
+                &[InspectPrivilege::OwnInvocation],
+            ),
+            InspectDecision::Denied(InspectDenial::MissingPrivilege)
+        ));
+        assert!(matches!(
+            authorise_inspect(
+                USER,
+                InspectPrivilege::AnyInvocation,
+                Some(USER),
+                &[InspectPrivilege::SessionInvocations],
+            ),
+            InspectDecision::Denied(InspectDenial::MissingPrivilege)
+        ));
+        assert!(matches!(
+            authorise_inspect(USER, InspectPrivilege::OwnInvocation, Some(USER), &[]),
+            InspectDecision::Denied(InspectDenial::MissingPrivilege)
+        ));
+    }
+
+    #[test]
+    fn inspect_denials_carry_closed_audit_reasons() {
+        assert_eq!(
+            InspectDenial::MissingPrivilege.audit_reason(),
+            "inspect:missing-privilege"
+        );
+        assert_eq!(
+            InspectDenial::MissingEpoch.audit_reason(),
+            "inspect:missing-epoch"
+        );
+        assert_eq!(
+            InspectDenial::ObserverSuppressed.audit_reason(),
+            "inspect:observer-suppressed"
+        );
+    }
+
+    #[test]
+    fn inspect_audit_decisions_record_epoch_access_facts() {
+        let snapshot = SecuritySnapshot::new(
+            REVISION,
+            vec![FUNCTION],
+            vec![active(USER, PrincipalKind::User)],
+            vec![],
+            vec![],
+        )
+        .expect("valid INSPECT audit session");
+        let session = snapshot
+            .bind_authenticated_session(USER, vec![])
+            .expect("active user session should bind");
+
+        let decision = authorise_inspect(
+            USER,
+            InspectPrivilege::OwnInvocation,
+            Some(USER),
+            &[InspectPrivilege::OwnInvocation],
+        );
+        let allowed = SecurityAuditDecision::inspect_allowed(&session, decision, Some(USER))
+            .expect("an allowed decision must record");
+        assert_eq!(allowed.kind(), SecurityAuditKind::Inspect);
+        assert_eq!(allowed.outcome(), SecurityAuditOutcome::Allowed);
+        assert_eq!(allowed.session_principal(), Some(USER));
+        assert_eq!(
+            allowed.inspect_requested(),
+            Some(InspectPrivilege::OwnInvocation)
+        );
+        assert_eq!(allowed.inspect_epoch_scope(), Some(InspectEpochScope::Own));
+        assert_eq!(allowed.denial(), None);
+
+        let recovered = SecurityAuditDecision::recover_inspect_allowed(
+            USER,
+            InspectPrivilege::Values,
+            InspectEpochScope::Foreign,
+            Some(OTHER_PRINCIPAL),
+        );
+        assert_eq!(recovered.kind(), SecurityAuditKind::Inspect);
+        assert_eq!(
+            recovered.inspect_requested(),
+            Some(InspectPrivilege::Values)
+        );
+        assert_eq!(
+            recovered.inspect_epoch_scope(),
+            Some(InspectEpochScope::Foreign)
+        );
+
+        let denied = SecurityAuditDecision::inspect_denied(
+            &session,
+            Some(OTHER_PRINCIPAL),
+            InspectDenial::MissingPrivilege,
+        );
+        assert_eq!(denied.kind(), SecurityAuditKind::Inspect);
+        assert_eq!(denied.outcome(), SecurityAuditOutcome::Denied);
+        assert_eq!(denied.session_principal(), Some(USER));
+        assert_eq!(
+            denied.denial(),
+            Some(SecurityAuditDenial::Inspect(
+                InspectDenial::MissingPrivilege
+            ))
+        );
+        assert_eq!(
+            denied.inspect_denial(),
+            Some(InspectDenial::MissingPrivilege)
+        );
+        assert_eq!(denied.inspect_requested(), None);
+    }
+
+    #[test]
+    fn inspect_audit_allowed_rejects_a_denied_decision_shape() {
+        let snapshot = SecuritySnapshot::new(
+            REVISION,
+            vec![FUNCTION],
+            vec![active(USER, PrincipalKind::User)],
+            vec![],
+            vec![],
+        )
+        .expect("valid INSPECT audit session");
+        let session = snapshot
+            .bind_authenticated_session(USER, vec![])
+            .expect("active user session should bind");
+        assert_eq!(
+            SecurityAuditDecision::inspect_allowed(
+                &session,
+                InspectDecision::Denied(InspectDenial::MissingPrivilege),
+                Some(USER),
+            ),
+            Err(SecurityAuditDecisionError::InspectDecisionShape)
         );
     }
 }
