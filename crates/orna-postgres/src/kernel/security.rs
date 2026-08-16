@@ -640,11 +640,11 @@ impl PostgresKernel {
                                 &active,
                                 &registry,
                             ) {
-                                Ok(presented) => sealed_completed_events(
+                                Ok(presented) => Some(sealed_completed_events(
                                     authenticated_session.principal(),
                                     invocation,
                                     presented,
-                                )?,
+                                )?),
                                 Err(
                                     SealedPresentationError::OutputResolution(_)
                                     | SealedPresentationError::NoPath,
@@ -657,28 +657,31 @@ impl PostgresKernel {
                                         invocation,
                                     )
                                     .await?;
-                                    return Ok(SealedInvocationResult::PresentationFailed {
-                                        invocation,
-                                    });
+                                    None
                                 }
                                 Err(SealedPresentationError::Kernel(error)) => return Err(error),
                             }
                         }
-                        None => sealed_completed_events(
+                        None => Some(sealed_completed_events(
                             authenticated_session.principal(),
                             invocation,
                             value,
-                        )?,
+                        )?),
                     };
-                    append_allowed_invocation_audit(
-                        &transaction,
-                        &security,
-                        authenticated_session,
-                        security_target,
-                        invocation,
-                    )
-                    .await?;
-                    SealedInvocationResult::Completed { invocation, events }
+                    match events {
+                        Some(events) => {
+                            append_allowed_invocation_audit(
+                                &transaction,
+                                &security,
+                                authenticated_session,
+                                security_target,
+                                invocation,
+                            )
+                            .await?;
+                            SealedInvocationResult::Completed { invocation, events }
+                        }
+                        None => SealedInvocationResult::PresentationFailed { invocation },
+                    }
                 }
                 ProtectedInvocationDecision::AllowedWithBindFailure => {
                     let target =
