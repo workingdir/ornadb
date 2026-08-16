@@ -9,38 +9,38 @@
 
 ; Keywords
 [
-  (kw_create) (kw_schema) (kw_type) (kw_as) (kw_enum) (kw_object)
-  (kw_value) (kw_opaque) (kw_primitive) (kw_final) (kw_documentation)
-  (kw_immutable) (kw_transient) (kw_persistable) (kw_sealed) (kw_kernel)
-  (kw_contract) (kw_export) (kw_to) (kw_prelude) (kw_server) (kw_function)
-  (kw_client) (kw_external) (kw_returns) (kw_table) (kw_rows) (kw_security)
-  (kw_invoker) (kw_definer) (kw_transaction) (kw_atomic) (kw_read) (kw_only)
-  (kw_manual) (kw_volatility) (kw_stable) (kw_volatile) (kw_requires)
-  (kw_capability) (kw_alter) (kw_rename) (kw_field) (kw_add) (kw_drop)
-  (kw_cascade) (kw_restrict) (kw_user) (kw_disabled) (kw_role) (kw_grant)
-  (kw_revoke) (kw_on) (kw_from) (kw_execute) (kw_select) (kw_insert)
-  (kw_update) (kw_delete) (kw_inspect) (kw_is) (kw_begin) (kw_end) (kw_if)
-  (kw_then) (kw_elsif) (kw_else) (kw_while) (kw_loop) (kw_for) (kw_in)
-  (kw_let) (kw_const) (kw_state) (kw_scope) (kw_local) (kw_session)
-  (kw_default) (kw_not) (kw_null) (kw_unique) (kw_check) (kw_call)
-  (kw_await) (kw_return) (kw_and) (kw_or) (kw_like) (kw_ilike) (kw_true)
-  (kw_false) (kw_case) (kw_when) (kw_ref) (kw_list) (kw_set) (kw_map)
-  (kw_stream) (kw_option) (kw_bool) (kw_int) (kw_bigint) (kw_float)
-  (kw_decimal) (kw_text) (kw_bytes) (kw_uuid) (kw_date) (kw_time)
-  (kw_timestamp) (kw_duration) (kw_void) (kw_distinct) (kw_order) (kw_by)
-  (kw_values) (kw_returning) (kw_into) (kw_where)
+    (kw_create) (kw_schema) (kw_type) (kw_as) (kw_enum) (kw_object)
+    (kw_value) (kw_opaque) (kw_primitive) (kw_final) (kw_documentation)
+    (kw_immutable) (kw_transient) (kw_persistable) (kw_sealed) (kw_kernel)
+    (kw_contract) (kw_export) (kw_to) (kw_prelude) (kw_server) (kw_function)
+    (kw_client) (kw_external) (kw_returns) (kw_table) (kw_rows) (kw_security)
+    (kw_invoker) (kw_definer) (kw_transaction) (kw_atomic) (kw_read) (kw_only)
+    (kw_manual) (kw_volatility) (kw_stable) (kw_volatile) (kw_requires)
+    (kw_capability) (kw_alter) (kw_rename) (kw_field) (kw_add) (kw_drop)
+    (kw_cascade) (kw_restrict) (kw_user) (kw_disabled) (kw_role) (kw_grant)
+    (kw_revoke) (kw_on) (kw_from) (kw_execute) (kw_select) (kw_insert)
+    (kw_update) (kw_delete) (kw_inspect) (kw_is) (kw_begin) (kw_end) (kw_if)
+    (kw_then) (kw_elsif) (kw_else) (kw_while) (kw_loop) (kw_for) (kw_in)
+    (kw_let) (kw_const) (kw_state) (kw_scope) (kw_local) (kw_session)
+    (kw_default) (kw_not) (kw_null) (kw_unique) (kw_check) (kw_call)
+    (kw_await) (kw_return) (kw_and) (kw_or) (kw_like) (kw_ilike) (kw_true)
+    (kw_false) (kw_case) (kw_when) (kw_ref) (kw_list) (kw_set) (kw_map)
+    (kw_stream) (kw_option) (kw_bool) (kw_int) (kw_bigint) (kw_float)
+    (kw_decimal) (kw_text) (kw_bytes) (kw_uuid) (kw_date) (kw_time)
+    (kw_timestamp) (kw_duration) (kw_void) (kw_distinct) (kw_order) (kw_by)
+    (kw_values) (kw_returning) (kw_into) (kw_where)
 ] @keyword
 
 ; Operators
 [
-  (comparison_operator) (additive_operator) (multiplicative_operator)
-  (unary_operator) (assignment_operator) (arrow_operator)
+    (comparison_operator) (additive_operator) (multiplicative_operator)
+    (unary_operator) (assignment_operator) (arrow_operator)
 ] @operator
 
 ; Punctuation
 [
-  (lparen) (rparen) (lbracket) (rbracket) (lbrace) (rbrace) (comma)
-  (semicolon) (dot) (colon) (question_mark)
+    (lparen) (rparen) (lbracket) (rbracket) (lbrace) (rbrace) (comma)
+    (semicolon) (dot) (colon) (question_mark)
 ] @punctuation
 
 ; Qualified names: capitalized names are types, everything else is a
