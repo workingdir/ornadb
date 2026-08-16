@@ -512,6 +512,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "orna-runtime-tty"
+version = "0.1.0"
+
+[[package]]
 name = "orna-server"
 version = "0.1.0"
 dependencies = [
