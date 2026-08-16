@@ -757,11 +757,23 @@ impl<'source> Parser<'source> {
             } else {
                 None
             };
+            self.skip_trivia();
+            let documentation = if self
+                .current()
+                .is_some_and(|token| token.is_word("DOCUMENTATION"))
+            {
+                let documentation = self.parse_documentation_modifier()?;
+                end = documentation.span.end;
+                Some(documentation)
+            } else {
+                None
+            };
             Some(ServerFunctionParameter {
                 name,
                 order,
                 type_specification,
                 default_expression,
+                documentation,
                 span: SourceSpan { start, end },
             })
         })()
@@ -1313,6 +1325,22 @@ impl<'source> Parser<'source> {
 
         let fields = self.parse_object_fields();
         self.skip_trivia();
+        let mut final_type = false;
+        let mut documentation = None;
+        loop {
+            self.skip_trivia();
+            if self.take_word("FINAL").is_some() {
+                final_type = true;
+            } else if self
+                .current()
+                .is_some_and(|token| token.is_word("DOCUMENTATION"))
+            {
+                documentation = self.parse_documentation_modifier();
+            } else {
+                break;
+            }
+        }
+        self.skip_trivia();
         let semicolon = self.expect_kind(
             TokenKind::Semicolon,
             "expected ';' after object type declaration",
@@ -1323,6 +1351,8 @@ impl<'source> Parser<'source> {
                 self.object_types.push(ObjectTypeDeclaration {
                     name,
                     fields,
+                    final_type,
+                    documentation,
                     span: SourceSpan {
                         start: statement_start,
                         end: semicolon.end,
@@ -1461,6 +1491,8 @@ impl<'source> Parser<'source> {
             return;
         };
         self.skip_trivia();
+        let documentation = self.parse_documentation_modifier();
+        self.skip_trivia();
         let Some(semicolon) = self.expect_kind(
             TokenKind::Semicolon,
             "expected ';' after primitive value type declaration",
@@ -1476,6 +1508,7 @@ impl<'source> Parser<'source> {
                     kernel_contract_modifier_span,
                     persistence,
                     persistence_span,
+                    documentation,
                     span: SourceSpan {
                         start: statement_start,
                         end: semicolon.end,
@@ -1515,6 +1548,8 @@ impl<'source> Parser<'source> {
             return;
         };
         self.skip_trivia();
+        let documentation = self.parse_documentation_modifier();
+        self.skip_trivia();
         let Some(semicolon) = self.expect_kind(
             TokenKind::Semicolon,
             "expected ';' after opaque value type declaration",
@@ -1530,12 +1565,35 @@ impl<'source> Parser<'source> {
                 kernel_contract_modifier_span,
                 immutable_span: immutable.span(),
                 transient_span: transient.span(),
+                documentation,
                 span: SourceSpan {
                     start: statement_start,
                     end: semicolon.end,
                 },
             });
         }
+    }
+
+    /// Parses one `DOCUMENTATION '...'` modifier and returns its string text.
+    fn parse_documentation_modifier(&mut self) -> Option<SourceSlice> {
+        self.skip_trivia();
+        if self.take_word("DOCUMENTATION").is_none() {
+            return None;
+        }
+        self.skip_trivia();
+        let Some(literal) = self
+            .current()
+            .cloned()
+            .filter(|token| token.kind == TokenKind::StringLiteral)
+        else {
+            self.error_current("ORNA0001", "expected a string literal after DOCUMENTATION");
+            return None;
+        };
+        self.bump();
+        Some(SourceSlice {
+            text: literal.text.to_owned(),
+            span: literal.span(),
+        })
     }
 
     fn parse_kernel_contract(
@@ -1607,6 +1665,8 @@ impl<'source> Parser<'source> {
             return;
         };
         self.skip_trivia();
+        let documentation = self.parse_documentation_modifier();
+        self.skip_trivia();
         let Some(semicolon) = self.expect_kind(
             TokenKind::Semicolon,
             "expected ';' after record value type declaration",
@@ -1621,6 +1681,7 @@ impl<'source> Parser<'source> {
                 fields,
                 immutable_span: immutable.span(),
                 persistable_span: persistable.span(),
+                documentation,
                 span: SourceSpan {
                     start: statement_start,
                     end: semicolon.end,
@@ -1860,10 +1921,11 @@ impl<'source> Parser<'source> {
                 self.parse_type_specification_with_message("expected a record value field type")?;
             let field_end = type_specification.span().end;
             self.skip_trivia();
+            let documentation = self.parse_documentation_modifier();
+            self.skip_trivia();
             if self.current().is_some_and(|token| {
                 token.is_word("DEFAULT")
                     || token.is_word("CHECK")
-                    || token.is_word("DOCUMENTATION")
                     || token.is_word("NULL")
                     || token.is_word("NOT")
                     || token.is_word("UNIQUE")
@@ -1873,10 +1935,14 @@ impl<'source> Parser<'source> {
                 self.error_current("ORNA0001", "record value fields do not accept modifiers");
                 return None;
             }
+            let field_end = documentation
+                .as_ref()
+                .map_or(field_end, |documentation| documentation.span.end);
             Some(ValueFieldDeclaration {
                 name,
                 order,
                 type_specification,
+                documentation,
                 span: SourceSpan {
                     start: field_start,
                     end: field_end,
@@ -1903,6 +1969,7 @@ impl<'source> Parser<'source> {
         let mut unique = false;
         let mut default_expression = None;
         let mut on_delete = None;
+        let mut documentation = None;
         let mut field_end = type_specification.span().end;
 
         loop {
@@ -1955,6 +2022,13 @@ impl<'source> Parser<'source> {
                 };
                 on_delete = Some(policy);
                 field_end = policy_end;
+            } else if token.is_word("DOCUMENTATION") {
+                let Some(documentation_slice) = self.parse_documentation_modifier() else {
+                    self.builder.finish_node();
+                    return None;
+                };
+                field_end = documentation_slice.span.end;
+                documentation = Some(documentation_slice);
             } else if token.is_word("PRIMARY") {
                 self.reject_primary_key();
                 self.builder.finish_node();
@@ -1975,6 +2049,7 @@ impl<'source> Parser<'source> {
             unique,
             default_expression,
             on_delete,
+            documentation,
             span: SourceSpan {
                 start: field_start,
                 end: field_end,

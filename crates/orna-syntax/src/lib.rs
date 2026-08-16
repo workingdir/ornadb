@@ -311,7 +311,9 @@ pub struct ServerFunctionParameter {
     pub type_specification: TypeSpecification,
     /// The unparsed default expression source, if one was declared.
     pub default_expression: Option<SourceSlice>,
-    /// The span from the parameter name through its default expression.
+    /// The documentation text declared by a `DOCUMENTATION` modifier.
+    pub documentation: Option<SourceSlice>,
+    /// The span from the parameter name through its final modifier.
     pub span: SourceSpan,
 }
 
@@ -758,6 +760,8 @@ pub struct ObjectFieldDeclaration {
     pub default_expression: Option<SourceSlice>,
     /// The reference delete action, if one was declared.
     pub on_delete: Option<OnDeletePolicy>,
+    /// The documentation text declared by a `DOCUMENTATION` modifier.
+    pub documentation: Option<SourceSlice>,
     /// The span from the field name through its final modifier.
     pub span: SourceSpan,
 }
@@ -769,6 +773,10 @@ pub struct ObjectTypeDeclaration {
     pub name: QualifiedName,
     /// The object fields in source order.
     pub fields: Vec<ObjectFieldDeclaration>,
+    /// Whether the `FINAL` modifier was declared.
+    pub final_type: bool,
+    /// The documentation text declared by a `DOCUMENTATION` modifier.
+    pub documentation: Option<SourceSlice>,
     /// The declaration span, including its terminating semicolon.
     pub span: SourceSpan,
 }
@@ -800,7 +808,9 @@ pub struct ValueFieldDeclaration {
     pub order: usize,
     /// The type written for the field.
     pub type_specification: TypeSpecification,
-    /// The span from the field name through its type.
+    /// The documentation text declared by a `DOCUMENTATION` modifier.
+    pub documentation: Option<SourceSlice>,
+    /// The span from the field name through its final modifier.
     pub span: SourceSpan,
 }
 
@@ -815,6 +825,8 @@ pub struct RecordValueTypeDeclaration {
     pub immutable_span: SourceSpan,
     /// The span of the required `PERSISTABLE` keyword.
     pub persistable_span: SourceSpan,
+    /// The documentation text declared by a `DOCUMENTATION` modifier.
+    pub documentation: Option<SourceSlice>,
     /// The declaration span, including its terminating semicolon.
     pub span: SourceSpan,
 }
@@ -841,6 +853,8 @@ pub struct PrimitiveValueTypeDeclaration {
     pub persistence: PrimitiveValueTypePersistence,
     /// The span of the persistence keyword.
     pub persistence_span: SourceSpan,
+    /// The documentation text declared by a `DOCUMENTATION` modifier.
+    pub documentation: Option<SourceSlice>,
     /// The declaration span, including its terminating semicolon.
     pub span: SourceSpan,
 }
@@ -860,6 +874,8 @@ pub struct OpaqueValueTypeDeclaration {
     pub immutable_span: SourceSpan,
     /// The span of the required `TRANSIENT` keyword.
     pub transient_span: SourceSpan,
+    /// The documentation text declared by a `DOCUMENTATION` modifier.
+    pub documentation: Option<SourceSlice>,
     /// The declaration span, including its terminating semicolon.
     pub span: SourceSpan,
 }
@@ -1256,12 +1272,6 @@ mod tests {
                 false,
             ),
             (
-                "CREATE TYPE app.point AS VALUE (x INT DOCUMENTATION 'x') IMMUTABLE PERSISTABLE;",
-                "record value fields do not accept modifiers",
-                "DOCUMENTATION",
-                false,
-            ),
-            (
                 "CREATE TYPE app.point AS VALUE (x INT) IMMUTABLE IMMUTABLE PERSISTABLE;",
                 "expected keyword PERSISTABLE",
                 "IMMUTABLE",
@@ -1309,6 +1319,95 @@ mod tests {
             );
             assert_eq!(parsed.syntax().text(), source, "{source}");
         }
+    }
+
+    #[test]
+    fn captures_documentation_modifiers() {
+        let object_field = "CREATE TYPE app.task AS OBJECT (title TEXT DOCUMENTATION 'the title');";
+        let parsed = parse(object_field);
+        assert!(parsed.diagnostics().is_empty(), "{object_field}");
+        let documentation = parsed.object_types()[0].fields[0]
+            .documentation
+            .as_ref()
+            .expect("field documentation");
+        assert_eq!(documentation.text, "'the title'");
+
+        let object_type =
+            "CREATE TYPE app.task AS OBJECT (title TEXT) FINAL DOCUMENTATION 'a final task';";
+        let parsed = parse(object_type);
+        assert!(parsed.diagnostics().is_empty(), "{object_type}");
+        let declaration = &parsed.object_types()[0];
+        assert!(declaration.final_type);
+        assert_eq!(
+            declaration
+                .documentation
+                .as_ref()
+                .expect("type documentation")
+                .text,
+            "'a final task'"
+        );
+
+        let value_field =
+            "CREATE TYPE app.point AS VALUE (x INT DOCUMENTATION 'the x') IMMUTABLE PERSISTABLE;";
+        let parsed = parse(value_field);
+        assert!(parsed.diagnostics().is_empty(), "{value_field}");
+        assert_eq!(
+            parsed.record_value_types()[0].fields[0]
+                .documentation
+                .as_ref()
+                .expect("value field documentation")
+                .text,
+            "'the x'"
+        );
+
+        let record =
+            "CREATE TYPE app.point AS VALUE (x INT) IMMUTABLE PERSISTABLE DOCUMENTATION 'a point';";
+        let parsed = parse(record);
+        assert!(parsed.diagnostics().is_empty(), "{record}");
+        assert_eq!(
+            parsed.record_value_types()[0]
+                .documentation
+                .as_ref()
+                .expect("record documentation")
+                .text,
+            "'a point'"
+        );
+
+        let primitive = "CREATE TYPE app.tick AS VALUE PRIMITIVE KERNEL CONTRACT 'k' IMMUTABLE PERSISTABLE DOCUMENTATION 'a primitive';";
+        let parsed = parse(primitive);
+        assert!(parsed.diagnostics().is_empty(), "{primitive}");
+        assert_eq!(
+            parsed.primitive_value_types()[0]
+                .documentation
+                .as_ref()
+                .expect("primitive documentation")
+                .text,
+            "'a primitive'"
+        );
+
+        let opaque = "CREATE TYPE app.blob AS VALUE OPAQUE KERNEL CONTRACT 'k' IMMUTABLE TRANSIENT DOCUMENTATION 'an opaque';";
+        let parsed = parse(opaque);
+        assert!(parsed.diagnostics().is_empty(), "{opaque}");
+        assert_eq!(
+            parsed.opaque_value_types()[0]
+                .documentation
+                .as_ref()
+                .expect("opaque documentation")
+                .text,
+            "'an opaque'"
+        );
+
+        let parameter = "CREATE SERVER FUNCTION app.overdue (p_before TIMESTAMP DOCUMENTATION 'cutoff') RETURNS BOOL AS SELECT probe.stored FROM app.probe probe;";
+        let parsed = parse(parameter);
+        assert!(parsed.diagnostics().is_empty(), "{parameter}");
+        assert_eq!(
+            parsed.server_functions()[0].parameters[0]
+                .documentation
+                .as_ref()
+                .expect("parameter documentation")
+                .text,
+            "'cutoff'"
+        );
     }
 
     #[test]
