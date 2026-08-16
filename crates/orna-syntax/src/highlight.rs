@@ -88,11 +88,12 @@ pub(crate) fn highlight_tree(tree: &SyntaxTree) -> Vec<HighlightToken> {
 fn merge_adjacent(tokens: Vec<HighlightToken>) -> Vec<HighlightToken> {
     let mut merged: Vec<HighlightToken> = Vec::with_capacity(tokens.len());
     for token in tokens {
-        if let Some(last) = merged.last_mut() {
-            if last.kind == token.kind && last.range.end == token.range.start {
-                last.range.end = token.range.end;
-                continue;
-            }
+        if let Some(last) = merged.last_mut()
+            && last.kind == token.kind
+            && last.range.end == token.range.start
+        {
+            last.range.end = token.range.end;
+            continue;
         }
         merged.push(token);
     }
@@ -307,20 +308,21 @@ fn walk_alter_statement(node: &SyntaxNode<OrnaLanguage>, tokens: &mut Vec<Highli
     let mut role = None;
     let mut rename_field = false;
     for index in 0..children.len() {
-        if let NodeOrToken::Token(token) = &children[index] {
-            if token.kind() == SyntaxKind::Word && is_keyword(token.text()) {
-                if token.text().eq_ignore_ascii_case("TYPE") {
-                    role = Some(NameRole::Type);
-                } else if token.text().eq_ignore_ascii_case("FIELD") {
-                    rename_field = true;
-                    role = Some(NameRole::Property);
-                } else if token.text().eq_ignore_ascii_case("TO") {
-                    role = Some(if rename_field {
-                        NameRole::Property
-                    } else {
-                        NameRole::Type
-                    });
-                }
+        if let NodeOrToken::Token(token) = &children[index]
+            && token.kind() == SyntaxKind::Word
+            && is_keyword(token.text())
+        {
+            if token.text().eq_ignore_ascii_case("TYPE") {
+                role = Some(NameRole::Type);
+            } else if token.text().eq_ignore_ascii_case("FIELD") {
+                rename_field = true;
+                role = Some(NameRole::Property);
+            } else if token.text().eq_ignore_ascii_case("TO") {
+                role = Some(if rename_field {
+                    NameRole::Property
+                } else {
+                    NameRole::Type
+                });
             }
         }
         classify_child(&children, index, &mut role, tokens);
@@ -583,7 +585,7 @@ fn is_operator(text: &str) -> bool {
 }
 
 /// Orna and SQL keywords recognised by the classifier, sorted for binary search.
-const KEYWORDS: &[&str] = &[
+pub const KEYWORDS: &[&str] = &[
     "ADD",
     "ALL",
     "ALTER",
@@ -713,7 +715,7 @@ const KEYWORDS: &[&str] = &[
 ];
 
 /// Standard scalar type names, sorted for binary search.
-const SCALAR_TYPES: &[&str] = &[
+pub const SCALAR_TYPES: &[&str] = &[
     "BIGINT",
     "BOOL",
     "BYTES",
