@@ -20,11 +20,6 @@ use orna_compiler::{
 use orna_core::{
     CatalogueRevisionId, FieldId, FunctionId, InvocationId, ObjectId, PrincipalId, SourceBundleId,
     SourceRevisionId, SourceUnitId, StandardLibraryRevisionId, StateSlotId, TypeId,
-    inspect::{
-        InspectOutcomeKind, InspectPrivilege, InspectSecurityDecisionKind,
-        InspectSecurityDecisionOutcome, InspectSnapshotOptions, InspectTraceEventKind,
-        InspectTracePayload,
-    },
     canonical_hash::{
         catalogue_digest_with_context, source_bundle_digest, source_revision_record_digest,
         source_unit_content_digest, verify_standard_library_snapshot,
@@ -32,6 +27,11 @@ use orna_core::{
     catalogue::{
         CatalogueSnapshot, FunctionReturn, TypeLookupName, ValueTypeKind, ValueTypeMutability,
         ValueTypePersistence,
+    },
+    inspect::{
+        InspectOutcomeKind, InspectPrivilege, InspectSecurityDecisionKind,
+        InspectSecurityDecisionOutcome, InspectSnapshotOptions, InspectTraceEventKind,
+        InspectTracePayload,
     },
     revision::{
         ActiveDatabaseRevision, CatalogueHashContext, CatalogueHashVersion, DefinitionIdentity,
@@ -7019,7 +7019,10 @@ async fn proves_inspect_capture_and_projections_after_sealed_echo() -> TestResul
             InspectPrivilege::OwnInvocation,
             &[InspectPrivilege::OwnInvocation],
         )?;
-        require(nodes == loaded.invocation_nodes(), "invocation_nodes projection drifted")?;
+        require(
+            nodes == loaded.invocation_nodes(),
+            "invocation_nodes projection drifted",
+        )?;
         let calls = kernel.inspect_calls(
             &session,
             &loaded,
@@ -7028,34 +7031,38 @@ async fn proves_inspect_capture_and_projections_after_sealed_echo() -> TestResul
         )?;
         require(calls == loaded.calls(), "calls projection drifted")?;
         require(
-            kernel.inspect_resources(
-                &session,
-                &loaded,
-                InspectPrivilege::OwnInvocation,
-                &[InspectPrivilege::OwnInvocation],
-            )?
-            .is_empty()
-                && kernel.inspect_ui_nodes(
+            kernel
+                .inspect_resources(
                     &session,
                     &loaded,
                     InspectPrivilege::OwnInvocation,
                     &[InspectPrivilege::OwnInvocation],
                 )?
                 .is_empty()
-                && kernel.inspect_presentation_candidates(
-                    &session,
-                    &loaded,
-                    InspectPrivilege::OwnInvocation,
-                    &[InspectPrivilege::OwnInvocation],
-                )?
-                .is_empty()
-                && kernel.inspect_runtime_bindings(
-                    &session,
-                    &loaded,
-                    InspectPrivilege::OwnInvocation,
-                    &[InspectPrivilege::OwnInvocation],
-                )?
-                .is_empty(),
+                && kernel
+                    .inspect_ui_nodes(
+                        &session,
+                        &loaded,
+                        InspectPrivilege::OwnInvocation,
+                        &[InspectPrivilege::OwnInvocation],
+                    )?
+                    .is_empty()
+                && kernel
+                    .inspect_presentation_candidates(
+                        &session,
+                        &loaded,
+                        InspectPrivilege::OwnInvocation,
+                        &[InspectPrivilege::OwnInvocation],
+                    )?
+                    .is_empty()
+                && kernel
+                    .inspect_runtime_bindings(
+                        &session,
+                        &loaded,
+                        InspectPrivilege::OwnInvocation,
+                        &[InspectPrivilege::OwnInvocation],
+                    )?
+                    .is_empty(),
             "the v1-empty projections returned non-empty rows",
         )?;
         let denied = kernel.inspect_invocation_nodes(
@@ -7194,7 +7201,12 @@ async fn proves_inspect_capture_and_projections_after_sealed_echo() -> TestResul
                 && cells[0].key().state_slot() == state_slot
                 && cells[0].value_type() == orna_compiler::STD_INTEGER_TYPE_ID
                 && cells[0].revision() == 1
-                && cells[0].value() == Some(&InvokeValue::new(RuntimeValue::Integer(ECHO_VALUE)).map_err(|error| failure(format!("invoke value construction failed: {error}")))?),
+                && cells[0].value()
+                    == Some(
+                        &InvokeValue::new(RuntimeValue::Integer(ECHO_VALUE)).map_err(|error| {
+                            failure(format!("invoke value construction failed: {error}"))
+                        })?,
+                    ),
             "the state_cells projection did not return the stored cell with values",
         )?;
         let redacted = kernel
@@ -7206,9 +7218,7 @@ async fn proves_inspect_capture_and_projections_after_sealed_echo() -> TestResul
             )
             .await?;
         require(
-            redacted.len() == 1
-                && redacted[0].revision() == 1
-                && redacted[0].value().is_none(),
+            redacted.len() == 1 && redacted[0].revision() == 1 && redacted[0].value().is_none(),
             "the state_cells projection did not redact the stored value",
         )?;
 
