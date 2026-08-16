@@ -199,6 +199,7 @@ fn main() -> ExitCode {
                 arguments.trace,
                 arguments.no_progress,
                 arguments.explain,
+                None,
             );
             match orna_server::run_installed_invoke(request, &mut stdout, &mut stderr) {
                 Ok(orna_server::InstalledInvokeOutcome::Completed) => ExitCode::SUCCESS,

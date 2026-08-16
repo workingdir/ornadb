@@ -36,8 +36,9 @@ use orna_core::{
     invocation::{
         InvocationArgument, InvocationCallerContext, InvocationCallerKind, InvocationClientOffer,
         InvocationEventBody, InvocationOutputRequirement, InvocationOutputTypeSelector,
-        InvocationSinkOffer, InvocationStreamingRequirement, InvocationTarget,
-        InvocationTracePolicy, InvokeRequest, InvokeRequestInput,
+        InvocationRuntimeContract, InvocationRuntimeOffer, InvocationSinkOffer,
+        InvocationStreamingRequirement, InvocationTarget, InvocationTracePolicy, InvokeRequest,
+        InvokeRequestInput,
     },
     invocation_binding::{CliArgumentInput, bind_cli_arguments},
     revision::{ActiveDatabaseRevision, VerifiedStandardLibrarySnapshot},
@@ -66,6 +67,54 @@ const DOCUMENT_SINK_MEDIA_TYPE: &str = "text/plain";
 /// bytes of any byte stream, so the client offers the generic binary type.
 const BYTE_STREAM_SINK_MEDIA_TYPE: &str = "application/octet-stream";
 
+/// The family name of the installed tty runtime (ADR 0063), taken from the
+/// runtime crate so family identity is not duplicated here.
+const TTY_RUNTIME_NAME: &str = orna_runtime_tty::RUNTIME_NAME;
+/// The installed tty runtime version (ADR 0063), taken from the runtime
+/// crate so the offer names the exact linked binary.
+const TTY_RUNTIME_VERSION: &str = orna_runtime_tty::RUNTIME_VERSION;
+
+/// The installed runtime family of one `orna invoke` run (ADR 0063).
+///
+/// Today the only installed family is [`RuntimeFamily::Tty`]; the spec's
+/// other desktop families (`qt`, `gtk`, `imgui`, `swiftui`, `web`) parse to
+/// `None` so an override to one fails closed at the CLI as a usage error.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RuntimeFamily {
+    /// The terminal runtime (`orna-runtime-tty`).
+    Tty,
+    /// A recognised-but-not-installed family (hidden).
+    ///
+    /// `--runtime` parsing never produces this variant — only `tty` parses
+    /// today — so it cannot reach the selection policy through the CLI. It
+    /// exists so the policy's fail-closed arm is expressible and testable:
+    /// when a second family lands as an installed variant, the arm keeps
+    /// rejecting families with no installed runtime.
+    #[doc(hidden)]
+    NotInstalled,
+}
+
+impl RuntimeFamily {
+    /// Parses one `--runtime <family>` override value.
+    ///
+    /// Only installed families parse; an unknown or not-installed family is
+    /// `None`, which the command parser reports as a usage error.
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            TTY_RUNTIME_NAME => Some(RuntimeFamily::Tty),
+            _ => None,
+        }
+    }
+
+    /// Returns the family name.
+    pub fn name(self) -> &'static str {
+        match self {
+            RuntimeFamily::Tty => TTY_RUNTIME_NAME,
+            RuntimeFamily::NotInstalled => "not-installed",
+        }
+    }
+}
+
 /// One complete installed `orna invoke` command request (ADR 0056).
 ///
 /// The command parser (step 4) strips option prefixes and splits
@@ -87,6 +136,9 @@ pub struct InstalledInvokeRequest {
     pub no_progress: bool,
     /// Print the plan instead of dispatching (`--explain`).
     pub explain: bool,
+    /// The `--runtime <family>` override, when present; absent selects the
+    /// deterministic default runtime (ADR 0063).
+    pub runtime: Option<RuntimeFamily>,
 }
 
 impl InstalledInvokeRequest {
@@ -102,6 +154,7 @@ impl InstalledInvokeRequest {
         trace: Option<InvocationTracePolicy>,
         no_progress: bool,
         explain: bool,
+        runtime: Option<RuntimeFamily>,
     ) -> Self {
         Self {
             target,
@@ -110,6 +163,7 @@ impl InstalledInvokeRequest {
             trace,
             no_progress,
             explain,
+            runtime,
         }
     }
 }
@@ -382,19 +436,27 @@ fn resolve_target<'a>(
 /// The caller context is `CliTty` when stdout is a terminal and `CliPipe`
 /// otherwise, with locale and timezone from the environment. The client
 /// offer is protocol major 5 with the two ADR 0057 sink offers
-/// (`std.terminal.Document` and `std.io.ByteStream`), an empty runtime offer
-/// list, and the default limits.
+/// (`std.terminal.Document` and `std.io.ByteStream`), the installed runtime
+/// offer list filtered to the selected family (ADR 0063), and the default
+/// limits.
 fn build_sealed_request(
     request: &InstalledInvokeRequest,
     arguments: Vec<InvocationArgument>,
 ) -> Result<InvokeRequest, InstalledInvokeError> {
     let caller_context = build_caller_context()?;
+    let runtime_offers = match selected_runtime(request)? {
+        Some(RuntimeFamily::Tty) => installed_runtime_offers(),
+        // A future selection path could select a family with no installed
+        // runtime; the sealed request then carries no runtime offer. Today
+        // every request selects the tty runtime.
+        _ => Vec::new(),
+    };
     let client_offer = InvocationClientOffer::new(
         CONNECTION_PROTOCOL_MAJOR,
         caller_context.locale(),
         caller_context.timezone(),
         client_sink_offers()?,
-        Vec::new(),
+        runtime_offers,
         MAXIMUM_FRAME_SIZE,
         MAXIMUM_ARTIFACT_SIZE,
         None,
@@ -427,14 +489,61 @@ fn build_sealed_request(
     .map_err(|error| usage_error(format!("the sealed request is invalid: {error}")))
 }
 
+/// Builds the runtime offers for the installed tty runtime (ADR 0063).
+///
+/// The one offer names the two sink types the tty runtime renders
+/// (`std.terminal.Document` and `std.io.ByteStream`), carries no UI
+/// contract surface yet, and marks the linked runtime trusted with the
+/// default preference rank. The construction cannot fail: the name and
+/// version are non-empty and the consumed descriptors are the same
+/// standard named descriptors the sink offers already carry.
+fn installed_runtime_offers() -> Vec<InvocationRuntimeOffer> {
+    vec![
+        InvocationRuntimeOffer::new(
+            TTY_RUNTIME_NAME,
+            TTY_RUNTIME_VERSION,
+            [
+                TypeDescriptor::named(STD_TERMINAL_DOCUMENT_TYPE_ID),
+                TypeDescriptor::named(STD_IO_BYTE_STREAM_TYPE_ID),
+            ],
+            Vec::<InvocationRuntimeContract>::new(),
+            0,
+            true,
+            None,
+        )
+        .expect("the tty runtime offer is structurally valid"),
+    ]
+}
+
+/// Selects the runtime family for one invoke request (ADR 0063).
+///
+/// The default (no `--runtime` override) is the tty runtime, the only
+/// runtime installed in this workspace, and an explicit `tty` override
+/// selects the same. Any other family — a future desktop family such as
+/// `qt`, `gtk`, or `imgui` — fails closed as a usage error because no such
+/// runtime is installed. Platform preference defaults (Linux desktop
+/// gtk > qt > imgui) are a later slice that depends on local configuration;
+/// this policy is deliberately family-explicit.
+fn selected_runtime(
+    request: &InstalledInvokeRequest,
+) -> Result<Option<RuntimeFamily>, InstalledInvokeError> {
+    match request.runtime {
+        None => Ok(Some(RuntimeFamily::Tty)),
+        Some(RuntimeFamily::Tty) => Ok(Some(RuntimeFamily::Tty)),
+        Some(other) => Err(usage_error(format!(
+            "the {} runtime family is not installed",
+            other.name()
+        ))),
+    }
+}
+
 /// Builds the two sink offers the installed client consumes (ADR 0057 step 9).
 ///
 /// The offer names `std.terminal.Document` and `std.io.ByteStream` so the
 /// sealed route's presentation planning sees the sinks the client can
 /// consume. Neither sink streams in this slice, both carry the default
-/// preference rank, and the runtime-offer list stays empty: runtime
-/// selection is the client's own deterministic decision, not a
-/// server-visible negotiation.
+/// preference rank, and runtime selection stays the client's own
+/// deterministic decision, not a server-visible negotiation.
 fn client_sink_offers() -> Result<Vec<InvocationSinkOffer>, InstalledInvokeError> {
     let document = InvocationSinkOffer::new(
         TypeDescriptor::named(STD_TERMINAL_DOCUMENT_TYPE_ID),
@@ -683,6 +792,11 @@ fn render_value(
 /// whether stdout is a terminal or piped to a file. The stdout-is-terminal
 /// fact still feeds the caller context (`CliTty` versus `CliPipe`); it does
 /// not gate sink consumption.
+///
+/// Seam (ADR 0063): this mapping is the tty family's sink map and stays
+/// unconditional while tty is the only installed runtime. When a second
+/// family lands, the renderer gains the selected-family parameter and this
+/// function becomes the selected family's sink map.
 fn select_runtime_sink(opaque_type: TypeId) -> Option<orna_runtime_tty::Sink> {
     match opaque_type {
         STD_TERMINAL_DOCUMENT_TYPE_ID => Some(orna_runtime_tty::Sink::Document),
@@ -762,7 +876,7 @@ fn render_explain(
         request.client_offer().locale(),
         request.client_offer().timezone(),
         request.client_offer().sink_offers().len(),
-        request.client_offer().runtime_offers().len(),
+        render_runtime_offers(request.client_offer().runtime_offers()),
         request.client_offer().maximum_frame_size(),
         request.client_offer().maximum_artifact_size(),
     ));
@@ -776,6 +890,19 @@ fn render_explain(
         .write_all(plan.as_bytes())
         .map_err(presentation_error)?;
     Ok(())
+}
+
+/// Renders the offered runtimes as `name@version` entries, or `none`.
+fn render_runtime_offers(offers: &[InvocationRuntimeOffer]) -> String {
+    let mut rendered = offers
+        .iter()
+        .map(|offer| format!("{}@{}", offer.name(), offer.version()))
+        .collect::<Vec<_>>()
+        .join(", ");
+    if rendered.is_empty() {
+        rendered.push_str("none");
+    }
+    rendered
 }
 
 /// Renders one resolved type in the ADR 0056 conversion-table spelling.
@@ -1158,7 +1285,7 @@ mod tests {
     }
 
     #[test]
-    fn the_client_offer_names_the_two_sinks() {
+    fn the_client_offer_names_the_tty_runtime() {
         let request = InstalledInvokeRequest::new(
             InvocationTarget::qualified_name(
                 QualifiedSemanticName::new(["std", "invoke", "echo"]).expect("qualified name"),
@@ -1169,6 +1296,7 @@ mod tests {
             None,
             false,
             false,
+            None,
         );
         let sealed = build_sealed_request(&request, Vec::new()).expect("the sealed request builds");
         let offer = sealed.client_offer();
@@ -1191,7 +1319,24 @@ mod tests {
             &[BYTE_STREAM_SINK_MEDIA_TYPE.to_owned()]
         );
         assert!(!offer.sink_offers()[1].streaming());
-        assert!(offer.runtime_offers().is_empty());
+        // The installed tty runtime offer survives the sealed request
+        // construction (ADR 0063).
+        assert_eq!(offer.runtime_offers().len(), 1);
+        let runtime = &offer.runtime_offers()[0];
+        assert_eq!(runtime.name(), "tty");
+        assert_eq!(runtime.version(), orna_runtime_tty::RUNTIME_VERSION);
+        assert!(!runtime.version().is_empty());
+        assert_eq!(
+            runtime.consumed_descriptors(),
+            &[
+                TypeDescriptor::named(STD_TERMINAL_DOCUMENT_TYPE_ID),
+                TypeDescriptor::named(STD_IO_BYTE_STREAM_TYPE_ID),
+            ]
+        );
+        assert!(runtime.contracts().is_empty());
+        assert_eq!(runtime.preference_rank(), 0);
+        assert!(runtime.trusted());
+        assert!(runtime.limits().is_none());
     }
 
     fn echo_definition() -> FunctionDefinition {
@@ -1231,7 +1376,7 @@ mod tests {
             "en-GB",
             "UTC",
             Vec::new(),
-            Vec::new(),
+            installed_runtime_offers(),
             MAXIMUM_FRAME_SIZE,
             MAXIMUM_ARTIFACT_SIZE,
             None,
@@ -1279,9 +1424,9 @@ mod tests {
         assert!(plan.contains("request:"));
         assert!(plan.contains("target: std.invoke.echo"));
         assert!(plan.contains("caller: CliPipe"));
-        assert!(
-            plan.contains("offer: protocol 5, locale en-GB, timezone UTC, sinks 0, runtimes 0")
-        );
+        assert!(plan.contains(
+            "offer: protocol 5, locale en-GB, timezone UTC, sinks 0, runtimes tty@0.1.0"
+        ));
         assert!(plan.contains("trace: Off"));
         assert!(plan.contains("output: none"));
     }
