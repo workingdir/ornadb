@@ -177,6 +177,83 @@ impl PostgresKernel {
         finish_inspect_session(operation, database_session.shutdown().await)
     }
 
+    /// Resolves the most recent inspection epoch captured for one invocation.
+    ///
+    /// The lookup returns the latest epoch for the invocation (the most
+    /// recently captured, breaking ties by epoch identity order) or `None`
+    /// when the invocation has no captured epoch. The result is gated by the
+    /// INSPECT privilege ladder against the resolved epoch owner, so a
+    /// caller with no privilege that reaches the epoch's scope fails closed
+    /// with the closed denial reason and no epoch identity is disclosed.
+    /// The sealed dispatch auto-captures one structural epoch for every
+    /// completed invocation, so a completed invocation normally resolves.
+    pub async fn find_latest_inspect_epoch(
+        &self,
+        authenticated_session: &AuthenticatedSession,
+        invocation: InvocationId,
+    ) -> Result<Option<InspectEpochId>, PostgresKernelError> {
+        let mut database_session = self.open().await?;
+        let operation = async {
+            let transaction = database_session
+                .client
+                .build_transaction()
+                .isolation_level(IsolationLevel::RepeatableRead)
+                .read_only(true)
+                .start()
+                .await
+                .map_err(PostgresKernelError::Database)?;
+            require_current_migrations(&transaction).await?;
+            let row = transaction
+                .query_opt(
+                    "SELECT epoch_id, owner_principal_id
+                     FROM _orna_kernel.inspect_snapshots
+                     WHERE invocation_id = $1
+                     ORDER BY recorded_at DESC, epoch_id DESC
+                     LIMIT 1",
+                    &[&invocation.to_bytes().to_vec()],
+                )
+                .await
+                .map_err(PostgresKernelError::Database)?;
+            let Some(row) = row else {
+                transaction
+                    .commit()
+                    .await
+                    .map_err(PostgresKernelError::Database)?;
+                return Ok(None);
+            };
+            let epoch_id = InspectEpochId::from_bytes(inspect_id(
+                INSPECT_SNAPSHOT_RELATION,
+                &row,
+                invocation.canonical().as_str(),
+                "epoch_id",
+            )?);
+            let owner = PrincipalId::from_bytes(inspect_id(
+                INSPECT_SNAPSHOT_RELATION,
+                &row,
+                invocation.canonical().as_str(),
+                "owner_principal_id",
+            )?);
+            match authorise_inspect(
+                authenticated_session.principal(),
+                InspectPrivilege::OwnInvocation,
+                Some(owner),
+                &[InspectPrivilege::OwnInvocation],
+            ) {
+                InspectDecision::Allowed { .. } => {}
+                InspectDecision::Denied(reason) => {
+                    return Err(PostgresKernelError::InspectDenied { reason });
+                }
+            }
+            transaction
+                .commit()
+                .await
+                .map_err(PostgresKernelError::Database)?;
+            Ok(Some(epoch_id))
+        }
+        .await;
+        finish_inspect_session(operation, database_session.shutdown().await)
+    }
+
     /// Returns the `invocation_nodes` projection over one epoch.
     ///
     /// The projection is gated by the INSPECT privilege ladder; a denied
