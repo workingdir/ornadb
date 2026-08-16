@@ -19,7 +19,7 @@ pub use embedded::{
 };
 pub use invoke::{
     InstalledInvokeError, InstalledInvokeErrorKind, InstalledInvokeOutcome, InstalledInvokeRequest,
-    run_installed_invoke,
+    run_installed_invoke, run_invoke_with_kernel,
 };
 pub use local_auth::{LocalAuthenticationError, authenticate_local_stream};
 pub use raw_call::{

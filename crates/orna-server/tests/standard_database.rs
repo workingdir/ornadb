@@ -28,6 +28,7 @@ use orna_core::{
         InvocationTarget as InvocationRequestTarget, InvocationTracePolicy, InvokeRequest,
         InvokeRequestInput, InvokeValue,
     },
+    invocation_binding::CliArgumentInput,
     revision::{
         DefinitionIdentity, DefinitionReference, DefinitionReferenceKind,
         DefinitionReferenceTarget, DeployableRevision, DeployableRevisionContent,
@@ -54,12 +55,14 @@ use orna_protocol::{
     ServerAction, ServerFrame, decode_active_server_frame, decode_constructed_server_frame,
     decode_invocation_event_batch, decode_registered_server_frame, decode_server_frame,
     encode_active_client_frame, encode_active_server_frame, encode_client_frame,
-    encode_constructed_client_frame, encode_invocation_event_batch, encode_invoke_request,
-    encode_registered_client_frame,
+    encode_constructed_client_frame, encode_constructed_value, encode_invocation_event_batch,
+    encode_invoke_request, encode_registered_client_frame,
 };
 use orna_server::{
+    InstalledInvokeError, InstalledInvokeErrorKind, InstalledInvokeOutcome, InstalledInvokeRequest,
     LocalAuthenticationError, LocalRawSocketError, LocalRawSocketResources,
-    OpenStandardDatabaseError, RawClientDispatch, open_standard_database, serve_local_raw_stream,
+    OpenStandardDatabaseError, RawClientDispatch, open_standard_database, run_invoke_with_kernel,
+    serve_local_raw_stream,
 };
 use orna_standard::{
     BOOLEAN_TYPE_ID, OPAQUE_TOKEN_TYPE_ID, registered_opaque_codecs,
@@ -1247,6 +1250,455 @@ async fn proves_standard_invocation_dogfooding_through_sealed_sys_invoke() -> Te
         require_no_database_sessions(&database).await
     })
     .await
+}
+
+/// Proves the installed `orna invoke` command path end to end (ADR 0056 step
+/// 5) against the Compose PostgreSQL kernel.
+///
+/// The host seam [`orna_server::run_invoke_with_kernel`] runs the exact
+/// public host flow — reflect, bind, build the sealed request, authenticate
+/// the local peer UID, dispatch through `sys.invoke`, and render — with the
+/// test kernel injected in place of the fixed private instance. The command
+/// parser is unit-covered; this proof drives the complete command path with
+/// the request structs the parser produces.
+///
+/// The proof asserts:
+/// - name invocation (`std.invoke.echo`, parameter name `p_value`) and
+///   identity invocation (canonical `FunctionId ...10` / `ParameterId ...10`)
+///   both complete, with stdout carrying exactly the canonical ORV5 value
+///   record and stderr carrying the progress diagnostics;
+/// - `--no-progress` keeps the value on stdout and writes no progress lines;
+/// - usage and conversion failures (unknown parameter, invalid value,
+///   unknown flag, unresolvable target, extra positional) return the exit-2
+///   usage class without executing any artifact and without appending audit
+///   evidence;
+/// - `--explain` prints the plan and neither dispatches nor audits;
+/// - revoking the EXECUTE grant returns the denied outcome (exit 4) with one
+///   denied decision appended and one denied invocation-audit row.
+#[tokio::test]
+#[ignore = "requires the Compose PostgreSQL development service"]
+async fn proves_installed_orna_invoke_end_to_end_against_postgres() -> TestResult<()> {
+    const ECHO_BY_NAME: i32 = 41;
+    const ECHO_BY_IDENTITY: i32 = 42;
+
+    with_test_database(|database| async move {
+        // The host authenticates the invoking process's effective UID, so the
+        // security snapshot must map that exact UID to the granted principal.
+        let uid = nix::unistd::geteuid().as_raw();
+
+        let kernel = kernel(&database)?;
+        kernel.bootstrap().await?;
+        let empty = kernel.recover().await?;
+        let upgrade = orna_standard::prepare_standard_upgrade_v1_to_v2(&empty)?;
+        let active = kernel.apply_standard_upgrade(&upgrade).await?;
+        let standard = active.catalogue_hash_context().standard().ok_or_else(|| {
+            failure("the V1-to-V2 upgrade did not pin a verified standard snapshot")
+        })?;
+        require(
+            standard.revision() == orna_standard::STANDARD_LIBRARY_V2_REVISION_ID
+                && standard
+                    .catalogue()
+                    .function_by_id(STD_INVOKE_ECHO_FUNCTION_ID)
+                    .is_some(),
+            "the installed V2 snapshot did not retain std.invoke.echo",
+        )?;
+        let pair = active.pair();
+        let standard_revision = standard.revision();
+        let registry = orna_standard::registered_opaque_codecs(standard)?;
+
+        // Grant EXECUTE on std.invoke.echo to the local peer principal and
+        // map the test process UID to it, exactly as the installed instance
+        // would for the invoking user.
+        let security = SecuritySnapshot::new_with_function_targets_and_local_peer_credentials(
+            pair,
+            vec![SecurityFunctionTarget::verified_standard(
+                STD_INVOKE_ECHO_FUNCTION_ID,
+                standard_revision,
+                STD_INVOKE_ECHO_FUNCTION_REVISION_ID,
+            )],
+            vec![Principal::new(
+                RAW_CLIENT_USER,
+                PrincipalKind::User,
+                PrincipalStatus::Active,
+            )],
+            vec![],
+            vec![ExecuteGrant::new(
+                RAW_CLIENT_USER,
+                STD_INVOKE_ECHO_FUNCTION_ID,
+            )],
+            vec![LocalPeerCredential::new(uid, RAW_CLIENT_USER)],
+        )?;
+        kernel.replace_security_snapshot(&security).await?;
+
+        let security_events_before = kernel.recover_security_audit_events().await?;
+        let invocation_rows_before = invocation_audit_count(&database).await?;
+
+        // One canonical value record: the ORV5 constructed encoding followed
+        // by the newline the renderer writes after every stdout value.
+        fn canonical_integer_record(
+            active: &orna_core::revision::ActiveDatabaseRevision,
+            registry: &orna_core::value::OpaqueCodecRegistry,
+            value: i32,
+        ) -> TestResult<Vec<u8>> {
+            let mut record =
+                encode_constructed_value(active, registry, &RuntimeValue::Integer(value))?;
+            record.push(b'\n');
+            Ok(record)
+        }
+
+        // Invoke by qualified name and parameter name (`std.invoke.echo` with
+        // `--arg p_value=41`).
+        let by_name = installed_invoke_request(
+            InvocationRequestTarget::qualified_name(QualifiedSemanticName::new([
+                "std", "invoke", "echo",
+            ])?)?,
+            vec![CliArgumentInput::Canonical {
+                parameter: "p_value".to_owned(),
+                value: ECHO_BY_NAME.to_string(),
+            }],
+            false,
+            false,
+        );
+        let (name_outcome, name_stdout, name_stderr) =
+            installed_invoke_run(&database, by_name).await?;
+        require(
+            name_outcome == Ok(InstalledInvokeOutcome::Completed),
+            "the name-addressed installed invoke did not complete",
+        )?;
+        require(
+            name_stdout == canonical_integer_record(&active, &registry, ECHO_BY_NAME)?,
+            "the name-addressed stdout did not carry exactly the canonical value record",
+        )?;
+        let name_stderr = String::from_utf8(name_stderr)
+            .map_err(|_| failure("the name-addressed stderr was not UTF-8 text"))?;
+        require(
+            name_stderr.contains("orna: invoke: invocation started")
+                && name_stderr.contains("orna: invoke: invocation completed in"),
+            "the name-addressed stderr did not carry the progress diagnostics",
+        )?;
+
+        // Invoke by the canonical function and parameter identities
+        // (`FunctionId ...10` with `--arg parameter:<...10>=42`).
+        let by_identity = installed_invoke_request(
+            InvocationRequestTarget::function_id(STD_INVOKE_ECHO_FUNCTION_ID),
+            vec![CliArgumentInput::Canonical {
+                parameter: STD_INVOKE_ECHO_PARAMETER_ID.canonical(),
+                value: ECHO_BY_IDENTITY.to_string(),
+            }],
+            false,
+            false,
+        );
+        let (identity_outcome, identity_stdout, identity_stderr) =
+            installed_invoke_run(&database, by_identity).await?;
+        require(
+            identity_outcome == Ok(InstalledInvokeOutcome::Completed),
+            "the identity-addressed installed invoke did not complete",
+        )?;
+        require(
+            identity_stdout == canonical_integer_record(&active, &registry, ECHO_BY_IDENTITY)?,
+            "the identity-addressed stdout did not carry exactly the canonical value record",
+        )?;
+        let identity_stderr = String::from_utf8(identity_stderr)
+            .map_err(|_| failure("the identity-addressed stderr was not UTF-8 text"))?;
+        require(
+            identity_stderr.contains("orna: invoke: invocation started")
+                && identity_stderr.contains("orna: invoke: invocation completed in"),
+            "the identity-addressed stderr did not carry the progress diagnostics",
+        )?;
+
+        // `--no-progress` keeps the value on stdout and suppresses every
+        // progress diagnostic.
+        let no_progress = installed_invoke_request(
+            InvocationRequestTarget::qualified_name(QualifiedSemanticName::new([
+                "std", "invoke", "echo",
+            ])?)?,
+            vec![CliArgumentInput::Canonical {
+                parameter: "p_value".to_owned(),
+                value: ECHO_BY_NAME.to_string(),
+            }],
+            true,
+            false,
+        );
+        let (quiet_outcome, quiet_stdout, quiet_stderr) =
+            installed_invoke_run(&database, no_progress).await?;
+        require(
+            quiet_outcome == Ok(InstalledInvokeOutcome::Completed),
+            "the --no-progress installed invoke did not complete",
+        )?;
+        require(
+            quiet_stdout == canonical_integer_record(&active, &registry, ECHO_BY_NAME)?,
+            "the --no-progress stdout did not carry exactly the canonical value record",
+        )?;
+        require(
+            quiet_stderr.is_empty(),
+            "the --no-progress stderr carried progress diagnostics",
+        )?;
+
+        // Three completed invocations appended three authentication-allowed
+        // and three EXECUTE-allowed security events, plus three allowed
+        // invocation-audit rows linking the exact historical RevisionPair.
+        let security_events_after_invocations =
+            kernel.recover_security_audit_events().await?;
+        require(
+            security_events_after_invocations.len() == security_events_before.len() + 6,
+            "the three completed invocations did not append exactly six security events",
+        )?;
+        require(
+            security_events_after_invocations[security_events_before.len()..]
+                .iter()
+                .filter(|event| event.decision().kind() == SecurityAuditKind::Execute)
+                .all(|event| {
+                    event.decision().outcome() == SecurityAuditOutcome::Allowed
+                        && event.decision().session_principal() == Some(RAW_CLIENT_USER)
+                        && event.decision().target()
+                            == Some(InvocationTarget::new(
+                                STD_INVOKE_ECHO_FUNCTION_ID,
+                                pair,
+                            ))
+                }),
+            "the completed invocations did not append three allowed EXECUTE decisions",
+        )?;
+        require(
+            invocation_audit_count(&database).await? == invocation_rows_before + 3,
+            "the completed invocations did not append exactly three invocation-audit rows",
+        )?;
+        let completed_rows = invocation_audit_rows(&database).await?;
+        require(
+            completed_rows.len() == invocation_rows_before as usize + 3
+                && completed_rows[invocation_rows_before as usize..]
+                    .iter()
+                    .all(|row| {
+                        row.outcome == "allowed"
+                            && row.function == STD_INVOKE_ECHO_FUNCTION_ID.to_bytes().to_vec()
+                            && row.source == pair.source().to_bytes().to_vec()
+                            && row.catalogue == pair.catalogue().to_bytes().to_vec()
+                            && row.security_event.is_some()
+                    }),
+            "the completed invocations did not record allowed invocation-audit rows for std.invoke.echo",
+        )?;
+
+        // Usage and conversion failures return the exit-2 usage class without
+        // dispatching and without appending any audit evidence: a bad `--arg`
+        // (unknown parameter), an invalid value, an unknown flag, a target
+        // absent from both catalogues (the host-level missing-target shape;
+        // absent-target parsing is unit-covered), and an extra positional
+        // argument.
+        let usage_shapes = [
+            vec![CliArgumentInput::Canonical {
+                parameter: "p_bogus".to_owned(),
+                value: "1".to_owned(),
+            }],
+            vec![CliArgumentInput::Canonical {
+                parameter: "p_value".to_owned(),
+                value: "not-an-int".to_owned(),
+            }],
+            vec![CliArgumentInput::Friendly {
+                name: "bogus".to_owned(),
+                value: "x".to_owned(),
+            }],
+            vec![CliArgumentInput::Positional("extra".to_owned())],
+        ];
+        for arguments in usage_shapes {
+            let request = installed_invoke_request(
+                InvocationRequestTarget::qualified_name(QualifiedSemanticName::new([
+                    "std", "invoke", "echo",
+                ])?)?,
+                arguments,
+                false,
+                false,
+            );
+            let (outcome, stdout, stderr) = installed_invoke_run(&database, request).await?;
+            require(
+                matches!(outcome, Err(error) if error.kind() == InstalledInvokeErrorKind::Usage),
+                "a usage failure did not return the exit-2 usage class",
+            )?;
+            require(
+                stdout.is_empty() && stderr.is_empty(),
+                "a usage failure wrote to a command channel before failing",
+            )?;
+        }
+        let missing_target = installed_invoke_request(
+            InvocationRequestTarget::qualified_name(QualifiedSemanticName::new([
+                "std", "invoke", "missing",
+            ])?)?,
+            vec![CliArgumentInput::Canonical {
+                parameter: "p_value".to_owned(),
+                value: "1".to_owned(),
+            }],
+            false,
+            false,
+        );
+        let (missing_outcome, missing_stdout, missing_stderr) =
+            installed_invoke_run(&database, missing_target).await?;
+        require(
+            matches!(missing_outcome, Err(error) if error.kind() == InstalledInvokeErrorKind::Usage),
+            "the unresolvable target did not return the exit-2 usage class",
+        )?;
+        require(
+            missing_stdout.is_empty() && missing_stderr.is_empty(),
+            "the unresolvable target wrote to a command channel before failing",
+        )?;
+        require(
+            kernel.recover_security_audit_events().await?.len()
+                == security_events_after_invocations.len()
+                && invocation_audit_count(&database).await? == invocation_rows_before + 3,
+            "a usage failure dispatched an artifact or appended audit evidence",
+        )?;
+
+        // `--explain` prints the resolution and sealed request plan to stdout,
+        // exits success, and neither dispatches nor audits.
+        let explain = installed_invoke_request(
+            InvocationRequestTarget::qualified_name(QualifiedSemanticName::new([
+                "std", "invoke", "echo",
+            ])?)?,
+            vec![CliArgumentInput::Canonical {
+                parameter: "p_value".to_owned(),
+                value: "41".to_owned(),
+            }],
+            false,
+            true,
+        );
+        let (explain_outcome, explain_stdout, explain_stderr) =
+            installed_invoke_run(&database, explain).await?;
+        require(
+            explain_outcome == Ok(InstalledInvokeOutcome::Completed),
+            "the --explain installed invoke did not exit success",
+        )?;
+        let plan = String::from_utf8(explain_stdout)
+            .map_err(|_| failure("the --explain plan was not UTF-8 text"))?;
+        require(
+            plan.contains("target: std.invoke.echo (function:")
+                && plan.contains("revision:")
+                && plan.contains("(pinned to verified standard")
+                && plan.contains("domain: Server")
+                && plan.contains("p_value (parameter:")
+                && plan.contains(": INTEGER")
+                && plan.contains("return: INTEGER")
+                && plan.contains("request:")
+                && plan.contains("caller:")
+                && plan.contains("offer: protocol 5")
+                && plan.contains("trace: Off")
+                && plan.contains("output: none"),
+            "the --explain plan did not carry the resolution and sealed request facts",
+        )?;
+        require(
+            explain_stderr.is_empty(),
+            "the --explain run wrote to stderr",
+        )?;
+        require(
+            kernel.recover_security_audit_events().await?.len()
+                == security_events_after_invocations.len()
+                && invocation_audit_count(&database).await? == invocation_rows_before + 3,
+            "--explain dispatched an artifact or appended audit evidence",
+        )?;
+
+        // Revoke the EXECUTE grant: the same command now returns the denied
+        // outcome (exit 4) with one denied decision and one denied
+        // invocation-audit row appended.
+        let revoked = SecuritySnapshot::new_with_function_targets_and_local_peer_credentials(
+            pair,
+            vec![SecurityFunctionTarget::verified_standard(
+                STD_INVOKE_ECHO_FUNCTION_ID,
+                standard_revision,
+                STD_INVOKE_ECHO_FUNCTION_REVISION_ID,
+            )],
+            vec![Principal::new(
+                RAW_CLIENT_USER,
+                PrincipalKind::User,
+                PrincipalStatus::Active,
+            )],
+            vec![],
+            vec![],
+            vec![LocalPeerCredential::new(uid, RAW_CLIENT_USER)],
+        )?;
+        kernel.replace_security_snapshot(&revoked).await?;
+        let denied_request = installed_invoke_request(
+            InvocationRequestTarget::qualified_name(QualifiedSemanticName::new([
+                "std", "invoke", "echo",
+            ])?)?,
+            vec![CliArgumentInput::Canonical {
+                parameter: "p_value".to_owned(),
+                value: "7".to_owned(),
+            }],
+            false,
+            false,
+        );
+        let (denied_outcome, denied_stdout, denied_stderr) =
+            installed_invoke_run(&database, denied_request).await?;
+        require(
+            denied_outcome == Ok(InstalledInvokeOutcome::Denied),
+            "the revoked installed invoke did not return the exit-4 denied outcome",
+        )?;
+        require(
+            denied_stdout.is_empty(),
+            "the denied installed invoke wrote a value to stdout",
+        )?;
+        require(
+            String::from_utf8(denied_stderr)
+                .map_err(|_| failure("the denied stderr was not UTF-8 text"))?
+                == "orna: invoke: invocation denied\n",
+            "the denied installed invoke did not print exactly one redacted denial line",
+        )?;
+        let security_events_after_denied = kernel.recover_security_audit_events().await?;
+        require(
+            security_events_after_denied.len() == security_events_after_invocations.len() + 2
+                && security_events_after_denied
+                    .last()
+                    .map(|event| event.decision().outcome())
+                    == Some(SecurityAuditOutcome::Denied)
+                && security_events_after_denied
+                    .last()
+                    .map(|event| event.decision().kind())
+                    == Some(SecurityAuditKind::Execute)
+                && security_events_after_denied
+                    .last()
+                    .map(|event| event.decision().target())
+                    == Some(Some(InvocationTarget::new(STD_INVOKE_ECHO_FUNCTION_ID, pair))),
+            "the denied invoke did not append exactly one denied EXECUTE decision",
+        )?;
+        let denied_rows = invocation_audit_rows(&database).await?;
+        require(
+            denied_rows.len() == invocation_rows_before as usize + 4
+                && denied_rows.last().map(|row| row.outcome.as_str()) == Some("denied")
+                && denied_rows
+                    .last()
+                    .map(|row| row.function == STD_INVOKE_ECHO_FUNCTION_ID.to_bytes().to_vec())
+                    == Some(true),
+            "the denied invoke did not append one denied invocation-audit row",
+        )?;
+
+        require_no_database_sessions(&database).await
+    })
+    .await
+}
+
+/// Builds one installed `orna invoke` command request the way the command
+/// parser would after stripping option prefixes (ADR 0056 step 4).
+fn installed_invoke_request(
+    target: InvocationRequestTarget,
+    arguments: Vec<CliArgumentInput>,
+    no_progress: bool,
+    explain: bool,
+) -> InstalledInvokeRequest {
+    InstalledInvokeRequest::new(target, arguments, None, None, no_progress, explain)
+}
+
+/// Runs one installed `orna invoke` command through the exact host flow
+/// against the Compose PostgreSQL test kernel, returning the outcome or
+/// failure class plus the exact bytes each channel received.
+async fn installed_invoke_run(
+    database: &TestDatabase,
+    request: InstalledInvokeRequest,
+) -> TestResult<(
+    Result<InstalledInvokeOutcome, InstalledInvokeError>,
+    Vec<u8>,
+    Vec<u8>,
+)> {
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    let outcome =
+        run_invoke_with_kernel(kernel(database)?, request, &mut stdout, &mut stderr).await;
+    Ok((outcome, stdout, stderr))
 }
 
 #[tokio::test]
