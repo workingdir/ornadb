@@ -81,13 +81,6 @@ editors/emacs/                Emacs eglot integration
 
 ### Visual Studio Code
 
-The extension contributes the **Orna File Icons** theme, which gives
-`.orna` files an invocation-graph mark in the explorer. Enable it once
-in File > Preferences > Theme > File Icon Theme, or add
-`"workbench.iconTheme": "orna-file-icons"` to settings. The theme
-extends the default Seti theme, so every other file keeps its usual
-icon. The same artwork is the extension's marketplace icon.
-
 Open the `editors/vscode/` folder in VS Code and run the extension from
 the Run view, or package it:
 
