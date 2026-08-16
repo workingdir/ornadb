@@ -1262,13 +1262,7 @@ fn retained_standard_library_v2_snapshot_from_source(
 pub fn registered_opaque_codecs(
     standard: &VerifiedStandardLibrarySnapshot,
 ) -> Result<OpaqueCodecRegistry, RegisteredOpaqueCodecsError> {
-    if standard.revision() != STANDARD_LIBRARY_REVISION_ID
-        || standard.catalogue().revision() != STANDARD_CATALOGUE_REVISION_ID
-        || standard.source().bundle() != STANDARD_SOURCE_BUNDLE_ID
-        || standard.source().id() != STANDARD_SOURCE_REVISION_ID
-        || standard.source().revision_hash() != ACCEPTED_SOURCE_REVISION_DIGEST
-        || standard.digest() != ACCEPTED_STANDARD_LIBRARY_DIGEST
-    {
+    if !accepted_standard_snapshot(standard) {
         return Err(RegisteredOpaqueCodecsError::UnacceptedStandardSnapshot);
     }
     let registration = OpaqueCodecRegistration::fixed_length_identity(
@@ -1284,6 +1278,27 @@ pub fn registered_opaque_codecs(
     .map_err(|source| RegisteredOpaqueCodecsError::Registry { source })?;
     OpaqueCodecRegistry::new(standard, [registration])
         .map_err(|source| RegisteredOpaqueCodecsError::Registry { source })
+}
+
+/// Returns whether one verified snapshot is exactly the accepted version-one
+/// or version-two standard library (ADR 0055).
+///
+/// Version two retains the version-one types byte-for-byte and adds no new
+/// opaque type or codec, so both accepted snapshots bind the same opaque-token
+/// codec.
+fn accepted_standard_snapshot(standard: &VerifiedStandardLibrarySnapshot) -> bool {
+    (standard.revision() == STANDARD_LIBRARY_REVISION_ID
+        && standard.catalogue().revision() == STANDARD_CATALOGUE_REVISION_ID
+        && standard.source().bundle() == STANDARD_SOURCE_BUNDLE_ID
+        && standard.source().id() == STANDARD_SOURCE_REVISION_ID
+        && standard.source().revision_hash() == ACCEPTED_SOURCE_REVISION_DIGEST
+        && standard.digest() == ACCEPTED_STANDARD_LIBRARY_DIGEST)
+        || (standard.revision() == STANDARD_LIBRARY_V2_REVISION_ID
+            && standard.catalogue().revision() == STANDARD_CATALOGUE_V2_REVISION_ID
+            && standard.source().bundle() == STANDARD_SOURCE_V2_BUNDLE_ID
+            && standard.source().id() == STANDARD_SOURCE_V2_REVISION_ID
+            && standard.source().revision_hash() == ACCEPTED_V2_SOURCE_REVISION_DIGEST
+            && standard.digest() == ACCEPTED_V2_STANDARD_LIBRARY_DIGEST)
 }
 
 /// An error from binding checked-in opaque codecs to a standard snapshot.

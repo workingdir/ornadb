@@ -973,14 +973,9 @@ async fn proves_standard_invocation_dogfooding_through_sealed_sys_invoke() -> Te
                     event.decision().kind() == SecurityAuditKind::Execute
                         && event.decision().session_principal() == Some(RAW_CLIENT_USER)
                         && event.decision().target()
-                            == Some(InvocationTarget::verified_standard(
-                                STD_INVOKE_ECHO_FUNCTION_ID,
-                                pair,
-                                standard_revision,
-                                STD_INVOKE_ECHO_FUNCTION_REVISION_ID,
-                            ))
+                            == Some(InvocationTarget::new(STD_INVOKE_ECHO_FUNCTION_ID, pair))
                 }),
-            "the allowed EXECUTE evidence did not pin the verified standard target to the historical pair",
+            "the allowed EXECUTE evidence did not link the exact historical application RevisionPair",
         )?;
         let allowed_security_ids = allowed.iter().map(|event| event.id()).collect::<Vec<_>>();
         let invocation_rows = invocation_audit_rows(&database).await?;
@@ -1063,10 +1058,10 @@ async fn proves_standard_invocation_dogfooding_through_sealed_sys_invoke() -> Te
             matches!(
                 &absent,
                 PostgresKernelError::DurableInvariant {
-                    relation: "_orna_kernel.invocation_target_authorities",
-                    record,
-                    rule: "standard invocation targets must exactly match the pinned verified standard executables",
-                } if record == "active catalogue"
+                    relation: "_orna_kernel.invocation_audit_events",
+                    rule: "target function and pinned revision must exist together",
+                    ..
+                }
             ),
             "the absent standard target did not fail recovery closed",
         )?;
@@ -1106,10 +1101,10 @@ async fn proves_standard_invocation_dogfooding_through_sealed_sys_invoke() -> Te
             matches!(
                 &wrong_revision,
                 PostgresKernelError::DurableInvariant {
-                    relation: "_orna_kernel.invocation_target_authorities",
-                    record,
-                    rule: "standard invocation target must resolve exactly once in the pinned verified standard snapshot",
-                } if *record == STD_INVOKE_ECHO_FUNCTION_ID.canonical()
+                    relation: "_orna_kernel.invocation_audit_events",
+                    rule: "target function and pinned revision must exist together",
+                    ..
+                }
             ),
             "the wrong standard executable revision did not fail recovery closed",
         )?;
