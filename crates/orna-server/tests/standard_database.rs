@@ -13,10 +13,10 @@ use orna_compiler::{
 };
 use orna_core::{
     CatalogueRevisionId, FunctionId, FunctionRevisionId, InvocationId, ObjectId, ParameterId,
-    PrincipalId, SourceRevisionId, TypeId,
+    PrincipalId, SourceBundleId, SourceRevisionId, TypeId,
     canonical_hash::{
         artifact_payload_digest, catalogue_digest_with_context,
-        function_semantic_digest_with_version,
+        function_semantic_digest_with_version, source_bundle_digest, source_revision_record_digest,
     },
     catalogue::{
         CatalogueSnapshot, FunctionDefinition, FunctionDomain, FunctionReturn, FunctionSecurity,
@@ -30,10 +30,11 @@ use orna_core::{
     },
     invocation_binding::CliArgumentInput,
     revision::{
-        DefinitionIdentity, DefinitionReference, DefinitionReferenceKind,
-        DefinitionReferenceTarget, DeployableRevision, DeployableRevisionContent,
-        DeployableRevisionInput, ExecutableArtifact, ExecutableArtifactKind,
-        FunctionRevisionRecord, FunctionSemanticHashVersion, RevisionPair,
+        ActiveDatabaseRevision, CatalogueHashContext, DefinitionIdentity, DefinitionReference,
+        DefinitionReferenceKind, DefinitionReferenceTarget, DeployableRevision,
+        DeployableRevisionContent, DeployableRevisionInput, ExecutableArtifact,
+        ExecutableArtifactKind, FunctionRevisionRecord, FunctionSemanticHashVersion, RevisionPair,
+        StoredSourceRevision, VerifiedStandardLibrarySnapshot,
     },
     security::{
         AuthenticatedSession, ExecuteDenial, ExecuteGrant, InvocationTarget,
@@ -65,8 +66,11 @@ use orna_server::{
     serve_local_raw_stream,
 };
 use orna_standard::{
-    BOOLEAN_TYPE_ID, OPAQUE_TOKEN_TYPE_ID, registered_opaque_codecs,
-    retained_standard_library_snapshot, verify_standard_library_snapshot,
+    BOOLEAN_TYPE_ID, OPAQUE_TOKEN_TYPE_ID, STANDARD_LIBRARY_V3_REVISION_ID,
+    STD_IO_BYTE_STREAM_TYPE_ID, STD_TERMINAL_DOCUMENT_TYPE_ID, registered_opaque_codecs,
+    retained_standard_library_snapshot, retained_standard_library_v2_snapshot,
+    retained_standard_library_v3_snapshot, verify_standard_library_snapshot,
+    verify_standard_library_v2_snapshot, verify_standard_library_v3_snapshot,
 };
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -1670,6 +1674,255 @@ async fn proves_installed_orna_invoke_end_to_end_against_postgres() -> TestResul
         require_no_database_sessions(&database).await
     })
     .await
+}
+
+#[tokio::test]
+#[ignore = "requires the Compose PostgreSQL development service"]
+async fn proves_output_through_orna_invoke_against_postgres() -> TestResult<()> {
+    const ECHO_JSON: i32 = 41;
+    const ECHO_TABLE: i32 = 42;
+
+    with_test_database(|database| async move {
+        // The host authenticates the invoking process's effective UID, so the
+        // security snapshot must map that exact UID to the granted principal.
+        let uid = nix::unistd::geteuid().as_raw();
+
+        let kernel = kernel(&database)?;
+        kernel.bootstrap().await?;
+        let empty = kernel.recover().await?;
+        let active = install_v3_standard(&kernel, &empty, &database).await?;
+        let standard = active.catalogue_hash_context().standard().ok_or_else(|| {
+            failure("the V3 install did not pin a verified standard snapshot")
+        })?;
+        require(
+            standard.revision() == STANDARD_LIBRARY_V3_REVISION_ID
+                && standard
+                    .catalogue()
+                    .function_by_id(STD_INVOKE_ECHO_FUNCTION_ID)
+                    .is_some()
+                && standard
+                    .catalogue()
+                    .type_definition_by_id(STD_TERMINAL_DOCUMENT_TYPE_ID)
+                    .is_some()
+                && standard
+                    .catalogue()
+                    .type_definition_by_id(STD_IO_BYTE_STREAM_TYPE_ID)
+                    .is_some(),
+            "the installed orna.std/3 snapshot did not retain the echo function and output types",
+        )?;
+        let pair = active.pair();
+        let standard_revision = standard.revision();
+        let registry = registered_opaque_codecs(standard)?;
+
+        // Grant EXECUTE on std.invoke.echo to the local peer principal and
+        // map the test process UID to it, exactly as the installed instance
+        // would for the invoking user.
+        let security = SecuritySnapshot::new_with_function_targets_and_local_peer_credentials(
+            pair,
+            vec![SecurityFunctionTarget::verified_standard(
+                STD_INVOKE_ECHO_FUNCTION_ID,
+                standard_revision,
+                STD_INVOKE_ECHO_FUNCTION_REVISION_ID,
+            )],
+            vec![Principal::new(
+                RAW_CLIENT_USER,
+                PrincipalKind::User,
+                PrincipalStatus::Active,
+            )],
+            vec![],
+            vec![ExecuteGrant::new(RAW_CLIENT_USER, STD_INVOKE_ECHO_FUNCTION_ID)],
+            vec![LocalPeerCredential::new(uid, RAW_CLIENT_USER)],
+        )?;
+        kernel.replace_security_snapshot(&security).await?;
+
+        let security_events_before = kernel.recover_security_audit_events().await?;
+        let invocation_rows_before = invocation_audit_count(&database).await?;
+
+        // One canonical value record: the ORV5 constructed encoding followed
+        // by the newline the renderer writes after every non-presented value.
+        fn canonical_integer_record(
+            active: &ActiveDatabaseRevision,
+            registry: &orna_core::value::OpaqueCodecRegistry,
+            value: i32,
+        ) -> TestResult<Vec<u8>> {
+            let mut record =
+                encode_constructed_value(active, registry, &RuntimeValue::Integer(value))?;
+            record.push(b'\n');
+            Ok(record)
+        }
+
+        // `--output json` resolves the `json` alias to std.json.encode, which
+        // wraps the canonical INTEGER 41 in an `application/json` ByteStream.
+        // The tty runtime writes the raw stream bytes to stdout: exactly `41`
+        // with no envelope and no progress interleave; the progress
+        // diagnostics stay on stderr (ADR 0057 steps 7-10).
+        let (json_outcome, json_stdout, json_stderr) = installed_invoke_run(
+            &database,
+            echo_invoke_request(ECHO_JSON, Some("json".to_owned()))?,
+        )
+        .await?;
+        require(
+            json_outcome == Ok(InstalledInvokeOutcome::Completed),
+            "the --output json installed invoke did not complete",
+        )?;
+        require(
+            json_stdout == b"41",
+            "the --output json stdout did not carry exactly the JSON bytes",
+        )?;
+        let json_stderr = String::from_utf8(json_stderr)
+            .map_err(|_| failure("the --output json stderr was not UTF-8 text"))?;
+        require(
+            json_stderr.contains("orna: invoke: invocation started")
+                && json_stderr.contains("orna: invoke: invocation completed in"),
+            "the --output json stderr did not carry the progress diagnostics",
+        )?;
+
+        // `--output table` resolves the `table` alias to
+        // std.terminal.present_table, which renders the one-column `result`
+        // row set as a terminal Document. The tty runtime writes the document
+        // text to stdout: exactly the header, separator, aligned row, trailing
+        // count, and final newline; the progress diagnostics stay on stderr.
+        let (table_outcome, table_stdout, table_stderr) = installed_invoke_run(
+            &database,
+            echo_invoke_request(ECHO_TABLE, Some("table".to_owned()))?,
+        )
+        .await?;
+        require(
+            table_outcome == Ok(InstalledInvokeOutcome::Completed),
+            "the --output table installed invoke did not complete",
+        )?;
+        require(
+            table_stdout == b"result\n------\n42\n(1 row)\n",
+            "the --output table stdout did not carry exactly the terminal document",
+        )?;
+        let table_stderr = String::from_utf8(table_stderr)
+            .map_err(|_| failure("the --output table stderr was not UTF-8 text"))?;
+        require(
+            table_stderr.contains("orna: invoke: invocation started")
+                && table_stderr.contains("orna: invoke: invocation completed in"),
+            "the --output table stderr did not carry the progress diagnostics",
+        )?;
+
+        // An unmatchable requirement (`application/xml` has no registered
+        // presenter) fails closed with the presentation error class (spec
+        // exit 5, `ORNA0702`): no presenter artifact executes, no value
+        // reaches stdout, and no diagnostic reaches stderr.
+        let (xml_outcome, xml_stdout, xml_stderr) = installed_invoke_run(
+            &database,
+            echo_invoke_request(ECHO_JSON, Some("application/xml".to_owned()))?,
+        )
+        .await?;
+        require(
+            matches!(
+                xml_outcome,
+                Err(error) if error.kind() == InstalledInvokeErrorKind::Presentation
+            ),
+            "the unmatchable output requirement did not return the exit-5 presentation class",
+        )?;
+        require(
+            xml_stdout.is_empty() && xml_stderr.is_empty(),
+            "the unmatchable output requirement wrote to a command channel",
+        )?;
+
+        // The no-requirement path is unchanged: the canonical value record on
+        // stdout and the progress diagnostics on stderr (milestone 5).
+        let (bare_outcome, bare_stdout, bare_stderr) =
+            installed_invoke_run(&database, echo_invoke_request(ECHO_JSON, None)?).await?;
+        require(
+            bare_outcome == Ok(InstalledInvokeOutcome::Completed),
+            "the no-requirement installed invoke did not complete",
+        )?;
+        require(
+            bare_stdout == canonical_integer_record(&active, &registry, ECHO_JSON)?,
+            "the no-requirement stdout did not carry exactly the canonical value record",
+        )?;
+        let bare_stderr = String::from_utf8(bare_stderr)
+            .map_err(|_| failure("the no-requirement stderr was not UTF-8 text"))?;
+        require(
+            bare_stderr.contains("orna: invoke: invocation started")
+                && bare_stderr.contains("orna: invoke: invocation completed in"),
+            "the no-requirement stderr did not carry the progress diagnostics",
+        )?;
+
+        // The three completed invocations (json, table, bare) each appended
+        // one authentication event and one allowed EXECUTE decision against
+        // the exact V3-pinned echo target, plus one allowed invocation-audit
+        // row. The unmatchable-requirement failure appends only its
+        // authentication event: the sealed dispatch appends the allowed
+        // EXECUTE evidence inside its transaction but returns the closed
+        // `PresentationFailed` result before the commit, so that evidence
+        // rolls back and the failure discloses nothing further (no denied or
+        // partial decision, no invocation-audit row).
+        let security_events_after = kernel.recover_security_audit_events().await?;
+        require(
+            security_events_after.len() == security_events_before.len() + 7,
+            "the four installed invocations did not append exactly seven security events",
+        )?;
+        let appended = &security_events_after[security_events_before.len()..];
+        require(
+            appended
+                .iter()
+                .filter(|event| event.decision().kind() == SecurityAuditKind::Execute)
+                .all(|event| {
+                    event.decision().outcome() == SecurityAuditOutcome::Allowed
+                        && event.decision().session_principal() == Some(RAW_CLIENT_USER)
+                        && event.decision().target()
+                            == Some(InvocationTarget::new(STD_INVOKE_ECHO_FUNCTION_ID, pair))
+                }),
+            "the completed invocations did not append three allowed EXECUTE decisions",
+        )?;
+        require(
+            appended
+                .iter()
+                .filter(|event| event.decision().kind() == SecurityAuditKind::Execute)
+                .count()
+                == 3
+                && appended
+                    .iter()
+                    .all(|event| event.decision().outcome() == SecurityAuditOutcome::Allowed),
+            "the four installed invocations appended a denied or partial security decision",
+        )?;
+        require(
+            invocation_audit_count(&database).await? == invocation_rows_before + 3,
+            "the three completed invocations did not append exactly three invocation-audit rows",
+        )?;
+        let completed_rows = invocation_audit_rows(&database).await?;
+        require(
+            completed_rows.len() == invocation_rows_before as usize + 3
+                && completed_rows[invocation_rows_before as usize..]
+                    .iter()
+                    .all(|row| {
+                        row.outcome == "allowed"
+                            && row.function == STD_INVOKE_ECHO_FUNCTION_ID.to_bytes().to_vec()
+                            && row.source == pair.source().to_bytes().to_vec()
+                            && row.catalogue == pair.catalogue().to_bytes().to_vec()
+                            && row.security_event.is_some()
+                    }),
+            "the completed invocations did not record allowed invocation-audit rows for std.invoke.echo",
+        )?;
+
+        require_no_database_sessions(&database).await
+    })
+    .await
+}
+
+/// Builds one installed `orna invoke` request against `std.invoke.echo` with
+/// an optional raw `--output <alias|media-type|type-name>` value (ADR 0057
+/// step 10).
+fn echo_invoke_request(value: i32, output: Option<String>) -> TestResult<InstalledInvokeRequest> {
+    Ok(InstalledInvokeRequest::new(
+        InvocationRequestTarget::qualified_name(QualifiedSemanticName::new([
+            "std", "invoke", "echo",
+        ])?)?,
+        vec![CliArgumentInput::Canonical {
+            parameter: "p_value".to_owned(),
+            value: value.to_string(),
+        }],
+        output,
+        None,
+        false,
+        false,
+    ))
 }
 
 /// Builds one installed `orna invoke` command request the way the command
@@ -7046,6 +7299,132 @@ async fn install_raw_client_fixture(
         .ok_or_else(|| failure("raw CLIENT fixture is missing its SERVER function"))?
         .id();
     Ok((active, standard_upgrade, client, server))
+}
+
+/// Installs `orna.std/3` as the active standard from the empty base (ADR 0057
+/// step 10).
+///
+/// The V2-to-V3 upgrade pipeline is deliberately not supported in this build
+/// (work ADR 0055 defers standard upgrades after `orna.std/2`, so
+/// `prepare_standard_upgrade_v2_to_v3` fails closed), but the live proof
+/// needs the V3 snapshot active so the sealed route's opaque codec registry
+/// binds the `std.terminal.Document` and `std.io.ByteStream` codecs. The
+/// proof therefore installs V3 exactly as the accepted V1-to-V2 pipeline
+/// installs V2 from the empty base: retain and verify the V3 snapshot, seed
+/// the retained V1 and V2 source records the V3 source parent chain requires,
+/// build the empty-base application candidate pinned to the V3 snapshot
+/// through the version-two catalogue hash context, and apply candidate plus
+/// snapshot through the kernel's test-hooks persistence seam (the same path
+/// [`PostgresKernel::apply_standard_upgrade`] uses for the compiler-produced
+/// V2 upgrade).
+async fn install_v3_standard(
+    kernel: &PostgresKernel,
+    empty: &ActiveDatabaseRevision,
+    database: &TestDatabase,
+) -> TestResult<ActiveDatabaseRevision> {
+    seed_standard_source_chain(database).await?;
+    let snapshot = retained_standard_library_v3_snapshot()?;
+    let verified = verify_standard_library_v3_snapshot(snapshot)?;
+    let candidate = v3_standard_upgrade_candidate(empty, &verified)?;
+    Ok(kernel
+        .apply_test_standard_upgrade(&candidate, &verified)
+        .await?)
+}
+
+/// Persists the retained `orna.std/1` and `orna.std/2` source bundles and
+/// revisions so the V3 snapshot's reserved source parent chain satisfies the
+/// kernel's foreign keys.
+///
+/// The V3 source revision descends from the V2 source revision, whose parent
+/// is the V1 source revision. The standard-install persistence path inserts
+/// those rows in the same transaction only for the V1 edge of a V2 install
+/// (`persist_retained_v1_standard_parent`), so a V3 install from the empty
+/// base must seed the two historical source records exactly as the accepted
+/// V2 install would persist them. Only the source bundles and revisions are
+/// seeded; the kernel's V3 persist inserts the V3 bundle, units, and revision
+/// rows itself.
+async fn seed_standard_source_chain(database: &TestDatabase) -> TestResult<()> {
+    let version_one = verify_standard_library_snapshot(retained_standard_library_snapshot()?)?;
+    let version_two =
+        verify_standard_library_v2_snapshot(retained_standard_library_v2_snapshot()?)?;
+    let sources = [version_one.source(), version_two.source()];
+    let session = database.open().await?;
+    for source in sources {
+        session
+            .client()
+            .execute(
+                "INSERT INTO _orna_kernel.source_bundles
+                    (id, content_hash, hash_algorithm, hash_contract_version)
+                 VALUES ($1, $2, 'sha256', 1)",
+                &[
+                    &source.bundle().to_bytes().to_vec(),
+                    &source.bundle_hash().to_bytes().to_vec(),
+                ],
+            )
+            .await?;
+    }
+    for source in sources {
+        session
+            .client()
+            .execute(
+                "INSERT INTO _orna_kernel.source_revisions
+                    (id, parent_source_revision_id, bundle_id, content_hash,
+                     hash_algorithm, hash_contract_version)
+                 VALUES ($1, $2, $3, $4, 'sha256', 1)",
+                &[
+                    &source.id().to_bytes().to_vec(),
+                    &source.parent().map(|parent| parent.to_bytes().to_vec()),
+                    &source.bundle().to_bytes().to_vec(),
+                    &source.revision_hash().to_bytes().to_vec(),
+                ],
+            )
+            .await?;
+    }
+    session.shutdown().await
+}
+
+/// Builds the V3 standard-upgrade application candidate for the empty base.
+///
+/// The candidate mirrors the compiler's standard-upgrade lowering exactly:
+/// fresh non-reserved application source and catalogue identities, the
+/// active (empty) source units, no functions, origins, or references, and
+/// the verified V3 snapshot pinned through the version-two catalogue hash
+/// context. The kernel persists the standard's own retained rows alongside
+/// the candidate.
+fn v3_standard_upgrade_candidate(
+    empty: &ActiveDatabaseRevision,
+    standard: &VerifiedStandardLibrarySnapshot,
+) -> TestResult<DeployableRevision> {
+    let source_bundle = SourceBundleId::from_bytes([0xb1; 16]);
+    let source_revision = SourceRevisionId::from_bytes([0xb2; 16]);
+    let bundle_hash = source_bundle_digest(&[])?;
+    let source = StoredSourceRevision::new(
+        source_bundle,
+        source_revision,
+        Some(empty.pair().source()),
+        Vec::new(),
+        bundle_hash,
+        source_revision_record_digest(source_bundle, Some(empty.pair().source()), bundle_hash)?,
+    )?;
+    let catalogue = CatalogueSnapshot::new(
+        CatalogueRevisionId::from_bytes([0xb3; 16]),
+        Vec::new(),
+        Vec::new(),
+    )?;
+    let context = CatalogueHashContext::version_two(standard.clone());
+    let catalogue_hash = catalogue_digest_with_context(&context, &catalogue, &[], &[], &[], &[])?;
+    Ok(DeployableRevision::new_with_catalogue_hash_context(
+        DeployableRevisionInput::new(
+            empty.pair(),
+            source,
+            empty.pair().catalogue(),
+            catalogue,
+            catalogue_hash,
+            DeployableRevisionContent::new(Vec::new(), Vec::new(), Vec::new(), Vec::new())
+                .with_current_function_revisions(Vec::new()),
+        ),
+        context,
+    )?)
 }
 
 async fn install_opaque_client_fixture(
