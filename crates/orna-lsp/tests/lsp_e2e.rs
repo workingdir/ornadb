@@ -290,7 +290,7 @@ fn serves_rich_hover_content() {
     open_document(&mut client, &uri, VALID_SOURCE, 1);
     let _ = client.read_notification("textDocument/publishDiagnostics");
 
-    let mut hover_at = |line: u64, character: u64| {
+    let mut hover_at = |client: &mut Client, line: u64, character: u64| {
         client.request(
             "textDocument/hover",
             json!({
@@ -301,7 +301,7 @@ fn serves_rich_hover_content() {
     };
 
     // Function hover: signature, usage example, spec link.
-    let hover = hover_at(6, 40);
+    let hover = hover_at(&mut client, 6, 40);
     let value = hover["contents"]["value"].as_str().expect("hover value");
     assert!(value.contains("server function"), "kind badge: {value}");
     assert!(value.contains("RETURNS ROWS"), "returns: {value}");
@@ -313,7 +313,7 @@ fn serves_rich_hover_content() {
     assert!(value.contains("orna.ebnf"), "spec link target: {value}");
 
     // Type hover: fields with modifiers and type-level documentation.
-    let hover = hover_at(2, 27);
+    let hover = hover_at(&mut client, 2, 27);
     let value = hover["contents"]["value"].as_str().expect("hover value");
     assert!(value.contains("object type"), "kind badge: {value}");
     assert!(value.contains("stored"), "field listing: {value}");
@@ -324,7 +324,7 @@ fn serves_rich_hover_content() {
     );
 
     // Field hover: the field name shadows the BOOLEAN scalar spelling.
-    let hover = hover_at(3, 7);
+    let hover = hover_at(&mut client, 3, 7);
     let value = hover["contents"]["value"].as_str().expect("hover value");
     assert!(value.starts_with("**field**"), "field hover: {value}");
     assert!(value.contains("BOOLEAN"), "field type: {value}");
@@ -334,13 +334,13 @@ fn serves_rich_hover_content() {
     );
 
     // Scalar hover on the type position of the same line.
-    let hover = hover_at(3, 14);
+    let hover = hover_at(&mut client, 3, 14);
     let value = hover["contents"]["value"].as_str().expect("hover value");
     assert!(value.starts_with("**`BOOLEAN`**"), "scalar hover: {value}");
     assert!(value.contains("boolean type"), "scalar summary: {value}");
 
     // Keyword hover.
-    let hover = hover_at(7, 3);
+    let hover = hover_at(&mut client, 7, 3);
     let value = hover["contents"]["value"].as_str().expect("hover value");
     assert!(
         value.contains("**`RETURNS`** keyword"),
@@ -402,6 +402,63 @@ fn serves_rich_hover_content() {
     assert!(
         value.contains("the value to echo"),
         "parameter documentation: {value}"
+    );
+
+    // SQL column hover: `stored` in the SELECT projection resolves to the
+    // field of the FROM object type.
+    let hover = hover_at(&mut client, 15, 21);
+    let value = hover["contents"]["value"]
+        .as_str()
+        .expect("select column hover");
+    assert!(
+        value.starts_with("**field**"),
+        "select column hover: {value}"
+    );
+    assert!(
+        value.contains("whether the probe is stored"),
+        "select column docs: {value}"
+    );
+
+    // SQL column hover: the INSERT column list resolves the same way.
+    let hover = hover_at(&mut client, 9, 45);
+    let value = hover["contents"]["value"]
+        .as_str()
+        .expect("insert column hover");
+    assert!(
+        value.starts_with("**field**"),
+        "insert column hover: {value}"
+    );
+    assert!(
+        value.contains("whether the probe is stored"),
+        "insert column docs: {value}"
+    );
+
+    // Standard-library type hover: a qualified std type reference resolves
+    // through the verified standard catalogue.
+    let std_uri = format!("file://{}/../../std-type.orna", env!("CARGO_MANIFEST_DIR"));
+    let std_source = concat!(
+        "CREATE SCHEMA std_test;\n",
+        "CREATE TYPE std_test.token AS VALUE (t std.types.OPAQUE_TOKEN) IMMUTABLE PERSISTABLE;\n",
+    );
+    open_document(&mut client, &std_uri, std_source, 1);
+    let _ = client.read_notification("textDocument/publishDiagnostics");
+    let std_hover = client.request(
+        "textDocument/hover",
+        json!({
+            "textDocument": { "uri": std_uri },
+            "position": { "line": 1, "character": 53 },
+        }),
+    );
+    let value = std_hover["contents"]["value"]
+        .as_str()
+        .expect("std type hover");
+    assert!(
+        value.contains("standard opaque value type"),
+        "std type hover: {value}"
+    );
+    assert!(
+        value.contains("orna.std.value.opaque-token@1"),
+        "std type contract: {value}"
     );
 
     client.shutdown();
