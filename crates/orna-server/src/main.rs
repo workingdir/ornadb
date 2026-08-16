@@ -5,7 +5,7 @@ use std::{
 };
 
 use orna_core::{
-    FunctionId, ParameterId as RawCallParameterId,
+    FunctionId, ParameterId as RawCallParameterId, StateSlotId, TypeId,
     catalogue::QualifiedSemanticName,
     invocation::{InvocationTarget, InvocationTracePolicy},
     invocation_binding::CliArgumentInput,
@@ -17,7 +17,7 @@ mod package_maintenance;
 mod security_admin;
 mod source_check;
 
-const USAGE: &str = "Usage:\n  orna --version\n  orna server run\n  orna server upgrade\n  orna server backend-shell\n  orna source check <file.orna>\n  orna source apply <file.orna>\n  orna security grant-execute <canonical-function-id>\n  orna raw-call <canonical-function-id>\n  orna raw-call <canonical-function-id> <canonical-parameter-id>\n  orna invoke <qualified-name | canonical-function-id> [options]";
+const USAGE: &str = "Usage:\n  orna --version\n  orna server run\n  orna server upgrade\n  orna server backend-shell\n  orna source check <file.orna>\n  orna source apply <file.orna>\n  orna security grant-execute <canonical-function-id>\n  orna raw-call <canonical-function-id>\n  orna raw-call <canonical-function-id> <canonical-parameter-id>\n  orna invoke <qualified-name | canonical-function-id> [options]\n  orna state get <root-function-id> [options]\n  orna state set <root-function-id> [options]";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum RawCallParameters {
@@ -58,6 +58,7 @@ enum Command {
     SecurityGrantExecute(FunctionId),
     RawCall(FunctionId, RawCallParameters),
     Invoke(InvokeArguments),
+    State(orna_server::InstalledUserStateRequest),
 }
 
 fn main() -> ExitCode {
@@ -212,6 +213,19 @@ fn main() -> ExitCode {
                 }
             }
         }
+        Command::State(request) => {
+            let stdout = io::stdout();
+            let mut stdout = stdout.lock();
+            match orna_server::run_installed_user_state(request, &mut stdout) {
+                Ok(orna_server::InstalledUserStateOutcome::Completed) => ExitCode::SUCCESS,
+                // A future closed outcome falls back to internal.
+                Ok(_) => ExitCode::from(7),
+                Err(error) => {
+                    write_stderr_line(&error.to_string());
+                    ExitCode::from(state_error_exit_code(&error))
+                }
+            }
+        }
     }
 }
 
@@ -283,6 +297,7 @@ where
             }
         }
         Some(value) if value == OsStr::new("invoke") => parse_invoke_command(args),
+        Some(value) if value == OsStr::new("state") => parse_state_command(args),
         Some(value) if value == OsStr::new("security") => {
             if args.next().as_deref() != Some(OsStr::new("grant-execute")) {
                 return None;
@@ -297,6 +312,149 @@ where
         }
         _ => None,
     }
+}
+
+/// Parses one `orna state <get|set> ...` command (ADR 0061 step 5).
+///
+/// `get` accepts exactly one root-function positional followed by the
+/// optional `--profile <state-profile>`, repeated `--instance
+/// <canonical-function-id> [--instance-key <instance-key>]` filters, and
+/// repeated `--expect-type <canonical-function-id> <canonical-state-slot-id>
+/// <canonical-type-id>` entry triples. `set` accepts exactly one root-function
+/// positional followed by `--function <canonical-function-id>`,
+/// `--slot <canonical-state-slot-id>`, `--revision <create|revision>`,
+/// `--type <canonical-type-id>`, `--value-file <path>`, the optional
+/// `--profile <state-profile>`, and the optional
+/// `--instance-key <instance-key>`. Any other shape is a usage error
+/// (`None`).
+fn parse_state_command<I>(args: I) -> Option<Command>
+where
+    I: IntoIterator<Item = OsString>,
+{
+    let mut args = args.into_iter();
+    let operation = match args.next().as_deref() {
+        Some(value) if value == OsStr::new("get") => parse_state_get(&mut args)?,
+        Some(value) if value == OsStr::new("set") => parse_state_set(&mut args)?,
+        _ => return None,
+    };
+    Some(Command::State(orna_server::InstalledUserStateRequest::new(
+        operation,
+    )))
+}
+
+/// Parses one `orna state get <root-function-id> [options]` command.
+fn parse_state_get<I>(args: &mut I) -> Option<orna_server::InstalledUserStateOperation>
+where
+    I: Iterator<Item = OsString>,
+{
+    let root_function = FunctionId::from_canonical(&args.next()?.into_string().ok()?).ok()?;
+    let mut state_profile = String::new();
+    let mut instances = Vec::new();
+    let mut expected_types = Vec::new();
+    loop {
+        match args.next().as_deref() {
+            None => break,
+            Some(flag) if flag == OsStr::new("--profile") => {
+                state_profile = args.next()?.into_string().ok()?;
+            }
+            Some(flag) if flag == OsStr::new("--instance") => {
+                let function =
+                    FunctionId::from_canonical(&args.next()?.into_string().ok()?).ok()?;
+                instances.push(orna_server::InstalledUserStateInstance {
+                    function,
+                    instance_key: String::new(),
+                });
+            }
+            Some(flag) if flag == OsStr::new("--instance-key") => {
+                instances.last_mut()?.instance_key = args.next()?.into_string().ok()?;
+            }
+            Some(flag) if flag == OsStr::new("--expect-type") => {
+                let function =
+                    FunctionId::from_canonical(&args.next()?.into_string().ok()?).ok()?;
+                let state_slot =
+                    StateSlotId::from_canonical(&args.next()?.into_string().ok()?).ok()?;
+                let value_type = TypeId::from_canonical(&args.next()?.into_string().ok()?).ok()?;
+                expected_types.push(orna_server::InstalledUserStateExpectedType {
+                    function,
+                    state_slot,
+                    value_type,
+                });
+            }
+            Some(_) => return None,
+        }
+    }
+    Some(orna_server::InstalledUserStateOperation::Load {
+        root_function,
+        state_profile,
+        instances,
+        expected_types,
+    })
+}
+
+/// Parses one `orna state set <root-function-id> [options]` command.
+fn parse_state_set<I>(args: &mut I) -> Option<orna_server::InstalledUserStateOperation>
+where
+    I: Iterator<Item = OsString>,
+{
+    let root_function = FunctionId::from_canonical(&args.next()?.into_string().ok()?).ok()?;
+    let mut state_profile = String::new();
+    let mut function = None;
+    let mut instance_key = String::new();
+    let mut state_slot = None;
+    let mut expected_revision = None;
+    let mut value_type = None;
+    let mut value_file = None;
+    loop {
+        match args.next().as_deref() {
+            None => break,
+            Some(flag) if flag == OsStr::new("--profile") => {
+                state_profile = args.next()?.into_string().ok()?;
+            }
+            Some(flag) if flag == OsStr::new("--function") => {
+                function =
+                    Some(FunctionId::from_canonical(&args.next()?.into_string().ok()?).ok()?);
+            }
+            Some(flag) if flag == OsStr::new("--instance-key") => {
+                instance_key = args.next()?.into_string().ok()?;
+            }
+            Some(flag) if flag == OsStr::new("--slot") => {
+                state_slot =
+                    Some(StateSlotId::from_canonical(&args.next()?.into_string().ok()?).ok()?);
+            }
+            Some(flag) if flag == OsStr::new("--revision") => {
+                let value = args.next()?.into_string().ok()?;
+                expected_revision = Some(if value == "create" {
+                    None
+                } else {
+                    Some(value.parse::<u64>().ok()?)
+                });
+            }
+            Some(flag) if flag == OsStr::new("--type") => {
+                value_type = Some(TypeId::from_canonical(&args.next()?.into_string().ok()?).ok()?);
+            }
+            Some(flag) if flag == OsStr::new("--value-file") => {
+                value_file = Some(args.next()?);
+            }
+            Some(_) => return None,
+        }
+    }
+    let function = function?;
+    let state_slot = state_slot?;
+    let expected_revision = expected_revision?;
+    let value_type = value_type?;
+    let value_bytes = std::fs::read(value_file?).ok()?;
+    Some(orna_server::InstalledUserStateOperation::Write {
+        root_function,
+        state_profile,
+        change: orna_server::InstalledUserStateChange {
+            function,
+            instance_key,
+            state_slot,
+            expected_revision,
+            value_type,
+            value_bytes,
+        },
+    })
 }
 
 /// Parses one `orna invoke <target> [options]` command (ADR 0056 step 4).
@@ -456,6 +614,18 @@ const fn invoke_error_exit_code(error: &orna_server::InstalledInvokeError) -> u8
     }
 }
 
+/// Maps one installed state failure to its closed exit code.
+const fn state_error_exit_code(error: &orna_server::InstalledUserStateError) -> u8 {
+    match error.kind() {
+        orna_server::InstalledUserStateErrorKind::Authentication => 3,
+        orna_server::InstalledUserStateErrorKind::State => 1,
+        orna_server::InstalledUserStateErrorKind::Presentation => 5,
+        orna_server::InstalledUserStateErrorKind::Internal => 7,
+        // A future closed kind falls back to internal.
+        _ => 7,
+    }
+}
+
 const fn failure_name(failure: CallFailure) -> &'static str {
     match failure {
         CallFailure::ExecuteDenied => "EXECUTE_DENIED",
@@ -485,6 +655,21 @@ mod tests {
 
     fn arguments(values: &[&str]) -> Vec<OsString> {
         values.iter().map(OsString::from).collect()
+    }
+
+    /// Writes one caller-owned state value payload below the system temp
+    /// directory and returns its path.
+    fn state_value_file(bytes: &[u8]) -> std::path::PathBuf {
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        static NEXT_DIRECTORY: AtomicU64 = AtomicU64::new(0);
+        let path = std::env::temp_dir().join(format!(
+            "orna-state-value-{}-{}.bin",
+            std::process::id(),
+            NEXT_DIRECTORY.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::write(&path, bytes).expect("state value file must write");
+        path
     }
 
     #[test]
@@ -1217,10 +1402,147 @@ mod tests {
     }
 
     #[test]
+    fn accepts_an_exact_state_get_command() {
+        let root = FunctionId::from_bytes([0x11; 16]);
+        assert_eq!(
+            parse_command(arguments(&["orna", "state", "get", &root.canonical()])),
+            Some(Command::State(orna_server::InstalledUserStateRequest::new(
+                orna_server::InstalledUserStateOperation::Load {
+                    root_function: root,
+                    state_profile: String::new(),
+                    instances: Vec::new(),
+                    expected_types: Vec::new(),
+                }
+            )))
+        );
+    }
+
+    #[test]
+    fn accepts_state_get_filters_and_expected_types() {
+        let root = FunctionId::from_bytes([0x11; 16]);
+        let function = FunctionId::from_bytes([0x21; 16]);
+        let state_slot = StateSlotId::from_bytes([0x31; 16]);
+        let value_type = TypeId::from_bytes([0x41; 16]);
+        assert_eq!(
+            parse_command(arguments(&[
+                "orna",
+                "state",
+                "get",
+                &root.canonical(),
+                "--profile",
+                "p1",
+                "--instance",
+                &function.canonical(),
+                "--instance-key",
+                "player-7",
+                "--expect-type",
+                &function.canonical(),
+                &state_slot.canonical(),
+                &value_type.canonical(),
+            ])),
+            Some(Command::State(orna_server::InstalledUserStateRequest::new(
+                orna_server::InstalledUserStateOperation::Load {
+                    root_function: root,
+                    state_profile: "p1".to_owned(),
+                    instances: vec![orna_server::InstalledUserStateInstance {
+                        function,
+                        instance_key: "player-7".to_owned(),
+                    }],
+                    expected_types: vec![orna_server::InstalledUserStateExpectedType {
+                        function,
+                        state_slot,
+                        value_type,
+                    }],
+                }
+            )))
+        );
+    }
+
+    #[test]
+    fn accepts_an_exact_state_set_command() {
+        let root = FunctionId::from_bytes([0x11; 16]);
+        let function = FunctionId::from_bytes([0x21; 16]);
+        let state_slot = StateSlotId::from_bytes([0x31; 16]);
+        let value_type = TypeId::from_bytes([0x41; 16]);
+        let path = state_value_file(&[0x0a, 0x0b]);
+        let command = parse_command(arguments(&[
+            "orna",
+            "state",
+            "set",
+            &root.canonical(),
+            "--profile",
+            "p1",
+            "--function",
+            &function.canonical(),
+            "--instance-key",
+            "player-7",
+            "--slot",
+            &state_slot.canonical(),
+            "--revision",
+            "create",
+            "--type",
+            &value_type.canonical(),
+            "--value-file",
+            &path.to_string_lossy(),
+        ]));
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(
+            command,
+            Some(Command::State(orna_server::InstalledUserStateRequest::new(
+                orna_server::InstalledUserStateOperation::Write {
+                    root_function: root,
+                    state_profile: "p1".to_owned(),
+                    change: orna_server::InstalledUserStateChange {
+                        function,
+                        instance_key: "player-7".to_owned(),
+                        state_slot,
+                        expected_revision: None,
+                        value_type,
+                        value_bytes: vec![0x0a, 0x0b],
+                    },
+                }
+            )))
+        );
+    }
+
+    #[test]
+    fn rejects_malformed_state_shapes() {
+        for values in [
+            vec!["orna", "state"],
+            vec!["orna", "state", "get"],
+            vec!["orna", "state", "get", "not-an-id"],
+            vec!["orna", "state", "get", "function:x", "extra"],
+            vec!["orna", "state", "set"],
+            vec!["orna", "state", "set", "function:x"],
+            vec!["orna", "state", "set", "function:x", "--function"],
+            vec!["orna", "state", "set", "function:x", "--revision", "seven"],
+            vec!["orna", "state", "set", "function:x", "--unknown", "value"],
+            vec!["orna", "state", "dump"],
+        ] {
+            assert_eq!(parse_command(arguments(&values)), None, "{values:?}");
+        }
+    }
+
+    #[test]
+    fn state_error_exit_codes_follow_the_closed_table() {
+        use orna_server::{InstalledUserStateError, InstalledUserStateErrorKind};
+
+        for (kind, expected) in [
+            (InstalledUserStateErrorKind::Authentication, 3),
+            (InstalledUserStateErrorKind::State, 1),
+            (InstalledUserStateErrorKind::Presentation, 5),
+            (InstalledUserStateErrorKind::Internal, 7),
+        ] {
+            let error = InstalledUserStateError::new(kind, "message".to_owned());
+            assert_eq!(state_error_exit_code(&error), expected, "{kind:?}");
+        }
+    }
+
+    #[test]
     fn usage_diagnostic_is_exact() {
         assert_eq!(
             USAGE,
-            "Usage:\n  orna --version\n  orna server run\n  orna server upgrade\n  orna server backend-shell\n  orna source check <file.orna>\n  orna source apply <file.orna>\n  orna security grant-execute <canonical-function-id>\n  orna raw-call <canonical-function-id>\n  orna raw-call <canonical-function-id> <canonical-parameter-id>\n  orna invoke <qualified-name | canonical-function-id> [options]"
+            "Usage:\n  orna --version\n  orna server run\n  orna server upgrade\n  orna server backend-shell\n  orna source check <file.orna>\n  orna source apply <file.orna>\n  orna security grant-execute <canonical-function-id>\n  orna raw-call <canonical-function-id>\n  orna raw-call <canonical-function-id> <canonical-parameter-id>\n  orna invoke <qualified-name | canonical-function-id> [options]\n  orna state get <root-function-id> [options]\n  orna state set <root-function-id> [options]"
         );
     }
 }
