@@ -290,7 +290,7 @@ fn serves_rich_hover_content() {
     open_document(&mut client, &uri, VALID_SOURCE, 1);
     let _ = client.read_notification("textDocument/publishDiagnostics");
 
-    let mut hover_at = |client: &mut Client, line: u64, character: u64| {
+    let hover_at = |client: &mut Client, line: u64, character: u64| {
         client.request(
             "textDocument/hover",
             json!({
