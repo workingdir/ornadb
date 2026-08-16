@@ -1704,10 +1704,7 @@ async fn append_security_audit_event(
 ) -> Result<SecurityAuditEventId, PostgresKernelError> {
     let event = SecurityAuditEventId::new();
     let event_id = event.to_bytes().to_vec();
-    let kind = match decision.kind() {
-        SecurityAuditKind::Authentication => "authentication",
-        SecurityAuditKind::Execute => "execute",
-    };
+    let kind = encode_security_audit_kind(decision.kind());
     let outcome = match decision.outcome() {
         SecurityAuditOutcome::Allowed => "allowed",
         SecurityAuditOutcome::Denied => "denied",
@@ -1730,11 +1727,18 @@ async fn append_security_audit_event(
         None => (None, None, None),
     };
     let denial_reason = match decision.denial() {
-        None => None,
+        None => decision
+            .capability_name()
+            .map(encode_capability_audit_denial),
         Some(SecurityAuditDenial::Authentication(reason)) => {
-            Some(encode_authentication_audit_denial(reason))
+            Some(encode_authentication_audit_denial(reason).to_owned())
         }
-        Some(SecurityAuditDenial::Execute(reason)) => Some(encode_execute_audit_denial(reason)),
+        Some(SecurityAuditDenial::Execute(reason)) => {
+            Some(encode_execute_audit_denial(reason).to_owned())
+        }
+        Some(SecurityAuditDenial::Capability { capability }) => {
+            Some(encode_capability_audit_denial(&capability))
+        }
     };
     transaction
         .execute(
@@ -3117,6 +3121,47 @@ fn decode_security_audit_event(row: &Row) -> Result<SecurityAuditEvent, Postgres
                 reason,
             )
         }
+        ("capability", outcome @ ("allowed" | "denied"))
+            if effective_principal.is_none()
+                && authorising_principal.is_none()
+                && function.is_some()
+                && source_revision.is_some()
+                && catalogue_revision.is_some() =>
+        {
+            let target = audit_target(function, source_revision, catalogue_revision, &record)?;
+            let capability = decode_capability_audit_denial(
+                require_audit_value(
+                    denial_reason,
+                    &record,
+                    "capability audit requires a capability name",
+                )?,
+                &record,
+            )?;
+            let session_principal = require_audit_value(
+                session_principal,
+                &record,
+                "capability audit requires a session principal",
+            )?;
+            let decision = match outcome {
+                "allowed" => SecurityAuditDecision::recover_capability_allowed(
+                    session_principal,
+                    target,
+                    capability,
+                ),
+                "denied" => SecurityAuditDecision::recover_capability_denied(
+                    session_principal,
+                    target,
+                    capability,
+                ),
+                _ => unreachable!("capability outcome is closed by the outer match"),
+            };
+            decision.map_err(|_| {
+                audit_invariant(
+                    &record,
+                    "capability audit name must be a qualified name with no arguments",
+                )
+            })?
+        }
         _ => {
             return Err(audit_invariant(
                 &record,
@@ -3236,6 +3281,28 @@ fn encode_execute_audit_denial(reason: orna_core::security::ExecuteDenial) -> &'
         ExecuteDenial::RevisionMismatch => "execute_revision_mismatch",
         ExecuteDenial::MissingExecuteGrant => "execute_missing_grant",
     }
+}
+
+fn encode_security_audit_kind(kind: SecurityAuditKind) -> &'static str {
+    match kind {
+        SecurityAuditKind::Authentication => "authentication",
+        SecurityAuditKind::Execute => "execute",
+        SecurityAuditKind::Capability => "capability",
+    }
+}
+
+fn encode_capability_audit_denial(capability: &str) -> String {
+    format!("capability:{capability}")
+}
+
+fn decode_capability_audit_denial(
+    value: String,
+    record: &str,
+) -> Result<String, PostgresKernelError> {
+    value
+        .strip_prefix("capability:")
+        .map(str::to_owned)
+        .ok_or_else(|| audit_invariant(record, "capability denial reason is unsupported"))
 }
 
 fn require_audit_value<T>(
@@ -3881,6 +3948,91 @@ mod tests {
                 rule: "EXECUTE denial reason is unsupported",
             }) if record == "44"
         ));
+    }
+
+    #[test]
+    fn capability_audit_denial_codec_round_trips_the_redacted_qualified_name() {
+        assert_eq!(
+            encode_security_audit_kind(SecurityAuditKind::Authentication),
+            "authentication"
+        );
+        assert_eq!(
+            encode_security_audit_kind(SecurityAuditKind::Execute),
+            "execute"
+        );
+        assert_eq!(
+            encode_security_audit_kind(SecurityAuditKind::Capability),
+            "capability"
+        );
+
+        for name in [
+            "std.fs.read",
+            "std.fs.write",
+            "std.net.connect",
+            "std.secret.use",
+        ] {
+            let stored = encode_capability_audit_denial(name);
+            assert_eq!(stored, format!("capability:{name}"));
+            assert_eq!(
+                decode_capability_audit_denial(stored, "50")
+                    .expect("redacted capability name must decode"),
+                name
+            );
+        }
+
+        assert!(matches!(
+            decode_capability_audit_denial("execute_missing_grant".to_owned(), "51"),
+            Err(PostgresKernelError::DurableInvariant {
+                relation: "_orna_kernel.security_audit_events",
+                ref record,
+                rule: "capability denial reason is unsupported",
+            }) if record == "51"
+        ));
+    }
+
+    #[test]
+    fn capability_audit_decisions_encode_the_redacted_name_for_both_outcomes() {
+        let target = InvocationTarget::new(
+            FunctionId::from_bytes([0x91; 16]),
+            RevisionPair::new(
+                SourceRevisionId::from_bytes([0x92; 16]),
+                CatalogueRevisionId::from_bytes([0x93; 16]),
+            ),
+        );
+        let principal = PrincipalId::from_bytes([0x94; 16]);
+        let allowed =
+            SecurityAuditDecision::recover_capability_allowed(principal, target, "std.fs.read")
+                .expect("closed capability name is valid");
+        let denied =
+            SecurityAuditDecision::recover_capability_denied(principal, target, "std.secret.use")
+                .expect("closed capability name is valid");
+
+        let encode = |decision: &SecurityAuditDecision| match decision.denial() {
+            None => decision
+                .capability_name()
+                .map(encode_capability_audit_denial),
+            Some(SecurityAuditDenial::Authentication(reason)) => {
+                Some(encode_authentication_audit_denial(reason).to_owned())
+            }
+            Some(SecurityAuditDenial::Execute(reason)) => {
+                Some(encode_execute_audit_denial(reason).to_owned())
+            }
+            Some(SecurityAuditDenial::Capability { capability }) => {
+                Some(encode_capability_audit_denial(&capability))
+            }
+        };
+
+        assert_eq!(encode(&allowed), Some("capability:std.fs.read".to_owned()));
+        assert_eq!(
+            encode(&denied),
+            Some("capability:std.secret.use".to_owned())
+        );
+        assert_eq!(allowed.kind(), SecurityAuditKind::Capability);
+        assert_eq!(denied.kind(), SecurityAuditKind::Capability);
+        assert_eq!(allowed.outcome(), SecurityAuditOutcome::Allowed);
+        assert_eq!(denied.outcome(), SecurityAuditOutcome::Denied);
+        assert_eq!(allowed.target(), Some(target));
+        assert_eq!(denied.target(), Some(target));
     }
 
     #[test]
