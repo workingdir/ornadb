@@ -17,7 +17,7 @@ mod package_maintenance;
 mod security_admin;
 mod source_check;
 
-const USAGE: &str = "Usage:\n  orna --version\n  orna server run\n  orna server upgrade\n  orna server backend-shell\n  orna source check <file.orna>\n  orna source apply <file.orna>\n  orna security grant-execute <canonical-function-id>\n  orna raw-call <canonical-function-id>\n  orna raw-call <canonical-function-id> <canonical-parameter-id>\n  orna invoke <qualified-name | canonical-function-id> [options]\n  orna state get <root-function-id> [options]\n  orna state set <root-function-id> [options]";
+const USAGE: &str = "Usage:\n  orna --version\n  orna server run\n  orna server upgrade\n  orna server backend-shell\n  orna source check <file.orna>\n  orna source apply <file.orna>\n  orna security grant-execute <canonical-function-id>\n  orna raw-call <canonical-function-id>\n  orna raw-call <canonical-function-id> <canonical-parameter-id>\n  orna [--runtime <family>] invoke <qualified-name | canonical-function-id> [options]\n  orna state get <root-function-id> [options]\n  orna state set <root-function-id> [options]";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum RawCallParameters {
@@ -45,6 +45,9 @@ struct InvokeArguments {
     no_progress: bool,
     /// Print the plan instead of dispatching (`--explain`).
     explain: bool,
+    /// The `--runtime <family>` override, when present; absent selects the
+    /// deterministic default runtime (ADR 0063).
+    runtime: Option<orna_server::RuntimeFamily>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -199,7 +202,7 @@ fn main() -> ExitCode {
                 arguments.trace,
                 arguments.no_progress,
                 arguments.explain,
-                None,
+                arguments.runtime,
             );
             match orna_server::run_installed_invoke(request, &mut stdout, &mut stderr) {
                 Ok(orna_server::InstalledInvokeOutcome::Completed) => ExitCode::SUCCESS,
@@ -234,8 +237,27 @@ fn parse_command<I>(args: I) -> Option<Command>
 where
     I: IntoIterator<Item = OsString>,
 {
-    let mut args = args.into_iter();
+    let mut args = args.into_iter().peekable();
     let _argv0 = args.next();
+
+    // The optional global `--runtime <family>` override (ADR 0063) is
+    // consumed before the command word so `orna --runtime tty invoke ...`
+    // works. A missing value or an unknown family is a usage error (`None`).
+    // The override is threaded into the invoke command below and ignored by
+    // every other command; unknown leading flags still fall to `_ => None`.
+    let runtime = if args
+        .peek()
+        .is_some_and(|value| value == OsStr::new("--runtime"))
+    {
+        let _ = args.next();
+        let value = args.next()?.into_string().ok()?;
+        match orna_server::RuntimeFamily::parse(&value) {
+            Some(runtime) => Some(runtime),
+            None => return None,
+        }
+    } else {
+        None
+    };
 
     match args.next().as_deref() {
         Some(value) if value == OsStr::new("--version") => {
@@ -297,7 +319,15 @@ where
                     .map(|function| Command::RawCall(function, parameters))
             }
         }
-        Some(value) if value == OsStr::new("invoke") => parse_invoke_command(args),
+        Some(value) if value == OsStr::new("invoke") => {
+            let mut command = parse_invoke_command(args)?;
+            // The global override (when given) takes precedence over the
+            // post-command form; otherwise the parser's own value stands.
+            if let (Command::Invoke(arguments), Some(runtime)) = (&mut command, runtime) {
+                arguments.runtime = Some(runtime);
+            }
+            Some(command)
+        }
         Some(value) if value == OsStr::new("state") => parse_state_command(args),
         Some(value) if value == OsStr::new("security") => {
             if args.next().as_deref() != Some(OsStr::new("grant-execute")) {
@@ -463,10 +493,13 @@ where
 /// The target is exactly one positional: a dotted qualified name of two or
 /// more parts or a canonical opaque [`FunctionId`]. Options are `--arg
 /// <parameter>=<value>` (canonical), `--<anything-else> <value>` (friendly),
-/// `--args-file <path>`, `--output <value>`, `--trace <value>`, and the
-/// value-less `--explain` and `--no-progress`. A second positional, an
-/// unknown flag without a value, an empty `--output`, an invalid trace
-/// value, or a malformed `--arg` pair is a usage error (`None`).
+/// `--args-file <path>`, `--output <value>`, `--trace <value>`, the runtime
+/// override `--runtime <family>` (ADR 0063), and the value-less `--explain`
+/// and `--no-progress`. A second positional, an unknown flag without a
+/// value, an empty `--output`, an invalid trace or runtime value, or a
+/// malformed `--arg` pair is a usage error (`None`). `--runtime` is parsed
+/// explicitly so it is never emitted as a friendly argument named
+/// `runtime`.
 fn parse_invoke_command<I>(args: I) -> Option<Command>
 where
     I: IntoIterator<Item = OsString>,
@@ -478,6 +511,7 @@ where
     let mut trace = None;
     let mut no_progress = false;
     let mut explain = false;
+    let mut runtime = None;
     while let Some(flag) = args.next() {
         let flag = flag.into_string().ok()?;
         let name = flag.strip_prefix("--")?;
@@ -508,6 +542,10 @@ where
                 let value = args.next()?.into_string().ok()?;
                 trace = Some(parse_trace(&value)?);
             }
+            "runtime" => {
+                let value = args.next()?.into_string().ok()?;
+                runtime = Some(orna_server::RuntimeFamily::parse(&value)?);
+            }
             "explain" => explain = true,
             "no-progress" => no_progress = true,
             _ => {
@@ -526,6 +564,7 @@ where
         trace,
         no_progress,
         explain,
+        runtime,
     }))
 }
 
@@ -653,6 +692,7 @@ fn write_stderr_line(line: &str) {
 mod tests {
     use super::*;
     use orna_core::ParameterId;
+    use orna_server::RuntimeFamily;
 
     fn arguments(values: &[&str]) -> Vec<OsString> {
         values.iter().map(OsString::from).collect()
@@ -1040,6 +1080,7 @@ mod tests {
         trace: Option<InvocationTracePolicy>,
         no_progress: bool,
         explain: bool,
+        runtime: Option<RuntimeFamily>,
     ) -> Command {
         Command::Invoke(InvokeArguments {
             target,
@@ -1048,6 +1089,7 @@ mod tests {
             trace,
             no_progress,
             explain,
+            runtime,
         })
     }
 
@@ -1080,7 +1122,8 @@ mod tests {
                 None,
                 None,
                 false,
-                false
+                false,
+                None,
             ))
         );
     }
@@ -1098,6 +1141,7 @@ mod tests {
                 None,
                 false,
                 false,
+                None,
             ))
         );
     }
@@ -1122,6 +1166,7 @@ mod tests {
                 None,
                 false,
                 false,
+                None,
             ))
         );
     }
@@ -1154,6 +1199,7 @@ mod tests {
                 None,
                 false,
                 false,
+                None,
             ))
         );
     }
@@ -1182,6 +1228,7 @@ mod tests {
                     Some(policy),
                     false,
                     false,
+                    None,
                 )),
                 "{value}"
             );
@@ -1201,6 +1248,8 @@ mod tests {
                 "41",
                 "--output",
                 "json",
+                "--runtime",
+                "tty",
                 "--trace",
                 "normal",
                 "--explain",
@@ -1222,8 +1271,74 @@ mod tests {
                 Some(InvocationTracePolicy::Normal),
                 true,
                 true,
+                Some(RuntimeFamily::Tty),
             ))
         );
+    }
+
+    #[test]
+    fn global_runtime_flag_parses_before_the_command() {
+        assert_eq!(
+            parse_command(arguments(&[
+                "orna",
+                "--runtime",
+                "tty",
+                "invoke",
+                "std.invoke.echo"
+            ])),
+            Some(invoke_command(
+                echo_target(),
+                Vec::new(),
+                None,
+                None,
+                false,
+                false,
+                Some(RuntimeFamily::Tty),
+            ))
+        );
+        for values in [
+            vec!["orna", "--runtime", "qt", "invoke", "std.invoke.echo"],
+            vec!["orna", "--runtime", "gtk", "invoke", "std.invoke.echo"],
+            vec!["orna", "--runtime"],
+            vec!["orna", "--runtime", "tty"],
+            vec!["orna", "--runtime", "tty", "invoke"],
+        ] {
+            assert_eq!(parse_command(arguments(&values)), None, "{values:?}");
+        }
+    }
+
+    #[test]
+    fn post_command_runtime_flag_is_explicit() {
+        // The post-command form is accepted...
+        assert_eq!(
+            parse_command(arguments(&[
+                "orna",
+                "invoke",
+                "std.invoke.echo",
+                "--runtime",
+                "tty"
+            ])),
+            Some(invoke_command(
+                echo_target(),
+                Vec::new(),
+                None,
+                None,
+                false,
+                false,
+                Some(RuntimeFamily::Tty),
+            ))
+        );
+        // ...and `--runtime` is never a friendly argument named `runtime`:
+        // a missing value or an unknown family is a usage error instead of
+        // silently binding a parameter called `runtime`. The accepted form
+        // above also pins `arguments` to the empty vector, so no friendly
+        // argument named `runtime` is ever emitted.
+        for values in [
+            vec!["orna", "invoke", "std.invoke.echo", "--runtime"],
+            vec!["orna", "invoke", "std.invoke.echo", "--runtime", "qt"],
+        ] {
+            assert_eq!(parse_command(arguments(&values)), None, "{values:?}");
+        }
     }
 
     #[test]
@@ -1250,6 +1365,7 @@ mod tests {
                 None,
                 false,
                 false,
+                None,
             ))
         );
         let _ = std::fs::remove_file(&path);
@@ -1281,6 +1397,7 @@ mod tests {
                 None,
                 false,
                 false,
+                None,
             ))
         );
         let _ = std::fs::remove_file(&path);
@@ -1302,6 +1419,8 @@ mod tests {
             vec!["orna", "invoke", "std.invoke.echo", "--arg"],
             vec!["orna", "invoke", "std.invoke.echo", "--trace"],
             vec!["orna", "invoke", "std.invoke.echo", "--output"],
+            vec!["orna", "invoke", "std.invoke.echo", "--runtime"],
+            vec!["orna", "invoke", "std.invoke.echo", "--runtime", "qt"],
             vec!["orna", "invoke", "std.invoke.echo", "--name"],
             vec!["orna", "invoke", "echo"],
             vec!["orna", "invoke", ""],
@@ -1543,7 +1662,7 @@ mod tests {
     fn usage_diagnostic_is_exact() {
         assert_eq!(
             USAGE,
-            "Usage:\n  orna --version\n  orna server run\n  orna server upgrade\n  orna server backend-shell\n  orna source check <file.orna>\n  orna source apply <file.orna>\n  orna security grant-execute <canonical-function-id>\n  orna raw-call <canonical-function-id>\n  orna raw-call <canonical-function-id> <canonical-parameter-id>\n  orna invoke <qualified-name | canonical-function-id> [options]\n  orna state get <root-function-id> [options]\n  orna state set <root-function-id> [options]"
+            "Usage:\n  orna --version\n  orna server run\n  orna server upgrade\n  orna server backend-shell\n  orna source check <file.orna>\n  orna source apply <file.orna>\n  orna security grant-execute <canonical-function-id>\n  orna raw-call <canonical-function-id>\n  orna raw-call <canonical-function-id> <canonical-parameter-id>\n  orna [--runtime <family>] invoke <qualified-name | canonical-function-id> [options]\n  orna state get <root-function-id> [options]\n  orna state set <root-function-id> [options]"
         );
     }
 }
