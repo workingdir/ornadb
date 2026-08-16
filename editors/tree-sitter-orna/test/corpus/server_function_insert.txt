@@ -1,0 +1,200 @@
+====================
+server function with insert body
+====================
+
+CREATE SERVER FUNCTION product_test.create_probe()
+RETURNS ROWS (created REF product_test.probe)
+SECURITY INVOKER TRANSACTION ATOMIC VOLATILITY VOLATILE
+AS INSERT INTO product_test.probe AS made (stored)
+VALUES (TRUE) RETURNING REF(made);
+
+---
+
+(source_file
+  (create_server_function_statement
+    (kw_create)
+    (kw_server)
+    (kw_function)
+    name: (qualified_name
+      (qualified_name
+        (identifier))
+      (dot)
+      (identifier))
+    parameters: (parameter_list
+      (lparen)
+      (rparen))
+    (kw_returns)
+    returns: (return_type_spec
+      (kw_rows)
+      (lparen)
+      (table_column_definition
+        name: (identifier)
+        type: (type_spec
+          (kw_ref)
+          (type_spec
+            (qualified_name
+              (qualified_name
+                (identifier))
+              (dot)
+              (identifier)))))
+      (rparen))
+    (security_clause
+      (kw_security)
+      (kw_invoker))
+    (transaction_clause
+      (kw_transaction)
+      (kw_atomic))
+    (volatility_clause
+      (kw_volatility)
+      (kw_volatile))
+    body: (function_body
+      (kw_as)
+      (sql_body
+        (insert_statement
+          (kw_insert)
+          (kw_into)
+          table: (qualified_name
+            (qualified_name
+              (identifier))
+            (dot)
+            (identifier))
+          (alias
+            (kw_as)
+            name: (identifier))
+          (lparen)
+          (identifier)
+          (rparen)
+          (kw_values)
+          (lparen)
+          (expression
+            (logical_expression
+              (comparison_expression
+                (additive_expression
+                  (multiplicative_expression
+                    (unary_expression
+                      (postfix_expression
+                        (primary_expression
+                          (literal
+                            (boolean_literal
+                              (kw_true)))))))))))
+          (rparen)
+          (kw_returning)
+          (expression
+            (logical_expression
+              (comparison_expression
+                (additive_expression
+                  (multiplicative_expression
+                    (unary_expression
+                      (postfix_expression
+                        (primary_expression
+                          (qualified_name
+                            (kw_ref)))
+                        (lparen)
+                        (argument_list
+                          (argument
+                            value: (expression
+                              (logical_expression
+                                (comparison_expression
+                                  (additive_expression
+                                    (multiplicative_expression
+                                      (unary_expression
+                                        (postfix_expression
+                                          (primary_expression
+                                            (qualified_name
+                                              (identifier))))))))))))
+                        (rparen)))))))))))
+    (semicolon)))
+
+====================
+top-level insert statement
+====================
+
+INSERT INTO std.present.presenter (
+    alias,
+    function,
+    priority
+) VALUES (
+    'json',
+    FUNCTION_REF(std.json.encode),
+    100
+);
+
+---
+
+(source_file
+  (sql_body
+    (insert_statement
+      (kw_insert)
+      (kw_into)
+      table: (qualified_name
+        (qualified_name
+          (qualified_name
+            (identifier))
+          (dot)
+          (identifier))
+        (dot)
+        (identifier))
+      (lparen)
+      (identifier)
+      (comma)
+      (kw_function)
+      (comma)
+      (identifier)
+      (rparen)
+      (kw_values)
+      (lparen)
+      (expression
+        (logical_expression
+          (comparison_expression
+            (additive_expression
+              (multiplicative_expression
+                (unary_expression
+                  (postfix_expression
+                    (primary_expression
+                      (literal
+                        (string_literal))))))))))
+      (comma)
+      (expression
+        (logical_expression
+          (comparison_expression
+            (additive_expression
+              (multiplicative_expression
+                (unary_expression
+                  (postfix_expression
+                    (primary_expression
+                      (qualified_name
+                        (identifier)))
+                    (lparen)
+                    (argument_list
+                      (argument
+                        value: (expression
+                          (logical_expression
+                            (comparison_expression
+                              (additive_expression
+                                (multiplicative_expression
+                                  (unary_expression
+                                    (postfix_expression
+                                      (primary_expression
+                                        (qualified_name
+                                          (qualified_name
+                                            (qualified_name
+                                              (identifier))
+                                            (dot)
+                                            (identifier))
+                                          (dot)
+                                          (identifier))))))))))))
+                    (rparen))))))))
+      (comma)
+      (expression
+        (logical_expression
+          (comparison_expression
+            (additive_expression
+              (multiplicative_expression
+                (unary_expression
+                  (postfix_expression
+                    (primary_expression
+                      (literal
+                        (number))))))))))
+      (rparen)))
+  (semicolon))
+
