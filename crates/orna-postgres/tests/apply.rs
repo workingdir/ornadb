@@ -19,7 +19,12 @@ use orna_compiler::{
 };
 use orna_core::{
     CatalogueRevisionId, FieldId, FunctionId, InvocationId, ObjectId, PrincipalId, SourceBundleId,
-    SourceRevisionId, SourceUnitId, StandardLibraryRevisionId, TypeId,
+    SourceRevisionId, SourceUnitId, StandardLibraryRevisionId, StateSlotId, TypeId,
+    inspect::{
+        InspectOutcomeKind, InspectPrivilege, InspectSecurityDecisionKind,
+        InspectSecurityDecisionOutcome, InspectSnapshotOptions, InspectTraceEventKind,
+        InspectTracePayload,
+    },
     canonical_hash::{
         catalogue_digest_with_context, source_bundle_digest, source_revision_record_digest,
         source_unit_content_digest, verify_standard_library_snapshot,
@@ -65,8 +70,8 @@ use orna_core::{
     invocation::{
         InvocationArgument, InvocationCallerContext, InvocationCallerKind, InvocationClientOffer,
         InvocationEventBody, InvocationEventKind, InvocationParameterSelector,
-        InvocationTarget as InvocationRequestTarget, InvocationTracePolicy, InvokeRequest,
-        InvokeRequestInput, InvokeValue,
+        InvocationTarget as InvocationRequestTarget, InvocationTracePolicy, InvokeEvent,
+        InvokeRequest, InvokeRequestInput, InvokeValue,
     },
     security::{
         ExecuteGrant, InvocationTarget, Principal, PrincipalKind, PrincipalStatus,
@@ -75,7 +80,8 @@ use orna_core::{
 };
 use orna_postgres::{PostgresKernel, PostgresKernelError, SealedInvocationResult};
 use orna_protocol::{
-    decode_invocation_event_batch, encode_invocation_event_batch, encode_invoke_request,
+    decode_invocation_event_batch, encode_constructed_value, encode_invocation_event_batch,
+    encode_invoke_request,
 };
 use orna_standard::{
     STANDARD_LIBRARY_REVISION_ID, STANDARD_LIBRARY_V2_REVISION_ID, STANDARD_LIBRARY_V3_REVISION_ID,
@@ -6841,6 +6847,431 @@ async fn proves_sealed_echo_invocation_and_rejects_tampered_v3_rows() -> TestRes
         Ok(())
     })
     .await
+}
+
+/// Proves the ADR 0064 capture surface end to end: a sealed echo invocation
+/// completes, an inspection epoch captures its snapshot and trace rows in
+/// the same commit, the epoch round-trips through load with the canonical
+/// payload, the trace stream returns the model events with
+/// `p_after_sequence` and self-observation suppression, the live
+/// `state_cells` projection returns the stored cell redacted or with values
+/// per the requested INSPECT classifier, and the `security_decisions`
+/// projection returns the linked EXECUTE decision. A fresh recovery then
+/// validates the inspection relations and the appended INSPECT audit row.
+#[tokio::test]
+#[ignore = "requires the Compose PostgreSQL development service"]
+async fn proves_inspect_capture_and_projections_after_sealed_echo() -> TestResult<()> {
+    const ECHO_VALUE: i32 = 41;
+
+    with_test_database(|database| async move {
+        let chain = install_v3_standard_chain(&database).await?;
+        let kernel = kernel(&database)?;
+        let standard = chain.version_three_upgrade.verified_standard_snapshot();
+        let pair = chain.version_three.pair();
+        let standard_revision = standard.revision();
+        let registry = registered_opaque_codecs(standard)?;
+
+        // Grant EXECUTE on std.invoke.echo to the proof principal and bind a
+        // session, exactly as the sealed-echo proof does.
+        let security = SecuritySnapshot::new_with_function_targets(
+            pair,
+            vec![SecurityFunctionTarget::verified_standard(
+                orna_compiler::STD_INVOKE_ECHO_FUNCTION_ID,
+                standard_revision,
+                orna_compiler::STD_INVOKE_ECHO_FUNCTION_REVISION_ID,
+            )],
+            vec![Principal::new(
+                V3_PROOF_CLIENT_USER,
+                PrincipalKind::User,
+                PrincipalStatus::Active,
+            )],
+            vec![],
+            vec![ExecuteGrant::new(
+                V3_PROOF_CLIENT_USER,
+                orna_compiler::STD_INVOKE_ECHO_FUNCTION_ID,
+            )],
+        )?;
+        let security = kernel.replace_security_snapshot(&security).await?;
+        let session = security.bind_authenticated_session(V3_PROOF_CLIENT_USER, vec![])?;
+
+        // Store one live USER state cell for the echo root so the live
+        // state_cells projection has a decodable row.
+        let state_slot = StateSlotId::from_bytes([0x42; 16]);
+        let cell_value = encode_constructed_value(
+            &chain.version_three,
+            &registry,
+            &RuntimeValue::Integer(ECHO_VALUE),
+        )
+        .map_err(|error| failure(format!("cell value encoding failed: {error}")))?;
+        let database_session = database.open().await?;
+        database_session
+            .client()
+            .execute(
+                "INSERT INTO _orna_kernel.user_state_cells
+                     (principal_id, root_function_id, root_state_profile,
+                      function_id, function_instance_key, state_slot_id,
+                      value_bytes, value_type_id, revision)
+                 VALUES ($1, $2, '', $3, '', $4, $5, $6, 1)",
+                &[
+                    &V3_PROOF_CLIENT_USER.to_bytes().to_vec(),
+                    &orna_compiler::STD_INVOKE_ECHO_FUNCTION_ID
+                        .to_bytes()
+                        .to_vec(),
+                    &orna_compiler::STD_INVOKE_ECHO_FUNCTION_ID
+                        .to_bytes()
+                        .to_vec(),
+                    &state_slot.to_bytes().to_vec(),
+                    &cell_value,
+                    &orna_compiler::STD_INTEGER_TYPE_ID.to_bytes().to_vec(),
+                ],
+            )
+            .await
+            .map_err(|error| failure(format!("USER state cell insert failed: {error}")))?;
+        let shutdown_result = database_session.shutdown().await;
+        if let Err(error) = shutdown_result {
+            return Err(failure(format!(
+                "USER state insert session shutdown failed: {error}"
+            )));
+        }
+
+        // Invoke through sys.invoke and capture the completed invocation.
+        let by_name = sealed_echo_request(
+            InvocationRequestTarget::qualified_name(
+                orna_core::catalogue::QualifiedSemanticName::new(["std", "invoke", "echo"])?,
+            )?,
+            InvocationParameterSelector::name("p_value")?,
+            ECHO_VALUE,
+        )?;
+        let retained = encode_invoke_request(&chain.version_three, &registry, &by_name)?;
+        let result = kernel
+            .dispatch_sealed_sys_invoke(&session, CONNECTION_PROTOCOL_MAJOR, &retained)
+            .await?;
+        let invocation = require_echo_completion(&result, ECHO_VALUE)?;
+        let events = match &result {
+            SealedInvocationResult::Completed { events, .. } => events,
+            _ => {
+                return Err(failure(
+                    "the sealed echo invocation did not complete with its Event batch",
+                ));
+            }
+        };
+
+        let epoch_id = kernel
+            .capture_inspect_snapshot(
+                &session,
+                invocation,
+                InspectSnapshotOptions::new(true, true, true, true),
+                V3_PROOF_CLIENT_USER,
+                orna_compiler::STD_INVOKE_ECHO_FUNCTION_ID,
+                InspectOutcomeKind::Allowed,
+                events,
+                by_name.client_offer(),
+                None,
+            )
+            .await?;
+
+        // The epoch round-trips through the canonical ORV5 payload and
+        // agrees with the invocation, the pinned pair, and the owner.
+        let loaded = kernel
+            .load_inspect_snapshot(epoch_id)
+            .await?
+            .ok_or_else(|| failure("the captured epoch did not load"))?;
+        require(
+            loaded.id() == epoch_id
+                && loaded.invocation_id() == invocation
+                && loaded.source_revision_id() == pair.source()
+                && loaded.catalogue_revision_id() == pair.catalogue()
+                && loaded.owner() == V3_PROOF_CLIENT_USER
+                && loaded.root_target() == orna_compiler::STD_INVOKE_ECHO_FUNCTION_ID
+                && loaded.outcome() == InspectOutcomeKind::Allowed,
+            "the loaded epoch did not retain the exact capture facts",
+        )?;
+        require(
+            loaded.summary().event_count() == 3
+                && loaded.summary().result()
+                    == orna_core::inspect::InspectResultSummary::ValueBatch { value_count: 1 },
+            "the loaded epoch did not retain the batch summary",
+        )?;
+        require(
+            loaded.invocation_nodes().len() == 1
+                && loaded.invocation_nodes()[0].id() == invocation
+                && loaded.invocation_nodes()[0].kind()
+                    == orna_core::inspect::InspectInvocationNodeKind::Root
+                && loaded.invocation_nodes()[0].phase()
+                    == orna_core::inspect::InspectInvocationPhase::Completed
+                && loaded.invocation_nodes()[0].target()
+                    == orna_compiler::STD_INVOKE_ECHO_FUNCTION_ID,
+            "the loaded epoch did not retain the root invocation node",
+        )?;
+        require(
+            loaded.calls().len() == 1
+                && loaded.calls()[0].invocation_id() == invocation
+                && loaded.calls()[0].value_count() == 1
+                && loaded.calls()[0].duration_nanoseconds() == 0,
+            "the loaded epoch did not retain the root call row",
+        )?;
+
+        // The projections return the epoch rows after the ladder check, and
+        // a request without a granted privilege fails closed.
+        let nodes = kernel.inspect_invocation_nodes(
+            &session,
+            &loaded,
+            InspectPrivilege::OwnInvocation,
+            &[InspectPrivilege::OwnInvocation],
+        )?;
+        require(nodes == loaded.invocation_nodes(), "invocation_nodes projection drifted")?;
+        let calls = kernel.inspect_calls(
+            &session,
+            &loaded,
+            InspectPrivilege::OwnInvocation,
+            &[InspectPrivilege::OwnInvocation],
+        )?;
+        require(calls == loaded.calls(), "calls projection drifted")?;
+        require(
+            kernel.inspect_resources(
+                &session,
+                &loaded,
+                InspectPrivilege::OwnInvocation,
+                &[InspectPrivilege::OwnInvocation],
+            )?
+            .is_empty()
+                && kernel.inspect_ui_nodes(
+                    &session,
+                    &loaded,
+                    InspectPrivilege::OwnInvocation,
+                    &[InspectPrivilege::OwnInvocation],
+                )?
+                .is_empty()
+                && kernel.inspect_presentation_candidates(
+                    &session,
+                    &loaded,
+                    InspectPrivilege::OwnInvocation,
+                    &[InspectPrivilege::OwnInvocation],
+                )?
+                .is_empty()
+                && kernel.inspect_runtime_bindings(
+                    &session,
+                    &loaded,
+                    InspectPrivilege::OwnInvocation,
+                    &[InspectPrivilege::OwnInvocation],
+                )?
+                .is_empty(),
+            "the v1-empty projections returned non-empty rows",
+        )?;
+        let denied = kernel.inspect_invocation_nodes(
+            &session,
+            &loaded,
+            InspectPrivilege::OwnInvocation,
+            &[],
+        );
+        require(
+            matches!(denied, Err(PostgresKernelError::InspectDenied { .. })),
+            "a projection without a granted privilege did not fail closed",
+        )?;
+
+        // The trace relation retains sequences 0..3 with the four durable
+        // kinds; the model stream returns the three lifecycle events and
+        // honours p_after_sequence and self-observation suppression.
+        let trace_rows = inspect_trace_rows(&database, invocation).await?;
+        if !(trace_rows.len() == 4
+            && trace_rows[0].1 == 0
+            && trace_rows[0].2 == "started"
+            && trace_rows[1].1 == 1
+            && trace_rows[1].2 == "value_batch"
+            && trace_rows[2].1 == 2
+            && trace_rows[2].2 == "completed"
+            && trace_rows[3].1 == 3
+            && trace_rows[3].2 == "inspect_snapshot")
+        {
+            return Err(failure(format!(
+                "trace rows 0..3 are not exact: {trace_rows:?}"
+            )));
+        }
+        // `p_after_sequence` filters `sequence > $after`, so the default
+        // `after = 0` stream starts at the ValueBatch event (sequence 1)
+        // and excludes the Started marker at sequence 0.
+        let stream = kernel
+            .stream_inspect_trace(invocation, 0, None, false)
+            .await?;
+        require(
+            stream.len() == 2
+                && stream[0].sequence() == 1
+                && stream[0].kind() == InspectTraceEventKind::ValueBatch
+                && matches!(
+                    stream[0].payload(),
+                    InspectTracePayload::ValueBatch {
+                        schema: None,
+                        values,
+                    } if values.len() == 1
+                        && values[0].value() == &RuntimeValue::Integer(ECHO_VALUE)
+                )
+                && stream[1].sequence() == 2
+                && stream[1].kind() == InspectTraceEventKind::InvocationCompleted,
+            "the trace stream did not return the model lifecycle events",
+        )?;
+        let resumed = kernel
+            .stream_inspect_trace(invocation, 1, None, false)
+            .await?;
+        require(
+            resumed.len() == 1 && resumed[0].sequence() == 2,
+            "p_after_sequence did not resume after sequence 1",
+        )?;
+
+        // An observation-produced row is suppressed by default and included
+        // in the explicit include-observer mode.
+        let observer = InvocationId::from_bytes([0x77; 16]);
+        let observed_event = InvokeEvent::new(
+            invocation,
+            4,
+            InvocationEventBody::Started {
+                visible_principal: Some(V3_PROOF_CLIENT_USER),
+            },
+        )
+        .map_err(|error| failure(format!("observer event construction failed: {error}")))?;
+        let observed_payload = encode_constructed_value(
+            &chain.version_three,
+            &registry,
+            &RuntimeValue::InvokeEvent(observed_event),
+        )
+        .map_err(|error| failure(format!("observer event encoding failed: {error}")))?;
+        let database_session = database.open().await?;
+        database_session
+            .client()
+            .execute(
+                "INSERT INTO _orna_kernel.inspect_trace_events
+                     (invocation_id, sequence, kind, payload_bytes,
+                      observer_invocation_id, recorded_at)
+                 VALUES ($1, 4, 'started', $2, $3, transaction_timestamp())",
+                &[
+                    &invocation.to_bytes().to_vec(),
+                    &observed_payload,
+                    &observer.to_bytes().to_vec(),
+                ],
+            )
+            .await
+            .map_err(|error| failure(format!("observer trace row insert failed: {error}")))?;
+        let shutdown_result = database_session.shutdown().await;
+        if let Err(error) = shutdown_result {
+            return Err(failure(format!(
+                "observer row session shutdown failed: {error}"
+            )));
+        }
+        let suppressed = kernel
+            .stream_inspect_trace(invocation, 1, Some(observer), false)
+            .await?;
+        require(
+            suppressed.len() == 1 && suppressed[0].sequence() == 2,
+            "self-observation suppression did not drop the observer row",
+        )?;
+        let included = kernel
+            .stream_inspect_trace(invocation, 1, Some(observer), true)
+            .await?;
+        require(
+            included.len() == 2
+                && included[0].sequence() == 2
+                && included[1].sequence() == 4
+                && included[1].observer_invocation() == Some(observer),
+            "include-observer mode did not return the observer row",
+        )?;
+
+        // The live state_cells projection returns the stored cell; the typed
+        // value is redacted unless the Values classifier was requested and
+        // granted.
+        let cells = kernel
+            .inspect_state_cells(
+                &session,
+                &loaded,
+                InspectPrivilege::Values,
+                &[InspectPrivilege::OwnInvocation, InspectPrivilege::Values],
+            )
+            .await?;
+        require(
+            cells.len() == 1
+                && cells[0].key().root_function() == orna_compiler::STD_INVOKE_ECHO_FUNCTION_ID
+                && cells[0].key().state_profile().is_empty()
+                && cells[0].key().function() == orna_compiler::STD_INVOKE_ECHO_FUNCTION_ID
+                && cells[0].key().instance_key().is_empty()
+                && cells[0].key().state_slot() == state_slot
+                && cells[0].value_type() == orna_compiler::STD_INTEGER_TYPE_ID
+                && cells[0].revision() == 1
+                && cells[0].value() == Some(&InvokeValue::new(RuntimeValue::Integer(ECHO_VALUE)).map_err(|error| failure(format!("invoke value construction failed: {error}")))?),
+            "the state_cells projection did not return the stored cell with values",
+        )?;
+        let redacted = kernel
+            .inspect_state_cells(
+                &session,
+                &loaded,
+                InspectPrivilege::OwnInvocation,
+                &[InspectPrivilege::OwnInvocation],
+            )
+            .await?;
+        require(
+            redacted.len() == 1
+                && redacted[0].revision() == 1
+                && redacted[0].value().is_none(),
+            "the state_cells projection did not redact the stored value",
+        )?;
+
+        // The security_decisions projection returns the linked EXECUTE
+        // decision that admitted the captured invocation.
+        let decisions = kernel
+            .inspect_security_decisions(
+                &session,
+                &loaded,
+                InspectPrivilege::OwnInvocation,
+                &[InspectPrivilege::OwnInvocation],
+            )
+            .await?;
+        require(
+            decisions.len() == 1
+                && decisions[0].kind() == InspectSecurityDecisionKind::Execute
+                && decisions[0].outcome() == InspectSecurityDecisionOutcome::Allowed
+                && decisions[0].principals().contains(&V3_PROOF_CLIENT_USER)
+                && decisions[0].target() == Some(orna_compiler::STD_INVOKE_ECHO_FUNCTION_ID)
+                && decisions[0].denial_reason().is_none()
+                && decisions[0].audit_refs().len() == 1,
+            "the security_decisions projection did not return the linked EXECUTE decision",
+        )?;
+
+        // A fresh recovery validates the inspection relations and the
+        // appended INSPECT capture audit row.
+        kernel.recover().await?;
+        Ok(())
+    })
+    .await
+}
+
+/// Returns `(invocation_id, sequence, kind)` for every trace row of one
+/// invocation in sequence order.
+async fn inspect_trace_rows(
+    database: &TestDatabase,
+    invocation: InvocationId,
+) -> TestResult<Vec<(Vec<u8>, i64, String)>> {
+    let session = database.open().await?;
+    let result = async {
+        let rows = session
+            .client()
+            .query(
+                "SELECT invocation_id, sequence, kind
+                 FROM _orna_kernel.inspect_trace_events
+                 WHERE invocation_id = $1
+                 ORDER BY sequence",
+                &[&invocation.to_bytes().to_vec()],
+            )
+            .await?;
+        let mut trace = Vec::with_capacity(rows.len());
+        for row in &rows {
+            trace.push((row.try_get(0)?, row.try_get(1)?, row.try_get(2)?));
+        }
+        Ok(trace)
+    }
+    .await;
+    let shutdown_result = session.shutdown().await;
+    match (result, shutdown_result) {
+        (Ok(trace), Ok(())) => Ok(trace),
+        (Err(error), _) => Err(error),
+        (Ok(_), Err(error)) => Err(error),
+    }
 }
 
 /// Tamper fixture 1: the V3 `std/output.orna` unit's stored content digest is
