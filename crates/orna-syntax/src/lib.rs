@@ -5,8 +5,11 @@
 
 use std::{fmt, ops::Range};
 
+mod highlight;
 mod lexer;
 mod parser;
+
+pub use highlight::{HighlightKind, HighlightToken, highlight};
 
 /// A byte range in the input source.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -921,6 +924,11 @@ impl SyntaxTree {
     pub fn text(&self) -> String {
         self.root.to_string()
     }
+
+    /// Return the private Rowan root for intra-crate classification.
+    pub(crate) fn root(&self) -> &rowan::SyntaxNode<parser::OrnaLanguage> {
+        &self.root
+    }
 }
 
 impl fmt::Debug for SyntaxTree {
@@ -1005,6 +1013,14 @@ impl Parse {
     /// Return successfully parsed CLIENT function declarations in source order.
     pub fn client_functions(&self) -> &[ClientFunctionDeclaration] {
         &self.client_functions
+    }
+
+    /// Return context-aware highlight tokens for this source unit.
+    ///
+    /// The classification walks this unit's lossless CST, so declaration
+    /// names are recognised even in partially edited source.
+    pub fn highlight(&self) -> Vec<HighlightToken> {
+        highlight::highlight_tree(&self.syntax)
     }
 }
 
