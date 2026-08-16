@@ -245,6 +245,16 @@ pub enum ClientExecutionError {
         /// The registry or value validation failure.
         source: ClientOpaqueValueError,
     },
+    /// The local capability gate denied evaluation (ADR 0060).
+    ///
+    /// The recorded capability is the redacted qualified name only — no
+    /// path, host, or secret argument value is retained.
+    CapabilityDenied {
+        /// The resolved execution context.
+        context: ClientExecutionContext,
+        /// The redacted qualified capability name.
+        capability: String,
+    },
 }
 
 impl ClientExecutionError {
@@ -255,7 +265,8 @@ impl ClientExecutionError {
             Self::InvalidActiveRevision { pair, .. } | Self::FunctionNotFound { pair, .. } => *pair,
             Self::InvalidFunction { context, .. }
             | Self::InvalidArtifact { context, .. }
-            | Self::InvalidOpaqueValue { context, .. } => context.pair(),
+            | Self::InvalidOpaqueValue { context, .. }
+            | Self::CapabilityDenied { context, .. } => context.pair(),
         }
     }
 
@@ -267,7 +278,8 @@ impl ClientExecutionError {
             | Self::FunctionNotFound { function, .. } => *function,
             Self::InvalidFunction { context, .. }
             | Self::InvalidArtifact { context, .. }
-            | Self::InvalidOpaqueValue { context, .. } => context.function(),
+            | Self::InvalidOpaqueValue { context, .. }
+            | Self::CapabilityDenied { context, .. } => context.function(),
         }
     }
 
@@ -279,7 +291,8 @@ impl ClientExecutionError {
             | Self::FunctionNotFound { .. } => None,
             Self::InvalidFunction { context, .. }
             | Self::InvalidArtifact { context, .. }
-            | Self::InvalidOpaqueValue { context, .. } => Some(context),
+            | Self::InvalidOpaqueValue { context, .. }
+            | Self::CapabilityDenied { context, .. } => Some(context),
         }
     }
 }
@@ -300,6 +313,10 @@ impl fmt::Display for ClientExecutionError {
             Self::InvalidArtifact { .. } | Self::InvalidOpaqueValue { .. } => {
                 formatter.write_str("the saved CLIENT function cannot be evaluated")
             }
+            Self::CapabilityDenied { capability, .. } => write!(
+                formatter,
+                "the CLIENT function requires the capability {capability} which is not granted"
+            ),
         }
     }
 }
@@ -312,7 +329,8 @@ impl Error for ClientExecutionError {
             Self::InvalidOpaqueValue { source, .. } => Some(source),
             Self::AuthorisationMismatch { .. }
             | Self::FunctionNotFound { .. }
-            | Self::InvalidFunction { .. } => None,
+            | Self::InvalidFunction { .. }
+            | Self::CapabilityDenied { .. } => None,
         }
     }
 }
@@ -325,6 +343,30 @@ impl Error for ClientExecutionError {
 pub fn evaluate_client_function(
     active: &ActiveDatabaseRevision,
     authorisation: &AuthorisedInvocation,
+) -> Result<ClientExecutionResult, ClientExecutionError> {
+    evaluate_client_function_with_grants(
+        active,
+        authorisation,
+        &[],
+        &capability::LocalCapabilityGrantSet::new(),
+    )
+}
+
+/// Evaluates one closed CLIENT function after the local capability gate.
+///
+/// This is the ADR 0060 enforcement entry: every declared capability of the
+/// pinned function revision must be satisfied by the local grant set before
+/// evaluation proceeds. Declarations are supplied by the caller (the sealed
+/// or raw dispatch path, or a future durable revision field); a missing
+/// grant fails closed with a redacted [`ClientExecutionError::CapabilityDenied`]
+/// carrying only the qualified capability name. A function with zero declared
+/// capabilities and an empty grant set behaves exactly like the unguarded
+/// entry.
+pub fn evaluate_client_function_with_grants(
+    active: &ActiveDatabaseRevision,
+    authorisation: &AuthorisedInvocation,
+    declarations: &[capability::LocalCapabilityDeclaration],
+    grants: &capability::LocalCapabilityGrantSet,
 ) -> Result<ClientExecutionResult, ClientExecutionError> {
     let target = authorisation.target();
     if target.revision() != active.pair() {
@@ -353,6 +395,15 @@ pub fn evaluate_client_function(
         function,
         function_revision: revision.id(),
     };
+
+    for declaration in declarations {
+        if !grants.satisfies_declaration(declaration, |_parameter| None) {
+            return Err(ClientExecutionError::CapabilityDenied {
+                context,
+                capability: declaration.name().as_str().to_owned(),
+            });
+        }
+    }
 
     let return_shape = validate_function_shape(active, definition, context)?;
     validate_selected_references(
@@ -713,6 +764,74 @@ mod tests {
             assert_eq!(result.context().function_revision(), function_revision);
             assert_eq!(result.value(), &RuntimeValue::Boolean(value));
         }
+    }
+
+    #[test]
+    fn capability_gate_denies_an_ungranted_declared_capability() {
+        let (active, function, _, _) = version_one_active(true);
+        let grants = super::capability::LocalCapabilityGrantSet::new();
+        let declaration = super::capability::LocalCapabilityDeclaration::new(
+            super::capability::LocalCapabilityName::StdFsRead,
+            super::capability::LocalCapabilityArgumentSource::Text("/home/bob".to_owned()),
+        );
+
+        let error = super::evaluate_client_function_with_grants(
+            &active,
+            &authorise(active.pair(), function),
+            &[declaration],
+            &grants,
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            &error,
+            super::ClientExecutionError::CapabilityDenied {
+                context,
+                capability,
+            } if context.function() == function && capability == "std.fs.read"
+        ));
+    }
+
+    #[test]
+    fn capability_gate_admits_a_granted_declared_capability() {
+        let (active, function, pair, _) = version_one_active(true);
+        let grant = super::capability::LocalCapabilityGrant::new(
+            super::capability::LocalCapabilityName::StdFsRead,
+            super::capability::LocalCapabilityScope::path("/home/bob").unwrap(),
+        )
+        .unwrap();
+        let grants = super::capability::LocalCapabilityGrantSet::from_grants([grant]).unwrap();
+        let declaration = super::capability::LocalCapabilityDeclaration::new(
+            super::capability::LocalCapabilityName::StdFsRead,
+            super::capability::LocalCapabilityArgumentSource::Text("/home/bob/x".to_owned()),
+        );
+
+        let result = super::evaluate_client_function_with_grants(
+            &active,
+            &authorise(pair, function),
+            &[declaration],
+            &grants,
+        )
+        .unwrap();
+
+        assert_eq!(result.context().function(), function);
+        assert_eq!(result.value(), &RuntimeValue::Boolean(true));
+    }
+
+    #[test]
+    fn capability_gate_keeps_zero_declaration_functions_unchanged() {
+        let (active, function, pair, _) = version_one_active(true);
+        let empty_grants = super::capability::LocalCapabilityGrantSet::new();
+
+        let result = super::evaluate_client_function_with_grants(
+            &active,
+            &authorise(pair, function),
+            &[],
+            &empty_grants,
+        )
+        .unwrap();
+
+        assert_eq!(result.value(), &RuntimeValue::Boolean(true));
     }
 
     #[test]
