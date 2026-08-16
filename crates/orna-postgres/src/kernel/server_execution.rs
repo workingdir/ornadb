@@ -6,6 +6,7 @@
 use std::{collections::BTreeMap, error::Error, fmt};
 
 use futures_util::TryStreamExt;
+use orna_artifact::server_parameter_echo::{self, ServerParameterEcho, ServerParameterEchoError};
 use orna_artifact::server_plan::{
     self, DistinctServerPlan, Expression, ExpressionKind, FieldStep, IdentitySelectedServerPlan,
     Ordering, SelectBindValue as UniqueTextSelectBindValue, ServerPlan, SortDirection,
@@ -20,7 +21,7 @@ use orna_core::{
     },
     revision::{
         ActiveDatabaseRevision, CatalogueHashContext, DefinitionReferenceKind,
-        DefinitionReferenceTarget, ExecutableArtifactKind, RevisionPair,
+        DefinitionReferenceTarget, ExecutableArtifactKind, FunctionRevisionRecord, RevisionPair,
     },
     security::{AuthorisedInvocation, InvocationTarget},
     types::{ResolvedType, StandardScalar},
@@ -30,6 +31,7 @@ use orna_core::{
     },
 };
 use orna_protocol::{ValueCodecError, decode_active_value, encode_active_value};
+use orna_standard::INTEGER_TYPE_ID;
 use tokio_postgres::{
     Client, IsolationLevel, Row, Statement, Transaction,
     types::{ToSql, Type},
@@ -228,6 +230,8 @@ pub enum ServerSelectError {
     },
     /// The canonical server plan cannot decode.
     PlanDecode(orna_artifact::server_plan::ServerPlanError),
+    /// The pinned standard parameter-echo artifact cannot decode.
+    ParameterEchoDecode(ServerParameterEchoError),
     /// The plan does not agree with the recovered active catalogue.
     PlanInvariant { rule: &'static str },
     /// A saved `SELECT DISTINCT` function is outside the accepted runtime form.
@@ -377,6 +381,12 @@ impl fmt::Display for ServerSelectError {
                 )
             }
             Self::PlanDecode(error) => write!(formatter, "cannot decode server plan: {error}"),
+            Self::ParameterEchoDecode(error) => {
+                write!(
+                    formatter,
+                    "cannot decode server parameter-echo artifact: {error}"
+                )
+            }
             Self::PlanInvariant { rule } => {
                 write!(formatter, "server plan invariant failed: {rule}")
             }
@@ -460,6 +470,7 @@ impl Error for ServerSelectError {
             Self::Database { source, .. } => Some(source),
             Self::Kernel { source } => Some(source),
             Self::PlanDecode(error) => Some(error),
+            Self::ParameterEchoDecode(error) => Some(error),
             Self::ResultRows(error) => Some(error),
             Self::ReturnedRows(error) => Some(error),
             Self::RowDecode { source, .. } => Some(source),
@@ -1020,6 +1031,7 @@ pub(crate) const fn raw_server_target_is_unavailable(error: &ServerSelectError) 
         | ServerSelectError::RawTarget { .. }
         | ServerSelectError::Artifact { .. }
         | ServerSelectError::PlanDecode(_)
+        | ServerSelectError::ParameterEchoDecode(_)
         | ServerSelectError::PlanInvariant { .. }
         | ServerSelectError::Distinct { .. }
         | ServerSelectError::ReferenceEvidence { .. }
@@ -1291,6 +1303,158 @@ fn map_distinct_plan_decode_error(error: server_plan::ServerPlanError) -> Postgr
             distinct_error("ORDER BY is not allowed")
         }
         error => server_error(ServerSelectError::PlanDecode(error)),
+    }
+}
+
+/// Executes one closed standard `orna.server-parameter-echo` artifact.
+///
+/// This engine is reachable only from a pinned standard
+/// [`FunctionRevisionRecord`] and its already bound [`FunctionArgument`]. It
+/// dispatches purely by checked artifact kind, format, and version, then
+/// validates the artifact against the pinned standard function signature:
+/// decode pins the function's parameter identity and the resolved INTEGER
+/// value type, and the signature validator requires the fixed ADR 0055 echo
+/// shape. It never matches a function by Rust name or [`FunctionId`], executes
+/// SQL, or opens a PostgreSQL row. The result is the already bound typed
+/// integer.
+///
+/// The sealed `sys.invoke` execution step (ADR 0055 implementation order item
+/// 11) is the sole caller. Until that step wires the pinned standard target
+/// here, the seam has no non-test caller and is intentionally allowed dead.
+#[allow(dead_code)]
+pub(crate) fn execute_standard_parameter_echo(
+    function: &FunctionDefinition,
+    revision: &FunctionRevisionRecord,
+    arguments: &[FunctionArgument],
+) -> Result<RuntimeValue, PostgresKernelError> {
+    let artifact = revision.artifact();
+    if artifact.kind() != ExecutableArtifactKind::Server {
+        return Err(artifact_error(
+            function.id(),
+            "current revision must contain a SERVER artifact",
+        ));
+    }
+    if artifact.format() != server_parameter_echo::FORMAT_IDENTITY {
+        return Err(artifact_error(
+            function.id(),
+            "current SERVER artifact must use orna.server-parameter-echo",
+        ));
+    }
+    if artifact.version() != server_parameter_echo::FORMAT_VERSION {
+        return Err(artifact_error(
+            function.id(),
+            "current SERVER artifact must use orna.server-parameter-echo version 1",
+        ));
+    }
+    if revision.language_version() != server_parameter_echo::LANGUAGE_VERSION_IDENTITY {
+        return Err(artifact_error(
+            function.id(),
+            "current SERVER revision must use the parameter-echo language version",
+        ));
+    }
+    let parameter = validate_standard_parameter_echo_signature(function)?;
+    ServerParameterEcho::decode(artifact.payload(), parameter, INTEGER_TYPE_ID)
+        .map_err(ServerSelectError::ParameterEchoDecode)
+        .map_err(server_error)?;
+    validate_standard_parameter_echo_argument(parameter, arguments)
+}
+
+/// Validates one pinned function against the fixed ADR 0055 echo signature.
+///
+/// The accepted shape is exactly: SERVER domain, one required non-null
+/// `INTEGER` parameter with no default expression, one single `INTEGER`
+/// result, `SECURITY INVOKER`, `TRANSACTION READ ONLY`, and `VOLATILITY
+/// STABLE`. Both the parameter and the result must resolve to the durable
+/// INTEGER value type. Returns the pinned parameter identity the artifact must
+/// carry.
+fn validate_standard_parameter_echo_signature(
+    function: &FunctionDefinition,
+) -> Result<ParameterId, PostgresKernelError> {
+    if function.domain() != FunctionDomain::Server {
+        return Err(server_error(ServerSelectError::FunctionDomain {
+            function: function.id(),
+        }));
+    }
+    let [parameter] = function.parameters() else {
+        return Err(function_signature_error(
+            function.id(),
+            "standard parameter echo functions must declare exactly one required non-null INTEGER parameter",
+        ));
+    };
+    if parameter.default_expression().is_some() {
+        return Err(function_signature_error(
+            function.id(),
+            "standard parameter echo functions must declare exactly one required non-null INTEGER parameter",
+        ));
+    }
+    let FunctionReturn::Single(result_type) = function.return_type() else {
+        return Err(function_signature_error(
+            function.id(),
+            "standard parameter echo functions must return a single INTEGER value",
+        ));
+    };
+    if parameter.resolved_type() != ResolvedType::value(INTEGER_TYPE_ID)
+        || *result_type != ResolvedType::value(INTEGER_TYPE_ID)
+    {
+        return Err(function_signature_error(
+            function.id(),
+            "standard parameter echo functions must declare one INTEGER parameter and one INTEGER result",
+        ));
+    }
+    if function.security() != FunctionSecurity::Invoker {
+        return Err(function_signature_error(
+            function.id(),
+            "standard parameter echo functions must use INVOKER security",
+        ));
+    }
+    if function.transaction() != Some(FunctionTransaction::ReadOnly) {
+        return Err(function_signature_error(
+            function.id(),
+            "standard parameter echo functions must use READ ONLY transactions",
+        ));
+    }
+    if function.volatility() != FunctionVolatility::Stable {
+        return Err(function_signature_error(
+            function.id(),
+            "standard parameter echo functions must use STABLE volatility",
+        ));
+    }
+    Ok(parameter.id())
+}
+
+/// Validates the exact bound argument of one standard parameter-echo call.
+///
+/// The engine accepts exactly one argument bound to the pinned parameter that
+/// carries one non-null `RuntimeValue::Integer`, and returns that typed
+/// integer. A typed null cannot cross the [`FunctionArgument`] boundary; the
+/// explicit null arm keeps the closed-engine invariant independent of that
+/// boundary.
+fn validate_standard_parameter_echo_argument(
+    parameter: ParameterId,
+    arguments: &[FunctionArgument],
+) -> Result<RuntimeValue, PostgresKernelError> {
+    let [argument] = arguments else {
+        return Err(argument_error(
+            None,
+            "standard parameter echo calls require exactly one argument",
+        ));
+    };
+    if argument.parameter() != parameter {
+        return Err(argument_error(
+            Some(argument.parameter()),
+            "standard parameter echo arguments must bind the pinned parameter identity",
+        ));
+    }
+    match argument.value() {
+        RuntimeValue::Integer(value) => Ok(RuntimeValue::Integer(*value)),
+        RuntimeValue::Null(_) => Err(argument_error(
+            Some(parameter),
+            "standard parameter echo arguments cannot be NULL",
+        )),
+        _ => Err(argument_error(
+            Some(parameter),
+            "standard parameter echo arguments must be one non-null INTEGER value",
+        )),
     }
 }
 
@@ -3417,19 +3581,145 @@ fn reference_error(function: FunctionId, rule: &'static str) -> PostgresKernelEr
 
 #[cfg(test)]
 mod tests {
+    use orna_artifact::server_parameter_echo::{
+        self, ServerParameterEcho, ServerParameterEchoError,
+    };
     use orna_artifact::server_plan::{IdentitySelector, Scan, ValueType};
     use orna_core::{
-        CatalogueRevisionId, FieldId, ParameterId, SchemaId,
+        CatalogueRevisionId, ExpressionId, FieldId, ParameterId, SchemaId, SourceUnitId,
+        canonical_hash::artifact_payload_digest,
         catalogue::{
             CatalogueSnapshot, EnumTypeDefinition, FieldDefinition, FunctionReturnColumnDefinition,
             ObjectTypeDefinition, ParameterDefinition, QualifiedSemanticName,
             RecordValueFieldDefinition, RecordValueTypeDefinition, SchemaDefinition,
         },
-        revision::CatalogueHashContext,
+        revision::{
+            CatalogueHashContext, ExecutableArtifact, ExecutableArtifactKind,
+            FunctionRevisionRecord, Sha256Digest, SourceOrigin,
+        },
         types::TypeDescriptor,
     };
 
     use super::*;
+
+    /// The fixed ADR 0055 `std.invoke.echo` function identity: `...10`.
+    const STD_INVOKE_ECHO_FUNCTION_ID: FunctionId =
+        FunctionId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x10]);
+    /// The fixed ADR 0055 `std.invoke.echo.p_value` parameter identity: `...10`.
+    const STD_INVOKE_ECHO_PARAMETER_ID: ParameterId =
+        ParameterId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x10]);
+    /// The fixed ADR 0055 `std.invoke.echo` function-revision identity: `...10`.
+    const STD_INVOKE_ECHO_FUNCTION_REVISION_ID: FunctionRevisionId =
+        FunctionRevisionId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x10]);
+
+    fn echo_parameter(parameter: ParameterId) -> ParameterDefinition {
+        ParameterDefinition::new(
+            parameter,
+            "p_value",
+            0,
+            ResolvedType::value(orna_standard::INTEGER_TYPE_ID),
+            None,
+        )
+    }
+
+    fn echo_function(function: FunctionId, parameter: ParameterId) -> FunctionDefinition {
+        FunctionDefinition::new(
+            function,
+            name(&["std", "invoke", "echo"]),
+            FunctionDomain::Server,
+            vec![echo_parameter(parameter)],
+            FunctionReturn::Single(ResolvedType::value(orna_standard::INTEGER_TYPE_ID)),
+            STD_INVOKE_ECHO_FUNCTION_REVISION_ID,
+            FunctionSecurity::Invoker,
+            Some(FunctionTransaction::ReadOnly),
+            FunctionVolatility::Stable,
+        )
+    }
+
+    fn echo_payload(parameter: ParameterId) -> Vec<u8> {
+        ServerParameterEcho::new(parameter, orna_standard::INTEGER_TYPE_ID)
+            .expect("any identities form a valid echo model")
+            .encode()
+            .expect("the canonical echo model encodes")
+    }
+
+    fn artifact(
+        kind: ExecutableArtifactKind,
+        format: &str,
+        version: u32,
+        payload: Vec<u8>,
+    ) -> ExecutableArtifact {
+        let content_hash = artifact_payload_digest(&payload).expect("the payload digests");
+        ExecutableArtifact::new(kind, format, version, payload, content_hash)
+            .expect("the artifact is valid")
+    }
+
+    fn echo_artifact(parameter: ParameterId) -> ExecutableArtifact {
+        artifact(
+            ExecutableArtifactKind::Server,
+            server_parameter_echo::FORMAT_IDENTITY,
+            server_parameter_echo::FORMAT_VERSION,
+            echo_payload(parameter),
+        )
+    }
+
+    fn revision_with_artifact(
+        function: FunctionId,
+        artifact: ExecutableArtifact,
+    ) -> FunctionRevisionRecord {
+        FunctionRevisionRecord::new(
+            function,
+            STD_INVOKE_ECHO_FUNCTION_REVISION_ID,
+            1,
+            SourceOrigin::new(SourceUnitId::from_bytes([0x91; 16]), 0, 1)
+                .expect("a test source origin is valid"),
+            Sha256Digest::from_bytes([0x42; 32]),
+            Sha256Digest::from_bytes([0x43; 32]),
+            server_parameter_echo::LANGUAGE_VERSION_IDENTITY,
+            artifact,
+        )
+        .expect("the test revision is valid")
+    }
+
+    fn echo_revision(function: FunctionId, parameter: ParameterId) -> FunctionRevisionRecord {
+        revision_with_artifact(function, echo_artifact(parameter))
+    }
+
+    fn assert_echo_artifact_rule(
+        result: Result<RuntimeValue, PostgresKernelError>,
+        function: FunctionId,
+        expected: &'static str,
+    ) {
+        let Err(PostgresKernelError::ServerSelect(ServerSelectError::Artifact {
+            function: actual_function,
+            rule,
+        })) = result
+        else {
+            panic!("expected an artifact rejection");
+        };
+        assert_eq!(actual_function, function);
+        assert_eq!(rule, expected);
+    }
+
+    fn assert_echo_decode_rule(
+        result: Result<RuntimeValue, PostgresKernelError>,
+        expected: ServerParameterEchoError,
+    ) {
+        let Err(PostgresKernelError::ServerSelect(ServerSelectError::ParameterEchoDecode(actual))) =
+            result
+        else {
+            panic!("expected a parameter-echo decode rejection");
+        };
+        assert_eq!(actual, expected);
+    }
+
+    fn assert_echo_domain_rule(result: Result<RuntimeValue, PostgresKernelError>) {
+        let Err(PostgresKernelError::ServerSelect(ServerSelectError::FunctionDomain { .. })) =
+            result
+        else {
+            panic!("expected a function-domain rejection");
+        };
+    }
 
     fn name(parts: &[&str]) -> QualifiedSemanticName {
         QualifiedSemanticName::new(parts.iter().copied()).unwrap()
@@ -3672,8 +3962,8 @@ mod tests {
         )])
     }
 
-    fn assert_signature_rule(
-        result: Result<(), PostgresKernelError>,
+    fn assert_signature_rule<T>(
+        result: Result<T, PostgresKernelError>,
         function: FunctionId,
         expected: &'static str,
     ) {
@@ -5664,5 +5954,534 @@ mod tests {
                 .source()
                 .is_none()
         );
+        assert!(
+            ServerSelectError::ParameterEchoDecode(ServerParameterEchoError::InvalidMagic)
+                .source()
+                .is_some()
+        );
+        assert_eq!(
+            ServerSelectError::ParameterEchoDecode(ServerParameterEchoError::Truncated).to_string(),
+            "cannot decode server parameter-echo artifact: truncated orna.server-parameter-echo artifact"
+        );
+    }
+
+    #[test]
+    fn standard_parameter_echo_executes_and_returns_the_bound_integer() {
+        let function = echo_function(STD_INVOKE_ECHO_FUNCTION_ID, STD_INVOKE_ECHO_PARAMETER_ID);
+        let revision = echo_revision(STD_INVOKE_ECHO_FUNCTION_ID, STD_INVOKE_ECHO_PARAMETER_ID);
+        let argument =
+            FunctionArgument::new(STD_INVOKE_ECHO_PARAMETER_ID, RuntimeValue::Integer(7))
+                .expect("the bound integer argument is valid");
+        assert_eq!(
+            execute_standard_parameter_echo(&function, &revision, &[argument])
+                .expect("the exact standard artifact must execute"),
+            RuntimeValue::Integer(7)
+        );
+        let negative =
+            FunctionArgument::new(STD_INVOKE_ECHO_PARAMETER_ID, RuntimeValue::Integer(-41))
+                .expect("a negative bound integer argument is valid");
+        assert_eq!(
+            execute_standard_parameter_echo(&function, &revision, &[negative])
+                .expect("a negative bound integer must echo unchanged"),
+            RuntimeValue::Integer(-41)
+        );
+    }
+
+    #[test]
+    fn standard_parameter_echo_dispatches_without_function_name_or_id_matching() {
+        // A different function identity, revision, parameter identity, and name
+        // with the same closed echo shape executes identically: the engine
+        // dispatches only on artifact kind, format, and version, then validates
+        // against the pinned signature.
+        let other_function = FunctionId::from_bytes([0x41; 16]);
+        let other_parameter = ParameterId::from_bytes([0x42; 16]);
+        let function = FunctionDefinition::new(
+            other_function,
+            name(&["other", "echo"]),
+            FunctionDomain::Server,
+            vec![echo_parameter(other_parameter)],
+            FunctionReturn::Single(ResolvedType::value(orna_standard::INTEGER_TYPE_ID)),
+            FunctionRevisionId::from_bytes([0x44; 16]),
+            FunctionSecurity::Invoker,
+            Some(FunctionTransaction::ReadOnly),
+            FunctionVolatility::Stable,
+        );
+        let revision = echo_revision(other_function, other_parameter);
+        let argument = FunctionArgument::new(other_parameter, RuntimeValue::Integer(3))
+            .expect("the bound integer argument is valid");
+        assert_eq!(
+            execute_standard_parameter_echo(&function, &revision, &[argument])
+                .expect("the same artifact shape must execute identically"),
+            RuntimeValue::Integer(3)
+        );
+    }
+
+    #[test]
+    fn standard_parameter_echo_rejects_wrong_kind_format_and_version() {
+        let function = echo_function(STD_INVOKE_ECHO_FUNCTION_ID, STD_INVOKE_ECHO_PARAMETER_ID);
+        let parameter = STD_INVOKE_ECHO_PARAMETER_ID;
+        let argument = || {
+            FunctionArgument::new(parameter, RuntimeValue::Integer(5))
+                .expect("the bound integer argument is valid")
+        };
+
+        // Wrong artifact kind: a CLIENT artifact with the exact echo payload.
+        let revision = revision_with_artifact(
+            STD_INVOKE_ECHO_FUNCTION_ID,
+            artifact(
+                ExecutableArtifactKind::Client,
+                server_parameter_echo::FORMAT_IDENTITY,
+                server_parameter_echo::FORMAT_VERSION,
+                echo_payload(parameter),
+            ),
+        );
+        assert_echo_artifact_rule(
+            execute_standard_parameter_echo(&function, &revision, &[argument()]),
+            STD_INVOKE_ECHO_FUNCTION_ID,
+            "current revision must contain a SERVER artifact",
+        );
+
+        // Wrong format: a different SERVER artifact format with the exact payload.
+        let revision = revision_with_artifact(
+            STD_INVOKE_ECHO_FUNCTION_ID,
+            artifact(
+                ExecutableArtifactKind::Server,
+                "orna.server-plan",
+                server_parameter_echo::FORMAT_VERSION,
+                echo_payload(parameter),
+            ),
+        );
+        assert_echo_artifact_rule(
+            execute_standard_parameter_echo(&function, &revision, &[argument()]),
+            STD_INVOKE_ECHO_FUNCTION_ID,
+            "current SERVER artifact must use orna.server-parameter-echo",
+        );
+
+        // Wrong version.
+        let revision = revision_with_artifact(
+            STD_INVOKE_ECHO_FUNCTION_ID,
+            artifact(
+                ExecutableArtifactKind::Server,
+                server_parameter_echo::FORMAT_IDENTITY,
+                2,
+                echo_payload(parameter),
+            ),
+        );
+        assert_echo_artifact_rule(
+            execute_standard_parameter_echo(&function, &revision, &[argument()]),
+            STD_INVOKE_ECHO_FUNCTION_ID,
+            "current SERVER artifact must use orna.server-parameter-echo version 1",
+        );
+
+        // Wrong revision language version.
+        let revision = FunctionRevisionRecord::new(
+            STD_INVOKE_ECHO_FUNCTION_ID,
+            STD_INVOKE_ECHO_FUNCTION_REVISION_ID,
+            1,
+            SourceOrigin::new(SourceUnitId::from_bytes([0x91; 16]), 0, 1)
+                .expect("a test source origin is valid"),
+            Sha256Digest::from_bytes([0x42; 32]),
+            Sha256Digest::from_bytes([0x43; 32]),
+            "orna.language/2",
+            echo_artifact(parameter),
+        )
+        .expect("the test revision is valid");
+        assert_echo_artifact_rule(
+            execute_standard_parameter_echo(&function, &revision, &[argument()]),
+            STD_INVOKE_ECHO_FUNCTION_ID,
+            "current SERVER revision must use the parameter-echo language version",
+        );
+    }
+
+    #[test]
+    fn standard_parameter_echo_rejects_each_artifact_payload_deviation() {
+        let function = echo_function(STD_INVOKE_ECHO_FUNCTION_ID, STD_INVOKE_ECHO_PARAMETER_ID);
+        let parameter = STD_INVOKE_ECHO_PARAMETER_ID;
+        let argument = || {
+            FunctionArgument::new(parameter, RuntimeValue::Integer(5))
+                .expect("the bound integer argument is valid")
+        };
+        let canonical = echo_payload(parameter);
+
+        // Wrong magic.
+        let mut bytes = canonical.clone();
+        bytes[0] = b'X';
+        let revision = revision_with_artifact(
+            STD_INVOKE_ECHO_FUNCTION_ID,
+            artifact(
+                ExecutableArtifactKind::Server,
+                server_parameter_echo::FORMAT_IDENTITY,
+                server_parameter_echo::FORMAT_VERSION,
+                bytes,
+            ),
+        );
+        assert_echo_decode_rule(
+            execute_standard_parameter_echo(&function, &revision, &[argument()]),
+            ServerParameterEchoError::InvalidMagic,
+        );
+
+        // Wrong parameter identity: the artifact pins a parameter the pinned
+        // function does not declare.
+        let other_parameter = ParameterId::from_bytes([0x45; 16]);
+        let revision = echo_revision(STD_INVOKE_ECHO_FUNCTION_ID, other_parameter);
+        assert_echo_decode_rule(
+            execute_standard_parameter_echo(&function, &revision, &[argument()]),
+            ServerParameterEchoError::UnexpectedParameter {
+                actual: other_parameter,
+                expected: parameter,
+            },
+        );
+
+        // Wrong type identity: the artifact pins a non-INTEGER value type.
+        let mut bytes = canonical.clone();
+        bytes[43] = 0x03;
+        let other_type = TypeId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x03]);
+        let revision = revision_with_artifact(
+            STD_INVOKE_ECHO_FUNCTION_ID,
+            artifact(
+                ExecutableArtifactKind::Server,
+                server_parameter_echo::FORMAT_IDENTITY,
+                server_parameter_echo::FORMAT_VERSION,
+                bytes,
+            ),
+        );
+        assert_echo_decode_rule(
+            execute_standard_parameter_echo(&function, &revision, &[argument()]),
+            ServerParameterEchoError::UnexpectedType {
+                actual: other_type,
+                expected: orna_standard::INTEGER_TYPE_ID,
+            },
+        );
+
+        // Truncated payload.
+        let revision = revision_with_artifact(
+            STD_INVOKE_ECHO_FUNCTION_ID,
+            artifact(
+                ExecutableArtifactKind::Server,
+                server_parameter_echo::FORMAT_IDENTITY,
+                server_parameter_echo::FORMAT_VERSION,
+                canonical[..43].to_vec(),
+            ),
+        );
+        assert_echo_decode_rule(
+            execute_standard_parameter_echo(&function, &revision, &[argument()]),
+            ServerParameterEchoError::Truncated,
+        );
+
+        // Excess bytes after the canonical payload.
+        let mut excess = canonical;
+        excess.push(0);
+        let revision = revision_with_artifact(
+            STD_INVOKE_ECHO_FUNCTION_ID,
+            artifact(
+                ExecutableArtifactKind::Server,
+                server_parameter_echo::FORMAT_IDENTITY,
+                server_parameter_echo::FORMAT_VERSION,
+                excess,
+            ),
+        );
+        assert_echo_decode_rule(
+            execute_standard_parameter_echo(&function, &revision, &[argument()]),
+            ServerParameterEchoError::TrailingBytes,
+        );
+    }
+
+    #[test]
+    fn standard_parameter_echo_signature_rejects_each_shape_deviation() {
+        let parameter = STD_INVOKE_ECHO_PARAMETER_ID;
+        let valid = || {
+            FunctionDefinition::new(
+                STD_INVOKE_ECHO_FUNCTION_ID,
+                name(&["std", "invoke", "echo"]),
+                FunctionDomain::Server,
+                vec![echo_parameter(parameter)],
+                FunctionReturn::Single(ResolvedType::value(orna_standard::INTEGER_TYPE_ID)),
+                STD_INVOKE_ECHO_FUNCTION_REVISION_ID,
+                FunctionSecurity::Invoker,
+                Some(FunctionTransaction::ReadOnly),
+                FunctionVolatility::Stable,
+            )
+        };
+        let revision = || echo_revision(STD_INVOKE_ECHO_FUNCTION_ID, parameter);
+        let argument = || {
+            FunctionArgument::new(parameter, RuntimeValue::Integer(5))
+                .expect("the bound integer argument is valid")
+        };
+        let run = |function: &FunctionDefinition| {
+            execute_standard_parameter_echo(function, &revision(), &[argument()])
+        };
+
+        // Wrong domain.
+        let client = FunctionDefinition::new(
+            STD_INVOKE_ECHO_FUNCTION_ID,
+            name(&["std", "invoke", "echo"]),
+            FunctionDomain::Client,
+            vec![echo_parameter(parameter)],
+            FunctionReturn::Single(ResolvedType::value(orna_standard::INTEGER_TYPE_ID)),
+            STD_INVOKE_ECHO_FUNCTION_REVISION_ID,
+            FunctionSecurity::Invoker,
+            Some(FunctionTransaction::ReadOnly),
+            FunctionVolatility::Stable,
+        );
+        assert_echo_domain_rule(run(&client));
+
+        // Parameter count and default deviations.
+        let none = FunctionDefinition::new(
+            STD_INVOKE_ECHO_FUNCTION_ID,
+            name(&["std", "invoke", "echo"]),
+            FunctionDomain::Server,
+            Vec::new(),
+            FunctionReturn::Single(ResolvedType::value(orna_standard::INTEGER_TYPE_ID)),
+            STD_INVOKE_ECHO_FUNCTION_REVISION_ID,
+            FunctionSecurity::Invoker,
+            Some(FunctionTransaction::ReadOnly),
+            FunctionVolatility::Stable,
+        );
+        assert_signature_rule(
+            run(&none),
+            STD_INVOKE_ECHO_FUNCTION_ID,
+            "standard parameter echo functions must declare exactly one required non-null INTEGER parameter",
+        );
+
+        let extra = FunctionDefinition::new(
+            STD_INVOKE_ECHO_FUNCTION_ID,
+            name(&["std", "invoke", "echo"]),
+            FunctionDomain::Server,
+            vec![
+                echo_parameter(parameter),
+                echo_parameter(ParameterId::from_bytes([0x47; 16])),
+            ],
+            FunctionReturn::Single(ResolvedType::value(orna_standard::INTEGER_TYPE_ID)),
+            STD_INVOKE_ECHO_FUNCTION_REVISION_ID,
+            FunctionSecurity::Invoker,
+            Some(FunctionTransaction::ReadOnly),
+            FunctionVolatility::Stable,
+        );
+        assert_signature_rule(
+            run(&extra),
+            STD_INVOKE_ECHO_FUNCTION_ID,
+            "standard parameter echo functions must declare exactly one required non-null INTEGER parameter",
+        );
+
+        let defaulted = FunctionDefinition::new(
+            STD_INVOKE_ECHO_FUNCTION_ID,
+            name(&["std", "invoke", "echo"]),
+            FunctionDomain::Server,
+            vec![ParameterDefinition::new(
+                parameter,
+                "p_value",
+                0,
+                ResolvedType::value(orna_standard::INTEGER_TYPE_ID),
+                Some(ExpressionId::from_bytes([0x48; 16])),
+            )],
+            FunctionReturn::Single(ResolvedType::value(orna_standard::INTEGER_TYPE_ID)),
+            STD_INVOKE_ECHO_FUNCTION_REVISION_ID,
+            FunctionSecurity::Invoker,
+            Some(FunctionTransaction::ReadOnly),
+            FunctionVolatility::Stable,
+        );
+        assert_signature_rule(
+            run(&defaulted),
+            STD_INVOKE_ECHO_FUNCTION_ID,
+            "standard parameter echo functions must declare exactly one required non-null INTEGER parameter",
+        );
+
+        // Result shape deviations.
+        let rows = FunctionDefinition::new(
+            STD_INVOKE_ECHO_FUNCTION_ID,
+            name(&["std", "invoke", "echo"]),
+            FunctionDomain::Server,
+            vec![echo_parameter(parameter)],
+            rows_return(),
+            STD_INVOKE_ECHO_FUNCTION_REVISION_ID,
+            FunctionSecurity::Invoker,
+            Some(FunctionTransaction::ReadOnly),
+            FunctionVolatility::Stable,
+        );
+        assert_signature_rule(
+            run(&rows),
+            STD_INVOKE_ECHO_FUNCTION_ID,
+            "standard parameter echo functions must return a single INTEGER value",
+        );
+
+        let boolean = FunctionDefinition::new(
+            STD_INVOKE_ECHO_FUNCTION_ID,
+            name(&["std", "invoke", "echo"]),
+            FunctionDomain::Server,
+            vec![ParameterDefinition::new(
+                parameter,
+                "p_value",
+                0,
+                ResolvedType::value(orna_standard::BOOLEAN_TYPE_ID),
+                None,
+            )],
+            FunctionReturn::Single(ResolvedType::value(orna_standard::BOOLEAN_TYPE_ID)),
+            STD_INVOKE_ECHO_FUNCTION_REVISION_ID,
+            FunctionSecurity::Invoker,
+            Some(FunctionTransaction::ReadOnly),
+            FunctionVolatility::Stable,
+        );
+        assert_signature_rule(
+            run(&boolean),
+            STD_INVOKE_ECHO_FUNCTION_ID,
+            "standard parameter echo functions must declare one INTEGER parameter and one INTEGER result",
+        );
+
+        let mismatched = FunctionDefinition::new(
+            STD_INVOKE_ECHO_FUNCTION_ID,
+            name(&["std", "invoke", "echo"]),
+            FunctionDomain::Server,
+            vec![echo_parameter(parameter)],
+            FunctionReturn::Single(ResolvedType::value(orna_standard::BOOLEAN_TYPE_ID)),
+            STD_INVOKE_ECHO_FUNCTION_REVISION_ID,
+            FunctionSecurity::Invoker,
+            Some(FunctionTransaction::ReadOnly),
+            FunctionVolatility::Stable,
+        );
+        assert_signature_rule(
+            run(&mismatched),
+            STD_INVOKE_ECHO_FUNCTION_ID,
+            "standard parameter echo functions must declare one INTEGER parameter and one INTEGER result",
+        );
+
+        // Security, transaction, and volatility deviations.
+        let owner = FunctionDefinition::new(
+            STD_INVOKE_ECHO_FUNCTION_ID,
+            name(&["std", "invoke", "echo"]),
+            FunctionDomain::Server,
+            vec![echo_parameter(parameter)],
+            FunctionReturn::Single(ResolvedType::value(orna_standard::INTEGER_TYPE_ID)),
+            STD_INVOKE_ECHO_FUNCTION_REVISION_ID,
+            FunctionSecurity::Definer,
+            Some(FunctionTransaction::ReadOnly),
+            FunctionVolatility::Stable,
+        );
+        assert_signature_rule(
+            run(&owner),
+            STD_INVOKE_ECHO_FUNCTION_ID,
+            "standard parameter echo functions must use INVOKER security",
+        );
+
+        for transaction in [None, Some(FunctionTransaction::Atomic)] {
+            let wrong_transaction = FunctionDefinition::new(
+                STD_INVOKE_ECHO_FUNCTION_ID,
+                name(&["std", "invoke", "echo"]),
+                FunctionDomain::Server,
+                vec![echo_parameter(parameter)],
+                FunctionReturn::Single(ResolvedType::value(orna_standard::INTEGER_TYPE_ID)),
+                STD_INVOKE_ECHO_FUNCTION_REVISION_ID,
+                FunctionSecurity::Invoker,
+                transaction,
+                FunctionVolatility::Stable,
+            );
+            assert_signature_rule(
+                run(&wrong_transaction),
+                STD_INVOKE_ECHO_FUNCTION_ID,
+                "standard parameter echo functions must use READ ONLY transactions",
+            );
+        }
+
+        let volatile = FunctionDefinition::new(
+            STD_INVOKE_ECHO_FUNCTION_ID,
+            name(&["std", "invoke", "echo"]),
+            FunctionDomain::Server,
+            vec![echo_parameter(parameter)],
+            FunctionReturn::Single(ResolvedType::value(orna_standard::INTEGER_TYPE_ID)),
+            STD_INVOKE_ECHO_FUNCTION_REVISION_ID,
+            FunctionSecurity::Invoker,
+            Some(FunctionTransaction::ReadOnly),
+            FunctionVolatility::Immutable,
+        );
+        assert_signature_rule(
+            run(&volatile),
+            STD_INVOKE_ECHO_FUNCTION_ID,
+            "standard parameter echo functions must use STABLE volatility",
+        );
+
+        // The exact pinned shape still executes after every rejection.
+        assert_eq!(
+            run(&valid()).expect("the pinned shape must execute"),
+            RuntimeValue::Integer(5)
+        );
+    }
+
+    #[test]
+    fn standard_parameter_echo_arguments_are_exact_complete_and_typed() {
+        let function = echo_function(STD_INVOKE_ECHO_FUNCTION_ID, STD_INVOKE_ECHO_PARAMETER_ID);
+        let revision = echo_revision(STD_INVOKE_ECHO_FUNCTION_ID, STD_INVOKE_ECHO_PARAMETER_ID);
+        let parameter = STD_INVOKE_ECHO_PARAMETER_ID;
+
+        // Missing argument.
+        assert_argument_rule(
+            execute_standard_parameter_echo(&function, &revision, &[]),
+            None,
+            "standard parameter echo calls require exactly one argument",
+        );
+
+        // Extra argument.
+        let first = FunctionArgument::new(parameter, RuntimeValue::Integer(1))
+            .expect("the bound integer argument is valid");
+        let second = FunctionArgument::new(parameter, RuntimeValue::Integer(2))
+            .expect("the bound integer argument is valid");
+        assert_argument_rule(
+            execute_standard_parameter_echo(&function, &revision, &[first, second]),
+            None,
+            "standard parameter echo calls require exactly one argument",
+        );
+
+        // Argument bound to a different parameter identity.
+        let other = ParameterId::from_bytes([0x46; 16]);
+        let wrong = FunctionArgument::new(other, RuntimeValue::Integer(1))
+            .expect("the bound integer argument is valid");
+        assert_argument_rule(
+            execute_standard_parameter_echo(&function, &revision, &[wrong]),
+            Some(other),
+            "standard parameter echo arguments must bind the pinned parameter identity",
+        );
+
+        // Non-INTEGER runtime value.
+        let boolean = FunctionArgument::new(parameter, RuntimeValue::Boolean(true))
+            .expect("a Boolean argument binds");
+        assert_argument_rule(
+            execute_standard_parameter_echo(&function, &revision, &[boolean]),
+            Some(parameter),
+            "standard parameter echo arguments must be one non-null INTEGER value",
+        );
+
+        // A typed null cannot cross the bound-argument boundary, so the engine
+        // can never receive one: FunctionArgument::new rejects it.
+        let null = RuntimeValue::null(ResolvedType::value(orna_standard::INTEGER_TYPE_ID))
+            .expect("a typed INTEGER null is valid");
+        assert!(matches!(
+            FunctionArgument::new(parameter, null),
+            Err(orna_core::value::FunctionArgumentError::NullValue {
+                parameter: actual,
+                ..
+            }) if actual == parameter
+        ));
+    }
+
+    #[test]
+    fn raw_server_execution_never_reaches_the_parameter_echo_engine() {
+        // A direct raw request for a standard target is denied at raw dispatch
+        // because the target is not in the active application catalogue. Even
+        // if an echo-formatted artifact sat in an active application revision,
+        // the raw SERVER executor's format gate rejects it before any plan
+        // decoding: decode_plan accepts only orna.server-plan formats, so the
+        // raw path can never reach execute_standard_parameter_echo.
+        let parameter = STD_INVOKE_ECHO_PARAMETER_ID;
+        let payload = echo_payload(parameter);
+        let Err(PostgresKernelError::ServerSelect(ServerSelectError::Artifact { function, rule })) =
+            decode_plan(
+                STD_INVOKE_ECHO_FUNCTION_ID,
+                server_parameter_echo::FORMAT_IDENTITY,
+                server_parameter_echo::FORMAT_VERSION,
+                &payload,
+            )
+        else {
+            panic!("raw SERVER plan decoding must reject the parameter-echo format");
+        };
+        assert_eq!(function, STD_INVOKE_ECHO_FUNCTION_ID);
+        assert_eq!(rule, "current SERVER artifact must use orna.server-plan");
     }
 }
