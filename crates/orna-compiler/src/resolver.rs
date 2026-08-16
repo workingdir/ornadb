@@ -24,15 +24,16 @@ pub use model::{
     CheckedStandardLibrary, CheckedStandardParameterEcho, CheckedStandardSchema,
     CheckedStandardTerminalPresentTable, CheckedStandardTypeBinding, CheckedStandardTypeReference,
     CheckedStandardValueType, CheckedTypeUseKind, CheckedValueTypeUse, ConstantValue,
-    STD_DATA_ROWS_TYPE_ID, STD_DATA_SCHEMA_ID, STD_INTEGER_TYPE_ID, STD_INVOKE_ECHO_FUNCTION_ID,
-    STD_INVOKE_ECHO_FUNCTION_REVISION_ID, STD_INVOKE_ECHO_PARAMETER_ID,
-    STD_INVOKE_ECHO_REVISION_NUMBER, STD_INVOKE_SCHEMA_ID, STD_INVOKE_SOURCE_UNIT_ID,
-    STD_IO_BYTE_STREAM_TYPE_ID, STD_IO_SCHEMA_ID, STD_JSON_ENCODE_FUNCTION_ID,
-    STD_JSON_ENCODE_FUNCTION_REVISION_ID, STD_JSON_ENCODE_PARAMETER_ID, STD_JSON_SCHEMA_ID,
-    STD_JSON_VALUE_TYPE_ID, STD_TERMINAL_DOCUMENT_TYPE_ID, STD_TERMINAL_PRESENT_TABLE_FUNCTION_ID,
-    STD_TERMINAL_PRESENT_TABLE_FUNCTION_REVISION_ID, STD_TERMINAL_PRESENT_TABLE_PARAMETER_ID,
-    STD_TERMINAL_SCHEMA_ID, STD_TYPES_SOURCE_UNIT_ID, SemanticType,
-    StandardApplicationCheckContext, StandardApplicationCheckReport,
+    STANDARD_LIBRARY_V3_REVISION_ID, STD_DATA_ROWS_TYPE_ID, STD_DATA_SCHEMA_ID,
+    STD_INTEGER_TYPE_ID, STD_INVOKE_ECHO_FUNCTION_ID, STD_INVOKE_ECHO_FUNCTION_REVISION_ID,
+    STD_INVOKE_ECHO_PARAMETER_ID, STD_INVOKE_ECHO_REVISION_NUMBER, STD_INVOKE_SCHEMA_ID,
+    STD_INVOKE_SOURCE_UNIT_ID, STD_IO_BYTE_STREAM_TYPE_ID, STD_IO_SCHEMA_ID,
+    STD_JSON_ENCODE_FUNCTION_ID, STD_JSON_ENCODE_FUNCTION_REVISION_ID,
+    STD_JSON_ENCODE_PARAMETER_ID, STD_JSON_SCHEMA_ID, STD_JSON_VALUE_TYPE_ID,
+    STD_OUTPUT_SOURCE_UNIT_ID, STD_TERMINAL_DOCUMENT_TYPE_ID,
+    STD_TERMINAL_PRESENT_TABLE_FUNCTION_ID, STD_TERMINAL_PRESENT_TABLE_FUNCTION_REVISION_ID,
+    STD_TERMINAL_PRESENT_TABLE_PARAMETER_ID, STD_TERMINAL_SCHEMA_ID, STD_TYPES_SOURCE_UNIT_ID,
+    SemanticType, StandardApplicationCheckContext, StandardApplicationCheckReport,
     StandardApplicationContextError, StandardLibraryCheckError,
 };
 pub(crate) use model::{
@@ -350,13 +351,23 @@ pub fn check_standard_application(
 /// `std/invoke.orna`), the fixed identities, the exact `std.invoke.echo`
 /// executable (artifact, semantic digest, and three durable references), and
 /// every schema, function, and parameter origin against the retained units.
-/// The checker does not trust a source file because its path looks standard.
+/// The V3 standard revision (ADR 0058) reuses the V2 digest contract but
+/// carries the ordered three-unit bundle (`std/types.orna`,
+/// `std/invoke.orna`, then `std/output.orna`); its branch reconciles the
+/// first two units exactly as V2 does and additionally reconciles the output
+/// unit closed against the `std.terminal` and `std.io` schemas, the two
+/// opaque output value types, their exports, and every origin on the
+/// retained unit. The checker does not trust a source file because its path
+/// looks standard.
 pub fn check_standard_library_source(
     snapshot: &VerifiedStandardLibrarySnapshot,
 ) -> Result<CheckedStandardLibrary, StandardLibraryCheckError> {
     match snapshot.digest_version() {
         StandardLibraryDigestVersion::Version1 => check_standard_library_source_v1(snapshot),
-        StandardLibraryDigestVersion::Version2 => check_standard_library_source_v2(snapshot),
+        StandardLibraryDigestVersion::Version2 => match snapshot.revision() {
+            STANDARD_LIBRARY_V3_REVISION_ID => check_standard_library_source_v3(snapshot),
+            _ => check_standard_library_source_v2(snapshot),
+        },
         _ => Err(StandardLibraryCheckError::SourceMismatch),
     }
 }
@@ -495,6 +506,101 @@ fn check_standard_library_source_v2_parts(
     Ok((families, checked_executable))
 }
 
+/// Checks one retained V3 output standard source bundle.
+///
+/// The ordered bundle must be exactly `std/types.orna` (`...02`),
+/// `std/invoke.orna` (`...03`), then `std/output.orna` (`...04`). Units zero
+/// and one reconcile exactly as the V2 checker does, including the unchanged
+/// `std.invoke.echo` executable. The output unit must declare exactly the
+/// `std.terminal` (`...04`) and `std.io` (`...05`) schemas, the two opaque
+/// value types `std.terminal.Document` (`...15`) and `std.io.ByteStream`
+/// (`...16`) with their ADR 0058 kernel contracts and `IMMUTABLE TRANSIENT`
+/// catalogue facts, and the two qualified exports (`std.Document`,
+/// `std.ByteStream`); every origin must sit on the retained output unit at
+/// the exact declaration byte ranges, and any extra, missing, or mismatched
+/// declaration, identity, contract, binding, or origin fails closed.
+fn check_standard_library_source_v3(
+    snapshot: &VerifiedStandardLibrarySnapshot,
+) -> Result<CheckedStandardLibrary, StandardLibraryCheckError> {
+    let (families, checked_executable) = check_standard_library_source_v3_parts(
+        snapshot.source(),
+        snapshot.catalogue(),
+        snapshot.origins(),
+        snapshot.executables(),
+    )?;
+    Ok(CheckedStandardLibrary {
+        verified_snapshot: snapshot.clone(),
+        schemas: families.schemas,
+        value_types: families.value_types,
+        type_bindings: families.type_bindings,
+        checked_executable: Some(checked_executable),
+    })
+}
+
+/// Checks the retained V3 source bundle, catalogue, origins, and executable
+/// evidence without a retained digest.
+///
+/// The digest gate is a separate, prior verification step
+/// (`verify_standard_library_v3_snapshot`); this function reconciles the
+/// source facts against the supplied stored facts and fails closed on any
+/// disagreement, exactly as [`check_standard_library_source_v2_parts`] does
+/// for the first two units, then reconciles the output unit.
+fn check_standard_library_source_v3_parts(
+    source: &StoredSourceRevision,
+    catalogue: &CatalogueSnapshot,
+    origins: &[DefinitionOrigin],
+    executables: &[StandardExecutable],
+) -> Result<(StandardSourceFamilies, CheckedStandardExecutable), StandardLibraryCheckError> {
+    let source_units = source.units();
+    let [types_unit, invoke_unit, output_unit] = source_units else {
+        return Err(StandardLibraryCheckError::SourceUnitCount {
+            actual: source_units.len(),
+        });
+    };
+    if types_unit.id() != STD_TYPES_SOURCE_UNIT_ID
+        || types_unit.logical_path() != "std/types.orna"
+        || types_unit.ordinal() != 0
+        || invoke_unit.id() != STD_INVOKE_SOURCE_UNIT_ID
+        || invoke_unit.logical_path() != "std/invoke.orna"
+        || invoke_unit.ordinal() != 1
+        || output_unit.id() != STD_OUTPUT_SOURCE_UNIT_ID
+        || output_unit.logical_path() != "std/output.orna"
+        || output_unit.ordinal() != 2
+    {
+        return Err(StandardLibraryCheckError::SourceMismatch);
+    }
+
+    let bundle = SourceBundle::new([
+        SourceUnit::new(types_unit.logical_path(), types_unit.content()),
+        SourceUnit::new(invoke_unit.logical_path(), invoke_unit.content()),
+        SourceUnit::new(output_unit.logical_path(), output_unit.content()),
+    ])
+    .map_err(|_| StandardLibraryCheckError::SourceMismatch)?;
+    let report = parse_bundle(&bundle);
+    if !report.diagnostics().is_empty() {
+        return Err(StandardLibraryCheckError::Diagnostics {
+            diagnostics: report.diagnostics().to_vec(),
+        });
+    }
+    let [parsed_types, parsed_invoke, parsed_output] = report.units() else {
+        return Err(StandardLibraryCheckError::SourceMismatch);
+    };
+
+    let (types_origins, invoke_origins, output_origins) = partition_standard_v3_origins(origins)?;
+    let types_catalogue = standard_v3_types_catalogue(catalogue)?;
+    let families =
+        reconcile_standard_source(types_unit, parsed_types, &types_catalogue, &types_origins)?;
+    let checked_executable = reconcile_standard_invoke_executable(
+        catalogue,
+        &invoke_origins,
+        executables,
+        invoke_unit,
+        parsed_invoke,
+    )?;
+    reconcile_standard_output_unit(output_unit, parsed_output, catalogue, &output_origins)?;
+    Ok((families, checked_executable))
+}
+
 /// Scopes the V2 catalogue to the declarations retained in `std/types.orna`:
 /// the standard schemas, value types, and type bindings only.
 ///
@@ -505,6 +611,43 @@ fn check_standard_library_source_v2_parts(
 fn standard_types_catalogue(
     catalogue: &CatalogueSnapshot,
 ) -> Result<CatalogueSnapshot, StandardLibraryCheckError> {
+    scope_standard_catalogue(catalogue, &[STD_INVOKE_SCHEMA_ID], &[])
+}
+
+/// Scopes the V3 catalogue to the declarations retained in `std/types.orna`:
+/// the standard schemas, value types, and type bindings only.
+///
+/// The `std.invoke`, `std.terminal`, and `std.io` schemas, the two opaque
+/// output value types, and their exports are declared in the other retained
+/// units and are reconciled by their own paths; the V1 type-only reconcile
+/// contract must not see them. Any other catalogue schema, function, object,
+/// enum, or record type fails closed.
+fn standard_v3_types_catalogue(
+    catalogue: &CatalogueSnapshot,
+) -> Result<CatalogueSnapshot, StandardLibraryCheckError> {
+    scope_standard_catalogue(
+        catalogue,
+        &[
+            STD_INVOKE_SCHEMA_ID,
+            STD_TERMINAL_SCHEMA_ID,
+            STD_IO_SCHEMA_ID,
+        ],
+        &[STD_TERMINAL_DOCUMENT_TYPE_ID, STD_IO_BYTE_STREAM_TYPE_ID],
+    )
+}
+
+/// Scopes one standard catalogue to the declarations retained in one source
+/// unit, dropping the excluded schemas and value types and every type binding
+/// that targets an excluded value type.
+///
+/// The returned scope carries no functions; the invoke path reconciles the
+/// executable functions separately. Object, enum, and record value types are
+/// not part of any retained standard source and fail closed.
+fn scope_standard_catalogue(
+    catalogue: &CatalogueSnapshot,
+    excluded_schemas: &[SchemaId],
+    excluded_value_types: &[TypeId],
+) -> Result<CatalogueSnapshot, StandardLibraryCheckError> {
     if !catalogue.object_types().is_empty()
         || !catalogue.enum_types().is_empty()
         || !catalogue.record_value_types().is_empty()
@@ -513,20 +656,209 @@ fn standard_types_catalogue(
     }
     let mut schemas = Vec::with_capacity(catalogue.schemas().len());
     for schema in catalogue.schemas() {
-        if schema.id() == STD_INVOKE_SCHEMA_ID {
+        if excluded_schemas.contains(&schema.id()) {
             continue;
         }
         schemas.push(schema.clone());
+    }
+    let mut value_types = Vec::with_capacity(catalogue.value_types().len());
+    for value_type in catalogue.value_types() {
+        if excluded_value_types.contains(&value_type.id()) {
+            continue;
+        }
+        value_types.push(value_type.clone());
+    }
+    let mut type_bindings = Vec::with_capacity(catalogue.type_bindings().len());
+    for binding in catalogue.type_bindings() {
+        if excluded_value_types.contains(&binding.target()) {
+            continue;
+        }
+        type_bindings.push(binding.clone());
     }
     CatalogueSnapshot::new_with_functions_and_types(
         catalogue.revision(),
         schemas,
         vec![],
-        catalogue.value_types().to_vec(),
-        catalogue.type_bindings().to_vec(),
+        value_types,
+        type_bindings,
         vec![],
     )
     .map_err(|_| StandardLibraryCheckError::SourceMismatch)
+}
+
+/// Reconciles the retained `std/output.orna` unit against the snapshot
+/// catalogue and origins.
+///
+/// The unit must round-trip exactly and contain nothing besides the
+/// `std.terminal` and `std.io` schema declarations, the two opaque output
+/// value type declarations (`std.terminal.Document` `...15` and
+/// `std.io.ByteStream` `...16`, both with their ADR 0058 kernel contracts and
+/// their `IMMUTABLE TRANSIENT` catalogue facts), and their two qualified
+/// exports (`std.Document`, `std.ByteStream`). Every catalogue definition
+/// must sit at the fixed identity and agree with the declaration, and the
+/// snapshot origins must cover exactly those six declarations at their exact
+/// byte ranges on the retained unit; any extra, missing, or mismatched
+/// declaration, identity, contract, binding, or origin fails closed.
+fn reconcile_standard_output_unit(
+    stored_unit: &StoredSourceUnit,
+    parsed_unit: &ParsedSourceUnit,
+    catalogue: &CatalogueSnapshot,
+    origins: &[DefinitionOrigin],
+) -> Result<(), StandardLibraryCheckError> {
+    if parsed_unit.source_text() != stored_unit.content()
+        || parsed_unit.source_text() != parsed_unit.syntax_text()
+        || !parsed_unit.parsed().object_types().is_empty()
+        || !parsed_unit.parsed().enum_types().is_empty()
+        || !parsed_unit.parsed().primitive_value_types().is_empty()
+        || !parsed_unit.parsed().record_value_types().is_empty()
+        || !parsed_unit.parsed().field_renames().is_empty()
+        || !parsed_unit.parsed().server_functions().is_empty()
+        || !parsed_unit.parsed().client_functions().is_empty()
+    {
+        return Err(StandardLibraryCheckError::SourceMismatch);
+    }
+    let [terminal_declaration, io_declaration] = parsed_unit.parsed().schemas() else {
+        return Err(StandardLibraryCheckError::SourceMismatch);
+    };
+    let [document_declaration, bytestream_declaration] = parsed_unit.parsed().opaque_value_types()
+    else {
+        return Err(StandardLibraryCheckError::SourceMismatch);
+    };
+    let [document_export, bytestream_export] = parsed_unit.parsed().type_exports() else {
+        return Err(StandardLibraryCheckError::SourceMismatch);
+    };
+
+    let expected_terminal_name = QualifiedSemanticName::new(["std", "terminal"])
+        .expect("the fixed standard schema is valid");
+    let expected_io_name =
+        QualifiedSemanticName::new(["std", "io"]).expect("the fixed standard schema is valid");
+    let terminal_name = unquoted_semantic_name(&terminal_declaration.name)?;
+    let io_name = unquoted_semantic_name(&io_declaration.name)?;
+    if terminal_name != expected_terminal_name || io_name != expected_io_name {
+        return Err(StandardLibraryCheckError::SourceMismatch);
+    }
+    let terminal = catalogue
+        .schema_by_id(STD_TERMINAL_SCHEMA_ID)
+        .ok_or(StandardLibraryCheckError::MissingSchema)?;
+    let io = catalogue
+        .schema_by_id(STD_IO_SCHEMA_ID)
+        .ok_or(StandardLibraryCheckError::MissingSchema)?;
+    if terminal.name() != &terminal_name || io.name() != &io_name {
+        return Err(StandardLibraryCheckError::SourceMismatch);
+    }
+
+    let expected_document_name = QualifiedSemanticName::new(["std", "terminal", "document"])
+        .expect("the fixed standard value type is valid");
+    let expected_bytestream_name = QualifiedSemanticName::new(["std", "io", "bytestream"])
+        .expect("the fixed standard value type is valid");
+    let document_name = unquoted_semantic_name(&document_declaration.name)?;
+    let bytestream_name = unquoted_semantic_name(&bytestream_declaration.name)?;
+    if document_name != expected_document_name || bytestream_name != expected_bytestream_name {
+        return Err(StandardLibraryCheckError::SourceMismatch);
+    }
+    let document_contract = decode_string_literal(&document_declaration.kernel_contract)
+        .ok_or(StandardLibraryCheckError::SourceMismatch)?;
+    let bytestream_contract = decode_string_literal(&bytestream_declaration.kernel_contract)
+        .ok_or(StandardLibraryCheckError::SourceMismatch)?;
+    let document = catalogue
+        .value_type_by_id(STD_TERMINAL_DOCUMENT_TYPE_ID)
+        .ok_or(StandardLibraryCheckError::SourceMismatch)?;
+    let bytestream = catalogue
+        .value_type_by_id(STD_IO_BYTE_STREAM_TYPE_ID)
+        .ok_or(StandardLibraryCheckError::SourceMismatch)?;
+    for (name, contract, definition) in [
+        (&document_name, &document_contract, document),
+        (&bytestream_name, &bytestream_contract, bytestream),
+    ] {
+        if definition.name() != name
+            || definition.kind() != ValueTypeKind::Opaque
+            || definition.mutability() != ValueTypeMutability::Immutable
+            || definition.persistence() != ValueTypePersistence::Transient
+            || definition.representation_contract() != contract
+        {
+            return Err(StandardLibraryCheckError::SourceMismatch);
+        }
+    }
+
+    let expected_document_binding_name = QualifiedSemanticName::new(["std", "document"])
+        .expect("the fixed standard export is valid");
+    let expected_bytestream_binding_name = QualifiedSemanticName::new(["std", "bytestream"])
+        .expect("the fixed standard export is valid");
+    let document_binding = catalogue
+        .type_binding_by_name(&TypeLookupName::qualified(
+            expected_document_binding_name.clone(),
+        ))
+        .ok_or(StandardLibraryCheckError::SourceMismatch)?;
+    let bytestream_binding = catalogue
+        .type_binding_by_name(&TypeLookupName::qualified(
+            expected_bytestream_binding_name.clone(),
+        ))
+        .ok_or(StandardLibraryCheckError::SourceMismatch)?;
+    let document_export_source = unquoted_semantic_name(&document_export.source_type)?;
+    let bytestream_export_source = unquoted_semantic_name(&bytestream_export.source_type)?;
+    if document_export_source != document_name || bytestream_export_source != bytestream_name {
+        return Err(StandardLibraryCheckError::SourceMismatch);
+    }
+    for (export, binding, expected_name, expected_target) in [
+        (
+            document_export,
+            document_binding,
+            &expected_document_binding_name,
+            STD_TERMINAL_DOCUMENT_TYPE_ID,
+        ),
+        (
+            bytestream_export,
+            bytestream_binding,
+            &expected_bytestream_binding_name,
+            STD_IO_BYTE_STREAM_TYPE_ID,
+        ),
+    ] {
+        let TypeExportTarget::Qualified { name } = &export.target else {
+            return Err(StandardLibraryCheckError::SourceMismatch);
+        };
+        if unquoted_semantic_name(name)? != *expected_name
+            || !matches!(binding.kind(), TypeBindingKind::Qualified)
+            || binding.name() != &TypeLookupName::qualified(expected_name.clone())
+            || binding.target() != expected_target
+        {
+            return Err(StandardLibraryCheckError::SourceMismatch);
+        }
+    }
+
+    let mut origins_by_identity = origin_map(origins)?;
+    for (identity, span) in [
+        (
+            DefinitionIdentity::Schema(STD_TERMINAL_SCHEMA_ID),
+            &terminal_declaration.span,
+        ),
+        (
+            DefinitionIdentity::Schema(STD_IO_SCHEMA_ID),
+            &io_declaration.span,
+        ),
+        (
+            DefinitionIdentity::ValueType(STD_TERMINAL_DOCUMENT_TYPE_ID),
+            &document_declaration.span,
+        ),
+        (
+            DefinitionIdentity::ValueType(STD_IO_BYTE_STREAM_TYPE_ID),
+            &bytestream_declaration.span,
+        ),
+        (
+            DefinitionIdentity::TypeBinding(document_binding.id()),
+            &document_export.span,
+        ),
+        (
+            DefinitionIdentity::TypeBinding(bytestream_binding.id()),
+            &bytestream_export.span,
+        ),
+    ] {
+        take_origin(&mut origins_by_identity, identity, stored_unit.id(), span)?;
+    }
+    if !origins_by_identity.is_empty() {
+        return Err(StandardLibraryCheckError::SourceMismatch);
+    }
+
+    Ok(())
 }
 
 /// Splits the snapshot origins into the `std/types.orna` origins (schemas,
@@ -551,6 +883,42 @@ fn partition_standard_origins(
         }
     }
     Ok((types_origins, invoke_origins))
+}
+
+/// The three ordered origin partitions of a V3 standard bundle: the types,
+/// invoke, and output unit origins.
+type StandardV3OriginPartitions = (
+    Vec<DefinitionOrigin>,
+    Vec<DefinitionOrigin>,
+    Vec<DefinitionOrigin>,
+);
+
+/// Splits the snapshot origins into the three retained V3 units: the
+/// `std/types.orna` origins, the `std/invoke.orna` origins, and the
+/// `std/output.orna` origins (the two output schemas, the two opaque output
+/// value types, and their two exports).
+///
+/// Every origin must belong to one of the three retained V3 units; any other
+/// source unit fails closed.
+fn partition_standard_v3_origins(
+    origins: &[DefinitionOrigin],
+) -> Result<StandardV3OriginPartitions, StandardLibraryCheckError> {
+    let mut types_origins = Vec::new();
+    let mut invoke_origins = Vec::new();
+    let mut output_origins = Vec::new();
+    for origin in origins {
+        let source_unit = origin.source().source_unit();
+        if source_unit == STD_TYPES_SOURCE_UNIT_ID {
+            types_origins.push(origin.clone());
+        } else if source_unit == STD_INVOKE_SOURCE_UNIT_ID {
+            invoke_origins.push(origin.clone());
+        } else if source_unit == STD_OUTPUT_SOURCE_UNIT_ID {
+            output_origins.push(origin.clone());
+        } else {
+            return Err(StandardLibraryCheckError::SourceMismatch);
+        }
+    }
+    Ok((types_origins, invoke_origins, output_origins))
 }
 
 /// Checks one parsed declaration against the closed ADR 0055 standard
@@ -5745,21 +6113,21 @@ mod tests {
         CheckedStandardExecutable, CheckedStandardJsonEncode, CheckedStandardParameterEcho,
         CheckedStandardTerminalPresentTable, CheckedTypeId, CheckedTypeUseKind,
         CheckedValueTypeUse, ConstantValue, DiagnosticCode, IdentityAssignments,
-        NewApplicationCheckError, STD_DATA_ROWS_TYPE_ID, STD_DATA_SCHEMA_ID, STD_INTEGER_TYPE_ID,
-        STD_INVOKE_ECHO_FUNCTION_ID, STD_INVOKE_ECHO_FUNCTION_REVISION_ID,
-        STD_INVOKE_ECHO_PARAMETER_ID, STD_INVOKE_ECHO_REVISION_NUMBER, STD_INVOKE_SCHEMA_ID,
-        STD_INVOKE_SOURCE_UNIT_ID, STD_IO_BYTE_STREAM_TYPE_ID, STD_IO_SCHEMA_ID,
-        STD_JSON_ENCODE_FUNCTION_ID, STD_JSON_ENCODE_FUNCTION_REVISION_ID,
-        STD_JSON_ENCODE_PARAMETER_ID, STD_JSON_SCHEMA_ID, STD_JSON_VALUE_TYPE_ID,
-        STD_TERMINAL_DOCUMENT_TYPE_ID, STD_TERMINAL_PRESENT_TABLE_FUNCTION_ID,
-        STD_TERMINAL_PRESENT_TABLE_FUNCTION_REVISION_ID, STD_TERMINAL_PRESENT_TABLE_PARAMETER_ID,
-        STD_TERMINAL_SCHEMA_ID, STD_TYPES_SOURCE_UNIT_ID, SemanticType,
-        StandardApplicationCheckContext, StandardApplicationContextError,
+        NewApplicationCheckError, STANDARD_LIBRARY_V3_REVISION_ID, STD_DATA_ROWS_TYPE_ID,
+        STD_DATA_SCHEMA_ID, STD_INTEGER_TYPE_ID, STD_INVOKE_ECHO_FUNCTION_ID,
+        STD_INVOKE_ECHO_FUNCTION_REVISION_ID, STD_INVOKE_ECHO_PARAMETER_ID,
+        STD_INVOKE_ECHO_REVISION_NUMBER, STD_INVOKE_SCHEMA_ID, STD_INVOKE_SOURCE_UNIT_ID,
+        STD_IO_BYTE_STREAM_TYPE_ID, STD_IO_SCHEMA_ID, STD_JSON_ENCODE_FUNCTION_ID,
+        STD_JSON_ENCODE_FUNCTION_REVISION_ID, STD_JSON_ENCODE_PARAMETER_ID, STD_JSON_SCHEMA_ID,
+        STD_JSON_VALUE_TYPE_ID, STD_OUTPUT_SOURCE_UNIT_ID, STD_TERMINAL_DOCUMENT_TYPE_ID,
+        STD_TERMINAL_PRESENT_TABLE_FUNCTION_ID, STD_TERMINAL_PRESENT_TABLE_FUNCTION_REVISION_ID,
+        STD_TERMINAL_PRESENT_TABLE_PARAMETER_ID, STD_TERMINAL_SCHEMA_ID, STD_TYPES_SOURCE_UNIT_ID,
+        SemanticType, StandardApplicationCheckContext, StandardApplicationContextError,
         StandardLibraryCheckError, StandardSourceFamilies, check, check_new_application,
         check_new_application_with_catalogue, check_standard_application,
         check_standard_json_encode, check_standard_library_source,
-        check_standard_library_source_v2_parts, check_standard_parameter_echo,
-        check_standard_terminal_present_table,
+        check_standard_library_source_v2_parts, check_standard_library_source_v3_parts,
+        check_standard_parameter_echo, check_standard_terminal_present_table,
         checked_standard_library_with_contract_overrides_for_test, location,
         reconcile_standard_executable, reconcile_standard_source, sort_standard_type_uses,
         supports_record_value_scalar, unquoted_prelude_name, unquoted_semantic_name,
@@ -16493,5 +16861,979 @@ mod tests {
         fails(
             &StandardExecutable::new(revision.function(), revision.clone(), wrong_origin).unwrap(),
         );
+    }
+
+    /// The exact retained ADR 0058 `std/output.orna` source: the two output
+    /// schema declarations, the two opaque output value type declarations,
+    /// and their two qualified exports.
+    const STANDARD_V3_OUTPUT_SOURCE: &str = "CREATE SCHEMA std.terminal;\nCREATE SCHEMA std.io;\n\nCREATE TYPE std.terminal.Document AS VALUE OPAQUE\n    KERNEL CONTRACT 'orna.std.value.terminal-document@1'\n    IMMUTABLE\n    TRANSIENT;\n\nEXPORT TYPE std.terminal.Document AS std.Document;\n\nCREATE TYPE std.io.ByteStream AS VALUE OPAQUE\n    KERNEL CONTRACT 'orna.std.value.byte-stream@1'\n    IMMUTABLE\n    TRANSIENT;\n\nEXPORT TYPE std.io.ByteStream AS std.ByteStream;";
+
+    fn standard_v3_catalogue(with_invoke: bool) -> CatalogueSnapshot {
+        let catalogue = standard_v2_catalogue(with_invoke);
+        let mut schemas = catalogue.schemas().to_vec();
+        schemas.push(SchemaDefinition::new(
+            STD_TERMINAL_SCHEMA_ID,
+            QualifiedSemanticName::new(["std", "terminal"]).unwrap(),
+        ));
+        schemas.push(SchemaDefinition::new(
+            STD_IO_SCHEMA_ID,
+            QualifiedSemanticName::new(["std", "io"]).unwrap(),
+        ));
+        let mut value_types = catalogue.value_types().to_vec();
+        value_types.push(ValueTypeDefinition::opaque(
+            STD_TERMINAL_DOCUMENT_TYPE_ID,
+            QualifiedSemanticName::new(["std", "terminal", "document"]).unwrap(),
+            "orna.std.value.terminal-document@1",
+        ));
+        value_types.push(ValueTypeDefinition::opaque(
+            STD_IO_BYTE_STREAM_TYPE_ID,
+            QualifiedSemanticName::new(["std", "io", "bytestream"]).unwrap(),
+            "orna.std.value.byte-stream@1",
+        ));
+        let mut type_bindings = catalogue.type_bindings().to_vec();
+        type_bindings.push(
+            TypeBinding::qualified(
+                QualifiedSemanticName::new(["std", "document"]).unwrap(),
+                STD_TERMINAL_DOCUMENT_TYPE_ID,
+            )
+            .unwrap(),
+        );
+        type_bindings.push(
+            TypeBinding::qualified(
+                QualifiedSemanticName::new(["std", "bytestream"]).unwrap(),
+                STD_IO_BYTE_STREAM_TYPE_ID,
+            )
+            .unwrap(),
+        );
+        CatalogueSnapshot::new_with_functions_and_types(
+            CatalogueRevisionId::from_bytes([0x21; 16]),
+            schemas,
+            vec![],
+            value_types,
+            type_bindings,
+            catalogue.functions().to_vec(),
+        )
+        .unwrap()
+    }
+
+    fn standard_v3_catalogue_with_output_value_type(
+        index: usize,
+        definition: ValueTypeDefinition,
+    ) -> CatalogueSnapshot {
+        let catalogue = standard_v3_catalogue(true);
+        let mut value_types = catalogue.value_types().to_vec();
+        value_types[index] = definition;
+        CatalogueSnapshot::new_with_functions_and_types(
+            catalogue.revision(),
+            catalogue.schemas().to_vec(),
+            vec![],
+            value_types,
+            catalogue.type_bindings().to_vec(),
+            catalogue.functions().to_vec(),
+        )
+        .unwrap()
+    }
+
+    fn standard_v3_units() -> (StoredSourceUnit, StoredSourceUnit, StoredSourceUnit) {
+        (
+            stored_v2_unit(
+                STD_TYPES_SOURCE_UNIT_ID,
+                0,
+                "std/types.orna",
+                STANDARD_V2_TYPES_SOURCE,
+            ),
+            stored_v2_unit(
+                STD_INVOKE_SOURCE_UNIT_ID,
+                1,
+                "std/invoke.orna",
+                STD_INVOKE_SOURCE,
+            ),
+            stored_v2_unit(
+                STD_OUTPUT_SOURCE_UNIT_ID,
+                2,
+                "std/output.orna",
+                STANDARD_V3_OUTPUT_SOURCE,
+            ),
+        )
+    }
+
+    fn standard_v3_output_origins(
+        catalogue: &CatalogueSnapshot,
+        source: &str,
+    ) -> Vec<DefinitionOrigin> {
+        let report =
+            parse_bundle(&SourceBundle::new([SourceUnit::new("std/output.orna", source)]).unwrap());
+        assert!(report.diagnostics().is_empty(), "{source}");
+        let parsed = &report.units()[0];
+        let origin = |identity: DefinitionIdentity, span: &SourceSpan| -> DefinitionOrigin {
+            DefinitionOrigin::new(
+                identity,
+                SourceOrigin::new(
+                    STD_OUTPUT_SOURCE_UNIT_ID,
+                    u32::try_from(span.start).unwrap(),
+                    u32::try_from(span.end).unwrap(),
+                )
+                .unwrap(),
+            )
+        };
+        let document_binding = catalogue.type_binding_by_name(&TypeLookupName::qualified(
+            QualifiedSemanticName::new(["std", "document"]).unwrap(),
+        ));
+        let bytestream_binding = catalogue.type_binding_by_name(&TypeLookupName::qualified(
+            QualifiedSemanticName::new(["std", "bytestream"]).unwrap(),
+        ));
+        let mut origins = Vec::with_capacity(6);
+        if let Some(schema) = parsed.parsed().schemas().first() {
+            origins.push(origin(
+                DefinitionIdentity::Schema(STD_TERMINAL_SCHEMA_ID),
+                &schema.span,
+            ));
+        }
+        if let Some(schema) = parsed.parsed().schemas().get(1) {
+            origins.push(origin(
+                DefinitionIdentity::Schema(STD_IO_SCHEMA_ID),
+                &schema.span,
+            ));
+        }
+        if let Some(value_type) = parsed.parsed().opaque_value_types().first() {
+            origins.push(origin(
+                DefinitionIdentity::ValueType(STD_TERMINAL_DOCUMENT_TYPE_ID),
+                &value_type.span,
+            ));
+        }
+        if let (Some(binding), Some(export)) =
+            (document_binding, parsed.parsed().type_exports().first())
+        {
+            origins.push(origin(
+                DefinitionIdentity::TypeBinding(binding.id()),
+                &export.span,
+            ));
+        }
+        if let Some(value_type) = parsed.parsed().opaque_value_types().get(1) {
+            origins.push(origin(
+                DefinitionIdentity::ValueType(STD_IO_BYTE_STREAM_TYPE_ID),
+                &value_type.span,
+            ));
+        }
+        if let (Some(binding), Some(export)) =
+            (bytestream_binding, parsed.parsed().type_exports().get(1))
+        {
+            origins.push(origin(
+                DefinitionIdentity::TypeBinding(binding.id()),
+                &export.span,
+            ));
+        }
+        origins
+    }
+
+    fn standard_v3_parts() -> (
+        Vec<StoredSourceUnit>,
+        CatalogueSnapshot,
+        Vec<DefinitionOrigin>,
+        Vec<StandardExecutable>,
+    ) {
+        let (types_unit, invoke_unit, output_unit) = standard_v3_units();
+        let catalogue = standard_v3_catalogue(true);
+        let parsed_types = parsed_standard_unit(STANDARD_V2_TYPES_SOURCE);
+        let mut origins = standard_v2_types_origins(&catalogue, &parsed_types);
+        origins.extend(standard_v2_invoke_origins(STD_INVOKE_SOURCE));
+        origins.extend(standard_v3_output_origins(
+            &catalogue,
+            STANDARD_V3_OUTPUT_SOURCE,
+        ));
+        let executable = standard_v2_executable(&catalogue, &origins);
+        (
+            vec![types_unit, invoke_unit, output_unit],
+            catalogue,
+            origins,
+            vec![executable],
+        )
+    }
+
+    fn standard_v3_source(units: Vec<StoredSourceUnit>) -> StoredSourceRevision {
+        let bundle_hash = source_bundle_digest(&units).unwrap();
+        StoredSourceRevision::new(
+            SourceBundleId::from_bytes([0x51; 16]),
+            SourceRevisionId::from_bytes([0x52; 16]),
+            Some(SourceRevisionId::from_bytes([0x53; 16])),
+            units,
+            bundle_hash,
+            source_revision_record_digest(
+                SourceBundleId::from_bytes([0x51; 16]),
+                Some(SourceRevisionId::from_bytes([0x53; 16])),
+                bundle_hash,
+            )
+            .unwrap(),
+        )
+        .unwrap()
+    }
+
+    /// Runs the V3 source reconcile directly on raw stored facts, without the
+    /// separate digest-verification gate.
+    fn check_v3_parts(
+        units: Vec<StoredSourceUnit>,
+        catalogue: &CatalogueSnapshot,
+        origins: &[DefinitionOrigin],
+        executables: &[StandardExecutable],
+    ) -> Result<(StandardSourceFamilies, CheckedStandardExecutable), StandardLibraryCheckError>
+    {
+        check_standard_library_source_v3_parts(
+            &standard_v3_source(units),
+            catalogue,
+            origins,
+            executables,
+        )
+    }
+
+    fn build_standard_v3_snapshot(
+        units: Vec<StoredSourceUnit>,
+        catalogue: CatalogueSnapshot,
+        origins: Vec<DefinitionOrigin>,
+        executables: Vec<StandardExecutable>,
+        digest: Sha256Digest,
+    ) -> StandardLibrarySnapshot {
+        StandardLibrarySnapshot::new_with_executables(
+            STANDARD_LIBRARY_V3_REVISION_ID,
+            StandardLibraryDigestVersion::Version2,
+            standard_v3_source(units),
+            "orna.language/1",
+            catalogue,
+            executables,
+            origins,
+            digest,
+        )
+        .unwrap()
+    }
+
+    /// The compiled canonical V3 standard-library digest for the exact test
+    /// inputs (`STANDARD_V2_TYPES_SOURCE`, `STD_INVOKE_SOURCE`,
+    /// `STANDARD_V3_OUTPUT_SOURCE`, the fixed identities, catalogue,
+    /// executable, and origins). Computed by the canonical encoder.
+    const STANDARD_V3_CANONICAL_DIGEST: Sha256Digest = Sha256Digest::from_bytes([
+        190, 191, 32, 251, 204, 169, 87, 210, 50, 82, 209, 87, 203, 106, 51, 38, 191, 112, 175, 46,
+        92, 50, 161, 93, 72, 2, 203, 116, 173, 102, 221, 131,
+    ]);
+
+    fn verified_standard_v3_snapshot() -> VerifiedStandardLibrarySnapshot {
+        let (units, catalogue, origins, executables) = standard_v3_parts();
+        verify_standard_library_v2_snapshot(build_standard_v3_snapshot(
+            units,
+            catalogue,
+            origins,
+            executables,
+            STANDARD_V3_CANONICAL_DIGEST,
+        ))
+        .unwrap()
+    }
+
+    #[test]
+    fn reconciles_the_exact_v3_standard_output_bundle() {
+        let verified = verified_standard_v3_snapshot();
+        assert_eq!(verified.revision(), STANDARD_LIBRARY_V3_REVISION_ID);
+        assert_eq!(
+            verified.digest_version(),
+            StandardLibraryDigestVersion::Version2
+        );
+        let checked = check_standard_library_source(&verified).unwrap();
+
+        assert_eq!(checked.schemas().len(), 2);
+        assert_eq!(checked.value_types().len(), 1);
+        assert_eq!(checked.type_bindings().len(), 2);
+
+        let executable = checked.checked_executable().unwrap();
+        assert_eq!(executable.function_id(), STD_INVOKE_ECHO_FUNCTION_ID);
+        assert_eq!(executable.parameter_id(), STD_INVOKE_ECHO_PARAMETER_ID);
+        assert_eq!(
+            executable.revision_id(),
+            STD_INVOKE_ECHO_FUNCTION_REVISION_ID
+        );
+        assert_eq!(
+            executable.revision_number(),
+            STD_INVOKE_ECHO_REVISION_NUMBER
+        );
+        assert_eq!(
+            executable.semantic_hash_version(),
+            FunctionSemanticHashVersion::Version2
+        );
+        assert_eq!(executable.language_version(), "orna.language/1");
+        assert_eq!(executable.references().len(), 3);
+
+        let stored = &verified.executables()[0];
+        assert_eq!(executable.artifact(), stored.revision().artifact());
+        assert_eq!(executable.references(), stored.references());
+        assert_eq!(
+            executable.declaration_origin(),
+            stored.revision().declaration_origin()
+        );
+        assert_eq!(
+            executable.declaration_content_hash(),
+            stored.revision().declaration_content_hash()
+        );
+        assert_eq!(
+            executable.semantic_hash(),
+            stored.revision().semantic_hash()
+        );
+
+        // The retained output unit carries exactly the six output origins at
+        // the exact declaration byte ranges.
+        let output_origins = verified
+            .origins()
+            .iter()
+            .filter(|origin| origin.source().source_unit() == STD_OUTPUT_SOURCE_UNIT_ID)
+            .collect::<Vec<_>>();
+        assert_eq!(output_origins.len(), 6);
+        let document_origin = output_origins
+            .iter()
+            .find(|origin| {
+                origin.identity() == DefinitionIdentity::ValueType(STD_TERMINAL_DOCUMENT_TYPE_ID)
+            })
+            .unwrap();
+        assert_eq!(
+            &STANDARD_V3_OUTPUT_SOURCE[document_origin.source().byte_start() as usize
+                ..document_origin.source().byte_end() as usize],
+            "CREATE TYPE std.terminal.Document AS VALUE OPAQUE\n    KERNEL CONTRACT 'orna.std.value.terminal-document@1'\n    IMMUTABLE\n    TRANSIENT;"
+        );
+        assert_eq!(verified.origins().len(), 14);
+    }
+
+    #[test]
+    fn rejects_a_v3_bundle_with_the_wrong_unit_identity_order_or_path() {
+        let (types_unit, invoke_unit, output_unit) = standard_v3_units();
+        let catalogue = standard_v3_catalogue(true);
+        let parsed_types = parsed_standard_unit(STANDARD_V2_TYPES_SOURCE);
+        let mut origins = standard_v2_types_origins(&catalogue, &parsed_types);
+        origins.extend(standard_v2_invoke_origins(STD_INVOKE_SOURCE));
+        origins.extend(standard_v3_output_origins(
+            &catalogue,
+            STANDARD_V3_OUTPUT_SOURCE,
+        ));
+        let executable = standard_v2_executable(&catalogue, &origins);
+        let rejects = |units: Vec<StoredSourceUnit>, label: &str| {
+            let error = check_v3_parts(
+                units,
+                &catalogue,
+                &origins,
+                std::slice::from_ref(&executable),
+            )
+            .unwrap_err();
+            assert!(
+                matches!(error, StandardLibraryCheckError::SourceMismatch),
+                "{label}: unexpected rejection: {error}"
+            );
+        };
+
+        rejects(
+            vec![
+                stored_v2_unit(
+                    SourceUnitId::from_bytes([0x77; 16]),
+                    0,
+                    "std/types.orna",
+                    STANDARD_V2_TYPES_SOURCE,
+                ),
+                invoke_unit.clone(),
+                output_unit.clone(),
+            ],
+            "wrong types unit identity",
+        );
+        rejects(
+            vec![
+                types_unit.clone(),
+                stored_v2_unit(
+                    STD_INVOKE_SOURCE_UNIT_ID,
+                    1,
+                    "std/invoke.orna",
+                    STD_INVOKE_SOURCE,
+                ),
+                stored_v2_unit(
+                    STD_OUTPUT_SOURCE_UNIT_ID,
+                    2,
+                    "std/out.orna",
+                    STANDARD_V3_OUTPUT_SOURCE,
+                ),
+            ],
+            "wrong output unit path",
+        );
+        rejects(
+            vec![
+                types_unit,
+                stored_v2_unit(
+                    STD_OUTPUT_SOURCE_UNIT_ID,
+                    1,
+                    "std/output.orna",
+                    STANDARD_V3_OUTPUT_SOURCE,
+                ),
+                stored_v2_unit(
+                    STD_INVOKE_SOURCE_UNIT_ID,
+                    2,
+                    "std/invoke.orna",
+                    STD_INVOKE_SOURCE,
+                ),
+            ],
+            "swapped invoke and output units",
+        );
+    }
+
+    #[test]
+    fn rejects_a_v3_bundle_with_a_missing_or_extra_unit() {
+        let (types_unit, invoke_unit, output_unit) = standard_v3_units();
+        let catalogue = standard_v3_catalogue(true);
+        let parsed_types = parsed_standard_unit(STANDARD_V2_TYPES_SOURCE);
+        let mut origins = standard_v2_types_origins(&catalogue, &parsed_types);
+        origins.extend(standard_v2_invoke_origins(STD_INVOKE_SOURCE));
+        origins.extend(standard_v3_output_origins(
+            &catalogue,
+            STANDARD_V3_OUTPUT_SOURCE,
+        ));
+        let executable = standard_v2_executable(&catalogue, &origins);
+
+        let error = check_v3_parts(
+            vec![types_unit.clone(), invoke_unit.clone()],
+            &catalogue,
+            &origins,
+            std::slice::from_ref(&executable),
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            StandardLibraryCheckError::SourceUnitCount { actual: 2 }
+        ));
+
+        let extra = stored_v2_unit(
+            SourceUnitId::from_bytes([0x78; 16]),
+            3,
+            "std/extra.orna",
+            "CREATE SCHEMA std.extra;",
+        );
+        let error = check_v3_parts(
+            vec![types_unit.clone(), invoke_unit.clone(), output_unit, extra],
+            &catalogue,
+            &origins,
+            &[executable],
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            StandardLibraryCheckError::SourceUnitCount { actual: 4 }
+        ));
+    }
+
+    #[test]
+    fn rejects_every_output_unit_content_variation_closed() {
+        let (types_unit, invoke_unit, _output_unit) = standard_v3_units();
+        let catalogue = standard_v3_catalogue(true);
+        let parsed_types = parsed_standard_unit(STANDARD_V2_TYPES_SOURCE);
+        let mut base_origins = standard_v2_types_origins(&catalogue, &parsed_types);
+        base_origins.extend(standard_v2_invoke_origins(STD_INVOKE_SOURCE));
+        let rejects_output = |source: &str, label: &str| {
+            let output_unit =
+                stored_v2_unit(STD_OUTPUT_SOURCE_UNIT_ID, 2, "std/output.orna", source);
+            let mut origins = base_origins.clone();
+            origins.extend(standard_v3_output_origins(&catalogue, source));
+            let executable = standard_v2_executable(&catalogue, &origins);
+            let error = check_v3_parts(
+                vec![types_unit.clone(), invoke_unit.clone(), output_unit],
+                &catalogue,
+                &origins,
+                &[executable],
+            )
+            .unwrap_err();
+            assert!(
+                matches!(error, StandardLibraryCheckError::SourceMismatch),
+                "{label}: unexpected rejection: {error}"
+            );
+        };
+
+        rejects_output(
+            &STANDARD_V3_OUTPUT_SOURCE.replace("CREATE SCHEMA std.terminal;\n", ""),
+            "missing terminal schema",
+        );
+        rejects_output(
+            &STANDARD_V3_OUTPUT_SOURCE
+                .replace("CREATE SCHEMA std.terminal;", "CREATE SCHEMA std.term;"),
+            "wrong terminal schema name",
+        );
+        rejects_output(
+            &STANDARD_V3_OUTPUT_SOURCE.replace(
+                "CREATE TYPE std.terminal.Document AS VALUE OPAQUE\n    KERNEL CONTRACT 'orna.std.value.terminal-document@1'\n    IMMUTABLE\n    TRANSIENT;\n\n",
+                "",
+            ),
+            "missing document type",
+        );
+        rejects_output(
+            &STANDARD_V3_OUTPUT_SOURCE.replace(
+                "CREATE TYPE std.terminal.Document",
+                "CREATE TYPE std.terminal.Doc",
+            ),
+            "wrong document type name",
+        );
+        rejects_output(
+            &STANDARD_V3_OUTPUT_SOURCE.replace(
+                "'orna.std.value.terminal-document@1'",
+                "'orna.std.value.terminal-document@2'",
+            ),
+            "wrong document contract",
+        );
+        rejects_output(
+            &STANDARD_V3_OUTPUT_SOURCE.replace("AS std.Document;", "AS std.Doc;"),
+            "wrong document export target",
+        );
+        rejects_output(
+            &STANDARD_V3_OUTPUT_SOURCE.replace(
+                "EXPORT TYPE std.terminal.Document",
+                "EXPORT TYPE std.terminal.Doc",
+            ),
+            "wrong document export source",
+        );
+        rejects_output(
+            &STANDARD_V3_OUTPUT_SOURCE.replace(
+                "EXPORT TYPE std.terminal.Document AS std.Document;",
+                "EXPORT TYPE std.terminal.Document TO PRELUDE AS Document;",
+            ),
+            "prelude document export",
+        );
+        rejects_output(
+            &format!("{STANDARD_V3_OUTPUT_SOURCE}\nCREATE SCHEMA std.extra;"),
+            "extra schema declaration",
+        );
+        rejects_output(
+            &STANDARD_V3_OUTPUT_SOURCE.replace(
+                "EXPORT TYPE std.io.ByteStream AS std.ByteStream;",
+                "EXPORT TYPE std.io.ByteStream AS std.ByteStream;\n\nCREATE TYPE std.io.Extra AS VALUE OPAQUE\n    KERNEL CONTRACT 'orna.std.value.extra@1'\n    IMMUTABLE\n    TRANSIENT;",
+            ),
+            "extra opaque value type declaration",
+        );
+        rejects_output(
+            &format!(
+                "{STANDARD_V3_OUTPUT_SOURCE}\nEXPORT TYPE std.io.ByteStream AS std.ByteStream;"
+            ),
+            "extra export declaration",
+        );
+        rejects_output(
+            &format!(
+                "{STANDARD_V3_OUTPUT_SOURCE}\nCREATE TYPE std.extra.Value AS VALUE PRIMITIVE KERNEL CONTRACT 'extra@1' IMMUTABLE TRANSIENT;"
+            ),
+            "extra primitive value type declaration",
+        );
+    }
+
+    #[test]
+    fn rejects_wrong_v3_output_catalogue_definitions_closed() {
+        let (types_unit, invoke_unit, output_unit) = standard_v3_units();
+        let parsed_types = parsed_standard_unit(STANDARD_V2_TYPES_SOURCE);
+        let rejects_catalogue = |catalogue: CatalogueSnapshot, label: &str| {
+            let mut origins = standard_v2_types_origins(&catalogue, &parsed_types);
+            origins.extend(standard_v2_invoke_origins(STD_INVOKE_SOURCE));
+            origins.extend(standard_v3_output_origins(
+                &catalogue,
+                STANDARD_V3_OUTPUT_SOURCE,
+            ));
+            let executable = standard_v2_executable(&catalogue, &origins);
+            let error = check_v3_parts(
+                vec![types_unit.clone(), invoke_unit.clone(), output_unit.clone()],
+                &catalogue,
+                &origins,
+                &[executable],
+            )
+            .unwrap_err();
+            assert!(
+                matches!(
+                    error,
+                    StandardLibraryCheckError::SourceMismatch
+                        | StandardLibraryCheckError::MissingSchema
+                ),
+                "{label}: unexpected rejection: {error}"
+            );
+        };
+
+        // Wrong document kernel contract at the fixed identity.
+        rejects_catalogue(
+            standard_v3_catalogue_with_output_value_type(
+                1,
+                ValueTypeDefinition::opaque(
+                    STD_TERMINAL_DOCUMENT_TYPE_ID,
+                    QualifiedSemanticName::new(["std", "terminal", "document"]).unwrap(),
+                    "orna.std.value.terminal-document@2",
+                ),
+            ),
+            "wrong document contract",
+        );
+        // Document defined as a persistable primitive at the fixed identity,
+        // not the opaque IMMUTABLE TRANSIENT output contract.
+        rejects_catalogue(
+            standard_v3_catalogue_with_output_value_type(
+                1,
+                ValueTypeDefinition::primitive(
+                    STD_TERMINAL_DOCUMENT_TYPE_ID,
+                    QualifiedSemanticName::new(["std", "terminal", "document"]).unwrap(),
+                    ValueTypeMutability::Immutable,
+                    ValueTypePersistence::Persistable,
+                    "orna.std.value.terminal-document@1",
+                ),
+            ),
+            "wrong document mutability and persistence",
+        );
+        // ByteStream defined as a persistable primitive at the fixed identity.
+        rejects_catalogue(
+            standard_v3_catalogue_with_output_value_type(
+                2,
+                ValueTypeDefinition::primitive(
+                    STD_IO_BYTE_STREAM_TYPE_ID,
+                    QualifiedSemanticName::new(["std", "io", "bytestream"]).unwrap(),
+                    ValueTypeMutability::Immutable,
+                    ValueTypePersistence::Persistable,
+                    "orna.std.value.byte-stream@1",
+                ),
+            ),
+            "wrong bytestream mutability and persistence",
+        );
+        // The terminal schema, document value type, and document binding are
+        // missing from the catalogue.
+        let catalogue = standard_v3_catalogue(true);
+        let mut schemas = catalogue.schemas().to_vec();
+        schemas.retain(|schema| schema.id() != STD_TERMINAL_SCHEMA_ID);
+        let mut value_types = catalogue.value_types().to_vec();
+        value_types.retain(|value_type| value_type.id() != STD_TERMINAL_DOCUMENT_TYPE_ID);
+        let mut type_bindings = catalogue.type_bindings().to_vec();
+        type_bindings.retain(|binding| binding.target() != STD_TERMINAL_DOCUMENT_TYPE_ID);
+        let catalogue = CatalogueSnapshot::new_with_functions_and_types(
+            catalogue.revision(),
+            schemas,
+            vec![],
+            value_types,
+            type_bindings,
+            catalogue.functions().to_vec(),
+        )
+        .unwrap();
+        rejects_catalogue(catalogue, "missing terminal schema and document");
+        // The std.Document binding targets the wrong value type.
+        let catalogue = standard_v3_catalogue(true);
+        let mut type_bindings = catalogue.type_bindings().to_vec();
+        let document_lookup =
+            TypeLookupName::qualified(QualifiedSemanticName::new(["std", "document"]).unwrap());
+        let document_index = type_bindings
+            .iter()
+            .position(|binding| binding.name() == &document_lookup)
+            .unwrap();
+        type_bindings[document_index] = TypeBinding::qualified(
+            QualifiedSemanticName::new(["std", "document"]).unwrap(),
+            STD_IO_BYTE_STREAM_TYPE_ID,
+        )
+        .unwrap();
+        let catalogue = CatalogueSnapshot::new_with_functions_and_types(
+            catalogue.revision(),
+            catalogue.schemas().to_vec(),
+            vec![],
+            catalogue.value_types().to_vec(),
+            type_bindings,
+            catalogue.functions().to_vec(),
+        )
+        .unwrap();
+        rejects_catalogue(catalogue, "wrong document binding target");
+    }
+
+    #[test]
+    fn rejects_swapped_output_declaration_order_closed() {
+        // The retained origins bind each identity to its exact declaration
+        // byte range; a source that swaps the two schema declarations shifts
+        // those ranges and fails closed.
+        let (types_unit, invoke_unit, _) = standard_v3_units();
+        let catalogue = standard_v3_catalogue(true);
+        let parsed_types = parsed_standard_unit(STANDARD_V2_TYPES_SOURCE);
+        let mut origins = standard_v2_types_origins(&catalogue, &parsed_types);
+        origins.extend(standard_v2_invoke_origins(STD_INVOKE_SOURCE));
+        origins.extend(standard_v3_output_origins(
+            &catalogue,
+            STANDARD_V3_OUTPUT_SOURCE,
+        ));
+        let executable = standard_v2_executable(&catalogue, &origins);
+
+        let swapped = STANDARD_V3_OUTPUT_SOURCE.replacen(
+            "CREATE SCHEMA std.terminal;\nCREATE SCHEMA std.io;\n",
+            "CREATE SCHEMA std.io;\nCREATE SCHEMA std.terminal;\n",
+            1,
+        );
+        assert_ne!(swapped, STANDARD_V3_OUTPUT_SOURCE);
+        let output_unit = stored_v2_unit(STD_OUTPUT_SOURCE_UNIT_ID, 2, "std/output.orna", &swapped);
+        let error = check_v3_parts(
+            vec![types_unit, invoke_unit, output_unit],
+            &catalogue,
+            &origins,
+            &[executable],
+        )
+        .unwrap_err();
+        assert!(
+            matches!(error, StandardLibraryCheckError::SourceMismatch),
+            "unexpected rejection: {error}"
+        );
+    }
+
+    #[test]
+    fn rejects_wrong_v3_output_origin_ranges_closed() {
+        let (types_unit, invoke_unit, output_unit) = standard_v3_units();
+        let catalogue = standard_v3_catalogue(true);
+        let parsed_types = parsed_standard_unit(STANDARD_V2_TYPES_SOURCE);
+        let assert_rejected = |error: StandardLibraryCheckError| {
+            assert!(
+                matches!(error, StandardLibraryCheckError::SourceMismatch),
+                "unexpected rejection: {error}"
+            );
+        };
+        let document_lookup =
+            TypeLookupName::qualified(QualifiedSemanticName::new(["std", "document"]).unwrap());
+        let document_binding_id = catalogue
+            .type_binding_by_name(&document_lookup)
+            .unwrap()
+            .id();
+
+        // Shifted document type origin range.
+        let mut origins = standard_v2_types_origins(&catalogue, &parsed_types);
+        origins.extend(standard_v2_invoke_origins(STD_INVOKE_SOURCE));
+        let mut output_origins = standard_v3_output_origins(&catalogue, STANDARD_V3_OUTPUT_SOURCE);
+        let document_origin = output_origins
+            .iter_mut()
+            .find(|origin| {
+                origin.identity() == DefinitionIdentity::ValueType(STD_TERMINAL_DOCUMENT_TYPE_ID)
+            })
+            .unwrap();
+        *document_origin = DefinitionOrigin::new(
+            document_origin.identity(),
+            SourceOrigin::new(
+                STD_OUTPUT_SOURCE_UNIT_ID,
+                document_origin.source().byte_start() + 1,
+                document_origin.source().byte_end(),
+            )
+            .unwrap(),
+        );
+        origins.extend(output_origins);
+        let executable = standard_v2_executable(&catalogue, &origins);
+        assert_rejected(
+            check_v3_parts(
+                vec![types_unit.clone(), invoke_unit.clone(), output_unit.clone()],
+                &catalogue,
+                &origins,
+                &[executable],
+            )
+            .unwrap_err(),
+        );
+
+        // Missing document export origin.
+        let mut origins = standard_v2_types_origins(&catalogue, &parsed_types);
+        origins.extend(standard_v2_invoke_origins(STD_INVOKE_SOURCE));
+        let mut output_origins = standard_v3_output_origins(&catalogue, STANDARD_V3_OUTPUT_SOURCE);
+        output_origins.retain(|origin| {
+            origin.identity() != DefinitionIdentity::TypeBinding(document_binding_id)
+        });
+        origins.extend(output_origins);
+        let executable = standard_v2_executable(&catalogue, &origins);
+        assert_rejected(
+            check_v3_parts(
+                vec![types_unit.clone(), invoke_unit.clone(), output_unit.clone()],
+                &catalogue,
+                &origins,
+                &[executable],
+            )
+            .unwrap_err(),
+        );
+
+        // Duplicate output origin identity.
+        let mut origins = standard_v2_types_origins(&catalogue, &parsed_types);
+        origins.extend(standard_v2_invoke_origins(STD_INVOKE_SOURCE));
+        let mut output_origins = standard_v3_output_origins(&catalogue, STANDARD_V3_OUTPUT_SOURCE);
+        let schema_origin = output_origins
+            .iter()
+            .find(|origin| origin.identity() == DefinitionIdentity::Schema(STD_TERMINAL_SCHEMA_ID))
+            .unwrap()
+            .clone();
+        output_origins.push(schema_origin);
+        origins.extend(output_origins);
+        let executable = standard_v2_executable(&catalogue, &origins);
+        assert_rejected(
+            check_v3_parts(
+                vec![types_unit.clone(), invoke_unit.clone(), output_unit.clone()],
+                &catalogue,
+                &origins,
+                &[executable],
+            )
+            .unwrap_err(),
+        );
+
+        // Output origin on a foreign source unit.
+        let mut origins = standard_v2_types_origins(&catalogue, &parsed_types);
+        origins.extend(standard_v2_invoke_origins(STD_INVOKE_SOURCE));
+        let mut output_origins = standard_v3_output_origins(&catalogue, STANDARD_V3_OUTPUT_SOURCE);
+        let schema_origin = output_origins
+            .iter_mut()
+            .find(|origin| origin.identity() == DefinitionIdentity::Schema(STD_IO_SCHEMA_ID))
+            .unwrap();
+        *schema_origin = DefinitionOrigin::new(
+            schema_origin.identity(),
+            SourceOrigin::new(
+                SourceUnitId::from_bytes([0x99; 16]),
+                schema_origin.source().byte_start(),
+                schema_origin.source().byte_end(),
+            )
+            .unwrap(),
+        );
+        origins.extend(output_origins);
+        let executable = standard_v2_executable(&catalogue, &origins);
+        assert_rejected(
+            check_v3_parts(
+                vec![types_unit, invoke_unit, output_unit],
+                &catalogue,
+                &origins,
+                &[executable],
+            )
+            .unwrap_err(),
+        );
+    }
+
+    #[test]
+    fn rejects_a_byte_modified_output_unit_closed() {
+        let (types_unit, invoke_unit, _) = standard_v3_units();
+        let catalogue = standard_v3_catalogue(true);
+        let parsed_types = parsed_standard_unit(STANDARD_V2_TYPES_SOURCE);
+        let mut origins = standard_v2_types_origins(&catalogue, &parsed_types);
+        origins.extend(standard_v2_invoke_origins(STD_INVOKE_SOURCE));
+        origins.extend(standard_v3_output_origins(
+            &catalogue,
+            STANDARD_V3_OUTPUT_SOURCE,
+        ));
+        let executable = standard_v2_executable(&catalogue, &origins);
+
+        // Whitespace-only modification: tokens identical, declaration byte
+        // ranges shift, so the stored origins no longer agree with the
+        // retained source.
+        let modified = STANDARD_V3_OUTPUT_SOURCE.replacen(
+            "CREATE SCHEMA std.terminal;",
+            "CREATE  SCHEMA std.terminal;",
+            1,
+        );
+        assert_ne!(modified, STANDARD_V3_OUTPUT_SOURCE);
+        let output_unit =
+            stored_v2_unit(STD_OUTPUT_SOURCE_UNIT_ID, 2, "std/output.orna", &modified);
+        let error = check_v3_parts(
+            vec![types_unit.clone(), invoke_unit.clone(), output_unit],
+            &catalogue,
+            &origins,
+            &[executable],
+        )
+        .unwrap_err();
+        assert!(
+            matches!(error, StandardLibraryCheckError::SourceMismatch),
+            "unexpected rejection: {error}"
+        );
+
+        // Semantic modification: the schema declaration itself is rejected.
+        let modified = STANDARD_V3_OUTPUT_SOURCE.replacen(
+            "CREATE SCHEMA std.io;",
+            "CREATE SCHEMA std.other;",
+            1,
+        );
+        let output_unit =
+            stored_v2_unit(STD_OUTPUT_SOURCE_UNIT_ID, 2, "std/output.orna", &modified);
+        let mut origins = standard_v2_types_origins(&catalogue, &parsed_types);
+        origins.extend(standard_v2_invoke_origins(STD_INVOKE_SOURCE));
+        origins.extend(standard_v3_output_origins(&catalogue, &modified));
+        let executable = standard_v2_executable(&catalogue, &origins);
+        let error = check_v3_parts(
+            vec![types_unit, invoke_unit, output_unit],
+            &catalogue,
+            &origins,
+            &[executable],
+        )
+        .unwrap_err();
+        assert!(
+            matches!(error, StandardLibraryCheckError::SourceMismatch),
+            "unexpected rejection: {error}"
+        );
+    }
+
+    #[test]
+    fn rejects_a_byte_modified_invoke_unit_through_the_v3_path() {
+        let (types_unit, _, output_unit) = standard_v3_units();
+        let catalogue = standard_v3_catalogue(true);
+        let parsed_types = parsed_standard_unit(STANDARD_V2_TYPES_SOURCE);
+        let mut origins = standard_v2_types_origins(&catalogue, &parsed_types);
+        origins.extend(standard_v2_invoke_origins(STD_INVOKE_SOURCE));
+        origins.extend(standard_v3_output_origins(
+            &catalogue,
+            STANDARD_V3_OUTPUT_SOURCE,
+        ));
+        let executable = standard_v2_executable(&catalogue, &origins);
+
+        // The invoke unit reconciles exactly as the V2 checker does: a
+        // semantic modification fails closed through the echo checker.
+        let modified = STD_INVOKE_SOURCE.replacen("p_value INTEGER", "p_value BIGINT", 1);
+        let invoke_unit =
+            stored_v2_unit(STD_INVOKE_SOURCE_UNIT_ID, 1, "std/invoke.orna", &modified);
+        let error = check_v3_parts(
+            vec![types_unit, invoke_unit, output_unit],
+            &catalogue,
+            &origins,
+            &[executable],
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            StandardLibraryCheckError::UnexpectedParameterType
+        ));
+    }
+
+    #[test]
+    fn rejects_a_wrong_stored_executable_through_the_v3_path() {
+        let (types_unit, invoke_unit, output_unit) = standard_v3_units();
+        let catalogue = standard_v3_catalogue(true);
+        let parsed_types = parsed_standard_unit(STANDARD_V2_TYPES_SOURCE);
+        let mut origins = standard_v2_types_origins(&catalogue, &parsed_types);
+        origins.extend(standard_v2_invoke_origins(STD_INVOKE_SOURCE));
+        origins.extend(standard_v3_output_origins(
+            &catalogue,
+            STANDARD_V3_OUTPUT_SOURCE,
+        ));
+        let executable = standard_v2_executable(&catalogue, &origins);
+
+        // Rebuild the stored executable with a different revision identity.
+        let wrong_revision = FunctionRevisionId::from_bytes([0x11; 16]);
+        let revision = executable.revision().clone();
+        let references = executable
+            .references()
+            .iter()
+            .map(|reference| {
+                DefinitionReference::new(
+                    reference.source_function(),
+                    wrong_revision,
+                    reference.ordinal(),
+                    reference.target(),
+                    reference.kind(),
+                    reference.source_origin(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let revision = FunctionRevisionRecord::new(
+            revision.function(),
+            wrong_revision,
+            revision.revision_number(),
+            revision.declaration_origin(),
+            revision.declaration_content_hash(),
+            revision.semantic_hash(),
+            revision.language_version(),
+            revision.artifact().clone(),
+        )
+        .unwrap()
+        .with_semantic_hash_version(revision.semantic_hash_version());
+        let executable =
+            StandardExecutable::new(revision.function(), revision, references).unwrap();
+
+        let error = check_v3_parts(
+            vec![types_unit, invoke_unit, output_unit],
+            &catalogue,
+            &origins,
+            &[executable],
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            StandardLibraryCheckError::ExecutableMismatch
+        ));
     }
 }
