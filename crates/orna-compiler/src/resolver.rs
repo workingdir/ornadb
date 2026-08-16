@@ -73,7 +73,7 @@ use orna_core::{
     types::StandardScalar,
 };
 use orna_syntax::{
-    ClientFunctionDeclaration, FieldRenameDeclaration, FunctionReturnType,
+    CapabilitySpecification, ClientFunctionDeclaration, FieldRenameDeclaration, FunctionReturnType,
     FunctionSecurity as SyntaxFunctionSecurity, FunctionTransaction as SyntaxFunctionTransaction,
     FunctionVolatility as SyntaxFunctionVolatility, ObjectTypeDeclaration, OnDeletePolicy,
     PrimitiveValueTypePersistence, QualifiedName, RecordValueTypeDeclaration, SelectQuantifier,
@@ -2170,6 +2170,7 @@ struct ResolvedClientFunctionInput<'a> {
     return_type: SemanticType<CheckedTypeId>,
     standard_value_type: Option<orna_core::TypeId>,
     body: &'a orna_syntax::ClientFunctionBody,
+    capabilities: &'a [CapabilitySpecification],
     location: SourceLocation,
     declaration_span: SourceSpan,
     logical_path: &'a str,
@@ -3427,6 +3428,7 @@ fn resolve_client_function_inputs<'a>(
             inputs.push(ResolvedClientFunctionInput {
                 id: header.id,
                 name: semantic_name(&declaration.name),
+                capabilities: &declaration.capabilities,
                 parameters: Vec::new(),
                 return_type: semantic_type,
                 standard_value_type,
@@ -3439,6 +3441,234 @@ fn resolve_client_function_inputs<'a>(
     }
     inputs
 }
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ClientCapabilityArgumentKind {
+    PathScope,
+    HostScope,
+    SecretId,
+}
+
+impl ClientCapabilityArgumentKind {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::PathScope => "path-scope",
+            Self::HostScope => "host-scope",
+            Self::SecretId => "secret-id",
+        }
+    }
+}
+
+struct ClientCapabilityVocabularyEntry {
+    parts: &'static [&'static str],
+    argument_count: usize,
+    argument_kind: ClientCapabilityArgumentKind,
+}
+
+const CLIENT_CAPABILITY_VOCABULARY: &[ClientCapabilityVocabularyEntry] = &[
+    ClientCapabilityVocabularyEntry {
+        parts: &["std", "fs", "read"],
+        argument_count: 1,
+        argument_kind: ClientCapabilityArgumentKind::PathScope,
+    },
+    ClientCapabilityVocabularyEntry {
+        parts: &["std", "fs", "write"],
+        argument_count: 1,
+        argument_kind: ClientCapabilityArgumentKind::PathScope,
+    },
+    ClientCapabilityVocabularyEntry {
+        parts: &["std", "net", "connect"],
+        argument_count: 1,
+        argument_kind: ClientCapabilityArgumentKind::HostScope,
+    },
+    ClientCapabilityVocabularyEntry {
+        parts: &["std", "secret", "use"],
+        argument_count: 1,
+        argument_kind: ClientCapabilityArgumentKind::SecretId,
+    },
+];
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum ClientCapabilityArgument {
+    TextLiteral,
+    Parameter(String),
+}
+
+fn client_capability_entry(
+    name: &QualifiedSemanticName,
+) -> Option<&'static ClientCapabilityVocabularyEntry> {
+    CLIENT_CAPABILITY_VOCABULARY.iter().find(|entry| {
+        name.parts()
+            .iter()
+            .map(String::as_str)
+            .eq(entry.parts.iter().copied())
+    })
+}
+
+fn client_capability_argument_count(arguments: Option<&SourceSlice>) -> usize {
+    let Some(arguments) = arguments else {
+        return 0;
+    };
+    let text = arguments.text.trim();
+    if text.is_empty() {
+        return 0;
+    }
+
+    let mut count = 1;
+    let mut parentheses = 0usize;
+    let mut quote = None;
+    let mut characters = text.chars().peekable();
+    while let Some(character) = characters.next() {
+        if let Some(quote_character) = quote {
+            if character == quote_character {
+                if characters.peek() == Some(&quote_character) {
+                    characters.next();
+                } else {
+                    quote = None;
+                }
+            }
+            continue;
+        }
+        match character {
+            '\'' | '"' => quote = Some(character),
+            '(' => parentheses += 1,
+            ')' => parentheses = parentheses.saturating_sub(1),
+            ',' if parentheses == 0 => count += 1,
+            _ => {}
+        }
+    }
+    count
+}
+
+fn parse_client_capability_argument(text: &str) -> Option<ClientCapabilityArgument> {
+    let text = text.trim();
+    if is_client_text_literal(text) {
+        return Some(ClientCapabilityArgument::TextLiteral);
+    }
+    normalise_client_parameter_name(text).map(ClientCapabilityArgument::Parameter)
+}
+
+fn is_client_text_literal(text: &str) -> bool {
+    let mut characters = text.chars();
+    if characters.next() != Some('\'') || !text.ends_with('\'') {
+        return false;
+    }
+
+    let mut characters = text[1..].chars().peekable();
+    while let Some(character) = characters.next() {
+        if character != '\'' {
+            continue;
+        }
+        if characters.peek() == Some(&'\'') {
+            characters.next();
+        } else {
+            return characters.peek().is_none();
+        }
+    }
+    false
+}
+
+fn normalise_client_parameter_name(text: &str) -> Option<String> {
+    if text.starts_with('"') {
+        if !text.ends_with('"') || text.len() < 2 {
+            return None;
+        }
+        let inner = &text[1..text.len() - 1];
+        let mut characters = inner.chars().peekable();
+        while let Some(character) = characters.next() {
+            if character == '"' && characters.peek() == Some(&'"') {
+                characters.next();
+            } else if character == '"' {
+                return None;
+            }
+        }
+        if inner.is_empty() {
+            return None;
+        }
+        return Some(inner.replace("\"\"", "\""));
+    }
+
+    let mut characters = text.chars();
+    let first = characters.next()?;
+    if first != '_' && !first.is_alphabetic() {
+        return None;
+    }
+    if characters.any(|character| character != '_' && !character.is_alphanumeric()) {
+        return None;
+    }
+    Some(text.to_lowercase())
+}
+
+fn validate_client_capability<'a>(
+    capability: &CapabilitySpecification,
+    declared_parameters: impl IntoIterator<Item = &'a str>,
+    logical_path: &str,
+    declaration_span: &SourceSpan,
+    diagnostics: &mut Vec<CompilerDiagnostic>,
+) {
+    let name = semantic_name(&capability.name);
+    let Some(entry) = client_capability_entry(&name) else {
+        diagnostics.push(diagnostic(
+            DiagnosticCode::CapabilityRequirement,
+            format!("unknown CLIENT capability {name}"),
+            logical_path,
+            declaration_span,
+        ));
+        return;
+    };
+
+    let argument_count = client_capability_argument_count(capability.arguments.as_ref());
+    if argument_count != entry.argument_count {
+        diagnostics.push(diagnostic(
+            DiagnosticCode::CapabilityRequirement,
+            format!(
+                "CLIENT capability {name} requires exactly {} {} argument",
+                entry.argument_count,
+                entry.argument_kind.label()
+            ),
+            logical_path,
+            declaration_span,
+        ));
+        return;
+    }
+
+    let Some(arguments) = capability.arguments.as_ref() else {
+        diagnostics.push(diagnostic(
+            DiagnosticCode::CapabilityRequirement,
+            format!(
+                "CLIENT capability {name} requires one {} argument",
+                entry.argument_kind.label()
+            ),
+            logical_path,
+            declaration_span,
+        ));
+        return;
+    };
+    let Some(argument) = parse_client_capability_argument(&arguments.text) else {
+        diagnostics.push(diagnostic(
+            DiagnosticCode::CapabilityRequirement,
+            format!(
+                "CLIENT capability {name} argument must be a text literal or declared parameter"
+            ),
+            logical_path,
+            declaration_span,
+        ));
+        return;
+    };
+    if let ClientCapabilityArgument::Parameter(parameter) = argument
+        && !declared_parameters
+            .into_iter()
+            .any(|declared| declared == parameter)
+    {
+        diagnostics.push(diagnostic(
+            DiagnosticCode::CapabilityRequirement,
+            format!(
+                "CLIENT capability {name} argument references undeclared parameter {parameter}"
+            ),
+            logical_path,
+            declaration_span,
+        ));
+    }
+}
 
 fn check_client_functions(
     inputs: &[ResolvedClientFunctionInput<'_>],
@@ -3449,6 +3679,18 @@ fn check_client_functions(
     inputs
         .iter()
         .filter_map(|input| {
+            for capability in input.capabilities {
+                validate_client_capability(
+                    capability,
+                    input
+                        .parameters
+                        .iter()
+                        .map(|parameter| parameter.name.as_str()),
+                    input.logical_path,
+                    &input.declaration_span,
+                    diagnostics,
+                );
+            }
             let Some((value, body_source)) = input.body.as_boolean_literal() else {
                 diagnostics.push(diagnostic(
                     DiagnosticCode::DomainIncompatible,
@@ -3458,6 +3700,15 @@ fn check_client_functions(
                 ));
                 return None;
             };
+            if !input.capabilities.is_empty() {
+                diagnostics.push(diagnostic(
+                    DiagnosticCode::CapabilityRequirement,
+                    "accepted CLIENT function bodies must not declare capabilities",
+                    input.logical_path,
+                    &input.declaration_span,
+                ));
+                return None;
+            }
             record_standard_value_type_use(
                 uses,
                 standard,
@@ -6131,6 +6382,7 @@ mod tests {
         checked_standard_library_with_contract_overrides_for_test, location,
         reconcile_standard_executable, reconcile_standard_source, sort_standard_type_uses,
         supports_record_value_scalar, unquoted_prelude_name, unquoted_semantic_name,
+        validate_client_capability,
     };
     use crate::mutation::{MutationExpressionKind, MutationRecordFieldExpressionKind};
     use crate::{
@@ -13774,6 +14026,84 @@ mod tests {
         assert_eq!(literal_location.logical_path(), "client.orna");
         assert_eq!(literal_location.span().start(), literal_start);
         assert_eq!(literal_location.span().end(), literal_start + 4);
+    }
+
+    fn validate_capability_text(
+        capability: &str,
+        declared_parameters: &[&str],
+    ) -> Vec<crate::CompilerDiagnostic> {
+        let source = format!(
+            "CREATE CLIENT FUNCTION examples.f() RETURNS BOOLEAN REQUIRES CAPABILITY {capability} RETURN TRUE;"
+        );
+        let parsed = parse(&source);
+        assert!(parsed.diagnostics().is_empty(), "source: {source}");
+        let declaration = &parsed.client_functions()[0];
+        let mut diagnostics = Vec::new();
+        validate_client_capability(
+            &declaration.capabilities[0],
+            declared_parameters.iter().copied(),
+            "capability.orna",
+            &declaration.span,
+            &mut diagnostics,
+        );
+        diagnostics
+    }
+
+    #[test]
+    fn validates_closed_client_capability_vocabulary_and_argument_shapes() {
+        for capability in [
+            "std.fs.read('/tmp/input')",
+            "std.fs.write('/tmp/output')",
+            "std.net.connect('db.internal')",
+            "std.secret.use('database-password')",
+        ] {
+            assert!(
+                validate_capability_text(capability, &[]).is_empty(),
+                "capability: {capability}"
+            );
+        }
+        assert!(validate_capability_text("std.fs.read(p_file)", &["p_file"]).is_empty());
+    }
+
+    #[test]
+    fn rejects_invalid_client_capability_names_counts_arguments_and_references() {
+        for capability in [
+            "std.net.call('db.internal')",
+            "std.fs.read()",
+            "std.fs.read('/tmp/a', '/tmp/b')",
+            "std.fs.read(42)",
+        ] {
+            let diagnostics = validate_capability_text(capability, &[]);
+            assert_eq!(diagnostics.len(), 1, "capability: {capability}");
+            assert_eq!(
+                diagnostics[0].code(),
+                DiagnosticCode::CapabilityRequirement,
+                "capability: {capability}"
+            );
+        }
+
+        let diagnostics = validate_capability_text("std.fs.read(p_file)", &[]);
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].code(), DiagnosticCode::CapabilityRequirement);
+        assert!(diagnostics[0].message().contains("undeclared parameter"));
+    }
+
+    #[test]
+    fn rejects_capabilities_on_accepted_client_boolean_bodies() {
+        let source = "CREATE SCHEMA examples; CREATE CLIENT FUNCTION examples.read() \
+            RETURNS BOOLEAN REQUIRES CAPABILITY std.fs.read('/tmp/input') RETURN TRUE;";
+        let report = check(&bundle([("client.orna", source)]), &empty_catalogue());
+
+        assert_eq!(report.diagnostics().len(), 1);
+        assert_eq!(
+            report.diagnostics()[0].code(),
+            DiagnosticCode::CapabilityRequirement
+        );
+        assert_eq!(
+            report.diagnostics()[0].message(),
+            "accepted CLIENT function bodies must not declare capabilities"
+        );
+        assert_no_checked_bundle(&report);
     }
 
     #[test]
