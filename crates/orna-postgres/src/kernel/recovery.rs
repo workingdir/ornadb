@@ -216,6 +216,7 @@ async fn recover_client(
 
     let active = recover_active_revision(&transaction).await?;
     crate::security::recover_invocation_audit_events(&transaction, &active).await?;
+    crate::inspect::recover_inspect_relations(&transaction, &active).await?;
 
     transaction
         .commit()
