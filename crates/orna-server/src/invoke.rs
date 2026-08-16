@@ -76,6 +76,31 @@ pub struct InstalledInvokeRequest {
     pub explain: bool,
 }
 
+impl InstalledInvokeRequest {
+    /// Creates one complete installed invoke command request.
+    ///
+    /// The command parser (step 4) passes its parsed target, argument
+    /// inputs, and option values through this constructor; the host reflects
+    /// the resolved signature and binds them.
+    pub fn new(
+        target: InvocationTarget,
+        arguments: Vec<CliArgumentInput>,
+        output: Option<String>,
+        trace: Option<InvocationTracePolicy>,
+        no_progress: bool,
+        explain: bool,
+    ) -> Self {
+        Self {
+            target,
+            arguments,
+            output,
+            trace,
+            no_progress,
+            explain,
+        }
+    }
+}
+
 /// The terminal public result of one installed sealed invocation run.
 ///
 /// The CLI maps each variant to the ADR 0056 exit table: `Completed` 0,
