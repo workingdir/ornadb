@@ -540,6 +540,10 @@ fn render_result(
             writeln!(stderr, "orna: invoke: invocation denied").map_err(presentation_error)?;
             Ok(InstalledInvokeOutcome::Denied)
         }
+        SealedInvocationResult::PresentationFailed { .. } => Err(InstalledInvokeError::new(
+            InstalledInvokeErrorKind::Presentation,
+            "presentation failed".to_owned(),
+        )),
     }
 }
 
@@ -941,6 +945,20 @@ mod tests {
             String::from_utf8(stderr).expect("stderr is text"),
             "orna: invoke: invocation binding failed\n"
         );
+    }
+
+    #[test]
+    fn presentation_failure_returns_the_closed_presentation_error() {
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let result = SealedInvocationResult::PresentationFailed {
+            invocation: InvocationId::new(),
+        };
+        let error = render_result(&result, false, &mut stdout, &mut stderr, &mut encoder)
+            .expect_err("a presentation failure is a closed presentation error");
+        assert_eq!(error.kind(), InstalledInvokeErrorKind::Presentation);
+        assert!(stdout.is_empty());
+        assert!(stderr.is_empty());
     }
 
     fn echo_definition() -> FunctionDefinition {

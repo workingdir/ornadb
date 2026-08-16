@@ -36,8 +36,9 @@ use crate::{
     bootstrap::require_current_migrations,
     recovery::{load_verified_standard_library, recover_active_revision},
     server_execution::{
-        ServerSelectError, ServerSelectResult, execute_authorised_raw_server_select,
-        execute_authorised_server_select, execute_standard_parameter_echo,
+        SealedPresentationError, ServerSelectError, ServerSelectResult,
+        execute_authorised_raw_server_select, execute_authorised_server_select,
+        execute_standard_parameter_echo, present_sealed_standard_output,
         raw_identity_selected_server_select_target_is_selected, raw_server_target_is_unavailable,
         raw_unique_text_selected_server_select_target_is_selected,
     },
@@ -85,6 +86,16 @@ pub enum SealedInvocationResult {
     },
     /// The invocation was denied without executing any artifact.
     Denied {
+        /// The invocation identity.
+        invocation: InvocationId,
+    },
+    /// The allowed invocation executed but its output requirement could not
+    /// be presented (ADR 0057 step 7).
+    ///
+    /// This variant is closed: it discloses no target, requirement, value,
+    /// presenter, or failure detail. The CLI maps it to the presentation
+    /// error exit code 5.
+    PresentationFailed {
         /// The invocation identity.
         invocation: InvocationId,
     },
@@ -615,13 +626,50 @@ impl PostgresKernel {
                         executable.revision(),
                         &arguments,
                     )?;
-                    let events = sealed_echo_events(authenticated_session, invocation, value)?;
                     let security_target = InvocationTarget::verified_standard(
                         definition.id(),
                         active.pair(),
                         standard.revision(),
                         executable.revision().id(),
                     );
+                    let events = match decoded.output_requirement() {
+                        Some(requirement) => {
+                            match present_sealed_standard_output(
+                                requirement,
+                                value,
+                                &active,
+                                &registry,
+                            ) {
+                                Ok(presented) => sealed_completed_events(
+                                    authenticated_session.principal(),
+                                    invocation,
+                                    presented,
+                                )?,
+                                Err(
+                                    SealedPresentationError::OutputResolution(_)
+                                    | SealedPresentationError::NoPath,
+                                ) => {
+                                    append_allowed_invocation_audit(
+                                        &transaction,
+                                        &security,
+                                        authenticated_session,
+                                        security_target,
+                                        invocation,
+                                    )
+                                    .await?;
+                                    return Ok(SealedInvocationResult::PresentationFailed {
+                                        invocation,
+                                    });
+                                }
+                                Err(SealedPresentationError::Kernel(error)) => return Err(error),
+                            }
+                        }
+                        None => sealed_completed_events(
+                            authenticated_session.principal(),
+                            invocation,
+                            value,
+                        )?,
+                    };
                     append_allowed_invocation_audit(
                         &transaction,
                         &security,
@@ -1908,14 +1956,17 @@ fn bind_sealed_invoke_arguments(
     Ok(bound)
 }
 
-/// Builds the exact sealed Event sequence for one completed parameter echo.
+/// Builds the exact sealed Event sequence for one completed invocation.
 ///
-/// The batch carries `InvocationStarted(0)`, `ValueBatch(1)` with the typed
-/// integer, and `InvocationCompleted(2)` as one contiguous outer record
-/// sequence `1, 2, 3`. A server adapter delivers this batch on the
+/// The batch carries `InvocationStarted(0)`, `ValueBatch(1)` with the
+/// presented value, and `InvocationCompleted(2)` as one contiguous outer
+/// record sequence `1, 2, 3`. A server adapter delivers this batch on the
 /// `RESULT_VALUES` channel and then completes the call.
-fn sealed_echo_events(
-    authenticated_session: &AuthenticatedSession,
+///
+/// ADR 0057 step 7 passes either the canonical echo value (no output
+/// requirement) or the presented opaque value in the final `ValueBatch`.
+pub(crate) fn sealed_completed_events(
+    principal: PrincipalId,
     invocation: InvocationId,
     value: RuntimeValue,
 ) -> Result<InvocationEventBatch, PostgresKernelError> {
@@ -1923,7 +1974,7 @@ fn sealed_echo_events(
         invocation,
         0,
         InvocationEventBody::Started {
-            visible_principal: Some(authenticated_session.principal()),
+            visible_principal: Some(principal),
         },
     )
     .map_err(PostgresKernelError::InvocationCarrier)?;
@@ -3869,6 +3920,41 @@ mod tests {
                 ref record,
                 rule: "driver failed during shutdown",
             }) if record == "shutdown"
+        ));
+    }
+
+    #[test]
+    fn sealed_completed_events_carry_the_value_in_the_final_value_batch() {
+        let principal = PrincipalId::from_bytes([0x51; 16]);
+        let invocation = InvocationId::from_bytes([0x52; 16]);
+        let events = sealed_completed_events(principal, invocation, RuntimeValue::Integer(41))
+            .expect("the completed events are valid");
+        let records = events.records();
+        assert_eq!(records.len(), 3);
+        assert_eq!(records[0].outer_sequence(), 1);
+        assert_eq!(records[1].outer_sequence(), 2);
+        assert_eq!(records[2].outer_sequence(), 3);
+        assert!(matches!(
+            records[0].event().body(),
+            InvocationEventBody::Started {
+                visible_principal: Some(actual)
+            } if *actual == principal
+        ));
+        match records[1].event().body() {
+            InvocationEventBody::ValueBatch { schema, values } => {
+                assert!(schema.is_none());
+                let [value] = values.as_slice() else {
+                    panic!("the ValueBatch must carry exactly one value");
+                };
+                assert_eq!(value.value(), &RuntimeValue::Integer(41));
+            }
+            other => panic!("expected a ValueBatch event, got {other:?}"),
+        }
+        assert!(matches!(
+            records[2].event().body(),
+            InvocationEventBody::Completed {
+                duration_nanoseconds: 0
+            }
         ));
     }
 }
