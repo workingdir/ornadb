@@ -5,8 +5,7 @@ use orna_client::{
 };
 use orna_core::{
     CatalogueRevisionId, FunctionId, FunctionRevisionId, InspectEpochId, InvocationAuditEventId,
-    InvocationId, PrincipalId, SecurityAuditEventId, SourceRevisionId,
-    StandardLibraryRevisionId,
+    InvocationId, PrincipalId, SecurityAuditEventId, SourceRevisionId, StandardLibraryRevisionId,
     catalogue::{FunctionDefinition, FunctionDomain},
     inspect::{InspectOutcomeKind, InspectPrivilege, InspectSnapshotOptions},
     invocation::{
@@ -19,10 +18,9 @@ use orna_core::{
         AuthenticatedSession, CATALOGUE_HEALTH_FUNCTION_ID, CATALOGUE_HEALTH_SERVICE_PRINCIPAL_ID,
         ExecuteDecision, ExecuteDenial, ExecuteGrant, InspectDenial, InspectEpochScope,
         InvocationTarget, LocalPeerAuthenticationError, LocalPeerCredential, Principal,
-        PrincipalKind, PrincipalStatus, RoleMembership, SecurityAuditDecision,
-        SecurityAuditDenial, SecurityAuditEvent, SecurityAuditKind, SecurityAuditOutcome,
-        SecurityFunctionTarget, SecuritySnapshot, SessionBindingError, TargetClass,
-        UserStateAuditOperation,
+        PrincipalKind, PrincipalStatus, RoleMembership, SecurityAuditDecision, SecurityAuditDenial,
+        SecurityAuditEvent, SecurityAuditKind, SecurityAuditOutcome, SecurityFunctionTarget,
+        SecuritySnapshot, SessionBindingError, TargetClass, UserStateAuditOperation,
     },
     system::{SYS_INVOKE_FUNCTION_ID, system_function_by_id},
     value::{FunctionArgument, OpaqueCodecRegistry, RecordValue, RuntimeValue},
@@ -3301,11 +3299,7 @@ fn decode_security_audit_event(row: &Row) -> Result<SecurityAuditEvent, Postgres
                 && catalogue_revision.is_none() =>
         {
             let reason = decode_inspect_audit_denial(
-                require_audit_value(
-                    denial_reason,
-                    &record,
-                    "denied INSPECT requires a reason",
-                )?,
+                require_audit_value(denial_reason, &record, "denied INSPECT requires a reason")?,
                 &record,
             )?;
             SecurityAuditDecision::recover_inspect_denied(
@@ -3567,7 +3561,10 @@ fn decode_inspect_privilege(
     }
 }
 
-fn decode_inspect_scope(value: &str, record: &str) -> Result<InspectEpochScope, PostgresKernelError> {
+fn decode_inspect_scope(
+    value: &str,
+    record: &str,
+) -> Result<InspectEpochScope, PostgresKernelError> {
     match value {
         "own" => Ok(InspectEpochScope::Own),
         "session" => Ok(InspectEpochScope::Session),
