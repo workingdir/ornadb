@@ -1,20 +1,20 @@
 {
-  "name": "tree-sitter-orna",
-  "version": "0.1.0",
-  "description": "Tree-sitter grammar for the Orna language",
-  "main": "bindings/node",
-  "tree-sitter": {
-    "scopes": {
-      "source.orna": "orna"
+    "name": "tree-sitter-orna",
+    "version": "0.1.0",
+    "description": "Tree-sitter grammar for the Orna language",
+    "main": "bindings/node",
+    "tree-sitter": {
+        "scopes": {
+            "source.orna": "orna"
+        },
+        "file-types": [
+            "orna"
+        ],
+        "highlights": [
+            "queries/highlights.scm"
+        ]
     },
-    "file-types": [
-      "orna"
-    ],
-    "highlights": [
-      "queries/highlights.scm"
-    ]
-  },
-  "devDependencies": {
-    "tree-sitter-cli": "^0.26.5"
-  }
+    "devDependencies": {
+        "tree-sitter-cli": "^0.26.5"
+    }
 }
