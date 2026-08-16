@@ -9,19 +9,29 @@ use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use serde_json::{Value, json};
 
 /// The valid application source used for positive tests.
-const VALID_SOURCE: &str = "CREATE SCHEMA product_test;\n\
-CREATE TYPE product_test.probe AS OBJECT (\n\
-    stored BOOLEAN NOT NULL\n\
-);\n\
-CREATE SERVER FUNCTION product_test.create_probe()\n\
-RETURNS ROWS (created REF product_test.probe)\n\
-SECURITY INVOKER TRANSACTION ATOMIC VOLATILITY VOLATILE\n\
-AS INSERT INTO product_test.probe AS made (stored)\n\
-VALUES (TRUE) RETURNING REF(made);\n\
-CREATE SERVER FUNCTION product_test.read_probes()\n\
-RETURNS ROWS (stored BOOLEAN)\n\
-SECURITY INVOKER TRANSACTION READ ONLY VOLATILITY STABLE\n\
-AS SELECT probe.stored FROM product_test.probe probe;\n";
+///
+/// The probe type carries DOCUMENTATION clauses so the rich hover
+/// assertions can check documentation rendering.
+// The `concat!` form preserves the leading spaces of the field line, which
+// a backslash line continuation would strip.
+const VALID_SOURCE: &str = concat!(
+    "CREATE SCHEMA product_test;\n",
+    "\n",
+    "CREATE TYPE product_test.probe AS OBJECT (\n",
+    "    stored BOOLEAN NOT NULL DOCUMENTATION 'whether the probe is stored'\n",
+    ") DOCUMENTATION 'an object probe';\n",
+    "\n",
+    "CREATE SERVER FUNCTION product_test.create_probe()\n",
+    "RETURNS ROWS (created REF product_test.probe)\n",
+    "SECURITY INVOKER TRANSACTION ATOMIC VOLATILITY VOLATILE\n",
+    "AS INSERT INTO product_test.probe AS made (stored)\n",
+    "VALUES (TRUE) RETURNING REF(made);\n",
+    "\n",
+    "CREATE SERVER FUNCTION product_test.read_probes()\n",
+    "RETURNS ROWS (stored BOOLEAN)\n",
+    "SECURITY INVOKER TRANSACTION READ ONLY VOLATILITY STABLE\n",
+    "AS SELECT probe.stored FROM product_test.probe probe;\n",
+);
 
 /// The broken source used for negative diagnostics tests.
 const BROKEN_SOURCE: &str = "CREATE SCHEMA broken_test;\n\
@@ -268,6 +278,136 @@ fn serves_semantic_tokens_document_symbols_and_completion() {
 }
 
 #[test]
+fn serves_rich_hover_content() {
+    let mut client = Client::spawn();
+    initialize(&mut client);
+    // The URI sits inside the workspace tree so the spec-bundle walk finds
+    // the grammar reference and hovers carry a Spec link.
+    let uri = format!(
+        "file://{}/../../rich-hover.orna",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    open_document(&mut client, &uri, VALID_SOURCE, 1);
+    let _ = client.read_notification("textDocument/publishDiagnostics");
+
+    let mut hover_at = |line: u64, character: u64| {
+        client.request(
+            "textDocument/hover",
+            json!({
+                "textDocument": { "uri": uri },
+                "position": { "line": line, "character": character },
+            }),
+        )
+    };
+
+    // Function hover: signature, usage example, spec link.
+    let hover = hover_at(6, 40);
+    let value = hover["contents"]["value"].as_str().expect("hover value");
+    assert!(value.contains("server function"), "kind badge: {value}");
+    assert!(value.contains("RETURNS ROWS"), "returns: {value}");
+    assert!(
+        value.contains("orna invoke product_test.create_probe"),
+        "usage example: {value}"
+    );
+    assert!(value.contains("**Spec**"), "spec link: {value}");
+    assert!(value.contains("orna.ebnf"), "spec link target: {value}");
+
+    // Type hover: fields with modifiers and type-level documentation.
+    let hover = hover_at(2, 27);
+    let value = hover["contents"]["value"].as_str().expect("hover value");
+    assert!(value.contains("object type"), "kind badge: {value}");
+    assert!(value.contains("stored"), "field listing: {value}");
+    assert!(value.contains("NOT NULL"), "field modifier: {value}");
+    assert!(
+        value.contains("an object probe"),
+        "type documentation: {value}"
+    );
+
+    // Field hover: the field name shadows the BOOLEAN scalar spelling.
+    let hover = hover_at(3, 7);
+    let value = hover["contents"]["value"].as_str().expect("hover value");
+    assert!(value.starts_with("**field**"), "field hover: {value}");
+    assert!(value.contains("BOOLEAN"), "field type: {value}");
+    assert!(
+        value.contains("whether the probe is stored"),
+        "field documentation: {value}"
+    );
+
+    // Scalar hover on the type position of the same line.
+    let hover = hover_at(3, 14);
+    let value = hover["contents"]["value"].as_str().expect("hover value");
+    assert!(value.starts_with("**`BOOLEAN`**"), "scalar hover: {value}");
+    assert!(value.contains("boolean type"), "scalar summary: {value}");
+
+    // Keyword hover.
+    let hover = hover_at(7, 3);
+    let value = hover["contents"]["value"].as_str().expect("hover value");
+    assert!(
+        value.contains("**`RETURNS`** keyword"),
+        "keyword hover: {value}"
+    );
+    assert!(value.contains("result shape"), "keyword summary: {value}");
+    assert!(value.contains("**Example**"), "keyword example: {value}");
+
+    // Parameter hover needs a document with parameters. The parameter-select
+    // body is a parser-level form that the application checker rejects, so
+    // this document carries diagnostics; hover still serves the parsed
+    // parameter documentation.
+    let echo_uri = format!("file://{}/../../echo.orna", env!("CARGO_MANIFEST_DIR"));
+    let echo_source = concat!(
+        "CREATE SCHEMA echo_test;\n",
+        "CREATE SERVER FUNCTION echo_test.echo_value(p_value BOOLEAN DOCUMENTATION 'the value to echo')\n",
+        "RETURNS BOOLEAN\n",
+        "SECURITY INVOKER TRANSACTION READ ONLY VOLATILITY STABLE\n",
+        "AS SELECT p_value;\n",
+    );
+    open_document(&mut client, &echo_uri, echo_source, 1);
+    let _ = client.read_notification("textDocument/publishDiagnostics");
+
+    let parameter_hover = client.request(
+        "textDocument/hover",
+        json!({
+            "textDocument": { "uri": echo_uri },
+            "position": { "line": 1, "character": 50 },
+        }),
+    );
+    let value = parameter_hover["contents"]["value"]
+        .as_str()
+        .expect("parameter hover value");
+    assert!(
+        value.starts_with("**parameter**"),
+        "parameter hover: {value}"
+    );
+    assert!(value.contains("BOOLEAN"), "parameter type: {value}");
+    assert!(
+        value.contains("the value to echo"),
+        "parameter documentation: {value}"
+    );
+
+    let function_hover = client.request(
+        "textDocument/hover",
+        json!({
+            "textDocument": { "uri": echo_uri },
+            "position": { "line": 1, "character": 40 },
+        }),
+    );
+    let value = function_hover["contents"]["value"]
+        .as_str()
+        .expect("echo function hover value");
+    assert!(
+        value.contains("**Parameters**"),
+        "parameters section: {value}"
+    );
+    assert!(value.contains("p_value"), "parameter listing: {value}");
+    assert!(
+        value.contains("the value to echo"),
+        "parameter documentation: {value}"
+    );
+
+    client.shutdown();
+}
+
+#[test]
 fn serves_hover_and_definition() {
     let mut client = Client::spawn();
     initialize(&mut client);
@@ -275,12 +415,12 @@ fn serves_hover_and_definition() {
     open_document(&mut client, uri, VALID_SOURCE, 1);
     let _ = client.read_notification("textDocument/publishDiagnostics");
 
-    // Hover over the function declaration name on line 4 (0-based).
+    // Hover over the function declaration name on line 6 (0-based).
     let hover = client.request(
         "textDocument/hover",
         json!({
             "textDocument": { "uri": uri },
-            "position": { "line": 4, "character": 40 },
+            "position": { "line": 6, "character": 40 },
         }),
     );
     assert!(
@@ -291,17 +431,17 @@ fn serves_hover_and_definition() {
     );
 
     // Definition of the type reference inside the insert body.
-    // Line 7 contains "AS INSERT INTO product_test.probe AS made (stored)".
+    // Line 9 contains "AS INSERT INTO product_test.probe AS made (stored)".
     let definition = client.request(
         "textDocument/definition",
         json!({
             "textDocument": { "uri": uri },
-            "position": { "line": 7, "character": 30 },
+            "position": { "line": 9, "character": 30 },
         }),
     );
     assert_eq!(definition["uri"], uri);
     assert_eq!(
-        definition["range"]["start"]["line"], 1,
+        definition["range"]["start"]["line"], 2,
         "type declaration line: {definition}"
     );
 
