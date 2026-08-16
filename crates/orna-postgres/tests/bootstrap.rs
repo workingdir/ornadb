@@ -762,8 +762,8 @@ async fn bootstrap_upgrades_the_registered_v20_empty_catalogue() -> TestResult<(
 
         let after = snapshot_upgrade_state(&database).await?;
         require(
-            after.migrations.len() == 21 && after.migrations[..20] == before.migrations[..],
-            format!("v21 changed prior migration records: {:?}", after.migrations),
+            after.migrations.len() == 23 && after.migrations[..20] == before.migrations[..],
+            format!("v21-v23 changed prior migration records: {:?}", after.migrations),
         )?;
         require(
             after.migrations[20]
@@ -775,8 +775,26 @@ async fn bootstrap_upgrades_the_registered_v20_empty_catalogue() -> TestResult<(
             format!("v21 migration record is not exact: {:?}", after.migrations[20]),
         )?;
         require(
+            after.migrations[21]
+                == (
+                    22,
+                    "protected invocation audit".to_owned(),
+                    expected_migration_checksum(22, MIGRATIONS[21].2),
+                ),
+            format!("v22 migration record is not exact: {:?}", after.migrations[21]),
+        )?;
+        require(
+            after.migrations[22]
+                == (
+                    23,
+                    "executable standard relations".to_owned(),
+                    expected_migration_checksum(23, MIGRATIONS[22].2),
+                ),
+            format!("v23 migration record is not exact: {:?}", after.migrations[22]),
+        )?;
+        require(
             after.active_pair == before.active_pair,
-            "v21 changed the active revision pair",
+            "v21-v23 changed the active revision pair",
         )?;
 
         let recovered = kernel.recover().await?;
@@ -784,7 +802,7 @@ async fn bootstrap_upgrades_the_registered_v20_empty_catalogue() -> TestResult<(
         require(
             recovered.pair().source().to_bytes().to_vec() == source_revision_id
                 && recovered.pair().catalogue().to_bytes().to_vec() == catalogue_revision_id,
-            "v21 recovery does not preserve the active revision pair",
+            "v21-v23 recovery does not preserve the active revision pair",
         )?;
         Ok(())
     })
@@ -856,8 +874,8 @@ async fn bootstrap_upgrades_v5_write_reference_evidence_without_mutating_semanti
 
         let after = snapshot_upgrade_state(&database).await?;
         require(
-            after.migrations.len() == 21 && after.migrations[..5] == before.migrations[..],
-            format!("v6-v21 changed prior migration records: {:?}", after.migrations),
+            after.migrations.len() == 23 && after.migrations[..5] == before.migrations[..],
+            format!("v6-v23 changed prior migration records: {:?}", after.migrations),
         )?;
         require(
             after.migrations[5]
@@ -1004,6 +1022,24 @@ async fn bootstrap_upgrades_v5_write_reference_evidence_without_mutating_semanti
             format!("v21 migration record is not exact: {:?}", after.migrations[20]),
         )?;
         require(
+            after.migrations[21]
+                == (
+                    22,
+                    "protected invocation audit".to_owned(),
+                    expected_migration_checksum(22, MIGRATIONS[21].2),
+                ),
+            format!("v22 migration record is not exact: {:?}", after.migrations[21]),
+        )?;
+        require(
+            after.migrations[22]
+                == (
+                    23,
+                    "executable standard relations".to_owned(),
+                    expected_migration_checksum(23, MIGRATIONS[22].2),
+                ),
+            format!("v23 migration record is not exact: {:?}", after.migrations[22]),
+        )?;
+        require(
             after.active_pair == before.active_pair,
             "v6 changed the active revision pair",
         )?;
@@ -1089,7 +1125,7 @@ async fn bootstrap_upgrades_registered_v6_without_standard_rows() -> TestResult<
 
         let after = snapshot_upgrade_state(&database).await?;
         require(
-            after.migrations.len() == 21
+            after.migrations.len() == 23
                 && after.migrations[..6] == before.migrations[..]
                 && after.migrations[6]
                     == (
@@ -1102,6 +1138,18 @@ async fn bootstrap_upgrades_registered_v6_without_standard_rows() -> TestResult<
                         21,
                         "nested record field targets".to_owned(),
                         expected_migration_checksum(21, MIGRATIONS[20].2),
+                    )
+                && after.migrations[21]
+                    == (
+                        22,
+                        "protected invocation audit".to_owned(),
+                        expected_migration_checksum(22, MIGRATIONS[21].2),
+                    )
+                && after.migrations[22]
+                    == (
+                        23,
+                        "executable standard relations".to_owned(),
+                        expected_migration_checksum(23, MIGRATIONS[22].2),
                     ),
             format!("v6 upgrade produced unexpected migrations: {:?}", after.migrations),
         )?;
@@ -1296,7 +1344,7 @@ async fn bootstrap_upgrades_registered_v7_without_resolved_value_rows() -> TestR
         let after_surface = snapshot_catalogue_surface(&database).await?;
         let after_target_fks = snapshot_application_target_foreign_keys(&database).await?;
         require(
-            after.migrations.len() == 21
+            after.migrations.len() == 23
                 && after.migrations[..7] == before.migrations[..]
                 && after.migrations[7]
                     == (
@@ -1381,6 +1429,18 @@ async fn bootstrap_upgrades_registered_v7_without_resolved_value_rows() -> TestR
                         21,
                         "nested record field targets".to_owned(),
                         expected_migration_checksum(21, MIGRATIONS[20].2),
+                    )
+                && after.migrations[21]
+                    == (
+                        22,
+                        "protected invocation audit".to_owned(),
+                        expected_migration_checksum(22, MIGRATIONS[21].2),
+                    )
+                && after.migrations[22]
+                    == (
+                        23,
+                        "executable standard relations".to_owned(),
+                        expected_migration_checksum(23, MIGRATIONS[22].2),
                     ),
             format!("v7 upgrade produced unexpected migrations: {:?}", after.migrations),
         )?;
