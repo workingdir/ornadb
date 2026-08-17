@@ -54,15 +54,24 @@ render paths.
 
 ## Sealed registration
 
-Fourteen new sealed `sys.security.*` entries (`...0d` through `...1a`),
+Twelve new sealed `sys.security.*` entries (`...40` through `...4b`),
 three new `SystemFunctionKind` variants (`SecurityIdentity`,
 `SecurityAdmin`, `SecurityCheck`), a `SystemSecuritySignature` type mirroring
 `SystemInspectSignature`, the `sys.security.principal` carrier type
 (`...f7`, representation contract `orna.sys.security.principal@1`), and the
-registry-length test updated 12 to 26. Execution is CLI-installed kernel
+registry-length test updated 12 to 24. Execution is CLI-installed kernel
 model methods, exactly like ADR 0064: sealed `sys.invoke` routing of system
 identities is deferred because the sealed target resolution never resolves
 system functions.
+
+The original allocation placed the block at `...0d` through `...1a`. That
+range collides with the retained standard library's FunctionId space
+(`std.invoke.echo` at `...10`, `std.json.encode` at `...11`,
+`std.terminal.present_table` at `...12`); `security_function_targets` would
+then silently filter a standard function as a sealed system function and no
+complete-active-function-set proof could install it. The block therefore
+lives in the documented `...40` through `...4b` range, disjoint from the
+standard library, and a registry test pins the disjointness.
 
 ## Privilege model
 
