@@ -447,8 +447,21 @@ mod tests {
         )
     }
 
+    /// The ADR 0067 `std.csv.encode` presenter: rows to a CSV byte stream.
+    fn csv_encode() -> PresenterEntry {
+        entry(
+            "csv",
+            3,
+            3, // std.data.Rows
+            2, // std.io.ByteStream
+            Some("text/csv"),
+            false,
+            100,
+        )
+    }
+
     fn standard_registry() -> PresenterRegistry {
-        PresenterRegistry::new(vec![json_encode(), present_table()])
+        PresenterRegistry::new(vec![json_encode(), present_table(), csv_encode()])
             .expect("the standard registry must construct")
     }
 
@@ -577,8 +590,18 @@ mod tests {
         assert_eq!(table.input_type(), type_id(3));
         assert_eq!(table.output_type(), type_id(4));
 
+        let csv = registry
+            .resolve_alias("csv")
+            .expect("the csv alias must resolve");
+        assert_eq!(csv.function(), function_id(3));
+        assert_eq!(csv.input_type(), type_id(3));
+        assert_eq!(csv.output_type(), type_id(2));
+        assert_eq!(csv.media_type(), Some("text/csv"));
+        assert!(!csv.streaming());
+        assert_eq!(csv.priority(), 100);
+
         assert_eq!(registry.resolve_alias("JSON"), None);
-        assert_eq!(registry.resolve_alias("csv"), None);
+        assert_eq!(registry.resolve_alias("xml"), None);
     }
 
     #[test]
@@ -592,6 +615,10 @@ mod tests {
             .resolve_media_type("text/plain")
             .expect("text/plain must resolve");
         assert_eq!(table.alias(), "table");
+        let csv = registry
+            .resolve_media_type("text/csv")
+            .expect("text/csv must resolve");
+        assert_eq!(csv.alias(), "csv");
         assert_eq!(
             registry.resolve_media_type("application/xml"),
             Err(OutputResolutionError::UnresolvedMediaType {
@@ -607,10 +634,16 @@ mod tests {
             .resolve_input_type(type_id(1))
             .expect("the json value type must resolve");
         assert_eq!(resolved.alias(), "json");
-        let table = registry
-            .resolve_input_type(type_id(3))
-            .expect("the rows type must resolve");
-        assert_eq!(table.alias(), "table");
+        // Rows are accepted by both table and csv at equal priority, so a
+        // bare type-name selector is ambiguous; disambiguate via alias or
+        // media type instead.
+        assert_eq!(
+            registry.resolve_input_type(type_id(3)),
+            Err(OutputResolutionError::Ambiguous {
+                selector: AmbiguousOutputSelector::TypeName(type_id(3).canonical()),
+                aliases: vec!["csv".to_owned(), "table".to_owned()],
+            })
+        );
         assert_eq!(
             registry.resolve_input_type(type_id(9)),
             Err(OutputResolutionError::UnresolvedTypeName {
@@ -730,9 +763,9 @@ mod tests {
     fn requirement_resolution_reports_unresolved_selectors() {
         let registry = standard_registry();
         assert_eq!(
-            registry.resolve_requirement(&requirement(Some("csv"), None, None), |_| None),
+            registry.resolve_requirement(&requirement(Some("xml"), None, None), |_| None),
             Err(OutputResolutionError::UnresolvedAlias {
-                alias: "csv".to_owned()
+                alias: "xml".to_owned()
             })
         );
         assert_eq!(
@@ -785,7 +818,7 @@ mod tests {
     fn errors_map_to_spec_code_and_exit_code() {
         for error in [
             OutputResolutionError::UnresolvedAlias {
-                alias: "csv".to_owned(),
+                alias: "xml".to_owned(),
             },
             OutputResolutionError::UnresolvedMediaType {
                 media_type: "application/xml".to_owned(),
@@ -807,10 +840,10 @@ mod tests {
     fn errors_display_human_readable_messages() {
         assert_eq!(
             OutputResolutionError::UnresolvedAlias {
-                alias: "csv".to_owned()
+                alias: "xml".to_owned()
             }
             .to_string(),
-            "no presenter for output alias \"csv\""
+            "no presenter for output alias \"xml\""
         );
         assert_eq!(
             OutputResolutionError::Ambiguous {
