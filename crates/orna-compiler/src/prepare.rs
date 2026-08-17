@@ -9,7 +9,9 @@ use std::{
 
 use orna_artifact::{
     client_plan::{
-        ClientExpressionNode, ClientPlan, StateClientPlan, StateDefault, StateScope, StateSlot,
+        CAPABILITY_FORMAT_VERSION as CLIENT_PLAN_CAPABILITY_VERSION, CapabilityArgumentSource,
+        CapabilityClientPlan, CapabilityRequirement, ClientExpressionNode, ClientPlan,
+        InnerClientPlan, StateClientPlan, StateDefault, StateScope, StateSlot,
         EXPRESSION_FORMAT_VERSION as CLIENT_PLAN_EXPRESSION_VERSION,
         ExpressionClientPlan, STATE_FORMAT_VERSION as CLIENT_PLAN_STATE_VERSION,
         FORMAT_IDENTITY as CLIENT_PLAN_FORMAT, FORMAT_VERSION as CLIENT_PLAN_VERSION,
@@ -1623,6 +1625,7 @@ struct ValidatedClient {
     return_scalar: Option<StandardScalar>,
     body: ValidatedClientBody,
     references: Vec<crate::CheckedDefinitionReference>,
+    capabilities: Vec<crate::CheckedClientCapability>,
 }
 
 #[derive(Clone, Default)]
@@ -3857,6 +3860,7 @@ fn validate_client_function_preflight(
                 || function.return_type() != SemanticType::Scalar(StandardScalar::Boolean)
                 || return_scalar != Some(StandardScalar::Boolean)
                 || !function.references().is_empty()
+                || !function.capabilities().is_empty()
             {
                 return Err(PrepareError::InvalidCheckedBundle {
                     reason: "checked Boolean CLIENT function violates its closed body invariants",
@@ -3905,6 +3909,7 @@ fn validate_client_function_preflight(
         return_scalar,
         body,
         references: function.references().to_vec(),
+        capabilities: function.capabilities().to_vec(),
     })
 }
 fn validate_existing_function(
@@ -5488,6 +5493,26 @@ struct CandidateBuilder<'a> {
     declaration_evidence: Option<RefCell<DeclarationEvidence>>,
 }
 
+/// Maps one checked CLIENT capability requirement to its artifact carrier.
+///
+/// The checked name is the closed vocabulary name and the argument source is
+/// the declaration's literal scope text or parameter reference. The
+/// version-5 envelope carries both as plain text so it stays independent of
+/// the client grant model.
+fn client_capability_requirement(
+    capability: &crate::CheckedClientCapability,
+) -> CapabilityRequirement {
+    let argument = match capability.argument() {
+        crate::CheckedClientCapabilityArgument::Text(text) => {
+            CapabilityArgumentSource::Text(text.clone())
+        }
+        crate::CheckedClientCapabilityArgument::Parameter(parameter) => {
+            CapabilityArgumentSource::Parameter(parameter.clone())
+        }
+    };
+    CapabilityRequirement::new(capability.name().to_owned(), argument)
+}
+
 impl<'a> CandidateBuilder<'a> {
     fn new(
         parse_report: &'a ParseReport,
@@ -6289,19 +6314,26 @@ impl<'a> CandidateBuilder<'a> {
         &self,
         validated: &ValidatedClient,
     ) -> Result<PreparedFunctionArtifact, PrepareError> {
-        let (version, payload) = match &validated.body {
-            ValidatedClientBody::BooleanLiteral(value) => (
-                CLIENT_PLAN_VERSION,
-                ClientPlan::return_boolean(*value).encode(),
-            ),
+        let (version, payload, inner) = match &validated.body {
+            ValidatedClientBody::BooleanLiteral(value) => {
+                let plan = ClientPlan::return_boolean(*value);
+                (
+                    CLIENT_PLAN_VERSION,
+                    plan.encode(),
+                    InnerClientPlan::Boolean(plan),
+                )
+            }
             ValidatedClientBody::Expression(expression) => {
                 let expression = self.client_expression_node(expression)?;
-                let payload = ExpressionClientPlan::new(expression)
-                    .encode()
-                    .map_err(|_| PrepareError::InvalidCheckedBundle {
-                        reason: "checked CLIENT expression exceeds client-plan limits",
-                    })?;
-                (CLIENT_PLAN_EXPRESSION_VERSION, payload)
+                let plan = ExpressionClientPlan::new(expression);
+                let payload = plan.encode().map_err(|_| PrepareError::InvalidCheckedBundle {
+                    reason: "checked CLIENT expression exceeds client-plan limits",
+                })?;
+                (
+                    CLIENT_PLAN_EXPRESSION_VERSION,
+                    payload,
+                    InnerClientPlan::Expression(plan),
+                )
             }
             ValidatedClientBody::StateBlock {
                 return_expression,
@@ -6313,23 +6345,47 @@ impl<'a> CandidateBuilder<'a> {
                     .iter()
                     .map(|state| self.client_state_slot(state, function_id))
                     .collect::<Result<Vec<_>, PrepareError>>()?;
-                let payload = StateClientPlan::new(expression, slots)
-                    .encode()
-                    .map_err(|_| PrepareError::InvalidCheckedBundle {
-                        reason: "checked CLIENT state plan exceeds client-plan limits",
-                    })?;
-                (CLIENT_PLAN_STATE_VERSION, payload)
+                let plan = StateClientPlan::new(expression, slots);
+                let payload = plan.encode().map_err(|_| PrepareError::InvalidCheckedBundle {
+                    reason: "checked CLIENT state plan exceeds client-plan limits",
+                })?;
+                (
+                    CLIENT_PLAN_STATE_VERSION,
+                    payload,
+                    InnerClientPlan::State(plan),
+                )
             }
             ValidatedClientBody::ExternalContract(identity) => {
-                let payload = ExpressionClientPlan::new(ClientExpressionNode::ExternalContract {
+                let plan = ExpressionClientPlan::new(ClientExpressionNode::ExternalContract {
                     identity: identity.clone(),
-                })
-                .encode()
-                .map_err(|_| PrepareError::InvalidCheckedBundle {
+                });
+                let payload = plan.encode().map_err(|_| PrepareError::InvalidCheckedBundle {
                     reason: "checked CLIENT external contract exceeds client-plan limits",
                 })?;
-                (CLIENT_PLAN_EXPRESSION_VERSION, payload)
+                (
+                    CLIENT_PLAN_EXPRESSION_VERSION,
+                    payload,
+                    InnerClientPlan::Expression(plan),
+                )
             }
+        };
+        // A function with checked capability requirements persists them in the
+        // version-5 envelope around its inner plan; a function with none keeps
+        // the exact version 1-4 artefact.
+        let (version, payload) = if validated.capabilities.is_empty() {
+            (version, payload)
+        } else {
+            let requirements = validated
+                .capabilities
+                .iter()
+                .map(client_capability_requirement)
+                .collect();
+            let payload = CapabilityClientPlan::new(inner, requirements)
+                .encode()
+                .map_err(|_| PrepareError::InvalidCheckedBundle {
+                    reason: "checked CLIENT capability plan exceeds client-plan limits",
+                })?;
+            (CLIENT_PLAN_CAPABILITY_VERSION, payload)
         };
         let hash = artifact_payload_digest(&payload)?;
         Ok(PreparedFunctionArtifact {
@@ -12553,6 +12609,81 @@ mod tests {
         assert!(!standard_upgrade_reuse_is_current_only(
             FunctionSemanticHashVersion::Version2
         ));
+    }
+
+    #[test]
+    fn checked_client_capability_maps_to_the_artifact_requirement_carrier() {
+        let read = crate::CheckedClientCapability::new(
+            "std.fs.read",
+            crate::CheckedClientCapabilityArgument::Text("/home/bob".to_owned()),
+        );
+        let requirement = client_capability_requirement(&read);
+        assert_eq!(requirement.name(), "std.fs.read");
+        assert_eq!(
+            requirement.argument(),
+            &CapabilityArgumentSource::Text("/home/bob".to_owned())
+        );
+
+        let secret = crate::CheckedClientCapability::new(
+            "std.secret.use",
+            crate::CheckedClientCapabilityArgument::Parameter("p_secret".to_owned()),
+        );
+        let requirement = client_capability_requirement(&secret);
+        assert_eq!(requirement.name(), "std.secret.use");
+        assert_eq!(
+            requirement.argument(),
+            &CapabilityArgumentSource::Parameter("p_secret".to_owned())
+        );
+    }
+
+    #[test]
+    fn capability_client_plan_round_trips_the_emitted_version_five_envelope() {
+        let requirements = vec![
+            CapabilityRequirement::new(
+                "std.fs.read",
+                CapabilityArgumentSource::Text("/home/bob".to_owned()),
+            ),
+            CapabilityRequirement::new(
+                "std.secret.use",
+                CapabilityArgumentSource::Parameter("p_secret".to_owned()),
+            ),
+        ];
+        let plan = CapabilityClientPlan::new(
+            InnerClientPlan::Expression(ExpressionClientPlan::new(
+                ClientExpressionNode::String {
+                    value: "ready".to_owned(),
+                },
+            )),
+            requirements,
+        );
+        assert_eq!(plan.format_version(), CLIENT_PLAN_CAPABILITY_VERSION);
+        assert_eq!(plan.inner_plan_version(), CLIENT_PLAN_EXPRESSION_VERSION);
+
+        let bytes = plan.encode().unwrap();
+        assert_eq!(&bytes[8..12], &CLIENT_PLAN_CAPABILITY_VERSION.to_be_bytes());
+        let decoded = CapabilityClientPlan::decode(&bytes).unwrap();
+        assert_eq!(decoded.format_version(), CLIENT_PLAN_CAPABILITY_VERSION);
+        assert_eq!(decoded.inner_plan_version(), CLIENT_PLAN_EXPRESSION_VERSION);
+        let InnerClientPlan::Expression(inner) = decoded.inner_plan() else {
+            panic!("inner plan must round-trip as an expression plan");
+        };
+        assert_eq!(
+            inner.expression(),
+            &ClientExpressionNode::String {
+                value: "ready".to_owned()
+            }
+        );
+        assert_eq!(decoded.requirements().len(), 2);
+        assert_eq!(decoded.requirements()[0].name(), "std.fs.read");
+        assert_eq!(
+            decoded.requirements()[0].argument(),
+            &CapabilityArgumentSource::Text("/home/bob".to_owned())
+        );
+        assert_eq!(decoded.requirements()[1].name(), "std.secret.use");
+        assert_eq!(
+            decoded.requirements()[1].argument(),
+            &CapabilityArgumentSource::Parameter("p_secret".to_owned())
+        );
     }
 
     fn checked_report(source: &str, base: &CatalogueSnapshot) -> CheckReport {
