@@ -14,7 +14,7 @@
 
 use crate::{
     FieldId, FunctionId, ParameterId, SchemaId, TypeId,
-    catalogue::{CatalogueSnapshot, FunctionDefinition, ObjectTypeDefinition},
+    catalogue::{CatalogueSnapshot, FieldDefinition, FunctionDefinition, ObjectTypeDefinition},
 };
 
 /// What happened to one durable definition between two catalogues.
@@ -70,6 +70,8 @@ pub enum SemanticChange {
         from: String,
         to: String,
     },
+    /// A retained enum type changed its declared label set.
+    EnumLabelsChanged { id: TypeId, name: String },
     /// A function present in the candidate but absent from the base.
     FunctionAdded { id: FunctionId, name: String },
     /// A function present in the base but absent from the candidate.
@@ -99,6 +101,47 @@ pub enum SemanticChange {
         from: String,
         to: String,
     },
+    /// A retained object field changed its resolved type.
+    FieldTypeChanged {
+        owner: TypeId,
+        id: FieldId,
+        name: String,
+    },
+    /// A retained object field changed its nullability.
+    FieldNullabilityChanged {
+        owner: TypeId,
+        id: FieldId,
+        name: String,
+    },
+    /// A retained object field changed its uniqueness.
+    FieldUniquenessChanged {
+        owner: TypeId,
+        id: FieldId,
+        name: String,
+    },
+    /// A retained object field changed its default expression or on-delete
+    /// policy.
+    FieldConstraintChanged {
+        owner: TypeId,
+        id: FieldId,
+        name: String,
+    },
+    /// A retained function changed its return type.
+    FunctionReturnChanged { id: FunctionId, name: String },
+    /// A retained function changed its execution domain.
+    FunctionDomainChanged { id: FunctionId, name: String },
+    /// A retained function changed its security mode.
+    FunctionSecurityChanged { id: FunctionId, name: String },
+    /// A retained function changed its transaction mode.
+    FunctionTransactionChanged { id: FunctionId, name: String },
+    /// A retained function changed its volatility.
+    FunctionVolatilityChanged { id: FunctionId, name: String },
+    /// A retained function parameter changed its resolved type.
+    ParameterTypeChanged {
+        owner: FunctionId,
+        id: ParameterId,
+        name: String,
+    },
 }
 
 impl SemanticChange {
@@ -110,18 +153,29 @@ impl SemanticChange {
             Self::ObjectTypeAdded { .. }
             | Self::ObjectTypeRenamed { .. }
             | Self::ObjectTypeDropped { .. } => "object_type",
-            Self::FieldAdded { .. } | Self::FieldRenamed { .. } | Self::FieldDropped { .. } => {
-                "field"
-            }
+            Self::FieldAdded { .. }
+            | Self::FieldRenamed { .. }
+            | Self::FieldDropped { .. }
+            | Self::FieldTypeChanged { .. }
+            | Self::FieldNullabilityChanged { .. }
+            | Self::FieldUniquenessChanged { .. }
+            | Self::FieldConstraintChanged { .. } => "field",
             Self::EnumTypeAdded { .. }
             | Self::EnumTypeRenamed { .. }
-            | Self::EnumTypeDropped { .. } => "enum_type",
+            | Self::EnumTypeDropped { .. }
+            | Self::EnumLabelsChanged { .. } => "enum_type",
             Self::FunctionAdded { .. }
             | Self::FunctionRenamed { .. }
-            | Self::FunctionDropped { .. } => "function",
+            | Self::FunctionDropped { .. }
+            | Self::FunctionReturnChanged { .. }
+            | Self::FunctionDomainChanged { .. }
+            | Self::FunctionSecurityChanged { .. }
+            | Self::FunctionTransactionChanged { .. }
+            | Self::FunctionVolatilityChanged { .. } => "function",
             Self::ParameterAdded { .. }
             | Self::ParameterRenamed { .. }
-            | Self::ParameterDropped { .. } => "parameter",
+            | Self::ParameterDropped { .. }
+            | Self::ParameterTypeChanged { .. } => "parameter",
         }
     }
 }
@@ -245,7 +299,9 @@ fn diff_fields(
 ) {
     for field in candidate.fields() {
         match base.field_by_id(field.id()) {
-            Some(found) if found.name() == field.name() => {}
+            Some(found) if found.name() == field.name() => {
+                diff_field_payload(found, field, owner, diff);
+            }
             Some(found) => diff.push(SemanticChange::FieldRenamed {
                 owner,
                 id: field.id(),
@@ -270,6 +326,42 @@ fn diff_fields(
     }
 }
 
+fn diff_field_payload(
+    base: &FieldDefinition,
+    candidate: &FieldDefinition,
+    owner: TypeId,
+    diff: &mut CatalogueSemanticDiff,
+) {
+    let id = candidate.id();
+    let name = candidate.name().to_owned();
+    if base.resolved_type() != candidate.resolved_type() {
+        diff.push(SemanticChange::FieldTypeChanged {
+            owner,
+            id,
+            name: name.clone(),
+        });
+    }
+    if base.nullable() != candidate.nullable() {
+        diff.push(SemanticChange::FieldNullabilityChanged {
+            owner,
+            id,
+            name: name.clone(),
+        });
+    }
+    if base.unique() != candidate.unique() {
+        diff.push(SemanticChange::FieldUniquenessChanged {
+            owner,
+            id,
+            name: name.clone(),
+        });
+    }
+    if base.default_expression() != candidate.default_expression()
+        || base.on_delete() != candidate.on_delete()
+    {
+        diff.push(SemanticChange::FieldConstraintChanged { owner, id, name });
+    }
+}
+
 fn diff_enum_types(
     base: &CatalogueSnapshot,
     candidate: &CatalogueSnapshot,
@@ -277,7 +369,14 @@ fn diff_enum_types(
 ) {
     for definition in candidate.enum_types() {
         match base.enum_type_by_id(definition.id()) {
-            Some(found) if found.name() == definition.name() => {}
+            Some(found) if found.name() == definition.name() => {
+                if found.labels() != definition.labels() {
+                    diff.push(SemanticChange::EnumLabelsChanged {
+                        id: definition.id(),
+                        name: qualified(definition.name()),
+                    });
+                }
+            }
             Some(found) => diff.push(SemanticChange::EnumTypeRenamed {
                 id: definition.id(),
                 from: qualified(found.name()),
@@ -308,6 +407,7 @@ fn diff_functions(
         match base.function_by_id(definition.id()) {
             Some(found) if found.name() == definition.name() => {
                 diff_parameters(found, definition, definition.id(), diff);
+                diff_function_payload(found, definition, definition.id(), diff);
             }
             Some(found) => diff.push(SemanticChange::FunctionRenamed {
                 id: definition.id(),
@@ -330,6 +430,42 @@ fn diff_functions(
     }
 }
 
+fn diff_function_payload(
+    base: &FunctionDefinition,
+    candidate: &FunctionDefinition,
+    id: FunctionId,
+    diff: &mut CatalogueSemanticDiff,
+) {
+    let name = qualified(candidate.name());
+    if base.return_type() != candidate.return_type() {
+        diff.push(SemanticChange::FunctionReturnChanged {
+            id,
+            name: name.clone(),
+        });
+    }
+    if base.domain() != candidate.domain() {
+        diff.push(SemanticChange::FunctionDomainChanged {
+            id,
+            name: name.clone(),
+        });
+    }
+    if base.security() != candidate.security() {
+        diff.push(SemanticChange::FunctionSecurityChanged {
+            id,
+            name: name.clone(),
+        });
+    }
+    if base.transaction() != candidate.transaction() {
+        diff.push(SemanticChange::FunctionTransactionChanged {
+            id,
+            name: name.clone(),
+        });
+    }
+    if base.volatility() != candidate.volatility() {
+        diff.push(SemanticChange::FunctionVolatilityChanged { id, name });
+    }
+}
+
 fn diff_parameters(
     base: &FunctionDefinition,
     candidate: &FunctionDefinition,
@@ -338,7 +474,15 @@ fn diff_parameters(
 ) {
     for parameter in candidate.parameters() {
         match base.parameter_by_id(parameter.id()) {
-            Some(found) if found.name() == parameter.name() => {}
+            Some(found) if found.name() == parameter.name() => {
+                if found.resolved_type() != parameter.resolved_type() {
+                    diff.push(SemanticChange::ParameterTypeChanged {
+                        owner,
+                        id: parameter.id(),
+                        name: parameter.name().to_owned(),
+                    });
+                }
+            }
             Some(found) => diff.push(SemanticChange::ParameterRenamed {
                 owner,
                 id: parameter.id(),
@@ -653,6 +797,240 @@ mod tests {
                 id: TypeId::from_bytes([2; 16]),
                 from: "app.stage".to_owned(),
                 to: "app.phase".to_owned(),
+            }]
+        );
+    }
+
+    #[test]
+    fn retained_enum_reports_label_changes() {
+        let base = full_snapshot(
+            vec![schema(1, &["app"])],
+            vec![],
+            vec![enum_type(2, &["app", "stage"])],
+            vec![],
+        );
+        let candidate = full_snapshot(
+            vec![schema(1, &["app"])],
+            vec![],
+            vec![EnumTypeDefinition::new(
+                TypeId::from_bytes([2; 16]),
+                name(&["app", "stage"]),
+                vec!["lead".to_owned(), "won".to_owned()],
+            )],
+            vec![],
+        );
+        let diff = catalogue_diff(&base, &candidate);
+        assert_eq!(
+            diff.changes(),
+            &[SemanticChange::EnumLabelsChanged {
+                id: TypeId::from_bytes([2; 16]),
+                name: "app.stage".to_owned(),
+            }]
+        );
+    }
+
+    #[test]
+    fn retained_field_reports_type_nullability_unique_and_constraint_changes() {
+        let base = full_snapshot(
+            vec![schema(1, &["app"])],
+            vec![object(
+                2,
+                &["app", "widget"],
+                vec![FieldDefinition::new(
+                    FieldId::from_bytes([3; 16]),
+                    "count",
+                    0,
+                    ResolvedType::scalar(StandardScalar::Integer),
+                    false,
+                    false,
+                    None,
+                    None,
+                )],
+            )],
+            vec![],
+            vec![],
+        );
+        let candidate = full_snapshot(
+            vec![schema(1, &["app"])],
+            vec![object(
+                2,
+                &["app", "widget"],
+                vec![FieldDefinition::new(
+                    FieldId::from_bytes([3; 16]),
+                    "count",
+                    0,
+                    ResolvedType::scalar(StandardScalar::CharacterLargeObject),
+                    true,
+                    true,
+                    None,
+                    None,
+                )],
+            )],
+            vec![],
+            vec![],
+        );
+        let diff = catalogue_diff(&base, &candidate);
+        assert_eq!(
+            diff.changes(),
+            &[
+                SemanticChange::FieldTypeChanged {
+                    owner: TypeId::from_bytes([2; 16]),
+                    id: FieldId::from_bytes([3; 16]),
+                    name: "count".to_owned(),
+                },
+                SemanticChange::FieldNullabilityChanged {
+                    owner: TypeId::from_bytes([2; 16]),
+                    id: FieldId::from_bytes([3; 16]),
+                    name: "count".to_owned(),
+                },
+                SemanticChange::FieldUniquenessChanged {
+                    owner: TypeId::from_bytes([2; 16]),
+                    id: FieldId::from_bytes([3; 16]),
+                    name: "count".to_owned(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn retained_function_reports_payload_changes() {
+        let base = full_snapshot(
+            vec![schema(1, &["app"])],
+            vec![],
+            vec![],
+            vec![FunctionDefinition::new(
+                FunctionId::from_bytes([5; 16]),
+                name(&["app", "read"]),
+                FunctionDomain::Server,
+                vec![parameter(6, "p_q", 0)],
+                FunctionReturn::Single(ResolvedType::scalar(StandardScalar::CharacterLargeObject)),
+                FunctionRevisionId::from_bytes([5; 16]),
+                FunctionSecurity::Invoker,
+                Some(FunctionTransaction::ReadOnly),
+                FunctionVolatility::Stable,
+            )],
+        );
+        let candidate = full_snapshot(
+            vec![schema(1, &["app"])],
+            vec![],
+            vec![],
+            vec![FunctionDefinition::new(
+                FunctionId::from_bytes([5; 16]),
+                name(&["app", "read"]),
+                FunctionDomain::Server,
+                vec![parameter(6, "p_q", 0)],
+                FunctionReturn::Single(ResolvedType::scalar(StandardScalar::Integer)),
+                FunctionRevisionId::from_bytes([5; 16]),
+                FunctionSecurity::Definer,
+                Some(FunctionTransaction::Atomic),
+                FunctionVolatility::Volatile,
+            )],
+        );
+        let diff = catalogue_diff(&base, &candidate);
+        assert_eq!(
+            diff.changes(),
+            &[
+                SemanticChange::FunctionReturnChanged {
+                    id: FunctionId::from_bytes([5; 16]),
+                    name: "app.read".to_owned(),
+                },
+                SemanticChange::FunctionSecurityChanged {
+                    id: FunctionId::from_bytes([5; 16]),
+                    name: "app.read".to_owned(),
+                },
+                SemanticChange::FunctionTransactionChanged {
+                    id: FunctionId::from_bytes([5; 16]),
+                    name: "app.read".to_owned(),
+                },
+                SemanticChange::FunctionVolatilityChanged {
+                    id: FunctionId::from_bytes([5; 16]),
+                    name: "app.read".to_owned(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn retained_function_reports_domain_changes() {
+        let base = full_snapshot(
+            vec![schema(1, &["app"])],
+            vec![],
+            vec![],
+            vec![FunctionDefinition::new(
+                FunctionId::from_bytes([5; 16]),
+                name(&["app", "read"]),
+                FunctionDomain::Server,
+                vec![],
+                FunctionReturn::Single(ResolvedType::scalar(StandardScalar::CharacterLargeObject)),
+                FunctionRevisionId::from_bytes([5; 16]),
+                FunctionSecurity::Invoker,
+                None,
+                FunctionVolatility::Stable,
+            )],
+        );
+        let candidate = full_snapshot(
+            vec![schema(1, &["app"])],
+            vec![],
+            vec![],
+            vec![FunctionDefinition::new(
+                FunctionId::from_bytes([5; 16]),
+                name(&["app", "read"]),
+                FunctionDomain::Client,
+                vec![],
+                FunctionReturn::Single(ResolvedType::scalar(StandardScalar::CharacterLargeObject)),
+                FunctionRevisionId::from_bytes([5; 16]),
+                FunctionSecurity::Invoker,
+                None,
+                FunctionVolatility::Stable,
+            )],
+        );
+        let diff = catalogue_diff(&base, &candidate);
+        assert_eq!(
+            diff.changes(),
+            &[SemanticChange::FunctionDomainChanged {
+                id: FunctionId::from_bytes([5; 16]),
+                name: "app.read".to_owned(),
+            }]
+        );
+    }
+
+    #[test]
+    fn retained_parameter_reports_type_changes() {
+        let base = full_snapshot(
+            vec![schema(1, &["app"])],
+            vec![],
+            vec![],
+            vec![function(5, &["app", "read"], vec![parameter(6, "p_q", 0)])],
+        );
+        let candidate = full_snapshot(
+            vec![schema(1, &["app"])],
+            vec![],
+            vec![],
+            vec![FunctionDefinition::new(
+                FunctionId::from_bytes([5; 16]),
+                name(&["app", "read"]),
+                FunctionDomain::Server,
+                vec![ParameterDefinition::new(
+                    ParameterId::from_bytes([6; 16]),
+                    "p_q",
+                    0,
+                    ResolvedType::scalar(StandardScalar::CharacterLargeObject),
+                    None,
+                )],
+                FunctionReturn::Single(ResolvedType::scalar(StandardScalar::CharacterLargeObject)),
+                FunctionRevisionId::from_bytes([5; 16]),
+                FunctionSecurity::Invoker,
+                Some(FunctionTransaction::ReadOnly),
+                FunctionVolatility::Stable,
+            )],
+        );
+        let diff = catalogue_diff(&base, &candidate);
+        assert_eq!(
+            diff.changes(),
+            &[SemanticChange::ParameterTypeChanged {
+                owner: FunctionId::from_bytes([5; 16]),
+                id: ParameterId::from_bytes([6; 16]),
+                name: "p_q".to_owned(),
             }]
         );
     }
