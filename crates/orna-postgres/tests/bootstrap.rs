@@ -53,6 +53,7 @@ const EXPECTED_KERNEL_TABLES: &[&str] = &[
     "security_execute_grants",
     "security_local_peer_credentials",
     "security_principals",
+    "security_privilege_grants",
     "security_role_memberships",
     "source_bundles",
     "source_revisions",
@@ -196,6 +197,21 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         "durable user state cells",
         include_str!("../migrations/0025_user_state_cells.sql"),
     ),
+    (
+        26,
+        "user state audit decisions",
+        include_str!("../migrations/0026_user_state_audit.sql"),
+    ),
+    (
+        27,
+        "inspect snapshots and trace",
+        include_str!("../migrations/0027_inspect_snapshots.sql"),
+    ),
+    (
+        28,
+        "security admin privilege grants",
+        include_str!("../migrations/0028_security_admin.sql"),
+    ),
 ];
 const MIGRATION_DATA_STEP_SEPARATOR: &[u8] = b"\0orna.kernel.migration-step\0";
 const CANONICAL_HASH_V1_EMPTY_SEED_STEP: &[u8] = b"canonical-hash-v1-empty-seed/v1";
@@ -287,6 +303,7 @@ fn is_later_catalogue_relation(relation: &str) -> bool {
         || relation == "definition_references_enum_type_target_index"
         || relation.starts_with("definition_references_record_")
         || relation.starts_with("invocation_")
+        || relation.starts_with("inspect_")
         || relation.starts_with("standard_function_")
         || relation.starts_with("standard_catalogue_function")
         || relation.starts_with("standard_definition_references")
@@ -839,8 +856,8 @@ async fn bootstrap_upgrades_the_registered_v20_empty_catalogue() -> TestResult<(
 
         let after = snapshot_upgrade_state(&database).await?;
         require(
-            after.migrations.len() == 27 && after.migrations[..20] == before.migrations[..],
-            format!("v21-v27 changed prior migration records: {:?}", after.migrations),
+            after.migrations.len() == 28 && after.migrations[..20] == before.migrations[..],
+            format!("v21-v28 changed prior migration records: {:?}", after.migrations),
         )?;
         require(
             after.migrations[20]
@@ -906,8 +923,17 @@ async fn bootstrap_upgrades_the_registered_v20_empty_catalogue() -> TestResult<(
             format!("v27 migration record is not exact: {:?}", after.migrations[26]),
         )?;
         require(
+            after.migrations[27]
+                == (
+                    28,
+                    "security admin privilege grants".to_owned(),
+                    expected_migration_checksum(28, MIGRATIONS[27].2),
+                ),
+            format!("v28 migration record is not exact: {:?}", after.migrations[27]),
+        )?;
+        require(
             after.active_pair == before.active_pair,
-            "v21-v27 changed the active revision pair",
+            "v21-v28 changed the active revision pair",
         )?;
 
         let recovered = kernel.recover().await?;
@@ -1577,8 +1603,8 @@ async fn bootstrap_upgrades_v5_write_reference_evidence_without_mutating_semanti
 
         let after = snapshot_upgrade_state(&database).await?;
         require(
-            after.migrations.len() == 27 && after.migrations[..5] == before.migrations[..],
-            format!("v6-v27 changed prior migration records: {:?}", after.migrations),
+            after.migrations.len() == 28 && after.migrations[..5] == before.migrations[..],
+            format!("v6-v28 changed prior migration records: {:?}", after.migrations),
         )?;
         require(
             after.migrations[5]
@@ -1761,6 +1787,33 @@ async fn bootstrap_upgrades_v5_write_reference_evidence_without_mutating_semanti
             format!("v25 migration record is not exact: {:?}", after.migrations[24]),
         )?;
         require(
+            after.migrations[25]
+                == (
+                    26,
+                    "user state audit decisions".to_owned(),
+                    expected_migration_checksum(26, MIGRATIONS[25].2),
+                ),
+            format!("v26 migration record is not exact: {:?}", after.migrations[25]),
+        )?;
+        require(
+            after.migrations[26]
+                == (
+                    27,
+                    "inspect snapshots and trace".to_owned(),
+                    expected_migration_checksum(27, MIGRATIONS[26].2),
+                ),
+            format!("v27 migration record is not exact: {:?}", after.migrations[26]),
+        )?;
+        require(
+            after.migrations[27]
+                == (
+                    28,
+                    "security admin privilege grants".to_owned(),
+                    expected_migration_checksum(28, MIGRATIONS[27].2),
+                ),
+            format!("v28 migration record is not exact: {:?}", after.migrations[27]),
+        )?;
+        require(
             after.active_pair == before.active_pair,
             "v6 changed the active revision pair",
         )?;
@@ -1846,7 +1899,7 @@ async fn bootstrap_upgrades_registered_v6_without_standard_rows() -> TestResult<
 
         let after = snapshot_upgrade_state(&database).await?;
         require(
-            after.migrations.len() == 25
+            after.migrations.len() == 28
                 && after.migrations[..6] == before.migrations[..]
                 && after.migrations[6]
                     == (
@@ -1883,6 +1936,24 @@ async fn bootstrap_upgrades_registered_v6_without_standard_rows() -> TestResult<
                         25,
                         "durable user state cells".to_owned(),
                         expected_migration_checksum(25, MIGRATIONS[24].2),
+                    )
+                && after.migrations[25]
+                    == (
+                        26,
+                        "user state audit decisions".to_owned(),
+                        expected_migration_checksum(26, MIGRATIONS[25].2),
+                    )
+                && after.migrations[26]
+                    == (
+                        27,
+                        "inspect snapshots and trace".to_owned(),
+                        expected_migration_checksum(27, MIGRATIONS[26].2),
+                    )
+                && after.migrations[27]
+                    == (
+                        28,
+                        "security admin privilege grants".to_owned(),
+                        expected_migration_checksum(28, MIGRATIONS[27].2),
                     ),
             format!("v6 upgrade produced unexpected migrations: {:?}", after.migrations),
         )?;
@@ -2077,7 +2148,7 @@ async fn bootstrap_upgrades_registered_v7_without_resolved_value_rows() -> TestR
         let after_surface = snapshot_catalogue_surface(&database).await?;
         let after_target_fks = snapshot_application_target_foreign_keys(&database).await?;
         require(
-            after.migrations.len() == 25
+            after.migrations.len() == 28
                 && after.migrations[..7] == before.migrations[..]
                 && after.migrations[7]
                     == (
@@ -2186,6 +2257,24 @@ async fn bootstrap_upgrades_registered_v7_without_resolved_value_rows() -> TestR
                         25,
                         "durable user state cells".to_owned(),
                         expected_migration_checksum(25, MIGRATIONS[24].2),
+                    )
+                && after.migrations[25]
+                    == (
+                        26,
+                        "user state audit decisions".to_owned(),
+                        expected_migration_checksum(26, MIGRATIONS[25].2),
+                    )
+                && after.migrations[26]
+                    == (
+                        27,
+                        "inspect snapshots and trace".to_owned(),
+                        expected_migration_checksum(27, MIGRATIONS[26].2),
+                    )
+                && after.migrations[27]
+                    == (
+                        28,
+                        "security admin privilege grants".to_owned(),
+                        expected_migration_checksum(28, MIGRATIONS[27].2),
                     ),
             format!("v7 upgrade produced unexpected migrations: {:?}", after.migrations),
         )?;
