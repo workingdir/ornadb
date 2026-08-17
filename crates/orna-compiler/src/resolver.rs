@@ -4733,11 +4733,11 @@ fn check_client_functions(
                     }
                     let Some(identity) = client_contract_identity(contract) else {
                         diagnostics.push(diagnostic(
-                        DiagnosticCode::DomainIncompatible,
-                        "RUNTIME CONTRACT identity must be '<qualified-name>@<positive-version>'",
-                        input.logical_path,
-                        &input.declaration_span,
-                    ));
+                            DiagnosticCode::DomainIncompatible,
+                            "RUNTIME CONTRACT identity must be '<qualified-name>@<positive-version>'",
+                            input.logical_path,
+                            &input.declaration_span,
+                        ));
                         return None;
                     };
                     (
