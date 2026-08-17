@@ -1946,8 +1946,11 @@ async fn proves_expression_client_functions_through_installed_invoke() -> TestRe
             .transpose()?
             .ok_or_else(|| failure("the expression CLIENT fixture has no standard context"))?;
         let expected = {
-            let mut record =
-                encode_constructed_value(&active, &registry, &RuntimeValue::Text("hello world".into()))?;
+            let mut record = encode_constructed_value(
+                &active,
+                &registry,
+                &RuntimeValue::Text("hello world".into()),
+            )?;
             record.push(b'\n');
             record
         };
@@ -1957,9 +1960,11 @@ async fn proves_expression_client_functions_through_installed_invoke() -> TestRe
             )?)
         };
 
-        let (outcome, stdout, stderr) =
-            installed_invoke_run(&database, installed_invoke_request(target("composed")?, vec![], true, false))
-                .await?;
+        let (outcome, stdout, stderr) = installed_invoke_run(
+            &database,
+            installed_invoke_request(target("composed")?, vec![], true, false),
+        )
+        .await?;
         require(
             outcome == Ok(InstalledInvokeOutcome::Completed)
                 && stdout == expected
@@ -1967,9 +1972,11 @@ async fn proves_expression_client_functions_through_installed_invoke() -> TestRe
             "the installed invoke path did not evaluate the expression CLIENT call and concat",
         )?;
 
-        let (outcome, stdout, stderr) =
-            installed_invoke_run(&database, installed_invoke_request(target("external")?, vec![], true, false))
-                .await?;
+        let (outcome, stdout, stderr) = installed_invoke_run(
+            &database,
+            installed_invoke_request(target("external")?, vec![], true, false),
+        )
+        .await?;
         let error = outcome
             .err()
             .ok_or_else(|| failure("the external CLIENT contract unexpectedly completed"))?;

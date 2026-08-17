@@ -1002,10 +1002,7 @@ impl CheckedClientFunctionBody {
     /// Returns the external contract identity when this body is external.
     pub(crate) fn as_external_contract(&self) -> Option<(&str, &SourceLocation)> {
         match self {
-            Self::ExternalContract {
-                identity,
-                location,
-            } => Some((identity, location)),
+            Self::ExternalContract { identity, location } => Some((identity, location)),
             Self::BooleanLiteral { .. } | Self::Expression { .. } => None,
             #[cfg(test)]
             Self::Unsupported => None,
@@ -1076,7 +1073,6 @@ pub(crate) enum CheckedClientExpression {
         location: SourceLocation,
     },
 }
-
 
 /// The checked argument source of one CLIENT capability requirement.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1200,7 +1196,6 @@ impl CheckedClientFunction {
     pub(crate) fn body(&self) -> &CheckedClientFunctionBody {
         &self.body
     }
-
 
     /// Returns checked definition references in source-resolution order.
     pub fn references(&self) -> &[CheckedDefinitionReference] {
