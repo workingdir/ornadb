@@ -296,7 +296,8 @@ impl ExpressionClientPlan {
         bytes.extend_from_slice(&EXPRESSION_FORMAT_VERSION.to_be_bytes());
         bytes.push(RETURN_EXPRESSION_OPERATION);
         let mut writer = NodeWriter::new();
-        encode_expression_node(&self.expression, &mut writer)?;
+        let mut count = 0;
+        encode_expression_node(&self.expression, &mut writer, 0, &mut count)?;
         bytes.extend_from_slice(&writer.finish());
         if bytes.len() > MAX_ARTIFACT_BYTES {
             return Err(ClientPlanError::ArtifactSizeLimit {
@@ -361,7 +362,16 @@ impl NodeWriter {
 fn encode_expression_node(
     node: &ClientExpressionNode,
     writer: &mut NodeWriter,
+    depth: usize,
+    count: &mut usize,
 ) -> Result<(), ClientPlanError> {
+    if depth > MAX_EXPRESSION_DEPTH {
+        return Err(ClientPlanError::ExpressionDepthExceeded);
+    }
+    *count += 1;
+    if *count > MAX_EXPRESSION_NODES {
+        return Err(ClientPlanError::ExpressionNodeCountExceeded);
+    }
     match node {
         ClientExpressionNode::Call {
             function,
@@ -382,7 +392,7 @@ fn encode_expression_node(
             writer.extend(&length.to_be_bytes());
             for (parameter, value) in arguments {
                 writer.extend(&parameter.to_bytes());
-                encode_expression_node(value, writer)?;
+                encode_expression_node(value, writer, depth + 1, count)?;
             }
         }
         ClientExpressionNode::String { value } => {
@@ -409,10 +419,8 @@ fn encode_expression_node(
             writer.extend(&parameter.to_bytes());
         }
         ClientExpressionNode::FieldPath { root, fields } => {
-            if fields.len() > MAX_FIELD_PATH_LENGTH {
-                return Err(ClientPlanError::ExpressionCollectionExceeded {
-                    limit: MAX_FIELD_PATH_LENGTH,
-                });
+            if fields.is_empty() || fields.len() > MAX_FIELD_PATH_LENGTH {
+                return Err(ClientPlanError::InvalidExpressionNode(NODE_FIELD_PATH));
             }
             writer.push(NODE_FIELD_PATH);
             writer.extend(&root.to_bytes());
@@ -428,8 +436,8 @@ fn encode_expression_node(
         }
         ClientExpressionNode::Concat { left, right } => {
             writer.push(NODE_CONCAT);
-            encode_expression_node(left, writer)?;
-            encode_expression_node(right, writer)?;
+            encode_expression_node(left, writer, depth + 1, count)?;
+            encode_expression_node(right, writer, depth + 1, count)?;
         }
         ClientExpressionNode::ExternalContract { identity } => {
             writer.push(NODE_EXTERNAL_CONTRACT);
@@ -508,6 +516,9 @@ fn decode_expression_node(
         NODE_FIELD_PATH => {
             let root = ParameterId::from_bytes(reader.array()?);
             let length = reader.u32()? as usize;
+            if length == 0 {
+                return Err(ClientPlanError::InvalidExpressionNode(NODE_FIELD_PATH));
+            }
             if length > MAX_FIELD_PATH_LENGTH {
                 return Err(ClientPlanError::ExpressionCollectionExceeded {
                     limit: MAX_FIELD_PATH_LENGTH,
@@ -1008,11 +1019,20 @@ mod tests {
             Err(ClientPlanError::InvalidExpressionNode(NODE_BOOLEAN))
         );
 
-        let deep = ExpressionClientPlan::new(deep_concat(MAX_EXPRESSION_DEPTH + 1));
+        let mut empty_field_path = ExpressionClientPlan::new(ClientExpressionNode::FieldPath {
+            root: ParameterId::from_bytes([0x32; 16]),
+            fields: vec![FieldId::from_bytes([0x42; 16])],
+        })
+        .encode()
+        .expect("the field path encodes");
+        empty_field_path[30..34].copy_from_slice(&0_u32.to_be_bytes());
         assert_eq!(
-            ExpressionClientPlan::decode(&deep.encode().expect("the deep plan encodes")),
-            Err(ClientPlanError::ExpressionDepthExceeded)
+            ExpressionClientPlan::decode(&empty_field_path),
+            Err(ClientPlanError::InvalidExpressionNode(NODE_FIELD_PATH))
         );
+
+        let deep = ExpressionClientPlan::new(deep_concat(MAX_EXPRESSION_DEPTH + 1));
+        assert_eq!(deep.encode(), Err(ClientPlanError::ExpressionDepthExceeded));
 
         let call = ExpressionClientPlan::new(ClientExpressionNode::Call {
             function: FunctionId::from_bytes([0x21; 16]),
@@ -1030,6 +1050,32 @@ mod tests {
             Err(ClientPlanError::ExpressionCollectionExceeded {
                 limit: MAX_CALL_ARGUMENTS,
             })
+        );
+
+        let wide = ExpressionClientPlan::new(ClientExpressionNode::Call {
+            function: FunctionId::from_bytes([0x51; 16]),
+            arguments: (0..MAX_CALL_ARGUMENTS)
+                .map(|outer| {
+                    (
+                        ParameterId::from_bytes([outer as u8; 16]),
+                        ClientExpressionNode::Call {
+                            function: FunctionId::from_bytes([0x52; 16]),
+                            arguments: (0..MAX_CALL_ARGUMENTS)
+                                .map(|inner| {
+                                    (
+                                        ParameterId::from_bytes([inner as u8; 16]),
+                                        ClientExpressionNode::Boolean { value: true },
+                                    )
+                                })
+                                .collect(),
+                        },
+                    )
+                })
+                .collect(),
+        });
+        assert_eq!(
+            wide.encode(),
+            Err(ClientPlanError::ExpressionNodeCountExceeded)
         );
     }
 
