@@ -2312,6 +2312,226 @@ mod tests {
     }
 
     #[test]
+    fn version_five_recursive_calls_enforce_the_callee_capability() {
+        let (base, caller_id, pair, caller_revision_id) = version_one_active(true);
+        let callee_id = FunctionId::from_bytes([0xc2; 16]);
+        let callee_revision_id = FunctionRevisionId::from_bytes([0xc3; 16]);
+        let previous_revision = &base.function_revisions()[0];
+        let caller_name = base.catalogue().function_by_id(caller_id).unwrap().name().clone();
+        let caller_plan = orna_artifact::client_plan::ExpressionClientPlan::new(
+            orna_artifact::client_plan::ClientExpressionNode::Call {
+                function: callee_id,
+                arguments: Vec::new(),
+            },
+        );
+        let caller_payload = orna_artifact::client_plan::CapabilityClientPlan::new(
+            orna_artifact::client_plan::InnerClientPlan::Expression(caller_plan),
+            vec![orna_artifact::client_plan::CapabilityRequirement::new(
+                "std.fs.write",
+                orna_artifact::client_plan::CapabilityArgumentSource::Text(
+                    "/home/bob".to_owned(),
+                ),
+            )],
+        )
+        .encode()
+        .unwrap();
+        let callee_plan = orna_artifact::client_plan::ExpressionClientPlan::new(
+            orna_artifact::client_plan::ClientExpressionNode::Boolean { value: true },
+        );
+        let callee_payload = orna_artifact::client_plan::CapabilityClientPlan::new(
+            orna_artifact::client_plan::InnerClientPlan::Expression(callee_plan),
+            vec![orna_artifact::client_plan::CapabilityRequirement::new(
+                "std.fs.read",
+                orna_artifact::client_plan::CapabilityArgumentSource::Text(
+                    "/home/bob".to_owned(),
+                ),
+            )],
+        )
+        .encode()
+        .unwrap();
+        let caller = FunctionDefinition::new(
+            caller_id,
+            caller_name,
+            FunctionDomain::Client,
+            Vec::new(),
+            FunctionReturn::Single(ResolvedType::Value(orna_standard::BOOLEAN_TYPE_ID)),
+            caller_revision_id,
+            FunctionSecurity::Invoker,
+            None,
+            FunctionVolatility::Immutable,
+        );
+        let callee = FunctionDefinition::new(
+            callee_id,
+            QualifiedSemanticName::new(["app", "callee"]).unwrap(),
+            FunctionDomain::Client,
+            Vec::new(),
+            FunctionReturn::Single(ResolvedType::Value(orna_standard::BOOLEAN_TYPE_ID)),
+            callee_revision_id,
+            FunctionSecurity::Invoker,
+            None,
+            FunctionVolatility::Immutable,
+        );
+        let catalogue = CatalogueSnapshot::new_with_functions(
+            base.catalogue().revision(),
+            base.catalogue().schemas().to_vec(),
+            base.catalogue().object_types().to_vec(),
+            vec![caller.clone(), callee.clone()],
+        )
+        .unwrap();
+        let caller_artifact = ExecutableArtifact::new(
+            ExecutableArtifactKind::Client,
+            "orna.client-plan",
+            orna_artifact::client_plan::CAPABILITY_FORMAT_VERSION,
+            caller_payload.clone(),
+            artifact_payload_digest(&caller_payload).unwrap(),
+        )
+        .unwrap();
+        let callee_artifact = ExecutableArtifact::new(
+            ExecutableArtifactKind::Client,
+            "orna.client-plan",
+            orna_artifact::client_plan::CAPABILITY_FORMAT_VERSION,
+            callee_payload.clone(),
+            artifact_payload_digest(&callee_payload).unwrap(),
+        )
+        .unwrap();
+        let caller_reference = DefinitionReference::new(
+            caller_id,
+            caller_revision_id,
+            0,
+            DefinitionReferenceTarget::Function(callee_id),
+            DefinitionReferenceKind::FunctionCall,
+            previous_revision.declaration_origin(),
+        );
+        let caller_semantic_hash = function_semantic_digest_with_version(
+            FunctionSemanticHashVersion::Version2,
+            &caller,
+            previous_revision.language_version(),
+            &caller_artifact,
+            base.expressions(),
+            std::slice::from_ref(&caller_reference),
+        )
+        .unwrap();
+        let callee_semantic_hash = function_semantic_digest_with_version(
+            FunctionSemanticHashVersion::Version2,
+            &callee,
+            previous_revision.language_version(),
+            &callee_artifact,
+            base.expressions(),
+            &[],
+        )
+        .unwrap();
+        let caller_revision = FunctionRevisionRecord::new(
+            caller_id,
+            caller_revision_id,
+            previous_revision.revision_number(),
+            previous_revision.declaration_origin(),
+            previous_revision.declaration_content_hash(),
+            caller_semantic_hash,
+            previous_revision.language_version(),
+            caller_artifact,
+        )
+        .unwrap()
+        .with_semantic_hash_version(FunctionSemanticHashVersion::Version2);
+        let callee_origin = SourceOrigin::new(
+            previous_revision.declaration_origin().source_unit(),
+            previous_revision.declaration_origin().byte_start(),
+            previous_revision.declaration_origin().byte_end(),
+        )
+        .unwrap();
+        let callee_revision = FunctionRevisionRecord::new(
+            callee_id,
+            callee_revision_id,
+            previous_revision.revision_number(),
+            callee_origin,
+            previous_revision.declaration_content_hash(),
+            callee_semantic_hash,
+            previous_revision.language_version(),
+            callee_artifact,
+        )
+        .unwrap()
+        .with_semantic_hash_version(FunctionSemanticHashVersion::Version2);
+        let mut origins = base.origins().to_vec();
+        origins.push(DefinitionOrigin::new(
+            DefinitionIdentity::Function(callee_id),
+            callee_origin,
+        ));
+        let revisions = vec![caller_revision, callee_revision];
+        let references = vec![caller_reference];
+        let standard = orna_standard::verify_standard_library_snapshot(
+            orna_standard::retained_standard_library_snapshot().unwrap(),
+        )
+        .unwrap();
+        let context = orna_core::revision::CatalogueHashContext::version_two(standard);
+        let catalogue_hash = catalogue_digest_with_context(
+            &context,
+            &catalogue,
+            &revisions,
+            base.expressions(),
+            &origins,
+            &references,
+        )
+        .unwrap();
+        let active = ActiveDatabaseRevision::new_with_catalogue_hash_context(
+            ActiveDatabaseRevisionInput::new(
+                pair,
+                base.source().clone(),
+                catalogue,
+                catalogue_hash,
+                ActiveRevisionContent::new(
+                    base.expressions().to_vec(),
+                    revisions,
+                    origins,
+                    references,
+                ),
+            ),
+            context,
+        )
+        .unwrap();
+        let write_grant = super::capability::LocalCapabilityGrant::new(
+            super::capability::LocalCapabilityName::StdFsWrite,
+            super::capability::LocalCapabilityScope::path("/home/bob").unwrap(),
+        )
+        .unwrap();
+        let write_only = super::capability::LocalCapabilityGrantSet::from_grants([write_grant])
+            .unwrap();
+        let error = super::evaluate_client_function_with_grants(
+            &active,
+            &authorise(pair, caller_id),
+            &[],
+            &write_only,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            super::ClientExecutionError::CapabilityDenied {
+                context,
+                capability,
+            } if context.function() == callee_id && capability == "std.fs.read"
+        ));
+        let read_grant = super::capability::LocalCapabilityGrant::new(
+            super::capability::LocalCapabilityName::StdFsRead,
+            super::capability::LocalCapabilityScope::path("/home/bob").unwrap(),
+        )
+        .unwrap();
+        let grants = super::capability::LocalCapabilityGrantSet::from_grants(
+            write_only
+                .as_slice()
+                .iter()
+                .cloned()
+                .chain(std::iter::once(read_grant)),
+        )
+        .unwrap();
+        let result = super::evaluate_client_function_with_grants(
+            &active,
+            &authorise(pair, caller_id),
+            &[],
+            &grants,
+        )
+        .unwrap();
+        assert_eq!(result.value(), &RuntimeValue::Boolean(true));
+    }
+
+    #[test]
     fn transfers_the_evaluated_value_without_cloning_its_payload() {
         let (active, function, _, _) = version_one_active(true);
 
