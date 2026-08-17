@@ -911,10 +911,7 @@ impl<'source> Parser<'source> {
         let mut parts = Vec::new();
         let mut end = root_start;
         let mut probe = self.index;
-        loop {
-            let Some(part) = self.tokens.get(probe).cloned() else {
-                break;
-            };
+        while let Some(part) = self.tokens.get(probe).cloned() {
             if !part.is_identifier() {
                 break;
             }
@@ -1041,9 +1038,7 @@ impl<'source> Parser<'source> {
             .is_some_and(|token| token.kind == TokenKind::RightParenthesis)
         {
             loop {
-                let Some(argument) = self.parse_client_call_argument() else {
-                    return None;
-                };
+                let argument = self.parse_client_call_argument()?;
                 let span = argument.span;
                 arguments.push(ClientCallArgument {
                     name: argument.name,
@@ -1139,10 +1134,8 @@ impl<'source> Parser<'source> {
             let end = value.span().end;
             Some((named, value, SourceSpan { start, end }))
         })();
-        let argument = match result {
-            Some((name, value, span)) => Some(ClientCallArgument { name, value, span }),
-            None => None,
-        };
+        let argument =
+            result.map(|(name, value, span)| ClientCallArgument { name, value, span });
         self.builder.finish_node();
         argument
     }

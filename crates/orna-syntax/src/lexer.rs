@@ -167,9 +167,7 @@ pub(crate) fn lex(source: &str) -> (Vec<Token<'_>>, Vec<Diagnostic>) {
                     .find(|(_, current)| !current.is_ascii_digit())
                     .map_or(rest.len(), |(index, _)| index);
                 (TokenKind::NumberLiteral, width)
-            } else if rest.starts_with("=>") {
-                (TokenKind::Other, 2)
-            } else if rest.starts_with("||") {
+            } else if rest.starts_with("=>") || rest.starts_with("||") {
                 (TokenKind::Other, 2)
             } else {
                 let kind = match character {
