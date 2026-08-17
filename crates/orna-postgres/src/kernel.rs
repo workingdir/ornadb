@@ -14,7 +14,10 @@ use orna_core::{
     invocation::InvocationCarrierConstructionError,
     physical::PhysicalPlanError,
     revision::{CatalogueHashVersion, RevisionInvariantError, RevisionPair},
-    security::{ExecuteDenial, InspectDenial, LocalPeerAuthenticationError, SecuritySnapshotError},
+    security::{
+        ExecuteDenial, InspectDenial, LocalPeerAuthenticationError, PrivilegeDenial,
+        SecuritySnapshotError,
+    },
     state::UserStateError,
 };
 use orna_protocol::{FrameCodecError, ValueCodecError};
@@ -37,6 +40,8 @@ pub(crate) mod physical;
 pub(crate) mod recovery;
 #[path = "kernel/security.rs"]
 pub(crate) mod security;
+#[path = "kernel/security_admin.rs"]
+pub(crate) mod security_admin;
 #[path = "kernel/server_execution.rs"]
 pub(crate) mod server_execution;
 #[path = "kernel/server_mutation_execution.rs"]
@@ -250,6 +255,11 @@ pub enum PostgresKernelError {
         /// The fail-closed denial reason.
         reason: InspectDenial,
     },
+    /// The calling session was denied a security-admin mutation.
+    SecurityAdminDenied {
+        /// The fail-closed privilege denial reason.
+        reason: PrivilegeDenial,
+    },
     /// An inspection payload failed the canonical ORV5 codec.
     InspectValueCodec(ValueCodecError),
     /// A kernel-supplied local peer UID could not establish an Orna session.
@@ -406,6 +416,13 @@ impl fmt::Display for PostgresKernelError {
                     reason.audit_reason()
                 )
             }
+            Self::SecurityAdminDenied { reason } => {
+                write!(
+                    formatter,
+                    "security-admin mutation was denied: {}",
+                    reason.audit_reason()
+                )
+            }
             Self::InspectValueCodec(error) => {
                 write!(formatter, "inspection payload codec failed: {error}")
             }
@@ -493,6 +510,7 @@ impl Error for PostgresKernelError {
             | Self::RawExecuteDenied { .. }
             | Self::RawCallTargetUnavailable { .. }
             | Self::InspectDenied { .. }
+            | Self::SecurityAdminDenied { .. }
             | Self::DurableInvariant { .. } => None,
         }
     }
