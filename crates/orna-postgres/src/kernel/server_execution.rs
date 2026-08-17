@@ -7,6 +7,7 @@ use std::{collections::BTreeMap, error::Error, fmt, sync::OnceLock};
 
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use futures_util::TryStreamExt;
+use orna_artifact::server_csv_encode::{self, CsvEncodePlan, CsvEncodePlanError};
 use orna_artifact::server_json_encode::{self, JsonEncodePlan, JsonEncodePlanError};
 use orna_artifact::server_parameter_echo::{self, ServerParameterEcho, ServerParameterEchoError};
 use orna_artifact::server_plan::{
@@ -106,6 +107,15 @@ const STD_TERMINAL_PRESENT_TABLE_PARAMETER_ID: ParameterId =
 /// The fixed ADR 0057 `std.terminal.present_table` function-revision identity: `...12`.
 const STD_TERMINAL_PRESENT_TABLE_FUNCTION_REVISION_ID: FunctionRevisionId =
     FunctionRevisionId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x12]);
+/// The fixed ADR 0067 `std.csv.encode` function identity: `...13`.
+const STD_CSV_ENCODE_FUNCTION_ID: FunctionId =
+    FunctionId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x13]);
+/// The fixed ADR 0067 `std.csv.encode.p_rows` parameter identity: `...13`.
+const STD_CSV_ENCODE_PARAMETER_ID: ParameterId =
+    ParameterId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x13]);
+/// The fixed ADR 0067 `std.csv.encode` function-revision identity: `...13`.
+const STD_CSV_ENCODE_FUNCTION_REVISION_ID: FunctionRevisionId =
+    FunctionRevisionId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x13]);
 
 #[cfg(feature = "test-hooks")]
 struct SelectTestBarrier {
@@ -272,6 +282,8 @@ pub enum ServerSelectError {
     JsonEncodeDecode(JsonEncodePlanError),
     /// The pinned standard terminal-table artifact cannot decode.
     TerminalTableDecode(TerminalTablePlanError),
+    /// The pinned standard csv-encode artifact cannot decode.
+    CsvEncodeDecode(CsvEncodePlanError),
     /// A standard presenter cannot convert the bound value without loss.
     Presenter {
         /// The exact rejected presenter rule.
@@ -446,6 +458,12 @@ impl fmt::Display for ServerSelectError {
                     "cannot decode server terminal-table artifact: {error}"
                 )
             }
+            Self::CsvEncodeDecode(error) => {
+                write!(
+                    formatter,
+                    "cannot decode server csv-encode artifact: {error}"
+                )
+            }
             Self::Presenter { rule } => {
                 write!(formatter, "standard presenter execution failed: {rule}")
             }
@@ -541,6 +559,7 @@ impl Error for ServerSelectError {
             Self::ParameterEchoDecode(error) => Some(error),
             Self::JsonEncodeDecode(error) => Some(error),
             Self::TerminalTableDecode(error) => Some(error),
+            Self::CsvEncodeDecode(error) => Some(error),
             Self::PresenterOpaque(error) => Some(error),
             Self::ResultRows(error) => Some(error),
             Self::ReturnedRows(error) => Some(error),
@@ -1106,6 +1125,7 @@ pub(crate) const fn raw_server_target_is_unavailable(error: &ServerSelectError) 
         | ServerSelectError::ParameterEchoDecode(_)
         | ServerSelectError::JsonEncodeDecode(_)
         | ServerSelectError::TerminalTableDecode(_)
+        | ServerSelectError::CsvEncodeDecode(_)
         | ServerSelectError::PlanInvariant { .. }
         | ServerSelectError::Distinct { .. }
         | ServerSelectError::ReferenceEvidence { .. }
@@ -1688,6 +1708,69 @@ pub(crate) fn execute_standard_terminal_table(
     Ok(RuntimeValue::Opaque(opaque))
 }
 
+/// Executes one closed standard `orna.server-csv-encode` artifact.
+///
+/// This engine is reachable only from a pinned standard
+/// [`FunctionRevisionRecord`], the bound `std.data.Rows` input (the validated
+/// [`ResultRows`] result set itself, which cannot ride the value channel),
+/// the active revision it executes against, and the opaque codec registry of
+/// the active verified standard. It dispatches purely by checked artifact
+/// kind, format, and version, then validates the artifact against the pinned
+/// standard presenter signature: decode pins the function's parameter
+/// identity and the resolved `std.data.Rows` value type, and the signature
+/// validator requires the fixed ADR 0067 `std.csv.encode` shape.
+///
+/// The bound rows render as one CSV document (header row of column names,
+/// one row per result row, RFC-4180-style quoting), and the result is one
+/// `std.io.ByteStream` opaque value whose payload follows the ADR 0058 codec
+/// framing (`ORNA-BYTE-STREAM/1 <media-type:u32 be> <media-type>
+/// <len:u32 be> <bytes>`) with media type `text/csv`.
+pub(crate) fn execute_standard_csv_encode(
+    function: &FunctionDefinition,
+    revision: &FunctionRevisionRecord,
+    rows: &ResultRows,
+    active: &ActiveDatabaseRevision,
+    registry: &OpaqueCodecRegistry,
+) -> Result<RuntimeValue, PostgresKernelError> {
+    let artifact = revision.artifact();
+    if artifact.kind() != ExecutableArtifactKind::Server {
+        return Err(artifact_error(
+            function.id(),
+            "current revision must contain a SERVER artifact",
+        ));
+    }
+    if artifact.format() != server_csv_encode::FORMAT_IDENTITY {
+        return Err(artifact_error(
+            function.id(),
+            "current SERVER artifact must use orna.server-csv-encode",
+        ));
+    }
+    if artifact.version() != server_csv_encode::FORMAT_VERSION {
+        return Err(artifact_error(
+            function.id(),
+            "current SERVER artifact must use orna.server-csv-encode version 1",
+        ));
+    }
+    if revision.language_version() != server_csv_encode::LANGUAGE_VERSION_IDENTITY {
+        return Err(artifact_error(
+            function.id(),
+            "current SERVER revision must use the csv-encode language version",
+        ));
+    }
+    let parameter = validate_standard_csv_encode_signature(function)?;
+    CsvEncodePlan::decode(artifact.payload(), parameter, STD_DATA_ROWS_TYPE_ID)
+        .map_err(ServerSelectError::CsvEncodeDecode)
+        .map_err(server_error)?;
+    let document = render_csv_document(active, rows)
+        .map_err(|rule| ServerSelectError::Presenter { rule })
+        .map_err(server_error)?;
+    let payload = frame_byte_stream(b"text/csv", document.as_bytes());
+    let opaque = OpaqueValue::new(active, registry, STD_IO_BYTE_STREAM_TYPE_ID, &payload)
+        .map_err(ServerSelectError::PresenterOpaque)
+        .map_err(server_error)?;
+    Ok(RuntimeValue::Opaque(opaque))
+}
+
 /// One closed presentation failure from the sealed output route (ADR 0057
 /// step 7).
 ///
@@ -1734,15 +1817,17 @@ impl fmt::Display for SealedPresentationError {
     }
 }
 
-/// The immutable sealed presenter registry (ADR 0057 step 7).
+/// The immutable sealed presenter registry (ADR 0057 step 7, ADR 0067).
 ///
-/// The standard snapshot does not yet declare the ADR 0057 presenter
+/// The standard snapshot does not yet declare the ADR 0057/0067 presenter
 /// functions as standard-library objects, so the sealed route constructs the
-/// two known presenter records here: alias `json` -> `std.json.encode` (input
+/// known presenter records here: alias `json` -> `std.json.encode` (input
 /// `std.json.Value`, output `std.io.ByteStream` with media type
-/// `application/json`) and alias `table` -> `std.terminal.present_table`
-/// (input `std.data.Rows`, output `std.terminal.Document`, no media type).
-/// Both entries stream nothing and carry the default priority.
+/// `application/json`), alias `table` -> `std.terminal.present_table`
+/// (input `std.data.Rows`, output `std.terminal.Document`, no media type),
+/// and alias `csv` -> `std.csv.encode` (input `std.data.Rows`, output
+/// `std.io.ByteStream` with media type `text/csv`).
+/// All entries stream nothing and carry the default priority.
 fn sealed_presenter_registry() -> &'static PresenterRegistry {
     static REGISTRY: OnceLock<PresenterRegistry> = OnceLock::new();
     REGISTRY.get_or_init(|| {
@@ -1766,7 +1851,18 @@ fn sealed_presenter_registry() -> &'static PresenterRegistry {
             0,
         )
         .expect("the fixed table presenter entry is valid");
-        PresenterRegistry::new(vec![json, table]).expect("the fixed presenter registry is valid")
+        let csv = PresenterEntry::new(
+            String::from("csv"),
+            STD_CSV_ENCODE_FUNCTION_ID,
+            STD_DATA_ROWS_TYPE_ID,
+            orna_standard::STD_IO_BYTE_STREAM_TYPE_ID,
+            Some(String::from("text/csv")),
+            false,
+            0,
+        )
+        .expect("the fixed csv presenter entry is valid");
+        PresenterRegistry::new(vec![json, table, csv])
+            .expect("the fixed presenter registry is valid")
     })
 }
 
@@ -1777,9 +1873,10 @@ fn sealed_presenter_registry() -> &'static PresenterRegistry {
 /// alias > media-type > type-name precedence, then the matched presenter's
 /// input pattern is checked against the canonical result: `std.json.encode`
 /// accepts every argument the closed value channel can carry (any
-/// json-convertible flat value), while `std.terminal.present_table` accepts
-/// the canonical result only when it converts to a bounded `ResultRows` (the
-/// one-column, one-row `result` set this step builds). An unresolved alias,
+/// json-convertible flat value), while `std.terminal.present_table` and
+/// `std.csv.encode` accept the canonical result only when it converts to a
+/// bounded `ResultRows` (the one-column, one-row `result` set this step
+/// builds). An unresolved alias,
 /// media type, or type name is [`SealedPresentationError::OutputResolution`]
 /// (`ORNA0702`); a result the matched presenter cannot accept is
 /// [`SealedPresentationError::NoPath`] (`ORNA0701`). The presented opaque
@@ -1821,11 +1918,22 @@ pub(crate) fn present_sealed_standard_output(
             )
             .map_err(sealed_presenter_engine_error)
         }
+        STD_CSV_ENCODE_FUNCTION_ID => {
+            let rows = sealed_result_rows(value)?;
+            execute_standard_csv_encode(
+                &sealed_csv_encode_definition(),
+                &sealed_csv_encode_revision(),
+                &rows,
+                active,
+                registry,
+            )
+            .map_err(sealed_presenter_engine_error)
+        }
         other => Err(SealedPresentationError::Kernel(
             PostgresKernelError::DurableInvariant {
                 relation: "sealed presenter registry",
                 record: other.canonical(),
-                rule: "the sealed presenter registry must name only the ADR 0057 presenters",
+                rule: "the sealed presenter registry must name only the ADR 0057/0067 presenters",
             },
         )),
     }
@@ -1962,6 +2070,54 @@ fn sealed_terminal_table_revision() -> FunctionRevisionRecord {
     )
 }
 
+/// Builds the closed ADR 0067 `std.csv.encode` definition the sealed route
+/// executes.
+///
+/// The exact shape matches the engine's signature validator: SERVER domain,
+/// one required non-null `std.data.Rows` parameter, one single
+/// `std.io.ByteStream` result, INVOKER security, READ ONLY transaction, and
+/// STABLE volatility.
+fn sealed_csv_encode_definition() -> FunctionDefinition {
+    FunctionDefinition::new(
+        STD_CSV_ENCODE_FUNCTION_ID,
+        QualifiedSemanticName::new(["std", "csv", "encode"])
+            .expect("the fixed csv-encode name is qualified"),
+        FunctionDomain::Server,
+        vec![ParameterDefinition::new(
+            STD_CSV_ENCODE_PARAMETER_ID,
+            "p_rows",
+            0,
+            ResolvedType::named(STD_DATA_ROWS_TYPE_ID),
+            None,
+        )],
+        FunctionReturn::Single(ResolvedType::named(
+            orna_standard::STD_IO_BYTE_STREAM_TYPE_ID,
+        )),
+        STD_CSV_ENCODE_FUNCTION_REVISION_ID,
+        FunctionSecurity::Invoker,
+        Some(FunctionTransaction::ReadOnly),
+        FunctionVolatility::Stable,
+    )
+}
+
+/// Builds the closed ADR 0067 `std.csv.encode` revision the sealed route
+/// executes: the canonical `orna.server-csv-encode` version 1 artifact.
+fn sealed_csv_encode_revision() -> FunctionRevisionRecord {
+    sealed_presenter_revision(
+        STD_CSV_ENCODE_FUNCTION_ID,
+        STD_CSV_ENCODE_FUNCTION_REVISION_ID,
+        server_csv_encode::LANGUAGE_VERSION_IDENTITY,
+        sealed_presenter_artifact(
+            server_csv_encode::FORMAT_IDENTITY,
+            server_csv_encode::FORMAT_VERSION,
+            CsvEncodePlan::new(STD_CSV_ENCODE_PARAMETER_ID, STD_DATA_ROWS_TYPE_ID)
+                .expect("the fixed csv-encode plan is valid")
+                .encode()
+                .expect("the fixed csv-encode plan encodes"),
+        ),
+    )
+}
+
 /// Frames one closed presenter artifact payload as a canonical executable
 /// artifact.
 fn sealed_presenter_artifact(format: &str, version: u32, payload: Vec<u8>) -> ExecutableArtifact {
@@ -2040,6 +2196,28 @@ fn validate_standard_terminal_present_table_signature(
         "standard terminal-table presenters must declare exactly one required non-null std.data.Rows parameter",
         "standard terminal-table presenters must return a single std.terminal.Document value",
         "standard terminal-table presenters must declare one std.data.Rows parameter and one std.terminal.Document result",
+    )
+}
+
+/// Validates one pinned function against the fixed ADR 0067
+/// `std.csv.encode` presenter signature.
+///
+/// The accepted shape is exactly: SERVER domain, one required non-null
+/// `std.data.Rows` parameter with no default expression, one single
+/// `std.io.ByteStream` result, `SECURITY INVOKER`, `TRANSACTION READ
+/// ONLY`, and `VOLATILITY STABLE`. Both the parameter and the result must
+/// resolve to the fixed value types. Returns the pinned parameter identity
+/// the artifact must carry.
+fn validate_standard_csv_encode_signature(
+    function: &FunctionDefinition,
+) -> Result<ParameterId, PostgresKernelError> {
+    validate_standard_presenter_signature(
+        function,
+        STD_DATA_ROWS_TYPE_ID,
+        STD_IO_BYTE_STREAM_TYPE_ID,
+        "standard csv-encode presenters must declare exactly one required non-null std.data.Rows parameter",
+        "standard csv-encode presenters must return a single std.io.ByteStream value",
+        "standard csv-encode presenters must declare one std.data.Rows parameter and one std.io.ByteStream result",
     )
 }
 
@@ -2342,6 +2520,68 @@ fn render_terminal_table(
         document.push_str(&format!("({count} rows)\n"));
     }
     Ok(document)
+}
+
+/// Renders one validated [`ResultRows`] as one CSV document.
+///
+/// The fixed layout is one header row of column names followed by one row
+/// per result row; every row ends with `\n` and the document ends with a
+/// trailing newline. Cells render with the same closed rules as the terminal
+/// table, then receive RFC-4180-style quoting: a cell containing a comma,
+/// double quote, CR, or LF is quoted and embedded quotes are doubled. Column
+/// names and cells cannot carry control characters; any rendered fragment
+/// containing one is rejected.
+fn render_csv_document(
+    active: &ActiveDatabaseRevision,
+    rows: &ResultRows,
+) -> Result<String, &'static str> {
+    let columns = rows.columns();
+    let mut document = String::new();
+    for (index, column) in columns.iter().enumerate() {
+        if index > 0 {
+            document.push(',');
+        }
+        reject_control_characters(
+            column.name(),
+            "csv column names cannot contain control characters",
+        )?;
+        push_csv_field(&mut document, column.name());
+    }
+    document.push('\n');
+    for row in rows.rows() {
+        for (index, value) in row.values().iter().enumerate() {
+            if index > 0 {
+                document.push(',');
+            }
+            let cell = render_terminal_cell(active, value)?;
+            push_csv_field(&mut document, &cell);
+        }
+        document.push('\n');
+    }
+    Ok(document)
+}
+
+/// Appends one CSV field to the document with RFC-4180-style quoting.
+///
+/// A field containing a comma, double quote, CR, or LF is wrapped in double
+/// quotes and every embedded double quote is doubled. A field free of those
+/// four characters is appended verbatim.
+fn push_csv_field(document: &mut String, field: &str) {
+    let needs_quoting = field
+        .chars()
+        .any(|character| matches!(character, ',' | '"' | '\r' | '\n'));
+    if !needs_quoting {
+        document.push_str(field);
+        return;
+    }
+    document.push('"');
+    for character in field.chars() {
+        if character == '"' {
+            document.push('"');
+        }
+        document.push(character);
+    }
+    document.push('"');
 }
 
 /// Appends one aligned table line to the document.
@@ -4957,6 +5197,73 @@ mod tests {
             server_terminal_table::LANGUAGE_VERSION_IDENTITY,
             terminal_table_artifact(parameter),
         )
+    }
+
+    fn csv_encode_parameter(parameter: ParameterId) -> ParameterDefinition {
+        ParameterDefinition::new(
+            parameter,
+            "p_rows",
+            0,
+            ResolvedType::named(STD_DATA_ROWS_TYPE_ID),
+            None,
+        )
+    }
+
+    fn csv_encode_function(
+        function: FunctionId,
+        parameter: ParameterId,
+        revision: FunctionRevisionId,
+    ) -> FunctionDefinition {
+        FunctionDefinition::new(
+            function,
+            name(&["std", "csv", "encode"]),
+            FunctionDomain::Server,
+            vec![csv_encode_parameter(parameter)],
+            FunctionReturn::Single(ResolvedType::named(
+                orna_standard::STD_IO_BYTE_STREAM_TYPE_ID,
+            )),
+            revision,
+            FunctionSecurity::Invoker,
+            Some(FunctionTransaction::ReadOnly),
+            FunctionVolatility::Stable,
+        )
+    }
+
+    fn csv_encode_payload(parameter: ParameterId) -> Vec<u8> {
+        CsvEncodePlan::new(parameter, STD_DATA_ROWS_TYPE_ID)
+            .expect("any identities form a valid csv-encode model")
+            .encode()
+            .expect("the canonical csv-encode model encodes")
+    }
+
+    fn csv_encode_artifact(parameter: ParameterId) -> ExecutableArtifact {
+        artifact(
+            ExecutableArtifactKind::Server,
+            server_csv_encode::FORMAT_IDENTITY,
+            server_csv_encode::FORMAT_VERSION,
+            csv_encode_payload(parameter),
+        )
+    }
+
+    fn csv_encode_revision(function: FunctionId, parameter: ParameterId) -> FunctionRevisionRecord {
+        presenter_revision(
+            function,
+            STD_CSV_ENCODE_FUNCTION_REVISION_ID,
+            server_csv_encode::LANGUAGE_VERSION_IDENTITY,
+            csv_encode_artifact(parameter),
+        )
+    }
+
+    fn assert_csv_encode_decode_rule(
+        result: Result<RuntimeValue, PostgresKernelError>,
+        expected: CsvEncodePlanError,
+    ) {
+        let Err(PostgresKernelError::ServerSelect(ServerSelectError::CsvEncodeDecode(actual))) =
+            result
+        else {
+            panic!("expected a csv-encode decode rejection");
+        };
+        assert_eq!(actual, expected);
     }
 
     fn json_encode_argument(parameter: ParameterId, value: RuntimeValue) -> FunctionArgument {
@@ -8735,6 +9042,113 @@ mod tests {
     }
 
     #[test]
+    fn standard_csv_encode_dispatches_without_function_name_or_id_matching() {
+        let standard = presenter_standard();
+        let registry = orna_standard::registered_opaque_codecs(&standard)
+            .expect("the V3 opaque codecs register");
+        let active = presenter_active(&standard);
+        let other_function = FunctionId::from_bytes([0x42; 16]);
+        let other_revision = FunctionRevisionId::from_bytes([0x44; 16]);
+        let function = FunctionDefinition::new(
+            other_function,
+            name(&["other", "csv"]),
+            FunctionDomain::Server,
+            vec![csv_encode_parameter(STD_CSV_ENCODE_PARAMETER_ID)],
+            FunctionReturn::Single(ResolvedType::named(
+                orna_standard::STD_IO_BYTE_STREAM_TYPE_ID,
+            )),
+            other_revision,
+            FunctionSecurity::Invoker,
+            Some(FunctionTransaction::ReadOnly),
+            FunctionVolatility::Stable,
+        );
+        let revision = csv_encode_revision(other_function, STD_CSV_ENCODE_PARAMETER_ID);
+        let rows = ResultRows::new(
+            [ResultColumn::new(
+                "value",
+                ResolvedType::scalar(StandardScalar::Integer),
+                false,
+            )
+            .expect("the value column is valid")],
+            [ResultRow::new([RuntimeValue::Integer(3)])],
+        )
+        .expect("the presenter rows are valid");
+        let RuntimeValue::Opaque(value) =
+            execute_standard_csv_encode(&function, &revision, &rows, &active, &registry)
+                .expect("the same artifact shape must execute identically")
+        else {
+            panic!("the csv-encode presenter must return one opaque value");
+        };
+        assert_eq!(
+            value.opaque_type(),
+            orna_standard::STD_IO_BYTE_STREAM_TYPE_ID
+        );
+        assert_eq!(
+            value.canonical_payload(),
+            frame_byte_stream(b"text/csv", b"value\n3\n")
+        );
+    }
+
+    #[test]
+    fn sealed_output_csv_requirement_emits_the_byte_stream_in_the_final_value_batch() {
+        let standard = presenter_standard();
+        let registry = orna_standard::registered_opaque_codecs(&standard)
+            .expect("the V3 opaque codecs register");
+        let active = presenter_active(&standard);
+        let requirement = InvocationOutputRequirement::new(
+            Some(String::from("csv")),
+            None,
+            None,
+            InvocationStreamingRequirement::Unspecified,
+        )
+        .expect("the csv output requirement is valid");
+        let presented = present_sealed_standard_output(
+            &requirement,
+            RuntimeValue::Integer(42),
+            &active,
+            &registry,
+        )
+        .expect("the csv presenter must execute on the sealed canonical result");
+        let RuntimeValue::Opaque(value) = &presented else {
+            panic!("the csv presenter must return one opaque value");
+        };
+        assert_eq!(
+            value.opaque_type(),
+            orna_standard::STD_IO_BYTE_STREAM_TYPE_ID
+        );
+        let mut expected = Vec::from(BYTE_STREAM_MAGIC.as_bytes());
+        expected.extend_from_slice(&8_u32.to_be_bytes());
+        expected.extend_from_slice(b"text/csv");
+        expected.extend_from_slice(&10_u32.to_be_bytes());
+        expected.extend_from_slice(b"result\n42\n");
+        assert_eq!(value.canonical_payload(), expected);
+
+        let principal = PrincipalId::from_bytes([0x65; 16]);
+        let invocation = InvocationId::from_bytes([0x66; 16]);
+        let events =
+            crate::kernel::security::sealed_completed_events(principal, invocation, presented)
+                .expect("the presented events are valid");
+        let records = events.records();
+        assert_eq!(records.len(), 3);
+        match records[1].event().body() {
+            InvocationEventBody::ValueBatch { values, .. } => {
+                let [value] = values.as_slice() else {
+                    panic!("the final ValueBatch must carry exactly one value");
+                };
+                let RuntimeValue::Opaque(opaque) = value.value() else {
+                    panic!("the final ValueBatch must carry the presented opaque value");
+                };
+                assert_eq!(
+                    opaque.opaque_type(),
+                    orna_standard::STD_IO_BYTE_STREAM_TYPE_ID
+                );
+                assert_eq!(opaque.canonical_payload(), expected);
+            }
+            other => panic!("expected a ValueBatch event, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn sealed_output_json_requirement_emits_the_byte_stream_in_the_final_value_batch() {
         let standard = presenter_standard();
         let registry = orna_standard::registered_opaque_codecs(&standard)
@@ -9136,6 +9550,536 @@ mod tests {
                 .map(RuntimeValue::Text)
                 .map_err(|rule| server_error(ServerSelectError::Presenter { rule })),
             "terminal table column names cannot contain control characters",
+        );
+    }
+
+    #[test]
+    fn csv_renders_each_cell_form_and_quotes_embedded_delimiters() {
+        let standard = presenter_standard();
+        let active = presenter_active(&standard);
+
+        let status = ResultRows::new(
+            [
+                ResultColumn::new("b", ResolvedType::scalar(StandardScalar::Boolean), false)
+                    .expect("the boolean column is valid"),
+                ResultColumn::new("n", ResolvedType::scalar(StandardScalar::BigInt), false)
+                    .expect("the bigint column is valid"),
+                ResultColumn::new("f", ResolvedType::scalar(StandardScalar::Float), false)
+                    .expect("the float column is valid"),
+                ResultColumn::new(
+                    "t",
+                    ResolvedType::scalar(StandardScalar::CharacterLargeObject),
+                    false,
+                )
+                .expect("the text column is valid"),
+                ResultColumn::new(
+                    "x",
+                    ResolvedType::scalar(StandardScalar::BinaryLargeObject),
+                    false,
+                )
+                .expect("the bytes column is valid"),
+                ResultColumn::new("r", ResolvedType::reference(PRESENTER_OBJECT_TYPE), false)
+                    .expect("the reference column is valid"),
+                ResultColumn::new("e", ResolvedType::named(PRESENTER_ENUM_TYPE), false)
+                    .expect("the enum column is valid"),
+                ResultColumn::new("c", ResolvedType::named(PRESENTER_RECORD_TYPE), false)
+                    .expect("the record column is valid"),
+            ],
+            [ResultRow::new([
+                RuntimeValue::Boolean(true),
+                RuntimeValue::BigInt(-9_007_199_254_740_993),
+                RuntimeValue::Float(RuntimeFloat::new(10.5).expect("10.5 is finite")),
+                RuntimeValue::Text("a,b\"c".to_owned()),
+                RuntimeValue::Bytes(vec![0x00, 0xff]),
+                RuntimeValue::Reference {
+                    target: PRESENTER_OBJECT_TYPE,
+                    object: ObjectId::from_bytes([0x55; 16]),
+                },
+                RuntimeValue::Enum(
+                    EnumValue::new(active.catalogue(), PRESENTER_ENUM_TYPE, "qualified")
+                        .expect("the enum label is declared"),
+                ),
+                RuntimeValue::Record(
+                    RecordValue::new(
+                        &active,
+                        PRESENTER_RECORD_TYPE,
+                        vec![
+                            ("x".to_owned(), RuntimeValue::Integer(7)),
+                            ("y".to_owned(), RuntimeValue::Text("z".to_owned())),
+                        ],
+                    )
+                    .expect("the record value is valid"),
+                ),
+            ])],
+        )
+        .expect("the presenter rows are valid");
+        let document = render_csv_document(&active, &status).expect("the csv renders");
+        let object = ObjectId::from_bytes([0x55; 16]).canonical();
+        let expected = format!(
+            "b,n,f,t,x,r,e,c\n\
+             true,-9007199254740993,10.5,\"a,b\"\"c\",AP8=,{object},qualified,\"app.status{{x=7, y=z}}\"\n"
+        );
+        assert_eq!(document, expected);
+    }
+
+    #[test]
+    fn csv_rejects_control_characters_in_cells_and_headers() {
+        let standard = presenter_standard();
+        let active = presenter_active(&standard);
+
+        let newline_text = ResultRows::new(
+            [ResultColumn::new(
+                "value",
+                ResolvedType::scalar(StandardScalar::CharacterLargeObject),
+                false,
+            )
+            .expect("the value column is valid")],
+            [ResultRow::new([RuntimeValue::Text("a\nb".to_owned())])],
+        )
+        .expect("the presenter rows are valid");
+        assert_presenter_rule(
+            render_csv_document(&active, &newline_text)
+                .map(RuntimeValue::Text)
+                .map_err(|rule| server_error(ServerSelectError::Presenter { rule })),
+            "terminal table cells cannot contain control characters",
+        );
+
+        let comma_header = ResultRows::new(
+            [
+                ResultColumn::new("a,b", ResolvedType::scalar(StandardScalar::Integer), false)
+                    .expect("the value column is valid"),
+            ],
+            [ResultRow::new([RuntimeValue::Integer(1)])],
+        )
+        .expect("the presenter rows are valid");
+        let document = render_csv_document(&active, &comma_header).expect("the csv renders");
+        assert_eq!(document, "\"a,b\"\n1\n");
+
+        let tab_header = ResultRows::new(
+            [ResultColumn::new(
+                "val\tue",
+                ResolvedType::scalar(StandardScalar::Integer),
+                false,
+            )
+            .expect("the value column is valid")],
+            [ResultRow::new([RuntimeValue::Integer(1)])],
+        )
+        .expect("the presenter rows are valid");
+        assert_presenter_rule(
+            render_csv_document(&active, &tab_header)
+                .map(RuntimeValue::Text)
+                .map_err(|rule| server_error(ServerSelectError::Presenter { rule })),
+            "csv column names cannot contain control characters",
+        );
+    }
+
+    #[test]
+    fn standard_csv_encode_rejects_wrong_kind_format_and_version() {
+        let standard = presenter_standard();
+        let registry = orna_standard::registered_opaque_codecs(&standard)
+            .expect("the V3 opaque codecs register");
+        let active = presenter_active(&standard);
+        let function = csv_encode_function(
+            STD_CSV_ENCODE_FUNCTION_ID,
+            STD_CSV_ENCODE_PARAMETER_ID,
+            STD_CSV_ENCODE_FUNCTION_REVISION_ID,
+        );
+        let parameter = STD_CSV_ENCODE_PARAMETER_ID;
+        let rows = ResultRows::new(
+            [ResultColumn::new(
+                "value",
+                ResolvedType::scalar(StandardScalar::Integer),
+                false,
+            )
+            .expect("the value column is valid")],
+            [ResultRow::new([RuntimeValue::Integer(1)])],
+        )
+        .expect("the presenter rows are valid");
+
+        let wrong_kind = presenter_revision(
+            function.id(),
+            STD_CSV_ENCODE_FUNCTION_REVISION_ID,
+            server_csv_encode::LANGUAGE_VERSION_IDENTITY,
+            artifact(
+                ExecutableArtifactKind::Client,
+                server_csv_encode::FORMAT_IDENTITY,
+                server_csv_encode::FORMAT_VERSION,
+                csv_encode_payload(parameter),
+            ),
+        );
+        assert_presenter_artifact_rule(
+            execute_standard_csv_encode(&function, &wrong_kind, &rows, &active, &registry),
+            function.id(),
+            "current revision must contain a SERVER artifact",
+        );
+
+        let wrong_format = presenter_revision(
+            function.id(),
+            STD_CSV_ENCODE_FUNCTION_REVISION_ID,
+            server_csv_encode::LANGUAGE_VERSION_IDENTITY,
+            artifact(
+                ExecutableArtifactKind::Server,
+                server_terminal_table::FORMAT_IDENTITY,
+                server_csv_encode::FORMAT_VERSION,
+                csv_encode_payload(parameter),
+            ),
+        );
+        assert_presenter_artifact_rule(
+            execute_standard_csv_encode(&function, &wrong_format, &rows, &active, &registry),
+            function.id(),
+            "current SERVER artifact must use orna.server-csv-encode",
+        );
+
+        let wrong_version = presenter_revision(
+            function.id(),
+            STD_CSV_ENCODE_FUNCTION_REVISION_ID,
+            server_csv_encode::LANGUAGE_VERSION_IDENTITY,
+            artifact(
+                ExecutableArtifactKind::Server,
+                server_csv_encode::FORMAT_IDENTITY,
+                server_csv_encode::FORMAT_VERSION + 1,
+                csv_encode_payload(parameter),
+            ),
+        );
+        assert_presenter_artifact_rule(
+            execute_standard_csv_encode(&function, &wrong_version, &rows, &active, &registry),
+            function.id(),
+            "current SERVER artifact must use orna.server-csv-encode version 1",
+        );
+
+        let wrong_language = presenter_revision(
+            function.id(),
+            STD_CSV_ENCODE_FUNCTION_REVISION_ID,
+            "orna.language/9",
+            csv_encode_artifact(parameter),
+        );
+        assert_presenter_artifact_rule(
+            execute_standard_csv_encode(&function, &wrong_language, &rows, &active, &registry),
+            function.id(),
+            "current SERVER revision must use the csv-encode language version",
+        );
+
+        assert_eq!(
+            execute_standard_csv_encode(
+                &function,
+                &csv_encode_revision(function.id(), parameter),
+                &rows,
+                &active,
+                &registry,
+            )
+            .expect("the exact artifact must execute"),
+            RuntimeValue::Opaque(
+                OpaqueValue::new(
+                    &active,
+                    &registry,
+                    orna_standard::STD_IO_BYTE_STREAM_TYPE_ID,
+                    frame_byte_stream(b"text/csv", b"value\n1\n"),
+                )
+                .expect("the framed byte stream constructs"),
+            )
+        );
+    }
+
+    #[test]
+    fn standard_csv_encode_artifacts_reject_each_decode_deviation() {
+        let standard = presenter_standard();
+        let registry = orna_standard::registered_opaque_codecs(&standard)
+            .expect("the V3 opaque codecs register");
+        let active = presenter_active(&standard);
+        let function = csv_encode_function(
+            STD_CSV_ENCODE_FUNCTION_ID,
+            STD_CSV_ENCODE_PARAMETER_ID,
+            STD_CSV_ENCODE_FUNCTION_REVISION_ID,
+        );
+        let parameter = STD_CSV_ENCODE_PARAMETER_ID;
+        let rows = ResultRows::new(
+            [ResultColumn::new(
+                "value",
+                ResolvedType::scalar(StandardScalar::Integer),
+                false,
+            )
+            .expect("the value column is valid")],
+            [ResultRow::new([RuntimeValue::Integer(1)])],
+        )
+        .expect("the presenter rows are valid");
+
+        let mut invalid_magic = csv_encode_payload(parameter);
+        invalid_magic[0] = b'X';
+        let revision = presenter_revision(
+            function.id(),
+            STD_CSV_ENCODE_FUNCTION_REVISION_ID,
+            server_csv_encode::LANGUAGE_VERSION_IDENTITY,
+            artifact(
+                ExecutableArtifactKind::Server,
+                server_csv_encode::FORMAT_IDENTITY,
+                server_csv_encode::FORMAT_VERSION,
+                invalid_magic,
+            ),
+        );
+        assert_csv_encode_decode_rule(
+            execute_standard_csv_encode(&function, &revision, &rows, &active, &registry),
+            CsvEncodePlanError::InvalidMagic,
+        );
+
+        let other_parameter = ParameterId::from_bytes([0x52; 16]);
+        let revision = presenter_revision(
+            function.id(),
+            STD_CSV_ENCODE_FUNCTION_REVISION_ID,
+            server_csv_encode::LANGUAGE_VERSION_IDENTITY,
+            artifact(
+                ExecutableArtifactKind::Server,
+                server_csv_encode::FORMAT_IDENTITY,
+                server_csv_encode::FORMAT_VERSION,
+                csv_encode_payload(other_parameter),
+            ),
+        );
+        assert_csv_encode_decode_rule(
+            execute_standard_csv_encode(&function, &revision, &rows, &active, &registry),
+            CsvEncodePlanError::UnexpectedParameter {
+                actual: other_parameter,
+                expected: parameter,
+            },
+        );
+
+        let other_type = orna_standard::BIGINT_TYPE_ID;
+        let revision = presenter_revision(
+            function.id(),
+            STD_CSV_ENCODE_FUNCTION_REVISION_ID,
+            server_csv_encode::LANGUAGE_VERSION_IDENTITY,
+            artifact(
+                ExecutableArtifactKind::Server,
+                server_csv_encode::FORMAT_IDENTITY,
+                server_csv_encode::FORMAT_VERSION,
+                CsvEncodePlan::new(parameter, other_type)
+                    .expect("any identities form a valid csv-encode model")
+                    .encode()
+                    .expect("the canonical csv-encode model encodes"),
+            ),
+        );
+        assert_csv_encode_decode_rule(
+            execute_standard_csv_encode(&function, &revision, &rows, &active, &registry),
+            CsvEncodePlanError::UnexpectedType {
+                actual: other_type,
+                expected: STD_DATA_ROWS_TYPE_ID,
+            },
+        );
+
+        let truncated = csv_encode_payload(parameter)[..40].to_vec();
+        let revision = presenter_revision(
+            function.id(),
+            STD_CSV_ENCODE_FUNCTION_REVISION_ID,
+            server_csv_encode::LANGUAGE_VERSION_IDENTITY,
+            artifact(
+                ExecutableArtifactKind::Server,
+                server_csv_encode::FORMAT_IDENTITY,
+                server_csv_encode::FORMAT_VERSION,
+                truncated,
+            ),
+        );
+        assert_csv_encode_decode_rule(
+            execute_standard_csv_encode(&function, &revision, &rows, &active, &registry),
+            CsvEncodePlanError::Truncated,
+        );
+
+        let mut trailing = csv_encode_payload(parameter);
+        trailing.push(0);
+        let revision = presenter_revision(
+            function.id(),
+            STD_CSV_ENCODE_FUNCTION_REVISION_ID,
+            server_csv_encode::LANGUAGE_VERSION_IDENTITY,
+            artifact(
+                ExecutableArtifactKind::Server,
+                server_csv_encode::FORMAT_IDENTITY,
+                server_csv_encode::FORMAT_VERSION,
+                trailing,
+            ),
+        );
+        assert_csv_encode_decode_rule(
+            execute_standard_csv_encode(&function, &revision, &rows, &active, &registry),
+            CsvEncodePlanError::TrailingBytes,
+        );
+    }
+
+    #[test]
+    fn standard_csv_encode_signature_rejects_each_shape_deviation() {
+        let standard = presenter_standard();
+        let registry = orna_standard::registered_opaque_codecs(&standard)
+            .expect("the V3 opaque codecs register");
+        let active = presenter_active(&standard);
+        let parameter = STD_CSV_ENCODE_PARAMETER_ID;
+        let revision = csv_encode_revision(STD_CSV_ENCODE_FUNCTION_ID, parameter);
+        let rows = ResultRows::new(
+            [ResultColumn::new(
+                "value",
+                ResolvedType::scalar(StandardScalar::Integer),
+                false,
+            )
+            .expect("the value column is valid")],
+            [ResultRow::new([RuntimeValue::Integer(1)])],
+        )
+        .expect("the presenter rows are valid");
+        let run = |function: &FunctionDefinition| {
+            execute_standard_csv_encode(function, &revision, &rows, &active, &registry)
+        };
+
+        let client = FunctionDefinition::new(
+            STD_CSV_ENCODE_FUNCTION_ID,
+            name(&["std", "csv", "encode"]),
+            FunctionDomain::Client,
+            vec![csv_encode_parameter(parameter)],
+            FunctionReturn::Single(ResolvedType::named(
+                orna_standard::STD_IO_BYTE_STREAM_TYPE_ID,
+            )),
+            STD_CSV_ENCODE_FUNCTION_REVISION_ID,
+            FunctionSecurity::Invoker,
+            Some(FunctionTransaction::ReadOnly),
+            FunctionVolatility::Stable,
+        );
+        assert_presenter_domain_rule(run(&client));
+
+        let missing = FunctionDefinition::new(
+            STD_CSV_ENCODE_FUNCTION_ID,
+            name(&["std", "csv", "encode"]),
+            FunctionDomain::Server,
+            vec![],
+            FunctionReturn::Single(ResolvedType::named(
+                orna_standard::STD_IO_BYTE_STREAM_TYPE_ID,
+            )),
+            STD_CSV_ENCODE_FUNCTION_REVISION_ID,
+            FunctionSecurity::Invoker,
+            Some(FunctionTransaction::ReadOnly),
+            FunctionVolatility::Stable,
+        );
+        assert_signature_rule(
+            run(&missing),
+            STD_CSV_ENCODE_FUNCTION_ID,
+            "standard csv-encode presenters must declare exactly one required non-null std.data.Rows parameter",
+        );
+
+        let wrong_parameter_type = FunctionDefinition::new(
+            STD_CSV_ENCODE_FUNCTION_ID,
+            name(&["std", "csv", "encode"]),
+            FunctionDomain::Server,
+            vec![ParameterDefinition::new(
+                parameter,
+                "p_rows",
+                0,
+                ResolvedType::named(orna_standard::BIGINT_TYPE_ID),
+                None,
+            )],
+            FunctionReturn::Single(ResolvedType::named(
+                orna_standard::STD_IO_BYTE_STREAM_TYPE_ID,
+            )),
+            STD_CSV_ENCODE_FUNCTION_REVISION_ID,
+            FunctionSecurity::Invoker,
+            Some(FunctionTransaction::ReadOnly),
+            FunctionVolatility::Stable,
+        );
+        assert_signature_rule(
+            run(&wrong_parameter_type),
+            STD_CSV_ENCODE_FUNCTION_ID,
+            "standard csv-encode presenters must declare one std.data.Rows parameter and one std.io.ByteStream result",
+        );
+
+        let wrong_result_type = FunctionDefinition::new(
+            STD_CSV_ENCODE_FUNCTION_ID,
+            name(&["std", "csv", "encode"]),
+            FunctionDomain::Server,
+            vec![csv_encode_parameter(parameter)],
+            FunctionReturn::Single(ResolvedType::named(
+                orna_standard::STD_TERMINAL_DOCUMENT_TYPE_ID,
+            )),
+            STD_CSV_ENCODE_FUNCTION_REVISION_ID,
+            FunctionSecurity::Invoker,
+            Some(FunctionTransaction::ReadOnly),
+            FunctionVolatility::Stable,
+        );
+        assert_signature_rule(
+            run(&wrong_result_type),
+            STD_CSV_ENCODE_FUNCTION_ID,
+            "standard csv-encode presenters must declare one std.data.Rows parameter and one std.io.ByteStream result",
+        );
+
+        let definer = FunctionDefinition::new(
+            STD_CSV_ENCODE_FUNCTION_ID,
+            name(&["std", "csv", "encode"]),
+            FunctionDomain::Server,
+            vec![csv_encode_parameter(parameter)],
+            FunctionReturn::Single(ResolvedType::named(
+                orna_standard::STD_IO_BYTE_STREAM_TYPE_ID,
+            )),
+            STD_CSV_ENCODE_FUNCTION_REVISION_ID,
+            FunctionSecurity::Definer,
+            Some(FunctionTransaction::ReadOnly),
+            FunctionVolatility::Stable,
+        );
+        assert_signature_rule(
+            run(&definer),
+            STD_CSV_ENCODE_FUNCTION_ID,
+            "standard presenter functions must use INVOKER security",
+        );
+
+        let manual = FunctionDefinition::new(
+            STD_CSV_ENCODE_FUNCTION_ID,
+            name(&["std", "csv", "encode"]),
+            FunctionDomain::Server,
+            vec![csv_encode_parameter(parameter)],
+            FunctionReturn::Single(ResolvedType::named(
+                orna_standard::STD_IO_BYTE_STREAM_TYPE_ID,
+            )),
+            STD_CSV_ENCODE_FUNCTION_REVISION_ID,
+            FunctionSecurity::Invoker,
+            Some(FunctionTransaction::Atomic),
+            FunctionVolatility::Stable,
+        );
+        assert_signature_rule(
+            run(&manual),
+            STD_CSV_ENCODE_FUNCTION_ID,
+            "standard presenter functions must use READ ONLY transactions",
+        );
+
+        let volatile = FunctionDefinition::new(
+            STD_CSV_ENCODE_FUNCTION_ID,
+            name(&["std", "csv", "encode"]),
+            FunctionDomain::Server,
+            vec![csv_encode_parameter(parameter)],
+            FunctionReturn::Single(ResolvedType::named(
+                orna_standard::STD_IO_BYTE_STREAM_TYPE_ID,
+            )),
+            STD_CSV_ENCODE_FUNCTION_REVISION_ID,
+            FunctionSecurity::Invoker,
+            Some(FunctionTransaction::ReadOnly),
+            FunctionVolatility::Immutable,
+        );
+        assert_signature_rule(
+            run(&volatile),
+            STD_CSV_ENCODE_FUNCTION_ID,
+            "standard presenter functions must use STABLE volatility",
+        );
+
+        // The exact pinned shape still executes after every rejection.
+        assert_eq!(
+            execute_standard_csv_encode(
+                &csv_encode_function(
+                    STD_CSV_ENCODE_FUNCTION_ID,
+                    parameter,
+                    STD_CSV_ENCODE_FUNCTION_REVISION_ID,
+                ),
+                &revision,
+                &rows,
+                &active,
+                &registry,
+            )
+            .expect("the pinned shape must execute"),
+            RuntimeValue::Opaque(
+                OpaqueValue::new(
+                    &active,
+                    &registry,
+                    orna_standard::STD_IO_BYTE_STREAM_TYPE_ID,
+                    frame_byte_stream(b"text/csv", b"value\n1\n"),
+                )
+                .expect("the framed byte stream constructs"),
+            )
         );
     }
 
