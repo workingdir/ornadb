@@ -3110,6 +3110,50 @@ mod tests {
     }
 
     #[test]
+    fn compiler_emitted_v5_capability_gate_fails_closed_before_runtime() {
+        let prepared = prepared_client_source(
+            "CREATE SCHEMA app; \
+             CREATE EXTERNAL CLIENT FUNCTION app.read() \
+             RETURNS BOOLEAN RUNTIME CONTRACT 'std.fs.read@1' \
+             REQUIRES CAPABILITY std.fs.read('/tmp/input');",
+        );
+        let active = active_from_prepared_candidate(&prepared);
+        let function = active.catalogue().functions()[0].id();
+        let authorisation = authorise(active.pair(), function);
+
+        let missing = super::evaluate_client_function_with_grants(
+            &active,
+            &authorisation,
+            &[],
+            &super::capability::LocalCapabilityGrantSet::new(),
+        )
+        .unwrap_err();
+        assert!(matches!(
+            missing,
+            super::ClientExecutionError::CapabilityDenied { capability, .. }
+                if capability == "std.fs.read"
+        ));
+
+        let grant = super::capability::LocalCapabilityGrant::new(
+            super::capability::LocalCapabilityName::StdFsRead,
+            super::capability::LocalCapabilityScope::path("/tmp").unwrap(),
+        )
+        .unwrap();
+        let grants = super::capability::LocalCapabilityGrantSet::from_grants([grant]).unwrap();
+        // The local grant passes. The runtime contract is not installed in this evaluator,
+        // so the next error must be the external-contract boundary.
+        let unavailable =
+            super::evaluate_client_function_with_grants(&active, &authorisation, &[], &grants)
+                .unwrap_err();
+
+        assert!(matches!(
+            unavailable,
+            super::ClientExecutionError::ExternalContract { identity, .. }
+                if identity == "std.fs.read@1"
+        ));
+    }
+
+    #[test]
     fn evaluates_prepared_version_two_client_constants() {
         for (literal, expected) in [("TRUE", true), ("FALSE", false)] {
             let prepared = prepared_client_constant(literal);
@@ -3896,6 +3940,12 @@ mod tests {
     }
 
     fn prepared_client_constant(literal: &str) -> DeployableRevision {
+        prepared_client_source(&format!(
+            "CREATE SCHEMA app; CREATE CLIENT FUNCTION app.enabled() RETURNS BOOLEAN RETURN {literal};"
+        ))
+    }
+
+    fn prepared_client_source(source: &str) -> DeployableRevision {
         let snapshot = orna_standard::retained_standard_library_snapshot().unwrap();
         let verified = orna_standard::verify_standard_library_snapshot(snapshot).unwrap();
         let standard = orna_compiler::check_standard_library_source(&verified).unwrap();
@@ -3903,10 +3953,7 @@ mod tests {
         let context =
             orna_compiler::StandardApplicationCheckContext::try_new(active.catalogue(), &standard)
                 .unwrap();
-        let source = format!(
-            "CREATE SCHEMA app; CREATE CLIENT FUNCTION app.enabled() RETURNS BOOLEAN RETURN {literal};"
-        );
-        let bundle = SourceBundle::new([SourceUnit::new("application.orna", &source)]).unwrap();
+        let bundle = SourceBundle::new([SourceUnit::new("application.orna", source)]).unwrap();
         let report = orna_compiler::check_standard_application(&bundle, &context);
         assert_eq!(report.diagnostics(), &[]);
 
