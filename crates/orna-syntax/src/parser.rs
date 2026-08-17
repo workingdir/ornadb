@@ -1134,8 +1134,7 @@ impl<'source> Parser<'source> {
             let end = value.span().end;
             Some((named, value, SourceSpan { start, end }))
         })();
-        let argument =
-            result.map(|(name, value, span)| ClientCallArgument { name, value, span });
+        let argument = result.map(|(name, value, span)| ClientCallArgument { name, value, span });
         self.builder.finish_node();
         argument
     }
