@@ -4992,8 +4992,16 @@ mod tests {
         let ClientFunctionBody::Expression { expression } = &function.body else {
             panic!("expected an expression body");
         };
-        let ClientExpression::Concat { left, right, .. } = expression else {
+        let ClientExpression::Concat {
+            left: outer_left,
+            right: outer_right,
+            ..
+        } = expression
+        else {
             panic!("expected a concatenation");
+        };
+        let ClientExpression::Concat { left, right, .. } = outer_left.as_ref() else {
+            panic!("expected a left-nested concatenation");
         };
         let ClientExpression::FieldPath { root, members, .. } = left.as_ref() else {
             panic!("expected a field path on the left");
@@ -5001,13 +5009,37 @@ mod tests {
         assert_eq!(root.text, "p_item");
         assert_eq!(members.len(), 1);
         assert_eq!(members[0].text, "name");
-        let ClientExpression::Concat { left, .. } = right.as_ref() else {
-            panic!("expected a nested concatenation on the right");
-        };
-        let ClientExpression::StringLiteral { value, .. } = left.as_ref() else {
+        let ClientExpression::StringLiteral { value, .. } = right.as_ref() else {
             panic!("expected the literal in the middle");
         };
         assert_eq!(value, " #");
+        let ClientExpression::FieldPath { root, members, .. } = outer_right.as_ref() else {
+            panic!("expected a field path on the right");
+        };
+        assert_eq!(root.text, "p_item");
+        assert_eq!(members.len(), 1);
+        assert_eq!(members[0].text, "code");
+    }
+
+    #[test]
+    fn rejects_client_expression_trailing_dots() {
+        for expression in ["p.", "p_item.name."] {
+            let source = format!(
+                "CREATE CLIENT FUNCTION examples.read(p_item REF app.item) \
+                 RETURNS TEXT AS {expression};"
+            );
+            let parsed = parse(&source);
+
+            assert!(
+                parsed
+                    .diagnostics()
+                    .iter()
+                    .any(|diagnostic| diagnostic.message
+                        == "expected an identifier after a CLIENT expression dot"),
+                "{expression:?}: {:?}",
+                parsed.diagnostics()
+            );
+        }
     }
 
     #[test]
