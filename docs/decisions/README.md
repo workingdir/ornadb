@@ -127,3 +127,5 @@ source-of-truth or authority rules.
   [`orna.std/3` Standard Output Value Types](0058-orna-std-3-output-value-types.md)
 * **work ADR 0059:**
   [Offline LSP and Editor Tooling for `.orna` Source](0059-offline-lsp-editor-tooling.md)
+* **work ADR 0066:**
+  [`orna source diff` — Semantic Source Changes Without Apply](0066-semantic-source-diff.md)
