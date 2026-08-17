@@ -1697,6 +1697,15 @@ pub const STD_TERMINAL_PRESENT_TABLE_PARAMETER_ID: ParameterId =
 /// The fixed ADR 0057 `std.terminal.present_table` function-revision identity: `...12`.
 pub const STD_TERMINAL_PRESENT_TABLE_FUNCTION_REVISION_ID: FunctionRevisionId =
     FunctionRevisionId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x12]);
+/// The fixed ADR 0067 `std.csv.encode` function identity: `...13`.
+pub const STD_CSV_ENCODE_FUNCTION_ID: FunctionId =
+    FunctionId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x13]);
+/// The fixed ADR 0067 `std.csv.encode.p_rows` parameter identity: `...13`.
+pub const STD_CSV_ENCODE_PARAMETER_ID: ParameterId =
+    ParameterId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x13]);
+/// The fixed ADR 0067 `std.csv.encode` function-revision identity: `...13`.
+pub const STD_CSV_ENCODE_FUNCTION_REVISION_ID: FunctionRevisionId =
+    FunctionRevisionId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x13]);
 
 /// The checked executable facts for the one accepted standard parameter-echo
 /// function (`std.invoke.echo`, ADR 0055).
