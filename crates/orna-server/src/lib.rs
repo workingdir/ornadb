@@ -56,10 +56,10 @@ pub use source_diff::{
 };
 pub use upgrade::{EmbeddedUpgradeError, run_embedded_upgrade};
 pub use user_state::{
-    InstalledUserStateChange, InstalledUserStateError, InstalledUserStateErrorKind,
-    InstalledUserStateExpectedType, InstalledUserStateInstance, InstalledUserStateOperation,
-    InstalledUserStateOutcome, InstalledUserStateRequest, run_installed_user_state,
-    run_user_state_with_kernel,
+    AuthenticatedClientStateAdapter, AuthenticatedClientStateError, InstalledUserStateChange,
+    InstalledUserStateError, InstalledUserStateErrorKind, InstalledUserStateExpectedType,
+    InstalledUserStateInstance, InstalledUserStateOperation, InstalledUserStateOutcome,
+    InstalledUserStateRequest, run_installed_user_state, run_user_state_with_kernel,
 };
 
 use std::fmt;

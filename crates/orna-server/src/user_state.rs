@@ -18,8 +18,10 @@
 
 use std::{collections::BTreeMap, fmt, io, io::Write};
 
+use orna_client::{ClientStateContext, ClientStateStore, ClientUserStateError};
 use orna_core::{
     FunctionId, StateSlotId, TypeId,
+    security::AuthenticatedSession,
     state::{
         UserStateCell, UserStateChange, UserStateError, UserStateWriteOutcome, UserStateWriteResult,
     },
@@ -246,6 +248,111 @@ pub async fn run_user_state_with_kernel(
     stdout: &mut impl Write,
 ) -> Result<InstalledUserStateOutcome, InstalledUserStateError> {
     execute_user_state(kernel, &request, stdout).await
+}
+
+/// An authenticated CLIENT state transport backed by the protected USER state
+/// service.
+///
+/// The authenticated session is supplied when the adapter is created. The
+/// client state model never supplies a principal.
+pub struct AuthenticatedClientStateAdapter<'a> {
+    kernel: &'a PostgresKernel,
+    session: &'a AuthenticatedSession,
+}
+
+impl<'a> AuthenticatedClientStateAdapter<'a> {
+    /// Creates an adapter for one authenticated kernel session.
+    pub const fn new(
+        kernel: &'a PostgresKernel,
+        session: &'a AuthenticatedSession,
+    ) -> Self {
+        Self { kernel, session }
+    }
+
+    /// Loads the state for one root context into the caller-owned store.
+    pub async fn load(
+        &self,
+        context: &ClientStateContext,
+        instances: &[UserStateInstanceRequest],
+        expected_types: &BTreeMap<(FunctionId, StateSlotId), TypeId>,
+        store: &mut ClientStateStore,
+    ) -> Result<(), AuthenticatedClientStateError> {
+        let cells = self
+            .kernel
+            .load_user_state(
+                self.session,
+                context.root_function(),
+                context.state_profile(),
+                instances,
+                expected_types,
+            )
+            .await
+            .map_err(AuthenticatedClientStateError::Kernel)?;
+        store.set_context(context.clone());
+        store
+            .load_user_state(&cells)
+            .map_err(AuthenticatedClientStateError::Client)
+    }
+
+    /// Flushes the store's dirty USER values as one bounded authenticated
+    /// batch.
+    pub async fn flush(
+        &self,
+        store: &mut ClientStateStore,
+    ) -> Result<(), AuthenticatedClientStateError> {
+        let changes = store
+            .pending_user_state_changes()
+            .map_err(AuthenticatedClientStateError::Client)?;
+        if changes.is_empty() {
+            return Ok(());
+        }
+        let context = store.context();
+        if changes.iter().any(|change| {
+            change.root_function() != context.root_function()
+                || change.state_profile() != context.state_profile()
+        }) {
+            return Err(AuthenticatedClientStateError::Client(
+                ClientUserStateError::InvalidChange(
+                    "dirty USER state spans more than one root context".to_owned(),
+                ),
+            ));
+        }
+        let results = self
+            .kernel
+            .write_user_state(self.session, &changes)
+            .await
+            .map_err(AuthenticatedClientStateError::Kernel)?;
+        store
+            .apply_user_state_write_results(&changes, &results)
+            .map_err(AuthenticatedClientStateError::Client)
+    }
+}
+
+/// A failure from an authenticated CLIENT state load or flush.
+#[derive(Debug)]
+pub enum AuthenticatedClientStateError {
+    /// The protected PostgreSQL state service failed.
+    Kernel(PostgresKernelError),
+    /// The caller-owned client state store rejected the batch.
+    Client(ClientUserStateError),
+}
+
+impl fmt::Display for AuthenticatedClientStateError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Kernel(source) => source.fmt(formatter),
+            Self::Client(source) => source.fmt(formatter),
+        }
+    }
+}
+
+impl std::error::Error for AuthenticatedClientStateError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Kernel(source) => Some(source),
+            Self::Client(source) => Some(source),
+        }
+    }
 }
 
 async fn execute_user_state(
