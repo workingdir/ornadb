@@ -453,7 +453,72 @@ fn render_change(
                 .unwrap_or_else(|| owner.canonical());
             let _ = write!(line, "~ parameter {owner}.{from} -> {owner}.{to}");
         }
-        _ => {}
+        SemanticChange::FieldTypeChanged {
+            owner, name, id, ..
+        } => {
+            let owner = candidate
+                .object_type_by_id(*owner)
+                .map(|definition| qualified(definition.name()))
+                .unwrap_or_else(|| owner.canonical());
+            let _ = write!(line, "! field {owner}.{name} type [{id:?}]");
+        }
+        SemanticChange::FieldNullabilityChanged {
+            owner, name, id, ..
+        } => {
+            let owner = candidate
+                .object_type_by_id(*owner)
+                .map(|definition| qualified(definition.name()))
+                .unwrap_or_else(|| owner.canonical());
+            let _ = write!(line, "! field {owner}.{name} nullability [{id:?}]");
+        }
+        SemanticChange::FieldUniquenessChanged {
+            owner, name, id, ..
+        } => {
+            let owner = candidate
+                .object_type_by_id(*owner)
+                .map(|definition| qualified(definition.name()))
+                .unwrap_or_else(|| owner.canonical());
+            let _ = write!(line, "! field {owner}.{name} uniqueness [{id:?}]");
+        }
+        SemanticChange::FieldConstraintChanged {
+            owner, name, id, ..
+        } => {
+            let owner = candidate
+                .object_type_by_id(*owner)
+                .map(|definition| qualified(definition.name()))
+                .unwrap_or_else(|| owner.canonical());
+            let _ = write!(line, "! field {owner}.{name} default/on-delete [{id:?}]");
+        }
+        SemanticChange::EnumLabelsChanged { name, .. } => {
+            let _ = write!(line, "! enum type {name} labels");
+        }
+        SemanticChange::FunctionReturnChanged { name, .. } => {
+            let _ = write!(line, "! function {name} return type");
+        }
+        SemanticChange::FunctionDomainChanged { name, .. } => {
+            let _ = write!(line, "! function {name} domain");
+        }
+        SemanticChange::FunctionSecurityChanged { name, .. } => {
+            let _ = write!(line, "! function {name} security");
+        }
+        SemanticChange::FunctionTransactionChanged { name, .. } => {
+            let _ = write!(line, "! function {name} transaction");
+        }
+        SemanticChange::FunctionVolatilityChanged { name, .. } => {
+            let _ = write!(line, "! function {name} volatility");
+        }
+        SemanticChange::ParameterTypeChanged {
+            owner, name, id, ..
+        } => {
+            let owner = candidate
+                .function_by_id(*owner)
+                .map(|definition| qualified(definition.name()))
+                .unwrap_or_else(|| owner.canonical());
+            let _ = write!(line, "! parameter {owner}.{name} type [{id:?}]");
+        }
+        change @ _ => {
+            let _ = write!(line, "! unsupported change ({})", change.category());
+        }
     }
     line
 }
