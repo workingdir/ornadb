@@ -1,19 +1,20 @@
 use rowan::{GreenNode, GreenNodeBuilder, Language};
 
 use crate::{
-    CapabilitySpecification, ClientFunctionBody, ClientFunctionDeclaration, DeleteStatement,
-    Diagnostic, EnumLabelDeclaration, EnumTypeDeclaration, FieldRenameDeclaration,
-    FunctionReturnType, FunctionSecurity, FunctionTransaction, FunctionVolatility, InsertStatement,
-    MutationValue, NamePart, NoInputParameterSelectBody, NullOrdering, ObjectFieldDeclaration,
-    ObjectSource, ObjectTypeDeclaration, OnDeletePolicy, OpaqueValueTypeDeclaration,
-    OptionTypeSpelling, OrderingDirection, OrderingExpression, Parse,
-    PrimitiveValueTypeDeclaration, PrimitiveValueTypePersistence, QualifiedName, QueryExpression,
-    RecordConstructor, RecordConstructorField, RecordConstructorFieldValue,
-    RecordValueTypeDeclaration, RowsColumnDeclaration, SchemaDeclaration, SelectQuantifier,
-    SelectQuery, ServerFunctionBody, ServerFunctionDeclaration, ServerFunctionParameter,
-    SourceSlice, SourceSpan, SqlDeleteBody, SqlInsertBody, SqlQueryBody, SqlUpdateBody,
-    StandardLargeObjectKind, SyntaxTree, TypeExportDeclaration, TypeExportTarget,
-    TypeSpecification, UpdateAssignment, UpdateStatement, ValueFieldDeclaration,
+    CapabilitySpecification, ClientCallArgument, ClientExpression, ClientFunctionBody,
+    ClientFunctionDeclaration, DeleteStatement, Diagnostic, EnumLabelDeclaration,
+    EnumTypeDeclaration, FieldRenameDeclaration, FunctionReturnType, FunctionSecurity,
+    FunctionTransaction, FunctionVolatility, InsertStatement, MutationValue, NamePart,
+    NoInputParameterSelectBody, NullOrdering, ObjectFieldDeclaration, ObjectSource,
+    ObjectTypeDeclaration, OnDeletePolicy, OpaqueValueTypeDeclaration, OptionTypeSpelling,
+    OrderingDirection, OrderingExpression, Parse, PrimitiveValueTypeDeclaration,
+    PrimitiveValueTypePersistence, QualifiedName, QueryExpression, RecordConstructor,
+    RecordConstructorField, RecordConstructorFieldValue, RecordValueTypeDeclaration,
+    RowsColumnDeclaration, SchemaDeclaration, SelectQuantifier, SelectQuery, ServerFunctionBody,
+    ServerFunctionDeclaration, ServerFunctionParameter, SourceSlice, SourceSpan, SqlDeleteBody,
+    SqlInsertBody, SqlQueryBody, SqlUpdateBody, StandardLargeObjectKind, SyntaxTree,
+    TypeExportDeclaration, TypeExportTarget, TypeSpecification, UpdateAssignment, UpdateStatement,
+    ValueFieldDeclaration,
     lexer::{Token, TokenKind, lex},
 };
 
@@ -56,6 +57,12 @@ pub(crate) enum SyntaxKind {
     ClientFunctionParameter,
     ClientFunctionReturnType,
     ClientBooleanReturnBody,
+    ClientExpressionBody,
+    ClientExternalContractBody,
+    ClientCallExpression,
+    ClientCallArgument,
+    ClientConcatExpression,
+    NumberLiteral,
     ExportTypeStatement,
     ValueField,
     ListTypeSpecification,
@@ -115,13 +122,19 @@ impl Language for OrnaLanguage {
             33 => SyntaxKind::ClientFunctionParameter,
             34 => SyntaxKind::ClientFunctionReturnType,
             35 => SyntaxKind::ClientBooleanReturnBody,
-            36 => SyntaxKind::ExportTypeStatement,
-            37 => SyntaxKind::ValueField,
-            38 => SyntaxKind::ListTypeSpecification,
-            39 => SyntaxKind::SetTypeSpecification,
-            40 => SyntaxKind::MapTypeSpecification,
-            41 => SyntaxKind::OptionTypeSpecification,
-            42 => SyntaxKind::StreamTypeSpecification,
+            36 => SyntaxKind::ClientExpressionBody,
+            37 => SyntaxKind::ClientExternalContractBody,
+            38 => SyntaxKind::ClientCallExpression,
+            39 => SyntaxKind::ClientCallArgument,
+            40 => SyntaxKind::ClientConcatExpression,
+            41 => SyntaxKind::NumberLiteral,
+            42 => SyntaxKind::ExportTypeStatement,
+            43 => SyntaxKind::ValueField,
+            44 => SyntaxKind::ListTypeSpecification,
+            45 => SyntaxKind::SetTypeSpecification,
+            46 => SyntaxKind::MapTypeSpecification,
+            47 => SyntaxKind::OptionTypeSpecification,
+            48 => SyntaxKind::StreamTypeSpecification,
             _ => panic!("unknown Orna syntax kind"),
         }
     }
@@ -234,6 +247,17 @@ impl<'source> Parser<'source> {
             .is_some_and(|token| token.is_word("CLIENT"))
             && self
                 .peek_significant(2)
+                .is_some_and(|token| token.is_word("FUNCTION"))
+        {
+            self.parse_create_client_function_statement();
+        } else if self
+            .peek_significant(1)
+            .is_some_and(|token| token.is_word("EXTERNAL"))
+            && self
+                .peek_significant(2)
+                .is_some_and(|token| token.is_word("CLIENT"))
+            && self
+                .peek_significant(3)
                 .is_some_and(|token| token.is_word("FUNCTION"))
         {
             self.parse_create_client_function_statement();
@@ -546,6 +570,16 @@ impl<'source> Parser<'source> {
 
         self.expect_word("CREATE");
         self.skip_trivia();
+        let external = if self
+            .current()
+            .is_some_and(|token| token.is_word("EXTERNAL"))
+        {
+            self.bump();
+            self.skip_trivia();
+            true
+        } else {
+            false
+        };
         if !self.expect_word("CLIENT") {
             self.recover_statement();
             self.builder.finish_node();
@@ -597,6 +631,18 @@ impl<'source> Parser<'source> {
         };
 
         self.skip_trivia();
+        let runtime_contract = if external {
+            let Some(contract) = self.parse_runtime_contract_clause() else {
+                self.recover_statement();
+                self.builder.finish_node();
+                return;
+            };
+            Some(contract)
+        } else {
+            None
+        };
+
+        self.skip_trivia();
         let capabilities = if self
             .current()
             .is_some_and(|token| token.is_word("REQUIRES"))
@@ -613,11 +659,21 @@ impl<'source> Parser<'source> {
             Vec::new()
         };
 
-        self.skip_trivia();
-        let Some(body) = self.parse_client_function_body() else {
-            self.recover_statement();
-            self.builder.finish_node();
-            return;
+        let body = if external {
+            let Some(identity) = runtime_contract.clone() else {
+                self.recover_statement();
+                self.builder.finish_node();
+                return;
+            };
+            ClientFunctionBody::ExternalContract { identity }
+        } else {
+            self.skip_trivia();
+            let Some(body) = self.parse_client_function_body() else {
+                self.recover_statement();
+                self.builder.finish_node();
+                return;
+            };
+            body
         };
         self.skip_trivia();
         let Some(semicolon) = self.expect_kind(
@@ -637,6 +693,8 @@ impl<'source> Parser<'source> {
                 end: parameter_list_end,
             },
             return_type,
+            external,
+            runtime_contract,
             capabilities,
             body,
             span: SourceSpan {
@@ -645,6 +703,52 @@ impl<'source> Parser<'source> {
             },
         });
         self.builder.finish_node();
+    }
+
+    /// Parses one `RUNTIME CONTRACT '<identity>'` clause.
+    ///
+    /// The clause owns the `ClientExternalContractBody` node: the string is
+    /// emitted here at its exact source position, before any capability
+    /// clause, so the tree stays lossless regardless of clause order.
+    fn parse_runtime_contract_clause(&mut self) -> Option<SourceSlice> {
+        if !self.expect_word("RUNTIME") {
+            self.error_current(
+                "ORNA0001",
+                "external CLIENT functions must declare RUNTIME CONTRACT '<identity>'",
+            );
+            return None;
+        }
+        self.skip_trivia();
+        if !self.expect_word("CONTRACT") {
+            self.error_current(
+                "ORNA0001",
+                "external CLIENT functions must declare RUNTIME CONTRACT '<identity>'",
+            );
+            return None;
+        }
+        self.skip_trivia();
+        let Some(token) = self.current().cloned() else {
+            self.error_current(
+                "ORNA0001",
+                "expected a contract identity string after RUNTIME CONTRACT",
+            );
+            return None;
+        };
+        if token.kind != TokenKind::StringLiteral {
+            self.error_current(
+                "ORNA0001",
+                "expected a quoted contract identity after RUNTIME CONTRACT",
+            );
+            return None;
+        }
+        self.builder
+            .start_node(SyntaxKind::ClientExternalContractBody.into());
+        self.bump();
+        self.builder.finish_node();
+        Some(SourceSlice {
+            text: token.text.to_owned(),
+            span: token.span(),
+        })
     }
 
     fn parse_client_function_parameters(
@@ -667,6 +771,15 @@ impl<'source> Parser<'source> {
     }
 
     fn parse_client_function_body(&mut self) -> Option<ClientFunctionBody> {
+        if self.current().is_some_and(|token| token.is_word("AS")) {
+            self.bump();
+            self.skip_trivia();
+            self.builder
+                .start_node(SyntaxKind::ClientExpressionBody.into());
+            let expression = self.parse_client_expression();
+            self.builder.finish_node();
+            return expression.map(|expression| ClientFunctionBody::Expression { expression });
+        }
         self.builder
             .start_node(SyntaxKind::ClientBooleanReturnBody.into());
         let result = (|| {
@@ -716,6 +829,322 @@ impl<'source> Parser<'source> {
         })();
         self.builder.finish_node();
         result
+    }
+
+    /// Parses one closed CLIENT expression (ADR 0068).
+    ///
+    /// The expression surface is: a call, a string/integer/Boolean literal,
+    /// a parameter read, a field path from a parameter, and left-associative
+    /// `||` concatenation. This parser is deliberately closed: it never
+    /// accepts arithmetic, comparisons, parentheses, or SQL fragments.
+    fn parse_client_expression(&mut self) -> Option<ClientExpression> {
+        let left = self.parse_client_primary_expression()?;
+        self.skip_trivia();
+        if self.current().is_some_and(|token| token.text == "||") {
+            self.bump();
+            self.skip_trivia();
+            let right = self.parse_client_expression()?;
+            let span = SourceSpan {
+                start: left.span().start,
+                end: right.span().end,
+            };
+            return Some(ClientExpression::Concat {
+                left: Box::new(left),
+                right: Box::new(right),
+                span,
+            });
+        }
+        Some(left)
+    }
+
+    fn parse_client_primary_expression(&mut self) -> Option<ClientExpression> {
+        let Some(token) = self.current().cloned() else {
+            self.error_current("ORNA0001", "expected a CLIENT expression");
+            return None;
+        };
+        if token.kind == TokenKind::StringLiteral {
+            self.bump();
+            return Some(ClientExpression::StringLiteral {
+                value: Self::unquote_client_text_literal(&token.text)?,
+                source: SourceSlice {
+                    text: token.text.to_owned(),
+                    span: token.span(),
+                },
+            });
+        }
+        if token.kind == TokenKind::NumberLiteral {
+            self.bump();
+            let value = token.text.parse::<i64>().ok().or_else(|| {
+                self.error_current(
+                    "ORNA0001",
+                    "CLIENT integer literals must fit in a signed 64-bit value",
+                );
+                None
+            })?;
+            return Some(ClientExpression::IntegerLiteral {
+                value,
+                source: SourceSlice {
+                    text: token.text.to_owned(),
+                    span: token.span(),
+                },
+            });
+        }
+        if token.is_word("TRUE") || token.is_word("FALSE") {
+            self.bump();
+            return Some(ClientExpression::BooleanLiteral {
+                value: token.is_word("TRUE"),
+                source: SourceSlice {
+                    text: token.text.to_owned(),
+                    span: token.span(),
+                },
+            });
+        }
+        if !token.is_identifier() {
+            self.error_current("ORNA0001", "expected a CLIENT expression");
+            return None;
+        }
+        let root_start = token.span().start;
+        // Collect one dotted name without emitting tokens yet: a qualified
+        // callee is followed by `(`, otherwise the name is a parameter read
+        // or field path. Emitting happens inside the owning node so the
+        // highlighter sees the call's opening parenthesis after the callee.
+        let mut parts = Vec::new();
+        let mut end = root_start;
+        let mut probe = self.index;
+        loop {
+            let Some(part) = self.tokens.get(probe).cloned() else {
+                break;
+            };
+            if !part.is_identifier() {
+                break;
+            }
+            parts.push(NamePart {
+                text: part.text.to_owned(),
+                span: part.span(),
+            });
+            end = part.span().end;
+            probe += 1;
+            while self
+                .tokens
+                .get(probe)
+                .is_some_and(|token| token.kind.is_trivia())
+            {
+                probe += 1;
+            }
+            if self
+                .tokens
+                .get(probe)
+                .is_some_and(|token| token.kind == TokenKind::Dot)
+            {
+                probe += 1;
+                while self
+                    .tokens
+                    .get(probe)
+                    .is_some_and(|token| token.kind.is_trivia())
+                {
+                    probe += 1;
+                }
+                continue;
+            }
+            break;
+        }
+        if parts.is_empty() {
+            self.error_current("ORNA0001", "expected a CLIENT expression");
+            return None;
+        }
+        if self
+            .tokens
+            .get(probe)
+            .is_some_and(|token| token.kind == TokenKind::LeftParenthesis)
+        {
+            return self.parse_client_call(parts, root_start, end);
+        }
+        // Emit the collected name tokens for the non-call form.
+        for part in &parts {
+            self.skip_trivia();
+            self.bump();
+            self.skip_trivia();
+            if self
+                .current()
+                .is_some_and(|token| token.kind == TokenKind::Dot)
+            {
+                self.bump();
+                self.skip_trivia();
+            }
+            let _ = part;
+        }
+        if parts.len() == 1 {
+            let parameter = parts
+                .into_iter()
+                .next()
+                .expect("a single-part name has one part");
+            return Some(ClientExpression::ParameterRead { parameter });
+        }
+        let root = parts.remove(0);
+        Some(ClientExpression::FieldPath {
+            root,
+            members: parts,
+            span: SourceSpan {
+                start: root_start,
+                end,
+            },
+        })
+    }
+
+    fn parse_client_call(
+        &mut self,
+        parts: Vec<NamePart>,
+        start: usize,
+        name_end: usize,
+    ) -> Option<ClientExpression> {
+        self.builder
+            .start_node(SyntaxKind::ClientCallExpression.into());
+        let result = self.parse_client_call_inner(parts, start, name_end);
+        self.builder.finish_node();
+        result
+    }
+
+    fn parse_client_call_inner(
+        &mut self,
+        parts: Vec<NamePart>,
+        start: usize,
+        name_end: usize,
+    ) -> Option<ClientExpression> {
+        let callee = QualifiedName {
+            parts,
+            span: SourceSpan {
+                start,
+                end: name_end,
+            },
+        };
+        // Emit the callee qualified name inside the call node.
+        self.builder.start_node(SyntaxKind::QualifiedName.into());
+        for (index, part) in callee.parts.iter().enumerate() {
+            self.skip_trivia();
+            self.bump();
+            self.skip_trivia();
+            if index + 1 < callee.parts.len()
+                && self
+                    .current()
+                    .is_some_and(|token| token.kind == TokenKind::Dot)
+            {
+                self.bump();
+                self.skip_trivia();
+            }
+        }
+        self.builder.finish_node();
+        self.bump(); // consume '('
+        self.skip_trivia();
+        let mut arguments = Vec::new();
+        if !self
+            .current()
+            .is_some_and(|token| token.kind == TokenKind::RightParenthesis)
+        {
+            loop {
+                let Some(argument) = self.parse_client_call_argument() else {
+                    return None;
+                };
+                let span = argument.span;
+                arguments.push(ClientCallArgument {
+                    name: argument.name,
+                    value: argument.value,
+                    span,
+                });
+                self.skip_trivia();
+                if self
+                    .current()
+                    .is_some_and(|token| token.kind == TokenKind::Comma)
+                {
+                    self.bump();
+                    self.skip_trivia();
+                    continue;
+                }
+                break;
+            }
+        }
+        self.skip_trivia();
+        self.expect_kind(
+            TokenKind::RightParenthesis,
+            "expected ')' to close the CLIENT call",
+        )?;
+        let end = self.tokens[self.index - 1].range.end;
+        let span = SourceSpan {
+            start: callee.span.start,
+            end,
+        };
+        Some(ClientExpression::Call {
+            callee,
+            arguments,
+            span,
+        })
+    }
+
+    /// Unquotes one single-quoted text literal with doubled-quote escaping.
+    fn unquote_client_text_literal(text: &str) -> Option<String> {
+        let mut characters = text.chars();
+        if characters.next() != Some('\'') || !text.ends_with('\'') {
+            return None;
+        }
+        let inner = &text[1..text.len() - 1];
+        let mut value = String::with_capacity(inner.len());
+        let mut characters = inner.chars().peekable();
+        while let Some(character) = characters.next() {
+            value.push(character);
+            if character == '\'' && characters.peek() == Some(&'\'') {
+                characters.next();
+            }
+        }
+        Some(value)
+    }
+
+    fn parse_client_call_argument(&mut self) -> Option<ClientCallArgument> {
+        self.builder
+            .start_node(SyntaxKind::ClientCallArgument.into());
+        let result = (|| {
+            let start = self.current()?.span().start;
+            // A named argument is `identifier => expression`. Detect it with
+            // a pure lookahead over the token vector (never emitting or
+            // moving the parser index), then emit the identifier, the arrow,
+            // and their intervening trivia exactly once.
+            let named = if self.current().is_some_and(Token::is_identifier) {
+                let name = self.current().cloned()?;
+                let mut probe = self.index + 1;
+                while self
+                    .tokens
+                    .get(probe)
+                    .is_some_and(|token| token.kind.is_trivia())
+                {
+                    probe += 1;
+                }
+                if self
+                    .tokens
+                    .get(probe)
+                    .is_some_and(|token| token.text == "=>")
+                {
+                    self.bump(); // identifier
+                    self.skip_trivia();
+                    self.bump(); // '=>'
+                    self.skip_trivia();
+                    Some(NamePart {
+                        text: name.text.to_owned(),
+                        span: name.span(),
+                    })
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+            let value = self.parse_client_expression()?;
+            let end = value.span().end;
+            Some((named, value, SourceSpan { start, end }))
+        })();
+        let argument = match result {
+            Some((name, value, span)) => Some(ClientCallArgument { name, value, span }),
+            None => None,
+        };
+        self.builder.finish_node();
+        argument
     }
 
     fn recover_client_body(&mut self, long_form: bool) {
