@@ -13,11 +13,8 @@
 //! database; callers recover the two snapshots and render the report.
 
 use crate::{
-    catalogue::{
-        CatalogueSnapshot, EnumTypeDefinition, FieldDefinition, FunctionDefinition,
-        ObjectTypeDefinition, ParameterDefinition, SchemaDefinition,
-    },
     FieldId, FunctionId, ParameterId, SchemaId, TypeId,
+    catalogue::{CatalogueSnapshot, FunctionDefinition, ObjectTypeDefinition},
 };
 
 /// What happened to one durable definition between two catalogues.
@@ -374,12 +371,13 @@ fn qualified(name: &crate::catalogue::QualifiedSemanticName) -> String {
 mod tests {
     use super::*;
     use crate::catalogue::{
-        FunctionDomain, FunctionReturn, FunctionSecurity, FunctionTransaction, FunctionVolatility,
-        QualifiedSemanticName,
+        EnumTypeDefinition, FieldDefinition, FunctionDomain, FunctionReturn, FunctionSecurity,
+        FunctionTransaction, FunctionVolatility, ParameterDefinition, QualifiedSemanticName,
+        SchemaDefinition,
     };
     use crate::{
-        types::{ResolvedType, StandardScalar},
         CatalogueRevisionId, FunctionRevisionId,
+        types::{ResolvedType, StandardScalar},
     };
 
     fn name(parts: &[&str]) -> QualifiedSemanticName {
