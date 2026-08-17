@@ -989,25 +989,6 @@ impl CheckedClientFunctionBody {
         }
     }
 
-    /// Returns the checked expression when this body contains one.
-    pub(crate) fn as_expression(&self) -> Option<&CheckedClientExpression> {
-        match self {
-            Self::Expression { expression } => Some(expression),
-            Self::BooleanLiteral { .. } | Self::ExternalContract { .. } => None,
-            #[cfg(test)]
-            Self::Unsupported => None,
-        }
-    }
-
-    /// Returns the external contract identity when this body is external.
-    pub(crate) fn as_external_contract(&self) -> Option<(&str, &SourceLocation)> {
-        match self {
-            Self::ExternalContract { identity, location } => Some((identity, location)),
-            Self::BooleanLiteral { .. } | Self::Expression { .. } => None,
-            #[cfg(test)]
-            Self::Unsupported => None,
-        }
-    }
 }
 
 /// One checked CLIENT expression in the ADR 0068 closed surface.
