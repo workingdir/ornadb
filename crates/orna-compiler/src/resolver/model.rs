@@ -4,7 +4,7 @@ use std::{collections::HashMap, error::Error, fmt, hash::Hash};
 
 use orna_artifact::server_parameter_echo::ServerParameterEchoError;
 use orna_core::{
-    CatalogueRevisionId, FieldId, FunctionId, FunctionRevisionId, ParameterId, SchemaId,
+    CatalogueRevisionId, FieldId, FunctionId, FunctionRevisionId, ParameterId, SchemaId, StateSlotId,
     SourceUnitId, StandardLibraryRevisionId, TypeBindingId, TypeId,
     canonical_hash::CanonicalHashError,
     catalogue::{
@@ -962,6 +962,13 @@ pub(crate) enum CheckedClientFunctionBody {
         /// The checked expression returned by the function.
         expression: CheckedClientExpression,
     },
+    /// A closed CLIENT state block with ordered slot metadata and one return expression (ADR 0069).
+    StateBlock {
+        /// The checked state slots in declaration order.
+        states: Vec<CheckedClientStateSlot>,
+        /// The checked return expression.
+        return_expression: CheckedClientExpression,
+    },
     /// An external function body declared only by its runtime contract.
     ExternalContract {
         /// The exact contract identity string.
@@ -983,7 +990,9 @@ impl CheckedClientFunctionBody {
     pub(crate) fn as_boolean_literal(&self) -> Option<(bool, &SourceLocation)> {
         match self {
             Self::BooleanLiteral { value, location } => Some((*value, location)),
-            Self::Expression { .. } | Self::ExternalContract { .. } => None,
+            Self::Expression { .. } | Self::StateBlock { .. } | Self::ExternalContract { .. } => {
+                None
+            }
             #[cfg(test)]
             Self::Unsupported => None,
         }
@@ -1098,6 +1107,80 @@ impl CheckedClientCapability {
     /// Returns the declared argument source.
     pub fn argument(&self) -> &CheckedClientCapabilityArgument {
         &self.argument
+    }
+}
+
+/// The scope of one checked CLIENT state slot (work ADR 0069).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum CheckedStateScope {
+    /// State private to one mounted function instance.
+    Local,
+    /// State retained for the client invocation session.
+    Session,
+    /// State associated with the authenticated principal.
+    User,
+}
+
+/// The checked initial value of one CLIENT state slot.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum CheckedStateDefault {
+    /// No DEFAULT clause was written.
+    Unset,
+    /// The slot starts with an explicit null value.
+    Null,
+    /// The slot starts with a checked CLIENT expression value.
+    Expression(CheckedClientExpression),
+}
+
+/// A checked state-slot identity. Provisional values are placeholders only;
+/// preparation must derive their durable identity from the eventual function id.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub(crate) enum CheckedStateSlotId {
+    /// A slot owned by a function with a durable identity.
+    Existing(StateSlotId),
+    /// A slot owned by a newly declared function.
+    Provisional(StateSlotId),
+}
+
+/// One checked CLIENT state slot with source-free semantic metadata.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct CheckedClientStateSlot {
+    pub(super) id: CheckedStateSlotId,
+    pub(super) name: String,
+    pub(super) ordinal: u32,
+    pub(super) semantic_type: SemanticType<CheckedTypeId>,
+    pub(super) scope: CheckedStateScope,
+    pub(super) default: CheckedStateDefault,
+    pub(super) location: SourceLocation,
+}
+
+impl CheckedClientStateSlot {
+    pub(crate) const fn id(&self) -> CheckedStateSlotId {
+        self.id
+    }
+
+    pub(crate) fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub(crate) const fn ordinal(&self) -> u32 {
+        self.ordinal
+    }
+
+    pub(crate) const fn semantic_type(&self) -> SemanticType<CheckedTypeId> {
+        self.semantic_type
+    }
+
+    pub(crate) const fn scope(&self) -> CheckedStateScope {
+        self.scope
+    }
+
+    pub(crate) fn default(&self) -> &CheckedStateDefault {
+        &self.default
+    }
+
+    pub(crate) fn location(&self) -> &SourceLocation {
+        &self.location
     }
 }
 

@@ -3864,6 +3864,13 @@ fn validate_client_function_preflight(
         CheckedClientFunctionBody::ExternalContract { identity, .. } => {
             ValidatedClientBody::ExternalContract(identity.clone())
         }
+        CheckedClientFunctionBody::StateBlock { .. } => {
+            // V4 state-plan preparation must re-derive provisional slot ids from
+            // the eventual durable FunctionId; this slice fails closed before that stage.
+            return Err(PrepareError::InvalidCheckedBundle {
+                reason: "checked CLIENT state block bodies are not yet preparable",
+            });
+        }
         #[cfg(test)]
         CheckedClientFunctionBody::Unsupported => {
             return Err(PrepareError::InvalidCheckedBundle {
@@ -4127,6 +4134,7 @@ fn standard_checked_locations<'a>(
             CheckedClientFunctionBody::Expression { expression } => {
                 client_expression_locations(expression, &mut locations);
             }
+            CheckedClientFunctionBody::StateBlock { .. } => {}
             #[cfg(test)]
             CheckedClientFunctionBody::Unsupported => {}
         }
