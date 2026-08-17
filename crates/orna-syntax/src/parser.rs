@@ -838,21 +838,24 @@ impl<'source> Parser<'source> {
     /// `||` concatenation. This parser is deliberately closed: it never
     /// accepts arithmetic, comparisons, parentheses, or SQL fragments.
     fn parse_client_expression(&mut self) -> Option<ClientExpression> {
-        let left = self.parse_client_primary_expression()?;
-        self.skip_trivia();
-        if self.current().is_some_and(|token| token.text == "||") {
+        let mut left = self.parse_client_primary_expression()?;
+        loop {
+            self.skip_trivia();
+            if !self.current().is_some_and(|token| token.text == "||") {
+                break;
+            }
             self.bump();
             self.skip_trivia();
-            let right = self.parse_client_expression()?;
+            let right = self.parse_client_primary_expression()?;
             let span = SourceSpan {
                 start: left.span().start,
                 end: right.span().end,
             };
-            return Some(ClientExpression::Concat {
+            left = ClientExpression::Concat {
                 left: Box::new(left),
                 right: Box::new(right),
                 span,
-            });
+            };
         }
         Some(left)
     }
@@ -940,6 +943,14 @@ impl<'source> Parser<'source> {
                     .is_some_and(|token| token.kind.is_trivia())
                 {
                     probe += 1;
+                }
+                if !self.tokens.get(probe).is_some_and(Token::is_identifier) {
+                    self.index = probe;
+                    self.error_current(
+                        "ORNA0001",
+                        "expected an identifier after a CLIENT expression dot",
+                    );
+                    return None;
                 }
                 continue;
             }
