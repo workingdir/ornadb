@@ -9,8 +9,10 @@ use std::{
 
 use orna_artifact::{
     client_plan::{
-        ClientPlan, FORMAT_IDENTITY as CLIENT_PLAN_FORMAT, FORMAT_VERSION as CLIENT_PLAN_VERSION,
+        ClientExpressionNode, ClientPlan, ExpressionClientPlan,
+        FORMAT_IDENTITY as CLIENT_PLAN_FORMAT, FORMAT_VERSION as CLIENT_PLAN_VERSION,
         LANGUAGE_VERSION_IDENTITY as CLIENT_PLAN_LANGUAGE_VERSION,
+        EXPRESSION_FORMAT_VERSION as CLIENT_PLAN_EXPRESSION_VERSION,
     },
     constant_expression::{
         ConstantExpression, ConstantExpressionError, FORMAT_IDENTITY as CONSTANT_FORMAT,
@@ -76,7 +78,8 @@ use crate::{
     },
     relational::{supports_server_select_distinct, supports_server_select_equality},
     resolver::{
-        CheckedFieldRename, UNIQUE_FIELD_MESSAGE, supports_unique_text_or_required_reference,
+        CheckedClientExpression, CheckedClientFunctionBody, CheckedFieldRename, UNIQUE_FIELD_MESSAGE,
+        supports_unique_text_or_required_reference,
     },
 };
 
@@ -1587,8 +1590,33 @@ struct SignatureSlot {
 #[derive(Clone)]
 struct ValidatedClientReturn {
     owner: CheckedFunctionId,
-    return_type: TypeId,
+    target: EvidenceTarget,
+    semantic_type: SemanticType<CheckedTypeId>,
     location: SourceLocation,
+}
+
+#[derive(Clone)]
+enum ValidatedClientBody {
+    BooleanLiteral(bool),
+    Expression(CheckedClientExpression),
+    ExternalContract(String),
+}
+
+#[derive(Clone)]
+struct ValidatedClient {
+    id: CheckedFunctionId,
+    name: orna_core::catalogue::QualifiedSemanticName,
+    location: SourceLocation,
+    security: FunctionSecurity,
+    transaction: Option<FunctionTransaction>,
+    volatility: FunctionVolatility,
+    parameters: Vec<crate::CheckedServerFunctionParameter>,
+    return_target: EvidenceTarget,
+    return_semantic_type: SemanticType<CheckedTypeId>,
+    return_location: SourceLocation,
+    return_scalar: Option<StandardScalar>,
+    body: ValidatedClientBody,
+    references: Vec<crate::CheckedDefinitionReference>,
 }
 
 #[derive(Clone, Default)]
@@ -1616,19 +1644,6 @@ impl ValidatedClientReturns {
     }
 }
 
-#[derive(Clone)]
-struct ValidatedClient {
-    id: CheckedFunctionId,
-    name: orna_core::catalogue::QualifiedSemanticName,
-    location: SourceLocation,
-    security: FunctionSecurity,
-    transaction: Option<FunctionTransaction>,
-    volatility: FunctionVolatility,
-    return_type: TypeId,
-    return_location: SourceLocation,
-    return_scalar: StandardScalar,
-    body_value: bool,
-}
 
 #[derive(Clone)]
 struct ValidatedFunctionIdentity {
@@ -1796,10 +1811,10 @@ impl SignatureEvidence {
 
         Ok(Self { ordered })
     }
-
     fn function_slots(&self, owner: CheckedFunctionId) -> impl Iterator<Item = &SignatureSlot> {
         self.ordered.iter().filter(move |slot| slot.owner == owner)
     }
+
 
     fn materialise_client_returns(
         &self,
@@ -1827,14 +1842,21 @@ impl SignatureEvidence {
                     },
                 );
             };
-            let EvidenceTarget::Value(return_type) = &slot.target else {
+            if slot_owner != owner || ordinal != 0 || slot.flattened_ordinal != 0 {
                 return Err(
                     PrepareStandardApplicationError::FunctionTypeReferenceMismatch {
                         function: owner,
                     },
                 );
+            }
+            let expected_target = match function.return_type() {
+                SemanticType::Scalar(_) => matches!(slot.target, EvidenceTarget::Value(_)),
+                SemanticType::Named(_) => matches!(slot.target, EvidenceTarget::Named(_)),
+                SemanticType::Reference { .. } => {
+                    matches!(slot.target, EvidenceTarget::ObjectReference(_))
+                }
             };
-            if slot_owner != owner || ordinal != 0 || slot.flattened_ordinal != 0 {
+            if !expected_target {
                 return Err(
                     PrepareStandardApplicationError::FunctionTypeReferenceMismatch {
                         function: owner,
@@ -1843,7 +1865,8 @@ impl SignatureEvidence {
             }
             ordered.push(ValidatedClientReturn {
                 owner,
-                return_type: *return_type,
+                target: slot.target.clone(),
+                semantic_type: function.return_type(),
                 location: slot.location.clone(),
             });
         }
@@ -3718,19 +3741,24 @@ fn validate_client_function_preflight(
             reason: "checked CLIENT function has an unsupported domain",
         });
     }
-    if !function.parameters().is_empty() {
+    let legacy_boolean_body =
+        matches!(function.body(), CheckedClientFunctionBody::BooleanLiteral { .. });
+    if legacy_boolean_body && !function.parameters().is_empty() {
         return Err(PrepareError::InvalidCheckedBundle {
             reason: "checked CLIENT function declares parameters",
         });
     }
-    let standard_boolean = standard.value_types().iter().any(|value_type| {
-        value_type.id() == return_evidence.return_type
-            && value_type.representation_contract() == "orna.kernel.value.boolean@1"
-    });
-    if function.return_type() != SemanticType::Scalar(StandardScalar::Boolean) || !standard_boolean
+    if legacy_boolean_body
+        && (function.return_type() != SemanticType::Scalar(StandardScalar::Boolean)
+            || return_evidence.semantic_type != SemanticType::Scalar(StandardScalar::Boolean))
     {
         return Err(PrepareError::InvalidCheckedBundle {
             reason: "checked CLIENT function does not return BOOLEAN from the checked standard library",
+        });
+    }
+    if !legacy_boolean_body && function.return_type() != return_evidence.semantic_type {
+        return Err(PrepareError::InvalidCheckedBundle {
+            reason: "checked CLIENT function return evidence does not match its return type",
         });
     }
     if function.security() != FunctionSecurity::Invoker {
@@ -3748,16 +3776,102 @@ fn validate_client_function_preflight(
             reason: "checked CLIENT function has an unsupported volatility mode",
         });
     }
-    let (body_value, _) = function
-        .boolean_body()
-        .ok_or(PrepareError::InvalidCheckedBundle {
-            reason: "checked CLIENT function has an unsupported body",
-        })?;
-    if !function.references().is_empty() {
+    if u32::try_from(function.references().len()).is_err() {
+        return Err(PrepareError::ReferenceCountExceedsU32 {
+            function: function.id(),
+            count: function.references().len(),
+        });
+    }
+    if function
+        .references()
+        .iter()
+        .any(|reference| !supports_definition_reference_kind(reference.kind()))
+    {
+        return Err(PrepareError::InvalidCheckedBundle {
+            reason: "checked CLIENT function contains an unsupported definition reference kind",
+        });
+    }
+    if legacy_boolean_body && !function.references().is_empty() {
         return Err(PrepareError::InvalidCheckedBundle {
             reason: "checked CLIENT function contains unsupported application definition references",
         });
     }
+
+    let return_scalar = match (function.return_type(), &return_evidence.target) {
+        (SemanticType::Scalar(scalar), EvidenceTarget::Value(type_id)) => {
+            let Some(value_type) = standard
+                .value_types()
+                .iter()
+                .find(|value| value.id() == *type_id)
+            else {
+                return Err(PrepareError::InvalidCheckedBundle {
+                    reason: "checked CLIENT function return value type has no standard definition",
+                });
+            };
+            let expected = match value_type.representation_contract() {
+                "orna.kernel.value.boolean@1" => StandardScalar::Boolean,
+                "orna.kernel.value.integer@1" => StandardScalar::Integer,
+                "orna.kernel.value.bigint@1" => StandardScalar::BigInt,
+                "orna.kernel.value.float@1" => StandardScalar::Float,
+                "orna.kernel.value.character-large-object@1" => {
+                    StandardScalar::CharacterLargeObject
+                }
+                "orna.kernel.value.binary-large-object@1" => StandardScalar::BinaryLargeObject,
+                _ => {
+                    return Err(PrepareError::InvalidCheckedBundle {
+                        reason: "checked CLIENT function return type has an unsupported standard contract",
+                    });
+                }
+            };
+            if scalar != expected {
+                return Err(PrepareError::InvalidCheckedBundle {
+                    reason: "checked CLIENT function return type disagrees with its standard contract",
+                });
+            }
+            Some(expected)
+        }
+        (SemanticType::Named(target), EvidenceTarget::Named(evidence)) if target == *evidence => {
+            None
+        }
+        (SemanticType::Reference { target }, EvidenceTarget::ObjectReference(evidence))
+            if target == *evidence =>
+        {
+            None
+        }
+        _ => {
+            return Err(PrepareError::InvalidCheckedBundle {
+                reason: "checked CLIENT function return evidence has an unsupported target",
+            });
+        }
+    };
+
+    let body = match function.body() {
+        CheckedClientFunctionBody::BooleanLiteral { value, .. } => {
+            if function.parameters().len() != 0
+                || function.return_type() != SemanticType::Scalar(StandardScalar::Boolean)
+                || return_scalar != Some(StandardScalar::Boolean)
+                || !function.references().is_empty()
+            {
+                return Err(PrepareError::InvalidCheckedBundle {
+                    reason: "checked Boolean CLIENT function violates its closed body invariants",
+                });
+            }
+            ValidatedClientBody::BooleanLiteral(*value)
+        }
+        CheckedClientFunctionBody::Expression { expression } => {
+            ValidatedClientBody::Expression(expression.clone())
+        }
+        CheckedClientFunctionBody::ExternalContract { identity, .. } => {
+            ValidatedClientBody::ExternalContract(identity.clone())
+        }
+        #[cfg(test)]
+        CheckedClientFunctionBody::Unsupported => {
+            return Err(PrepareError::InvalidCheckedBundle {
+                reason: "checked CLIENT function has an unsupported body",
+            });
+        }
+    };
+
     validate_existing_function(
         function.id(),
         function.name(),
@@ -3771,13 +3885,15 @@ fn validate_client_function_preflight(
         security: function.security(),
         transaction: function.transaction(),
         volatility: function.volatility(),
-        return_type: return_evidence.return_type,
+        parameters: function.parameters().to_vec(),
+        return_target: return_evidence.target.clone(),
+        return_semantic_type: return_evidence.semantic_type,
         return_location: return_evidence.location.clone(),
-        return_scalar: StandardScalar::Boolean,
-        body_value,
+        return_scalar,
+        body,
+        references: function.references().to_vec(),
     })
 }
-
 fn validate_existing_function(
     id: CheckedFunctionId,
     name: &orna_core::catalogue::QualifiedSemanticName,
@@ -3906,6 +4022,7 @@ fn validate_field_renames(
     Ok(())
 }
 
+
 fn validate_active_field_rename(
     active: &ObjectTypeDefinition,
     rename: &CheckedFieldRename,
@@ -4003,8 +4120,16 @@ fn standard_checked_locations<'a>(
                 .map(|parameter| parameter.location()),
         );
         locations.push(&client_returns.for_client(index, function.id())?.location);
-        if let Some((_, location)) = function.boolean_body() {
-            locations.push(location);
+        match function.body() {
+            CheckedClientFunctionBody::BooleanLiteral { location, .. }
+            | CheckedClientFunctionBody::ExternalContract { location, .. } => {
+                locations.push(location);
+            }
+            CheckedClientFunctionBody::Expression { expression } => {
+                client_expression_locations(expression, &mut locations);
+            }
+            #[cfg(test)]
+            CheckedClientFunctionBody::Unsupported => {}
         }
         locations.extend(
             function
@@ -4014,6 +4139,36 @@ fn standard_checked_locations<'a>(
         );
     }
     Ok(locations)
+}
+
+fn client_expression_locations<'a>(
+    expression: &'a CheckedClientExpression,
+    locations: &mut Vec<&'a SourceLocation>,
+) {
+    match expression {
+        CheckedClientExpression::Call {
+            arguments, location, ..
+        } => {
+            locations.push(location);
+            for (_, argument) in arguments {
+                client_expression_locations(argument, locations);
+            }
+        }
+        CheckedClientExpression::String { location, .. }
+        | CheckedClientExpression::Integer { location, .. }
+        | CheckedClientExpression::Boolean { location, .. }
+        | CheckedClientExpression::ParameterRead { location, .. }
+        | CheckedClientExpression::FieldPath { location, .. } => locations.push(location),
+        CheckedClientExpression::Concat {
+            left,
+            right,
+            location,
+        } => {
+            locations.push(location);
+            client_expression_locations(left, locations);
+            client_expression_locations(right, locations);
+        }
+    }
 }
 
 fn validate_location(
@@ -4458,6 +4613,25 @@ impl IdentityMap {
                                 }
                             };
                             result.functions.insert(function.id(), function_id);
+                            for parameter in function.parameters() {
+                                let parameter_id = match parameter.id() {
+                                    CheckedParameterId::Existing(id) => id,
+                                    CheckedParameterId::Provisional(_) if allow_provisional => {
+                                        ParameterId::new()
+                                    }
+                                    CheckedParameterId::Provisional(_) => {
+                                        return Err(PrepareError::InvalidCheckedBundle {
+                                            reason: "matched active source contains a provisional parameter",
+                                        });
+                                    }
+                                };
+                                insert_consistent(
+                                    &mut result.parameters,
+                                    parameter.id(),
+                                    parameter_id,
+                                    "checked parameter identity maps inconsistently",
+                                )?;
+                            }
                         }
                     }
                 }
@@ -6064,7 +6238,27 @@ impl<'a> CandidateBuilder<'a> {
             self.identities.function(validated.id)?,
             validated.name.clone(),
             FunctionDomain::Client,
-            Vec::new(),
+            validated
+                .parameters
+                .iter()
+                .map(|parameter| {
+                    Ok(ParameterDefinition::new(
+                        self.identities.parameter(parameter.id())?,
+                        parameter.name(),
+                        parameter.ordinal(),
+                        self.declaration_type(
+                            parameter.semantic_type(),
+                            crate::CheckedTypeUseKind::Parameter {
+                                owner: validated.id,
+                                parameter: parameter.id(),
+                            },
+                            consume_evidence,
+                            projection,
+                        )?,
+                        None,
+                    ))
+                })
+                .collect::<Result<Vec<_>, PrepareError>>()?,
             FunctionReturn::Single(self.client_return_type(
                 validated,
                 consume_evidence,
@@ -6076,22 +6270,95 @@ impl<'a> CandidateBuilder<'a> {
             validated.volatility,
         ))
     }
-
     fn client_artifact(
         &self,
         validated: &ValidatedClient,
     ) -> Result<PreparedFunctionArtifact, PrepareError> {
-        let payload = ClientPlan::return_boolean(validated.body_value).encode();
+        let (version, payload) = match &validated.body {
+            ValidatedClientBody::BooleanLiteral(value) => {
+                (CLIENT_PLAN_VERSION, ClientPlan::return_boolean(*value).encode())
+            }
+            ValidatedClientBody::Expression(expression) => {
+                let expression = self.client_expression_node(expression)?;
+                let payload = ExpressionClientPlan::new(expression).encode().map_err(|_| {
+                    PrepareError::InvalidCheckedBundle {
+                        reason: "checked CLIENT expression exceeds client-plan limits",
+                    }
+                })?;
+                (CLIENT_PLAN_EXPRESSION_VERSION, payload)
+            }
+            ValidatedClientBody::ExternalContract(identity) => {
+                let payload = ExpressionClientPlan::new(ClientExpressionNode::ExternalContract {
+                    identity: identity.clone(),
+                })
+                .encode()
+                .map_err(|_| PrepareError::InvalidCheckedBundle {
+                    reason: "checked CLIENT external contract exceeds client-plan limits",
+                })?;
+                (CLIENT_PLAN_EXPRESSION_VERSION, payload)
+            }
+        };
         let hash = artifact_payload_digest(&payload)?;
         Ok(PreparedFunctionArtifact {
             artifact: ExecutableArtifact::new(
                 ExecutableArtifactKind::Client,
                 CLIENT_PLAN_FORMAT,
-                CLIENT_PLAN_VERSION,
+                version,
                 payload,
                 hash,
             )?,
             language_version: CLIENT_PLAN_LANGUAGE_VERSION.to_owned(),
+        })
+    }
+
+    fn client_expression_node(
+        &self,
+        expression: &CheckedClientExpression,
+    ) -> Result<ClientExpressionNode, PrepareError> {
+        Ok(match expression {
+            CheckedClientExpression::Call {
+                function,
+                arguments,
+                ..
+            } => ClientExpressionNode::Call {
+                function: self.identities.function(*function)?,
+                arguments: arguments
+                    .iter()
+                    .map(|(parameter, value)| {
+                        Ok((
+                            self.identities.parameter(*parameter)?,
+                            self.client_expression_node(value)?,
+                        ))
+                    })
+                    .collect::<Result<Vec<_>, PrepareError>>()?,
+            },
+            CheckedClientExpression::String { value, .. } => {
+                ClientExpressionNode::String { value: value.clone() }
+            }
+            CheckedClientExpression::Integer { value, .. } => {
+                ClientExpressionNode::Integer { value: *value }
+            }
+            CheckedClientExpression::Boolean { value, .. } => {
+                ClientExpressionNode::Boolean { value: *value }
+            }
+            CheckedClientExpression::ParameterRead { parameter, .. } => {
+                ClientExpressionNode::ParameterRead {
+                    parameter: self.identities.parameter(*parameter)?,
+                }
+            }
+            CheckedClientExpression::FieldPath { root, fields, .. } => {
+                ClientExpressionNode::FieldPath {
+                    root: self.identities.parameter(*root)?,
+                    fields: fields
+                        .iter()
+                        .map(|field| self.identities.field(*field))
+                        .collect::<Result<Vec<_>, PrepareError>>()?,
+                }
+            }
+            CheckedClientExpression::Concat { left, right, .. } => ClientExpressionNode::Concat {
+                left: Box::new(self.client_expression_node(left)?),
+                right: Box::new(self.client_expression_node(right)?),
+            },
         })
     }
 
@@ -6101,14 +6368,50 @@ impl<'a> CandidateBuilder<'a> {
         revision: FunctionRevisionId,
         validated: &ValidatedClient,
     ) -> Result<Vec<DefinitionReference>, PrepareError> {
-        Ok(vec![DefinitionReference::new(
+        let mut references = Vec::with_capacity(validated.references.len() + 1);
+        let return_target = match validated.return_target {
+            EvidenceTarget::Value(type_id) => DefinitionReferenceTarget::ValueType(type_id),
+            EvidenceTarget::Named(type_id) => {
+                DefinitionReferenceTarget::ValueType(self.identities.type_id(type_id)?)
+            }
+            EvidenceTarget::ObjectReference(type_id) => {
+                DefinitionReferenceTarget::ObjectType(self.identities.type_id(type_id)?)
+            }
+            EvidenceTarget::Unknown => {
+                return Err(PrepareError::InvalidCheckedBundle {
+                    reason: "checked CLIENT return type has no durable identity",
+                });
+            }
+        };
+        references.push(DefinitionReference::new(
             function,
             revision,
             0,
-            DefinitionReferenceTarget::ValueType(validated.return_type),
-            DefinitionReferenceKind::NamedType,
+            return_target,
+            if matches!(validated.return_target, EvidenceTarget::ObjectReference(_)) {
+                DefinitionReferenceKind::ObjectReference
+            } else {
+                DefinitionReferenceKind::NamedType
+            },
             self.source.origin(&validated.return_location)?,
-        )])
+        ));
+        for (index, reference) in validated.references.iter().enumerate() {
+            let ordinal = u32::try_from(index + 1).map_err(|_| {
+                PrepareError::ReferenceCountExceedsU32 {
+                    function: validated.id,
+                    count: validated.references.len() + 1,
+                }
+            })?;
+            references.push(DefinitionReference::new(
+                function,
+                revision,
+                ordinal,
+                self.identities.reference_target(reference.target())?,
+                reference.kind(),
+                self.source.origin(reference.location())?,
+            ));
+        }
+        Ok(references)
     }
 
     fn initial_function_revision(
@@ -6267,29 +6570,62 @@ impl<'a> CandidateBuilder<'a> {
         validated: &ValidatedClient,
         consume_evidence: bool,
     ) -> Result<CandidateResolvedType, PrepareError> {
-        let Some(declaration_evidence) = &self.declaration_evidence else {
-            return Ok(CandidateResolvedType::LegacyScalar(validated.return_scalar));
-        };
-        let kind = crate::CheckedTypeUseKind::Return {
-            owner: validated.id,
-            ordinal: 0,
-        };
-        let evidence = if consume_evidence {
-            declaration_evidence.borrow_mut().consume(kind)?
+        let evidence = if let Some(declaration_evidence) = &self.declaration_evidence {
+            let kind = crate::CheckedTypeUseKind::Return {
+                owner: validated.id,
+                ordinal: 0,
+            };
+            if consume_evidence {
+                declaration_evidence.borrow_mut().consume(kind)?
+            } else {
+                declaration_evidence.borrow().lookup(kind)?
+            }
         } else {
-            declaration_evidence.borrow().lookup(kind)?
+            EvidenceUse {
+                kind: crate::CheckedTypeUseKind::Return {
+                    owner: validated.id,
+                    ordinal: 0,
+                },
+                target: validated.return_target.clone(),
+                location: validated.return_location.clone(),
+            }
         };
-        if evidence.target != EvidenceTarget::Value(validated.return_type)
+        if evidence.target != validated.return_target
             || evidence.location != validated.return_location
         {
             return Err(PrepareError::InvalidCheckedBundle {
                 reason: "checked CLIENT function return evidence does not match its validated slot",
             });
         }
-        Ok(CandidateResolvedType::StandardValue {
-            type_id: validated.return_type,
-            compatibility: validated.return_scalar,
-        })
+        match (validated.return_semantic_type, validated.return_target.clone()) {
+            (SemanticType::Scalar(_compatibility), EvidenceTarget::Value(type_id)) => {
+                Ok(CandidateResolvedType::StandardValue {
+                    type_id,
+                    compatibility: validated.return_scalar.ok_or(
+                        PrepareError::InvalidCheckedBundle {
+                            reason: "checked CLIENT scalar return has no compatibility type",
+                        },
+                    )?,
+                })
+            }
+            (SemanticType::Named(target), EvidenceTarget::Named(evidence))
+                if target == evidence =>
+            {
+                Ok(CandidateResolvedType::Named(
+                    self.identities.type_id(target)?,
+                ))
+            }
+            (SemanticType::Reference { target }, EvidenceTarget::ObjectReference(evidence))
+                if target == evidence =>
+            {
+                Ok(CandidateResolvedType::Reference(
+                    self.identities.type_id(target)?,
+                ))
+            }
+            _ => Err(PrepareError::InvalidCheckedBundle {
+                reason: "checked CLIENT function return evidence does not match its semantic type",
+            }),
+        }
     }
 
     fn function_definition(
