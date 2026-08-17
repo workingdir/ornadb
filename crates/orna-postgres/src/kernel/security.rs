@@ -552,10 +552,10 @@ impl PostgresKernel {
     /// keeps the historical application `RevisionPair` as its durable
     /// standard pin.
     ///
-    /// Sealed execution of an `Application` target is not admitted by this
-    /// step: the raw dispatcher remains the application-call boundary. A
-    /// request that privately resolves to an application target fails closed
-    /// after the protected decision, before any artifact executes.
+    /// The invocation first passes the protected `sys.invoke` gate, then
+    /// executes application CLIENT targets through the same authorised local
+    /// evaluator as the raw dispatch path. Verified standard targets retain
+    /// their sealed standard-only execution path.
     pub async fn dispatch_sealed_sys_invoke(
         &self,
         authenticated_session: &AuthenticatedSession,
@@ -609,28 +609,58 @@ impl PostgresKernel {
                                 "allowed sealed invocation target must resolve",
                             )
                         })?;
-                    let SealedResolvedTarget::VerifiedStandard {
-                        definition,
-                        executable,
-                    } = target
-                    else {
-                        return Err(sealed_target_invariant(
-                            &active,
-                            "sealed execution requires a verified-standard target",
-                        ));
+                    let (value, security_target) = match target {
+                        SealedResolvedTarget::Application(definition) => {
+                            if definition.domain() != FunctionDomain::Client {
+                                return Err(sealed_target_invariant(
+                                    &active,
+                                    "sealed application execution requires a CLIENT function",
+                                ));
+                            }
+                            let security_target =
+                                InvocationTarget::new(definition.id(), active.pair());
+                            let authorisation = match security
+                                .authorise_execute(authenticated_session, security_target)
+                            {
+                                ExecuteDecision::Allowed(authorisation) => authorisation,
+                                ExecuteDecision::Denied(_) => {
+                                    return Err(sealed_target_invariant(
+                                        &active,
+                                        "allowed sealed invocation must re-authorise its pinned target",
+                                    ));
+                                }
+                            };
+                            let arguments =
+                                bind_sealed_invoke_arguments(definition, decoded.arguments())?;
+                            let value = evaluate_authorised_client_function_with_arguments(
+                                &active,
+                                &authorisation,
+                                &arguments,
+                            )
+                            .map_err(PostgresKernelError::ClientExecution)?
+                            .into_value();
+                            (value, security_target)
+                        }
+                        SealedResolvedTarget::VerifiedStandard {
+                            definition,
+                            executable,
+                        } => {
+                            let arguments =
+                                bind_sealed_invoke_arguments(definition, decoded.arguments())?;
+                            let value = execute_standard_parameter_echo(
+                                definition,
+                                executable.revision(),
+                                &arguments,
+                            )?;
+                            let security_target = InvocationTarget::verified_standard(
+                                definition.id(),
+                                active.pair(),
+                                standard.revision(),
+                                executable.revision().id(),
+                            );
+                            (value, security_target)
+                        }
                     };
-                    let arguments = bind_sealed_invoke_arguments(definition, decoded.arguments())?;
-                    let value = execute_standard_parameter_echo(
-                        definition,
-                        executable.revision(),
-                        &arguments,
-                    )?;
-                    let security_target = InvocationTarget::verified_standard(
-                        definition.id(),
-                        active.pair(),
-                        standard.revision(),
-                        executable.revision().id(),
-                    );
                     let events = match decoded.output_requirement() {
                         Some(requirement) => {
                             match present_sealed_standard_output(
@@ -683,7 +713,7 @@ impl PostgresKernel {
                                 &registry,
                                 authenticated_session,
                                 invocation,
-                                definition.id(),
+                                security_target.function(),
                                 &events,
                                 decoded.client_offer(),
                             )
