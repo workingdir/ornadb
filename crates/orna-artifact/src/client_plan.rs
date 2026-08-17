@@ -1,4 +1,4 @@
-//! Canonical `orna.client-plan` artefact formats, versions 1, 2, and 3.
+//! Canonical `orna.client-plan` artefact formats, versions 1, 2, 3, and 4.
 //!
 //! The first CLIENT function slice has one operation: return a non-null
 //! BOOLEAN constant. The complete encoding is:
@@ -30,6 +30,22 @@
 //! tree: canonical recursive node encoding
 //! ```
 //!
+//! Version 4 (work ADR 0069) returns one closed CLIENT expression tree
+//! followed by the checked state-slot declarations of the owning function:
+//!
+//! ```text
+//! magic[8] = ORNACP\0\0
+//! version: u32 big-endian = 4
+//! operation: u8 = 4
+//! return tree: canonical recursive node encoding
+//! slot count: u32 big-endian, 1..=MAX_STATE_SLOTS
+//! slot: StateSlotId[16]
+//!       TypeId[16]
+//!       scope: u8 = 1|2|3 (LOCAL|SESSION|USER)
+//!       default tag: u8 = 0|1|2 (unset|null|expression)
+//!       [default tree: canonical recursive node encoding]
+//! ```
+//!
 //! Each node starts with a tag byte followed by its exact payload. The node
 //! set is closed: call, string, integer, Boolean, parameter read, field
 //! path, concatenation, and external contract. Decoding enforces the closed
@@ -41,7 +57,7 @@
 
 use std::fmt;
 
-use orna_core::{FieldId, FunctionId, ParameterId, TypeId};
+use orna_core::{FieldId, FunctionId, ParameterId, StateSlotId, TypeId};
 
 /// The stable public identity of this artefact format.
 pub const FORMAT_IDENTITY: &str = "orna.client-plan";
@@ -53,6 +69,9 @@ pub const FORMAT_VERSION: u32 = 1;
 pub const OPAQUE_FORMAT_VERSION: u32 = 2;
 /// The client-plan version that returns one closed CLIENT expression tree.
 pub const EXPRESSION_FORMAT_VERSION: u32 = 3;
+/// The client-plan version that returns one closed CLIENT expression tree
+/// and the owning function's checked state-slot declarations.
+pub const STATE_FORMAT_VERSION: u32 = 4;
 /// The exact first eight bytes of every client-plan artefact.
 pub const MAGIC: [u8; 8] = *b"ORNACP\0\0";
 /// The maximum accepted encoded artefact size.
@@ -65,10 +84,13 @@ pub const MAX_EXPRESSION_NODES: usize = 1024;
 pub const MAX_CALL_ARGUMENTS: usize = 64;
 /// The maximum number of fields in one field path.
 pub const MAX_FIELD_PATH_LENGTH: usize = 64;
+/// The maximum number of state slots in one state client plan.
+pub const MAX_STATE_SLOTS: usize = 64;
 
 const RETURN_BOOLEAN_OPERATION: u8 = 1;
 const RETURN_OPAQUE_OPERATION: u8 = 2;
 const RETURN_EXPRESSION_OPERATION: u8 = 3;
+const RETURN_STATE_OPERATION: u8 = 4;
 const ENCODED_LENGTH: usize = MAGIC.len() + size_of::<u32>() + 2;
 const OPAQUE_PAYLOAD_LENGTH: usize = 16;
 const OPAQUE_ENCODED_LENGTH: usize =
@@ -82,6 +104,14 @@ const NODE_PARAMETER_READ: u8 = 5;
 const NODE_FIELD_PATH: u8 = 6;
 const NODE_CONCAT: u8 = 7;
 const NODE_EXTERNAL_CONTRACT: u8 = 8;
+
+const STATE_SCOPE_LOCAL: u8 = 1;
+const STATE_SCOPE_SESSION: u8 = 2;
+const STATE_SCOPE_USER: u8 = 3;
+
+const STATE_DEFAULT_UNSET: u8 = 0;
+const STATE_DEFAULT_NULL: u8 = 1;
+const STATE_DEFAULT_EXPRESSION: u8 = 2;
 
 /// A checked CLIENT plan that returns one Boolean constant.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -335,6 +365,237 @@ impl ExpressionClientPlan {
     }
 }
 
+/// The scope of one checked CLIENT state slot (work ADR 0069).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum StateScope {
+    /// State private to one mounted function instance.
+    Local,
+    /// State retained for the client invocation session.
+    Session,
+    /// State associated with the authenticated principal.
+    User,
+}
+
+impl StateScope {
+    /// Returns the canonical scope tag byte.
+    const fn tag(self) -> u8 {
+        match self {
+            Self::Local => STATE_SCOPE_LOCAL,
+            Self::Session => STATE_SCOPE_SESSION,
+            Self::User => STATE_SCOPE_USER,
+        }
+    }
+}
+
+/// The checked initial value of one CLIENT state slot (work ADR 0069).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum StateDefault {
+    /// No DEFAULT clause was written.
+    Unset,
+    /// The slot starts with an explicit null value.
+    Null,
+    /// The slot starts with a checked CLIENT expression value.
+    Expression(ClientExpressionNode),
+}
+
+/// One checked CLIENT state slot with source-free semantic metadata.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StateSlot {
+    state_slot_id: StateSlotId,
+    type_id: TypeId,
+    scope: StateScope,
+    default: StateDefault,
+}
+
+impl StateSlot {
+    /// Creates a checked state slot from its durable identity, nominal type,
+    /// scope, and checked default.
+    pub const fn new(
+        state_slot_id: StateSlotId,
+        type_id: TypeId,
+        scope: StateScope,
+        default: StateDefault,
+    ) -> Self {
+        Self {
+            state_slot_id,
+            type_id,
+            scope,
+            default,
+        }
+    }
+
+    /// Returns the durable state-slot identity.
+    pub const fn state_slot_id(&self) -> StateSlotId {
+        self.state_slot_id
+    }
+
+    /// Returns the nominal state value type.
+    pub const fn type_id(&self) -> TypeId {
+        self.type_id
+    }
+
+    /// Returns the declared state scope.
+    pub const fn scope(&self) -> StateScope {
+        self.scope
+    }
+
+    /// Returns the checked initial value of this slot.
+    pub const fn default(&self) -> &StateDefault {
+        &self.default
+    }
+}
+
+/// A checked version-4 CLIENT plan that returns one closed expression tree
+/// and carries the owning function's ordered state-slot declarations.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StateClientPlan {
+    expression: ClientExpressionNode,
+    slots: Vec<StateSlot>,
+}
+
+impl StateClientPlan {
+    /// Creates a checked state plan from one closed expression tree and the
+    /// ordered state-slot records.
+    pub fn new(expression: ClientExpressionNode, slots: Vec<StateSlot>) -> Self {
+        Self { expression, slots }
+    }
+
+    /// Returns the closed return expression tree.
+    pub const fn expression(&self) -> &ClientExpressionNode {
+        &self.expression
+    }
+
+    /// Returns the state slots in declaration order.
+    pub fn slots(&self) -> &[StateSlot] {
+        &self.slots
+    }
+
+    /// Returns the canonical artefact version for this plan.
+    pub const fn format_version(&self) -> u32 {
+        STATE_FORMAT_VERSION
+    }
+
+    /// Encodes this plan into its exact version-4 bytes.
+    pub fn encode(&self) -> Result<Vec<u8>, ClientPlanError> {
+        let slot_count = self.slots.len();
+        if slot_count == 0 {
+            return Err(ClientPlanError::InvalidStateSlotCount { actual: 0 });
+        }
+        if slot_count > MAX_STATE_SLOTS {
+            return Err(ClientPlanError::StateSlotLimitExceeded {
+                limit: MAX_STATE_SLOTS,
+            });
+        }
+        let mut seen: Vec<StateSlotId> = Vec::with_capacity(slot_count);
+        for slot in &self.slots {
+            if seen.contains(&slot.state_slot_id) {
+                return Err(ClientPlanError::DuplicateStateSlotId(
+                    slot.state_slot_id,
+                ));
+            }
+            seen.push(slot.state_slot_id);
+        }
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&MAGIC);
+        bytes.extend_from_slice(&STATE_FORMAT_VERSION.to_be_bytes());
+        bytes.push(RETURN_STATE_OPERATION);
+        let mut writer = NodeWriter::new();
+        let mut count = 0;
+        encode_expression_node(&self.expression, &mut writer, 0, &mut count)?;
+        bytes.extend_from_slice(&writer.finish());
+        bytes.extend_from_slice(&(slot_count as u32).to_be_bytes());
+        for slot in &self.slots {
+            bytes.extend_from_slice(&slot.state_slot_id.to_bytes());
+            bytes.extend_from_slice(&slot.type_id.to_bytes());
+            bytes.push(slot.scope.tag());
+            match &slot.default {
+                StateDefault::Unset => bytes.push(STATE_DEFAULT_UNSET),
+                StateDefault::Null => bytes.push(STATE_DEFAULT_NULL),
+                StateDefault::Expression(node) => {
+                    bytes.push(STATE_DEFAULT_EXPRESSION);
+                    let mut writer = NodeWriter::new();
+                    let mut count = 0;
+                    encode_expression_node(node, &mut writer, 0, &mut count)?;
+                    bytes.extend_from_slice(&writer.finish());
+                }
+            }
+        }
+        if bytes.len() > MAX_ARTIFACT_BYTES {
+            return Err(ClientPlanError::ArtifactSizeLimit {
+                size: bytes.len(),
+                maximum: MAX_ARTIFACT_BYTES,
+            });
+        }
+        Ok(bytes)
+    }
+
+    /// Decodes exactly one canonical version-4 state client-plan.
+    pub fn decode(bytes: &[u8]) -> Result<Self, ClientPlanError> {
+        if bytes.len() > MAX_ARTIFACT_BYTES {
+            return Err(ClientPlanError::ArtifactSizeLimit {
+                size: bytes.len(),
+                maximum: MAX_ARTIFACT_BYTES,
+            });
+        }
+        let mut reader = Reader::new(bytes);
+        if reader.array::<8>()? != MAGIC {
+            return Err(ClientPlanError::InvalidMagic);
+        }
+        let version = reader.u32()?;
+        if version != STATE_FORMAT_VERSION {
+            return Err(ClientPlanError::UnsupportedVersion(version));
+        }
+        let operation = reader.u8()?;
+        if operation != RETURN_STATE_OPERATION {
+            return Err(ClientPlanError::InvalidOperation(operation));
+        }
+        let mut count = 0usize;
+        let expression = decode_expression_node(&mut reader, 0, &mut count, bytes.len())?;
+        let slot_count = reader.u32()?;
+        if slot_count == 0 {
+            return Err(ClientPlanError::InvalidStateSlotCount { actual: 0 });
+        }
+        if slot_count as usize > MAX_STATE_SLOTS {
+            return Err(ClientPlanError::StateSlotLimitExceeded {
+                limit: MAX_STATE_SLOTS,
+            });
+        }
+        let mut slots = Vec::with_capacity(slot_count as usize);
+        let mut seen: Vec<StateSlotId> = Vec::with_capacity(slot_count as usize);
+        for _ in 0..slot_count {
+            let state_slot_id = StateSlotId::from_bytes(reader.array()?);
+            if seen.contains(&state_slot_id) {
+                return Err(ClientPlanError::DuplicateStateSlotId(state_slot_id));
+            }
+            seen.push(state_slot_id);
+            let type_id = TypeId::from_bytes(reader.array()?);
+            let scope = match reader.u8()? {
+                STATE_SCOPE_LOCAL => StateScope::Local,
+                STATE_SCOPE_SESSION => StateScope::Session,
+                STATE_SCOPE_USER => StateScope::User,
+                tag => return Err(ClientPlanError::InvalidStateScope(tag)),
+            };
+            let default = match reader.u8()? {
+                STATE_DEFAULT_UNSET => StateDefault::Unset,
+                STATE_DEFAULT_NULL => StateDefault::Null,
+                STATE_DEFAULT_EXPRESSION => {
+                    let mut count = 0usize;
+                    StateDefault::Expression(decode_expression_node(
+                        &mut reader,
+                        0,
+                        &mut count,
+                        bytes.len(),
+                    )?)
+                }
+                tag => return Err(ClientPlanError::InvalidStateDefaultTag(tag)),
+            };
+            slots.push(StateSlot::new(state_slot_id, type_id, scope, default));
+        }
+        reader.require_finished()?;
+        Ok(Self::new(expression, slots))
+    }
+}
+
 /// The maximum encoded length of one expression-tree byte slice.
 struct NodeWriter {
     bytes: Vec<u8>,
@@ -578,6 +839,22 @@ pub enum ClientPlanError {
         /// The exceeded limit.
         limit: usize,
     },
+    /// A version-4 state slot uses an unknown scope tag.
+    InvalidStateScope(u8),
+    /// A version-4 state slot uses an unknown default tag.
+    InvalidStateDefaultTag(u8),
+    /// A version-4 plan declares zero state slots.
+    InvalidStateSlotCount {
+        /// The non-canonical count from the artefact.
+        actual: u32,
+    },
+    /// A version-4 plan declares more state slots than the format allows.
+    StateSlotLimitExceeded {
+        /// The exceeded limit.
+        limit: usize,
+    },
+    /// A version-4 plan repeats one state-slot identity.
+    DuplicateStateSlotId(StateSlotId),
     /// The encoded artefact exceeds the format byte limit.
     ArtifactSizeLimit {
         /// The supplied artefact size.
@@ -622,6 +899,22 @@ impl fmt::Display for ClientPlanError {
                 formatter,
                 "client-plan expression collection exceeds the limit {limit}"
             ),
+            Self::InvalidStateScope(tag) => {
+                write!(formatter, "invalid client-plan state scope tag {tag}")
+            }
+            Self::InvalidStateDefaultTag(tag) => {
+                write!(formatter, "invalid client-plan state default tag {tag}")
+            }
+            Self::InvalidStateSlotCount { actual } => write!(
+                formatter,
+                "invalid client-plan state slot count {actual}; a state plan requires at least one slot"
+            ),
+            Self::StateSlotLimitExceeded { limit } => {
+                write!(formatter, "client-plan state slot count exceeds the limit {limit}")
+            }
+            Self::DuplicateStateSlotId(id) => {
+                write!(formatter, "duplicate client-plan state slot identity {id}")
+            }
             Self::ArtifactSizeLimit { size, maximum } => write!(
                 formatter,
                 "orna.client-plan artefact size {size} exceeds the limit {maximum}"
@@ -822,6 +1115,8 @@ mod tests {
 
     #[test]
     fn displays_the_public_error_contract() {
+        let duplicate_slot = StateSlotId::from_bytes([0x61; 16]);
+        let duplicate_display = format!("duplicate client-plan state slot identity {duplicate_slot}");
         let cases = [
             (
                 ClientPlanError::InvalidMagic,
@@ -866,6 +1161,26 @@ mod tests {
             (
                 ClientPlanError::ExpressionCollectionExceeded { limit: 64 },
                 "client-plan expression collection exceeds the limit 64",
+            ),
+            (
+                ClientPlanError::InvalidStateScope(9),
+                "invalid client-plan state scope tag 9",
+            ),
+            (
+                ClientPlanError::InvalidStateDefaultTag(7),
+                "invalid client-plan state default tag 7",
+            ),
+            (
+                ClientPlanError::InvalidStateSlotCount { actual: 0 },
+                "invalid client-plan state slot count 0; a state plan requires at least one slot",
+            ),
+            (
+                ClientPlanError::StateSlotLimitExceeded { limit: 64 },
+                "client-plan state slot count exceeds the limit 64",
+            ),
+            (
+                ClientPlanError::DuplicateStateSlotId(duplicate_slot),
+                duplicate_display.as_str(),
             ),
             (
                 ClientPlanError::ArtifactSizeLimit {
@@ -1096,6 +1411,474 @@ mod tests {
         for length in 0..encoded.len() {
             assert_eq!(
                 ExpressionClientPlan::decode(&encoded[..length]),
+                Err(ClientPlanError::Truncated),
+                "prefix length {length} must be truncated"
+            );
+        }
+    }
+
+    fn state_plan() -> StateClientPlan {
+        let function = FunctionId::from_bytes([0x21; 16]);
+        let parameter = ParameterId::from_bytes([0x31; 16]);
+        let field = FieldId::from_bytes([0x41; 16]);
+        StateClientPlan::new(
+            ClientExpressionNode::Call {
+                function,
+                arguments: vec![(
+                    parameter,
+                    ClientExpressionNode::FieldPath {
+                        root: parameter,
+                        fields: vec![field],
+                    },
+                )],
+            },
+            vec![
+                StateSlot::new(
+                    StateSlotId::from_bytes([0x11; 16]),
+                    TypeId::from_bytes([0x12; 16]),
+                    StateScope::Local,
+                    StateDefault::Unset,
+                ),
+                StateSlot::new(
+                    StateSlotId::from_bytes([0x21; 16]),
+                    TypeId::from_bytes([0x22; 16]),
+                    StateScope::Session,
+                    StateDefault::Null,
+                ),
+                StateSlot::new(
+                    StateSlotId::from_bytes([0x31; 16]),
+                    TypeId::from_bytes([0x32; 16]),
+                    StateScope::User,
+                    StateDefault::Expression(ClientExpressionNode::Concat {
+                        left: Box::new(ClientExpressionNode::String {
+                            value: "prefix".to_owned(),
+                        }),
+                        right: Box::new(ClientExpressionNode::ParameterRead { parameter }),
+                    }),
+                ),
+            ],
+        )
+    }
+
+    fn expression_default_plan() -> StateClientPlan {
+        let function = FunctionId::from_bytes([0x21; 16]);
+        let parameter = ParameterId::from_bytes([0x31; 16]);
+        let field = FieldId::from_bytes([0x41; 16]);
+        let forms = [
+            ClientExpressionNode::Call {
+                function,
+                arguments: vec![(parameter, ClientExpressionNode::Boolean { value: true })],
+            },
+            ClientExpressionNode::String {
+                value: "a'b\"c".to_owned(),
+            },
+            ClientExpressionNode::Integer { value: -42 },
+            ClientExpressionNode::Boolean { value: false },
+            ClientExpressionNode::ParameterRead { parameter },
+            ClientExpressionNode::FieldPath {
+                root: parameter,
+                fields: vec![field],
+            },
+            ClientExpressionNode::Concat {
+                left: Box::new(ClientExpressionNode::String {
+                    value: "x".to_owned(),
+                }),
+                right: Box::new(ClientExpressionNode::Integer { value: 7 }),
+            },
+            ClientExpressionNode::ExternalContract {
+                identity: "std.ui.window@1".to_owned(),
+            },
+        ];
+        let slots = forms
+            .iter()
+            .enumerate()
+            .map(|(index, node)| {
+                StateSlot::new(
+                    StateSlotId::from_bytes([index as u8; 16]),
+                    TypeId::from_bytes([0x40 + index as u8; 16]),
+                    match index % 3 {
+                        0 => StateScope::Local,
+                        1 => StateScope::Session,
+                        _ => StateScope::User,
+                    },
+                    StateDefault::Expression(node.clone()),
+                )
+            })
+            .collect();
+        StateClientPlan::new(
+            ClientExpressionNode::String {
+                value: "ready".to_owned(),
+            },
+            slots,
+        )
+    }
+
+    fn minimal_state_plan() -> StateClientPlan {
+        StateClientPlan::new(
+            ClientExpressionNode::Boolean { value: true },
+            vec![StateSlot::new(
+                StateSlotId::from_bytes([0x11; 16]),
+                TypeId::from_bytes([0x12; 16]),
+                StateScope::Local,
+                StateDefault::Unset,
+            )],
+        )
+    }
+
+    #[test]
+    fn state_plan_round_trips_every_scope_and_default_form() {
+        let plans = [
+            state_plan(),
+            expression_default_plan(),
+            minimal_state_plan(),
+            StateClientPlan::new(
+                ClientExpressionNode::Boolean { value: false },
+                vec![StateSlot::new(
+                    StateSlotId::from_bytes([0x51; 16]),
+                    TypeId::from_bytes([0x52; 16]),
+                    StateScope::Session,
+                    StateDefault::Null,
+                )],
+            ),
+        ];
+        for plan in plans {
+            let bytes = plan.encode().expect("the plan encodes");
+            let decoded = StateClientPlan::decode(&bytes).expect("the plan decodes");
+            assert_eq!(decoded, plan);
+            assert_eq!(decoded.format_version(), STATE_FORMAT_VERSION);
+            assert_eq!(decoded.slots().len(), plan.slots().len());
+            assert_eq!(decoded.expression(), plan.expression());
+        }
+    }
+
+    #[test]
+    fn state_plan_exposes_its_slot_accessors() {
+        let plan = state_plan();
+        let bytes = plan.encode().expect("the plan encodes");
+        let decoded = StateClientPlan::decode(&bytes).expect("the plan decodes");
+        let slots = decoded.slots();
+        assert_eq!(slots.len(), 3);
+        assert_eq!(slots[0].state_slot_id(), StateSlotId::from_bytes([0x11; 16]));
+        assert_eq!(slots[0].type_id(), TypeId::from_bytes([0x12; 16]));
+        assert_eq!(slots[0].scope(), StateScope::Local);
+        assert_eq!(slots[0].default(), &StateDefault::Unset);
+        assert_eq!(slots[1].scope(), StateScope::Session);
+        assert_eq!(slots[1].default(), &StateDefault::Null);
+        assert_eq!(slots[2].scope(), StateScope::User);
+        assert!(matches!(
+            slots[2].default(),
+            StateDefault::Expression(ClientExpressionNode::Concat { .. })
+        ));
+    }
+
+    #[test]
+    fn state_plan_has_the_exact_version_four_layout() {
+        let plan = minimal_state_plan();
+        let bytes = plan.encode().expect("the plan encodes");
+        let mut expected = Vec::new();
+        expected.extend_from_slice(&MAGIC);
+        expected.extend_from_slice(&STATE_FORMAT_VERSION.to_be_bytes());
+        expected.push(RETURN_STATE_OPERATION);
+        expected.push(NODE_BOOLEAN);
+        expected.push(1);
+        expected.extend_from_slice(&1_u32.to_be_bytes());
+        expected.extend_from_slice(&[0x11; 16]);
+        expected.extend_from_slice(&[0x12; 16]);
+        expected.push(STATE_SCOPE_LOCAL);
+        expected.push(STATE_DEFAULT_UNSET);
+        assert_eq!(bytes, expected);
+        assert_eq!(plan.format_version(), STATE_FORMAT_VERSION);
+    }
+
+    #[test]
+    fn state_plan_has_the_exact_expression_default_layout() {
+        let plan = StateClientPlan::new(
+            ClientExpressionNode::Boolean { value: false },
+            vec![StateSlot::new(
+                StateSlotId::from_bytes([0x11; 16]),
+                TypeId::from_bytes([0x12; 16]),
+                StateScope::User,
+                StateDefault::Expression(ClientExpressionNode::String {
+                    value: "hi".to_owned(),
+                }),
+            )],
+        );
+        let bytes = plan.encode().expect("the plan encodes");
+        let mut expected = Vec::new();
+        expected.extend_from_slice(&MAGIC);
+        expected.extend_from_slice(&STATE_FORMAT_VERSION.to_be_bytes());
+        expected.push(RETURN_STATE_OPERATION);
+        expected.push(NODE_BOOLEAN);
+        expected.push(0);
+        expected.extend_from_slice(&1_u32.to_be_bytes());
+        expected.extend_from_slice(&[0x11; 16]);
+        expected.extend_from_slice(&[0x12; 16]);
+        expected.push(STATE_SCOPE_USER);
+        expected.push(STATE_DEFAULT_EXPRESSION);
+        expected.push(NODE_STRING);
+        expected.extend_from_slice(&2_u32.to_be_bytes());
+        expected.extend_from_slice(b"hi");
+        assert_eq!(bytes, expected);
+    }
+
+    #[test]
+    fn state_plan_versions_remain_mutually_closed() {
+        let state = state_plan().encode().expect("the plan encodes");
+        assert_eq!(
+            ClientPlan::decode(&state),
+            Err(ClientPlanError::UnsupportedVersion(STATE_FORMAT_VERSION))
+        );
+        assert_eq!(
+            OpaqueClientPlan::decode(&state),
+            Err(ClientPlanError::UnsupportedVersion(STATE_FORMAT_VERSION))
+        );
+        assert_eq!(
+            ExpressionClientPlan::decode(&state),
+            Err(ClientPlanError::UnsupportedVersion(STATE_FORMAT_VERSION))
+        );
+        assert_eq!(
+            StateClientPlan::decode(&TRUE_BYTES),
+            Err(ClientPlanError::UnsupportedVersion(FORMAT_VERSION))
+        );
+        let expression = expression_plan().encode().expect("the plan encodes");
+        assert_eq!(
+            StateClientPlan::decode(&expression),
+            Err(ClientPlanError::UnsupportedVersion(
+                EXPRESSION_FORMAT_VERSION
+            ))
+        );
+    }
+
+    #[test]
+    fn state_plan_rejects_magic_version_operation_and_trailing_corruption() {
+        let encoded = state_plan().encode().expect("the plan encodes");
+
+        let mut wrong_magic = encoded.clone();
+        wrong_magic[0] = b'X';
+        assert_eq!(
+            StateClientPlan::decode(&wrong_magic),
+            Err(ClientPlanError::InvalidMagic)
+        );
+
+        let mut wrong_version = encoded.clone();
+        wrong_version[8..12].copy_from_slice(&2_u32.to_be_bytes());
+        assert_eq!(
+            StateClientPlan::decode(&wrong_version),
+            Err(ClientPlanError::UnsupportedVersion(2))
+        );
+
+        let mut wrong_operation = encoded.clone();
+        wrong_operation[12] = RETURN_EXPRESSION_OPERATION;
+        assert_eq!(
+            StateClientPlan::decode(&wrong_operation),
+            Err(ClientPlanError::InvalidOperation(RETURN_EXPRESSION_OPERATION))
+        );
+
+        let mut trailing = encoded;
+        trailing.push(0);
+        assert_eq!(
+            StateClientPlan::decode(&trailing),
+            Err(ClientPlanError::TrailingBytes)
+        );
+    }
+
+    #[test]
+    fn state_plan_rejects_unknown_scope_and_default_tags() {
+        let plan = minimal_state_plan();
+        let mut bytes = plan.encode().expect("the plan encodes");
+        assert_eq!(bytes.len(), 53);
+        bytes[51] = 4;
+        assert_eq!(
+            StateClientPlan::decode(&bytes),
+            Err(ClientPlanError::InvalidStateScope(4))
+        );
+
+        let mut bytes = plan.encode().expect("the plan encodes");
+        bytes[52] = 3;
+        assert_eq!(
+            StateClientPlan::decode(&bytes),
+            Err(ClientPlanError::InvalidStateDefaultTag(3))
+        );
+    }
+
+    #[test]
+    fn state_plan_rejects_zero_and_oversized_slot_counts() {
+        let plan = minimal_state_plan();
+        let mut zero_slots = plan.encode().expect("the plan encodes");
+        zero_slots[15..19].copy_from_slice(&0_u32.to_be_bytes());
+        assert_eq!(
+            StateClientPlan::decode(&zero_slots),
+            Err(ClientPlanError::InvalidStateSlotCount { actual: 0 })
+        );
+
+        let mut oversized = plan.encode().expect("the plan encodes");
+        oversized[15..19].copy_from_slice(&(MAX_STATE_SLOTS as u32 + 1).to_be_bytes());
+        assert_eq!(
+            StateClientPlan::decode(&oversized),
+            Err(ClientPlanError::StateSlotLimitExceeded {
+                limit: MAX_STATE_SLOTS,
+            })
+        );
+    }
+
+    #[test]
+    fn state_plan_rejects_duplicate_state_slot_identities() {
+        let duplicated = StateClientPlan::new(
+            ClientExpressionNode::Boolean { value: true },
+            vec![
+                StateSlot::new(
+                    StateSlotId::from_bytes([0x11; 16]),
+                    TypeId::from_bytes([0x12; 16]),
+                    StateScope::Local,
+                    StateDefault::Unset,
+                ),
+                StateSlot::new(
+                    StateSlotId::from_bytes([0x11; 16]),
+                    TypeId::from_bytes([0x13; 16]),
+                    StateScope::Session,
+                    StateDefault::Null,
+                ),
+            ],
+        );
+        assert_eq!(
+            duplicated.encode(),
+            Err(ClientPlanError::DuplicateStateSlotId(
+                StateSlotId::from_bytes([0x11; 16])
+            ))
+        );
+
+        let mut crafted = minimal_state_plan().encode().expect("the plan encodes");
+        crafted[15..19].copy_from_slice(&2_u32.to_be_bytes());
+        crafted.extend_from_slice(&[0x11; 16]);
+        crafted.extend_from_slice(&[0x13; 16]);
+        crafted.push(STATE_SCOPE_SESSION);
+        crafted.push(STATE_DEFAULT_NULL);
+        assert_eq!(
+            StateClientPlan::decode(&crafted),
+            Err(ClientPlanError::DuplicateStateSlotId(
+                StateSlotId::from_bytes([0x11; 16])
+            ))
+        );
+    }
+
+    #[test]
+    fn state_plan_encode_rejects_empty_and_oversized_slot_lists() {
+        let empty = StateClientPlan::new(
+            ClientExpressionNode::Boolean { value: true },
+            Vec::new(),
+        );
+        assert_eq!(
+            empty.encode(),
+            Err(ClientPlanError::InvalidStateSlotCount { actual: 0 })
+        );
+
+        let slot = StateSlot::new(
+            StateSlotId::from_bytes([0x11; 16]),
+            TypeId::from_bytes([0x12; 16]),
+            StateScope::Local,
+            StateDefault::Unset,
+        );
+        let oversized = StateClientPlan::new(
+            ClientExpressionNode::Boolean { value: true },
+            vec![slot; MAX_STATE_SLOTS + 1],
+        );
+        assert_eq!(
+            oversized.encode(),
+            Err(ClientPlanError::StateSlotLimitExceeded {
+                limit: MAX_STATE_SLOTS,
+            })
+        );
+    }
+
+    #[test]
+    fn state_plan_rejects_malformed_return_and_default_trees() {
+        let mut unknown_return = minimal_state_plan().encode().expect("the plan encodes");
+        unknown_return[13] = 9;
+        assert_eq!(
+            StateClientPlan::decode(&unknown_return),
+            Err(ClientPlanError::InvalidExpressionNode(9))
+        );
+
+        let expression_default = StateClientPlan::new(
+            ClientExpressionNode::Boolean { value: true },
+            vec![StateSlot::new(
+                StateSlotId::from_bytes([0x11; 16]),
+                TypeId::from_bytes([0x12; 16]),
+                StateScope::Session,
+                StateDefault::Expression(ClientExpressionNode::String {
+                    value: "ab".to_owned(),
+                }),
+            )],
+        );
+        let mut unknown_default = expression_default.encode().expect("the plan encodes");
+        unknown_default[53] = 9;
+        assert_eq!(
+            StateClientPlan::decode(&unknown_default),
+            Err(ClientPlanError::InvalidExpressionNode(9))
+        );
+
+        let mut truncated_default = expression_default.encode().expect("the plan encodes");
+        truncated_default[54..58].copy_from_slice(&3_u32.to_be_bytes());
+        assert_eq!(
+            StateClientPlan::decode(&truncated_default),
+            Err(ClientPlanError::Truncated)
+        );
+
+        let mut invalid_utf8 = expression_default.encode().expect("the plan encodes");
+        invalid_utf8[54..58].copy_from_slice(&1_u32.to_be_bytes());
+        invalid_utf8[58] = 0xff;
+        assert_eq!(
+            StateClientPlan::decode(&invalid_utf8),
+            Err(ClientPlanError::InvalidExpressionNode(NODE_STRING))
+        );
+    }
+
+    #[test]
+    fn state_plan_rejects_depth_and_collection_violations() {
+        let deep = StateClientPlan::new(
+            deep_concat(MAX_EXPRESSION_DEPTH + 1),
+            vec![StateSlot::new(
+                StateSlotId::from_bytes([0x11; 16]),
+                TypeId::from_bytes([0x12; 16]),
+                StateScope::Local,
+                StateDefault::Unset,
+            )],
+        );
+        assert_eq!(deep.encode(), Err(ClientPlanError::ExpressionDepthExceeded));
+
+        let wide_default = StateClientPlan::new(
+            ClientExpressionNode::Boolean { value: true },
+            vec![StateSlot::new(
+                StateSlotId::from_bytes([0x11; 16]),
+                TypeId::from_bytes([0x12; 16]),
+                StateScope::User,
+                StateDefault::Expression(ClientExpressionNode::Call {
+                    function: FunctionId::from_bytes([0x51; 16]),
+                    arguments: (0..=MAX_CALL_ARGUMENTS)
+                        .map(|index| {
+                            (
+                                ParameterId::from_bytes([index as u8; 16]),
+                                ClientExpressionNode::Boolean { value: true },
+                            )
+                        })
+                        .collect(),
+                }),
+            )],
+        );
+        assert_eq!(
+            wide_default.encode(),
+            Err(ClientPlanError::ExpressionCollectionExceeded {
+                limit: MAX_CALL_ARGUMENTS,
+            })
+        );
+    }
+
+    #[test]
+    fn state_plan_rejects_every_truncated_prefix() {
+        let encoded = minimal_state_plan().encode().expect("the plan encodes");
+        for length in 0..encoded.len() {
+            assert_eq!(
+                StateClientPlan::decode(&encoded[..length]),
                 Err(ClientPlanError::Truncated),
                 "prefix length {length} must be truncated"
             );
