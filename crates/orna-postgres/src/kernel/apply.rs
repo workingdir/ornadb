@@ -241,6 +241,7 @@ async fn apply_transaction(
         &materialized,
         &encoder,
         None,
+        candidate.catalogue_hash_context().standard(),
     )
     .await
 }
@@ -282,6 +283,7 @@ async fn apply_standard_upgrade_transaction(
         &active,
         &materialized,
         &encoder,
+        Some(standard),
         Some(standard),
     )
     .await
@@ -346,7 +348,8 @@ async fn apply_materialized_candidate(
     active: &ActiveDatabaseRevision,
     materialized: &Materialized,
     encoder: &CandidateEncoder<'_>,
-    standard: Option<&VerifiedStandardLibrarySnapshot>,
+    install_standard: Option<&VerifiedStandardLibrarySnapshot>,
+    authority_standard: Option<&VerifiedStandardLibrarySnapshot>,
 ) -> Result<ActiveDatabaseRevision, PostgresKernelError> {
     let plan =
         plan_physical_changes(active, candidate).map_err(PostgresKernelError::PhysicalPlan)?;
@@ -355,11 +358,11 @@ async fn apply_materialized_candidate(
         .batch_execute("SET CONSTRAINTS ALL DEFERRED")
         .await
         .map_err(PostgresKernelError::Database)?;
-    if let Some(standard) = standard {
+    if let Some(standard) = install_standard {
         persist_standard_library(transaction, standard).await?;
     }
     persist_candidate(transaction, candidate, encoder).await?;
-    persist_target_authorities(transaction, candidate, standard).await?;
+    persist_target_authorities(transaction, candidate, authority_standard).await?;
     transaction
         .batch_execute("SET CONSTRAINTS ALL IMMEDIATE")
         .await
