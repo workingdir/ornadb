@@ -61,6 +61,9 @@ separate release action.
   catalogue, storage, codec, protocol, and first SERVER execution slices.
 - [x] Add a separately accepted record value type.
 - [x] Add a separately accepted opaque value type.
+- [x] Add the installed `orna source diff` semantic diff surface
+  (identity-keyed add/drop/rename report, no apply, live proof;
+  work ADR 0066).
 
 ## Language tooling
 
