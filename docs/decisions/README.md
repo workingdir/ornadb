@@ -129,3 +129,5 @@ source-of-truth or authority rules.
   [Offline LSP and Editor Tooling for `.orna` Source](0059-offline-lsp-editor-tooling.md)
 * **work ADR 0066:**
   [`orna source diff` — Semantic Source Changes Without Apply](0066-semantic-source-diff.md)
+* **work ADR 0067:**
+  [`std.csv.encode` — the Sealed CSV Output Presenter](0067-csv-output-presenter.md)
