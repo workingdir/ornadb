@@ -8,6 +8,7 @@ mod local_auth;
 mod raw_call;
 mod raw_client_dispatch;
 mod raw_socket;
+pub mod security_admin;
 mod source_apply;
 mod upgrade;
 mod user_state;
@@ -37,6 +38,11 @@ pub use raw_client_dispatch::{RawClientDispatch, RawClientDispatchResult};
 pub use raw_socket::{
     LocalRawSocketError, LocalRawSocketResources, LocalRawSocketServer, LocalRawSocketServerError,
     serve_local_raw_stream, start_local_raw_socket,
+};
+pub use security_admin::{
+    InstalledSecurityAdminError, InstalledSecurityAdminErrorKind, InstalledSecurityAdminOperation,
+    InstalledSecurityAdminOutcome, InstalledSecurityAdminRequest, parse_privilege_class,
+    run_installed_security_admin, run_security_admin_with_kernel,
 };
 pub use source_apply::{
     InstalledSourceApplyDiagnostics, InstalledSourceApplyError, InstalledSourceApplyHostFailure,
