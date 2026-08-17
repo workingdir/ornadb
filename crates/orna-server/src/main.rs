@@ -17,7 +17,7 @@ use orna_protocol::CallFailure;
 mod package_maintenance;
 mod source_check;
 
-const USAGE: &str = "Usage:\n  orna --version\n  orna server run\n  orna server upgrade\n  orna server backend-shell\n  orna source check <file.orna>\n  orna source apply <file.orna>\n  orna security grant-execute <canonical-function-id>\n  orna security user create|disable <canonical-principal-id>\n  orna security role create|grant|revoke <canonical-principal-id> [canonical-principal-id]\n  orna security grants grant|revoke <canonical-principal-id> <class> [canonical-function-id]\n  orna security check can-execute <canonical-principal-id> <canonical-function-id>\n  orna security check has-privilege <canonical-principal-id> <class> [canonical-function-id]\n  orna security whoami\n  orna raw-call <canonical-function-id>\n  orna raw-call <canonical-function-id> <canonical-parameter-id>\n  orna [--runtime <family>] invoke <qualified-name | canonical-function-id> [options]\n  orna state get <root-function-id> [options]\n  orna state set <root-function-id> [options]\n  orna inspect <invocation-id> [options]";
+const USAGE: &str = "Usage:\n  orna --version\n  orna server run\n  orna server upgrade\n  orna server backend-shell\n  orna source check <file.orna>\n  orna source apply <file.orna>\n  orna source diff <file.orna>\n  orna security grant-execute <canonical-function-id>\n  orna security user create|disable <canonical-principal-id>\n  orna security role create|grant|revoke <canonical-principal-id> [canonical-principal-id]\n  orna security grants grant|revoke <canonical-principal-id> <class> [canonical-function-id]\n  orna security check can-execute <canonical-principal-id> <canonical-function-id>\n  orna security check has-privilege <canonical-principal-id> <class> [canonical-function-id]\n  orna security whoami\n  orna raw-call <canonical-function-id>\n  orna raw-call <canonical-function-id> <canonical-parameter-id>\n  orna [--runtime <family>] invoke <qualified-name | canonical-function-id> [options]\n  orna state get <root-function-id> [options]\n  orna state set <root-function-id> [options]\n  orna inspect <invocation-id> [options]";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum RawCallParameters {
@@ -58,6 +58,7 @@ enum Command {
     Upgrade,
     SourceCheck(String),
     SourceApply(String),
+    SourceDiff(String),
     SecurityGrantExecute(FunctionId),
     SecurityAdmin(orna_server::InstalledSecurityAdminRequest),
     RawCall(FunctionId, RawCallParameters),
@@ -149,6 +150,35 @@ fn main() -> ExitCode {
             }
             Ok(_) => {
                 write_stderr_line("orna: source apply returned an unsupported result");
+                ExitCode::from(1)
+            }
+            Err(error) => {
+                write_stderr_line(&error.to_string());
+                ExitCode::from(1)
+            }
+        },
+        Command::SourceDiff(path) => match orna_server::run_installed_source_diff(&path) {
+            Ok(orna_server::InstalledSourceDiffOutcome::Diagnostics(diagnostics)) => {
+                let stderr = io::stderr();
+                let mut stderr = stderr.lock();
+                let _ = stderr
+                    .write_all(diagnostics.as_bytes())
+                    .and_then(|()| stderr.flush());
+                ExitCode::from(1)
+            }
+            Ok(orna_server::InstalledSourceDiffOutcome::Diff(report)) => {
+                let stdout = io::stdout();
+                let mut stdout = stdout.lock();
+                match report.write_to(&mut stdout) {
+                    Ok(()) => ExitCode::SUCCESS,
+                    Err(error) => {
+                        write_stderr_line(&error.to_string());
+                        ExitCode::from(1)
+                    }
+                }
+            }
+            Ok(_) => {
+                write_stderr_line("orna: source diff returned an unsupported result");
                 ExitCode::from(1)
             }
             Err(error) => {
@@ -311,6 +341,7 @@ where
             let command = match args.next().as_deref() {
                 Some(value) if value == OsStr::new("check") => Command::SourceCheck,
                 Some(value) if value == OsStr::new("apply") => Command::SourceApply,
+                Some(value) if value == OsStr::new("diff") => Command::SourceDiff,
                 _ => return None,
             };
             let path = args.next()?.into_string().ok()?;
