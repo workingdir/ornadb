@@ -52,6 +52,7 @@ pub use source_apply::{
 pub use source_diff::{
     InstalledSourceDiffDiagnostics, InstalledSourceDiffError, InstalledSourceDiffHostFailure,
     InstalledSourceDiffOutcome, InstalledSourceDiffReport, run_installed_source_diff,
+    run_source_diff_with_kernel,
 };
 pub use upgrade::{EmbeddedUpgradeError, run_embedded_upgrade};
 pub use user_state::{
