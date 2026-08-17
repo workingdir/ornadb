@@ -15,22 +15,26 @@
 #![cfg(unix)]
 #![allow(dead_code)]
 
-mod support;
-
 #[path = "../../orna-postgres/tests/support/mod.rs"]
 mod postgres_test_support;
 
+use std::collections::BTreeMap;
+
+use orna_client::{
+    ClientStateContext, ClientStateKey, ClientStateStore, ClientUserStateError,
+};
 use orna_core::{
     FunctionId, PrincipalId, StateSlotId, TypeId,
     security::{LocalPeerCredential, Principal, PrincipalKind, PrincipalStatus, SecuritySnapshot},
+    state::{UserStateChange, UserStateWriteOutcome},
     value::RuntimeValue,
 };
 use orna_postgres::PostgresKernel;
 use orna_protocol::encode_constructed_value;
 use orna_server::{
-    InstalledUserStateChange, InstalledUserStateError, InstalledUserStateExpectedType,
-    InstalledUserStateInstance, InstalledUserStateOperation, InstalledUserStateOutcome,
-    InstalledUserStateRequest, run_user_state_with_kernel,
+    AuthenticatedClientStateAdapter, InstalledUserStateChange, InstalledUserStateError,
+    InstalledUserStateExpectedType, InstalledUserStateInstance, InstalledUserStateOperation,
+    InstalledUserStateOutcome, InstalledUserStateRequest, run_user_state_with_kernel,
 };
 use orna_standard::{INTEGER_TYPE_ID, registered_opaque_codecs};
 use postgres_test_support::{TestDatabase, TestResult, failure, with_test_database};
@@ -388,6 +392,141 @@ async fn proves_user_state_end_to_end() -> TestResult<()> {
         )?;
 
         Ok(())
+    })
+    .await
+}
+
+/// Proves the authenticated CLIENT state adapter lifecycle (ADR 0070).
+///
+/// The adapter uses the authenticated kernel session for principal selection,
+/// loads typed USER values into the caller-owned store, flushes one explicit
+/// update, reloads it, and reports a stale revision without replacing the
+/// local value.
+#[tokio::test]
+#[ignore = "requires the Compose PostgreSQL development service"]
+async fn proves_authenticated_client_state_adapter_lifecycle() -> TestResult<()> {
+    with_test_database(|database| async move {
+        install_standard(&database).await?;
+        map_peer(&database, PRINCIPAL_A).await?;
+
+        let kernel = kernel(&database);
+        let session = kernel
+            .authenticate_local_peer(nix::unistd::geteuid().as_raw())
+            .await?;
+        let context = ClientStateContext::new(
+            ROOT_FUNCTION,
+            "adapter-profile".to_owned(),
+            String::new(),
+        )
+        .map_err(|error| failure(error.to_string()))?;
+        let expected_types = BTreeMap::from([((SLOT_FUNCTION, SLOT), INTEGER_TYPE_ID)]);
+        let initial_change = UserStateChange::new(
+            ROOT_FUNCTION,
+            "adapter-profile".to_owned(),
+            SLOT_FUNCTION,
+            String::new(),
+            SLOT,
+            None,
+            RuntimeValue::Integer(7),
+            INTEGER_TYPE_ID,
+        )?;
+        let initial_results = kernel
+            .write_user_state(&session, &[initial_change])
+            .await?;
+        require(
+            matches!(
+                initial_results.first().map(|result| result.outcome()),
+                Some(UserStateWriteOutcome::Written { revision: 1 })
+            ),
+            "the adapter fixture write must create revision 1",
+        )?;
+
+        let adapter = AuthenticatedClientStateAdapter::new(&kernel, &session);
+        let mut state = ClientStateStore::new();
+        adapter
+            .load(&context, &[], &expected_types, &mut state)
+            .await
+            .map_err(|error| failure(error.to_string()))?;
+        let key = ClientStateKey::from_context(&context, SLOT_FUNCTION, SLOT);
+        require(
+            state.user().get(&key).is_some_and(|value| {
+                value.value() == &RuntimeValue::Integer(7)
+                    && value.revision() == Some(1)
+                    && !value.is_dirty()
+            }),
+            "the adapter load must restore the typed value and revision",
+        )?;
+        require(
+            state.pending_user_state_changes()?.is_empty(),
+            "a loaded USER value must not be dirty",
+        )?;
+
+        state.set_user_state(key.clone(), RuntimeValue::Integer(8), INTEGER_TYPE_ID)?;
+        adapter
+            .flush(&mut state)
+            .await
+            .map_err(|error| failure(error.to_string()))?;
+        require(
+            state.user().get(&key).is_some_and(|value| {
+                value.value() == &RuntimeValue::Integer(8)
+                    && value.revision() == Some(2)
+                    && !value.is_dirty()
+            }),
+            "the adapter flush must acknowledge revision 2",
+        )?;
+
+        let mut reloaded = ClientStateStore::new();
+        adapter
+            .load(&context, &[], &expected_types, &mut reloaded)
+            .await
+            .map_err(|error| failure(error.to_string()))?;
+        require(
+            reloaded.user().get(&key).is_some_and(|value| {
+                value.value() == &RuntimeValue::Integer(8) && value.revision() == Some(2)
+            }),
+            "the adapter reload must return the flushed value",
+        )?;
+
+        reloaded.set_user_state(key.clone(), RuntimeValue::Integer(9), INTEGER_TYPE_ID)?;
+        let external_change = UserStateChange::new(
+            ROOT_FUNCTION,
+            "adapter-profile".to_owned(),
+            SLOT_FUNCTION,
+            String::new(),
+            SLOT,
+            Some(2),
+            RuntimeValue::Integer(10),
+            INTEGER_TYPE_ID,
+        )?;
+        let external_results = kernel
+            .write_user_state(&session, &[external_change])
+            .await?;
+        require(
+            matches!(
+                external_results.first().map(|result| result.outcome()),
+                Some(UserStateWriteOutcome::Written { revision: 3 })
+            ),
+            "the external write must advance the server revision to 3",
+        )?;
+
+        let conflict = adapter.flush(&mut reloaded).await;
+        require(
+            matches!(
+                conflict,
+                Err(orna_server::AuthenticatedClientStateError::Client(
+                    ClientUserStateError::Conflict { current: 3, .. }
+                ))
+            ),
+            "the adapter must report the stale revision conflict",
+        )?;
+        require(
+            reloaded.user().get(&key).is_some_and(|value| {
+                value.value() == &RuntimeValue::Integer(9)
+                    && value.revision() == Some(2)
+                    && value.is_dirty()
+            }),
+            "a conflict must preserve the dirty local value",
+        )
     })
     .await
 }
