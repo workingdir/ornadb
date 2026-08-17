@@ -184,6 +184,20 @@ pub const SYS_SECURITY_HAS_PRIVILEGE_FUNCTION_ID: FunctionId =
 /// The exact resolved name of the sealed has-privilege check.
 pub const SYS_SECURITY_HAS_PRIVILEGE_FUNCTION_NAME: &str = "sys.security.has_privilege";
 
+/// The stable identity of the sealed `sys.state.load_user_state` function.
+pub const SYS_STATE_LOAD_USER_STATE_FUNCTION_ID: FunctionId =
+    FunctionId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x4c]);
+
+/// The exact resolved name of the sealed load-user-state function.
+pub const SYS_STATE_LOAD_USER_STATE_FUNCTION_NAME: &str = "sys.state.load_user_state";
+
+/// The stable identity of the sealed `sys.state.write_user_state` function.
+pub const SYS_STATE_WRITE_USER_STATE_FUNCTION_ID: FunctionId =
+    FunctionId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x4d]);
+
+/// The exact resolved name of the sealed write-user-state function.
+pub const SYS_STATE_WRITE_USER_STATE_FUNCTION_NAME: &str = "sys.state.write_user_state";
+
 /// The stable identity of the sole sealed `sys.invoke` parameter.
 pub const SYS_INVOKE_PARAMETER_ID: ParameterId =
     ParameterId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3]);
@@ -310,6 +324,10 @@ const SYS_SECURITY_REVOKE_PRIVILEGE_FUNCTION_NAME_PARTS: &[&str] =
 const SYS_SECURITY_CAN_EXECUTE_FUNCTION_NAME_PARTS: &[&str] = &["sys", "security", "can_execute"];
 const SYS_SECURITY_HAS_PRIVILEGE_FUNCTION_NAME_PARTS: &[&str] =
     &["sys", "security", "has_privilege"];
+const SYS_STATE_LOAD_USER_STATE_FUNCTION_NAME_PARTS: &[&str] =
+    &["sys", "state", "load_user_state"];
+const SYS_STATE_WRITE_USER_STATE_FUNCTION_NAME_PARTS: &[&str] =
+    &["sys", "state", "write_user_state"];
 
 /// The behaviour selected for one sealed system function.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -331,6 +349,8 @@ pub enum SystemFunctionKind {
     SecurityAdmin,
     /// Checks one execute grant or privilege class against the snapshot.
     SecurityCheck,
+    /// Reads or writes one authenticated principal's durable USER state.
+    State,
 }
 
 /// The sealed invocation-carrier behaviour selected by one registry entry.
@@ -649,6 +669,43 @@ const SYS_SECURITY_CAN_EXECUTE_SIGNATURE: SystemSecuritySignature =
 const SYS_SECURITY_HAS_PRIVILEGE_SIGNATURE: SystemSecuritySignature =
     SystemSecuritySignature::new(3, false, false, true, None);
 
+/// The immutable sealed signature shape of one `sys.state` entry.
+///
+/// The two entries share one closed shape: a fixed sealed parameter count
+/// and a set result. `load_user_state` takes three parameters and
+/// `write_user_state` takes one; both return a set of sealed carriers. No
+/// entry returns a stream. A caller can obtain a signature only from the
+/// sealed system-function registry.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SystemStateSignature {
+    parameter_count: u8,
+    returns_set: bool,
+}
+
+impl SystemStateSignature {
+    const fn new(parameter_count: u8, returns_set: bool) -> Self {
+        Self {
+            parameter_count,
+            returns_set,
+        }
+    }
+
+    /// Returns the fixed sealed parameter count.
+    pub const fn parameter_count(self) -> u8 {
+        self.parameter_count
+    }
+
+    /// Returns whether the entry returns a set of values.
+    pub const fn returns_set(self) -> bool {
+        self.returns_set
+    }
+}
+
+const SYS_STATE_LOAD_USER_STATE_SIGNATURE: SystemStateSignature =
+    SystemStateSignature::new(3, true);
+const SYS_STATE_WRITE_USER_STATE_SIGNATURE: SystemStateSignature =
+    SystemStateSignature::new(1, true);
+
 /// One immutable entry in the sealed system-function registry.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct SystemFunctionDefinition {
@@ -658,6 +715,7 @@ pub struct SystemFunctionDefinition {
     invocation_signature: Option<SystemInvocationSignature>,
     inspect_signature: Option<SystemInspectSignature>,
     security_signature: Option<SystemSecuritySignature>,
+    state_signature: Option<SystemStateSignature>,
 }
 
 impl SystemFunctionDefinition {
@@ -668,6 +726,7 @@ impl SystemFunctionDefinition {
         invocation_signature: Option<SystemInvocationSignature>,
         inspect_signature: Option<SystemInspectSignature>,
         security_signature: Option<SystemSecuritySignature>,
+        state_signature: Option<SystemStateSignature>,
     ) -> Self {
         Self {
             kind,
@@ -676,6 +735,7 @@ impl SystemFunctionDefinition {
             invocation_signature,
             inspect_signature,
             security_signature,
+            state_signature,
         }
     }
 
@@ -717,6 +777,14 @@ impl SystemFunctionDefinition {
         self.security_signature
     }
 
+    /// Returns the sealed state signature when this entry is a `sys.state`
+    /// function.
+    ///
+    /// Other system functions do not have a state signature.
+    pub const fn state_signature(self) -> Option<SystemStateSignature> {
+        self.state_signature
+    }
+
     pub(crate) fn has_name(self, name: &QualifiedSemanticName) -> bool {
         name.parts()
             .iter()
@@ -734,12 +802,14 @@ pub const SYSTEM_FUNCTIONS: &[SystemFunctionDefinition] = &[
         None,
         None,
         None,
+        None,
     ),
     SystemFunctionDefinition::new(
         SystemFunctionKind::Invoke,
         SYS_INVOKE_FUNCTION_ID,
         SYS_INVOKE_NAME_PARTS,
         Some(SYS_INVOKE_SIGNATURE),
+        None,
         None,
         None,
     ),
@@ -750,6 +820,7 @@ pub const SYSTEM_FUNCTIONS: &[SystemFunctionDefinition] = &[
         None,
         Some(SYS_INSPECT_SNAPSHOT_SIGNATURE),
         None,
+        None,
     ),
     SystemFunctionDefinition::new(
         SystemFunctionKind::InspectProjection,
@@ -757,6 +828,7 @@ pub const SYSTEM_FUNCTIONS: &[SystemFunctionDefinition] = &[
         SYS_INSPECT_INVOCATION_NODES_FUNCTION_NAME_PARTS,
         None,
         Some(SYS_INSPECT_PROJECTION_SIGNATURE),
+        None,
         None,
     ),
     SystemFunctionDefinition::new(
@@ -766,6 +838,7 @@ pub const SYSTEM_FUNCTIONS: &[SystemFunctionDefinition] = &[
         None,
         Some(SYS_INSPECT_PROJECTION_SIGNATURE),
         None,
+        None,
     ),
     SystemFunctionDefinition::new(
         SystemFunctionKind::InspectProjection,
@@ -773,6 +846,7 @@ pub const SYSTEM_FUNCTIONS: &[SystemFunctionDefinition] = &[
         SYS_INSPECT_RESOURCES_FUNCTION_NAME_PARTS,
         None,
         Some(SYS_INSPECT_PROJECTION_SIGNATURE),
+        None,
         None,
     ),
     SystemFunctionDefinition::new(
@@ -782,6 +856,7 @@ pub const SYSTEM_FUNCTIONS: &[SystemFunctionDefinition] = &[
         None,
         Some(SYS_INSPECT_PROJECTION_SIGNATURE),
         None,
+        None,
     ),
     SystemFunctionDefinition::new(
         SystemFunctionKind::InspectProjection,
@@ -789,6 +864,7 @@ pub const SYSTEM_FUNCTIONS: &[SystemFunctionDefinition] = &[
         SYS_INSPECT_UI_NODES_FUNCTION_NAME_PARTS,
         None,
         Some(SYS_INSPECT_PROJECTION_SIGNATURE),
+        None,
         None,
     ),
     SystemFunctionDefinition::new(
@@ -798,6 +874,7 @@ pub const SYSTEM_FUNCTIONS: &[SystemFunctionDefinition] = &[
         None,
         Some(SYS_INSPECT_PROJECTION_SIGNATURE),
         None,
+        None,
     ),
     SystemFunctionDefinition::new(
         SystemFunctionKind::InspectProjection,
@@ -805,6 +882,7 @@ pub const SYSTEM_FUNCTIONS: &[SystemFunctionDefinition] = &[
         SYS_INSPECT_RUNTIME_BINDINGS_FUNCTION_NAME_PARTS,
         None,
         Some(SYS_INSPECT_PROJECTION_SIGNATURE),
+        None,
         None,
     ),
     SystemFunctionDefinition::new(
@@ -814,6 +892,7 @@ pub const SYSTEM_FUNCTIONS: &[SystemFunctionDefinition] = &[
         None,
         Some(SYS_INSPECT_PROJECTION_SIGNATURE),
         None,
+        None,
     ),
     SystemFunctionDefinition::new(
         SystemFunctionKind::InspectTrace,
@@ -821,6 +900,7 @@ pub const SYSTEM_FUNCTIONS: &[SystemFunctionDefinition] = &[
         SYS_INSPECT_TRACE_FUNCTION_NAME_PARTS,
         None,
         Some(SYS_INSPECT_TRACE_SIGNATURE),
+        None,
         None,
     ),
     SystemFunctionDefinition::new(
@@ -830,6 +910,7 @@ pub const SYSTEM_FUNCTIONS: &[SystemFunctionDefinition] = &[
         None,
         None,
         Some(SYS_SECURITY_SESSION_PRINCIPAL_SIGNATURE),
+        None,
     ),
     SystemFunctionDefinition::new(
         SystemFunctionKind::SecurityIdentity,
@@ -838,6 +919,7 @@ pub const SYSTEM_FUNCTIONS: &[SystemFunctionDefinition] = &[
         None,
         None,
         Some(SYS_SECURITY_EFFECTIVE_PRINCIPAL_SIGNATURE),
+        None,
     ),
     SystemFunctionDefinition::new(
         SystemFunctionKind::SecurityIdentity,
@@ -846,6 +928,7 @@ pub const SYSTEM_FUNCTIONS: &[SystemFunctionDefinition] = &[
         None,
         None,
         Some(SYS_SECURITY_ACTIVE_ROLES_SIGNATURE),
+        None,
     ),
     SystemFunctionDefinition::new(
         SystemFunctionKind::SecurityAdmin,
@@ -854,6 +937,7 @@ pub const SYSTEM_FUNCTIONS: &[SystemFunctionDefinition] = &[
         None,
         None,
         Some(SYS_SECURITY_CREATE_PRINCIPAL_SIGNATURE),
+        None,
     ),
     SystemFunctionDefinition::new(
         SystemFunctionKind::SecurityAdmin,
@@ -862,6 +946,7 @@ pub const SYSTEM_FUNCTIONS: &[SystemFunctionDefinition] = &[
         None,
         None,
         Some(SYS_SECURITY_DISABLE_PRINCIPAL_SIGNATURE),
+        None,
     ),
     SystemFunctionDefinition::new(
         SystemFunctionKind::SecurityAdmin,
@@ -870,6 +955,7 @@ pub const SYSTEM_FUNCTIONS: &[SystemFunctionDefinition] = &[
         None,
         None,
         Some(SYS_SECURITY_CREATE_ROLE_SIGNATURE),
+        None,
     ),
     SystemFunctionDefinition::new(
         SystemFunctionKind::SecurityAdmin,
@@ -878,6 +964,7 @@ pub const SYSTEM_FUNCTIONS: &[SystemFunctionDefinition] = &[
         None,
         None,
         Some(SYS_SECURITY_GRANT_ROLE_SIGNATURE),
+        None,
     ),
     SystemFunctionDefinition::new(
         SystemFunctionKind::SecurityAdmin,
@@ -886,6 +973,7 @@ pub const SYSTEM_FUNCTIONS: &[SystemFunctionDefinition] = &[
         None,
         None,
         Some(SYS_SECURITY_REVOKE_ROLE_SIGNATURE),
+        None,
     ),
     SystemFunctionDefinition::new(
         SystemFunctionKind::SecurityAdmin,
@@ -894,6 +982,7 @@ pub const SYSTEM_FUNCTIONS: &[SystemFunctionDefinition] = &[
         None,
         None,
         Some(SYS_SECURITY_GRANT_PRIVILEGE_SIGNATURE),
+        None,
     ),
     SystemFunctionDefinition::new(
         SystemFunctionKind::SecurityAdmin,
@@ -902,6 +991,7 @@ pub const SYSTEM_FUNCTIONS: &[SystemFunctionDefinition] = &[
         None,
         None,
         Some(SYS_SECURITY_REVOKE_PRIVILEGE_SIGNATURE),
+        None,
     ),
     SystemFunctionDefinition::new(
         SystemFunctionKind::SecurityCheck,
@@ -910,6 +1000,7 @@ pub const SYSTEM_FUNCTIONS: &[SystemFunctionDefinition] = &[
         None,
         None,
         Some(SYS_SECURITY_CAN_EXECUTE_SIGNATURE),
+        None,
     ),
     SystemFunctionDefinition::new(
         SystemFunctionKind::SecurityCheck,
@@ -918,6 +1009,25 @@ pub const SYSTEM_FUNCTIONS: &[SystemFunctionDefinition] = &[
         None,
         None,
         Some(SYS_SECURITY_HAS_PRIVILEGE_SIGNATURE),
+        None,
+    ),
+    SystemFunctionDefinition::new(
+        SystemFunctionKind::State,
+        SYS_STATE_LOAD_USER_STATE_FUNCTION_ID,
+        SYS_STATE_LOAD_USER_STATE_FUNCTION_NAME_PARTS,
+        None,
+        None,
+        None,
+        Some(SYS_STATE_LOAD_USER_STATE_SIGNATURE),
+    ),
+    SystemFunctionDefinition::new(
+        SystemFunctionKind::State,
+        SYS_STATE_WRITE_USER_STATE_FUNCTION_ID,
+        SYS_STATE_WRITE_USER_STATE_FUNCTION_NAME_PARTS,
+        None,
+        None,
+        None,
+        Some(SYS_STATE_WRITE_USER_STATE_SIGNATURE),
     ),
 ];
 
@@ -958,8 +1068,8 @@ mod tests {
     }
 
     #[test]
-    fn system_registry_contains_exactly_the_twenty_four_sealed_entries_in_order() {
-        assert_eq!(SYSTEM_FUNCTIONS.len(), 24);
+    fn system_registry_contains_exactly_the_twenty_six_sealed_entries_in_order() {
+        assert_eq!(SYSTEM_FUNCTIONS.len(), 26);
         let health = SYSTEM_FUNCTIONS[0];
         assert_eq!(health.kind(), SystemFunctionKind::Health);
         assert_eq!(health.id(), CATALOGUE_HEALTH_FUNCTION_ID);
@@ -1004,6 +1114,26 @@ mod tests {
         assert!(parts_equal(
             has_privilege.name_parts(),
             &["sys", "security", "has_privilege"]
+        ));
+        let load_user_state = SYSTEM_FUNCTIONS[24];
+        assert_eq!(load_user_state.kind(), SystemFunctionKind::State);
+        assert_eq!(
+            load_user_state.id(),
+            SYS_STATE_LOAD_USER_STATE_FUNCTION_ID
+        );
+        assert!(parts_equal(
+            load_user_state.name_parts(),
+            &["sys", "state", "load_user_state"]
+        ));
+        let write_user_state = SYSTEM_FUNCTIONS[25];
+        assert_eq!(write_user_state.kind(), SystemFunctionKind::State);
+        assert_eq!(
+            write_user_state.id(),
+            SYS_STATE_WRITE_USER_STATE_FUNCTION_ID
+        );
+        assert!(parts_equal(
+            write_user_state.name_parts(),
+            &["sys", "state", "write_user_state"]
         ));
     }
 
@@ -1478,6 +1608,106 @@ mod tests {
         for (index, id) in ids.into_iter().enumerate() {
             assert_eq!(id.to_bytes()[15], 0x40 + index as u8);
             assert_eq!(SYSTEM_FUNCTIONS[12 + index].id(), id);
+        }
+    }
+
+    #[test]
+    fn state_entries_expose_the_sealed_function_ids_and_names_in_order() {
+        let expected = [
+            (
+                SYS_STATE_LOAD_USER_STATE_FUNCTION_ID,
+                "sys.state.load_user_state",
+                SystemFunctionKind::State,
+            ),
+            (
+                SYS_STATE_WRITE_USER_STATE_FUNCTION_ID,
+                "sys.state.write_user_state",
+                SystemFunctionKind::State,
+            ),
+        ];
+        for (index, (id, name, kind)) in expected.into_iter().enumerate() {
+            let entry = SYSTEM_FUNCTIONS[24 + index];
+            assert_eq!(entry.id(), id);
+            assert_eq!(entry.kind(), kind);
+            assert_eq!(entry.name_parts().join("."), name);
+            assert_eq!(system_function_by_id(id), Some(entry));
+            let parts: Vec<&str> = name.split('.').collect();
+            assert_eq!(system_function_by_name(&qualified(&parts)), Some(entry));
+        }
+    }
+
+    #[test]
+    fn state_entries_expose_the_closed_signature_shapes() {
+        let load = system_function_by_id(SYS_STATE_LOAD_USER_STATE_FUNCTION_ID)
+            .expect("the load-user-state identity must resolve");
+        assert_eq!(load.kind(), SystemFunctionKind::State);
+        let load_signature = load
+            .state_signature()
+            .expect("load_user_state must expose its sealed signature");
+        assert_eq!(load_signature.parameter_count(), 3);
+        assert!(load_signature.returns_set());
+        assert!(load.invocation_signature().is_none());
+        assert!(load.inspect_signature().is_none());
+        assert!(load.security_signature().is_none());
+
+        let write = system_function_by_id(SYS_STATE_WRITE_USER_STATE_FUNCTION_ID)
+            .expect("the write-user-state identity must resolve");
+        assert_eq!(write.kind(), SystemFunctionKind::State);
+        let write_signature = write
+            .state_signature()
+            .expect("write_user_state must expose its sealed signature");
+        assert_eq!(write_signature.parameter_count(), 1);
+        assert!(write_signature.returns_set());
+        assert!(write.invocation_signature().is_none());
+        assert!(write.inspect_signature().is_none());
+        assert!(write.security_signature().is_none());
+
+        let health = system_function_by_id(CATALOGUE_HEALTH_FUNCTION_ID)
+            .expect("the health identity must resolve");
+        assert!(health.state_signature().is_none());
+        let invoke = system_function_by_id(SYS_INVOKE_FUNCTION_ID)
+            .expect("the invoke identity must resolve");
+        assert!(invoke.state_signature().is_none());
+        let snapshot = system_function_by_id(SYS_INSPECT_SNAPSHOT_FUNCTION_ID)
+            .expect("the snapshot identity must resolve");
+        assert!(snapshot.state_signature().is_none());
+        let session_principal = system_function_by_id(SYS_SECURITY_SESSION_PRINCIPAL_FUNCTION_ID)
+            .expect("the session-principal identity must resolve");
+        assert!(session_principal.state_signature().is_none());
+    }
+
+    #[test]
+    fn state_ids_occupy_the_sealed_function_byte_range_after_security() {
+        let ids = [
+            SYS_STATE_LOAD_USER_STATE_FUNCTION_ID,
+            SYS_STATE_WRITE_USER_STATE_FUNCTION_ID,
+        ];
+        for (index, id) in ids.into_iter().enumerate() {
+            assert_eq!(id.to_bytes()[15], 0x4c + index as u8);
+            assert_eq!(SYSTEM_FUNCTIONS[24 + index].id(), id);
+        }
+    }
+
+    #[test]
+    fn state_lookup_rejects_unregistered_names_and_identities() {
+        for parts in [
+            &["sys", "state"][..],
+            &["sys", "state", "load"][..],
+            &["sys", "state", "load_user_states"][..],
+            &["sys", "state", "LoadUserState"][..],
+            &["sys", "state", "write_user_state", "extra"][..],
+            &["state", "load_user_state"][..],
+        ] {
+            assert!(
+                system_function_by_name(&qualified(parts)).is_none(),
+                "{parts:?}"
+            );
+        }
+        for bytes in [
+            [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x4e],
+            [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x4f],
+        ] {
+            assert!(system_function_by_id(FunctionId::from_bytes(bytes)).is_none());
         }
     }
 
