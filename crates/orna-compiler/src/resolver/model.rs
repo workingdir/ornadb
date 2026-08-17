@@ -957,6 +957,18 @@ pub(crate) enum CheckedClientFunctionBody {
         /// The exact source location of the literal.
         location: SourceLocation,
     },
+    /// A closed CLIENT expression returned by the function (ADR 0068).
+    Expression {
+        /// The checked expression returned by the function.
+        expression: CheckedClientExpression,
+    },
+    /// An external function body declared only by its runtime contract.
+    ExternalContract {
+        /// The exact contract identity string.
+        identity: String,
+        /// The exact source location of the contract literal.
+        location: SourceLocation,
+    },
     /// A hostile test-only body outside the accepted CLIENT subset.
     #[cfg(test)]
     Unsupported,
@@ -971,11 +983,100 @@ impl CheckedClientFunctionBody {
     pub(crate) fn as_boolean_literal(&self) -> Option<(bool, &SourceLocation)> {
         match self {
             Self::BooleanLiteral { value, location } => Some((*value, location)),
+            Self::Expression { .. } | Self::ExternalContract { .. } => None,
+            #[cfg(test)]
+            Self::Unsupported => None,
+        }
+    }
+
+    /// Returns the checked expression when this body contains one.
+    pub(crate) fn as_expression(&self) -> Option<&CheckedClientExpression> {
+        match self {
+            Self::Expression { expression } => Some(expression),
+            Self::BooleanLiteral { .. } | Self::ExternalContract { .. } => None,
+            #[cfg(test)]
+            Self::Unsupported => None,
+        }
+    }
+
+    /// Returns the external contract identity when this body is external.
+    pub(crate) fn as_external_contract(&self) -> Option<(&str, &SourceLocation)> {
+        match self {
+            Self::ExternalContract {
+                identity,
+                location,
+            } => Some((identity, location)),
+            Self::BooleanLiteral { .. } | Self::Expression { .. } => None,
             #[cfg(test)]
             Self::Unsupported => None,
         }
     }
 }
+
+/// One checked CLIENT expression in the ADR 0068 closed surface.
+///
+/// The checked tree mirrors the parsed surface with every name resolved to a
+/// stable identity: the callee is a [`CheckedFunctionId`], parameters read by
+/// [`CheckedParameterId`], and field-path steps by [`CheckedFieldId`].
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum CheckedClientExpression {
+    /// A call to one checked CLIENT function with bound arguments.
+    Call {
+        /// The called function identity.
+        function: CheckedFunctionId,
+        /// The bound arguments in call order: parameter then value.
+        arguments: Vec<(CheckedParameterId, CheckedClientExpression)>,
+        /// The source location of the complete call.
+        location: SourceLocation,
+    },
+    /// A text literal value.
+    String {
+        /// The unescaped text value.
+        value: String,
+        /// The exact source location of the literal.
+        location: SourceLocation,
+    },
+    /// An integer literal value.
+    Integer {
+        /// The parsed integer value.
+        value: i64,
+        /// The exact source location of the literal.
+        location: SourceLocation,
+    },
+    /// A Boolean literal value.
+    Boolean {
+        /// The Boolean value.
+        value: bool,
+        /// The exact source location of the literal.
+        location: SourceLocation,
+    },
+    /// A read of one declared parameter.
+    ParameterRead {
+        /// The read parameter identity.
+        parameter: CheckedParameterId,
+        /// The source location of the read.
+        location: SourceLocation,
+    },
+    /// A path from one parameter through object fields.
+    FieldPath {
+        /// The parameter at the start of the path.
+        root: CheckedParameterId,
+        /// The fields selected in source order.
+        fields: Vec<CheckedFieldId>,
+        /// The source location of the complete path.
+        location: SourceLocation,
+    },
+    /// A left-associative text concatenation.
+    Concat {
+        /// The left operand.
+        left: Box<CheckedClientExpression>,
+        /// The right operand.
+        right: Box<CheckedClientExpression>,
+        /// The source location of the complete expression.
+        location: SourceLocation,
+    },
+}
+
 
 /// The checked argument source of one CLIENT capability requirement.
 #[derive(Clone, Debug, Eq, PartialEq)]
