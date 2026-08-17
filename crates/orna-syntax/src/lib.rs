@@ -713,6 +713,11 @@ pub enum ClientFunctionBody {
         /// The exact contract identity spelling and source span.
         identity: SourceSlice,
     },
+    /// A closed state-declaration block with one return statement.
+    ///
+    /// The block body accepts only `STATE` declarations before `BEGIN` and
+    /// exactly one `RETURN` statement before `END` (work ADR 0069).
+    StateBlock(ClientStateBlockBody),
 }
 
 impl ClientFunctionBody {
@@ -721,7 +726,9 @@ impl ClientFunctionBody {
     pub fn as_boolean_literal(&self) -> Option<(bool, &SourceSlice)> {
         match self {
             Self::BooleanLiteral { value, source } => Some((*value, source)),
-            Self::Expression { .. } | Self::ExternalContract { .. } => None,
+            Self::Expression { .. }
+            | Self::ExternalContract { .. }
+            | Self::StateBlock(_) => None,
         }
     }
 
@@ -730,7 +737,9 @@ impl ClientFunctionBody {
     pub fn as_expression(&self) -> Option<&ClientExpression> {
         match self {
             Self::Expression { expression } => Some(expression),
-            Self::BooleanLiteral { .. } | Self::ExternalContract { .. } => None,
+            Self::BooleanLiteral { .. } | Self::ExternalContract { .. } | Self::StateBlock(_) => {
+                None
+            }
         }
     }
 
@@ -739,9 +748,75 @@ impl ClientFunctionBody {
     pub fn as_external_contract(&self) -> Option<&SourceSlice> {
         match self {
             Self::ExternalContract { identity } => Some(identity),
-            Self::BooleanLiteral { .. } | Self::Expression { .. } => None,
+            Self::BooleanLiteral { .. } | Self::Expression { .. } | Self::StateBlock(_) => None,
         }
     }
+
+    /// Return the parsed state block when this body declares one.
+    #[must_use]
+    pub fn as_state_block(&self) -> Option<&ClientStateBlockBody> {
+        match self {
+            Self::StateBlock(block) => Some(block),
+            Self::BooleanLiteral { .. }
+            | Self::Expression { .. }
+            | Self::ExternalContract { .. } => None,
+        }
+    }
+}
+
+/// The declared scope of one CLIENT state slot (work ADR 0069).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StateScope {
+    /// State private to one mounted function instance.
+    Local,
+    /// State retained for the client invocation session.
+    Session,
+    /// State associated with the authenticated principal.
+    User,
+}
+
+/// One parsed `STATE` declaration inside a CLIENT state block.
+///
+/// The declaration follows the canonical shape
+/// `STATE identifier type_spec [SCOPE (LOCAL | SESSION | USER)]
+/// [DEFAULT expression] ;`. An omitted scope means `LOCAL`; an omitted
+/// default means an unset value.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StateDeclaration {
+    /// The declared state name as written.
+    pub name: NamePart,
+    /// The declared state type.
+    pub type_specification: TypeSpecification,
+    /// The declared scope; `StateScope::Local` when the clause is omitted.
+    pub scope: StateScope,
+    /// The parsed default expression when a `DEFAULT` clause was declared.
+    pub default: Option<ClientExpression>,
+    /// The span from `STATE` through the terminating semicolon.
+    pub span: SourceSpan,
+}
+
+/// The single-return body of a CLIENT state block (work ADR 0069).
+///
+/// The closed body shape is:
+///
+/// ```text
+/// IS
+///     { state_declaration }
+/// BEGIN
+///     RETURN [ expression ] ;
+/// END
+/// ```
+///
+/// The return expression uses the closed ADR 0068 CLIENT expression
+/// vocabulary. The body has exactly one return statement.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClientStateBlockBody {
+    /// The state declarations in source order.
+    pub states: Vec<StateDeclaration>,
+    /// The parsed return expression when the statement names one.
+    pub return_expression: Option<ClientExpression>,
+    /// The span from the `IS` keyword through the closing `END`.
+    pub span: SourceSpan,
 }
 
 /// One closed CLIENT expression in the ADR 0068 expression surface.
@@ -1179,7 +1254,8 @@ mod tests {
         FunctionTransaction, FunctionVolatility, InsertValue, MutationValue, NullOrdering,
         OnDeletePolicy, OptionTypeSpelling, OrderingDirection, PrimitiveValueTypePersistence,
         QueryExpression, RecordConstructorFieldValue, SelectQuantifier, ServerFunctionBody,
-        SourceSpan, StandardLargeObjectKind, TypeExportTarget, TypeSpecification, parse,
+        SourceSpan, StandardLargeObjectKind, StateScope, TypeExportTarget, TypeSpecification,
+        parse,
     };
 
     #[test]
@@ -4770,11 +4846,6 @@ mod tests {
     fn reports_closed_client_body_diagnostics_with_exact_public_messages() {
         let cases = [
             (
-                "CREATE CLIENT FUNCTION examples.is_form() RETURNS BOOLEAN IS BEGIN RETURN TRUE; END;",
-                "CLIENT functions use RETURN before their result value",
-                "IS",
-            ),
-            (
                 "CREATE CLIENT FUNCTION examples.expression() RETURNS BOOLEAN RETURN NULL;",
                 "CLIENT RETURN currently supports only TRUE or FALSE",
                 "NULL",
@@ -5128,9 +5199,9 @@ mod tests {
                 ";",
             ),
             (
-                "CREATE CLIENT FUNCTION examples.is_form() RETURNS BOOLEAN REQUIRES CAPABILITY std.fs.read(p_file) IS BEGIN RETURN TRUE; END;",
+                "CREATE CLIENT FUNCTION examples.is_form() RETURNS BOOLEAN REQUIRES CAPABILITY std.fs.read(p_file);",
                 "CLIENT functions use RETURN before their result value",
-                "IS",
+                ";",
             ),
         ];
 
@@ -5153,7 +5224,7 @@ mod tests {
 
     #[test]
     fn recovers_after_client_function_errors_to_all_later_declarations() {
-        let source = "CREATE CLIENT FUNCTION examples.bad() RETURNS BOOLEAN IS BEGIN RETURN TRUE; END;\n\
+        let source = "CREATE CLIENT FUNCTION examples.bad() RETURNS BOOLEAN SECURITY INVOKER RETURN TRUE;\n\
             CREATE SCHEMA later;\n\
             CREATE TYPE later.item AS OBJECT (name TEXT);\n\
             CREATE SERVER FUNCTION later.server() RETURNS ROWS (value BOOL) AS SELECT t.value FROM later.item t;\n\
@@ -5165,12 +5236,12 @@ mod tests {
             parsed.diagnostics()[0].message,
             "CLIENT functions use RETURN before their result value"
         );
-        let rejected_form = source.find("IS BEGIN").expect("rejected CLIENT body form");
+        let rejected_form = source.find("SECURITY").expect("rejected CLIENT body form");
         assert_eq!(
             parsed.diagnostics()[0].span,
             SourceSpan {
                 start: rejected_form,
-                end: rejected_form + 2,
+                end: rejected_form + 8,
             }
         );
         assert_eq!(parsed.schemas().len(), 1);
@@ -5179,6 +5250,196 @@ mod tests {
         assert_eq!(parsed.client_functions().len(), 1);
         assert_eq!(parsed.client_functions()[0].name.parts[0].text, "later");
         assert_eq!(parsed.client_functions()[0].name.parts[1].text, "good");
+    }
+
+    #[test]
+    fn parses_client_state_blocks_with_scopes_defaults_and_single_return() {
+        let source = "CREATE CLIENT FUNCTION studio.connections()\n\
+            RETURNS TEXT\n\
+            IS\n\
+                STATE filter TEXT SCOPE LOCAL DEFAULT '';\n\
+                STATE selected TEXT SCOPE SESSION DEFAULT NULL;\n\
+                STATE count INTEGER SCOPE USER;\n\
+            BEGIN\n\
+                RETURN filter || selected;\n\
+            END;";
+        let parsed = parse(source);
+
+        assert!(
+            parsed.diagnostics().is_empty(),
+            "{:?}",
+            parsed.diagnostics()
+        );
+        assert_eq!(parsed.syntax().text(), source);
+        assert_eq!(parsed.client_functions().len(), 1);
+        let function = &parsed.client_functions()[0];
+        let ClientFunctionBody::StateBlock(block) = &function.body else {
+            panic!("expected a state block body");
+        };
+        assert_eq!(block.states.len(), 3);
+
+        let filter = &block.states[0];
+        assert_eq!(filter.name.text, "filter");
+        assert_eq!(filter.scope, StateScope::Local);
+        assert!(matches!(
+            filter.default,
+            Some(ClientExpression::StringLiteral { .. })
+        ));
+        assert!(matches!(
+            &filter.type_specification,
+            TypeSpecification::Named(name) if name.parts[0].text == "TEXT"
+        ));
+
+        let selected = &block.states[1];
+        assert_eq!(selected.name.text, "selected");
+        assert_eq!(selected.scope, StateScope::Session);
+        // `DEFAULT NULL` parses as a parameter read in the closed ADR 0068
+        // vocabulary; the compiler owns the semantic rejection.
+        assert!(matches!(
+            selected.default,
+            Some(ClientExpression::ParameterRead { .. })
+        ));
+
+        let count = &block.states[2];
+        assert_eq!(count.name.text, "count");
+        assert_eq!(count.scope, StateScope::User);
+        assert!(count.default.is_none());
+        assert!(matches!(
+            &count.type_specification,
+            TypeSpecification::Named(name) if name.parts[0].text == "INTEGER"
+        ));
+
+        let ClientExpression::Concat { .. } =
+            block.return_expression.as_ref().expect("return expression")
+        else {
+            panic!("expected a concatenation return expression");
+        };
+
+        let filter_start = source.find("STATE filter").expect("filter declaration");
+        let filter_end = source.find("'';").expect("filter terminator") + "'';".len();
+        assert_eq!(
+            filter.span,
+            SourceSpan {
+                start: filter_start,
+                end: filter_end,
+            }
+        );
+        let block_start = source.find("IS").expect("IS keyword");
+        let block_end = source.find("END").expect("END keyword") + "END".len();
+        assert_eq!(
+            block.span,
+            SourceSpan {
+                start: block_start,
+                end: block_end,
+            }
+        );
+    }
+
+    #[test]
+    fn parses_client_state_blocks_with_bare_return_and_omitted_clauses() {
+        let source = "CREATE CLIENT FUNCTION examples.reset() RETURNS BOOLEAN IS BEGIN RETURN; END;\n\
+            CREATE CLIENT FUNCTION examples.touched() RETURNS TEXT IS\n\
+                STATE stamp TEXT;\n\
+            BEGIN\n\
+                RETURN stamp;\n\
+            END;";
+        let parsed = parse(source);
+
+        assert!(
+            parsed.diagnostics().is_empty(),
+            "{:?}",
+            parsed.diagnostics()
+        );
+        assert_eq!(parsed.syntax().text(), source);
+        assert_eq!(parsed.client_functions().len(), 2);
+
+        let reset = &parsed.client_functions()[0];
+        let ClientFunctionBody::StateBlock(block) = &reset.body else {
+            panic!("expected a state block body");
+        };
+        assert!(block.states.is_empty());
+        assert!(block.return_expression.is_none());
+
+        let touched = &parsed.client_functions()[1];
+        let ClientFunctionBody::StateBlock(block) = &touched.body else {
+            panic!("expected a state block body");
+        };
+        assert_eq!(block.states.len(), 1);
+        let stamp = &block.states[0];
+        assert_eq!(stamp.name.text, "stamp");
+        assert_eq!(stamp.scope, StateScope::Local);
+        assert!(stamp.default.is_none());
+        let ClientExpression::ParameterRead { parameter } =
+            block.return_expression.as_ref().expect("return expression")
+        else {
+            panic!("expected a parameter read return expression");
+        };
+        assert_eq!(parameter.text, "stamp");
+    }
+
+    #[test]
+    fn keeps_duplicate_state_names_for_the_compiler_to_reject() {
+        let source = "CREATE CLIENT FUNCTION examples.dup() RETURNS TEXT IS\n\
+            STATE stamp TEXT;\n\
+            STATE stamp TEXT;\n\
+        BEGIN\n\
+            RETURN stamp;\n\
+        END;";
+        let parsed = parse(source);
+
+        assert!(
+            parsed.diagnostics().is_empty(),
+            "{:?}",
+            parsed.diagnostics()
+        );
+        let ClientFunctionBody::StateBlock(block) = &parsed.client_functions()[0].body else {
+            panic!("expected a state block body");
+        };
+        assert_eq!(block.states.len(), 2);
+        assert_eq!(block.states[0].name.text, "stamp");
+        assert_eq!(block.states[1].name.text, "stamp");
+    }
+
+    #[test]
+    fn rejects_unsupported_procedural_statements_in_client_state_blocks() {
+        let cases = [
+            (
+                "CREATE CLIENT FUNCTION examples.bad() RETURNS BOOLEAN IS LET x = 1; BEGIN RETURN TRUE; END;",
+                "CLIENT state blocks accept only STATE declarations before BEGIN",
+                "LET",
+            ),
+            (
+                "CREATE CLIENT FUNCTION examples.bad() RETURNS BOOLEAN IS STATE count TEXT; BEGIN RETURN 1; RETURN 2; END;",
+                "CLIENT state blocks accept only a single RETURN statement",
+                "RETURN 2",
+            ),
+            (
+                "CREATE CLIENT FUNCTION examples.bad() RETURNS BOOLEAN IS BEGIN IF x THEN RETURN TRUE; END;",
+                "CLIENT state blocks accept only a single RETURN statement",
+                "IF",
+            ),
+        ];
+
+        for (source, message, marker) in cases {
+            let parsed = parse(source);
+            assert!(parsed.client_functions().is_empty(), "source: {source}");
+            let diagnostic = parsed
+                .diagnostics()
+                .iter()
+                .find(|diagnostic| diagnostic.message == message)
+                .unwrap_or_else(|| panic!("source: {source}: {:?}", parsed.diagnostics()));
+            assert_eq!(diagnostic.code, "ORNA0001");
+            let start = source.find(marker).expect("diagnostic marker");
+            assert_eq!(diagnostic.span.start, start, "source: {source}");
+            // The diagnostic names the offending keyword token, which is
+            // the first word of the marker.
+            let token = marker.split_whitespace().next().expect("marker token");
+            assert_eq!(
+                diagnostic.span.end,
+                start + token.len(),
+                "source: {source}"
+            );
+        }
     }
 
     #[test]
