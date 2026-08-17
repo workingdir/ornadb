@@ -3,10 +3,10 @@
 use std::{collections::HashMap, error::Error, fmt};
 
 use orna_artifact::client_plan::{
-    ClientExpressionNode, ClientPlan, ClientPlanError, EXPRESSION_FORMAT_VERSION,
-    ExpressionClientPlan, FORMAT_IDENTITY, FORMAT_VERSION, LANGUAGE_VERSION_IDENTITY,
-    OPAQUE_FORMAT_VERSION, OpaqueClientPlan, STATE_FORMAT_VERSION, StateClientPlan, StateDefault,
-    StateScope,
+    CAPABILITY_FORMAT_VERSION, CapabilityArgumentSource, CapabilityClientPlan, ClientExpressionNode,
+    ClientPlan, ClientPlanError, EXPRESSION_FORMAT_VERSION, ExpressionClientPlan, FORMAT_IDENTITY,
+    FORMAT_VERSION, InnerClientPlan, LANGUAGE_VERSION_IDENTITY, OPAQUE_FORMAT_VERSION,
+    OpaqueClientPlan, STATE_FORMAT_VERSION, StateClientPlan, StateDefault, StateScope,
 };
 use orna_core::{
     FunctionId, FunctionRevisionId, ParameterId, StateSlotId, TypeId,
@@ -703,29 +703,66 @@ fn evaluate_function(
         function,
         function_revision: revision.id(),
     };
-    for declaration in declarations {
-        if !grants.satisfies_declaration(declaration, |parameter| {
-            let parameter_id = definition
-                .parameters()
-                .iter()
-                .find(|candidate| candidate.name() == parameter)
-                .map(|candidate| candidate.id())?;
-            arguments
-                .iter()
-                .find(|(candidate, _)| *candidate == parameter_id)
-                .and_then(|(_, value)| match value {
-                    RuntimeValue::Text(value) => Some(value.clone()),
-                    _ => None,
-                })
-        }) {
-            return Err(ClientExecutionError::CapabilityDenied {
-                context,
-                capability: declaration.name().as_str().to_owned(),
-            });
+    // A version-5 capability envelope is decoded before function-shape
+    // validation (work ADR 0060). Its inner plan version classifies the
+    // function, and its stored requirements gate evaluation; the caller's
+    // declaration list never replaces them. Any decode failure fails closed
+    // with the invalid-artifact path before anything executes.
+    let envelope = if revision.artifact().version() == CAPABILITY_FORMAT_VERSION {
+        Some(
+            CapabilityClientPlan::decode(revision.artifact().payload()).map_err(|source| {
+                ClientExecutionError::InvalidArtifact { context, source }
+            })?,
+        )
+    } else {
+        None
+    };
+    let artifact_version = envelope
+        .as_ref()
+        .map_or(revision.artifact().version(), |plan| plan.inner_plan_version());
+    let resolve_parameter = |parameter: &str| {
+        resolve_parameter_argument(definition, &arguments, parameter)
+    };
+    match &envelope {
+        Some(plan) => {
+            for requirement in plan.requirements() {
+                let name = capability::LocalCapabilityName::parse(requirement.name()).map_err(
+                    |_| ClientExecutionError::CapabilityDenied {
+                        context,
+                        capability: requirement.name().to_owned(),
+                    },
+                )?;
+                let declaration = capability::LocalCapabilityDeclaration::new(
+                    name,
+                    match requirement.argument() {
+                        CapabilityArgumentSource::Text(text) => {
+                            capability::LocalCapabilityArgumentSource::Text(text.clone())
+                        }
+                        CapabilityArgumentSource::Parameter(parameter) => {
+                            capability::LocalCapabilityArgumentSource::Parameter(parameter.clone())
+                        }
+                    },
+                );
+                if !grants.satisfies_declaration(&declaration, resolve_parameter) {
+                    return Err(ClientExecutionError::CapabilityDenied {
+                        context,
+                        capability: requirement.name().to_owned(),
+                    });
+                }
+            }
+        }
+        None => {
+            for declaration in declarations {
+                if !grants.satisfies_declaration(declaration, resolve_parameter) {
+                    return Err(ClientExecutionError::CapabilityDenied {
+                        context,
+                        capability: declaration.name().as_str().to_owned(),
+                    });
+                }
+            }
         }
     }
-    let return_shape =
-        validate_function_shape(active, definition, context, revision.artifact().version())?;
+    let return_shape = validate_function_shape(active, definition, context, artifact_version)?;
     if arguments.len() != definition.parameters().len()
         || definition.parameters().iter().any(|parameter| {
             arguments
@@ -757,19 +794,56 @@ fn evaluate_function(
         revision.language_version(),
         context,
         return_shape,
+        artifact_version,
     )?;
-    let value = evaluate_plan(
-        active,
-        revision.artifact().payload(),
-        context,
-        return_shape,
-        &arguments,
-        declarations,
-        grants,
-        state,
-        depth,
-    )?;
+    let value = match &envelope {
+        Some(plan) => evaluate_capability_plan(
+            active,
+            plan,
+            context,
+            return_shape,
+            &arguments,
+            grants,
+            state,
+            depth,
+        )?,
+        None => evaluate_plan(
+            active,
+            revision.artifact().payload(),
+            context,
+            return_shape,
+            &arguments,
+            declarations,
+            grants,
+            state,
+            depth,
+        )?,
+    };
     Ok((context, value))
+}
+
+/// Resolves one declared parameter name to its invocation value.
+///
+/// A parameter that is not declared, not bound at invocation time, or not a
+/// text value cannot satisfy a capability scope and resolves to `None`, so
+/// the capability gate fails closed.
+fn resolve_parameter_argument(
+    definition: &orna_core::catalogue::FunctionDefinition,
+    arguments: &[(ParameterId, RuntimeValue)],
+    parameter: &str,
+) -> Option<String> {
+    let parameter_id = definition
+        .parameters()
+        .iter()
+        .find(|candidate| candidate.name() == parameter)
+        .map(|candidate| candidate.id())?;
+    arguments
+        .iter()
+        .find(|(candidate, _)| *candidate == parameter_id)
+        .and_then(|(_, value)| match value {
+            RuntimeValue::Text(value) => Some(value.clone()),
+            _ => None,
+        })
 }
 
 fn evaluate_plan(
@@ -792,90 +866,204 @@ fn evaluate_plan(
         ClientReturnShape::Opaque(expected) => {
             let plan = OpaqueClientPlan::decode(payload)
                 .map_err(|source| ClientExecutionError::InvalidArtifact { context, source })?;
-            if plan.opaque_type() != expected {
-                return Err(ClientExecutionError::InvalidOpaqueValue {
-                    context,
-                    source: ClientOpaqueValueError::TypeMismatch {
-                        expected,
-                        actual: plan.opaque_type(),
-                    },
-                });
-            }
-            let Some(standard) = active.catalogue_hash_context().standard() else {
-                return Err(ClientExecutionError::InvalidOpaqueValue {
-                    context,
-                    source: ClientOpaqueValueError::Value(OpaqueValueError::ActiveStandardRequired),
-                });
-            };
-            let registry = registered_opaque_codecs(standard).map_err(|source| {
-                ClientExecutionError::InvalidOpaqueValue {
-                    context,
-                    source: ClientOpaqueValueError::Registry(Box::new(source)),
-                }
-            })?;
-            let value = OpaqueValue::new(active, &registry, expected, plan.canonical_payload())
-                .map_err(|source| ClientExecutionError::InvalidOpaqueValue {
-                    context,
-                    source: ClientOpaqueValueError::Value(source),
-                })?;
-            Ok(RuntimeValue::Opaque(value))
+            evaluate_opaque_plan(active, &plan, context, expected)
         }
         ClientReturnShape::Expression(expected) => {
             let plan = ExpressionClientPlan::decode(payload)
                 .map_err(|source| ClientExecutionError::InvalidArtifact { context, source })?;
-            let value = evaluate_expression(
+            evaluate_expression_plan(
                 active,
                 plan.expression(),
                 context,
+                expected,
                 arguments,
                 declarations,
                 grants,
                 state,
                 depth,
-            )?;
-            if runtime_value_matches(active, &value, expected) {
-                Ok(value)
-            } else {
-                Err(expression_error(
-                    context,
-                    ClientExpressionError::TypeMismatch,
-                ))
-            }
+            )
         }
         ClientReturnShape::State(expected) => {
             let plan = StateClientPlan::decode(payload)
                 .map_err(|source| ClientExecutionError::InvalidArtifact { context, source })?;
-            initialize_client_state(
+            evaluate_state_plan(
                 active,
                 &plan,
                 context,
+                expected,
                 arguments,
                 declarations,
                 grants,
                 state,
                 depth,
-            )?;
-            let value = evaluate_expression(
-                active,
-                plan.expression(),
-                context,
-                arguments,
-                declarations,
-                grants,
-                state,
-                depth,
-            )?;
-            if runtime_value_matches(active, &value, expected) {
-                Ok(value)
-            } else {
-                Err(expression_error(
-                    context,
-                    ClientExpressionError::TypeMismatch,
-                ))
-            }
+            )
         }
         ClientReturnShape::OtherValue => unreachable!("definition references were validated"),
         ClientReturnShape::Unsupported => unreachable!("function shape was validated"),
+    }
+}
+
+/// Evaluates one decoded version-2 opaque plan against the function return
+/// type, sharing the closed value-creation contract of the plain path.
+fn evaluate_opaque_plan(
+    active: &ActiveDatabaseRevision,
+    plan: &OpaqueClientPlan,
+    context: ClientExecutionContext,
+    expected: TypeId,
+) -> Result<RuntimeValue, ClientExecutionError> {
+    if plan.opaque_type() != expected {
+        return Err(ClientExecutionError::InvalidOpaqueValue {
+            context,
+            source: ClientOpaqueValueError::TypeMismatch {
+                expected,
+                actual: plan.opaque_type(),
+            },
+        });
+    }
+    let Some(standard) = active.catalogue_hash_context().standard() else {
+        return Err(ClientExecutionError::InvalidOpaqueValue {
+            context,
+            source: ClientOpaqueValueError::Value(OpaqueValueError::ActiveStandardRequired),
+        });
+    };
+    let registry = registered_opaque_codecs(standard).map_err(|source| {
+        ClientExecutionError::InvalidOpaqueValue {
+            context,
+            source: ClientOpaqueValueError::Registry(Box::new(source)),
+        }
+    })?;
+    let value = OpaqueValue::new(active, &registry, expected, plan.canonical_payload())
+        .map_err(|source| ClientExecutionError::InvalidOpaqueValue {
+            context,
+            source: ClientOpaqueValueError::Value(source),
+        })?;
+    Ok(RuntimeValue::Opaque(value))
+}
+
+/// Evaluates one decoded expression tree and type-checks its value.
+fn evaluate_expression_plan(
+    active: &ActiveDatabaseRevision,
+    expression: &ClientExpressionNode,
+    context: ClientExecutionContext,
+    expected: ResolvedType,
+    arguments: &[(ParameterId, RuntimeValue)],
+    declarations: &[capability::LocalCapabilityDeclaration],
+    grants: &capability::LocalCapabilityGrantSet,
+    state: &mut ClientStateStore,
+    depth: usize,
+) -> Result<RuntimeValue, ClientExecutionError> {
+    let value = evaluate_expression(
+        active,
+        expression,
+        context,
+        arguments,
+        declarations,
+        grants,
+        state,
+        depth,
+    )?;
+    if runtime_value_matches(active, &value, expected) {
+        Ok(value)
+    } else {
+        Err(expression_error(
+            context,
+            ClientExpressionError::TypeMismatch,
+        ))
+    }
+}
+
+/// Evaluates one decoded version-4 state plan after initialising its slots.
+fn evaluate_state_plan(
+    active: &ActiveDatabaseRevision,
+    plan: &StateClientPlan,
+    context: ClientExecutionContext,
+    expected: ResolvedType,
+    arguments: &[(ParameterId, RuntimeValue)],
+    declarations: &[capability::LocalCapabilityDeclaration],
+    grants: &capability::LocalCapabilityGrantSet,
+    state: &mut ClientStateStore,
+    depth: usize,
+) -> Result<RuntimeValue, ClientExecutionError> {
+    initialize_client_state(
+        active,
+        plan,
+        context,
+        arguments,
+        declarations,
+        grants,
+        state,
+        depth,
+    )?;
+    evaluate_expression_plan(
+        active,
+        plan.expression(),
+        context,
+        expected,
+        arguments,
+        declarations,
+        grants,
+        state,
+        depth,
+    )
+}
+
+/// Evaluates one decoded version-5 capability envelope after its stored
+/// requirements passed the capability gate (work ADR 0060).
+///
+/// The envelope's requirements are the only capability gate for version-5
+/// plans: the caller's declaration list is not consulted, so a recursive
+/// CLIENT call validates its own stored requirements instead of inheriting
+/// the parent declaration list.
+fn evaluate_capability_plan(
+    active: &ActiveDatabaseRevision,
+    plan: &CapabilityClientPlan,
+    context: ClientExecutionContext,
+    return_shape: ClientReturnShape,
+    arguments: &[(ParameterId, RuntimeValue)],
+    grants: &capability::LocalCapabilityGrantSet,
+    state: &mut ClientStateStore,
+    depth: usize,
+) -> Result<RuntimeValue, ClientExecutionError> {
+    match plan.inner_plan() {
+        InnerClientPlan::Boolean(inner) => Ok(RuntimeValue::Boolean(inner.returned_boolean())),
+        InnerClientPlan::Opaque(inner) => {
+            let ClientReturnShape::Opaque(expected) = return_shape else {
+                unreachable!("function shape was validated against the inner plan version");
+            };
+            evaluate_opaque_plan(active, inner, context, expected)
+        }
+        InnerClientPlan::Expression(inner) => {
+            let ClientReturnShape::Expression(expected) = return_shape else {
+                unreachable!("function shape was validated against the inner plan version");
+            };
+            evaluate_expression_plan(
+                active,
+                inner.expression(),
+                context,
+                expected,
+                arguments,
+                &[],
+                grants,
+                state,
+                depth,
+            )
+        }
+        InnerClientPlan::State(inner) => {
+            let ClientReturnShape::State(expected) = return_shape else {
+                unreachable!("function shape was validated against the inner plan version");
+            };
+            evaluate_state_plan(
+                active,
+                inner,
+                context,
+                expected,
+                arguments,
+                &[],
+                grants,
+                state,
+                depth,
+            )
+        }
     }
 }
 
@@ -1450,11 +1638,17 @@ fn validate_selected_references(
     Ok(())
 }
 
+/// Validates the saved artefact contract against the effective plan version.
+///
+/// For a version-5 capability envelope the effective version is the inner
+/// plan version (the envelope decode already fixed the outer version); for
+/// versions 1-4 it is the artefact's own version.
 fn validate_artifact(
     artifact: &orna_core::revision::ExecutableArtifact,
     language_version: &str,
     context: ClientExecutionContext,
     return_shape: ClientReturnShape,
+    artifact_version: u32,
 ) -> Result<(), ClientExecutionError> {
     if artifact.format() != FORMAT_IDENTITY {
         return Err(invalid_function(
@@ -1470,7 +1664,7 @@ fn validate_artifact(
         ClientReturnShape::OtherValue => unreachable!("definition references were validated"),
         ClientReturnShape::Unsupported => unreachable!("function shape was validated"),
     };
-    if artifact.version() != expected_version {
+    if artifact_version != expected_version {
         return Err(invalid_function(
             context,
             ClientExecutionRule::ArtifactVersion,
@@ -1937,6 +2131,184 @@ mod tests {
         .unwrap();
 
         assert_eq!(result.value(), &RuntimeValue::Boolean(true));
+    }
+
+    #[test]
+    fn version_five_stored_literal_capability_denies_without_grants() {
+        let requirements = vec![orna_artifact::client_plan::CapabilityRequirement::new(
+            "std.fs.read",
+            orna_artifact::client_plan::CapabilityArgumentSource::Text("/home/bob/x".to_owned()),
+        )];
+        let (active, function, _, _) =
+            version_five_boolean_active(version_five_boolean_envelope(true, requirements));
+        let empty_grants = super::capability::LocalCapabilityGrantSet::new();
+        // A caller-supplied declaration must never replace the stored
+        // requirements of a version-5 envelope.
+        let declaration = super::capability::LocalCapabilityDeclaration::new(
+            super::capability::LocalCapabilityName::StdSecretUse,
+            super::capability::LocalCapabilityArgumentSource::Text("secret-1".to_owned()),
+        );
+
+        let error = super::evaluate_client_function_with_grants(
+            &active,
+            &authorise(active.pair(), function),
+            &[declaration],
+            &empty_grants,
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            &error,
+            super::ClientExecutionError::CapabilityDenied {
+                context,
+                capability,
+            } if context.function() == function && capability == "std.fs.read"
+        ));
+        assert_eq!(
+            error.to_string(),
+            "the CLIENT function requires the capability std.fs.read which is not granted"
+        );
+    }
+
+    #[test]
+    fn version_five_stored_literal_capability_evaluates_when_covered() {
+        let requirements = vec![orna_artifact::client_plan::CapabilityRequirement::new(
+            "std.fs.read",
+            orna_artifact::client_plan::CapabilityArgumentSource::Text("/home/bob/x".to_owned()),
+        )];
+        let (active, function, pair, _) =
+            version_five_boolean_active(version_five_boolean_envelope(true, requirements));
+        let grant = super::capability::LocalCapabilityGrant::new(
+            super::capability::LocalCapabilityName::StdFsRead,
+            super::capability::LocalCapabilityScope::path("/home/bob").unwrap(),
+        )
+        .unwrap();
+        let grants = super::capability::LocalCapabilityGrantSet::from_grants([grant]).unwrap();
+
+        let result = super::evaluate_client_function_with_grants(
+            &active,
+            &authorise(pair, function),
+            &[],
+            &grants,
+        )
+        .unwrap();
+
+        assert_eq!(result.context().function(), function);
+        assert_eq!(result.value(), &RuntimeValue::Boolean(true));
+    }
+
+    #[test]
+    fn version_five_unknown_stored_capability_name_fails_closed() {
+        let requirements = vec![orna_artifact::client_plan::CapabilityRequirement::new(
+            "std.bogus.op",
+            orna_artifact::client_plan::CapabilityArgumentSource::Text("anything".to_owned()),
+        )];
+        let (active, function, _, _) =
+            version_five_boolean_active(version_five_boolean_envelope(true, requirements));
+        // Every vocabulary grant present: the unknown stored name still fails
+        // closed and never falls back to an empty requirement set.
+        let grants = super::capability::LocalCapabilityGrantSet::from_grants(
+            super::capability::LocalCapabilityName::ALL.into_iter().map(|name| {
+                let scope = match name {
+                    super::capability::LocalCapabilityName::StdFsRead
+                    | super::capability::LocalCapabilityName::StdFsWrite => {
+                        super::capability::LocalCapabilityScope::path("/home/bob").unwrap()
+                    }
+                    super::capability::LocalCapabilityName::StdNetConnect => {
+                        super::capability::LocalCapabilityScope::host("example.com").unwrap()
+                    }
+                    super::capability::LocalCapabilityName::StdSecretUse => {
+                        super::capability::LocalCapabilityScope::secret("secret-1").unwrap()
+                    }
+                };
+                super::capability::LocalCapabilityGrant::new(name, scope).unwrap()
+            }),
+        )
+        .unwrap();
+
+        let error = super::evaluate_client_function_with_grants(
+            &active,
+            &authorise(active.pair(), function),
+            &[],
+            &grants,
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            &error,
+            super::ClientExecutionError::CapabilityDenied {
+                context,
+                capability,
+            } if context.function() == function && capability == "std.bogus.op"
+        ));
+    }
+
+    #[test]
+    fn version_five_stored_parameter_capability_resolves_the_invocation_argument() {
+        let parameter_id = ParameterId::from_bytes([0xb1; 16]);
+        let plan = orna_artifact::client_plan::CapabilityClientPlan::new(
+            orna_artifact::client_plan::InnerClientPlan::Expression(
+                orna_artifact::client_plan::ExpressionClientPlan::new(
+                    orna_artifact::client_plan::ClientExpressionNode::ParameterRead {
+                        parameter: parameter_id,
+                    },
+                ),
+            ),
+            vec![orna_artifact::client_plan::CapabilityRequirement::new(
+                "std.fs.read",
+                orna_artifact::client_plan::CapabilityArgumentSource::Parameter(
+                    "p_path".to_owned(),
+                ),
+            )],
+        );
+        let (active, function, pair, _, _) =
+            version_five_expression_active_with_parameter(plan.encode().unwrap());
+        let argument = orna_core::value::FunctionArgument::new(
+            parameter_id,
+            RuntimeValue::Text("/home/bob/notes.txt".to_owned()),
+        )
+        .unwrap();
+
+        let result = super::evaluate_client_function_with_grants_and_arguments(
+            &active,
+            &authorise(pair, function),
+            &[argument],
+            &[],
+            &super::capability::LocalCapabilityGrantSet::new(),
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            &result,
+            super::ClientExecutionError::CapabilityDenied { capability, .. }
+                if capability == "std.fs.read"
+        ));
+
+        let grant = super::capability::LocalCapabilityGrant::new(
+            super::capability::LocalCapabilityName::StdFsRead,
+            super::capability::LocalCapabilityScope::path("/home/bob").unwrap(),
+        )
+        .unwrap();
+        let grants = super::capability::LocalCapabilityGrantSet::from_grants([grant]).unwrap();
+        let argument = orna_core::value::FunctionArgument::new(
+            parameter_id,
+            RuntimeValue::Text("/home/bob/notes.txt".to_owned()),
+        )
+        .unwrap();
+
+        let result = super::evaluate_client_function_with_grants_and_arguments(
+            &active,
+            &authorise(pair, function),
+            &[argument],
+            &[],
+            &grants,
+        )
+        .unwrap();
+
+        assert_eq!(
+            result.value(),
+            &RuntimeValue::Text("/home/bob/notes.txt".to_owned())
+        );
     }
 
     #[test]
@@ -4051,6 +4423,145 @@ mod tests {
         .unwrap();
 
         (active, function, pair, function_revision)
+    }
+
+    fn version_five_boolean_envelope(
+        value: bool,
+        requirements: Vec<orna_artifact::client_plan::CapabilityRequirement>,
+    ) -> Vec<u8> {
+        orna_artifact::client_plan::CapabilityClientPlan::new(
+            orna_artifact::client_plan::InnerClientPlan::Boolean(
+                orna_artifact::client_plan::ClientPlan::return_boolean(value),
+            ),
+            requirements,
+        )
+        .encode()
+        .expect("the version-5 capability envelope encodes")
+    }
+
+    fn version_five_boolean_active(payload: Vec<u8>) -> (
+        ActiveDatabaseRevision,
+        FunctionId,
+        RevisionPair,
+        FunctionRevisionId,
+    ) {
+        let artifact = ExecutableArtifact::new(
+            ExecutableArtifactKind::Client,
+            "orna.client-plan",
+            orna_artifact::client_plan::CAPABILITY_FORMAT_VERSION,
+            payload.clone(),
+            artifact_payload_digest(&payload).unwrap(),
+        )
+        .unwrap();
+        version_one_active_with_artifact(artifact, "orna.language/1")
+    }
+
+    fn version_five_expression_active_with_parameter(payload: Vec<u8>) -> (
+        ActiveDatabaseRevision,
+        FunctionId,
+        RevisionPair,
+        FunctionRevisionId,
+        ParameterId,
+    ) {
+        let standard = orna_standard::verify_standard_library_snapshot(
+            orna_standard::retained_standard_library_snapshot().unwrap(),
+        )
+        .unwrap();
+        let (version_one, function_id, pair, function_revision_id) = version_one_active(true);
+        let prior_function = version_one.catalogue().function_by_id(function_id).unwrap();
+        let parameter = ParameterDefinition::new(
+            ParameterId::from_bytes([0xb1; 16]),
+            "p_path",
+            0,
+            ResolvedType::Value(orna_standard::CHARACTER_LARGE_OBJECT_TYPE_ID),
+            None,
+        );
+        let function = FunctionDefinition::new(
+            function_id,
+            prior_function.name().clone(),
+            FunctionDomain::Client,
+            vec![parameter.clone()],
+            FunctionReturn::Single(ResolvedType::Value(
+                orna_standard::CHARACTER_LARGE_OBJECT_TYPE_ID,
+            )),
+            function_revision_id,
+            FunctionSecurity::Invoker,
+            None,
+            FunctionVolatility::Immutable,
+        );
+        let catalogue = CatalogueSnapshot::new_with_functions(
+            version_one.catalogue().revision(),
+            version_one.catalogue().schemas().to_vec(),
+            version_one.catalogue().object_types().to_vec(),
+            vec![function.clone()],
+        )
+        .unwrap();
+        let prior_revision = &version_one.function_revisions()[0];
+        let artifact = ExecutableArtifact::new(
+            ExecutableArtifactKind::Client,
+            "orna.client-plan",
+            orna_artifact::client_plan::CAPABILITY_FORMAT_VERSION,
+            payload.clone(),
+            artifact_payload_digest(&payload).unwrap(),
+        )
+        .unwrap();
+        let semantic_hash = function_semantic_digest_with_version(
+            FunctionSemanticHashVersion::Version2,
+            &function,
+            prior_revision.language_version(),
+            &artifact,
+            version_one.expressions(),
+            &[],
+        )
+        .unwrap();
+        let revision = FunctionRevisionRecord::new(
+            function_id,
+            function_revision_id,
+            prior_revision.revision_number(),
+            prior_revision.declaration_origin(),
+            prior_revision.declaration_content_hash(),
+            semantic_hash,
+            prior_revision.language_version(),
+            artifact,
+        )
+        .unwrap()
+        .with_semantic_hash_version(FunctionSemanticHashVersion::Version2);
+        let mut origins = version_one.origins().to_vec();
+        origins.push(DefinitionOrigin::new(
+            DefinitionIdentity::Parameter {
+                owner: function_id,
+                parameter: parameter.id(),
+            },
+            prior_revision.declaration_origin(),
+        ));
+        let context = orna_core::revision::CatalogueHashContext::version_two(standard);
+        let catalogue_hash = catalogue_digest_with_context(
+            &context,
+            &catalogue,
+            std::slice::from_ref(&revision),
+            version_one.expressions(),
+            &origins,
+            &[],
+        )
+        .unwrap();
+        let active = ActiveDatabaseRevision::new_with_catalogue_hash_context(
+            ActiveDatabaseRevisionInput::new(
+                pair,
+                version_one.source().clone(),
+                catalogue,
+                catalogue_hash,
+                ActiveRevisionContent::new(
+                    version_one.expressions().to_vec(),
+                    vec![revision],
+                    origins,
+                    Vec::new(),
+                ),
+            ),
+            context,
+        )
+        .unwrap();
+
+        (active, function_id, pair, function_revision_id, parameter.id())
     }
 
     fn boolean_parameter() -> ParameterDefinition {
