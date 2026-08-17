@@ -281,16 +281,10 @@ impl ClientResource {
 
     /// Starts a new request and invalidates every older completion.
     pub fn begin_loading(&mut self) -> Result<ClientResourceGeneration, ClientResourceError> {
-        self.generation = ClientResourceGeneration(
-            self.generation
-                .0
-                .checked_add(1)
-                .ok_or(ClientResourceError::GenerationExhausted)?,
-        );
+        let generation = self.advance_generation()?;
         self.status = ClientResourceStatus::Loading;
-        self.value = None;
-        self.failure = None;
-        Ok(self.generation)
+        self.clear_result();
+        Ok(generation)
     }
 
     /// Publishes one type-checked result for the current generation.
@@ -333,23 +327,31 @@ impl ClientResource {
     ) -> Result<(), ClientResourceError> {
         self.require_loading(generation)?;
         self.status = ClientResourceStatus::Cancelled;
-        self.value = None;
-        self.failure = None;
+        self.clear_result();
         Ok(())
     }
 
     /// Invalidates the current generation and returns to `IDLE`.
     pub fn invalidate(&mut self) -> Result<(), ClientResourceError> {
+        self.advance_generation()?;
+        self.status = ClientResourceStatus::Idle;
+        self.clear_result();
+        Ok(())
+    }
+
+    fn clear_result(&mut self) {
+        self.value = None;
+        self.failure = None;
+    }
+
+    fn advance_generation(&mut self) -> Result<ClientResourceGeneration, ClientResourceError> {
         self.generation = ClientResourceGeneration(
             self.generation
                 .0
                 .checked_add(1)
                 .ok_or(ClientResourceError::GenerationExhausted)?,
         );
-        self.status = ClientResourceStatus::Idle;
-        self.value = None;
-        self.failure = None;
-        Ok(())
+        Ok(self.generation)
     }
 
     fn require_loading(
