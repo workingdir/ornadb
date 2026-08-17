@@ -1,6 +1,6 @@
 //! Local evaluation for closed CLIENT functions.
 
-use std::{collections::HashMap, error::Error, fmt};
+use std::{collections::{HashMap, hash_map::Entry}, error::Error, fmt};
 
 use orna_artifact::client_plan::{
     CAPABILITY_FORMAT_VERSION, CapabilityArgumentSource, CapabilityClientPlan, ClientExpressionNode,
@@ -19,6 +19,10 @@ use orna_core::{
         FunctionSemanticHashVersion, RevisionPair,
     },
     security::{AuthorisedInvocation, InvocationTarget},
+    state::{
+        UserStateCell, UserStateChange, UserStateKeyWithoutPrincipal, UserStateWriteOutcome,
+        UserStateWriteResult,
+    },
     types::{ResolvedType, StandardScalar},
     value::{FunctionArgument, OpaqueValue, OpaqueValueError, RuntimeValue},
 };
@@ -74,23 +78,168 @@ impl ClientExecutionResult {
         self.value
     }
 }
+fn validate_state_text(value: &str, field: &'static str) -> Result<(), ClientStateIdentityError> {
+    if value.contains('\0') {
+        return Err(ClientStateIdentityError::InvalidText { field });
+    }
+    Ok(())
+}
+
+/// A CLIENT state context or key contains text that cannot cross the state
+/// service boundary.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ClientStateIdentityError {
+    /// One profile or instance component contains a NUL byte.
+    InvalidText {
+        /// The rejected logical component.
+        field: &'static str,
+    },
+}
+
+impl fmt::Display for ClientStateIdentityError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidText { field } => write!(formatter, "{field} must not contain a NUL byte"),
+        }
+    }
+}
+
+impl Error for ClientStateIdentityError {}
+
+/// The root invocation context used to address CLIENT state.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ClientStateContext {
+    root_function: FunctionId,
+    state_profile: String,
+    instance_key: String,
+}
+
+impl ClientStateContext {
+    /// Creates one state context. Empty profile and instance values select
+    /// their default identities.
+    pub fn new(
+        root_function: FunctionId,
+        state_profile: String,
+        instance_key: String,
+    ) -> Result<Self, ClientStateIdentityError> {
+        validate_state_text(&state_profile, "state profile")?;
+        validate_state_text(&instance_key, "instance key")?;
+        Ok(Self {
+            root_function,
+            state_profile,
+            instance_key,
+        })
+    }
+
+    /// Creates the default context for one root function.
+    pub fn default_for(root_function: FunctionId) -> Self {
+        Self {
+            root_function,
+            state_profile: String::new(),
+            instance_key: String::new(),
+        }
+    }
+
+    /// Returns the root function identity.
+    pub const fn root_function(&self) -> FunctionId {
+        self.root_function
+    }
+
+    /// Returns the root state profile.
+    pub fn state_profile(&self) -> &str {
+        &self.state_profile
+    }
+
+    /// Returns the mounted root instance key.
+    pub fn instance_key(&self) -> &str {
+        &self.instance_key
+    }
+}
 
 /// One state slot of one CLIENT function inside an in-memory state store.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct ClientStateKey {
+    root_function: FunctionId,
+    state_profile: String,
     function: FunctionId,
+    instance_key: String,
     slot: StateSlotId,
 }
 
 impl ClientStateKey {
-    /// Creates one state key from the owning function and durable slot identity.
-    pub const fn new(function: FunctionId, slot: StateSlotId) -> Self {
-        Self { function, slot }
+    /// Creates a key in the default root context.
+    pub fn new(function: FunctionId, slot: StateSlotId) -> Self {
+        Self::from_context(&ClientStateContext::default_for(function), function, slot)
+    }
+
+    /// Creates a key from a root context and the owning function.
+    pub fn from_context(
+        context: &ClientStateContext,
+        function: FunctionId,
+        slot: StateSlotId,
+    ) -> Self {
+        Self {
+            root_function: context.root_function,
+            state_profile: context.state_profile.clone(),
+            function,
+            instance_key: context.instance_key.clone(),
+            slot,
+        }
+    }
+
+    /// Creates a key from one durable USER state cell.
+    pub fn from_user_cell(cell: &UserStateCell) -> Self {
+        let key = cell.key();
+        Self {
+            root_function: key.root_function(),
+            state_profile: key.state_profile().to_owned(),
+            function: key.function(),
+            instance_key: key.instance_key().to_owned(),
+            slot: key.state_slot(),
+        }
+    }
+
+    /// Creates a key from a server write change.
+    fn from_user_change(change: &UserStateChange) -> Self {
+        let key = change.key_without_principal();
+        Self {
+            root_function: key.root_function(),
+            state_profile: key.state_profile().to_owned(),
+            function: key.function(),
+            instance_key: key.instance_key().to_owned(),
+            slot: key.state_slot(),
+        }
+    }
+
+    /// Creates a key from a server result key.
+    fn from_user_key(key: &UserStateKeyWithoutPrincipal) -> Self {
+        Self {
+            root_function: key.root_function(),
+            state_profile: key.state_profile().to_owned(),
+            function: key.function(),
+            instance_key: key.instance_key().to_owned(),
+            slot: key.state_slot(),
+        }
+    }
+
+    /// Returns the root function identity.
+    pub const fn root_function(&self) -> FunctionId {
+        self.root_function
+    }
+
+    /// Returns the root state profile.
+    pub fn state_profile(&self) -> &str {
+        &self.state_profile
     }
 
     /// Returns the owning function identity.
     pub const fn function(&self) -> FunctionId {
         self.function
+    }
+
+    /// Returns the function-instance key.
+    pub fn instance_key(&self) -> &str {
+        &self.instance_key
     }
 
     /// Returns the durable state-slot identity.
@@ -99,18 +248,81 @@ impl ClientStateKey {
     }
 }
 
+/// One loaded or locally updated USER state value.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ClientUserState {
+    value: RuntimeValue,
+    value_type: TypeId,
+    revision: Option<u64>,
+    dirty: bool,
+}
+
+impl ClientUserState {
+    fn loaded(cell: &UserStateCell) -> Self {
+        Self {
+            value: cell.value().clone(),
+            value_type: cell.value_type(),
+            revision: Some(cell.revision()),
+            dirty: false,
+        }
+    }
+
+    fn local(value: RuntimeValue, value_type: TypeId, revision: Option<u64>) -> Self {
+        Self {
+            value,
+            value_type,
+            revision,
+            dirty: true,
+        }
+    }
+    fn defaulted(value: RuntimeValue, value_type: TypeId) -> Self {
+        Self {
+            value,
+            value_type,
+            revision: None,
+            dirty: false,
+        }
+    }
+
+    /// Returns the current local value.
+    pub const fn value(&self) -> &RuntimeValue {
+        &self.value
+    }
+
+    /// Returns the persisted value type.
+    pub const fn value_type(&self) -> TypeId {
+        self.value_type
+    }
+
+    /// Returns the acknowledged server revision, or `None` for a new cell.
+    pub const fn revision(&self) -> Option<u64> {
+        self.revision
+    }
+
+    /// Returns whether the value needs a server flush.
+    pub const fn is_dirty(&self) -> bool {
+        self.dirty
+    }
+}
 /// The explicit in-memory CLIENT state for one invocation session
-/// (work ADR 0069).
-///
-/// This runtime slice initialises `LOCAL` and `SESSION` slot values in this
-/// store and fails closed on `USER`-scoped slots. The store is owned by the
-/// caller and makes no persistence claim: dropping it discards its values,
-/// and the client never sends it to a server.
-#[derive(Clone, Debug, Default, PartialEq)]
+/// (work ADRs 0069 and 0070).
+#[derive(Clone, Debug, PartialEq)]
 pub struct ClientStateStore {
+    context: ClientStateContext,
     local: HashMap<ClientStateKey, RuntimeValue>,
     session: HashMap<ClientStateKey, RuntimeValue>,
-    user: HashMap<ClientStateKey, RuntimeValue>,
+    user: HashMap<ClientStateKey, ClientUserState>,
+}
+
+impl Default for ClientStateStore {
+    fn default() -> Self {
+        Self {
+            context: ClientStateContext::default_for(FunctionId::from_bytes([0; 16])),
+            local: HashMap::new(),
+            session: HashMap::new(),
+            user: HashMap::new(),
+        }
+    }
 }
 
 impl ClientStateStore {
@@ -119,13 +331,27 @@ impl ClientStateStore {
         Self::default()
     }
 
+    /// Selects the root context used for subsequent evaluator state keys.
+    pub fn set_context(&mut self, context: ClientStateContext) {
+        self.context = context;
+    }
+
+    /// Returns the selected root state context.
+    pub const fn context(&self) -> &ClientStateContext {
+        &self.context
+    }
+
+    /// Creates one state key in the selected root context.
+    fn key_for(&self, function: FunctionId, slot: StateSlotId) -> ClientStateKey {
+        ClientStateKey::from_context(&self.context, function, slot)
+    }
+
     /// Returns the `LOCAL` slot values of one mounted function instance.
     pub fn local(&self) -> &HashMap<ClientStateKey, RuntimeValue> {
         &self.local
     }
 
-    /// Returns mutable access to the `LOCAL` slot values, e.g. to seed or
-    /// clear one mounted function instance.
+    /// Returns mutable access to the `LOCAL` slot values.
     pub fn local_mut(&mut self) -> &mut HashMap<ClientStateKey, RuntimeValue> {
         &mut self.local
     }
@@ -135,15 +361,212 @@ impl ClientStateStore {
         &self.session
     }
 
-    /// Returns mutable access to the `SESSION` slot values, e.g. to supply
-    /// state from a compatible remount or to end the session.
+    /// Returns mutable access to the `SESSION` slot values.
     pub fn session_mut(&mut self) -> &mut HashMap<ClientStateKey, RuntimeValue> {
         &mut self.session
     }
 
-    /// Returns the `USER` slot values; this slice never populates them.
-    pub fn user(&self) -> &HashMap<ClientStateKey, RuntimeValue> {
+    /// Returns loaded and locally updated `USER` slot values.
+    pub fn user(&self) -> &HashMap<ClientStateKey, ClientUserState> {
         &self.user
+    }
+}
+
+/// A USER state store rejected a lifecycle operation.
+#[non_exhaustive]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ClientUserStateError {
+    /// A load contained the same logical cell more than once.
+    DuplicateKey(ClientStateKey),
+    /// A transport result did not align with the submitted change batch.
+    WriteBatchLength { expected: usize, actual: usize },
+    /// A transport result named a different cell from its change.
+    WriteKeyMismatch {
+        /// The submitted change key.
+        expected: ClientStateKey,
+        /// The returned result key.
+        actual: ClientStateKey,
+    },
+    /// A write result named a cell that is not in the local store.
+    UnknownKey(ClientStateKey),
+    /// A write result did not describe the current dirty local value.
+    ValueMismatch(ClientStateKey),
+    /// The server reported a revision conflict.
+    Conflict {
+        /// The conflicted logical cell.
+        key: ClientStateKey,
+        /// The revision sent by the client.
+        expected: Option<u64>,
+        /// The revision currently held by the server.
+        current: u64,
+    },
+    /// A successful write returned an invalid revision transition.
+    InvalidRevision(ClientStateKey),
+    /// The state change could not be constructed from the local key.
+    InvalidChange(String),
+    /// A state context contains invalid text.
+    InvalidIdentity(ClientStateIdentityError),
+}
+
+impl fmt::Display for ClientUserStateError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::DuplicateKey(key) => write!(formatter, "USER state load contains duplicate key {key:?}"),
+            Self::WriteBatchLength { expected, actual } => write!(
+                formatter,
+                "USER state write result count {actual} does not match change count {expected}",
+            ),
+            Self::WriteKeyMismatch { expected, actual } => {
+                write!(formatter, "USER state write result key {actual:?} does not match {expected:?}")
+            }
+            Self::UnknownKey(key) => write!(formatter, "USER state write result names unknown key {key:?}"),
+            Self::ValueMismatch(key) => {
+                write!(formatter, "USER state write result does not match local value for {key:?}")
+            }
+            Self::Conflict {
+                key,
+                expected,
+                current,
+            } => write!(
+                formatter,
+                "USER state revision conflict for {key:?}: expected {expected:?}, current {current}",
+            ),
+            Self::InvalidRevision(key) => {
+                write!(formatter, "USER state write returned an invalid revision for {key:?}")
+            }
+            Self::InvalidChange(reason) => write!(formatter, "USER state change is invalid: {reason}"),
+            Self::InvalidIdentity(source) => source.fmt(formatter),
+        }
+    }
+}
+
+impl Error for ClientUserStateError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::InvalidIdentity(source) => Some(source),
+            _ => None,
+        }
+    }
+}
+
+impl ClientStateStore {
+    /// Loads one complete authenticated USER state batch.
+    pub fn load_user_state(
+        &mut self,
+        cells: &[UserStateCell],
+    ) -> Result<(), ClientUserStateError> {
+        let mut loaded = HashMap::with_capacity(cells.len());
+        for cell in cells {
+            let key = ClientStateKey::from_user_cell(cell);
+            if loaded.insert(key.clone(), ClientUserState::loaded(cell)).is_some() {
+                return Err(ClientUserStateError::DuplicateKey(key));
+            }
+        }
+        self.user.extend(loaded);
+        Ok(())
+    }
+
+    /// Updates one USER value and marks it for the next explicit flush.
+    pub fn set_user_state(
+        &mut self,
+        key: ClientStateKey,
+        value: RuntimeValue,
+        value_type: TypeId,
+    ) -> Result<(), ClientUserStateError> {
+        if let Some(existing) = self.user.get(&key)
+            && existing.value_type != value_type
+        {
+            return Err(ClientUserStateError::ValueMismatch(key));
+        }
+        let revision = self.user.get(&key).and_then(ClientUserState::revision);
+        self.user
+            .insert(key, ClientUserState::local(value, value_type, revision));
+        Ok(())
+    }
+
+    /// Returns dirty USER values as one deterministic change batch.
+    pub fn pending_user_state_changes(&self) -> Result<Vec<UserStateChange>, ClientUserStateError> {
+        let mut pending = self
+            .user
+            .iter()
+            .filter(|(_, value)| value.dirty)
+            .map(|(key, value)| {
+                UserStateChange::new(
+                    key.root_function,
+                    key.state_profile.clone(),
+                    key.function,
+                    key.instance_key.clone(),
+                    key.slot,
+                    value.revision,
+                    value.value.clone(),
+                    value.value_type,
+                )
+                .map(|change| (key, change))
+                .map_err(|error| ClientUserStateError::InvalidChange(error.to_string()))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        pending.sort_by(|(left, _), (right, _)| left.cmp(right));
+        Ok(pending.into_iter().map(|(_, change)| change).collect())
+    }
+
+    /// Applies one aligned server write-result batch.
+    pub fn apply_user_state_write_results(
+        &mut self,
+        changes: &[UserStateChange],
+        results: &[UserStateWriteResult],
+    ) -> Result<(), ClientUserStateError> {
+        if changes.len() != results.len() {
+            return Err(ClientUserStateError::WriteBatchLength {
+                expected: changes.len(),
+                actual: results.len(),
+            });
+        }
+        for (change, result) in changes.iter().zip(results) {
+            let expected_key = ClientStateKey::from_user_change(change);
+            let actual_key = ClientStateKey::from_user_key(result.key());
+            if expected_key != actual_key {
+                return Err(ClientUserStateError::WriteKeyMismatch {
+                    expected: expected_key,
+                    actual: actual_key,
+                });
+            }
+            let Some(local) = self.user.get(&expected_key) else {
+                return Err(ClientUserStateError::UnknownKey(expected_key));
+            };
+            if !local.dirty
+                || local.revision != change.expected_revision()
+                || local.value != *change.value()
+                || local.value_type != change.value_type()
+            {
+                return Err(ClientUserStateError::ValueMismatch(expected_key));
+            }
+        }
+        for (change, result) in changes.iter().zip(results) {
+            let key = ClientStateKey::from_user_change(change);
+            let local = self
+                .user
+                .get_mut(&key)
+                .expect("USER state key was validated above");
+            match result.outcome() {
+                UserStateWriteOutcome::Written { revision } => {
+                    let valid = revision > 0
+                        && local.revision.is_none_or(|current| revision > current);
+                    if !valid {
+                        return Err(ClientUserStateError::InvalidRevision(key));
+                    }
+                    local.revision = Some(revision);
+                    local.dirty = false;
+                }
+                UserStateWriteOutcome::Conflict { current_revision } => {
+                    return Err(ClientUserStateError::Conflict {
+                        key,
+                        expected: change.expected_revision(),
+                        current: current_revision,
+                    });
+                }
+            }
+        }
+        Ok(())
     }
 }
 
@@ -654,6 +1077,28 @@ pub fn evaluate_client_function_with_state_and_grants_and_arguments(
     grants: &capability::LocalCapabilityGrantSet,
     state: &mut ClientStateStore,
 ) -> Result<ClientExecutionResult, ClientExecutionError> {
+    let state_context = ClientStateContext::default_for(authorisation.target().function());
+    evaluate_client_function_in_state_context(
+        active,
+        authorisation,
+        &state_context,
+        arguments,
+        declarations,
+        grants,
+        state,
+    )
+}
+
+/// Evaluates one CLIENT function in an explicit root state context.
+pub fn evaluate_client_function_in_state_context(
+    active: &ActiveDatabaseRevision,
+    authorisation: &AuthorisedInvocation,
+    state_context: &ClientStateContext,
+    arguments: &[FunctionArgument],
+    declarations: &[capability::LocalCapabilityDeclaration],
+    grants: &capability::LocalCapabilityGrantSet,
+    state: &mut ClientStateStore,
+) -> Result<ClientExecutionResult, ClientExecutionError> {
     let target = authorisation.target();
     if target.revision() != active.pair() {
         return Err(ClientExecutionError::AuthorisationMismatch {
@@ -662,7 +1107,9 @@ pub fn evaluate_client_function_with_state_and_grants_and_arguments(
         });
     }
     validate_active_catalogue(active, target.function())?;
-    let (context, value) = evaluate_function(
+    let mut staged = state.clone();
+    staged.set_context(state_context.clone());
+    let result = evaluate_function(
         active,
         target.function(),
         arguments
@@ -671,9 +1118,11 @@ pub fn evaluate_client_function_with_state_and_grants_and_arguments(
             .collect(),
         declarations,
         grants,
-        state,
+        &mut staged,
         0,
     )?;
+    *state = staged;
+    let (context, value) = result;
     Ok(ClientExecutionResult { context, value })
 }
 
@@ -1273,8 +1722,8 @@ fn state_error(context: ClientExecutionContext, source: ClientStateError) -> Cli
     ClientExecutionError::StateEvaluation { context, source }
 }
 
-/// Initialises the LOCAL and SESSION slots of one version-four plan in the
-/// caller-owned in-memory store and fails closed on any USER slot.
+/// Initialises the LOCAL, SESSION, and loaded USER slots of one version-four
+/// plan in the caller-owned in-memory store.
 ///
 /// A slot that already has an entry in the store keeps its value (caller
 /// state input wins over the plan default). `Unset` defaults leave no entry;
@@ -1290,19 +1739,9 @@ fn initialize_client_state(
     state: &mut ClientStateStore,
     depth: usize,
 ) -> Result<(), ClientExecutionError> {
-    for slot in plan.slots() {
-        if slot.scope() == StateScope::User {
-            return Err(state_error(
-                context,
-                ClientStateError::UserScopeUnsupported {
-                    slot: slot.state_slot_id(),
-                },
-            ));
-        }
-    }
 
     for slot in plan.slots() {
-        let key = ClientStateKey::new(context.function(), slot.state_slot_id());
+        let key = state.key_for(context.function(), slot.state_slot_id());
         let resolved = resolve_state_slot_type(active, slot.type_id()).ok_or_else(|| {
             state_error(
                 context,
@@ -1314,7 +1753,7 @@ fn initialize_client_state(
         let stored_value = match slot.scope() {
             StateScope::Local => state.local.get(&key),
             StateScope::Session => state.session.get(&key),
-            StateScope::User => unreachable!("USER slots fail closed above"),
+            StateScope::User => state.user.get(&key).map(|value| &value.value),
         };
         if stored_value.is_some_and(|value| !runtime_value_matches(active, value, resolved)) {
             return Err(state_error(
@@ -1361,12 +1800,20 @@ fn initialize_client_state(
         };
         match slot.scope() {
             StateScope::Local => {
-                state.local.insert(key, value);
+                if let Entry::Vacant(entry) = state.local.entry(key) {
+                    entry.insert(value);
+                }
             }
             StateScope::Session => {
-                state.session.insert(key, value);
+                if let Entry::Vacant(entry) = state.session.entry(key) {
+                    entry.insert(value);
+                }
             }
-            StateScope::User => unreachable!("USER slots fail closed above"),
+            StateScope::User => {
+                if let Entry::Vacant(entry) = state.user.entry(key) {
+                    entry.insert(ClientUserState::defaulted(value, slot.type_id()));
+                }
+            }
         }
     }
     Ok(())
@@ -1688,6 +2135,8 @@ fn invalid_function(
 
 #[cfg(test)]
 mod tests {
+    use std::time::SystemTime;
+
     use orna_core::{
         CatalogueRevisionId, FunctionId, FunctionRevisionId, ParameterId, PrincipalId, SchemaId,
         SourceBundleId, SourceRevisionId, SourceUnitId, StateSlotId, TypeId,
@@ -1715,6 +2164,9 @@ mod tests {
             PrincipalKind, PrincipalStatus, SecuritySnapshot,
         },
         source::{SourceBundle, SourceUnit},
+        state::{
+            UserStateCell, UserStateKey, UserStateWriteOutcome, UserStateWriteResult,
+        },
         types::{ResolvedType, StandardScalar},
         value::RuntimeValue,
     };
@@ -1909,13 +2361,14 @@ mod tests {
             super::ClientExecutionError::StateEvaluation {
                 context,
                 source: super::ClientStateError::StoredTypeMismatch { slot },
+
             } if context.function() == function
                 && *slot == StateSlotId::from_bytes([0x12; 16])
         ));
     }
 
     #[test]
-    fn version_four_user_state_fails_closed_without_partial_writes() {
+    fn version_four_user_state_without_persisted_value_uses_unset_default() {
         let plan = orna_artifact::client_plan::StateClientPlan::new(
             orna_artifact::client_plan::ClientExpressionNode::Boolean { value: true },
             vec![orna_artifact::client_plan::StateSlot::new(
@@ -1931,38 +2384,103 @@ mod tests {
         );
         let mut state = super::ClientStateStore::new();
 
-        let error = super::evaluate_client_function_with_state(
+        let result = super::evaluate_client_function_with_state(
             &active,
             &authorise(active.pair(), function),
             &mut state,
         )
-        .unwrap_err();
+        .unwrap();
 
-        assert!(matches!(
-            &error,
-            super::ClientExecutionError::StateEvaluation {
-                context,
-                source: super::ClientStateError::UserScopeUnsupported { slot },
-            } if context.function() == function
-                && *slot == StateSlotId::from_bytes([0x21; 16])
-        ));
+        assert_eq!(result.value(), &RuntimeValue::Boolean(true));
+        assert!(state.user().is_empty());
         assert!(state.local().is_empty() && state.session().is_empty());
     }
+    #[test]
+    fn client_user_state_store_loads_updates_and_applies_write_results() {
+        let root_function = FunctionId::from_bytes([0x31; 16]);
+        let function = FunctionId::from_bytes([0x32; 16]);
+        let slot = StateSlotId::from_bytes([0x33; 16]);
+        let value_type = orna_standard::CHARACTER_LARGE_OBJECT_TYPE_ID;
+        let context = super::ClientStateContext::new(
+            root_function,
+            "profile".to_owned(),
+            "root-instance".to_owned(),
+        )
+        .unwrap();
+        let client_key = super::ClientStateKey::from_context(&context, function, slot);
+        let durable_key = UserStateKey::new(
+            PrincipalId::from_bytes([0x34; 16]),
+            root_function,
+            "profile".to_owned(),
+            function,
+            "root-instance".to_owned(),
+            slot,
+        )
+        .unwrap();
+        let cell = UserStateCell::new(
+            durable_key,
+            RuntimeValue::Text("loaded".to_owned()),
+            value_type,
+            7,
+            SystemTime::UNIX_EPOCH,
+        );
+        let mut state = super::ClientStateStore::new();
+        state.set_context(context);
+        state.load_user_state(&[cell]).unwrap();
+        assert!(state.pending_user_state_changes().unwrap().is_empty());
+
+        state
+            .set_user_state(
+                client_key.clone(),
+                RuntimeValue::Text("changed".to_owned()),
+                value_type,
+            )
+            .unwrap();
+        let changes = state.pending_user_state_changes().unwrap();
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].expected_revision(), Some(7));
+        let result = UserStateWriteResult::new(
+            changes[0].key_without_principal(),
+            UserStateWriteOutcome::Written { revision: 8 },
+        );
+        state
+            .apply_user_state_write_results(&changes, &[result])
+            .unwrap();
+
+        let stored = state.user().get(&client_key).unwrap();
+        assert_eq!(stored.value(), &RuntimeValue::Text("changed".to_owned()));
+        assert_eq!(stored.revision(), Some(8));
+        assert!(!stored.is_dirty());
+        assert!(state.pending_user_state_changes().unwrap().is_empty());
+    }
+
 
     #[test]
     fn version_four_state_default_type_mismatch_fails_closed() {
         let plan = orna_artifact::client_plan::StateClientPlan::new(
             orna_artifact::client_plan::ClientExpressionNode::Boolean { value: true },
-            vec![orna_artifact::client_plan::StateSlot::new(
-                StateSlotId::from_bytes([0x31; 16]),
-                orna_standard::BOOLEAN_TYPE_ID,
-                orna_artifact::client_plan::StateScope::Local,
-                orna_artifact::client_plan::StateDefault::Expression(
-                    orna_artifact::client_plan::ClientExpressionNode::String {
-                        value: "not-a-boolean".to_owned(),
-                    },
+            vec![
+                orna_artifact::client_plan::StateSlot::new(
+                    StateSlotId::from_bytes([0x30; 16]),
+                    orna_standard::CHARACTER_LARGE_OBJECT_TYPE_ID,
+                    orna_artifact::client_plan::StateScope::Local,
+                    orna_artifact::client_plan::StateDefault::Expression(
+                        orna_artifact::client_plan::ClientExpressionNode::String {
+                            value: "must-not-commit".to_owned(),
+                        },
+                    ),
                 ),
-            )],
+                orna_artifact::client_plan::StateSlot::new(
+                    StateSlotId::from_bytes([0x31; 16]),
+                    orna_standard::BOOLEAN_TYPE_ID,
+                    orna_artifact::client_plan::StateScope::Local,
+                    orna_artifact::client_plan::StateDefault::Expression(
+                        orna_artifact::client_plan::ClientExpressionNode::String {
+                            value: "not-a-boolean".to_owned(),
+                        },
+                    ),
+                ),
+            ],
         );
         let (active, function, _, _) = version_four_state_active(
             orna_standard::BOOLEAN_TYPE_ID,
@@ -1976,6 +2494,7 @@ mod tests {
             &mut state,
         )
         .unwrap_err();
+        assert!(state.local().is_empty());
 
         assert!(matches!(
             &error,
