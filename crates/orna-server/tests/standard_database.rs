@@ -140,6 +140,10 @@ const RAW_EXPRESSION_CLIENT_FUNCTION_SOURCE: &str = "CREATE SCHEMA expr;\n\
     CREATE CLIENT FUNCTION expr.composed() RETURNS TEXT AS expr.literal() || ' world';\n\
     CREATE EXTERNAL CLIENT FUNCTION expr.external() RETURNS TEXT\n\
     RUNTIME CONTRACT 'expr.runtime@1';\n";
+const RAW_EXTERNAL_CAPABILITY_SOURCE: &str = "CREATE SCHEMA cap;\n\
+    CREATE EXTERNAL CLIENT FUNCTION cap.read() RETURNS TEXT\n\
+    RUNTIME CONTRACT 'std.fs.read@1'\n\
+    REQUIRES CAPABILITY std.fs.read('/home/bob');\n";
 /// One Integer single-parameter INSERT and one public Integer reader.
 const RAW_CLIENT_INT_INSERT_SOURCE: &str = "CREATE SCHEMA raw_int_insert;\n\
     CREATE TYPE raw_int_insert.int_probe AS OBJECT (\n\
@@ -1987,6 +1991,99 @@ async fn proves_expression_client_functions_through_installed_invoke() -> TestRe
                 && stderr.is_empty(),
             "the external CLIENT contract did not fail closed through installed invoke",
         )
+    })
+    .await
+}
+
+#[tokio::test]
+#[ignore = "requires the Compose PostgreSQL development service"]
+async fn proves_kernel_capability_gate_for_external_client_contract() -> TestResult<()> {
+    with_test_database(|database| async move {
+        let grant = LocalCapabilityGrant::new(
+            LocalCapabilityName::StdFsRead,
+            LocalCapabilityScope::path("/home/bob").unwrap(),
+        )
+        .unwrap();
+        let grants = LocalCapabilityGrantSet::from_grants([grant]).unwrap();
+        let granted_kernel = kernel(&database)?.with_capability_grants(grants);
+        let (active, function) = install_external_capability_fixture(&granted_kernel).await?;
+        let uid = nix::unistd::geteuid().as_raw();
+        let functions = active
+            .catalogue()
+            .functions()
+            .iter()
+            .map(FunctionDefinition::id)
+            .collect::<Vec<_>>();
+        let security = SecuritySnapshot::new_with_local_peer_credentials(
+            active.pair(),
+            functions,
+            vec![Principal::new(
+                RAW_CLIENT_USER,
+                PrincipalKind::User,
+                PrincipalStatus::Active,
+            )],
+            vec![],
+            vec![ExecuteGrant::new(RAW_CLIENT_USER, function)],
+            vec![LocalPeerCredential::new(uid, RAW_CLIENT_USER)],
+        )?;
+        let security = granted_kernel.replace_security_snapshot(&security).await?;
+        let session = security.bind_authenticated_session(RAW_CLIENT_USER, vec![])?;
+
+        let allowed = granted_kernel
+            .dispatch_authenticated_raw_call(&session, function)
+            .await;
+        require(
+            matches!(
+                allowed,
+                Err(PostgresKernelError::ClientExecution(
+                    ClientExecutionError::ExternalContract { identity, .. }
+                )) if identity == "std.fs.read@1"
+            ),
+            "the granted external CLIENT contract did not pass the capability gate",
+        )?;
+        let events = granted_kernel.recover_security_audit_events().await?;
+        require(
+            events.iter().any(|event| {
+                event.decision().kind() == SecurityAuditKind::Capability
+                    && event.decision().outcome() == SecurityAuditOutcome::Allowed
+                    && event.decision().capability_name() == Some("std.fs.read")
+                    && event.decision().denial().is_none()
+            }),
+            "the granted CLIENT capability did not append an allowed audit decision",
+        )?;
+
+        let denied_kernel = kernel(&database)?;
+        let denied = denied_kernel
+            .dispatch_authenticated_raw_call(&session, function)
+            .await;
+        require(
+            matches!(
+                denied,
+                Err(PostgresKernelError::ClientExecution(
+                    ClientExecutionError::CapabilityDenied { ref capability, .. }
+                )) if capability == "std.fs.read"
+            ),
+            "the external CLIENT contract did not fail closed without its local grant",
+        )?;
+        require(
+            !denied
+                .as_ref()
+                .err()
+                .is_some_and(|error| error.to_string().contains("/home/bob")),
+            "the denied CLIENT capability exposed its path scope",
+        )?;
+        let events = denied_kernel.recover_security_audit_events().await?;
+        require(
+            events.iter().any(|event| {
+                event.decision().kind() == SecurityAuditKind::Capability
+                    && event.decision().outcome() == SecurityAuditOutcome::Denied
+                    && event.decision().capability_name() == Some("std.fs.read")
+                    && event.decision().denial().is_some()
+            }),
+            "the denied CLIENT capability did not append a redacted audit decision",
+        )?;
+
+        require_no_database_sessions(&database).await
     })
     .await
 }
@@ -7765,6 +7862,52 @@ async fn install_expression_client_fixture(
     let external = function_id(&["expr", "external"])
         .ok_or_else(|| failure("expression CLIENT fixture is missing expr.external"))?;
     Ok((active, literal, composed, external))
+}
+
+async fn install_external_capability_fixture(
+    kernel: &PostgresKernel,
+) -> TestResult<(orna_core::revision::ActiveDatabaseRevision, FunctionId)> {
+    kernel.bootstrap().await?;
+    let empty = kernel.recover().await?;
+    let schema = SourceBundle::new([SourceUnit::new("schema.orna", RAW_CLIENT_SCHEMA_SOURCE)])?;
+    let report = check(&schema, empty.catalogue());
+    require(
+        report.diagnostics().is_empty(),
+        "external capability fixture schema did not compile",
+    )?;
+    let version_one = kernel
+        .apply(&prepare(&report, empty.pair(), &empty)?)
+        .await?;
+    let standard_upgrade = orna_standard::prepare_standard_upgrade(&version_one)?;
+    let version_two = kernel.apply_standard_upgrade(&standard_upgrade).await?;
+    let context = StandardApplicationCheckContext::try_new(
+        version_two.catalogue(),
+        standard_upgrade.checked_standard_library(),
+    )?;
+    let source = SourceBundle::new([SourceUnit::new(
+        "external-capability.orna",
+        RAW_EXTERNAL_CAPABILITY_SOURCE,
+    )])?;
+    let report = check_standard_application(&source, &context);
+    require(
+        report.diagnostics().is_empty(),
+        "external capability CLIENT fixture did not compile",
+    )?;
+    let active = kernel
+        .apply(&prepare_standard_application(
+            &report,
+            version_two.pair(),
+            &version_two,
+        )?)
+        .await?;
+    let function = active
+        .catalogue()
+        .functions()
+        .iter()
+        .find(|function| function.name().parts() == ["cap", "read"])
+        .ok_or_else(|| failure("external capability fixture is missing cap.read"))?
+        .id();
+    Ok((active, function))
 }
 
 /// Installs `orna.std/3` as the active standard from the empty base (ADR 0057
