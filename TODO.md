@@ -72,9 +72,10 @@ separate release action.
   (30 corpus cases pass; every `spec/examples/*.orna` file parses).
 - [x] Land the TextMate grammar and VS Code extension (valid package,
   syntaxes, and built `orna-vscode-0.1.0.vsix`).
-- [x] Land the Neovim, vim, Helix, Zed, and Emacs integrations
-  (configs present; Helix/Zed TOML validated, Emacs loads under batch
-  Emacs; Neovim/Vim load checks need their editors at runtime).
+- [x] Land the Helix, Zed, and Emacs integrations (TOML validated;
+  Emacs loads under batch Emacs).
+- [ ] Verify the Neovim and Vim integrations at runtime (configs landed;
+  load checks require their editors).
 - [x] Verify the whole tooling surface against the spec examples
   (tree-sitter parses all ten examples; LSP suite exercises the server).
 
