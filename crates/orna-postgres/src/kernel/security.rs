@@ -18,8 +18,8 @@ use orna_core::{
         AuthenticatedSession, CATALOGUE_HEALTH_FUNCTION_ID, CATALOGUE_HEALTH_SERVICE_PRINCIPAL_ID,
         ExecuteDecision, ExecuteDenial, ExecuteGrant, InspectDenial, InspectEpochScope,
         InvocationTarget, LocalPeerAuthenticationError, LocalPeerCredential, Principal,
-        PrincipalKind, PrincipalStatus, PrivilegeClass, PrivilegeDenial, RoleMembership,
-        SecurityAdminAuditOperation, SecurityAuditDecision, SecurityAuditDenial,
+        PrincipalKind, PrincipalStatus, PrivilegeClass, PrivilegeDenial, PrivilegeGrant,
+        RoleMembership, SecurityAdminAuditOperation, SecurityAuditDecision, SecurityAuditDenial,
         SecurityAuditEvent, SecurityAuditKind, SecurityAuditOutcome, SecurityFunctionTarget,
         SecuritySnapshot, SessionBindingError, TargetClass, UserStateAuditOperation,
     },
@@ -1403,12 +1403,13 @@ fn snapshot_contains_catalogue_health_identity(snapshot: &SecuritySnapshot) -> b
             .any(|credential| credential.principal() == CATALOGUE_HEALTH_SERVICE_PRINCIPAL_ID)
 }
 
-fn security_snapshots_match(left: &SecuritySnapshot, right: &SecuritySnapshot) -> bool {
+pub(crate) fn security_snapshots_match(left: &SecuritySnapshot, right: &SecuritySnapshot) -> bool {
     left.revision() == right.revision()
         && left.functions().eq(right.functions())
         && left.principals().eq(right.principals())
         && left.memberships().eq(right.memberships())
         && left.execute_grants().eq(right.execute_grants())
+        && left.privilege_grants().eq(right.privilege_grants())
         && left
             .local_peer_credentials()
             .eq(right.local_peer_credentials())
@@ -1543,7 +1544,7 @@ async fn pause_after_authenticated_select_recovery(
 ) {
 }
 
-fn finish_security_session<T>(
+pub(crate) fn finish_security_session<T>(
     operation: Result<T, PostgresKernelError>,
     shutdown: Result<(), PostgresKernelError>,
 ) -> Result<T, PostgresKernelError> {
@@ -2203,7 +2204,7 @@ async fn append_unresolved_invocation_audit(
     Ok(())
 }
 
-async fn lock_active_revision(
+pub(crate) async fn lock_active_revision(
     transaction: &Transaction<'_>,
     expected: RevisionPair,
 ) -> Result<(), PostgresKernelError> {
@@ -2235,7 +2236,7 @@ async fn lock_active_revision(
     Ok(())
 }
 
-fn require_complete_function_set(
+pub(crate) fn require_complete_function_set(
     active: &ActiveDatabaseRevision,
     snapshot: &SecuritySnapshot,
 ) -> Result<(), PostgresKernelError> {
@@ -2279,6 +2280,7 @@ async fn replace_security_rows(
         .batch_execute(
             "DELETE FROM _orna_kernel.security_local_peer_credentials;
              DELETE FROM _orna_kernel.security_execute_grants;
+             DELETE FROM _orna_kernel.security_privilege_grants;
              DELETE FROM _orna_kernel.security_role_memberships;
              DELETE FROM _orna_kernel.security_principals;",
         )
@@ -2334,6 +2336,23 @@ async fn replace_security_rows(
             .await
             .map_err(PostgresKernelError::Database)?;
     }
+    for grant in snapshot.privilege_grants() {
+        let grantee = grant.grantee().to_bytes().to_vec();
+        let class = encode_privilege_class(grant.class());
+        let object = grant
+            .object()
+            .map(|function| function.to_bytes().to_vec())
+            .unwrap_or_default();
+        transaction
+            .execute(
+                "INSERT INTO _orna_kernel.security_privilege_grants
+                     (grantee_id, privilege_class, object_id)
+                 VALUES ($1, $2, $3)",
+                &[&grantee, &class, &object],
+            )
+            .await
+            .map_err(PostgresKernelError::Database)?;
+    }
     Ok(())
 }
 
@@ -2370,15 +2389,17 @@ pub(crate) async fn recover_security_snapshot_for_active(
     let principals = load_principals(transaction).await?;
     let memberships = load_memberships(transaction).await?;
     let grants = load_grants(transaction).await?;
+    let privilege_grants = load_privilege_grants(transaction).await?;
     let local_peer_credentials = load_local_peer_credentials(transaction).await?;
 
-    SecuritySnapshot::new_with_function_targets_and_local_peer_credentials(
+    SecuritySnapshot::new_with_function_targets_local_peer_credentials_and_privilege_grants(
         active.pair(),
         function_targets,
         principals,
         memberships,
         grants,
         local_peer_credentials,
+        privilege_grants,
     )
     .map_err(PostgresKernelError::SecuritySnapshot)
 }
@@ -2658,6 +2679,103 @@ async fn load_grants(
             ))
         })
         .collect()
+}
+
+/// Encodes one closed privilege class exactly as the pure model displays it.
+pub(crate) fn encode_privilege_class(class: PrivilegeClass) -> &'static str {
+    match class {
+        PrivilegeClass::Execute => "execute",
+        PrivilegeClass::SecurityAdmin => "security_admin",
+        PrivilegeClass::Inspect(privilege) => match privilege {
+            InspectPrivilege::OwnInvocation => "inspect:own-invocation",
+            InspectPrivilege::SessionInvocations => "inspect:session-invocations",
+            InspectPrivilege::AnyInvocation => "inspect:any-invocation",
+            InspectPrivilege::Values => "inspect:values",
+            InspectPrivilege::Source => "inspect:source",
+            InspectPrivilege::SecurityDetails => "inspect:security-details",
+            InspectPrivilege::RuntimeInternals => "inspect:runtime-internals",
+        },
+    }
+}
+
+/// Decodes one closed privilege-class display string from protected storage.
+pub(crate) fn decode_privilege_class(value: &str) -> Result<PrivilegeClass, PostgresKernelError> {
+    match value {
+        "execute" => Ok(PrivilegeClass::Execute),
+        "security_admin" => Ok(PrivilegeClass::SecurityAdmin),
+        "inspect:own-invocation" => Ok(PrivilegeClass::Inspect(InspectPrivilege::OwnInvocation)),
+        "inspect:session-invocations" => Ok(PrivilegeClass::Inspect(
+            InspectPrivilege::SessionInvocations,
+        )),
+        "inspect:any-invocation" => Ok(PrivilegeClass::Inspect(InspectPrivilege::AnyInvocation)),
+        "inspect:values" => Ok(PrivilegeClass::Inspect(InspectPrivilege::Values)),
+        "inspect:source" => Ok(PrivilegeClass::Inspect(InspectPrivilege::Source)),
+        "inspect:security-details" => {
+            Ok(PrivilegeClass::Inspect(InspectPrivilege::SecurityDetails))
+        }
+        "inspect:runtime-internals" => {
+            Ok(PrivilegeClass::Inspect(InspectPrivilege::RuntimeInternals))
+        }
+        _ => Err(PostgresKernelError::DurableInvariant {
+            relation: "_orna_kernel.security_privilege_grants",
+            record: value.to_owned(),
+            rule: "privilege class must be execute, security_admin, or one closed inspect sub-privilege",
+        }),
+    }
+}
+
+/// Loads the durable privilege-class grants in canonical key order.
+///
+/// The class-wide sentinel `''` stored in `object_id` recovers as no object.
+pub(crate) async fn load_privilege_grants(
+    transaction: &Transaction<'_>,
+) -> Result<Vec<PrivilegeGrant>, PostgresKernelError> {
+    const RELATION: &str = "_orna_kernel.security_privilege_grants";
+    let rows = transaction
+        .query(
+            "SELECT grantee_id, privilege_class, object_id
+             FROM _orna_kernel.security_privilege_grants
+             ORDER BY grantee_id, privilege_class, object_id",
+            &[],
+        )
+        .await
+        .map_err(PostgresKernelError::Database)?;
+    let mut grants = Vec::with_capacity(rows.len());
+    for row in &rows {
+        let grantee = PrincipalId::from_bytes(exact_id(
+            row,
+            "grantee_id",
+            "security privilege grantee identity is not exactly 16 bytes",
+        )?);
+        let class: String = row.try_get("privilege_class").map_err(|source| {
+            row_decode(RELATION, grantee.canonical(), "privilege_class", source)
+        })?;
+        let class = decode_privilege_class(&class)?;
+        let object: Vec<u8> = row
+            .try_get("object_id")
+            .map_err(|source| row_decode(RELATION, grantee.canonical(), "object_id", source))?;
+        let object = if object.is_empty() {
+            None
+        } else {
+            let function: [u8; 16] =
+                object
+                    .try_into()
+                    .map_err(|_| PostgresKernelError::DurableInvariant {
+                        relation: RELATION,
+                        record: grantee.canonical(),
+                        rule: "security privilege grant object identity is not exactly 16 bytes",
+                    })?;
+            Some(FunctionId::from_bytes(function))
+        };
+        grants.push(PrivilegeGrant::new(grantee, class, object).map_err(|_| {
+            PostgresKernelError::DurableInvariant {
+                relation: RELATION,
+                record: grantee.canonical(),
+                rule: "security privilege grant must carry a non-empty grantee",
+            }
+        })?);
+    }
+    Ok(grants)
 }
 
 async fn load_local_peer_credentials(
@@ -3989,7 +4107,7 @@ fn row_decode(
     }
 }
 
-fn encode_principal_kind(kind: PrincipalKind) -> &'static str {
+pub(crate) fn encode_principal_kind(kind: PrincipalKind) -> &'static str {
     match kind {
         PrincipalKind::User => "user",
         PrincipalKind::Role => "role",
