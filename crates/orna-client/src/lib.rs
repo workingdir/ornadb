@@ -1035,6 +1035,9 @@ fn runtime_value_matches(
     value: &RuntimeValue,
     expected: ResolvedType,
 ) -> bool {
+    if let RuntimeValue::Null(null) = value {
+        return null.resolved_type() == expected;
+    }
     let scalar_matches = |scalar| match (scalar, value) {
         (StandardScalar::Boolean, RuntimeValue::Boolean(_))
         | (StandardScalar::Integer, RuntimeValue::Integer(_))
@@ -1191,11 +1194,23 @@ fn resolve_state_slot_type(
     active: &ActiveDatabaseRevision,
     type_id: TypeId,
 ) -> Option<ResolvedType> {
-    active
+    let definition = active
         .catalogue_hash_context()
-        .standard()
-        .and_then(|standard| standard.catalogue().value_type_by_id(type_id))
-        .map(|_| ResolvedType::value(type_id))
+        .standard()?
+        .catalogue()
+        .value_type_by_id(type_id)?;
+    if definition.kind() == ValueTypeKind::Opaque
+        || matches!(
+            definition.representation_contract(),
+            "orna.kernel.value.boolean@1"
+                | "orna.kernel.value.integer@1"
+                | "orna.kernel.value.character-large-object@1"
+        )
+    {
+        Some(ResolvedType::value(type_id))
+    } else {
+        None
+    }
 }
 
 fn validate_active_catalogue(
@@ -1643,6 +1658,13 @@ mod tests {
         )));
         assert!(state.user().is_empty());
         assert_eq!(plan.format_version(), orna_artifact::client_plan::STATE_FORMAT_VERSION);
+
+        super::evaluate_client_function_with_state(
+            &active,
+            &authorise(active.pair(), function),
+            &mut state,
+        )
+        .unwrap();
     }
 
     #[test]
@@ -1768,14 +1790,13 @@ mod tests {
                 && *slot == StateSlotId::from_bytes([0x31; 16])
         ));
     }
-
     #[test]
     fn version_four_unsupported_slot_type_fails_closed() {
         let plan = orna_artifact::client_plan::StateClientPlan::new(
             orna_artifact::client_plan::ClientExpressionNode::Boolean { value: true },
             vec![orna_artifact::client_plan::StateSlot::new(
                 StateSlotId::from_bytes([0x41; 16]),
-                TypeId::from_bytes([0x99; 16]),
+                orna_standard::BIGINT_TYPE_ID,
                 orna_artifact::client_plan::StateScope::Local,
                 orna_artifact::client_plan::StateDefault::Unset,
             )],
