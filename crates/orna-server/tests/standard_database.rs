@@ -1185,23 +1185,30 @@ async fn proves_standard_invocation_dogfooding_through_sealed_sys_invoke() -> Te
 
         // The allowed protected security and invocation audit events both
         // link to the exact historical application RevisionPair whose
-        // catalogue hash context pins orna.std/2.
+        // catalogue hash context pins orna.std/2. Each sealed invocation
+        // also appends an allowed INSPECT decision from the ADR 0064
+        // capture seam; the EXECUTE evidence is the two allowed decisions.
         let security_events = kernel.recover_security_audit_events().await?;
-        let allowed = security_events
+        let allowed_execute = security_events
             .iter()
-            .filter(|event| event.decision().outcome() == SecurityAuditOutcome::Allowed)
+            .filter(|event| {
+                event.decision().outcome() == SecurityAuditOutcome::Allowed
+                    && event.decision().kind() == SecurityAuditKind::Execute
+            })
             .collect::<Vec<_>>();
         require(
-            allowed.len() == 2
-                && allowed.iter().all(|event| {
-                    event.decision().kind() == SecurityAuditKind::Execute
-                        && event.decision().session_principal() == Some(RAW_CLIENT_USER)
+            allowed_execute.len() == 2
+                && allowed_execute.iter().all(|event| {
+                    event.decision().session_principal() == Some(RAW_CLIENT_USER)
                         && event.decision().target()
                             == Some(InvocationTarget::new(STD_INVOKE_ECHO_FUNCTION_ID, pair))
                 }),
             "the allowed EXECUTE evidence did not link the exact historical application RevisionPair",
         )?;
-        let allowed_security_ids = allowed.iter().map(|event| event.id()).collect::<Vec<_>>();
+        let allowed_security_ids = allowed_execute
+            .iter()
+            .map(|event| event.id())
+            .collect::<Vec<_>>();
         let invocation_rows = invocation_audit_rows(&database).await?;
         require(
             invocation_rows.len() == 2
@@ -1655,14 +1662,16 @@ async fn proves_installed_orna_invoke_end_to_end_against_postgres() -> TestResul
             "the --no-progress stderr carried progress diagnostics",
         )?;
 
-        // Three completed invocations appended three authentication-allowed
-        // and three EXECUTE-allowed security events, plus three allowed
-        // invocation-audit rows linking the exact historical RevisionPair.
+        // Three completed invocations appended three authentication-allowed,
+        // three EXECUTE-allowed, and three INSPECT-allowed security events
+        // (the ADR 0064 capture seam audits each auto-captured epoch), plus
+        // three allowed invocation-audit rows linking the exact historical
+        // RevisionPair.
         let security_events_after_invocations =
             kernel.recover_security_audit_events().await?;
         require(
-            security_events_after_invocations.len() == security_events_before.len() + 6,
-            "the three completed invocations did not append exactly six security events",
+            security_events_after_invocations.len() == security_events_before.len() + 9,
+            "the three completed invocations did not append exactly nine security events",
         )?;
         require(
             security_events_after_invocations[security_events_before.len()..]
@@ -2062,18 +2071,17 @@ async fn proves_output_through_orna_invoke_against_postgres() -> TestResult<()> 
         )?;
 
         // The three completed invocations (json, table, bare) each appended
-        // one authentication event and one allowed EXECUTE decision against
-        // the exact V3-pinned echo target, plus one allowed invocation-audit
-        // row. The unmatchable-requirement failure appends only its
-        // authentication event: the sealed dispatch appends the allowed
-        // EXECUTE evidence inside its transaction but returns the closed
-        // `PresentationFailed` result before the commit, so that evidence
-        // rolls back and the failure discloses nothing further (no denied or
-        // partial decision, no invocation-audit row).
+        // one authentication event, one allowed EXECUTE decision against
+        // the exact V3-pinned echo target, and one INSPECT decision from the
+        // ADR 0064 capture seam, plus one allowed invocation-audit row. The
+        // unmatchable-requirement failure appends its authentication event
+        // and the allowed EXECUTE evidence, which the sealed dispatch now
+        // commits (work ADR 0059 fix): the failure still captures no epoch,
+        // so it adds no INSPECT event and no invocation-audit row.
         let security_events_after = kernel.recover_security_audit_events().await?;
         require(
-            security_events_after.len() == security_events_before.len() + 7,
-            "the four installed invocations did not append exactly seven security events",
+            security_events_after.len() == security_events_before.len() + 11,
+            "the four installed invocations did not append exactly eleven security events",
         )?;
         let appended = &security_events_after[security_events_before.len()..];
         require(
@@ -2086,26 +2094,34 @@ async fn proves_output_through_orna_invoke_against_postgres() -> TestResult<()> 
                         && event.decision().target()
                             == Some(InvocationTarget::new(STD_INVOKE_ECHO_FUNCTION_ID, pair))
                 }),
-            "the completed invocations did not append three allowed EXECUTE decisions",
+            "the installed invocations did not append four allowed EXECUTE decisions",
         )?;
         require(
             appended
                 .iter()
                 .filter(|event| event.decision().kind() == SecurityAuditKind::Execute)
                 .count()
-                == 3
+                == 4
+                && appended
+                    .iter()
+                    .filter(|event| event.decision().kind() == SecurityAuditKind::Inspect)
+                    .count()
+                    == 3
                 && appended
                     .iter()
                     .all(|event| event.decision().outcome() == SecurityAuditOutcome::Allowed),
             "the four installed invocations appended a denied or partial security decision",
         )?;
+        // Four invocations total (json, table, the unmatchable-requirement
+        // failure, and bare). The failure path now commits its linked
+        // invocation-audit evidence as well, so all four rows are present.
         require(
-            invocation_audit_count(&database).await? == invocation_rows_before + 3,
-            "the three completed invocations did not append exactly three invocation-audit rows",
+            invocation_audit_count(&database).await? == invocation_rows_before + 4,
+            "the four installed invocations did not append exactly four invocation-audit rows",
         )?;
         let completed_rows = invocation_audit_rows(&database).await?;
         require(
-            completed_rows.len() == invocation_rows_before as usize + 3
+            completed_rows.len() == invocation_rows_before as usize + 4
                 && completed_rows[invocation_rows_before as usize..]
                     .iter()
                     .all(|row| {
@@ -2115,7 +2131,7 @@ async fn proves_output_through_orna_invoke_against_postgres() -> TestResult<()> 
                             && row.catalogue == pair.catalogue().to_bytes().to_vec()
                             && row.security_event.is_some()
                     }),
-            "the completed invocations did not record allowed invocation-audit rows for std.invoke.echo",
+            "the installed invocations did not record allowed invocation-audit rows for std.invoke.echo",
         )?;
 
         require_no_database_sessions(&database).await
