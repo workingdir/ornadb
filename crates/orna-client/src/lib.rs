@@ -1,14 +1,15 @@
 //! Local evaluation for closed CLIENT functions.
 
-use std::{error::Error, fmt};
+use std::{collections::HashMap, error::Error, fmt};
 
 use orna_artifact::client_plan::{
     ClientExpressionNode, ClientPlan, ClientPlanError, EXPRESSION_FORMAT_VERSION,
     ExpressionClientPlan, FORMAT_IDENTITY, FORMAT_VERSION, LANGUAGE_VERSION_IDENTITY,
-    OPAQUE_FORMAT_VERSION, OpaqueClientPlan,
+    OPAQUE_FORMAT_VERSION, OpaqueClientPlan, STATE_FORMAT_VERSION, StateClientPlan,
+    StateDefault, StateScope,
 };
 use orna_core::{
-    FunctionId, FunctionRevisionId, ParameterId, TypeId,
+    FunctionId, FunctionRevisionId, ParameterId, StateSlotId, TypeId,
     canonical_hash::{CanonicalHashError, catalogue_digest_with_context},
     catalogue::{
         FunctionDomain, FunctionReturn, FunctionSecurity, FunctionVolatility, ValueTypeKind,
@@ -71,6 +72,78 @@ impl ClientExecutionResult {
     /// Transfers the evaluated value without cloning its payload.
     pub fn into_value(self) -> RuntimeValue {
         self.value
+    }
+}
+
+/// One state slot of one CLIENT function inside an in-memory state store.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct ClientStateKey {
+    function: FunctionId,
+    slot: StateSlotId,
+}
+
+impl ClientStateKey {
+    /// Creates one state key from the owning function and durable slot identity.
+    pub const fn new(function: FunctionId, slot: StateSlotId) -> Self {
+        Self { function, slot }
+    }
+
+    /// Returns the owning function identity.
+    pub const fn function(&self) -> FunctionId {
+        self.function
+    }
+
+    /// Returns the durable state-slot identity.
+    pub const fn slot(&self) -> StateSlotId {
+        self.slot
+    }
+}
+
+/// The explicit in-memory CLIENT state for one invocation session
+/// (work ADR 0069).
+///
+/// This runtime slice initialises `LOCAL` and `SESSION` slot values in this
+/// store and fails closed on `USER`-scoped slots. The store is owned by the
+/// caller and makes no persistence claim: dropping it discards its values,
+/// and the client never sends it to a server.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ClientStateStore {
+    local: HashMap<ClientStateKey, RuntimeValue>,
+    session: HashMap<ClientStateKey, RuntimeValue>,
+    user: HashMap<ClientStateKey, RuntimeValue>,
+}
+
+impl ClientStateStore {
+    /// Creates one empty in-memory CLIENT state store.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Returns the `LOCAL` slot values of one mounted function instance.
+    pub fn local(&self) -> &HashMap<ClientStateKey, RuntimeValue> {
+        &self.local
+    }
+
+    /// Returns mutable access to the `LOCAL` slot values, e.g. to seed or
+    /// clear one mounted function instance.
+    pub fn local_mut(&mut self) -> &mut HashMap<ClientStateKey, RuntimeValue> {
+        &mut self.local
+    }
+
+    /// Returns the `SESSION` slot values of one client invocation session.
+    pub fn session(&self) -> &HashMap<ClientStateKey, RuntimeValue> {
+        &self.session
+    }
+
+    /// Returns mutable access to the `SESSION` slot values, e.g. to supply
+    /// state from a compatible remount or to end the session.
+    pub fn session_mut(&mut self) -> &mut HashMap<ClientStateKey, RuntimeValue> {
+        &mut self.session
+    }
+
+    /// Returns the `USER` slot values; this slice never populates them.
+    pub fn user(&self) -> &HashMap<ClientStateKey, RuntimeValue> {
+        &self.user
     }
 }
 
@@ -228,6 +301,62 @@ impl fmt::Display for ClientExpressionError {
 
 impl Error for ClientExpressionError {}
 
+/// A version-four CLIENT state failure (work ADR 0069).
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ClientStateError {
+    /// A `USER`-scoped slot has no runtime slice yet and must fail closed.
+    UserScopeUnsupported {
+        /// The declared user-scoped slot identity.
+        slot: StateSlotId,
+    },
+    /// The slot type is not a supported scalar or registered value type.
+    UnsupportedSlotType {
+        /// The slot whose type cannot be resolved.
+        slot: StateSlotId,
+    },
+    /// A caller-provided state value does not match the declared slot type.
+    StoredTypeMismatch {
+        /// The slot whose stored value has the wrong runtime type.
+        slot: StateSlotId,
+    },
+    /// A state default value does not match the declared slot type.
+    DefaultTypeMismatch {
+        /// The slot whose checked default has the wrong runtime type.
+        slot: StateSlotId,
+    },
+    /// A typed null default could not be constructed for the slot type.
+    NullDefault {
+        /// The slot whose null default cannot be represented.
+        slot: StateSlotId,
+    },
+}
+
+
+impl fmt::Display for ClientStateError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::UserScopeUnsupported { .. } => formatter.write_str(
+                "USER CLIENT state has no runtime slice yet and fails closed",
+            ),
+            Self::UnsupportedSlotType { .. } => {
+                formatter.write_str("CLIENT state slot type is not supported locally")
+            }
+            Self::StoredTypeMismatch { .. } => {
+                formatter.write_str("CLIENT state value has the wrong runtime type")
+            }
+            Self::DefaultTypeMismatch { .. } => {
+                formatter.write_str("CLIENT state default has the wrong runtime type")
+            }
+            Self::NullDefault { .. } => {
+                formatter.write_str("CLIENT state null default cannot be represented")
+            }
+        }
+    }
+}
+
+impl Error for ClientStateError {}
+
 /// An error returned by the closed local CLIENT evaluator.
 #[non_exhaustive]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -300,6 +429,13 @@ pub enum ClientExecutionError {
         /// The exact contract identity retained by the artifact.
         identity: String,
     },
+    /// A version-four plan could not initialise or carry CLIENT state.
+    StateEvaluation {
+        /// The resolved execution context.
+        context: ClientExecutionContext,
+        /// The closed state failure.
+        source: ClientStateError,
+    },
 }
 impl ClientExecutionError {
     /// Returns the active revision pair associated with this error.
@@ -312,7 +448,8 @@ impl ClientExecutionError {
             | Self::InvalidOpaqueValue { context, .. }
             | Self::CapabilityDenied { context, .. }
             | Self::ExpressionEvaluation { context, .. }
-            | Self::ExternalContract { context, .. } => context.pair(),
+            | Self::ExternalContract { context, .. }
+            | Self::StateEvaluation { context, .. } => context.pair(),
         }
     }
 
@@ -327,7 +464,8 @@ impl ClientExecutionError {
             | Self::InvalidOpaqueValue { context, .. }
             | Self::CapabilityDenied { context, .. }
             | Self::ExpressionEvaluation { context, .. }
-            | Self::ExternalContract { context, .. } => context.function(),
+            | Self::ExternalContract { context, .. }
+            | Self::StateEvaluation { context, .. } => context.function(),
         }
     }
 
@@ -342,7 +480,8 @@ impl ClientExecutionError {
             | Self::InvalidOpaqueValue { context, .. }
             | Self::CapabilityDenied { context, .. }
             | Self::ExpressionEvaluation { context, .. }
-            | Self::ExternalContract { context, .. } => Some(context),
+            | Self::ExternalContract { context, .. }
+            | Self::StateEvaluation { context, .. } => Some(context),
         }
     }
 }
@@ -372,6 +511,7 @@ impl fmt::Display for ClientExecutionError {
                 formatter,
                 "the CLIENT runtime contract {identity} is not available"
             ),
+            Self::StateEvaluation { source, .. } => source.fmt(formatter),
         }
     }
 }
@@ -381,6 +521,7 @@ impl Error for ClientExecutionError {
             Self::InvalidActiveRevision { source, .. } => Some(source),
             Self::InvalidArtifact { source, .. } => Some(source),
             Self::InvalidOpaqueValue { source, .. } => Some(source),
+            Self::StateEvaluation { source, .. } => Some(source),
             Self::AuthorisationMismatch { .. }
             | Self::FunctionNotFound { .. }
             | Self::InvalidFunction { .. }
@@ -435,12 +576,84 @@ pub fn evaluate_client_function_with_grants(
 }
 
 /// Evaluates one closed CLIENT function with invocation arguments and grants.
+///
+/// Version-four state plans run with a transient in-memory state store that
+/// is discarded when the call returns. Callers that must retain `LOCAL` or
+/// `SESSION` state across calls use
+/// [`evaluate_client_function_with_state_and_grants_and_arguments`].
 pub fn evaluate_client_function_with_grants_and_arguments(
     active: &ActiveDatabaseRevision,
     authorisation: &AuthorisedInvocation,
     arguments: &[FunctionArgument],
     declarations: &[capability::LocalCapabilityDeclaration],
     grants: &capability::LocalCapabilityGrantSet,
+) -> Result<ClientExecutionResult, ClientExecutionError> {
+    let mut state = ClientStateStore::new();
+    evaluate_client_function_with_state_and_grants_and_arguments(
+        active,
+        authorisation,
+        arguments,
+        declarations,
+        grants,
+        &mut state,
+    )
+}
+
+/// Evaluates one closed CLIENT function with an explicit in-memory state store.
+pub fn evaluate_client_function_with_state(
+    active: &ActiveDatabaseRevision,
+    authorisation: &AuthorisedInvocation,
+    state: &mut ClientStateStore,
+) -> Result<ClientExecutionResult, ClientExecutionError> {
+    evaluate_client_function_with_state_and_arguments(active, authorisation, &[], state)
+}
+
+/// Evaluates one closed CLIENT function with invocation arguments and an
+/// explicit in-memory state store.
+pub fn evaluate_client_function_with_state_and_arguments(
+    active: &ActiveDatabaseRevision,
+    authorisation: &AuthorisedInvocation,
+    arguments: &[FunctionArgument],
+    state: &mut ClientStateStore,
+) -> Result<ClientExecutionResult, ClientExecutionError> {
+    evaluate_client_function_with_state_and_grants_and_arguments(
+        active,
+        authorisation,
+        arguments,
+        &[],
+        &capability::LocalCapabilityGrantSet::new(),
+        state,
+    )
+}
+
+/// Evaluates one closed CLIENT function after the local capability gate with
+/// an explicit in-memory state store.
+pub fn evaluate_client_function_with_state_and_grants(
+    active: &ActiveDatabaseRevision,
+    authorisation: &AuthorisedInvocation,
+    declarations: &[capability::LocalCapabilityDeclaration],
+    grants: &capability::LocalCapabilityGrantSet,
+    state: &mut ClientStateStore,
+) -> Result<ClientExecutionResult, ClientExecutionError> {
+    evaluate_client_function_with_state_and_grants_and_arguments(
+        active,
+        authorisation,
+        &[],
+        declarations,
+        grants,
+        state,
+    )
+}
+
+/// Evaluates one closed CLIENT function with invocation arguments, grants, and
+/// an explicit in-memory state store.
+pub fn evaluate_client_function_with_state_and_grants_and_arguments(
+    active: &ActiveDatabaseRevision,
+    authorisation: &AuthorisedInvocation,
+    arguments: &[FunctionArgument],
+    declarations: &[capability::LocalCapabilityDeclaration],
+    grants: &capability::LocalCapabilityGrantSet,
+    state: &mut ClientStateStore,
 ) -> Result<ClientExecutionResult, ClientExecutionError> {
     let target = authorisation.target();
     if target.revision() != active.pair() {
@@ -459,6 +672,7 @@ pub fn evaluate_client_function_with_grants_and_arguments(
             .collect(),
         declarations,
         grants,
+        state,
         0,
     )?;
     Ok(ClientExecutionResult { context, value })
@@ -470,6 +684,7 @@ fn evaluate_function(
     arguments: Vec<(ParameterId, RuntimeValue)>,
     declarations: &[capability::LocalCapabilityDeclaration],
     grants: &capability::LocalCapabilityGrantSet,
+    state: &mut ClientStateStore,
     depth: usize,
 ) -> Result<(ClientExecutionContext, RuntimeValue), ClientExecutionError> {
     let pair = active.pair();
@@ -552,6 +767,7 @@ fn evaluate_function(
         &arguments,
         declarations,
         grants,
+        state,
         depth,
     )?;
     Ok((context, value))
@@ -565,6 +781,7 @@ fn evaluate_plan(
     arguments: &[(ParameterId, RuntimeValue)],
     declarations: &[capability::LocalCapabilityDeclaration],
     grants: &capability::LocalCapabilityGrantSet,
+    state: &mut ClientStateStore,
     depth: usize,
 ) -> Result<RuntimeValue, ClientExecutionError> {
     match return_shape {
@@ -614,6 +831,39 @@ fn evaluate_plan(
                 arguments,
                 declarations,
                 grants,
+                state,
+                depth,
+            )?;
+            if runtime_value_matches(active, &value, expected) {
+                Ok(value)
+            } else {
+                Err(expression_error(
+                    context,
+                    ClientExpressionError::TypeMismatch,
+                ))
+            }
+        }
+        ClientReturnShape::State(expected) => {
+            let plan = StateClientPlan::decode(payload)
+                .map_err(|source| ClientExecutionError::InvalidArtifact { context, source })?;
+            initialize_client_state(
+                active,
+                &plan,
+                context,
+                arguments,
+                declarations,
+                grants,
+                state,
+                depth,
+            )?;
+            let value = evaluate_expression(
+                active,
+                plan.expression(),
+                context,
+                arguments,
+                declarations,
+                grants,
+                state,
                 depth,
             )?;
             if runtime_value_matches(active, &value, expected) {
@@ -637,6 +887,7 @@ fn evaluate_expression(
     arguments: &[(ParameterId, RuntimeValue)],
     declarations: &[capability::LocalCapabilityDeclaration],
     grants: &capability::LocalCapabilityGrantSet,
+    state: &mut ClientStateStore,
     depth: usize,
 ) -> Result<RuntimeValue, ClientExecutionError> {
     match expression {
@@ -668,6 +919,7 @@ fn evaluate_expression(
                 arguments,
                 declarations,
                 grants,
+                state,
                 depth,
             )?;
             let right = evaluate_expression(
@@ -677,6 +929,7 @@ fn evaluate_expression(
                 arguments,
                 declarations,
                 grants,
+                state,
                 depth,
             )?;
             let (RuntimeValue::Text(left), RuntimeValue::Text(right)) = (left, right) else {
@@ -715,6 +968,7 @@ fn evaluate_expression(
                     arguments,
                     declarations,
                     grants,
+                    state,
                     depth,
                 )?;
                 evaluated.push((*parameter, value));
@@ -725,6 +979,7 @@ fn evaluate_expression(
                 evaluated,
                 declarations,
                 grants,
+                state,
                 depth + 1,
             )?;
             Ok(value)
@@ -824,6 +1079,125 @@ fn expression_error(
     ClientExecutionError::ExpressionEvaluation { context, source }
 }
 
+fn state_error(
+    context: ClientExecutionContext,
+    source: ClientStateError,
+) -> ClientExecutionError {
+    ClientExecutionError::StateEvaluation { context, source }
+}
+
+/// Initialises the LOCAL and SESSION slots of one version-four plan in the
+/// caller-owned in-memory store and fails closed on any USER slot.
+///
+/// A slot that already has an entry in the store keeps its value (caller
+/// state input wins over the plan default). `Unset` defaults leave no entry;
+/// `Null` and checked expression defaults are evaluated and type-checked
+/// against the declared slot type.
+fn initialize_client_state(
+    active: &ActiveDatabaseRevision,
+    plan: &StateClientPlan,
+    context: ClientExecutionContext,
+    arguments: &[(ParameterId, RuntimeValue)],
+    declarations: &[capability::LocalCapabilityDeclaration],
+    grants: &capability::LocalCapabilityGrantSet,
+    state: &mut ClientStateStore,
+    depth: usize,
+) -> Result<(), ClientExecutionError> {
+    for slot in plan.slots() {
+        if slot.scope() == StateScope::User {
+            return Err(state_error(
+                context,
+                ClientStateError::UserScopeUnsupported {
+                    slot: slot.state_slot_id(),
+                },
+            ));
+        }
+    }
+
+    for slot in plan.slots() {
+        let key = ClientStateKey::new(context.function(), slot.state_slot_id());
+        let resolved = resolve_state_slot_type(active, slot.type_id()).ok_or_else(|| {
+            state_error(
+                context,
+                ClientStateError::UnsupportedSlotType {
+                    slot: slot.state_slot_id(),
+                },
+            )
+        })?;
+        let stored_value = match slot.scope() {
+            StateScope::Local => state.local.get(&key),
+            StateScope::Session => state.session.get(&key),
+            StateScope::User => unreachable!("USER slots fail closed above"),
+        };
+        if stored_value.is_some_and(|value| !runtime_value_matches(active, value, resolved)) {
+            return Err(state_error(
+                context,
+                ClientStateError::StoredTypeMismatch {
+                    slot: slot.state_slot_id(),
+                },
+            ));
+        }
+        if stored_value.is_some() {
+            continue;
+        }
+        let value = match slot.default() {
+            StateDefault::Unset => continue,
+            StateDefault::Null => RuntimeValue::null(resolved).map_err(|_| {
+                state_error(
+                    context,
+                    ClientStateError::NullDefault {
+                        slot: slot.state_slot_id(),
+                    },
+                )
+            })?,
+            StateDefault::Expression(node) => {
+                let value = evaluate_expression(
+                    active,
+                    node,
+                    context,
+                    arguments,
+                    declarations,
+                    grants,
+                    state,
+                    depth,
+                )?;
+                if !runtime_value_matches(active, &value, resolved) {
+                    return Err(state_error(
+                        context,
+                        ClientStateError::DefaultTypeMismatch {
+                            slot: slot.state_slot_id(),
+                        },
+                    ));
+                }
+                value
+            }
+        };
+        match slot.scope() {
+            StateScope::Local => {
+                state.local.insert(key, value);
+            }
+            StateScope::Session => {
+                state.session.insert(key, value);
+            }
+            StateScope::User => unreachable!("USER slots fail closed above"),
+        }
+    }
+    Ok(())
+}
+
+/// Resolves one checked state slot type to the runtime type used to check
+/// defaults and construct null values.
+fn resolve_state_slot_type(
+    active: &ActiveDatabaseRevision,
+    type_id: TypeId,
+) -> Option<ResolvedType> {
+    active
+        .catalogue_hash_context()
+        .standard()
+        .and_then(|standard| standard.catalogue().value_type_by_id(type_id))
+        .map(|_| ResolvedType::value(type_id))
+}
+
 fn validate_active_catalogue(
     active: &ActiveDatabaseRevision,
     function: FunctionId,
@@ -865,6 +1239,7 @@ enum ClientReturnShape {
     StandardBoolean(TypeId),
     Opaque(TypeId),
     Expression(ResolvedType),
+    State(ResolvedType),
     OtherValue,
     Unsupported,
 }
@@ -874,23 +1249,34 @@ fn classify_client_return(
     return_type: &FunctionReturn,
     artifact_version: u32,
 ) -> ClientReturnShape {
+    let expression_eligible = matches!(
+        artifact_version,
+        EXPRESSION_FORMAT_VERSION | STATE_FORMAT_VERSION
+    );
+    let expression_shape = |resolved_type: ResolvedType| {
+        if artifact_version == STATE_FORMAT_VERSION {
+            ClientReturnShape::State(resolved_type)
+        } else {
+            ClientReturnShape::Expression(resolved_type)
+        }
+    };
     let FunctionReturn::Single(resolved_type) = return_type else {
         return ClientReturnShape::Unsupported;
     };
     if let Some(scalar) = resolved_type.legacy_scalar() {
         return if scalar == StandardScalar::Boolean {
-            if artifact_version == EXPRESSION_FORMAT_VERSION {
-                ClientReturnShape::Expression(*resolved_type)
+            if expression_eligible {
+                expression_shape(*resolved_type)
             } else {
                 ClientReturnShape::LegacyBoolean
             }
-        } else if artifact_version == EXPRESSION_FORMAT_VERSION
+        } else if expression_eligible
             && matches!(
                 scalar,
                 StandardScalar::Integer | StandardScalar::CharacterLargeObject
             )
         {
-            ClientReturnShape::Expression(*resolved_type)
+            expression_shape(*resolved_type)
         } else {
             ClientReturnShape::Unsupported
         };
@@ -907,26 +1293,26 @@ fn classify_client_return(
             return ClientReturnShape::Unsupported;
         };
         if definition.representation_contract() == "orna.kernel.value.boolean@1" {
-            return if artifact_version == EXPRESSION_FORMAT_VERSION {
-                ClientReturnShape::Expression(*resolved_type)
+            return if expression_eligible {
+                expression_shape(*resolved_type)
             } else {
                 ClientReturnShape::StandardBoolean(type_id)
             };
         }
         if definition.kind() == ValueTypeKind::Opaque {
-            return if artifact_version == EXPRESSION_FORMAT_VERSION {
-                ClientReturnShape::Expression(*resolved_type)
+            return if expression_eligible {
+                expression_shape(*resolved_type)
             } else {
                 ClientReturnShape::Opaque(type_id)
             };
         }
-        if artifact_version == EXPRESSION_FORMAT_VERSION
+        if expression_eligible
             && matches!(
                 definition.representation_contract(),
                 "orna.kernel.value.integer@1" | "orna.kernel.value.character-large-object@1"
             )
         {
-            return ClientReturnShape::Expression(*resolved_type);
+            return expression_shape(*resolved_type);
         }
         return ClientReturnShape::OtherValue;
     }
@@ -945,7 +1331,11 @@ fn validate_function_shape(
             ClientExecutionRule::FunctionDomain,
         ));
     }
-    if artifact_version != EXPRESSION_FORMAT_VERSION && !definition.parameters().is_empty() {
+    if !matches!(
+        artifact_version,
+        EXPRESSION_FORMAT_VERSION | STATE_FORMAT_VERSION
+    ) && !definition.parameters().is_empty()
+    {
         return Err(invalid_function(context, ClientExecutionRule::Parameters));
     }
     let return_shape = classify_client_return(active, definition.return_type(), artifact_version);
@@ -989,7 +1379,10 @@ fn validate_selected_references(
             if semantic_hash_version != FunctionSemanticHashVersion::Version2 {
                 return Err(invalid_function(context, ClientExecutionRule::References));
             }
-            if matches!(return_shape, ClientReturnShape::Expression(_)) {
+            if matches!(
+                return_shape,
+                ClientReturnShape::Expression(_) | ClientReturnShape::State(_)
+            ) {
                 if selected.iter().any(|reference| {
                     !matches!(
                         reference.kind(),
@@ -1030,6 +1423,7 @@ fn validate_selected_references(
                                         .is_some_and(|value| value.kind() == ValueTypeKind::Opaque)
                             }
                             ClientReturnShape::Expression(_)
+                            | ClientReturnShape::State(_)
                             | ClientReturnShape::OtherValue
                             | ClientReturnShape::Unsupported => false,
                         }
@@ -1061,6 +1455,7 @@ fn validate_artifact(
         ClientReturnShape::LegacyBoolean | ClientReturnShape::StandardBoolean(_) => FORMAT_VERSION,
         ClientReturnShape::Opaque(_) => OPAQUE_FORMAT_VERSION,
         ClientReturnShape::Expression(_) => EXPRESSION_FORMAT_VERSION,
+        ClientReturnShape::State(_) => STATE_FORMAT_VERSION,
         ClientReturnShape::OtherValue => unreachable!("definition references were validated"),
         ClientReturnShape::Unsupported => unreachable!("function shape was validated"),
     };
@@ -1090,7 +1485,7 @@ fn invalid_function(
 mod tests {
     use orna_core::{
         CatalogueRevisionId, FunctionId, FunctionRevisionId, ParameterId, PrincipalId, SchemaId,
-        SourceBundleId, SourceRevisionId, SourceUnitId, TypeId,
+        SourceBundleId, SourceRevisionId, SourceUnitId, StateSlotId, TypeId,
         canonical_hash::{
             artifact_payload_digest, catalogue_digest, catalogue_digest_with_context,
             function_declaration_digest, function_semantic_digest,
@@ -1163,6 +1558,291 @@ mod tests {
             assert_eq!(result.context().function_revision(), function_revision);
             assert_eq!(result.value(), &RuntimeValue::Boolean(value));
         }
+    }
+
+    fn version_four_text_state_plan() -> (
+        ActiveDatabaseRevision,
+        FunctionId,
+        orna_artifact::client_plan::StateClientPlan,
+    ) {
+        let plan = orna_artifact::client_plan::StateClientPlan::new(
+            orna_artifact::client_plan::ClientExpressionNode::Concat {
+                left: Box::new(orna_artifact::client_plan::ClientExpressionNode::String {
+                    value: "hello ".to_owned(),
+                }),
+                right: Box::new(orna_artifact::client_plan::ClientExpressionNode::String {
+                    value: "world".to_owned(),
+                }),
+            },
+            vec![
+                orna_artifact::client_plan::StateSlot::new(
+                    StateSlotId::from_bytes([0x11; 16]),
+                    orna_standard::CHARACTER_LARGE_OBJECT_TYPE_ID,
+                    orna_artifact::client_plan::StateScope::Local,
+                    orna_artifact::client_plan::StateDefault::Expression(
+                        orna_artifact::client_plan::ClientExpressionNode::String {
+                            value: "local-default".to_owned(),
+                        },
+                    ),
+                ),
+                orna_artifact::client_plan::StateSlot::new(
+                    StateSlotId::from_bytes([0x12; 16]),
+                    orna_standard::CHARACTER_LARGE_OBJECT_TYPE_ID,
+                    orna_artifact::client_plan::StateScope::Session,
+                    orna_artifact::client_plan::StateDefault::Null,
+                ),
+                orna_artifact::client_plan::StateSlot::new(
+                    StateSlotId::from_bytes([0x13; 16]),
+                    orna_standard::CHARACTER_LARGE_OBJECT_TYPE_ID,
+                    orna_artifact::client_plan::StateScope::Local,
+                    orna_artifact::client_plan::StateDefault::Unset,
+                ),
+            ],
+        );
+        let (active, function, _, _) = version_four_state_active(
+            orna_standard::CHARACTER_LARGE_OBJECT_TYPE_ID,
+            plan.encode().expect("the state plan encodes"),
+        );
+        (active, function, plan)
+    }
+
+    #[test]
+    fn evaluates_version_four_state_plans_and_initialises_local_and_session_state() {
+        let (active, function, plan) = version_four_text_state_plan();
+        let mut state = super::ClientStateStore::new();
+
+        let result = super::evaluate_client_function_with_state(
+            &active,
+            &authorise(active.pair(), function),
+            &mut state,
+        )
+        .unwrap();
+
+        assert_eq!(result.value(), &RuntimeValue::Text("hello world".to_owned()));
+        assert_eq!(
+            state.local().get(&super::ClientStateKey::new(
+                function,
+                StateSlotId::from_bytes([0x11; 16])
+            )),
+            Some(&RuntimeValue::Text("local-default".to_owned()))
+        );
+        let expected_null = RuntimeValue::null(ResolvedType::value(
+            orna_standard::CHARACTER_LARGE_OBJECT_TYPE_ID,
+        ))
+        .unwrap();
+        assert_eq!(
+            state.session().get(&super::ClientStateKey::new(
+                function,
+                StateSlotId::from_bytes([0x12; 16])
+            )),
+            Some(&expected_null)
+        );
+        assert!(!state.local().contains_key(&super::ClientStateKey::new(
+            function,
+            StateSlotId::from_bytes([0x13; 16])
+        )));
+        assert!(state.user().is_empty());
+        assert_eq!(plan.format_version(), orna_artifact::client_plan::STATE_FORMAT_VERSION);
+    }
+
+    #[test]
+    fn version_four_keeps_caller_state_input_over_the_plan_default() {
+        let (active, function, _) = version_four_text_state_plan();
+        let mut state = super::ClientStateStore::new();
+        state.session_mut().insert(
+            super::ClientStateKey::new(function, StateSlotId::from_bytes([0x12; 16])),
+            RuntimeValue::Text("remounted-session".to_owned()),
+        );
+
+        super::evaluate_client_function_with_state(
+            &active,
+            &authorise(active.pair(), function),
+            &mut state,
+        )
+        .unwrap();
+
+        assert_eq!(
+            state.session().get(&super::ClientStateKey::new(
+                function,
+                StateSlotId::from_bytes([0x12; 16])
+            )),
+            Some(&RuntimeValue::Text("remounted-session".to_owned()))
+        );
+    }
+
+    #[test]
+    fn version_four_rejects_caller_state_with_the_wrong_type() {
+        let (active, function, _) = version_four_text_state_plan();
+        let mut state = super::ClientStateStore::new();
+        state.session_mut().insert(
+            super::ClientStateKey::new(function, StateSlotId::from_bytes([0x12; 16])),
+            RuntimeValue::Boolean(true),
+        );
+
+        let error = super::evaluate_client_function_with_state(
+            &active,
+            &authorise(active.pair(), function),
+            &mut state,
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            &error,
+            super::ClientExecutionError::StateEvaluation {
+                context,
+                source: super::ClientStateError::StoredTypeMismatch { slot },
+            } if context.function() == function
+                && *slot == StateSlotId::from_bytes([0x12; 16])
+        ));
+    }
+
+    #[test]
+    fn version_four_user_state_fails_closed_without_partial_writes() {
+        let plan = orna_artifact::client_plan::StateClientPlan::new(
+            orna_artifact::client_plan::ClientExpressionNode::Boolean { value: true },
+            vec![orna_artifact::client_plan::StateSlot::new(
+                StateSlotId::from_bytes([0x21; 16]),
+                orna_standard::BOOLEAN_TYPE_ID,
+                orna_artifact::client_plan::StateScope::User,
+                orna_artifact::client_plan::StateDefault::Unset,
+            )],
+        );
+        let (active, function, _, _) = version_four_state_active(
+            orna_standard::BOOLEAN_TYPE_ID,
+            plan.encode().expect("the state plan encodes"),
+        );
+        let mut state = super::ClientStateStore::new();
+
+        let error = super::evaluate_client_function_with_state(
+            &active,
+            &authorise(active.pair(), function),
+            &mut state,
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            &error,
+            super::ClientExecutionError::StateEvaluation {
+                context,
+                source: super::ClientStateError::UserScopeUnsupported { slot },
+            } if context.function() == function
+                && *slot == StateSlotId::from_bytes([0x21; 16])
+        ));
+        assert!(state.local().is_empty() && state.session().is_empty());
+    }
+
+    #[test]
+    fn version_four_state_default_type_mismatch_fails_closed() {
+        let plan = orna_artifact::client_plan::StateClientPlan::new(
+            orna_artifact::client_plan::ClientExpressionNode::Boolean { value: true },
+            vec![orna_artifact::client_plan::StateSlot::new(
+                StateSlotId::from_bytes([0x31; 16]),
+                orna_standard::BOOLEAN_TYPE_ID,
+                orna_artifact::client_plan::StateScope::Local,
+                orna_artifact::client_plan::StateDefault::Expression(
+                    orna_artifact::client_plan::ClientExpressionNode::String {
+                        value: "not-a-boolean".to_owned(),
+                    },
+                ),
+            )],
+        );
+        let (active, function, _, _) = version_four_state_active(
+            orna_standard::BOOLEAN_TYPE_ID,
+            plan.encode().expect("the state plan encodes"),
+        );
+        let mut state = super::ClientStateStore::new();
+
+        let error = super::evaluate_client_function_with_state(
+            &active,
+            &authorise(active.pair(), function),
+            &mut state,
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            &error,
+            super::ClientExecutionError::StateEvaluation {
+                context,
+                source: super::ClientStateError::DefaultTypeMismatch { slot },
+            } if context.function() == function
+                && *slot == StateSlotId::from_bytes([0x31; 16])
+        ));
+    }
+
+    #[test]
+    fn version_four_unsupported_slot_type_fails_closed() {
+        let plan = orna_artifact::client_plan::StateClientPlan::new(
+            orna_artifact::client_plan::ClientExpressionNode::Boolean { value: true },
+            vec![orna_artifact::client_plan::StateSlot::new(
+                StateSlotId::from_bytes([0x41; 16]),
+                TypeId::from_bytes([0x99; 16]),
+                orna_artifact::client_plan::StateScope::Local,
+                orna_artifact::client_plan::StateDefault::Unset,
+            )],
+        );
+        let (active, function, _, _) = version_four_state_active(
+            orna_standard::BOOLEAN_TYPE_ID,
+            plan.encode().expect("the state plan encodes"),
+        );
+        let mut state = super::ClientStateStore::new();
+
+        let error = super::evaluate_client_function_with_state(
+            &active,
+            &authorise(active.pair(), function),
+            &mut state,
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            &error,
+            super::ClientExecutionError::StateEvaluation {
+                context,
+                source: super::ClientStateError::UnsupportedSlotType { slot },
+            } if context.function() == function
+                && *slot == StateSlotId::from_bytes([0x41; 16])
+        ));
+    }
+
+    #[test]
+    fn version_four_return_type_mismatch_fails_as_an_expression_error() {
+        let plan = orna_artifact::client_plan::StateClientPlan::new(
+            orna_artifact::client_plan::ClientExpressionNode::Integer { value: 42 },
+            vec![orna_artifact::client_plan::StateSlot::new(
+                StateSlotId::from_bytes([0x51; 16]),
+                orna_standard::BOOLEAN_TYPE_ID,
+                orna_artifact::client_plan::StateScope::Local,
+                orna_artifact::client_plan::StateDefault::Unset,
+            )],
+        );
+        let (active, function, _, _) = version_four_state_active(
+            orna_standard::BOOLEAN_TYPE_ID,
+            plan.encode().expect("the state plan encodes"),
+        );
+        let mut state = super::ClientStateStore::new();
+
+        let error = super::evaluate_client_function_with_state(
+            &active,
+            &authorise(active.pair(), function),
+            &mut state,
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            &error,
+            super::ClientExecutionError::ExpressionEvaluation {
+                context,
+                source: super::ClientExpressionError::TypeMismatch,
+            } if context.function() == function
+        ));
+    }
+
+    #[test]
+    fn version_four_plans_run_through_the_legacy_entry_point_with_transient_state() {
+        let (active, function, _) = version_four_text_state_plan();
+
+        let result = evaluate_client_function(&active, function).unwrap();
+
+        assert_eq!(result.value(), &RuntimeValue::Text("hello world".to_owned()));
     }
 
     #[test]
@@ -3062,6 +3742,99 @@ mod tests {
                     vec![revision],
                     version_one.origins().to_vec(),
                     vec![reference],
+                ),
+            ),
+            context,
+        )
+        .unwrap();
+
+        (active, function_id, pair, function_revision_id)
+    }
+
+    fn version_four_state_active(
+        return_type: TypeId,
+        payload: Vec<u8>,
+    ) -> (
+        ActiveDatabaseRevision,
+        FunctionId,
+        RevisionPair,
+        FunctionRevisionId,
+    ) {
+        let standard = orna_standard::verify_standard_library_snapshot(
+            orna_standard::retained_standard_library_snapshot().unwrap(),
+        )
+        .unwrap();
+        let (version_one, function_id, pair, function_revision_id) = version_one_active(true);
+        let prior_function = version_one.catalogue().function_by_id(function_id).unwrap();
+        let function = FunctionDefinition::new(
+            function_id,
+            prior_function.name().clone(),
+            FunctionDomain::Client,
+            Vec::new(),
+            FunctionReturn::Single(ResolvedType::Value(return_type)),
+            function_revision_id,
+            FunctionSecurity::Invoker,
+            None,
+            FunctionVolatility::Immutable,
+        );
+        let catalogue = CatalogueSnapshot::new_with_functions(
+            version_one.catalogue().revision(),
+            version_one.catalogue().schemas().to_vec(),
+            version_one.catalogue().object_types().to_vec(),
+            vec![function.clone()],
+        )
+        .unwrap();
+        let prior_revision = &version_one.function_revisions()[0];
+        let artifact = ExecutableArtifact::new(
+            ExecutableArtifactKind::Client,
+            "orna.client-plan",
+            orna_artifact::client_plan::STATE_FORMAT_VERSION,
+            payload.clone(),
+            artifact_payload_digest(&payload).unwrap(),
+        )
+        .unwrap();
+        let semantic_hash = function_semantic_digest_with_version(
+            FunctionSemanticHashVersion::Version2,
+            &function,
+            prior_revision.language_version(),
+            &artifact,
+            version_one.expressions(),
+            &[],
+        )
+        .unwrap();
+        let revision = FunctionRevisionRecord::new(
+            function_id,
+            function_revision_id,
+            prior_revision.revision_number(),
+            prior_revision.declaration_origin(),
+            prior_revision.declaration_content_hash(),
+            semantic_hash,
+            prior_revision.language_version(),
+            artifact,
+        )
+        .unwrap()
+        .with_semantic_hash_version(FunctionSemanticHashVersion::Version2);
+        let context = orna_core::revision::CatalogueHashContext::version_two(standard);
+        let catalogue_hash = catalogue_digest_with_context(
+            &context,
+            &catalogue,
+            std::slice::from_ref(&revision),
+            version_one.expressions(),
+            version_one.origins(),
+            &[],
+        )
+        .unwrap();
+        let active = ActiveDatabaseRevision::new_with_catalogue_hash_context(
+            ActiveDatabaseRevisionInput::new(
+                pair,
+                version_one.source().clone(),
+                catalogue,
+                catalogue_hash,
+                ActiveRevisionContent::new(
+                    version_one.expressions().to_vec(),
+                    vec![revision],
+                    version_one.origins().to_vec(),
+                    Vec::new(),
                 ),
             ),
             context,
