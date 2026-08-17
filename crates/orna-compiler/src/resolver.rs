@@ -40,8 +40,8 @@ pub use model::{
     StandardApplicationContextError, StandardLibraryCheckError,
 };
 pub(crate) use model::{
-    CheckedClientFunctionBody, CheckedFieldRename, CheckedServerFunctionBody, QueryCatalogue,
-    QueryField, QueryObjectType, ResolutionCatalogue, STD_UI_CONTRACT,
+    CheckedClientExpression, CheckedClientFunctionBody, CheckedFieldRename, CheckedServerFunctionBody,
+    QueryCatalogue, QueryField, QueryObjectType, ResolutionCatalogue, STD_UI_CONTRACT,
 };
 use model::{CheckedEnumType, CheckedRecordValueField, CheckedRecordValueType};
 
@@ -59,6 +59,7 @@ use orna_core::{
     },
     catalogue::{
         CatalogueSnapshot, CatalogueSnapshotError, FunctionDomain,
+        FunctionReturn,
         FunctionSecurity as CatalogueFunctionSecurity,
         FunctionTransaction as CatalogueFunctionTransaction,
         FunctionVolatility as CatalogueFunctionVolatility, OnDeleteAction, PreludeTypeName,
@@ -73,15 +74,16 @@ use orna_core::{
         VerifiedStandardLibrarySnapshot,
     },
     source::{SourceBundle, SourceUnit},
-    types::StandardScalar,
+    types::{ResolvedType, StandardScalar},
 };
 use orna_syntax::{
-    CapabilitySpecification, ClientFunctionDeclaration, FieldRenameDeclaration, FunctionReturnType,
+    CapabilitySpecification, ClientExpression, ClientFunctionDeclaration,
+    FieldRenameDeclaration, FunctionReturnType,
     FunctionSecurity as SyntaxFunctionSecurity, FunctionTransaction as SyntaxFunctionTransaction,
     FunctionVolatility as SyntaxFunctionVolatility, ObjectTypeDeclaration, OnDeletePolicy,
     PrimitiveValueTypePersistence, QualifiedName, RecordValueTypeDeclaration, SelectQuantifier,
-    ServerFunctionBody, ServerFunctionDeclaration, SourceSlice, SourceSpan,
-    StandardLargeObjectKind, TypeExportTarget, TypeSpecification,
+    ServerFunctionBody, ServerFunctionDeclaration, SourceSlice, SourceSpan, StandardLargeObjectKind,
+    TypeExportTarget, TypeSpecification,
 };
 
 use crate::mutation::{
@@ -3054,6 +3056,8 @@ fn check_application_parsed(
         resolve_client_function_inputs(
             &client_headers,
             &submitted_ids,
+            base,
+            &mut assignments,
             &mut diagnostics,
             standard,
             &mut uses,
@@ -3062,7 +3066,19 @@ fn check_application_parsed(
         Vec::new()
     };
     let checked_client_functions = if diagnostics.is_empty() {
-        check_client_functions(&client_inputs, &mut diagnostics, standard, &mut uses)
+        let server_names = function_inputs
+            .iter()
+            .map(|input| input.name.clone())
+            .collect::<Vec<_>>();
+        check_client_functions(
+            &client_inputs,
+            &query_catalogue,
+            &server_names,
+            base,
+            &mut diagnostics,
+            standard,
+            &mut uses,
+        )
     } else {
         Vec::new()
     };
@@ -3615,6 +3631,8 @@ fn resolve_client_function_headers<'a>(
 fn resolve_client_function_inputs<'a>(
     headers: &[ClientFunctionHeader<'a>],
     submitted_ids: &HashMap<QualifiedSemanticName, SubmittedType>,
+    base: &CatalogueSnapshot,
+    assignments: &mut CheckAssignments,
     diagnostics: &mut Vec<CompilerDiagnostic>,
     standard: Option<&CheckedStandardLibrary>,
     uses: &mut Vec<CheckedApplicationTypeUse>,
@@ -3622,7 +3640,12 @@ fn resolve_client_function_inputs<'a>(
     let mut inputs = Vec::with_capacity(headers.len());
     for header in headers {
         let declaration = header.declaration;
-        if !declaration.parameters.is_empty() {
+        let diagnostics_before = diagnostics.len();
+        let name = semantic_name(&declaration.name);
+        let base_function = base.function_by_name(&name);
+        let expression_body =
+            declaration.body.as_expression().is_some() || declaration.body.as_external_contract().is_some();
+        if !expression_body && !declaration.parameters.is_empty() {
             diagnostics.push(diagnostic(
                 DiagnosticCode::DomainIncompatible,
                 "this CLIENT function cannot declare parameters yet",
@@ -3630,12 +3653,13 @@ fn resolve_client_function_inputs<'a>(
                 &declaration.parameter_list_span,
             ));
         }
-
-        if let (Some(standard), FunctionReturnType::Single(specification), Some((_, body_source))) = (
-            standard,
-            &declaration.return_type,
-            declaration.body.as_boolean_literal(),
-        ) && is_standard_client_boolean_return(specification)
+        if !expression_body
+            && let (Some(standard), FunctionReturnType::Single(specification), Some((_, body_source))) = (
+                standard,
+                &declaration.return_type,
+                declaration.body.as_boolean_literal(),
+            )
+            && is_standard_client_boolean_return(specification)
             && matches!(
                 intrinsic_boolean_type(Some(standard)),
                 IntrinsicBooleanType::Missing
@@ -3647,25 +3671,68 @@ fn resolve_client_function_inputs<'a>(
                 header.logical_path,
                 &body_source.span,
             ));
-            continue;
+        }
+        let mut parameter_names = HashSet::new();
+        let mut parameters = Vec::with_capacity(declaration.parameters.len());
+
+        for parameter in &declaration.parameters {
+            let parameter_name = semantic_part(&parameter.name);
+            if !parameter_names.insert(parameter_name.clone()) {
+                diagnostics.push(diagnostic(
+                    DiagnosticCode::DuplicateDefinition,
+                    format!("duplicate parameter definition {parameter_name} in {name}"),
+                    header.logical_path,
+                    &parameter.name.span,
+                ));
+                continue;
+            }
+            let Some(resolved_type) = resolve_application_type_with_named_standard(
+                &parameter.type_specification,
+                submitted_ids,
+                header.logical_path,
+                diagnostics,
+                standard,
+                true,
+            ) else {
+                continue;
+            };
+            let id = assignments.parameter_id(
+                base_function
+                    .and_then(|function| function.parameter_by_name(&parameter_name))
+                    .map(|parameter| parameter.id()),
+            );
+            record_standard_type_use(
+                uses,
+                standard,
+                CheckedTypeUseKind::Parameter {
+                    owner: header.id,
+                    parameter: id,
+                },
+                resolved_type,
+                type_use_location(&parameter.type_specification, header.logical_path),
+            );
+            parameters.push(ResolvedServerFunctionParameter {
+                id,
+                name: parameter_name,
+                ordinal: parameter.order as u32,
+                semantic_type: resolved_type.semantic_type,
+                standard_value_type: resolved_type.standard_value_type,
+                name_span: parameter.name.span.clone(),
+                location: location(header.logical_path, &parameter.span),
+                reference_location: reference_location(
+                    &parameter.type_specification,
+                    header.logical_path,
+                ),
+            });
         }
 
-        let return_type = match (&declaration.return_type, standard) {
-            (FunctionReturnType::Single(specification), Some(standard)) => {
-                let diagnostics_before = diagnostics.len();
-                let resolved = resolve_application_type(
-                    specification,
-                    submitted_ids,
-                    header.logical_path,
-                    diagnostics,
-                    Some(standard),
-                );
-                if diagnostics.len() != diagnostics_before {
-                    None
-                } else if resolved.is_some_and(|resolved| {
-                    resolved.semantic_type == SemanticType::scalar(StandardScalar::Boolean)
-                }) {
-                    resolved
+        let return_type = match &declaration.return_type {
+            FunctionReturnType::Single(specification) if !expression_body && standard.is_none() => {
+                if is_closed_client_boolean_return(specification) {
+                    Some(ResolvedApplicationType {
+                        semantic_type: SemanticType::scalar(StandardScalar::Boolean),
+                        standard_value_type: None,
+                    })
                 } else {
                     diagnostics.push(diagnostic(
                         DiagnosticCode::TypeMismatch,
@@ -3676,27 +3743,22 @@ fn resolve_client_function_inputs<'a>(
                     None
                 }
             }
-            (FunctionReturnType::Single(specification), None)
-                if is_closed_client_boolean_return(specification) =>
-            {
-                Some(ResolvedApplicationType {
-                    semantic_type: SemanticType::scalar(StandardScalar::Boolean),
-                    standard_value_type: None,
-                })
-            }
-            (FunctionReturnType::Single(specification), None) => {
+            FunctionReturnType::Single(specification) => resolve_application_type_with_named_standard(
+                specification,
+                submitted_ids,
+                header.logical_path,
+                diagnostics,
+                standard,
+                true,
+            ),
+            FunctionReturnType::Rows { span, .. } => {
                 diagnostics.push(diagnostic(
                     DiagnosticCode::TypeMismatch,
-                    "this CLIENT function must return BOOLEAN",
-                    header.logical_path,
-                    specification.span(),
-                ));
-                None
-            }
-            (FunctionReturnType::Rows { span, .. }, _) => {
-                diagnostics.push(diagnostic(
-                    DiagnosticCode::TypeMismatch,
-                    "this CLIENT function must return BOOLEAN",
+                    if expression_body {
+                        "this CLIENT function must return one value"
+                    } else {
+                        "this CLIENT function must return BOOLEAN"
+                    },
                     header.logical_path,
                     span,
                 ));
@@ -3704,36 +3766,51 @@ fn resolve_client_function_inputs<'a>(
             }
         };
 
-        if let Some(return_type) = return_type
-            && declaration.parameters.is_empty()
-        {
-            let semantic_type = return_type.semantic_type;
-            let standard_value_type = return_type.standard_value_type;
-            if let FunctionReturnType::Single(specification) = &declaration.return_type {
-                record_standard_type_use(
-                    uses,
-                    standard,
-                    CheckedTypeUseKind::Return {
-                        owner: header.id,
-                        ordinal: 0,
-                    },
-                    return_type,
-                    type_use_location(specification, header.logical_path),
-                );
-            }
-            inputs.push(ResolvedClientFunctionInput {
-                id: header.id,
-                name: semantic_name(&declaration.name),
-                capabilities: &declaration.capabilities,
-                parameters: Vec::new(),
-                return_type: semantic_type,
-                standard_value_type,
-                body: &declaration.body,
-                location: location(header.logical_path, &declaration.span),
-                declaration_span: declaration.span.clone(),
-                logical_path: header.logical_path,
-            });
+        if diagnostics.len() != diagnostics_before {
+            continue;
         }
+        let Some(return_type) = return_type else {
+            continue;
+        };
+        if !expression_body
+            && return_type.semantic_type != SemanticType::scalar(StandardScalar::Boolean)
+        {
+            let span = match &declaration.return_type {
+                FunctionReturnType::Single(specification) => specification.span(),
+                FunctionReturnType::Rows { span, .. } => span,
+            };
+            diagnostics.push(diagnostic(
+                DiagnosticCode::TypeMismatch,
+                "this CLIENT function must return BOOLEAN",
+                header.logical_path,
+                span,
+            ));
+            continue;
+        }
+        if let FunctionReturnType::Single(specification) = &declaration.return_type {
+            record_standard_type_use(
+                uses,
+                standard,
+                CheckedTypeUseKind::Return {
+                    owner: header.id,
+                    ordinal: 0,
+                },
+                return_type,
+                type_use_location(specification, header.logical_path),
+            );
+        }
+        inputs.push(ResolvedClientFunctionInput {
+            id: header.id,
+            name,
+            capabilities: &declaration.capabilities,
+            parameters,
+            return_type: return_type.semantic_type,
+            standard_value_type: return_type.standard_value_type,
+            body: &declaration.body,
+            location: location(header.logical_path, &declaration.span),
+            declaration_span: declaration.span.clone(),
+            logical_path: header.logical_path,
+        });
     }
     inputs
 }
@@ -4012,12 +4089,512 @@ fn validate_client_capability<'a>(
     }
 }
 
+#[derive(Clone, Copy)]
+struct ClientExpressionType {
+    semantic_type: SemanticType<CheckedTypeId>,
+    standard_value_type: Option<orna_core::TypeId>,
+}
+
+#[derive(Clone)]
+struct ClientExpressionParameter {
+    id: CheckedParameterId,
+    name: String,
+    expression_type: ClientExpressionType,
+}
+
+#[derive(Clone)]
+struct ClientExpressionTarget {
+    id: CheckedFunctionId,
+    parameters: Vec<ClientExpressionParameter>,
+    return_type: ClientExpressionType,
+}
+
+fn standard_scalar_type_id(
+    standard: Option<&CheckedStandardLibrary>,
+    scalar: StandardScalar,
+) -> Option<orna_core::TypeId> {
+    standard.and_then(|standard| {
+        standard.value_types().iter().find_map(|value_type| {
+            (value_type.kind() == ValueTypeKind::Primitive
+                && compatibility_scalar(value_type.representation_contract()) == Some(scalar))
+                .then_some(value_type.id())
+        })
+    })
+}
+
+fn client_expression_type_from_core(
+    resolved_type: ResolvedType,
+    standard: Option<&CheckedStandardLibrary>,
+) -> Option<ClientExpressionType> {
+    let (semantic_type, standard_value_type) = match resolved_type {
+        ResolvedType::Scalar(scalar) => (
+            SemanticType::scalar(scalar),
+            standard_scalar_type_id(standard, scalar),
+        ),
+        ResolvedType::Named(type_id) => {
+            (SemanticType::Named(CheckedTypeId::Existing(type_id)), None)
+        }
+        ResolvedType::Reference { target } => (
+            SemanticType::reference(CheckedTypeId::Existing(target)),
+            None,
+        ),
+        ResolvedType::Value(type_id) => {
+            let scalar = standard.and_then(|standard| {
+                standard
+                    .value_types()
+                    .iter()
+                    .find(|value_type| value_type.id() == type_id)
+                    .and_then(|value_type| {
+                        compatibility_scalar(value_type.representation_contract())
+                    })
+            });
+            (
+                scalar.map_or(SemanticType::Named(CheckedTypeId::Existing(type_id)), SemanticType::scalar),
+                scalar.and_then(|_| Some(type_id)),
+            )
+        }
+    };
+    Some(ClientExpressionType {
+        semantic_type,
+        standard_value_type,
+    })
+}
+
+fn client_expression_targets(
+    inputs: &[ResolvedClientFunctionInput<'_>],
+    base: &CatalogueSnapshot,
+    standard: Option<&CheckedStandardLibrary>,
+) -> HashMap<QualifiedSemanticName, ClientExpressionTarget> {
+    let mut targets = HashMap::new();
+    for input in inputs {
+        targets.insert(
+            input.name.clone(),
+            ClientExpressionTarget {
+                id: input.id,
+                parameters: input
+                    .parameters
+                    .iter()
+                    .map(|parameter| ClientExpressionParameter {
+                        id: parameter.id,
+                        name: parameter.name.clone(),
+                        expression_type: ClientExpressionType {
+                            semantic_type: parameter.semantic_type,
+                            standard_value_type: parameter.standard_value_type,
+                        },
+                    })
+                    .collect(),
+                return_type: ClientExpressionType {
+                    semantic_type: input.return_type,
+                    standard_value_type: input.standard_value_type,
+                },
+            },
+        );
+    }
+    for function in base.functions() {
+        if function.domain() != FunctionDomain::Client || targets.contains_key(function.name()) {
+            continue;
+        }
+        let Some(return_type) = (match function.return_type() {
+            FunctionReturn::Single(resolved_type) => {
+                client_expression_type_from_core(*resolved_type, standard)
+            }
+            FunctionReturn::Rows(_) => None,
+        }) else {
+            continue;
+        };
+        let parameters = function
+            .parameters()
+            .iter()
+            .filter_map(|parameter| {
+                client_expression_type_from_core(parameter.resolved_type(), standard).map(
+                    |expression_type| ClientExpressionParameter {
+                        id: CheckedParameterId::Existing(parameter.id()),
+                        name: parameter.name().to_owned(),
+                        expression_type,
+                    },
+                )
+            })
+            .collect();
+        targets.insert(
+            function.name().clone(),
+            ClientExpressionTarget {
+                id: CheckedFunctionId::Existing(function.id()),
+                parameters,
+                return_type,
+            },
+        );
+    }
+    targets
+}
+
+fn client_expression_types_compatible(
+    actual: ClientExpressionType,
+    expected: ClientExpressionType,
+) -> bool {
+    actual.semantic_type == expected.semantic_type
+        && (expected.standard_value_type.is_none()
+            || actual.standard_value_type == expected.standard_value_type)
+}
+
+fn check_client_expression(
+    expression: &ClientExpression,
+    input: &ResolvedClientFunctionInput<'_>,
+    targets: &HashMap<QualifiedSemanticName, ClientExpressionTarget>,
+    query_catalogue: &ResolutionCatalogue<CheckedTypeId, CheckedFieldId>,
+    base: &CatalogueSnapshot,
+    server_names: &[QualifiedSemanticName],
+    standard: Option<&CheckedStandardLibrary>,
+    diagnostics: &mut Vec<CompilerDiagnostic>,
+    references: &mut Vec<CheckedDefinitionReference>,
+    used_capabilities: &mut HashSet<QualifiedSemanticName>,
+) -> Option<(CheckedClientExpression, ClientExpressionType)> {
+    let expression_location = || location(input.logical_path, expression.span());
+    match expression {
+        ClientExpression::StringLiteral { value, source } => {
+            let expression_type = ClientExpressionType {
+                semantic_type: SemanticType::scalar(StandardScalar::CharacterLargeObject),
+                standard_value_type: standard_scalar_type_id(
+                    standard,
+                    StandardScalar::CharacterLargeObject,
+                ),
+            };
+            Some((
+                CheckedClientExpression::String {
+                    value: value.clone(),
+                    location: location(input.logical_path, &source.span),
+                },
+                expression_type,
+            ))
+        }
+        ClientExpression::IntegerLiteral { value, source } => {
+            let expression_type = ClientExpressionType {
+                semantic_type: SemanticType::scalar(StandardScalar::Integer),
+                standard_value_type: standard_scalar_type_id(standard, StandardScalar::Integer),
+            };
+            Some((
+                CheckedClientExpression::Integer {
+                    value: *value,
+                    location: location(input.logical_path, &source.span),
+                },
+                expression_type,
+            ))
+        }
+        ClientExpression::BooleanLiteral { value, source } => {
+            let expression_type = ClientExpressionType {
+                semantic_type: SemanticType::scalar(StandardScalar::Boolean),
+                standard_value_type: standard_scalar_type_id(standard, StandardScalar::Boolean),
+            };
+            Some((
+                CheckedClientExpression::Boolean {
+                    value: *value,
+                    location: location(input.logical_path, &source.span),
+                },
+                expression_type,
+            ))
+        }
+        ClientExpression::ParameterRead { parameter } => {
+            let name = semantic_part(parameter);
+            let Some(parameter) = input.parameters.iter().find(|parameter| parameter.name == name)
+            else {
+                diagnostics.push(diagnostic(
+                    DiagnosticCode::UnknownQualifiedName,
+                    format!("unknown CLIENT parameter {name}"),
+                    input.logical_path,
+                    &parameter.span,
+                ));
+                return None;
+            };
+            Some((
+                CheckedClientExpression::ParameterRead {
+                    parameter: parameter.id,
+                    location: expression_location(),
+                },
+                ClientExpressionType {
+                    semantic_type: parameter.semantic_type,
+                    standard_value_type: parameter.standard_value_type,
+                },
+            ))
+        }
+        ClientExpression::FieldPath {
+            root,
+            members,
+            span,
+        } => {
+            let root_name = semantic_part(root);
+            let Some(parameter) = input.parameters.iter().find(|parameter| parameter.name == root_name)
+            else {
+                diagnostics.push(diagnostic(
+                    DiagnosticCode::UnknownQualifiedName,
+                    format!("unknown CLIENT parameter {root_name}"),
+                    input.logical_path,
+                    &root.span,
+                ));
+                return None;
+            };
+            let SemanticType::Reference { target } = parameter.semantic_type else {
+                diagnostics.push(diagnostic(
+                    DiagnosticCode::TypeMismatch,
+                    "CLIENT field paths require a REF parameter",
+                    input.logical_path,
+                    span,
+                ));
+                return None;
+            };
+            let mut owner = target;
+            let mut fields = Vec::with_capacity(members.len());
+            let mut expression_type = None;
+            for (index, member) in members.iter().enumerate() {
+                let field_name = semantic_part(member);
+                let Some(field) = QueryCatalogue::field_by_name(query_catalogue, owner, &field_name) else {
+                    diagnostics.push(diagnostic(
+                        DiagnosticCode::UnknownQualifiedName,
+                        format!("unknown field {field_name} in CLIENT field path"),
+                        input.logical_path,
+                        &member.span,
+                    ));
+                    return None;
+                };
+                fields.push(field.id());
+                expression_type = Some(ClientExpressionType {
+                    semantic_type: field.semantic_type(),
+                    standard_value_type: field.standard_value_type(),
+                });
+                if let SemanticType::Reference { target: next } = field.semantic_type() {
+                    owner = next;
+                } else if index + 1 != members.len() {
+                    diagnostics.push(diagnostic(
+                        DiagnosticCode::TypeMismatch,
+                        "CLIENT field path continues through a non-reference field",
+                        input.logical_path,
+                        &member.span,
+                    ));
+                    return None;
+                }
+            }
+            let Some(expression_type) = expression_type else {
+                diagnostics.push(diagnostic(
+                    DiagnosticCode::TypeMismatch,
+                    "CLIENT field path must select a field",
+                    input.logical_path,
+                    span,
+                ));
+                return None;
+            };
+            Some((
+                CheckedClientExpression::FieldPath {
+                    root: parameter.id,
+                    fields,
+                    location: location(input.logical_path, span),
+                },
+                expression_type,
+            ))
+        }
+        ClientExpression::Concat { left, right, span } => {
+            let Some((left_checked, left_type)) = check_client_expression(
+                left,
+                input,
+                targets,
+                query_catalogue,
+                base,
+                server_names,
+                standard,
+                diagnostics,
+                references,
+                used_capabilities,
+            ) else {
+                return None;
+            };
+            let Some((right_checked, right_type)) = check_client_expression(
+                right,
+                input,
+                targets,
+                query_catalogue,
+                base,
+                server_names,
+                standard,
+                diagnostics,
+                references,
+                used_capabilities,
+            ) else {
+                return None;
+            };
+            let text = SemanticType::scalar(StandardScalar::CharacterLargeObject);
+            if left_type.semantic_type != text || right_type.semantic_type != text {
+                diagnostics.push(diagnostic(
+                    DiagnosticCode::TypeMismatch,
+                    "CLIENT concatenation requires TEXT expressions",
+                    input.logical_path,
+                    span,
+                ));
+                return None;
+            }
+            Some((
+                CheckedClientExpression::Concat {
+                    left: Box::new(left_checked),
+                    right: Box::new(right_checked),
+                    location: location(input.logical_path, span),
+                },
+                ClientExpressionType {
+                    semantic_type: text,
+                    standard_value_type: left_type.standard_value_type,
+                },
+            ))
+        }
+        ClientExpression::Call {
+            callee,
+            arguments,
+            span,
+        } => {
+            let name = semantic_name(callee);
+            let Some(target) = targets.get(&name) else {
+                let message = if server_names.contains(&name)
+                    || base
+                        .function_by_name(&name)
+                        .is_some_and(|function| function.domain() == FunctionDomain::Server)
+                {
+                    format!("CLIENT expression cannot call SERVER function {name}")
+                } else {
+                    format!("unknown CLIENT function {name}")
+                };
+                diagnostics.push(diagnostic(
+                    DiagnosticCode::UnknownQualifiedName,
+                    message,
+                    input.logical_path,
+                    span,
+                ));
+                return None;
+            };
+            used_capabilities.insert(name.clone());
+            let mut bound = vec![false; target.parameters.len()];
+            let mut positional = 0usize;
+            let mut checked_arguments = Vec::with_capacity(arguments.len());
+            for argument in arguments {
+                let parameter_index = if let Some(name) = &argument.name {
+                    let parameter_name = semantic_part(name);
+                    let Some(index) = target
+                        .parameters
+                        .iter()
+                        .position(|parameter| parameter.name == parameter_name)
+                    else {
+                        diagnostics.push(diagnostic(
+                            DiagnosticCode::UnknownQualifiedName,
+                            format!("unknown CLIENT argument {parameter_name}"),
+                            input.logical_path,
+                            &input.declaration_span,
+                        ));
+                        return None;
+                    };
+                    index
+                } else {
+                    while positional < bound.len() && bound[positional] {
+                        positional += 1;
+                    }
+                    if positional >= bound.len() {
+                        diagnostics.push(diagnostic(
+                            DiagnosticCode::TypeMismatch,
+                            format!("too many arguments for CLIENT function {name}"),
+                            input.logical_path,
+                            &input.declaration_span,
+                        ));
+                        return None;
+                    }
+                    let index = positional;
+                    positional += 1;
+                    index
+                };
+                if bound[parameter_index] {
+                    diagnostics.push(diagnostic(
+                        DiagnosticCode::DuplicateDefinition,
+                        format!(
+                            "duplicate argument for CLIENT parameter {}",
+                            target.parameters[parameter_index].name
+                        ),
+                        input.logical_path,
+                        &input.declaration_span,
+                    ));
+                    return None;
+                }
+                let Some((checked, expression_type)) = check_client_expression(
+                    &argument.value,
+                    input,
+                    targets,
+                    query_catalogue,
+                    base,
+                    server_names,
+                    standard,
+                    diagnostics,
+                    references,
+                    used_capabilities,
+                ) else {
+                    return None;
+                };
+                let parameter = &target.parameters[parameter_index];
+                if !client_expression_types_compatible(expression_type, parameter.expression_type) {
+                    diagnostics.push(diagnostic(
+                        DiagnosticCode::TypeMismatch,
+                        format!("argument does not match CLIENT parameter {}", parameter.name),
+                        input.logical_path,
+                        &input.declaration_span,
+                    ));
+                    return None;
+                }
+                bound[parameter_index] = true;
+                checked_arguments.push((parameter.id, checked));
+            }
+            if bound.iter().any(|bound| !bound) {
+                diagnostics.push(diagnostic(
+                    DiagnosticCode::TypeMismatch,
+                    format!("missing argument for CLIENT function {name}"),
+                    input.logical_path,
+                    &input.declaration_span,
+                ));
+                return None;
+            }
+            references.push(CheckedDefinitionReference {
+                target: CheckedDefinitionReferenceTarget::Function(target.id),
+                kind: DefinitionReferenceKind::FunctionCall,
+                location: location(input.logical_path, span),
+            });
+            Some((
+                CheckedClientExpression::Call {
+                    function: target.id,
+                    arguments: checked_arguments,
+                    location: location(input.logical_path, span),
+                },
+                target.return_type,
+            ))
+        }
+    }
+}
+
+fn client_contract_identity(source: &SourceSlice) -> Option<String> {
+    let identity = decode_string_literal(source)?;
+    let (name, version) = identity.rsplit_once('@')?;
+    if version.is_empty()
+        || version.parse::<u64>().ok().is_none_or(|version| version == 0)
+        || name.contains('@')
+    {
+        return None;
+    }
+    let parts = name.split('.').collect::<Vec<_>>();
+    if parts.iter().any(|part| normalise_client_parameter_name(part).is_none())
+        || QualifiedSemanticName::new(parts).is_err()
+    {
+        return None;
+    }
+    Some(identity)
+}
+
 fn check_client_functions(
     inputs: &[ResolvedClientFunctionInput<'_>],
+    query_catalogue: &ResolutionCatalogue<CheckedTypeId, CheckedFieldId>,
+    server_names: &[QualifiedSemanticName],
+    base: &CatalogueSnapshot,
     diagnostics: &mut Vec<CompilerDiagnostic>,
     standard: Option<&CheckedStandardLibrary>,
     uses: &mut Vec<CheckedApplicationTypeUse>,
 ) -> Vec<CheckedClientFunction> {
+    let targets = client_expression_targets(inputs, base, standard);
     inputs
         .iter()
         .filter_map(|input| {
@@ -4033,44 +4610,178 @@ fn check_client_functions(
                     diagnostics,
                 );
             }
-            let Some((value, body_source)) = input.body.as_boolean_literal() else {
-                diagnostics.push(diagnostic(
-                    DiagnosticCode::DomainIncompatible,
-                    "CLIENT function body is not supported",
-                    input.logical_path,
-                    &input.declaration_span,
-                ));
-                return None;
-            };
-            if !input.capabilities.is_empty() {
-                diagnostics.push(diagnostic(
-                    DiagnosticCode::CapabilityRequirement,
-                    "accepted CLIENT function bodies must not declare capabilities",
-                    input.logical_path,
-                    &input.declaration_span,
-                ));
-                return None;
+            let (body, body_type, body_location, references) =
+                if let Some((value, body_source)) = input.body.as_boolean_literal() {
+                    if !input.capabilities.is_empty() {
+                        diagnostics.push(diagnostic(
+                            DiagnosticCode::CapabilityRequirement,
+                            "accepted CLIENT function bodies must not declare capabilities",
+                            input.logical_path,
+                            &input.declaration_span,
+                        ));
+                        return None;
+                    }
+                    (
+                        CheckedClientFunctionBody::BooleanLiteral {
+                            value,
+                            location: location(input.logical_path, &body_source.span),
+                        },
+                        ClientExpressionType {
+                            semantic_type: input.return_type,
+                            standard_value_type: input.standard_value_type,
+                        },
+                        location(input.logical_path, &body_source.span),
+                        Vec::new(),
+                    )
+                } else if let Some(expression) = input.body.as_expression() {
+                    let mut references = Vec::new();
+                    let mut used_capabilities = HashSet::new();
+                    let Some((checked, expression_type)) = check_client_expression(
+                        expression,
+                        input,
+                        &targets,
+                        query_catalogue,
+                        base,
+                        server_names,
+                        standard,
+                        diagnostics,
+                        &mut references,
+                        &mut used_capabilities,
+                    ) else {
+                        return None;
+                    };
+                    if !client_expression_types_compatible(expression_type, ClientExpressionType {
+                        semantic_type: input.return_type,
+                        standard_value_type: input.standard_value_type,
+                    }) {
+                        diagnostics.push(diagnostic(
+                            DiagnosticCode::TypeMismatch,
+                            "this CLIENT function must return the declared value type",
+                            input.logical_path,
+                            expression.span(),
+                        ));
+                        return None;
+                    }
+                    for capability in input.capabilities {
+                        let capability_name = semantic_name(&capability.name);
+                        if !used_capabilities.contains(&capability_name) {
+                            diagnostics.push(diagnostic(
+                                DiagnosticCode::CapabilityRequirement,
+                                format!("declared CLIENT capability {capability_name} is not exercised"),
+                                input.logical_path,
+                                &input.declaration_span,
+                            ));
+                            return None;
+                        }
+                    }
+                    (
+                        CheckedClientFunctionBody::Expression { expression: checked },
+                        expression_type,
+                        location(input.logical_path, expression.span()),
+                        references,
+                    )
+                } else if let Some(contract) = input.body.as_external_contract() {
+                    if !input.parameters.is_empty() {
+                        diagnostics.push(diagnostic(
+                            DiagnosticCode::DomainIncompatible,
+                            "external CLIENT functions cannot declare parameters",
+                            input.logical_path,
+                            &input.declaration_span,
+                        ));
+                        return None;
+                    }
+                    if !input.capabilities.is_empty() {
+                        diagnostics.push(diagnostic(
+                            DiagnosticCode::CapabilityRequirement,
+                            "external CLIENT functions cannot declare capabilities",
+                            input.logical_path,
+                            &input.declaration_span,
+                        ));
+                        return None;
+                    }
+                    let Some(identity) = client_contract_identity(contract) else {
+                        diagnostics.push(diagnostic(
+                            DiagnosticCode::DomainIncompatible,
+                            "RUNTIME CONTRACT identity must be '<qualified-name>@<positive-version>'",
+                            input.logical_path,
+                            &input.declaration_span,
+                        ));
+                        return None;
+                    };
+                    (
+                        CheckedClientFunctionBody::ExternalContract {
+                            identity,
+                            location: location(input.logical_path, &contract.span),
+                        },
+                        ClientExpressionType {
+                            semantic_type: input.return_type,
+                            standard_value_type: input.standard_value_type,
+                        },
+                        location(input.logical_path, &contract.span),
+                        Vec::new(),
+                    )
+                } else {
+                    diagnostics.push(diagnostic(
+                        DiagnosticCode::DomainIncompatible,
+                        "CLIENT function body is not supported",
+                        input.logical_path,
+                        &input.declaration_span,
+                    ));
+                    return None;
+                };
+            match &body {
+                CheckedClientFunctionBody::BooleanLiteral { .. } => {
+                    record_standard_value_type_use(
+                        uses,
+                        standard,
+                        CheckedTypeUseKind::Expression {
+                            owner: input.id,
+                            ordinal: 0,
+                        },
+                        body_type.standard_value_type,
+                        body_location.clone(),
+                    );
+                    record_standard_value_type_use(
+                        uses,
+                        standard,
+                        CheckedTypeUseKind::Result {
+                            owner: input.id,
+                            ordinal: 0,
+                        },
+                        body_type.standard_value_type,
+                        body_location,
+                    );
+                }
+                CheckedClientFunctionBody::Expression { .. } => {
+                    let resolved = ResolvedApplicationType {
+                        semantic_type: body_type.semantic_type,
+                        standard_value_type: body_type.standard_value_type,
+                    };
+                    record_standard_type_use(
+                        uses,
+                        standard,
+                        CheckedTypeUseKind::Expression {
+                            owner: input.id,
+                            ordinal: 0,
+                        },
+                        resolved,
+                        body_location.clone(),
+                    );
+                    record_standard_type_use(
+                        uses,
+                        standard,
+                        CheckedTypeUseKind::Result {
+                            owner: input.id,
+                            ordinal: 0,
+                        },
+                        resolved,
+                        body_location,
+                    );
+                }
+                CheckedClientFunctionBody::ExternalContract { .. } => {}
+                #[cfg(test)]
+                CheckedClientFunctionBody::Unsupported => {}
             }
-            record_standard_value_type_use(
-                uses,
-                standard,
-                CheckedTypeUseKind::Expression {
-                    owner: input.id,
-                    ordinal: 0,
-                },
-                input.standard_value_type,
-                location(input.logical_path, &body_source.span),
-            );
-            record_standard_value_type_use(
-                uses,
-                standard,
-                CheckedTypeUseKind::Result {
-                    owner: input.id,
-                    ordinal: 0,
-                },
-                input.standard_value_type,
-                location(input.logical_path, &body_source.span),
-            );
             Some(CheckedClientFunction {
                 id: input.id,
                 name: input.name.clone(),
@@ -4091,11 +4802,8 @@ fn check_client_functions(
                 transaction: None,
                 volatility: CatalogueFunctionVolatility::Immutable,
                 location: input.location.clone(),
-                body: CheckedClientFunctionBody::BooleanLiteral {
-                    value,
-                    location: location(input.logical_path, &body_source.span),
-                },
-                references: Vec::new(),
+                body,
+                references,
                 capabilities: input
                     .capabilities
                     .iter()
@@ -5737,6 +6445,24 @@ fn resolve_application_type(
     diagnostics: &mut Vec<CompilerDiagnostic>,
     standard: Option<&CheckedStandardLibrary>,
 ) -> Option<ResolvedApplicationType> {
+    resolve_application_type_with_named_standard(
+        specification,
+        submitted_ids,
+        logical_path,
+        diagnostics,
+        standard,
+        false,
+    )
+}
+
+fn resolve_application_type_with_named_standard(
+    specification: &TypeSpecification,
+    submitted_ids: &HashMap<QualifiedSemanticName, SubmittedType>,
+    logical_path: &str,
+    diagnostics: &mut Vec<CompilerDiagnostic>,
+    standard: Option<&CheckedStandardLibrary>,
+    allow_standard_named: bool,
+) -> Option<ResolvedApplicationType> {
     match specification {
         TypeSpecification::Named(name) => {
             let value_type = standard.map_or_else(
@@ -5750,6 +6476,15 @@ fn resolve_application_type(
                 return Some(ResolvedApplicationType {
                     semantic_type: SemanticType::scalar(scalar),
                     standard_value_type,
+                });
+            }
+            if allow_standard_named
+                && let Some(standard) = standard
+                && let Some(type_id) = standard_type_id_by_name(name, standard)
+            {
+                return Some(ResolvedApplicationType {
+                    semantic_type: SemanticType::Named(CheckedTypeId::Existing(type_id)),
+                    standard_value_type: None,
                 });
             }
             let semantic_name = semantic_name(name);
@@ -6055,6 +6790,21 @@ const fn supports_record_value_scalar(scalar: StandardScalar) -> bool {
             | StandardScalar::BinaryLargeObject
     )
 }
+
+fn standard_type_id_by_name(
+    name: &QualifiedName,
+    standard: &CheckedStandardLibrary,
+) -> Option<orna_core::TypeId> {
+    let lookup = if name.parts.len() == 1 && !name.parts[0].text.starts_with('"') {
+        PreludeTypeName::new([semantic_part(&name.parts[0])])
+            .ok()
+            .map(TypeLookupName::prelude)?
+    } else {
+        TypeLookupName::qualified(semantic_name(name))
+    };
+    standard.verified_snapshot().catalogue().type_id_by_name(&lookup)
+}
+
 
 fn standard_value_by_name(
     name: &QualifiedName,
