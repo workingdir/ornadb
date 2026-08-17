@@ -276,7 +276,23 @@ pub fn run_installed_source_diff(
         .enable_all()
         .build()
         .map_err(|source| InstalledSourceDiffError::Runtime { source })?;
-    runtime.block_on(diff_source_bundle(kernel, bundle))
+    runtime.block_on(run_source_diff_with_kernel(kernel, bundle))
+}
+
+/// Runs one installed `orna source diff` against a caller-supplied kernel
+/// (work ADR 0066 live-proof seam).
+///
+/// The public entry [`run_installed_source_diff`] inspects the fixed private
+/// instance and delegates here; the live proof drives the exact
+/// check-prepare-render path against the Compose PostgreSQL test kernel.
+/// Public consumers keep [`run_installed_source_diff`]; this seam is hidden
+/// from the documented API surface.
+#[doc(hidden)]
+pub async fn run_source_diff_with_kernel(
+    kernel: PostgresKernel,
+    bundle: SourceBundle,
+) -> Result<InstalledSourceDiffOutcome, InstalledSourceDiffError> {
+    diff_source_bundle(kernel, bundle).await
 }
 
 async fn diff_source_bundle(
@@ -332,14 +348,17 @@ fn render_diff_document(
         return Ok(bytes);
     }
     for change in diff.changes() {
-        let _ = writeln!(document, "{}", render_change(change));
+        let _ = writeln!(document, "{}", render_change(change, candidate.candidate()));
     }
     let mut bytes = document.into_bytes();
     bytes.push(b'\n');
     Ok(bytes)
 }
 
-fn render_change(change: &SemanticChange) -> String {
+fn render_change(
+    change: &SemanticChange,
+    candidate: &orna_core::catalogue::CatalogueSnapshot,
+) -> String {
     use std::fmt::Write as _;
 
     let mut line = String::new();
@@ -365,17 +384,29 @@ fn render_change(change: &SemanticChange) -> String {
         SemanticChange::FieldAdded {
             owner, name, id, ..
         } => {
-            let _ = write!(line, "+ field {owner:?}.{name} [{id:?}]");
+            let owner = candidate
+                .object_type_by_id(*owner)
+                .map(|definition| qualified(definition.name()))
+                .unwrap_or_else(|| owner.canonical());
+            let _ = write!(line, "+ field {owner}.{name} [{id:?}]");
         }
         SemanticChange::FieldDropped {
             owner, name, id, ..
         } => {
-            let _ = write!(line, "- field {owner:?}.{name} [{id:?}]");
+            let owner = candidate
+                .object_type_by_id(*owner)
+                .map(|definition| qualified(definition.name()))
+                .unwrap_or_else(|| owner.canonical());
+            let _ = write!(line, "- field {owner}.{name} [{id:?}]");
         }
         SemanticChange::FieldRenamed {
             owner, from, to, ..
         } => {
-            let _ = write!(line, "~ field {owner:?}.{from} -> {to}");
+            let owner = candidate
+                .object_type_by_id(*owner)
+                .map(|definition| qualified(definition.name()))
+                .unwrap_or_else(|| owner.canonical());
+            let _ = write!(line, "~ field {owner}.{from} -> {owner}.{to}");
         }
         SemanticChange::EnumTypeAdded { name, .. } => {
             let _ = write!(line, "+ enum type {name}");
@@ -398,21 +429,37 @@ fn render_change(change: &SemanticChange) -> String {
         SemanticChange::ParameterAdded {
             owner, name, id, ..
         } => {
-            let _ = write!(line, "+ parameter {owner:?}.{name} [{id:?}]");
+            let owner = candidate
+                .function_by_id(*owner)
+                .map(|definition| qualified(definition.name()))
+                .unwrap_or_else(|| owner.canonical());
+            let _ = write!(line, "+ parameter {owner}.{name} [{id:?}]");
         }
         SemanticChange::ParameterDropped {
             owner, name, id, ..
         } => {
-            let _ = write!(line, "- parameter {owner:?}.{name} [{id:?}]");
+            let owner = candidate
+                .function_by_id(*owner)
+                .map(|definition| qualified(definition.name()))
+                .unwrap_or_else(|| owner.canonical());
+            let _ = write!(line, "- parameter {owner}.{name} [{id:?}]");
         }
         SemanticChange::ParameterRenamed {
             owner, from, to, ..
         } => {
-            let _ = write!(line, "~ parameter {owner:?}.{from} -> {to}");
+            let owner = candidate
+                .function_by_id(*owner)
+                .map(|definition| qualified(definition.name()))
+                .unwrap_or_else(|| owner.canonical());
+            let _ = write!(line, "~ parameter {owner}.{from} -> {owner}.{to}");
         }
         _ => {}
     }
     line
+}
+
+fn qualified(name: &orna_core::catalogue::QualifiedSemanticName) -> String {
+    name.parts().join(".")
 }
 
 fn require_accepted_active_standard(
