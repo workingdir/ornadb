@@ -1907,6 +1907,7 @@ async fn proves_installed_orna_invoke_end_to_end_against_postgres() -> TestResul
 async fn proves_output_through_orna_invoke_against_postgres() -> TestResult<()> {
     const ECHO_JSON: i32 = 41;
     const ECHO_TABLE: i32 = 42;
+    const ECHO_CSV: i32 = 43;
 
     with_test_database(|database| async move {
         // The host authenticates the invoking process's effective UID, so the
@@ -2029,6 +2030,34 @@ async fn proves_output_through_orna_invoke_against_postgres() -> TestResult<()> 
             "the --output table stderr did not carry the progress diagnostics",
         )?;
 
+        // `--output csv` resolves the `csv` alias to std.csv.encode (work
+        // ADR 0067), which wraps the canonical INTEGER 43 in a `text/csv`
+        // ByteStream: the one-column `result` row set renders as the header
+        // row, the value row, and the final newline. The tty runtime writes
+        // the raw stream bytes to stdout: exactly `result\n43\n` with no
+        // envelope and no progress interleave; the progress diagnostics stay
+        // on stderr.
+        let (csv_outcome, csv_stdout, csv_stderr) = installed_invoke_run(
+            &database,
+            echo_invoke_request(ECHO_CSV, Some("csv".to_owned()))?,
+        )
+        .await?;
+        require(
+            csv_outcome == Ok(InstalledInvokeOutcome::Completed),
+            "the --output csv installed invoke did not complete",
+        )?;
+        require(
+            csv_stdout == b"result\n43\n",
+            "the --output csv stdout did not carry exactly the CSV bytes",
+        )?;
+        let csv_stderr = String::from_utf8(csv_stderr)
+            .map_err(|_| failure("the --output csv stderr was not UTF-8 text"))?;
+        require(
+            csv_stderr.contains("orna: invoke: invocation started")
+                && csv_stderr.contains("orna: invoke: invocation completed in"),
+            "the --output csv stderr did not carry the progress diagnostics",
+        )?;
+
         // An unmatchable requirement (`application/xml` has no registered
         // presenter) fails closed with the presentation error class (spec
         // exit 5, `ORNA0702`): no presenter artifact executes, no value
@@ -2070,18 +2099,19 @@ async fn proves_output_through_orna_invoke_against_postgres() -> TestResult<()> 
             "the no-requirement stderr did not carry the progress diagnostics",
         )?;
 
-        // The three completed invocations (json, table, bare) each appended
-        // one authentication event, one allowed EXECUTE decision against
-        // the exact V3-pinned echo target, and one INSPECT decision from the
-        // ADR 0064 capture seam, plus one allowed invocation-audit row. The
-        // unmatchable-requirement failure appends its authentication event
-        // and the allowed EXECUTE evidence, which the sealed dispatch now
-        // commits (work ADR 0059 fix): the failure still captures no epoch,
-        // so it adds no INSPECT event and no invocation-audit row.
+        // The four completed invocations (json, table, csv, bare) each
+        // appended one authentication event, one allowed EXECUTE decision
+        // against the exact V3-pinned echo target, and one INSPECT decision
+        // from the ADR 0064 capture seam, plus one allowed invocation-audit
+        // row. The unmatchable-requirement failure appends its
+        // authentication event and the allowed EXECUTE evidence, which the
+        // sealed dispatch now commits (work ADR 0059 fix): the failure still
+        // captures no epoch, so it adds no INSPECT event and no
+        // invocation-audit row.
         let security_events_after = kernel.recover_security_audit_events().await?;
         require(
-            security_events_after.len() == security_events_before.len() + 11,
-            "the four installed invocations did not append exactly eleven security events",
+            security_events_after.len() == security_events_before.len() + 14,
+            "the five installed invocations did not append exactly fourteen security events",
         )?;
         let appended = &security_events_after[security_events_before.len()..];
         require(
@@ -2094,34 +2124,35 @@ async fn proves_output_through_orna_invoke_against_postgres() -> TestResult<()> 
                         && event.decision().target()
                             == Some(InvocationTarget::new(STD_INVOKE_ECHO_FUNCTION_ID, pair))
                 }),
-            "the installed invocations did not append four allowed EXECUTE decisions",
+            "the installed invocations did not append five allowed EXECUTE decisions",
         )?;
         require(
             appended
                 .iter()
                 .filter(|event| event.decision().kind() == SecurityAuditKind::Execute)
                 .count()
-                == 4
+                == 5
                 && appended
                     .iter()
                     .filter(|event| event.decision().kind() == SecurityAuditKind::Inspect)
                     .count()
-                    == 3
+                    == 4
                 && appended
                     .iter()
                     .all(|event| event.decision().outcome() == SecurityAuditOutcome::Allowed),
-            "the four installed invocations appended a denied or partial security decision",
+            "the five installed invocations appended a denied or partial security decision",
         )?;
-        // Four invocations total (json, table, the unmatchable-requirement
-        // failure, and bare). The failure path now commits its linked
-        // invocation-audit evidence as well, so all four rows are present.
+        // Five invocations total (json, table, csv, the unmatchable-
+        // requirement failure, and bare). The failure path now commits its
+        // linked invocation-audit evidence as well, so all five rows are
+        // present.
         require(
-            invocation_audit_count(&database).await? == invocation_rows_before + 4,
-            "the four installed invocations did not append exactly four invocation-audit rows",
+            invocation_audit_count(&database).await? == invocation_rows_before + 5,
+            "the five installed invocations did not append exactly five invocation-audit rows",
         )?;
         let completed_rows = invocation_audit_rows(&database).await?;
         require(
-            completed_rows.len() == invocation_rows_before as usize + 4
+            completed_rows.len() == invocation_rows_before as usize + 5
                 && completed_rows[invocation_rows_before as usize..]
                     .iter()
                     .all(|row| {
