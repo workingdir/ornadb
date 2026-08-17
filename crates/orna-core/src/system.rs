@@ -102,84 +102,84 @@ pub const SYS_INSPECT_TRACE_FUNCTION_NAME: &str = "sys.inspect.trace";
 
 /// The stable identity of the sealed `sys.security.session_principal` function.
 pub const SYS_SECURITY_SESSION_PRINCIPAL_FUNCTION_ID: FunctionId =
-    FunctionId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x0d]);
+    FunctionId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x40]);
 
 /// The exact resolved name of the sealed session-principal function.
 pub const SYS_SECURITY_SESSION_PRINCIPAL_FUNCTION_NAME: &str = "sys.security.session_principal";
 
 /// The stable identity of the sealed `sys.security.effective_principal` function.
 pub const SYS_SECURITY_EFFECTIVE_PRINCIPAL_FUNCTION_ID: FunctionId =
-    FunctionId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x0e]);
+    FunctionId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x41]);
 
 /// The exact resolved name of the sealed effective-principal function.
 pub const SYS_SECURITY_EFFECTIVE_PRINCIPAL_FUNCTION_NAME: &str = "sys.security.effective_principal";
 
 /// The stable identity of the sealed `sys.security.active_roles` function.
 pub const SYS_SECURITY_ACTIVE_ROLES_FUNCTION_ID: FunctionId =
-    FunctionId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x0f]);
+    FunctionId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x42]);
 
 /// The exact resolved name of the sealed active-roles function.
 pub const SYS_SECURITY_ACTIVE_ROLES_FUNCTION_NAME: &str = "sys.security.active_roles";
 
 /// The stable identity of the sealed `sys.security.create_principal` function.
 pub const SYS_SECURITY_CREATE_PRINCIPAL_FUNCTION_ID: FunctionId =
-    FunctionId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x10]);
+    FunctionId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x43]);
 
 /// The exact resolved name of the sealed create-principal function.
 pub const SYS_SECURITY_CREATE_PRINCIPAL_FUNCTION_NAME: &str = "sys.security.create_principal";
 
 /// The stable identity of the sealed `sys.security.disable_principal` function.
 pub const SYS_SECURITY_DISABLE_PRINCIPAL_FUNCTION_ID: FunctionId =
-    FunctionId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x11]);
+    FunctionId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x44]);
 
 /// The exact resolved name of the sealed disable-principal function.
 pub const SYS_SECURITY_DISABLE_PRINCIPAL_FUNCTION_NAME: &str = "sys.security.disable_principal";
 
 /// The stable identity of the sealed `sys.security.create_role` function.
 pub const SYS_SECURITY_CREATE_ROLE_FUNCTION_ID: FunctionId =
-    FunctionId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x12]);
+    FunctionId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x45]);
 
 /// The exact resolved name of the sealed create-role function.
 pub const SYS_SECURITY_CREATE_ROLE_FUNCTION_NAME: &str = "sys.security.create_role";
 
 /// The stable identity of the sealed `sys.security.grant_role` function.
 pub const SYS_SECURITY_GRANT_ROLE_FUNCTION_ID: FunctionId =
-    FunctionId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x13]);
+    FunctionId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x46]);
 
 /// The exact resolved name of the sealed grant-role function.
 pub const SYS_SECURITY_GRANT_ROLE_FUNCTION_NAME: &str = "sys.security.grant_role";
 
 /// The stable identity of the sealed `sys.security.revoke_role` function.
 pub const SYS_SECURITY_REVOKE_ROLE_FUNCTION_ID: FunctionId =
-    FunctionId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x14]);
+    FunctionId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x47]);
 
 /// The exact resolved name of the sealed revoke-role function.
 pub const SYS_SECURITY_REVOKE_ROLE_FUNCTION_NAME: &str = "sys.security.revoke_role";
 
 /// The stable identity of the sealed `sys.security.grant_privilege` function.
 pub const SYS_SECURITY_GRANT_PRIVILEGE_FUNCTION_ID: FunctionId =
-    FunctionId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x15]);
+    FunctionId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x48]);
 
 /// The exact resolved name of the sealed grant-privilege function.
 pub const SYS_SECURITY_GRANT_PRIVILEGE_FUNCTION_NAME: &str = "sys.security.grant_privilege";
 
 /// The stable identity of the sealed `sys.security.revoke_privilege` function.
 pub const SYS_SECURITY_REVOKE_PRIVILEGE_FUNCTION_ID: FunctionId =
-    FunctionId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x16]);
+    FunctionId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x49]);
 
 /// The exact resolved name of the sealed revoke-privilege function.
 pub const SYS_SECURITY_REVOKE_PRIVILEGE_FUNCTION_NAME: &str = "sys.security.revoke_privilege";
 
 /// The stable identity of the sealed `sys.security.can_execute` function.
 pub const SYS_SECURITY_CAN_EXECUTE_FUNCTION_ID: FunctionId =
-    FunctionId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x17]);
+    FunctionId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x4a]);
 
 /// The exact resolved name of the sealed can-execute check.
 pub const SYS_SECURITY_CAN_EXECUTE_FUNCTION_NAME: &str = "sys.security.can_execute";
 
 /// The stable identity of the sealed `sys.security.has_privilege` function.
 pub const SYS_SECURITY_HAS_PRIVILEGE_FUNCTION_ID: FunctionId =
-    FunctionId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x18]);
+    FunctionId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x4b]);
 
 /// The exact resolved name of the sealed has-privilege check.
 pub const SYS_SECURITY_HAS_PRIVILEGE_FUNCTION_NAME: &str = "sys.security.has_privilege";
@@ -1022,6 +1022,35 @@ mod tests {
     }
 
     #[test]
+    fn sealed_registry_function_ids_are_disjoint_from_the_standard_library() {
+        // The sealed registry and the retained standard library share the
+        // FunctionId space. A collision would make `security_function_targets`
+        // silently filter a standard function as a sealed system function,
+        // so the complete-active-function-set proof can never install it.
+        // ADR 0065 originally placed the sys.security block at ...0d-...1a,
+        // overlapping std.invoke.echo (...0x10), std.json.encode (...0x11),
+        // and std.terminal.present_table (...0x12); the block now lives in
+        // the documented ...0x40-...0x4b range below.
+        let sealed = SYSTEM_FUNCTIONS.iter().map(|function| function.id());
+        // The retained standard library pins these FunctionIds in
+        // `orna-compiler` (which cannot be imported from `orna-core`):
+        // std.invoke.echo = ...0x10, std.json.encode = ...0x11,
+        // std.terminal.present_table = ...0x12.
+        let standard = [
+            FunctionId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x10]),
+            FunctionId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x11]),
+            FunctionId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x12]),
+        ];
+        let overlap = sealed
+            .filter(|sealed_id| standard.contains(sealed_id))
+            .collect::<Vec<_>>();
+        assert!(
+            overlap.is_empty(),
+            "sealed system identities collide with the standard library: {overlap:?}"
+        );
+    }
+
+    #[test]
     fn system_function_lookup_rejects_similar_prefix_case_unqualified_and_unknown_names() {
         for parts in [
             &["sys", "catalog", "healthx"][..],
@@ -1447,7 +1476,7 @@ mod tests {
             SYS_SECURITY_HAS_PRIVILEGE_FUNCTION_ID,
         ];
         for (index, id) in ids.into_iter().enumerate() {
-            assert_eq!(id.to_bytes()[15], 0x0d + index as u8);
+            assert_eq!(id.to_bytes()[15], 0x40 + index as u8);
             assert_eq!(SYSTEM_FUNCTIONS[12 + index].id(), id);
         }
     }
