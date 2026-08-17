@@ -6,6 +6,7 @@
 use std::{error::Error, fmt, str::FromStr};
 
 use orna_client::ClientExecutionError;
+use orna_client::capability::LocalCapabilityGrantSet;
 use orna_core::{
     FunctionId,
     canonical_hash::CanonicalHashError,
@@ -102,12 +103,29 @@ impl Error for RawServerTargetError {
 #[derive(Clone)]
 pub struct PostgresKernel {
     config: Config,
+    capability_grants: LocalCapabilityGrantSet,
 }
 
 impl PostgresKernel {
     /// Creates a kernel from an already parsed PostgreSQL connection config.
+    ///
+    /// The default grant set is empty. Callers that run the local CLIENT
+    /// sandbox can install grants from local configuration with
+    /// [`PostgresKernel::with_capability_grants`].
     pub const fn new(config: Config) -> Self {
-        Self { config }
+        Self {
+            config,
+            capability_grants: LocalCapabilityGrantSet::new(),
+        }
+    }
+
+    /// Returns a kernel that uses the supplied local CLIENT capability grants.
+    ///
+    /// The grant set is caller-owned configuration. The database cannot change
+    /// it.
+    pub fn with_capability_grants(mut self, capability_grants: LocalCapabilityGrantSet) -> Self {
+        self.capability_grants = capability_grants;
+        self
     }
 
     /// Verifies that the configured private kernel accepts a query.

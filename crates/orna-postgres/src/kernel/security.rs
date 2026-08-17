@@ -1,9 +1,11 @@
 use std::time::SystemTime;
 
 use orna_client::{
-    ClientExecutionResult, evaluate_client_function as evaluate_authorised_client_function,
-    evaluate_client_function_with_arguments as evaluate_authorised_client_function_with_arguments,
+    ClientExecutionError, ClientExecutionResult,
+    evaluate_client_function_with_grants as evaluate_authorised_client_function,
+    evaluate_client_function_with_grants_and_arguments as evaluate_authorised_client_function_with_arguments,
 };
+use orna_artifact::client_plan::{CAPABILITY_FORMAT_VERSION, CapabilityClientPlan};
 use orna_core::{
     CatalogueRevisionId, FunctionId, FunctionRevisionId, InspectEpochId, InvocationAuditEventId,
     InvocationId, PrincipalId, SecurityAuditEventId, SourceRevisionId, StandardLibraryRevisionId,
@@ -360,6 +362,8 @@ impl PostgresKernel {
                                     &active,
                                     &authorisation,
                                     arguments,
+                                    &[],
+                                    &self.capability_grants,
                                 )
                                 .map(|result| AuthenticatedRawCallResult::Client(result.into_value()))
                                 .map_err(PostgresKernelError::ClientExecution)
@@ -532,6 +536,14 @@ impl PostgresKernel {
                     }
                 }
             };
+            append_client_capability_audit(
+                &transaction,
+                authenticated_session,
+                &active,
+                target,
+                &execution,
+            )
+            .await?;
             transaction
                 .commit()
                 .await
@@ -636,13 +648,32 @@ impl PostgresKernel {
                             };
                             let arguments =
                                 bind_sealed_invoke_arguments(definition, decoded.arguments())?;
-                            let value = evaluate_authorised_client_function_with_arguments(
+                            let execution = evaluate_authorised_client_function_with_arguments(
                                 &active,
                                 &authorisation,
                                 &arguments,
+                                &[],
+                                &self.capability_grants,
                             )
-                            .map_err(PostgresKernelError::ClientExecution)?
-                            .into_value();
+                            .map_err(PostgresKernelError::ClientExecution);
+                            append_client_capability_audit(
+                                &transaction,
+                                authenticated_session,
+                                &active,
+                                security_target,
+                                &execution,
+                            )
+                            .await?;
+                            let value = match execution {
+                                Ok(result) => result.into_value(),
+                                Err(error) => {
+                                    transaction
+                                        .commit()
+                                        .await
+                                        .map_err(PostgresKernelError::Database)?;
+                                    return Err(error);
+                                }
+                            };
                             (value, security_target)
                         }
                         SealedResolvedTarget::VerifiedStandard {
@@ -1102,8 +1133,13 @@ impl PostgresKernel {
             {
                 ExecuteDecision::Allowed(authorisation) => {
                     let decision = SecurityAuditDecision::execute_allowed(&authorisation);
-                    let execution = evaluate_authorised_client_function(&active, &authorisation)
-                        .map_err(PostgresKernelError::ClientExecution);
+                    let execution = evaluate_authorised_client_function(
+                        &active,
+                        &authorisation,
+                        &[],
+                        &self.capability_grants,
+                    )
+                    .map_err(PostgresKernelError::ClientExecution);
                     (decision, execution)
                 }
                 ExecuteDecision::Denied(reason) => {
@@ -1121,6 +1157,14 @@ impl PostgresKernel {
                 }
             };
             append_security_audit_event(&transaction, decision).await?;
+            append_client_capability_audit(
+                &transaction,
+                authenticated_session,
+                &active,
+                target,
+                &execution,
+            )
+            .await?;
             transaction
                 .commit()
                 .await
@@ -1405,6 +1449,83 @@ async fn insert_catalogue_health_identity(
         .await
         .map_err(PostgresKernelError::Database)?;
     Ok(())
+}
+
+async fn append_client_capability_audit<T>(
+    transaction: &Transaction<'_>,
+    authenticated_session: &AuthenticatedSession,
+    active: &ActiveDatabaseRevision,
+    target: InvocationTarget,
+    execution: &Result<T, PostgresKernelError>,
+) -> Result<(), PostgresKernelError> {
+    match execution {
+        Ok(_) => {
+            for capability in stored_capability_names(active, target.function())? {
+                let decision = SecurityAuditDecision::capability_allowed(
+                    authenticated_session,
+                    target,
+                    capability,
+                )
+                .map_err(|_| PostgresKernelError::DurableInvariant {
+                    relation: "_orna_kernel.security_audit_events",
+                    record: target.function().canonical(),
+                    rule: "stored capability names must be valid redacted names",
+                })?;
+                append_security_audit_event(transaction, decision).await?;
+            }
+        }
+        Err(PostgresKernelError::ClientExecution(
+            ClientExecutionError::CapabilityDenied {
+                context,
+                capability,
+            },
+        )) => {
+            let decision = SecurityAuditDecision::capability_denied(
+                authenticated_session,
+                InvocationTarget::new(context.function(), active.pair()),
+                capability,
+            )
+            .map_err(|_| PostgresKernelError::DurableInvariant {
+                relation: "_orna_kernel.security_audit_events",
+                record: context.function().canonical(),
+                rule: "capability denial names must be valid redacted names",
+            })?;
+            append_security_audit_event(transaction, decision).await?;
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn stored_capability_names(
+    active: &ActiveDatabaseRevision,
+    function: FunctionId,
+) -> Result<Vec<String>, PostgresKernelError> {
+    let Some(definition) = active.catalogue().function_by_id(function) else {
+        return Ok(Vec::new());
+    };
+    let Some(revision) = active
+        .function_revisions()
+        .iter()
+        .find(|revision| revision.id() == definition.current_revision())
+    else {
+        return Ok(Vec::new());
+    };
+    if revision.artifact().version() != CAPABILITY_FORMAT_VERSION {
+        return Ok(Vec::new());
+    }
+    let plan = CapabilityClientPlan::decode(revision.artifact().payload()).map_err(|_| {
+        PostgresKernelError::DurableInvariant {
+            relation: "_orna_kernel.function_revisions",
+            record: revision.id().canonical(),
+            rule: "a successfully evaluated capability artifact must decode",
+        }
+    })?;
+    Ok(plan
+        .requirements()
+        .iter()
+        .map(|requirement| requirement.name().to_owned())
+        .collect())
 }
 
 fn require_catalogue_health_identity_preserved(
