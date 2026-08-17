@@ -13,7 +13,7 @@ use crate::{
     RowsColumnDeclaration, SchemaDeclaration, SelectQuantifier, SelectQuery, ServerFunctionBody,
     ServerFunctionDeclaration, ServerFunctionParameter, SourceSlice, SourceSpan, SqlDeleteBody,
     SqlInsertBody, SqlQueryBody, SqlUpdateBody, StandardLargeObjectKind, StateDeclaration,
-    StateScope, SyntaxTree, TypeExportDeclaration, TypeExportTarget, TypeSpecification,
+    StateDefault, StateScope, SyntaxTree, TypeExportDeclaration, TypeExportTarget, TypeSpecification,
     UpdateAssignment, UpdateStatement, ValueFieldDeclaration,
     lexer::{Token, TokenKind, lex},
 };
@@ -1279,9 +1279,14 @@ impl<'source> Parser<'source> {
             let default = if self.current().is_some_and(|token| token.is_word("DEFAULT")) {
                 self.bump();
                 self.skip_trivia();
-                Some(self.parse_client_expression()?)
+                if self.current().is_some_and(|token| token.is_word("NULL")) {
+                    self.bump();
+                    StateDefault::Null
+                } else {
+                    StateDefault::Expression(self.parse_client_expression()?)
+                }
             } else {
-                None
+                StateDefault::Unset
             };
             self.skip_trivia();
             let Some(semicolon) = self.take_kind(TokenKind::Semicolon) else {
