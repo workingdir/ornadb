@@ -100,6 +100,90 @@ pub const SYS_INSPECT_TRACE_FUNCTION_ID: FunctionId =
 /// The exact resolved name of the sealed trace function.
 pub const SYS_INSPECT_TRACE_FUNCTION_NAME: &str = "sys.inspect.trace";
 
+/// The stable identity of the sealed `sys.security.session_principal` function.
+pub const SYS_SECURITY_SESSION_PRINCIPAL_FUNCTION_ID: FunctionId =
+    FunctionId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x0d]);
+
+/// The exact resolved name of the sealed session-principal function.
+pub const SYS_SECURITY_SESSION_PRINCIPAL_FUNCTION_NAME: &str = "sys.security.session_principal";
+
+/// The stable identity of the sealed `sys.security.effective_principal` function.
+pub const SYS_SECURITY_EFFECTIVE_PRINCIPAL_FUNCTION_ID: FunctionId =
+    FunctionId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x0e]);
+
+/// The exact resolved name of the sealed effective-principal function.
+pub const SYS_SECURITY_EFFECTIVE_PRINCIPAL_FUNCTION_NAME: &str = "sys.security.effective_principal";
+
+/// The stable identity of the sealed `sys.security.active_roles` function.
+pub const SYS_SECURITY_ACTIVE_ROLES_FUNCTION_ID: FunctionId =
+    FunctionId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x0f]);
+
+/// The exact resolved name of the sealed active-roles function.
+pub const SYS_SECURITY_ACTIVE_ROLES_FUNCTION_NAME: &str = "sys.security.active_roles";
+
+/// The stable identity of the sealed `sys.security.create_principal` function.
+pub const SYS_SECURITY_CREATE_PRINCIPAL_FUNCTION_ID: FunctionId =
+    FunctionId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x10]);
+
+/// The exact resolved name of the sealed create-principal function.
+pub const SYS_SECURITY_CREATE_PRINCIPAL_FUNCTION_NAME: &str = "sys.security.create_principal";
+
+/// The stable identity of the sealed `sys.security.disable_principal` function.
+pub const SYS_SECURITY_DISABLE_PRINCIPAL_FUNCTION_ID: FunctionId =
+    FunctionId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x11]);
+
+/// The exact resolved name of the sealed disable-principal function.
+pub const SYS_SECURITY_DISABLE_PRINCIPAL_FUNCTION_NAME: &str = "sys.security.disable_principal";
+
+/// The stable identity of the sealed `sys.security.create_role` function.
+pub const SYS_SECURITY_CREATE_ROLE_FUNCTION_ID: FunctionId =
+    FunctionId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x12]);
+
+/// The exact resolved name of the sealed create-role function.
+pub const SYS_SECURITY_CREATE_ROLE_FUNCTION_NAME: &str = "sys.security.create_role";
+
+/// The stable identity of the sealed `sys.security.grant_role` function.
+pub const SYS_SECURITY_GRANT_ROLE_FUNCTION_ID: FunctionId =
+    FunctionId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x13]);
+
+/// The exact resolved name of the sealed grant-role function.
+pub const SYS_SECURITY_GRANT_ROLE_FUNCTION_NAME: &str = "sys.security.grant_role";
+
+/// The stable identity of the sealed `sys.security.revoke_role` function.
+pub const SYS_SECURITY_REVOKE_ROLE_FUNCTION_ID: FunctionId =
+    FunctionId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x14]);
+
+/// The exact resolved name of the sealed revoke-role function.
+pub const SYS_SECURITY_REVOKE_ROLE_FUNCTION_NAME: &str = "sys.security.revoke_role";
+
+/// The stable identity of the sealed `sys.security.grant_privilege` function.
+pub const SYS_SECURITY_GRANT_PRIVILEGE_FUNCTION_ID: FunctionId =
+    FunctionId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x15]);
+
+/// The exact resolved name of the sealed grant-privilege function.
+pub const SYS_SECURITY_GRANT_PRIVILEGE_FUNCTION_NAME: &str = "sys.security.grant_privilege";
+
+/// The stable identity of the sealed `sys.security.revoke_privilege` function.
+pub const SYS_SECURITY_REVOKE_PRIVILEGE_FUNCTION_ID: FunctionId =
+    FunctionId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x16]);
+
+/// The exact resolved name of the sealed revoke-privilege function.
+pub const SYS_SECURITY_REVOKE_PRIVILEGE_FUNCTION_NAME: &str = "sys.security.revoke_privilege";
+
+/// The stable identity of the sealed `sys.security.can_execute` function.
+pub const SYS_SECURITY_CAN_EXECUTE_FUNCTION_ID: FunctionId =
+    FunctionId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x17]);
+
+/// The exact resolved name of the sealed can-execute check.
+pub const SYS_SECURITY_CAN_EXECUTE_FUNCTION_NAME: &str = "sys.security.can_execute";
+
+/// The stable identity of the sealed `sys.security.has_privilege` function.
+pub const SYS_SECURITY_HAS_PRIVILEGE_FUNCTION_ID: FunctionId =
+    FunctionId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x18]);
+
+/// The exact resolved name of the sealed has-privilege check.
+pub const SYS_SECURITY_HAS_PRIVILEGE_FUNCTION_NAME: &str = "sys.security.has_privilege";
+
 /// The stable identity of the sole sealed `sys.invoke` parameter.
 pub const SYS_INVOKE_PARAMETER_ID: ParameterId =
     ParameterId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3]);
@@ -178,6 +262,16 @@ pub const SYS_INSPECT_TRACE_EVENT_TYPE_NAME: &str = "sys.inspect.trace_event";
 /// The immutable representation contract of the sealed inspect-trace-event carrier.
 pub const SYS_INSPECT_TRACE_EVENT_REPRESENTATION_CONTRACT: &str = "orna.sys.inspect.trace_event@1";
 
+/// The stable identity of the sealed `sys.security.principal` carrier.
+pub const SYS_SECURITY_PRINCIPAL_TYPE_ID: TypeId =
+    TypeId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xf7]);
+
+/// The exact semantic name of the sealed security-principal carrier.
+pub const SYS_SECURITY_PRINCIPAL_TYPE_NAME: &str = "sys.security.principal";
+
+/// The immutable representation contract of the sealed security-principal carrier.
+pub const SYS_SECURITY_PRINCIPAL_REPRESENTATION_CONTRACT: &str = "orna.sys.security.principal@1";
+
 const CATALOGUE_HEALTH_NAME_PARTS: &[&str] = &["sys", "catalog", "health"];
 const SYS_INVOKE_NAME_PARTS: &[&str] = &["sys", "invoke"];
 const SYS_INVOKE_VALUE_NAME_PARTS: &[&str] = &["sys", "invoke", "Value"];
@@ -197,6 +291,25 @@ const SYS_INSPECT_RUNTIME_BINDINGS_FUNCTION_NAME_PARTS: &[&str] =
 const SYS_INSPECT_SECURITY_DECISIONS_FUNCTION_NAME_PARTS: &[&str] =
     &["sys", "inspect", "security_decisions"];
 const SYS_INSPECT_TRACE_FUNCTION_NAME_PARTS: &[&str] = &["sys", "inspect", "trace"];
+const SYS_SECURITY_SESSION_PRINCIPAL_FUNCTION_NAME_PARTS: &[&str] =
+    &["sys", "security", "session_principal"];
+const SYS_SECURITY_EFFECTIVE_PRINCIPAL_FUNCTION_NAME_PARTS: &[&str] =
+    &["sys", "security", "effective_principal"];
+const SYS_SECURITY_ACTIVE_ROLES_FUNCTION_NAME_PARTS: &[&str] = &["sys", "security", "active_roles"];
+const SYS_SECURITY_CREATE_PRINCIPAL_FUNCTION_NAME_PARTS: &[&str] =
+    &["sys", "security", "create_principal"];
+const SYS_SECURITY_DISABLE_PRINCIPAL_FUNCTION_NAME_PARTS: &[&str] =
+    &["sys", "security", "disable_principal"];
+const SYS_SECURITY_CREATE_ROLE_FUNCTION_NAME_PARTS: &[&str] = &["sys", "security", "create_role"];
+const SYS_SECURITY_GRANT_ROLE_FUNCTION_NAME_PARTS: &[&str] = &["sys", "security", "grant_role"];
+const SYS_SECURITY_REVOKE_ROLE_FUNCTION_NAME_PARTS: &[&str] = &["sys", "security", "revoke_role"];
+const SYS_SECURITY_GRANT_PRIVILEGE_FUNCTION_NAME_PARTS: &[&str] =
+    &["sys", "security", "grant_privilege"];
+const SYS_SECURITY_REVOKE_PRIVILEGE_FUNCTION_NAME_PARTS: &[&str] =
+    &["sys", "security", "revoke_privilege"];
+const SYS_SECURITY_CAN_EXECUTE_FUNCTION_NAME_PARTS: &[&str] = &["sys", "security", "can_execute"];
+const SYS_SECURITY_HAS_PRIVILEGE_FUNCTION_NAME_PARTS: &[&str] =
+    &["sys", "security", "has_privilege"];
 
 /// The behaviour selected for one sealed system function.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -212,6 +325,12 @@ pub enum SystemFunctionKind {
     InspectProjection,
     /// Streams the sequence-addressable trace of one invocation.
     InspectTrace,
+    /// Reads one session identity fact from a bound authenticated session.
+    SecurityIdentity,
+    /// Mutates protected principal, role, or privilege state.
+    SecurityAdmin,
+    /// Checks one execute grant or privilege class against the snapshot.
+    SecurityCheck,
 }
 
 /// The sealed invocation-carrier behaviour selected by one registry entry.
@@ -444,6 +563,92 @@ const SYS_INSPECT_PROJECTION_SIGNATURE: SystemInspectSignature =
 const SYS_INSPECT_TRACE_SIGNATURE: SystemInspectSignature =
     SystemInspectSignature::new(2, Some(SYS_INSPECT_TRACE_EVENT_TYPE_ID));
 
+/// The immutable sealed signature shape of one `sys.security` entry.
+///
+/// The twelve entries use four closed shapes: the two session identity
+/// functions return one reference to the sealed `sys.security.principal`
+/// carrier, `active_roles` returns a set of those references, the seven
+/// protected admin functions mutate state and return nothing, and the two
+/// checks return a boolean. No entry returns a stream. A caller can obtain
+/// a signature only from the sealed system-function registry.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SystemSecuritySignature {
+    parameter_count: u8,
+    returns_set: bool,
+    returns_ref_principal: bool,
+    returns_boolean: bool,
+    stream_item_type: Option<TypeId>,
+}
+
+impl SystemSecuritySignature {
+    const fn new(
+        parameter_count: u8,
+        returns_set: bool,
+        returns_ref_principal: bool,
+        returns_boolean: bool,
+        stream_item_type: Option<TypeId>,
+    ) -> Self {
+        Self {
+            parameter_count,
+            returns_set,
+            returns_ref_principal,
+            returns_boolean,
+            stream_item_type,
+        }
+    }
+
+    /// Returns the fixed sealed parameter count.
+    pub const fn parameter_count(self) -> u8 {
+        self.parameter_count
+    }
+
+    /// Returns whether the entry returns a set of values.
+    pub const fn returns_set(self) -> bool {
+        self.returns_set
+    }
+
+    /// Returns whether the entry returns a reference to the sealed
+    /// `sys.security.principal` carrier.
+    pub const fn returns_ref_principal(self) -> bool {
+        self.returns_ref_principal
+    }
+
+    /// Returns whether the entry returns a boolean.
+    pub const fn returns_boolean(self) -> bool {
+        self.returns_boolean
+    }
+
+    /// Returns the sealed stream item type when the entry returns a stream.
+    pub const fn stream_item_type(self) -> Option<TypeId> {
+        self.stream_item_type
+    }
+}
+
+const SYS_SECURITY_SESSION_PRINCIPAL_SIGNATURE: SystemSecuritySignature =
+    SystemSecuritySignature::new(0, false, true, false, None);
+const SYS_SECURITY_EFFECTIVE_PRINCIPAL_SIGNATURE: SystemSecuritySignature =
+    SystemSecuritySignature::new(0, false, true, false, None);
+const SYS_SECURITY_ACTIVE_ROLES_SIGNATURE: SystemSecuritySignature =
+    SystemSecuritySignature::new(0, true, true, false, None);
+const SYS_SECURITY_CREATE_PRINCIPAL_SIGNATURE: SystemSecuritySignature =
+    SystemSecuritySignature::new(2, false, false, false, None);
+const SYS_SECURITY_DISABLE_PRINCIPAL_SIGNATURE: SystemSecuritySignature =
+    SystemSecuritySignature::new(1, false, false, false, None);
+const SYS_SECURITY_CREATE_ROLE_SIGNATURE: SystemSecuritySignature =
+    SystemSecuritySignature::new(1, false, false, false, None);
+const SYS_SECURITY_GRANT_ROLE_SIGNATURE: SystemSecuritySignature =
+    SystemSecuritySignature::new(2, false, false, false, None);
+const SYS_SECURITY_REVOKE_ROLE_SIGNATURE: SystemSecuritySignature =
+    SystemSecuritySignature::new(2, false, false, false, None);
+const SYS_SECURITY_GRANT_PRIVILEGE_SIGNATURE: SystemSecuritySignature =
+    SystemSecuritySignature::new(3, false, false, false, None);
+const SYS_SECURITY_REVOKE_PRIVILEGE_SIGNATURE: SystemSecuritySignature =
+    SystemSecuritySignature::new(3, false, false, false, None);
+const SYS_SECURITY_CAN_EXECUTE_SIGNATURE: SystemSecuritySignature =
+    SystemSecuritySignature::new(2, false, false, true, None);
+const SYS_SECURITY_HAS_PRIVILEGE_SIGNATURE: SystemSecuritySignature =
+    SystemSecuritySignature::new(3, false, false, true, None);
+
 /// One immutable entry in the sealed system-function registry.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct SystemFunctionDefinition {
@@ -452,6 +657,7 @@ pub struct SystemFunctionDefinition {
     name_parts: &'static [&'static str],
     invocation_signature: Option<SystemInvocationSignature>,
     inspect_signature: Option<SystemInspectSignature>,
+    security_signature: Option<SystemSecuritySignature>,
 }
 
 impl SystemFunctionDefinition {
@@ -461,6 +667,7 @@ impl SystemFunctionDefinition {
         name_parts: &'static [&'static str],
         invocation_signature: Option<SystemInvocationSignature>,
         inspect_signature: Option<SystemInspectSignature>,
+        security_signature: Option<SystemSecuritySignature>,
     ) -> Self {
         Self {
             kind,
@@ -468,6 +675,7 @@ impl SystemFunctionDefinition {
             name_parts,
             invocation_signature,
             inspect_signature,
+            security_signature,
         }
     }
 
@@ -501,6 +709,14 @@ impl SystemFunctionDefinition {
         self.inspect_signature
     }
 
+    /// Returns the sealed security signature when this entry is a
+    /// `sys.security` function.
+    ///
+    /// Other system functions do not have a security signature.
+    pub const fn security_signature(self) -> Option<SystemSecuritySignature> {
+        self.security_signature
+    }
+
     pub(crate) fn has_name(self, name: &QualifiedSemanticName) -> bool {
         name.parts()
             .iter()
@@ -517,12 +733,14 @@ pub const SYSTEM_FUNCTIONS: &[SystemFunctionDefinition] = &[
         CATALOGUE_HEALTH_NAME_PARTS,
         None,
         None,
+        None,
     ),
     SystemFunctionDefinition::new(
         SystemFunctionKind::Invoke,
         SYS_INVOKE_FUNCTION_ID,
         SYS_INVOKE_NAME_PARTS,
         Some(SYS_INVOKE_SIGNATURE),
+        None,
         None,
     ),
     SystemFunctionDefinition::new(
@@ -531,6 +749,7 @@ pub const SYSTEM_FUNCTIONS: &[SystemFunctionDefinition] = &[
         SYS_INSPECT_SNAPSHOT_FUNCTION_NAME_PARTS,
         None,
         Some(SYS_INSPECT_SNAPSHOT_SIGNATURE),
+        None,
     ),
     SystemFunctionDefinition::new(
         SystemFunctionKind::InspectProjection,
@@ -538,6 +757,7 @@ pub const SYSTEM_FUNCTIONS: &[SystemFunctionDefinition] = &[
         SYS_INSPECT_INVOCATION_NODES_FUNCTION_NAME_PARTS,
         None,
         Some(SYS_INSPECT_PROJECTION_SIGNATURE),
+        None,
     ),
     SystemFunctionDefinition::new(
         SystemFunctionKind::InspectProjection,
@@ -545,6 +765,7 @@ pub const SYSTEM_FUNCTIONS: &[SystemFunctionDefinition] = &[
         SYS_INSPECT_CALLS_FUNCTION_NAME_PARTS,
         None,
         Some(SYS_INSPECT_PROJECTION_SIGNATURE),
+        None,
     ),
     SystemFunctionDefinition::new(
         SystemFunctionKind::InspectProjection,
@@ -552,6 +773,7 @@ pub const SYSTEM_FUNCTIONS: &[SystemFunctionDefinition] = &[
         SYS_INSPECT_RESOURCES_FUNCTION_NAME_PARTS,
         None,
         Some(SYS_INSPECT_PROJECTION_SIGNATURE),
+        None,
     ),
     SystemFunctionDefinition::new(
         SystemFunctionKind::InspectProjection,
@@ -559,6 +781,7 @@ pub const SYSTEM_FUNCTIONS: &[SystemFunctionDefinition] = &[
         SYS_INSPECT_STATE_CELLS_FUNCTION_NAME_PARTS,
         None,
         Some(SYS_INSPECT_PROJECTION_SIGNATURE),
+        None,
     ),
     SystemFunctionDefinition::new(
         SystemFunctionKind::InspectProjection,
@@ -566,6 +789,7 @@ pub const SYSTEM_FUNCTIONS: &[SystemFunctionDefinition] = &[
         SYS_INSPECT_UI_NODES_FUNCTION_NAME_PARTS,
         None,
         Some(SYS_INSPECT_PROJECTION_SIGNATURE),
+        None,
     ),
     SystemFunctionDefinition::new(
         SystemFunctionKind::InspectProjection,
@@ -573,6 +797,7 @@ pub const SYSTEM_FUNCTIONS: &[SystemFunctionDefinition] = &[
         SYS_INSPECT_PRESENTATION_CANDIDATES_FUNCTION_NAME_PARTS,
         None,
         Some(SYS_INSPECT_PROJECTION_SIGNATURE),
+        None,
     ),
     SystemFunctionDefinition::new(
         SystemFunctionKind::InspectProjection,
@@ -580,6 +805,7 @@ pub const SYSTEM_FUNCTIONS: &[SystemFunctionDefinition] = &[
         SYS_INSPECT_RUNTIME_BINDINGS_FUNCTION_NAME_PARTS,
         None,
         Some(SYS_INSPECT_PROJECTION_SIGNATURE),
+        None,
     ),
     SystemFunctionDefinition::new(
         SystemFunctionKind::InspectProjection,
@@ -587,6 +813,7 @@ pub const SYSTEM_FUNCTIONS: &[SystemFunctionDefinition] = &[
         SYS_INSPECT_SECURITY_DECISIONS_FUNCTION_NAME_PARTS,
         None,
         Some(SYS_INSPECT_PROJECTION_SIGNATURE),
+        None,
     ),
     SystemFunctionDefinition::new(
         SystemFunctionKind::InspectTrace,
@@ -594,6 +821,103 @@ pub const SYSTEM_FUNCTIONS: &[SystemFunctionDefinition] = &[
         SYS_INSPECT_TRACE_FUNCTION_NAME_PARTS,
         None,
         Some(SYS_INSPECT_TRACE_SIGNATURE),
+        None,
+    ),
+    SystemFunctionDefinition::new(
+        SystemFunctionKind::SecurityIdentity,
+        SYS_SECURITY_SESSION_PRINCIPAL_FUNCTION_ID,
+        SYS_SECURITY_SESSION_PRINCIPAL_FUNCTION_NAME_PARTS,
+        None,
+        None,
+        Some(SYS_SECURITY_SESSION_PRINCIPAL_SIGNATURE),
+    ),
+    SystemFunctionDefinition::new(
+        SystemFunctionKind::SecurityIdentity,
+        SYS_SECURITY_EFFECTIVE_PRINCIPAL_FUNCTION_ID,
+        SYS_SECURITY_EFFECTIVE_PRINCIPAL_FUNCTION_NAME_PARTS,
+        None,
+        None,
+        Some(SYS_SECURITY_EFFECTIVE_PRINCIPAL_SIGNATURE),
+    ),
+    SystemFunctionDefinition::new(
+        SystemFunctionKind::SecurityIdentity,
+        SYS_SECURITY_ACTIVE_ROLES_FUNCTION_ID,
+        SYS_SECURITY_ACTIVE_ROLES_FUNCTION_NAME_PARTS,
+        None,
+        None,
+        Some(SYS_SECURITY_ACTIVE_ROLES_SIGNATURE),
+    ),
+    SystemFunctionDefinition::new(
+        SystemFunctionKind::SecurityAdmin,
+        SYS_SECURITY_CREATE_PRINCIPAL_FUNCTION_ID,
+        SYS_SECURITY_CREATE_PRINCIPAL_FUNCTION_NAME_PARTS,
+        None,
+        None,
+        Some(SYS_SECURITY_CREATE_PRINCIPAL_SIGNATURE),
+    ),
+    SystemFunctionDefinition::new(
+        SystemFunctionKind::SecurityAdmin,
+        SYS_SECURITY_DISABLE_PRINCIPAL_FUNCTION_ID,
+        SYS_SECURITY_DISABLE_PRINCIPAL_FUNCTION_NAME_PARTS,
+        None,
+        None,
+        Some(SYS_SECURITY_DISABLE_PRINCIPAL_SIGNATURE),
+    ),
+    SystemFunctionDefinition::new(
+        SystemFunctionKind::SecurityAdmin,
+        SYS_SECURITY_CREATE_ROLE_FUNCTION_ID,
+        SYS_SECURITY_CREATE_ROLE_FUNCTION_NAME_PARTS,
+        None,
+        None,
+        Some(SYS_SECURITY_CREATE_ROLE_SIGNATURE),
+    ),
+    SystemFunctionDefinition::new(
+        SystemFunctionKind::SecurityAdmin,
+        SYS_SECURITY_GRANT_ROLE_FUNCTION_ID,
+        SYS_SECURITY_GRANT_ROLE_FUNCTION_NAME_PARTS,
+        None,
+        None,
+        Some(SYS_SECURITY_GRANT_ROLE_SIGNATURE),
+    ),
+    SystemFunctionDefinition::new(
+        SystemFunctionKind::SecurityAdmin,
+        SYS_SECURITY_REVOKE_ROLE_FUNCTION_ID,
+        SYS_SECURITY_REVOKE_ROLE_FUNCTION_NAME_PARTS,
+        None,
+        None,
+        Some(SYS_SECURITY_REVOKE_ROLE_SIGNATURE),
+    ),
+    SystemFunctionDefinition::new(
+        SystemFunctionKind::SecurityAdmin,
+        SYS_SECURITY_GRANT_PRIVILEGE_FUNCTION_ID,
+        SYS_SECURITY_GRANT_PRIVILEGE_FUNCTION_NAME_PARTS,
+        None,
+        None,
+        Some(SYS_SECURITY_GRANT_PRIVILEGE_SIGNATURE),
+    ),
+    SystemFunctionDefinition::new(
+        SystemFunctionKind::SecurityAdmin,
+        SYS_SECURITY_REVOKE_PRIVILEGE_FUNCTION_ID,
+        SYS_SECURITY_REVOKE_PRIVILEGE_FUNCTION_NAME_PARTS,
+        None,
+        None,
+        Some(SYS_SECURITY_REVOKE_PRIVILEGE_SIGNATURE),
+    ),
+    SystemFunctionDefinition::new(
+        SystemFunctionKind::SecurityCheck,
+        SYS_SECURITY_CAN_EXECUTE_FUNCTION_ID,
+        SYS_SECURITY_CAN_EXECUTE_FUNCTION_NAME_PARTS,
+        None,
+        None,
+        Some(SYS_SECURITY_CAN_EXECUTE_SIGNATURE),
+    ),
+    SystemFunctionDefinition::new(
+        SystemFunctionKind::SecurityCheck,
+        SYS_SECURITY_HAS_PRIVILEGE_FUNCTION_ID,
+        SYS_SECURITY_HAS_PRIVILEGE_FUNCTION_NAME_PARTS,
+        None,
+        None,
+        Some(SYS_SECURITY_HAS_PRIVILEGE_SIGNATURE),
     ),
 ];
 
@@ -634,8 +958,8 @@ mod tests {
     }
 
     #[test]
-    fn system_registry_contains_exactly_the_twelve_sealed_entries_in_order() {
-        assert_eq!(SYSTEM_FUNCTIONS.len(), 12);
+    fn system_registry_contains_exactly_the_twenty_four_sealed_entries_in_order() {
+        assert_eq!(SYSTEM_FUNCTIONS.len(), 24);
         let health = SYSTEM_FUNCTIONS[0];
         assert_eq!(health.kind(), SystemFunctionKind::Health);
         assert_eq!(health.id(), CATALOGUE_HEALTH_FUNCTION_ID);
@@ -660,6 +984,26 @@ mod tests {
         assert!(parts_equal(
             trace.name_parts(),
             &["sys", "inspect", "trace"]
+        ));
+        let session_principal = SYSTEM_FUNCTIONS[12];
+        assert_eq!(
+            session_principal.kind(),
+            SystemFunctionKind::SecurityIdentity
+        );
+        assert_eq!(
+            session_principal.id(),
+            SYS_SECURITY_SESSION_PRINCIPAL_FUNCTION_ID
+        );
+        assert!(parts_equal(
+            session_principal.name_parts(),
+            &["sys", "security", "session_principal"]
+        ));
+        let has_privilege = SYSTEM_FUNCTIONS[23];
+        assert_eq!(has_privilege.kind(), SystemFunctionKind::SecurityCheck);
+        assert_eq!(has_privilege.id(), SYS_SECURITY_HAS_PRIVILEGE_FUNCTION_ID);
+        assert!(parts_equal(
+            has_privilege.name_parts(),
+            &["sys", "security", "has_privilege"]
         ));
     }
 
@@ -703,7 +1047,7 @@ mod tests {
     fn system_function_lookup_rejects_unknown_identities() {
         for bytes in [
             [0; 16],
-            [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x0d],
+            [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x19],
             [0x7f; 16],
         ] {
             assert!(system_function_by_id(FunctionId::from_bytes(bytes)).is_none());
@@ -872,6 +1216,255 @@ mod tests {
         let invoke = system_function_by_id(SYS_INVOKE_FUNCTION_ID)
             .expect("the invoke identity must resolve");
         assert!(invoke.inspect_signature().is_none());
+    }
+
+    #[test]
+    fn security_entries_expose_the_sealed_function_ids_and_names_in_order() {
+        let expected = [
+            (
+                SYS_SECURITY_SESSION_PRINCIPAL_FUNCTION_ID,
+                "sys.security.session_principal",
+                SystemFunctionKind::SecurityIdentity,
+            ),
+            (
+                SYS_SECURITY_EFFECTIVE_PRINCIPAL_FUNCTION_ID,
+                "sys.security.effective_principal",
+                SystemFunctionKind::SecurityIdentity,
+            ),
+            (
+                SYS_SECURITY_ACTIVE_ROLES_FUNCTION_ID,
+                "sys.security.active_roles",
+                SystemFunctionKind::SecurityIdentity,
+            ),
+            (
+                SYS_SECURITY_CREATE_PRINCIPAL_FUNCTION_ID,
+                "sys.security.create_principal",
+                SystemFunctionKind::SecurityAdmin,
+            ),
+            (
+                SYS_SECURITY_DISABLE_PRINCIPAL_FUNCTION_ID,
+                "sys.security.disable_principal",
+                SystemFunctionKind::SecurityAdmin,
+            ),
+            (
+                SYS_SECURITY_CREATE_ROLE_FUNCTION_ID,
+                "sys.security.create_role",
+                SystemFunctionKind::SecurityAdmin,
+            ),
+            (
+                SYS_SECURITY_GRANT_ROLE_FUNCTION_ID,
+                "sys.security.grant_role",
+                SystemFunctionKind::SecurityAdmin,
+            ),
+            (
+                SYS_SECURITY_REVOKE_ROLE_FUNCTION_ID,
+                "sys.security.revoke_role",
+                SystemFunctionKind::SecurityAdmin,
+            ),
+            (
+                SYS_SECURITY_GRANT_PRIVILEGE_FUNCTION_ID,
+                "sys.security.grant_privilege",
+                SystemFunctionKind::SecurityAdmin,
+            ),
+            (
+                SYS_SECURITY_REVOKE_PRIVILEGE_FUNCTION_ID,
+                "sys.security.revoke_privilege",
+                SystemFunctionKind::SecurityAdmin,
+            ),
+            (
+                SYS_SECURITY_CAN_EXECUTE_FUNCTION_ID,
+                "sys.security.can_execute",
+                SystemFunctionKind::SecurityCheck,
+            ),
+            (
+                SYS_SECURITY_HAS_PRIVILEGE_FUNCTION_ID,
+                "sys.security.has_privilege",
+                SystemFunctionKind::SecurityCheck,
+            ),
+        ];
+        for (index, (id, name, kind)) in expected.into_iter().enumerate() {
+            let entry = SYSTEM_FUNCTIONS[12 + index];
+            assert_eq!(entry.id(), id);
+            assert_eq!(entry.kind(), kind);
+            assert_eq!(entry.name_parts().join("."), name);
+            assert_eq!(system_function_by_id(id), Some(entry));
+            let parts: Vec<&str> = name.split('.').collect();
+            assert_eq!(system_function_by_name(&qualified(&parts)), Some(entry));
+        }
+    }
+
+    #[test]
+    fn security_entries_expose_the_closed_signature_shapes() {
+        for id in [
+            SYS_SECURITY_SESSION_PRINCIPAL_FUNCTION_ID,
+            SYS_SECURITY_EFFECTIVE_PRINCIPAL_FUNCTION_ID,
+        ] {
+            let identity = system_function_by_id(id).expect("an identity function must resolve");
+            let signature = identity
+                .security_signature()
+                .expect("a security function must expose its sealed signature");
+            assert_eq!(signature.parameter_count(), 0);
+            assert!(signature.returns_ref_principal());
+            assert!(!signature.returns_set());
+            assert!(!signature.returns_boolean());
+            assert_eq!(signature.stream_item_type(), None);
+            assert!(identity.invocation_signature().is_none());
+            assert!(identity.inspect_signature().is_none());
+        }
+
+        let active_roles = system_function_by_id(SYS_SECURITY_ACTIVE_ROLES_FUNCTION_ID)
+            .expect("the active-roles identity must resolve");
+        let signature = active_roles
+            .security_signature()
+            .expect("active_roles must expose its sealed signature");
+        assert_eq!(signature.parameter_count(), 0);
+        assert!(signature.returns_set());
+        assert!(signature.returns_ref_principal());
+        assert!(!signature.returns_boolean());
+        assert_eq!(signature.stream_item_type(), None);
+
+        let admin_shapes = [
+            (
+                SYS_SECURITY_CREATE_PRINCIPAL_FUNCTION_ID,
+                2,
+                SystemFunctionKind::SecurityAdmin,
+            ),
+            (
+                SYS_SECURITY_DISABLE_PRINCIPAL_FUNCTION_ID,
+                1,
+                SystemFunctionKind::SecurityAdmin,
+            ),
+            (
+                SYS_SECURITY_CREATE_ROLE_FUNCTION_ID,
+                1,
+                SystemFunctionKind::SecurityAdmin,
+            ),
+            (
+                SYS_SECURITY_GRANT_ROLE_FUNCTION_ID,
+                2,
+                SystemFunctionKind::SecurityAdmin,
+            ),
+            (
+                SYS_SECURITY_REVOKE_ROLE_FUNCTION_ID,
+                2,
+                SystemFunctionKind::SecurityAdmin,
+            ),
+            (
+                SYS_SECURITY_GRANT_PRIVILEGE_FUNCTION_ID,
+                3,
+                SystemFunctionKind::SecurityAdmin,
+            ),
+            (
+                SYS_SECURITY_REVOKE_PRIVILEGE_FUNCTION_ID,
+                3,
+                SystemFunctionKind::SecurityAdmin,
+            ),
+        ];
+        for (id, parameter_count, kind) in admin_shapes {
+            let admin = system_function_by_id(id).expect("an admin identity must resolve");
+            assert_eq!(admin.kind(), kind);
+            let signature = admin
+                .security_signature()
+                .expect("an admin function must expose its sealed signature");
+            assert_eq!(signature.parameter_count(), parameter_count);
+            assert!(!signature.returns_ref_principal());
+            assert!(!signature.returns_set());
+            assert!(!signature.returns_boolean());
+            assert_eq!(signature.stream_item_type(), None);
+            assert!(admin.invocation_signature().is_none());
+            assert!(admin.inspect_signature().is_none());
+        }
+
+        let checks = [
+            (SYS_SECURITY_CAN_EXECUTE_FUNCTION_ID, 2),
+            (SYS_SECURITY_HAS_PRIVILEGE_FUNCTION_ID, 3),
+        ];
+        for (id, parameter_count) in checks {
+            let check = system_function_by_id(id).expect("a check identity must resolve");
+            assert_eq!(check.kind(), SystemFunctionKind::SecurityCheck);
+            let signature = check
+                .security_signature()
+                .expect("a check must expose its sealed signature");
+            assert_eq!(signature.parameter_count(), parameter_count);
+            assert!(signature.returns_boolean());
+            assert!(!signature.returns_ref_principal());
+            assert!(!signature.returns_set());
+            assert_eq!(signature.stream_item_type(), None);
+            assert!(check.invocation_signature().is_none());
+            assert!(check.inspect_signature().is_none());
+        }
+
+        let health = system_function_by_id(CATALOGUE_HEALTH_FUNCTION_ID)
+            .expect("the health identity must resolve");
+        assert!(health.security_signature().is_none());
+        let invoke = system_function_by_id(SYS_INVOKE_FUNCTION_ID)
+            .expect("the invoke identity must resolve");
+        assert!(invoke.security_signature().is_none());
+        let snapshot = system_function_by_id(SYS_INSPECT_SNAPSHOT_FUNCTION_ID)
+            .expect("the snapshot identity must resolve");
+        assert!(snapshot.security_signature().is_none());
+    }
+
+    #[test]
+    fn security_lookup_rejects_deferred_and_unregistered_identities() {
+        for parts in [
+            &["sys", "security", "create_delegation"][..],
+            &["sys", "security", "terminate_session"][..],
+            &["sys", "security"][..],
+            &["sys", "security", "session_principalx"][..],
+            &["sys", "security", "SessionPrincipal"][..],
+            &["sys", "security", "session_principal", "extra"][..],
+            &["security", "session_principal"][..],
+        ] {
+            assert!(
+                system_function_by_name(&qualified(parts)).is_none(),
+                "{parts:?}"
+            );
+        }
+        for bytes in [
+            [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x19],
+            [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x1a],
+            [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x1b],
+        ] {
+            assert!(system_function_by_id(FunctionId::from_bytes(bytes)).is_none());
+        }
+    }
+
+    #[test]
+    fn security_carrier_is_sealed_and_collision_free() {
+        assert_eq!(
+            SYS_SECURITY_PRINCIPAL_TYPE_ID,
+            TypeId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xf7])
+        );
+        assert_eq!(SYS_SECURITY_PRINCIPAL_TYPE_ID.to_bytes()[15], 0xf7);
+        assert_eq!(SYS_SECURITY_PRINCIPAL_TYPE_NAME, "sys.security.principal");
+        assert_eq!(
+            SYS_SECURITY_PRINCIPAL_REPRESENTATION_CONTRACT,
+            "orna.sys.security.principal@1"
+        );
+        assert!(SYS_SECURITY_PRINCIPAL_REPRESENTATION_CONTRACT.ends_with("@1"));
+        assert!(
+            !INVOCATION_CARRIERS
+                .iter()
+                .any(|carrier| carrier.id() == SYS_SECURITY_PRINCIPAL_TYPE_ID),
+            "the security carrier must not collide with the invocation carriers"
+        );
+        assert_ne!(
+            SYS_SECURITY_PRINCIPAL_TYPE_ID, SYS_INSPECT_INVOCATION_TYPE_ID,
+            "the security carrier must not collide with the inspect carriers"
+        );
+        assert_ne!(
+            SYS_SECURITY_PRINCIPAL_TYPE_ID, SYS_INSPECT_SNAPSHOT_TYPE_ID,
+            "the security carrier must not collide with the inspect carriers"
+        );
+        assert_ne!(
+            SYS_SECURITY_PRINCIPAL_TYPE_ID, SYS_INSPECT_SNAPSHOT_OPTIONS_TYPE_ID,
+            "the security carrier must not collide with the inspect carriers"
+        );
+        assert_ne!(
+            SYS_SECURITY_PRINCIPAL_TYPE_ID, SYS_INSPECT_TRACE_EVENT_TYPE_ID,
+            "the security carrier must not collide with the inspect carriers"
+        );
     }
 
     #[test]
