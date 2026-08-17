@@ -7315,7 +7315,9 @@ async fn proves_security_admin_identity_checks_mutations_and_audit() -> TestResu
         )?;
 
         // can_execute wraps authorise_execute: the granted user is allowed,
-        // an ungranted principal fails closed on the missing grant.
+        // an existing principal without an EXECUTE grant fails closed on the
+        // missing grant (an unknown principal would instead be an invalid
+        // session; NEW_USER is created later in this proof).
         let allowed_execute = kernel.can_execute(USER, function).await?;
         require(
             matches!(
@@ -7327,7 +7329,7 @@ async fn proves_security_admin_identity_checks_mutations_and_audit() -> TestResu
             "can_execute did not allow the granted user",
         )?;
         require(
-            kernel.can_execute(NEW_USER, function).await?
+            kernel.can_execute(ADMIN, function).await?
                 == ExecuteDecision::Denied(ExecuteDenial::MissingExecuteGrant),
             "can_execute did not deny an ungranted principal",
         )?;
