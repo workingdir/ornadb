@@ -536,26 +536,24 @@ impl PostgresKernel {
         finish_authenticated_server_select_session(operation, database_session.shutdown().await)
     }
 
-    /// Dispatches one sealed `sys.invoke` Request inside one transaction.
-    ///
-    /// This is the sole caller of [`execute_standard_parameter_echo`] and the
-    /// only boundary through which a verified-standard target can execute
-    /// (ADR 0055 implementation order item 11). It recovers the active
-    /// revision and its security snapshot, decodes the retained Request
-    /// against the opaque codec registry of the exact verified standard
-    /// snapshot, makes the redacted protected decision, and then either
-    /// executes the pinned standard parameter-echo executable (emitting
-    /// `InvocationStarted(0)`, `ValueBatch(1)`, `InvocationCompleted(2)`) or
-    /// returns the closed denial without executing any artifact. Every
-    /// decision is appended as protected security and invocation audit
-    /// evidence before the transaction commits; the invocation-audit row
-    /// keeps the historical application `RevisionPair` as its durable
-    /// standard pin.
-    ///
-    /// The invocation first passes the protected `sys.invoke` gate, then
-    /// executes application CLIENT targets through the same authorised local
-    /// evaluator as the raw dispatch path. Verified standard targets retain
-    /// their sealed standard-only execution path.
+/// Dispatches one sealed `sys.invoke` Request inside one transaction.
+///
+/// This boundary recovers the active revision and its security snapshot,
+/// decodes the retained Request against the opaque codec registry of the exact
+/// verified standard snapshot, makes the redacted protected decision, and then
+/// executes either an application CLIENT target through the local evaluator or
+/// a verified-standard target through its pinned executable. Completed
+/// invocations emit `InvocationStarted(0)`, `ValueBatch(1)`, and
+/// `InvocationCompleted(2)`. Denied requests return without executing an
+/// artifact. Every decision is appended as protected security and invocation
+/// audit evidence before the transaction commits; the invocation-audit row
+/// keeps the historical application `RevisionPair` as its durable standard
+/// pin.
+///
+/// The invocation first passes the protected `sys.invoke` gate. Application
+/// CLIENT targets use the same authorised local evaluator as the raw dispatch
+/// path. Verified standard targets retain their sealed standard-only execution
+/// path.
     pub async fn dispatch_sealed_sys_invoke(
         &self,
         authenticated_session: &AuthenticatedSession,
