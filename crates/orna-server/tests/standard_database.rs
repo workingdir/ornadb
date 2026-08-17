@@ -135,6 +135,11 @@ const RAW_CLIENT_FUNCTION_SOURCE: &str = "CREATE SCHEMA app;\n\
     SECURITY INVOKER TRANSACTION READ ONLY VOLATILITY STABLE\n\
     AS SELECT assignment.marker FROM app.assignment assignment;\n\
     CREATE CLIENT FUNCTION app.enabled() RETURNS BOOLEAN RETURN TRUE;\n";
+const RAW_EXPRESSION_CLIENT_FUNCTION_SOURCE: &str = "CREATE SCHEMA expr;\n\
+    CREATE CLIENT FUNCTION expr.literal() RETURNS TEXT AS 'hello';\n\
+    CREATE CLIENT FUNCTION expr.composed() RETURNS TEXT AS expr.literal() || ' world';\n\
+    CREATE EXTERNAL CLIENT FUNCTION expr.external() RETURNS TEXT\n\
+    RUNTIME CONTRACT 'expr.runtime@1';\n";
 /// One Integer single-parameter INSERT and one public Integer reader.
 const RAW_CLIENT_INT_INSERT_SOURCE: &str = "CREATE SCHEMA raw_int_insert;\n\
     CREATE TYPE raw_int_insert.int_probe AS OBJECT (\n\
@@ -1898,6 +1903,83 @@ async fn proves_installed_orna_invoke_end_to_end_against_postgres() -> TestResul
         )?;
 
         require_no_database_sessions(&database).await
+    })
+    .await
+}
+
+#[tokio::test]
+#[ignore = "requires the Compose PostgreSQL development service"]
+async fn proves_expression_client_functions_through_installed_invoke() -> TestResult<()> {
+    with_test_database(|database| async move {
+        let uid = nix::unistd::geteuid().as_raw();
+        let kernel = kernel(&database)?;
+        let (active, literal, composed, external) =
+            install_expression_client_fixture(&kernel).await?;
+        let functions = active
+            .catalogue()
+            .functions()
+            .iter()
+            .map(FunctionDefinition::id)
+            .collect::<Vec<_>>();
+        let security = SecuritySnapshot::new_with_local_peer_credentials(
+            active.pair(),
+            functions,
+            vec![Principal::new(
+                RAW_CLIENT_USER,
+                PrincipalKind::User,
+                PrincipalStatus::Active,
+            )],
+            vec![],
+            vec![
+                ExecuteGrant::new(RAW_CLIENT_USER, literal),
+                ExecuteGrant::new(RAW_CLIENT_USER, composed),
+                ExecuteGrant::new(RAW_CLIENT_USER, external),
+            ],
+            vec![LocalPeerCredential::new(uid, RAW_CLIENT_USER)],
+        )?;
+        kernel.replace_security_snapshot(&security).await?;
+
+        let registry = active
+            .catalogue_hash_context()
+            .standard()
+            .map(|standard| orna_standard::registered_opaque_codecs(standard))
+            .transpose()?
+            .ok_or_else(|| failure("the expression CLIENT fixture has no standard context"))?;
+        let expected = {
+            let mut record =
+                encode_constructed_value(&active, &registry, &RuntimeValue::Text("hello world".into()))?;
+            record.push(b'\n');
+            record
+        };
+        let target = |name: &'static str| -> TestResult<InvocationRequestTarget> {
+            Ok(InvocationRequestTarget::qualified_name(
+                QualifiedSemanticName::new(["expr", name])?,
+            )?)
+        };
+
+        let (outcome, stdout, stderr) =
+            installed_invoke_run(&database, installed_invoke_request(target("composed")?, vec![], true, false))
+                .await?;
+        require(
+            outcome == Ok(InstalledInvokeOutcome::Completed)
+                && stdout == expected
+                && stderr.is_empty(),
+            "the installed invoke path did not evaluate the expression CLIENT call and concat",
+        )?;
+
+        let (outcome, stdout, stderr) =
+            installed_invoke_run(&database, installed_invoke_request(target("external")?, vec![], true, false))
+                .await?;
+        let error = outcome
+            .err()
+            .ok_or_else(|| failure("the external CLIENT contract unexpectedly completed"))?;
+        require(
+            error.kind() == InstalledInvokeErrorKind::Internal
+                && error.message().contains("expr.runtime@1")
+                && stdout.is_empty()
+                && stderr.is_empty(),
+            "the external CLIENT contract did not fail closed through installed invoke",
+        )
     })
     .await
 }
@@ -7619,6 +7701,63 @@ async fn install_raw_client_fixture(
         .ok_or_else(|| failure("raw CLIENT fixture is missing its SERVER function"))?
         .id();
     Ok((active, standard_upgrade, client, server))
+}
+async fn install_expression_client_fixture(
+    kernel: &PostgresKernel,
+) -> TestResult<(
+    orna_core::revision::ActiveDatabaseRevision,
+    FunctionId,
+    FunctionId,
+    FunctionId,
+)> {
+    kernel.bootstrap().await?;
+    let empty = kernel.recover().await?;
+    let schema = SourceBundle::new([SourceUnit::new("schema.orna", RAW_CLIENT_SCHEMA_SOURCE)])?;
+    let report = check(&schema, empty.catalogue());
+    require(
+        report.diagnostics().is_empty(),
+        "expression CLIENT fixture schema did not compile",
+    )?;
+    let version_one = kernel
+        .apply(&prepare(&report, empty.pair(), &empty)?)
+        .await?;
+    let standard_upgrade = orna_standard::prepare_standard_upgrade(&version_one)?;
+    let version_two = kernel.apply_standard_upgrade(&standard_upgrade).await?;
+    let context = StandardApplicationCheckContext::try_new(
+        version_two.catalogue(),
+        standard_upgrade.checked_standard_library(),
+    )?;
+    let source = SourceBundle::new([SourceUnit::new(
+        "expression.orna",
+        RAW_EXPRESSION_CLIENT_FUNCTION_SOURCE,
+    )])?;
+    let report = check_standard_application(&source, &context);
+    require(
+        report.diagnostics().is_empty(),
+        "expression CLIENT fixture functions did not compile",
+    )?;
+    let active = kernel
+        .apply(&prepare_standard_application(
+            &report,
+            version_two.pair(),
+            &version_two,
+        )?)
+        .await?;
+    let function_id = |parts: &[&str]| {
+        active
+            .catalogue()
+            .functions()
+            .iter()
+            .find(|function| function.name().parts() == parts)
+            .map(FunctionDefinition::id)
+    };
+    let literal = function_id(&["expr", "literal"])
+        .ok_or_else(|| failure("expression CLIENT fixture is missing expr.literal"))?;
+    let composed = function_id(&["expr", "composed"])
+        .ok_or_else(|| failure("expression CLIENT fixture is missing expr.composed"))?;
+    let external = function_id(&["expr", "external"])
+        .ok_or_else(|| failure("expression CLIENT fixture is missing expr.external"))?;
+    Ok((active, literal, composed, external))
 }
 
 /// Installs `orna.std/3` as the active standard from the empty base (ADR 0057
