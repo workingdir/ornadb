@@ -404,6 +404,10 @@ pub enum SecuritySnapshotError {
     DuplicateLocalPeerPrincipal,
     /// A local credential names a principal absent from the snapshot.
     UnknownLocalPeerPrincipal,
+    /// Two privilege grants name the same grantee, class, and object.
+    DuplicatePrivilegeGrant,
+    /// A privilege grant names a principal absent from the snapshot.
+    UnknownPrivilegeGrantPrincipal,
 }
 
 impl fmt::Display for SecuritySnapshotError {
@@ -426,6 +430,12 @@ impl fmt::Display for SecuritySnapshotError {
             }
             Self::UnknownLocalPeerPrincipal => {
                 "security snapshot local credential has an unknown principal"
+            }
+            Self::DuplicatePrivilegeGrant => {
+                "security snapshot contains a duplicate privilege grant"
+            }
+            Self::UnknownPrivilegeGrantPrincipal => {
+                "security snapshot privilege grant has an unknown principal"
             }
         })
     }
@@ -604,6 +614,206 @@ pub fn authorise_inspect(
     }
 }
 
+/// The closed privilege-class set of one privilege grant.
+///
+/// `Execute` and `SecurityAdmin` are class-wide privileges. `Inspect`
+/// carries exactly one closed INSPECT sub-privilege; there is no wildcard
+/// INSPECT class.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub enum PrivilegeClass {
+    /// The privilege to execute a function, or any function class-wide.
+    Execute,
+    /// One closed INSPECT privilege from the sealed INSPECT set.
+    Inspect(InspectPrivilege),
+    /// The protected security-administration privilege.
+    SecurityAdmin,
+}
+
+impl fmt::Display for PrivilegeClass {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::Execute => "execute",
+            Self::SecurityAdmin => "security_admin",
+            Self::Inspect(privilege) => match privilege {
+                InspectPrivilege::OwnInvocation => "inspect:own-invocation",
+                InspectPrivilege::SessionInvocations => "inspect:session-invocations",
+                InspectPrivilege::AnyInvocation => "inspect:any-invocation",
+                InspectPrivilege::Values => "inspect:values",
+                InspectPrivilege::Source => "inspect:source",
+                InspectPrivilege::SecurityDetails => "inspect:security-details",
+                InspectPrivilege::RuntimeInternals => "inspect:runtime-internals",
+            },
+        })
+    }
+}
+
+/// An invalid privilege grant.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PrivilegeGrantError {
+    /// The grantee is the empty identity.
+    EmptyGrantee,
+    /// The object names the empty function identity.
+    EmptyObject,
+}
+
+impl fmt::Display for PrivilegeGrantError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::EmptyGrantee => "privilege grant has an empty grantee identity",
+            Self::EmptyObject => "privilege grant has an empty object identity",
+        })
+    }
+}
+
+impl Error for PrivilegeGrantError {}
+
+/// A privilege-class grant from one grantee to one class and object.
+///
+/// `object` is `None` for a class-wide grant and `Some(function)` for a
+/// function-scoped grant. The class is closed by construction: every
+/// variant is a concrete privilege, so there is no empty class.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct PrivilegeGrant {
+    grantee: PrincipalId,
+    class: PrivilegeClass,
+    object: Option<FunctionId>,
+}
+
+impl PrivilegeGrant {
+    /// Creates a privilege grant with the closed invariants checked.
+    ///
+    /// The grantee must not be the empty identity, and an object-scoped
+    /// grant must name a non-empty function identity.
+    pub fn new(
+        grantee: PrincipalId,
+        class: PrivilegeClass,
+        object: Option<FunctionId>,
+    ) -> Result<Self, PrivilegeGrantError> {
+        if grantee == PrincipalId::from_bytes([0; 16]) {
+            return Err(PrivilegeGrantError::EmptyGrantee);
+        }
+        if let Some(function) = object
+            && function == FunctionId::from_bytes([0; 16])
+        {
+            return Err(PrivilegeGrantError::EmptyObject);
+        }
+        Ok(Self {
+            grantee,
+            class,
+            object,
+        })
+    }
+
+    /// Returns the principal that received the grant.
+    pub const fn grantee(self) -> PrincipalId {
+        self.grantee
+    }
+
+    /// Returns the closed privilege class of the grant.
+    pub const fn class(self) -> PrivilegeClass {
+        self.class
+    }
+
+    /// Returns the object when the grant is function-scoped.
+    pub const fn object(self) -> Option<FunctionId> {
+        self.object
+    }
+
+    /// Returns whether this grant applies to the whole class.
+    pub const fn is_class_wide(self) -> bool {
+        self.object.is_none()
+    }
+}
+
+/// The closed reason a privilege-class decision was denied.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PrivilegeDenial {
+    /// The requested privilege class is not granted for the object.
+    MissingPrivilege {
+        /// The privilege class that was requested and denied.
+        requested: PrivilegeClass,
+    },
+}
+
+impl PrivilegeDenial {
+    /// Returns the stable closed audit reason recorded for this denial.
+    pub const fn audit_reason(self) -> &'static str {
+        match self {
+            Self::MissingPrivilege { requested } => match requested {
+                PrivilegeClass::Execute => "execute:missing-privilege",
+                PrivilegeClass::Inspect(_) => "inspect:missing-privilege",
+                PrivilegeClass::SecurityAdmin => "security_admin:missing-privilege",
+            },
+        }
+    }
+}
+
+/// The complete result of one privilege-class authorisation check.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PrivilegeDecision {
+    /// The requested privilege class is granted for the object.
+    Allowed {
+        /// The privilege class that was requested and granted.
+        requested: PrivilegeClass,
+    },
+    /// The requested privilege class is denied with a closed reason.
+    Denied(PrivilegeDenial),
+}
+
+/// Decides whether one principal holds one privilege class for one object.
+///
+/// `granted` is the closed set of privilege classes the principal holds for
+/// `object`: a caller that resolves durable grants must first keep exactly
+/// the grants whose object is `None` or equals the requested object, then
+/// pass their classes here. `session_or_principal` names the principal
+/// being decided and is retained as decision evidence; the decision itself
+/// is closed over the granted set.
+///
+/// `Execute` and `SecurityAdmin` are class-membership decisions. `Inspect`
+/// applies the closed INSPECT ladder: a granted higher rung reaches a
+/// requested lower rung, and a requested content classifier must itself be
+/// granted. The decision fails closed: a request the granted set does not
+/// cover is denied with [`PrivilegeDenial::MissingPrivilege`] without
+/// exposing any grant or object content beyond the requested class.
+pub fn authorise_privilege(
+    session_or_principal: PrincipalId,
+    requested: PrivilegeClass,
+    object: Option<FunctionId>,
+    granted: &[PrivilegeClass],
+) -> PrivilegeDecision {
+    let covered = match requested {
+        PrivilegeClass::Execute | PrivilegeClass::SecurityAdmin => granted.contains(&requested),
+        PrivilegeClass::Inspect(requested_privilege) => {
+            let required_rung = requested_privilege.ladder_rank().unwrap_or(0);
+            let granted_rung = granted
+                .iter()
+                .filter_map(|class| match class {
+                    PrivilegeClass::Inspect(privilege) => privilege.ladder_rank(),
+                    _ => None,
+                })
+                .max();
+            let ladder_covered = granted_rung.is_some_and(|rung| rung >= required_rung);
+            let classifier_covered = match requested_privilege.classifier() {
+                None => true,
+                Some(classifier) => granted.iter().any(|class| {
+                    matches!(
+                        class,
+                        PrivilegeClass::Inspect(privilege)
+                            if privilege.classifier() == Some(classifier)
+                    )
+                }),
+            };
+            ladder_covered && classifier_covered
+        }
+    };
+    let _ = (session_or_principal, object);
+    if covered {
+        PrivilegeDecision::Allowed { requested }
+    } else {
+        PrivilegeDecision::Denied(PrivilegeDenial::MissingPrivilege { requested })
+    }
+}
+
 /// The closed family of protected security audit events.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SecurityAuditKind {
@@ -617,6 +827,9 @@ pub enum SecurityAuditKind {
     UserState,
     /// An authenticated session requested INSPECT access to an inspection epoch.
     Inspect,
+    /// An authenticated session performed or attempted a security-admin
+    /// mutation.
+    SecurityAdmin,
 }
 
 /// The closed USER state operation family recorded in protected audit.
@@ -626,6 +839,25 @@ pub enum UserStateAuditOperation {
     Load,
     /// A `write_user_state` operation.
     Write,
+}
+
+/// The closed security-admin operation family recorded in protected audit.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SecurityAdminAuditOperation {
+    /// A `sys.security.create_principal` operation.
+    CreatePrincipal,
+    /// A `sys.security.disable_principal` operation.
+    DisablePrincipal,
+    /// A `sys.security.create_role` operation.
+    CreateRole,
+    /// A `sys.security.grant_role` operation.
+    GrantRole,
+    /// A `sys.security.revoke_role` operation.
+    RevokeRole,
+    /// A `sys.security.grant_privilege` operation.
+    GrantPrivilege,
+    /// A `sys.security.revoke_privilege` operation.
+    RevokePrivilege,
 }
 
 /// Whether a protected security decision allowed or denied its operation.
@@ -653,6 +885,8 @@ pub enum SecurityAuditDenial {
     },
     /// An INSPECT decision was denied for the recorded closed reason.
     Inspect(InspectDenial),
+    /// A security-admin operation was denied for the recorded closed reason.
+    SecurityAdmin(PrivilegeDenial),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -701,6 +935,17 @@ enum SecurityAuditDecisionShape {
         session_principal: PrincipalId,
         epoch_owner: Option<PrincipalId>,
         reason: InspectDenial,
+    },
+    SecurityAdminAllowed {
+        session_principal: PrincipalId,
+        operation: SecurityAdminAuditOperation,
+        target: FunctionId,
+    },
+    SecurityAdminDenied {
+        session_principal: PrincipalId,
+        operation: SecurityAdminAuditOperation,
+        target: FunctionId,
+        reason: PrivilegeDenial,
     },
 }
 
@@ -934,6 +1179,73 @@ impl SecurityAuditDecision {
         })
     }
 
+    /// Records an allowed security-admin decision from its privilege decision.
+    ///
+    /// The operation kind, principal, and sealed target identity are
+    /// retained; argument payloads are never written to audit. The decision
+    /// must be an `Allowed` decision for the `SecurityAdmin` class; any
+    /// other decision fails closed here.
+    pub fn security_admin_allowed(
+        session: &AuthenticatedSession,
+        decision: PrivilegeDecision,
+        operation: SecurityAdminAuditOperation,
+        target: FunctionId,
+    ) -> Result<Self, SecurityAuditDecisionError> {
+        let PrivilegeDecision::Allowed { requested } = decision else {
+            return Err(SecurityAuditDecisionError::SecurityAdminDecisionShape);
+        };
+        if requested != PrivilegeClass::SecurityAdmin {
+            return Err(SecurityAuditDecisionError::SecurityAdminDecisionShape);
+        }
+        Ok(Self::recover_security_admin_allowed(
+            session.principal,
+            operation,
+            target,
+        ))
+    }
+
+    /// Recovers an allowed security-admin decision from protected storage.
+    pub const fn recover_security_admin_allowed(
+        session_principal: PrincipalId,
+        operation: SecurityAdminAuditOperation,
+        target: FunctionId,
+    ) -> Self {
+        Self(SecurityAuditDecisionShape::SecurityAdminAllowed {
+            session_principal,
+            operation,
+            target,
+        })
+    }
+
+    /// Records a denied security-admin decision for a trusted session.
+    ///
+    /// Only the closed denial reason, operation kind, principal, and sealed
+    /// target identity are retained; no argument payload is ever written to
+    /// audit.
+    pub fn security_admin_denied(
+        session: &AuthenticatedSession,
+        operation: SecurityAdminAuditOperation,
+        target: FunctionId,
+        reason: PrivilegeDenial,
+    ) -> Self {
+        Self::recover_security_admin_denied(session.principal, operation, target, reason)
+    }
+
+    /// Recovers a denied security-admin decision from protected storage.
+    pub const fn recover_security_admin_denied(
+        session_principal: PrincipalId,
+        operation: SecurityAdminAuditOperation,
+        target: FunctionId,
+        reason: PrivilegeDenial,
+    ) -> Self {
+        Self(SecurityAuditDecisionShape::SecurityAdminDenied {
+            session_principal,
+            operation,
+            target,
+            reason,
+        })
+    }
+
     /// Returns the USER state operation when this decision records one.
     pub const fn user_state_operation(&self) -> Option<UserStateAuditOperation> {
         match self.0 {
@@ -985,6 +1297,34 @@ impl SecurityAuditDecision {
         }
     }
 
+    /// Returns the operation kind when this decision records security admin.
+    pub const fn security_admin_operation(&self) -> Option<SecurityAdminAuditOperation> {
+        match self.0 {
+            SecurityAuditDecisionShape::SecurityAdminAllowed { operation, .. }
+            | SecurityAuditDecisionShape::SecurityAdminDenied { operation, .. } => Some(operation),
+            _ => None,
+        }
+    }
+
+    /// Returns the sealed target identity when this decision records
+    /// security admin.
+    pub const fn security_admin_target(&self) -> Option<FunctionId> {
+        match self.0 {
+            SecurityAuditDecisionShape::SecurityAdminAllowed { target, .. }
+            | SecurityAuditDecisionShape::SecurityAdminDenied { target, .. } => Some(target),
+            _ => None,
+        }
+    }
+
+    /// Returns the closed denial reason when this decision records a denied
+    /// security-admin decision.
+    pub const fn security_admin_denial(&self) -> Option<PrivilegeDenial> {
+        match self.0 {
+            SecurityAuditDecisionShape::SecurityAdminDenied { reason, .. } => Some(reason),
+            _ => None,
+        }
+    }
+
     /// Returns the closed event kind.
     pub const fn kind(&self) -> SecurityAuditKind {
         match self.0 {
@@ -999,6 +1339,10 @@ impl SecurityAuditDecision {
             SecurityAuditDecisionShape::UserStateAllowed { .. } => SecurityAuditKind::UserState,
             SecurityAuditDecisionShape::InspectAllowed { .. }
             | SecurityAuditDecisionShape::InspectDenied { .. } => SecurityAuditKind::Inspect,
+            SecurityAuditDecisionShape::SecurityAdminAllowed { .. }
+            | SecurityAuditDecisionShape::SecurityAdminDenied { .. } => {
+                SecurityAuditKind::SecurityAdmin
+            }
         }
     }
 
@@ -1009,11 +1353,17 @@ impl SecurityAuditDecision {
             | SecurityAuditDecisionShape::ExecuteAllowed { .. }
             | SecurityAuditDecisionShape::CapabilityAllowed { .. }
             | SecurityAuditDecisionShape::UserStateAllowed { .. }
-            | SecurityAuditDecisionShape::InspectAllowed { .. } => SecurityAuditOutcome::Allowed,
+            | SecurityAuditDecisionShape::InspectAllowed { .. }
+            | SecurityAuditDecisionShape::SecurityAdminAllowed { .. } => {
+                SecurityAuditOutcome::Allowed
+            }
             SecurityAuditDecisionShape::AuthenticationDenied { .. }
             | SecurityAuditDecisionShape::ExecuteDenied { .. }
             | SecurityAuditDecisionShape::CapabilityDenied { .. }
-            | SecurityAuditDecisionShape::InspectDenied { .. } => SecurityAuditOutcome::Denied,
+            | SecurityAuditDecisionShape::InspectDenied { .. }
+            | SecurityAuditDecisionShape::SecurityAdminDenied { .. } => {
+                SecurityAuditOutcome::Denied
+            }
         }
     }
 
@@ -1040,6 +1390,12 @@ impl SecurityAuditDecision {
                 session_principal, ..
             }
             | SecurityAuditDecisionShape::InspectDenied {
+                session_principal, ..
+            }
+            | SecurityAuditDecisionShape::SecurityAdminAllowed {
+                session_principal, ..
+            }
+            | SecurityAuditDecisionShape::SecurityAdminDenied {
                 session_principal, ..
             } => Some(session_principal),
             SecurityAuditDecisionShape::AuthenticationDenied {
@@ -1110,6 +1466,9 @@ impl SecurityAuditDecision {
             SecurityAuditDecisionShape::InspectDenied { reason, .. } => {
                 Some(SecurityAuditDenial::Inspect(*reason))
             }
+            SecurityAuditDecisionShape::SecurityAdminDenied { reason, .. } => {
+                Some(SecurityAuditDenial::SecurityAdmin(*reason))
+            }
             _ => None,
         }
     }
@@ -1153,6 +1512,9 @@ pub enum SecurityAuditDecisionError {
     CapabilityNameShape,
     /// A non-allowed INSPECT decision reached an allowed-only constructor.
     InspectDecisionShape,
+    /// A non-allowed or non-`SecurityAdmin` decision reached an
+    /// allowed-only constructor.
+    SecurityAdminDecisionShape,
 }
 
 impl fmt::Display for SecurityAuditDecisionError {
@@ -1166,6 +1528,9 @@ impl fmt::Display for SecurityAuditDecisionError {
             }
             Self::InspectDecisionShape => {
                 "security audit INSPECT decision must be an allowed decision"
+            }
+            Self::SecurityAdminDecisionShape => {
+                "security audit security-admin decision must be an allowed SecurityAdmin decision"
             }
         })
     }
@@ -1231,6 +1596,7 @@ pub struct SecuritySnapshot {
     principals: BTreeMap<PrincipalId, Principal>,
     memberships: Vec<RoleMembership>,
     grants: BTreeSet<ExecuteGrant>,
+    privilege_grants: BTreeSet<PrivilegeGrant>,
     local_peer_credentials: BTreeMap<u32, LocalPeerCredential>,
 }
 
@@ -1361,6 +1727,37 @@ impl SecuritySnapshot {
         grants: Vec<ExecuteGrant>,
         local_peer_credentials: Vec<LocalPeerCredential>,
     ) -> Result<Self, SecuritySnapshotError> {
+        Self::new_with_function_targets_local_peer_credentials_and_privilege_grants(
+            revision,
+            functions,
+            principals,
+            memberships,
+            grants,
+            local_peer_credentials,
+            vec![],
+        )
+    }
+
+    /// Creates a two-class security snapshot with protected local peer
+    /// credentials and privilege-class grants.
+    ///
+    /// The function set is the canonical, identity-ordered union of the
+    /// pinned application catalogue and the exact verified standard
+    /// snapshot. A function identity repeated across the two classes, or
+    /// twice in either class, is a duplicate and fails construction closed.
+    /// Privilege grants must be mutually distinct and must name a principal
+    /// in the snapshot; a grant object is not required to be a member of
+    /// the known function union because privilege grants may name sealed
+    /// system functions.
+    pub fn new_with_function_targets_local_peer_credentials_and_privilege_grants(
+        revision: RevisionPair,
+        functions: Vec<SecurityFunctionTarget>,
+        principals: Vec<Principal>,
+        memberships: Vec<RoleMembership>,
+        grants: Vec<ExecuteGrant>,
+        local_peer_credentials: Vec<LocalPeerCredential>,
+        privilege_grants: Vec<PrivilegeGrant>,
+    ) -> Result<Self, SecuritySnapshotError> {
         let mut known_functions = BTreeMap::new();
         for function in functions {
             if known_functions
@@ -1434,12 +1831,23 @@ impl SecuritySnapshot {
             }
         }
 
+        let mut validated_privilege_grants = BTreeSet::new();
+        for privilege_grant in privilege_grants {
+            if !validated_privilege_grants.insert(privilege_grant) {
+                return Err(SecuritySnapshotError::DuplicatePrivilegeGrant);
+            }
+            if !principals_by_id.contains_key(&privilege_grant.grantee) {
+                return Err(SecuritySnapshotError::UnknownPrivilegeGrantPrincipal);
+            }
+        }
+
         Ok(Self {
             revision,
             function_targets: known_functions,
             principals: principals_by_id,
             memberships: validated_memberships,
             grants: validated_grants,
+            privilege_grants: validated_privilege_grants,
             local_peer_credentials: local_peers_by_uid,
         })
     }
@@ -1472,6 +1880,12 @@ impl SecuritySnapshot {
     /// Iterates over `EXECUTE` grants ordered by grantee and function.
     pub fn execute_grants(&self) -> impl Iterator<Item = ExecuteGrant> + '_ {
         self.grants.iter().copied()
+    }
+
+    /// Iterates over privilege-class grants ordered by grantee, class, and
+    /// object.
+    pub fn privilege_grants(&self) -> impl Iterator<Item = PrivilegeGrant> + '_ {
+        self.privilege_grants.iter().copied()
     }
 
     /// Iterates over local peer credentials in numeric UID order.
