@@ -3,11 +3,12 @@
 use std::{error::Error, fmt};
 
 use orna_artifact::client_plan::{
-    ClientPlan, ClientPlanError, FORMAT_IDENTITY, FORMAT_VERSION, LANGUAGE_VERSION_IDENTITY,
-    OPAQUE_FORMAT_VERSION, OpaqueClientPlan,
+    ClientExpressionNode, ClientPlan, ClientPlanError, ExpressionClientPlan, OpaqueClientPlan,
+    FORMAT_IDENTITY, FORMAT_VERSION, LANGUAGE_VERSION_IDENTITY, OPAQUE_FORMAT_VERSION,
+    EXPRESSION_FORMAT_VERSION,
 };
 use orna_core::{
-    FunctionId, FunctionRevisionId, TypeId,
+    FunctionId, FunctionRevisionId, ParameterId, TypeId,
     canonical_hash::{CanonicalHashError, catalogue_digest_with_context},
     catalogue::{
         FunctionDomain, FunctionReturn, FunctionSecurity, FunctionVolatility, ValueTypeKind,
@@ -17,8 +18,8 @@ use orna_core::{
         FunctionSemanticHashVersion, RevisionPair,
     },
     security::{AuthorisedInvocation, InvocationTarget},
-    types::StandardScalar,
-    value::{OpaqueValue, OpaqueValueError, RuntimeValue},
+    types::{ResolvedType, StandardScalar},
+    value::{FunctionArgument, OpaqueValue, OpaqueValueError, RuntimeValue},
 };
 use orna_standard::{RegisteredOpaqueCodecsError, registered_opaque_codecs};
 
@@ -197,6 +198,37 @@ impl fmt::Display for ClientExecutionRule {
 
 impl Error for ClientExecutionRule {}
 
+/// A closed CLIENT expression could not produce a value.
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ClientExpressionError {
+    /// An expression read a parameter that was not bound at invocation time.
+    ParameterNotBound,
+    /// An expression value did not match the declared parameter or return type.
+    TypeMismatch,
+    /// A call did not bind exactly the target's declared parameters.
+    InvalidCall,
+    /// A field path did not resolve against its record value.
+    FieldPath,
+    /// The closed call-depth limit was reached.
+    RecursionLimit,
+}
+
+impl fmt::Display for ClientExpressionError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::ParameterNotBound => "a CLIENT expression parameter was not bound",
+            Self::TypeMismatch => "a CLIENT expression value has the wrong type",
+            Self::InvalidCall => "a CLIENT expression call has invalid arguments",
+            Self::FieldPath => "a CLIENT expression field path could not be resolved",
+            Self::RecursionLimit => "the CLIENT expression call-depth limit was exceeded",
+        })
+    }
+}
+
+impl Error for ClientExpressionError {}
+
+
 /// An error returned by the closed local CLIENT evaluator.
 #[non_exhaustive]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -255,8 +287,21 @@ pub enum ClientExecutionError {
         /// The redacted qualified capability name.
         capability: String,
     },
+    /// A version-3 expression could not produce a typed value.
+    ExpressionEvaluation {
+        /// The resolved execution context.
+        context: ClientExecutionContext,
+        /// The closed expression failure.
+        source: ClientExpressionError,
+    },
+    /// A version-3 external contract has no installed local runtime.
+    ExternalContract {
+        /// The resolved execution context.
+        context: ClientExecutionContext,
+        /// The exact contract identity retained by the artifact.
+        identity: String,
+    },
 }
-
 impl ClientExecutionError {
     /// Returns the active revision pair associated with this error.
     pub const fn pair(&self) -> RevisionPair {
@@ -266,7 +311,9 @@ impl ClientExecutionError {
             Self::InvalidFunction { context, .. }
             | Self::InvalidArtifact { context, .. }
             | Self::InvalidOpaqueValue { context, .. }
-            | Self::CapabilityDenied { context, .. } => context.pair(),
+            | Self::CapabilityDenied { context, .. }
+            | Self::ExpressionEvaluation { context, .. }
+            | Self::ExternalContract { context, .. } => context.pair(),
         }
     }
 
@@ -279,7 +326,9 @@ impl ClientExecutionError {
             Self::InvalidFunction { context, .. }
             | Self::InvalidArtifact { context, .. }
             | Self::InvalidOpaqueValue { context, .. }
-            | Self::CapabilityDenied { context, .. } => context.function(),
+            | Self::CapabilityDenied { context, .. }
+            | Self::ExpressionEvaluation { context, .. }
+            | Self::ExternalContract { context, .. } => context.function(),
         }
     }
 
@@ -292,7 +341,9 @@ impl ClientExecutionError {
             Self::InvalidFunction { context, .. }
             | Self::InvalidArtifact { context, .. }
             | Self::InvalidOpaqueValue { context, .. }
-            | Self::CapabilityDenied { context, .. } => Some(context),
+            | Self::CapabilityDenied { context, .. }
+            | Self::ExpressionEvaluation { context, .. }
+            | Self::ExternalContract { context, .. } => Some(context),
         }
     }
 }
@@ -317,10 +368,14 @@ impl fmt::Display for ClientExecutionError {
                 formatter,
                 "the CLIENT function requires the capability {capability} which is not granted"
             ),
+            Self::ExpressionEvaluation { source, .. } => source.fmt(formatter),
+            Self::ExternalContract { identity, .. } => write!(
+                formatter,
+                "the CLIENT runtime contract {identity} is not available"
+            ),
         }
     }
 }
-
 impl Error for ClientExecutionError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
@@ -330,7 +385,9 @@ impl Error for ClientExecutionError {
             Self::AuthorisationMismatch { .. }
             | Self::FunctionNotFound { .. }
             | Self::InvalidFunction { .. }
-            | Self::CapabilityDenied { .. } => None,
+            | Self::CapabilityDenied { .. }
+            | Self::ExpressionEvaluation { .. }
+            | Self::ExternalContract { .. } => None,
         }
     }
 }
@@ -344,27 +401,45 @@ pub fn evaluate_client_function(
     active: &ActiveDatabaseRevision,
     authorisation: &AuthorisedInvocation,
 ) -> Result<ClientExecutionResult, ClientExecutionError> {
-    evaluate_client_function_with_grants(
+    evaluate_client_function_with_arguments(active, authorisation, &[])
+}
+
+/// Evaluates one closed CLIENT function with invocation arguments.
+pub fn evaluate_client_function_with_arguments(
+    active: &ActiveDatabaseRevision,
+    authorisation: &AuthorisedInvocation,
+    arguments: &[FunctionArgument],
+) -> Result<ClientExecutionResult, ClientExecutionError> {
+    evaluate_client_function_with_grants_and_arguments(
         active,
         authorisation,
+        arguments,
         &[],
         &capability::LocalCapabilityGrantSet::new(),
     )
 }
 
 /// Evaluates one closed CLIENT function after the local capability gate.
-///
-/// This is the ADR 0060 enforcement entry: every declared capability of the
-/// pinned function revision must be satisfied by the local grant set before
-/// evaluation proceeds. Declarations are supplied by the caller (the sealed
-/// or raw dispatch path, or a future durable revision field); a missing
-/// grant fails closed with a redacted [`ClientExecutionError::CapabilityDenied`]
-/// carrying only the qualified capability name. A function with zero declared
-/// capabilities and an empty grant set behaves exactly like the unguarded
-/// entry.
 pub fn evaluate_client_function_with_grants(
     active: &ActiveDatabaseRevision,
     authorisation: &AuthorisedInvocation,
+    declarations: &[capability::LocalCapabilityDeclaration],
+    grants: &capability::LocalCapabilityGrantSet,
+) -> Result<ClientExecutionResult, ClientExecutionError> {
+    evaluate_client_function_with_grants_and_arguments(
+        active,
+        authorisation,
+        &[],
+        declarations,
+        grants,
+    )
+}
+
+/// Evaluates one closed CLIENT function with invocation arguments and grants.
+pub fn evaluate_client_function_with_grants_and_arguments(
+    active: &ActiveDatabaseRevision,
+    authorisation: &AuthorisedInvocation,
+    arguments: &[FunctionArgument],
     declarations: &[capability::LocalCapabilityDeclaration],
     grants: &capability::LocalCapabilityGrantSet,
 ) -> Result<ClientExecutionResult, ClientExecutionError> {
@@ -375,9 +450,29 @@ pub fn evaluate_client_function_with_grants(
             active: active.pair(),
         });
     }
-    let function = target.function();
-    validate_active_catalogue(active, function)?;
+    validate_active_catalogue(active, target.function())?;
+    let (context, value) = evaluate_function(
+        active,
+        target.function(),
+        arguments
+            .iter()
+            .map(|argument| (argument.parameter(), argument.value().clone()))
+            .collect(),
+        declarations,
+        grants,
+        0,
+    )?;
+    Ok(ClientExecutionResult { context, value })
+}
 
+fn evaluate_function(
+    active: &ActiveDatabaseRevision,
+    function: FunctionId,
+    arguments: Vec<(ParameterId, RuntimeValue)>,
+    declarations: &[capability::LocalCapabilityDeclaration],
+    grants: &capability::LocalCapabilityGrantSet,
+    depth: usize,
+) -> Result<(ClientExecutionContext, RuntimeValue), ClientExecutionError> {
     let pair = active.pair();
     let definition = active
         .catalogue()
@@ -395,17 +490,55 @@ pub fn evaluate_client_function_with_grants(
         function,
         function_revision: revision.id(),
     };
-
+    if revision.artifact().version() == EXPRESSION_FORMAT_VERSION {
+        if arguments.len() != definition.parameters().len()
+            || definition.parameters().iter().any(|parameter| {
+                arguments
+                    .iter()
+                    .filter(|(candidate, _)| *candidate == parameter.id())
+                    .count()
+                    != 1
+                    || arguments
+                        .iter()
+                        .find(|(candidate, _)| *candidate == parameter.id())
+                        .is_none_or(|(_, value)| {
+                            !runtime_value_matches(active, value, parameter.resolved_type())
+                        })
+            })
+        {
+            return Err(expression_error(
+                context,
+                ClientExpressionError::InvalidCall,
+            ));
+        }
+    }
     for declaration in declarations {
-        if !grants.satisfies_declaration(declaration, |_parameter| None) {
+        if !grants.satisfies_declaration(declaration, |parameter| {
+            let parameter_id = definition
+                .parameters()
+                .iter()
+                .find(|candidate| candidate.name() == parameter)
+                .map(|candidate| candidate.id())?;
+            arguments
+                .iter()
+                .find(|(candidate, _)| *candidate == parameter_id)
+                .and_then(|(_, value)| match value {
+                    RuntimeValue::Text(value) => Some(value.clone()),
+                    _ => None,
+                })
+        }) {
             return Err(ClientExecutionError::CapabilityDenied {
                 context,
                 capability: declaration.name().as_str().to_owned(),
             });
         }
     }
-
-    let return_shape = validate_function_shape(active, definition, context)?;
+    let return_shape = validate_function_shape(
+        active,
+        definition,
+        context,
+        revision.artifact().version(),
+    )?;
     validate_selected_references(
         active,
         revision.semantic_hash_version(),
@@ -418,9 +551,17 @@ pub fn evaluate_client_function_with_grants(
         context,
         return_shape,
     )?;
-
-    let value = evaluate_plan(active, revision.artifact().payload(), context, return_shape)?;
-    Ok(ClientExecutionResult { context, value })
+    let value = evaluate_plan(
+        active,
+        revision.artifact().payload(),
+        context,
+        return_shape,
+        &arguments,
+        declarations,
+        grants,
+        depth,
+    )?;
+    Ok((context, value))
 }
 
 fn evaluate_plan(
@@ -428,6 +569,10 @@ fn evaluate_plan(
     payload: &[u8],
     context: ClientExecutionContext,
     return_shape: ClientReturnShape,
+    arguments: &[(ParameterId, RuntimeValue)],
+    declarations: &[capability::LocalCapabilityDeclaration],
+    grants: &capability::LocalCapabilityGrantSet,
+    depth: usize,
 ) -> Result<RuntimeValue, ClientExecutionError> {
     match return_shape {
         ClientReturnShape::LegacyBoolean | ClientReturnShape::StandardBoolean(_) => {
@@ -466,9 +611,216 @@ fn evaluate_plan(
                 })?;
             Ok(RuntimeValue::Opaque(value))
         }
+        ClientReturnShape::Expression(expected) => {
+            let plan = ExpressionClientPlan::decode(payload)
+                .map_err(|source| ClientExecutionError::InvalidArtifact { context, source })?;
+            let value = evaluate_expression(
+                active,
+                plan.expression(),
+                context,
+                arguments,
+                declarations,
+                grants,
+                depth,
+            )?;
+            if runtime_value_matches(active, &value, expected) {
+                Ok(value)
+            } else {
+                Err(expression_error(
+                    context,
+                    ClientExpressionError::TypeMismatch,
+                ))
+            }
+        }
         ClientReturnShape::OtherValue => unreachable!("definition references were validated"),
         ClientReturnShape::Unsupported => unreachable!("function shape was validated"),
     }
+}
+
+fn evaluate_expression(
+    active: &ActiveDatabaseRevision,
+    expression: &ClientExpressionNode,
+    context: ClientExecutionContext,
+    arguments: &[(ParameterId, RuntimeValue)],
+    declarations: &[capability::LocalCapabilityDeclaration],
+    grants: &capability::LocalCapabilityGrantSet,
+    depth: usize,
+) -> Result<RuntimeValue, ClientExecutionError> {
+    match expression {
+        ClientExpressionNode::String { value } => Ok(RuntimeValue::Text(value.clone())),
+        ClientExpressionNode::Integer { value } => i32::try_from(*value)
+            .map(RuntimeValue::Integer)
+            .map_err(|_| expression_error(context, ClientExpressionError::TypeMismatch)),
+        ClientExpressionNode::Boolean { value } => Ok(RuntimeValue::Boolean(*value)),
+        ClientExpressionNode::ParameterRead { parameter } => arguments
+            .iter()
+            .find(|(candidate, _)| candidate == parameter)
+            .map(|(_, value)| value.clone())
+            .ok_or_else(|| expression_error(context, ClientExpressionError::ParameterNotBound)),
+        ClientExpressionNode::FieldPath { root, fields } => {
+            let value = arguments
+                .iter()
+                .find(|(candidate, _)| candidate == root)
+                .map(|(_, value)| value)
+                .ok_or_else(|| expression_error(context, ClientExpressionError::ParameterNotBound))?;
+            evaluate_field_path(active, value, fields, context)
+        }
+        ClientExpressionNode::Concat { left, right } => {
+            let left = evaluate_expression(
+                active,
+                left,
+                context,
+                arguments,
+                declarations,
+                grants,
+                depth,
+            )?;
+            let right = evaluate_expression(
+                active,
+                right,
+                context,
+                arguments,
+                declarations,
+                grants,
+                depth,
+            )?;
+            let (RuntimeValue::Text(left), RuntimeValue::Text(right)) = (left, right) else {
+                return Err(expression_error(
+                    context,
+                    ClientExpressionError::TypeMismatch,
+                ));
+            };
+            Ok(RuntimeValue::Text(format!("{left}{right}")))
+        }
+        ClientExpressionNode::Call {
+            function,
+            arguments: bound,
+        } => {
+            if depth >= orna_artifact::client_plan::MAX_EXPRESSION_DEPTH {
+                return Err(expression_error(
+                    context,
+                    ClientExpressionError::RecursionLimit,
+                ));
+            }
+            let mut evaluated = Vec::with_capacity(bound.len());
+            for (parameter, expression) in bound {
+                if evaluated.iter().any(|(candidate, _)| candidate == parameter) {
+                    return Err(expression_error(context, ClientExpressionError::InvalidCall));
+                }
+                let value = evaluate_expression(
+                    active,
+                    expression,
+                    context,
+                    arguments,
+                    declarations,
+                    grants,
+                    depth,
+                )?;
+                evaluated.push((*parameter, value));
+            }
+            let (_, value) = evaluate_function(
+                active,
+                *function,
+                evaluated,
+                declarations,
+                grants,
+                depth + 1,
+            )?;
+            Ok(value)
+        }
+        ClientExpressionNode::ExternalContract { identity } => {
+            Err(ClientExecutionError::ExternalContract {
+                context,
+                identity: identity.clone(),
+            })
+        }
+    }
+}
+
+fn evaluate_field_path(
+    active: &ActiveDatabaseRevision,
+    value: &RuntimeValue,
+    fields: &[orna_core::FieldId],
+    context: ClientExecutionContext,
+) -> Result<RuntimeValue, ClientExecutionError> {
+    let mut current = value;
+    for field_id in fields {
+        let RuntimeValue::Record(record) = current else {
+            return Err(expression_error(context, ClientExpressionError::FieldPath));
+        };
+        let definition = active
+            .catalogue()
+            .record_value_type_by_id(record.record_type())
+            .and_then(|definition| definition.field_by_id(*field_id))
+            .or_else(|| {
+                active
+                    .catalogue_hash_context()
+                    .standard()
+                    .and_then(|standard| {
+                        standard
+                            .catalogue()
+                            .record_value_type_by_id(record.record_type())
+                            .and_then(|definition| definition.field_by_id(*field_id))
+                    })
+            })
+            .ok_or_else(|| expression_error(context, ClientExpressionError::FieldPath))?;
+        let index = usize::try_from(definition.ordinal())
+            .map_err(|_| expression_error(context, ClientExpressionError::FieldPath))?;
+        current = record
+            .fields()
+            .get(index)
+            .ok_or_else(|| expression_error(context, ClientExpressionError::FieldPath))?;
+    }
+    Ok(current.clone())
+}
+
+fn runtime_value_matches(
+    active: &ActiveDatabaseRevision,
+    value: &RuntimeValue,
+    expected: ResolvedType,
+) -> bool {
+    let scalar_matches = |scalar| match (scalar, value) {
+        (StandardScalar::Boolean, RuntimeValue::Boolean(_))
+        | (StandardScalar::Integer, RuntimeValue::Integer(_))
+        | (StandardScalar::CharacterLargeObject, RuntimeValue::Text(_)) => true,
+        _ => false,
+    };
+    match expected {
+        ResolvedType::Scalar(scalar) => scalar_matches(scalar),
+        ResolvedType::Value(type_id) => {
+            let Some(definition) = active
+                .catalogue_hash_context()
+                .standard()
+                .and_then(|standard| standard.catalogue().value_type_by_id(type_id))
+            else {
+                return false;
+            };
+            if definition.kind() == ValueTypeKind::Opaque {
+                return matches!(value, RuntimeValue::Opaque(opaque) if opaque.opaque_type() == type_id);
+            }
+            match definition.representation_contract() {
+                "orna.kernel.value.boolean@1" => scalar_matches(StandardScalar::Boolean),
+                "orna.kernel.value.integer@1" => scalar_matches(StandardScalar::Integer),
+                "orna.kernel.value.character-large-object@1" => {
+                    scalar_matches(StandardScalar::CharacterLargeObject)
+                }
+                _ => false,
+            }
+        }
+        ResolvedType::Named(type_id) => {
+            matches!(value, RuntimeValue::Record(record) if record.record_type() == type_id)
+        }
+        ResolvedType::Reference { target } => {
+            matches!(value, RuntimeValue::Reference { target: actual, .. } if *actual == target)
+        }
+    }
+}
+
+fn expression_error(
+    context: ClientExecutionContext,
+    source: ClientExpressionError,
+) -> ClientExecutionError {
+    ClientExecutionError::ExpressionEvaluation { context, source }
 }
 
 fn validate_active_catalogue(
@@ -511,6 +863,7 @@ enum ClientReturnShape {
     LegacyBoolean,
     StandardBoolean(TypeId),
     Opaque(TypeId),
+    Expression(ResolvedType),
     OtherValue,
     Unsupported,
 }
@@ -518,21 +871,30 @@ enum ClientReturnShape {
 fn classify_client_return(
     active: &ActiveDatabaseRevision,
     return_type: &FunctionReturn,
+    artifact_version: u32,
 ) -> ClientReturnShape {
     let FunctionReturn::Single(resolved_type) = return_type else {
         return ClientReturnShape::Unsupported;
     };
     if let Some(scalar) = resolved_type.legacy_scalar() {
         return if scalar == StandardScalar::Boolean {
-            ClientReturnShape::LegacyBoolean
+            if artifact_version == EXPRESSION_FORMAT_VERSION {
+                ClientReturnShape::Expression(*resolved_type)
+            } else {
+                ClientReturnShape::LegacyBoolean
+            }
+        } else if artifact_version == EXPRESSION_FORMAT_VERSION
+            && matches!(
+                scalar,
+                StandardScalar::Integer | StandardScalar::CharacterLargeObject
+            )
+        {
+            ClientReturnShape::Expression(*resolved_type)
         } else {
             ClientReturnShape::Unsupported
         };
     }
-    if resolved_type.reference_target().is_some() {
-        return ClientReturnShape::Unsupported;
-    }
-    if resolved_type.named_type().is_some() {
+    if resolved_type.reference_target().is_some() || resolved_type.named_type().is_some() {
         return ClientReturnShape::Unsupported;
     }
     if let Some(type_id) = resolved_type.value_type() {
@@ -544,10 +906,26 @@ fn classify_client_return(
             return ClientReturnShape::Unsupported;
         };
         if definition.representation_contract() == "orna.kernel.value.boolean@1" {
-            return ClientReturnShape::StandardBoolean(type_id);
+            return if artifact_version == EXPRESSION_FORMAT_VERSION {
+                ClientReturnShape::Expression(*resolved_type)
+            } else {
+                ClientReturnShape::StandardBoolean(type_id)
+            };
         }
         if definition.kind() == ValueTypeKind::Opaque {
-            return ClientReturnShape::Opaque(type_id);
+            return if artifact_version == EXPRESSION_FORMAT_VERSION {
+                ClientReturnShape::Expression(*resolved_type)
+            } else {
+                ClientReturnShape::Opaque(type_id)
+            };
+        }
+        if artifact_version == EXPRESSION_FORMAT_VERSION
+            && matches!(
+                definition.representation_contract(),
+                "orna.kernel.value.integer@1" | "orna.kernel.value.character-large-object@1"
+            )
+        {
+            return ClientReturnShape::Expression(*resolved_type);
         }
         return ClientReturnShape::OtherValue;
     }
@@ -558,6 +936,7 @@ fn validate_function_shape(
     active: &ActiveDatabaseRevision,
     definition: &orna_core::catalogue::FunctionDefinition,
     context: ClientExecutionContext,
+    artifact_version: u32,
 ) -> Result<ClientReturnShape, ClientExecutionError> {
     if definition.domain() != FunctionDomain::Client {
         return Err(invalid_function(
@@ -565,10 +944,10 @@ fn validate_function_shape(
             ClientExecutionRule::FunctionDomain,
         ));
     }
-    if !definition.parameters().is_empty() {
+    if artifact_version != EXPRESSION_FORMAT_VERSION && !definition.parameters().is_empty() {
         return Err(invalid_function(context, ClientExecutionRule::Parameters));
     }
-    let return_shape = classify_client_return(active, definition.return_type());
+    let return_shape = classify_client_return(active, definition.return_type(), artifact_version);
     if matches!(return_shape, ClientReturnShape::Unsupported) {
         return Err(invalid_function(context, ClientExecutionRule::ReturnType));
     }
@@ -606,11 +985,28 @@ fn validate_selected_references(
             }
         }
         orna_core::revision::CatalogueHashContext::Version2 { standard } => {
+            if semantic_hash_version != FunctionSemanticHashVersion::Version2 {
+                return Err(invalid_function(context, ClientExecutionRule::References));
+            }
+            if matches!(return_shape, ClientReturnShape::Expression(_)) {
+                if selected.iter().any(|reference| {
+                    !matches!(
+                        reference.kind(),
+                        DefinitionReferenceKind::FunctionCall
+                            | DefinitionReferenceKind::NamedType
+                            | DefinitionReferenceKind::ParameterRead
+                            | DefinitionReferenceKind::QueryField
+                            | DefinitionReferenceKind::Expression
+                    )
+                }) {
+                    return Err(invalid_function(context, ClientExecutionRule::References));
+                }
+                return Ok(());
+            }
             let Some(reference) = selected.first() else {
                 return Err(invalid_function(context, ClientExecutionRule::References));
             };
-            let valid = semantic_hash_version == FunctionSemanticHashVersion::Version2
-                && selected.len() == 1
+            let valid = selected.len() == 1
                 && reference.ordinal() == 0
                 && reference.kind() == DefinitionReferenceKind::NamedType
                 && match reference.target() {
@@ -632,8 +1028,9 @@ fn validate_selected_references(
                                     && definition
                                         .is_some_and(|value| value.kind() == ValueTypeKind::Opaque)
                             }
-                            ClientReturnShape::OtherValue => false,
-                            ClientReturnShape::Unsupported => false,
+                            ClientReturnShape::Expression(_)
+                            | ClientReturnShape::OtherValue
+                            | ClientReturnShape::Unsupported => false,
                         }
                     }
                     _ => false,
@@ -662,6 +1059,7 @@ fn validate_artifact(
     let expected_version = match return_shape {
         ClientReturnShape::LegacyBoolean | ClientReturnShape::StandardBoolean(_) => FORMAT_VERSION,
         ClientReturnShape::Opaque(_) => OPAQUE_FORMAT_VERSION,
+        ClientReturnShape::Expression(_) => EXPRESSION_FORMAT_VERSION,
         ClientReturnShape::OtherValue => unreachable!("definition references were validated"),
         ClientReturnShape::Unsupported => unreachable!("function shape was validated"),
     };
