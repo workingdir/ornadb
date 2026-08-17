@@ -1,6 +1,6 @@
 //! Local evaluation for closed CLIENT functions.
 
-use std::{collections::{HashMap, hash_map::Entry}, error::Error, fmt};
+use std::{collections::{HashMap, hash_map::Entry}, error::Error, fmt, hash::{Hash, Hasher}};
 
 use orna_artifact::client_plan::{
     CAPABILITY_FORMAT_VERSION, CapabilityArgumentSource, CapabilityClientPlan, ClientExpressionNode,
@@ -9,14 +9,14 @@ use orna_artifact::client_plan::{
     OpaqueClientPlan, STATE_FORMAT_VERSION, StateClientPlan, StateDefault, StateScope,
 };
 use orna_core::{
-    FunctionId, FunctionRevisionId, ParameterId, StateSlotId, TypeId,
+    FunctionId, FunctionRevisionId, ParameterId, PrincipalId, StateSlotId, TypeId,
     canonical_hash::{CanonicalHashError, catalogue_digest_with_context},
     catalogue::{
         FunctionDomain, FunctionReturn, FunctionSecurity, FunctionVolatility, ValueTypeKind,
     },
     revision::{
         ActiveDatabaseRevision, DefinitionReferenceKind, DefinitionReferenceTarget,
-        FunctionSemanticHashVersion, RevisionPair,
+        FunctionSemanticHashVersion, RevisionPair, Sha256Digest,
     },
     security::{AuthorisedInvocation, InvocationTarget},
     state::{
@@ -78,6 +78,299 @@ impl ClientExecutionResult {
         self.value
     }
 }
+/// The cache identity for one CLIENT resource request.
+///
+/// All four components are part of the cache boundary. A resource result must
+/// not cross a principal, pinned revision, argument set, or invalidation epoch.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ClientResourceKey {
+    target: InvocationTarget,
+    principal: PrincipalId,
+    arguments_digest: Sha256Digest,
+    invalidation_token: Sha256Digest,
+}
+
+impl ClientResourceKey {
+    /// Creates one principal- and revision-scoped resource identity.
+    pub const fn new(
+        target: InvocationTarget,
+        principal: PrincipalId,
+        arguments_digest: Sha256Digest,
+        invalidation_token: Sha256Digest,
+    ) -> Self {
+        Self {
+            target,
+            principal,
+            arguments_digest,
+            invalidation_token,
+        }
+    }
+
+    /// Returns the pinned invocation target.
+    pub const fn target(self) -> InvocationTarget {
+        self.target
+    }
+
+    /// Returns the principal that owns the result.
+    pub const fn principal(self) -> PrincipalId {
+        self.principal
+    }
+
+    /// Returns the canonical typed argument digest.
+    pub const fn arguments_digest(self) -> Sha256Digest {
+        self.arguments_digest
+    }
+
+    /// Returns the catalogue or data invalidation token.
+    pub const fn invalidation_token(self) -> Sha256Digest {
+        self.invalidation_token
+    }
+}
+
+impl Hash for ClientResourceKey {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.target.function().hash(state);
+        self.target.revision().hash(state);
+        self.target.class().hash(state);
+        self.target.standard_revision().hash(state);
+        self.target.executable_revision().hash(state);
+        self.principal.hash(state);
+        self.arguments_digest.hash(state);
+        self.invalidation_token.hash(state);
+    }
+}
+
+/// The externally visible lifecycle state of one CLIENT resource.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ClientResourceStatus {
+    /// No request generation is active.
+    Idle,
+    /// The current generation is waiting for its executor result.
+    Loading,
+    /// The current generation has one type-checked value.
+    Ready,
+    /// The current generation ended with a structured failure code.
+    Failed,
+    /// The current generation was cancelled before completion.
+    Cancelled,
+}
+
+/// A monotonically increasing CLIENT resource request generation.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct ClientResourceGeneration(u64);
+
+impl ClientResourceGeneration {
+    /// Returns the durable generation number.
+    pub const fn value(self) -> u64 {
+        self.0
+    }
+}
+
+/// A structured failure recorded by a CLIENT resource.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ClientResourceFailure {
+    code: String,
+}
+
+impl ClientResourceFailure {
+    /// Returns the stable failure code.
+    pub fn code(&self) -> &str {
+        &self.code
+    }
+}
+
+/// Errors that leave a CLIENT resource unchanged.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ClientResourceError {
+    /// The generation counter cannot advance safely.
+    GenerationExhausted,
+    /// A completion belongs to an older or unknown generation.
+    StaleGeneration {
+        /// The generation currently owned by the resource.
+        expected: ClientResourceGeneration,
+        /// The generation supplied by the executor.
+        actual: ClientResourceGeneration,
+    },
+    /// The operation is not valid while the resource has this status.
+    InvalidTransition {
+        /// The current resource status.
+        status: ClientResourceStatus,
+    },
+    /// A failure code is empty or contains a forbidden NUL byte.
+    InvalidFailureCode,
+    /// The result does not match the declared resolved type.
+    TypeMismatch,
+}
+
+impl fmt::Display for ClientResourceError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::GenerationExhausted => formatter.write_str("CLIENT resource generation exhausted"),
+            Self::StaleGeneration { expected, actual } => write!(
+                formatter,
+                "CLIENT resource completion has generation {}, expected {}",
+                actual.value(),
+                expected.value(),
+            ),
+            Self::InvalidTransition { status } => {
+                write!(formatter, "CLIENT resource operation is invalid in {status:?} state")
+            }
+            Self::InvalidFailureCode => {
+                formatter.write_str("CLIENT resource failure code must be non-empty and contain no NUL")
+            }
+            Self::TypeMismatch => formatter.write_str("CLIENT resource value has the wrong runtime type"),
+        }
+    }
+}
+
+impl Error for ClientResourceError {}
+
+/// One typed CLIENT resource lifecycle owned by the local evaluator.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ClientResource {
+    key: ClientResourceKey,
+    expected_type: ResolvedType,
+    generation: ClientResourceGeneration,
+    status: ClientResourceStatus,
+    value: Option<RuntimeValue>,
+    failure: Option<ClientResourceFailure>,
+}
+
+impl ClientResource {
+    /// Creates an idle resource with no published value.
+    pub const fn new(key: ClientResourceKey, expected_type: ResolvedType) -> Self {
+        Self {
+            key,
+            expected_type,
+            generation: ClientResourceGeneration(0),
+            status: ClientResourceStatus::Idle,
+            value: None,
+            failure: None,
+        }
+    }
+
+    /// Returns the complete cache identity.
+    pub const fn key(&self) -> ClientResourceKey {
+        self.key
+    }
+
+    /// Returns the expected result type.
+    pub const fn expected_type(&self) -> ResolvedType {
+        self.expected_type
+    }
+
+    /// Returns the current request generation.
+    pub const fn generation(&self) -> ClientResourceGeneration {
+        self.generation
+    }
+
+    /// Returns the current lifecycle state.
+    pub const fn status(&self) -> ClientResourceStatus {
+        self.status
+    }
+
+    /// Returns the published value in the `READY` state.
+    pub fn value(&self) -> Option<&RuntimeValue> {
+        self.value.as_ref()
+    }
+
+    /// Returns the structured failure in the `FAILED` state.
+    pub fn failure(&self) -> Option<&ClientResourceFailure> {
+        self.failure.as_ref()
+    }
+
+    /// Starts a new request and invalidates every older completion.
+    pub fn begin_loading(&mut self) -> Result<ClientResourceGeneration, ClientResourceError> {
+        self.generation = ClientResourceGeneration(
+            self.generation
+                .0
+                .checked_add(1)
+                .ok_or(ClientResourceError::GenerationExhausted)?,
+        );
+        self.status = ClientResourceStatus::Loading;
+        self.value = None;
+        self.failure = None;
+        Ok(self.generation)
+    }
+
+    /// Publishes one type-checked result for the current generation.
+    pub fn publish_ready(
+        &mut self,
+        active: &ActiveDatabaseRevision,
+        generation: ClientResourceGeneration,
+        value: RuntimeValue,
+    ) -> Result<(), ClientResourceError> {
+        self.require_loading(generation)?;
+        if !runtime_value_matches(active, &value, self.expected_type) {
+            return Err(ClientResourceError::TypeMismatch);
+        }
+        self.status = ClientResourceStatus::Ready;
+        self.value = Some(value);
+        self.failure = None;
+        Ok(())
+    }
+
+    /// Records one structured failure for the current generation.
+    pub fn publish_failure(
+        &mut self,
+        generation: ClientResourceGeneration,
+        code: String,
+    ) -> Result<(), ClientResourceError> {
+        if code.is_empty() || code.contains('\0') {
+            return Err(ClientResourceError::InvalidFailureCode);
+        }
+        self.require_loading(generation)?;
+        self.status = ClientResourceStatus::Failed;
+        self.value = None;
+        self.failure = Some(ClientResourceFailure { code });
+        Ok(())
+    }
+
+    /// Cancels the current generation without retaining a value or failure.
+    pub fn cancel(
+        &mut self,
+        generation: ClientResourceGeneration,
+    ) -> Result<(), ClientResourceError> {
+        self.require_loading(generation)?;
+        self.status = ClientResourceStatus::Cancelled;
+        self.value = None;
+        self.failure = None;
+        Ok(())
+    }
+
+    /// Invalidates the current generation and returns to `IDLE`.
+    pub fn invalidate(&mut self) -> Result<(), ClientResourceError> {
+        self.generation = ClientResourceGeneration(
+            self.generation
+                .0
+                .checked_add(1)
+                .ok_or(ClientResourceError::GenerationExhausted)?,
+        );
+        self.status = ClientResourceStatus::Idle;
+        self.value = None;
+        self.failure = None;
+        Ok(())
+    }
+
+    fn require_loading(
+        &self,
+        generation: ClientResourceGeneration,
+    ) -> Result<(), ClientResourceError> {
+        if generation != self.generation {
+            return Err(ClientResourceError::StaleGeneration {
+                expected: self.generation,
+                actual: generation,
+            });
+        }
+        if self.status != ClientResourceStatus::Loading {
+            return Err(ClientResourceError::InvalidTransition {
+                status: self.status,
+            });
+        }
+        Ok(())
+    }
+}
+
 fn validate_state_text(value: &str, field: &'static str) -> Result<(), ClientStateIdentityError> {
     if value.contains('\0') {
         return Err(ClientStateIdentityError::InvalidText { field });
@@ -2156,7 +2449,7 @@ mod tests {
             DefinitionIdentity, DefinitionOrigin, DefinitionReference, DefinitionReferenceKind,
             DefinitionReferenceTarget, DeployableRevision, ExecutableArtifact,
             ExecutableArtifactKind, FunctionRevisionRecord, FunctionSemanticHashVersion,
-            RevisionInvariantError, RevisionPair, SourceOrigin, StoredSourceRevision,
+            RevisionInvariantError, RevisionPair, Sha256Digest, SourceOrigin, StoredSourceRevision,
             StoredSourceUnit,
         },
         security::{
@@ -2215,6 +2508,102 @@ mod tests {
             assert_eq!(result.context().function_revision(), function_revision);
             assert_eq!(result.value(), &RuntimeValue::Boolean(value));
         }
+    }
+
+    #[test]
+    fn client_resource_lifecycle_rejects_stale_and_invalid_results() {
+        let (active, function, pair, _) = version_one_active(true);
+        let principal = PrincipalId::from_bytes([0x7a; 16]);
+        let key = super::ClientResourceKey::new(
+            InvocationTarget::new(function, pair),
+            principal,
+            Sha256Digest::from_bytes([0x11; 32]),
+            Sha256Digest::from_bytes([0x22; 32]),
+        );
+        let mut resource = super::ClientResource::new(
+            key,
+            ResolvedType::Scalar(StandardScalar::Boolean),
+        );
+
+        assert_eq!(resource.status(), super::ClientResourceStatus::Idle);
+        assert_eq!(resource.generation().value(), 0);
+
+        let first = resource.begin_loading().unwrap();
+        assert_eq!(resource.status(), super::ClientResourceStatus::Loading);
+        assert_eq!(first.value(), 1);
+        assert_eq!(
+            resource.publish_ready(
+                &active,
+                super::ClientResourceGeneration(0),
+                RuntimeValue::Boolean(true),
+            ),
+            Err(super::ClientResourceError::StaleGeneration {
+                expected: first,
+                actual: super::ClientResourceGeneration(0),
+            }),
+        );
+        assert_eq!(resource.status(), super::ClientResourceStatus::Loading);
+
+        resource
+            .publish_ready(&active, first, RuntimeValue::Boolean(true))
+            .unwrap();
+        assert_eq!(resource.status(), super::ClientResourceStatus::Ready);
+        assert_eq!(resource.value(), Some(&RuntimeValue::Boolean(true)));
+
+        let second = resource.begin_loading().unwrap();
+        assert_eq!(resource.value(), None);
+        assert_eq!(
+            resource.publish_failure(second, String::new()),
+            Err(super::ClientResourceError::InvalidFailureCode),
+        );
+        assert_eq!(resource.status(), super::ClientResourceStatus::Loading);
+        resource
+            .publish_failure(second, "network.timeout".to_owned())
+            .unwrap();
+        assert_eq!(resource.status(), super::ClientResourceStatus::Failed);
+        assert_eq!(
+            resource.failure().map(super::ClientResourceFailure::code),
+            Some("network.timeout"),
+        );
+
+        let third = resource.begin_loading().unwrap();
+        resource.cancel(third).unwrap();
+        assert_eq!(resource.status(), super::ClientResourceStatus::Cancelled);
+        assert_eq!(resource.value(), None);
+        assert_eq!(resource.failure(), None);
+        assert_eq!(
+            resource.publish_failure(third, "late".to_owned()),
+            Err(super::ClientResourceError::InvalidTransition {
+                status: super::ClientResourceStatus::Cancelled,
+            }),
+        );
+
+        resource.invalidate().unwrap();
+        assert_eq!(resource.status(), super::ClientResourceStatus::Idle);
+        assert_eq!(resource.generation().value(), 4);
+    }
+
+    #[test]
+    fn client_resource_ready_value_must_match_declared_type() {
+        let (active, function, pair, _) = version_one_active(true);
+        let key = super::ClientResourceKey::new(
+            InvocationTarget::new(function, pair),
+            PrincipalId::from_bytes([0x7a; 16]),
+            Sha256Digest::from_bytes([0x31; 32]),
+            Sha256Digest::from_bytes([0x32; 32]),
+        );
+        let mut resource = super::ClientResource::new(
+            key,
+            ResolvedType::Scalar(StandardScalar::Boolean),
+        );
+        let generation = resource.begin_loading().unwrap();
+
+        assert_eq!(
+            resource.publish_ready(&active, generation, RuntimeValue::Integer(4)),
+            Err(super::ClientResourceError::TypeMismatch),
+        );
+        assert_eq!(resource.status(), super::ClientResourceStatus::Loading);
+        assert_eq!(resource.value(), None);
     }
 
     fn version_four_text_state_plan() -> (
