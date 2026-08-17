@@ -119,17 +119,25 @@ source-of-truth or authority rules.
   [`orna.std/3` Standard Output Value Types](0058-orna-std-3-output-value-types.md)
 * **work ADR 0059:**
   [Compiler-Backed `orna.std/3` Standard Upgrade](0059-compiler-backed-v3-standard-upgrade.md)
+* **work ADR 0059 (duplicate historical number):**
+  [Offline LSP and Editor Tooling for `.orna` Source](0059-offline-lsp-editor-tooling.md)
 * **work ADR 0060:**
   [CLIENT Capability Requirements and the Local Sandbox](0060-client-capability-requirements.md)
 * **work ADR 0061:**
   [Durable USER State Service](0061-durable-user-state-service.md)
-* **work ADR 0058:**
-  [`orna.std/3` Standard Output Value Types](0058-orna-std-3-output-value-types.md)
-* **work ADR 0059:**
-  [Offline LSP and Editor Tooling for `.orna` Source](0059-offline-lsp-editor-tooling.md)
+* **work ADR 0062:**
+  [`std.ui.UI` Standard-Library Value Type](0062-std-ui-value-type.md)
+* **work ADR 0063:**
+  [Automatic Runtime Selection](0063-automatic-runtime-selection.md)
+* **work ADR 0064:**
+  [`sys.inspect` Core](0064-sys-inspect-core.md)
+* **work ADR 0065:**
+  [Security Admin Functions](0065-security-admin-functions.md)
 * **work ADR 0066:**
   [`orna source diff` — Semantic Source Changes Without Apply](0066-semantic-source-diff.md)
 * **work ADR 0067:**
   [`std.csv.encode` — the Sealed CSV Output Presenter](0067-csv-output-presenter.md)
 * **work ADR 0068:**
   [CLIENT Expression Bodies and RUNTIME CONTRACT Clauses](0068-client-expression-bodies.md)
+* **work ADR 0069:**
+  [CLIENT STATE Declarations and Function-Instance State](0069-client-state-declarations.md)
