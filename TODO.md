@@ -68,10 +68,15 @@ separate release action.
 - [x] Ship the `orna-lsp` language server binary over stdio.
 - [x] Prove diagnostics, semantic tokens, symbols, hover, navigation,
   and completion through a framed end-to-end protocol test.
-- [ ] Land the tree-sitter grammar with corpus tests and queries.
-- [ ] Land the TextMate grammar and VS Code extension.
-- [ ] Land the Neovim, vim, Helix, Zed, and Emacs integrations.
-- [ ] Verify the whole tooling surface against the spec examples.
+- [x] Land the tree-sitter grammar with corpus tests and queries
+  (30 corpus cases pass; every `spec/examples/*.orna` file parses).
+- [x] Land the TextMate grammar and VS Code extension (valid package,
+  syntaxes, and built `orna-vscode-0.1.0.vsix`).
+- [x] Land the Neovim, vim, Helix, Zed, and Emacs integrations
+  (configs present; Helix/Zed TOML validated, Emacs loads under batch
+  Emacs; Neovim/Vim load checks need their editors at runtime).
+- [x] Verify the whole tooling surface against the spec examples
+  (tree-sitter parses all ten examples; LSP suite exercises the server).
 
 ## Completed foundations
 
