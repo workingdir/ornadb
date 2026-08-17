@@ -3,9 +3,9 @@
 use std::{error::Error, fmt};
 
 use orna_artifact::client_plan::{
-    ClientExpressionNode, ClientPlan, ClientPlanError, ExpressionClientPlan, OpaqueClientPlan,
-    FORMAT_IDENTITY, FORMAT_VERSION, LANGUAGE_VERSION_IDENTITY, OPAQUE_FORMAT_VERSION,
-    EXPRESSION_FORMAT_VERSION,
+    ClientExpressionNode, ClientPlan, ClientPlanError, EXPRESSION_FORMAT_VERSION,
+    ExpressionClientPlan, FORMAT_IDENTITY, FORMAT_VERSION, LANGUAGE_VERSION_IDENTITY,
+    OPAQUE_FORMAT_VERSION, OpaqueClientPlan,
 };
 use orna_core::{
     FunctionId, FunctionRevisionId, ParameterId, TypeId,
@@ -227,7 +227,6 @@ impl fmt::Display for ClientExpressionError {
 }
 
 impl Error for ClientExpressionError {}
-
 
 /// An error returned by the closed local CLIENT evaluator.
 #[non_exhaustive]
@@ -511,12 +510,8 @@ fn evaluate_function(
             });
         }
     }
-    let return_shape = validate_function_shape(
-        active,
-        definition,
-        context,
-        revision.artifact().version(),
-    )?;
+    let return_shape =
+        validate_function_shape(active, definition, context, revision.artifact().version())?;
     if arguments.len() != definition.parameters().len()
         || definition.parameters().iter().any(|parameter| {
             arguments
@@ -660,7 +655,9 @@ fn evaluate_expression(
                 .iter()
                 .find(|(candidate, _)| candidate == root)
                 .map(|(_, value)| value)
-                .ok_or_else(|| expression_error(context, ClientExpressionError::ParameterNotBound))?;
+                .ok_or_else(|| {
+                    expression_error(context, ClientExpressionError::ParameterNotBound)
+                })?;
             evaluate_field_path(active, value, fields, context)
         }
         ClientExpressionNode::Concat { left, right } => {
@@ -702,8 +699,14 @@ fn evaluate_expression(
             }
             let mut evaluated = Vec::with_capacity(bound.len());
             for (parameter, expression) in bound {
-                if evaluated.iter().any(|(candidate, _)| candidate == parameter) {
-                    return Err(expression_error(context, ClientExpressionError::InvalidCall));
+                if evaluated
+                    .iter()
+                    .any(|(candidate, _)| candidate == parameter)
+                {
+                    return Err(expression_error(
+                        context,
+                        ClientExpressionError::InvalidCall,
+                    ));
                 }
                 let value = evaluate_expression(
                     active,

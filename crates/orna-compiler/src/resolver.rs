@@ -40,8 +40,9 @@ pub use model::{
     StandardApplicationContextError, StandardLibraryCheckError,
 };
 pub(crate) use model::{
-    CheckedClientExpression, CheckedClientFunctionBody, CheckedFieldRename, CheckedServerFunctionBody,
-    QueryCatalogue, QueryField, QueryObjectType, ResolutionCatalogue, STD_UI_CONTRACT,
+    CheckedClientExpression, CheckedClientFunctionBody, CheckedFieldRename,
+    CheckedServerFunctionBody, QueryCatalogue, QueryField, QueryObjectType, ResolutionCatalogue,
+    STD_UI_CONTRACT,
 };
 use model::{CheckedEnumType, CheckedRecordValueField, CheckedRecordValueType};
 
@@ -58,8 +59,7 @@ use orna_core::{
         artifact_payload_digest, function_declaration_digest, function_semantic_digest_with_version,
     },
     catalogue::{
-        CatalogueSnapshot, CatalogueSnapshotError, FunctionDomain,
-        FunctionReturn,
+        CatalogueSnapshot, CatalogueSnapshotError, FunctionDomain, FunctionReturn,
         FunctionSecurity as CatalogueFunctionSecurity,
         FunctionTransaction as CatalogueFunctionTransaction,
         FunctionVolatility as CatalogueFunctionVolatility, OnDeleteAction, PreludeTypeName,
@@ -77,13 +77,13 @@ use orna_core::{
     types::{ResolvedType, StandardScalar},
 };
 use orna_syntax::{
-    CapabilitySpecification, ClientExpression, ClientFunctionDeclaration,
-    FieldRenameDeclaration, FunctionReturnType,
-    FunctionSecurity as SyntaxFunctionSecurity, FunctionTransaction as SyntaxFunctionTransaction,
+    CapabilitySpecification, ClientExpression, ClientFunctionDeclaration, FieldRenameDeclaration,
+    FunctionReturnType, FunctionSecurity as SyntaxFunctionSecurity,
+    FunctionTransaction as SyntaxFunctionTransaction,
     FunctionVolatility as SyntaxFunctionVolatility, ObjectTypeDeclaration, OnDeletePolicy,
     PrimitiveValueTypePersistence, QualifiedName, RecordValueTypeDeclaration, SelectQuantifier,
-    ServerFunctionBody, ServerFunctionDeclaration, SourceSlice, SourceSpan, StandardLargeObjectKind,
-    TypeExportTarget, TypeSpecification,
+    ServerFunctionBody, ServerFunctionDeclaration, SourceSlice, SourceSpan,
+    StandardLargeObjectKind, TypeExportTarget, TypeSpecification,
 };
 
 use crate::mutation::{
@@ -3643,8 +3643,8 @@ fn resolve_client_function_inputs<'a>(
         let diagnostics_before = diagnostics.len();
         let name = semantic_name(&declaration.name);
         let base_function = base.function_by_name(&name);
-        let expression_body =
-            declaration.body.as_expression().is_some() || declaration.body.as_external_contract().is_some();
+        let expression_body = declaration.body.as_expression().is_some()
+            || declaration.body.as_external_contract().is_some();
         if !expression_body && !declaration.parameters.is_empty() {
             diagnostics.push(diagnostic(
                 DiagnosticCode::DomainIncompatible,
@@ -3654,7 +3654,11 @@ fn resolve_client_function_inputs<'a>(
             ));
         }
         if !expression_body
-            && let (Some(standard), FunctionReturnType::Single(specification), Some((_, body_source))) = (
+            && let (
+                Some(standard),
+                FunctionReturnType::Single(specification),
+                Some((_, body_source)),
+            ) = (
                 standard,
                 &declaration.return_type,
                 declaration.body.as_boolean_literal(),
@@ -3743,14 +3747,16 @@ fn resolve_client_function_inputs<'a>(
                     None
                 }
             }
-            FunctionReturnType::Single(specification) => resolve_application_type_with_named_standard(
-                specification,
-                submitted_ids,
-                header.logical_path,
-                diagnostics,
-                standard,
-                true,
-            ),
+            FunctionReturnType::Single(specification) => {
+                resolve_application_type_with_named_standard(
+                    specification,
+                    submitted_ids,
+                    header.logical_path,
+                    diagnostics,
+                    standard,
+                    true,
+                )
+            }
             FunctionReturnType::Rows { span, .. } => {
                 diagnostics.push(diagnostic(
                     DiagnosticCode::TypeMismatch,
@@ -4117,7 +4123,7 @@ fn standard_scalar_type_id(
         standard.value_types().iter().find_map(|value_type| {
             (value_type.kind() == ValueTypeKind::Primitive
                 && compatibility_scalar(value_type.representation_contract()) == Some(scalar))
-                .then_some(value_type.id())
+            .then_some(value_type.id())
         })
     })
 }
@@ -4149,7 +4155,10 @@ fn client_expression_type_from_core(
                     })
             });
             (
-                scalar.map_or(SemanticType::Named(CheckedTypeId::Existing(type_id)), SemanticType::scalar),
+                scalar.map_or(
+                    SemanticType::Named(CheckedTypeId::Existing(type_id)),
+                    SemanticType::scalar,
+                ),
                 scalar.and_then(|_| Some(type_id)),
             )
         }
@@ -4294,7 +4303,10 @@ fn check_client_expression(
         }
         ClientExpression::ParameterRead { parameter } => {
             let name = semantic_part(parameter);
-            let Some(parameter) = input.parameters.iter().find(|parameter| parameter.name == name)
+            let Some(parameter) = input
+                .parameters
+                .iter()
+                .find(|parameter| parameter.name == name)
             else {
                 diagnostics.push(diagnostic(
                     DiagnosticCode::UnknownQualifiedName,
@@ -4321,7 +4333,10 @@ fn check_client_expression(
             span,
         } => {
             let root_name = semantic_part(root);
-            let Some(parameter) = input.parameters.iter().find(|parameter| parameter.name == root_name)
+            let Some(parameter) = input
+                .parameters
+                .iter()
+                .find(|parameter| parameter.name == root_name)
             else {
                 diagnostics.push(diagnostic(
                     DiagnosticCode::UnknownQualifiedName,
@@ -4345,7 +4360,9 @@ fn check_client_expression(
             let mut expression_type = None;
             for (index, member) in members.iter().enumerate() {
                 let field_name = semantic_part(member);
-                let Some(field) = QueryCatalogue::field_by_name(query_catalogue, owner, &field_name) else {
+                let Some(field) =
+                    QueryCatalogue::field_by_name(query_catalogue, owner, &field_name)
+                else {
                     diagnostics.push(diagnostic(
                         DiagnosticCode::UnknownQualifiedName,
                         format!("unknown field {field_name} in CLIENT field path"),
@@ -4532,7 +4549,10 @@ fn check_client_expression(
                 if !client_expression_types_compatible(expression_type, parameter.expression_type) {
                     diagnostics.push(diagnostic(
                         DiagnosticCode::TypeMismatch,
-                        format!("argument does not match CLIENT parameter {}", parameter.name),
+                        format!(
+                            "argument does not match CLIENT parameter {}",
+                            parameter.name
+                        ),
                         input.logical_path,
                         &input.declaration_span,
                     ));
@@ -4571,13 +4591,18 @@ fn client_contract_identity(source: &SourceSlice) -> Option<String> {
     let identity = decode_string_literal(source)?;
     let (name, version) = identity.rsplit_once('@')?;
     if version.is_empty()
-        || version.parse::<u64>().ok().is_none_or(|version| version == 0)
+        || version
+            .parse::<u64>()
+            .ok()
+            .is_none_or(|version| version == 0)
         || name.contains('@')
     {
         return None;
     }
     let parts = name.split('.').collect::<Vec<_>>();
-    if parts.iter().any(|part| normalise_client_parameter_name(part).is_none())
+    if parts
+        .iter()
+        .any(|part| normalise_client_parameter_name(part).is_none())
         || QualifiedSemanticName::new(parts).is_err()
     {
         return None;
@@ -4650,10 +4675,13 @@ fn check_client_functions(
                     ) else {
                         return None;
                     };
-                    if !client_expression_types_compatible(expression_type, ClientExpressionType {
-                        semantic_type: input.return_type,
-                        standard_value_type: input.standard_value_type,
-                    }) {
+                    if !client_expression_types_compatible(
+                        expression_type,
+                        ClientExpressionType {
+                            semantic_type: input.return_type,
+                            standard_value_type: input.standard_value_type,
+                        },
+                    ) {
                         diagnostics.push(diagnostic(
                             DiagnosticCode::TypeMismatch,
                             "this CLIENT function must return the declared value type",
@@ -4667,7 +4695,9 @@ fn check_client_functions(
                         if !used_capabilities.contains(&capability_name) {
                             diagnostics.push(diagnostic(
                                 DiagnosticCode::CapabilityRequirement,
-                                format!("declared CLIENT capability {capability_name} is not exercised"),
+                                format!(
+                                    "declared CLIENT capability {capability_name} is not exercised"
+                                ),
                                 input.logical_path,
                                 &input.declaration_span,
                             ));
@@ -4675,7 +4705,9 @@ fn check_client_functions(
                         }
                     }
                     (
-                        CheckedClientFunctionBody::Expression { expression: checked },
+                        CheckedClientFunctionBody::Expression {
+                            expression: checked,
+                        },
                         expression_type,
                         location(input.logical_path, expression.span()),
                         references,
@@ -4701,11 +4733,11 @@ fn check_client_functions(
                     }
                     let Some(identity) = client_contract_identity(contract) else {
                         diagnostics.push(diagnostic(
-                            DiagnosticCode::DomainIncompatible,
-                            "RUNTIME CONTRACT identity must be '<qualified-name>@<positive-version>'",
-                            input.logical_path,
-                            &input.declaration_span,
-                        ));
+                        DiagnosticCode::DomainIncompatible,
+                        "RUNTIME CONTRACT identity must be '<qualified-name>@<positive-version>'",
+                        input.logical_path,
+                        &input.declaration_span,
+                    ));
                         return None;
                     };
                     (
@@ -6802,9 +6834,11 @@ fn standard_type_id_by_name(
     } else {
         TypeLookupName::qualified(semantic_name(name))
     };
-    standard.verified_snapshot().catalogue().type_id_by_name(&lookup)
+    standard
+        .verified_snapshot()
+        .catalogue()
+        .type_id_by_name(&lookup)
 }
-
 
 fn standard_value_by_name(
     name: &QualifiedName,

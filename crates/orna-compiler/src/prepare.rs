@@ -9,10 +9,10 @@ use std::{
 
 use orna_artifact::{
     client_plan::{
-        ClientExpressionNode, ClientPlan, ExpressionClientPlan,
+        ClientExpressionNode, ClientPlan,
+        EXPRESSION_FORMAT_VERSION as CLIENT_PLAN_EXPRESSION_VERSION, ExpressionClientPlan,
         FORMAT_IDENTITY as CLIENT_PLAN_FORMAT, FORMAT_VERSION as CLIENT_PLAN_VERSION,
         LANGUAGE_VERSION_IDENTITY as CLIENT_PLAN_LANGUAGE_VERSION,
-        EXPRESSION_FORMAT_VERSION as CLIENT_PLAN_EXPRESSION_VERSION,
     },
     constant_expression::{
         ConstantExpression, ConstantExpressionError, FORMAT_IDENTITY as CONSTANT_FORMAT,
@@ -78,8 +78,8 @@ use crate::{
     },
     relational::{supports_server_select_distinct, supports_server_select_equality},
     resolver::{
-        CheckedClientExpression, CheckedClientFunctionBody, CheckedFieldRename, UNIQUE_FIELD_MESSAGE,
-        supports_unique_text_or_required_reference,
+        CheckedClientExpression, CheckedClientFunctionBody, CheckedFieldRename,
+        UNIQUE_FIELD_MESSAGE, supports_unique_text_or_required_reference,
     },
 };
 
@@ -1644,7 +1644,6 @@ impl ValidatedClientReturns {
     }
 }
 
-
 #[derive(Clone)]
 struct ValidatedFunctionIdentity {
     domain: FunctionDomain,
@@ -1814,7 +1813,6 @@ impl SignatureEvidence {
     fn function_slots(&self, owner: CheckedFunctionId) -> impl Iterator<Item = &SignatureSlot> {
         self.ordered.iter().filter(move |slot| slot.owner == owner)
     }
-
 
     fn materialise_client_returns(
         &self,
@@ -3741,8 +3739,10 @@ fn validate_client_function_preflight(
             reason: "checked CLIENT function has an unsupported domain",
         });
     }
-    let legacy_boolean_body =
-        matches!(function.body(), CheckedClientFunctionBody::BooleanLiteral { .. });
+    let legacy_boolean_body = matches!(
+        function.body(),
+        CheckedClientFunctionBody::BooleanLiteral { .. }
+    );
     if legacy_boolean_body && !function.parameters().is_empty() {
         return Err(PrepareError::InvalidCheckedBundle {
             reason: "checked CLIENT function declares parameters",
@@ -4022,7 +4022,6 @@ fn validate_field_renames(
     Ok(())
 }
 
-
 fn validate_active_field_rename(
     active: &ObjectTypeDefinition,
     rename: &CheckedFieldRename,
@@ -4147,7 +4146,9 @@ fn client_expression_locations<'a>(
 ) {
     match expression {
         CheckedClientExpression::Call {
-            arguments, location, ..
+            arguments,
+            location,
+            ..
         } => {
             locations.push(location);
             for (_, argument) in arguments {
@@ -6275,16 +6276,17 @@ impl<'a> CandidateBuilder<'a> {
         validated: &ValidatedClient,
     ) -> Result<PreparedFunctionArtifact, PrepareError> {
         let (version, payload) = match &validated.body {
-            ValidatedClientBody::BooleanLiteral(value) => {
-                (CLIENT_PLAN_VERSION, ClientPlan::return_boolean(*value).encode())
-            }
+            ValidatedClientBody::BooleanLiteral(value) => (
+                CLIENT_PLAN_VERSION,
+                ClientPlan::return_boolean(*value).encode(),
+            ),
             ValidatedClientBody::Expression(expression) => {
                 let expression = self.client_expression_node(expression)?;
-                let payload = ExpressionClientPlan::new(expression).encode().map_err(|_| {
-                    PrepareError::InvalidCheckedBundle {
+                let payload = ExpressionClientPlan::new(expression)
+                    .encode()
+                    .map_err(|_| PrepareError::InvalidCheckedBundle {
                         reason: "checked CLIENT expression exceeds client-plan limits",
-                    }
-                })?;
+                    })?;
                 (CLIENT_PLAN_EXPRESSION_VERSION, payload)
             }
             ValidatedClientBody::ExternalContract(identity) => {
@@ -6332,9 +6334,9 @@ impl<'a> CandidateBuilder<'a> {
                     })
                     .collect::<Result<Vec<_>, PrepareError>>()?,
             },
-            CheckedClientExpression::String { value, .. } => {
-                ClientExpressionNode::String { value: value.clone() }
-            }
+            CheckedClientExpression::String { value, .. } => ClientExpressionNode::String {
+                value: value.clone(),
+            },
             CheckedClientExpression::Integer { value, .. } => {
                 ClientExpressionNode::Integer { value: *value }
             }
@@ -6396,12 +6398,11 @@ impl<'a> CandidateBuilder<'a> {
             self.source.origin(&validated.return_location)?,
         ));
         for (index, reference) in validated.references.iter().enumerate() {
-            let ordinal = u32::try_from(index + 1).map_err(|_| {
-                PrepareError::ReferenceCountExceedsU32 {
+            let ordinal =
+                u32::try_from(index + 1).map_err(|_| PrepareError::ReferenceCountExceedsU32 {
                     function: validated.id,
                     count: validated.references.len() + 1,
-                }
-            })?;
+                })?;
             references.push(DefinitionReference::new(
                 function,
                 revision,
@@ -6597,7 +6598,10 @@ impl<'a> CandidateBuilder<'a> {
                 reason: "checked CLIENT function return evidence does not match its validated slot",
             });
         }
-        match (validated.return_semantic_type, validated.return_target.clone()) {
+        match (
+            validated.return_semantic_type,
+            validated.return_target.clone(),
+        ) {
             (SemanticType::Scalar(_compatibility), EvidenceTarget::Value(type_id)) => {
                 Ok(CandidateResolvedType::StandardValue {
                     type_id,
