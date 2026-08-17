@@ -73,9 +73,12 @@ use orna_core::{
         InvokeRequest, InvokeRequestInput, InvokeValue,
     },
     security::{
-        ExecuteGrant, InvocationTarget, Principal, PrincipalKind, PrincipalStatus,
-        SecurityAuditKind, SecurityAuditOutcome, SecurityFunctionTarget, SecuritySnapshot,
+        ExecuteDecision, ExecuteDenial, ExecuteGrant, InvocationTarget, Principal, PrincipalKind,
+        PrincipalStatus, PrivilegeClass, PrivilegeDecision, PrivilegeDenial, PrivilegeGrant,
+        RoleMembership, SecurityAdminAuditOperation, SecurityAuditKind, SecurityAuditOutcome,
+        SecurityFunctionTarget, SecuritySnapshot,
     },
+    system::SYS_SECURITY_CREATE_PRINCIPAL_FUNCTION_ID,
 };
 use orna_postgres::{PostgresKernel, PostgresKernelError, SealedInvocationResult};
 use orna_protocol::{
@@ -7239,6 +7242,310 @@ async fn proves_inspect_capture_and_projections_after_sealed_echo() -> TestResul
         // A fresh recovery validates the inspection relations and the
         // appended INSPECT capture audit row.
         kernel.recover().await?;
+        Ok(())
+    })
+    .await
+}
+
+/// Proves the ADR 0065 security-admin surface end to end: the identity
+/// facts from a bound session, the `can_execute` and `has_privilege`
+/// decisions against the recovered snapshot, the SecurityAdmin privilege
+/// gate denying a session without the class while still recording the
+/// closed denied audit, every admin mutation persisting its durable row
+/// through the validated candidate, a privilege granted to an active role
+/// passing the gate, disable failing closed for an unknown principal and
+/// denying session formation afterwards, revoke removing the durable rows,
+/// the audit rows carrying the closed `security_admin` kind for both
+/// outcomes with the sealed target identities, and a fresh kernel
+/// recovering the grants and the audit rows.
+#[tokio::test]
+#[ignore = "requires the Compose PostgreSQL development service"]
+async fn proves_security_admin_identity_checks_mutations_and_audit() -> TestResult<()> {
+    const ADMIN: PrincipalId = PrincipalId::from_bytes([0x61; 16]);
+    const USER: PrincipalId = PrincipalId::from_bytes([0x62; 16]);
+    const ROLE: PrincipalId = PrincipalId::from_bytes([0x63; 16]);
+    const NEW_USER: PrincipalId = PrincipalId::from_bytes([0x64; 16]);
+    const OTHER: PrincipalId = PrincipalId::from_bytes([0x65; 16]);
+    const UNKNOWN: PrincipalId = PrincipalId::from_bytes([0x66; 16]);
+
+    with_test_database(|database| async move {
+        let kernel = kernel(&database)?;
+        kernel.bootstrap().await?;
+        let empty = kernel.recover().await?;
+        let version_one = kernel.apply(&candidate(BASIC_SOURCE, &empty)?).await?;
+        let function = version_one
+            .catalogue()
+            .functions()
+            .iter()
+            .find(|definition| definition.name().parts() == ["app", "list_widgets"])
+            .ok_or_else(|| failure("the security-admin fixture function was not recovered"))?
+            .id();
+
+        // Seed the snapshot with one active admin holding the class-wide
+        // SecurityAdmin privilege, one user with an active role and an
+        // object-scoped EXECUTE privilege, and the application target.
+        let security =
+            SecuritySnapshot::new_with_function_targets_local_peer_credentials_and_privilege_grants(
+                version_one.pair(),
+                vec![SecurityFunctionTarget::application(function)],
+                vec![
+                    Principal::new(ADMIN, PrincipalKind::User, PrincipalStatus::Active),
+                    Principal::new(USER, PrincipalKind::User, PrincipalStatus::Active),
+                    Principal::new(ROLE, PrincipalKind::Role, PrincipalStatus::Active),
+                ],
+                vec![RoleMembership::new(ROLE, USER)],
+                vec![ExecuteGrant::new(USER, function)],
+                vec![],
+                vec![
+                    PrivilegeGrant::new(ADMIN, PrivilegeClass::SecurityAdmin, None)?,
+                    PrivilegeGrant::new(USER, PrivilegeClass::Execute, Some(function))?,
+                ],
+            )?;
+        let security = kernel.replace_security_snapshot(&security).await?;
+        let admin_session = security.bind_authenticated_session(ADMIN, vec![])?;
+        let user_session = security.bind_authenticated_session(USER, vec![ROLE])?;
+
+        // The identity functions return the typed facts of the bound session;
+        // effective identity equals the session principal today.
+        require(
+            kernel.session_principal(&user_session) == USER
+                && kernel.effective_principal(&user_session) == USER
+                && kernel.active_roles(&user_session) == vec![ROLE],
+            "the identity facts did not match the bound session",
+        )?;
+
+        // can_execute wraps authorise_execute: the granted user is allowed,
+        // an ungranted principal fails closed on the missing grant.
+        let allowed_execute = kernel.can_execute(USER, function).await?;
+        require(
+            matches!(
+                &allowed_execute,
+                ExecuteDecision::Allowed(authorised)
+                    if authorised.session_principal() == USER
+                        && authorised.authorising_principal() == USER
+            ),
+            "can_execute did not allow the granted user",
+        )?;
+        require(
+            kernel.can_execute(NEW_USER, function).await?
+                == ExecuteDecision::Denied(ExecuteDenial::MissingExecuteGrant),
+            "can_execute did not deny an ungranted principal",
+        )?;
+
+        // has_privilege honours the class and the object scope: the
+        // object-scoped EXECUTE grant reaches an object request only, and
+        // the user holds no SecurityAdmin class.
+        require(
+            kernel
+                .has_privilege(USER, PrivilegeClass::Execute, Some(function))
+                .await?
+                == PrivilegeDecision::Allowed {
+                    requested: PrivilegeClass::Execute,
+                },
+            "has_privilege did not allow the object-scoped execute privilege",
+        )?;
+        require(
+            kernel
+                .has_privilege(USER, PrivilegeClass::Execute, None)
+                .await?
+                == PrivilegeDecision::Denied(PrivilegeDenial::MissingPrivilege {
+                    requested: PrivilegeClass::Execute,
+                }),
+            "has_privilege did not keep the object scope closed",
+        )?;
+        require(
+            kernel
+                .has_privilege(USER, PrivilegeClass::SecurityAdmin, None)
+                .await?
+                == PrivilegeDecision::Denied(PrivilegeDenial::MissingPrivilege {
+                    requested: PrivilegeClass::SecurityAdmin,
+                }),
+            "has_privilege did not deny an unprivileged user",
+        )?;
+
+        // The enforcement gate denies a session without the SecurityAdmin
+        // class and still records the closed denied audit decision.
+        let denied = kernel
+            .create_principal(&user_session, NEW_USER, PrincipalKind::User)
+            .await
+            .expect_err("a session without SecurityAdmin must be denied");
+        require(
+            matches!(
+                denied,
+                PostgresKernelError::SecurityAdminDenied {
+                    reason: PrivilegeDenial::MissingPrivilege {
+                        requested: PrivilegeClass::SecurityAdmin,
+                    },
+                }
+            ),
+            "the gate returned the wrong typed denial",
+        )?;
+
+        // The admin mutations persist their durable rows through the
+        // validated candidate and return the recovered snapshot.
+        let after_create = kernel
+            .create_principal(&admin_session, NEW_USER, PrincipalKind::User)
+            .await?;
+        require(
+            after_create
+                .principals()
+                .any(|principal| principal.id() == NEW_USER),
+            "create_principal did not persist the new principal",
+        )?;
+        let after_role = kernel.grant_role(&admin_session, ROLE, NEW_USER).await?;
+        require(
+            after_role
+                .memberships()
+                .any(|membership| membership.role() == ROLE && membership.member() == NEW_USER),
+            "grant_role did not persist the membership",
+        )?;
+        let after_privilege = kernel
+            .grant_privilege(
+                &admin_session,
+                NEW_USER,
+                PrivilegeClass::SecurityAdmin,
+                None,
+            )
+            .await?;
+        require(
+            after_privilege.privilege_grants().any(|grant| {
+                grant.grantee() == NEW_USER
+                    && grant.class() == PrivilegeClass::SecurityAdmin
+                    && grant.is_class_wide()
+            }),
+            "grant_privilege did not persist the class-wide grant",
+        )?;
+
+        // A privilege granted to an active role reaches the session through
+        // the gate: the user session can now create a role.
+        kernel
+            .grant_privilege(&admin_session, ROLE, PrivilegeClass::SecurityAdmin, None)
+            .await?;
+        let after_role_privilege = kernel.create_role(&user_session, OTHER).await?;
+        require(
+            after_role_privilege
+                .principals()
+                .any(|principal| principal.id() == OTHER),
+            "an active role with the privilege did not pass the gate",
+        )?;
+
+        // Disabling fails closed for an unknown principal and prevents a
+        // disabled principal from forming a session afterwards.
+        kernel.disable_principal(&admin_session, NEW_USER).await?;
+        require(
+            kernel.can_execute(NEW_USER, function).await?
+                == ExecuteDecision::Denied(ExecuteDenial::InvalidSession),
+            "a disabled principal must not form a session",
+        )?;
+        let unknown_error = kernel
+            .disable_principal(&admin_session, UNKNOWN)
+            .await
+            .expect_err("disabling an unknown principal must fail");
+        require(
+            matches!(
+                unknown_error,
+                PostgresKernelError::DurableInvariant {
+                    rule: "the principal to disable must exist",
+                    ..
+                }
+            ),
+            "disabling an unknown principal returned the wrong error",
+        )?;
+
+        // Revoke removes the durable rows.
+        let after_revoke_role = kernel.revoke_role(&admin_session, ROLE, NEW_USER).await?;
+        require(
+            !after_revoke_role
+                .memberships()
+                .any(|membership| membership.role() == ROLE && membership.member() == NEW_USER),
+            "revoke_role did not remove the membership",
+        )?;
+        let after_revoke_privilege = kernel
+            .revoke_privilege(
+                &admin_session,
+                NEW_USER,
+                PrivilegeClass::SecurityAdmin,
+                None,
+            )
+            .await?;
+        require(
+            !after_revoke_privilege
+                .privilege_grants()
+                .any(|grant| grant.grantee() == NEW_USER),
+            "revoke_privilege did not remove the grant",
+        )?;
+
+        // The audit rows carry the closed security_admin kind for both
+        // outcomes with the exact sealed target identities and the session
+        // principals; argument payloads never appear.
+        let events = kernel.recover_security_audit_events().await?;
+        let admin_events = events
+            .iter()
+            .filter(|event| event.decision().kind() == SecurityAuditKind::SecurityAdmin)
+            .collect::<Vec<_>>();
+        require(
+            admin_events.iter().any(|event| {
+                event.decision().outcome() == SecurityAuditOutcome::Denied
+                    && event.decision().session_principal() == Some(USER)
+                    && event.decision().security_admin_operation()
+                        == Some(SecurityAdminAuditOperation::CreatePrincipal)
+                    && event.decision().security_admin_target()
+                        == Some(SYS_SECURITY_CREATE_PRINCIPAL_FUNCTION_ID)
+                    && event.decision().security_admin_denial()
+                        == Some(PrivilegeDenial::MissingPrivilege {
+                            requested: PrivilegeClass::SecurityAdmin,
+                        })
+            }),
+            "the denied gate did not record its closed audit decision",
+        )?;
+        let allowed_creates = admin_events
+            .iter()
+            .filter(|event| {
+                event.decision().outcome() == SecurityAuditOutcome::Allowed
+                    && event.decision().security_admin_operation()
+                        == Some(SecurityAdminAuditOperation::CreatePrincipal)
+                    && event.decision().session_principal() == Some(ADMIN)
+                    && event.decision().security_admin_target()
+                        == Some(SYS_SECURITY_CREATE_PRINCIPAL_FUNCTION_ID)
+            })
+            .count();
+        require(
+            allowed_creates == 1
+                && admin_events.len() == 9
+                && admin_events.iter().all(|event| {
+                    event.decision().security_admin_target().is_some()
+                        && event.decision().session_principal().is_some()
+                }),
+            "the allowed mutation audit rows did not record the closed shape",
+        )?;
+
+        // A fresh kernel recovers the same privilege grants and the audit
+        // rows, proving the durable round-trip through the privilege loader
+        // and the security_admin audit decoder.
+        let reopened = named_kernel(&database, "orna-security-admin-reopen")?
+            .recover_security_snapshot()
+            .await?;
+        require(
+            reopened.privilege_grants().any(|grant| {
+                grant.grantee() == ADMIN
+                    && grant.class() == PrivilegeClass::SecurityAdmin
+                    && grant.is_class_wide()
+            }) && reopened.principals().any(|principal| {
+                principal.id() == NEW_USER && principal.status() == PrincipalStatus::Disabled
+            }),
+            "a fresh kernel did not recover the persisted privilege grants",
+        )?;
+        let reopened_audit = named_kernel(&database, "orna-security-admin-audit-reopen")?
+            .recover_security_audit_events()
+            .await?;
+        require(
+            reopened_audit
+                .iter()
+                .filter(|event| event.decision().kind() == SecurityAuditKind::SecurityAdmin)
+                .count()
+                == admin_events.len(),
+            "a fresh kernel did not recover the security-admin audit rows",
+        )?;
         Ok(())
     })
     .await
