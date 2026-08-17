@@ -9,8 +9,9 @@ use std::{
 
 use orna_artifact::{
     client_plan::{
-        ClientExpressionNode, ClientPlan,
-        EXPRESSION_FORMAT_VERSION as CLIENT_PLAN_EXPRESSION_VERSION, ExpressionClientPlan,
+        ClientExpressionNode, ClientPlan, StateClientPlan, StateDefault, StateScope, StateSlot,
+        EXPRESSION_FORMAT_VERSION as CLIENT_PLAN_EXPRESSION_VERSION,
+        ExpressionClientPlan, STATE_FORMAT_VERSION as CLIENT_PLAN_STATE_VERSION,
         FORMAT_IDENTITY as CLIENT_PLAN_FORMAT, FORMAT_VERSION as CLIENT_PLAN_VERSION,
         LANGUAGE_VERSION_IDENTITY as CLIENT_PLAN_LANGUAGE_VERSION,
     },
@@ -78,7 +79,8 @@ use crate::{
     },
     relational::{supports_server_select_distinct, supports_server_select_equality},
     resolver::{
-        CheckedClientExpression, CheckedClientFunctionBody, CheckedFieldRename,
+        durable_state_slot_id, CheckedClientExpression, CheckedClientFunctionBody,
+        CheckedClientStateSlot, CheckedFieldRename, CheckedStateDefault, CheckedStateScope,
         UNIQUE_FIELD_MESSAGE, supports_unique_text_or_required_reference,
     },
 };
@@ -1599,6 +1601,10 @@ struct ValidatedClientReturn {
 enum ValidatedClientBody {
     BooleanLiteral(bool),
     Expression(CheckedClientExpression),
+    StateBlock {
+        return_expression: CheckedClientExpression,
+        states: Vec<CheckedClientStateSlot>,
+    },
     ExternalContract(String),
 }
 
@@ -3864,13 +3870,13 @@ fn validate_client_function_preflight(
         CheckedClientFunctionBody::ExternalContract { identity, .. } => {
             ValidatedClientBody::ExternalContract(identity.clone())
         }
-        CheckedClientFunctionBody::StateBlock { .. } => {
-            // V4 state-plan preparation must re-derive provisional slot ids from
-            // the eventual durable FunctionId; this slice fails closed before that stage.
-            return Err(PrepareError::InvalidCheckedBundle {
-                reason: "checked CLIENT state block bodies are not yet preparable",
-            });
-        }
+        CheckedClientFunctionBody::StateBlock {
+            states,
+            return_expression,
+        } => ValidatedClientBody::StateBlock {
+            return_expression: return_expression.clone(),
+            states: states.clone(),
+        },
         #[cfg(test)]
         CheckedClientFunctionBody::Unsupported => {
             return Err(PrepareError::InvalidCheckedBundle {
@@ -6297,6 +6303,23 @@ impl<'a> CandidateBuilder<'a> {
                     })?;
                 (CLIENT_PLAN_EXPRESSION_VERSION, payload)
             }
+            ValidatedClientBody::StateBlock {
+                return_expression,
+                states,
+            } => {
+                let function_id = self.identities.function(validated.id)?;
+                let expression = self.client_expression_node(return_expression)?;
+                let slots = states
+                    .iter()
+                    .map(|state| self.client_state_slot(state, function_id))
+                    .collect::<Result<Vec<_>, PrepareError>>()?;
+                let payload = StateClientPlan::new(expression, slots)
+                    .encode()
+                    .map_err(|_| PrepareError::InvalidCheckedBundle {
+                        reason: "checked CLIENT state plan exceeds client-plan limits",
+                    })?;
+                (CLIENT_PLAN_STATE_VERSION, payload)
+            }
             ValidatedClientBody::ExternalContract(identity) => {
                 let payload = ExpressionClientPlan::new(ClientExpressionNode::ExternalContract {
                     identity: identity.clone(),
@@ -6319,6 +6342,43 @@ impl<'a> CandidateBuilder<'a> {
             )?,
             language_version: CLIENT_PLAN_LANGUAGE_VERSION.to_owned(),
         })
+    }
+
+    fn client_state_slot(
+        &self,
+        state: &CheckedClientStateSlot,
+        function_id: FunctionId,
+    ) -> Result<StateSlot, PrepareError> {
+        let state_slot_id = match state.id() {
+            crate::resolver::CheckedStateSlotId::Existing(id) => id,
+            crate::resolver::CheckedStateSlotId::Provisional(_) => {
+                durable_state_slot_id(function_id, state.name())
+            }
+        };
+        let type_id = state
+            .standard_value_type()
+            .or_else(|| match state.semantic_type() {
+                SemanticType::Named(id) | SemanticType::Reference { target: id } => {
+                    self.identities.type_id(id).ok()
+                }
+                SemanticType::Scalar(_) => None,
+            })
+            .ok_or(PrepareError::InvalidCheckedBundle {
+                reason: "checked CLIENT state slot has no durable value type identity",
+            })?;
+        let scope = match state.scope() {
+            CheckedStateScope::Local => StateScope::Local,
+            CheckedStateScope::Session => StateScope::Session,
+            CheckedStateScope::User => StateScope::User,
+        };
+        let default = match state.default() {
+            CheckedStateDefault::Unset => StateDefault::Unset,
+            CheckedStateDefault::Null => StateDefault::Null,
+            CheckedStateDefault::Expression(expression) => {
+                StateDefault::Expression(self.client_expression_node(expression)?)
+            }
+        };
+        Ok(StateSlot::new(state_slot_id, type_id, scope, default))
     }
 
     fn client_expression_node(

@@ -4680,6 +4680,16 @@ fn checked_state_slot_id(function: CheckedFunctionId, name: &str) -> CheckedStat
         CheckedStateSlotId::Provisional(id)
     }
 }
+pub(crate) fn durable_state_slot_id(function: FunctionId, name: &str) -> StateSlotId {
+    let mut payload = function.to_string().into_bytes();
+    payload.push(0);
+    payload.extend_from_slice(&(name.len() as u32).to_be_bytes());
+    payload.extend_from_slice(name.as_bytes());
+    let digest = artifact_payload_digest(&payload).expect("state-slot identity payload is bounded");
+    let mut bytes = [0; 16];
+    bytes.copy_from_slice(&digest.to_bytes()[..16]);
+    StateSlotId::from_bytes(bytes)
+}
 
 fn unsupported_client_state_reference(
     expression: &ClientExpression,
@@ -4904,6 +4914,7 @@ fn check_client_functions(
                             name: state_name,
                             ordinal: ordinal as u32,
                             semantic_type: resolved.semantic_type,
+                            standard_value_type: resolved.standard_value_type,
                             scope,
                             default,
                             location: location(input.logical_path, &state.span),

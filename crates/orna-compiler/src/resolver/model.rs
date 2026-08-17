@@ -1149,6 +1149,7 @@ pub(crate) struct CheckedClientStateSlot {
     pub(super) name: String,
     pub(super) ordinal: u32,
     pub(super) semantic_type: SemanticType<CheckedTypeId>,
+    pub(super) standard_value_type: Option<TypeId>,
     pub(super) scope: CheckedStateScope,
     pub(super) default: CheckedStateDefault,
     pub(super) location: SourceLocation,
@@ -1163,12 +1164,14 @@ impl CheckedClientStateSlot {
         &self.name
     }
 
-    pub(crate) const fn ordinal(&self) -> u32 {
-        self.ordinal
-    }
 
     pub(crate) const fn semantic_type(&self) -> SemanticType<CheckedTypeId> {
         self.semantic_type
+    }
+
+    /// Returns the standard-library value identity when this slot uses one.
+    pub(crate) const fn standard_value_type(&self) -> Option<TypeId> {
+        self.standard_value_type
     }
 
     pub(crate) const fn scope(&self) -> CheckedStateScope {
@@ -1177,10 +1180,6 @@ impl CheckedClientStateSlot {
 
     pub(crate) fn default(&self) -> &CheckedStateDefault {
         &self.default
-    }
-
-    pub(crate) fn location(&self) -> &SourceLocation {
-        &self.location
     }
 }
 
