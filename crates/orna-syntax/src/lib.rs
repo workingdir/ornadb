@@ -703,6 +703,16 @@ pub enum ClientFunctionBody {
         /// The exact literal spelling and source span.
         source: SourceSlice,
     },
+    /// A closed CLIENT expression evaluated by the local client.
+    Expression {
+        /// The checked expression returned by the function.
+        expression: ClientExpression,
+    },
+    /// An external function body declared only by its runtime contract.
+    ExternalContract {
+        /// The exact contract identity spelling and source span.
+        identity: SourceSlice,
+    },
 }
 
 impl ClientFunctionBody {
@@ -711,8 +721,112 @@ impl ClientFunctionBody {
     pub fn as_boolean_literal(&self) -> Option<(bool, &SourceSlice)> {
         match self {
             Self::BooleanLiteral { value, source } => Some((*value, source)),
+            Self::Expression { .. } | Self::ExternalContract { .. } => None,
         }
     }
+
+    /// Return the closed expression when this body contains one.
+    #[must_use]
+    pub fn as_expression(&self) -> Option<&ClientExpression> {
+        match self {
+            Self::Expression { expression } => Some(expression),
+            Self::BooleanLiteral { .. } | Self::ExternalContract { .. } => None,
+        }
+    }
+
+    /// Return the contract identity when this body is external.
+    #[must_use]
+    pub fn as_external_contract(&self) -> Option<&SourceSlice> {
+        match self {
+            Self::ExternalContract { identity } => Some(identity),
+            Self::BooleanLiteral { .. } | Self::Expression { .. } => None,
+        }
+    }
+}
+
+/// One closed CLIENT expression in the ADR 0068 expression surface.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ClientExpression {
+    /// A call to one CLIENT function with bound arguments.
+    Call {
+        /// The called function's qualified name as written.
+        callee: QualifiedName,
+        /// The call arguments in source order.
+        arguments: Vec<ClientCallArgument>,
+        /// The span from the callee through the closing parenthesis.
+        span: SourceSpan,
+    },
+    /// A single-quoted text literal with doubled-quote escaping.
+    StringLiteral {
+        /// The unescaped text value.
+        value: String,
+        /// The exact literal spelling and source span.
+        source: SourceSlice,
+    },
+    /// A non-negative integer literal.
+    IntegerLiteral {
+        /// The parsed integer value.
+        value: i64,
+        /// The exact literal spelling and source span.
+        source: SourceSlice,
+    },
+    /// A Boolean literal.
+    BooleanLiteral {
+        /// The Boolean value selected by the source text.
+        value: bool,
+        /// The exact literal spelling and source span.
+        source: SourceSlice,
+    },
+    /// A read of one declared parameter.
+    ParameterRead {
+        /// The parameter name as written.
+        parameter: NamePart,
+    },
+    /// A path from one declared parameter through object fields.
+    FieldPath {
+        /// The parameter at the start of the path.
+        root: NamePart,
+        /// The fields selected from the parameter in source order.
+        members: Vec<NamePart>,
+        /// The span from the root through the final field.
+        span: SourceSpan,
+    },
+    /// A left-associative text concatenation.
+    Concat {
+        /// The expression to the left of `||`.
+        left: Box<ClientExpression>,
+        /// The expression to the right of `||`.
+        right: Box<ClientExpression>,
+        /// The span from the left expression through the right expression.
+        span: SourceSpan,
+    },
+}
+
+impl ClientExpression {
+    /// Return the complete source span for this expression.
+    #[must_use]
+    pub fn span(&self) -> &SourceSpan {
+        match self {
+            Self::Call { span, .. } | Self::FieldPath { span, .. } | Self::Concat { span, .. } => {
+                span
+            }
+            Self::StringLiteral { source, .. }
+            | Self::IntegerLiteral { source, .. }
+            | Self::BooleanLiteral { source, .. } => &source.span,
+            Self::ParameterRead { parameter } => &parameter.span,
+        }
+    }
+}
+
+/// One argument bound to a CLIENT expression call.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClientCallArgument {
+    /// The named parameter when the argument is written `name => value`.
+    pub name: Option<NamePart>,
+    /// The argument value expression.
+    pub value: ClientExpression,
+    /// The span from the argument name (when present) through the value.
+    pub span: SourceSpan,
 }
 
 /// A parsed `CREATE CLIENT FUNCTION` declaration.
@@ -726,6 +840,10 @@ pub struct ClientFunctionDeclaration {
     pub parameter_list_span: SourceSpan,
     /// The declared result shape retained for semantic checking.
     pub return_type: FunctionReturnType,
+    /// Whether the declaration used the `CREATE EXTERNAL CLIENT FUNCTION` form.
+    pub external: bool,
+    /// The exact `RUNTIME CONTRACT '<identity>'` clause, when present.
+    pub runtime_contract: Option<SourceSlice>,
     /// The capabilities required by the function, in source order.
     pub capabilities: Vec<CapabilitySpecification>,
     /// The retained CLIENT function body.
@@ -1057,11 +1175,11 @@ mod tests {
     use crate::parser::SyntaxKind;
 
     use super::{
-        FunctionReturnType, FunctionSecurity, FunctionTransaction, FunctionVolatility, InsertValue,
-        MutationValue, NullOrdering, OnDeletePolicy, OptionTypeSpelling, OrderingDirection,
-        PrimitiveValueTypePersistence, QueryExpression, RecordConstructorFieldValue,
-        SelectQuantifier, ServerFunctionBody, SourceSpan, StandardLargeObjectKind,
-        TypeExportTarget, TypeSpecification, parse,
+        ClientExpression, ClientFunctionBody, FunctionReturnType, FunctionSecurity,
+        FunctionTransaction, FunctionVolatility, InsertValue, MutationValue, NullOrdering,
+        OnDeletePolicy, OptionTypeSpelling, OrderingDirection, PrimitiveValueTypePersistence,
+        QueryExpression, RecordConstructorFieldValue, SelectQuantifier, ServerFunctionBody,
+        SourceSpan, StandardLargeObjectKind, TypeExportTarget, TypeSpecification, parse,
     };
 
     #[test]
@@ -4652,11 +4770,6 @@ mod tests {
     fn reports_closed_client_body_diagnostics_with_exact_public_messages() {
         let cases = [
             (
-                "CREATE CLIENT FUNCTION examples.as_form() RETURNS BOOLEAN AS TRUE;",
-                "CLIENT functions use RETURN before their result value",
-                "AS",
-            ),
-            (
                 "CREATE CLIENT FUNCTION examples.is_form() RETURNS BOOLEAN IS BEGIN RETURN TRUE; END;",
                 "CLIENT functions use RETURN before their result value",
                 "IS",
@@ -4744,6 +4857,157 @@ mod tests {
                 assert_eq!(diagnostic.span.end, start + marker.len());
             }
         }
+    }
+
+    #[test]
+    fn parses_client_expression_bodies_and_external_contracts_with_exact_spans() {
+        let source = "CREATE CLIENT FUNCTION examples.greeting(p_name TEXT)\n\
+            RETURNS TEXT\n\
+            AS std.strings.concat('Hello ', p_name);\n\
+            CREATE CLIENT FUNCTION examples.qualified() RETURNS BOOLEAN AS TRUE;\n\
+            CREATE EXTERNAL CLIENT FUNCTION std.ui.window (\n\
+                title TEXT,\n\
+                content std.ui.UI\n\
+            )\n\
+            RETURNS std.ui.UI\n\
+            RUNTIME CONTRACT 'std.ui.window@1';";
+        let parsed = parse(source);
+
+        assert!(
+            parsed.diagnostics().is_empty(),
+            "{:?}",
+            parsed.diagnostics()
+        );
+        assert_eq!(parsed.syntax().text(), source);
+        assert_eq!(parsed.client_functions().len(), 3);
+
+        let greeting = &parsed.client_functions()[0];
+        assert!(!greeting.external);
+        assert_eq!(greeting.runtime_contract, None);
+        assert_eq!(greeting.parameters.len(), 1);
+        let ClientFunctionBody::Expression { expression } = &greeting.body else {
+            panic!("expected an expression body");
+        };
+        let ClientExpression::Call {
+            callee,
+            arguments,
+            span,
+        } = expression
+        else {
+            panic!("expected a call expression");
+        };
+        assert_eq!(callee.parts.len(), 3);
+        assert_eq!(callee.parts[0].text, "std");
+        assert_eq!(callee.parts[2].text, "concat");
+        assert_eq!(arguments.len(), 2);
+        assert_eq!(arguments[0].name, None);
+        let ClientExpression::StringLiteral { value, .. } = &arguments[0].value else {
+            panic!("expected a string literal argument");
+        };
+        assert_eq!(value, "Hello ");
+        assert_eq!(
+            arguments[1].name.as_ref().map(|name| name.text.as_str()),
+            None
+        );
+        let ClientExpression::ParameterRead { parameter } = &arguments[1].value else {
+            panic!("expected a parameter read argument");
+        };
+        assert_eq!(parameter.text, "p_name");
+        assert_eq!(span.start, source.find("std.strings").expect("callee"));
+
+        let qualified = &parsed.client_functions()[1];
+        let ClientFunctionBody::Expression { expression } = &qualified.body else {
+            panic!("expected an expression body");
+        };
+        let ClientExpression::BooleanLiteral { value, .. } = expression else {
+            panic!("expected a boolean literal expression");
+        };
+        assert!(*value);
+
+        let external = &parsed.client_functions()[2];
+        assert!(external.external);
+        let contract = external
+            .runtime_contract
+            .as_ref()
+            .expect("external functions carry a contract");
+        assert_eq!(contract.text, "'std.ui.window@1'");
+        let contract_start = source.find("'std.ui.window@1'").expect("contract");
+        assert_eq!(
+            contract.span,
+            SourceSpan {
+                start: contract_start,
+                end: contract_start + "'std.ui.window@1'".len(),
+            }
+        );
+        let ClientFunctionBody::ExternalContract { identity } = &external.body else {
+            panic!("expected an external-contract body");
+        };
+        assert_eq!(identity.text, "'std.ui.window@1'");
+    }
+
+    #[test]
+    fn parses_external_contract_with_capability_clause_in_source_order() {
+        let source = "CREATE EXTERNAL CLIENT FUNCTION std.net.connect (\n\
+            p_host TEXT\n\
+        )\n\
+        RETURNS BOOLEAN\n\
+        RUNTIME CONTRACT 'std.net.connect@1'\n\
+        REQUIRES CAPABILITY std.net.connect(p_host);";
+        let parsed = parse(source);
+
+        assert!(
+            parsed.diagnostics().is_empty(),
+            "{:?}",
+            parsed.diagnostics()
+        );
+        assert_eq!(parsed.syntax().text(), source);
+        let function = &parsed.client_functions()[0];
+        assert!(function.external);
+        assert_eq!(function.capabilities.len(), 1);
+        let contract = function
+            .runtime_contract
+            .as_ref()
+            .expect("external functions carry a contract");
+        assert_eq!(contract.text, "'std.net.connect@1'");
+        let ClientFunctionBody::ExternalContract { identity } = &function.body else {
+            panic!("expected an external-contract body");
+        };
+        assert_eq!(identity.text, "'std.net.connect@1'");
+    }
+
+    #[test]
+    fn parses_client_concat_and_field_path_expressions() {
+        let source = "CREATE CLIENT FUNCTION examples.label(p_item REF app.item)\n\
+            RETURNS TEXT\n\
+            AS p_item.name || ' #' || p_item.code;";
+        let parsed = parse(source);
+
+        assert!(
+            parsed.diagnostics().is_empty(),
+            "{:?}",
+            parsed.diagnostics()
+        );
+        assert_eq!(parsed.syntax().text(), source);
+        let function = &parsed.client_functions()[0];
+        let ClientFunctionBody::Expression { expression } = &function.body else {
+            panic!("expected an expression body");
+        };
+        let ClientExpression::Concat { left, right, .. } = expression else {
+            panic!("expected a concatenation");
+        };
+        let ClientExpression::FieldPath { root, members, .. } = left.as_ref() else {
+            panic!("expected a field path on the left");
+        };
+        assert_eq!(root.text, "p_item");
+        assert_eq!(members.len(), 1);
+        assert_eq!(members[0].text, "name");
+        let ClientExpression::Concat { left, .. } = right.as_ref() else {
+            panic!("expected a nested concatenation on the right");
+        };
+        let ClientExpression::StringLiteral { value, .. } = left.as_ref() else {
+            panic!("expected the literal in the middle");
+        };
+        assert_eq!(value, " #");
     }
 
     #[test]
