@@ -10,6 +10,7 @@ mod raw_client_dispatch;
 mod raw_socket;
 pub mod security_admin;
 mod source_apply;
+mod source_diff;
 mod upgrade;
 mod user_state;
 
@@ -47,6 +48,10 @@ pub use security_admin::{
 pub use source_apply::{
     InstalledSourceApplyDiagnostics, InstalledSourceApplyError, InstalledSourceApplyHostFailure,
     InstalledSourceApplyOutcome, InstalledSourceApplySuccess, run_installed_source_apply,
+};
+pub use source_diff::{
+    InstalledSourceDiffDiagnostics, InstalledSourceDiffError, InstalledSourceDiffHostFailure,
+    InstalledSourceDiffOutcome, InstalledSourceDiffReport, run_installed_source_diff,
 };
 pub use upgrade::{EmbeddedUpgradeError, run_embedded_upgrade};
 pub use user_state::{
