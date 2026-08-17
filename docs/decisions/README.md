@@ -143,3 +143,5 @@ source-of-truth or authority rules.
   [CLIENT STATE Declarations and Function-Instance State](0069-client-state-declarations.md)
 * **work ADR 0070:**
   [CLIENT USER State Lifecycle](0070-client-user-state-lifecycle.md)
+* **work ADR 0071:**
+  [CLIENT Resource Lifecycle](0071-client-resource-lifecycle.md)
