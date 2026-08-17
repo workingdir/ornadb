@@ -48,7 +48,7 @@ use crate::{
 /// dimension (typed values, source text, security details, runtime
 /// internals) independently of structural visibility. The ladder decision
 /// that consumes this set is [`crate::security::authorise_inspect`].
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum InspectPrivilege {
     /// Inspect invocations owned by the session principal.
     OwnInvocation,
