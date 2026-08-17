@@ -5,8 +5,8 @@ use std::{collections::HashMap, error::Error, fmt};
 use orna_artifact::client_plan::{
     ClientExpressionNode, ClientPlan, ClientPlanError, EXPRESSION_FORMAT_VERSION,
     ExpressionClientPlan, FORMAT_IDENTITY, FORMAT_VERSION, LANGUAGE_VERSION_IDENTITY,
-    OPAQUE_FORMAT_VERSION, OpaqueClientPlan, STATE_FORMAT_VERSION, StateClientPlan,
-    StateDefault, StateScope,
+    OPAQUE_FORMAT_VERSION, OpaqueClientPlan, STATE_FORMAT_VERSION, StateClientPlan, StateDefault,
+    StateScope,
 };
 use orna_core::{
     FunctionId, FunctionRevisionId, ParameterId, StateSlotId, TypeId,
@@ -332,13 +332,12 @@ pub enum ClientStateError {
     },
 }
 
-
 impl fmt::Display for ClientStateError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::UserScopeUnsupported { .. } => formatter.write_str(
-                "USER CLIENT state has no runtime slice yet and fails closed",
-            ),
+            Self::UserScopeUnsupported { .. } => {
+                formatter.write_str("USER CLIENT state has no runtime slice yet and fails closed")
+            }
             Self::UnsupportedSlotType { .. } => {
                 formatter.write_str("CLIENT state slot type is not supported locally")
             }
@@ -1082,10 +1081,7 @@ fn expression_error(
     ClientExecutionError::ExpressionEvaluation { context, source }
 }
 
-fn state_error(
-    context: ClientExecutionContext,
-    source: ClientStateError,
-) -> ClientExecutionError {
+fn state_error(context: ClientExecutionContext, source: ClientStateError) -> ClientExecutionError {
     ClientExecutionError::StateEvaluation { context, source }
 }
 
@@ -1633,7 +1629,10 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(result.value(), &RuntimeValue::Text("hello world".to_owned()));
+        assert_eq!(
+            result.value(),
+            &RuntimeValue::Text("hello world".to_owned())
+        );
         assert_eq!(
             state.local().get(&super::ClientStateKey::new(
                 function,
@@ -1657,7 +1656,10 @@ mod tests {
             StateSlotId::from_bytes([0x13; 16])
         )));
         assert!(state.user().is_empty());
-        assert_eq!(plan.format_version(), orna_artifact::client_plan::STATE_FORMAT_VERSION);
+        assert_eq!(
+            plan.format_version(),
+            orna_artifact::client_plan::STATE_FORMAT_VERSION
+        );
 
         super::evaluate_client_function_with_state(
             &active,
@@ -1863,7 +1865,10 @@ mod tests {
 
         let result = evaluate_client_function(&active, function).unwrap();
 
-        assert_eq!(result.value(), &RuntimeValue::Text("hello world".to_owned()));
+        assert_eq!(
+            result.value(),
+            &RuntimeValue::Text("hello world".to_owned())
+        );
     }
 
     #[test]
