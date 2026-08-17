@@ -52,8 +52,33 @@
 //! shape, the depth cap, the node-count cap, and per-node limits, so an
 //! untrusted artefact cannot exhaust the evaluator.
 //!
-//! The format contains no source text, source locations, Orna names, or
-//! backend values.
+//! Version 5 (work ADR 0060) wraps one complete version 1-4 client plan
+//! with the owning function's ordered, closed capability requirements:
+//!
+//! ```text
+//! magic[8] = ORNACP\0\0
+//! version: u32 big-endian = 5
+//! operation: u8 = 5
+//! inner plan version: u32 big-endian = 1|2|3|4
+//! inner payload length: u32 big-endian
+//! inner payload: complete inner client-plan artefact bytes
+//! capability count: u32 big-endian, 1..=MAX_CAPABILITY_REQUIREMENTS
+//! capability: name length: u32 big-endian, 1..=MAX_CAPABILITY_NAME_LENGTH
+//!             name: UTF-8
+//!             argument tag: u8 = 1|2 (text|parameter)
+//!             argument length: u32 big-endian, 1..=MAX_CAPABILITY_ARGUMENT_LENGTH
+//!             argument: UTF-8
+//! ```
+//!
+//! The inner payload is validated as a complete plan of the declared
+//! version, so a decoded version-5 plan holds only checked inner plans and
+//! checked requirements. Each requirement mirrors the closed
+//! `CapabilitySpecification` form (a qualified name plus exactly one text
+//! or parameter argument source); names and argument sources travel as
+//! plain text so the envelope stays independent of the client grant model.
+//!
+//! The version 1-4 formats contain no source text, source locations, Orna
+//! names, or backend values.
 
 use std::fmt;
 
@@ -86,11 +111,23 @@ pub const MAX_CALL_ARGUMENTS: usize = 64;
 pub const MAX_FIELD_PATH_LENGTH: usize = 64;
 /// The maximum number of state slots in one state client plan.
 pub const MAX_STATE_SLOTS: usize = 64;
+/// The client-plan version that carries one inner plan and the owning
+/// function's ordered, closed capability requirements (work ADR 0060).
+pub const CAPABILITY_FORMAT_VERSION: u32 = 5;
+/// The maximum number of capability requirements in one capability plan.
+pub const MAX_CAPABILITY_REQUIREMENTS: usize = 64;
+/// The maximum encoded length of one capability requirement name.
+pub const MAX_CAPABILITY_NAME_LENGTH: usize = 256;
+/// The maximum encoded length of one capability requirement argument.
+pub const MAX_CAPABILITY_ARGUMENT_LENGTH: usize = 1024;
 
 const RETURN_BOOLEAN_OPERATION: u8 = 1;
 const RETURN_OPAQUE_OPERATION: u8 = 2;
 const RETURN_EXPRESSION_OPERATION: u8 = 3;
 const RETURN_STATE_OPERATION: u8 = 4;
+const RETURN_CAPABILITY_OPERATION: u8 = 5;
+const CAPABILITY_ARGUMENT_TEXT: u8 = 1;
+const CAPABILITY_ARGUMENT_PARAMETER: u8 = 2;
 const ENCODED_LENGTH: usize = MAGIC.len() + size_of::<u32>() + 2;
 const OPAQUE_PAYLOAD_LENGTH: usize = 16;
 const OPAQUE_ENCODED_LENGTH: usize =
@@ -596,6 +633,300 @@ impl StateClientPlan {
     }
 }
 
+/// The argument source of one CLIENT capability requirement (work ADR 0060).
+///
+/// The envelope is independent of the client grant model: literal scope
+/// text and parameter names travel as plain strings, mirroring the closed
+/// `CapabilitySpecification` form (exactly one argument, either a literal
+/// or a declared parameter reference).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum CapabilityArgumentSource {
+    /// A literal scope value written in the declaration.
+    Text(String),
+    /// A reference to one declared function parameter by name.
+    Parameter(String),
+}
+
+/// One ordered, closed CLIENT capability requirement (work ADR 0060).
+///
+/// A requirement is a qualified capability name plus exactly one argument
+/// source. The name and argument are plain text so the artifact layer
+/// stays independent of the client grant model.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CapabilityRequirement {
+    name: String,
+    argument: CapabilityArgumentSource,
+}
+
+impl CapabilityRequirement {
+    /// Creates a requirement from one capability name and one argument source.
+    pub fn new(name: impl Into<String>, argument: CapabilityArgumentSource) -> Self {
+        Self {
+            name: name.into(),
+            argument,
+        }
+    }
+
+    /// Returns the qualified capability name.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// Returns the declared argument source.
+    pub const fn argument(&self) -> &CapabilityArgumentSource {
+        &self.argument
+    }
+}
+
+/// The inner plan carried by one version-5 capability envelope.
+///
+/// The envelope holds a complete decoded version 1-4 client plan so the
+/// runtime can evaluate it directly after the capability gate admits it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum InnerClientPlan {
+    /// A version-1 Boolean-constant plan.
+    Boolean(ClientPlan),
+    /// A version-2 opaque-value plan.
+    Opaque(OpaqueClientPlan),
+    /// A version-3 expression plan.
+    Expression(ExpressionClientPlan),
+    /// A version-4 state plan.
+    State(StateClientPlan),
+}
+
+impl InnerClientPlan {
+    /// Returns the canonical version of the inner plan.
+    pub const fn format_version(&self) -> u32 {
+        match self {
+            Self::Boolean(_) => FORMAT_VERSION,
+            Self::Opaque(_) => OPAQUE_FORMAT_VERSION,
+            Self::Expression(_) => EXPRESSION_FORMAT_VERSION,
+            Self::State(_) => STATE_FORMAT_VERSION,
+        }
+    }
+
+    /// Encodes the inner plan into its exact version bytes.
+    pub fn encode(&self) -> Result<Vec<u8>, ClientPlanError> {
+        match self {
+            Self::Boolean(plan) => Ok(plan.encode()),
+            Self::Opaque(plan) => Ok(plan.encode()),
+            Self::Expression(plan) => plan.encode(),
+            Self::State(plan) => plan.encode(),
+        }
+    }
+}
+
+/// A checked version-5 CLIENT plan that carries one version 1-4 inner plan
+/// and the owning function's ordered, closed capability requirements
+/// (work ADR 0060).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CapabilityClientPlan {
+    inner_plan_version: u32,
+    inner_plan: InnerClientPlan,
+    requirements: Vec<CapabilityRequirement>,
+}
+
+impl CapabilityClientPlan {
+    /// Creates a checked capability plan from one inner plan and the ordered
+    /// capability requirements.
+    pub fn new(inner_plan: InnerClientPlan, requirements: Vec<CapabilityRequirement>) -> Self {
+        Self {
+            inner_plan_version: inner_plan.format_version(),
+            inner_plan,
+            requirements,
+        }
+    }
+
+    /// Returns the canonical artefact version for this plan.
+    pub const fn format_version(&self) -> u32 {
+        CAPABILITY_FORMAT_VERSION
+    }
+
+    /// Returns the canonical version of the carried inner plan.
+    pub const fn inner_plan_version(&self) -> u32 {
+        self.inner_plan_version
+    }
+
+    /// Returns the decoded inner client plan.
+    pub const fn inner_plan(&self) -> &InnerClientPlan {
+        &self.inner_plan
+    }
+
+    /// Returns the capability requirements in declaration order.
+    pub fn requirements(&self) -> &[CapabilityRequirement] {
+        &self.requirements
+    }
+
+    /// Encodes this plan into its exact version-5 bytes.
+    pub fn encode(&self) -> Result<Vec<u8>, ClientPlanError> {
+        let requirement_count = self.requirements.len();
+        if requirement_count == 0 {
+            return Err(ClientPlanError::InvalidCapabilityCount { actual: 0 });
+        }
+        if requirement_count > MAX_CAPABILITY_REQUIREMENTS {
+            return Err(ClientPlanError::CapabilityLimitExceeded {
+                limit: MAX_CAPABILITY_REQUIREMENTS,
+            });
+        }
+        let mut seen: Vec<&str> = Vec::with_capacity(requirement_count);
+        for requirement in &self.requirements {
+            if requirement.name.is_empty() {
+                return Err(ClientPlanError::EmptyCapabilityName);
+            }
+            if requirement.name.len() > MAX_CAPABILITY_NAME_LENGTH {
+                return Err(ClientPlanError::CapabilityNameTooLong {
+                    length: requirement.name.len(),
+                    limit: MAX_CAPABILITY_NAME_LENGTH,
+                });
+            }
+            if seen.contains(&requirement.name.as_str()) {
+                return Err(ClientPlanError::DuplicateCapabilityName(
+                    requirement.name.clone(),
+                ));
+            }
+            seen.push(&requirement.name);
+            let argument = match &requirement.argument {
+                CapabilityArgumentSource::Text(text) => text,
+                CapabilityArgumentSource::Parameter(text) => text,
+            };
+            if argument.is_empty() {
+                return Err(ClientPlanError::EmptyCapabilityArgument);
+            }
+            if argument.len() > MAX_CAPABILITY_ARGUMENT_LENGTH {
+                return Err(ClientPlanError::CapabilityArgumentTooLong {
+                    length: argument.len(),
+                    limit: MAX_CAPABILITY_ARGUMENT_LENGTH,
+                });
+            }
+        }
+        let inner_payload = self.inner_plan.encode()?;
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&MAGIC);
+        bytes.extend_from_slice(&CAPABILITY_FORMAT_VERSION.to_be_bytes());
+        bytes.push(RETURN_CAPABILITY_OPERATION);
+        bytes.extend_from_slice(&self.inner_plan_version.to_be_bytes());
+        // The inner plan encoder bounds its artefact to MAX_ARTIFACT_BYTES,
+        // so the length always fits a u32.
+        bytes.extend_from_slice(&(inner_payload.len() as u32).to_be_bytes());
+        bytes.extend_from_slice(&inner_payload);
+        bytes.extend_from_slice(&(requirement_count as u32).to_be_bytes());
+        for requirement in &self.requirements {
+            // Lengths were bounded above, so the casts always fit a u32.
+            bytes.extend_from_slice(&(requirement.name.len() as u32).to_be_bytes());
+            bytes.extend_from_slice(requirement.name.as_bytes());
+            match &requirement.argument {
+                CapabilityArgumentSource::Text(text) => {
+                    bytes.push(CAPABILITY_ARGUMENT_TEXT);
+                    bytes.extend_from_slice(&(text.len() as u32).to_be_bytes());
+                    bytes.extend_from_slice(text.as_bytes());
+                }
+                CapabilityArgumentSource::Parameter(text) => {
+                    bytes.push(CAPABILITY_ARGUMENT_PARAMETER);
+                    bytes.extend_from_slice(&(text.len() as u32).to_be_bytes());
+                    bytes.extend_from_slice(text.as_bytes());
+                }
+            }
+        }
+        if bytes.len() > MAX_ARTIFACT_BYTES {
+            return Err(ClientPlanError::ArtifactSizeLimit {
+                size: bytes.len(),
+                maximum: MAX_ARTIFACT_BYTES,
+            });
+        }
+        Ok(bytes)
+    }
+
+    /// Decodes exactly one canonical version-5 capability client-plan.
+    pub fn decode(bytes: &[u8]) -> Result<Self, ClientPlanError> {
+        if bytes.len() > MAX_ARTIFACT_BYTES {
+            return Err(ClientPlanError::ArtifactSizeLimit {
+                size: bytes.len(),
+                maximum: MAX_ARTIFACT_BYTES,
+            });
+        }
+        let mut reader = Reader::new(bytes);
+        if reader.array::<8>()? != MAGIC {
+            return Err(ClientPlanError::InvalidMagic);
+        }
+        let version = reader.u32()?;
+        if version != CAPABILITY_FORMAT_VERSION {
+            return Err(ClientPlanError::UnsupportedVersion(version));
+        }
+        let operation = reader.u8()?;
+        if operation != RETURN_CAPABILITY_OPERATION {
+            return Err(ClientPlanError::InvalidOperation(operation));
+        }
+        let inner_plan_version = reader.u32()?;
+        let inner_payload_length = reader.u32()? as usize;
+        let inner_payload = reader.bytes(inner_payload_length)?;
+        let inner_plan = match inner_plan_version {
+            FORMAT_VERSION => InnerClientPlan::Boolean(ClientPlan::decode(inner_payload)?),
+            OPAQUE_FORMAT_VERSION => {
+                InnerClientPlan::Opaque(OpaqueClientPlan::decode(inner_payload)?)
+            }
+            EXPRESSION_FORMAT_VERSION => {
+                InnerClientPlan::Expression(ExpressionClientPlan::decode(inner_payload)?)
+            }
+            STATE_FORMAT_VERSION => InnerClientPlan::State(StateClientPlan::decode(inner_payload)?),
+            version => return Err(ClientPlanError::UnsupportedInnerVersion(version)),
+        };
+        let requirement_count = reader.u32()?;
+        if requirement_count == 0 {
+            return Err(ClientPlanError::InvalidCapabilityCount { actual: 0 });
+        }
+        if requirement_count as usize > MAX_CAPABILITY_REQUIREMENTS {
+            return Err(ClientPlanError::CapabilityLimitExceeded {
+                limit: MAX_CAPABILITY_REQUIREMENTS,
+            });
+        }
+        let mut requirements = Vec::with_capacity(requirement_count as usize);
+        let mut seen: Vec<String> = Vec::with_capacity(requirement_count as usize);
+        for _ in 0..requirement_count {
+            let name_length = reader.u32()? as usize;
+            if name_length == 0 {
+                return Err(ClientPlanError::EmptyCapabilityName);
+            }
+            if name_length > MAX_CAPABILITY_NAME_LENGTH {
+                return Err(ClientPlanError::CapabilityNameTooLong {
+                    length: name_length,
+                    limit: MAX_CAPABILITY_NAME_LENGTH,
+                });
+            }
+            let name = std::str::from_utf8(reader.bytes(name_length)?)
+                .map_err(|_| ClientPlanError::InvalidCapabilityNameUtf8)?
+                .to_owned();
+            if seen.contains(&name) {
+                return Err(ClientPlanError::DuplicateCapabilityName(name));
+            }
+            seen.push(name.clone());
+            let argument_tag = reader.u8()?;
+            let argument_length = reader.u32()? as usize;
+            if argument_length == 0 {
+                return Err(ClientPlanError::EmptyCapabilityArgument);
+            }
+            if argument_length > MAX_CAPABILITY_ARGUMENT_LENGTH {
+                return Err(ClientPlanError::CapabilityArgumentTooLong {
+                    length: argument_length,
+                    limit: MAX_CAPABILITY_ARGUMENT_LENGTH,
+                });
+            }
+            let argument_text = std::str::from_utf8(reader.bytes(argument_length)?)
+                .map_err(|_| ClientPlanError::InvalidCapabilityArgumentUtf8)?
+                .to_owned();
+            let argument = match argument_tag {
+                CAPABILITY_ARGUMENT_TEXT => CapabilityArgumentSource::Text(argument_text),
+                CAPABILITY_ARGUMENT_PARAMETER => {
+                    CapabilityArgumentSource::Parameter(argument_text)
+                }
+                tag => return Err(ClientPlanError::InvalidCapabilityArgumentTag(tag)),
+            };
+            requirements.push(CapabilityRequirement::new(name, argument));
+        }
+        reader.require_finished()?;
+        Ok(Self::new(inner_plan, requirements))
+    }
+}
+
 /// The maximum encoded length of one expression-tree byte slice.
 struct NodeWriter {
     bytes: Vec<u8>,
@@ -855,6 +1186,44 @@ pub enum ClientPlanError {
     },
     /// A version-4 plan repeats one state-slot identity.
     DuplicateStateSlotId(StateSlotId),
+    /// A version-5 plan declares zero capability requirements.
+    InvalidCapabilityCount {
+        /// The non-canonical count from the artefact.
+        actual: u32,
+    },
+    /// A version-5 plan declares more requirements than the format allows.
+    CapabilityLimitExceeded {
+        /// The exceeded limit.
+        limit: usize,
+    },
+    /// A version-5 plan repeats one capability requirement name.
+    DuplicateCapabilityName(String),
+    /// A version-5 capability name is empty.
+    EmptyCapabilityName,
+    /// A version-5 capability argument is empty.
+    EmptyCapabilityArgument,
+    /// A version-5 capability name exceeds the length limit.
+    CapabilityNameTooLong {
+        /// The offending name length.
+        length: usize,
+        /// The largest accepted name length.
+        limit: usize,
+    },
+    /// A version-5 capability argument exceeds the length limit.
+    CapabilityArgumentTooLong {
+        /// The offending argument length.
+        length: usize,
+        /// The largest accepted argument length.
+        limit: usize,
+    },
+    /// A version-5 capability name is not valid UTF-8.
+    InvalidCapabilityNameUtf8,
+    /// A version-5 capability argument is not valid UTF-8.
+    InvalidCapabilityArgumentUtf8,
+    /// A version-5 capability argument uses an unknown tag.
+    InvalidCapabilityArgumentTag(u8),
+    /// A version-5 envelope carries an unsupported inner plan version.
+    UnsupportedInnerVersion(u32),
     /// The encoded artefact exceeds the format byte limit.
     ArtifactSizeLimit {
         /// The supplied artefact size.
@@ -914,6 +1283,44 @@ impl fmt::Display for ClientPlanError {
             }
             Self::DuplicateStateSlotId(id) => {
                 write!(formatter, "duplicate client-plan state slot identity {id}")
+            }
+            Self::InvalidCapabilityCount { actual } => write!(
+                formatter,
+                "invalid client-plan capability count {actual}; a capability plan requires at least one requirement"
+            ),
+            Self::CapabilityLimitExceeded { limit } => write!(
+                formatter,
+                "client-plan capability count exceeds the limit {limit}"
+            ),
+            Self::DuplicateCapabilityName(name) => write!(
+                formatter,
+                "duplicate client-plan capability requirement {name}"
+            ),
+            Self::EmptyCapabilityName => {
+                formatter.write_str("client-plan capability name must not be empty")
+            }
+            Self::EmptyCapabilityArgument => {
+                formatter.write_str("client-plan capability argument must not be empty")
+            }
+            Self::CapabilityNameTooLong { length, limit } => write!(
+                formatter,
+                "client-plan capability name length {length} exceeds the limit {limit}"
+            ),
+            Self::CapabilityArgumentTooLong { length, limit } => write!(
+                formatter,
+                "client-plan capability argument length {length} exceeds the limit {limit}"
+            ),
+            Self::InvalidCapabilityNameUtf8 => {
+                formatter.write_str("client-plan capability name is not valid UTF-8")
+            }
+            Self::InvalidCapabilityArgumentUtf8 => {
+                formatter.write_str("client-plan capability argument is not valid UTF-8")
+            }
+            Self::InvalidCapabilityArgumentTag(tag) => {
+                write!(formatter, "invalid client-plan capability argument tag {tag}")
+            }
+            Self::UnsupportedInnerVersion(version) => {
+                write!(formatter, "unsupported inner client-plan version {version}")
             }
             Self::ArtifactSizeLimit { size, maximum } => write!(
                 formatter,
@@ -1181,6 +1588,56 @@ mod tests {
             (
                 ClientPlanError::DuplicateStateSlotId(duplicate_slot),
                 duplicate_display.as_str(),
+            ),
+            (
+                ClientPlanError::InvalidCapabilityCount { actual: 0 },
+                "invalid client-plan capability count 0; a capability plan requires at least one requirement",
+            ),
+            (
+                ClientPlanError::CapabilityLimitExceeded { limit: 64 },
+                "client-plan capability count exceeds the limit 64",
+            ),
+            (
+                ClientPlanError::DuplicateCapabilityName("std.fs.read".to_owned()),
+                "duplicate client-plan capability requirement std.fs.read",
+            ),
+            (
+                ClientPlanError::EmptyCapabilityName,
+                "client-plan capability name must not be empty",
+            ),
+            (
+                ClientPlanError::EmptyCapabilityArgument,
+                "client-plan capability argument must not be empty",
+            ),
+            (
+                ClientPlanError::CapabilityNameTooLong {
+                    length: 300,
+                    limit: 256,
+                },
+                "client-plan capability name length 300 exceeds the limit 256",
+            ),
+            (
+                ClientPlanError::CapabilityArgumentTooLong {
+                    length: 2000,
+                    limit: 1024,
+                },
+                "client-plan capability argument length 2000 exceeds the limit 1024",
+            ),
+            (
+                ClientPlanError::InvalidCapabilityNameUtf8,
+                "client-plan capability name is not valid UTF-8",
+            ),
+            (
+                ClientPlanError::InvalidCapabilityArgumentUtf8,
+                "client-plan capability argument is not valid UTF-8",
+            ),
+            (
+                ClientPlanError::InvalidCapabilityArgumentTag(9),
+                "invalid client-plan capability argument tag 9",
+            ),
+            (
+                ClientPlanError::UnsupportedInnerVersion(6),
+                "unsupported inner client-plan version 6",
             ),
             (
                 ClientPlanError::ArtifactSizeLimit {
@@ -1879,6 +2336,517 @@ mod tests {
         for length in 0..encoded.len() {
             assert_eq!(
                 StateClientPlan::decode(&encoded[..length]),
+                Err(ClientPlanError::Truncated),
+                "prefix length {length} must be truncated"
+            );
+        }
+    }
+
+    fn capability_plan() -> CapabilityClientPlan {
+        let function = FunctionId::from_bytes([0x21; 16]);
+        let parameter = ParameterId::from_bytes([0x31; 16]);
+        let field = FieldId::from_bytes([0x41; 16]);
+        CapabilityClientPlan::new(
+            InnerClientPlan::Expression(ExpressionClientPlan::new(ClientExpressionNode::Call {
+                function,
+                arguments: vec![(
+                    parameter,
+                    ClientExpressionNode::FieldPath {
+                        root: parameter,
+                        fields: vec![field],
+                    },
+                )],
+            })),
+            vec![
+                CapabilityRequirement::new(
+                    "std.fs.read",
+                    CapabilityArgumentSource::Text("/home/bob".to_owned()),
+                ),
+                CapabilityRequirement::new(
+                    "std.net.connect",
+                    CapabilityArgumentSource::Parameter("p_host".to_owned()),
+                ),
+            ],
+        )
+    }
+
+    fn minimal_capability_plan() -> CapabilityClientPlan {
+        CapabilityClientPlan::new(
+            InnerClientPlan::Boolean(ClientPlan::return_boolean(true)),
+            vec![CapabilityRequirement::new(
+                "std.secret.use",
+                CapabilityArgumentSource::Parameter("p_secret".to_owned()),
+            )],
+        )
+    }
+
+    #[test]
+    fn capability_plan_round_trips_every_inner_form_and_argument_source() {
+        let inner_forms = [
+            InnerClientPlan::Boolean(ClientPlan::return_boolean(false)),
+            InnerClientPlan::Opaque(OpaqueClientPlan::return_opaque(OPAQUE_TYPE, OPAQUE_PAYLOAD)),
+            InnerClientPlan::Expression(ExpressionClientPlan::new(ClientExpressionNode::String {
+                value: "hi".to_owned(),
+            })),
+            InnerClientPlan::State(minimal_state_plan()),
+        ];
+        for inner in inner_forms {
+            let plan = CapabilityClientPlan::new(
+                inner.clone(),
+                vec![
+                    CapabilityRequirement::new(
+                        "std.fs.read",
+                        CapabilityArgumentSource::Text("/home/bob".to_owned()),
+                    ),
+                    CapabilityRequirement::new(
+                        "std.fs.write",
+                        CapabilityArgumentSource::Parameter("p_path".to_owned()),
+                    ),
+                ],
+            );
+            let bytes = plan.encode().expect("the plan encodes");
+            let decoded = CapabilityClientPlan::decode(&bytes).expect("the plan decodes");
+            assert_eq!(decoded, plan);
+            assert_eq!(decoded.format_version(), CAPABILITY_FORMAT_VERSION);
+            assert_eq!(decoded.inner_plan_version(), inner.format_version());
+            assert_eq!(decoded.inner_plan(), &inner);
+            assert_eq!(decoded.requirements(), plan.requirements());
+        }
+    }
+
+    #[test]
+    fn capability_plan_has_the_exact_version_five_layout() {
+        let plan = minimal_capability_plan();
+        let bytes = plan.encode().expect("the plan encodes");
+        let mut expected = Vec::new();
+        expected.extend_from_slice(&MAGIC);
+        expected.extend_from_slice(&CAPABILITY_FORMAT_VERSION.to_be_bytes());
+        expected.push(RETURN_CAPABILITY_OPERATION);
+        expected.extend_from_slice(&FORMAT_VERSION.to_be_bytes());
+        expected.extend_from_slice(&(TRUE_BYTES.len() as u32).to_be_bytes());
+        expected.extend_from_slice(&TRUE_BYTES);
+        expected.extend_from_slice(&1_u32.to_be_bytes());
+        expected.extend_from_slice(&(b"std.secret.use".len() as u32).to_be_bytes());
+        expected.extend_from_slice(b"std.secret.use");
+        expected.push(CAPABILITY_ARGUMENT_PARAMETER);
+        expected.extend_from_slice(&(b"p_secret".len() as u32).to_be_bytes());
+        expected.extend_from_slice(b"p_secret");
+        assert_eq!(bytes, expected);
+        assert_eq!(plan.format_version(), CAPABILITY_FORMAT_VERSION);
+        assert_eq!(plan.inner_plan_version(), FORMAT_VERSION);
+        assert_eq!(
+            plan.inner_plan(),
+            &InnerClientPlan::Boolean(ClientPlan::return_boolean(true))
+        );
+    }
+
+    #[test]
+    fn capability_plan_versions_remain_mutually_closed() {
+        let capability = capability_plan().encode().expect("the plan encodes");
+        assert_eq!(
+            ClientPlan::decode(&capability),
+            Err(ClientPlanError::UnsupportedVersion(
+                CAPABILITY_FORMAT_VERSION
+            ))
+        );
+        assert_eq!(
+            OpaqueClientPlan::decode(&capability),
+            Err(ClientPlanError::UnsupportedVersion(
+                CAPABILITY_FORMAT_VERSION
+            ))
+        );
+        assert_eq!(
+            ExpressionClientPlan::decode(&capability),
+            Err(ClientPlanError::UnsupportedVersion(
+                CAPABILITY_FORMAT_VERSION
+            ))
+        );
+        assert_eq!(
+            StateClientPlan::decode(&capability),
+            Err(ClientPlanError::UnsupportedVersion(
+                CAPABILITY_FORMAT_VERSION
+            ))
+        );
+        let inner_artefacts = [
+            (
+                FORMAT_VERSION,
+                ClientPlan::return_boolean(true).encode(),
+            ),
+            (
+                OPAQUE_FORMAT_VERSION,
+                OpaqueClientPlan::return_opaque(OPAQUE_TYPE, OPAQUE_PAYLOAD).encode(),
+            ),
+            (
+                EXPRESSION_FORMAT_VERSION,
+                expression_plan().encode().expect("the plan encodes"),
+            ),
+            (
+                STATE_FORMAT_VERSION,
+                minimal_state_plan().encode().expect("the plan encodes"),
+            ),
+        ];
+        for (version, bytes) in inner_artefacts {
+            assert_eq!(
+                CapabilityClientPlan::decode(&bytes),
+                Err(ClientPlanError::UnsupportedVersion(version))
+            );
+        }
+    }
+
+    #[test]
+    fn capability_plan_rejects_magic_version_operation_and_trailing_corruption() {
+        let encoded = capability_plan().encode().expect("the plan encodes");
+
+        let mut wrong_magic = encoded.clone();
+        wrong_magic[0] = b'X';
+        assert_eq!(
+            CapabilityClientPlan::decode(&wrong_magic),
+            Err(ClientPlanError::InvalidMagic)
+        );
+
+        let mut wrong_version = encoded.clone();
+        wrong_version[8..12].copy_from_slice(&4_u32.to_be_bytes());
+        assert_eq!(
+            CapabilityClientPlan::decode(&wrong_version),
+            Err(ClientPlanError::UnsupportedVersion(4))
+        );
+
+        let mut wrong_operation = encoded.clone();
+        wrong_operation[12] = RETURN_STATE_OPERATION;
+        assert_eq!(
+            CapabilityClientPlan::decode(&wrong_operation),
+            Err(ClientPlanError::InvalidOperation(RETURN_STATE_OPERATION))
+        );
+
+        let mut trailing = encoded;
+        trailing.push(0);
+        assert_eq!(
+            CapabilityClientPlan::decode(&trailing),
+            Err(ClientPlanError::TrailingBytes)
+        );
+    }
+
+    #[test]
+    fn capability_plan_rejects_invalid_argument_tags_and_utf8() {
+        let count_offset = 8 + 4 + 1 + 4 + 4 + ENCODED_LENGTH;
+        let name_length_offset = count_offset + 4;
+        let tag_offset = name_length_offset + 4 + b"std.secret.use".len();
+        let argument_length_offset = tag_offset + 1;
+
+        let mut wrong_tag = minimal_capability_plan()
+            .encode()
+            .expect("the plan encodes");
+        wrong_tag[tag_offset] = 3;
+        assert_eq!(
+            CapabilityClientPlan::decode(&wrong_tag),
+            Err(ClientPlanError::InvalidCapabilityArgumentTag(3))
+        );
+
+        let mut text_form = minimal_capability_plan()
+            .encode()
+            .expect("the plan encodes");
+        text_form[tag_offset] = CAPABILITY_ARGUMENT_TEXT;
+        let decoded = CapabilityClientPlan::decode(&text_form).expect("the text form decodes");
+        assert_eq!(
+            decoded.requirements()[0].argument(),
+            &CapabilityArgumentSource::Text("p_secret".to_owned())
+        );
+
+        let mut bad_name_utf8 = minimal_capability_plan()
+            .encode()
+            .expect("the plan encodes");
+        bad_name_utf8[name_length_offset..name_length_offset + 4]
+            .copy_from_slice(&1_u32.to_be_bytes());
+        bad_name_utf8[name_length_offset + 4] = 0xff;
+        assert_eq!(
+            CapabilityClientPlan::decode(&bad_name_utf8),
+            Err(ClientPlanError::InvalidCapabilityNameUtf8)
+        );
+
+        let mut bad_argument_utf8 = minimal_capability_plan()
+            .encode()
+            .expect("the plan encodes");
+        bad_argument_utf8[argument_length_offset..argument_length_offset + 4]
+            .copy_from_slice(&1_u32.to_be_bytes());
+        bad_argument_utf8[argument_length_offset + 4] = 0xff;
+        assert_eq!(
+            CapabilityClientPlan::decode(&bad_argument_utf8),
+            Err(ClientPlanError::InvalidCapabilityArgumentUtf8)
+        );
+    }
+
+    #[test]
+    fn capability_plan_rejects_zero_and_oversized_counts_and_lengths() {
+        let count_offset = 8 + 4 + 1 + 4 + 4 + ENCODED_LENGTH;
+        let name_length_offset = count_offset + 4;
+        let tag_offset = name_length_offset + 4 + b"std.secret.use".len();
+        let argument_length_offset = tag_offset + 1;
+
+        let mut zero_count = minimal_capability_plan()
+            .encode()
+            .expect("the plan encodes");
+        zero_count[count_offset..count_offset + 4].copy_from_slice(&0_u32.to_be_bytes());
+        assert_eq!(
+            CapabilityClientPlan::decode(&zero_count),
+            Err(ClientPlanError::InvalidCapabilityCount { actual: 0 })
+        );
+
+        let mut oversized_count = minimal_capability_plan()
+            .encode()
+            .expect("the plan encodes");
+        oversized_count[count_offset..count_offset + 4]
+            .copy_from_slice(&(MAX_CAPABILITY_REQUIREMENTS as u32 + 1).to_be_bytes());
+        assert_eq!(
+            CapabilityClientPlan::decode(&oversized_count),
+            Err(ClientPlanError::CapabilityLimitExceeded {
+                limit: MAX_CAPABILITY_REQUIREMENTS,
+            })
+        );
+
+        let mut zero_name = minimal_capability_plan()
+            .encode()
+            .expect("the plan encodes");
+        zero_name[name_length_offset..name_length_offset + 4].copy_from_slice(&0_u32.to_be_bytes());
+        assert_eq!(
+            CapabilityClientPlan::decode(&zero_name),
+            Err(ClientPlanError::EmptyCapabilityName)
+        );
+
+        let mut long_name = minimal_capability_plan()
+            .encode()
+            .expect("the plan encodes");
+        long_name[name_length_offset..name_length_offset + 4]
+            .copy_from_slice(&(MAX_CAPABILITY_NAME_LENGTH as u32 + 1).to_be_bytes());
+        assert_eq!(
+            CapabilityClientPlan::decode(&long_name),
+            Err(ClientPlanError::CapabilityNameTooLong {
+                length: MAX_CAPABILITY_NAME_LENGTH + 1,
+                limit: MAX_CAPABILITY_NAME_LENGTH,
+            })
+        );
+
+        let mut zero_argument = minimal_capability_plan()
+            .encode()
+            .expect("the plan encodes");
+        zero_argument[argument_length_offset..argument_length_offset + 4]
+            .copy_from_slice(&0_u32.to_be_bytes());
+        assert_eq!(
+            CapabilityClientPlan::decode(&zero_argument),
+            Err(ClientPlanError::EmptyCapabilityArgument)
+        );
+
+        let mut long_argument = minimal_capability_plan()
+            .encode()
+            .expect("the plan encodes");
+        long_argument[argument_length_offset..argument_length_offset + 4]
+            .copy_from_slice(&(MAX_CAPABILITY_ARGUMENT_LENGTH as u32 + 1).to_be_bytes());
+        assert_eq!(
+            CapabilityClientPlan::decode(&long_argument),
+            Err(ClientPlanError::CapabilityArgumentTooLong {
+                length: MAX_CAPABILITY_ARGUMENT_LENGTH + 1,
+                limit: MAX_CAPABILITY_ARGUMENT_LENGTH,
+            })
+        );
+
+        let inner = InnerClientPlan::Boolean(ClientPlan::return_boolean(true));
+        let empty = CapabilityClientPlan::new(inner.clone(), Vec::new());
+        assert_eq!(
+            empty.encode(),
+            Err(ClientPlanError::InvalidCapabilityCount { actual: 0 })
+        );
+
+        let requirement = CapabilityRequirement::new(
+            "std.fs.read",
+            CapabilityArgumentSource::Text("/home/bob".to_owned()),
+        );
+        let oversized = CapabilityClientPlan::new(
+            inner.clone(),
+            vec![requirement; MAX_CAPABILITY_REQUIREMENTS + 1],
+        );
+        assert_eq!(
+            oversized.encode(),
+            Err(ClientPlanError::CapabilityLimitExceeded {
+                limit: MAX_CAPABILITY_REQUIREMENTS,
+            })
+        );
+
+        let empty_name = CapabilityClientPlan::new(
+            inner.clone(),
+            vec![CapabilityRequirement::new(
+                "",
+                CapabilityArgumentSource::Text("x".to_owned()),
+            )],
+        );
+        assert_eq!(empty_name.encode(), Err(ClientPlanError::EmptyCapabilityName));
+
+        let long_name_plan = CapabilityClientPlan::new(
+            inner.clone(),
+            vec![CapabilityRequirement::new(
+                "x".repeat(MAX_CAPABILITY_NAME_LENGTH + 1),
+                CapabilityArgumentSource::Text("x".to_owned()),
+            )],
+        );
+        assert_eq!(
+            long_name_plan.encode(),
+            Err(ClientPlanError::CapabilityNameTooLong {
+                length: MAX_CAPABILITY_NAME_LENGTH + 1,
+                limit: MAX_CAPABILITY_NAME_LENGTH,
+            })
+        );
+
+        let empty_argument = CapabilityClientPlan::new(
+            inner.clone(),
+            vec![CapabilityRequirement::new(
+                "std.fs.read",
+                CapabilityArgumentSource::Text(String::new()),
+            )],
+        );
+        assert_eq!(
+            empty_argument.encode(),
+            Err(ClientPlanError::EmptyCapabilityArgument)
+        );
+
+        let long_argument_plan = CapabilityClientPlan::new(
+            inner,
+            vec![CapabilityRequirement::new(
+                "std.fs.read",
+                CapabilityArgumentSource::Text("x".repeat(MAX_CAPABILITY_ARGUMENT_LENGTH + 1)),
+            )],
+        );
+        assert_eq!(
+            long_argument_plan.encode(),
+            Err(ClientPlanError::CapabilityArgumentTooLong {
+                length: MAX_CAPABILITY_ARGUMENT_LENGTH + 1,
+                limit: MAX_CAPABILITY_ARGUMENT_LENGTH,
+            })
+        );
+    }
+
+    #[test]
+    fn capability_plan_rejects_duplicate_requirement_names() {
+        let duplicated = CapabilityClientPlan::new(
+            InnerClientPlan::Boolean(ClientPlan::return_boolean(true)),
+            vec![
+                CapabilityRequirement::new(
+                    "std.fs.read",
+                    CapabilityArgumentSource::Text("/home/bob".to_owned()),
+                ),
+                CapabilityRequirement::new(
+                    "std.fs.read",
+                    CapabilityArgumentSource::Parameter("p_path".to_owned()),
+                ),
+            ],
+        );
+        assert_eq!(
+            duplicated.encode(),
+            Err(ClientPlanError::DuplicateCapabilityName(
+                "std.fs.read".to_owned()
+            ))
+        );
+
+        let count_offset = 8 + 4 + 1 + 4 + 4 + ENCODED_LENGTH;
+        let mut crafted = minimal_capability_plan()
+            .encode()
+            .expect("the plan encodes");
+        crafted[count_offset..count_offset + 4].copy_from_slice(&2_u32.to_be_bytes());
+        crafted.extend_from_slice(&(b"std.secret.use".len() as u32).to_be_bytes());
+        crafted.extend_from_slice(b"std.secret.use");
+        crafted.push(CAPABILITY_ARGUMENT_TEXT);
+        crafted.extend_from_slice(&(b"/home/bob".len() as u32).to_be_bytes());
+        crafted.extend_from_slice(b"/home/bob");
+        assert_eq!(
+            CapabilityClientPlan::decode(&crafted),
+            Err(ClientPlanError::DuplicateCapabilityName(
+                "std.secret.use".to_owned()
+            ))
+        );
+    }
+
+    #[test]
+    fn capability_plan_rejects_unsupported_inner_versions_and_malformed_payloads() {
+        let mut zero_inner = minimal_capability_plan()
+            .encode()
+            .expect("the plan encodes");
+        zero_inner[13..17].copy_from_slice(&0_u32.to_be_bytes());
+        assert_eq!(
+            CapabilityClientPlan::decode(&zero_inner),
+            Err(ClientPlanError::UnsupportedInnerVersion(0))
+        );
+
+        let mut inner_five = minimal_capability_plan()
+            .encode()
+            .expect("the plan encodes");
+        inner_five[13..17].copy_from_slice(&CAPABILITY_FORMAT_VERSION.to_be_bytes());
+        assert_eq!(
+            CapabilityClientPlan::decode(&inner_five),
+            Err(ClientPlanError::UnsupportedInnerVersion(
+                CAPABILITY_FORMAT_VERSION
+            ))
+        );
+
+        let mut mismatched = minimal_capability_plan()
+            .encode()
+            .expect("the plan encodes");
+        mismatched[13..17].copy_from_slice(&OPAQUE_FORMAT_VERSION.to_be_bytes());
+        // The inner payload is a version-1 artefact; the version-2 decoder
+        // rejects it with the payload's own version.
+        assert_eq!(
+            CapabilityClientPlan::decode(&mismatched),
+            Err(ClientPlanError::UnsupportedVersion(FORMAT_VERSION))
+        );
+
+        let mut corrupt_inner = minimal_capability_plan()
+            .encode()
+            .expect("the plan encodes");
+        corrupt_inner[8 + 4 + 1 + 4 + 4] = b'X';
+        assert_eq!(
+            CapabilityClientPlan::decode(&corrupt_inner),
+            Err(ClientPlanError::InvalidMagic)
+        );
+
+        let mut oversized_inner = minimal_capability_plan()
+            .encode()
+            .expect("the plan encodes");
+        oversized_inner[17..21].copy_from_slice(&u32::MAX.to_be_bytes());
+        assert_eq!(
+            CapabilityClientPlan::decode(&oversized_inner),
+            Err(ClientPlanError::Truncated)
+        );
+    }
+
+    #[test]
+    fn capability_plan_exposes_inner_plan_and_requirement_accessors() {
+        let plan = capability_plan();
+        let bytes = plan.encode().expect("the plan encodes");
+        let decoded = CapabilityClientPlan::decode(&bytes).expect("the plan decodes");
+        assert_eq!(decoded.format_version(), CAPABILITY_FORMAT_VERSION);
+        assert_eq!(decoded.inner_plan_version(), EXPRESSION_FORMAT_VERSION);
+        assert!(matches!(
+            decoded.inner_plan(),
+            InnerClientPlan::Expression(_)
+        ));
+        let requirements = decoded.requirements();
+        assert_eq!(requirements.len(), 2);
+        assert_eq!(requirements[0].name(), "std.fs.read");
+        assert_eq!(
+            requirements[0].argument(),
+            &CapabilityArgumentSource::Text("/home/bob".to_owned())
+        );
+        assert_eq!(requirements[1].name(), "std.net.connect");
+        assert_eq!(
+            requirements[1].argument(),
+            &CapabilityArgumentSource::Parameter("p_host".to_owned())
+        );
+    }
+
+    #[test]
+    fn capability_plan_rejects_every_truncated_prefix() {
+        let encoded = minimal_capability_plan()
+            .encode()
+            .expect("the plan encodes");
+        for length in 0..encoded.len() {
+            assert_eq!(
+                CapabilityClientPlan::decode(&encoded[..length]),
                 Err(ClientPlanError::Truncated),
                 "prefix length {length} must be truncated"
             );
