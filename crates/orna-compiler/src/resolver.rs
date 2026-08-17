@@ -40,9 +40,9 @@ pub use model::{
     StandardApplicationContextError, StandardLibraryCheckError,
 };
 pub(crate) use model::{
-    CheckedClientExpression, CheckedClientFunctionBody, CheckedFieldRename,
-    CheckedServerFunctionBody, QueryCatalogue, QueryField, QueryObjectType, ResolutionCatalogue,
-    STD_UI_CONTRACT,
+    CheckedClientExpression, CheckedClientFunctionBody, CheckedClientStateSlot, CheckedFieldRename,
+    CheckedStateDefault, CheckedStateScope, CheckedStateSlotId, CheckedServerFunctionBody,
+    QueryCatalogue, QueryField, QueryObjectType, ResolutionCatalogue, STD_UI_CONTRACT,
 };
 use model::{CheckedEnumType, CheckedRecordValueField, CheckedRecordValueType};
 
@@ -54,7 +54,7 @@ use std::{
 
 use orna_artifact::server_parameter_echo::{self, ServerParameterEcho};
 use orna_core::{
-    ExpressionId, FunctionId, FunctionRevisionId, ParameterId, SchemaId, TypeId,
+    ExpressionId, FunctionId, FunctionRevisionId, ParameterId, SchemaId, StateSlotId, TypeId,
     canonical_hash::{
         artifact_payload_digest, function_declaration_digest, function_semantic_digest_with_version,
     },
@@ -77,13 +77,13 @@ use orna_core::{
     types::{ResolvedType, StandardScalar},
 };
 use orna_syntax::{
-    CapabilitySpecification, ClientExpression, ClientFunctionDeclaration, FieldRenameDeclaration,
-    FunctionReturnType, FunctionSecurity as SyntaxFunctionSecurity,
+    CapabilitySpecification, ClientExpression, ClientFunctionDeclaration,
+    FieldRenameDeclaration, FunctionReturnType, FunctionSecurity as SyntaxFunctionSecurity,
     FunctionTransaction as SyntaxFunctionTransaction,
     FunctionVolatility as SyntaxFunctionVolatility, ObjectTypeDeclaration, OnDeletePolicy,
     PrimitiveValueTypePersistence, QualifiedName, RecordValueTypeDeclaration, SelectQuantifier,
     ServerFunctionBody, ServerFunctionDeclaration, SourceSlice, SourceSpan,
-    StandardLargeObjectKind, TypeExportTarget, TypeSpecification,
+    StandardLargeObjectKind, StateDefault, StateScope, TypeExportTarget, TypeSpecification,
 };
 
 use crate::mutation::{
@@ -3072,6 +3072,7 @@ fn check_application_parsed(
             .collect::<Vec<_>>();
         check_client_functions(
             &client_inputs,
+            &submitted_ids,
             &query_catalogue,
             &server_names,
             base,
@@ -3644,7 +3645,8 @@ fn resolve_client_function_inputs<'a>(
         let name = semantic_name(&declaration.name);
         let base_function = base.function_by_name(&name);
         let expression_body = declaration.body.as_expression().is_some()
-            || declaration.body.as_external_contract().is_some();
+            || declaration.body.as_external_contract().is_some()
+            || declaration.body.as_state_block().is_some();
         if !expression_body && !declaration.parameters.is_empty() {
             diagnostics.push(diagnostic(
                 DiagnosticCode::DomainIncompatible,
@@ -4663,9 +4665,53 @@ fn client_contract_identity(source: &SourceSlice) -> Option<String> {
     }
     Some(identity)
 }
+fn checked_state_slot_id(function: CheckedFunctionId, name: &str) -> CheckedStateSlotId {
+    let mut payload = function.to_string().into_bytes();
+    payload.push(0);
+    payload.extend_from_slice(&(name.len() as u32).to_be_bytes());
+    payload.extend_from_slice(name.as_bytes());
+    let digest = artifact_payload_digest(&payload).expect("state-slot identity payload is bounded");
+    let mut bytes = [0; 16];
+    bytes.copy_from_slice(&digest.to_bytes()[..16]);
+    let id = StateSlotId::from_bytes(bytes);
+    if function.existing().is_some() {
+        CheckedStateSlotId::Existing(id)
+    } else {
+        CheckedStateSlotId::Provisional(id)
+    }
+}
+
+fn unsupported_client_state_reference(
+    expression: &ClientExpression,
+    input: &ResolvedClientFunctionInput<'_>,
+    state_names: &HashSet<String>,
+) -> Option<SourceSpan> {
+    let parameter_name = |name: &orna_syntax::NamePart| semantic_part(name);
+    let is_state = |name: &orna_syntax::NamePart| {
+        let name = parameter_name(name);
+        state_names.contains(&name) && !input.parameters.iter().any(|parameter| parameter.name == name)
+    };
+    match expression {
+        ClientExpression::ParameterRead { parameter } if is_state(parameter) => {
+            Some(parameter.span.clone())
+        }
+        ClientExpression::FieldPath { root, .. } if is_state(root) => Some(root.span.clone()),
+        ClientExpression::Call { arguments, .. } => arguments
+            .iter()
+            .find_map(|argument| unsupported_client_state_reference(&argument.value, input, state_names)),
+        ClientExpression::Concat { left, right, .. } => unsupported_client_state_reference(
+            left,
+            input,
+            state_names,
+        )
+        .or_else(|| unsupported_client_state_reference(right, input, state_names)),
+        _ => None,
+    }
+}
 
 fn check_client_functions(
     inputs: &[ResolvedClientFunctionInput<'_>],
+    submitted_ids: &HashMap<QualifiedSemanticName, SubmittedType>,
     query_catalogue: &ResolutionCatalogue<CheckedTypeId, CheckedFieldId>,
     server_names: &[QualifiedSemanticName],
     base: &CatalogueSnapshot,
@@ -4766,6 +4812,175 @@ fn check_client_functions(
                         location(input.logical_path, expression.span()),
                         references,
                     )
+                } else if let Some(block) = input.body.as_state_block() {
+                    let mut references = Vec::new();
+                    let mut used_capabilities = HashSet::new();
+                    let mut state_names = HashSet::new();
+                    let mut states = Vec::with_capacity(block.states.len());
+                    for (ordinal, state) in block.states.iter().enumerate() {
+                        let state_name = semantic_part(&state.name);
+                        if !state_names.insert(state_name.clone()) {
+                            diagnostics.push(diagnostic(
+                                DiagnosticCode::DuplicateDefinition,
+                                format!("duplicate state definition {state_name} in {}", input.name),
+                                input.logical_path,
+                                &state.name.span,
+                            ));
+                            return None;
+                        }
+                        let Some(resolved) = resolve_application_type_with_named_standard(
+                            &state.type_specification,
+                            submitted_ids,
+                            input.logical_path,
+                            diagnostics,
+                            standard,
+                            true,
+                        ) else {
+                            return None;
+                        };
+                        let state_type = ClientExpressionType {
+                            semantic_type: resolved.semantic_type,
+                            standard_value_type: resolved.standard_value_type,
+                        };
+                        if !client_expression_type_is_evaluable(state_type, standard) {
+                            diagnostics.push(diagnostic(
+                                DiagnosticCode::TypeMismatch,
+                                "this CLIENT state type is not supported by the local evaluator",
+                                input.logical_path,
+                                state.type_specification.span(),
+                            ));
+                            return None;
+                        }
+                        let default = match &state.default {
+                            StateDefault::Unset => CheckedStateDefault::Unset,
+                            StateDefault::Null => CheckedStateDefault::Null,
+                            StateDefault::Expression(expression) => {
+                                if let Some(span) = unsupported_client_state_reference(
+                                    expression,
+                                    input,
+                                    &state_names,
+                                ) {
+                                    diagnostics.push(diagnostic(
+                                        DiagnosticCode::DomainIncompatible,
+                                        "CLIENT state references are not supported in expressions",
+                                        input.logical_path,
+                                        &span,
+                                    ));
+                                    return None;
+                                }
+                                let Some((checked, expression_type)) = check_client_expression(
+                                    expression,
+                                    input,
+                                    &targets,
+                                    query_catalogue,
+                                    base,
+                                    server_names,
+                                    standard,
+                                    diagnostics,
+                                    &mut references,
+                                    &mut used_capabilities,
+                                ) else {
+                                    return None;
+                                };
+                                if !client_expression_types_compatible(expression_type, state_type) {
+                                    diagnostics.push(diagnostic(
+                                        DiagnosticCode::TypeMismatch,
+                                        "this CLIENT state default must have the declared state type",
+                                        input.logical_path,
+                                        expression.span(),
+                                    ));
+                                    return None;
+                                }
+                                CheckedStateDefault::Expression(checked)
+                            }
+                        };
+                        let scope = match state.scope {
+                            StateScope::Local => CheckedStateScope::Local,
+                            StateScope::Session => CheckedStateScope::Session,
+                            StateScope::User => CheckedStateScope::User,
+                        };
+                        states.push(CheckedClientStateSlot {
+                            id: checked_state_slot_id(input.id, &state_name),
+                            name: state_name,
+                            ordinal: ordinal as u32,
+                            semantic_type: resolved.semantic_type,
+                            scope,
+                            default,
+                            location: location(input.logical_path, &state.span),
+                        });
+                    }
+                    let Some(expression) = block.return_expression.as_ref() else {
+                        diagnostics.push(diagnostic(
+                            DiagnosticCode::DomainIncompatible,
+                            "CLIENT state blocks must return an expression",
+                            input.logical_path,
+                            &block.span,
+                        ));
+                        return None;
+                    };
+                    if let Some(span) =
+                        unsupported_client_state_reference(expression, input, &state_names)
+                    {
+                        diagnostics.push(diagnostic(
+                            DiagnosticCode::DomainIncompatible,
+                            "CLIENT state references are not supported in expressions",
+                            input.logical_path,
+                            &span,
+                        ));
+                        return None;
+                    }
+                    let Some((checked_return, return_type)) = check_client_expression(
+                        expression,
+                        input,
+                        &targets,
+                        query_catalogue,
+                        base,
+                        server_names,
+                        standard,
+                        diagnostics,
+                        &mut references,
+                        &mut used_capabilities,
+                    ) else {
+                        return None;
+                    };
+                    if !client_expression_types_compatible(
+                        return_type,
+                        ClientExpressionType {
+                            semantic_type: input.return_type,
+                            standard_value_type: input.standard_value_type,
+                        },
+                    ) {
+                        diagnostics.push(diagnostic(
+                            DiagnosticCode::TypeMismatch,
+                            "this CLIENT function must return the declared value type",
+                            input.logical_path,
+                            expression.span(),
+                        ));
+                        return None;
+                    }
+                    for capability in input.capabilities {
+                        let capability_name = semantic_name(&capability.name);
+                        if !used_capabilities.contains(&capability_name) {
+                            diagnostics.push(diagnostic(
+                                DiagnosticCode::CapabilityRequirement,
+                                format!(
+                                    "declared CLIENT capability {capability_name} is not exercised"
+                                ),
+                                input.logical_path,
+                                &input.declaration_span,
+                            ));
+                            return None;
+                        }
+                    }
+                    (
+                        CheckedClientFunctionBody::StateBlock {
+                            states,
+                            return_expression: checked_return,
+                        },
+                        return_type,
+                        location(input.logical_path, expression.span()),
+                        references,
+                    )
                 } else if let Some(contract) = input.body.as_external_contract() {
                     let Some(identity) = client_contract_identity(contract) else {
                         diagnostics.push(diagnostic(
@@ -4820,7 +5035,8 @@ fn check_client_functions(
                         body_location,
                     );
                 }
-                CheckedClientFunctionBody::Expression { .. } => {
+                CheckedClientFunctionBody::Expression { .. }
+                | CheckedClientFunctionBody::StateBlock { .. } => {
                     let resolved = ResolvedApplicationType {
                         semantic_type: body_type.semantic_type,
                         standard_value_type: body_type.standard_value_type,
@@ -7530,8 +7746,8 @@ mod tests {
     use super::{
         CheckAssignments, CheckedApplicationTypeUse, CheckedDefinitionReferenceTarget,
         CheckedStandardExecutable, CheckedStandardJsonEncode, CheckedStandardParameterEcho,
-        CheckedStandardTerminalPresentTable, CheckedTypeId, CheckedTypeUseKind,
-        CheckedValueTypeUse, ConstantValue, DiagnosticCode, IdentityAssignments,
+        CheckedStandardTerminalPresentTable, CheckedStateDefault, CheckedTypeId,
+        CheckedTypeUseKind, CheckedValueTypeUse, ConstantValue, DiagnosticCode, IdentityAssignments,
         NewApplicationCheckError, STANDARD_LIBRARY_V3_REVISION_ID, STANDARD_LIBRARY_V4_REVISION_ID,
         STD_DATA_ROWS_TYPE_ID, STD_DATA_SCHEMA_ID, STD_INTEGER_TYPE_ID,
         STD_INVOKE_ECHO_FUNCTION_ID, STD_INVOKE_ECHO_FUNCTION_REVISION_ID,
@@ -15299,6 +15515,53 @@ mod tests {
             CheckedClientFunctionBody::ExternalContract { identity, .. }
                 if identity == "std.net.connect@1"
         ));
+    }
+
+    #[test]
+    fn checks_client_state_slots_and_rejects_state_shape_type_errors() {
+        let valid = "CREATE SCHEMA examples; \
+            CREATE CLIENT FUNCTION examples.state() RETURNS TEXT IS \
+            STATE filter TEXT SCOPE LOCAL DEFAULT ''; \
+            STATE selected TEXT SCOPE SESSION DEFAULT NULL; \
+            STATE count INTEGER; \
+            BEGIN RETURN 'ready'; END;";
+        let report = check(&bundle([("client.orna", valid)]), &empty_catalogue());
+        assert!(report.diagnostics().is_empty(), "{:?}", report.diagnostics());
+        let function = &report.checked_bundle().unwrap().client_functions()[0];
+        let CheckedClientFunctionBody::StateBlock { states, .. } = function.body() else {
+            panic!("expected checked CLIENT state block");
+        };
+        assert_eq!(states.len(), 3);
+        assert!(matches!(states[0].default(), CheckedStateDefault::Expression(_)));
+        assert!(matches!(states[1].default(), CheckedStateDefault::Null));
+        assert!(matches!(states[2].default(), CheckedStateDefault::Unset));
+
+        let duplicate = "CREATE SCHEMA examples; CREATE CLIENT FUNCTION examples.state() RETURNS TEXT IS \
+            STATE value TEXT; STATE value INTEGER; BEGIN RETURN 'ready'; END;";
+        let report = check(&bundle([("client.orna", duplicate)]), &empty_catalogue());
+        assert_eq!(report.diagnostics().len(), 1);
+        assert_eq!(report.diagnostics()[0].code(), DiagnosticCode::DuplicateDefinition);
+        assert!(report.diagnostics()[0].message().contains("duplicate state definition"));
+
+        let bad_default = "CREATE SCHEMA examples; CREATE CLIENT FUNCTION examples.state() RETURNS TEXT IS \
+            STATE value TEXT DEFAULT 1; BEGIN RETURN 'ready'; END;";
+        let report = check(&bundle([("client.orna", bad_default)]), &empty_catalogue());
+        assert_eq!(report.diagnostics().len(), 1);
+        assert_eq!(report.diagnostics()[0].code(), DiagnosticCode::TypeMismatch);
+        assert_eq!(
+            report.diagnostics()[0].message(),
+            "this CLIENT state default must have the declared state type"
+        );
+
+        let bad_return = "CREATE SCHEMA examples; CREATE CLIENT FUNCTION examples.state() RETURNS TEXT IS \
+            STATE value TEXT; BEGIN RETURN 1; END;";
+        let report = check(&bundle([("client.orna", bad_return)]), &empty_catalogue());
+        assert_eq!(report.diagnostics().len(), 1);
+        assert_eq!(report.diagnostics()[0].code(), DiagnosticCode::TypeMismatch);
+        assert_eq!(
+            report.diagnostics()[0].message(),
+            "this CLIENT function must return the declared value type"
+        );
     }
 
     #[test]
