@@ -1019,7 +1019,7 @@ impl<'source> Parser<'source> {
         };
         // Emit the callee qualified name inside the call node.
         self.builder.start_node(SyntaxKind::QualifiedName.into());
-        for (index, part) in callee.parts.iter().enumerate() {
+        for (index, _part) in callee.parts.iter().enumerate() {
             self.skip_trivia();
             self.bump();
             self.skip_trivia();
