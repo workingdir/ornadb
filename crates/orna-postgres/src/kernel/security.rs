@@ -1459,21 +1459,6 @@ async fn append_client_capability_audit<T>(
     execution: &Result<T, PostgresKernelError>,
 ) -> Result<(), PostgresKernelError> {
     match execution {
-        Ok(_) => {
-            for capability in stored_capability_names(active, target.function())? {
-                let decision = SecurityAuditDecision::capability_allowed(
-                    authenticated_session,
-                    target,
-                    capability,
-                )
-                .map_err(|_| PostgresKernelError::DurableInvariant {
-                    relation: "_orna_kernel.security_audit_events",
-                    record: target.function().canonical(),
-                    rule: "stored capability names must be valid redacted names",
-                })?;
-                append_security_audit_event(transaction, decision).await?;
-            }
-        }
         Err(PostgresKernelError::ClientExecution(
             ClientExecutionError::CapabilityDenied {
                 context,
@@ -1492,7 +1477,24 @@ async fn append_client_capability_audit<T>(
             })?;
             append_security_audit_event(transaction, decision).await?;
         }
-        _ => {}
+        _ => {
+            // A non-denial result means the stored capability gate passed.
+            // Record that decision even when the local evaluator then returns
+            // an external-contract or another execution error.
+            for capability in stored_capability_names(active, target.function())? {
+                let decision = SecurityAuditDecision::capability_allowed(
+                    authenticated_session,
+                    target,
+                    capability,
+                )
+                .map_err(|_| PostgresKernelError::DurableInvariant {
+                    relation: "_orna_kernel.security_audit_events",
+                    record: target.function().canonical(),
+                    rule: "stored capability names must be valid redacted names",
+                })?;
+                append_security_audit_event(transaction, decision).await?;
+            }
+        }
     }
     Ok(())
 }
