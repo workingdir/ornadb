@@ -988,7 +988,6 @@ impl CheckedClientFunctionBody {
             Self::Unsupported => None,
         }
     }
-
 }
 
 /// One checked CLIENT expression in the ADR 0068 closed surface.
