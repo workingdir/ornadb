@@ -490,28 +490,6 @@ fn evaluate_function(
         function,
         function_revision: revision.id(),
     };
-    if revision.artifact().version() == EXPRESSION_FORMAT_VERSION {
-        if arguments.len() != definition.parameters().len()
-            || definition.parameters().iter().any(|parameter| {
-                arguments
-                    .iter()
-                    .filter(|(candidate, _)| *candidate == parameter.id())
-                    .count()
-                    != 1
-                    || arguments
-                        .iter()
-                        .find(|(candidate, _)| *candidate == parameter.id())
-                        .is_none_or(|(_, value)| {
-                            !runtime_value_matches(active, value, parameter.resolved_type())
-                        })
-            })
-        {
-            return Err(expression_error(
-                context,
-                ClientExpressionError::InvalidCall,
-            ));
-        }
-    }
     for declaration in declarations {
         if !grants.satisfies_declaration(declaration, |parameter| {
             let parameter_id = definition
@@ -539,6 +517,26 @@ fn evaluate_function(
         context,
         revision.artifact().version(),
     )?;
+    if arguments.len() != definition.parameters().len()
+        || definition.parameters().iter().any(|parameter| {
+            arguments
+                .iter()
+                .filter(|(candidate, _)| *candidate == parameter.id())
+                .count()
+                != 1
+                || arguments
+                    .iter()
+                    .find(|(candidate, _)| *candidate == parameter.id())
+                    .is_none_or(|(_, value)| {
+                        !runtime_value_matches(active, value, parameter.resolved_type())
+                    })
+        })
+    {
+        return Err(expression_error(
+            context,
+            ClientExpressionError::InvalidCall,
+        ));
+    }
     validate_selected_references(
         active,
         revision.semantic_hash_version(),
