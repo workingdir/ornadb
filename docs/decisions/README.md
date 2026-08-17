@@ -141,3 +141,5 @@ source-of-truth or authority rules.
   [CLIENT Expression Bodies and RUNTIME CONTRACT Clauses](0068-client-expression-bodies.md)
 * **work ADR 0069:**
   [CLIENT STATE Declarations and Function-Instance State](0069-client-state-declarations.md)
+* **work ADR 0070:**
+  [CLIENT USER State Lifecycle](0070-client-user-state-lifecycle.md)
