@@ -138,6 +138,11 @@ version-3 evaluation path:
 Recursion is bounded by the existing artifact node limits and a closed
 call-depth cap.
 
+The raw dispatch path also passes trusted `FunctionArgument` values to the
+evaluator. A parameterised expression function can therefore run through raw
+dispatch. A non-empty argument list for a parameter-free CLIENT function
+remains a closed `TARGET_UNAVAILABLE` target-shape failure.
+
 ## Required implementation order
 
 1. `docs(client): define CLIENT expression bodies and RUNTIME CONTRACT` —
