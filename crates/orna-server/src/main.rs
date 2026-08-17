@@ -5,8 +5,8 @@ use std::{
 };
 
 use orna_core::{
-    FunctionId, InspectEpochId, InvocationId, ParameterId as RawCallParameterId, StateSlotId,
-    TypeId,
+    FunctionId, InspectEpochId, InvocationId, ParameterId as RawCallParameterId, PrincipalId,
+    StateSlotId, TypeId,
     catalogue::QualifiedSemanticName,
     invocation::{InvocationTarget, InvocationTracePolicy},
     invocation_binding::CliArgumentInput,
@@ -15,10 +15,9 @@ use orna_core::{
 use orna_protocol::CallFailure;
 
 mod package_maintenance;
-mod security_admin;
 mod source_check;
 
-const USAGE: &str = "Usage:\n  orna --version\n  orna server run\n  orna server upgrade\n  orna server backend-shell\n  orna source check <file.orna>\n  orna source apply <file.orna>\n  orna security grant-execute <canonical-function-id>\n  orna raw-call <canonical-function-id>\n  orna raw-call <canonical-function-id> <canonical-parameter-id>\n  orna [--runtime <family>] invoke <qualified-name | canonical-function-id> [options]\n  orna state get <root-function-id> [options]\n  orna state set <root-function-id> [options]\n  orna inspect <invocation-id> [options]";
+const USAGE: &str = "Usage:\n  orna --version\n  orna server run\n  orna server upgrade\n  orna server backend-shell\n  orna source check <file.orna>\n  orna source apply <file.orna>\n  orna security grant-execute <canonical-function-id>\n  orna security user create|disable <canonical-principal-id>\n  orna security role create|grant|revoke <canonical-principal-id> [canonical-principal-id]\n  orna security grants grant|revoke <canonical-principal-id> <class> [canonical-function-id]\n  orna security check can-execute <canonical-principal-id> <canonical-function-id>\n  orna security check has-privilege <canonical-principal-id> <class> [canonical-function-id]\n  orna security whoami\n  orna raw-call <canonical-function-id>\n  orna raw-call <canonical-function-id> <canonical-parameter-id>\n  orna [--runtime <family>] invoke <qualified-name | canonical-function-id> [options]\n  orna state get <root-function-id> [options]\n  orna state set <root-function-id> [options]\n  orna inspect <invocation-id> [options]";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum RawCallParameters {
@@ -60,6 +59,7 @@ enum Command {
     SourceCheck(String),
     SourceApply(String),
     SecurityGrantExecute(FunctionId),
+    SecurityAdmin(orna_server::InstalledSecurityAdminRequest),
     RawCall(FunctionId, RawCallParameters),
     Invoke(InvokeArguments),
     State(orna_server::InstalledUserStateRequest),
@@ -157,11 +157,31 @@ fn main() -> ExitCode {
             }
         },
         Command::SecurityGrantExecute(function) => {
-            match security_admin::run_installed_security_grant(function) {
+            match orna_server::security_admin::run_installed_security_grant(function) {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(error) => {
                     write_stderr_line(&error.to_string());
                     ExitCode::from(1)
+                }
+            }
+        }
+        Command::SecurityAdmin(request) => {
+            let mut stdout = std::io::stdout().lock();
+            match orna_server::run_installed_security_admin(request, &mut stdout) {
+                Ok(_) => ExitCode::SUCCESS,
+                Err(error) => {
+                    write_stderr_line(&error.to_string());
+                    match error.kind() {
+                        orna_server::InstalledSecurityAdminErrorKind::Usage
+                        | orna_server::InstalledSecurityAdminErrorKind::Internal => {
+                            ExitCode::from(2)
+                        }
+                        orna_server::InstalledSecurityAdminErrorKind::Kernel => ExitCode::from(4),
+                        orna_server::InstalledSecurityAdminErrorKind::Rendering => {
+                            ExitCode::from(5)
+                        }
+                        _ => ExitCode::from(7),
+                    }
                 }
             }
         }
@@ -346,16 +366,19 @@ where
         Some(value) if value == OsStr::new("state") => parse_state_command(args),
         Some(value) if value == OsStr::new("inspect") => parse_inspect_command(args),
         Some(value) if value == OsStr::new("security") => {
-            if args.next().as_deref() != Some(OsStr::new("grant-execute")) {
-                return None;
+            let subcommand = args.next()?.into_string().ok()?;
+            match subcommand.as_str() {
+                "grant-execute" => {
+                    let function = args.next()?.into_string().ok()?;
+                    if args.next().is_some() {
+                        return None;
+                    }
+                    FunctionId::from_canonical(&function)
+                        .ok()
+                        .map(Command::SecurityGrantExecute)
+                }
+                _ => parse_security_admin_command(&subcommand, args),
             }
-            let function = args.next()?.into_string().ok()?;
-            if args.next().is_some() {
-                return None;
-            }
-            FunctionId::from_canonical(&function)
-                .ok()
-                .map(Command::SecurityGrantExecute)
         }
         _ => None,
     }
@@ -565,6 +588,149 @@ where
         include_runtime,
         None,
     )))
+}
+
+/// Parses one `orna security <subcommand> ...` administrative command
+/// (ADR 0065).
+///
+/// The subcommand verb is consumed by the dispatcher and passed here. The
+/// closed shapes are: `user create|disable <principal-id>`; `role
+/// create|grant|revoke <role-id> [member-id]`; `grants grant|revoke|list
+/// <grantee-id> [<class> [<object-id>]]`; `check can-execute <principal-id>
+/// <function-id>`; `check has-privilege <principal-id> <class>
+/// [<object-id>]`; and `whoami`. Any other shape is a usage error (`None`).
+fn parse_security_admin_command<I>(subcommand: &str, args: I) -> Option<Command>
+where
+    I: IntoIterator<Item = OsString>,
+{
+    use orna_server::InstalledSecurityAdminOperation as Operation;
+
+    let mut args = args.into_iter();
+    let operation = match subcommand {
+        "whoami" => {
+            if args.next().is_some() {
+                return None;
+            }
+            Operation::SessionPrincipal
+        }
+        "user" => {
+            let action = args.next()?.into_string().ok()?;
+            let principal = parse_principal_id(args.next()?.into_string().ok()?)?;
+            if args.next().is_some() {
+                return None;
+            }
+            match action.as_str() {
+                "create" => Operation::CreatePrincipal {
+                    principal,
+                    kind: orna_core::security::PrincipalKind::User,
+                },
+                "disable" => Operation::DisablePrincipal { principal },
+                _ => return None,
+            }
+        }
+        "role" => {
+            let action = args.next()?.into_string().ok()?;
+            let role = parse_principal_id(args.next()?.into_string().ok()?)?;
+            match action.as_str() {
+                "create" => {
+                    if args.next().is_some() {
+                        return None;
+                    }
+                    Operation::CreateRole { role }
+                }
+                "grant" | "revoke" => {
+                    let member = parse_principal_id(args.next()?.into_string().ok()?)?;
+                    if args.next().is_some() {
+                        return None;
+                    }
+                    if action == "grant" {
+                        Operation::GrantRole { role, member }
+                    } else {
+                        Operation::RevokeRole { role, member }
+                    }
+                }
+                _ => return None,
+            }
+        }
+        "grants" => {
+            let action = args.next()?.into_string().ok()?;
+            let grantee = parse_principal_id(args.next()?.into_string().ok()?)?;
+            match action.as_str() {
+                "grant" | "revoke" => {
+                    let class_text = args.next()?.into_string().ok()?;
+                    let class = orna_server::parse_privilege_class(&class_text)?;
+                    let object = match args.next() {
+                        Some(object) => Some(parse_function_id(object.into_string().ok()?)?),
+                        None => None,
+                    };
+                    if args.next().is_some() {
+                        return None;
+                    }
+                    if action == "grant" {
+                        Operation::GrantPrivilege {
+                            grantee,
+                            class,
+                            object,
+                        }
+                    } else {
+                        Operation::RevokePrivilege {
+                            grantee,
+                            class,
+                            object,
+                        }
+                    }
+                }
+                _ => return None,
+            }
+        }
+        "check" => {
+            let action = args.next()?.into_string().ok()?;
+            let principal = parse_principal_id(args.next()?.into_string().ok()?)?;
+            match action.as_str() {
+                "can-execute" => {
+                    let function = parse_function_id(args.next()?.into_string().ok()?)?;
+                    if args.next().is_some() {
+                        return None;
+                    }
+                    Operation::CanExecute {
+                        principal,
+                        function,
+                    }
+                }
+                "has-privilege" => {
+                    let class_text = args.next()?.into_string().ok()?;
+                    let class = orna_server::parse_privilege_class(&class_text)?;
+                    let object = match args.next() {
+                        Some(object) => Some(parse_function_id(object.into_string().ok()?)?),
+                        None => None,
+                    };
+                    if args.next().is_some() {
+                        return None;
+                    }
+                    Operation::HasPrivilege {
+                        principal,
+                        class,
+                        object,
+                    }
+                }
+                _ => return None,
+            }
+        }
+        _ => return None,
+    };
+    Some(Command::SecurityAdmin(
+        orna_server::InstalledSecurityAdminRequest::new(operation),
+    ))
+}
+
+/// Parses one canonical `PrincipalId` text value.
+fn parse_principal_id(value: String) -> Option<PrincipalId> {
+    PrincipalId::from_canonical(&value).ok()
+}
+
+/// Parses one canonical `FunctionId` text value.
+fn parse_function_id(value: String) -> Option<FunctionId> {
+    FunctionId::from_canonical(&value).ok()
 }
 
 /// Parses one `orna invoke <target> [options]` command (ADR 0056 step 4).
@@ -979,6 +1145,143 @@ mod tests {
             ])),
             Some(Command::SecurityGrantExecute(function))
         );
+    }
+
+    #[test]
+    fn accepts_the_security_admin_identity_commands() {
+        let principal = PrincipalId::from_bytes([0x44; 16]);
+        let canonical = principal.canonical();
+        let request = |operation| {
+            Some(Command::SecurityAdmin(
+                orna_server::InstalledSecurityAdminRequest::new(operation),
+            ))
+        };
+        assert_eq!(
+            parse_command(arguments(&["orna", "security", "whoami"])),
+            request(orna_server::InstalledSecurityAdminOperation::SessionPrincipal)
+        );
+        assert_eq!(
+            parse_command(arguments(&[
+                "orna", "security", "user", "create", &canonical,
+            ])),
+            request(
+                orna_server::InstalledSecurityAdminOperation::CreatePrincipal {
+                    principal,
+                    kind: orna_core::security::PrincipalKind::User,
+                }
+            )
+        );
+        assert_eq!(
+            parse_command(arguments(&[
+                "orna", "security", "user", "disable", &canonical,
+            ])),
+            request(orna_server::InstalledSecurityAdminOperation::DisablePrincipal { principal })
+        );
+    }
+
+    #[test]
+    fn accepts_security_role_and_grant_shapes() {
+        let role = PrincipalId::from_bytes([0x44; 16]);
+        let member = PrincipalId::from_bytes([0x55; 16]);
+        let grantee = PrincipalId::from_bytes([0x66; 16]);
+        let function = FunctionId::from_bytes([0x77; 16]);
+        let role_canonical = role.canonical();
+        let member_canonical = member.canonical();
+        let grantee_canonical = grantee.canonical();
+        let function_canonical = function.canonical();
+        let request = |operation| {
+            Some(Command::SecurityAdmin(
+                orna_server::InstalledSecurityAdminRequest::new(operation),
+            ))
+        };
+        assert_eq!(
+            parse_command(arguments(&[
+                "orna",
+                "security",
+                "role",
+                "create",
+                &role_canonical,
+            ])),
+            request(orna_server::InstalledSecurityAdminOperation::CreateRole { role })
+        );
+        assert_eq!(
+            parse_command(arguments(&[
+                "orna",
+                "security",
+                "role",
+                "grant",
+                &role_canonical,
+                &member_canonical,
+            ])),
+            request(orna_server::InstalledSecurityAdminOperation::GrantRole { role, member })
+        );
+        assert_eq!(
+            parse_command(arguments(&[
+                "orna",
+                "security",
+                "grants",
+                "grant",
+                &grantee_canonical,
+                "execute",
+                &function_canonical,
+            ])),
+            request(
+                orna_server::InstalledSecurityAdminOperation::GrantPrivilege {
+                    grantee,
+                    class: orna_core::security::PrivilegeClass::Execute,
+                    object: Some(function),
+                }
+            )
+        );
+        assert_eq!(
+            parse_command(arguments(&[
+                "orna",
+                "security",
+                "check",
+                "can-execute",
+                &grantee_canonical,
+                &function_canonical,
+            ])),
+            request(orna_server::InstalledSecurityAdminOperation::CanExecute {
+                principal: grantee,
+                function,
+            })
+        );
+        assert_eq!(
+            parse_command(arguments(&[
+                "orna",
+                "security",
+                "check",
+                "has-privilege",
+                &grantee_canonical,
+                "security_admin",
+            ])),
+            request(orna_server::InstalledSecurityAdminOperation::HasPrivilege {
+                principal: grantee,
+                class: orna_core::security::PrivilegeClass::SecurityAdmin,
+                object: None,
+            })
+        );
+    }
+
+    #[test]
+    fn rejects_malformed_security_admin_shapes() {
+        for values in [
+            vec!["orna", "security", "user"],
+            vec!["orna", "security", "user", "create"],
+            vec!["orna", "security", "user", "bogus", "principal:deadbeef"],
+            vec!["orna", "security", "role", "revoke", "r1"],
+            vec!["orna", "security", "grants", "list", "g1"],
+            vec!["orna", "security", "grants", "grant", "g1", "not-a-class"],
+            vec!["orna", "security", "check", "can-execute", "p1"],
+            vec!["orna", "security", "check", "bogus"],
+        ] {
+            assert_eq!(
+                parse_command(arguments(&values)),
+                None,
+                "expected rejection: {values:?}"
+            );
+        }
     }
 
     #[test]
@@ -1933,7 +2236,7 @@ mod tests {
     fn usage_diagnostic_is_exact() {
         assert_eq!(
             USAGE,
-            "Usage:\n  orna --version\n  orna server run\n  orna server upgrade\n  orna server backend-shell\n  orna source check <file.orna>\n  orna source apply <file.orna>\n  orna security grant-execute <canonical-function-id>\n  orna raw-call <canonical-function-id>\n  orna raw-call <canonical-function-id> <canonical-parameter-id>\n  orna [--runtime <family>] invoke <qualified-name | canonical-function-id> [options]\n  orna state get <root-function-id> [options]\n  orna state set <root-function-id> [options]\n  orna inspect <invocation-id> [options]"
+            "Usage:\n  orna --version\n  orna server run\n  orna server upgrade\n  orna server backend-shell\n  orna source check <file.orna>\n  orna source apply <file.orna>\n  orna security grant-execute <canonical-function-id>\n  orna security user create|disable <canonical-principal-id>\n  orna security role create|grant|revoke <canonical-principal-id> [canonical-principal-id]\n  orna security grants grant|revoke <canonical-principal-id> <class> [canonical-function-id]\n  orna security check can-execute <canonical-principal-id> <canonical-function-id>\n  orna security check has-privilege <canonical-principal-id> <class> [canonical-function-id]\n  orna security whoami\n  orna raw-call <canonical-function-id>\n  orna raw-call <canonical-function-id> <canonical-parameter-id>\n  orna [--runtime <family>] invoke <qualified-name | canonical-function-id> [options]\n  orna state get <root-function-id> [options]\n  orna state set <root-function-id> [options]\n  orna inspect <invocation-id> [options]"
         );
     }
 }
