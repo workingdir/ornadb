@@ -775,12 +775,22 @@ pub enum StateScope {
     User,
 }
 
+/// The initial value declaration for one CLIENT state slot.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StateDefault {
+    /// No DEFAULT clause was written.
+    Unset,
+    /// The slot starts with an explicit null value.
+    Null,
+    /// The slot starts with a closed CLIENT expression value.
+    Expression(ClientExpression),
+}
+
 /// One parsed `STATE` declaration inside a CLIENT state block.
 ///
 /// The declaration follows the canonical shape
 /// `STATE identifier type_spec [SCOPE (LOCAL | SESSION | USER)]
-/// [DEFAULT expression] ;`. An omitted scope means `LOCAL`; an omitted
-/// default means an unset value.
+/// [DEFAULT expression] ;`. An omitted scope means `LOCAL`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StateDeclaration {
     /// The declared state name as written.
@@ -789,8 +799,8 @@ pub struct StateDeclaration {
     pub type_specification: TypeSpecification,
     /// The declared scope; `StateScope::Local` when the clause is omitted.
     pub scope: StateScope,
-    /// The parsed default expression when a `DEFAULT` clause was declared.
-    pub default: Option<ClientExpression>,
+    /// The declared initial value.
+    pub default: StateDefault,
     /// The span from `STATE` through the terminating semicolon.
     pub span: SourceSpan,
 }
@@ -1254,8 +1264,8 @@ mod tests {
         FunctionTransaction, FunctionVolatility, InsertValue, MutationValue, NullOrdering,
         OnDeletePolicy, OptionTypeSpelling, OrderingDirection, PrimitiveValueTypePersistence,
         QueryExpression, RecordConstructorFieldValue, SelectQuantifier, ServerFunctionBody,
-        SourceSpan, StandardLargeObjectKind, StateScope, TypeExportTarget, TypeSpecification,
-        parse,
+        SourceSpan, StandardLargeObjectKind, StateDefault, StateScope, TypeExportTarget,
+        TypeSpecification, parse,
     };
 
     #[test]
@@ -5283,7 +5293,7 @@ mod tests {
         assert_eq!(filter.scope, StateScope::Local);
         assert!(matches!(
             filter.default,
-            Some(ClientExpression::StringLiteral { .. })
+            StateDefault::Expression(ClientExpression::StringLiteral { .. })
         ));
         assert!(matches!(
             &filter.type_specification,
@@ -5293,21 +5303,13 @@ mod tests {
         let selected = &block.states[1];
         assert_eq!(selected.name.text, "selected");
         assert_eq!(selected.scope, StateScope::Session);
-        // `DEFAULT NULL` parses as a parameter read in the closed ADR 0068
-        // vocabulary; the compiler owns the semantic rejection.
-        assert!(matches!(
-            selected.default,
-            Some(ClientExpression::ParameterRead { .. })
-        ));
+        // `DEFAULT NULL` represents an explicit null initial value.
+        assert!(matches!(selected.default, StateDefault::Null));
 
         let count = &block.states[2];
         assert_eq!(count.name.text, "count");
         assert_eq!(count.scope, StateScope::User);
-        assert!(count.default.is_none());
-        assert!(matches!(
-            &count.type_specification,
-            TypeSpecification::Named(name) if name.parts[0].text == "INTEGER"
-        ));
+        assert!(matches!(count.default, StateDefault::Unset));
 
         let ClientExpression::Concat { .. } =
             block.return_expression.as_ref().expect("return expression")
@@ -5368,7 +5370,7 @@ mod tests {
         let stamp = &block.states[0];
         assert_eq!(stamp.name.text, "stamp");
         assert_eq!(stamp.scope, StateScope::Local);
-        assert!(stamp.default.is_none());
+        assert!(matches!(stamp.default, StateDefault::Unset));
         let ClientExpression::ParameterRead { parameter } =
             block.return_expression.as_ref().expect("return expression")
         else {
