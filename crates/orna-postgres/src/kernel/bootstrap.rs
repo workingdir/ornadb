@@ -183,6 +183,12 @@ const MIGRATIONS: &[Migration] = &[
         sql: include_str!("../../migrations/0027_inspect_snapshots.sql"),
         data_step: None,
     },
+    Migration {
+        version: 28,
+        name: "security admin privilege grants",
+        sql: include_str!("../../migrations/0028_security_admin.sql"),
+        data_step: None,
+    },
 ];
 const MIGRATION_DATA_STEP_SEPARATOR: &[u8] = b"\0orna.kernel.migration-step\0";
 const CANONICAL_HASH_V1_EMPTY_SEED_STEP: &[u8] = b"canonical-hash-v1-empty-seed/v1";
@@ -861,7 +867,7 @@ mod tests {
             validated_migration_registry()
                 .expect("registry is valid")
                 .len(),
-            27
+            28
         );
         assert_eq!(MIGRATIONS[0].version, 1);
         assert_eq!(MIGRATIONS[1].version, 2);
@@ -888,6 +894,9 @@ mod tests {
         assert_eq!(MIGRATIONS[22].version, 23);
         assert_eq!(MIGRATIONS[23].version, 24);
         assert_eq!(MIGRATIONS[24].version, 25);
+        assert_eq!(MIGRATIONS[25].version, 26);
+        assert_eq!(MIGRATIONS[26].version, 27);
+        assert_eq!(MIGRATIONS[27].version, 28);
         assert_eq!(MIGRATIONS[5].name, "definition reference write evidence");
         assert_eq!(MIGRATIONS[6].name, "standard catalogue type storage");
         assert_eq!(MIGRATIONS[7].name, "resolved value type storage");
@@ -908,6 +917,9 @@ mod tests {
         assert_eq!(MIGRATIONS[22].name, "executable standard relations");
         assert_eq!(MIGRATIONS[23].name, "capability audit decisions");
         assert_eq!(MIGRATIONS[24].name, "durable user state cells");
+        assert_eq!(MIGRATIONS[25].name, "user state audit decisions");
+        assert_eq!(MIGRATIONS[26].name, "inspect snapshots and trace");
+        assert_eq!(MIGRATIONS[27].name, "security admin privilege grants");
         assert!(MIGRATIONS[6].data_step.is_none());
         assert!(MIGRATIONS[7].data_step.is_none());
         assert!(MIGRATIONS[8].data_step.is_none());
@@ -927,6 +939,9 @@ mod tests {
         assert!(MIGRATIONS[22].data_step.is_none());
         assert!(MIGRATIONS[23].data_step.is_none());
         assert!(MIGRATIONS[24].data_step.is_none());
+        assert!(MIGRATIONS[25].data_step.is_none());
+        assert!(MIGRATIONS[26].data_step.is_none());
+        assert!(MIGRATIONS[27].data_step.is_none());
     }
 
     #[test]
@@ -1074,6 +1089,92 @@ mod tests {
             migration
                 .sql
                 .contains("REVOKE ALL ON TABLE _orna_kernel.user_state_cells FROM PUBLIC")
+        );
+    }
+
+    #[test]
+    fn security_admin_privilege_grants_is_the_registered_version_twenty_eight() {
+        let migration = &MIGRATIONS[27];
+
+        assert_eq!(migration.version, 28);
+        assert_eq!(migration.name, "security admin privilege grants");
+        assert!(migration.data_step.is_none());
+        assert!(
+            migration
+                .sql
+                .contains("CREATE TABLE _orna_kernel.security_privilege_grants")
+        );
+        assert!(
+            migration
+                .sql
+                .contains("PRIMARY KEY (grantee_id, privilege_class, object_id)")
+                && migration.sql.contains("grantee_id bytea NOT NULL")
+                && migration.sql.contains("privilege_class text NOT NULL")
+                && migration.sql.contains("object_id bytea NOT NULL")
+        );
+        // The class-wide sentinel keeps the composite key total: PostgreSQL
+        // treats NULLs as distinct in unique keys, so a nullable object_id
+        // would admit duplicate class-wide grants.
+        assert!(
+            migration
+                .sql
+                .contains("object_id = '' OR octet_length(object_id) = 16")
+        );
+        assert!(
+            migration
+                .sql
+                .contains("privilege_class IN ('execute', 'security_admin')")
+        );
+        assert!(migration.sql.contains("'inspect:own-invocation'"));
+        assert!(migration.sql.contains("'inspect:runtime-internals'"));
+        assert!(
+            migration
+                .sql
+                .contains("REFERENCES _orna_kernel.security_principals(id)")
+        );
+        assert!(
+            migration
+                .sql
+                .contains("REVOKE ALL ON TABLE _orna_kernel.security_privilege_grants FROM PUBLIC")
+        );
+
+        // The audit extension admits the closed security_admin kind and both
+        // allowed/denied shape rows.
+        assert!(
+            migration.sql.contains(
+                "event_kind IN (\n            'authentication',\n            'execute',\n            'capability',\n            'user_state',\n            'inspect',\n            'security_admin'\n        )"
+            )
+        );
+        assert!(
+            migration
+                .sql
+                .contains("denial_reason LIKE 'security_admin:%'")
+        );
+        assert!(migration.sql.contains("event_kind = 'security_admin'"));
+        assert!(
+            migration
+                .sql
+                .contains("denial_reason NOT LIKE '%:missing-privilege'")
+        );
+        assert!(
+            migration
+                .sql
+                .contains("denial_reason LIKE 'security_admin:%:missing-privilege'")
+        );
+        assert!(
+            migration
+                .sql
+                .contains("DROP CONSTRAINT security_audit_events_shape_check")
+        );
+        assert!(
+            migration
+                .sql
+                .contains("DROP CONSTRAINT security_audit_events_kind_check")
+        );
+        assert!(
+            migration
+                .sql
+                .contains("DROP CONSTRAINT security_audit_events_denial_reason_check")
         );
     }
 
