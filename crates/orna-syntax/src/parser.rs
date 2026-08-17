@@ -2,19 +2,19 @@ use rowan::{GreenNode, GreenNodeBuilder, Language};
 
 use crate::{
     CapabilitySpecification, ClientCallArgument, ClientExpression, ClientFunctionBody,
-    ClientFunctionDeclaration, DeleteStatement, Diagnostic, EnumLabelDeclaration,
-    EnumTypeDeclaration, FieldRenameDeclaration, FunctionReturnType, FunctionSecurity,
-    FunctionTransaction, FunctionVolatility, InsertStatement, MutationValue, NamePart,
-    NoInputParameterSelectBody, NullOrdering, ObjectFieldDeclaration, ObjectSource,
+    ClientFunctionDeclaration, ClientStateBlockBody, DeleteStatement, Diagnostic,
+    EnumLabelDeclaration, EnumTypeDeclaration, FieldRenameDeclaration, FunctionReturnType,
+    FunctionSecurity, FunctionTransaction, FunctionVolatility, InsertStatement, MutationValue,
+    NamePart, NoInputParameterSelectBody, NullOrdering, ObjectFieldDeclaration, ObjectSource,
     ObjectTypeDeclaration, OnDeletePolicy, OpaqueValueTypeDeclaration, OptionTypeSpelling,
     OrderingDirection, OrderingExpression, Parse, PrimitiveValueTypeDeclaration,
     PrimitiveValueTypePersistence, QualifiedName, QueryExpression, RecordConstructor,
     RecordConstructorField, RecordConstructorFieldValue, RecordValueTypeDeclaration,
     RowsColumnDeclaration, SchemaDeclaration, SelectQuantifier, SelectQuery, ServerFunctionBody,
     ServerFunctionDeclaration, ServerFunctionParameter, SourceSlice, SourceSpan, SqlDeleteBody,
-    SqlInsertBody, SqlQueryBody, SqlUpdateBody, StandardLargeObjectKind, SyntaxTree,
-    TypeExportDeclaration, TypeExportTarget, TypeSpecification, UpdateAssignment, UpdateStatement,
-    ValueFieldDeclaration,
+    SqlInsertBody, SqlQueryBody, SqlUpdateBody, StandardLargeObjectKind, StateDeclaration,
+    StateScope, SyntaxTree, TypeExportDeclaration, TypeExportTarget, TypeSpecification,
+    UpdateAssignment, UpdateStatement, ValueFieldDeclaration,
     lexer::{Token, TokenKind, lex},
 };
 
@@ -70,6 +70,9 @@ pub(crate) enum SyntaxKind {
     MapTypeSpecification,
     OptionTypeSpecification,
     StreamTypeSpecification,
+    ClientStateBlockBody,
+    ClientStateDeclaration,
+    ClientStateReturnStatement,
 }
 
 impl From<SyntaxKind> for rowan::SyntaxKind {
@@ -135,6 +138,9 @@ impl Language for OrnaLanguage {
             46 => SyntaxKind::MapTypeSpecification,
             47 => SyntaxKind::OptionTypeSpecification,
             48 => SyntaxKind::StreamTypeSpecification,
+            49 => SyntaxKind::ClientStateBlockBody,
+            50 => SyntaxKind::ClientStateDeclaration,
+            51 => SyntaxKind::ClientStateReturnStatement,
             _ => panic!("unknown Orna syntax kind"),
         }
     }
@@ -780,22 +786,17 @@ impl<'source> Parser<'source> {
             self.builder.finish_node();
             return expression.map(|expression| ClientFunctionBody::Expression { expression });
         }
+        if self.current().is_some_and(|token| token.is_word("IS")) {
+            return self.parse_client_state_block();
+        }
         self.builder
             .start_node(SyntaxKind::ClientBooleanReturnBody.into());
         let result = (|| {
             if !self.current().is_some_and(|token| token.is_word("RETURN")) {
-                let long_form = self.current().is_some_and(|token| token.is_word("IS"));
                 self.error_current(
                     "ORNA0001",
                     "CLIENT functions use RETURN before their result value",
                 );
-                if self
-                    .current()
-                    .is_some_and(|token| token.is_word("AS") || token.is_word("IS"))
-                {
-                    self.bump();
-                    self.recover_client_body(long_form);
-                }
                 return None;
             }
             self.bump();
@@ -1150,21 +1151,192 @@ impl<'source> Parser<'source> {
         argument
     }
 
-    fn recover_client_body(&mut self, long_form: bool) {
-        let mut saw_end = false;
-        while let Some(token) = self.current().cloned() {
-            if token.is_word("CREATE") || token.is_word("ALTER") || token.is_word("EXPORT") {
-                break;
-            }
-            if token.is_word("END") {
-                saw_end = true;
-            }
-            let is_semicolon = token.kind == TokenKind::Semicolon;
+    /// Parses one closed CLIENT state block body (work ADR 0069).
+    ///
+    /// The accepted shape is exactly:
+    ///
+    /// ```text
+    /// IS
+    ///     { STATE identifier type_spec [SCOPE (LOCAL | SESSION | USER)]
+    ///       [DEFAULT expression] ; }
+    /// BEGIN
+    ///     RETURN [ expression ] ;
+    /// END
+    /// ```
+    ///
+    /// The subset is deliberately closed: only `STATE` declarations may
+    /// precede `BEGIN`, and exactly one `RETURN` statement may follow it.
+    /// Every other procedural statement is rejected with a closed
+    /// diagnostic. On failure the caller recovers to the statement
+    /// terminator.
+    fn parse_client_state_block(&mut self) -> Option<ClientFunctionBody> {
+        self.builder
+            .start_node(SyntaxKind::ClientStateBlockBody.into());
+        let result = (|| {
+            let block_start = self.current().expect("IS token exists").range.start;
             self.bump();
-            if is_semicolon && (!long_form || saw_end) {
-                break;
+            let mut states = Vec::new();
+            loop {
+                self.skip_trivia();
+                if self.current().is_some_and(|token| token.is_word("BEGIN")) {
+                    break;
+                }
+                if self.current().is_some_and(|token| token.is_word("STATE")) {
+                    let state = self.parse_client_state_declaration()?;
+                    states.push(state);
+                    continue;
+                }
+                if self.current().is_none() {
+                    self.error_current(
+                        "ORNA0001",
+                        "expected BEGIN after CLIENT state declarations",
+                    );
+                    return None;
+                }
+                self.error_current(
+                    "ORNA0001",
+                    "CLIENT state blocks accept only STATE declarations before BEGIN",
+                );
+                return None;
             }
-        }
+            self.bump(); // BEGIN
+            self.skip_trivia();
+            if !self.current().is_some_and(|token| token.is_word("RETURN")) {
+                self.error_current(
+                    "ORNA0001",
+                    "CLIENT state blocks accept only a single RETURN statement",
+                );
+                return None;
+            }
+            let return_expression = self.parse_client_state_return()?;
+            self.skip_trivia();
+            if self.current().is_some_and(|token| token.is_word("RETURN")) {
+                self.error_current(
+                    "ORNA0001",
+                    "CLIENT state blocks accept only a single RETURN statement",
+                );
+                return None;
+            }
+            let Some(end_token) = self.expect_word_token("END") else {
+                return None;
+            };
+            Some(ClientFunctionBody::StateBlock(ClientStateBlockBody {
+                states,
+                return_expression,
+                span: SourceSpan {
+                    start: block_start,
+                    end: end_token.range.end,
+                },
+            }))
+        })();
+        self.builder.finish_node();
+        result
+    }
+
+    /// Parses one `STATE` declaration inside a CLIENT state block.
+    fn parse_client_state_declaration(&mut self) -> Option<StateDeclaration> {
+        self.builder
+            .start_node(SyntaxKind::ClientStateDeclaration.into());
+        let result = (|| {
+            let Some(state_token) = self.take_word("STATE") else {
+                self.error_current("ORNA0001", "expected STATE before a state declaration");
+                return None;
+            };
+            let start = state_token.range.start;
+            self.skip_trivia();
+            let name = self.expect_identifier("expected a state name after STATE")?;
+            self.skip_trivia();
+            let type_specification = self.parse_type_specification_with_message(
+                "expected a state type after the state name",
+            )?;
+            self.skip_trivia();
+            let scope = if self.current().is_some_and(|token| token.is_word("SCOPE")) {
+                self.bump();
+                self.skip_trivia();
+                let Some(token) = self.current().cloned() else {
+                    self.error_current("ORNA0001", "expected LOCAL, SESSION, or USER after SCOPE");
+                    return None;
+                };
+                let scope = if token.is_word("LOCAL") {
+                    StateScope::Local
+                } else if token.is_word("SESSION") {
+                    StateScope::Session
+                } else if token.is_word("USER") {
+                    StateScope::User
+                } else {
+                    self.error_current(
+                        "ORNA0001",
+                        "CLIENT state scope must be LOCAL, SESSION, or USER",
+                    );
+                    return None;
+                };
+                self.bump();
+                scope
+            } else {
+                StateScope::Local
+            };
+            self.skip_trivia();
+            let default = if self.current().is_some_and(|token| token.is_word("DEFAULT")) {
+                self.bump();
+                self.skip_trivia();
+                Some(self.parse_client_expression()?)
+            } else {
+                None
+            };
+            self.skip_trivia();
+            let Some(semicolon) = self.take_kind(TokenKind::Semicolon) else {
+                self.error_current(
+                    "ORNA0001",
+                    "expected ';' after the CLIENT state declaration",
+                );
+                return None;
+            };
+            Some(StateDeclaration {
+                name,
+                type_specification,
+                scope,
+                default,
+                span: SourceSpan {
+                    start,
+                    end: semicolon.range.end,
+                },
+            })
+        })();
+        self.builder.finish_node();
+        result
+    }
+
+    /// Parses the single `RETURN [ expression ] ;` statement of a state
+    /// block.
+    ///
+    /// The caller has verified that the current token is `RETURN`. The
+    /// result is the parsed return expression, or `None` when the statement
+    /// names no expression.
+    fn parse_client_state_return(&mut self) -> Option<Option<ClientExpression>> {
+        self.builder
+            .start_node(SyntaxKind::ClientStateReturnStatement.into());
+        let result = (|| {
+            self.bump(); // RETURN
+            self.skip_trivia();
+            if self.current().is_some_and(|token| token.kind == TokenKind::Semicolon) {
+                self.bump();
+                return Some(None);
+            }
+            let expression = self.parse_client_expression()?;
+            self.skip_trivia();
+            if self
+                .expect_kind(
+                    TokenKind::Semicolon,
+                    "expected ';' after the CLIENT state block RETURN statement",
+                )
+                .is_none()
+            {
+                return None;
+            }
+            Some(Some(expression))
+        })();
+        self.builder.finish_node();
+        result
     }
 
     fn parse_server_function_parameters(&mut self) -> Option<Vec<ServerFunctionParameter>> {
