@@ -2113,6 +2113,10 @@ impl SecuritySnapshot {
 
 #[cfg(test)]
 mod tests {
+    use crate::system::{
+        SYS_SECURITY_CREATE_PRINCIPAL_FUNCTION_ID, SYS_SECURITY_CREATE_ROLE_FUNCTION_ID,
+        SYS_SECURITY_GRANT_PRIVILEGE_FUNCTION_ID, SYS_SECURITY_GRANT_ROLE_FUNCTION_ID,
+    };
     use crate::{CatalogueRevisionId, SourceRevisionId};
 
     use super::*;
@@ -3732,6 +3736,470 @@ mod tests {
                 Some(USER),
             ),
             Err(SecurityAuditDecisionError::InspectDecisionShape)
+        );
+    }
+
+    #[test]
+    fn privilege_class_display_uses_closed_canonical_strings() {
+        assert_eq!(PrivilegeClass::Execute.to_string(), "execute");
+        assert_eq!(PrivilegeClass::SecurityAdmin.to_string(), "security_admin");
+        assert_eq!(
+            PrivilegeClass::Inspect(InspectPrivilege::OwnInvocation).to_string(),
+            "inspect:own-invocation"
+        );
+        assert_eq!(
+            PrivilegeClass::Inspect(InspectPrivilege::SessionInvocations).to_string(),
+            "inspect:session-invocations"
+        );
+        assert_eq!(
+            PrivilegeClass::Inspect(InspectPrivilege::AnyInvocation).to_string(),
+            "inspect:any-invocation"
+        );
+        assert_eq!(
+            PrivilegeClass::Inspect(InspectPrivilege::Values).to_string(),
+            "inspect:values"
+        );
+        assert_eq!(
+            PrivilegeClass::Inspect(InspectPrivilege::Source).to_string(),
+            "inspect:source"
+        );
+        assert_eq!(
+            PrivilegeClass::Inspect(InspectPrivilege::SecurityDetails).to_string(),
+            "inspect:security-details"
+        );
+        assert_eq!(
+            PrivilegeClass::Inspect(InspectPrivilege::RuntimeInternals).to_string(),
+            "inspect:runtime-internals"
+        );
+    }
+
+    #[test]
+    fn privilege_grant_constructor_rejects_empty_identities() {
+        assert!(matches!(
+            PrivilegeGrant::new(
+                PrincipalId::from_bytes([0; 16]),
+                PrivilegeClass::SecurityAdmin,
+                None,
+            ),
+            Err(PrivilegeGrantError::EmptyGrantee)
+        ));
+        assert!(matches!(
+            PrivilegeGrant::new(
+                USER,
+                PrivilegeClass::Execute,
+                Some(FunctionId::from_bytes([0; 16])),
+            ),
+            Err(PrivilegeGrantError::EmptyObject)
+        ));
+    }
+
+    #[test]
+    fn privilege_grant_accessors_expose_grantee_class_and_object() {
+        let class_wide = PrivilegeGrant::new(USER, PrivilegeClass::SecurityAdmin, None)
+            .expect("a class-wide grant is valid");
+        assert_eq!(class_wide.grantee(), USER);
+        assert_eq!(class_wide.class(), PrivilegeClass::SecurityAdmin);
+        assert_eq!(class_wide.object(), None);
+        assert!(class_wide.is_class_wide());
+
+        let scoped = PrivilegeGrant::new(USER, PrivilegeClass::Execute, Some(FUNCTION))
+            .expect("an object-scoped grant is valid");
+        assert_eq!(scoped.grantee(), USER);
+        assert_eq!(scoped.class(), PrivilegeClass::Execute);
+        assert_eq!(scoped.object(), Some(FUNCTION));
+        assert!(!scoped.is_class_wide());
+    }
+
+    #[test]
+    fn authorise_privilege_allows_when_the_class_is_granted() {
+        assert_eq!(
+            authorise_privilege(
+                USER,
+                PrivilegeClass::Execute,
+                None,
+                &[PrivilegeClass::Execute]
+            ),
+            PrivilegeDecision::Allowed {
+                requested: PrivilegeClass::Execute,
+            }
+        );
+        // A class-wide grant covers an object-scoped request.
+        assert_eq!(
+            authorise_privilege(
+                USER,
+                PrivilegeClass::Execute,
+                Some(FUNCTION),
+                &[PrivilegeClass::Execute],
+            ),
+            PrivilegeDecision::Allowed {
+                requested: PrivilegeClass::Execute,
+            }
+        );
+        assert_eq!(
+            authorise_privilege(
+                USER,
+                PrivilegeClass::SecurityAdmin,
+                None,
+                &[PrivilegeClass::SecurityAdmin],
+            ),
+            PrivilegeDecision::Allowed {
+                requested: PrivilegeClass::SecurityAdmin,
+            }
+        );
+        assert_eq!(
+            authorise_privilege(
+                USER,
+                PrivilegeClass::Inspect(InspectPrivilege::OwnInvocation),
+                None,
+                &[PrivilegeClass::Inspect(InspectPrivilege::OwnInvocation)],
+            ),
+            PrivilegeDecision::Allowed {
+                requested: PrivilegeClass::Inspect(InspectPrivilege::OwnInvocation),
+            }
+        );
+    }
+
+    #[test]
+    fn authorise_privilege_denies_when_the_class_is_not_granted() {
+        for requested in [
+            PrivilegeClass::Execute,
+            PrivilegeClass::SecurityAdmin,
+            PrivilegeClass::Inspect(InspectPrivilege::OwnInvocation),
+        ] {
+            assert_eq!(
+                authorise_privilege(USER, requested, None, &[]),
+                PrivilegeDecision::Denied(PrivilegeDenial::MissingPrivilege { requested })
+            );
+        }
+        // An unrelated granted class never covers another class.
+        assert!(matches!(
+            authorise_privilege(
+                USER,
+                PrivilegeClass::SecurityAdmin,
+                None,
+                &[PrivilegeClass::Execute],
+            ),
+            PrivilegeDecision::Denied(PrivilegeDenial::MissingPrivilege { .. })
+        ));
+        assert!(matches!(
+            authorise_privilege(
+                USER,
+                PrivilegeClass::Execute,
+                Some(FUNCTION),
+                &[PrivilegeClass::Inspect(InspectPrivilege::OwnInvocation)],
+            ),
+            PrivilegeDecision::Denied(PrivilegeDenial::MissingPrivilege { .. })
+        ));
+    }
+
+    #[test]
+    fn authorise_privilege_applies_the_inspect_ladder() {
+        // A granted higher rung reaches a requested lower rung.
+        assert_eq!(
+            authorise_privilege(
+                USER,
+                PrivilegeClass::Inspect(InspectPrivilege::OwnInvocation),
+                None,
+                &[PrivilegeClass::Inspect(
+                    InspectPrivilege::SessionInvocations
+                )],
+            ),
+            PrivilegeDecision::Allowed {
+                requested: PrivilegeClass::Inspect(InspectPrivilege::OwnInvocation),
+            }
+        );
+        assert_eq!(
+            authorise_privilege(
+                USER,
+                PrivilegeClass::Inspect(InspectPrivilege::SessionInvocations),
+                None,
+                &[PrivilegeClass::Inspect(InspectPrivilege::AnyInvocation)],
+            ),
+            PrivilegeDecision::Allowed {
+                requested: PrivilegeClass::Inspect(InspectPrivilege::SessionInvocations),
+            }
+        );
+        // A requested rung above the granted rung is denied.
+        assert!(matches!(
+            authorise_privilege(
+                USER,
+                PrivilegeClass::Inspect(InspectPrivilege::AnyInvocation),
+                None,
+                &[PrivilegeClass::Inspect(
+                    InspectPrivilege::SessionInvocations
+                )],
+            ),
+            PrivilegeDecision::Denied(PrivilegeDenial::MissingPrivilege { .. })
+        ));
+    }
+
+    #[test]
+    fn authorise_privilege_applies_the_inspect_classifier_matrix() {
+        // A classifier request without any ladder rung is denied.
+        assert!(matches!(
+            authorise_privilege(
+                USER,
+                PrivilegeClass::Inspect(InspectPrivilege::Values),
+                None,
+                &[PrivilegeClass::Inspect(InspectPrivilege::Values)],
+            ),
+            PrivilegeDecision::Denied(PrivilegeDenial::MissingPrivilege { .. })
+        ));
+        // A ladder rung plus the same classifier allows the request.
+        assert_eq!(
+            authorise_privilege(
+                USER,
+                PrivilegeClass::Inspect(InspectPrivilege::Values),
+                None,
+                &[
+                    PrivilegeClass::Inspect(InspectPrivilege::OwnInvocation),
+                    PrivilegeClass::Inspect(InspectPrivilege::Values),
+                ],
+            ),
+            PrivilegeDecision::Allowed {
+                requested: PrivilegeClass::Inspect(InspectPrivilege::Values),
+            }
+        );
+        // A different classifier never covers the requested one.
+        assert!(matches!(
+            authorise_privilege(
+                USER,
+                PrivilegeClass::Inspect(InspectPrivilege::Values),
+                None,
+                &[
+                    PrivilegeClass::Inspect(InspectPrivilege::OwnInvocation),
+                    PrivilegeClass::Inspect(InspectPrivilege::Source),
+                ],
+            ),
+            PrivilegeDecision::Denied(PrivilegeDenial::MissingPrivilege { .. })
+        ));
+        // A classifier never grants a ladder rung.
+        assert!(matches!(
+            authorise_privilege(
+                USER,
+                PrivilegeClass::Inspect(InspectPrivilege::AnyInvocation),
+                None,
+                &[PrivilegeClass::Inspect(InspectPrivilege::Values)],
+            ),
+            PrivilegeDecision::Denied(PrivilegeDenial::MissingPrivilege { .. })
+        ));
+    }
+
+    #[test]
+    fn privilege_denials_carry_closed_audit_reasons() {
+        assert_eq!(
+            PrivilegeDenial::MissingPrivilege {
+                requested: PrivilegeClass::Execute,
+            }
+            .audit_reason(),
+            "execute:missing-privilege"
+        );
+        assert_eq!(
+            PrivilegeDenial::MissingPrivilege {
+                requested: PrivilegeClass::SecurityAdmin,
+            }
+            .audit_reason(),
+            "security_admin:missing-privilege"
+        );
+        assert_eq!(
+            PrivilegeDenial::MissingPrivilege {
+                requested: PrivilegeClass::Inspect(InspectPrivilege::Values),
+            }
+            .audit_reason(),
+            "inspect:missing-privilege"
+        );
+    }
+
+    #[test]
+    fn snapshot_privilege_grants_round_trip_through_the_deepest_constructor() {
+        let grant = PrivilegeGrant::new(USER, PrivilegeClass::SecurityAdmin, None)
+            .expect("a class-wide grant is valid");
+        let snapshot = SecuritySnapshot::new_with_function_targets_local_peer_credentials_and_privilege_grants(
+            REVISION,
+            vec![SecurityFunctionTarget::application(FUNCTION)],
+            vec![active(USER, PrincipalKind::User)],
+            vec![],
+            vec![],
+            vec![],
+            vec![grant],
+        )
+        .expect("a snapshot with one privilege grant is valid");
+        assert_eq!(snapshot.privilege_grants().collect::<Vec<_>>(), vec![grant]);
+
+        // The stable existing constructors default to no privilege grants.
+        let plain = SecuritySnapshot::new(
+            REVISION,
+            vec![FUNCTION],
+            vec![active(USER, PrincipalKind::User)],
+            vec![],
+            vec![],
+        )
+        .expect("the flat constructor stays valid");
+        assert_eq!(plain.privilege_grants().count(), 0);
+    }
+
+    #[test]
+    fn snapshot_rejects_duplicate_privilege_grants() {
+        let grant = PrivilegeGrant::new(USER, PrivilegeClass::SecurityAdmin, None)
+            .expect("a class-wide grant is valid");
+        assert!(matches!(
+            SecuritySnapshot::new_with_function_targets_local_peer_credentials_and_privilege_grants(
+                REVISION,
+                vec![SecurityFunctionTarget::application(FUNCTION)],
+                vec![active(USER, PrincipalKind::User)],
+                vec![],
+                vec![],
+                vec![],
+                vec![grant, grant],
+            ),
+            Err(SecuritySnapshotError::DuplicatePrivilegeGrant)
+        ));
+    }
+
+    #[test]
+    fn snapshot_rejects_privilege_grants_for_unknown_principals() {
+        let grant = PrivilegeGrant::new(OTHER_PRINCIPAL, PrivilegeClass::Execute, None)
+            .expect("a class-wide grant is valid");
+        assert!(matches!(
+            SecuritySnapshot::new_with_function_targets_local_peer_credentials_and_privilege_grants(
+                REVISION,
+                vec![SecurityFunctionTarget::application(FUNCTION)],
+                vec![active(USER, PrincipalKind::User)],
+                vec![],
+                vec![],
+                vec![],
+                vec![grant],
+            ),
+            Err(SecuritySnapshotError::UnknownPrivilegeGrantPrincipal)
+        ));
+    }
+
+    #[test]
+    fn security_admin_audit_decisions_record_operation_and_target() {
+        let snapshot = SecuritySnapshot::new(
+            REVISION,
+            vec![FUNCTION],
+            vec![active(USER, PrincipalKind::User)],
+            vec![],
+            vec![],
+        )
+        .expect("valid security-admin audit session");
+        let session = snapshot
+            .bind_authenticated_session(USER, vec![])
+            .expect("active user session should bind");
+
+        let decision = authorise_privilege(
+            USER,
+            PrivilegeClass::SecurityAdmin,
+            None,
+            &[PrivilegeClass::SecurityAdmin],
+        );
+        let allowed = SecurityAuditDecision::security_admin_allowed(
+            &session,
+            decision,
+            SecurityAdminAuditOperation::GrantRole,
+            SYS_SECURITY_GRANT_ROLE_FUNCTION_ID,
+        )
+        .expect("an allowed decision must record");
+        assert_eq!(allowed.kind(), SecurityAuditKind::SecurityAdmin);
+        assert_eq!(allowed.outcome(), SecurityAuditOutcome::Allowed);
+        assert_eq!(allowed.session_principal(), Some(USER));
+        assert_eq!(
+            allowed.security_admin_operation(),
+            Some(SecurityAdminAuditOperation::GrantRole)
+        );
+        assert_eq!(
+            allowed.security_admin_target(),
+            Some(SYS_SECURITY_GRANT_ROLE_FUNCTION_ID)
+        );
+        assert_eq!(allowed.security_admin_denial(), None);
+        assert_eq!(allowed.denial(), None);
+
+        let recovered = SecurityAuditDecision::recover_security_admin_allowed(
+            USER,
+            SecurityAdminAuditOperation::CreatePrincipal,
+            SYS_SECURITY_CREATE_PRINCIPAL_FUNCTION_ID,
+        );
+        assert_eq!(recovered.kind(), SecurityAuditKind::SecurityAdmin);
+        assert_eq!(
+            recovered.security_admin_operation(),
+            Some(SecurityAdminAuditOperation::CreatePrincipal)
+        );
+        assert_eq!(
+            recovered.security_admin_target(),
+            Some(SYS_SECURITY_CREATE_PRINCIPAL_FUNCTION_ID)
+        );
+
+        let denied = SecurityAuditDecision::security_admin_denied(
+            &session,
+            SecurityAdminAuditOperation::GrantPrivilege,
+            SYS_SECURITY_GRANT_PRIVILEGE_FUNCTION_ID,
+            PrivilegeDenial::MissingPrivilege {
+                requested: PrivilegeClass::SecurityAdmin,
+            },
+        );
+        assert_eq!(denied.kind(), SecurityAuditKind::SecurityAdmin);
+        assert_eq!(denied.outcome(), SecurityAuditOutcome::Denied);
+        assert_eq!(denied.session_principal(), Some(USER));
+        assert_eq!(
+            denied.denial(),
+            Some(SecurityAuditDenial::SecurityAdmin(
+                PrivilegeDenial::MissingPrivilege {
+                    requested: PrivilegeClass::SecurityAdmin,
+                }
+            ))
+        );
+        assert_eq!(
+            denied.security_admin_denial(),
+            Some(PrivilegeDenial::MissingPrivilege {
+                requested: PrivilegeClass::SecurityAdmin,
+            })
+        );
+        assert_eq!(
+            denied.security_admin_operation(),
+            Some(SecurityAdminAuditOperation::GrantPrivilege)
+        );
+        assert_eq!(
+            denied.security_admin_target(),
+            Some(SYS_SECURITY_GRANT_PRIVILEGE_FUNCTION_ID)
+        );
+    }
+
+    #[test]
+    fn security_admin_audit_allowed_rejects_wrong_decision_shapes() {
+        let snapshot = SecuritySnapshot::new(
+            REVISION,
+            vec![FUNCTION],
+            vec![active(USER, PrincipalKind::User)],
+            vec![],
+            vec![],
+        )
+        .expect("valid security-admin audit session");
+        let session = snapshot
+            .bind_authenticated_session(USER, vec![])
+            .expect("active user session should bind");
+        assert_eq!(
+            SecurityAuditDecision::security_admin_allowed(
+                &session,
+                PrivilegeDecision::Denied(PrivilegeDenial::MissingPrivilege {
+                    requested: PrivilegeClass::SecurityAdmin,
+                }),
+                SecurityAdminAuditOperation::CreateRole,
+                SYS_SECURITY_CREATE_ROLE_FUNCTION_ID,
+            ),
+            Err(SecurityAuditDecisionError::SecurityAdminDecisionShape)
+        );
+        // An allowed decision for a different class never records as admin.
+        assert_eq!(
+            SecurityAuditDecision::security_admin_allowed(
+                &session,
+                PrivilegeDecision::Allowed {
+                    requested: PrivilegeClass::Execute,
+                },
+                SecurityAdminAuditOperation::CreateRole,
+                SYS_SECURITY_CREATE_ROLE_FUNCTION_ID,
+            ),
+            Err(SecurityAuditDecisionError::SecurityAdminDecisionShape)
         );
     }
 }
