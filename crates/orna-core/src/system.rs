@@ -1431,6 +1431,28 @@ mod tests {
     }
 
     #[test]
+    fn security_ids_occupy_the_sealed_function_byte_range_in_order() {
+        let ids = [
+            SYS_SECURITY_SESSION_PRINCIPAL_FUNCTION_ID,
+            SYS_SECURITY_EFFECTIVE_PRINCIPAL_FUNCTION_ID,
+            SYS_SECURITY_ACTIVE_ROLES_FUNCTION_ID,
+            SYS_SECURITY_CREATE_PRINCIPAL_FUNCTION_ID,
+            SYS_SECURITY_DISABLE_PRINCIPAL_FUNCTION_ID,
+            SYS_SECURITY_CREATE_ROLE_FUNCTION_ID,
+            SYS_SECURITY_GRANT_ROLE_FUNCTION_ID,
+            SYS_SECURITY_REVOKE_ROLE_FUNCTION_ID,
+            SYS_SECURITY_GRANT_PRIVILEGE_FUNCTION_ID,
+            SYS_SECURITY_REVOKE_PRIVILEGE_FUNCTION_ID,
+            SYS_SECURITY_CAN_EXECUTE_FUNCTION_ID,
+            SYS_SECURITY_HAS_PRIVILEGE_FUNCTION_ID,
+        ];
+        for (index, id) in ids.into_iter().enumerate() {
+            assert_eq!(id.to_bytes()[15], 0x0d + index as u8);
+            assert_eq!(SYSTEM_FUNCTIONS[12 + index].id(), id);
+        }
+    }
+
+    #[test]
     fn security_carrier_is_sealed_and_collision_free() {
         assert_eq!(
             SYS_SECURITY_PRINCIPAL_TYPE_ID,
