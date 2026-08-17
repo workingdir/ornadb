@@ -165,6 +165,9 @@ fn walk_node(
         SyntaxKind::CapabilitySpecification => {
             walk_children_with_role(node, Some(NameRole::Function), tokens)
         }
+        SyntaxKind::ClientCallExpression => {
+            walk_children_with_role(node, Some(NameRole::Function), tokens)
+        }
         SyntaxKind::SqlQueryBody
         | SyntaxKind::SqlInsertBody
         | SyntaxKind::SqlUpdateBody
@@ -215,6 +218,13 @@ fn classify_token(
                 start,
                 end,
                 HighlightKind::StringLiteral,
+            ));
+        }
+        SyntaxKind::NumberLiteral => {
+            tokens.push(HighlightToken::new(
+                start,
+                end,
+                HighlightKind::NumberLiteral,
             ));
         }
         SyntaxKind::QuotedIdentifier => {

@@ -12,6 +12,7 @@ pub(crate) enum TokenKind {
     Dot,
     Semicolon,
     StringLiteral,
+    NumberLiteral,
     LeftParenthesis,
     RightParenthesis,
     Comma,
@@ -29,6 +30,7 @@ impl TokenKind {
             Self::Dot => SyntaxKind::Dot,
             Self::Semicolon => SyntaxKind::Semicolon,
             Self::StringLiteral => SyntaxKind::StringLiteral,
+            Self::NumberLiteral => SyntaxKind::NumberLiteral,
             Self::LeftParenthesis => SyntaxKind::LeftParenthesis,
             Self::RightParenthesis => SyntaxKind::RightParenthesis,
             Self::Comma => SyntaxKind::Comma,
@@ -159,6 +161,16 @@ pub(crate) fn lex(source: &str) -> (Vec<Token<'_>>, Vec<Diagnostic>) {
                     .find(|(_, current)| !is_identifier_continue(*current))
                     .map_or(rest.len(), |(index, _)| index);
                 (TokenKind::Word, width)
+            } else if character.is_ascii_digit() {
+                let width = rest
+                    .char_indices()
+                    .find(|(_, current)| !current.is_ascii_digit())
+                    .map_or(rest.len(), |(index, _)| index);
+                (TokenKind::NumberLiteral, width)
+            } else if rest.starts_with("=>") {
+                (TokenKind::Other, 2)
+            } else if rest.starts_with("||") {
+                (TokenKind::Other, 2)
             } else {
                 let kind = match character {
                     '.' => TokenKind::Dot,
