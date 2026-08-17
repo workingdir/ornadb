@@ -1,7 +1,9 @@
 use std::time::SystemTime;
 
 use orna_client::{
-    ClientExecutionResult, evaluate_client_function as evaluate_authorised_client_function,
+    ClientExecutionResult,
+    evaluate_client_function as evaluate_authorised_client_function,
+    evaluate_client_function_with_arguments as evaluate_authorised_client_function_with_arguments,
 };
 use orna_core::{
     CatalogueRevisionId, FunctionId, FunctionRevisionId, InspectEpochId, InvocationAuditEventId,
@@ -349,18 +351,13 @@ impl PostgresKernel {
                             ),
                         ),
                         Some(definition) if definition.domain() == FunctionDomain::Client => {
-                            if arguments.is_empty() {
-                                evaluate_authorised_client_function(&active, &authorisation)
-                                    .map(|result| {
-                                        AuthenticatedRawCallResult::Client(result.into_value())
-                                    })
-                                    .map_err(PostgresKernelError::ClientExecution)
-                            } else {
-                                Err(raw_call_target_unavailable(
-                                    function,
-                                    "raw call arguments require a supported active SERVER mutation target",
-                                ))
-                            }
+                            evaluate_authorised_client_function_with_arguments(
+                                &active,
+                                &authorisation,
+                                arguments,
+                            )
+                            .map(|result| AuthenticatedRawCallResult::Client(result.into_value()))
+                            .map_err(PostgresKernelError::ClientExecution)
                         }
                         Some(definition) if definition.domain() == FunctionDomain::Server => {
                             let reference_argument = matches!(
