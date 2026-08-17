@@ -3793,6 +3793,27 @@ fn resolve_client_function_inputs<'a>(
             ));
             continue;
         }
+        if expression_body
+            && !client_expression_type_is_evaluable(
+                ClientExpressionType {
+                    semantic_type: return_type.semantic_type,
+                    standard_value_type: return_type.standard_value_type,
+                },
+                standard,
+            )
+        {
+            let span = match &declaration.return_type {
+                FunctionReturnType::Single(specification) => specification.span(),
+                FunctionReturnType::Rows { span, .. } => span,
+            };
+            diagnostics.push(diagnostic(
+                DiagnosticCode::TypeMismatch,
+                "this CLIENT function return type is not supported by the local evaluator",
+                header.logical_path,
+                span,
+            ));
+            continue;
+        }
         if let FunctionReturnType::Single(specification) = &declaration.return_type {
             record_standard_type_use(
                 uses,
@@ -4234,6 +4255,39 @@ fn client_expression_targets(
         );
     }
     targets
+}
+
+fn client_expression_type_is_evaluable(
+    expression_type: ClientExpressionType,
+    standard: Option<&CheckedStandardLibrary>,
+) -> bool {
+    match expression_type.semantic_type {
+        SemanticType::Scalar(scalar) => matches!(
+            scalar,
+            StandardScalar::Boolean
+                | StandardScalar::Integer
+                | StandardScalar::CharacterLargeObject
+        ),
+        SemanticType::Named(CheckedTypeId::Existing(type_id)) => standard
+            .and_then(|standard| {
+                standard
+                    .value_types()
+                    .iter()
+                    .find(|value_type| value_type.id() == type_id)
+            })
+            .is_some_and(|value_type| {
+                value_type.kind() == ValueTypeKind::Opaque
+                    || matches!(
+                        value_type.representation_contract(),
+                        "orna.kernel.value.boolean@1"
+                            | "orna.kernel.value.integer@1"
+                            | "orna.kernel.value.character-large-object@1"
+                    )
+            }),
+        SemanticType::Named(CheckedTypeId::Provisional(_)) | SemanticType::Reference { .. } => {
+            false
+        }
+    }
 }
 
 fn client_expression_types_compatible(
@@ -4713,24 +4767,6 @@ fn check_client_functions(
                         references,
                     )
                 } else if let Some(contract) = input.body.as_external_contract() {
-                    if !input.parameters.is_empty() {
-                        diagnostics.push(diagnostic(
-                            DiagnosticCode::DomainIncompatible,
-                            "external CLIENT functions cannot declare parameters",
-                            input.logical_path,
-                            &input.declaration_span,
-                        ));
-                        return None;
-                    }
-                    if !input.capabilities.is_empty() {
-                        diagnostics.push(diagnostic(
-                            DiagnosticCode::CapabilityRequirement,
-                            "external CLIENT functions cannot declare capabilities",
-                            input.logical_path,
-                            &input.declaration_span,
-                        ));
-                        return None;
-                    }
                     let Some(identity) = client_contract_identity(contract) else {
                         diagnostics.push(diagnostic(
                         DiagnosticCode::DomainIncompatible,
@@ -7444,6 +7480,7 @@ fn diagnostic(
 
 #[cfg(test)]
 mod tests {
+    use super::CheckedClientFunctionBody;
     use std::{cell::Cell, error::Error};
 
     use orna_artifact::server_mutation_plan::{
@@ -15236,6 +15273,47 @@ mod tests {
         assert_eq!(
             report.diagnostics()[0].message(),
             "accepted CLIENT function bodies must not declare capabilities"
+        );
+        assert_no_checked_bundle(&report);
+    }
+
+    #[test]
+    fn accepts_external_client_parameters_and_capabilities() {
+        let source = "CREATE SCHEMA examples; \
+            CREATE EXTERNAL CLIENT FUNCTION examples.connect(p_host TEXT) \
+            RETURNS TEXT \
+            RUNTIME CONTRACT 'std.net.connect@1' \
+            REQUIRES CAPABILITY std.net.connect(p_host);";
+        let report = check(&bundle([("client.orna", source)]), &empty_catalogue());
+
+        assert!(
+            report.diagnostics().is_empty(),
+            "{:?}",
+            report.diagnostics()
+        );
+        let function = &report.checked_bundle().unwrap().client_functions()[0];
+        assert_eq!(function.parameters().len(), 1);
+        assert_eq!(function.capabilities().len(), 1);
+        assert!(matches!(
+            function.body(),
+            CheckedClientFunctionBody::ExternalContract { identity, .. }
+                if identity == "std.net.connect@1"
+        ));
+    }
+
+    #[test]
+    fn rejects_expression_returns_the_local_evaluator_cannot_execute() {
+        let source = "CREATE SCHEMA examples; \
+            CREATE TYPE examples.item AS OBJECT (); \
+            CREATE CLIENT FUNCTION examples.read(p_item REF examples.item) \
+            RETURNS REF examples.item AS p_item;";
+        let report = check(&bundle([("client.orna", source)]), &empty_catalogue());
+
+        assert_eq!(report.diagnostics().len(), 1);
+        assert_eq!(report.diagnostics()[0].code(), DiagnosticCode::TypeMismatch);
+        assert_eq!(
+            report.diagnostics()[0].message(),
+            "this CLIENT function return type is not supported by the local evaluator"
         );
         assert_no_checked_bundle(&report);
     }
