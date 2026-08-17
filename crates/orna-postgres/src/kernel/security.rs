@@ -351,13 +351,20 @@ impl PostgresKernel {
                             ),
                         ),
                         Some(definition) if definition.domain() == FunctionDomain::Client => {
-                            evaluate_authorised_client_function_with_arguments(
-                                &active,
-                                &authorisation,
-                                arguments,
-                            )
-                            .map(|result| AuthenticatedRawCallResult::Client(result.into_value()))
-                            .map_err(PostgresKernelError::ClientExecution)
+                            if arguments.len() != definition.parameters().len() {
+                                Err(raw_call_target_unavailable(
+                                    function,
+                                    "raw CLIENT arguments do not match the declared parameter set",
+                                ))
+                            } else {
+                                evaluate_authorised_client_function_with_arguments(
+                                    &active,
+                                    &authorisation,
+                                    arguments,
+                                )
+                                .map(|result| AuthenticatedRawCallResult::Client(result.into_value()))
+                                .map_err(PostgresKernelError::ClientExecution)
+                            }
                         }
                         Some(definition) if definition.domain() == FunctionDomain::Server => {
                             let reference_argument = matches!(
