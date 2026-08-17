@@ -1196,6 +1196,11 @@ impl CheckedClientFunction {
     pub(crate) fn boolean_body(&self) -> Option<(bool, &SourceLocation)> {
         self.body.as_boolean_literal()
     }
+    /// Returns the complete checked CLIENT body.
+    pub(crate) fn body(&self) -> &CheckedClientFunctionBody {
+        &self.body
+    }
+
 
     /// Returns checked definition references in source-resolution order.
     pub fn references(&self) -> &[CheckedDefinitionReference] {
