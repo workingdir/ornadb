@@ -1184,9 +1184,8 @@ impl CheckedClientFunction {
 
     /// Returns the checked capability requirements in declaration order.
     ///
-    /// The accepted CLIENT body forms declare zero capabilities in this
-    /// slice, so the list is empty for checked functions; tests and later
-    /// body forms record requirements here.
+    /// Expression and external-contract bodies retain their declared
+    /// requirements; legacy Boolean bodies reject capability clauses.
     pub fn capabilities(&self) -> &[CheckedClientCapability] {
         &self.capabilities
     }
