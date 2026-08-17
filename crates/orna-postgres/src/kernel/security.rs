@@ -18,7 +18,8 @@ use orna_core::{
         AuthenticatedSession, CATALOGUE_HEALTH_FUNCTION_ID, CATALOGUE_HEALTH_SERVICE_PRINCIPAL_ID,
         ExecuteDecision, ExecuteDenial, ExecuteGrant, InspectDenial, InspectEpochScope,
         InvocationTarget, LocalPeerAuthenticationError, LocalPeerCredential, Principal,
-        PrincipalKind, PrincipalStatus, RoleMembership, SecurityAuditDecision, SecurityAuditDenial,
+        PrincipalKind, PrincipalStatus, PrivilegeClass, PrivilegeDenial, RoleMembership,
+        SecurityAdminAuditOperation, SecurityAuditDecision, SecurityAuditDenial,
         SecurityAuditEvent, SecurityAuditKind, SecurityAuditOutcome, SecurityFunctionTarget,
         SecuritySnapshot, SessionBindingError, TargetClass, UserStateAuditOperation,
     },
@@ -1739,6 +1740,7 @@ pub(crate) async fn append_security_audit_event(
         None => (
             decision
                 .user_state_root_function()
+                .or_else(|| decision.security_admin_target())
                 .map(|function| function.to_bytes().to_vec()),
             None,
             None,
@@ -1759,6 +1761,11 @@ pub(crate) async fn append_security_audit_event(
                     .inspect_requested()
                     .zip(decision.inspect_epoch_scope())
                     .map(|(requested, scope)| encode_inspect_audit_detail(requested, scope))
+            })
+            .or_else(|| {
+                decision
+                    .security_admin_operation()
+                    .map(encode_security_admin_audit_detail)
             }),
         Some(SecurityAuditDenial::Authentication(reason)) => {
             Some(encode_authentication_audit_denial(reason).to_owned())
@@ -1771,6 +1778,9 @@ pub(crate) async fn append_security_audit_event(
         }
         Some(SecurityAuditDenial::Inspect(reason)) => {
             Some(encode_inspect_audit_denial(reason).to_owned())
+        }
+        Some(SecurityAuditDenial::SecurityAdmin(reason)) => {
+            encode_security_admin_audit_denied_detail(&decision, reason)
         }
     };
     transaction
@@ -3312,6 +3322,68 @@ fn decode_security_audit_event(row: &Row) -> Result<SecurityAuditEvent, Postgres
                 reason,
             )
         }
+        ("security_admin", "allowed")
+            if effective_principal.is_none()
+                && authorising_principal.is_none()
+                && function.is_some()
+                && source_revision.is_none()
+                && catalogue_revision.is_none() =>
+        {
+            // The protected columns retain only the closed operation detail
+            // and the sealed target identity; argument payloads are never
+            // stored.
+            let operation = decode_security_admin_audit_detail(
+                &require_audit_value(
+                    denial_reason,
+                    &record,
+                    "allowed security-admin audit requires an operation detail",
+                )?,
+                &record,
+            )?;
+            SecurityAuditDecision::recover_security_admin_allowed(
+                require_audit_value(
+                    session_principal,
+                    &record,
+                    "allowed security-admin audit requires a session principal",
+                )?,
+                operation,
+                require_audit_value(
+                    function,
+                    &record,
+                    "security-admin audit requires the sealed target identity",
+                )?,
+            )
+        }
+        ("security_admin", "denied")
+            if effective_principal.is_none()
+                && authorising_principal.is_none()
+                && function.is_some()
+                && source_revision.is_none()
+                && catalogue_revision.is_none() =>
+        {
+            let (operation, reason) = decode_security_admin_audit_denial(
+                &require_audit_value(
+                    denial_reason,
+                    &record,
+                    "denied security-admin audit requires a reason",
+                )?,
+                &record,
+            )?;
+            SecurityAuditDecision::recover_security_admin_denied(
+                require_audit_value(
+                    session_principal,
+                    &record,
+                    "denied security-admin audit requires a session principal",
+                )?,
+                operation,
+                require_audit_value(
+                    function,
+                    &record,
+                    "security-admin audit requires the sealed target identity",
+                )?,
+                reason,
+            )
+        }
         _ => {
             return Err(audit_invariant(
                 &record,
@@ -3440,6 +3512,7 @@ fn encode_security_audit_kind(kind: SecurityAuditKind) -> &'static str {
         SecurityAuditKind::Capability => "capability",
         SecurityAuditKind::UserState => "user_state",
         SecurityAuditKind::Inspect => "inspect",
+        SecurityAuditKind::SecurityAdmin => "security_admin",
     }
 }
 
@@ -3622,6 +3695,140 @@ fn decode_inspect_audit_denial(
             "INSPECT denial reason is unsupported",
         )),
     }
+}
+
+/// Encodes one closed security-admin operation kind exactly as the pure
+/// model names it.
+fn encode_security_admin_audit_operation(operation: SecurityAdminAuditOperation) -> &'static str {
+    match operation {
+        SecurityAdminAuditOperation::CreatePrincipal => "create_principal",
+        SecurityAdminAuditOperation::DisablePrincipal => "disable_principal",
+        SecurityAdminAuditOperation::CreateRole => "create_role",
+        SecurityAdminAuditOperation::GrantRole => "grant_role",
+        SecurityAdminAuditOperation::RevokeRole => "revoke_role",
+        SecurityAdminAuditOperation::GrantPrivilege => "grant_privilege",
+        SecurityAdminAuditOperation::RevokePrivilege => "revoke_privilege",
+    }
+}
+
+/// Encodes the allowed security-admin capture detail into the protected
+/// `denial_reason` column, mirroring the INSPECT and USER state detail
+/// patterns: the column carries a closed `security_admin:<operation>`
+/// detail for allowed rows.
+fn encode_security_admin_audit_detail(operation: SecurityAdminAuditOperation) -> String {
+    format!(
+        "security_admin:{}",
+        encode_security_admin_audit_operation(operation)
+    )
+}
+
+/// Encodes the denied security-admin capture detail: the closed operation
+/// and the closed `missing-privilege` reason tail, so a denied row
+/// round-trips both the operation and the denial without ever recording an
+/// argument payload.
+fn encode_security_admin_audit_denied_detail(
+    decision: &SecurityAuditDecision,
+    reason: PrivilegeDenial,
+) -> Option<String> {
+    let operation = decision.security_admin_operation()?;
+    Some(encode_security_admin_audit_denied_detail_value(
+        operation, reason,
+    ))
+}
+
+fn decode_security_admin_audit_operation(
+    value: &str,
+    record: &str,
+) -> Result<SecurityAdminAuditOperation, PostgresKernelError> {
+    match value {
+        "create_principal" => Ok(SecurityAdminAuditOperation::CreatePrincipal),
+        "disable_principal" => Ok(SecurityAdminAuditOperation::DisablePrincipal),
+        "create_role" => Ok(SecurityAdminAuditOperation::CreateRole),
+        "grant_role" => Ok(SecurityAdminAuditOperation::GrantRole),
+        "revoke_role" => Ok(SecurityAdminAuditOperation::RevokeRole),
+        "grant_privilege" => Ok(SecurityAdminAuditOperation::GrantPrivilege),
+        "revoke_privilege" => Ok(SecurityAdminAuditOperation::RevokePrivilege),
+        _ => Err(audit_invariant(
+            record,
+            "security-admin audit operation is unsupported",
+        )),
+    }
+}
+
+fn decode_security_admin_audit_detail(
+    value: &str,
+    record: &str,
+) -> Result<SecurityAdminAuditOperation, PostgresKernelError> {
+    let Some(operation) = value.strip_prefix("security_admin:") else {
+        return Err(audit_invariant(
+            record,
+            "security-admin audit detail must start with security_admin:",
+        ));
+    };
+    if operation.contains(':') {
+        return Err(audit_invariant(
+            record,
+            "allowed security-admin audit detail must carry only the operation",
+        ));
+    }
+    let operation = decode_security_admin_audit_operation(operation, record)?;
+    if encode_security_admin_audit_detail(operation) != value {
+        return Err(audit_invariant(
+            record,
+            "security-admin audit detail is not canonical",
+        ));
+    }
+    Ok(operation)
+}
+
+fn decode_security_admin_audit_denial(
+    value: &str,
+    record: &str,
+) -> Result<(SecurityAdminAuditOperation, PrivilegeDenial), PostgresKernelError> {
+    let Some(rest) = value.strip_prefix("security_admin:") else {
+        return Err(audit_invariant(
+            record,
+            "security-admin denial reason must start with security_admin:",
+        ));
+    };
+    let Some((operation, reason)) = rest.split_once(':') else {
+        return Err(audit_invariant(
+            record,
+            "security-admin denial reason must carry an operation and a reason",
+        ));
+    };
+    let operation = decode_security_admin_audit_operation(operation, record)?;
+    let reason = match reason {
+        "missing-privilege" => PrivilegeDenial::MissingPrivilege {
+            requested: PrivilegeClass::SecurityAdmin,
+        },
+        _ => {
+            return Err(audit_invariant(
+                record,
+                "security-admin denial reason is unsupported",
+            ));
+        }
+    };
+    if encode_security_admin_audit_denied_detail_value(operation, reason) != value {
+        return Err(audit_invariant(
+            record,
+            "security-admin denial reason is not canonical",
+        ));
+    }
+    Ok((operation, reason))
+}
+
+fn encode_security_admin_audit_denied_detail_value(
+    operation: SecurityAdminAuditOperation,
+    reason: PrivilegeDenial,
+) -> String {
+    format!(
+        "security_admin:{}:{}",
+        encode_security_admin_audit_operation(operation),
+        match reason {
+            PrivilegeDenial::MissingPrivilege { .. } => "missing-privilege",
+        }
+    )
 }
 
 fn require_audit_value<T>(
@@ -3829,6 +4036,10 @@ mod tests {
         CatalogueRevisionId, FieldId, ObjectId, ParameterId, TypeId,
         catalogue::{
             CatalogueSnapshot, EnumTypeDefinition, QualifiedSemanticName, SchemaDefinition,
+        },
+        security::PrivilegeDecision,
+        system::{
+            SYS_SECURITY_CREATE_PRINCIPAL_FUNCTION_ID, SYS_SECURITY_GRANT_PRIVILEGE_FUNCTION_ID,
         },
         value::{EnumValue, RuntimeFloat},
     };
@@ -4283,6 +4494,10 @@ mod tests {
             encode_security_audit_kind(SecurityAuditKind::Capability),
             "capability"
         );
+        assert_eq!(
+            encode_security_audit_kind(SecurityAuditKind::SecurityAdmin),
+            "security_admin"
+        );
 
         for name in [
             "std.fs.read",
@@ -4342,6 +4557,9 @@ mod tests {
             Some(SecurityAuditDenial::Inspect(reason)) => {
                 Some(encode_inspect_audit_denial(reason).to_owned())
             }
+            Some(SecurityAuditDenial::SecurityAdmin(reason)) => {
+                encode_security_admin_audit_denied_detail(decision, reason)
+            }
         };
 
         assert_eq!(encode(&allowed), Some("capability:std.fs.read".to_owned()));
@@ -4355,6 +4573,110 @@ mod tests {
         assert_eq!(denied.outcome(), SecurityAuditOutcome::Denied);
         assert_eq!(allowed.target(), Some(target));
         assert_eq!(denied.target(), Some(target));
+    }
+
+    #[test]
+    fn security_admin_audit_codec_round_trips_operation_and_denial() {
+        let principal = PrincipalId::from_bytes([0x95; 16]);
+        let snapshot = SecuritySnapshot::new(
+            RevisionPair::new(
+                SourceRevisionId::from_bytes([0x96; 16]),
+                CatalogueRevisionId::from_bytes([0x97; 16]),
+            ),
+            vec![],
+            vec![Principal::new(
+                principal,
+                PrincipalKind::User,
+                PrincipalStatus::Active,
+            )],
+            vec![],
+            vec![],
+        )
+        .expect("security-admin codec snapshot is valid");
+        let session = snapshot
+            .bind_authenticated_session(principal, vec![])
+            .expect("security-admin codec session binds");
+        let operation = SecurityAdminAuditOperation::GrantPrivilege;
+        let target = SYS_SECURITY_GRANT_PRIVILEGE_FUNCTION_ID;
+
+        let allowed = SecurityAuditDecision::security_admin_allowed(
+            &session,
+            PrivilegeDecision::Allowed {
+                requested: PrivilegeClass::SecurityAdmin,
+            },
+            operation,
+            target,
+        )
+        .expect("allowed security-admin decision must construct");
+        assert_eq!(
+            encode_security_admin_audit_detail(operation),
+            "security_admin:grant_privilege"
+        );
+        assert_eq!(
+            decode_security_admin_audit_detail("security_admin:grant_privilege", "60")
+                .expect("allowed security-admin detail must decode"),
+            operation
+        );
+        assert!(matches!(
+            decode_security_admin_audit_detail("security_admin:grant_privilege:missing-privilege", "61"),
+            Err(PostgresKernelError::DurableInvariant {
+                relation: "_orna_kernel.security_audit_events",
+                ref record,
+                rule: "allowed security-admin audit detail must carry only the operation",
+            }) if record == "61"
+        ));
+        assert!(matches!(
+            decode_security_admin_audit_detail("execute_missing_grant", "62"),
+            Err(PostgresKernelError::DurableInvariant {
+                relation: "_orna_kernel.security_audit_events",
+                ref record,
+                rule: "security-admin audit detail must start with security_admin:",
+            }) if record == "62"
+        ));
+        assert_eq!(allowed.kind(), SecurityAuditKind::SecurityAdmin);
+        assert_eq!(allowed.outcome(), SecurityAuditOutcome::Allowed);
+        assert_eq!(allowed.security_admin_operation(), Some(operation));
+        assert_eq!(allowed.security_admin_target(), Some(target));
+
+        let reason = PrivilegeDenial::MissingPrivilege {
+            requested: PrivilegeClass::SecurityAdmin,
+        };
+        let denied = SecurityAuditDecision::security_admin_denied(
+            &session,
+            SecurityAdminAuditOperation::CreatePrincipal,
+            SYS_SECURITY_CREATE_PRINCIPAL_FUNCTION_ID,
+            reason,
+        );
+        let stored = encode_security_admin_audit_denied_detail(&denied, reason)
+            .expect("denied security-admin decision must carry its operation");
+        assert_eq!(stored, "security_admin:create_principal:missing-privilege");
+        let (operation, decoded_reason) = decode_security_admin_audit_denial(&stored, "63")
+            .expect("denied security-admin detail must decode");
+        assert_eq!(operation, SecurityAdminAuditOperation::CreatePrincipal);
+        assert_eq!(decoded_reason, reason);
+        assert!(matches!(
+            decode_security_admin_audit_denial("security_admin:create_principal:granted", "64"),
+            Err(PostgresKernelError::DurableInvariant {
+                relation: "_orna_kernel.security_audit_events",
+                ref record,
+                rule: "security-admin denial reason is unsupported",
+            }) if record == "64"
+        ));
+        assert!(matches!(
+            decode_security_admin_audit_denial("security_admin:create_principal", "65"),
+            Err(PostgresKernelError::DurableInvariant {
+                relation: "_orna_kernel.security_audit_events",
+                ref record,
+                rule: "security-admin denial reason must carry an operation and a reason",
+            }) if record == "65"
+        ));
+        assert_eq!(denied.kind(), SecurityAuditKind::SecurityAdmin);
+        assert_eq!(denied.outcome(), SecurityAuditOutcome::Denied);
+        assert_eq!(denied.security_admin_denial(), Some(reason));
+        assert_eq!(
+            denied.denial(),
+            Some(SecurityAuditDenial::SecurityAdmin(reason))
+        );
     }
 
     #[test]
