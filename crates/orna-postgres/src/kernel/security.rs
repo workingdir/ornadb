@@ -1,8 +1,7 @@
 use std::time::SystemTime;
 
 use orna_client::{
-    ClientExecutionResult,
-    evaluate_client_function as evaluate_authorised_client_function,
+    ClientExecutionResult, evaluate_client_function as evaluate_authorised_client_function,
     evaluate_client_function_with_arguments as evaluate_authorised_client_function_with_arguments,
 };
 use orna_core::{
@@ -543,24 +542,24 @@ impl PostgresKernel {
         finish_authenticated_server_select_session(operation, database_session.shutdown().await)
     }
 
-/// Dispatches one sealed `sys.invoke` Request inside one transaction.
-///
-/// This boundary recovers the active revision and its security snapshot,
-/// decodes the retained Request against the opaque codec registry of the exact
-/// verified standard snapshot, makes the redacted protected decision, and then
-/// executes either an application CLIENT target through the local evaluator or
-/// a verified-standard target through its pinned executable. Completed
-/// invocations emit `InvocationStarted(0)`, `ValueBatch(1)`, and
-/// `InvocationCompleted(2)`. Denied requests return without executing an
-/// artifact. Every decision is appended as protected security and invocation
-/// audit evidence before the transaction commits; the invocation-audit row
-/// keeps the historical application `RevisionPair` as its durable standard
-/// pin.
-///
-/// The invocation first passes the protected `sys.invoke` gate. Application
-/// CLIENT targets use the same authorised local evaluator as the raw dispatch
-/// path. Verified standard targets retain their sealed standard-only execution
-/// path.
+    /// Dispatches one sealed `sys.invoke` Request inside one transaction.
+    ///
+    /// This boundary recovers the active revision and its security snapshot,
+    /// decodes the retained Request against the opaque codec registry of the exact
+    /// verified standard snapshot, makes the redacted protected decision, and then
+    /// executes either an application CLIENT target through the local evaluator or
+    /// a verified-standard target through its pinned executable. Completed
+    /// invocations emit `InvocationStarted(0)`, `ValueBatch(1)`, and
+    /// `InvocationCompleted(2)`. Denied requests return without executing an
+    /// artifact. Every decision is appended as protected security and invocation
+    /// audit evidence before the transaction commits; the invocation-audit row
+    /// keeps the historical application `RevisionPair` as its durable standard
+    /// pin.
+    ///
+    /// The invocation first passes the protected `sys.invoke` gate. Application
+    /// CLIENT targets use the same authorised local evaluator as the raw dispatch
+    /// path. Verified standard targets retain their sealed standard-only execution
+    /// path.
     pub async fn dispatch_sealed_sys_invoke(
         &self,
         authenticated_session: &AuthenticatedSession,
