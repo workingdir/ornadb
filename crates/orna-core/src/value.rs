@@ -2229,7 +2229,8 @@ impl FunctionArgument {
             | RuntimeValue::Text(_)
             | RuntimeValue::Bytes(_)
             | RuntimeValue::Reference { .. }
-            | RuntimeValue::Enum(_) => Ok(Self { parameter, value }),
+            | RuntimeValue::Enum(_)
+            | RuntimeValue::Opaque(_) => Ok(Self { parameter, value }),
             RuntimeValue::Constructed(value) => {
                 Err(FunctionArgumentError::ConstructedValueNotAccepted {
                     parameter,
@@ -2239,10 +2240,6 @@ impl FunctionArgument {
             RuntimeValue::Record(value) => Err(FunctionArgumentError::RecordValueNotAccepted {
                 parameter,
                 record_type: value.record_type(),
-            }),
-            RuntimeValue::Opaque(value) => Err(FunctionArgumentError::OpaqueValueNotAccepted {
-                parameter,
-                opaque_type: value.opaque_type(),
             }),
             RuntimeValue::InvokeValue(_)
             | RuntimeValue::InvokeRequest(_)
@@ -2292,13 +2289,6 @@ pub enum FunctionArgumentError {
         /// The record type carried by the value.
         record_type: TypeId,
     },
-    /// An opaque value is outside the current executable argument subset.
-    OpaqueValueNotAccepted {
-        /// The parameter identity supplied with the opaque value.
-        parameter: ParameterId,
-        /// The opaque type carried by the value.
-        opaque_type: TypeId,
-    },
     /// A sealed invocation carrier is outside ordinary function arguments.
     InvocationCarrierNotAccepted {
         /// The parameter identity supplied with the carrier.
@@ -2317,9 +2307,6 @@ impl fmt::Display for FunctionArgumentError {
             }
             Self::RecordValueNotAccepted { .. } => {
                 formatter.write_str("record function arguments are not accepted")
-            }
-            Self::OpaqueValueNotAccepted { .. } => {
-                formatter.write_str("opaque function arguments are not accepted")
             }
             Self::InvocationCarrierNotAccepted { .. } => {
                 formatter.write_str("invocation carrier function arguments are not accepted")
@@ -6484,11 +6471,10 @@ mod tests {
         let runtime_value = RuntimeValue::Opaque(value.clone());
         let parameter = ParameterId::from_bytes([0x4c; 16]);
         assert_eq!(
-            FunctionArgument::new(parameter, runtime_value.clone()),
-            Err(FunctionArgumentError::OpaqueValueNotAccepted {
-                parameter,
-                opaque_type: OPAQUE_TYPE,
-            })
+            FunctionArgument::new(parameter, runtime_value.clone())
+                .unwrap()
+                .value(),
+            &runtime_value
         );
         assert_eq!(
             ResultRows::new(
