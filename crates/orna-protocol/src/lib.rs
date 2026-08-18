@@ -58,6 +58,7 @@ const CATALOGUE_MARKER: &[u8; 4] = b"ORV2";
 const ACTIVE_MARKER: &[u8; 4] = b"ORV3";
 const REGISTERED_MARKER: &[u8; 4] = b"ORV4";
 const CONSTRUCTED_MARKER: &[u8; 4] = b"ORV5";
+const SET_MARKER: &[u8; 4] = b"ORV6";
 const HEADER_LENGTH: usize = 25;
 const RECORD_FIELD_HEADER_LENGTH: usize = 20;
 const NULL_SCALAR_TAG: u8 = 0x00;
@@ -165,6 +166,11 @@ pub enum ValueCodecError {
     },
     /// MAP entries are not already in canonical key order.
     NonCanonicalMapOrder {
+        /// The first non-canonical wire entry index.
+        index: usize,
+    },
+    /// SET elements are not already in canonical element order.
+    NonCanonicalSetOrder {
         /// The first non-canonical wire entry index.
         index: usize,
     },
@@ -679,6 +685,9 @@ impl fmt::Display for ValueCodecError {
             Self::NonCanonicalMapOrder { .. } => {
                 formatter.write_str("constructed MAP entries are not in canonical key order")
             }
+            Self::NonCanonicalSetOrder { .. } => {
+                formatter.write_str("constructed SET elements are not in canonical order")
+            }
             Self::CollectionValue { .. } => {
                 formatter.write_str("constructed runtime value is invalid")
             }
@@ -1003,10 +1012,10 @@ fn decode_registered_value_with_marker(
         _ => decode_active_non_record_value(active, tag, type_id, payload),
     }
 }
-
-/// Encodes one complete ORV5 runtime value.
+/// Encodes one complete ORV5/ORV6 runtime value.
 ///
-/// ORV5 retains every ORV4 value and adds checked constructed values.
+/// ORV5 retains every ORV4 value and adds checked OPTION, LIST, and MAP values.
+/// ORV6 is selected for checked SET values.
 pub fn encode_constructed_value(
     active: &ActiveDatabaseRevision,
     registry: &OpaqueCodecRegistry,
@@ -1015,7 +1024,7 @@ pub fn encode_constructed_value(
     encode_orv5_value(active, registry, value)
 }
 
-/// Decodes one complete ORV5 runtime value.
+/// Decodes one complete ORV5 or ORV6 runtime value.
 ///
 /// The decoder validates the whole structural tree before materialising any
 /// value. This preserves the authoritative global node-limit precedence.
@@ -1024,7 +1033,10 @@ pub fn decode_constructed_value(
     registry: &OpaqueCodecRegistry,
     encoded: &[u8],
 ) -> Result<RuntimeValue, ValueCodecError> {
-    let (tag, type_id, payload) = decode_envelope(encoded, CONSTRUCTED_MARKER)?;
+    let (is_set_version, tag, type_id, payload) = decode_constructed_envelope(encoded)?;
+    if is_set_version && tag != CONSTRUCTED_TAG {
+        return Err(ValueCodecError::InvalidMarker);
+    }
     if tag == OPAQUE_TAG && invocation_carrier_by_id(type_id).is_some() {
         return decode_invocation_carrier(active, registry, type_id, payload);
     }
@@ -1032,7 +1044,8 @@ pub fn decode_constructed_value(
         return Err(ValueCodecError::ConstructedTypeIdentityNotZero { identity: type_id });
     }
     if tag == CONSTRUCTED_TAG {
-        let (descriptor, body) = decode_constructed_descriptor(payload)?;
+        let (descriptor, body) =
+            decode_constructed_descriptor_with_set(payload, is_set_version)?;
         preflight_constructed_descriptor(active, &descriptor)?;
         let mut budget = NodeBudget::runtime();
         preflight_orv5_tree(
@@ -1041,6 +1054,7 @@ pub fn decode_constructed_value(
             &mut budget,
             &mut Vec::new(),
             InvocationCarrierPreflightPolicy::Allow,
+            is_set_version,
         )?;
         return decode_constructed_parts(active, registry, descriptor, body);
     }
@@ -1051,6 +1065,7 @@ pub fn decode_constructed_value(
         &mut budget,
         &mut Vec::new(),
         InvocationCarrierPreflightPolicy::Allow,
+        false,
     )?;
     decode_orv5_parts(active, registry, tag, type_id, payload)
 }
@@ -1082,7 +1097,7 @@ fn encode_orv5_value(
     payload.extend_from_slice(&descriptor_length.to_be_bytes());
     payload.extend_from_slice(&descriptor_bytes);
 
-    match constructed.kind() {
+    let marker = match constructed.kind() {
         ConstructedValueKind::Option(value) => {
             RuntimeValue::option(active, descriptor.clone(), value.cloned())
                 .map_err(|source| ValueCodecError::CollectionValue { source })?;
@@ -1093,6 +1108,7 @@ fn encode_orv5_value(
                     append_orv5_child(active, registry, &mut payload, value)?;
                 }
             }
+            CONSTRUCTED_MARKER
         }
         ConstructedValueKind::List(values) => {
             RuntimeValue::list(active, descriptor.clone(), values.to_vec())
@@ -1101,6 +1117,16 @@ fn encode_orv5_value(
             for child in values {
                 append_orv5_child(active, registry, &mut payload, child)?;
             }
+            CONSTRUCTED_MARKER
+        }
+        ConstructedValueKind::Set(values) => {
+            RuntimeValue::set(active, descriptor.clone(), values.to_vec())
+                .map_err(|source| ValueCodecError::CollectionValue { source })?;
+            append_count(&mut payload, values.len())?;
+            for child in values {
+                append_orv5_child(active, registry, &mut payload, child)?;
+            }
+            SET_MARKER
         }
         ConstructedValueKind::Map(entries) => {
             RuntimeValue::map(active, descriptor.clone(), entries.to_vec())
@@ -1110,12 +1136,13 @@ fn encode_orv5_value(
                 append_orv5_child(active, registry, &mut payload, key)?;
                 append_orv5_child(active, registry, &mut payload, mapped)?;
             }
+            CONSTRUCTED_MARKER
         }
         _ => return Err(ValueCodecError::UnsupportedValue),
-    }
+    };
     require_payload_limit(payload.len())?;
     Ok(encode_with_marker(
-        CONSTRUCTED_MARKER,
+        marker,
         CONSTRUCTED_TAG,
         TypeId::from_bytes([0; 16]),
         &payload,
@@ -1407,7 +1434,16 @@ fn reject_carrier_descriptor(
             reject_carrier_descriptor(key, path)?;
             reject_carrier_descriptor(value, path)
         }
-        TypeDescriptorKind::Set(_) | TypeDescriptorKind::Stream(_) => {
+        TypeDescriptorKind::Set(child) => {
+            if !matches!(
+                child.kind(),
+                TypeDescriptorKind::Named(_) | TypeDescriptorKind::Reference(_)
+            ) {
+                return Err(InvocationCarrierCodecError::InvalidField { path: path.clone() });
+            }
+            reject_carrier_descriptor(child, path)
+        }
+        TypeDescriptorKind::Stream(_) => {
             Err(InvocationCarrierCodecError::InvalidField { path: path.clone() })
         }
     }
@@ -2728,7 +2764,7 @@ fn parse_descriptor(
     let offset = reader.absolute_position();
     let bytes = reader.take(length)?;
     let (descriptor, consumed) =
-        parse_constructed_descriptor(bytes, 0).map_err(|source| match source {
+        parse_constructed_descriptor(bytes, 0, true).map_err(|source| match source {
             ValueCodecError::TruncatedConstructedDescriptorNode {
                 offset: inner,
                 required,
@@ -3652,7 +3688,11 @@ fn encode_constructed_descriptor(
             encoded.push(4);
             encode_constructed_descriptor(child, encoded)?;
         }
-        TypeDescriptorKind::Set(_) | TypeDescriptorKind::Stream(_) => {
+        TypeDescriptorKind::Set(child) => {
+            encoded.push(5);
+            encode_constructed_descriptor(child, encoded)?;
+        }
+        TypeDescriptorKind::Stream(_) => {
             return Err(ValueCodecError::UnsupportedConstructedDescriptor {
                 descriptor: descriptor.clone(),
             });
@@ -3700,6 +3740,7 @@ fn decode_constructed_parts(
     match descriptor.kind() {
         TypeDescriptorKind::Option(_) => decode_option_chain(active, registry, descriptor, body),
         TypeDescriptorKind::List(_) => decode_list_body(active, registry, descriptor, body),
+        TypeDescriptorKind::Set(_) => decode_set_body(active, registry, descriptor, body),
         TypeDescriptorKind::Map { .. } => decode_map_body(active, registry, descriptor, body),
         _ => Err(ValueCodecError::UnsupportedConstructedDescriptor { descriptor }),
     }
@@ -3707,6 +3748,13 @@ fn decode_constructed_parts(
 
 fn decode_constructed_descriptor(
     payload: &[u8],
+) -> Result<(TypeDescriptor, &[u8]), ValueCodecError> {
+    decode_constructed_descriptor_with_set(payload, false)
+}
+
+fn decode_constructed_descriptor_with_set(
+    payload: &[u8],
+    allow_set: bool,
 ) -> Result<(TypeDescriptor, &[u8]), ValueCodecError> {
     if payload.len() < 2 {
         return Err(ValueCodecError::TruncatedConstructedHeader {
@@ -3725,7 +3773,7 @@ fn decode_constructed_descriptor(
         });
     }
     let bytes = &payload[2..2 + length];
-    let (descriptor, consumed) = parse_constructed_descriptor(bytes, 0)?;
+    let (descriptor, consumed) = parse_constructed_descriptor(bytes, 0, allow_set)?;
     if consumed != bytes.len() {
         return Err(ValueCodecError::TrailingConstructedDescriptor {
             remaining: bytes.len() - consumed,
@@ -3737,9 +3785,11 @@ fn decode_constructed_descriptor(
 fn parse_constructed_descriptor(
     encoded: &[u8],
     offset: usize,
+    allow_set: bool,
 ) -> Result<(TypeDescriptor, usize), ValueCodecError> {
     enum Pending {
         List,
+        Set,
         Option,
         MapKey,
         MapValue(TypeDescriptor),
@@ -3754,6 +3804,11 @@ fn parse_constructed_descriptor(
                 match pending.pop() {
                     Some(Pending::List) => {
                         descriptor = TypeDescriptor::list(descriptor).map_err(|source| {
+                            ValueCodecError::InvalidConstructedDescriptor { source }
+                        })?;
+                    }
+                    Some(Pending::Set) => {
+                        descriptor = TypeDescriptor::set(descriptor).map_err(|source| {
                             ValueCodecError::InvalidConstructedDescriptor { source }
                         })?;
                     }
@@ -3825,6 +3880,20 @@ fn parse_constructed_descriptor(
                     _ => unreachable!("constructor tag was checked"),
                 });
             }
+            5 if allow_set => {
+                let depth = pending.len() + 1;
+                if depth > MAX_TYPE_DESCRIPTOR_DEPTH {
+                    return Err(ValueCodecError::InvalidConstructedDescriptor {
+                        source: TypeDescriptorError::TooDeep {
+                            maximum: MAX_TYPE_DESCRIPTOR_DEPTH,
+                            actual: depth,
+                        },
+                    });
+                }
+                cursor += 1;
+                pending.push(Pending::Set);
+            }
+            5 => return Err(ValueCodecError::UnknownConstructedDescriptorTag { tag }),
             tag => return Err(ValueCodecError::UnknownConstructedDescriptorTag { tag }),
         }
     }
@@ -3837,6 +3906,7 @@ fn preflight_constructed_descriptor(
     let result = match descriptor.kind() {
         TypeDescriptorKind::Option(_) => RuntimeValue::option(active, descriptor.clone(), None),
         TypeDescriptorKind::List(_) => RuntimeValue::list(active, descriptor.clone(), Vec::new()),
+        TypeDescriptorKind::Set(_) => RuntimeValue::set(active, descriptor.clone(), Vec::new()),
         TypeDescriptorKind::Map { .. } => RuntimeValue::map(active, descriptor.clone(), Vec::new()),
         _ => {
             return Err(ValueCodecError::UnsupportedConstructedDescriptor {
@@ -3978,6 +4048,47 @@ fn decode_list_body(
     }
     RuntimeValue::list(active, descriptor, values)
         .map_err(|source| ValueCodecError::CollectionValue { source })
+}
+
+fn decode_set_body(
+    active: &ActiveDatabaseRevision,
+    registry: &OpaqueCodecRegistry,
+    descriptor: TypeDescriptor,
+    body: &[u8],
+) -> Result<RuntimeValue, ValueCodecError> {
+    let count = decode_constructed_count(body)?;
+    let mut cursor = 4;
+    let mut values = Vec::with_capacity(count);
+    for index in 0..count {
+        let path = vec![CollectionValuePathSegment::SetElement(index)];
+        let (encoded, consumed) = take_constructed_child(body, cursor, &path)?;
+        values.push(decode_orv5_child(active, registry, encoded, path)?);
+        cursor = consumed;
+    }
+    if cursor != body.len() {
+        return Err(ValueCodecError::TrailingBytes {
+            declared: cursor,
+            actual: body.len(),
+        });
+    }
+    let wire_values = values.clone();
+    let value = RuntimeValue::set(active, descriptor, values)
+        .map_err(|source| ValueCodecError::CollectionValue { source })?;
+    let RuntimeValue::Constructed(constructed) = &value else {
+        unreachable!("checked SET construction returns a constructed value");
+    };
+    let ConstructedValueKind::Set(canonical) = constructed.kind() else {
+        unreachable!("checked SET construction retains SET contents");
+    };
+    if canonical != wire_values.as_slice() {
+        let index = canonical
+            .iter()
+            .zip(&wire_values)
+            .position(|(left, right)| left != right)
+            .unwrap_or(0);
+        return Err(ValueCodecError::NonCanonicalSetOrder { index });
+    }
+    Ok(value)
 }
 
 fn decode_map_body(
@@ -4144,11 +4255,12 @@ fn preflight_orv5_tree(
     budget: &mut NodeBudget,
     path: &mut Vec<CollectionValuePathSegment>,
     policy: InvocationCarrierPreflightPolicy<'_>,
+    allow_set: bool,
 ) -> Result<(), ValueCodecError> {
     budget.increment()?;
     match tag {
         CONSTRUCTED_TAG => {
-            let (descriptor, body) = decode_constructed_descriptor(payload)?;
+            let (descriptor, body) = decode_constructed_descriptor_with_set(payload, allow_set)?;
             match descriptor.kind() {
                 TypeDescriptorKind::Option(_) => {
                     preflight_orv5_option_chain(body, budget, path, policy)?
@@ -4160,6 +4272,25 @@ fn preflight_orv5_tree(
                         let child_path = [CollectionValuePathSegment::ListElement(index)];
                         let (child, end) = take_constructed_child(body, cursor, &child_path)?;
                         path.push(CollectionValuePathSegment::ListElement(index));
+                        let result = preflight_orv5_child(child, budget, path, policy);
+                        path.pop();
+                        result?;
+                        cursor = end;
+                    }
+                    if cursor != body.len() {
+                        return Err(ValueCodecError::TrailingBytes {
+                            declared: cursor,
+                            actual: body.len(),
+                        });
+                    }
+                }
+                TypeDescriptorKind::Set(_) => {
+                    let count = decode_constructed_count(body)?;
+                    let mut cursor = 4;
+                    for index in 0..count {
+                        let child_path = [CollectionValuePathSegment::SetElement(index)];
+                        let (child, end) = take_constructed_child(body, cursor, &child_path)?;
+                        path.push(CollectionValuePathSegment::SetElement(index));
                         let result = preflight_orv5_child(child, budget, path, policy);
                         path.pop();
                         result?;
@@ -4351,7 +4482,7 @@ fn preflight_orv5_envelope(
     path: &mut Vec<CollectionValuePathSegment>,
     policy: InvocationCarrierPreflightPolicy<'_>,
 ) -> Result<(), ValueCodecError> {
-    let (tag, type_id, payload) = decode_envelope(encoded, CONSTRUCTED_MARKER)?;
+    let (allow_set, tag, type_id, payload) = decode_constructed_envelope(encoded)?;
     if let InvocationCarrierPreflightPolicy::Reject { outer, path } = policy
         && invocation_carrier_by_id(type_id).is_some()
     {
@@ -4366,7 +4497,7 @@ fn preflight_orv5_envelope(
     if tag == CONSTRUCTED_TAG && type_id.to_bytes() != [0; 16] {
         return Err(ValueCodecError::ConstructedTypeIdentityNotZero { identity: type_id });
     }
-    preflight_orv5_tree(payload, tag, budget, path, policy)
+    preflight_orv5_tree(payload, tag, budget, path, policy, allow_set)
 }
 
 fn preflight_orv5_record_tree(
@@ -4945,6 +5076,27 @@ fn decode_envelope<'a>(
         return Err(ValueCodecError::TrailingBytes { declared, actual });
     }
     Ok((tag, type_id, &encoded[HEADER_LENGTH..]))
+}
+
+fn decode_constructed_envelope<'a>(
+    encoded: &'a [u8],
+) -> Result<(bool, u8, TypeId, &'a [u8]), ValueCodecError> {
+    if encoded.len() < HEADER_LENGTH {
+        return Err(ValueCodecError::TruncatedHeader {
+            actual: encoded.len(),
+        });
+    }
+    let is_set_version = &encoded[..SET_MARKER.len()] == SET_MARKER;
+    if !is_set_version && &encoded[..CONSTRUCTED_MARKER.len()] != CONSTRUCTED_MARKER {
+        return Err(ValueCodecError::InvalidMarker);
+    }
+    let marker = if is_set_version {
+        SET_MARKER
+    } else {
+        CONSTRUCTED_MARKER
+    };
+    let (tag, type_id, payload) = decode_envelope(encoded, marker)?;
+    Ok((is_set_version, tag, type_id, payload))
 }
 
 fn require_active_enum_type(
@@ -7954,6 +8106,79 @@ mod tests {
         assert_eq!(
             decode_constructed_value(&active, &registry, &noncanonical),
             Err(ValueCodecError::NonCanonicalMapOrder { index: 0 })
+        );
+    }
+
+    #[test]
+    fn orv6_round_trips_canonical_sets_and_rejects_noncanonical_or_unsupported_wire() {
+        let active = active_record_revision();
+        let standard = active.catalogue_hash_context().standard().unwrap();
+        let registry = registered_opaque_codecs(standard).unwrap();
+        let descriptor = TypeDescriptor::set(TypeDescriptor::named(BOOLEAN_TYPE_ID)).unwrap();
+        let value = RuntimeValue::set(
+            &active,
+            descriptor,
+            vec![RuntimeValue::Boolean(true), RuntimeValue::Boolean(false)],
+        )
+        .unwrap();
+        let encoded = encode_constructed_value(&active, &registry, &value).unwrap();
+        assert_eq!(&encoded[..4], b"ORV6");
+        assert_eq!(encoded[25], 0);
+        assert_eq!(encoded[26], 18);
+        assert_eq!(encoded[27], 0x05);
+        assert_eq!(
+            decode_constructed_value(&active, &registry, &encoded),
+            Ok(value.clone())
+        );
+        assert_eq!(
+            encode_constructed_value(&active, &registry, &value),
+            Ok(encoded.clone())
+        );
+
+        let first_len = u32::from_be_bytes(encoded[49..53].try_into().unwrap()) as usize;
+        let first_end = 53 + first_len;
+        let second_len =
+            u32::from_be_bytes(encoded[first_end..first_end + 4].try_into().unwrap()) as usize;
+        let second_end = first_end + 4 + second_len;
+        let mut noncanonical = encoded[..49].to_vec();
+        noncanonical.extend_from_slice(&encoded[first_end..second_end]);
+        noncanonical.extend_from_slice(&encoded[49..first_end]);
+        assert_eq!(
+            decode_constructed_value(&active, &registry, &noncanonical),
+            Err(ValueCodecError::NonCanonicalSetOrder { index: 0 })
+        );
+
+        let mut duplicate = encoded[..49].to_vec();
+        duplicate.extend_from_slice(&encoded[49..first_end]);
+        duplicate.extend_from_slice(&encoded[49..first_end]);
+        assert_eq!(
+            decode_constructed_value(&active, &registry, &duplicate),
+            Err(ValueCodecError::CollectionValue {
+                source: CollectionValueError::DuplicateSetElement {
+                    first: 0,
+                    duplicate: 1,
+                },
+            })
+        );
+
+        let mut nested_descriptor = vec![0x05, 0x02];
+        nested_descriptor.extend_from_slice(&orv5_named_descriptor(BOOLEAN_TYPE_ID));
+        let nested = orv6_constructed(orv5_descriptor_payload(
+            &nested_descriptor,
+            &0_u32.to_be_bytes(),
+        ));
+        assert!(matches!(
+            decode_constructed_value(&active, &registry, &nested),
+            Err(ValueCodecError::CollectionValue {
+                source: CollectionValueError::UnsupportedDescriptor { .. }
+            })
+        ));
+
+        let mut orv5_set = encoded.clone();
+        orv5_set[..4].copy_from_slice(b"ORV5");
+        assert_eq!(
+            decode_constructed_value(&active, &registry, &orv5_set),
+            Err(ValueCodecError::UnknownConstructedDescriptorTag { tag: 0x05 })
         );
     }
 
@@ -12137,6 +12362,15 @@ mod tests {
 
     fn orv5_constructed(payload: Vec<u8>) -> Vec<u8> {
         let mut encoded = b"ORV5".to_vec();
+        encoded.push(0x0d);
+        encoded.extend_from_slice(&[0; 16]);
+        encoded.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+        encoded.extend_from_slice(&payload);
+        encoded
+    }
+
+    fn orv6_constructed(payload: Vec<u8>) -> Vec<u8> {
+        let mut encoded = b"ORV6".to_vec();
         encoded.push(0x0d);
         encoded.extend_from_slice(&[0; 16]);
         encoded.extend_from_slice(&(payload.len() as u32).to_be_bytes());
