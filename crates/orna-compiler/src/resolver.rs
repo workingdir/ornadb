@@ -25,14 +25,16 @@ pub use model::{
     CheckedStandardLibrary, CheckedStandardParameterEcho, CheckedStandardSchema,
     CheckedStandardTerminalPresentTable, CheckedStandardTypeBinding, CheckedStandardTypeReference,
     CheckedStandardValueType, CheckedTypeUseKind, CheckedValueTypeUse, ConstantValue,
-    STANDARD_LIBRARY_V3_REVISION_ID, STANDARD_LIBRARY_V4_REVISION_ID, STD_CSV_ENCODE_FUNCTION_ID,
+    STANDARD_LIBRARY_V3_REVISION_ID, STANDARD_LIBRARY_V4_REVISION_ID, STANDARD_LIBRARY_V5_REVISION_ID,
+    STD_CSV_ENCODE_FUNCTION_ID,
     STD_CSV_ENCODE_FUNCTION_REVISION_ID, STD_CSV_ENCODE_PARAMETER_ID, STD_DATA_ROWS_TYPE_ID,
     STD_DATA_SCHEMA_ID, STD_INTEGER_TYPE_ID, STD_INVOKE_ECHO_FUNCTION_ID,
     STD_INVOKE_ECHO_FUNCTION_REVISION_ID, STD_INVOKE_ECHO_PARAMETER_ID,
     STD_INVOKE_ECHO_REVISION_NUMBER, STD_INVOKE_SCHEMA_ID, STD_INVOKE_SOURCE_UNIT_ID,
     STD_IO_BYTE_STREAM_TYPE_ID, STD_IO_SCHEMA_ID, STD_JSON_ENCODE_FUNCTION_ID,
     STD_JSON_ENCODE_FUNCTION_REVISION_ID, STD_JSON_ENCODE_PARAMETER_ID, STD_JSON_SCHEMA_ID,
-    STD_JSON_VALUE_TYPE_ID, STD_OUTPUT_SOURCE_UNIT_ID, STD_TERMINAL_DOCUMENT_TYPE_ID,
+    STD_JSON_SOURCE_UNIT_ID, STD_JSON_VALUE_TYPE_ID, STD_OUTPUT_SOURCE_UNIT_ID,
+    STD_TERMINAL_DOCUMENT_TYPE_ID,
     STD_TERMINAL_PRESENT_TABLE_FUNCTION_ID, STD_TERMINAL_PRESENT_TABLE_FUNCTION_REVISION_ID,
     STD_TERMINAL_PRESENT_TABLE_PARAMETER_ID, STD_TERMINAL_SCHEMA_ID, STD_TYPES_SOURCE_UNIT_ID,
     STD_UI_SCHEMA_ID, STD_UI_SOURCE_UNIT_ID, STD_UI_TYPE_ID, SemanticType,
@@ -42,7 +44,8 @@ pub use model::{
 pub(crate) use model::{
     CheckedClientExpression, CheckedClientFunctionBody, CheckedClientStateSlot, CheckedFieldRename,
     CheckedStateDefault, CheckedStateScope, CheckedStateSlotId, CheckedServerFunctionBody,
-    QueryCatalogue, QueryField, QueryObjectType, ResolutionCatalogue, STD_UI_CONTRACT,
+    QueryCatalogue, QueryField, QueryObjectType, ResolutionCatalogue, STD_JSON_CONTRACT,
+    STD_UI_CONTRACT,
 };
 use model::{CheckedEnumType, CheckedRecordValueField, CheckedRecordValueType};
 
@@ -358,23 +361,27 @@ pub fn check_standard_application(
 /// every schema, function, and parameter origin against the retained units.
 /// The V3 standard revision (ADR 0058) reuses the V2 digest contract but
 /// carries the ordered three-unit bundle (`std/types.orna`,
-/// `std/invoke.orna`, then `std/output.orna`); its branch reconciles the
-/// first two units exactly as V2 does and additionally reconciles the output
-/// unit closed against the `std.terminal` and `std.io` schemas, the two
-/// opaque output value types, their exports, and every origin on the
-/// retained unit. The V4 standard revision (ADR 0062) carries the ordered
-/// four-unit bundle (`std/types.orna`, `std/invoke.orna`,
-/// `std/output.orna`, then `std/ui.orna`); its branch reconciles the first
-/// three units exactly as V3 does and additionally reconciles the ui unit
-/// closed against the `std.ui` schema, the opaque `std.ui.ui` value type,
-/// its export, and every origin on the retained unit. The checker does not
-/// trust a source file because its path looks standard.
+/// `std/invoke.orna`, then `std/output.orna`); its branch reconciles the first
+/// two units exactly as V2 does and additionally reconciles the output unit
+/// closed against the `std.terminal` and `std.io` schemas, the two opaque
+/// output value types, their exports, and every origin on the retained unit.
+/// The V4 standard revision (ADR 0062) carries the ordered four-unit bundle
+/// (`std/types.orna`, `std/invoke.orna`, `std/output.orna`, then `std/ui.orna`);
+/// its branch reconciles the first three units exactly as V3 does and
+/// additionally reconciles the ui unit closed against the `std.ui` schema, the
+/// opaque `std.ui.ui` value type, its export, and every origin on the retained
+/// unit. The V5 standard revision (ADR 0075) retains those four units and adds
+/// `std/json.orna`; its explicit branch reconciles the JSON schema, opaque value
+/// type, export, and existing `std.json.encode` presenter against the installed
+/// catalogue. The checker does not trust a source file because its path looks
+/// standard.
 pub fn check_standard_library_source(
     snapshot: &VerifiedStandardLibrarySnapshot,
 ) -> Result<CheckedStandardLibrary, StandardLibraryCheckError> {
     match snapshot.digest_version() {
         StandardLibraryDigestVersion::Version1 => check_standard_library_source_v1(snapshot),
         StandardLibraryDigestVersion::Version2 => match snapshot.revision() {
+            STANDARD_LIBRARY_V5_REVISION_ID => check_standard_library_source_v5(snapshot),
             STANDARD_LIBRARY_V4_REVISION_ID => check_standard_library_source_v4(snapshot),
             STANDARD_LIBRARY_V3_REVISION_ID => check_standard_library_source_v3(snapshot),
             _ => check_standard_library_source_v2(snapshot),
@@ -656,7 +663,24 @@ fn check_standard_library_source_v4_parts(
     origins: &[DefinitionOrigin],
     executables: &[StandardExecutable],
 ) -> Result<(StandardSourceFamilies, CheckedStandardExecutable), StandardLibraryCheckError> {
-    let source_units = source.units();
+    let types_catalogue = standard_v4_types_catalogue(catalogue)?;
+    let origin_partitions = partition_standard_v4_origins(origins)?;
+    check_standard_library_source_v4_units(
+        source.units(),
+        catalogue,
+        executables,
+        &types_catalogue,
+        origin_partitions,
+    )
+}
+
+fn check_standard_library_source_v4_units(
+    source_units: &[StoredSourceUnit],
+    catalogue: &CatalogueSnapshot,
+    executables: &[StandardExecutable],
+    types_catalogue: &CatalogueSnapshot,
+    (types_origins, invoke_origins, output_origins, ui_origins): StandardV4OriginPartitions,
+) -> Result<(StandardSourceFamilies, CheckedStandardExecutable), StandardLibraryCheckError> {
     let [types_unit, invoke_unit, output_unit, ui_unit] = source_units else {
         return Err(StandardLibraryCheckError::SourceUnitCount {
             actual: source_units.len(),
@@ -695,11 +719,8 @@ fn check_standard_library_source_v4_parts(
         return Err(StandardLibraryCheckError::SourceMismatch);
     };
 
-    let (types_origins, invoke_origins, output_origins, ui_origins) =
-        partition_standard_v4_origins(origins)?;
-    let types_catalogue = standard_v4_types_catalogue(catalogue)?;
     let families =
-        reconcile_standard_source(types_unit, parsed_types, &types_catalogue, &types_origins)?;
+        reconcile_standard_source(types_unit, parsed_types, types_catalogue, &types_origins)?;
     let checked_executable = reconcile_standard_invoke_executable(
         catalogue,
         &invoke_origins,
@@ -724,6 +745,98 @@ fn standard_types_catalogue(
 ) -> Result<CatalogueSnapshot, StandardLibraryCheckError> {
     scope_standard_catalogue(catalogue, &[STD_INVOKE_SCHEMA_ID], &[])
 }
+/// Checks one retained V5 JSON standard source bundle.
+fn check_standard_library_source_v5(
+    snapshot: &VerifiedStandardLibrarySnapshot,
+) -> Result<CheckedStandardLibrary, StandardLibraryCheckError> {
+    let (families, checked_executable) = check_standard_library_source_v5_parts(
+        snapshot.source(),
+        snapshot.catalogue(),
+        snapshot.origins(),
+        snapshot.executables(),
+    )?;
+    Ok(CheckedStandardLibrary {
+        verified_snapshot: snapshot.clone(),
+        schemas: families.schemas,
+        value_types: families.value_types,
+        type_bindings: families.type_bindings,
+        checked_executable: Some(checked_executable),
+    })
+}
+
+fn check_standard_library_source_v5_parts(
+    source: &StoredSourceRevision,
+    catalogue: &CatalogueSnapshot,
+    origins: &[DefinitionOrigin],
+    executables: &[StandardExecutable],
+) -> Result<(StandardSourceFamilies, CheckedStandardExecutable), StandardLibraryCheckError> {
+    let source_units = source.units();
+    let [types_unit, invoke_unit, output_unit, ui_unit, json_unit] = source_units else {
+        return Err(StandardLibraryCheckError::SourceUnitCount {
+            actual: source_units.len(),
+        });
+    };
+    if json_unit.id() != STD_JSON_SOURCE_UNIT_ID
+        || json_unit.logical_path() != "std/json.orna"
+        || json_unit.ordinal() != 4
+    {
+        return Err(StandardLibraryCheckError::SourceMismatch);
+    }
+
+    let bundle = SourceBundle::new([
+        SourceUnit::new(types_unit.logical_path(), types_unit.content()),
+        SourceUnit::new(invoke_unit.logical_path(), invoke_unit.content()),
+        SourceUnit::new(output_unit.logical_path(), output_unit.content()),
+        SourceUnit::new(ui_unit.logical_path(), ui_unit.content()),
+        SourceUnit::new(json_unit.logical_path(), json_unit.content()),
+    ])
+    .map_err(|_| StandardLibraryCheckError::SourceMismatch)?;
+    let report = parse_bundle(&bundle);
+    if !report.diagnostics().is_empty() {
+        return Err(StandardLibraryCheckError::Diagnostics {
+            diagnostics: report.diagnostics().to_vec(),
+        });
+    }
+    let [parsed_types, parsed_invoke, parsed_output, parsed_ui, parsed_json] = report.units()
+    else {
+        return Err(StandardLibraryCheckError::SourceMismatch);
+    };
+
+    let mut retained_v4_origins = Vec::with_capacity(origins.len());
+    let mut json_origins = Vec::new();
+    for origin in origins {
+        if origin.source().source_unit() == STD_JSON_SOURCE_UNIT_ID {
+            json_origins.push(origin.clone());
+        } else {
+            retained_v4_origins.push(origin.clone());
+        }
+    }
+    let origin_partitions = partition_standard_v4_origins(&retained_v4_origins)?;
+    let types_catalogue = standard_v5_types_catalogue(catalogue)?;
+    let families = reconcile_standard_source(
+        types_unit,
+        parsed_types,
+        &types_catalogue,
+        &origin_partitions.0,
+    )?;
+    let checked_executable = reconcile_standard_invoke_executable(
+        catalogue,
+        &origin_partitions.1,
+        executables,
+        invoke_unit,
+        parsed_invoke,
+    )?;
+    reconcile_standard_output_unit(
+        output_unit,
+        parsed_output,
+        catalogue,
+        &origin_partitions.2,
+    )?;
+    reconcile_standard_ui_unit(ui_unit, parsed_ui, catalogue, &origin_partitions.3)?;
+    reconcile_standard_json_unit(json_unit, parsed_json, catalogue, &json_origins)?;
+    Ok((families, checked_executable))
+}
+
 
 /// Scopes the V3 catalogue to the declarations retained in `std/types.orna`:
 /// the standard schemas, value types, and type bindings only.
@@ -822,6 +935,28 @@ fn scope_standard_catalogue(
         vec![],
     )
     .map_err(|_| StandardLibraryCheckError::SourceMismatch)
+}
+/// Scopes the V5 catalogue to declarations retained in `std/types.orna`.
+/// The JSON schema and value type are reconciled in `std/json.orna`.
+fn standard_v5_types_catalogue(
+    catalogue: &CatalogueSnapshot,
+) -> Result<CatalogueSnapshot, StandardLibraryCheckError> {
+    scope_standard_catalogue(
+        catalogue,
+        &[
+            STD_INVOKE_SCHEMA_ID,
+            STD_TERMINAL_SCHEMA_ID,
+            STD_IO_SCHEMA_ID,
+            STD_UI_SCHEMA_ID,
+            STD_JSON_SCHEMA_ID,
+        ],
+        &[
+            STD_TERMINAL_DOCUMENT_TYPE_ID,
+            STD_IO_BYTE_STREAM_TYPE_ID,
+            STD_UI_TYPE_ID,
+            STD_JSON_VALUE_TYPE_ID,
+        ],
+    )
 }
 
 /// Reconciles the retained `std/output.orna` unit against the snapshot
@@ -1112,6 +1247,136 @@ fn reconcile_standard_ui_unit(
     ] {
         take_origin(&mut origins_by_identity, identity, stored_unit.id(), span)?;
     }
+    if !origins_by_identity.is_empty() {
+        return Err(StandardLibraryCheckError::SourceMismatch);
+    }
+
+    Ok(())
+}
+/// Reconciles the retained `std/json.orna` unit against the V5 catalogue and
+/// origins. The unit contains the JSON schema, opaque value type, export, and
+/// the existing closed `std.json.encode` presenter.
+fn reconcile_standard_json_unit(
+    stored_unit: &StoredSourceUnit,
+    parsed_unit: &ParsedSourceUnit,
+    catalogue: &CatalogueSnapshot,
+    origins: &[DefinitionOrigin],
+) -> Result<(), StandardLibraryCheckError> {
+    if parsed_unit.source_text() != stored_unit.content()
+        || parsed_unit.source_text() != parsed_unit.syntax_text()
+        || !parsed_unit.parsed().object_types().is_empty()
+        || !parsed_unit.parsed().enum_types().is_empty()
+        || !parsed_unit.parsed().primitive_value_types().is_empty()
+        || !parsed_unit.parsed().record_value_types().is_empty()
+        || !parsed_unit.parsed().field_renames().is_empty()
+        || !parsed_unit.parsed().client_functions().is_empty()
+    {
+        return Err(StandardLibraryCheckError::SourceMismatch);
+    }
+    let [json_declaration] = parsed_unit.parsed().schemas() else {
+        return Err(StandardLibraryCheckError::SourceMismatch);
+    };
+    let [json_type_declaration] = parsed_unit.parsed().opaque_value_types() else {
+        return Err(StandardLibraryCheckError::SourceMismatch);
+    };
+    let [json_export] = parsed_unit.parsed().type_exports() else {
+        return Err(StandardLibraryCheckError::SourceMismatch);
+    };
+    let [json_function] = parsed_unit.parsed().server_functions() else {
+        return Err(StandardLibraryCheckError::SourceMismatch);
+    };
+
+    let expected_json_name =
+        QualifiedSemanticName::new(["std", "json"]).expect("the fixed standard schema is valid");
+    let json_name = unquoted_semantic_name(&json_declaration.name)?;
+    if json_name != expected_json_name {
+        return Err(StandardLibraryCheckError::SourceMismatch);
+    }
+    let json_schema = catalogue
+        .schema_by_id(STD_JSON_SCHEMA_ID)
+        .ok_or(StandardLibraryCheckError::MissingSchema)?;
+    if json_schema.name() != &json_name {
+        return Err(StandardLibraryCheckError::SourceMismatch);
+    }
+
+    let expected_json_type_name = QualifiedSemanticName::new(["std", "json", "value"])
+        .expect("the fixed standard value type is valid");
+    let json_type_name = unquoted_semantic_name(&json_type_declaration.name)?;
+    if json_type_name != expected_json_type_name {
+        return Err(StandardLibraryCheckError::SourceMismatch);
+    }
+    let json_contract = decode_string_literal(&json_type_declaration.kernel_contract)
+        .ok_or(StandardLibraryCheckError::SourceMismatch)?;
+    if json_contract != STD_JSON_CONTRACT {
+        return Err(StandardLibraryCheckError::SourceMismatch);
+    }
+    let json_definition = catalogue
+        .value_type_by_id(STD_JSON_VALUE_TYPE_ID)
+        .ok_or(StandardLibraryCheckError::SourceMismatch)?;
+    if json_definition.name() != &json_type_name
+        || json_definition.kind() != ValueTypeKind::Opaque
+        || json_definition.mutability() != ValueTypeMutability::Immutable
+        || json_definition.persistence() != ValueTypePersistence::Transient
+        || json_definition.representation_contract() != json_contract
+    {
+        return Err(StandardLibraryCheckError::SourceMismatch);
+    }
+
+    let expected_json_binding_name = QualifiedSemanticName::new(["std", "jsonvalue"])
+        .expect("the fixed standard export is valid");
+    let json_binding = catalogue
+        .type_binding_by_name(&TypeLookupName::qualified(expected_json_binding_name.clone()))
+        .ok_or(StandardLibraryCheckError::SourceMismatch)?;
+    let json_export_source = unquoted_semantic_name(&json_export.source_type)?;
+    let TypeExportTarget::Qualified { name } = &json_export.target else {
+        return Err(StandardLibraryCheckError::SourceMismatch);
+    };
+    if json_export_source != json_type_name
+        || unquoted_semantic_name(name)? != expected_json_binding_name
+        || !matches!(json_binding.kind(), TypeBindingKind::Qualified)
+        || json_binding.name()
+            != &TypeLookupName::qualified(expected_json_binding_name.clone())
+        || json_binding.target() != STD_JSON_VALUE_TYPE_ID
+    {
+        return Err(StandardLibraryCheckError::SourceMismatch);
+    }
+
+    check_standard_json_encode(json_function, catalogue, origins, STD_JSON_VALUE_TYPE_ID)?;
+
+    let mut origins_by_identity = origin_map(origins)?;
+    for (identity, span) in [
+        (
+            DefinitionIdentity::Schema(STD_JSON_SCHEMA_ID),
+            &json_declaration.span,
+        ),
+        (
+            DefinitionIdentity::ValueType(STD_JSON_VALUE_TYPE_ID),
+            &json_type_declaration.span,
+        ),
+        (
+            DefinitionIdentity::TypeBinding(json_binding.id()),
+            &json_export.span,
+        ),
+        (
+            DefinitionIdentity::Function(STD_JSON_ENCODE_FUNCTION_ID),
+            &json_function.span,
+        ),
+    ] {
+        take_origin(&mut origins_by_identity, identity, stored_unit.id(), span)?;
+    }
+    let parameter = json_function
+        .parameters
+        .first()
+        .ok_or(StandardLibraryCheckError::SourceMismatch)?;
+    take_origin(
+        &mut origins_by_identity,
+        DefinitionIdentity::Parameter {
+            owner: STD_JSON_ENCODE_FUNCTION_ID,
+            parameter: STD_JSON_ENCODE_PARAMETER_ID,
+        },
+        stored_unit.id(),
+        &parameter.span,
+    )?;
     if !origins_by_identity.is_empty() {
         return Err(StandardLibraryCheckError::SourceMismatch);
     }
