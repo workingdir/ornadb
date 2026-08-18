@@ -4565,7 +4565,7 @@ fn client_expression_type_from_core(
                     SemanticType::Named(CheckedTypeId::Existing(type_id)),
                     SemanticType::scalar,
                 ),
-                scalar.and_then(|_| Some(type_id)),
+                scalar.map(|_| type_id),
             )
         }
     };
@@ -4684,6 +4684,7 @@ fn client_expression_types_compatible(
             || actual.standard_value_type == expected.standard_value_type)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn check_client_expression(
     expression: &ClientExpression,
     input: &ResolvedClientFunctionInput<'_>,
@@ -4846,7 +4847,7 @@ fn check_client_expression(
             ))
         }
         ClientExpression::Concat { left, right, span } => {
-            let Some((left_checked, left_type)) = check_client_expression(
+            let (left_checked, left_type) = check_client_expression(
                 left,
                 input,
                 targets,
@@ -4857,10 +4858,8 @@ fn check_client_expression(
                 diagnostics,
                 references,
                 used_capabilities,
-            ) else {
-                return None;
-            };
-            let Some((right_checked, right_type)) = check_client_expression(
+            )?;
+            let (right_checked, right_type) = check_client_expression(
                 right,
                 input,
                 targets,
@@ -4871,9 +4870,7 @@ fn check_client_expression(
                 diagnostics,
                 references,
                 used_capabilities,
-            ) else {
-                return None;
-            };
+            )?;
             let text = SemanticType::scalar(StandardScalar::CharacterLargeObject);
             if left_type.semantic_type != text || right_type.semantic_type != text {
                 diagnostics.push(diagnostic(
@@ -4970,7 +4967,7 @@ fn check_client_expression(
                     ));
                     return None;
                 }
-                let Some((checked, expression_type)) = check_client_expression(
+                let (checked, expression_type) = check_client_expression(
                     &argument.value,
                     input,
                     targets,
@@ -4981,9 +4978,7 @@ fn check_client_expression(
                     diagnostics,
                     references,
                     used_capabilities,
-                ) else {
-                    return None;
-                };
+                )?;
                 let parameter = &target.parameters[parameter_index];
                 if !client_expression_types_compatible(expression_type, parameter.expression_type) {
                     diagnostics.push(diagnostic(
@@ -5102,6 +5097,7 @@ fn unsupported_client_state_reference(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn check_client_functions(
     inputs: &[ResolvedClientFunctionInput<'_>],
     submitted_ids: &HashMap<QualifiedSemanticName, SubmittedType>,
@@ -5154,7 +5150,7 @@ fn check_client_functions(
                 } else if let Some(expression) = input.body.as_expression() {
                     let mut references = Vec::new();
                     let mut used_capabilities = HashSet::new();
-                    let Some((checked, expression_type)) = check_client_expression(
+                    let (checked, expression_type) = check_client_expression(
                         expression,
                         input,
                         &targets,
@@ -5165,9 +5161,7 @@ fn check_client_functions(
                         diagnostics,
                         &mut references,
                         &mut used_capabilities,
-                    ) else {
-                        return None;
-                    };
+                    )?;
                     if !client_expression_types_compatible(
                         expression_type,
                         ClientExpressionType {
@@ -5221,16 +5215,14 @@ fn check_client_functions(
                             ));
                             return None;
                         }
-                        let Some(resolved) = resolve_application_type_with_named_standard(
+                        let resolved = resolve_application_type_with_named_standard(
                             &state.type_specification,
                             submitted_ids,
                             input.logical_path,
                             diagnostics,
                             standard,
                             true,
-                        ) else {
-                            return None;
-                        };
+                        )?;
                         let state_type = ClientExpressionType {
                             semantic_type: resolved.semantic_type,
                             standard_value_type: resolved.standard_value_type,
@@ -5261,7 +5253,7 @@ fn check_client_functions(
                                     ));
                                     return None;
                                 }
-                                let Some((checked, expression_type)) = check_client_expression(
+                                let (checked, expression_type) = check_client_expression(
                                     expression,
                                     input,
                                     &targets,
@@ -5272,9 +5264,7 @@ fn check_client_functions(
                                     diagnostics,
                                     &mut references,
                                     &mut used_capabilities,
-                                ) else {
-                                    return None;
-                                };
+                                )?;
                                 if !client_expression_types_compatible(expression_type, state_type) {
                                     diagnostics.push(diagnostic(
                                         DiagnosticCode::TypeMismatch,
@@ -5323,7 +5313,7 @@ fn check_client_functions(
                         ));
                         return None;
                     }
-                    let Some((checked_return, return_type)) = check_client_expression(
+                    let (checked_return, return_type) = check_client_expression(
                         expression,
                         input,
                         &targets,
@@ -5334,9 +5324,7 @@ fn check_client_functions(
                         diagnostics,
                         &mut references,
                         &mut used_capabilities,
-                    ) else {
-                        return None;
-                    };
+                    )?;
                     if !client_expression_types_compatible(
                         return_type,
                         ClientExpressionType {
