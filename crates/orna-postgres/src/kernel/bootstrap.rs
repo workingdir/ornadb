@@ -2,6 +2,10 @@ use orna_core::{
     CatalogueRevisionId, SourceBundleId, SourceRevisionId,
     canonical_hash::{catalogue_digest, source_bundle_digest, source_revision_record_digest},
     catalogue::CatalogueSnapshot,
+    system::{
+        SYS_SECURITY_ACTIVE_ROLES_FUNCTION_ID, SYS_SECURITY_EFFECTIVE_PRINCIPAL_FUNCTION_ID,
+        SYS_SECURITY_SESSION_PRINCIPAL_FUNCTION_ID,
+    },
 };
 use sha2::{Digest, Sha256};
 use tokio_postgres::{Client, Row, Transaction};
@@ -193,6 +197,12 @@ const MIGRATIONS: &[Migration] = &[
         version: 29,
         name: "sealed system invocation authorities",
         sql: include_str!("../../migrations/0029_sealed_system_invocation_authorities.sql"),
+        data_step: None,
+    },
+    Migration {
+        version: 30,
+        name: "active roles system invocation authority",
+        sql: include_str!("../../migrations/0030_active_roles_system_invocation_authority.sql"),
         data_step: None,
     },
 ];
@@ -829,6 +839,24 @@ async fn load_or_seed_active_revision(
         )
         .await
         .map_err(PostgresKernelError::Database)?;
+    for function in [
+        SYS_SECURITY_SESSION_PRINCIPAL_FUNCTION_ID,
+        SYS_SECURITY_EFFECTIVE_PRINCIPAL_FUNCTION_ID,
+        SYS_SECURITY_ACTIVE_ROLES_FUNCTION_ID,
+    ] {
+        let function_bytes = function.to_bytes().to_vec();
+        transaction
+            .execute(
+                "INSERT INTO _orna_kernel.invocation_target_authorities
+                    (catalogue_revision_id, function_id, target_class,
+                     function_revision_id, standard_library_revision_id)
+                 VALUES ($1, $2, 'system', $2, NULL)",
+                &[&catalogue_bytes, &function_bytes],
+            )
+            .await
+            .map_err(PostgresKernelError::Database)?;
+    }
+
     transaction
         .execute(
             "INSERT INTO _orna_kernel.active_revision
@@ -873,7 +901,7 @@ mod tests {
             validated_migration_registry()
                 .expect("registry is valid")
                 .len(),
-            29
+            30
         );
         assert_eq!(MIGRATIONS[0].version, 1);
         assert_eq!(MIGRATIONS[1].version, 2);
@@ -904,6 +932,7 @@ mod tests {
         assert_eq!(MIGRATIONS[26].version, 27);
         assert_eq!(MIGRATIONS[27].version, 28);
         assert_eq!(MIGRATIONS[28].version, 29);
+        assert_eq!(MIGRATIONS[29].version, 30);
         assert_eq!(MIGRATIONS[5].name, "definition reference write evidence");
         assert_eq!(MIGRATIONS[6].name, "standard catalogue type storage");
         assert_eq!(MIGRATIONS[7].name, "resolved value type storage");
@@ -927,7 +956,14 @@ mod tests {
         assert_eq!(MIGRATIONS[25].name, "user state audit decisions");
         assert_eq!(MIGRATIONS[26].name, "inspect snapshots and trace");
         assert_eq!(MIGRATIONS[27].name, "security admin privilege grants");
-        assert_eq!(MIGRATIONS[28].name, "sealed system invocation authorities");
+        assert_eq!(
+            MIGRATIONS[28].name,
+            "sealed system invocation authorities"
+        );
+        assert_eq!(
+            MIGRATIONS[29].name,
+            "active roles system invocation authority"
+        );
         assert!(MIGRATIONS[6].data_step.is_none());
         assert!(MIGRATIONS[7].data_step.is_none());
         assert!(MIGRATIONS[8].data_step.is_none());
@@ -951,6 +987,7 @@ mod tests {
         assert!(MIGRATIONS[26].data_step.is_none());
         assert!(MIGRATIONS[27].data_step.is_none());
         assert!(MIGRATIONS[28].data_step.is_none());
+        assert!(MIGRATIONS[29].data_step.is_none());
     }
 
     #[test]
