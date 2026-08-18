@@ -28,13 +28,18 @@ vim.filetype.add({ extension = { orna = "orna" } })
 -- Project root: nearest directory containing a marker file. OrnaDB
 -- workspaces are Cargo workspaces; fall back to the buffer directory.
 ---@param bufnr integer
----@return string
-local function root_dir(bufnr)
+---@param on_dir fun(root_dir: string|nil)|nil
+---@return string|nil
+local function root_dir(bufnr, on_dir)
     local root = vim.fs.root(bufnr, { ".git", "Cargo.toml" })
-    if root then
-        return root
+    if not root then
+        root = vim.fs.dirname(vim.api.nvim_buf_get_name(bufnr))
     end
-    return vim.fs.dirname(vim.api.nvim_buf_get_name(bufnr))
+    if on_dir then
+        on_dir(root)
+        return
+    end
+    return root
 end
 
 local function base_capabilities()
