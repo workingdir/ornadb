@@ -44,12 +44,13 @@ separate release action.
 - [ ] Add the durable same-major transition when a release first declares a
   real predecessor edge, then define the later multi-major transition without
   an external `pg_upgrade` executable.
-- [x] Build the Debian package with one public `/usr/bin/orna` executable and
-  embedded PostgreSQL code and support assets.
-- [x] Prove installation, initialisation, restart recovery, current upgrade
-  boundaries, shell, and
-  removal on a clean Debian host with no system PostgreSQL, Docker, or second
-  PostgreSQL executable.
+- [x] Exercise installation, initialisation, restart recovery, current
+  engine upgrade boundaries, shell, and removal in the isolated
+  network-disabled Debian container scenario.
+- [ ] Prove the complete lifecycle on a fresh network-disabled Debian 12
+  amd64 host or VM without Docker, a host PostgreSQL installation, or a
+  second PostgreSQL executable; archive the machine, package, manifest,
+  process-closure, trace, and lifecycle evidence required by work ADR 0019.
 
 ## Product expansion
 
