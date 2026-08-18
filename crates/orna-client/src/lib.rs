@@ -642,6 +642,7 @@ pub struct ClientStateStore {
     local: HashMap<ClientStateKey, RuntimeValue>,
     session: HashMap<ClientStateKey, RuntimeValue>,
     user: HashMap<ClientStateKey, ClientUserState>,
+    resources: HashMap<ClientResourceKey, ClientResource>,
 }
 
 impl Default for ClientStateStore {
@@ -651,6 +652,7 @@ impl Default for ClientStateStore {
             local: HashMap::new(),
             session: HashMap::new(),
             user: HashMap::new(),
+            resources: HashMap::new(),
         }
     }
 }
@@ -674,6 +676,47 @@ impl ClientStateStore {
     /// Creates one state key in the selected root context.
     fn key_for(&self, function: FunctionId, slot: StateSlotId) -> ClientStateKey {
         ClientStateKey::from_context(&self.context, function, slot)
+    }
+
+    /// Returns the resource for one complete cache identity.
+    pub fn resource(&self, key: ClientResourceKey) -> Option<&ClientResource> {
+        self.resources.get(&key)
+    }
+
+    /// Returns mutable access to one cached resource.
+    pub fn resource_mut(&mut self, key: ClientResourceKey) -> Option<&mut ClientResource> {
+        self.resources.get_mut(&key)
+    }
+
+    /// Returns the existing resource, or creates one with its first declared type.
+    ///
+    /// A repeated lookup does not replace the cached resource or its expected
+    /// type. The complete key is the cache boundary, so callers must use a new
+    /// key when the target, principal, arguments, or invalidation token changes.
+    pub fn get_or_create_resource(
+        &mut self,
+        key: ClientResourceKey,
+        expected_type: ResolvedType,
+    ) -> &mut ClientResource {
+        match self.resources.entry(key) {
+            Entry::Occupied(entry) => entry.into_mut(),
+            Entry::Vacant(entry) => entry.insert(ClientResource::new(key, expected_type)),
+        }
+    }
+
+    /// Invalidates one cached resource without removing its identity.
+    ///
+    /// The generation advances and any published value or failure is cleared.
+    /// An absent key is already invalidated and returns `false`.
+    pub fn invalidate_resource(
+        &mut self,
+        key: ClientResourceKey,
+    ) -> Result<bool, ClientResourceError> {
+        let Some(resource) = self.resources.get_mut(&key) else {
+            return Ok(false);
+        };
+        resource.invalidate()?;
+        Ok(true)
     }
 
     /// Returns the `LOCAL` slot values of one mounted function instance.
@@ -701,6 +744,7 @@ impl ClientStateStore {
         &self.user
     }
 }
+
 
 /// A USER state store rejected a lifecycle operation.
 #[non_exhaustive]
@@ -2928,6 +2972,84 @@ mod tests {
             );
             assert_eq!(resource.status(), super::ClientResourceStatus::Loading);
         }
+    }
+
+    #[test]
+    fn client_resource_cache_keeps_identity_and_transitions() {
+        let (active, function, pair, _) = version_one_active(true);
+        let key = super::ClientResourceKey::new(
+            InvocationTarget::new(function, pair),
+            PrincipalId::from_bytes([0x7a; 16]),
+            Sha256Digest::from_bytes([0xc1; 32]),
+            Sha256Digest::from_bytes([0xc2; 32]),
+        );
+        let mut state = super::ClientStateStore::new();
+
+        assert!(state.resource(key).is_none());
+        {
+            let resource = state.get_or_create_resource(
+                key,
+                ResolvedType::Scalar(StandardScalar::Boolean),
+            );
+            let generation = resource.begin_loading().unwrap();
+            resource
+                .publish_ready(&active, generation, RuntimeValue::Boolean(true))
+                .unwrap();
+        }
+        assert_eq!(
+            state.resource(key).and_then(super::ClientResource::value),
+            Some(&RuntimeValue::Boolean(true)),
+        );
+
+        // A duplicate lookup returns the existing resource and keeps its
+        // original type and published value.
+        let resource = state.get_or_create_resource(
+            key,
+            ResolvedType::Scalar(StandardScalar::Integer),
+        );
+        assert_eq!(
+            resource.expected_type(),
+            ResolvedType::Scalar(StandardScalar::Boolean),
+        );
+        assert_eq!(resource.value(), Some(&RuntimeValue::Boolean(true)));
+
+        let first = resource.begin_loading().unwrap();
+        let second = resource.begin_loading().unwrap();
+        assert_eq!(
+            state
+                .resource_mut(key)
+                .expect("resource remains in the cache")
+                .publish_failure(first, "stale".to_owned()),
+            Err(super::ClientResourceError::StaleGeneration {
+                expected: second,
+                actual: first,
+            }),
+        );
+        assert_eq!(
+            state.resource(key).map(super::ClientResource::status),
+            Some(super::ClientResourceStatus::Loading),
+        );
+
+        state
+            .resource_mut(key)
+            .expect("resource remains in the cache")
+            .cancel(second)
+            .unwrap();
+        assert_eq!(
+            state.resource(key).map(super::ClientResource::status),
+            Some(super::ClientResourceStatus::Cancelled),
+        );
+        assert_eq!(state.invalidate_resource(key), Ok(true));
+        let resource = state.resource(key).expect("invalidated resource remains cached");
+        assert_eq!(resource.status(), super::ClientResourceStatus::Idle);
+        assert_eq!(resource.value(), None);
+        assert_eq!(resource.failure(), None);
+        assert_eq!(state.invalidate_resource(super::ClientResourceKey::new(
+            InvocationTarget::new(function, pair),
+            PrincipalId::from_bytes([0x7b; 16]),
+            Sha256Digest::from_bytes([0xc1; 32]),
+            Sha256Digest::from_bytes([0xc2; 32]),
+        )), Ok(false));
     }
 
     fn version_four_text_state_plan() -> (
