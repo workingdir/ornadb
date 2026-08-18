@@ -1011,10 +1011,15 @@ async fn load_standard_catalogue(
 ) -> Result<(CatalogueSnapshot, Vec<DefinitionOrigin>), PostgresKernelError> {
     let schemas = load_standard_schemas(transaction, header.revision).await?;
     let value_types = load_standard_value_types(transaction, header.revision).await?;
+    let value_type_ids = value_types
+        .iter()
+        .map(|value_type| value_type.definition.id())
+        .collect::<HashSet<_>>();
     let enum_types = load_standard_enum_types(transaction, header.revision).await?;
     let bindings = load_standard_type_bindings(transaction, header.revision).await?;
-    let functions = load_standard_functions(transaction, header.revision).await?;
-    let parameters = load_standard_parameters(transaction, header.revision).await?;
+    let functions = load_standard_functions(transaction, header.revision, &value_type_ids).await?;
+    let parameters =
+        load_standard_parameters(transaction, header.revision, &value_type_ids).await?;
 
     let schema_names = schemas
         .iter()
@@ -1191,6 +1196,7 @@ async fn require_no_standard_executable_rows(
 async fn load_standard_functions(
     transaction: &Transaction<'_>,
     standard: StandardLibraryRevisionId,
+    value_type_ids: &HashSet<TypeId>,
 ) -> Result<Vec<RecoveredStandardFunction>, PostgresKernelError> {
     const RELATION: &str = "_orna_kernel.standard_catalogue_functions";
     let rows = transaction
@@ -1208,7 +1214,13 @@ async fn load_standard_functions(
         .map_err(PostgresKernelError::Database)?;
     let mut functions = Vec::with_capacity(rows.len());
     for (index, row) in rows.iter().enumerate() {
-        functions.push(decode_standard_function(row, index, standard, RELATION)?);
+        functions.push(decode_standard_function(
+            row,
+            index,
+            standard,
+            RELATION,
+            value_type_ids,
+        )?);
     }
     Ok(functions)
 }
@@ -1218,6 +1230,7 @@ fn decode_standard_function(
     index: usize,
     expected_standard: StandardLibraryRevisionId,
     relation: &'static str,
+    value_type_ids: &HashSet<TypeId>,
 ) -> Result<RecoveredStandardFunction, PostgresKernelError> {
     let row_record = DurableRecord::new(relation, format!("row={index}"));
     require_standard_library_revision(row, &row_record, expected_standard, "function")?;
@@ -1306,7 +1319,7 @@ fn decode_standard_function(
         &record,
         "standard function volatility must be immutable, stable, or volatile",
     )?;
-    let return_type = decode_standard_function_return(row, &record)?;
+    let return_type = decode_standard_function_return(row, &record, value_type_ids)?;
     let current_revision = FunctionRevisionId::from_bytes(identity_bytes(
         record.column(
             row,
@@ -1334,6 +1347,7 @@ fn decode_standard_function(
 fn decode_standard_function_return(
     row: &Row,
     record: &DurableRecord,
+    value_type_ids: &HashSet<TypeId>,
 ) -> Result<FunctionReturn, PostgresKernelError> {
     let shape: String = record.column(
         row,
@@ -1360,18 +1374,19 @@ fn decode_standard_function_return(
         "return_value_type_id",
         "standard function return value type identity must be null or exact bytes",
     )?;
-    let resolved = decode_standard_resolved_type(kind, scalar, value_type, None, true, record)?;
+    let resolved =
+        decode_standard_resolved_type(kind, scalar, value_type, Some(value_type_ids), true, record)?;
     Ok(FunctionReturn::Single(resolved))
 }
 
 /// Decodes the closed scalar-or-value resolved type persisted for standard
-/// catalogue functions and parameters. `catalogue` is required for the value
-/// shape so the type must identify one standard value type.
+/// catalogue functions and parameters. `value_type_ids` is required for the
+/// value shape so the type must identify one standard value type.
 fn decode_standard_resolved_type(
     kind: Option<String>,
     scalar_name: Option<String>,
     value_type: Option<Vec<u8>>,
-    catalogue: Option<&CatalogueSnapshot>,
+    value_type_ids: Option<&HashSet<TypeId>>,
     allow_void: bool,
     record: &DurableRecord,
 ) -> Result<ResolvedType, PostgresKernelError> {
@@ -1433,7 +1448,7 @@ fn decode_standard_resolved_type(
                 record,
                 "standard resolved value type identity must be 16 bytes",
             )?);
-            if catalogue.is_none_or(|catalogue| catalogue.value_type_by_id(id).is_none()) {
+            if value_type_ids.is_none_or(|value_type_ids| !value_type_ids.contains(&id)) {
                 return Err(record.invariant(
                     "standard resolved value type must identify one standard catalogue value type",
                 ));
@@ -1447,6 +1462,7 @@ fn decode_standard_resolved_type(
 async fn load_standard_parameters(
     transaction: &Transaction<'_>,
     standard: StandardLibraryRevisionId,
+    value_type_ids: &HashSet<TypeId>,
 ) -> Result<BTreeMap<FunctionId, Vec<RecoveredStandardParameter>>, PostgresKernelError> {
     const RELATION: &str = "_orna_kernel.standard_catalogue_function_parameters";
     let rows = transaction
@@ -1463,7 +1479,7 @@ async fn load_standard_parameters(
         .map_err(PostgresKernelError::Database)?;
     let mut parameters = BTreeMap::<FunctionId, Vec<RecoveredStandardParameter>>::new();
     for (index, row) in rows.iter().enumerate() {
-        let parameter = decode_standard_parameter(row, index, standard, RELATION)?;
+        let parameter = decode_standard_parameter(row, index, standard, RELATION, value_type_ids)?;
         parameters
             .entry(parameter.function)
             .or_default()
@@ -1477,6 +1493,7 @@ fn decode_standard_parameter(
     index: usize,
     expected_standard: StandardLibraryRevisionId,
     relation: &'static str,
+    value_type_ids: &HashSet<TypeId>,
 ) -> Result<RecoveredStandardParameter, PostgresKernelError> {
     let row_record = DurableRecord::new(relation, format!("row={index}"));
     require_standard_library_revision(row, &row_record, expected_standard, "parameter")?;
@@ -1531,7 +1548,8 @@ fn decode_standard_parameter(
         "value_type_id",
         "standard parameter value type identity must be null or exact bytes",
     )?;
-    let resolved = decode_standard_resolved_type(kind, scalar, value_type, None, false, &record)?;
+    let resolved =
+        decode_standard_resolved_type(kind, scalar, value_type, Some(value_type_ids), false, &record)?;
     let origin = decode_origin(
         row,
         &record,
@@ -2153,12 +2171,12 @@ fn build_standard_executables(
             "standard definition reference must belong to one recovered executable revision",
         ));
     }
-    if executables.len() != 1 {
+    if executables.is_empty() {
         return Err(DurableRecord::new(
             "_orna_kernel.standard_library_revisions",
             catalogue.revision().canonical(),
         )
-        .invariant("version-two standard snapshot must carry exactly one executable"));
+        .invariant("version-two standard snapshot must carry at least one executable"));
     }
     Ok(executables)
 }
