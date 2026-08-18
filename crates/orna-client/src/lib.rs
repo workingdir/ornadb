@@ -2975,7 +2975,7 @@ mod tests {
     }
 
     #[test]
-    fn client_resource_cache_keeps_identity_and_transitions() {
+    fn client_resource_cache_keeps_key_and_transitions() {
         let (active, function, pair, _) = version_one_active(true);
         let key = super::ClientResourceKey::new(
             InvocationTarget::new(function, pair),
@@ -3047,6 +3047,10 @@ mod tests {
         let resource = state.resource(key).expect("invalidated resource remains cached");
         assert_eq!(resource.key(), key);
         assert_eq!(
+            resource.expected_type(),
+            ResolvedType::Scalar(StandardScalar::Boolean),
+        );
+        assert_eq!(
             resource.generation().value(),
             generation_before_invalidation.value() + 1,
         );
@@ -3078,6 +3082,7 @@ mod tests {
             Sha256Digest::from_bytes([0xd1; 32]),
             Sha256Digest::from_bytes([0xd3; 32]),
         );
+        assert_ne!(key_a, key_b);
         let mut state = super::ClientStateStore::new();
 
         state.get_or_create_resource(
