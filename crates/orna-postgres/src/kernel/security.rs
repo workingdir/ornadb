@@ -40,7 +40,9 @@ use orna_protocol::{
     InvocationEventBatch, InvocationEventRecord, RetainedInvokeRequest,
     decode_retained_invoke_request, encode_active_value,
 };
-use orna_standard::registered_opaque_codecs;
+use orna_standard::{
+    registered_opaque_codecs, STD_INVOKE_ECHO_FUNCTION_ID, STD_JSON_ENCODE_FUNCTION_ID,
+};
 use tokio_postgres::{IsolationLevel, Row, Transaction, types::FromSqlOwned};
 
 use crate::{
@@ -50,9 +52,9 @@ use crate::{
     server_execution::{
         SealedPresentationError, ServerSelectError, ServerSelectResult,
         execute_authorised_raw_server_select, execute_authorised_server_select,
-        execute_standard_parameter_echo, present_sealed_standard_output,
-        raw_identity_selected_server_select_target_is_selected, raw_server_target_is_unavailable,
-        raw_unique_text_selected_server_select_target_is_selected,
+        execute_standard_json_encode, execute_standard_parameter_echo,
+        present_sealed_standard_output, raw_identity_selected_server_select_target_is_selected,
+        raw_server_target_is_unavailable, raw_unique_text_selected_server_select_target_is_selected,
     },
     server_mutation_execution::{
         RawServerReferenceMutation, ServerInsertError, execute_authorised_raw_server_insert,
@@ -754,11 +756,26 @@ impl PostgresKernel {
                         } => {
                             let arguments =
                                 bind_sealed_invoke_arguments(definition, decoded.arguments())?;
-                            let value = execute_standard_parameter_echo(
-                                definition,
-                                executable.revision(),
-                                &arguments,
-                            )?;
+                            let value = match definition.id() {
+                                STD_INVOKE_ECHO_FUNCTION_ID => execute_standard_parameter_echo(
+                                    definition,
+                                    executable.revision(),
+                                    &arguments,
+                                )?,
+                                STD_JSON_ENCODE_FUNCTION_ID => execute_standard_json_encode(
+                                    definition,
+                                    executable.revision(),
+                                    &arguments,
+                                    &active,
+                                    &registry,
+                                )?,
+                                _ => {
+                                    return Err(sealed_target_invariant(
+                                        &active,
+                                        "verified standard invocation target has no execution engine",
+                                    ));
+                                }
+                            };
                             let security_target = InvocationTarget::verified_standard(
                                 definition.id(),
                                 active.pair(),
