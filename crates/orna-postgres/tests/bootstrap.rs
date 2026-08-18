@@ -212,6 +212,16 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         "security admin privilege grants",
         include_str!("../migrations/0028_security_admin.sql"),
     ),
+    (
+        29,
+        "sealed system invocation authorities",
+        include_str!("../migrations/0029_sealed_system_invocation_authorities.sql"),
+    ),
+    (
+        30,
+        "active roles system invocation authority",
+        include_str!("../migrations/0030_active_roles_system_invocation_authority.sql"),
+    ),
 ];
 const MIGRATION_DATA_STEP_SEPARATOR: &[u8] = b"\0orna.kernel.migration-step\0";
 const CANONICAL_HASH_V1_EMPTY_SEED_STEP: &[u8] = b"canonical-hash-v1-empty-seed/v1";
@@ -856,8 +866,8 @@ async fn bootstrap_upgrades_the_registered_v20_empty_catalogue() -> TestResult<(
 
         let after = snapshot_upgrade_state(&database).await?;
         require(
-            after.migrations.len() == 28 && after.migrations[..20] == before.migrations[..],
-            format!("v21-v28 changed prior migration records: {:?}", after.migrations),
+            after.migrations.len() == 30 && after.migrations[..20] == before.migrations[..],
+            format!("v21-v30 changed prior migration records: {:?}", after.migrations),
         )?;
         require(
             after.migrations[20]
@@ -932,8 +942,26 @@ async fn bootstrap_upgrades_the_registered_v20_empty_catalogue() -> TestResult<(
             format!("v28 migration record is not exact: {:?}", after.migrations[27]),
         )?;
         require(
+            after.migrations[28]
+                == (
+                    29,
+                    "sealed system invocation authorities".to_owned(),
+                    expected_migration_checksum(29, MIGRATIONS[28].2),
+                ),
+            format!("v29 migration record is not exact: {:?}", after.migrations[28]),
+        )?;
+        require(
+            after.migrations[29]
+                == (
+                    30,
+                    "active roles system invocation authority".to_owned(),
+                    expected_migration_checksum(30, MIGRATIONS[29].2),
+                ),
+            format!("v30 migration record is not exact: {:?}", after.migrations[29]),
+        )?;
+        require(
             after.active_pair == before.active_pair,
-            "v21-v28 changed the active revision pair",
+            "v21-v30 changed the active revision pair",
         )?;
 
         let recovered = kernel.recover().await?;
@@ -1603,8 +1631,8 @@ async fn bootstrap_upgrades_v5_write_reference_evidence_without_mutating_semanti
 
         let after = snapshot_upgrade_state(&database).await?;
         require(
-            after.migrations.len() == 28 && after.migrations[..5] == before.migrations[..],
-            format!("v6-v28 changed prior migration records: {:?}", after.migrations),
+            after.migrations.len() == 30 && after.migrations[..5] == before.migrations[..],
+            format!("v6-v30 changed prior migration records: {:?}", after.migrations),
         )?;
         require(
             after.migrations[5]
@@ -1814,6 +1842,24 @@ async fn bootstrap_upgrades_v5_write_reference_evidence_without_mutating_semanti
             format!("v28 migration record is not exact: {:?}", after.migrations[27]),
         )?;
         require(
+            after.migrations[28]
+                == (
+                    29,
+                    "sealed system invocation authorities".to_owned(),
+                    expected_migration_checksum(29, MIGRATIONS[28].2),
+                ),
+            format!("v29 migration record is not exact: {:?}", after.migrations[28]),
+        )?;
+        require(
+            after.migrations[29]
+                == (
+                    30,
+                    "active roles system invocation authority".to_owned(),
+                    expected_migration_checksum(30, MIGRATIONS[29].2),
+                ),
+            format!("v30 migration record is not exact: {:?}", after.migrations[29]),
+        )?;
+        require(
             after.active_pair == before.active_pair,
             "v6 changed the active revision pair",
         )?;
@@ -1899,7 +1945,7 @@ async fn bootstrap_upgrades_registered_v6_without_standard_rows() -> TestResult<
 
         let after = snapshot_upgrade_state(&database).await?;
         require(
-            after.migrations.len() == 28
+            after.migrations.len() == 30
                 && after.migrations[..6] == before.migrations[..]
                 && after.migrations[6]
                     == (
@@ -1954,6 +2000,18 @@ async fn bootstrap_upgrades_registered_v6_without_standard_rows() -> TestResult<
                         28,
                         "security admin privilege grants".to_owned(),
                         expected_migration_checksum(28, MIGRATIONS[27].2),
+                    )
+                && after.migrations[28]
+                    == (
+                        29,
+                        "sealed system invocation authorities".to_owned(),
+                        expected_migration_checksum(29, MIGRATIONS[28].2),
+                    )
+                && after.migrations[29]
+                    == (
+                        30,
+                        "active roles system invocation authority".to_owned(),
+                        expected_migration_checksum(30, MIGRATIONS[29].2),
                     ),
             format!("v6 upgrade produced unexpected migrations: {:?}", after.migrations),
         )?;
@@ -2148,7 +2206,7 @@ async fn bootstrap_upgrades_registered_v7_without_resolved_value_rows() -> TestR
         let after_surface = snapshot_catalogue_surface(&database).await?;
         let after_target_fks = snapshot_application_target_foreign_keys(&database).await?;
         require(
-            after.migrations.len() == 28
+            after.migrations.len() == 30
                 && after.migrations[..7] == before.migrations[..]
                 && after.migrations[7]
                     == (
@@ -2275,6 +2333,18 @@ async fn bootstrap_upgrades_registered_v7_without_resolved_value_rows() -> TestR
                         28,
                         "security admin privilege grants".to_owned(),
                         expected_migration_checksum(28, MIGRATIONS[27].2),
+                    )
+                && after.migrations[28]
+                    == (
+                        29,
+                        "sealed system invocation authorities".to_owned(),
+                        expected_migration_checksum(29, MIGRATIONS[28].2),
+                    )
+                && after.migrations[29]
+                    == (
+                        30,
+                        "active roles system invocation authority".to_owned(),
+                        expected_migration_checksum(30, MIGRATIONS[29].2),
                     ),
             format!("v7 upgrade produced unexpected migrations: {:?}", after.migrations),
         )?;
