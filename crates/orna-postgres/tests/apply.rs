@@ -6233,6 +6233,7 @@ async fn migration_twenty_three_aborts_on_revision_mismatched_backfill() -> Test
 
 const V3_PROOF_CLIENT_USER: PrincipalId = PrincipalId::from_bytes([0x71; 16]);
 const V3_PROOF_CLIENT_ROLE: PrincipalId = PrincipalId::from_bytes([0x72; 16]);
+const V3_PROOF_CLIENT_ROLE_SECOND: PrincipalId = PrincipalId::from_bytes([0x73; 16]);
 const CONNECTION_PROTOCOL_MAJOR: u16 = 5;
 
 /// Installs the complete production standard chain on a fresh database:
@@ -6880,25 +6881,22 @@ async fn proves_sealed_security_identity_invocation_and_audit() -> TestResult<()
                 PrincipalStatus::Active,
             ));
         }
-        if !principals
-            .iter()
-            .any(|principal| principal.id() == V3_PROOF_CLIENT_ROLE)
-        {
-            principals.push(Principal::new(
-                V3_PROOF_CLIENT_ROLE,
-                PrincipalKind::Role,
-                PrincipalStatus::Active,
-            ));
+        for role in [V3_PROOF_CLIENT_ROLE, V3_PROOF_CLIENT_ROLE_SECOND] {
+            if !principals.iter().any(|principal| principal.id() == role) {
+                principals.push(Principal::new(
+                    role,
+                    PrincipalKind::Role,
+                    PrincipalStatus::Active,
+                ));
+            }
         }
         let mut memberships = recovered.memberships().collect::<Vec<_>>();
-        if !memberships.iter().any(|membership| {
-            membership.role() == V3_PROOF_CLIENT_ROLE
-                && membership.member() == V3_PROOF_CLIENT_USER
-        }) {
-            memberships.push(RoleMembership::new(
-                V3_PROOF_CLIENT_ROLE,
-                V3_PROOF_CLIENT_USER,
-            ));
+        for role in [V3_PROOF_CLIENT_ROLE, V3_PROOF_CLIENT_ROLE_SECOND] {
+            if !memberships.iter().any(|membership| {
+                membership.role() == role && membership.member() == V3_PROOF_CLIENT_USER
+            }) {
+                memberships.push(RoleMembership::new(role, V3_PROOF_CLIENT_USER));
+            }
         }
         let security = SecuritySnapshot::new_with_function_targets(
             pair,
@@ -6908,8 +6906,10 @@ async fn proves_sealed_security_identity_invocation_and_audit() -> TestResult<()
             recovered.execute_grants().collect(),
         )?;
         let security = kernel.replace_security_snapshot(&security).await?;
-        let session =
-            security.bind_authenticated_session(V3_PROOF_CLIENT_USER, vec![V3_PROOF_CLIENT_ROLE])?;
+        let session = security.bind_authenticated_session(
+            V3_PROOF_CLIENT_USER,
+            vec![V3_PROOF_CLIENT_ROLE_SECOND, V3_PROOF_CLIENT_ROLE],
+        )?;
 
         let requests = [
             (
@@ -6949,7 +6949,10 @@ async fn proves_sealed_security_identity_invocation_and_audit() -> TestResult<()
             let result = kernel
                 .dispatch_sealed_sys_invoke(&session, CONNECTION_PROTOCOL_MAJOR, &retained)
                 .await?;
-            require_active_roles_completion(&result, V3_PROOF_CLIENT_ROLE)?;
+            require_active_roles_completion(
+                &result,
+                &[V3_PROOF_CLIENT_ROLE, V3_PROOF_CLIENT_ROLE_SECOND],
+            )?;
         }
 
         let security_events = kernel.recover_security_audit_events().await?;
@@ -8362,7 +8365,7 @@ fn sealed_security_identity_request(target: InvocationRequestTarget) -> TestResu
 
 fn require_active_roles_completion(
     result: &SealedInvocationResult,
-    role: PrincipalId,
+    roles: &[PrincipalId],
 ) -> TestResult<InvocationId> {
     let SealedInvocationResult::Completed { invocation, events } = result else {
         return Err(failure(
@@ -8394,10 +8397,14 @@ fn require_active_roles_completion(
             "the sealed active-roles result did not contain a SET",
         ));
     };
-    let expected = RuntimeValue::Reference {
-        target: SYS_SECURITY_PRINCIPAL_TYPE_ID,
-        object: ObjectId::from_bytes(role.to_bytes()),
-    };
+    let expected = roles
+        .iter()
+        .copied()
+        .map(|role| RuntimeValue::Reference {
+            target: SYS_SECURITY_PRINCIPAL_TYPE_ID,
+            object: ObjectId::from_bytes(role.to_bytes()),
+        })
+        .collect::<Vec<_>>();
     require(
         records.len() == 3
             && records[0].event().kind() == InvocationEventKind::InvocationStarted
@@ -8413,7 +8420,7 @@ fn require_active_roles_completion(
                             if target == SYS_SECURITY_PRINCIPAL_TYPE_ID
                     )
             )
-            && elements == std::slice::from_ref(&expected),
+            && elements == expected.as_slice(),
         "the sealed active-roles result did not return the exact typed canonical SET",
     )?;
     require(
