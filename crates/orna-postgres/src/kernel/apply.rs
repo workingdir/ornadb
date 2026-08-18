@@ -29,6 +29,9 @@ use orna_standard::{
     STANDARD_SOURCE_REVISION_ID, StandardUpgrade, StandardUpgradeIdentity,
     retained_standard_library_snapshot, verify_standard_library_snapshot,
 };
+use orna_core::system::{
+    SYS_SECURITY_EFFECTIVE_PRINCIPAL_FUNCTION_ID, SYS_SECURITY_SESSION_PRINCIPAL_FUNCTION_ID,
+};
 use tokio_postgres::{Client, IsolationLevel, Transaction};
 
 use crate::{
@@ -1988,7 +1991,12 @@ async fn persist_target_authorities(
     standard: Option<&VerifiedStandardLibrarySnapshot>,
 ) -> Result<(), PostgresKernelError> {
     let catalogue_revision = candidate.candidate().revision();
-    let mut expected_authority_count = candidate.candidate().functions().len() as i64;
+    let system_identity_functions = [
+        SYS_SECURITY_SESSION_PRINCIPAL_FUNCTION_ID,
+        SYS_SECURITY_EFFECTIVE_PRINCIPAL_FUNCTION_ID,
+    ];
+    let mut expected_authority_count =
+        candidate.candidate().functions().len() as i64 + system_identity_functions.len() as i64;
     for function in candidate.candidate().functions() {
         transaction
             .execute(
@@ -2001,6 +2009,18 @@ async fn persist_target_authorities(
                     &bytes(function.id()),
                     &bytes(function.current_revision()),
                 ],
+            )
+            .await
+            .map_err(PostgresKernelError::Database)?;
+    }
+    for function in system_identity_functions {
+        transaction
+            .execute(
+                "INSERT INTO _orna_kernel.invocation_target_authorities
+                    (catalogue_revision_id, function_id, target_class,
+                     function_revision_id, standard_library_revision_id)
+                 VALUES ($1, $2, 'system', $2, NULL)",
+                &[&bytes(catalogue_revision), &bytes(function)],
             )
             .await
             .map_err(PostgresKernelError::Database)?;
@@ -2042,7 +2062,7 @@ async fn persist_target_authorities(
     let written: i64 = rows[0].try_get(0).map_err(PostgresKernelError::Database)?;
     if written != expected_authority_count {
         return Err(invariant(
-            "invocation target authority rows must match the applied catalogue functions exactly",
+            "invocation target authority rows must match the applied catalogue functions and sealed system audit anchors exactly",
         ));
     }
     Ok(())
