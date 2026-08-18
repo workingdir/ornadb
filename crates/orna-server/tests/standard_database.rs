@@ -74,8 +74,10 @@ use orna_server::{
     serve_local_raw_stream,
 };
 use orna_standard::{
-    BOOLEAN_TYPE_ID, OPAQUE_TOKEN_TYPE_ID, STANDARD_LIBRARY_V3_REVISION_ID,
-    STD_IO_BYTE_STREAM_TYPE_ID, STD_TERMINAL_DOCUMENT_TYPE_ID, registered_opaque_codecs,
+    BOOLEAN_TYPE_ID, BYTE_STREAM_MAGIC, JSON_MAGIC, OPAQUE_TOKEN_TYPE_ID,
+    STANDARD_LIBRARY_V3_REVISION_ID, STANDARD_LIBRARY_V5_REVISION_ID, STD_IO_BYTE_STREAM_TYPE_ID,
+    STD_JSON_ENCODE_FUNCTION_ID, STD_JSON_ENCODE_FUNCTION_REVISION_ID, STD_JSON_ENCODE_PARAMETER_ID,
+    STD_JSON_VALUE_TYPE_ID, STD_TERMINAL_DOCUMENT_TYPE_ID, registered_opaque_codecs,
     retained_standard_library_snapshot, retained_standard_library_v2_snapshot,
     retained_standard_library_v3_snapshot, verify_standard_library_snapshot,
     verify_standard_library_v2_snapshot, verify_standard_library_v3_snapshot,
@@ -2083,6 +2085,99 @@ async fn proves_kernel_capability_gate_for_external_client_contract() -> TestRes
             "the denied CLIENT capability did not append a redacted audit decision",
         )?;
 
+        require_no_database_sessions(&database).await
+    })
+    .await
+}
+
+#[tokio::test]
+#[ignore = "requires the Compose PostgreSQL development service"]
+async fn proves_v5_json_value_and_encode_through_installed_sealed_invoke() -> TestResult<()> {
+    with_test_database(|database| async move {
+        let uid = nix::unistd::geteuid().as_raw();
+        let kernel = kernel(&database)?;
+        kernel.bootstrap().await?;
+        let empty = kernel.recover().await?;
+        let active = install_v5_standard(&kernel, &empty, &database).await?;
+        let standard = active.catalogue_hash_context().standard().ok_or_else(|| {
+            failure("the V5 install did not pin a verified standard snapshot")
+        })?;
+        require(
+            standard.revision() == STANDARD_LIBRARY_V5_REVISION_ID
+                && standard
+                    .catalogue()
+                    .type_definition_by_id(STD_JSON_VALUE_TYPE_ID)
+                    .is_some()
+                && standard
+                    .catalogue()
+                    .function_by_id(STD_JSON_ENCODE_FUNCTION_ID)
+                    .is_some()
+                && standard
+                    .catalogue()
+                    .type_definition_by_id(STD_IO_BYTE_STREAM_TYPE_ID)
+                    .is_some()
+                && standard.executables().iter().any(|executable| {
+                    executable.function() == STD_JSON_ENCODE_FUNCTION_ID
+                        && executable.revision().id() == STD_JSON_ENCODE_FUNCTION_REVISION_ID
+                }),
+            "the installed orna.std/5 snapshot did not retain the JSON value and presenter",
+        )?;
+        let registry = registered_opaque_codecs(standard)?;
+        let body = br#"{"items":[1,2],"ok":true}"#;
+        let mut json_payload = Vec::from(JSON_MAGIC.as_bytes());
+        json_payload.extend_from_slice(
+            &u32::try_from(body.len())
+                .expect("the JSON body length fits the canonical frame")
+                .to_be_bytes(),
+        );
+        json_payload.extend_from_slice(body);
+        let json_value = OpaqueValue::new(
+            &active,
+            &registry,
+            STD_JSON_VALUE_TYPE_ID,
+            &json_payload,
+        )?;
+        require(
+            json_value.canonical_payload() == json_payload.as_slice(),
+            "the V5 JSON codec did not retain the canonical value payload",
+        )?;
+
+        let mut expected_payload = Vec::from(BYTE_STREAM_MAGIC.as_bytes());
+        expected_payload.extend_from_slice(&16_u32.to_be_bytes());
+        expected_payload.extend_from_slice(b"application/json");
+        expected_payload.extend_from_slice(
+            &u32::try_from(body.len())
+                .expect("the JSON body length fits the byte-stream frame")
+                .to_be_bytes(),
+        );
+        expected_payload.extend_from_slice(body);
+
+        let pair = active.pair();
+        let standard_revision = standard.revision();
+        let security = SecuritySnapshot::new_with_function_targets_and_local_peer_credentials(
+            pair,
+            vec![SecurityFunctionTarget::verified_standard(
+                STD_JSON_ENCODE_FUNCTION_ID,
+                standard_revision,
+                STD_JSON_ENCODE_FUNCTION_REVISION_ID,
+            )],
+            vec![Principal::new(
+                RAW_CLIENT_USER,
+                PrincipalKind::User,
+                PrincipalStatus::Active,
+            )],
+            vec![],
+            vec![ExecuteGrant::new(RAW_CLIENT_USER, STD_JSON_ENCODE_FUNCTION_ID)],
+            vec![LocalPeerCredential::new(uid, RAW_CLIENT_USER)],
+        )?;
+        kernel.replace_security_snapshot(&security).await?;
+        let session = kernel.authenticate_local_peer(uid).await?;
+        let request = sealed_json_encode_request(json_value)?;
+        let retained = encode_invoke_request(&active, &registry, &request)?;
+        let result = kernel
+            .dispatch_sealed_sys_invoke(&session, 5, &retained)
+            .await?;
+        require_json_encode_completion(&result, &expected_payload)?;
         require_no_database_sessions(&database).await
     })
     .await
@@ -7940,6 +8035,20 @@ async fn install_v3_standard(
         .await?)
 }
 
+/// Installs the accepted V5 standard through the compiler-backed V3-to-V4
+/// and V4-to-V5 append-only upgrade path.
+async fn install_v5_standard(
+    kernel: &PostgresKernel,
+    empty: &ActiveDatabaseRevision,
+    database: &TestDatabase,
+) -> TestResult<ActiveDatabaseRevision> {
+    let version_three = install_v3_standard(kernel, empty, database).await?;
+    let upgrade_v4 = orna_standard::prepare_standard_upgrade_v3_to_v4(&version_three)?;
+    let version_four = kernel.apply_standard_upgrade(&upgrade_v4).await?;
+    let upgrade_v5 = orna_standard::prepare_standard_upgrade_v4_to_v5(&version_four)?;
+    Ok(kernel.apply_standard_upgrade(&upgrade_v5).await?)
+}
+
 /// Persists the retained `orna.std/1` and `orna.std/2` source bundles and
 /// revisions so the V3 snapshot's reserved source parent chain satisfies the
 /// kernel's foreign keys.
@@ -8365,6 +8474,44 @@ fn sealed_echo_request(
     })?)
 }
 
+/// Builds one complete checked `sys.invoke` Request for `std.json.encode`.
+fn sealed_json_encode_request(value: OpaqueValue) -> TestResult<InvokeRequest> {
+    Ok(InvokeRequest::new(InvokeRequestInput {
+        target: InvocationRequestTarget::function_id(STD_JSON_ENCODE_FUNCTION_ID),
+        arguments: vec![InvocationArgument::new(
+            InvocationParameterSelector::parameter_id(STD_JSON_ENCODE_PARAMETER_ID),
+            InvokeValue::new(RuntimeValue::Opaque(value))?,
+        )],
+        caller_context: InvocationCallerContext::new(
+            InvocationCallerKind::TestRunner,
+            false,
+            false,
+            None,
+            None,
+            "en-GB",
+            "UTC",
+            None,
+        )?,
+        client_offer: InvocationClientOffer::new(
+            5,
+            "en-GB",
+            "UTC",
+            Vec::new(),
+            Vec::new(),
+            1_024,
+            0,
+            None,
+            None,
+        )?,
+        output_requirement: None,
+        state_profile: None,
+        trace_policy: InvocationTracePolicy::Off,
+        idempotency_key: None,
+        parent_invocation_id: None,
+        observer_context: None,
+    })?)
+}
+
 /// Asserts one completed sealed echo invocation carried exactly
 /// `InvocationStarted(0)`, `ValueBatch(1)` with the typed integer, and
 /// `InvocationCompleted(2)`, and returns its invocation identity.
@@ -8412,6 +8559,66 @@ fn require_echo_completion(
             && records[1].event().invocation_id() == *invocation
             && records[2].event().invocation_id() == *invocation,
         "the sealed events did not share one invocation identity",
+    )?;
+    Ok(*invocation)
+}
+
+/// Asserts one completed sealed JSON presenter invocation returned the exact
+/// application/json ByteStream payload.
+fn require_json_encode_completion(
+    result: &SealedInvocationResult,
+    expected_payload: &[u8],
+) -> TestResult<InvocationId> {
+    let SealedInvocationResult::Completed { invocation, events } = result else {
+        return Err(failure(
+            "the sealed JSON presenter invocation did not complete with its Event batch",
+        ));
+    };
+    let records = events.records();
+    require(
+        records.len() == 3
+            && records[0].outer_sequence() == 1
+            && records[1].outer_sequence() == 2
+            && records[2].outer_sequence() == 3
+            && records[0].event().sequence() == 0
+            && records[1].event().sequence() == 1
+            && records[2].event().sequence() == 2,
+        "the sealed JSON presenter stream did not carry contiguous sequences",
+    )?;
+    require(
+        records[0].event().kind() == InvocationEventKind::InvocationStarted
+            && records[1].event().kind() == InvocationEventKind::ValueBatch
+            && records[2].event().kind() == InvocationEventKind::InvocationCompleted,
+        "the sealed JSON presenter stream did not carry the expected event kinds",
+    )?;
+    let InvocationEventBody::ValueBatch {
+        schema: None,
+        values,
+    } = records[1].event().body()
+    else {
+        return Err(failure(
+            "the sealed JSON presenter ValueBatch did not carry a plain typed batch",
+        ));
+    };
+    require(
+        values.len() == 1,
+        "the sealed JSON presenter ValueBatch did not carry one result",
+    )?;
+    let RuntimeValue::Opaque(value) = values[0].value() else {
+        return Err(failure(
+            "the sealed JSON presenter result was not an opaque ByteStream",
+        ));
+    };
+    require(
+        value.opaque_type() == STD_IO_BYTE_STREAM_TYPE_ID
+            && value.canonical_payload() == expected_payload,
+        "the sealed JSON presenter did not return the exact application/json ByteStream",
+    )?;
+    require(
+        records[0].event().invocation_id() == *invocation
+            && records[1].event().invocation_id() == *invocation
+            && records[2].event().invocation_id() == *invocation,
+        "the sealed JSON presenter events did not share one invocation identity",
     )?;
     Ok(*invocation)
 }
