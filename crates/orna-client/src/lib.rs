@@ -3039,8 +3039,17 @@ mod tests {
             state.resource(key).map(super::ClientResource::status),
             Some(super::ClientResourceStatus::Cancelled),
         );
+        let generation_before_invalidation = state
+            .resource(key)
+            .expect("cancelled resource remains in the cache")
+            .generation();
         assert_eq!(state.invalidate_resource(key), Ok(true));
         let resource = state.resource(key).expect("invalidated resource remains cached");
+        assert_eq!(resource.key(), key);
+        assert_eq!(
+            resource.generation().value(),
+            generation_before_invalidation.value() + 1,
+        );
         assert_eq!(resource.status(), super::ClientResourceStatus::Idle);
         assert_eq!(resource.value(), None);
         assert_eq!(resource.failure(), None);
@@ -3050,6 +3059,59 @@ mod tests {
             Sha256Digest::from_bytes([0xc1; 32]),
             Sha256Digest::from_bytes([0xc2; 32]),
         )), Ok(false));
+    }
+
+    #[test]
+    fn client_resource_cache_keeps_distinct_complete_keys_independent() {
+        let (_, function, pair, _) = version_one_active(true);
+        let target = InvocationTarget::new(function, pair);
+        let principal = PrincipalId::from_bytes([0x7a; 16]);
+        let key_a = super::ClientResourceKey::new(
+            target,
+            principal,
+            Sha256Digest::from_bytes([0xd1; 32]),
+            Sha256Digest::from_bytes([0xd2; 32]),
+        );
+        let key_b = super::ClientResourceKey::new(
+            target,
+            principal,
+            Sha256Digest::from_bytes([0xd1; 32]),
+            Sha256Digest::from_bytes([0xd3; 32]),
+        );
+        let mut state = super::ClientStateStore::new();
+
+        state.get_or_create_resource(
+            key_a,
+            ResolvedType::Scalar(StandardScalar::Boolean),
+        );
+        state.get_or_create_resource(
+            key_b,
+            ResolvedType::Scalar(StandardScalar::Boolean),
+        );
+
+        let resource_a = state.resource(key_a).expect("first resource is cached");
+        let resource_b = state.resource(key_b).expect("second resource is cached");
+        assert_eq!(resource_a.key(), key_a);
+        assert_eq!(resource_b.key(), key_b);
+
+        let generation = state
+            .resource_mut(key_a)
+            .expect("first resource is cached")
+            .begin_loading()
+            .unwrap();
+        assert_eq!(
+            state.resource(key_a).map(super::ClientResource::status),
+            Some(super::ClientResourceStatus::Loading),
+        );
+        assert_eq!(
+            state.resource(key_b).map(super::ClientResource::status),
+            Some(super::ClientResourceStatus::Idle),
+        );
+        state
+            .resource_mut(key_a)
+            .expect("first resource is cached")
+            .cancel(generation)
+            .unwrap();
     }
 
     fn version_four_text_state_plan() -> (
