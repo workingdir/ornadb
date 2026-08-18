@@ -55,6 +55,7 @@ use std::{
     fmt,
 };
 
+use orna_artifact::server_json_encode::{self, JsonEncodePlan};
 use orna_artifact::server_parameter_echo::{self, ServerParameterEcho};
 use orna_core::{
     ExpressionId, FunctionId, FunctionRevisionId, ParameterId, SchemaId, StateSlotId, TypeId,
@@ -72,8 +73,8 @@ use orna_core::{
     revision::{
         DefinitionIdentity, DefinitionOrigin, DefinitionReference, DefinitionReferenceKind,
         DefinitionReferenceTarget, EMPTY_APPLICATION_CATALOGUE_REVISION_ID, ExecutableArtifact,
-        ExecutableArtifactKind, FunctionSemanticHashVersion, SourceOrigin, StandardExecutable,
-        StandardLibraryDigestVersion, StoredSourceRevision, StoredSourceUnit,
+        ExecutableArtifactKind, FunctionRevisionRecord, FunctionSemanticHashVersion, SourceOrigin,
+        StandardExecutable, StandardLibraryDigestVersion, StoredSourceRevision, StoredSourceUnit,
         VerifiedStandardLibrarySnapshot,
     },
     source::{SourceBundle, SourceUnit},
@@ -782,7 +783,6 @@ fn check_standard_library_source_v5_parts(
     {
         return Err(StandardLibraryCheckError::SourceMismatch);
     }
-
     let bundle = SourceBundle::new([
         SourceUnit::new(types_unit.logical_path(), types_unit.content()),
         SourceUnit::new(invoke_unit.logical_path(), invoke_unit.content()),
@@ -819,10 +819,27 @@ fn check_standard_library_source_v5_parts(
         &types_catalogue,
         &origin_partitions.0,
     )?;
+    let Some(echo_executable) = executables
+        .iter()
+        .find(|executable| executable.function() == STD_INVOKE_ECHO_FUNCTION_ID)
+    else {
+        return Err(StandardLibraryCheckError::ExecutableMismatch);
+    };
+    let Some(json_executable) = executables
+        .iter()
+        .find(|executable| executable.function() == STD_JSON_ENCODE_FUNCTION_ID)
+    else {
+        return Err(StandardLibraryCheckError::ExecutableMismatch);
+    };
+    if executables.len() != 2 {
+        return Err(StandardLibraryCheckError::ExecutableCount {
+            actual: executables.len(),
+        });
+    }
     let checked_executable = reconcile_standard_invoke_executable(
         catalogue,
         &origin_partitions.1,
-        executables,
+        std::slice::from_ref(echo_executable),
         invoke_unit,
         parsed_invoke,
     )?;
@@ -834,9 +851,92 @@ fn check_standard_library_source_v5_parts(
     )?;
     reconcile_standard_ui_unit(ui_unit, parsed_ui, catalogue, &origin_partitions.3)?;
     reconcile_standard_json_unit(json_unit, parsed_json, catalogue, &json_origins)?;
+    let [json_function] = parsed_json.parsed().server_functions() else {
+        return Err(StandardLibraryCheckError::SourceMismatch);
+    };
+    reconcile_standard_json_executable(
+        json_executable,
+        json_function,
+        catalogue,
+        &json_origins,
+        json_unit,
+    )?;
     Ok((families, checked_executable))
 }
 
+fn expected_standard_json_executable(
+    declaration: &ServerFunctionDeclaration,
+    catalogue: &CatalogueSnapshot,
+    origins: &[DefinitionOrigin],
+    stored_unit: &StoredSourceUnit,
+) -> Result<StandardExecutable, StandardLibraryCheckError> {
+    check_standard_json_encode(declaration, catalogue, origins, STD_JSON_VALUE_TYPE_ID)?;
+    let function_origin = origins
+        .iter()
+        .find(|origin| {
+            origin.identity() == DefinitionIdentity::Function(STD_JSON_ENCODE_FUNCTION_ID)
+        })
+        .ok_or(StandardLibraryCheckError::PresenterMissingFunctionOrigin)?
+        .source();
+    let declaration_bytes = &stored_unit.content().as_bytes()
+        [function_origin.byte_start() as usize..function_origin.byte_end() as usize];
+    let declaration_content_hash = function_declaration_digest(declaration_bytes)
+        .map_err(|source| StandardLibraryCheckError::Digest { source })?;
+    let function = catalogue
+        .function_by_id(STD_JSON_ENCODE_FUNCTION_ID)
+        .ok_or(StandardLibraryCheckError::PresenterMissingFunction)?;
+    let payload = JsonEncodePlan::new(STD_JSON_ENCODE_PARAMETER_ID, STD_JSON_VALUE_TYPE_ID)
+        .expect("fixed JSON presenter identities are valid")
+        .encode()
+        .expect("the fixed JSON presenter payload is within the format limit");
+    let artifact_hash = artifact_payload_digest(&payload)
+        .map_err(|source| StandardLibraryCheckError::Digest { source })?;
+    let artifact = ExecutableArtifact::new(
+        ExecutableArtifactKind::Server,
+        server_json_encode::FORMAT_IDENTITY,
+        server_json_encode::FORMAT_VERSION,
+        payload,
+        artifact_hash,
+    )
+    .map_err(|source| StandardLibraryCheckError::Revision { source })?;
+    let semantic_hash = function_semantic_digest_with_version(
+        FunctionSemanticHashVersion::Version2,
+        function,
+        server_json_encode::LANGUAGE_VERSION_IDENTITY,
+        &artifact,
+        &[],
+        &[],
+    )
+    .map_err(|source| StandardLibraryCheckError::Digest { source })?;
+    let revision = FunctionRevisionRecord::new(
+        STD_JSON_ENCODE_FUNCTION_ID,
+        STD_JSON_ENCODE_FUNCTION_REVISION_ID,
+        u64::from(server_json_encode::FORMAT_VERSION),
+        function_origin,
+        declaration_content_hash,
+        semantic_hash,
+        server_json_encode::LANGUAGE_VERSION_IDENTITY,
+        artifact,
+    )
+    .map_err(|source| StandardLibraryCheckError::Revision { source })?
+    .with_semantic_hash_version(FunctionSemanticHashVersion::Version2);
+    StandardExecutable::new(STD_JSON_ENCODE_FUNCTION_ID, revision, Vec::new())
+        .map_err(|source| StandardLibraryCheckError::Revision { source })
+}
+
+fn reconcile_standard_json_executable(
+    stored: &StandardExecutable,
+    declaration: &ServerFunctionDeclaration,
+    catalogue: &CatalogueSnapshot,
+    origins: &[DefinitionOrigin],
+    stored_unit: &StoredSourceUnit,
+) -> Result<(), StandardLibraryCheckError> {
+    let expected = expected_standard_json_executable(declaration, catalogue, origins, stored_unit)?;
+    if stored != &expected {
+        return Err(StandardLibraryCheckError::ExecutableMismatch);
+    }
+    Ok(())
+}
 
 /// Scopes the V3 catalogue to the declarations retained in `std/types.orna`:
 /// the standard schemas, value types, and type bindings only.
@@ -1343,7 +1443,25 @@ fn reconcile_standard_json_unit(
 
     check_standard_json_encode(json_function, catalogue, origins, STD_JSON_VALUE_TYPE_ID)?;
 
-    let mut origins_by_identity = origin_map(origins)?;
+    let mut origins_by_identity = HashMap::with_capacity(origins.len());
+    for origin in origins {
+        if !matches!(
+            origin.identity(),
+            DefinitionIdentity::Schema(_)
+                | DefinitionIdentity::ValueType(_)
+                | DefinitionIdentity::TypeBinding(_)
+                | DefinitionIdentity::Function(_)
+                | DefinitionIdentity::Parameter { .. }
+        ) {
+            return Err(StandardLibraryCheckError::SourceMismatch);
+        }
+        if origins_by_identity
+            .insert(origin.identity(), origin.source())
+            .is_some()
+        {
+            return Err(StandardLibraryCheckError::SourceMismatch);
+        }
+    }
     for (identity, span) in [
         (
             DefinitionIdentity::Schema(STD_JSON_SCHEMA_ID),
@@ -8042,8 +8160,9 @@ mod tests {
         check_standard_library_source_v2_parts, check_standard_library_source_v3_parts,
         check_standard_library_source_v4_parts, check_standard_parameter_echo,
         check_standard_terminal_present_table,
-        checked_standard_library_with_contract_overrides_for_test, location,
-        reconcile_standard_executable, reconcile_standard_source, sort_standard_type_uses,
+        checked_standard_library_with_contract_overrides_for_test,
+        expected_standard_json_executable, location, reconcile_standard_executable,
+        reconcile_standard_json_executable, reconcile_standard_source, sort_standard_type_uses,
         supports_record_value_scalar, unquoted_prelude_name, unquoted_semantic_name,
         validate_client_capability,
     };
@@ -17170,6 +17289,61 @@ mod tests {
         assert_eq!(checked.function_id(), STD_JSON_ENCODE_FUNCTION_ID);
         assert_eq!(checked.parameter_id(), STD_JSON_ENCODE_PARAMETER_ID);
         assert_eq!(checked.revision_id(), STD_JSON_ENCODE_FUNCTION_REVISION_ID);
+    }
+    #[test]
+    fn rejects_a_tampered_json_executable_record() {
+        let declaration = presenter_declaration(STD_JSON_ENCODE_SOURCE);
+        let catalogue = json_encode_catalogue(true, true, true, true, false);
+        let origins = presenter_origins(
+            STD_JSON_ENCODE_SOURCE,
+            STD_JSON_ENCODE_FUNCTION_ID,
+            STD_JSON_ENCODE_PARAMETER_ID,
+        );
+        let stored_unit = stored_v2_unit(
+            STD_PRESENT_SOURCE_UNIT_ID,
+            0,
+            "std/present.orna",
+            STD_JSON_ENCODE_SOURCE,
+        );
+        let expected = expected_standard_json_executable(
+            &declaration,
+            &catalogue,
+            &origins,
+            &stored_unit,
+        )
+        .expect("the canonical JSON executable is valid");
+        let revision = expected.revision();
+        let tampered_revision = FunctionRevisionRecord::new(
+            revision.function(),
+            revision.id(),
+            revision.revision_number() + 1,
+            revision.declaration_origin(),
+            revision.declaration_content_hash(),
+            revision.semantic_hash(),
+            revision.language_version(),
+            revision.artifact().clone(),
+        )
+        .expect("the tampered revision remains structurally valid")
+        .with_semantic_hash_version(revision.semantic_hash_version());
+        let tampered = StandardExecutable::new(
+            expected.function(),
+            tampered_revision,
+            expected.references().to_vec(),
+        )
+        .expect("the tampered executable remains structurally valid");
+
+        let error = reconcile_standard_json_executable(
+            &tampered,
+            &declaration,
+            &catalogue,
+            &origins,
+            &stored_unit,
+        )
+        .expect_err("the checker must reject a tampered JSON executable");
+        assert!(matches!(
+            error,
+            StandardLibraryCheckError::ExecutableMismatch
+        ));
     }
 
     #[test]
