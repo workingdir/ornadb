@@ -64,6 +64,12 @@ separate release action.
 - [x] Add the installed `orna source diff` semantic diff surface
   (identity-keyed add/drop/rename report, no apply, live proof;
   work ADR 0066).
+- [ ] Implement the ordinary CLIENT Inspector after the canonical
+  RESOURCE, UI runtime-contract, and CLIENT-to-SERVER invocation contracts
+  become accepted executable specifications.
+- [ ] Implement reflective JSON-RPC and MCP gateway programs after the
+  canonical Exposure and Service value contracts become accepted executable
+  specifications.
 
 ## Language tooling
 
