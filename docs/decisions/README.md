@@ -145,3 +145,5 @@ source-of-truth or authority rules.
   [CLIENT USER State Lifecycle](0070-client-user-state-lifecycle.md)
 * **work ADR 0071:**
   [CLIENT Resource Lifecycle](0071-client-resource-lifecycle.md)
+* **work ADR 0072:**
+  [Sealed System Identity Calls](0072-sealed-system-identity-calls.md)
