@@ -6339,21 +6339,37 @@ impl<'a> CandidateBuilder<'a> {
                 return_expression,
                 states,
             } => {
-                let function_id = self.identities.function(validated.id)?;
                 let expression = self.client_expression_node(return_expression)?;
-                let slots = states
-                    .iter()
-                    .map(|state| self.client_state_slot(state, function_id))
-                    .collect::<Result<Vec<_>, PrepareError>>()?;
-                let plan = StateClientPlan::new(expression, slots);
-                let payload = plan.encode().map_err(|_| PrepareError::InvalidCheckedBundle {
-                    reason: "checked CLIENT state plan exceeds client-plan limits",
-                })?;
-                (
-                    CLIENT_PLAN_STATE_VERSION,
-                    payload,
-                    InnerClientPlan::State(plan),
-                )
+                if states.is_empty() {
+                    let plan = ExpressionClientPlan::new(expression);
+                    let payload =
+                        plan.encode()
+                            .map_err(|_| PrepareError::InvalidCheckedBundle {
+                                reason: "checked CLIENT expression exceeds client-plan limits",
+                            })?;
+                    (
+                        CLIENT_PLAN_EXPRESSION_VERSION,
+                        payload,
+                        InnerClientPlan::Expression(plan),
+                    )
+                } else {
+                    let function_id = self.identities.function(validated.id)?;
+                    let slots = states
+                        .iter()
+                        .map(|state| self.client_state_slot(state, function_id))
+                        .collect::<Result<Vec<_>, PrepareError>>()?;
+                    let plan = StateClientPlan::new(expression, slots);
+                    let payload =
+                        plan.encode()
+                            .map_err(|_| PrepareError::InvalidCheckedBundle {
+                                reason: "checked CLIENT state plan exceeds client-plan limits",
+                            })?;
+                    (
+                        CLIENT_PLAN_STATE_VERSION,
+                        payload,
+                        InnerClientPlan::State(plan),
+                    )
+                }
             }
             ValidatedClientBody::ExternalContract(identity) => {
                 let plan = ExpressionClientPlan::new(ClientExpressionNode::ExternalContract {
@@ -12609,6 +12625,30 @@ mod tests {
         assert!(!standard_upgrade_reuse_is_current_only(
             FunctionSemanticHashVersion::Version2
         ));
+    }
+
+    #[test]
+    fn empty_client_state_block_uses_expression_plan_format() {
+        let verified = invocation_carrier_standard();
+        let standard = check_standard_library_source(&verified).unwrap();
+        let active = empty_standard_application_active(&verified);
+        let context =
+            StandardApplicationCheckContext::try_new(active.catalogue(), &standard).unwrap();
+        let source = "CREATE SCHEMA examples; \
+            CREATE CLIENT FUNCTION examples.ready() RETURNS BOOLEAN IS \
+            BEGIN RETURN TRUE; END;";
+        let bundle = SourceBundle::new([SourceUnit::new("application.orna", source)]).unwrap();
+        let report = check_standard_application(&bundle, &context);
+        assert!(report.diagnostics().is_empty(), "{:?}", report.diagnostics());
+
+        let prepared = prepare_standard_application(&report, active.pair(), &active).unwrap();
+        let revision = &prepared.new_function_revisions()[0];
+        assert_eq!(revision.artifact().version(), CLIENT_PLAN_EXPRESSION_VERSION);
+        let plan = ExpressionClientPlan::decode(revision.artifact().payload()).unwrap();
+        assert_eq!(
+            plan.expression(),
+            &ClientExpressionNode::Boolean { value: true },
+        );
     }
 
     #[test]
