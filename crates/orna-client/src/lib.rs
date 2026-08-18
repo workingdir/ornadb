@@ -3106,6 +3106,41 @@ mod tests {
     }
 
     #[test]
+    fn client_resource_rejects_completion_with_mismatched_request_key() {
+        let (active, function, pair, _) = version_one_active(true);
+        let key = super::ClientResourceKey::new(
+            InvocationTarget::new(function, pair),
+            PrincipalId::from_bytes([0x7a; 16]),
+            Sha256Digest::from_bytes([0x11; 32]),
+            Sha256Digest::from_bytes([0x22; 32]),
+        );
+        let wrong_key = super::ClientResourceKey::new(
+            key.target(),
+            key.principal(),
+            Sha256Digest::from_bytes([0xaa; 32]),
+            key.invalidation_token(),
+        );
+        let mut resource =
+            super::ClientResource::new(key, ResolvedType::Scalar(StandardScalar::Boolean));
+        let generation = resource.begin_loading().unwrap();
+        let completion = super::ClientResourceCompletion::Ready {
+            key: wrong_key,
+            generation,
+            value: RuntimeValue::Boolean(true),
+        };
+        let before = resource.clone();
+
+        assert_eq!(
+            resource.apply_completion(&active, completion),
+            Err(super::ClientResourceError::RequestKeyMismatch {
+                expected: key,
+                actual: wrong_key,
+            })
+        );
+        assert_eq!(resource, before);
+    }
+
+    #[test]
     fn client_resource_ready_value_must_match_declared_type() {
         let (active, function, pair, _) = version_one_active(true);
         let key = super::ClientResourceKey::new(
