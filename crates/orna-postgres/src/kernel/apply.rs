@@ -1632,8 +1632,9 @@ async fn persist_standard_library(
 
 /// Fail-closed checks for the executable facts of one verified standard
 /// snapshot. A version-1 snapshot must carry no executable; a version-2
-/// snapshot must carry exactly one executable whose catalogue function,
-/// current revision, artifact domain, and reference evidence agree.
+/// snapshot must carry one executable per catalogue function. Each
+/// executable's catalogue function, current revision, artifact domain, and
+/// reference evidence must agree.
 fn validate_standard_executable_facts(
     digest_version: StandardLibraryDigestVersion,
     catalogue: &CatalogueSnapshot,
@@ -1648,53 +1649,60 @@ fn validate_standard_executable_facts(
             }
         }
         StandardLibraryDigestVersion::Version2 => {
-            if executables.len() != 1 {
+            if executables.is_empty() || executables.len() != catalogue.functions().len() {
                 return Err(invariant(
-                    "version-two standard library snapshot must carry exactly one executable",
+                    "version-two standard library snapshot must carry one executable per catalogue function",
                 ));
             }
-            let executable = &executables[0];
-            let function = catalogue
-                .function_by_id(executable.function())
-                .ok_or_else(|| {
-                    invariant("standard executable function must exist in the standard catalogue")
-                })?;
-            if function.current_revision() != executable.revision().id() {
-                return Err(invariant(
-                    "standard catalogue function and executable current revision must agree",
-                ));
-            }
-            if executable.revision().function() != executable.function() {
-                return Err(invariant(
-                    "standard executable revision function must agree with its executable",
-                ));
-            }
-            let domain_matches = match function.domain() {
-                FunctionDomain::Server => matches!(
-                    executable.revision().artifact().kind(),
-                    ExecutableArtifactKind::Server
-                ),
-                FunctionDomain::Client => matches!(
-                    executable.revision().artifact().kind(),
-                    ExecutableArtifactKind::Client
-                ),
-            };
-            if !domain_matches {
-                return Err(invariant(
-                    "standard executable artifact kind must match its function domain",
-                ));
-            }
-            for (index, reference) in executable.references().iter().enumerate() {
-                let ordinal = u32::try_from(index).map_err(|_| {
-                    invariant("standard executable reference ordinal must fit the u32 range")
-                })?;
-                if reference.ordinal() != ordinal
-                    || reference.source_function() != executable.function()
-                    || reference.source_revision() != executable.revision().id()
-                {
+            let mut function_ids = HashSet::with_capacity(executables.len());
+            for executable in executables {
+                if !function_ids.insert(executable.function()) {
                     return Err(invariant(
-                        "standard executable references must name the exact function revision with contiguous zero-based ordinals",
+                        "version-two standard library snapshot must carry each catalogue function exactly once",
                     ));
+                }
+                let function = catalogue
+                    .function_by_id(executable.function())
+                    .ok_or_else(|| {
+                        invariant("standard executable function must exist in the standard catalogue")
+                    })?;
+                if function.current_revision() != executable.revision().id() {
+                    return Err(invariant(
+                        "standard catalogue function and executable current revision must agree",
+                    ));
+                }
+                if executable.revision().function() != executable.function() {
+                    return Err(invariant(
+                        "standard executable revision function must agree with its executable",
+                    ));
+                }
+                let domain_matches = match function.domain() {
+                    FunctionDomain::Server => matches!(
+                        executable.revision().artifact().kind(),
+                        ExecutableArtifactKind::Server
+                    ),
+                    FunctionDomain::Client => matches!(
+                        executable.revision().artifact().kind(),
+                        ExecutableArtifactKind::Client
+                    ),
+                };
+                if !domain_matches {
+                    return Err(invariant(
+                        "standard executable artifact kind must match its function domain",
+                    ));
+                }
+                for (index, reference) in executable.references().iter().enumerate() {
+                    let ordinal = u32::try_from(index).map_err(|_| {
+                        invariant("standard executable reference ordinal must fit the u32 range")
+                    })?;
+                    if reference.ordinal() != ordinal
+                        || reference.source_function() != executable.function()
+                        || reference.source_revision() != executable.revision().id()
+                    {
+                        return Err(invariant(
+                            "standard executable references must name the exact function revision with contiguous zero-based ordinals",
+                        ));
+                    }
                 }
             }
         }
@@ -1708,9 +1716,10 @@ fn validate_standard_executable_facts(
 }
 
 /// Persists the complete V2 standard executable facts: the immutable function
-/// revision, its server artifact, the catalogue function with its resolved
-/// signature, the ordered parameter records, and the ordered reference
-/// sequence. Every row is written under the selected standard revision.
+/// revisions, their server or client artifacts, the catalogue functions with
+/// their resolved signatures, the ordered parameter records, and the ordered
+/// reference sequences. Every row is written under the selected standard
+/// revision.
 async fn persist_standard_executable_facts(
     transaction: &Transaction<'_>,
     standard: &VerifiedStandardLibrarySnapshot,
@@ -1720,8 +1729,20 @@ async fn persist_standard_executable_facts(
         standard.catalogue(),
         standard.executables(),
     )?;
+    for executable in standard.executables() {
+        persist_standard_executable_fact(transaction, standard, executable).await?;
+    }
+    Ok(())
+}
+
+/// Persists one standard executable and all facts owned by its function
+/// revision.
+async fn persist_standard_executable_fact(
+    transaction: &Transaction<'_>,
+    standard: &VerifiedStandardLibrarySnapshot,
+    executable: &StandardExecutable,
+) -> Result<(), PostgresKernelError> {
     let catalogue = standard.catalogue();
-    let executable = &standard.executables()[0];
     let function = catalogue
         .function_by_id(executable.function())
         .ok_or_else(|| {
@@ -2041,23 +2062,24 @@ async fn persist_target_authorities(
             standard.catalogue(),
             standard.executables(),
         )?;
-        let executable = &standard.executables()[0];
-        transaction
-            .execute(
-                "INSERT INTO _orna_kernel.invocation_target_authorities
-                    (catalogue_revision_id, function_id, target_class,
-                     function_revision_id, standard_library_revision_id)
-                 VALUES ($1, $2, 'standard', $3, $4)",
-                &[
-                    &bytes(catalogue_revision),
-                    &bytes(executable.function()),
-                    &bytes(executable.revision().id()),
-                    &bytes(standard.revision()),
-                ],
-            )
-            .await
-            .map_err(PostgresKernelError::Database)?;
-        expected_authority_count += 1;
+        for executable in standard.executables() {
+            transaction
+                .execute(
+                    "INSERT INTO _orna_kernel.invocation_target_authorities
+                        (catalogue_revision_id, function_id, target_class,
+                         function_revision_id, standard_library_revision_id)
+                     VALUES ($1, $2, 'standard', $3, $4)",
+                    &[
+                        &bytes(catalogue_revision),
+                        &bytes(executable.function()),
+                        &bytes(executable.revision().id()),
+                        &bytes(standard.revision()),
+                    ],
+                )
+                .await
+                .map_err(PostgresKernelError::Database)?;
+            expected_authority_count += 1;
+        }
     }
     let rows = transaction
         .query(
@@ -4464,6 +4486,16 @@ mod tests {
 
         let executable = standard_executable_fixture();
         let function = executable_function_fixture(executable.revision().id());
+        let second_function_id = FunctionId::from_bytes([0x20; 16]);
+        let second_executable = standard_executable_fixture_with_function(
+            second_function_id,
+            FunctionRevisionId::from_bytes([0x20; 16]),
+        );
+        let second_function = executable_function_fixture_with_id(
+            second_function_id,
+            second_executable.revision().id(),
+            QualifiedSemanticName::new(["std", "invoke", "other"]).unwrap(),
+        );
         let catalogue = CatalogueSnapshot::new_with_functions(
             CatalogueRevisionId::from_bytes([0x30; 16]),
             vec![SchemaDefinition::new(
@@ -4471,7 +4503,7 @@ mod tests {
                 QualifiedSemanticName::new(["std", "invoke"]).unwrap(),
             )],
             Vec::new(),
-            vec![function.clone()],
+            vec![function.clone(), second_function],
         )
         .unwrap();
 
@@ -4505,6 +4537,14 @@ mod tests {
                 &catalogue,
                 std::slice::from_ref(&executable),
             )
+            .is_err()
+        );
+        assert!(
+            validate_standard_executable_facts(
+                StandardLibraryDigestVersion::Version2,
+                &catalogue,
+                &[executable.clone(), second_executable.clone()],
+            )
             .is_ok()
         );
 
@@ -4513,7 +4553,7 @@ mod tests {
         let error = validate_standard_executable_facts(
             StandardLibraryDigestVersion::Version2,
             &catalogue,
-            std::slice::from_ref(&wrong_revision),
+            &[wrong_revision, second_executable],
         )
         .unwrap_err();
         assert!(matches!(
@@ -4687,13 +4727,22 @@ mod tests {
     }
 
     fn standard_executable_fixture() -> StandardExecutable {
-        standard_executable_fixture_with_revision(FunctionRevisionId::from_bytes([0x10; 16]))
+        standard_executable_fixture_with_function(
+            FunctionId::from_bytes([0x10; 16]),
+            FunctionRevisionId::from_bytes([0x10; 16]),
+        )
     }
 
     fn standard_executable_fixture_with_revision(
         revision_id: FunctionRevisionId,
     ) -> StandardExecutable {
-        let function = FunctionId::from_bytes([0x10; 16]);
+        standard_executable_fixture_with_function(FunctionId::from_bytes([0x10; 16]), revision_id)
+    }
+
+    fn standard_executable_fixture_with_function(
+        function: FunctionId,
+        revision_id: FunctionRevisionId,
+    ) -> StandardExecutable {
         let artifact = ExecutableArtifact::new(
             ExecutableArtifactKind::Server,
             "orna.server-parameter-echo",
@@ -4717,9 +4766,21 @@ mod tests {
     }
 
     fn executable_function_fixture(current_revision: FunctionRevisionId) -> FunctionDefinition {
-        FunctionDefinition::new(
+        executable_function_fixture_with_id(
             FunctionId::from_bytes([0x10; 16]),
+            current_revision,
             QualifiedSemanticName::new(["std", "invoke", "echo"]).unwrap(),
+        )
+    }
+
+    fn executable_function_fixture_with_id(
+        function: FunctionId,
+        current_revision: FunctionRevisionId,
+        name: QualifiedSemanticName,
+    ) -> FunctionDefinition {
+        FunctionDefinition::new(
+            function,
+            name,
             FunctionDomain::Server,
             Vec::new(),
             FunctionReturn::Single(ResolvedType::scalar(StandardScalar::Integer)),
