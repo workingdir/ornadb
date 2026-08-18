@@ -87,14 +87,13 @@ the renderer gains the selected-family parameter. A comment marks the seam.
 
 ## Deferred (documented, not invented)
 
-- `std.ui.UI` as a sink offer and any contract-aware selection. The value type
-  and its opaque codec exist (`orna.std/4`, ADR 0062), but no runtime offers any
-  UI contract because the parser has no `RUNTIME CONTRACT` clause and CLIENT
-  bodies accept only a Boolean literal (ADR 0062:176-181). The server's existing
-  `ORNA0701` no-path-to-sink failure remains the correct behaviour for a UI
-  result, so `client_sink_offers` is not changed by this slice.
-- Transitive-contract validation for a UI sink (spec section 8), pending the
-  contract syntax.
+- `std.ui.UI` as a sink offer and contract-aware selection remain
+  deferred. The value type and the `CREATE EXTERNAL CLIENT FUNCTION ...
+  RUNTIME CONTRACT` syntax and closed expression path now exist (work ADRs
+  0062 and 0068), but this slice does not define a graphical runtime offer or
+  UI contract.
+- Transitive-contract validation for a UI sink remains pending the accepted
+  graphical runtime contract and its compatibility rules.
 - `RuntimeOfferAccepted`/`Rejected` events: `InvocationEventBody` has no such
   variants and no emitter exists. Selection is a client decision; the visible
   surface for this slice is `--explain` naming the selected family.
