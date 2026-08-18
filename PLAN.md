@@ -309,6 +309,13 @@ These are specification blockers, not missing implementation effort:
   `CURRENT PROPOSAL`; Exposure and Service details are not executable.
 - Work ADR 0019 requires a clean Debian 12 amd64, network-disabled host proof,
   which is not available on the current Fedora host.
+- The checked-in `debian-clean-machine.sh` scenario currently runs its proof
+  inside Docker (`crates/orna-system-tests/scenarios/debian-clean-machine.sh:22-27`).
+  That is useful isolation evidence but does not satisfy the accepted host
+  proof. Obtain a fresh Debian 12 amd64 host or VM runner with networking
+  disabled, run the same package and lifecycle matrix without Docker, archive
+  machine/package/manifest/process/trace evidence, and update the CI proof path
+  before restoring the checked item in `TODO.md`.
 - The same-major PostgreSQL upgrade remains intentionally deferred until a
   real successor release declares a predecessor edge.
 
