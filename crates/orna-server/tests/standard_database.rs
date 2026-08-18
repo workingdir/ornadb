@@ -2156,11 +2156,18 @@ async fn proves_v5_json_value_and_encode_through_installed_sealed_invoke() -> Te
         let standard_revision = standard.revision();
         let security = SecuritySnapshot::new_with_function_targets_and_local_peer_credentials(
             pair,
-            vec![SecurityFunctionTarget::verified_standard(
-                STD_JSON_ENCODE_FUNCTION_ID,
-                standard_revision,
-                STD_JSON_ENCODE_FUNCTION_REVISION_ID,
-            )],
+            vec![
+                SecurityFunctionTarget::verified_standard(
+                    STD_INVOKE_ECHO_FUNCTION_ID,
+                    standard_revision,
+                    STD_INVOKE_ECHO_FUNCTION_REVISION_ID,
+                ),
+                SecurityFunctionTarget::verified_standard(
+                    STD_JSON_ENCODE_FUNCTION_ID,
+                    standard_revision,
+                    STD_JSON_ENCODE_FUNCTION_REVISION_ID,
+                ),
+            ],
             vec![Principal::new(
                 RAW_CLIENT_USER,
                 PrincipalKind::User,
