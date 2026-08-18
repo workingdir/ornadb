@@ -448,7 +448,9 @@ dependencies = [
  "orna-artifact",
  "orna-compiler",
  "orna-core",
+ "orna-protocol",
  "orna-standard",
+ "sha2",
 ]
 
 [[package]]
