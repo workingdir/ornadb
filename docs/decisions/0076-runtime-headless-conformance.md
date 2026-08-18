@@ -86,8 +86,9 @@ production `OrnaValueRefV1` choice between handles and encoded slices.
 The fixture allocates non-zero handles monotonically within one runtime. Every
 operation checks the handle provenance and current lifecycle state. Destroying
 a surface invalidates its node, action, model, and request handles. Runtime
-shutdown invalidates all remaining handles. A stale or foreign handle returns a
-stable `NOT_FOUND` or `INVALID_ARGUMENT` status and cannot mutate state.
+shutdown invalidates all remaining handles. A zero handle or a handle from a
+different runtime returns `INVALID_ARGUMENT`. A well-formed handle for a
+destroyed object returns `NOT_FOUND`. Neither result can mutate state.
 
 The lifecycle is:
 
@@ -151,8 +152,9 @@ payload tags and rejects a payload with the wrong kind or provenance.
 
 Each model request has one terminal outcome. A completion, failure, or
 cancellation wins the request race exactly once. Cancellation wins when it is
-observed before a terminal completion. A late row result or second terminal
-outcome returns `CANCELLED` or `NOT_FOUND` and cannot call the client callback.
+observed before a terminal completion. A late result for a cancelled request
+returns `CANCELLED`; a result for a request already removed by teardown
+returns `NOT_FOUND`. Neither path calls the client callback a second time.
 
 ### Shutdown and failure
 
