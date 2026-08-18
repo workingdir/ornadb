@@ -12,13 +12,14 @@ use orna_core::{
     FunctionId, FunctionRevisionId, ParameterId, PrincipalId, StateSlotId, TypeId,
     canonical_hash::{CanonicalHashError, catalogue_digest_with_context},
     catalogue::{
-        FunctionDomain, FunctionReturn, FunctionSecurity, FunctionVolatility, ValueTypeKind,
+        FunctionDomain, FunctionReturn, FunctionSecurity, FunctionVolatility, TypeDefinition,
+        ValueTypeKind,
     },
     revision::{
         ActiveDatabaseRevision, DefinitionReferenceKind, DefinitionReferenceTarget,
         FunctionSemanticHashVersion, RevisionPair, Sha256Digest,
     },
-    security::{AuthorisedInvocation, InvocationTarget},
+    security::{AuthorisedInvocation, InvocationTarget, TargetClass},
     state::{
         UserStateCell, UserStateChange, UserStateKeyWithoutPrincipal, UserStateWriteOutcome,
         UserStateWriteResult,
@@ -178,8 +179,8 @@ impl ClientResourceFailure {
         &self.code
     }
 }
-
 /// Errors that leave a CLIENT resource unchanged.
+#[non_exhaustive]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ClientResourceError {
     /// The generation counter cannot advance safely.
@@ -195,6 +196,18 @@ pub enum ClientResourceError {
     InvalidTransition {
         /// The current resource status.
         status: ClientResourceStatus,
+    },
+    /// The completion was evaluated against a different active revision pair.
+    RevisionMismatch {
+        /// The revision pair pinned by the resource key.
+        expected: RevisionPair,
+        /// The revision pair supplied for publication.
+        actual: RevisionPair,
+    },
+    /// The complete invocation target is not present in this active revision.
+    TargetMismatch {
+        /// The target pinned by the resource key.
+        expected: InvocationTarget,
     },
     /// A failure code is empty or contains a forbidden NUL byte.
     InvalidFailureCode,
@@ -215,6 +228,17 @@ impl fmt::Display for ClientResourceError {
             Self::InvalidTransition { status } => {
                 write!(formatter, "CLIENT resource operation is invalid in {status:?} state")
             }
+            Self::RevisionMismatch { expected, actual } => write!(
+                formatter,
+                "CLIENT resource completion uses revision {:?}, expected {:?}",
+                actual,
+                expected,
+            ),
+            Self::TargetMismatch { expected } => write!(
+                formatter,
+                "CLIENT resource target {:?} is not present in the active revision",
+                expected,
+            ),
             Self::InvalidFailureCode => {
                 formatter.write_str("CLIENT resource failure code must be non-empty and contain no NUL")
             }
@@ -295,6 +319,17 @@ impl ClientResource {
         value: RuntimeValue,
     ) -> Result<(), ClientResourceError> {
         self.require_loading(generation)?;
+        if active.pair() != self.key.target().revision() {
+            return Err(ClientResourceError::RevisionMismatch {
+                expected: self.key.target().revision(),
+                actual: active.pair(),
+            });
+        }
+        if !active_supports_invocation_target(active, self.key.target()) {
+            return Err(ClientResourceError::TargetMismatch {
+                expected: self.key.target(),
+            });
+        }
         if !runtime_value_matches(active, &value, self.expected_type) {
             return Err(ClientResourceError::TypeMismatch);
         }
@@ -1967,12 +2002,15 @@ fn runtime_value_matches(
     expected: ResolvedType,
 ) -> bool {
     if let RuntimeValue::Null(null) = value {
-        return null.resolved_type() == expected;
+        return null.resolved_type() == expected && active_type_is_known(active, expected);
     }
     let scalar_matches = |scalar| match (scalar, value) {
         (StandardScalar::Boolean, RuntimeValue::Boolean(_))
         | (StandardScalar::Integer, RuntimeValue::Integer(_))
-        | (StandardScalar::CharacterLargeObject, RuntimeValue::Text(_)) => true,
+        | (StandardScalar::BigInt, RuntimeValue::BigInt(_))
+        | (StandardScalar::Float, RuntimeValue::Float(_))
+        | (StandardScalar::CharacterLargeObject, RuntimeValue::Text(_))
+        | (StandardScalar::BinaryLargeObject, RuntimeValue::Bytes(_)) => true,
         _ => false,
     };
     match expected {
@@ -1991,19 +2029,138 @@ fn runtime_value_matches(
             match definition.representation_contract() {
                 "orna.kernel.value.boolean@1" => scalar_matches(StandardScalar::Boolean),
                 "orna.kernel.value.integer@1" => scalar_matches(StandardScalar::Integer),
+                "orna.kernel.value.bigint@1" => scalar_matches(StandardScalar::BigInt),
+                "orna.kernel.value.float@1" => scalar_matches(StandardScalar::Float),
                 "orna.kernel.value.character-large-object@1" => {
                     scalar_matches(StandardScalar::CharacterLargeObject)
+                }
+                "orna.kernel.value.binary-large-object@1" => {
+                    scalar_matches(StandardScalar::BinaryLargeObject)
                 }
                 _ => false,
             }
         }
-        ResolvedType::Named(type_id) => {
-            matches!(value, RuntimeValue::Record(record) if record.record_type() == type_id)
-        }
+        ResolvedType::Named(type_id) => match value {
+            RuntimeValue::Record(record) => {
+                record.record_type() == type_id && active_has_record_type(active, type_id)
+            }
+            RuntimeValue::Enum(enum_value) => {
+                enum_value.enum_type() == type_id
+                    && active_enum_label_is_valid(active, type_id, enum_value.label())
+            }
+            _ => false,
+        },
         ResolvedType::Reference { target } => {
             matches!(value, RuntimeValue::Reference { target: actual, .. } if *actual == target)
+                && active_has_object_type(active, target)
         }
     }
+}
+
+fn active_type_is_known(active: &ActiveDatabaseRevision, resolved: ResolvedType) -> bool {
+    match resolved {
+        ResolvedType::Scalar(_) => true,
+        ResolvedType::Value(type_id) => active_has_value_type(active, type_id),
+        ResolvedType::Named(type_id) => {
+            active_has_record_type(active, type_id) || active_has_enum_type(active, type_id)
+        }
+        ResolvedType::Reference { target } => active_has_object_type(active, target),
+    }
+}
+
+fn active_type_matches(
+    active: &ActiveDatabaseRevision,
+    type_id: TypeId,
+    predicate: impl for<'catalogue> Fn(TypeDefinition<'catalogue>) -> bool,
+) -> bool {
+    let application = active.catalogue().type_definition_by_id(type_id);
+    let standard = active
+        .catalogue_hash_context()
+        .standard()
+        .and_then(|snapshot| snapshot.catalogue().type_definition_by_id(type_id));
+    match (application, standard) {
+        (Some(_), Some(_)) => false,
+        (Some(definition), None) | (None, Some(definition)) => predicate(definition),
+        (None, None) => false,
+    }
+}
+
+fn active_supports_invocation_target(
+    active: &ActiveDatabaseRevision,
+    target: InvocationTarget,
+) -> bool {
+    let application_function = active.catalogue().function_by_id(target.function());
+    let standard_function = active
+        .catalogue_hash_context()
+        .standard()
+        .and_then(|standard| standard.catalogue().function_by_id(target.function()));
+    match target.class() {
+        None | Some(TargetClass::Application) => {
+            application_function.is_some() && standard_function.is_none()
+        }
+        Some(TargetClass::VerifiedStandard) => {
+            let (Some(standard_revision), Some(executable_revision)) =
+                (target.standard_revision(), target.executable_revision())
+            else {
+                return false;
+            };
+            let Some(standard) = active.catalogue_hash_context().standard() else {
+                return false;
+            };
+            application_function.is_none()
+                && standard.revision() == standard_revision
+                && standard_function.is_some()
+                && standard.executables().iter().any(|executable| {
+                    executable.function() == target.function()
+                        && executable.revision().id() == executable_revision
+                })
+        }
+    }
+}
+
+fn active_has_value_type(active: &ActiveDatabaseRevision, type_id: TypeId) -> bool {
+    active
+        .catalogue_hash_context()
+        .standard()
+        .is_some_and(|standard| {
+            standard
+                .catalogue()
+                .type_definition_by_id(type_id)
+                .is_some_and(|definition| definition.as_value().is_some())
+        })
+}
+
+fn active_has_record_type(active: &ActiveDatabaseRevision, type_id: TypeId) -> bool {
+    active_type_matches(active, type_id, |definition| {
+        definition.as_record_value().is_some()
+    })
+}
+
+fn active_has_enum_type(active: &ActiveDatabaseRevision, type_id: TypeId) -> bool {
+    active_type_matches(active, type_id, |definition| definition.as_enum().is_some())
+}
+
+fn active_enum_label_is_valid(
+    active: &ActiveDatabaseRevision,
+    type_id: TypeId,
+    label: &str,
+) -> bool {
+    let application = active.catalogue().enum_type_by_id(type_id);
+    let standard = active
+        .catalogue_hash_context()
+        .standard()
+        .and_then(|snapshot| snapshot.catalogue().enum_type_by_id(type_id));
+    match (application, standard) {
+        (Some(_), Some(_)) => false,
+        (Some(definition), None) | (None, Some(definition)) => {
+            definition.labels().iter().any(|declared| declared == label)
+        }
+        (None, None) => false,
+    }
+}
+
+fn active_has_object_type(active: &ActiveDatabaseRevision, type_id: TypeId) -> bool {
+    active_type_matches(active, type_id, |definition| definition.as_object().is_some())
 }
 
 fn expression_error(
@@ -2463,7 +2620,7 @@ mod tests {
             UserStateCell, UserStateKey, UserStateWriteOutcome, UserStateWriteResult,
         },
         types::{ResolvedType, StandardScalar},
-        value::RuntimeValue,
+        value::{RuntimeFloat, RuntimeValue},
     };
 
     fn authorise(pair: RevisionPair, function: FunctionId) -> AuthorisedInvocation {
@@ -2606,6 +2763,171 @@ mod tests {
         );
         assert_eq!(resource.status(), super::ClientResourceStatus::Loading);
         assert_eq!(resource.value(), None);
+    }
+
+    #[test]
+    fn client_resource_rejects_completion_from_a_different_revision() {
+        let (active, function, _, _) = version_one_active(true);
+        let resource_pair = RevisionPair::new(
+            SourceRevisionId::from_bytes([0x7b; 16]),
+            CatalogueRevisionId::from_bytes([0x7c; 16]),
+        );
+        let key = super::ClientResourceKey::new(
+            InvocationTarget::new(function, resource_pair),
+            PrincipalId::from_bytes([0x7a; 16]),
+            Sha256Digest::from_bytes([0x41; 32]),
+            Sha256Digest::from_bytes([0x42; 32]),
+        );
+        let mut resource = super::ClientResource::new(
+            key,
+            ResolvedType::Scalar(StandardScalar::Boolean),
+        );
+        let generation = resource.begin_loading().unwrap();
+
+        assert_eq!(
+            resource.publish_ready(&active, generation, RuntimeValue::Boolean(true)),
+            Err(super::ClientResourceError::RevisionMismatch {
+                expected: resource_pair,
+                actual: active.pair(),
+            }),
+        );
+        assert_eq!(resource.status(), super::ClientResourceStatus::Loading);
+        assert_eq!(resource.value(), None);
+    }
+
+    #[test]
+    fn client_resource_accepts_supported_scalar_runtime_values() {
+        let (active, function, pair, _) = version_one_active(true);
+        let cases = [
+            (
+                ResolvedType::Scalar(StandardScalar::BigInt),
+                RuntimeValue::BigInt(42),
+            ),
+            (
+                ResolvedType::Scalar(StandardScalar::Float),
+                RuntimeValue::Float(RuntimeFloat::new(4.25).unwrap()),
+            ),
+            (
+                ResolvedType::Scalar(StandardScalar::BinaryLargeObject),
+                RuntimeValue::Bytes(vec![0x01, 0x02]),
+            ),
+        ];
+
+        for (index, (expected, value)) in cases.into_iter().enumerate() {
+            let key = super::ClientResourceKey::new(
+                InvocationTarget::new(function, pair),
+                PrincipalId::from_bytes([0x7a; 16]),
+                Sha256Digest::from_bytes([0x50 + index as u8; 32]),
+                Sha256Digest::from_bytes([0x60 + index as u8; 32]),
+            );
+            let mut resource = super::ClientResource::new(key, expected);
+            let generation = resource.begin_loading().unwrap();
+            resource
+                .publish_ready(&active, generation, value)
+                .expect("supported scalar value should publish");
+            assert_eq!(resource.status(), super::ClientResourceStatus::Ready);
+        }
+    }
+
+    #[test]
+    fn client_resource_accepts_standard_value_contracts() {
+        let cases = [
+            (
+                orna_standard::BIGINT_TYPE_ID,
+                RuntimeValue::BigInt(42),
+            ),
+            (
+                orna_standard::FLOAT_TYPE_ID,
+                RuntimeValue::Float(RuntimeFloat::new(4.25).unwrap()),
+            ),
+            (
+                orna_standard::BINARY_LARGE_OBJECT_TYPE_ID,
+                RuntimeValue::Bytes(vec![0x01, 0x02]),
+            ),
+        ];
+
+        for (index, (type_id, value)) in cases.into_iter().enumerate() {
+            let (active, function, pair, _) = version_two_value_active(type_id, type_id);
+            let key = super::ClientResourceKey::new(
+                InvocationTarget::new(function, pair),
+                PrincipalId::from_bytes([0x7a; 16]),
+                Sha256Digest::from_bytes([0x90 + index as u8; 32]),
+                Sha256Digest::from_bytes([0xa0 + index as u8; 32]),
+            );
+            let mut resource = super::ClientResource::new(key, ResolvedType::Value(type_id));
+            let generation = resource.begin_loading().unwrap();
+
+            resource
+                .publish_ready(&active, generation, value)
+                .expect("standard value contract should publish");
+            assert_eq!(resource.status(), super::ClientResourceStatus::Ready);
+        }
+    }
+
+    #[test]
+    fn client_resource_requires_the_full_verified_standard_target_pin() {
+        let (active, function, pair, _) =
+            version_two_value_active(orna_standard::BOOLEAN_TYPE_ID, orna_standard::BOOLEAN_TYPE_ID);
+        let wrong_target = InvocationTarget::verified_standard(
+            function,
+            pair,
+            orna_core::StandardLibraryRevisionId::from_bytes([0xee; 16]),
+            FunctionRevisionId::from_bytes([0xef; 16]),
+        );
+        let wrong_key = super::ClientResourceKey::new(
+            wrong_target,
+            PrincipalId::from_bytes([0x7a; 16]),
+            Sha256Digest::from_bytes([0xb1; 32]),
+            Sha256Digest::from_bytes([0xb2; 32]),
+        );
+        let mut resource = super::ClientResource::new(
+            wrong_key,
+            ResolvedType::Scalar(StandardScalar::Boolean),
+        );
+        let generation = resource.begin_loading().unwrap();
+
+        assert_eq!(
+            resource.publish_ready(&active, generation, RuntimeValue::Boolean(true)),
+            Err(super::ClientResourceError::TargetMismatch {
+                expected: wrong_target,
+            }),
+        );
+        assert_eq!(resource.status(), super::ClientResourceStatus::Loading);
+    }
+
+    #[test]
+    fn client_resource_validates_named_and_reference_catalogue_membership() {
+        let (active, function, pair, _) = version_one_active(true);
+        let unknown = TypeId::from_bytes([0xee; 16]);
+        let cases = [
+            (
+                ResolvedType::Named(unknown),
+                RuntimeValue::null(ResolvedType::Named(unknown)).unwrap(),
+            ),
+            (
+                ResolvedType::Reference { target: unknown },
+                RuntimeValue::Reference {
+                    target: unknown,
+                    object: orna_core::ObjectId::from_bytes([0xef; 16]),
+                },
+            ),
+        ];
+
+        for (index, (expected, value)) in cases.into_iter().enumerate() {
+            let key = super::ClientResourceKey::new(
+                InvocationTarget::new(function, pair),
+                PrincipalId::from_bytes([0x7a; 16]),
+                Sha256Digest::from_bytes([0x70 + index as u8; 32]),
+                Sha256Digest::from_bytes([0x80 + index as u8; 32]),
+            );
+            let mut resource = super::ClientResource::new(key, expected);
+            let generation = resource.begin_loading().unwrap();
+            assert_eq!(
+                resource.publish_ready(&active, generation, value),
+                Err(super::ClientResourceError::TypeMismatch),
+            );
+            assert_eq!(resource.status(), super::ClientResourceStatus::Loading);
+        }
     }
 
     fn version_four_text_state_plan() -> (
