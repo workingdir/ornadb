@@ -1779,12 +1779,20 @@ pub const STANDARD_LIBRARY_V3_REVISION_ID: StandardLibraryRevisionId =
 /// The fixed ADR 0062 `orna.std/4` standard-library revision identity: `...04`.
 pub const STANDARD_LIBRARY_V4_REVISION_ID: StandardLibraryRevisionId =
     StandardLibraryRevisionId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x04]);
+/// The fixed ADR 0075 `orna.std/5` standard-library revision identity: `...05`.
+pub const STANDARD_LIBRARY_V5_REVISION_ID: StandardLibraryRevisionId =
+    StandardLibraryRevisionId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x05]);
 /// The fixed ADR 0062 `std/ui.orna` source-unit identity: `...05`.
 pub const STD_UI_SOURCE_UNIT_ID: SourceUnitId =
     SourceUnitId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x05]);
+/// The fixed ADR 0075 `std/json.orna` source-unit identity: `...06`.
+pub const STD_JSON_SOURCE_UNIT_ID: SourceUnitId =
+    SourceUnitId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x06]);
 /// The fixed ADR 0062 `std.ui` schema identity: 15 zero bytes then `0x08`.
 pub const STD_UI_SCHEMA_ID: SchemaId =
     SchemaId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x08]);
+/// The fixed ADR 0075 `std.json.Value` kernel representation contract.
+pub const STD_JSON_CONTRACT: &str = "orna.std.value.json@1";
 /// The fixed ADR 0062 `std.ui.UI` value-type identity: `...19`.
 pub const STD_UI_TYPE_ID: TypeId =
     TypeId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x13]);
