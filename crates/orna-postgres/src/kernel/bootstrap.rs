@@ -205,6 +205,12 @@ const MIGRATIONS: &[Migration] = &[
         sql: include_str!("../../migrations/0030_active_roles_system_invocation_authority.sql"),
         data_step: None,
     },
+    Migration {
+        version: 31,
+        name: "standard JSON executable format",
+        sql: include_str!("../../migrations/0031_standard_json_executable_format.sql"),
+        data_step: None,
+    },
 ];
 const MIGRATION_DATA_STEP_SEPARATOR: &[u8] = b"\0orna.kernel.migration-step\0";
 const CANONICAL_HASH_V1_EMPTY_SEED_STEP: &[u8] = b"canonical-hash-v1-empty-seed/v1";
@@ -901,7 +907,7 @@ mod tests {
             validated_migration_registry()
                 .expect("registry is valid")
                 .len(),
-            30
+            31
         );
         assert_eq!(MIGRATIONS[0].version, 1);
         assert_eq!(MIGRATIONS[1].version, 2);
@@ -933,6 +939,7 @@ mod tests {
         assert_eq!(MIGRATIONS[27].version, 28);
         assert_eq!(MIGRATIONS[28].version, 29);
         assert_eq!(MIGRATIONS[29].version, 30);
+        assert_eq!(MIGRATIONS[30].version, 31);
         assert_eq!(MIGRATIONS[5].name, "definition reference write evidence");
         assert_eq!(MIGRATIONS[6].name, "standard catalogue type storage");
         assert_eq!(MIGRATIONS[7].name, "resolved value type storage");
@@ -964,6 +971,7 @@ mod tests {
             MIGRATIONS[29].name,
             "active roles system invocation authority"
         );
+        assert_eq!(MIGRATIONS[30].name, "standard JSON executable format");
         assert!(MIGRATIONS[6].data_step.is_none());
         assert!(MIGRATIONS[7].data_step.is_none());
         assert!(MIGRATIONS[8].data_step.is_none());
@@ -988,6 +996,7 @@ mod tests {
         assert!(MIGRATIONS[27].data_step.is_none());
         assert!(MIGRATIONS[28].data_step.is_none());
         assert!(MIGRATIONS[29].data_step.is_none());
+        assert!(MIGRATIONS[30].data_step.is_none());
     }
 
     #[test]
