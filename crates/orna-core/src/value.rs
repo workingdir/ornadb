@@ -1096,6 +1096,13 @@ enum OpaquePayloadContract {
         /// The exact ASCII magic prefix, including any separating space.
         magic: String,
     },
+    /// `MAGIC <len:u32 be> <canonical JSON UTF-8 bytes>`: a fixed ASCII magic
+    /// prefix, then a big-endian `u32` body length, then exactly that many
+    /// canonical JSON UTF-8 bytes and no trailing bytes.
+    LengthPrefixedCanonicalJson {
+        /// The exact ASCII magic prefix, including any separating space.
+        magic: String,
+    },
     /// `MAGIC <media-type-len:u32 be> <media-type> <len:u32 be> <bytes>`: a
     /// fixed ASCII magic prefix, a big-endian `u32` media-type length, the
     /// non-empty media-type bytes, a big-endian `u32` body length, then
@@ -1175,6 +1182,25 @@ impl OpaqueCodecRegistration {
             semantic_name,
             representation_contract: representation_contract.into(),
             contract: OpaquePayloadContract::MediaTypeFramed { magic },
+        })
+    }
+
+    /// Declares a framed codec whose canonical form is
+    /// `MAGIC <len:u32 be> <canonical JSON UTF-8 bytes>` with exactly that
+    /// many canonical JSON UTF-8 body bytes and no trailing bytes.
+    pub fn length_prefixed_canonical_json(
+        opaque_type: TypeId,
+        semantic_name: QualifiedSemanticName,
+        representation_contract: impl Into<String>,
+        magic: impl Into<String>,
+    ) -> Result<Self, OpaqueCodecRegistryError> {
+        let magic = magic.into();
+        validate_codec_magic(opaque_type, &magic)?;
+        Ok(Self {
+            opaque_type,
+            semantic_name,
+            representation_contract: representation_contract.into(),
+            contract: OpaquePayloadContract::LengthPrefixedCanonicalJson { magic },
         })
     }
 }
@@ -1296,10 +1322,55 @@ fn validate_opaque_payload(
         OpaquePayloadContract::LengthPrefixedUtf8 { magic } => {
             validate_length_prefixed_utf8(opaque_type, magic.as_bytes(), payload)
         }
+        OpaquePayloadContract::LengthPrefixedCanonicalJson { magic } => {
+            validate_length_prefixed_canonical_json(opaque_type, magic.as_bytes(), payload)
+        }
         OpaquePayloadContract::MediaTypeFramed { magic } => {
             validate_media_type_framed(opaque_type, magic.as_bytes(), payload)
         }
     }
+}
+
+/// Validates `MAGIC <len:u32 be> <canonical JSON UTF-8 bytes>` with exactly
+/// `len` canonical JSON body bytes and no trailing bytes.
+fn validate_length_prefixed_canonical_json(
+    opaque_type: TypeId,
+    magic: &[u8],
+    payload: &[u8],
+) -> Result<(), OpaqueValueError> {
+    let prefix_length = magic
+        .len()
+        .checked_add(4)
+        .ok_or(OpaqueValueError::InvalidFrameLength { opaque_type })?;
+    if payload.len() < prefix_length || !payload.starts_with(magic) {
+        return Err(if payload.starts_with(magic) {
+            OpaqueValueError::InvalidFrameLength { opaque_type }
+        } else {
+            OpaqueValueError::InvalidMagic { opaque_type }
+        });
+    }
+    let body_length = u32::from_be_bytes(
+        payload[magic.len()..prefix_length]
+            .try_into()
+            .expect("the length prefix is exactly four bytes"),
+    ) as usize;
+    if body_length > MAX_OPAQUE_CODEC_PAYLOAD_LENGTH
+        || payload.len() != prefix_length + body_length
+    {
+        return Err(OpaqueValueError::InvalidFrameLength { opaque_type });
+    }
+    let body = &payload[prefix_length..];
+    if std::str::from_utf8(body).is_err() {
+        return Err(OpaqueValueError::InvalidUtf8Body { opaque_type });
+    }
+    let value = serde_json::from_slice::<serde_json::Value>(body)
+        .map_err(|_| OpaqueValueError::InvalidJsonBody { opaque_type })?;
+    let canonical_body = serde_json::to_vec(&value)
+        .map_err(|_| OpaqueValueError::InvalidJsonBody { opaque_type })?;
+    if canonical_body != body {
+        return Err(OpaqueValueError::InvalidJsonBody { opaque_type });
+    }
+    Ok(())
 }
 
 /// Validates `MAGIC <len:u32 be> <utf-8 bytes>` with exactly `len` body bytes.
@@ -1608,6 +1679,11 @@ pub enum OpaqueValueError {
         /// The opaque type whose payload was rejected.
         opaque_type: TypeId,
     },
+    /// A canonical JSON payload body is invalid or not in canonical form.
+    InvalidJsonBody {
+        /// The opaque type whose payload was rejected.
+        opaque_type: TypeId,
+    },
     /// A media-type framed payload carries an empty media type.
     InvalidMediaType {
         /// The opaque type whose payload was rejected.
@@ -1641,6 +1717,9 @@ impl fmt::Display for OpaqueValueError {
             }
             Self::InvalidUtf8Body { .. } => {
                 formatter.write_str("opaque value payload body is not valid UTF-8")
+            }
+            Self::InvalidJsonBody { .. } => {
+                formatter.write_str("opaque value payload body is not valid canonical JSON")
             }
             Self::InvalidMediaType { .. } => {
                 formatter.write_str("opaque value payload has an empty media type")
@@ -6463,6 +6542,19 @@ mod tests {
                     opaque_type: OPAQUE_TYPE,
                 }
             );
+            assert_eq!(
+                OpaqueCodecRegistration::length_prefixed_canonical_json(
+                    OPAQUE_TYPE,
+                    QualifiedSemanticName::new(name).unwrap(),
+                    OPAQUE_CONTRACT,
+                    magic,
+                )
+                .unwrap_err(),
+                OpaqueCodecRegistryError::InvalidMagic {
+                    opaque_type: OPAQUE_TYPE,
+                }
+            );
+
         }
         assert!(
             OpaqueCodecRegistration::length_prefixed_utf8(
@@ -6558,6 +6650,162 @@ mod tests {
             Err(OpaqueValueError::InvalidUtf8Body {
                 opaque_type: DOCUMENT_TYPE,
             })
+        );
+    }
+
+    #[test]
+    fn canonical_json_codec_accepts_canonical_payload() {
+        const JSON_TYPE: TypeId = TypeId::from_bytes([0x4f; 16]);
+        const JSON_MAGIC: &str = "ORNA-JSON-VALUE/1 ";
+        const JSON_NAME: [&str; 3] = ["std", "json", "value"];
+        const JSON_CONTRACT: &str = "orna.std.value.json@1";
+
+        let active = active_record_revision_with_standard(
+            RECORD_TYPE,
+            verified_standard_with_value_types_and_schemas(
+                vec![
+                    standard_boolean_definition(),
+                    opaque_definition(OPAQUE_TYPE, OPAQUE_NAME, OPAQUE_CONTRACT),
+                    opaque_definition(JSON_TYPE, JSON_NAME, JSON_CONTRACT),
+                ],
+                vec![SchemaDefinition::new(
+                    SchemaId::from_bytes([0x60; 16]),
+                    QualifiedSemanticName::new(["std", "json"]).unwrap(),
+                )],
+            ),
+        );
+        let standard = active.catalogue_hash_context().standard().unwrap();
+        let registry = OpaqueCodecRegistry::new(
+            standard,
+            [
+                opaque_registration(OPAQUE_TYPE, OPAQUE_NAME, OPAQUE_CONTRACT),
+                OpaqueCodecRegistration::length_prefixed_canonical_json(
+                    JSON_TYPE,
+                    QualifiedSemanticName::new(JSON_NAME).unwrap(),
+                    JSON_CONTRACT,
+                    JSON_MAGIC,
+                )
+                .unwrap(),
+            ],
+        )
+        .unwrap();
+
+        let body = br#"{"a":[1,true],"z":"ok"}"#;
+        let mut payload = Vec::from(JSON_MAGIC.as_bytes());
+        payload.extend_from_slice(&(body.len() as u32).to_be_bytes());
+        payload.extend_from_slice(body);
+        let value = OpaqueValue::new(&active, &registry, JSON_TYPE, &payload).unwrap();
+        assert_eq!(value.opaque_type(), JSON_TYPE);
+        assert_eq!(value.canonical_payload(), payload);
+    }
+
+    #[test]
+    fn canonical_json_codec_rejects_invalid_and_noncanonical_payloads() {
+        const JSON_TYPE: TypeId = TypeId::from_bytes([0x4f; 16]);
+        const JSON_MAGIC: &str = "ORNA-JSON-VALUE/1 ";
+        const JSON_NAME: [&str; 3] = ["std", "json", "value"];
+        const JSON_CONTRACT: &str = "orna.std.value.json@1";
+
+        let active = active_record_revision_with_standard(
+            RECORD_TYPE,
+            verified_standard_with_value_types_and_schemas(
+                vec![
+                    standard_boolean_definition(),
+                    opaque_definition(OPAQUE_TYPE, OPAQUE_NAME, OPAQUE_CONTRACT),
+                    opaque_definition(JSON_TYPE, JSON_NAME, JSON_CONTRACT),
+                ],
+                vec![SchemaDefinition::new(
+                    SchemaId::from_bytes([0x60; 16]),
+                    QualifiedSemanticName::new(["std", "json"]).unwrap(),
+                )],
+            ),
+        );
+        let standard = active.catalogue_hash_context().standard().unwrap();
+        let registry = OpaqueCodecRegistry::new(
+            standard,
+            [
+                opaque_registration(OPAQUE_TYPE, OPAQUE_NAME, OPAQUE_CONTRACT),
+                OpaqueCodecRegistration::length_prefixed_canonical_json(
+                    JSON_TYPE,
+                    QualifiedSemanticName::new(JSON_NAME).unwrap(),
+                    JSON_CONTRACT,
+                    JSON_MAGIC,
+                )
+                .unwrap(),
+            ],
+        )
+        .unwrap();
+        let frame = |body: &[u8]| {
+            let mut payload = Vec::from(JSON_MAGIC.as_bytes());
+            payload.extend_from_slice(&(body.len() as u32).to_be_bytes());
+            payload.extend_from_slice(body);
+            payload
+        };
+        let reject = |payload: &[u8]| {
+            OpaqueValue::new(&active, &registry, JSON_TYPE, payload).unwrap_err()
+        };
+
+        assert_eq!(
+            reject(b"WRONG-JSON-VALUE/1 \0\0\0\0null"),
+            OpaqueValueError::InvalidMagic {
+                opaque_type: JSON_TYPE,
+            }
+        );
+        assert_eq!(
+            reject(JSON_MAGIC.as_bytes()),
+            OpaqueValueError::InvalidFrameLength {
+                opaque_type: JSON_TYPE,
+            }
+        );
+
+        let mut short_body = frame(br#"null"#);
+        short_body.pop();
+        assert_eq!(
+            reject(&short_body),
+            OpaqueValueError::InvalidFrameLength {
+                opaque_type: JSON_TYPE,
+            }
+        );
+        let mut trailing = frame(br#"null"#);
+        trailing.push(0);
+        assert_eq!(
+            reject(&trailing),
+            OpaqueValueError::InvalidFrameLength {
+                opaque_type: JSON_TYPE,
+            }
+        );
+        let invalid_utf8 = frame(&[0xff]);
+        assert_eq!(
+            reject(&invalid_utf8),
+            OpaqueValueError::InvalidUtf8Body {
+                opaque_type: JSON_TYPE,
+            }
+        );
+
+        for body in [
+            br#"{"a":}"#.as_slice(),
+            br#" null"#.as_slice(),
+            br#"{"z":1,"a":2}"#.as_slice(),
+            br#"{"a":1,"a":1}"#.as_slice(),
+            br#"1e0"#.as_slice(),
+        ] {
+            assert_eq!(
+                reject(&frame(body)),
+                OpaqueValueError::InvalidJsonBody {
+                    opaque_type: JSON_TYPE,
+                }
+            );
+        }
+
+        let mut oversized = Vec::from(JSON_MAGIC.as_bytes());
+        oversized.extend_from_slice(&u32::try_from(MAX_OPAQUE_CODEC_PAYLOAD_LENGTH + 1)
+            .unwrap()
+            .to_be_bytes());
+        assert_eq!(
+            reject(&oversized),
+            OpaqueValueError::InvalidFrameLength {
+                opaque_type: JSON_TYPE,
+            }
         );
     }
 

@@ -468,6 +468,7 @@ version = "0.1.0"
 dependencies = [
  "base64",
  "proptest",
+ "serde_json",
  "sha2",
  "uuid",
 ]
