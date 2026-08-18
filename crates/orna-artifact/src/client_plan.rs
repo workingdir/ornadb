@@ -396,7 +396,7 @@ impl ExpressionClientPlan {
             return Err(ClientPlanError::InvalidOperation(operation));
         }
         let mut count = 0usize;
-        let expression = decode_expression_node(&mut reader, 0, &mut count, bytes.len())?;
+        let expression = decode_expression_node(&mut reader, 0, &mut count)?;
         reader.require_finished()?;
         Ok(Self::new(expression))
     }
@@ -587,7 +587,7 @@ impl StateClientPlan {
             return Err(ClientPlanError::InvalidOperation(operation));
         }
         let mut count = 0usize;
-        let expression = decode_expression_node(&mut reader, 0, &mut count, bytes.len())?;
+        let expression = decode_expression_node(&mut reader, 0, &mut count)?;
         let slot_count = reader.u32()?;
         if slot_count == 0 {
             return Err(ClientPlanError::InvalidStateSlotCount { actual: 0 });
@@ -621,7 +621,6 @@ impl StateClientPlan {
                         &mut reader,
                         0,
                         &mut count,
-                        bytes.len(),
                     )?)
                 }
                 tag => return Err(ClientPlanError::InvalidStateDefaultTag(tag)),
@@ -1051,7 +1050,6 @@ fn decode_expression_node(
     reader: &mut Reader<'_>,
     depth: usize,
     count: &mut usize,
-    total_bytes: usize,
 ) -> Result<ClientExpressionNode, ClientPlanError> {
     if depth > MAX_EXPRESSION_DEPTH {
         return Err(ClientPlanError::ExpressionDepthExceeded);
@@ -1073,7 +1071,7 @@ fn decode_expression_node(
             let mut arguments = Vec::with_capacity(length);
             for _ in 0..length {
                 let parameter = ParameterId::from_bytes(reader.array()?);
-                let value = decode_expression_node(reader, depth + 1, count, total_bytes)?;
+                let value = decode_expression_node(reader, depth + 1, count)?;
                 arguments.push((parameter, value));
             }
             Ok(ClientExpressionNode::Call {
@@ -1123,8 +1121,8 @@ fn decode_expression_node(
             Ok(ClientExpressionNode::FieldPath { root, fields })
         }
         NODE_CONCAT => {
-            let left = decode_expression_node(reader, depth + 1, count, total_bytes)?;
-            let right = decode_expression_node(reader, depth + 1, count, total_bytes)?;
+            let left = decode_expression_node(reader, depth + 1, count)?;
+            let right = decode_expression_node(reader, depth + 1, count)?;
             Ok(ClientExpressionNode::Concat {
                 left: Box::new(left),
                 right: Box::new(right),
@@ -1656,7 +1654,7 @@ mod tests {
         let function = FunctionId::from_bytes([0x21; 16]);
         let parameter = ParameterId::from_bytes([0x31; 16]);
         let field = FieldId::from_bytes([0x41; 16]);
-        let plan = ExpressionClientPlan::new(ClientExpressionNode::Call {
+        ExpressionClientPlan::new(ClientExpressionNode::Call {
             function,
             arguments: vec![(
                 parameter,
@@ -1670,8 +1668,7 @@ mod tests {
                     }),
                 },
             )],
-        });
-        plan
+        })
     }
 
     #[test]
