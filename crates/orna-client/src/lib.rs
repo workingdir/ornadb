@@ -1,12 +1,20 @@
 //! Local evaluation for closed CLIENT functions.
 
-use std::{collections::{HashMap, hash_map::Entry}, error::Error, fmt, hash::{Hash, Hasher}};
+use orna_protocol::{ClientFrame, encode_active_client_frame};
+use sha2::{Digest, Sha256};
+use std::{
+    collections::{HashMap, hash_map::Entry},
+    error::Error,
+    fmt,
+    hash::{Hash, Hasher},
+};
 
 use orna_artifact::client_plan::{
-    CAPABILITY_FORMAT_VERSION, CapabilityArgumentSource, CapabilityClientPlan, ClientExpressionNode,
-    ClientPlan, ClientPlanError, EXPRESSION_FORMAT_VERSION, ExpressionClientPlan, FORMAT_IDENTITY,
-    FORMAT_VERSION, InnerClientPlan, LANGUAGE_VERSION_IDENTITY, OPAQUE_FORMAT_VERSION,
-    OpaqueClientPlan, STATE_FORMAT_VERSION, StateClientPlan, StateDefault, StateScope,
+    CAPABILITY_FORMAT_VERSION, CapabilityArgumentSource, CapabilityClientPlan,
+    ClientExpressionNode, ClientPlan, ClientPlanError, EXPRESSION_FORMAT_VERSION,
+    ExpressionClientPlan, FORMAT_IDENTITY, FORMAT_VERSION, InnerClientPlan,
+    LANGUAGE_VERSION_IDENTITY, OPAQUE_FORMAT_VERSION, OpaqueClientPlan, STATE_FORMAT_VERSION,
+    StateClientPlan, StateDefault, StateScope,
 };
 use orna_core::{
     FunctionId, FunctionRevisionId, ParameterId, PrincipalId, StateSlotId, TypeId,
@@ -105,6 +113,14 @@ impl ClientResourceKey {
             arguments_digest,
             invalidation_token,
         }
+    }
+    /// Calculates the canonical digest used by a resource key.
+    pub fn canonical_arguments_digest(
+        active: &ActiveDatabaseRevision,
+        arguments: &[FunctionArgument],
+    ) -> Result<Sha256Digest, ClientResourceError> {
+        let arguments = canonical_resource_arguments(arguments)?;
+        canonical_resource_argument_digest(active, &arguments)
     }
 
     /// Returns the pinned invocation target.
@@ -209,6 +225,27 @@ pub enum ClientResourceError {
         /// The target pinned by the resource key.
         expected: InvocationTarget,
     },
+    /// An argument value could not be encoded by the active ORV3 codec.
+    ArgumentEncoding,
+    /// One parameter identity occurred more than once in a request.
+    DuplicateArgument {
+        /// The repeated parameter identity.
+        parameter: ParameterId,
+    },
+    /// The request arguments do not match the resource key digest.
+    ArgumentDigestMismatch {
+        /// The digest retained by the resource key.
+        expected: Sha256Digest,
+        /// The digest calculated from the request arguments.
+        actual: Sha256Digest,
+    },
+    /// The completion belongs to a different resource identity.
+    RequestKeyMismatch {
+        /// The key owned by the resource.
+        expected: ClientResourceKey,
+        /// The key carried by the completion.
+        actual: ClientResourceKey,
+    },
     /// A failure code is empty or contains a forbidden NUL byte.
     InvalidFailureCode,
     /// The result does not match the declared resolved type.
@@ -218,7 +255,9 @@ pub enum ClientResourceError {
 impl fmt::Display for ClientResourceError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::GenerationExhausted => formatter.write_str("CLIENT resource generation exhausted"),
+            Self::GenerationExhausted => {
+                formatter.write_str("CLIENT resource generation exhausted")
+            }
             Self::StaleGeneration { expected, actual } => write!(
                 formatter,
                 "CLIENT resource completion has generation {}, expected {}",
@@ -226,28 +265,191 @@ impl fmt::Display for ClientResourceError {
                 expected.value(),
             ),
             Self::InvalidTransition { status } => {
-                write!(formatter, "CLIENT resource operation is invalid in {status:?} state")
+                write!(
+                    formatter,
+                    "CLIENT resource operation is invalid in {status:?} state"
+                )
             }
             Self::RevisionMismatch { expected, actual } => write!(
                 formatter,
                 "CLIENT resource completion uses revision {:?}, expected {:?}",
-                actual,
-                expected,
+                actual, expected,
             ),
             Self::TargetMismatch { expected } => write!(
                 formatter,
                 "CLIENT resource target {:?} is not present in the active revision",
                 expected,
             ),
-            Self::InvalidFailureCode => {
-                formatter.write_str("CLIENT resource failure code must be non-empty and contain no NUL")
+            Self::ArgumentEncoding => formatter
+                .write_str("CLIENT resource argument cannot be encoded by the active codec"),
+            Self::DuplicateArgument { parameter } => {
+                write!(
+                    formatter,
+                    "CLIENT resource argument repeats parameter {parameter}"
+                )
             }
-            Self::TypeMismatch => formatter.write_str("CLIENT resource value has the wrong runtime type"),
+            Self::ArgumentDigestMismatch { expected, actual } => write!(
+                formatter,
+                "CLIENT resource argument digest {:?} does not match expected {:?}",
+                actual, expected,
+            ),
+            Self::RequestKeyMismatch { expected, actual } => write!(
+                formatter,
+                "CLIENT resource completion uses key {:?}, expected {:?}",
+                actual, expected,
+            ),
+            Self::InvalidFailureCode => {
+                formatter.write_str("CLIENT resource failure code must be non-empty and NUL-free")
+            }
+            Self::TypeMismatch => {
+                formatter.write_str("CLIENT resource result does not match its type")
+            }
         }
     }
 }
 
 impl Error for ClientResourceError {}
+
+/// One request submitted to a CLIENT resource executor.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ClientResourceRequest {
+    key: ClientResourceKey,
+    generation: ClientResourceGeneration,
+    expected_type: ResolvedType,
+    arguments: Vec<FunctionArgument>,
+}
+
+impl ClientResourceRequest {
+    fn new(
+        active: &ActiveDatabaseRevision,
+        key: ClientResourceKey,
+        generation: ClientResourceGeneration,
+        expected_type: ResolvedType,
+        arguments: Vec<FunctionArgument>,
+    ) -> Result<Self, ClientResourceError> {
+        if active.pair() != key.target().revision() {
+            return Err(ClientResourceError::RevisionMismatch {
+                expected: key.target().revision(),
+                actual: active.pair(),
+            });
+        }
+        if !active_supports_invocation_target(active, key.target()) {
+            return Err(ClientResourceError::TargetMismatch {
+                expected: key.target(),
+            });
+        }
+        let arguments = canonical_resource_arguments(&arguments)?;
+        let actual = canonical_resource_argument_digest(active, &arguments)?;
+        if actual != key.arguments_digest() {
+            return Err(ClientResourceError::ArgumentDigestMismatch {
+                expected: key.arguments_digest(),
+                actual,
+            });
+        }
+        Ok(Self {
+            key,
+            generation,
+            expected_type,
+            arguments,
+        })
+    }
+
+    /// Returns the complete resource identity carried by this request.
+    pub const fn key(&self) -> ClientResourceKey {
+        self.key
+    }
+
+    /// Returns the request generation.
+    pub const fn generation(&self) -> ClientResourceGeneration {
+        self.generation
+    }
+
+    /// Returns the pinned invocation target.
+    pub const fn target(&self) -> InvocationTarget {
+        self.key.target()
+    }
+
+    /// Returns the expected result type.
+    pub const fn expected_type(&self) -> ResolvedType {
+        self.expected_type
+    }
+
+    /// Returns the canonical parameter-ordered arguments.
+    pub fn arguments(&self) -> &[FunctionArgument] {
+        &self.arguments
+    }
+
+    /// Creates a successful completion for this request.
+    pub fn ready(self, value: RuntimeValue) -> ClientResourceCompletion {
+        ClientResourceCompletion::Ready {
+            key: self.key,
+            generation: self.generation,
+            value,
+        }
+    }
+
+    /// Creates a failed completion for this request.
+    pub fn failed(self, code: String) -> ClientResourceCompletion {
+        ClientResourceCompletion::Failed {
+            key: self.key,
+            generation: self.generation,
+            code,
+        }
+    }
+}
+
+/// One result returned by a CLIENT resource executor.
+#[derive(Clone, Debug, PartialEq)]
+pub enum ClientResourceCompletion {
+    /// One typed value produced by the request.
+    Ready {
+        /// The resource identity that created the request.
+        key: ClientResourceKey,
+        /// The request generation.
+        generation: ClientResourceGeneration,
+        /// The returned runtime value.
+        value: RuntimeValue,
+    },
+    /// One structured failure produced by the request.
+    Failed {
+        /// The resource identity that created the request.
+        key: ClientResourceKey,
+        /// The request generation.
+        generation: ClientResourceGeneration,
+        /// The stable failure code.
+        code: String,
+    },
+}
+
+/// A runtime adapter that evaluates one resource request.
+pub trait ClientResourceExecutor {
+    /// Executes one request and returns its completion.
+    fn execute(&mut self, request: ClientResourceRequest) -> ClientResourceCompletion;
+}
+
+/// A deterministic immediate executor for host glue and focused tests.
+pub struct DeterministicClientResourceExecutor<F> {
+    evaluate: F,
+}
+
+impl<F> DeterministicClientResourceExecutor<F> {
+    /// Creates an immediate executor around one evaluation closure.
+    pub const fn new(evaluate: F) -> Self {
+        Self { evaluate }
+    }
+}
+
+impl<F> ClientResourceExecutor for DeterministicClientResourceExecutor<F>
+where
+    F: FnMut(&ClientResourceRequest) -> Result<RuntimeValue, String>,
+{
+    fn execute(&mut self, request: ClientResourceRequest) -> ClientResourceCompletion {
+        match (self.evaluate)(&request) {
+            Ok(value) => request.ready(value),
+            Err(code) => request.failed(code),
+        }
+    }
+}
 
 /// One typed CLIENT resource lifecycle owned by the local evaluator.
 #[derive(Clone, Debug, PartialEq)]
@@ -309,6 +511,52 @@ impl ClientResource {
         self.status = ClientResourceStatus::Loading;
         self.clear_result();
         Ok(generation)
+    }
+
+    /// Starts a request after validating its active target and argument digest.
+    pub fn begin_request(
+        &mut self,
+        active: &ActiveDatabaseRevision,
+        arguments: Vec<FunctionArgument>,
+    ) -> Result<ClientResourceRequest, ClientResourceError> {
+        let generation = self.next_generation()?;
+        let request = ClientResourceRequest::new(
+            active,
+            self.key,
+            generation,
+            self.expected_type,
+            arguments,
+        )?;
+        self.generation = generation;
+        self.status = ClientResourceStatus::Loading;
+        self.clear_result();
+        Ok(request)
+    }
+
+    /// Applies one executor completion through the resource invariants.
+    pub fn apply_completion(
+        &mut self,
+        active: &ActiveDatabaseRevision,
+        completion: ClientResourceCompletion,
+    ) -> Result<(), ClientResourceError> {
+        match completion {
+            ClientResourceCompletion::Ready {
+                key,
+                generation,
+                value,
+            } => {
+                self.require_key(key)?;
+                self.publish_ready(active, generation, value)
+            }
+            ClientResourceCompletion::Failed {
+                key,
+                generation,
+                code,
+            } => {
+                self.require_key(key)?;
+                self.publish_failure(generation, code)
+            }
+        }
     }
 
     /// Publishes one type-checked result for the current generation.
@@ -379,6 +627,14 @@ impl ClientResource {
         self.failure = None;
     }
 
+    fn next_generation(&self) -> Result<ClientResourceGeneration, ClientResourceError> {
+        self.generation
+            .0
+            .checked_add(1)
+            .map(ClientResourceGeneration)
+            .ok_or(ClientResourceError::GenerationExhausted)
+    }
+
     fn advance_generation(&mut self) -> Result<ClientResourceGeneration, ClientResourceError> {
         self.generation = ClientResourceGeneration(
             self.generation
@@ -387,6 +643,16 @@ impl ClientResource {
                 .ok_or(ClientResourceError::GenerationExhausted)?,
         );
         Ok(self.generation)
+    }
+
+    fn require_key(&self, actual: ClientResourceKey) -> Result<(), ClientResourceError> {
+        if actual != self.key {
+            return Err(ClientResourceError::RequestKeyMismatch {
+                expected: self.key,
+                actual,
+            });
+        }
+        Ok(())
     }
 
     fn require_loading(
@@ -406,6 +672,45 @@ impl ClientResource {
         }
         Ok(())
     }
+}
+fn canonical_resource_arguments(
+    arguments: &[FunctionArgument],
+) -> Result<Vec<FunctionArgument>, ClientResourceError> {
+    let mut arguments = arguments.to_vec();
+    arguments.sort_by_key(FunctionArgument::parameter);
+    for pair in arguments.windows(2) {
+        if pair[0].parameter() == pair[1].parameter() {
+            return Err(ClientResourceError::DuplicateArgument {
+                parameter: pair[0].parameter(),
+            });
+        }
+    }
+    Ok(arguments)
+}
+
+fn canonical_resource_argument_digest(
+    active: &ActiveDatabaseRevision,
+    arguments: &[FunctionArgument],
+) -> Result<Sha256Digest, ClientResourceError> {
+    let mut hasher = Sha256::new();
+    hasher.update(b"ornadb.client-resource-arguments/v1\0");
+    let argument_count =
+        u32::try_from(arguments.len()).map_err(|_| ClientResourceError::ArgumentEncoding)?;
+    hasher.update(argument_count.to_be_bytes());
+    for argument in arguments {
+        let frame = ClientFrame::CallArgument {
+            stream: 1,
+            parameter: argument.parameter(),
+            value: argument.value().clone(),
+        };
+        let encoded = encode_active_client_frame(active, &frame)
+            .map_err(|_| ClientResourceError::ArgumentEncoding)?;
+        let encoded_length =
+            u32::try_from(encoded.len()).map_err(|_| ClientResourceError::ArgumentEncoding)?;
+        hasher.update(encoded_length.to_be_bytes());
+        hasher.update(encoded);
+    }
+    Ok(Sha256Digest::from_bytes(hasher.finalize().into()))
 }
 
 fn validate_state_text(value: &str, field: &'static str) -> Result<(), ClientStateIdentityError> {
@@ -745,7 +1050,6 @@ impl ClientStateStore {
     }
 }
 
-
 /// A USER state store rejected a lifecycle operation.
 #[non_exhaustive]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -785,17 +1089,28 @@ pub enum ClientUserStateError {
 impl fmt::Display for ClientUserStateError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::DuplicateKey(key) => write!(formatter, "USER state load contains duplicate key {key:?}"),
+            Self::DuplicateKey(key) => {
+                write!(formatter, "USER state load contains duplicate key {key:?}")
+            }
             Self::WriteBatchLength { expected, actual } => write!(
                 formatter,
                 "USER state write result count {actual} does not match change count {expected}",
             ),
             Self::WriteKeyMismatch { expected, actual } => {
-                write!(formatter, "USER state write result key {actual:?} does not match {expected:?}")
+                write!(
+                    formatter,
+                    "USER state write result key {actual:?} does not match {expected:?}"
+                )
             }
-            Self::UnknownKey(key) => write!(formatter, "USER state write result names unknown key {key:?}"),
+            Self::UnknownKey(key) => write!(
+                formatter,
+                "USER state write result names unknown key {key:?}"
+            ),
             Self::ValueMismatch(key) => {
-                write!(formatter, "USER state write result does not match local value for {key:?}")
+                write!(
+                    formatter,
+                    "USER state write result does not match local value for {key:?}"
+                )
             }
             Self::Conflict {
                 key,
@@ -806,9 +1121,14 @@ impl fmt::Display for ClientUserStateError {
                 "USER state revision conflict for {key:?}: expected {expected:?}, current {current}",
             ),
             Self::InvalidRevision(key) => {
-                write!(formatter, "USER state write returned an invalid revision for {key:?}")
+                write!(
+                    formatter,
+                    "USER state write returned an invalid revision for {key:?}"
+                )
             }
-            Self::InvalidChange(reason) => write!(formatter, "USER state change is invalid: {reason}"),
+            Self::InvalidChange(reason) => {
+                write!(formatter, "USER state change is invalid: {reason}")
+            }
             Self::InvalidIdentity(source) => source.fmt(formatter),
         }
     }
@@ -825,14 +1145,14 @@ impl Error for ClientUserStateError {
 
 impl ClientStateStore {
     /// Loads one complete authenticated USER state batch.
-    pub fn load_user_state(
-        &mut self,
-        cells: &[UserStateCell],
-    ) -> Result<(), ClientUserStateError> {
+    pub fn load_user_state(&mut self, cells: &[UserStateCell]) -> Result<(), ClientUserStateError> {
         let mut loaded = HashMap::with_capacity(cells.len());
         for cell in cells {
             let key = ClientStateKey::from_user_cell(cell);
-            if loaded.insert(key.clone(), ClientUserState::loaded(cell)).is_some() {
+            if loaded
+                .insert(key.clone(), ClientUserState::loaded(cell))
+                .is_some()
+            {
                 return Err(ClientUserStateError::DuplicateKey(key));
             }
         }
@@ -923,8 +1243,8 @@ impl ClientStateStore {
                 .expect("USER state key was validated above");
             match result.outcome() {
                 UserStateWriteOutcome::Written { revision } => {
-                    let valid = revision > 0
-                        && local.revision.is_none_or(|current| revision > current);
+                    let valid =
+                        revision > 0 && local.revision.is_none_or(|current| revision > current);
                     if !valid {
                         return Err(ClientUserStateError::InvalidRevision(key));
                     }
@@ -1533,28 +1853,29 @@ fn evaluate_function(
     // with the invalid-artifact path before anything executes.
     let envelope = if revision.artifact().version() == CAPABILITY_FORMAT_VERSION {
         Some(
-            CapabilityClientPlan::decode(revision.artifact().payload()).map_err(|source| {
-                ClientExecutionError::InvalidArtifact { context, source }
-            })?,
+            CapabilityClientPlan::decode(revision.artifact().payload())
+                .map_err(|source| ClientExecutionError::InvalidArtifact { context, source })?,
         )
     } else {
         None
     };
     let artifact_version = envelope
         .as_ref()
-        .map_or(revision.artifact().version(), |plan| plan.inner_plan_version());
-    let resolve_parameter = |parameter: &str| {
-        resolve_parameter_argument(definition, &arguments, parameter)
-    };
+        .map_or(revision.artifact().version(), |plan| {
+            plan.inner_plan_version()
+        });
+    let resolve_parameter =
+        |parameter: &str| resolve_parameter_argument(definition, &arguments, parameter);
     match &envelope {
         Some(plan) => {
             for requirement in plan.requirements() {
-                let name = capability::LocalCapabilityName::parse(requirement.name()).map_err(
-                    |_| ClientExecutionError::CapabilityDenied {
+                let name =
+                    capability::LocalCapabilityName::parse(requirement.name()).map_err(|_| {
+                        ClientExecutionError::CapabilityDenied {
                         context,
                         capability: requirement.name().to_owned(),
-                    },
-                )?;
+                        }
+                    })?;
                 let declaration = capability::LocalCapabilityDeclaration::new(
                     name,
                     match requirement.argument() {
@@ -1755,11 +2076,12 @@ fn evaluate_opaque_plan(
             source: ClientOpaqueValueError::Registry(Box::new(source)),
         }
     })?;
-    let value = OpaqueValue::new(active, &registry, expected, plan.canonical_payload())
-        .map_err(|source| ClientExecutionError::InvalidOpaqueValue {
+    let value = OpaqueValue::new(active, &registry, expected, plan.canonical_payload()).map_err(
+        |source| ClientExecutionError::InvalidOpaqueValue {
             context,
             source: ClientOpaqueValueError::Value(source),
-        })?;
+        },
+    )?;
     Ok(RuntimeValue::Opaque(value))
 }
 
@@ -2204,7 +2526,9 @@ fn active_enum_label_is_valid(
 }
 
 fn active_has_object_type(active: &ActiveDatabaseRevision, type_id: TypeId) -> bool {
-    active_type_matches(active, type_id, |definition| definition.as_object().is_some())
+    active_type_matches(active, type_id, |definition| {
+        definition.as_object().is_some()
+    })
 }
 
 fn expression_error(
@@ -2235,7 +2559,6 @@ fn initialize_client_state(
     state: &mut ClientStateStore,
     depth: usize,
 ) -> Result<(), ClientExecutionError> {
-
     for slot in plan.slots() {
         let key = state.key_for(context.function(), slot.state_slot_id());
         let resolved = resolve_state_slot_type(active, slot.type_id()).ok_or_else(|| {
@@ -2660,11 +2983,9 @@ mod tests {
             PrincipalKind, PrincipalStatus, SecuritySnapshot,
         },
         source::{SourceBundle, SourceUnit},
-        state::{
-            UserStateCell, UserStateKey, UserStateWriteOutcome, UserStateWriteResult,
-        },
+        state::{UserStateCell, UserStateKey, UserStateWriteOutcome, UserStateWriteResult},
         types::{ResolvedType, StandardScalar},
-        value::{RuntimeFloat, RuntimeValue},
+        value::{FunctionArgument, RuntimeFloat, RuntimeValue},
     };
 
     fn authorise(pair: RevisionPair, function: FunctionId) -> AuthorisedInvocation {
@@ -2723,10 +3044,8 @@ mod tests {
             Sha256Digest::from_bytes([0x11; 32]),
             Sha256Digest::from_bytes([0x22; 32]),
         );
-        let mut resource = super::ClientResource::new(
-            key,
-            ResolvedType::Scalar(StandardScalar::Boolean),
-        );
+        let mut resource =
+            super::ClientResource::new(key, ResolvedType::Scalar(StandardScalar::Boolean));
 
         assert_eq!(resource.status(), super::ClientResourceStatus::Idle);
         assert_eq!(resource.generation().value(), 0);
@@ -2795,10 +3114,8 @@ mod tests {
             Sha256Digest::from_bytes([0x31; 32]),
             Sha256Digest::from_bytes([0x32; 32]),
         );
-        let mut resource = super::ClientResource::new(
-            key,
-            ResolvedType::Scalar(StandardScalar::Boolean),
-        );
+        let mut resource =
+            super::ClientResource::new(key, ResolvedType::Scalar(StandardScalar::Boolean));
         let generation = resource.begin_loading().unwrap();
 
         assert_eq!(
@@ -2822,10 +3139,8 @@ mod tests {
             Sha256Digest::from_bytes([0x41; 32]),
             Sha256Digest::from_bytes([0x42; 32]),
         );
-        let mut resource = super::ClientResource::new(
-            key,
-            ResolvedType::Scalar(StandardScalar::Boolean),
-        );
+        let mut resource =
+            super::ClientResource::new(key, ResolvedType::Scalar(StandardScalar::Boolean));
         let generation = resource.begin_loading().unwrap();
 
         assert_eq!(
@@ -2836,6 +3151,166 @@ mod tests {
             }),
         );
         assert_eq!(resource.status(), super::ClientResourceStatus::Loading);
+        assert_eq!(resource.value(), None);
+    }
+
+    #[test]
+    fn client_resource_executor_validates_arguments_and_applies_completion() {
+        let (active, function, pair, _) = version_one_active_with_shape(
+            FunctionDomain::Client,
+            vec![
+                ParameterDefinition::new(
+                    ParameterId::from_bytes([0x02; 16]),
+                    "count",
+                    0,
+                    ResolvedType::Scalar(StandardScalar::Integer),
+                    None,
+                ),
+                ParameterDefinition::new(
+                    ParameterId::from_bytes([0x01; 16]),
+                    "enabled",
+                    1,
+                    ResolvedType::Scalar(StandardScalar::Boolean),
+                    None,
+                ),
+            ],
+            FunctionReturn::Single(ResolvedType::Scalar(StandardScalar::Boolean)),
+            FunctionSecurity::Invoker,
+            FunctionVolatility::Immutable,
+        );
+        let principal = PrincipalId::from_bytes([0x7a; 16]);
+        let first = FunctionArgument::new(
+            ParameterId::from_bytes([0x02; 16]),
+            RuntimeValue::Integer(7),
+        )
+        .unwrap();
+        let second = FunctionArgument::new(
+            ParameterId::from_bytes([0x01; 16]),
+            RuntimeValue::Boolean(true),
+        )
+        .unwrap();
+        let arguments = vec![first.clone(), second.clone()];
+        let digest =
+            super::ClientResourceKey::canonical_arguments_digest(&active, &arguments).unwrap();
+        assert_eq!(
+            digest,
+            super::ClientResourceKey::canonical_arguments_digest(
+                &active,
+                &[second.clone(), first.clone()],
+            )
+            .unwrap(),
+        );
+        let key = super::ClientResourceKey::new(
+            InvocationTarget::new(function, pair),
+            principal,
+            digest,
+            Sha256Digest::from_bytes([0x22; 32]),
+        );
+        let mut resource =
+            super::ClientResource::new(key, ResolvedType::Scalar(StandardScalar::Boolean));
+        let mut executor = super::DeterministicClientResourceExecutor::new(
+            |request: &super::ClientResourceRequest| {
+                assert_eq!(request.arguments()[0].parameter(), second.parameter());
+                assert_eq!(request.arguments()[1].parameter(), first.parameter());
+                Ok(RuntimeValue::Boolean(true))
+            },
+        );
+
+        let request = resource
+            .begin_request(&active, vec![first.clone(), second.clone()])
+            .unwrap();
+        assert_eq!(request.arguments()[0].parameter(), second.parameter());
+        let completion = super::ClientResourceExecutor::execute(&mut executor, request);
+        resource.apply_completion(&active, completion).unwrap();
+        assert_eq!(resource.status(), super::ClientResourceStatus::Ready);
+        assert_eq!(resource.value(), Some(&RuntimeValue::Boolean(true)));
+
+        let failed = resource
+            .begin_request(&active, vec![first, second])
+            .unwrap()
+            .failed("resource.denied".to_owned());
+        resource.apply_completion(&active, failed).unwrap();
+        assert_eq!(resource.status(), super::ClientResourceStatus::Failed);
+        assert_eq!(
+            resource.failure().map(super::ClientResourceFailure::code),
+            Some("resource.denied"),
+        );
+    }
+
+    #[test]
+    fn client_resource_executor_rejects_digest_duplicates_stale_and_cancelled() {
+        let (active, function, pair, _) = version_one_active_with_shape(
+            FunctionDomain::Client,
+            vec![ParameterDefinition::new(
+                ParameterId::from_bytes([0x01; 16]),
+                "enabled",
+                0,
+                ResolvedType::Scalar(StandardScalar::Boolean),
+                None,
+            )],
+            FunctionReturn::Single(ResolvedType::Scalar(StandardScalar::Boolean)),
+            FunctionSecurity::Invoker,
+            FunctionVolatility::Immutable,
+        );
+        let argument = FunctionArgument::new(
+            ParameterId::from_bytes([0x01; 16]),
+            RuntimeValue::Boolean(true),
+        )
+        .unwrap();
+        let digest = super::ClientResourceKey::canonical_arguments_digest(
+            &active,
+            std::slice::from_ref(&argument),
+        )
+        .unwrap();
+        let key = super::ClientResourceKey::new(
+            InvocationTarget::new(function, pair),
+            PrincipalId::from_bytes([0x7a; 16]),
+            digest,
+            Sha256Digest::from_bytes([0x22; 32]),
+        );
+        let mut resource =
+            super::ClientResource::new(key, ResolvedType::Scalar(StandardScalar::Boolean));
+
+        let wrong_key = super::ClientResourceKey::new(
+            InvocationTarget::new(function, pair),
+            key.principal(),
+            Sha256Digest::from_bytes([0xaa; 32]),
+            key.invalidation_token(),
+        );
+        let mut wrong_resource =
+            super::ClientResource::new(wrong_key, ResolvedType::Scalar(StandardScalar::Boolean));
+        assert!(matches!(
+            wrong_resource.begin_request(&active, vec![argument.clone()]),
+            Err(super::ClientResourceError::ArgumentDigestMismatch { .. }),
+        ));
+        assert_eq!(wrong_resource.status(), super::ClientResourceStatus::Idle);
+
+        assert_eq!(
+            resource.begin_request(&active, vec![argument.clone(), argument.clone()]),
+            Err(super::ClientResourceError::DuplicateArgument {
+                parameter: argument.parameter(),
+            }),
+        );
+        assert_eq!(resource.status(), super::ClientResourceStatus::Idle);
+
+        let first = resource
+            .begin_request(&active, vec![argument.clone()])
+            .unwrap();
+        let second = resource.begin_request(&active, vec![argument]).unwrap();
+        let first_completion = first.ready(RuntimeValue::Boolean(false));
+        assert!(matches!(
+            resource.apply_completion(&active, first_completion),
+            Err(super::ClientResourceError::StaleGeneration { .. }),
+        ));
+        let second_generation = second.generation();
+        resource.cancel(second_generation).unwrap();
+        assert!(matches!(
+            resource.apply_completion(&active, second.ready(RuntimeValue::Boolean(true))),
+            Err(super::ClientResourceError::InvalidTransition {
+                status: super::ClientResourceStatus::Cancelled,
+            }),
+        ));
+        assert_eq!(resource.status(), super::ClientResourceStatus::Cancelled);
         assert_eq!(resource.value(), None);
     }
 
@@ -2876,10 +3351,7 @@ mod tests {
     #[test]
     fn client_resource_accepts_standard_value_contracts() {
         let cases = [
-            (
-                orna_standard::BIGINT_TYPE_ID,
-                RuntimeValue::BigInt(42),
-            ),
+            (orna_standard::BIGINT_TYPE_ID, RuntimeValue::BigInt(42)),
             (
                 orna_standard::FLOAT_TYPE_ID,
                 RuntimeValue::Float(RuntimeFloat::new(4.25).unwrap()),
@@ -2910,8 +3382,10 @@ mod tests {
 
     #[test]
     fn client_resource_requires_the_full_verified_standard_target_pin() {
-        let (active, function, pair, _) =
-            version_two_value_active(orna_standard::BOOLEAN_TYPE_ID, orna_standard::BOOLEAN_TYPE_ID);
+        let (active, function, pair, _) = version_two_value_active(
+            orna_standard::BOOLEAN_TYPE_ID,
+            orna_standard::BOOLEAN_TYPE_ID,
+        );
         let wrong_target = InvocationTarget::verified_standard(
             function,
             pair,
@@ -2924,10 +3398,8 @@ mod tests {
             Sha256Digest::from_bytes([0xb1; 32]),
             Sha256Digest::from_bytes([0xb2; 32]),
         );
-        let mut resource = super::ClientResource::new(
-            wrong_key,
-            ResolvedType::Scalar(StandardScalar::Boolean),
-        );
+        let mut resource =
+            super::ClientResource::new(wrong_key, ResolvedType::Scalar(StandardScalar::Boolean));
         let generation = resource.begin_loading().unwrap();
 
         assert_eq!(
@@ -2987,10 +3459,8 @@ mod tests {
 
         assert!(state.resource(key).is_none());
         {
-            let resource = state.get_or_create_resource(
-                key,
-                ResolvedType::Scalar(StandardScalar::Boolean),
-            );
+            let resource =
+                state.get_or_create_resource(key, ResolvedType::Scalar(StandardScalar::Boolean));
             let generation = resource.begin_loading().unwrap();
             resource
                 .publish_ready(&active, generation, RuntimeValue::Boolean(true))
@@ -3003,10 +3473,8 @@ mod tests {
 
         // A duplicate lookup returns the existing resource and keeps its
         // original type and published value.
-        let resource = state.get_or_create_resource(
-            key,
-            ResolvedType::Scalar(StandardScalar::Integer),
-        );
+        let resource =
+            state.get_or_create_resource(key, ResolvedType::Scalar(StandardScalar::Integer));
         assert_eq!(
             resource.expected_type(),
             ResolvedType::Scalar(StandardScalar::Boolean),
@@ -3044,7 +3512,9 @@ mod tests {
             .expect("cancelled resource remains in the cache")
             .generation();
         assert_eq!(state.invalidate_resource(key), Ok(true));
-        let resource = state.resource(key).expect("invalidated resource remains cached");
+        let resource = state
+            .resource(key)
+            .expect("invalidated resource remains cached");
         assert_eq!(resource.key(), key);
         assert_eq!(
             resource.expected_type(),
@@ -3057,12 +3527,15 @@ mod tests {
         assert_eq!(resource.status(), super::ClientResourceStatus::Idle);
         assert_eq!(resource.value(), None);
         assert_eq!(resource.failure(), None);
-        assert_eq!(state.invalidate_resource(super::ClientResourceKey::new(
+        assert_eq!(
+            state.invalidate_resource(super::ClientResourceKey::new(
             InvocationTarget::new(function, pair),
             PrincipalId::from_bytes([0x7b; 16]),
             Sha256Digest::from_bytes([0xc1; 32]),
             Sha256Digest::from_bytes([0xc2; 32]),
-        )), Ok(false));
+            )),
+            Ok(false)
+        );
     }
 
     #[test]
@@ -3085,14 +3558,8 @@ mod tests {
         assert_ne!(key_a, key_b);
         let mut state = super::ClientStateStore::new();
 
-        state.get_or_create_resource(
-            key_a,
-            ResolvedType::Scalar(StandardScalar::Boolean),
-        );
-        state.get_or_create_resource(
-            key_b,
-            ResolvedType::Scalar(StandardScalar::Boolean),
-        );
+        state.get_or_create_resource(key_a, ResolvedType::Scalar(StandardScalar::Boolean));
+        state.get_or_create_resource(key_b, ResolvedType::Scalar(StandardScalar::Boolean));
 
         let resource_a = state.resource(key_a).expect("first resource is cached");
         let resource_b = state.resource(key_b).expect("second resource is cached");
@@ -3355,7 +3822,6 @@ mod tests {
         assert!(!stored.is_dirty());
         assert!(state.pending_user_state_changes().unwrap().is_empty());
     }
-
 
     #[test]
     fn version_four_state_default_type_mismatch_fails_closed() {
@@ -3629,7 +4095,9 @@ mod tests {
         // Every vocabulary grant present: the unknown stored name still fails
         // closed and never falls back to an empty requirement set.
         let grants = super::capability::LocalCapabilityGrantSet::from_grants(
-            super::capability::LocalCapabilityName::ALL.into_iter().map(|name| {
+            super::capability::LocalCapabilityName::ALL
+                .into_iter()
+                .map(|name| {
                 let scope = match name {
                     super::capability::LocalCapabilityName::StdFsRead
                     | super::capability::LocalCapabilityName::StdFsWrite => {
@@ -3738,7 +4206,12 @@ mod tests {
         let callee_id = FunctionId::from_bytes([0xc2; 16]);
         let callee_revision_id = FunctionRevisionId::from_bytes([0xc3; 16]);
         let previous_revision = &base.function_revisions()[0];
-        let caller_name = base.catalogue().function_by_id(caller_id).unwrap().name().clone();
+        let caller_name = base
+            .catalogue()
+            .function_by_id(caller_id)
+            .unwrap()
+            .name()
+            .clone();
         let caller_plan = orna_artifact::client_plan::ExpressionClientPlan::new(
             orna_artifact::client_plan::ClientExpressionNode::Call {
                 function: callee_id,
@@ -3749,9 +4222,7 @@ mod tests {
             orna_artifact::client_plan::InnerClientPlan::Expression(caller_plan),
             vec![orna_artifact::client_plan::CapabilityRequirement::new(
                 "std.fs.write",
-                orna_artifact::client_plan::CapabilityArgumentSource::Text(
-                    "/home/bob".to_owned(),
-                ),
+                orna_artifact::client_plan::CapabilityArgumentSource::Text("/home/bob".to_owned()),
             )],
         )
         .encode()
@@ -3763,9 +4234,7 @@ mod tests {
             orna_artifact::client_plan::InnerClientPlan::Expression(callee_plan),
             vec![orna_artifact::client_plan::CapabilityRequirement::new(
                 "std.fs.read",
-                orna_artifact::client_plan::CapabilityArgumentSource::Text(
-                    "/home/bob".to_owned(),
-                ),
+                orna_artifact::client_plan::CapabilityArgumentSource::Text("/home/bob".to_owned()),
             )],
         )
         .encode()
@@ -3913,8 +4382,8 @@ mod tests {
             super::capability::LocalCapabilityScope::path("/home/bob").unwrap(),
         )
         .unwrap();
-        let write_only = super::capability::LocalCapabilityGrantSet::from_grants([write_grant])
-            .unwrap();
+        let write_only =
+            super::capability::LocalCapabilityGrantSet::from_grants([write_grant]).unwrap();
         let error = super::evaluate_client_function_with_grants(
             &active,
             &authorise(pair, caller_id),
@@ -6127,7 +6596,9 @@ mod tests {
         .expect("the version-5 capability envelope encodes")
     }
 
-    fn version_five_boolean_active(payload: Vec<u8>) -> (
+    fn version_five_boolean_active(
+        payload: Vec<u8>,
+    ) -> (
         ActiveDatabaseRevision,
         FunctionId,
         RevisionPair,
@@ -6144,7 +6615,9 @@ mod tests {
         version_one_active_with_artifact(artifact, "orna.language/1")
     }
 
-    fn version_five_expression_active_with_parameter(payload: Vec<u8>) -> (
+    fn version_five_expression_active_with_parameter(
+        payload: Vec<u8>,
+    ) -> (
         ActiveDatabaseRevision,
         FunctionId,
         RevisionPair,
@@ -6249,7 +6722,13 @@ mod tests {
         )
         .unwrap();
 
-        (active, function_id, pair, function_revision_id, parameter.id())
+        (
+            active,
+            function_id,
+            pair,
+            function_revision_id,
+            parameter.id(),
+        )
     }
 
     fn boolean_parameter() -> ParameterDefinition {
