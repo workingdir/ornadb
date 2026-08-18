@@ -28,11 +28,12 @@ use orna_core::{
         SecuritySnapshot, SessionBindingError, TargetClass, UserStateAuditOperation,
     },
     system::{
-        SYS_INVOKE_FUNCTION_ID, SYS_SECURITY_EFFECTIVE_PRINCIPAL_FUNCTION_ID,
-        SYS_SECURITY_PRINCIPAL_TYPE_ID, SYS_SECURITY_SESSION_PRINCIPAL_FUNCTION_ID,
-        SystemFunctionDefinition, SystemFunctionKind, system_function_by_id,
-        system_function_by_name,
+        SYS_INVOKE_FUNCTION_ID, SYS_SECURITY_ACTIVE_ROLES_FUNCTION_ID,
+        SYS_SECURITY_EFFECTIVE_PRINCIPAL_FUNCTION_ID, SYS_SECURITY_PRINCIPAL_TYPE_ID,
+        SYS_SECURITY_SESSION_PRINCIPAL_FUNCTION_ID, SystemFunctionDefinition, SystemFunctionKind,
+        system_function_by_id, system_function_by_name,
     },
+    types::TypeDescriptor,
     value::{FunctionArgument, OpaqueCodecRegistry, RecordValue, RuntimeValue},
 };
 use orna_protocol::{
@@ -697,23 +698,53 @@ impl PostgresKernel {
                                     "allowed sealed system invocation must re-authorise its target",
                                 ));
                             }
-                            let principal = match definition.id() {
+                            let value = match definition.id() {
                                 SYS_SECURITY_SESSION_PRINCIPAL_FUNCTION_ID => {
-                                    self.session_principal(authenticated_session)
+                                    let principal = self.session_principal(authenticated_session);
+                                    RuntimeValue::Reference {
+                                        target: SYS_SECURITY_PRINCIPAL_TYPE_ID,
+                                        object: ObjectId::from_bytes(principal.to_bytes()),
+                                    }
                                 }
                                 SYS_SECURITY_EFFECTIVE_PRINCIPAL_FUNCTION_ID => {
-                                    self.effective_principal(authenticated_session)
+                                    let principal = self.effective_principal(authenticated_session);
+                                    RuntimeValue::Reference {
+                                        target: SYS_SECURITY_PRINCIPAL_TYPE_ID,
+                                        object: ObjectId::from_bytes(principal.to_bytes()),
+                                    }
+                                }
+                                SYS_SECURITY_ACTIVE_ROLES_FUNCTION_ID => {
+                                    let descriptor =
+                                        TypeDescriptor::set(TypeDescriptor::reference(
+                                            SYS_SECURITY_PRINCIPAL_TYPE_ID,
+                                        ))
+                                        .map_err(|_| {
+                                            sealed_target_invariant(
+                                                &active,
+                                                "sealed active_roles return descriptor must be valid",
+                                            )
+                                        })?;
+                                    let values = self
+                                        .active_roles(authenticated_session)
+                                        .into_iter()
+                                        .map(|principal| RuntimeValue::Reference {
+                                            target: SYS_SECURITY_PRINCIPAL_TYPE_ID,
+                                            object: ObjectId::from_bytes(principal.to_bytes()),
+                                        })
+                                        .collect();
+                                    RuntimeValue::set(&active, descriptor, values).map_err(|_| {
+                                        sealed_target_invariant(
+                                            &active,
+                                            "sealed active_roles return value must be valid",
+                                        )
+                                    })?
                                 }
                                 _ => {
                                     return Err(sealed_target_invariant(
                                         &active,
-                                        "sealed system invocation target is not an admitted scalar security identity",
+                                        "sealed system invocation target is not an admitted security identity",
                                     ));
                                 }
-                            };
-                            let value = RuntimeValue::Reference {
-                                target: SYS_SECURITY_PRINCIPAL_TYPE_ID,
-                                object: ObjectId::from_bytes(principal.to_bytes()),
                             };
                             (value, security_target)
                         }
@@ -2068,7 +2099,6 @@ pub(crate) async fn append_invocation_audit_event(
         .map_err(PostgresKernelError::Database)?;
     Ok(event_id)
 }
-
 /// One privately resolved sealed invocation target for the PostgreSQL kernel.
 ///
 /// This mirrors the closed resolution inside `orna-core` so the durable audit
@@ -2085,19 +2115,25 @@ enum SealedResolvedTarget<'a> {
         executable: &'a StandardExecutable,
     },
 }
-fn is_admitted_security_identity(definition: SystemFunctionDefinition) -> bool {
-    matches!(definition.kind(), SystemFunctionKind::SecurityIdentity)
-        && matches!(
-            definition.id(),
-            SYS_SECURITY_SESSION_PRINCIPAL_FUNCTION_ID
-                | SYS_SECURITY_EFFECTIVE_PRINCIPAL_FUNCTION_ID
-        )
+pub(crate) fn is_admitted_security_identity(definition: SystemFunctionDefinition) -> bool {
+    let id = definition.id();
+    matches!(
+        id,
+        SYS_SECURITY_SESSION_PRINCIPAL_FUNCTION_ID
+            | SYS_SECURITY_EFFECTIVE_PRINCIPAL_FUNCTION_ID
+            | SYS_SECURITY_ACTIVE_ROLES_FUNCTION_ID
+    ) && matches!(definition.kind(), SystemFunctionKind::SecurityIdentity)
         && definition.security_signature().is_some_and(|signature| {
             signature.parameter_count() == 0
-                && !signature.returns_set()
                 && signature.returns_ref_principal()
                 && !signature.returns_boolean()
                 && signature.stream_item_type().is_none()
+                && match id {
+                    SYS_SECURITY_ACTIVE_ROLES_FUNCTION_ID => signature.returns_set(),
+                    SYS_SECURITY_SESSION_PRINCIPAL_FUNCTION_ID
+                    | SYS_SECURITY_EFFECTIVE_PRINCIPAL_FUNCTION_ID => !signature.returns_set(),
+                    _ => false,
+                }
         })
 }
 
@@ -2655,6 +2691,12 @@ async fn load_invocation_target_authorities(
     active: &ActiveDatabaseRevision,
 ) -> Result<Vec<SecurityFunctionTarget>, PostgresKernelError> {
     const RELATION: &str = "_orna_kernel.invocation_target_authorities";
+    let admitted_system_identities = [
+        SYS_SECURITY_SESSION_PRINCIPAL_FUNCTION_ID,
+        SYS_SECURITY_EFFECTIVE_PRINCIPAL_FUNCTION_ID,
+        SYS_SECURITY_ACTIVE_ROLES_FUNCTION_ID,
+    ];
+    let mut seen_system_identities = [false; 3];
     let catalogue = active.pair().catalogue().to_bytes().to_vec();
     let rows = transaction
         .query(
@@ -2760,6 +2802,24 @@ async fn load_invocation_target_authorities(
                         rule: "system invocation targets must be sealed audit anchors",
                     });
                 }
+                let Some(index) = admitted_system_identities
+                    .iter()
+                    .position(|identity| *identity == function)
+                else {
+                    return Err(PostgresKernelError::DurableInvariant {
+                        relation: RELATION,
+                        record: function.canonical(),
+                        rule: "system invocation targets must use exactly the admitted sealed identities",
+                    });
+                };
+                if seen_system_identities[index] {
+                    return Err(PostgresKernelError::DurableInvariant {
+                        relation: RELATION,
+                        record: function.canonical(),
+                        rule: "system invocation targets must contain each admitted sealed identity exactly once",
+                    });
+                }
+                seen_system_identities[index] = true;
             }
             _ => {
                 return Err(PostgresKernelError::DurableInvariant {
@@ -2769,6 +2829,13 @@ async fn load_invocation_target_authorities(
                 });
             }
         }
+    }
+    if seen_system_identities.iter().any(|seen| !seen) {
+        return Err(PostgresKernelError::DurableInvariant {
+            relation: RELATION,
+            record: active.pair().catalogue().canonical(),
+            rule: "system invocation targets must contain exactly the three admitted sealed identities",
+        });
     }
     require_authorised_standard_targets(active, &targets)?;
     Ok(targets)
