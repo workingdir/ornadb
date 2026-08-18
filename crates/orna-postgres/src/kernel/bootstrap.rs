@@ -873,7 +873,7 @@ mod tests {
             validated_migration_registry()
                 .expect("registry is valid")
                 .len(),
-            28
+            29
         );
         assert_eq!(MIGRATIONS[0].version, 1);
         assert_eq!(MIGRATIONS[1].version, 2);
@@ -903,6 +903,7 @@ mod tests {
         assert_eq!(MIGRATIONS[25].version, 26);
         assert_eq!(MIGRATIONS[26].version, 27);
         assert_eq!(MIGRATIONS[27].version, 28);
+        assert_eq!(MIGRATIONS[28].version, 29);
         assert_eq!(MIGRATIONS[5].name, "definition reference write evidence");
         assert_eq!(MIGRATIONS[6].name, "standard catalogue type storage");
         assert_eq!(MIGRATIONS[7].name, "resolved value type storage");
@@ -926,6 +927,7 @@ mod tests {
         assert_eq!(MIGRATIONS[25].name, "user state audit decisions");
         assert_eq!(MIGRATIONS[26].name, "inspect snapshots and trace");
         assert_eq!(MIGRATIONS[27].name, "security admin privilege grants");
+        assert_eq!(MIGRATIONS[28].name, "sealed system invocation authorities");
         assert!(MIGRATIONS[6].data_step.is_none());
         assert!(MIGRATIONS[7].data_step.is_none());
         assert!(MIGRATIONS[8].data_step.is_none());
@@ -948,6 +950,7 @@ mod tests {
         assert!(MIGRATIONS[25].data_step.is_none());
         assert!(MIGRATIONS[26].data_step.is_none());
         assert!(MIGRATIONS[27].data_step.is_none());
+        assert!(MIGRATIONS[28].data_step.is_none());
     }
 
     #[test]
