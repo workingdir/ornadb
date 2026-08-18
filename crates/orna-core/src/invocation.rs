@@ -16,7 +16,9 @@ use crate::{
     },
     system::{
         InvocationCarrierKind, SYS_INVOKE_EVENT_TYPE_ID, SYS_INVOKE_REQUEST_TYPE_ID,
-        SYS_INVOKE_VALUE_TYPE_ID, invocation_carrier_by_id,
+        SYS_INVOKE_VALUE_TYPE_ID, SYS_SECURITY_EFFECTIVE_PRINCIPAL_FUNCTION_ID,
+        SYS_SECURITY_SESSION_PRINCIPAL_FUNCTION_ID, SystemFunctionDefinition, SystemFunctionKind,
+        invocation_carrier_by_id, system_function_by_id, system_function_by_name,
     },
     types::{TypeDescriptor, TypeDescriptorKind},
     value::{RuntimeType, RuntimeValue, count_invocation_runtime_value_nodes},
@@ -77,33 +79,51 @@ pub fn decide_protected_invocation(
     let Some(target) = resolve_target_privately(active, request.target()) else {
         return ProtectedInvocationDecision::Denied;
     };
-    let security_target = match target.class() {
-        PrivateTargetClass::Application => {
-            SecurityInvocationTarget::new(target.id(), active.pair())
-        }
-        PrivateTargetClass::VerifiedStandard => {
-            let Some(standard_revision) = target.standard_revision() else {
-                return ProtectedInvocationDecision::Denied;
+    let security_target = SecurityInvocationTarget::new(target.id(), active.pair());
+    let authorised = match target.class() {
+        PrivateTargetClass::System => security.authorise_system_function(session, security_target),
+        PrivateTargetClass::Application | PrivateTargetClass::VerifiedStandard => {
+            let security_target = match target.class() {
+                PrivateTargetClass::Application => security_target,
+                PrivateTargetClass::VerifiedStandard => {
+                    let Some(standard_revision) = target.standard_revision() else {
+                        return ProtectedInvocationDecision::Denied;
+                    };
+                    SecurityInvocationTarget::verified_standard(
+                        target.id(),
+                        active.pair(),
+                        standard_revision,
+                        target.executable_revision(),
+                    )
+                }
+                PrivateTargetClass::System => {
+                    unreachable!("system targets use system authorisation")
+                }
             };
-            SecurityInvocationTarget::verified_standard(
-                target.id(),
-                active.pair(),
-                standard_revision,
-                target.executable_revision(),
-            )
+            security.authorise_execute(session, security_target)
         }
     };
-    if !matches!(
-        security.authorise_execute(session, security_target),
-        ExecuteDecision::Allowed(_)
-    ) {
+    if !matches!(authorised, ExecuteDecision::Allowed(_)) {
         return ProtectedInvocationDecision::Denied;
     }
 
-    let prebind = prebind_privately(target.definition(), request);
-    if target.definition().security() != FunctionSecurity::Invoker {
-        return ProtectedInvocationDecision::Denied;
-    }
+    let prebind = match target.class() {
+        PrivateTargetClass::System => {
+            if target.system_definition().is_none() {
+                return ProtectedInvocationDecision::Denied;
+            }
+            prebind_system_privately(request)
+        }
+        PrivateTargetClass::Application | PrivateTargetClass::VerifiedStandard => {
+            let Some(definition) = target.definition() else {
+                return ProtectedInvocationDecision::Denied;
+            };
+            if definition.security() != FunctionSecurity::Invoker {
+                return ProtectedInvocationDecision::Denied;
+            }
+            prebind_privately(definition, request)
+        }
+    };
 
     match prebind {
         PrivatePrebind::Complete => ProtectedInvocationDecision::Allowed,
@@ -125,34 +145,33 @@ enum PrivateTargetClass {
     /// A function in the exact verified standard snapshot pinned by the
     /// active application revision.
     VerifiedStandard,
+    /// One of the explicitly admitted sealed system identity functions.
+    System,
 }
 
 /// One privately resolved invocation target with its immutable executable pin.
 ///
-/// The application target is pinned to the current function revision of its
-/// application catalogue definition. A verified-standard target is pinned to
-/// the exact `StandardExecutable` (function identity and executable revision)
-/// of the verified standard snapshot selected by the active application
-/// revision; a current, different, or unverified standard snapshot cannot
-/// authorise it. This record stays private to the protected boundary: the
-/// public decision result never carries a target, signature, selector, value,
-/// binding, or security evidence.
+/// Application and verified-standard targets retain their catalogue definition
+/// and executable pins. A system target retains only its sealed registry
+/// definition: it never fabricates or borrows a `FunctionDefinition`.
 #[derive(Clone, Debug)]
-struct PrivateResolvedTarget {
-    definition: FunctionDefinition,
-    class: PrivateTargetClass,
-    executable_revision: FunctionRevisionId,
-    standard_revision: Option<StandardLibraryRevisionId>,
+enum PrivateResolvedTarget {
+    Application {
+        definition: FunctionDefinition,
+    },
+    VerifiedStandard {
+        definition: FunctionDefinition,
+        standard_revision: StandardLibraryRevisionId,
+        executable_revision: FunctionRevisionId,
+    },
+    System {
+        definition: SystemFunctionDefinition,
+    },
 }
 
 impl PrivateResolvedTarget {
     fn new_application(definition: FunctionDefinition) -> Self {
-        Self {
-            executable_revision: definition.current_revision(),
-            class: PrivateTargetClass::Application,
-            standard_revision: None,
-            definition,
-        }
+        Self::Application { definition }
     }
 
     fn new_verified_standard(
@@ -160,37 +179,83 @@ impl PrivateResolvedTarget {
         standard_revision: StandardLibraryRevisionId,
         executable_revision: FunctionRevisionId,
     ) -> Self {
-        Self {
-            executable_revision,
-            class: PrivateTargetClass::VerifiedStandard,
-            standard_revision: Some(standard_revision),
+        Self::VerifiedStandard {
             definition,
+            standard_revision,
+            executable_revision,
+        }
+    }
+
+    fn new_system(definition: SystemFunctionDefinition) -> Option<Self> {
+        if !matches!(definition.kind(), SystemFunctionKind::SecurityIdentity) {
+            return None;
+        }
+        match definition.id() {
+            SYS_SECURITY_SESSION_PRINCIPAL_FUNCTION_ID
+            | SYS_SECURITY_EFFECTIVE_PRINCIPAL_FUNCTION_ID => Some(Self::System { definition }),
+            _ => None,
         }
     }
 
     /// Returns the stable target function identity.
     fn id(&self) -> FunctionId {
-        self.definition.id()
+        match self {
+            Self::Application { definition } | Self::VerifiedStandard { definition, .. } => {
+                definition.id()
+            }
+            Self::System { definition } => definition.id(),
+        }
     }
 
-    /// Returns the complete catalogue function definition.
-    fn definition(&self) -> &FunctionDefinition {
-        &self.definition
+    /// Returns the complete catalogue function definition, when applicable.
+    fn definition(&self) -> Option<&FunctionDefinition> {
+        match self {
+            Self::Application { definition } | Self::VerifiedStandard { definition, .. } => {
+                Some(definition)
+            }
+            Self::System { .. } => None,
+        }
+    }
+
+    /// Returns the sealed system-function definition, when applicable.
+    fn system_definition(&self) -> Option<SystemFunctionDefinition> {
+        match self {
+            Self::System { definition } => Some(*definition),
+            Self::Application { .. } | Self::VerifiedStandard { .. } => None,
+        }
     }
 
     /// Returns the closed target class.
     fn class(&self) -> PrivateTargetClass {
-        self.class
+        match self {
+            Self::Application { .. } => PrivateTargetClass::Application,
+            Self::VerifiedStandard { .. } => PrivateTargetClass::VerifiedStandard,
+            Self::System { .. } => PrivateTargetClass::System,
+        }
     }
 
     /// Returns the exact pinned executable function revision.
     fn executable_revision(&self) -> FunctionRevisionId {
-        self.executable_revision
+        match self {
+            Self::VerifiedStandard {
+                executable_revision,
+                ..
+            } => *executable_revision,
+            Self::Application { definition } => definition.current_revision(),
+            Self::System { .. } => {
+                unreachable!("system targets do not carry executable revisions")
+            }
+        }
     }
 
     /// Returns the exact verified standard snapshot revision for a standard target.
     fn standard_revision(&self) -> Option<StandardLibraryRevisionId> {
-        self.standard_revision
+        match self {
+            Self::VerifiedStandard {
+                standard_revision, ..
+            } => Some(*standard_revision),
+            Self::Application { .. } | Self::System { .. } => None,
+        }
     }
 }
 
@@ -198,6 +263,14 @@ fn resolve_target_privately(
     active: &ActiveDatabaseRevision,
     selector: &InvocationTarget,
 ) -> Option<PrivateResolvedTarget> {
+    let system = match selector {
+        InvocationTarget::FunctionId(id) => system_function_by_id(*id),
+        InvocationTarget::QualifiedName(name) => system_function_by_name(name),
+    };
+    if let Some(system) = system {
+        return PrivateResolvedTarget::new_system(system);
+    }
+
     let application = active.catalogue();
     let standard = active.catalogue_hash_context().standard();
     resolve_target_in_catalogues(application, standard, selector)
@@ -235,6 +308,14 @@ fn resolve_target_in_catalogues(
                 executable.revision().id(),
             ))
         }
+    }
+}
+
+fn prebind_system_privately(request: &InvokeRequest) -> PrivatePrebind {
+    if request.arguments().is_empty() {
+        PrivatePrebind::Complete
+    } else {
+        PrivatePrebind::Failed
     }
 }
 
@@ -1573,7 +1654,10 @@ mod tests {
             ExecuteGrant, InvocationTarget as SecurityInvocationTarget, Principal, PrincipalKind,
             PrincipalStatus, SecurityFunctionTarget, SecuritySnapshot,
         },
-        system::{CATALOGUE_HEALTH_FUNCTION_ID, SYS_INVOKE_FUNCTION_ID},
+        system::{
+            CATALOGUE_HEALTH_FUNCTION_ID, SYS_INVOKE_FUNCTION_ID,
+            SYS_SECURITY_ACTIVE_ROLES_FUNCTION_ID, SYS_SECURITY_EFFECTIVE_PRINCIPAL_FUNCTION_ID,
+        },
         types::{ResolvedType, StandardScalar},
     };
 
@@ -2662,6 +2746,60 @@ mod tests {
             resolve_target_in_catalogues(&application, Some(&verified), &unknown_selector)
                 .is_none(),
             "an unknown function must not resolve"
+        );
+    }
+
+    #[test]
+    fn protected_decision_allows_scalar_system_identities_and_denies_set_identity() {
+        let active = decision_active_revision(FunctionSecurity::Invoker);
+        let security = decision_security(&active, vec![]);
+        let session = security
+            .bind_authenticated_session(PrincipalId::from_bytes([25; 16]), vec![])
+            .expect("an active user session");
+        let system_request = |target: InvocationTarget| {
+            let mut input = request_input(Vec::new(), None);
+            input.target = target;
+            InvokeRequest::new(input).expect("a system target request")
+        };
+        let invoke_target = SecurityInvocationTarget::new(SYS_INVOKE_FUNCTION_ID, active.pair());
+        let qualified_session = system_request(
+            InvocationTarget::qualified_name(
+                QualifiedSemanticName::new(["sys", "security", "session_principal"])
+                    .expect("a qualified system target"),
+            )
+            .expect("a qualified target"),
+        );
+        assert_eq!(
+            decide_protected_invocation(
+                &security,
+                &session,
+                invoke_target,
+                &active,
+                5,
+                &qualified_session,
+            ),
+            ProtectedInvocationDecision::Allowed
+        );
+        let effective = system_request(InvocationTarget::function_id(
+            SYS_SECURITY_EFFECTIVE_PRINCIPAL_FUNCTION_ID,
+        ));
+        assert_eq!(
+            decide_protected_invocation(&security, &session, invoke_target, &active, 5, &effective,),
+            ProtectedInvocationDecision::Allowed
+        );
+        let active_roles = system_request(InvocationTarget::function_id(
+            SYS_SECURITY_ACTIVE_ROLES_FUNCTION_ID,
+        ));
+        assert_eq!(
+            decide_protected_invocation(
+                &security,
+                &session,
+                invoke_target,
+                &active,
+                5,
+                &active_roles,
+            ),
+            ProtectedInvocationDecision::Denied
         );
     }
 
