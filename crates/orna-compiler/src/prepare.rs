@@ -3856,7 +3856,7 @@ fn validate_client_function_preflight(
 
     let body = match function.body() {
         CheckedClientFunctionBody::BooleanLiteral { value, .. } => {
-            if function.parameters().len() != 0
+            if !function.parameters().is_empty()
                 || function.return_type() != SemanticType::Scalar(StandardScalar::Boolean)
                 || return_scalar != Some(StandardScalar::Boolean)
                 || !function.references().is_empty()
