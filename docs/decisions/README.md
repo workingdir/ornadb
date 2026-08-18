@@ -151,3 +151,5 @@ source-of-truth or authority rules.
   [SET Values Use ORV6 Transport](0073-set-valued-runtime-transport.md)
 * **work ADR 0074:**
   [Runtime-Only CLIENT Resource Executor Seam](0074-client-resource-executor-seam.md)
+* **work ADR 0075:**
+  [`std.json.Value` Standard Value Snapshot](0075-std-json-value.md)
