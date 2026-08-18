@@ -153,3 +153,5 @@ source-of-truth or authority rules.
   [Runtime-Only CLIENT Resource Executor Seam](0074-client-resource-executor-seam.md)
 * **work ADR 0075:**
   [`std.json.Value` Standard Value Snapshot](0075-std-json-value.md)
+* **work ADR 0076:**
+  [Headless Runtime ABI Conformance Boundary](0076-runtime-headless-conformance.md)
