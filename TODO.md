@@ -64,6 +64,20 @@ separate release action.
 - [x] Add the installed `orna source diff` semantic diff surface
   (identity-keyed add/drop/rename report, no apply, live proof;
   work ADR 0066).
+- [x] Register `std.ui.UI`, the deterministic TTY runtime offer, and the
+  server-side `sys.inspect` core with installed proofs (work ADRs 0062-0064).
+- [x] Add security administration and the sealed CSV output presenter
+  (work ADRs 0065 and 0067).
+- [x] Add CLIENT expression bodies and external `RUNTIME CONTRACT` clauses,
+  including version-three plans, closed evaluation, and installed proof
+  (work ADR 0068).
+- [x] Add CLIENT STATE declarations, version-four plans, and the authenticated
+  USER state lifecycle with conflict handling (work ADRs 0069-0070).
+- [x] Add the executor-independent CLIENT resource lifecycle and runtime-only
+  executor seam (work ADRs 0071 and 0074).
+- [x] Add sealed system identity calls, ORV6 SET transport, and the
+  `std.json.Value` standard snapshot with persisted V5 executable recovery
+  (work ADRs 0072, 0073, and 0075).
 - [ ] Implement the ordinary CLIENT Inspector after the canonical
   RESOURCE, UI runtime-contract, and CLIENT-to-SERVER invocation contracts
   become accepted executable specifications.
