@@ -655,7 +655,13 @@ fn verify_standard_library_snapshot_version(
     Ok(VerifiedStandardLibrarySnapshot::new(standard))
 }
 
-fn calculate_standard_library_digest(
+/// Calculates the canonical digest for a standard-library snapshot.
+///
+/// This validates the source revision and executable facts, then returns the
+/// digest calculated from the snapshot. It does not compare the result with
+/// the digest stored in the snapshot. Call `standard_library_digest` when the
+/// embedded digest must also be verified.
+pub fn calculate_standard_library_digest(
     standard: &StandardLibrarySnapshot,
 ) -> Result<Sha256Digest, CanonicalHashError> {
     let source_hash = source_revision_digest(standard.source())?;

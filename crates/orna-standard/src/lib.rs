@@ -10,9 +10,9 @@ use orna_core::{
     CatalogueRevisionId, SchemaId, SourceBundleId, SourceRevisionId, SourceUnitId,
     StandardLibraryRevisionId, TypeBindingId, TypeId,
     canonical_hash::{
-        CanonicalHashError, artifact_payload_digest, function_declaration_digest,
-        function_semantic_digest_with_version, source_bundle_digest, source_revision_record_digest,
-        source_unit_content_digest, standard_library_digest,
+        CanonicalHashError, artifact_payload_digest, calculate_standard_library_digest,
+        function_declaration_digest, function_semantic_digest_with_version, source_bundle_digest,
+        source_revision_record_digest, source_unit_content_digest, standard_library_digest,
         verify_standard_library_snapshot as verify_canonical_standard_library_snapshot,
         verify_standard_library_v2_snapshot as verify_canonical_standard_library_v2_snapshot,
     },
@@ -2238,9 +2238,13 @@ fn retained_standard_library_v5_snapshot_from_source(
         ACCEPTED_V5_STANDARD_LIBRARY_DIGEST,
     )
     .map_err(|source| StandardLibraryError::Revision { source })?;
-    if ACCEPTED_V5_STANDARD_LIBRARY_DIGEST != Sha256Digest::from_bytes([0; 32]) {
-        let _ = standard_library_digest(&snapshot)
-            .map_err(|source| StandardLibraryError::CanonicalHash { source })?;
+    let actual_digest = calculate_standard_library_digest(&snapshot)
+        .map_err(|source| StandardLibraryError::CanonicalHash { source })?;
+    if actual_digest != ACCEPTED_V5_STANDARD_LIBRARY_DIGEST {
+        return Err(StandardLibraryError::AcceptedDigestMismatch {
+            expected: ACCEPTED_V5_STANDARD_LIBRARY_DIGEST,
+            actual: actual_digest,
+        });
     }
     Ok(snapshot)
 }
@@ -3538,7 +3542,8 @@ mod tests {
         revision::{
             ActiveDatabaseRevision, ActiveDatabaseRevisionInput, ActiveRevisionContent,
             CatalogueHashContext, DefinitionReferenceKind, DefinitionReferenceTarget,
-            ExecutableArtifactKind, FunctionSemanticHashVersion, RevisionPair,
+            ExecutableArtifact, ExecutableArtifactKind, FunctionRevisionRecord,
+            FunctionSemanticHashVersion, RevisionPair, StandardExecutable,
             StandardLibraryDigestVersion, StandardLibrarySnapshot, StoredSourceRevision,
             StoredSourceUnit,
         },
@@ -3568,10 +3573,10 @@ mod tests {
         STD_TERMINAL_DOCUMENT_TYPE_ID, STD_TERMINAL_SCHEMA_ID, STD_TYPES_SCHEMA_ID,
         STD_TYPES_SOURCE_UNIT_ID, STD_UI_CONTRACT, STD_UI_SCHEMA_ID, STD_UI_SOURCE_LOGICAL_PATH,
         STD_UI_SOURCE_UNIT_ID, STD_UI_TYPE_ID, StandardLibraryError, StandardLibraryManifestError,
-        StandardUpgradeError, TERMINAL_DOCUMENT_MAGIC, TIME_TYPE_ID, TIMESTAMP_TYPE_ID,
-        UI_MAGIC, UUID_TYPE_ID, VOID_TYPE_ID, build_type_bindings, prepare_standard_upgrade,
+        StandardUpgradeError, TERMINAL_DOCUMENT_MAGIC, TIME_TYPE_ID, TIMESTAMP_TYPE_ID, UI_MAGIC,
+        UUID_TYPE_ID, VOID_TYPE_ID, build_type_bindings, prepare_standard_upgrade,
         prepare_standard_upgrade_v1_to_v2, prepare_standard_upgrade_v2_to_v3,
-        prepare_standard_upgrade_with, registered_opaque_codecs,
+        prepare_standard_upgrade_v4_to_v5, prepare_standard_upgrade_with, registered_opaque_codecs,
         retained_standard_library_snapshot, retained_standard_library_snapshot_from_source,
         retained_standard_library_v2_snapshot, retained_standard_library_v2_snapshot_from_source,
         retained_standard_library_v3_snapshot, retained_standard_library_v4_snapshot,
@@ -7500,5 +7505,138 @@ EXPORT TYPE std.ui.UI AS std.UI;
         let verified = super::verify_standard_library_v5_snapshot(snapshot)
             .expect("the retained V5 source verifies");
         assert!(super::registered_opaque_codecs(&verified).is_ok());
+    }
+
+    #[test]
+    fn rejects_a_tampered_v5_json_source_byte_before_verification() {
+        let mut json_source = super::RETAINED_STANDARD_JSON_SOURCE.to_owned();
+        json_source.push('\n');
+        let error = super::retained_standard_library_v5_snapshot_from_source(
+            super::RETAINED_STANDARD_SOURCE,
+            super::RETAINED_STANDARD_INVOKE_SOURCE,
+            super::RETAINED_STANDARD_OUTPUT_SOURCE,
+            super::RETAINED_STANDARD_UI_SOURCE,
+            &json_source,
+        )
+        .expect_err("a changed V5 source byte must be rejected");
+        assert!(matches!(
+            error,
+            super::StandardLibraryError::RetainedSourceMismatch
+        ));
+    }
+
+    #[test]
+    fn rejects_a_tampered_v5_json_executable_through_compiler_dispatch() {
+        let snapshot = super::retained_standard_library_v5_snapshot()
+            .expect("the retained V5 source is valid");
+        let json_index = snapshot
+            .executables()
+            .iter()
+            .position(|executable| executable.function() == super::STD_JSON_ENCODE_FUNCTION_ID)
+            .expect("the retained V5 snapshot contains the JSON executable");
+        let original = &snapshot.executables()[json_index];
+        let revision = original.revision();
+        let mut payload = revision.artifact().payload().to_vec();
+        payload.push(0);
+        let content_hash =
+            artifact_payload_digest(&payload).expect("the tampered payload can be hashed");
+        let artifact = ExecutableArtifact::new(
+            revision.artifact().kind(),
+            revision.artifact().format(),
+            revision.artifact().version(),
+            payload,
+            content_hash,
+        )
+        .expect("the tampered artifact remains structurally valid");
+        let function = snapshot
+            .catalogue()
+            .function_by_id(super::STD_JSON_ENCODE_FUNCTION_ID)
+            .expect("the retained V5 catalogue contains the JSON function");
+        let semantic_hash = function_semantic_digest_with_version(
+            revision.semantic_hash_version(),
+            function,
+            revision.language_version(),
+            &artifact,
+            &[],
+            original.references(),
+        )
+        .expect("the tampered semantic hash can be calculated");
+        let tampered_revision = FunctionRevisionRecord::new(
+            revision.function(),
+            revision.id(),
+            revision.revision_number(),
+            revision.declaration_origin(),
+            revision.declaration_content_hash(),
+            semantic_hash,
+            revision.language_version(),
+            artifact,
+        )
+        .expect("the tampered revision remains structurally valid")
+        .with_semantic_hash_version(revision.semantic_hash_version());
+        let tampered_executable = StandardExecutable::new(
+            original.function(),
+            tampered_revision,
+            original.references().to_vec(),
+        )
+        .expect("the tampered executable remains structurally valid");
+        let mut executables = snapshot.executables().to_vec();
+        executables[json_index] = tampered_executable;
+        let build_snapshot = |digest| {
+            StandardLibrarySnapshot::new_with_executables(
+                snapshot.revision(),
+                snapshot.digest_version(),
+                snapshot.source().clone(),
+                snapshot.language_version(),
+                snapshot.catalogue().clone(),
+                executables.clone(),
+                snapshot.origins().to_vec(),
+                digest,
+            )
+            .expect("the tampered snapshot remains structurally valid")
+        };
+        let provisional = build_snapshot(snapshot.digest());
+        let digest = orna_core::canonical_hash::calculate_standard_library_digest(&provisional)
+            .expect("the tampered snapshot digest can be calculated");
+        let tampered_snapshot = build_snapshot(digest);
+        let verified = super::verify_canonical_standard_library_v2_snapshot(tampered_snapshot)
+            .expect("the tampered snapshot verifies with its recalculated digest");
+        let error = orna_compiler::check_standard_library_source(&verified)
+            .expect_err("the V5 compiler path must reject the tampered executable");
+        assert!(matches!(
+            error,
+            orna_compiler::StandardLibraryCheckError::ExecutableMismatch
+        ));
+    }
+
+    #[test]
+    fn prepares_the_v4_to_v5_standard_upgrade_from_an_empty_v4_active_revision() {
+        let version_four = super::verify_standard_library_v4_snapshot(
+            super::retained_standard_library_v4_snapshot()
+                .expect("the retained V4 standard source is valid"),
+        )
+        .expect("the retained V4 standard source verifies");
+        let version_five = super::verify_standard_library_v5_snapshot(
+            super::retained_standard_library_v5_snapshot()
+                .expect("the retained V5 standard source is valid"),
+        )
+        .expect("the retained V5 standard source verifies");
+        orna_compiler::check_standard_library_source(&version_five)
+            .unwrap_or_else(|error| panic!("the V5 source must check: {error:?}"));
+        let active = empty_version_two_active_revision(&version_four);
+        let upgrade = super::prepare_standard_upgrade_v4_to_v5(&active)
+            .unwrap_or_else(|error| panic!("the V4-to-V5 upgrade must prepare: {error:?}"));
+        assert_eq!(
+            upgrade.verified_standard_snapshot().revision(),
+            super::STANDARD_LIBRARY_V5_REVISION_ID
+        );
+        assert_eq!(upgrade.verified_standard_snapshot().executables().len(), 2);
+        assert_eq!(
+            upgrade
+                .checked_standard_library()
+                .checked_executable()
+                .expect("the V5 upgrade retains the echo executable")
+                .function_id(),
+            super::STD_INVOKE_ECHO_FUNCTION_ID
+        );
     }
 }
