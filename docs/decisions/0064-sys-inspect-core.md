@@ -9,8 +9,10 @@ epochs captured during protected invocations, eight closed projections over an
 epoch, a sequence-addressable trace stream, an INSPECT privilege ladder, and an
 `orna inspect` CLI surface. This slice implements the spec `api/inspect.md`
 contract without any client UI: the `devtools.inspector` CLIENT function and
-its `std.ui` widgets are blocked on the runtime-contract syntax and are
-explicitly deferred.
+its `std.ui` widgets remain deferred because the graphical runtime contract,
+UI sink, and CLIENT-to-SERVER invocation contracts are not accepted or
+implemented. Work ADR 0068 now provides closed expression and RUNTIME
+CONTRACT syntax, but it does not define those graphical runtime contracts.
 
 ## Background
 
