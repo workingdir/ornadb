@@ -3097,11 +3097,12 @@ async fn recovery_rejects_an_application_standard_duplicate_target() -> TestResu
                    AND function_id = decode('{}', 'hex');
                  ALTER TABLE _orna_kernel.invocation_target_authorities
                      ADD CONSTRAINT invocation_target_authorities_target_class_check
-                     CHECK (target_class IN ('application', 'standard')),
+                     CHECK (target_class IN ('application', 'standard', 'system')),
                      ADD CONSTRAINT invocation_target_authorities_class_shape_check
                      CHECK (
                         (target_class = 'application' AND standard_library_revision_id IS NULL)
                         OR (target_class = 'standard' AND standard_library_revision_id IS NOT NULL)
+                        OR (target_class = 'system' AND standard_library_revision_id IS NULL)
                      );",
                 raw_id_hex(fixture.standard.revision().to_bytes()),
                 raw_id_hex(fixture.active.pair().catalogue().to_bytes()),
