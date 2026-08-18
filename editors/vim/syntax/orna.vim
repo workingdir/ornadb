@@ -50,7 +50,7 @@ syntax match ornaOperator "::"
 syntax match ornaOperator "||"
 
 " Function calls: identifier immediately followed by (.
-syntax match ornaFunction "\<[A-Za-z_][A-Za-z0-9_]*\(\s*("me=e-1
+syntax match ornaFunction "\<[A-Za-z_][A-Za-z0-9_]*\(\s*(\)"me=e-1
 
 " Default identifiers (keywords take precedence over this match).
 syntax match ornaIdentifier "\<[A-Za-z_][A-Za-z0-9_]*\>"
