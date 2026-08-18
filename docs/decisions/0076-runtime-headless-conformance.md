@@ -153,8 +153,9 @@ payload tags and rejects a payload with the wrong kind or provenance.
 Each model request has one terminal outcome. A completion, failure, or
 cancellation wins the request race exactly once. Cancellation wins when it is
 observed before a terminal completion. A late result for a cancelled request
-returns `CANCELLED`; a result for a request already removed by teardown
-returns `NOT_FOUND`. Neither path calls the client callback a second time.
+returns `ORNA_STATUS_CANCELLED`; a result for a request already removed by
+teardown returns `ORNA_STATUS_NOT_FOUND`. Neither path calls the client
+callback a second time.
 
 ### Shutdown and failure
 
