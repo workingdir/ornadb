@@ -8,7 +8,8 @@ use orna_client::{
 use orna_artifact::client_plan::{CAPABILITY_FORMAT_VERSION, CapabilityClientPlan};
 use orna_core::{
     CatalogueRevisionId, FunctionId, FunctionRevisionId, InspectEpochId, InvocationAuditEventId,
-    InvocationId, PrincipalId, SecurityAuditEventId, SourceRevisionId, StandardLibraryRevisionId,
+    InvocationId, ObjectId, PrincipalId, SecurityAuditEventId, SourceRevisionId,
+    StandardLibraryRevisionId,
     catalogue::{FunctionDefinition, FunctionDomain},
     inspect::{InspectOutcomeKind, InspectPrivilege, InspectSnapshotOptions},
     invocation::{
@@ -26,7 +27,12 @@ use orna_core::{
         SecurityAuditEvent, SecurityAuditKind, SecurityAuditOutcome, SecurityFunctionTarget,
         SecuritySnapshot, SessionBindingError, TargetClass, UserStateAuditOperation,
     },
-    system::{SYS_INVOKE_FUNCTION_ID, system_function_by_id},
+    system::{
+        SYS_INVOKE_FUNCTION_ID, SYS_SECURITY_EFFECTIVE_PRINCIPAL_FUNCTION_ID,
+        SYS_SECURITY_PRINCIPAL_TYPE_ID, SYS_SECURITY_SESSION_PRINCIPAL_FUNCTION_ID,
+        SystemFunctionDefinition, SystemFunctionKind, system_function_by_id,
+        system_function_by_name,
+    },
     value::{FunctionArgument, OpaqueCodecRegistry, RecordValue, RuntimeValue},
 };
 use orna_protocol::{
@@ -673,6 +679,41 @@ impl PostgresKernel {
                                         .map_err(PostgresKernelError::Database)?;
                                     return Err(error);
                                 }
+                            };
+                            (value, security_target)
+                        }
+                        SealedResolvedTarget::System(definition) => {
+                            let security_target =
+                                InvocationTarget::new(definition.id(), active.pair());
+                            if !matches!(
+                                security.authorise_system_function(
+                                    authenticated_session,
+                                    security_target,
+                                ),
+                                ExecuteDecision::Allowed(_)
+                            ) {
+                                return Err(sealed_target_invariant(
+                                    &active,
+                                    "allowed sealed system invocation must re-authorise its target",
+                                ));
+                            }
+                            let principal = match definition.id() {
+                                SYS_SECURITY_SESSION_PRINCIPAL_FUNCTION_ID => {
+                                    self.session_principal(authenticated_session)
+                                }
+                                SYS_SECURITY_EFFECTIVE_PRINCIPAL_FUNCTION_ID => {
+                                    self.effective_principal(authenticated_session)
+                                }
+                                _ => {
+                                    return Err(sealed_target_invariant(
+                                        &active,
+                                        "sealed system invocation target is not an admitted scalar security identity",
+                                    ));
+                                }
+                            };
+                            let value = RuntimeValue::Reference {
+                                target: SYS_SECURITY_PRINCIPAL_TYPE_ID,
+                                object: ObjectId::from_bytes(principal.to_bytes()),
                             };
                             (value, security_target)
                         }
@@ -2034,13 +2075,30 @@ pub(crate) async fn append_invocation_audit_event(
 /// and execution steps can re-derive the exact pinned target without exposing
 /// any resolution phase. An application target carries no executable pin; a
 /// verified-standard target carries the exact executable and standard
-/// revisions of the pinned snapshot.
+/// revisions of the pinned snapshot. A system target carries only its sealed
+/// registry definition.
 enum SealedResolvedTarget<'a> {
     Application(&'a FunctionDefinition),
+    System(SystemFunctionDefinition),
     VerifiedStandard {
         definition: &'a FunctionDefinition,
         executable: &'a StandardExecutable,
     },
+}
+fn is_admitted_security_identity(definition: SystemFunctionDefinition) -> bool {
+    matches!(definition.kind(), SystemFunctionKind::SecurityIdentity)
+        && matches!(
+            definition.id(),
+            SYS_SECURITY_SESSION_PRINCIPAL_FUNCTION_ID
+                | SYS_SECURITY_EFFECTIVE_PRINCIPAL_FUNCTION_ID
+        )
+        && definition.security_signature().is_some_and(|signature| {
+            signature.parameter_count() == 0
+                && !signature.returns_set()
+                && signature.returns_ref_principal()
+                && !signature.returns_boolean()
+                && signature.stream_item_type().is_none()
+        })
 }
 
 /// Resolves one sealed request target in the pinned application and
@@ -2054,6 +2112,15 @@ fn resolve_sealed_target<'a>(
     active: &'a ActiveDatabaseRevision,
     selector: &InvocationRequestTarget,
 ) -> Option<SealedResolvedTarget<'a>> {
+    let system_target = match selector {
+        InvocationRequestTarget::FunctionId(id) => system_function_by_id(*id),
+        InvocationRequestTarget::QualifiedName(name) => system_function_by_name(name),
+        _ => None,
+    };
+    if let Some(definition) = system_target {
+        return is_admitted_security_identity(definition)
+            .then_some(SealedResolvedTarget::System(definition));
+    }
     let application = active.catalogue();
     let standard = active.catalogue_hash_context().standard();
     let application_target = match selector {
@@ -2096,6 +2163,9 @@ fn sealed_security_target(
         SealedResolvedTarget::Application(definition) => {
             InvocationTarget::new(definition.id(), active.pair())
         }
+        SealedResolvedTarget::System(definition) => {
+            InvocationTarget::new(definition.id(), active.pair())
+        }
         SealedResolvedTarget::VerifiedStandard {
             definition,
             executable,
@@ -2111,6 +2181,17 @@ fn sealed_security_target(
                 executable.revision().id(),
             )
         }
+    }
+}
+fn authorise_sealed_target(
+    security: &SecuritySnapshot,
+    authenticated_session: &AuthenticatedSession,
+    target: InvocationTarget,
+) -> ExecuteDecision {
+    if system_function_by_id(target.function()).is_some_and(is_admitted_security_identity) {
+        security.authorise_system_function(authenticated_session, target)
+    } else {
+        security.authorise_execute(authenticated_session, target)
     }
 }
 
@@ -2261,7 +2342,7 @@ async fn append_allowed_invocation_audit(
     target: InvocationTarget,
     invocation: InvocationId,
 ) -> Result<(), PostgresKernelError> {
-    let authorisation = match security.authorise_execute(authenticated_session, target) {
+    let authorisation = match authorise_sealed_target(security, authenticated_session, target) {
         ExecuteDecision::Allowed(authorisation) => authorisation,
         ExecuteDecision::Denied(_) => {
             return Err(PostgresKernelError::DurableInvariant {
@@ -2298,7 +2379,7 @@ async fn append_sealed_denied_audit(
             .await;
     };
     let security_target = sealed_security_target(active, target);
-    let reason = match security.authorise_execute(authenticated_session, security_target) {
+    let reason = match authorise_sealed_target(security, authenticated_session, security_target) {
         ExecuteDecision::Denied(reason) => reason,
         ExecuteDecision::Allowed(_) => {
             // The protected denial came from a private rule that must not
@@ -2561,9 +2642,11 @@ pub(crate) async fn recover_security_snapshot_for_active(
 /// Loads the closed two-class `EXECUTE` target union for the active catalogue
 /// revision from the durable target-authority relation.
 ///
-/// Apply is the only writer of this relation, so every row carries the exact
-/// pinned executable revision and, for a standard target, the exact standard
-/// snapshot revision from the owning application catalogue hash context.
+/// Apply is the only writer of this relation, so every application and
+/// standard row carries its exact pinned executable revision. Sealed system
+/// identity rows are audit anchors only and do not enter the in-memory
+/// application/standard target set.
+///
 /// Recovery validates the standard rows against the already-verified active
 /// standard snapshot and fails closed on any absent, duplicated, mismatched,
 /// or unverified standard target.
@@ -2665,11 +2748,24 @@ async fn load_invocation_target_authorities(
                     executable,
                 ));
             }
+            "system" => {
+                if catalogue_revision.is_some()
+                    || standard.is_some()
+                    || executable.to_bytes() != function.to_bytes()
+                    || !system_function_by_id(function).is_some_and(is_admitted_security_identity)
+                {
+                    return Err(PostgresKernelError::DurableInvariant {
+                        relation: RELATION,
+                        record: function.canonical(),
+                        rule: "system invocation targets must be sealed audit anchors",
+                    });
+                }
+            }
             _ => {
                 return Err(PostgresKernelError::DurableInvariant {
                     relation: RELATION,
                     record: function.canonical(),
-                    rule: "invocation target class must be application or standard",
+                    rule: "invocation target class must be application, standard, or system",
                 });
             }
         }
@@ -3165,6 +3261,9 @@ async fn require_invocation_audit_target(
     target: InvocationTarget,
     record: &str,
 ) -> Result<(), PostgresKernelError> {
+    if system_function_by_id(target.function()).is_some_and(is_admitted_security_identity) {
+        return Ok(());
+    }
     let function = target.function().to_bytes().to_vec();
     let source = target.revision().source().to_bytes().to_vec();
     let catalogue = target.revision().catalogue().to_bytes().to_vec();
