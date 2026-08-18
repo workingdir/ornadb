@@ -175,11 +175,11 @@ to V4 through the same apply path when the server release activates it.
   to register; the runtime ABI slice may replace the frame with a compact
   typed codec under a new contract version.
 - `CREATE EXTERNAL CLIENT FUNCTION std.ui.window (...) RETURNS std.ui.UI
-  RUNTIME CONTRACT 'std.ui.window@1'` (spec ui-runtime philosophy) is
-  accepted as the later contract surface. The current parser has no
-  RUNTIME CONTRACT clause and CLIENT bodies accept only a Boolean
-  literal; those prerequisites (syntax, compiler, and the client
-  expression path) are tracked as the next steps, not this slice.
+  RUNTIME CONTRACT 'std.ui.window@1'` is a closed declaration surface accepted
+  by work ADR 0068. That ADR also defines the closed CLIENT expression
+  vocabulary and plan/evaluator path. This slice still does not define the
+  graphical runtime contract, UI sink offer, event ABI, or runtime lifecycle;
+  those remain later contract work.
 
 ## Precedence
 
