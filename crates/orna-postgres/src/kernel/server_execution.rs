@@ -41,8 +41,8 @@ use orna_core::{
 };
 use orna_protocol::{ValueCodecError, decode_active_value, encode_active_value};
 use orna_standard::{
-    BYTE_STREAM_MAGIC, INTEGER_TYPE_ID, STD_IO_BYTE_STREAM_TYPE_ID, STD_TERMINAL_DOCUMENT_TYPE_ID,
-    TERMINAL_DOCUMENT_MAGIC,
+    BYTE_STREAM_MAGIC, INTEGER_TYPE_ID, JSON_MAGIC, STD_IO_BYTE_STREAM_TYPE_ID,
+    STD_TERMINAL_DOCUMENT_TYPE_ID, TERMINAL_DOCUMENT_MAGIC,
 };
 use tokio_postgres::{
     Client, IsolationLevel, Row, Statement, Transaction,
@@ -2328,9 +2328,10 @@ fn validate_standard_json_encode_argument(
 /// The closed ADR 0057 conversion matrix accepts exactly: null, booleans,
 /// integers, bigints, floats, text, bytes (base64), references (an explicit
 /// `{"$ref": "orna://<type-name>/<object-id>", "$type": "<type-name>"}`
-/// object), lists (arrays), and maps (objects). Every other runtime form
-/// (enums, records, opaque values, options, and invocation carriers) cannot
-/// be represented without loss and is rejected.
+/// object), lists (arrays), maps (objects), and canonical `std.json.Value`
+/// payloads. Every other runtime form (enums, records, other opaque values,
+/// options, and invocation carriers) cannot be represented without loss and
+/// is rejected.
 fn encode_json_value(
     active: &ActiveDatabaseRevision,
     value: &RuntimeValue,
@@ -2386,6 +2387,9 @@ fn encode_json_value(
         RuntimeValue::Record(_) => {
             Err("std.json.encode cannot convert a RECORD value to JSON without loss")
         }
+        RuntimeValue::Opaque(value) if value.opaque_type() == STD_JSON_VALUE_TYPE_ID => {
+            decode_std_json_value(value)
+        }
         RuntimeValue::Opaque(_) => {
             Err("std.json.encode cannot convert an OPAQUE value to JSON without loss")
         }
@@ -2396,6 +2400,33 @@ fn encode_json_value(
         }
         _ => Err("std.json.encode cannot convert an unknown runtime value to JSON without loss"),
     }
+}
+
+/// Decodes the already-validated canonical payload of one `std.json.Value`.
+fn decode_std_json_value(value: &OpaqueValue) -> Result<serde_json::Value, &'static str> {
+    let payload = value.canonical_payload();
+    let magic = JSON_MAGIC.as_bytes();
+    if !payload.starts_with(magic) {
+        return Err("std.json.encode cannot decode a canonical std.json.Value payload");
+    }
+    let length_start = magic.len();
+    let body_start = length_start
+        .checked_add(4)
+        .ok_or("std.json.encode cannot decode a canonical std.json.Value payload")?;
+    let length_bytes = payload
+        .get(length_start..body_start)
+        .ok_or("std.json.encode cannot decode a canonical std.json.Value payload")?;
+    let body_length = u32::from_be_bytes(
+        length_bytes
+            .try_into()
+            .map_err(|_| "std.json.encode cannot decode a canonical std.json.Value payload")?,
+    ) as usize;
+    let body = payload
+        .get(body_start..)
+        .filter(|body| body.len() == body_length)
+        .ok_or("std.json.encode cannot decode a canonical std.json.Value payload")?;
+    serde_json::from_slice(body)
+        .map_err(|_| "std.json.encode cannot decode a canonical std.json.Value payload")
 }
 
 /// Converts one map key to its canonical JSON object-key text.
@@ -4943,6 +4974,16 @@ mod tests {
         )
         .expect("the retained V3 standard source verifies")
     }
+
+    /// Verifies the retained `orna.std/5` standard snapshot.
+    fn presenter_v5_standard() -> VerifiedStandardLibrarySnapshot {
+        orna_standard::verify_standard_library_v5_snapshot(
+            orna_standard::retained_standard_library_v5_snapshot()
+                .expect("the retained V5 standard source is valid"),
+        )
+        .expect("the retained V5 standard source verifies")
+    }
+
 
     /// Builds the active revision the presenter tests execute against: an
     /// application catalogue holding one object type, one enum type, and one
@@ -8323,6 +8364,31 @@ mod tests {
         assert_eq!(
             encode_json_value(&active, &nested).expect("a nested list encodes"),
             serde_json::json!([[1, 2, 3]])
+        );
+    }
+
+    #[test]
+    fn json_encoding_accepts_std_json_value_without_reencoding_loss() {
+        let standard = presenter_v5_standard();
+        let registry = orna_standard::registered_opaque_codecs(&standard)
+            .expect("the V5 opaque codecs register");
+        let active = presenter_active(&standard);
+        let body = br#"{"items":[1,2],"ok":true}"#;
+        let mut payload = Vec::from(JSON_MAGIC.as_bytes());
+        payload.extend_from_slice(
+            &u32::try_from(body.len())
+                .expect("the JSON body length fits the canonical frame")
+                .to_be_bytes(),
+        );
+        payload.extend_from_slice(body);
+        let value = RuntimeValue::Opaque(
+            OpaqueValue::new(&active, &registry, STD_JSON_VALUE_TYPE_ID, payload)
+                .expect("the canonical std.json.Value payload constructs"),
+        );
+
+        assert_eq!(
+            encode_json_value(&active, &value).expect("std.json.Value encodes"),
+            serde_json::json!({"items": [1, 2], "ok": true})
         );
     }
 
