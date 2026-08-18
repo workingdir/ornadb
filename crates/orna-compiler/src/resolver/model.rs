@@ -1079,11 +1079,10 @@ pub enum CheckedClientCapabilityArgument {
 /// parameter reference. The invocation-time gate resolves parameter
 /// references to invocation values before asking the local grant set.
 ///
-/// This slice records the requirement on the in-memory checked model only:
-/// durable capability persistence (a catalogue or revision column, or a
-/// client-plan format extension) is deferred to a later ADR. The enforcement
-/// gate reads the requirement from the checked model or from caller-supplied
-/// declarations.
+/// The checked requirement is copied into the version-five CLIENT capability
+/// envelope during preparation. Legacy direct evaluator calls may also supply
+/// caller-owned declarations when they evaluate version-one to version-four
+/// plans.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CheckedClientCapability {
     name: String,
