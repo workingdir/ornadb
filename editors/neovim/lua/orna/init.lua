@@ -63,9 +63,12 @@ local function legacy_attach(bufnr, config)
     end
 end
 
+local configured = false
+
 ---Configure and enable the Orna LSP integration.
 ---@param opts orna.Config|nil
 function M.setup(opts)
+    configured = true
     local config = vim.tbl_deep_extend("force", {}, defaults, opts or {})
 
     if vim.lsp.config then
@@ -78,6 +81,23 @@ function M.setup(opts)
             settings = config.settings,
         })
         vim.lsp.enable("orna")
+        -- `vim.lsp.enable()` does not reliably replay FileType for buffers
+        -- that were already open when a plugin manager loaded this module.
+        for _, bufnr in ipairs(vim.api.nvim_list_bufs()) do
+            if
+                vim.api.nvim_buf_is_loaded(bufnr)
+                and vim.bo[bufnr].filetype == "orna"
+                and #vim.lsp.get_clients({ bufnr = bufnr, name = "orna" }) == 0
+            then
+                vim.lsp.start({
+                    name = "orna",
+                    cmd = config.cmd,
+                    root_dir = root_dir(bufnr),
+                    capabilities = base_capabilities(),
+                    settings = config.settings,
+                }, { bufnr = bufnr })
+            end
+        end
     else
         -- Legacy path: start the client on the first Orna buffer.
         local group = vim.api.nvim_create_augroup("orna-lsp", { clear = true })
@@ -91,10 +111,15 @@ function M.setup(opts)
     end
 end
 
--- Enable eagerly on load; set vim.g.orna_skip_auto_setup = true in your
--- config to defer and call require("orna").setup({ ... }) yourself.
+-- Enable automatically after plugin-manager configuration has run. Set
+-- vim.g.orna_skip_auto_setup = true before this module is sourced to defer
+-- setup and call require("orna").setup({ ... }) yourself.
 if not vim.g.orna_skip_auto_setup then
-    M.setup()
+    vim.schedule(function()
+        if not configured and not vim.g.orna_skip_auto_setup then
+            M.setup()
+        end
+    end)
 end
 
 return M
