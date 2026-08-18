@@ -149,3 +149,5 @@ source-of-truth or authority rules.
   [Sealed System Identity Calls](0072-sealed-system-identity-calls.md)
 * **work ADR 0073:**
   [SET Values Use ORV6 Transport](0073-set-valued-runtime-transport.md)
+* **work ADR 0074:**
+  [Runtime-Only CLIENT Resource Executor Seam](0074-client-resource-executor-seam.md)
