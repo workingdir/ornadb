@@ -41,7 +41,7 @@ use orna_core::{
     },
     source::{SourceBundle, SourceUnit},
     types::{ResolvedType, StandardScalar, TypeDescriptorKind},
-    value::RuntimeValue,
+    value::{ConstructedValueKind, RuntimeValue},
 };
 #[cfg(feature = "test-hooks")]
 use orna_core::{
@@ -6232,6 +6232,7 @@ async fn migration_twenty_three_aborts_on_revision_mismatched_backfill() -> Test
 // against the V3-pinned active revision.
 
 const V3_PROOF_CLIENT_USER: PrincipalId = PrincipalId::from_bytes([0x71; 16]);
+const V3_PROOF_CLIENT_ROLE: PrincipalId = PrincipalId::from_bytes([0x72; 16]);
 const CONNECTION_PROTOCOL_MAJOR: u16 = 5;
 
 /// Installs the complete production standard chain on a fresh database:
@@ -6879,15 +6880,36 @@ async fn proves_sealed_security_identity_invocation_and_audit() -> TestResult<()
                 PrincipalStatus::Active,
             ));
         }
+        if !principals
+            .iter()
+            .any(|principal| principal.id() == V3_PROOF_CLIENT_ROLE)
+        {
+            principals.push(Principal::new(
+                V3_PROOF_CLIENT_ROLE,
+                PrincipalKind::Role,
+                PrincipalStatus::Active,
+            ));
+        }
+        let mut memberships = recovered.memberships().collect::<Vec<_>>();
+        if !memberships.iter().any(|membership| {
+            membership.role() == V3_PROOF_CLIENT_ROLE
+                && membership.member() == V3_PROOF_CLIENT_USER
+        }) {
+            memberships.push(RoleMembership::new(
+                V3_PROOF_CLIENT_ROLE,
+                V3_PROOF_CLIENT_USER,
+            ));
+        }
         let security = SecuritySnapshot::new_with_function_targets(
             pair,
             recovered.function_targets().collect(),
             principals,
-            recovered.memberships().collect(),
+            memberships,
             recovered.execute_grants().collect(),
         )?;
         let security = kernel.replace_security_snapshot(&security).await?;
-        let session = security.bind_authenticated_session(V3_PROOF_CLIENT_USER, vec![])?;
+        let session =
+            security.bind_authenticated_session(V3_PROOF_CLIENT_USER, vec![V3_PROOF_CLIENT_ROLE])?;
 
         let requests = [
             (
@@ -6914,6 +6936,21 @@ async fn proves_sealed_security_identity_invocation_and_audit() -> TestResult<()
                 .await?;
             require_security_identity_completion(&result, V3_PROOF_CLIENT_USER)?;
         }
+        for target in [
+            InvocationRequestTarget::qualified_name(
+                orna_core::catalogue::QualifiedSemanticName::new(
+                    "sys.security.active_roles".split('.'),
+                )?,
+            )?,
+            InvocationRequestTarget::function_id(SYS_SECURITY_ACTIVE_ROLES_FUNCTION_ID),
+        ] {
+            let request = sealed_security_identity_request(target)?;
+            let retained = encode_invoke_request(&chain.version_three, &registry, &request)?;
+            let result = kernel
+                .dispatch_sealed_sys_invoke(&session, CONNECTION_PROTOCOL_MAJOR, &retained)
+                .await?;
+            require_active_roles_completion(&result, V3_PROOF_CLIENT_ROLE)?;
+        }
 
         let security_events = kernel.recover_security_audit_events().await?;
 
@@ -6930,7 +6967,7 @@ async fn proves_sealed_security_identity_invocation_and_audit() -> TestResult<()
             })
             .collect::<Vec<_>>();
         require(
-            allowed.len() == 2
+            allowed.len() == 4
                 && allowed.iter().all(|event| {
                     event
                         .decision()
@@ -6939,6 +6976,7 @@ async fn proves_sealed_security_identity_invocation_and_audit() -> TestResult<()
                         .is_some_and(|function| {
                             function == SYS_SECURITY_SESSION_PRINCIPAL_FUNCTION_ID
                                 || function == SYS_SECURITY_EFFECTIVE_PRINCIPAL_FUNCTION_ID
+                                || function == SYS_SECURITY_ACTIVE_ROLES_FUNCTION_ID
                         })
                 })
                 && allowed.iter().any(|event| {
@@ -6948,13 +6986,21 @@ async fn proves_sealed_security_identity_invocation_and_audit() -> TestResult<()
                 && allowed.iter().any(|event| {
                     event.decision().target().map(|target| target.function())
                         == Some(SYS_SECURITY_EFFECTIVE_PRINCIPAL_FUNCTION_ID)
-                }),
+                })
+                && allowed
+                    .iter()
+                    .filter(|event| {
+                        event.decision().target().map(|target| target.function())
+                            == Some(SYS_SECURITY_ACTIVE_ROLES_FUNCTION_ID)
+                    })
+                    .count()
+                    == 2,
             "sealed security identity invocations did not append exact EXECUTE evidence",
         )?;
         let security_ids = allowed.iter().map(|event| event.id()).collect::<Vec<_>>();
         let invocation_rows = invocation_audit_rows(&database).await?;
         require(
-            invocation_rows.len() == 2
+            invocation_rows.len() == 4
                 && invocation_rows
                     .iter()
                     .all(|row| row.outcome == "allowed" && row.security_event.is_some())
@@ -6977,6 +7023,10 @@ async fn proves_sealed_security_identity_invocation_and_audit() -> TestResult<()
                 SYS_SECURITY_EFFECTIVE_PRINCIPAL_FUNCTION_ID,
                 "effective_principal",
             ),
+            (
+                SYS_SECURITY_ACTIVE_ROLES_FUNCTION_ID,
+                "active_roles",
+            ),
         ] {
             let authority =
                 standard_authority_row(&database, pair.catalogue(), function).await?;
@@ -6990,21 +7040,13 @@ async fn proves_sealed_security_identity_invocation_and_audit() -> TestResult<()
                     "session_principal" => {
                         "session_principal must have a sealed system audit anchor"
                     }
-                    _ => "effective_principal must have a sealed system audit anchor",
+                    "effective_principal" => {
+                        "effective_principal must have a sealed system audit anchor"
+                    }
+                    _ => "active_roles must have a sealed system audit anchor",
                 },
             )?;
         }
-        let denied_target =
-            InvocationRequestTarget::function_id(SYS_SECURITY_ACTIVE_ROLES_FUNCTION_ID);
-        let denied_request = sealed_security_identity_request(denied_target)?;
-        let retained = encode_invoke_request(&chain.version_three, &registry, &denied_request)?;
-        let result = kernel
-            .dispatch_sealed_sys_invoke(&session, CONNECTION_PROTOCOL_MAJOR, &retained)
-            .await?;
-        require(
-            matches!(result, SealedInvocationResult::Denied { .. }),
-            "active_roles must remain denied until set-valued transport is accepted",
-        )?;
         Ok(())
     })
     .await
@@ -8316,6 +8358,71 @@ fn sealed_security_identity_request(target: InvocationRequestTarget) -> TestResu
         parent_invocation_id: None,
         observer_context: None,
     })?)
+}
+
+fn require_active_roles_completion(
+    result: &SealedInvocationResult,
+    role: PrincipalId,
+) -> TestResult<InvocationId> {
+    let SealedInvocationResult::Completed { invocation, events } = result else {
+        return Err(failure(
+            "the sealed active-roles invocation did not complete with its Event batch",
+        ));
+    };
+    let records = events.records();
+    let values = records
+        .get(1)
+        .and_then(|record| match record.event().body() {
+            InvocationEventBody::ValueBatch {
+                schema: None,
+                values,
+            } => Some(values),
+            _ => None,
+        })
+        .ok_or_else(|| failure("the sealed active-roles result lacked a plain ValueBatch"))?;
+    let RuntimeValue::Constructed(value) = values
+        .first()
+        .ok_or_else(|| failure("the sealed active-roles result had no value"))?
+        .value()
+    else {
+        return Err(failure(
+            "the sealed active-roles result was not a constructed SET",
+        ));
+    };
+    let ConstructedValueKind::Set(elements) = value.kind() else {
+        return Err(failure(
+            "the sealed active-roles result did not contain a SET",
+        ));
+    };
+    let expected = RuntimeValue::Reference {
+        target: SYS_SECURITY_PRINCIPAL_TYPE_ID,
+        object: ObjectId::from_bytes(role.to_bytes()),
+    };
+    require(
+        records.len() == 3
+            && records[0].event().kind() == InvocationEventKind::InvocationStarted
+            && records[1].event().kind() == InvocationEventKind::ValueBatch
+            && records[2].event().kind() == InvocationEventKind::InvocationCompleted
+            && values.len() == 1
+            && matches!(
+                value.descriptor().kind(),
+                TypeDescriptorKind::Set(child)
+                    if matches!(
+                        child.kind(),
+                        TypeDescriptorKind::Reference(target)
+                            if target == SYS_SECURITY_PRINCIPAL_TYPE_ID
+                    )
+            )
+            && elements == std::slice::from_ref(&expected),
+        "the sealed active-roles result did not return the exact typed canonical SET",
+    )?;
+    require(
+        records
+            .iter()
+            .all(|record| record.event().invocation_id() == *invocation),
+        "the sealed active-roles events did not retain one invocation",
+    )?;
+    Ok(*invocation)
 }
 
 fn require_security_identity_completion(
