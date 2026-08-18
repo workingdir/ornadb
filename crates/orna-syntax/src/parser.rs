@@ -248,23 +248,21 @@ impl<'source> Parser<'source> {
                 .is_some_and(|token| token.is_word("FUNCTION"))
         {
             self.parse_create_server_function_statement();
-        } else if self
+        } else if (self
             .peek_significant(1)
             .is_some_and(|token| token.is_word("CLIENT"))
             && self
                 .peek_significant(2)
-                .is_some_and(|token| token.is_word("FUNCTION"))
-        {
-            self.parse_create_client_function_statement();
-        } else if self
-            .peek_significant(1)
-            .is_some_and(|token| token.is_word("EXTERNAL"))
-            && self
-                .peek_significant(2)
-                .is_some_and(|token| token.is_word("CLIENT"))
-            && self
-                .peek_significant(3)
-                .is_some_and(|token| token.is_word("FUNCTION"))
+                .is_some_and(|token| token.is_word("FUNCTION")))
+            || (self
+                .peek_significant(1)
+                .is_some_and(|token| token.is_word("EXTERNAL"))
+                && self
+                    .peek_significant(2)
+                    .is_some_and(|token| token.is_word("CLIENT"))
+                && self
+                    .peek_significant(3)
+                    .is_some_and(|token| token.is_word("FUNCTION")))
         {
             self.parse_create_client_function_statement();
         } else if self
@@ -842,7 +840,7 @@ impl<'source> Parser<'source> {
         let mut left = self.parse_client_primary_expression()?;
         loop {
             self.skip_trivia();
-            if !self.current().is_some_and(|token| token.text == "||") {
+            if self.current().is_none_or(|token| token.text != "||") {
                 break;
             }
             self.bump();
@@ -869,7 +867,7 @@ impl<'source> Parser<'source> {
         if token.kind == TokenKind::StringLiteral {
             self.bump();
             return Some(ClientExpression::StringLiteral {
-                value: Self::unquote_client_text_literal(&token.text)?,
+                value: Self::unquote_client_text_literal(token.text)?,
                 source: SourceSlice {
                     text: token.text.to_owned(),
                     span: token.span(),
@@ -1217,9 +1215,7 @@ impl<'source> Parser<'source> {
                 );
                 return None;
             }
-            let Some(end_token) = self.expect_word_token("END") else {
-                return None;
-            };
+            let end_token = self.expect_word_token("END")?;
             Some(ClientFunctionBody::StateBlock(ClientStateBlockBody {
                 states,
                 return_expression,
@@ -1329,15 +1325,11 @@ impl<'source> Parser<'source> {
             }
             let expression = self.parse_client_expression()?;
             self.skip_trivia();
-            if self
+            self
                 .expect_kind(
                     TokenKind::Semicolon,
                     "expected ';' after the CLIENT state block RETURN statement",
-                )
-                .is_none()
-            {
-                return None;
-            }
+                )?;
             Some(Some(expression))
         })();
         self.builder.finish_node();
