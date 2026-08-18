@@ -16,12 +16,15 @@ RETURNS REF sys.security.principal
 ```
 
 These functions remain sealed registry entries. They do not become application
-catalogue functions, standard-library functions, PostgreSQL rows, or fabricated
-`FunctionDefinition` values. The protected invocation decision resolves their
-`SystemFunctionDefinition` directly from the exact sealed registry identity or
-qualified name, authorises the target with the existing system-function rule,
-requires zero arguments, and then dispatches the identity-specific kernel
-method.
+catalogue functions, standard-library functions, PostgreSQL catalogue rows, or
+fabricated `FunctionDefinition` values. Migration 0029 adds one private
+`invocation_target_authorities` audit anchor per admitted system identity and
+application catalogue revision. These rows do not define or execute functions;
+they only satisfy the existing invocation-audit target foreign key. The
+protected invocation decision resolves the `SystemFunctionDefinition` directly
+from the exact sealed registry identity or qualified name, authorises the
+target with the existing system-function rule, requires zero arguments, and
+then dispatches the identity-specific kernel method.
 
 The result uses the existing typed reference runtime value with
 `SYS_SECURITY_PRINCIPAL_TYPE_ID` as its target type and the returned
@@ -54,8 +57,9 @@ The existing ordering remains unchanged:
 6. execute and append the existing security and invocation audit evidence.
 
 A system target uses the active application `RevisionPair` in the audit target
-for compatibility with the existing durable audit schema. It does not acquire
-an application function revision or a standard executable revision.
+for compatibility with the existing durable audit schema. The authority row
+uses the sealed function identity again as its opaque revision anchor. It does
+not acquire an application function revision or a standard executable revision.
 
 ## Rationale
 
