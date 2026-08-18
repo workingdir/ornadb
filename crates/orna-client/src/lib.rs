@@ -5044,6 +5044,51 @@ mod tests {
     }
 
     #[test]
+    fn evaluates_a_version_five_expression_parameter_read() {
+        use orna_artifact::client_plan::{
+            CapabilityArgumentSource, CapabilityClientPlan, CapabilityRequirement,
+            ClientExpressionNode, ExpressionClientPlan, InnerClientPlan,
+        };
+
+        let parameter = ParameterId::from_bytes([0xb1; 16]);
+        let payload = CapabilityClientPlan::new(
+            InnerClientPlan::Expression(ExpressionClientPlan::new(
+                ClientExpressionNode::ParameterRead { parameter },
+            )),
+            vec![CapabilityRequirement::new(
+                "std.fs.read",
+                CapabilityArgumentSource::Parameter("p_path".to_owned()),
+            )],
+        )
+        .encode()
+        .expect("the expression capability plan encodes");
+        let (active, function, pair, _, parameter) =
+            version_five_expression_active_with_parameter(payload);
+        let authorisation = authorise(pair, function);
+        let argument =
+            FunctionArgument::new(parameter, RuntimeValue::Text("/tmp/input".to_owned())).unwrap();
+        let grant = super::capability::LocalCapabilityGrant::new(
+            super::capability::LocalCapabilityName::StdFsRead,
+            super::capability::LocalCapabilityScope::path("/tmp").unwrap(),
+        )
+        .unwrap();
+        let grants = super::capability::LocalCapabilityGrantSet::from_grants([grant]).unwrap();
+
+        let result = super::evaluate_client_function_with_grants_and_arguments(
+            &active,
+            &authorisation,
+            std::slice::from_ref(&argument),
+            &[],
+            &grants,
+        )
+        .expect("the version-five expression evaluates");
+
+        assert_eq!(result.value(), &RuntimeValue::Text("/tmp/input".to_owned()));
+        assert_eq!(result.context().function(), function);
+        assert_eq!(result.context().pair(), active.pair());
+    }
+
+    #[test]
     fn evaluates_prepared_version_two_client_constants() {
         for (literal, expected) in [("TRUE", true), ("FALSE", false)] {
             let prepared = prepared_client_constant(literal);
