@@ -30,7 +30,8 @@ use orna_standard::{
     retained_standard_library_snapshot, verify_standard_library_snapshot,
 };
 use orna_core::system::{
-    SYS_SECURITY_EFFECTIVE_PRINCIPAL_FUNCTION_ID, SYS_SECURITY_SESSION_PRINCIPAL_FUNCTION_ID,
+    SYS_SECURITY_ACTIVE_ROLES_FUNCTION_ID, SYS_SECURITY_EFFECTIVE_PRINCIPAL_FUNCTION_ID,
+    SYS_SECURITY_SESSION_PRINCIPAL_FUNCTION_ID, system_function_by_id,
 };
 use tokio_postgres::{Client, IsolationLevel, Transaction};
 
@@ -39,6 +40,7 @@ use crate::{
     decode::{DurableRecord, identity_bytes},
     physical::{establish_trusted_search_path, install_physical_plan},
     recovery::recover_active_revision,
+    security::is_admitted_security_identity,
 };
 
 const ACTIVE_RELATION: &str = "_orna_kernel.active_revision";
@@ -1994,6 +1996,7 @@ async fn persist_target_authorities(
     let system_identity_functions = [
         SYS_SECURITY_SESSION_PRINCIPAL_FUNCTION_ID,
         SYS_SECURITY_EFFECTIVE_PRINCIPAL_FUNCTION_ID,
+        SYS_SECURITY_ACTIVE_ROLES_FUNCTION_ID,
     ];
     let mut expected_authority_count =
         candidate.candidate().functions().len() as i64 + system_identity_functions.len() as i64;
@@ -2014,6 +2017,11 @@ async fn persist_target_authorities(
             .map_err(PostgresKernelError::Database)?;
     }
     for function in system_identity_functions {
+        if !system_function_by_id(function).is_some_and(is_admitted_security_identity) {
+            return Err(invariant(
+                "persisted system invocation target must be an admitted sealed security identity",
+            ));
+        }
         transaction
             .execute(
                 "INSERT INTO _orna_kernel.invocation_target_authorities
