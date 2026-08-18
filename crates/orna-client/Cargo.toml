@@ -8,6 +8,8 @@ license.workspace = true
 [dependencies]
 orna-artifact = { path = "../orna-artifact" }
 orna-core = { path = "../orna-core" }
+orna-protocol = { path = "../orna-protocol" }
+sha2 = "0.11.0"
 orna-standard = { path = "../orna-standard" }
 
 [dev-dependencies]
