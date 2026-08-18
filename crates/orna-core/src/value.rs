@@ -52,6 +52,7 @@ pub struct ConstructedValue {
 enum ConstructedValueData {
     Option(Option<Box<RuntimeValue>>),
     List(Vec<RuntimeValue>),
+    Set(Vec<RuntimeValue>),
     Map(Vec<(RuntimeValue, RuntimeValue)>),
 }
 
@@ -72,6 +73,7 @@ impl ConstructedValue {
         match &self.kind {
             ConstructedValueData::Option(value) => ConstructedValueKind::Option(value.as_deref()),
             ConstructedValueData::List(values) => ConstructedValueKind::List(values),
+            ConstructedValueData::Set(values) => ConstructedValueKind::Set(values),
             ConstructedValueData::Map(entries) => ConstructedValueKind::Map(entries),
         }
     }
@@ -85,6 +87,8 @@ pub enum ConstructedValueKind<'a> {
     Option(Option<&'a RuntimeValue>),
     /// Ordered child values.
     List(&'a [RuntimeValue]),
+    /// Canonically ordered unique child values.
+    Set(&'a [RuntimeValue]),
     /// Canonically ordered key/value entries.
     Map(&'a [(RuntimeValue, RuntimeValue)]),
 }
@@ -108,6 +112,8 @@ pub enum CollectionValuePathSegment {
     OptionChild,
     /// One ordered list runtime value.
     ListElement(usize),
+    /// One canonical set runtime value.
+    SetElement(usize),
     /// One map runtime key.
     MapKey(usize),
     /// One map runtime value.
@@ -116,6 +122,8 @@ pub enum CollectionValuePathSegment {
     RecordField(FieldId),
     /// The child descriptor of a list descriptor.
     ListChild,
+    /// The child descriptor of a set descriptor.
+    SetChild,
     /// The key descriptor of a map descriptor.
     MapKeyChild,
     /// The value descriptor of a map descriptor.
@@ -130,6 +138,8 @@ pub enum CollectionKind {
     Option,
     /// An ordered collection value.
     List,
+    /// A logically unique collection value.
+    Set,
     /// A key/value collection value.
     Map,
 }
@@ -186,6 +196,13 @@ pub enum CollectionValueError {
         /// The higher original input index of the selected equal pair.
         duplicate: usize,
     },
+    /// Two set elements compare equal after canonical ordering.
+    DuplicateSetElement {
+        /// The lower original input index of the selected equal pair.
+        first: usize,
+        /// The higher original input index of the selected equal pair.
+        duplicate: usize,
+    },
 }
 
 impl fmt::Display for CollectionValueError {
@@ -209,9 +226,12 @@ impl fmt::Display for CollectionValueError {
             }
             Self::InactiveValue { .. } => formatter.write_str("collection value is not active"),
             Self::DuplicateMapKey { .. } => formatter.write_str("map contains a duplicate key"),
+            Self::DuplicateSetElement { .. } => {
+                formatter.write_str("set contains a duplicate element")
+            }
+        }
         }
     }
-}
 
 impl Error for CollectionValueError {}
 
@@ -366,6 +386,59 @@ impl RuntimeValue {
             node_count,
         }))
     }
+    /// Creates one checked immutable canonically ordered `SET` value.
+    pub fn set(
+        active: &ActiveDatabaseRevision,
+        descriptor: TypeDescriptor,
+        values: Vec<RuntimeValue>,
+    ) -> Result<Self, CollectionValueError> {
+        if !matches!(descriptor.kind(), TypeDescriptorKind::Set(_)) {
+            return Err(CollectionValueError::WrongConstructor {
+                expected: CollectionKind::Set,
+                descriptor,
+            });
+        }
+        let mut path = Vec::new();
+        preflight_collection_descriptor(active, &descriptor, &mut path)?;
+
+        let mut node_count = 1;
+        check_runtime_value_lower_bound(values.len().checked_add(1))?;
+        for value in &values {
+            count_runtime_value_nodes(value, &mut node_count)?;
+        }
+
+        let TypeDescriptorKind::Set(child) = descriptor.kind() else {
+            unreachable!("checked set descriptor must retain its set child");
+        };
+        for (index, value) in values.iter().enumerate() {
+            path.push(CollectionValuePathSegment::SetElement(index));
+            validate_collection_runtime_value(active, child, value, &mut path)?;
+            path.pop();
+        }
+
+        let mut indexed = values.into_iter().enumerate().collect::<Vec<_>>();
+        indexed.sort_by(|(left_index, left), (right_index, right)| {
+            compare_map_key(active, child, left, right).then(left_index.cmp(right_index))
+        });
+        for pair in indexed.windows(2) {
+            let (left_index, left) = &pair[0];
+            let (right_index, right) = &pair[1];
+            if compare_map_key(active, child, left, right) == Ordering::Equal {
+                return Err(CollectionValueError::DuplicateSetElement {
+                    first: *left_index,
+                    duplicate: *right_index,
+                });
+            }
+        }
+        let values = indexed.into_iter().map(|(_, value)| value).collect();
+
+        Ok(Self::Constructed(ConstructedValue {
+            descriptor,
+            kind: ConstructedValueData::Set(values),
+            node_count,
+        }))
+    }
+
 
     /// Creates one checked immutable canonically ordered `MAP` value.
     pub fn map(
@@ -536,6 +609,11 @@ pub(crate) fn count_invocation_runtime_value_nodes(
                             count(value, total)?;
                         }
                     }
+                    ConstructedValueKind::Set(values) => {
+                        for value in values {
+                            count(value, total)?;
+                        }
+                    }
                     ConstructedValueKind::Map(entries) => {
                         for (key, value) in entries {
                             count(key, total)?;
@@ -595,7 +673,9 @@ fn preflight_collection_descriptor(
             classify_collection_named_descriptor(active, descriptor, path).map(|_| ())
         }
         TypeDescriptorKind::Reference(target) => {
-            if active.catalogue().object_type_by_id(target).is_some() {
+            if active.catalogue().object_type_by_id(target).is_some()
+                || target == crate::system::SYS_SECURITY_PRINCIPAL_TYPE_ID
+            {
                 Ok(())
             } else {
                 Err(CollectionValueError::UnsupportedDescriptor {
@@ -640,7 +720,26 @@ fn preflight_collection_descriptor(
             }
             result
         }
-        TypeDescriptorKind::Set(_) | TypeDescriptorKind::Stream(_) => {
+        TypeDescriptorKind::Set(child) => {
+            if !path.is_empty()
+                || !matches!(
+                    child.kind(),
+                    TypeDescriptorKind::Named(_) | TypeDescriptorKind::Reference(_)
+                )
+            {
+                return Err(CollectionValueError::UnsupportedDescriptor {
+                    path: collection_value_path(path),
+                    descriptor: descriptor.clone(),
+                });
+            }
+            path.push(CollectionValuePathSegment::SetChild);
+            let result = preflight_collection_descriptor(active, child, path);
+            if result.is_ok() {
+                path.pop();
+            }
+            result
+        }
+        TypeDescriptorKind::Stream(_) => {
             Err(CollectionValueError::UnsupportedDescriptor {
                 path: collection_value_path(path),
                 descriptor: descriptor.clone(),
@@ -740,7 +839,9 @@ fn validate_collection_runtime_value(
                     path: collection_value_path(path),
                 });
             }
-            if active.catalogue().object_type_by_id(target).is_none() {
+            if active.catalogue().object_type_by_id(target).is_none()
+                && target != crate::system::SYS_SECURITY_PRINCIPAL_TYPE_ID
+            {
                 return Err(CollectionValueError::InactiveValue {
                     path: collection_value_path(path),
                 });
@@ -825,7 +926,30 @@ fn validate_collection_runtime_value(
             }
             Ok(())
         }
-        TypeDescriptorKind::Set(_) | TypeDescriptorKind::Stream(_) => {
+        TypeDescriptorKind::Set(child) => {
+            if value.runtime_type() != RuntimeType::Constructed(descriptor) {
+                return Err(CollectionValueError::ValueTypeMismatch {
+                    path: collection_value_path(path),
+                });
+            }
+            let RuntimeValue::Constructed(value) = value else {
+                return Err(CollectionValueError::ValueTypeMismatch {
+                    path: collection_value_path(path),
+                });
+            };
+            let ConstructedValueKind::Set(values) = value.kind() else {
+                return Err(CollectionValueError::ValueTypeMismatch {
+                    path: collection_value_path(path),
+                });
+            };
+            for (index, value) in values.iter().enumerate() {
+                path.push(CollectionValuePathSegment::SetElement(index));
+                validate_collection_runtime_value(active, child, value, path)?;
+                path.pop();
+            }
+            Ok(())
+        }
+        TypeDescriptorKind::Stream(_) => {
             Err(CollectionValueError::InactiveValue {
                 path: collection_value_path(path),
             })
@@ -3316,6 +3440,49 @@ mod tests {
                 ],
             )
             .unwrap()
+        );
+    }
+
+    #[test]
+    fn set_values_are_canonically_ordered_and_unique() {
+        let active = active_record_revision();
+        let descriptor = TypeDescriptor::set(TypeDescriptor::named(STANDARD_BOOLEAN)).unwrap();
+        let value = RuntimeValue::set(
+            &active,
+            descriptor.clone(),
+            vec![RuntimeValue::Boolean(true), RuntimeValue::Boolean(false)],
+        )
+        .unwrap();
+        let RuntimeValue::Constructed(constructed) = &value else {
+            panic!("set construction must return a constructed value");
+        };
+        let ConstructedValueKind::Set(values) = constructed.kind() else {
+            panic!("set construction must retain SET values");
+        };
+        assert_eq!(
+            values,
+            &[RuntimeValue::Boolean(false), RuntimeValue::Boolean(true)]
+        );
+        assert_eq!(
+            value,
+            RuntimeValue::set(
+                &active,
+                descriptor.clone(),
+                vec![RuntimeValue::Boolean(false), RuntimeValue::Boolean(true)],
+            )
+            .unwrap()
+        );
+        assert_eq!(
+            RuntimeValue::set(
+                &active,
+                descriptor,
+                vec![RuntimeValue::Boolean(true), RuntimeValue::Boolean(true)],
+            )
+            .unwrap_err(),
+            CollectionValueError::DuplicateSetElement {
+                first: 0,
+                duplicate: 1,
+            }
         );
     }
 
