@@ -10,9 +10,9 @@ use orna_core::{
     CatalogueRevisionId, SchemaId, SourceBundleId, SourceRevisionId, SourceUnitId,
     StandardLibraryRevisionId, TypeBindingId, TypeId,
     canonical_hash::{
-        CanonicalHashError, function_declaration_digest, function_semantic_digest_with_version,
-        source_bundle_digest, source_revision_record_digest, source_unit_content_digest,
-        standard_library_digest,
+        CanonicalHashError, artifact_payload_digest, function_declaration_digest,
+        function_semantic_digest_with_version, source_bundle_digest, source_revision_record_digest,
+        source_unit_content_digest, standard_library_digest,
         verify_standard_library_snapshot as verify_canonical_standard_library_snapshot,
         verify_standard_library_v2_snapshot as verify_canonical_standard_library_v2_snapshot,
     },
@@ -25,8 +25,9 @@ use orna_core::{
     },
     revision::{
         ActiveDatabaseRevision, DefinitionIdentity, DefinitionOrigin, DeployableRevision,
-        FunctionRevisionRecord, FunctionSemanticHashVersion, RevisionInvariantError, Sha256Digest,
-        SourceOrigin, StandardExecutable, StandardLibraryDigestVersion, StandardLibrarySnapshot,
+        ExecutableArtifact, ExecutableArtifactKind, FunctionRevisionRecord,
+        FunctionSemanticHashVersion, RevisionInvariantError, Sha256Digest, SourceOrigin,
+        StandardExecutable, StandardLibraryDigestVersion, StandardLibrarySnapshot,
         StoredSourceRevision, StoredSourceUnit, VerifiedStandardLibrarySnapshot,
     },
     types::{ResolvedType, StandardScalar},
@@ -40,6 +41,8 @@ pub use orna_compiler::{
     STD_INTEGER_TYPE_ID, STD_INVOKE_ECHO_FUNCTION_ID, STD_INVOKE_ECHO_FUNCTION_REVISION_ID,
     STD_INVOKE_ECHO_PARAMETER_ID, STD_INVOKE_ECHO_REVISION_NUMBER, STD_INVOKE_SCHEMA_ID,
     STD_INVOKE_SOURCE_UNIT_ID, STD_TYPES_SOURCE_UNIT_ID,
+    STD_JSON_ENCODE_FUNCTION_ID, STD_JSON_ENCODE_FUNCTION_REVISION_ID,
+    STD_JSON_ENCODE_PARAMETER_ID, STD_JSON_SCHEMA_ID, STD_JSON_VALUE_TYPE_ID,
 };
 
 /// The standard-library version represented by this manifest.
@@ -371,6 +374,44 @@ const ACCEPTED_V4_SEMANTIC_DIGEST: Sha256Digest = ACCEPTED_V3_SEMANTIC_DIGEST;
 const ACCEPTED_V4_STANDARD_LIBRARY_DIGEST: Sha256Digest = Sha256Digest::from_bytes([
     0xdc, 0xff, 0xa5, 0x23, 0x16, 0x43, 0xf4, 0x73, 0x29, 0xd3, 0x00, 0x34, 0x1f, 0xba, 0xa2, 0x4f,
     0x5a, 0xbf, 0xa6, 0xbc, 0xed, 0x77, 0x56, 0x5c, 0xd3, 0x82, 0x74, 0xce, 0xa4, 0x83, 0x8f, 0xb9,
+]);
+
+/// The standard-library version represented by the V5 manifest (ADR 0075).
+pub const STANDARD_LIBRARY_V5_VERSION_IDENTITY: &str = "orna.std/5";
+pub const STANDARD_LIBRARY_V5_REVISION_ID: StandardLibraryRevisionId =
+    StandardLibraryRevisionId::from_bytes(reserved_id(5));
+pub const STANDARD_CATALOGUE_V5_REVISION_ID: CatalogueRevisionId =
+    CatalogueRevisionId::from_bytes(reserved_id(5));
+pub const STANDARD_SOURCE_V5_BUNDLE_ID: SourceBundleId = SourceBundleId::from_bytes(reserved_id(5));
+pub const STANDARD_SOURCE_V5_REVISION_ID: SourceRevisionId =
+    SourceRevisionId::from_bytes(reserved_id(5));
+pub const STD_JSON_SOURCE_LOGICAL_PATH: &str = "std/json.orna";
+pub const STD_JSON_SOURCE_UNIT_ID: SourceUnitId = SourceUnitId::from_bytes(reserved_id(6));
+pub const STD_JSON_CONTRACT: &str = "orna.std.value.json@1";
+pub const JSON_MAGIC: &str = "ORNA-JSON-VALUE/1 ";
+
+const RETAINED_STANDARD_JSON_SOURCE: &str = include_str!("../../../stdlib/std/json.orna");
+const ACCEPTED_V5_TYPES_CONTENT_DIGEST: Sha256Digest = ACCEPTED_V4_TYPES_CONTENT_DIGEST;
+const ACCEPTED_V5_INVOKE_CONTENT_DIGEST: Sha256Digest = ACCEPTED_V4_INVOKE_CONTENT_DIGEST;
+const ACCEPTED_V5_OUTPUT_CONTENT_DIGEST: Sha256Digest = ACCEPTED_V4_OUTPUT_CONTENT_DIGEST;
+const ACCEPTED_V5_UI_CONTENT_DIGEST: Sha256Digest = ACCEPTED_V4_UI_CONTENT_DIGEST;
+const ACCEPTED_V5_JSON_CONTENT_DIGEST: Sha256Digest = Sha256Digest::from_bytes([
+    0x4b, 0x12, 0x56, 0xf5, 0x9d, 0x01, 0xe9, 0xec, 0x65, 0x22, 0x85, 0xb1, 0x4f, 0xb8, 0xfc, 0xd5,
+    0xde, 0xcf, 0x9b, 0x6d, 0xbf, 0xfb, 0xf7, 0x0d, 0xa8, 0x7a, 0xad, 0xeb, 0xb9, 0xa0, 0x18, 0xbe,
+]);
+const ACCEPTED_V5_SOURCE_BUNDLE_DIGEST: Sha256Digest = Sha256Digest::from_bytes([
+    0x87, 0xe2, 0xf5, 0x9d, 0x44, 0x47, 0x78, 0x9f, 0x0f, 0x9d, 0xc5, 0xa9, 0x64, 0xf9, 0xec, 0x20,
+    0x1a, 0xfd, 0xdd, 0xe2, 0x8b, 0xe0, 0x7e, 0xd3, 0xd2, 0x37, 0x74, 0xc8, 0x33, 0xf5, 0x31, 0x15,
+]);
+const ACCEPTED_V5_SOURCE_REVISION_DIGEST: Sha256Digest = Sha256Digest::from_bytes([
+    0x91, 0x2f, 0xb3, 0xb6, 0x6c, 0x28, 0x35, 0xb3, 0x68, 0x68, 0x68, 0x76, 0x75, 0x5d, 0x7c, 0x78,
+    0x9c, 0xc3, 0xf2, 0x5c, 0x26, 0x87, 0x27, 0xb0, 0x83, 0xd9, 0x6e, 0x70, 0x7a, 0x99, 0xbc, 0x51,
+]);
+const ACCEPTED_V5_ARTIFACT_DIGEST: Sha256Digest = ACCEPTED_V4_ARTIFACT_DIGEST;
+const ACCEPTED_V5_SEMANTIC_DIGEST: Sha256Digest = ACCEPTED_V4_SEMANTIC_DIGEST;
+const ACCEPTED_V5_STANDARD_LIBRARY_DIGEST: Sha256Digest = Sha256Digest::from_bytes([
+    0x22, 0x60, 0x9b, 0xe8, 0xc6, 0x6a, 0xce, 0x4a, 0xbe, 0x37, 0x6b, 0x2d, 0xfa, 0x82, 0x07, 0xd1,
+    0x9f, 0xe0, 0xae, 0xa9, 0x49, 0xde, 0x0b, 0xbc, 0xc8, 0xcf, 0x97, 0xbf, 0xec, 0xf8, 0xef, 0xed,
 ]);
 
 #[derive(Clone, Copy)]
@@ -1086,6 +1127,120 @@ pub fn standard_library_v4_manifest()
     Ok(StandardLibraryV4Manifest { catalogue })
 }
 
+/// The source-independent facts required to recognise the JSON `orna.std/5`
+/// standard library (ADR 0075).
+#[derive(Clone, Debug)]
+pub struct StandardLibraryV5Manifest {
+    catalogue: CatalogueSnapshot,
+}
+
+impl StandardLibraryV5Manifest {
+    pub const fn standard_library_version(&self) -> &'static str {
+        STANDARD_LIBRARY_V5_VERSION_IDENTITY
+    }
+    pub const fn standard_library_revision(&self) -> StandardLibraryRevisionId {
+        STANDARD_LIBRARY_V5_REVISION_ID
+    }
+    pub const fn language_version(&self) -> &'static str {
+        LANGUAGE_VERSION_IDENTITY
+    }
+    pub const fn source_bundle(&self) -> SourceBundleId {
+        STANDARD_SOURCE_V5_BUNDLE_ID
+    }
+    pub const fn source_revision(&self) -> SourceRevisionId {
+        STANDARD_SOURCE_V5_REVISION_ID
+    }
+    pub const fn types_source_unit(&self) -> SourceUnitId {
+        STD_TYPES_SOURCE_UNIT_ID
+    }
+    pub const fn invoke_source_unit(&self) -> SourceUnitId {
+        STD_INVOKE_SOURCE_UNIT_ID
+    }
+    pub const fn output_source_unit(&self) -> SourceUnitId {
+        STD_OUTPUT_SOURCE_UNIT_ID
+    }
+    pub const fn ui_source_unit(&self) -> SourceUnitId {
+        STD_UI_SOURCE_UNIT_ID
+    }
+    pub const fn json_source_unit(&self) -> SourceUnitId {
+        STD_JSON_SOURCE_UNIT_ID
+    }
+    pub const fn types_source_logical_path(&self) -> &'static str {
+        SOURCE_LOGICAL_PATH
+    }
+    pub const fn invoke_source_logical_path(&self) -> &'static str {
+        STD_INVOKE_SOURCE_LOGICAL_PATH
+    }
+    pub const fn output_source_logical_path(&self) -> &'static str {
+        STD_OUTPUT_SOURCE_LOGICAL_PATH
+    }
+    pub const fn ui_source_logical_path(&self) -> &'static str {
+        STD_UI_SOURCE_LOGICAL_PATH
+    }
+    pub const fn json_source_logical_path(&self) -> &'static str {
+        STD_JSON_SOURCE_LOGICAL_PATH
+    }
+    pub const fn catalogue(&self) -> &CatalogueSnapshot {
+        &self.catalogue
+    }
+}
+
+/// Builds and validates the append-only V5 catalogue over V4.
+pub fn standard_library_v5_manifest()
+-> Result<StandardLibraryV5Manifest, StandardLibraryManifestError> {
+    let version_four = standard_library_v4_manifest()?;
+    let mut schemas = version_four.catalogue().schemas().to_vec();
+    schemas.push(SchemaDefinition::new(
+        STD_JSON_SCHEMA_ID,
+        semantic_name("std.json", ["std", "json"])?,
+    ));
+    let mut value_types = version_four.catalogue().value_types().to_vec();
+    value_types.push(ValueTypeDefinition::opaque(
+        STD_JSON_VALUE_TYPE_ID,
+        semantic_name("std.json.value", ["std", "json", "value"])?,
+        STD_JSON_CONTRACT,
+    ));
+    let mut type_bindings = version_four.catalogue().type_bindings().to_vec();
+    let json_name = semantic_name("std.jsonvalue", ["std", "jsonvalue"])?;
+    let json_lookup = TypeLookupName::qualified(json_name.clone());
+    let json_binding = TypeBinding::qualified(json_name, STD_JSON_VALUE_TYPE_ID).map_err(|source| {
+        StandardLibraryManifestError::TypeBinding {
+            name: json_lookup,
+            source,
+        }
+    })?;
+    type_bindings.push(json_binding);
+    let json_encode = FunctionDefinition::new(
+        STD_JSON_ENCODE_FUNCTION_ID,
+        semantic_name("std.json.encode", ["std", "json", "encode"])?,
+        FunctionDomain::Server,
+        vec![ParameterDefinition::new(
+            STD_JSON_ENCODE_PARAMETER_ID,
+            "p_value",
+            0,
+            ResolvedType::value(STD_JSON_VALUE_TYPE_ID),
+            None,
+        )],
+        FunctionReturn::Single(ResolvedType::value(STD_IO_BYTE_STREAM_TYPE_ID)),
+        STD_JSON_ENCODE_FUNCTION_REVISION_ID,
+        FunctionSecurity::Invoker,
+        Some(FunctionTransaction::ReadOnly),
+        FunctionVolatility::Stable,
+    );
+    let mut functions = version_four.catalogue().functions().to_vec();
+    functions.push(json_encode);
+    let catalogue = CatalogueSnapshot::new_with_functions_and_types(
+        STANDARD_CATALOGUE_V5_REVISION_ID,
+        schemas,
+        Vec::new(),
+        value_types,
+        type_bindings,
+        functions,
+    )
+    .map_err(|source| StandardLibraryManifestError::Catalogue { source })?;
+    Ok(StandardLibraryV5Manifest { catalogue })
+}
+
 fn build_type_bindings(
     expected_ids: &[[u8; 16]],
 ) -> Result<Vec<TypeBinding>, StandardLibraryManifestError> {
@@ -1563,6 +1718,33 @@ pub fn prepare_standard_upgrade_v3_to_v4(
     )
 }
 
+/// Prepares the append-only `orna.std/4` to `orna.std/5` standard upgrade
+/// (ADR 0075). The retained V4 parent is verified before the V5 child.
+pub fn prepare_standard_upgrade_v4_to_v5(
+    active: &ActiveDatabaseRevision,
+) -> Result<StandardUpgrade, StandardUpgradeError> {
+    if let Some(installed) = active.catalogue_hash_context().standard()
+        && installed.revision() != STANDARD_LIBRARY_V4_REVISION_ID
+    {
+        return Err(StandardUpgradeError::Prepare {
+            source: PrepareStandardUpgradeError::StandardLibraryAlreadyInstalled {
+                revision: installed.revision(),
+            },
+        });
+    }
+    let version_four = retained_standard_library_v4_snapshot()
+        .map_err(|source| StandardUpgradeError::StandardLibrary { source })?;
+    verify_standard_library_v4_snapshot(version_four)
+        .map_err(|source| StandardUpgradeError::StandardLibrary { source })?;
+    prepare_standard_upgrade_with(
+        active,
+        retained_standard_library_v5_snapshot,
+        verify_standard_library_v5_snapshot,
+        check_standard_library_source,
+        prepare_checked_standard_upgrade,
+    )
+}
+
 fn prepare_standard_upgrade_with<Retain, Verify, Check, Prepare>(
     active: &ActiveDatabaseRevision,
     retain: Retain,
@@ -1772,6 +1954,40 @@ pub fn verify_standard_library_v4_snapshot(
         .map_err(|source| StandardLibraryError::CanonicalHash { source })
 }
 
+/// Retains the canonical V5 JSON standard source as an unverified snapshot.
+pub fn retained_standard_library_v5_snapshot()
+-> Result<StandardLibrarySnapshot, StandardLibraryError> {
+    retained_standard_library_v5_snapshot_from_source(
+        RETAINED_STANDARD_SOURCE,
+        RETAINED_STANDARD_INVOKE_SOURCE,
+        RETAINED_STANDARD_OUTPUT_SOURCE,
+        RETAINED_STANDARD_UI_SOURCE,
+        RETAINED_STANDARD_JSON_SOURCE,
+    )
+}
+
+/// Verifies a retained V5 JSON standard snapshot and returns authority.
+pub fn verify_standard_library_v5_snapshot(
+    snapshot: StandardLibrarySnapshot,
+) -> Result<VerifiedStandardLibrarySnapshot, StandardLibraryError> {
+    let actual_catalogue = snapshot.catalogue().revision();
+    if actual_catalogue != STANDARD_CATALOGUE_V5_REVISION_ID {
+        return Err(StandardLibraryError::CatalogueIdentityMismatch {
+            expected: STANDARD_CATALOGUE_V5_REVISION_ID,
+            actual: actual_catalogue,
+        });
+    }
+    let actual_digest = snapshot.digest();
+    if actual_digest != ACCEPTED_V5_STANDARD_LIBRARY_DIGEST {
+        return Err(StandardLibraryError::AcceptedDigestMismatch {
+            expected: ACCEPTED_V5_STANDARD_LIBRARY_DIGEST,
+            actual: actual_digest,
+        });
+    }
+    verify_canonical_standard_library_v2_snapshot(snapshot)
+        .map_err(|source| StandardLibraryError::CanonicalHash { source })
+}
+
 fn retained_standard_library_v4_snapshot_from_source(
     types_source: &str,
     invoke_source: &str,
@@ -1897,6 +2113,227 @@ fn retained_standard_library_v4_snapshot_from_source(
         .map_err(|source| StandardLibraryError::CanonicalHash { source })?;
 
     Ok(snapshot)
+}
+
+fn retained_standard_library_v5_snapshot_from_source(
+    types_source: &str,
+    invoke_source: &str,
+    output_source: &str,
+    ui_source: &str,
+    json_source: &str,
+) -> Result<StandardLibrarySnapshot, StandardLibraryError> {
+    let manifest = standard_library_v5_manifest()
+        .map_err(|source| StandardLibraryError::Manifest { source })?;
+    let types_manifest =
+        standard_library_manifest().map_err(|source| StandardLibraryError::Manifest { source })?;
+    let catalogue = manifest.catalogue();
+    let mut origins = reconcile_retained_source_with_unit(
+        types_source,
+        &types_manifest,
+        STD_TYPES_SOURCE_UNIT_ID,
+    )?;
+    let invoke_origins = reconcile_retained_invoke_source(invoke_source, catalogue)?;
+    origins.extend(invoke_origins.iter().cloned());
+    origins.extend(reconcile_retained_output_source(output_source, catalogue)?);
+    origins.extend(reconcile_retained_ui_source(ui_source, catalogue)?);
+    let json_origins = reconcile_retained_json_source(json_source, catalogue)?;
+    origins.extend(json_origins.iter().cloned());
+
+    let types_content_hash = source_unit_content_digest(types_source)
+        .map_err(|source| StandardLibraryError::CanonicalHash { source })?;
+    let invoke_content_hash = source_unit_content_digest(invoke_source)
+        .map_err(|source| StandardLibraryError::CanonicalHash { source })?;
+    let output_content_hash = source_unit_content_digest(output_source)
+        .map_err(|source| StandardLibraryError::CanonicalHash { source })?;
+    let ui_content_hash = source_unit_content_digest(ui_source)
+        .map_err(|source| StandardLibraryError::CanonicalHash { source })?;
+    let json_content_hash = source_unit_content_digest(json_source)
+        .map_err(|source| StandardLibraryError::CanonicalHash { source })?;
+    if types_content_hash != ACCEPTED_V5_TYPES_CONTENT_DIGEST
+        || invoke_content_hash != ACCEPTED_V5_INVOKE_CONTENT_DIGEST
+        || output_content_hash != ACCEPTED_V5_OUTPUT_CONTENT_DIGEST
+        || ui_content_hash != ACCEPTED_V5_UI_CONTENT_DIGEST
+        || json_content_hash != ACCEPTED_V5_JSON_CONTENT_DIGEST
+    {
+        return Err(StandardLibraryError::RetainedSourceMismatch);
+    }
+    let units = vec![
+        StoredSourceUnit::new(
+            STD_TYPES_SOURCE_UNIT_ID,
+            0,
+            SOURCE_LOGICAL_PATH,
+            types_source,
+            types_content_hash,
+        ),
+        StoredSourceUnit::new(
+            STD_INVOKE_SOURCE_UNIT_ID,
+            1,
+            STD_INVOKE_SOURCE_LOGICAL_PATH,
+            invoke_source,
+            invoke_content_hash,
+        ),
+        StoredSourceUnit::new(
+            STD_OUTPUT_SOURCE_UNIT_ID,
+            2,
+            STD_OUTPUT_SOURCE_LOGICAL_PATH,
+            output_source,
+            output_content_hash,
+        ),
+        StoredSourceUnit::new(
+            STD_UI_SOURCE_UNIT_ID,
+            3,
+            STD_UI_SOURCE_LOGICAL_PATH,
+            ui_source,
+            ui_content_hash,
+        ),
+        StoredSourceUnit::new(
+            STD_JSON_SOURCE_UNIT_ID,
+            4,
+            STD_JSON_SOURCE_LOGICAL_PATH,
+            json_source,
+            json_content_hash,
+        ),
+    ]
+    .into_iter()
+    .map(|unit| unit.map_err(|source| StandardLibraryError::Revision { source }))
+    .collect::<Result<Vec<_>, _>>()?;
+    let bundle_hash = source_bundle_digest(&units)
+        .map_err(|source| StandardLibraryError::CanonicalHash { source })?;
+    if bundle_hash != ACCEPTED_V5_SOURCE_BUNDLE_DIGEST {
+        return Err(StandardLibraryError::RetainedSourceMismatch);
+    }
+    let revision_hash = source_revision_record_digest(
+        STANDARD_SOURCE_V5_BUNDLE_ID,
+        Some(STANDARD_SOURCE_V4_REVISION_ID),
+        bundle_hash,
+    )
+    .map_err(|source| StandardLibraryError::CanonicalHash { source })?;
+    if revision_hash != ACCEPTED_V5_SOURCE_REVISION_DIGEST {
+        return Err(StandardLibraryError::RetainedSourceMismatch);
+    }
+    let retained_source = StoredSourceRevision::new(
+        STANDARD_SOURCE_V5_BUNDLE_ID,
+        STANDARD_SOURCE_V5_REVISION_ID,
+        Some(STANDARD_SOURCE_V4_REVISION_ID),
+        units,
+        bundle_hash,
+        revision_hash,
+    )
+    .map_err(|source| StandardLibraryError::Revision { source })?;
+    let executable = retained_v2_executable(invoke_source, catalogue, &invoke_origins)?;
+    if executable.revision().artifact().content_hash() != ACCEPTED_V5_ARTIFACT_DIGEST
+        || executable.revision().semantic_hash() != ACCEPTED_V5_SEMANTIC_DIGEST
+    {
+        return Err(StandardLibraryError::RetainedSourceMismatch);
+    }
+    let json_executable = retained_json_executable(json_source, catalogue, &json_origins)?;
+    let snapshot = StandardLibrarySnapshot::new_with_executables(
+        STANDARD_LIBRARY_V5_REVISION_ID,
+        StandardLibraryDigestVersion::Version2,
+        retained_source,
+        LANGUAGE_VERSION_IDENTITY,
+        catalogue.clone(),
+        vec![executable, json_executable],
+        origins,
+        ACCEPTED_V5_STANDARD_LIBRARY_DIGEST,
+    )
+    .map_err(|source| StandardLibraryError::Revision { source })?;
+    if ACCEPTED_V5_STANDARD_LIBRARY_DIGEST != Sha256Digest::from_bytes([0; 32]) {
+        let _ = standard_library_digest(&snapshot)
+            .map_err(|source| StandardLibraryError::CanonicalHash { source })?;
+    }
+    Ok(snapshot)
+}
+
+fn reconcile_retained_json_source(
+    source: &str,
+    catalogue: &CatalogueSnapshot,
+) -> Result<Vec<DefinitionOrigin>, StandardLibraryError> {
+    let parsed = orna_syntax::parse(source);
+    if !parsed.diagnostics().is_empty()
+        || parsed.syntax().text() != source
+        || !parsed.object_types().is_empty()
+        || !parsed.field_renames().is_empty()
+        || parsed.server_functions().len() != 1
+        || !parsed.client_functions().is_empty()
+        || !parsed.primitive_value_types().is_empty()
+        || !parsed.record_value_types().is_empty()
+        || !parsed.enum_types().is_empty()
+        || parsed.schemas().len() != 1
+        || parsed.opaque_value_types().len() != 1
+        || parsed.type_exports().len() != 1
+    {
+        return Err(StandardLibraryError::RetainedSourceMismatch);
+    }
+    let schema = catalogue
+        .schema_by_id(STD_JSON_SCHEMA_ID)
+        .ok_or(StandardLibraryError::RetainedSourceMismatch)?;
+    let value = catalogue
+        .type_definition_by_id(STD_JSON_VALUE_TYPE_ID)
+        .ok_or(StandardLibraryError::RetainedSourceMismatch)?
+        .as_opaque_value()
+        .ok_or(StandardLibraryError::RetainedSourceMismatch)?;
+    let binding = catalogue
+        .type_binding_by_name(&TypeLookupName::qualified(
+            semantic_name("std.jsonvalue", ["std", "jsonvalue"])
+                .map_err(|_| StandardLibraryError::RetainedSourceMismatch)?,
+        ))
+        .ok_or(StandardLibraryError::RetainedSourceMismatch)?;
+    if !matches_qualified_name(&parsed.schemas()[0].name, schema.name())
+        || !matches_qualified_name(&parsed.opaque_value_types()[0].name, value.name())
+        || decode_sql_string_literal(&parsed.opaque_value_types()[0].kernel_contract.text)
+            .as_deref()
+            != Some(value.representation_contract())
+        || value.persistence() != ValueTypePersistence::Transient
+        || !matches_qualified_export(
+            &parsed.type_exports()[0],
+            value.name(),
+            STD_JSON_VALUE_TYPE_ID,
+            binding,
+        )
+    {
+        return Err(StandardLibraryError::RetainedSourceMismatch);
+    }
+    let function = &parsed.server_functions()[0];
+    if function.name.parts.iter().map(|part| part.text.as_str()).collect::<Vec<_>>()
+        != ["std", "json", "encode"]
+    {
+        return Err(StandardLibraryError::RetainedSourceMismatch);
+    }
+    let function_definition = catalogue
+        .function_by_id(STD_JSON_ENCODE_FUNCTION_ID)
+        .ok_or(StandardLibraryError::RetainedSourceMismatch)?;
+    if function_definition.name()
+        != &semantic_name("std.json.encode", ["std", "json", "encode"])
+            .map_err(|_| StandardLibraryError::RetainedSourceMismatch)?
+    {
+        return Err(StandardLibraryError::RetainedSourceMismatch);
+    }
+    let parameter = function.parameters.first().ok_or(StandardLibraryError::RetainedSourceMismatch)?;
+    let origin = |span: &orna_syntax::SourceSpan, identity| {
+        let start = u32::try_from(span.start).map_err(|_| StandardLibraryError::RetainedSourceMismatch)?;
+        let end = u32::try_from(span.end).map_err(|_| StandardLibraryError::RetainedSourceMismatch)?;
+        Ok(DefinitionOrigin::new(
+            identity,
+            SourceOrigin::new(STD_JSON_SOURCE_UNIT_ID, start, end)
+                .map_err(|source| StandardLibraryError::Revision { source })?,
+        ))
+    };
+    let mut declarations = vec![
+        origin(&parsed.schemas()[0].span, DefinitionIdentity::Schema(STD_JSON_SCHEMA_ID))?,
+        origin(&parsed.opaque_value_types()[0].span, DefinitionIdentity::ValueType(STD_JSON_VALUE_TYPE_ID))?,
+        origin(&parsed.type_exports()[0].span, DefinitionIdentity::TypeBinding(binding.id()))?,
+        origin(&function.span, DefinitionIdentity::Function(STD_JSON_ENCODE_FUNCTION_ID))?,
+        origin(
+            &parameter.span,
+            DefinitionIdentity::Parameter {
+                owner: STD_JSON_ENCODE_FUNCTION_ID,
+                parameter: STD_JSON_ENCODE_PARAMETER_ID,
+            },
+        )?,
+    ];
+    declarations.sort_by_key(|origin| (origin.source().byte_start(), origin.source().byte_end()));
+    Ok(declarations)
 }
 
 /// Reconciles the retained `std/ui.orna` unit against the V4 catalogue.
@@ -2365,7 +2802,41 @@ pub fn registered_opaque_codecs(
     )
     .map_err(|source| RegisteredOpaqueCodecsError::Registry { source })?;
 
-    let registrations = if is_accepted_v4_standard(standard) {
+    let registrations = if is_accepted_v5_standard(standard) {
+        let document = OpaqueCodecRegistration::length_prefixed_utf8(
+            STD_TERMINAL_DOCUMENT_TYPE_ID,
+            semantic_name("std.terminal.document", ["std", "terminal", "document"])
+                .map_err(|source| RegisteredOpaqueCodecsError::Manifest { source })?,
+            STD_TERMINAL_DOCUMENT_CONTRACT,
+            TERMINAL_DOCUMENT_MAGIC,
+        )
+        .map_err(|source| RegisteredOpaqueCodecsError::Registry { source })?;
+        let byte_stream = OpaqueCodecRegistration::media_type_framed(
+            STD_IO_BYTE_STREAM_TYPE_ID,
+            semantic_name("std.io.bytestream", ["std", "io", "bytestream"])
+                .map_err(|source| RegisteredOpaqueCodecsError::Manifest { source })?,
+            STD_IO_BYTE_STREAM_CONTRACT,
+            BYTE_STREAM_MAGIC,
+        )
+        .map_err(|source| RegisteredOpaqueCodecsError::Registry { source })?;
+        let ui = OpaqueCodecRegistration::length_prefixed_utf8(
+            STD_UI_TYPE_ID,
+            semantic_name("std.ui.ui", ["std", "ui", "ui"])
+                .map_err(|source| RegisteredOpaqueCodecsError::Manifest { source })?,
+            STD_UI_CONTRACT,
+            UI_MAGIC,
+        )
+        .map_err(|source| RegisteredOpaqueCodecsError::Registry { source })?;
+        let json = OpaqueCodecRegistration::length_prefixed_canonical_json(
+            STD_JSON_VALUE_TYPE_ID,
+            semantic_name("std.json.value", ["std", "json", "value"])
+                .map_err(|source| RegisteredOpaqueCodecsError::Manifest { source })?,
+            STD_JSON_CONTRACT,
+            JSON_MAGIC,
+        )
+        .map_err(|source| RegisteredOpaqueCodecsError::Registry { source })?;
+        vec![opaque_token, document, byte_stream, ui, json]
+    } else if is_accepted_v4_standard(standard) {
         let document = OpaqueCodecRegistration::length_prefixed_utf8(
             STD_TERMINAL_DOCUMENT_TYPE_ID,
             semantic_name("std.terminal.document", ["std", "terminal", "document"])
@@ -2462,6 +2933,16 @@ fn is_accepted_v4_standard(standard: &VerifiedStandardLibrarySnapshot) -> bool {
         && standard.source().parent() == Some(STANDARD_SOURCE_V3_REVISION_ID)
         && standard.source().revision_hash() == ACCEPTED_V4_SOURCE_REVISION_DIGEST
         && standard.digest() == ACCEPTED_V4_STANDARD_LIBRARY_DIGEST
+}
+
+fn is_accepted_v5_standard(standard: &VerifiedStandardLibrarySnapshot) -> bool {
+    standard.revision() == STANDARD_LIBRARY_V5_REVISION_ID
+        && standard.catalogue().revision() == STANDARD_CATALOGUE_V5_REVISION_ID
+        && standard.source().bundle() == STANDARD_SOURCE_V5_BUNDLE_ID
+        && standard.source().id() == STANDARD_SOURCE_V5_REVISION_ID
+        && standard.source().parent() == Some(STANDARD_SOURCE_V4_REVISION_ID)
+        && standard.source().revision_hash() == ACCEPTED_V5_SOURCE_REVISION_DIGEST
+        && standard.digest() == ACCEPTED_V5_STANDARD_LIBRARY_DIGEST
 }
 
 /// An error from binding checked-in opaque codecs to a standard snapshot.
@@ -2894,6 +3375,64 @@ fn retained_v2_executable(
     .map_err(|source| StandardLibraryError::Revision { source })
 }
 
+fn retained_json_executable(
+    json_source: &str,
+    catalogue: &CatalogueSnapshot,
+    json_origins: &[DefinitionOrigin],
+) -> Result<StandardExecutable, StandardLibraryError> {
+    let function = catalogue
+        .function_by_id(STD_JSON_ENCODE_FUNCTION_ID)
+        .ok_or(StandardLibraryError::RetainedSourceMismatch)?;
+    let function_origin = json_origins
+        .iter()
+        .find(|origin| {
+            origin.identity() == DefinitionIdentity::Function(STD_JSON_ENCODE_FUNCTION_ID)
+        })
+        .ok_or(StandardLibraryError::RetainedSourceMismatch)?
+        .source();
+    let declaration_bytes = &json_source.as_bytes()
+        [function_origin.byte_start() as usize..function_origin.byte_end() as usize];
+    let declaration_content_hash = function_declaration_digest(declaration_bytes)
+        .map_err(|source| StandardLibraryError::CanonicalHash { source })?;
+    let mut payload = Vec::with_capacity(44);
+    payload.extend_from_slice(b"ORNAJE\0\0");
+    payload.extend_from_slice(&1_u32.to_be_bytes());
+    payload.extend_from_slice(&STD_JSON_ENCODE_PARAMETER_ID.to_bytes());
+    payload.extend_from_slice(&STD_JSON_VALUE_TYPE_ID.to_bytes());
+    let artifact_hash = artifact_payload_digest(&payload)
+        .map_err(|source| StandardLibraryError::CanonicalHash { source })?;
+    let artifact = ExecutableArtifact::new(
+        ExecutableArtifactKind::Server,
+        "orna.server-json-encode",
+        1,
+        payload,
+        artifact_hash,
+    )
+    .map_err(|source| StandardLibraryError::Revision { source })?;
+    let semantic_hash = function_semantic_digest_with_version(
+        FunctionSemanticHashVersion::Version2,
+        function,
+        LANGUAGE_VERSION_IDENTITY,
+        &artifact,
+        &[],
+        &[],
+    )
+    .map_err(|source| StandardLibraryError::CanonicalHash { source })?;
+    let revision = FunctionRevisionRecord::new(
+        STD_JSON_ENCODE_FUNCTION_ID,
+        STD_JSON_ENCODE_FUNCTION_REVISION_ID,
+        1,
+        function_origin,
+        declaration_content_hash,
+        semantic_hash,
+        LANGUAGE_VERSION_IDENTITY,
+        artifact,
+    )
+    .map_err(|source| StandardLibraryError::Revision { source })?
+    .with_semantic_hash_version(FunctionSemanticHashVersion::Version2);
+    StandardExecutable::new(STD_JSON_ENCODE_FUNCTION_ID, revision, Vec::new())
+        .map_err(|source| StandardLibraryError::Revision { source })
+}
 fn matches_qualified_export(
     export: &orna_syntax::TypeExportDeclaration,
     expected_source: &QualifiedSemanticName,
@@ -3036,10 +3575,11 @@ mod tests {
         retained_standard_library_snapshot, retained_standard_library_snapshot_from_source,
         retained_standard_library_v2_snapshot, retained_standard_library_v2_snapshot_from_source,
         retained_standard_library_v3_snapshot, retained_standard_library_v4_snapshot,
+        retained_standard_library_v5_snapshot,
         standard_library_manifest, standard_library_v2_manifest, standard_library_v3_manifest,
-        standard_library_v4_manifest, verify_standard_library_snapshot,
+        standard_library_v4_manifest, standard_library_v5_manifest, verify_standard_library_snapshot,
         verify_standard_library_v2_snapshot, verify_standard_library_v3_snapshot,
-        verify_standard_library_v4_snapshot,
+        verify_standard_library_v4_snapshot, verify_standard_library_v5_snapshot,
     };
 
     const EXPECTED_RETAINED_STANDARD_SOURCE: &str = r#"CREATE SCHEMA std;
@@ -6950,5 +7490,15 @@ EXPORT TYPE std.ui.UI AS std.UI;
                 .map(|snapshot| snapshot.revision()),
             Some(STANDARD_LIBRARY_V3_REVISION_ID)
         );
+    }
+
+    #[test]
+    fn retains_and_verifies_v5_json_standard_snapshot() {
+        let snapshot = super::retained_standard_library_v5_snapshot()
+            .expect("the retained V5 source is valid");
+        assert_eq!(snapshot.source().units().len(), 5);
+        let verified = super::verify_standard_library_v5_snapshot(snapshot)
+            .expect("the retained V5 source verifies");
+        assert!(super::registered_opaque_codecs(&verified).is_ok());
     }
 }
