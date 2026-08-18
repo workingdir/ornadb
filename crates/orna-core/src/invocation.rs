@@ -16,9 +16,10 @@ use crate::{
     },
     system::{
         InvocationCarrierKind, SYS_INVOKE_EVENT_TYPE_ID, SYS_INVOKE_REQUEST_TYPE_ID,
-        SYS_INVOKE_VALUE_TYPE_ID, SYS_SECURITY_EFFECTIVE_PRINCIPAL_FUNCTION_ID,
-        SYS_SECURITY_SESSION_PRINCIPAL_FUNCTION_ID, SystemFunctionDefinition, SystemFunctionKind,
-        invocation_carrier_by_id, system_function_by_id, system_function_by_name,
+        SYS_INVOKE_VALUE_TYPE_ID, SYS_SECURITY_ACTIVE_ROLES_FUNCTION_ID,
+        SYS_SECURITY_EFFECTIVE_PRINCIPAL_FUNCTION_ID, SYS_SECURITY_SESSION_PRINCIPAL_FUNCTION_ID,
+        SystemFunctionDefinition, SystemFunctionKind, invocation_carrier_by_id, system_function_by_id,
+        system_function_by_name,
     },
     types::{TypeDescriptor, TypeDescriptorKind},
     value::{RuntimeType, RuntimeValue, count_invocation_runtime_value_nodes},
@@ -192,7 +193,8 @@ impl PrivateResolvedTarget {
         }
         match definition.id() {
             SYS_SECURITY_SESSION_PRINCIPAL_FUNCTION_ID
-            | SYS_SECURITY_EFFECTIVE_PRINCIPAL_FUNCTION_ID => Some(Self::System { definition }),
+            | SYS_SECURITY_EFFECTIVE_PRINCIPAL_FUNCTION_ID
+            | SYS_SECURITY_ACTIVE_ROLES_FUNCTION_ID => Some(Self::System { definition }),
             _ => None,
         }
     }
@@ -2750,7 +2752,7 @@ mod tests {
     }
 
     #[test]
-    fn protected_decision_allows_scalar_system_identities_and_denies_set_identity() {
+    fn protected_decision_allows_scalar_and_set_system_identities() {
         let active = decision_active_revision(FunctionSecurity::Invoker);
         let security = decision_security(&active, vec![]);
         let session = security
@@ -2799,7 +2801,7 @@ mod tests {
                 5,
                 &active_roles,
             ),
-            ProtectedInvocationDecision::Denied
+            ProtectedInvocationDecision::Allowed
         );
     }
 
