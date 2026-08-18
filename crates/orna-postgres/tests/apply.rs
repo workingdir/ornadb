@@ -6968,6 +6968,32 @@ async fn proves_sealed_security_identity_invocation_and_audit() -> TestResult<()
                         .collect::<Vec<_>>(),
             "sealed security identity invocations did not link invocation audit evidence",
         )?;
+        for (function, name) in [
+            (
+                SYS_SECURITY_SESSION_PRINCIPAL_FUNCTION_ID,
+                "session_principal",
+            ),
+            (
+                SYS_SECURITY_EFFECTIVE_PRINCIPAL_FUNCTION_ID,
+                "effective_principal",
+            ),
+        ] {
+            let authority =
+                standard_authority_row(&database, pair.catalogue(), function).await?;
+            require(
+                authority.as_ref().is_some_and(|row| {
+                    row.target_class == "system"
+                        && row.function_revision == function.to_bytes().to_vec()
+                        && row.standard_revision.is_none()
+                }),
+                match name {
+                    "session_principal" => {
+                        "session_principal must have a sealed system audit anchor"
+                    }
+                    _ => "effective_principal must have a sealed system audit anchor",
+                },
+            )?;
+        }
         let denied_target =
             InvocationRequestTarget::function_id(SYS_SECURITY_ACTIVE_ROLES_FUNCTION_ID);
         let denied_request = sealed_security_identity_request(denied_target)?;
