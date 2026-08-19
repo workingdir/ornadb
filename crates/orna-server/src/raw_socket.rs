@@ -30,7 +30,7 @@ use orna_protocol::{
     CallFailure, ClientAction, ClientFrame, ConnectionError, FrameCodecError,
     MAX_FRAME_PAYLOAD_LENGTH, ProtocolConnection, RawCall, ResourceClientFrame,
     ResourceConnectionError, ResourceFrameDisposition, ResourceProtocolConnection, ResourceRequest,
-    ResourceServerFrame, ServerAction, ServerFrame, decode_active_client_frame,
+    ResourceServerFrame, ResourceKind, ServerAction, ServerFrame, decode_active_client_frame,
     decode_catalogue_client_frame, decode_client_frame, decode_constructed_client_frame,
     decode_registered_client_frame, decode_resource_client_frame, encode_active_server_frame,
     encode_catalogue_server_frame, encode_constructed_server_frame, encode_constructed_value,
@@ -1481,12 +1481,41 @@ async fn handle_resource_frame<D: DispatchService>(
                 .and_then(|completion| completion.actions.front())
                 .is_some_and(|action| resource_action_request_id(action) == cancel.request_id);
     }
+    let invalid_scalar_window_update = match &frame {
+        ResourceClientFrame::WindowUpdate(update) => requests
+            .get(&update.stream_id)
+            .is_some_and(|request| {
+                request.request_id == update.request_id
+                    && request.resource_kind == ResourceKind::Single
+            }),
+        _ => false,
+    };
     let disposition = if committed_completion {
         ResourceFrameDisposition::Applied
     } else {
-        connection
-            .receive(frame)
-            .map_err(|source| LocalRawSocketError::ResourceConnection { source })?
+        match connection.receive(frame) {
+            Ok(disposition) => disposition,
+            Err(ResourceConnectionError::WrongState { stream_id })
+                if invalid_scalar_window_update => {
+                    if let Some(task) = tasks.remove(&stream_id) {
+                        task.abort();
+                        let _ = task.await;
+                    }
+                    cancelled.insert(stream_id);
+                    let request = requests
+                        .get(&stream_id)
+                        .expect("scalar resource request exists")
+                        .clone();
+                    pending.insert(
+                        stream_id,
+                        ResourceDispatchCompletion {
+                            actions: resource_internal_failure(&request),
+                        },
+                    );
+                    ResourceFrameDisposition::Applied
+                }
+            Err(source) => return Err(LocalRawSocketError::ResourceConnection { source }),
+        }
     };
     if matches!(disposition, ResourceFrameDisposition::DroppedLate) {
         return Ok(true);
@@ -2264,6 +2293,48 @@ mod tests {
         }
     }
 
+    #[derive(Clone)]
+    struct MixedResourceDispatch {
+        started: Arc<Notify>,
+    }
+
+    impl DispatchService for MixedResourceDispatch {
+        fn start(
+            &self,
+            _session: AuthenticatedSession,
+            _stream: u64,
+            _call: RawCall,
+        ) -> StartedDispatch {
+            panic!("resource transport test does not issue a raw call")
+        }
+
+        fn start_resource(
+            &self,
+            _session: AuthenticatedSession,
+            request: ResourceRequest,
+            _resources: LocalRawSocketResources,
+            version: RawProtocolVersion,
+        ) -> Option<StartedResourceDispatch> {
+            if request.stream_id == 1 {
+                let started = Arc::clone(&self.started);
+                return Some(StartedResourceDispatch {
+                    future: Box::pin(async move {
+                        started.notify_one();
+                        std::future::pending::<ResourceDispatchCompletion>().await
+                    }),
+                });
+            }
+            let actions = resource_actions(
+                &version,
+                &request,
+                vec![RuntimeValue::Integer(7), RuntimeValue::Integer(8)],
+            );
+            Some(StartedResourceDispatch {
+                future: Box::pin(async move { ResourceDispatchCompletion { actions } }),
+            })
+        }
+    }
+
     struct DropSignal(Arc<AtomicBool>);
 
     impl Drop for DropSignal {
@@ -2541,6 +2612,116 @@ mod tests {
             .await
             .is_err()
         );
+
+        client.shutdown().await.unwrap();
+        server_task.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn invalid_scalar_window_update_only_terminates_its_resource_stream() {
+        let (version, revision) = constructed_test_version();
+        let (active, registry) = match &version {
+            RawProtocolVersion::Constructed(active, registry) => (active.clone(), registry.clone()),
+            _ => unreachable!("constructed test version"),
+        };
+        let started = Arc::new(Notify::new());
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let dispatcher = BlockingResourceDispatch {
+            started: Arc::clone(&started),
+            cancelled: Arc::clone(&cancelled),
+        };
+        let (server, mut client) = UnixStream::pair().unwrap();
+        let server_task = tokio::spawn(drive_versioned_authenticated_stream_until_shutdown(
+            dispatcher,
+            test_session(),
+            version,
+            server,
+            LocalRawSocketResources::new(),
+            watch::channel(false).1,
+        ));
+
+        let scalar = resource_request(revision);
+        let scalar_request_id = scalar.request_id;
+        client
+            .write_all(
+                &encode_resource_client_frame(
+                    &active,
+                    &registry,
+                    &ResourceClientFrame::Request(scalar),
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        started.notified().await;
+
+        client
+            .write_all(
+                &encode_resource_client_frame(
+                    &active,
+                    &registry,
+                    &ResourceClientFrame::WindowUpdate(ResourceWindowUpdate {
+                        stream_id: 1,
+                        request_id: scalar_request_id,
+                        add_items: 1,
+                        add_bytes: 1,
+                    }),
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let mut unrelated = resource_request(revision);
+        unrelated.stream_id = 2;
+        unrelated.request_id = InvocationId::from_bytes([0x22; 16]);
+        unrelated.resource_kind = ResourceKind::Stream;
+        unrelated.item_window = 1;
+        unrelated.byte_window = 1;
+        client
+            .write_all(
+                &encode_resource_client_frame(
+                    &active,
+                    &registry,
+                    &ResourceClientFrame::Request(unrelated.clone()),
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        started.notified().await;
+
+        client
+            .write_all(
+                &encode_resource_client_frame(
+                    &active,
+                    &registry,
+                    &ResourceClientFrame::Cancel(ResourceCancel {
+                        stream_id: unrelated.stream_id,
+                        request_id: unrelated.request_id,
+                        reason: ResourceCancellationCode::ClientRequested,
+                    }),
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert!(matches!(
+            read_resource_server_frame(&mut client, &active, &registry).await,
+            ResourceServerFrame::Failed(frame)
+                if frame.stream_id == 1
+                    && frame.request_id == scalar_request_id
+                    && frame.failure == orna_protocol::CallFailure::InternalFailure
+        ));
+        assert!(matches!(
+            read_resource_server_frame(&mut client, &active, &registry).await,
+            ResourceServerFrame::Cancelled(frame)
+                if frame.stream_id == unrelated.stream_id
+                    && frame.request_id == unrelated.request_id
+                    && frame.reason == ResourceCancellationCode::ClientRequested
+        ));
+        assert!(cancelled.load(Ordering::SeqCst));
 
         client.shutdown().await.unwrap();
         server_task.await.unwrap().unwrap();
