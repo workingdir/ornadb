@@ -10661,11 +10661,11 @@ mod runtime_conformance {
         }
 
         fn cancel_request(&mut self, request: RequestHandle) -> Status {
-            if self.cancelled_requests.contains_key(&request) {
-                return status(StatusCode::Cancelled, b"request is already cancelled");
-            }
             if self.terminal {
                 return status(StatusCode::Failed, b"runtime is shut down");
+            }
+            if self.cancelled_requests.contains_key(&request) {
+                return status(StatusCode::Cancelled, b"request is already cancelled");
             }
             if let Err(error) = self.check_request(request) {
                 return error;
@@ -10702,6 +10702,9 @@ mod runtime_conformance {
         }
 
         fn apply_model_rows(&mut self, request: RequestHandle, rows: ValueRef) -> Status {
+            if self.terminal {
+                return status(StatusCode::Failed, b"runtime is shut down");
+            }
             if self.cancelled_requests.contains_key(&request) {
                 return status(StatusCode::Cancelled, b"request was cancelled");
             }
@@ -10712,9 +10715,6 @@ mod runtime_conformance {
                     status(StatusCode::NotFound, b"request handle is not live")
                 };
             };
-            if self.terminal {
-                return status(StatusCode::Failed, b"runtime is shut down");
-            }
             let result = self.drain_events();
             if result.code != StatusCode::Ok {
                 return result;
@@ -11057,7 +11057,10 @@ mod runtime_conformance {
 
     impl FixtureSession {
         fn new() -> Self {
-            let serial = serial_lock();
+            Self::new_with_serial(serial_lock())
+        }
+
+        fn new_with_serial(serial: MutexGuard<'static, ()>) -> Self {
             {
                 let mut guard = global().lock().unwrap_or_else(|error| error.into_inner());
                 guard.runtime = None;
@@ -11400,20 +11403,19 @@ mod runtime_conformance {
 
     #[test]
     fn loads_valid_fixture_and_rejects_incompatible_table_before_describe() {
-        {
-            let _serial = serial_lock();
-            DESCRIBE_CALLS.store(0, Ordering::SeqCst);
-            assert_eq!(validate_api(&FIXTURE_API), Ok(()));
-            assert_eq!(DESCRIBE_CALLS.load(Ordering::SeqCst), 1);
-
-            let mut incompatible = FIXTURE_API;
-            incompatible.abi_major = 2;
-            DESCRIBE_CALLS.store(0, Ordering::SeqCst);
-            assert_eq!(validate_api(&incompatible), Err(LoadError::AbiMajor(2)));
-            assert_eq!(DESCRIBE_CALLS.load(Ordering::SeqCst), 0);
-        }
+        let serial = serial_lock();
         DESCRIBE_CALLS.store(0, Ordering::SeqCst);
-        let session = FixtureSession::new();
+        assert_eq!(validate_api(&FIXTURE_API), Ok(()));
+        assert_eq!(DESCRIBE_CALLS.load(Ordering::SeqCst), 1);
+
+        let mut incompatible = FIXTURE_API;
+        incompatible.abi_major = 2;
+        DESCRIBE_CALLS.store(0, Ordering::SeqCst);
+        assert_eq!(validate_api(&incompatible), Err(LoadError::AbiMajor(2)));
+        assert_eq!(DESCRIBE_CALLS.load(Ordering::SeqCst), 0);
+
+        DESCRIBE_CALLS.store(0, Ordering::SeqCst);
+        let session = FixtureSession::new_with_serial(serial);
         assert_eq!(DESCRIBE_CALLS.load(Ordering::SeqCst), 1);
         assert_eq!(
             unsafe { (FIXTURE_API.start_event_loop)(session.runtime) }.code,
@@ -12542,8 +12544,10 @@ mod runtime_conformance {
         assert_eq!(session.apply_model_rows(cancelled), StatusCode::Cancelled);
         let (_, pending) = session.start_model_request(surface);
         assert_eq!(session.shutdown(), StatusCode::Ok);
-        assert_eq!(session.apply_model_rows(pending), StatusCode::NotFound);
-        assert_eq!(session.apply_model_rows(pending), StatusCode::NotFound);
+        assert_eq!(session.cancel_request(cancelled), StatusCode::Failed);
+        assert_eq!(session.apply_model_rows(cancelled), StatusCode::Failed);
+        assert_eq!(session.apply_model_rows(pending), StatusCode::Failed);
+        assert_eq!(session.apply_model_rows(pending), StatusCode::Failed);
         assert_eq!(
             unsafe { (FIXTURE_API.poll_event_loop)(session.runtime, 0) }.code,
             StatusCode::Failed
