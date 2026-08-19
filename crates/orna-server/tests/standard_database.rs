@@ -4698,23 +4698,27 @@ async fn authenticated_stream_resource_dispatches_allowed_and_denied_with_redact
                 return Err(failure(format!("stream resource unexpectedly failed: {call_failure:?}")));
             }
         };
-
+        let denied_request = ResourceRequest {
+            request_id: InvocationId::new(),
+            ..request.clone()
+        };
         let denied = kernel
             .replace_security_snapshot(&snapshot(vec![]))
             .await?;
         let denied_session = denied.bind_authenticated_session(RAW_CLIENT_USER, vec![])?;
         let failed = kernel
-            .dispatch_authenticated_server_resource(&denied_session, &request)
+            .dispatch_authenticated_server_resource(&denied_session, &denied_request)
             .await?;
         require(
             failed
                 == AuthenticatedServerResourceResult::Failed {
-                    stream_id: request.stream_id,
-                    request_id: request.request_id,
+                    stream_id: denied_request.stream_id,
+                    request_id: denied_request.request_id,
                     failure: CallFailure::ExecuteDenied,
                 },
             "stream resource without its EXECUTE grant was not denied",
         )?;
+
 
         let audits = kernel.recover_security_audit_events().await?;
         require(
