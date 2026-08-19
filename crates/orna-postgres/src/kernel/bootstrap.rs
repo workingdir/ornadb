@@ -913,7 +913,7 @@ mod tests {
             validated_migration_registry()
                 .expect("registry is valid")
                 .len(),
-            31
+            32
         );
         assert_eq!(MIGRATIONS[0].version, 1);
         assert_eq!(MIGRATIONS[1].version, 2);
@@ -946,6 +946,7 @@ mod tests {
         assert_eq!(MIGRATIONS[28].version, 29);
         assert_eq!(MIGRATIONS[29].version, 30);
         assert_eq!(MIGRATIONS[30].version, 31);
+        assert_eq!(MIGRATIONS[31].version, 32);
         assert_eq!(MIGRATIONS[5].name, "definition reference write evidence");
         assert_eq!(MIGRATIONS[6].name, "standard catalogue type storage");
         assert_eq!(MIGRATIONS[7].name, "resolved value type storage");
@@ -978,6 +979,7 @@ mod tests {
             "active roles system invocation authority"
         );
         assert_eq!(MIGRATIONS[30].name, "standard JSON executable format");
+        assert_eq!(MIGRATIONS[31].name, "protected resource audit");
         assert!(MIGRATIONS[6].data_step.is_none());
         assert!(MIGRATIONS[7].data_step.is_none());
         assert!(MIGRATIONS[8].data_step.is_none());
@@ -1003,6 +1005,7 @@ mod tests {
         assert!(MIGRATIONS[28].data_step.is_none());
         assert!(MIGRATIONS[29].data_step.is_none());
         assert!(MIGRATIONS[30].data_step.is_none());
+        assert!(MIGRATIONS[31].data_step.is_none());
     }
 
     #[test]
