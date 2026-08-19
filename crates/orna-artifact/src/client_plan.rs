@@ -52,7 +52,7 @@
 //! shape, the depth cap, the node-count cap, and per-node limits, so an
 //! untrusted artefact cannot exhaust the evaluator.
 //!
-//! Version 5 (work ADR 0060) wraps one complete version 1-4 or version 6
+//! Version 5 (work ADR 0060) wraps one complete version 1-4, version 6, or version 7
 //! with the owning function's ordered, closed capability requirements:
 //!
 //! ```text
@@ -86,14 +86,30 @@
 //! Resource plans reject a bare resource, an await over another expression,
 //! and any trailing bytes.
 //!
+//! Version 7 carries a procedural CLIENT body:
+//!
+//! ```text
+//! magic[8] = ORNACP\0\0
+//! version: u32 big-endian = 7
+//! operation: u8 = 7
+//! local count: u32 big-endian, 0..=MAX_PROCEDURAL_LOCALS
+//! local: LocalId[16] TypeId[16] kind: u8 (0 value, 1 scalar resource, 2 stream resource)
+//! statement count: u32 big-endian, 0..=MAX_PROCEDURAL_STATEMENTS
+//! statement: tag u8 (1 LET, 2 ASSIGNMENT), LocalId[16], expression node
+//! final return expression node
+//! ```
+//!
+//! Procedural expressions additionally admit `LocalRead` nodes and the v6
+//! resource/`AWAIT` nodes; versions 1-6 reject `LocalRead` as an unknown node.
+//!
 //! The version 1-4 formats contain no source text, source locations, Orna
 //! names, or backend values.
 
 use std::fmt;
 
 use orna_core::{
-    revision::RevisionPair, CallSiteId, CatalogueRevisionId, FieldId, FunctionId, ParameterId,
-    SourceRevisionId, StateSlotId, TypeId,
+    CallSiteId, CatalogueRevisionId, FieldId, FunctionId, LocalId, ParameterId, SourceRevisionId,
+    StateSlotId, TypeId, revision::RevisionPair,
 };
 
 /// The stable public identity of this artefact format.
@@ -129,10 +145,17 @@ pub const CAPABILITY_FORMAT_VERSION: u32 = 5;
 /// The client-plan version that carries a closed expression tree with checked
 /// CLIENT-to-SERVER resource operation nodes (work ADR 0077).
 pub const RESOURCE_FORMAT_VERSION: u32 = 6;
+/// The client-plan version that carries ordered procedural local declarations,
+/// statements, and one final return expression (work ADR 0077).
+pub const PROCEDURAL_FORMAT_VERSION: u32 = 7;
 /// The maximum number of resource operation nodes in one resource plan.
 pub const MAX_RESOURCE_OPERATIONS: usize = 64;
 /// The maximum number of arguments in one resource operation.
 pub const MAX_RESOURCE_ARGUMENTS: usize = 64;
+/// The maximum number of local declarations in one procedural plan.
+pub const MAX_PROCEDURAL_LOCALS: usize = 64;
+/// The maximum number of ordered statements in one procedural plan.
+pub const MAX_PROCEDURAL_STATEMENTS: usize = 256;
 /// The maximum number of capability requirements in one capability plan.
 pub const MAX_CAPABILITY_REQUIREMENTS: usize = 64;
 /// The maximum encoded length of one capability requirement name.
@@ -146,6 +169,7 @@ const RETURN_EXPRESSION_OPERATION: u8 = 3;
 const RETURN_STATE_OPERATION: u8 = 4;
 const RETURN_CAPABILITY_OPERATION: u8 = 5;
 const RETURN_RESOURCE_OPERATION: u8 = 6;
+const RETURN_PROCEDURAL_OPERATION: u8 = 7;
 const CAPABILITY_ARGUMENT_TEXT: u8 = 1;
 const CAPABILITY_ARGUMENT_PARAMETER: u8 = 2;
 const RESOURCE_KIND_SCALAR: u8 = 1;
@@ -165,6 +189,13 @@ const NODE_PARAMETER_READ: u8 = 5;
 const NODE_FIELD_PATH: u8 = 6;
 const NODE_CONCAT: u8 = 7;
 const NODE_EXTERNAL_CONTRACT: u8 = 8;
+const NODE_LOCAL_READ: u8 = 11;
+
+const PROCEDURAL_STATEMENT_LET: u8 = 1;
+const PROCEDURAL_STATEMENT_ASSIGNMENT: u8 = 2;
+const LOCAL_KIND_VALUE: u8 = 0;
+const LOCAL_KIND_RESOURCE_SCALAR: u8 = 1;
+const LOCAL_KIND_RESOURCE_STREAM: u8 = 2;
 
 const STATE_SCOPE_LOCAL: u8 = 1;
 const STATE_SCOPE_SESSION: u8 = 2;
@@ -353,6 +384,11 @@ pub enum ClientExpressionNode {
         /// The read parameter identity.
         parameter: ParameterId,
     },
+    /// A read of one declared procedural local.
+    LocalRead {
+        /// The stable local binding identity.
+        local: LocalId,
+    },
     /// A path from one parameter through object fields.
     FieldPath {
         /// The parameter at the start of the path.
@@ -381,6 +417,314 @@ impl ExpressionClientPlan {
     }
 }
 
+/// The kind of value held by one procedural CLIENT local.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ClientLocalKind {
+    /// A normal eagerly evaluated local value.
+    Value,
+    /// A local resource handle whose result is scalar or stream shaped.
+    Resource(ResourceKind),
+}
+
+impl ClientLocalKind {
+    const fn tag(self) -> u8 {
+        match self {
+            Self::Value => LOCAL_KIND_VALUE,
+            Self::Resource(ResourceKind::Scalar) => LOCAL_KIND_RESOURCE_SCALAR,
+            Self::Resource(ResourceKind::Stream) => LOCAL_KIND_RESOURCE_STREAM,
+        }
+    }
+
+    fn from_tag(tag: u8) -> Result<Self, ClientPlanError> {
+        match tag {
+            LOCAL_KIND_VALUE => Ok(Self::Value),
+            LOCAL_KIND_RESOURCE_SCALAR => Ok(Self::Resource(ResourceKind::Scalar)),
+            LOCAL_KIND_RESOURCE_STREAM => Ok(Self::Resource(ResourceKind::Stream)),
+            tag => Err(ClientPlanError::InvalidLocalKind(tag)),
+        }
+    }
+}
+
+/// One stable procedural CLIENT local declaration.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ClientLocal {
+    local: LocalId,
+    type_id: TypeId,
+    kind: ClientLocalKind,
+}
+
+impl ClientLocal {
+    /// Creates a local declaration from its stable identity, resolved type, and kind.
+    pub const fn new(local: LocalId, type_id: TypeId, kind: ClientLocalKind) -> Self {
+        Self {
+            local,
+            type_id,
+            kind,
+        }
+    }
+
+    /// Returns the stable local identity.
+    pub const fn local(&self) -> LocalId {
+        self.local
+    }
+
+    /// Returns the stable local identity.
+    pub const fn local_id(&self) -> LocalId {
+        self.local
+    }
+
+    /// Returns the resolved local value type.
+    pub const fn type_id(&self) -> TypeId {
+        self.type_id
+    }
+
+    /// Returns whether this local stores a value or resource handle.
+    pub const fn kind(&self) -> ClientLocalKind {
+        self.kind
+    }
+}
+
+/// One ordered procedural CLIENT statement.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ClientStatement {
+    /// Declares and initialises a local binding.
+    Let {
+        local: LocalId,
+        expression: ClientExpressionNode,
+    },
+    /// Replaces an existing local binding.
+    Assignment {
+        local: LocalId,
+        expression: ClientExpressionNode,
+    },
+}
+
+impl ClientStatement {
+    /// Creates a LET statement.
+    pub const fn let_(local: LocalId, expression: ClientExpressionNode) -> Self {
+        Self::Let { local, expression }
+    }
+
+    /// Creates an assignment statement.
+    pub const fn assignment(local: LocalId, expression: ClientExpressionNode) -> Self {
+        Self::Assignment { local, expression }
+    }
+
+    /// Returns the target local identity.
+    pub const fn local(&self) -> LocalId {
+        match self {
+            Self::Let { local, .. } | Self::Assignment { local, .. } => *local,
+        }
+    }
+
+    /// Returns the statement expression.
+    pub const fn expression(&self) -> &ClientExpressionNode {
+        match self {
+            Self::Let { expression, .. } | Self::Assignment { expression, .. } => expression,
+        }
+    }
+}
+
+/// A checked version-7 procedural CLIENT plan.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProceduralClientPlan {
+    locals: Vec<ClientLocal>,
+    statements: Vec<ClientStatement>,
+    return_expression: ClientExpressionNode,
+}
+
+impl ProceduralClientPlan {
+    /// Creates a procedural plan from declaration-order locals, ordered statements,
+    /// and one final return expression.
+    pub fn new(
+        locals: Vec<ClientLocal>,
+        statements: Vec<ClientStatement>,
+        return_expression: ClientExpressionNode,
+    ) -> Self {
+        Self {
+            locals,
+            statements,
+            return_expression,
+        }
+    }
+
+    /// Returns local declarations in source order.
+    pub fn locals(&self) -> &[ClientLocal] {
+        &self.locals
+    }
+
+    /// Returns statements in source order.
+    pub fn statements(&self) -> &[ClientStatement] {
+        &self.statements
+    }
+
+    /// Returns the final return expression.
+    pub const fn return_expression(&self) -> &ClientExpressionNode {
+        &self.return_expression
+    }
+
+    /// Returns the canonical artefact version for this plan.
+    pub const fn format_version(&self) -> u32 {
+        PROCEDURAL_FORMAT_VERSION
+    }
+
+    /// Encodes this plan into its exact version-seven bytes.
+    pub fn encode(&self) -> Result<Vec<u8>, ClientPlanError> {
+        validate_procedural_model(self)?;
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&MAGIC);
+        bytes.extend_from_slice(&PROCEDURAL_FORMAT_VERSION.to_be_bytes());
+        bytes.push(RETURN_PROCEDURAL_OPERATION);
+        bytes.extend_from_slice(&(self.locals.len() as u32).to_be_bytes());
+        for local in &self.locals {
+            bytes.extend_from_slice(&local.local.to_bytes());
+            bytes.extend_from_slice(&local.type_id.to_bytes());
+            bytes.push(local.kind.tag());
+        }
+        bytes.extend_from_slice(&(self.statements.len() as u32).to_be_bytes());
+        let mut writer = NodeWriter::new();
+        let mut count = 0;
+        let mut resource_count = 0;
+        for statement in &self.statements {
+            match statement {
+                ClientStatement::Let { local, expression } => {
+                    writer.push(PROCEDURAL_STATEMENT_LET);
+                    writer.extend(&local.to_bytes());
+                    encode_expression_node_with_resources(
+                        expression,
+                        &mut writer,
+                        0,
+                        &mut count,
+                        true,
+                        true,
+                        &mut resource_count,
+                    )?;
+                }
+                ClientStatement::Assignment { local, expression } => {
+                    writer.push(PROCEDURAL_STATEMENT_ASSIGNMENT);
+                    writer.extend(&local.to_bytes());
+                    encode_expression_node_with_resources(
+                        expression,
+                        &mut writer,
+                        0,
+                        &mut count,
+                        true,
+                        true,
+                        &mut resource_count,
+                    )?;
+                }
+            }
+        }
+        encode_expression_node_with_resources(
+            &self.return_expression,
+            &mut writer,
+            0,
+            &mut count,
+            true,
+            true,
+            &mut resource_count,
+        )?;
+        bytes.extend_from_slice(&writer.finish());
+        if bytes.len() > MAX_ARTIFACT_BYTES {
+            return Err(ClientPlanError::ArtifactSizeLimit {
+                size: bytes.len(),
+                maximum: MAX_ARTIFACT_BYTES,
+            });
+        }
+        Ok(bytes)
+    }
+
+    /// Decodes exactly one canonical version-seven procedural client plan.
+    pub fn decode(bytes: &[u8]) -> Result<Self, ClientPlanError> {
+        if bytes.len() > MAX_ARTIFACT_BYTES {
+            return Err(ClientPlanError::ArtifactSizeLimit {
+                size: bytes.len(),
+                maximum: MAX_ARTIFACT_BYTES,
+            });
+        }
+        let mut reader = Reader::new(bytes);
+        if reader.array::<8>()? != MAGIC {
+            return Err(ClientPlanError::InvalidMagic);
+        }
+        let version = reader.u32()?;
+        if version != PROCEDURAL_FORMAT_VERSION {
+            return Err(ClientPlanError::UnsupportedVersion(version));
+        }
+        let operation = reader.u8()?;
+        if operation != RETURN_PROCEDURAL_OPERATION {
+            return Err(ClientPlanError::InvalidOperation(operation));
+        }
+        let local_count = reader.u32()? as usize;
+        if local_count > MAX_PROCEDURAL_LOCALS {
+            return Err(ClientPlanError::ProceduralLocalLimitExceeded {
+                limit: MAX_PROCEDURAL_LOCALS,
+            });
+        }
+        let mut locals = Vec::with_capacity(local_count);
+        for _ in 0..local_count {
+            let local = LocalId::from_bytes(reader.array()?);
+            if locals.iter().any(|item: &ClientLocal| item.local == local) {
+                return Err(ClientPlanError::DuplicateProceduralLocal(local));
+            }
+            let type_id = TypeId::from_bytes(reader.array()?);
+            let kind = ClientLocalKind::from_tag(reader.u8()?)?;
+            locals.push(ClientLocal::new(local, type_id, kind));
+        }
+        let statement_count = reader.u32()? as usize;
+        if statement_count > MAX_PROCEDURAL_STATEMENTS {
+            return Err(ClientPlanError::ProceduralStatementLimitExceeded {
+                limit: MAX_PROCEDURAL_STATEMENTS,
+            });
+        }
+        let mut statements = Vec::with_capacity(statement_count);
+        let mut count = 0;
+        let mut resource_count = 0;
+        for _ in 0..statement_count {
+            let tag = reader.u8()?;
+            let local = LocalId::from_bytes(reader.array()?);
+            if !locals.iter().any(|item| item.local == local) {
+                return Err(ClientPlanError::UnknownProceduralLocal(local));
+            }
+            let statement_kind = match tag {
+                PROCEDURAL_STATEMENT_LET => PROCEDURAL_STATEMENT_LET,
+                PROCEDURAL_STATEMENT_ASSIGNMENT => PROCEDURAL_STATEMENT_ASSIGNMENT,
+                tag => return Err(ClientPlanError::InvalidProceduralStatement(tag)),
+            };
+            let expression = decode_expression_node_with_resources(
+                &mut reader,
+                0,
+                &mut count,
+                true,
+                true,
+                &mut resource_count,
+            )?;
+            let statement = match statement_kind {
+                PROCEDURAL_STATEMENT_LET => ClientStatement::let_(local, expression),
+                PROCEDURAL_STATEMENT_ASSIGNMENT => ClientStatement::assignment(local, expression),
+                _ => unreachable!(),
+            };
+            statements.push(statement);
+        }
+        let return_expression = decode_expression_node_with_resources(
+            &mut reader,
+            0,
+            &mut count,
+            true,
+            true,
+            &mut resource_count,
+        )?;
+        reader.require_finished()?;
+        let plan = Self::new(locals, statements, return_expression);
+        validate_procedural_model(&plan)?;
+        Ok(plan)
+    }
+}
+
+// Compatibility aliases for callers that name the declaration/statement by role.
+pub type LocalDeclaration = ClientLocal;
+pub type LocalKind = ClientLocalKind;
+pub type ProceduralStatement = ClientStatement;
+pub type ClientProceduralStatement = ClientStatement;
 
 /// The kind of server result represented by a resource operation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -516,6 +860,7 @@ impl ResourceClientPlan {
             0,
             &mut expression_count,
             true,
+            false,
             &mut resource_count,
         )?;
         if resource_count == 0 {
@@ -558,6 +903,7 @@ impl ResourceClientPlan {
             0,
             &mut expression_count,
             true,
+            false,
             &mut resource_count,
         )?;
         reader.require_finished()?;
@@ -569,7 +915,6 @@ impl ResourceClientPlan {
     }
 }
 impl ExpressionClientPlan {
-
     /// Returns the closed expression tree.
     pub const fn expression(&self) -> &ClientExpressionNode {
         &self.expression
@@ -750,9 +1095,7 @@ impl StateClientPlan {
         let mut seen: Vec<StateSlotId> = Vec::with_capacity(slot_count);
         for slot in &self.slots {
             if seen.contains(&slot.state_slot_id) {
-                return Err(ClientPlanError::DuplicateStateSlotId(
-                    slot.state_slot_id,
-                ));
+                return Err(ClientPlanError::DuplicateStateSlotId(slot.state_slot_id));
             }
             seen.push(slot.state_slot_id);
         }
@@ -841,11 +1184,7 @@ impl StateClientPlan {
                 STATE_DEFAULT_NULL => StateDefault::Null,
                 STATE_DEFAULT_EXPRESSION => {
                     let mut count = 0usize;
-                    StateDefault::Expression(decode_expression_node(
-                        &mut reader,
-                        0,
-                        &mut count,
-                    )?)
+                    StateDefault::Expression(decode_expression_node(&mut reader, 0, &mut count)?)
                 }
                 tag => return Err(ClientPlanError::InvalidStateDefaultTag(tag)),
             };
@@ -903,8 +1242,8 @@ impl CapabilityRequirement {
 
 /// The inner plan carried by one version-5 capability envelope.
 ///
-/// The envelope holds a complete decoded version 1-4 or version-6 client
-/// plan so the runtime can evaluate it directly after the capability gate
+/// The envelope holds a complete decoded version 1-4, version-6, or
+/// version-7 client plan so the runtime can evaluate it directly after the capability gate
 /// admits it.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum InnerClientPlan {
@@ -918,6 +1257,8 @@ pub enum InnerClientPlan {
     State(StateClientPlan),
     /// A version-6 resource-operation plan.
     Resource(ResourceClientPlan),
+    /// A version-7 procedural plan.
+    Procedural(ProceduralClientPlan),
 }
 
 impl InnerClientPlan {
@@ -929,6 +1270,7 @@ impl InnerClientPlan {
             Self::Expression(_) => EXPRESSION_FORMAT_VERSION,
             Self::State(_) => STATE_FORMAT_VERSION,
             Self::Resource(_) => RESOURCE_FORMAT_VERSION,
+            Self::Procedural(_) => PROCEDURAL_FORMAT_VERSION,
         }
     }
 
@@ -940,12 +1282,13 @@ impl InnerClientPlan {
             Self::Expression(plan) => plan.encode(),
             Self::State(plan) => plan.encode(),
             Self::Resource(plan) => plan.encode(),
+            Self::Procedural(plan) => plan.encode(),
         }
     }
 }
 
-/// A checked version-5 CLIENT plan that carries one version 1-4 or version-6
-/// inner plan and the owning function's ordered, closed capability
+/// A checked version-5 CLIENT plan that carries one version 1-4, version-6,
+/// or version-7 inner plan and the owning function's ordered, closed capability
 /// requirements (work ADR 0060).
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CapabilityClientPlan {
@@ -1099,6 +1442,9 @@ impl CapabilityClientPlan {
             RESOURCE_FORMAT_VERSION => {
                 InnerClientPlan::Resource(ResourceClientPlan::decode(inner_payload)?)
             }
+            PROCEDURAL_FORMAT_VERSION => {
+                InnerClientPlan::Procedural(ProceduralClientPlan::decode(inner_payload)?)
+            }
             version => return Err(ClientPlanError::UnsupportedInnerVersion(version)),
         };
         let requirement_count = reader.u32()?;
@@ -1146,9 +1492,7 @@ impl CapabilityClientPlan {
                 .to_owned();
             let argument = match argument_tag {
                 CAPABILITY_ARGUMENT_TEXT => CapabilityArgumentSource::Text(argument_text),
-                CAPABILITY_ARGUMENT_PARAMETER => {
-                    CapabilityArgumentSource::Parameter(argument_text)
-                }
+                CAPABILITY_ARGUMENT_PARAMETER => CapabilityArgumentSource::Parameter(argument_text),
                 tag => return Err(ClientPlanError::InvalidCapabilityArgumentTag(tag)),
             };
             requirements.push(CapabilityRequirement::new(name, argument));
@@ -1189,7 +1533,15 @@ fn encode_expression_node(
     count: &mut usize,
 ) -> Result<(), ClientPlanError> {
     let mut resource_count = 0;
-    encode_expression_node_with_resources(node, writer, depth, count, false, &mut resource_count)
+    encode_expression_node_with_resources(
+        node,
+        writer,
+        depth,
+        count,
+        false,
+        false,
+        &mut resource_count,
+    )
 }
 
 fn encode_expression_node_with_resources(
@@ -1198,6 +1550,7 @@ fn encode_expression_node_with_resources(
     depth: usize,
     count: &mut usize,
     allow_resources: bool,
+    allow_local: bool,
     resource_count: &mut usize,
 ) -> Result<(), ClientPlanError> {
     if depth > MAX_EXPRESSION_DEPTH {
@@ -1219,6 +1572,7 @@ fn encode_expression_node_with_resources(
                 depth + 1,
                 count,
                 allow_resources,
+                allow_local,
                 resource_count,
             )?;
         }
@@ -1226,7 +1580,14 @@ fn encode_expression_node_with_resources(
             if !allow_resources {
                 return Err(ClientPlanError::InvalidExpressionNode(NODE_RESOURCE));
             }
-            encode_resource_operation(operation, writer, depth, count, resource_count)?;
+            encode_resource_operation(
+                operation,
+                writer,
+                depth,
+                count,
+                allow_local,
+                resource_count,
+            )?;
         }
         ClientExpressionNode::Call {
             function,
@@ -1253,6 +1614,7 @@ fn encode_expression_node_with_resources(
                     depth + 1,
                     count,
                     allow_resources,
+                    allow_local,
                     resource_count,
                 )?;
             }
@@ -1280,6 +1642,13 @@ fn encode_expression_node_with_resources(
             writer.push(NODE_PARAMETER_READ);
             writer.extend(&parameter.to_bytes());
         }
+        ClientExpressionNode::LocalRead { local } => {
+            if !allow_local {
+                return Err(ClientPlanError::InvalidExpressionNode(NODE_LOCAL_READ));
+            }
+            writer.push(NODE_LOCAL_READ);
+            writer.extend(&local.to_bytes());
+        }
         ClientExpressionNode::FieldPath { root, fields } => {
             if fields.is_empty() || fields.len() > MAX_FIELD_PATH_LENGTH {
                 return Err(ClientPlanError::InvalidExpressionNode(NODE_FIELD_PATH));
@@ -1304,6 +1673,7 @@ fn encode_expression_node_with_resources(
                 depth + 1,
                 count,
                 allow_resources,
+                allow_local,
                 resource_count,
             )?;
             encode_expression_node_with_resources(
@@ -1312,6 +1682,7 @@ fn encode_expression_node_with_resources(
                 depth + 1,
                 count,
                 allow_resources,
+                allow_local,
                 resource_count,
             )?;
         }
@@ -1330,12 +1701,12 @@ fn encode_expression_node_with_resources(
     Ok(())
 }
 
-
 fn encode_resource_operation(
     operation: &ResourceOperationNode,
     writer: &mut NodeWriter,
     depth: usize,
     count: &mut usize,
+    allow_local: bool,
     resource_count: &mut usize,
 ) -> Result<(), ClientPlanError> {
     *resource_count += 1;
@@ -1359,7 +1730,15 @@ fn encode_resource_operation(
     writer.extend(&argument_count.to_be_bytes());
     for (parameter, value) in &operation.arguments {
         writer.extend(&parameter.to_bytes());
-        encode_expression_node_with_resources(value, writer, depth + 1, count, true, resource_count)?;
+        encode_expression_node_with_resources(
+            value,
+            writer,
+            depth + 1,
+            count,
+            true,
+            allow_local,
+            resource_count,
+        )?;
     }
     writer.extend(&operation.result_type.to_bytes());
     Ok(())
@@ -1378,15 +1757,142 @@ fn validate_resource_arguments(
         if let Some(previous) = previous {
             match parameter.cmp(&previous) {
                 std::cmp::Ordering::Less => {
-                    return Err(ClientPlanError::NonCanonicalResourceArgumentOrder)
+                    return Err(ClientPlanError::NonCanonicalResourceArgumentOrder);
                 }
                 std::cmp::Ordering::Equal => {
-                    return Err(ClientPlanError::DuplicateResourceArgument(*parameter))
+                    return Err(ClientPlanError::DuplicateResourceArgument(*parameter));
                 }
                 std::cmp::Ordering::Greater => {}
             }
         }
         previous = Some(*parameter);
+    }
+    Ok(())
+}
+
+fn validate_procedural_model(plan: &ProceduralClientPlan) -> Result<(), ClientPlanError> {
+    if plan.locals.len() > MAX_PROCEDURAL_LOCALS {
+        return Err(ClientPlanError::ProceduralLocalLimitExceeded {
+            limit: MAX_PROCEDURAL_LOCALS,
+        });
+    }
+    if plan.statements.len() > MAX_PROCEDURAL_STATEMENTS {
+        return Err(ClientPlanError::ProceduralStatementLimitExceeded {
+            limit: MAX_PROCEDURAL_STATEMENTS,
+        });
+    }
+    let mut locals = Vec::with_capacity(plan.locals.len());
+    for local in &plan.locals {
+        if locals
+            .iter()
+            .any(|candidate: &ClientLocal| candidate.local == local.local)
+        {
+            return Err(ClientPlanError::DuplicateProceduralLocal(local.local));
+        }
+        locals.push(*local);
+    }
+    for statement in &plan.statements {
+        let target = locals
+            .iter()
+            .find(|candidate| candidate.local == statement.local())
+            .ok_or(ClientPlanError::UnknownProceduralLocal(statement.local()))?;
+        validate_procedural_expression(statement.expression(), &locals, true, true)?;
+        let expression_kind = procedural_resource_kind(statement.expression(), &locals);
+        match target.kind {
+            ClientLocalKind::Value if expression_kind.is_some() => {
+                return Err(ClientPlanError::ProceduralLocalKindMismatch(target.local));
+            }
+            ClientLocalKind::Resource(expected) if expression_kind != Some(expected) => {
+                return Err(ClientPlanError::ProceduralLocalKindMismatch(target.local));
+            }
+            ClientLocalKind::Value | ClientLocalKind::Resource(_) => {}
+        }
+    }
+    // A final return must produce a value; a resource handle has to be awaited.
+    validate_procedural_expression(&plan.return_expression, &locals, false, true)
+}
+
+fn procedural_resource_kind(
+    node: &ClientExpressionNode,
+    locals: &[ClientLocal],
+) -> Option<ResourceKind> {
+    match node {
+        ClientExpressionNode::Resource { operation } => Some(operation.kind()),
+        ClientExpressionNode::LocalRead { local } => locals
+            .iter()
+            .find(|candidate| candidate.local == *local)
+            .and_then(|candidate| match candidate.kind {
+                ClientLocalKind::Resource(kind) => Some(kind),
+                ClientLocalKind::Value => None,
+            }),
+        _ => None,
+    }
+}
+
+fn validate_procedural_expression(
+    node: &ClientExpressionNode,
+    locals: &[ClientLocal],
+    allow_resource_root: bool,
+    allow_await_root: bool,
+) -> Result<(), ClientPlanError> {
+    match node {
+        ClientExpressionNode::Await { expression } => {
+            if !allow_await_root {
+                return Err(ClientPlanError::InvalidExpressionNode(NODE_AWAIT));
+            }
+            match expression.as_ref() {
+                ClientExpressionNode::Resource { operation } => {
+                    validate_resource_arguments(&operation.arguments)?;
+                    for (_, value) in &operation.arguments {
+                        validate_procedural_expression(value, locals, false, false)?;
+                    }
+                }
+                ClientExpressionNode::LocalRead { local } => {
+                    let declaration = locals
+                        .iter()
+                        .find(|candidate| candidate.local == *local)
+                        .ok_or(ClientPlanError::UnknownProceduralLocal(*local))?;
+                    if !matches!(declaration.kind, ClientLocalKind::Resource(_)) {
+                        return Err(ClientPlanError::InvalidAwaitOperand(*local));
+                    }
+                }
+                _ => return Err(ClientPlanError::InvalidExpressionNode(NODE_AWAIT)),
+            }
+        }
+        ClientExpressionNode::Resource { operation } => {
+            if !allow_resource_root {
+                return Err(ClientPlanError::InvalidExpressionNode(NODE_RESOURCE));
+            }
+            validate_resource_arguments(&operation.arguments)?;
+            for (_, value) in &operation.arguments {
+                validate_procedural_expression(value, locals, false, false)?;
+            }
+        }
+        ClientExpressionNode::LocalRead { local } => {
+            if !locals.iter().any(|candidate| candidate.local == *local) {
+                return Err(ClientPlanError::UnknownProceduralLocal(*local));
+            }
+        }
+        ClientExpressionNode::Call { arguments, .. } => {
+            if arguments.len() > MAX_CALL_ARGUMENTS {
+                return Err(ClientPlanError::ExpressionCollectionExceeded {
+                    limit: MAX_CALL_ARGUMENTS,
+                });
+            }
+            for (_, value) in arguments {
+                validate_procedural_expression(value, locals, false, false)?;
+            }
+        }
+        ClientExpressionNode::Concat { left, right } => {
+            validate_procedural_expression(left, locals, false, false)?;
+            validate_procedural_expression(right, locals, false, false)?;
+        }
+        ClientExpressionNode::String { .. }
+        | ClientExpressionNode::Integer { .. }
+        | ClientExpressionNode::Boolean { .. }
+        | ClientExpressionNode::ParameterRead { .. }
+        | ClientExpressionNode::FieldPath { .. }
+        | ClientExpressionNode::ExternalContract { .. } => {}
     }
     Ok(())
 }
@@ -1405,8 +1911,7 @@ fn validate_resource_await_placement(
 ) -> Result<(), ClientPlanError> {
     match node {
         ClientExpressionNode::Await { expression } => {
-            if !allow_await
-                || !matches!(expression.as_ref(), ClientExpressionNode::Resource { .. })
+            if !allow_await || !matches!(expression.as_ref(), ClientExpressionNode::Resource { .. })
             {
                 return Err(ClientPlanError::InvalidExpressionNode(NODE_AWAIT));
             }
@@ -1433,6 +1938,7 @@ fn validate_resource_await_placement(
         | ClientExpressionNode::Integer { .. }
         | ClientExpressionNode::Boolean { .. }
         | ClientExpressionNode::ParameterRead { .. }
+        | ClientExpressionNode::LocalRead { .. }
         | ClientExpressionNode::FieldPath { .. }
         | ClientExpressionNode::ExternalContract { .. } => {}
     }
@@ -1446,7 +1952,7 @@ fn decode_expression_node(
     count: &mut usize,
 ) -> Result<ClientExpressionNode, ClientPlanError> {
     let mut resource_count = 0;
-    decode_expression_node_with_resources(reader, depth, count, false, &mut resource_count)
+    decode_expression_node_with_resources(reader, depth, count, false, false, &mut resource_count)
 }
 
 fn decode_expression_node_with_resources(
@@ -1454,6 +1960,7 @@ fn decode_expression_node_with_resources(
     depth: usize,
     count: &mut usize,
     allow_resources: bool,
+    allow_local: bool,
     resource_count: &mut usize,
 ) -> Result<ClientExpressionNode, ClientPlanError> {
     if depth > MAX_EXPRESSION_DEPTH {
@@ -1475,6 +1982,7 @@ fn decode_expression_node_with_resources(
                     depth + 1,
                     count,
                     allow_resources,
+                    allow_local,
                     resource_count,
                 )?),
             })
@@ -1484,7 +1992,13 @@ fn decode_expression_node_with_resources(
                 return Err(ClientPlanError::InvalidExpressionNode(NODE_RESOURCE));
             }
             Ok(ClientExpressionNode::Resource {
-                operation: decode_resource_operation(reader, depth, count, resource_count)?,
+                operation: decode_resource_operation(
+                    reader,
+                    depth,
+                    count,
+                    allow_local,
+                    resource_count,
+                )?,
             })
         }
         NODE_CALL => {
@@ -1503,6 +2017,7 @@ fn decode_expression_node_with_resources(
                     depth + 1,
                     count,
                     allow_resources,
+                    allow_local,
                     resource_count,
                 )?;
                 arguments.push((parameter, value));
@@ -1536,6 +2051,14 @@ fn decode_expression_node_with_resources(
             let parameter = ParameterId::from_bytes(reader.array()?);
             Ok(ClientExpressionNode::ParameterRead { parameter })
         }
+        NODE_LOCAL_READ => {
+            if !allow_local {
+                return Err(ClientPlanError::InvalidExpressionNode(NODE_LOCAL_READ));
+            }
+            Ok(ClientExpressionNode::LocalRead {
+                local: LocalId::from_bytes(reader.array()?),
+            })
+        }
         NODE_FIELD_PATH => {
             let root = ParameterId::from_bytes(reader.array()?);
             let length = reader.u32()? as usize;
@@ -1559,6 +2082,7 @@ fn decode_expression_node_with_resources(
                 depth + 1,
                 count,
                 allow_resources,
+                allow_local,
                 resource_count,
             )?;
             let right = decode_expression_node_with_resources(
@@ -1566,6 +2090,7 @@ fn decode_expression_node_with_resources(
                 depth + 1,
                 count,
                 allow_resources,
+                allow_local,
                 resource_count,
             )?;
             Ok(ClientExpressionNode::Concat {
@@ -1585,11 +2110,11 @@ fn decode_expression_node_with_resources(
     }
 }
 
-
 fn decode_resource_operation(
     reader: &mut Reader<'_>,
     depth: usize,
     count: &mut usize,
+    allow_local: bool,
     resource_count: &mut usize,
 ) -> Result<ResourceOperationNode, ClientPlanError> {
     *resource_count += 1;
@@ -1622,10 +2147,10 @@ fn decode_resource_operation(
         if let Some(previous) = previous {
             match parameter.cmp(&previous) {
                 std::cmp::Ordering::Less => {
-                    return Err(ClientPlanError::NonCanonicalResourceArgumentOrder)
+                    return Err(ClientPlanError::NonCanonicalResourceArgumentOrder);
                 }
                 std::cmp::Ordering::Equal => {
-                    return Err(ClientPlanError::DuplicateResourceArgument(parameter))
+                    return Err(ClientPlanError::DuplicateResourceArgument(parameter));
                 }
                 std::cmp::Ordering::Greater => {}
             }
@@ -1636,6 +2161,7 @@ fn decode_resource_operation(
             depth + 1,
             count,
             true,
+            allow_local,
             resource_count,
         )?;
         arguments.push((parameter, value));
@@ -1695,6 +2221,28 @@ pub enum ClientPlanError {
         /// The exceeded limit.
         limit: usize,
     },
+    /// A procedural local declaration uses an unknown value/resource kind.
+    InvalidLocalKind(u8),
+    /// A procedural statement uses an unknown tag.
+    InvalidProceduralStatement(u8),
+    /// A procedural plan exceeds its local declaration limit.
+    ProceduralLocalLimitExceeded {
+        /// The exceeded limit.
+        limit: usize,
+    },
+    /// A procedural plan exceeds its ordered statement limit.
+    ProceduralStatementLimitExceeded {
+        /// The exceeded limit.
+        limit: usize,
+    },
+    /// A procedural plan repeats one local identity.
+    DuplicateProceduralLocal(LocalId),
+    /// A statement or expression reads a local not declared by the plan.
+    UnknownProceduralLocal(LocalId),
+    /// A statement initializer does not match its local's resource/value kind.
+    ProceduralLocalKindMismatch(LocalId),
+    /// An AWAIT reads a local that is not a resource handle.
+    InvalidAwaitOperand(LocalId),
     /// A resource argument parameter identity occurs more than once.
     DuplicateResourceArgument(ParameterId),
     /// Resource arguments are not sorted by ascending ParameterId.
@@ -1812,12 +2360,44 @@ impl fmt::Display for ClientPlanError {
                 formatter,
                 "client-plan resource argument count exceeds the limit {limit}"
             ),
+            Self::InvalidLocalKind(tag) => write!(
+                formatter,
+                "invalid client-plan procedural local kind tag {tag}"
+            ),
+            Self::InvalidProceduralStatement(tag) => write!(
+                formatter,
+                "invalid client-plan procedural statement tag {tag}"
+            ),
+            Self::ProceduralLocalLimitExceeded { limit } => write!(
+                formatter,
+                "client-plan procedural local count exceeds the limit {limit}"
+            ),
+            Self::ProceduralStatementLimitExceeded { limit } => write!(
+                formatter,
+                "client-plan procedural statement count exceeds the limit {limit}"
+            ),
+            Self::DuplicateProceduralLocal(local) => {
+                write!(formatter, "duplicate client-plan procedural local {local}")
+            }
+            Self::UnknownProceduralLocal(local) => {
+                write!(formatter, "unknown client-plan procedural local {local}")
+            }
+            Self::ProceduralLocalKindMismatch(local) => write!(
+                formatter,
+                "client-plan procedural local {local} has an incompatible initializer kind"
+            ),
+            Self::InvalidAwaitOperand(local) => write!(
+                formatter,
+                "client-plan AWAIT operand local {local} is not a resource"
+            ),
             Self::DuplicateResourceArgument(parameter) => {
-                write!(formatter, "duplicate client-plan resource argument {parameter}")
+                write!(
+                    formatter,
+                    "duplicate client-plan resource argument {parameter}"
+                )
             }
-            Self::NonCanonicalResourceArgumentOrder => {
-                formatter.write_str("client-plan resource arguments are not in canonical ParameterId order")
-            }
+            Self::NonCanonicalResourceArgumentOrder => formatter
+                .write_str("client-plan resource arguments are not in canonical ParameterId order"),
             Self::InvalidStateScope(tag) => {
                 write!(formatter, "invalid client-plan state scope tag {tag}")
             }
@@ -1829,7 +2409,10 @@ impl fmt::Display for ClientPlanError {
                 "invalid client-plan state slot count {actual}; a state plan requires at least one slot"
             ),
             Self::StateSlotLimitExceeded { limit } => {
-                write!(formatter, "client-plan state slot count exceeds the limit {limit}")
+                write!(
+                    formatter,
+                    "client-plan state slot count exceeds the limit {limit}"
+                )
             }
             Self::DuplicateStateSlotId(id) => {
                 write!(formatter, "duplicate client-plan state slot identity {id}")
@@ -1867,7 +2450,10 @@ impl fmt::Display for ClientPlanError {
                 formatter.write_str("client-plan capability argument is not valid UTF-8")
             }
             Self::InvalidCapabilityArgumentTag(tag) => {
-                write!(formatter, "invalid client-plan capability argument tag {tag}")
+                write!(
+                    formatter,
+                    "invalid client-plan capability argument tag {tag}"
+                )
             }
             Self::UnsupportedInnerVersion(version) => {
                 write!(formatter, "unsupported inner client-plan version {version}")
@@ -2073,7 +2659,8 @@ mod tests {
     #[test]
     fn displays_the_public_error_contract() {
         let duplicate_slot = StateSlotId::from_bytes([0x61; 16]);
-        let duplicate_display = format!("duplicate client-plan state slot identity {duplicate_slot}");
+        let duplicate_display =
+            format!("duplicate client-plan state slot identity {duplicate_slot}");
         let cases = [
             (
                 ClientPlanError::InvalidMagic,
@@ -2564,7 +3151,10 @@ mod tests {
         let decoded = StateClientPlan::decode(&bytes).expect("the plan decodes");
         let slots = decoded.slots();
         assert_eq!(slots.len(), 3);
-        assert_eq!(slots[0].state_slot_id(), StateSlotId::from_bytes([0x11; 16]));
+        assert_eq!(
+            slots[0].state_slot_id(),
+            StateSlotId::from_bytes([0x11; 16])
+        );
         assert_eq!(slots[0].type_id(), TypeId::from_bytes([0x12; 16]));
         assert_eq!(slots[0].scope(), StateScope::Local);
         assert_eq!(slots[0].default(), &StateDefault::Unset);
@@ -2677,7 +3267,9 @@ mod tests {
         wrong_operation[12] = RETURN_EXPRESSION_OPERATION;
         assert_eq!(
             StateClientPlan::decode(&wrong_operation),
-            Err(ClientPlanError::InvalidOperation(RETURN_EXPRESSION_OPERATION))
+            Err(ClientPlanError::InvalidOperation(
+                RETURN_EXPRESSION_OPERATION
+            ))
         );
 
         let mut trailing = encoded;
@@ -2769,10 +3361,7 @@ mod tests {
 
     #[test]
     fn state_plan_encode_rejects_empty_and_oversized_slot_lists() {
-        let empty = StateClientPlan::new(
-            ClientExpressionNode::Boolean { value: true },
-            Vec::new(),
-        );
+        let empty = StateClientPlan::new(ClientExpressionNode::Boolean { value: true }, Vec::new());
         assert_eq!(
             empty.encode(),
             Err(ClientPlanError::InvalidStateSlotCount { actual: 0 })
@@ -3017,10 +3606,7 @@ mod tests {
             ))
         );
         let inner_artefacts = [
-            (
-                FORMAT_VERSION,
-                ClientPlan::return_boolean(true).encode(),
-            ),
+            (FORMAT_VERSION, ClientPlan::return_boolean(true).encode()),
             (
                 OPAQUE_FORMAT_VERSION,
                 OpaqueClientPlan::return_opaque(OPAQUE_TYPE, OPAQUE_PAYLOAD).encode(),
@@ -3226,7 +3812,10 @@ mod tests {
                 CapabilityArgumentSource::Text("x".to_owned()),
             )],
         );
-        assert_eq!(empty_name.encode(), Err(ClientPlanError::EmptyCapabilityName));
+        assert_eq!(
+            empty_name.encode(),
+            Err(ClientPlanError::EmptyCapabilityName)
+        );
 
         let long_name_plan = CapabilityClientPlan::new(
             inner.clone(),
@@ -3401,12 +3990,8 @@ mod tests {
             CapabilityClientPlan::decode(&encoded).expect("resource capability plan decodes");
         assert_eq!(decoded, plan);
         assert_eq!(decoded.inner_plan_version(), RESOURCE_FORMAT_VERSION);
-        assert!(matches!(
-            decoded.inner_plan(),
-            InnerClientPlan::Resource(_)
-        ));
+        assert!(matches!(decoded.inner_plan(), InnerClientPlan::Resource(_)));
     }
-
 
     #[test]
     fn capability_plan_rejects_every_truncated_prefix() {
@@ -3484,10 +4069,7 @@ mod tests {
         let plan = resource_plan();
         let encoded = plan.encode().expect("resource plan encodes");
         assert_eq!(&encoded[..8], &MAGIC);
-        assert_eq!(
-            &encoded[8..12],
-            &RESOURCE_FORMAT_VERSION.to_be_bytes()
-        );
+        assert_eq!(&encoded[8..12], &RESOURCE_FORMAT_VERSION.to_be_bytes());
         assert_eq!(encoded[12], RETURN_RESOURCE_OPERATION);
         assert_eq!(encoded[13], NODE_AWAIT);
         assert_eq!(encoded[14], NODE_RESOURCE);
@@ -3512,7 +4094,10 @@ mod tests {
         );
         assert_eq!(operation.call_site_id(), CallSiteId::from_bytes([0x24; 16]));
         assert_eq!(operation.arguments().len(), 2);
-        assert_eq!(operation.declared_result_type(), TypeId::from_bytes([0x51; 16]));
+        assert_eq!(
+            operation.declared_result_type(),
+            TypeId::from_bytes([0x51; 16])
+        );
     }
 
     #[test]
@@ -3706,13 +4291,17 @@ mod tests {
         wrong_version[8..12].copy_from_slice(&CAPABILITY_FORMAT_VERSION.to_be_bytes());
         assert_eq!(
             ResourceClientPlan::decode(&wrong_version),
-            Err(ClientPlanError::UnsupportedVersion(CAPABILITY_FORMAT_VERSION))
+            Err(ClientPlanError::UnsupportedVersion(
+                CAPABILITY_FORMAT_VERSION
+            ))
         );
         let mut wrong_operation = encoded.clone();
         wrong_operation[12] = RETURN_EXPRESSION_OPERATION;
         assert_eq!(
             ResourceClientPlan::decode(&wrong_operation),
-            Err(ClientPlanError::InvalidOperation(RETURN_EXPRESSION_OPERATION))
+            Err(ClientPlanError::InvalidOperation(
+                RETURN_EXPRESSION_OPERATION
+            ))
         );
         for length in 0..encoded.len() {
             assert_eq!(
@@ -3721,5 +4310,124 @@ mod tests {
                 "resource prefix length {length} must be truncated"
             );
         }
+    }
+
+    #[test]
+    fn procedural_plan_round_trips_locals_statements_local_reads_and_resources() {
+        let local = LocalId::from_bytes([0x71; 16]);
+        let function = FunctionId::from_bytes([0x21; 16]);
+        let resource = ClientExpressionNode::Resource {
+            operation: ResourceOperationNode::new(
+                ResourceKind::Scalar,
+                function,
+                RevisionPair::new(
+                    SourceRevisionId::from_bytes([0x22; 16]),
+                    CatalogueRevisionId::from_bytes([0x23; 16]),
+                ),
+                CallSiteId::from_bytes([0x24; 16]),
+                Vec::new(),
+                TypeId::from_bytes([0x25; 16]),
+            ),
+        };
+        let plan = ProceduralClientPlan::new(
+            vec![ClientLocal::new(
+                local,
+                TypeId::from_bytes([0x26; 16]),
+                ClientLocalKind::Resource(ResourceKind::Scalar),
+            )],
+            vec![ClientStatement::let_(local, resource)],
+            ClientExpressionNode::Await {
+                expression: Box::new(ClientExpressionNode::LocalRead { local }),
+            },
+        );
+        let encoded = plan.encode().expect("procedural plan encodes");
+        assert_eq!(&encoded[..8], &MAGIC);
+        assert_eq!(&encoded[8..12], &PROCEDURAL_FORMAT_VERSION.to_be_bytes());
+        assert_eq!(encoded[12], RETURN_PROCEDURAL_OPERATION);
+        assert_eq!(ProceduralClientPlan::decode(&encoded), Ok(plan.clone()));
+        assert_eq!(plan.format_version(), PROCEDURAL_FORMAT_VERSION);
+        let capability = CapabilityClientPlan::new(
+            InnerClientPlan::Procedural(plan.clone()),
+            vec![CapabilityRequirement::new(
+                "std.data.query",
+                CapabilityArgumentSource::Text("scope".to_owned()),
+            )],
+        );
+        let decoded_capability = CapabilityClientPlan::decode(
+            &capability.encode().expect("capability envelope encodes"),
+        )
+        .expect("capability envelope decodes");
+        assert_eq!(
+            decoded_capability.inner_plan_version(),
+            PROCEDURAL_FORMAT_VERSION
+        );
+        assert_eq!(
+            decoded_capability.inner_plan(),
+            &InnerClientPlan::Procedural(plan)
+        );
+    }
+
+    #[test]
+    fn procedural_plan_rejects_unknown_locals_and_legacy_local_reads() {
+        let local = LocalId::from_bytes([0x72; 16]);
+        let undeclared = LocalId::from_bytes([0x73; 16]);
+        let plan = ProceduralClientPlan::new(
+            vec![ClientLocal::new(
+                local,
+                TypeId::from_bytes([0x74; 16]),
+                ClientLocalKind::Value,
+            )],
+            vec![ClientStatement::assignment(
+                undeclared,
+                ClientExpressionNode::Boolean { value: true },
+            )],
+            ClientExpressionNode::Boolean { value: false },
+        );
+        assert_eq!(
+            plan.encode(),
+            Err(ClientPlanError::UnknownProceduralLocal(undeclared))
+        );
+        let local_read = ExpressionClientPlan::new(ClientExpressionNode::LocalRead { local });
+        assert_eq!(
+            local_read.encode(),
+            Err(ClientPlanError::InvalidExpressionNode(NODE_LOCAL_READ))
+        );
+        let mut legacy = TRUE_BYTES.to_vec();
+        legacy[8..12].copy_from_slice(&EXPRESSION_FORMAT_VERSION.to_be_bytes());
+        legacy[12] = RETURN_EXPRESSION_OPERATION;
+        legacy.truncate(13);
+        legacy.push(NODE_LOCAL_READ);
+        legacy.extend_from_slice(&local.to_bytes());
+        assert_eq!(
+            ExpressionClientPlan::decode(&legacy),
+            Err(ClientPlanError::InvalidExpressionNode(NODE_LOCAL_READ))
+        );
+        assert_eq!(
+            ProceduralClientPlan::new(
+                vec![],
+                vec![],
+                ClientExpressionNode::Await {
+                    expression: Box::new(ClientExpressionNode::Boolean { value: true }),
+                },
+            )
+            .encode(),
+            Err(ClientPlanError::InvalidExpressionNode(NODE_AWAIT))
+        );
+        let value_local = LocalId::from_bytes([0x75; 16]);
+        assert_eq!(
+            ProceduralClientPlan::new(
+                vec![ClientLocal::new(
+                    value_local,
+                    TypeId::from_bytes([0x76; 16]),
+                    ClientLocalKind::Value
+                )],
+                vec![],
+                ClientExpressionNode::Await {
+                    expression: Box::new(ClientExpressionNode::LocalRead { local: value_local }),
+                },
+            )
+            .encode(),
+            Err(ClientPlanError::InvalidAwaitOperand(value_local))
+        );
     }
 }

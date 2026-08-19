@@ -183,6 +183,7 @@ define_id!(FunctionId, "function");
 define_id!(ParameterId, "parameter");
 define_id!(FunctionRevisionId, "function-revision");
 define_id!(StateSlotId, "state-slot");
+define_id!(LocalId, "local");
 define_id!(CallSiteId, "call-site");
 define_id!(InvocationId, "invocation");
 define_id!(InvocationAuditEventId, "invocation-audit-event");
