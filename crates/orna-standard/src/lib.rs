@@ -414,6 +414,47 @@ const ACCEPTED_V5_STANDARD_LIBRARY_DIGEST: Sha256Digest = Sha256Digest::from_byt
     0x9f, 0xe0, 0xae, 0xa9, 0x49, 0xde, 0x0b, 0xbc, 0xc8, 0xcf, 0x97, 0xbf, 0xec, 0xf8, 0xef, 0xed,
 ]);
 
+/// The standard-library version represented by the V6 manifest (ADR 0079).
+pub const STANDARD_LIBRARY_V6_VERSION_IDENTITY: &str = "orna.std/6";
+pub const STANDARD_LIBRARY_V6_REVISION_ID: StandardLibraryRevisionId =
+    StandardLibraryRevisionId::from_bytes(reserved_id(6));
+pub const STANDARD_CATALOGUE_V6_REVISION_ID: CatalogueRevisionId =
+    CatalogueRevisionId::from_bytes(reserved_id(6));
+pub const STANDARD_SOURCE_V6_BUNDLE_ID: SourceBundleId = SourceBundleId::from_bytes(reserved_id(6));
+pub const STANDARD_SOURCE_V6_REVISION_ID: SourceRevisionId =
+    SourceRevisionId::from_bytes(reserved_id(6));
+pub const STD_ACTION_SOURCE_LOGICAL_PATH: &str = "std/action.orna";
+pub const STD_ACTION_SOURCE_UNIT_ID: SourceUnitId = SourceUnitId::from_bytes(reserved_id(7));
+pub const STD_ACTION_SCHEMA_ID: SchemaId = SchemaId::from_bytes(reserved_id(9));
+pub const STD_ACTION_TYPE_ID: TypeId = TypeId::from_bytes(reserved_id(20));
+pub const STD_ACTION_CONTRACT: &str = "orna.std.value.action@1";
+pub const ACTION_MAGIC: &str = "ORNA-ACTION/1 ";
+
+const RETAINED_STANDARD_ACTION_SOURCE: &str = include_str!("../../../stdlib/std/action.orna");
+const ACCEPTED_V6_TYPES_CONTENT_DIGEST: Sha256Digest = ACCEPTED_V5_TYPES_CONTENT_DIGEST;
+const ACCEPTED_V6_INVOKE_CONTENT_DIGEST: Sha256Digest = ACCEPTED_V5_INVOKE_CONTENT_DIGEST;
+const ACCEPTED_V6_OUTPUT_CONTENT_DIGEST: Sha256Digest = ACCEPTED_V5_OUTPUT_CONTENT_DIGEST;
+const ACCEPTED_V6_UI_CONTENT_DIGEST: Sha256Digest = ACCEPTED_V5_UI_CONTENT_DIGEST;
+const ACCEPTED_V6_JSON_CONTENT_DIGEST: Sha256Digest = ACCEPTED_V5_JSON_CONTENT_DIGEST;
+const ACCEPTED_V6_ACTION_CONTENT_DIGEST: Sha256Digest = Sha256Digest::from_bytes([
+    0x67, 0x6c, 0xf6, 0x55, 0x53, 0x5c, 0x72, 0xad, 0x0a, 0x2d, 0x1c, 0x51, 0x00, 0x92, 0x31, 0x3c,
+    0x2a, 0x9e, 0x1a, 0x8c, 0xe8, 0xaf, 0x04, 0x56, 0xfe, 0xca, 0x28, 0x95, 0xc7, 0x72, 0xef, 0x7a,
+]);
+const ACCEPTED_V6_SOURCE_BUNDLE_DIGEST: Sha256Digest = Sha256Digest::from_bytes([
+    0x0d, 0x3e, 0xe1, 0x9e, 0xf8, 0x51, 0xec, 0xbd, 0x9b, 0x8a, 0xe6, 0x6f, 0x49, 0x86, 0xf1, 0x70,
+    0x71, 0xb6, 0x3e, 0x6b, 0xf8, 0xff, 0xb4, 0x40, 0xeb, 0x06, 0x88, 0xc3, 0x76, 0xb2, 0xf7, 0x40,
+]);
+const ACCEPTED_V6_SOURCE_REVISION_DIGEST: Sha256Digest = Sha256Digest::from_bytes([
+    0xba, 0xd0, 0x13, 0x10, 0x53, 0x02, 0xa0, 0x48, 0x04, 0x4e, 0xce, 0xa7, 0x35, 0x1f, 0xde, 0x97,
+    0x72, 0x11, 0x9c, 0x3c, 0x95, 0x4c, 0x69, 0x70, 0xcd, 0x03, 0xf2, 0x0e, 0x0f, 0x9e, 0x87, 0xe2,
+]);
+const ACCEPTED_V6_ARTIFACT_DIGEST: Sha256Digest = ACCEPTED_V5_ARTIFACT_DIGEST;
+const ACCEPTED_V6_SEMANTIC_DIGEST: Sha256Digest = ACCEPTED_V5_SEMANTIC_DIGEST;
+const ACCEPTED_V6_STANDARD_LIBRARY_DIGEST: Sha256Digest = Sha256Digest::from_bytes([
+    0x79, 0x5c, 0xa1, 0xd8, 0xbb, 0x5b, 0x8a, 0x9c, 0x8e, 0x42, 0xc4, 0x7f, 0x79, 0x0a, 0xc5, 0x47,
+    0x27, 0xd9, 0x3f, 0xc3, 0xe8, 0xd5, 0x3e, 0x05, 0xc1, 0x08, 0xbc, 0x4a, 0x53, 0x4f, 0xe0, 0xbd,
+]);
+
 #[derive(Clone, Copy)]
 struct ValueTypeFact {
     id: TypeId,
@@ -1241,6 +1282,107 @@ pub fn standard_library_v5_manifest()
     Ok(StandardLibraryV5Manifest { catalogue })
 }
 
+/// The source-independent facts required to recognise the `orna.std/6`
+/// standard library (ADR 0079).
+#[derive(Clone, Debug)]
+pub struct StandardLibraryV6Manifest {
+    catalogue: CatalogueSnapshot,
+}
+
+impl StandardLibraryV6Manifest {
+    pub const fn standard_library_version(&self) -> &'static str {
+        STANDARD_LIBRARY_V6_VERSION_IDENTITY
+    }
+    pub const fn standard_library_revision(&self) -> StandardLibraryRevisionId {
+        STANDARD_LIBRARY_V6_REVISION_ID
+    }
+    pub const fn language_version(&self) -> &'static str {
+        LANGUAGE_VERSION_IDENTITY
+    }
+    pub const fn source_bundle(&self) -> SourceBundleId {
+        STANDARD_SOURCE_V6_BUNDLE_ID
+    }
+    pub const fn source_revision(&self) -> SourceRevisionId {
+        STANDARD_SOURCE_V6_REVISION_ID
+    }
+    pub const fn types_source_unit(&self) -> SourceUnitId {
+        STD_TYPES_SOURCE_UNIT_ID
+    }
+    pub const fn invoke_source_unit(&self) -> SourceUnitId {
+        STD_INVOKE_SOURCE_UNIT_ID
+    }
+    pub const fn output_source_unit(&self) -> SourceUnitId {
+        STD_OUTPUT_SOURCE_UNIT_ID
+    }
+    pub const fn ui_source_unit(&self) -> SourceUnitId {
+        STD_UI_SOURCE_UNIT_ID
+    }
+    pub const fn json_source_unit(&self) -> SourceUnitId {
+        STD_JSON_SOURCE_UNIT_ID
+    }
+    pub const fn action_source_unit(&self) -> SourceUnitId {
+        STD_ACTION_SOURCE_UNIT_ID
+    }
+    pub const fn types_source_logical_path(&self) -> &'static str {
+        SOURCE_LOGICAL_PATH
+    }
+    pub const fn invoke_source_logical_path(&self) -> &'static str {
+        STD_INVOKE_SOURCE_LOGICAL_PATH
+    }
+    pub const fn output_source_logical_path(&self) -> &'static str {
+        STD_OUTPUT_SOURCE_LOGICAL_PATH
+    }
+    pub const fn ui_source_logical_path(&self) -> &'static str {
+        STD_UI_SOURCE_LOGICAL_PATH
+    }
+    pub const fn json_source_logical_path(&self) -> &'static str {
+        STD_JSON_SOURCE_LOGICAL_PATH
+    }
+    pub const fn action_source_logical_path(&self) -> &'static str {
+        STD_ACTION_SOURCE_LOGICAL_PATH
+    }
+    pub const fn catalogue(&self) -> &CatalogueSnapshot {
+        &self.catalogue
+    }
+}
+
+/// Builds and validates the append-only V6 catalogue over V5.
+pub fn standard_library_v6_manifest()
+-> Result<StandardLibraryV6Manifest, StandardLibraryManifestError> {
+    let version_five = standard_library_v5_manifest()?;
+    let mut schemas = version_five.catalogue().schemas().to_vec();
+    schemas.push(SchemaDefinition::new(
+        STD_ACTION_SCHEMA_ID,
+        semantic_name("std.action", ["std", "action"])?,
+    ));
+    let mut value_types = version_five.catalogue().value_types().to_vec();
+    value_types.push(ValueTypeDefinition::opaque(
+        STD_ACTION_TYPE_ID,
+        semantic_name("std.action.action", ["std", "action", "action"])?,
+        STD_ACTION_CONTRACT,
+    ));
+    let mut type_bindings = version_five.catalogue().type_bindings().to_vec();
+    let action_name = semantic_name("std.action", ["std", "action"])?;
+    let action_lookup = TypeLookupName::qualified(action_name.clone());
+    let action_binding = TypeBinding::qualified(action_name, STD_ACTION_TYPE_ID).map_err(|source| {
+        StandardLibraryManifestError::TypeBinding {
+            name: action_lookup,
+            source,
+        }
+    })?;
+    type_bindings.push(action_binding);
+    let catalogue = CatalogueSnapshot::new_with_functions_and_types(
+        STANDARD_CATALOGUE_V6_REVISION_ID,
+        schemas,
+        Vec::new(),
+        value_types,
+        type_bindings,
+        version_five.catalogue().functions().to_vec(),
+    )
+    .map_err(|source| StandardLibraryManifestError::Catalogue { source })?;
+    Ok(StandardLibraryV6Manifest { catalogue })
+}
+
 fn build_type_bindings(
     expected_ids: &[[u8; 16]],
 ) -> Result<Vec<TypeBinding>, StandardLibraryManifestError> {
@@ -1740,6 +1882,33 @@ pub fn prepare_standard_upgrade_v4_to_v5(
         active,
         retained_standard_library_v5_snapshot,
         verify_standard_library_v5_snapshot,
+        check_standard_library_source,
+        prepare_checked_standard_upgrade,
+    )
+}
+
+/// Prepares the append-only `orna.std/5` to `orna.std/6` standard upgrade
+/// (ADR 0079). The retained V5 parent is verified before the V6 child.
+pub fn prepare_standard_upgrade_v5_to_v6(
+    active: &ActiveDatabaseRevision,
+) -> Result<StandardUpgrade, StandardUpgradeError> {
+    if let Some(installed) = active.catalogue_hash_context().standard()
+        && installed.revision() != STANDARD_LIBRARY_V5_REVISION_ID
+    {
+        return Err(StandardUpgradeError::Prepare {
+            source: PrepareStandardUpgradeError::StandardLibraryAlreadyInstalled {
+                revision: installed.revision(),
+            },
+        });
+    }
+    let version_five = retained_standard_library_v5_snapshot()
+        .map_err(|source| StandardUpgradeError::StandardLibrary { source })?;
+    verify_standard_library_v5_snapshot(version_five)
+        .map_err(|source| StandardUpgradeError::StandardLibrary { source })?;
+    prepare_standard_upgrade_with(
+        active,
+        retained_standard_library_v6_snapshot,
+        verify_standard_library_v6_snapshot,
         check_standard_library_source,
         prepare_checked_standard_upgrade,
     )
@@ -2247,6 +2416,282 @@ fn retained_standard_library_v5_snapshot_from_source(
         });
     }
     Ok(snapshot)
+}
+
+/// Retains the canonical V6 action standard source as an unverified snapshot.
+pub fn retained_standard_library_v6_snapshot()
+-> Result<StandardLibrarySnapshot, StandardLibraryError> {
+    retained_standard_library_v6_snapshot_from_source(
+        RETAINED_STANDARD_SOURCE,
+        RETAINED_STANDARD_INVOKE_SOURCE,
+        RETAINED_STANDARD_OUTPUT_SOURCE,
+        RETAINED_STANDARD_UI_SOURCE,
+        RETAINED_STANDARD_JSON_SOURCE,
+        RETAINED_STANDARD_ACTION_SOURCE,
+    )
+}
+
+/// Verifies a retained V6 action standard snapshot and returns authority.
+pub fn verify_standard_library_v6_snapshot(
+    snapshot: StandardLibrarySnapshot,
+) -> Result<VerifiedStandardLibrarySnapshot, StandardLibraryError> {
+    let actual_catalogue = snapshot.catalogue().revision();
+    if actual_catalogue != STANDARD_CATALOGUE_V6_REVISION_ID {
+        return Err(StandardLibraryError::CatalogueIdentityMismatch {
+            expected: STANDARD_CATALOGUE_V6_REVISION_ID,
+            actual: actual_catalogue,
+        });
+    }
+    let actual_digest = snapshot.digest();
+    if actual_digest != ACCEPTED_V6_STANDARD_LIBRARY_DIGEST {
+        return Err(StandardLibraryError::AcceptedDigestMismatch {
+            expected: ACCEPTED_V6_STANDARD_LIBRARY_DIGEST,
+            actual: actual_digest,
+        });
+    }
+    verify_canonical_standard_library_v2_snapshot(snapshot)
+        .map_err(|source| StandardLibraryError::CanonicalHash { source })
+}
+
+fn retained_standard_library_v6_snapshot_from_source(
+    types_source: &str,
+    invoke_source: &str,
+    output_source: &str,
+    ui_source: &str,
+    json_source: &str,
+    action_source: &str,
+) -> Result<StandardLibrarySnapshot, StandardLibraryError> {
+    let manifest = standard_library_v6_manifest()
+        .map_err(|source| StandardLibraryError::Manifest { source })?;
+    let types_manifest =
+        standard_library_manifest().map_err(|source| StandardLibraryError::Manifest { source })?;
+    let catalogue = manifest.catalogue();
+    let mut origins = reconcile_retained_source_with_unit(
+        types_source,
+        &types_manifest,
+        STD_TYPES_SOURCE_UNIT_ID,
+    )?;
+    let invoke_origins = reconcile_retained_invoke_source(invoke_source, catalogue)?;
+    origins.extend(invoke_origins.iter().cloned());
+    origins.extend(reconcile_retained_output_source(output_source, catalogue)?);
+    origins.extend(reconcile_retained_ui_source(ui_source, catalogue)?);
+    let json_origins = reconcile_retained_json_source(json_source, catalogue)?;
+    origins.extend(json_origins.iter().cloned());
+    let action_origins = reconcile_retained_action_source(action_source, catalogue)?;
+    origins.extend(action_origins.iter().cloned());
+
+    let types_content_hash = source_unit_content_digest(types_source)
+        .map_err(|source| StandardLibraryError::CanonicalHash { source })?;
+    let invoke_content_hash = source_unit_content_digest(invoke_source)
+        .map_err(|source| StandardLibraryError::CanonicalHash { source })?;
+    let output_content_hash = source_unit_content_digest(output_source)
+        .map_err(|source| StandardLibraryError::CanonicalHash { source })?;
+    let ui_content_hash = source_unit_content_digest(ui_source)
+        .map_err(|source| StandardLibraryError::CanonicalHash { source })?;
+    let json_content_hash = source_unit_content_digest(json_source)
+        .map_err(|source| StandardLibraryError::CanonicalHash { source })?;
+    let action_content_hash = source_unit_content_digest(action_source)
+        .map_err(|source| StandardLibraryError::CanonicalHash { source })?;
+    if types_content_hash != ACCEPTED_V6_TYPES_CONTENT_DIGEST
+        || invoke_content_hash != ACCEPTED_V6_INVOKE_CONTENT_DIGEST
+        || output_content_hash != ACCEPTED_V6_OUTPUT_CONTENT_DIGEST
+        || ui_content_hash != ACCEPTED_V6_UI_CONTENT_DIGEST
+        || json_content_hash != ACCEPTED_V6_JSON_CONTENT_DIGEST
+        || action_content_hash != ACCEPTED_V6_ACTION_CONTENT_DIGEST
+    {
+        return Err(StandardLibraryError::RetainedSourceMismatch);
+    }
+    let units = vec![
+        StoredSourceUnit::new(
+            STD_TYPES_SOURCE_UNIT_ID,
+            0,
+            SOURCE_LOGICAL_PATH,
+            types_source,
+            types_content_hash,
+        ),
+        StoredSourceUnit::new(
+            STD_INVOKE_SOURCE_UNIT_ID,
+            1,
+            STD_INVOKE_SOURCE_LOGICAL_PATH,
+            invoke_source,
+            invoke_content_hash,
+        ),
+        StoredSourceUnit::new(
+            STD_OUTPUT_SOURCE_UNIT_ID,
+            2,
+            STD_OUTPUT_SOURCE_LOGICAL_PATH,
+            output_source,
+            output_content_hash,
+        ),
+        StoredSourceUnit::new(
+            STD_UI_SOURCE_UNIT_ID,
+            3,
+            STD_UI_SOURCE_LOGICAL_PATH,
+            ui_source,
+            ui_content_hash,
+        ),
+        StoredSourceUnit::new(
+            STD_JSON_SOURCE_UNIT_ID,
+            4,
+            STD_JSON_SOURCE_LOGICAL_PATH,
+            json_source,
+            json_content_hash,
+        ),
+        StoredSourceUnit::new(
+            STD_ACTION_SOURCE_UNIT_ID,
+            5,
+            STD_ACTION_SOURCE_LOGICAL_PATH,
+            action_source,
+            action_content_hash,
+        ),
+    ]
+    .into_iter()
+    .map(|unit| unit.map_err(|source| StandardLibraryError::Revision { source }))
+    .collect::<Result<Vec<_>, _>>()?;
+    let bundle_hash = source_bundle_digest(&units)
+        .map_err(|source| StandardLibraryError::CanonicalHash { source })?;
+    if bundle_hash != ACCEPTED_V6_SOURCE_BUNDLE_DIGEST {
+        return Err(StandardLibraryError::RetainedSourceMismatch);
+    }
+    let revision_hash = source_revision_record_digest(
+        STANDARD_SOURCE_V6_BUNDLE_ID,
+        Some(STANDARD_SOURCE_V5_REVISION_ID),
+        bundle_hash,
+    )
+    .map_err(|source| StandardLibraryError::CanonicalHash { source })?;
+    if revision_hash != ACCEPTED_V6_SOURCE_REVISION_DIGEST {
+        return Err(StandardLibraryError::RetainedSourceMismatch);
+    }
+    let retained_source = StoredSourceRevision::new(
+        STANDARD_SOURCE_V6_BUNDLE_ID,
+        STANDARD_SOURCE_V6_REVISION_ID,
+        Some(STANDARD_SOURCE_V5_REVISION_ID),
+        units,
+        bundle_hash,
+        revision_hash,
+    )
+    .map_err(|source| StandardLibraryError::Revision { source })?;
+    let executable = retained_v2_executable(invoke_source, catalogue, &invoke_origins)?;
+    if executable.revision().artifact().content_hash() != ACCEPTED_V6_ARTIFACT_DIGEST
+        || executable.revision().semantic_hash() != ACCEPTED_V6_SEMANTIC_DIGEST
+    {
+        return Err(StandardLibraryError::RetainedSourceMismatch);
+    }
+    let json_executable = retained_json_executable(json_source, catalogue, &json_origins)?;
+    let snapshot = StandardLibrarySnapshot::new_with_executables(
+        STANDARD_LIBRARY_V6_REVISION_ID,
+        StandardLibraryDigestVersion::Version2,
+        retained_source,
+        LANGUAGE_VERSION_IDENTITY,
+        catalogue.clone(),
+        vec![executable, json_executable],
+        origins,
+        ACCEPTED_V6_STANDARD_LIBRARY_DIGEST,
+    )
+    .map_err(|source| StandardLibraryError::Revision { source })?;
+    let actual_digest = calculate_standard_library_digest(&snapshot)
+        .map_err(|source| StandardLibraryError::CanonicalHash { source })?;
+    if actual_digest != ACCEPTED_V6_STANDARD_LIBRARY_DIGEST {
+        return Err(StandardLibraryError::AcceptedDigestMismatch {
+            expected: ACCEPTED_V6_STANDARD_LIBRARY_DIGEST,
+            actual: actual_digest,
+        });
+    }
+    Ok(snapshot)
+}
+
+fn reconcile_retained_action_source(
+    source: &str,
+    catalogue: &CatalogueSnapshot,
+) -> Result<Vec<DefinitionOrigin>, StandardLibraryError> {
+    let parsed = orna_syntax::parse(source);
+    if !parsed.diagnostics().is_empty()
+        || parsed.syntax().text() != source
+        || !parsed.object_types().is_empty()
+        || !parsed.field_renames().is_empty()
+        || !parsed.server_functions().is_empty()
+        || !parsed.client_functions().is_empty()
+        || !parsed.primitive_value_types().is_empty()
+        || !parsed.record_value_types().is_empty()
+        || !parsed.enum_types().is_empty()
+        || parsed.schemas().len() != 1
+        || parsed.opaque_value_types().len() != 1
+        || parsed.type_exports().len() != 1
+    {
+        return Err(StandardLibraryError::RetainedSourceMismatch);
+    }
+    let action_schema = catalogue
+        .schema_by_id(STD_ACTION_SCHEMA_ID)
+        .ok_or(StandardLibraryError::RetainedSourceMismatch)?;
+    if !matches_qualified_name(&parsed.schemas()[0].name, action_schema.name()) {
+        return Err(StandardLibraryError::RetainedSourceMismatch);
+    }
+    let action_definition = catalogue
+        .type_definition_by_id(STD_ACTION_TYPE_ID)
+        .ok_or(StandardLibraryError::RetainedSourceMismatch)?
+        .as_opaque_value()
+        .ok_or(StandardLibraryError::RetainedSourceMismatch)?;
+    let declaration = &parsed.opaque_value_types()[0];
+    if !matches_qualified_name(&declaration.name, action_definition.name())
+        || decode_sql_string_literal(&declaration.kernel_contract.text).as_deref()
+            != Some(action_definition.representation_contract())
+        || action_definition.persistence() != ValueTypePersistence::Transient
+    {
+        return Err(StandardLibraryError::RetainedSourceMismatch);
+    }
+    let action_binding = catalogue
+        .type_binding_by_name(&TypeLookupName::qualified(
+            semantic_name("std.action", ["std", "action"])
+                .map_err(|_| StandardLibraryError::RetainedSourceMismatch)?,
+        ))
+        .ok_or(StandardLibraryError::RetainedSourceMismatch)?;
+    if !matches_qualified_export(
+        &parsed.type_exports()[0],
+        action_definition.name(),
+        STD_ACTION_TYPE_ID,
+        action_binding,
+    ) {
+        return Err(StandardLibraryError::RetainedSourceMismatch);
+    }
+    let origin = |span: &orna_syntax::SourceSpan| -> Result<SourceOrigin, StandardLibraryError> {
+        let start = u32::try_from(span.start)
+            .map_err(|_| StandardLibraryError::RetainedSourceMismatch)?;
+        let end = u32::try_from(span.end)
+            .map_err(|_| StandardLibraryError::RetainedSourceMismatch)?;
+        SourceOrigin::new(STD_ACTION_SOURCE_UNIT_ID, start, end)
+            .map_err(|source| StandardLibraryError::Revision { source })
+    };
+    let mut declarations = vec![
+        (
+            parsed.schemas()[0].span.clone(),
+            DefinitionIdentity::Schema(STD_ACTION_SCHEMA_ID),
+        ),
+        (
+            parsed.opaque_value_types()[0].span.clone(),
+            DefinitionIdentity::ValueType(STD_ACTION_TYPE_ID),
+        ),
+        (
+            parsed.type_exports()[0].span.clone(),
+            DefinitionIdentity::TypeBinding(action_binding.id()),
+        ),
+    ];
+    declarations.sort_by_key(|(span, _)| span.start);
+    let expected_identities = [
+        DefinitionIdentity::Schema(STD_ACTION_SCHEMA_ID),
+        DefinitionIdentity::ValueType(STD_ACTION_TYPE_ID),
+        DefinitionIdentity::TypeBinding(action_binding.id()),
+    ];
+    if declarations
+        .iter()
+        .map(|(_, identity)| *identity)
+        .ne(expected_identities.iter().copied())
+    {
+        return Err(StandardLibraryError::RetainedSourceMismatch);
+    }
+    declarations
+        .into_iter()
+        .map(|(span, identity)| Ok(DefinitionOrigin::new(identity, origin(&span)?)))
+        .collect()
 }
 
 fn reconcile_retained_json_source(
@@ -2790,7 +3235,9 @@ fn retained_standard_library_v2_snapshot_from_source(
 /// accepted `orna.std/3` snapshot additionally binds the two framed output
 /// codecs for `std.terminal.Document` and `std.io.ByteStream` (work ADR
 /// 0058); the accepted `orna.std/4` snapshot additionally binds the
-/// `ORNA-UI/1 ` length-prefixed-UTF-8 codec for `std.ui.UI` (work ADR 0062).
+/// `ORNA-UI/1 ` length-prefixed-UTF-8 codec for `std.ui.UI` (work ADR 0062);
+/// the accepted V6 snapshot additionally binds the bounded raw-byte action
+/// codec (ADR 0079).
 pub fn registered_opaque_codecs(
     standard: &VerifiedStandardLibrarySnapshot,
 ) -> Result<OpaqueCodecRegistry, RegisteredOpaqueCodecsError> {
@@ -2806,7 +3253,49 @@ pub fn registered_opaque_codecs(
     )
     .map_err(|source| RegisteredOpaqueCodecsError::Registry { source })?;
 
-    let registrations = if is_accepted_v5_standard(standard) {
+    let registrations = if is_accepted_v6_standard(standard) {
+        let document = OpaqueCodecRegistration::length_prefixed_utf8(
+            STD_TERMINAL_DOCUMENT_TYPE_ID,
+            semantic_name("std.terminal.document", ["std", "terminal", "document"])
+                .map_err(|source| RegisteredOpaqueCodecsError::Manifest { source })?,
+            STD_TERMINAL_DOCUMENT_CONTRACT,
+            TERMINAL_DOCUMENT_MAGIC,
+        )
+        .map_err(|source| RegisteredOpaqueCodecsError::Registry { source })?;
+        let byte_stream = OpaqueCodecRegistration::media_type_framed(
+            STD_IO_BYTE_STREAM_TYPE_ID,
+            semantic_name("std.io.bytestream", ["std", "io", "bytestream"])
+                .map_err(|source| RegisteredOpaqueCodecsError::Manifest { source })?,
+            STD_IO_BYTE_STREAM_CONTRACT,
+            BYTE_STREAM_MAGIC,
+        )
+        .map_err(|source| RegisteredOpaqueCodecsError::Registry { source })?;
+        let ui = OpaqueCodecRegistration::length_prefixed_utf8(
+            STD_UI_TYPE_ID,
+            semantic_name("std.ui.ui", ["std", "ui", "ui"])
+                .map_err(|source| RegisteredOpaqueCodecsError::Manifest { source })?,
+            STD_UI_CONTRACT,
+            UI_MAGIC,
+        )
+        .map_err(|source| RegisteredOpaqueCodecsError::Registry { source })?;
+        let json = OpaqueCodecRegistration::length_prefixed_canonical_json(
+            STD_JSON_VALUE_TYPE_ID,
+            semantic_name("std.json.value", ["std", "json", "value"])
+                .map_err(|source| RegisteredOpaqueCodecsError::Manifest { source })?,
+            STD_JSON_CONTRACT,
+            JSON_MAGIC,
+        )
+        .map_err(|source| RegisteredOpaqueCodecsError::Registry { source })?;
+        let action = OpaqueCodecRegistration::length_prefixed_bytes(
+            STD_ACTION_TYPE_ID,
+            semantic_name("std.action.action", ["std", "action", "action"])
+                .map_err(|source| RegisteredOpaqueCodecsError::Manifest { source })?,
+            STD_ACTION_CONTRACT,
+            ACTION_MAGIC,
+        )
+        .map_err(|source| RegisteredOpaqueCodecsError::Registry { source })?;
+        vec![opaque_token, document, byte_stream, ui, json, action]
+    } else if is_accepted_v5_standard(standard) {
         let document = OpaqueCodecRegistration::length_prefixed_utf8(
             STD_TERMINAL_DOCUMENT_TYPE_ID,
             semantic_name("std.terminal.document", ["std", "terminal", "document"])
@@ -2937,6 +3426,16 @@ fn is_accepted_v4_standard(standard: &VerifiedStandardLibrarySnapshot) -> bool {
         && standard.source().parent() == Some(STANDARD_SOURCE_V3_REVISION_ID)
         && standard.source().revision_hash() == ACCEPTED_V4_SOURCE_REVISION_DIGEST
         && standard.digest() == ACCEPTED_V4_STANDARD_LIBRARY_DIGEST
+}
+
+fn is_accepted_v6_standard(standard: &VerifiedStandardLibrarySnapshot) -> bool {
+    standard.revision() == STANDARD_LIBRARY_V6_REVISION_ID
+        && standard.catalogue().revision() == STANDARD_CATALOGUE_V6_REVISION_ID
+        && standard.source().bundle() == STANDARD_SOURCE_V6_BUNDLE_ID
+        && standard.source().id() == STANDARD_SOURCE_V6_REVISION_ID
+        && standard.source().parent() == Some(STANDARD_SOURCE_V5_REVISION_ID)
+        && standard.source().revision_hash() == ACCEPTED_V6_SOURCE_REVISION_DIGEST
+        && standard.digest() == ACCEPTED_V6_STANDARD_LIBRARY_DIGEST
 }
 
 fn is_accepted_v5_standard(standard: &VerifiedStandardLibrarySnapshot) -> bool {
@@ -7639,4 +8138,82 @@ EXPORT TYPE std.ui.UI AS std.UI;
             super::STD_INVOKE_ECHO_FUNCTION_ID
         );
     }
+    #[test]
+    fn v5_to_v6_upgrade_rejects_a_non_v5_parent_before_child_work() {
+        let v4 = super::verify_standard_library_v4_snapshot(
+            super::retained_standard_library_v4_snapshot()
+                .expect("the retained V4 source is valid"),
+        )
+        .expect("the retained V4 source verifies");
+        let active = empty_version_two_active_revision(&v4);
+        let error = super::prepare_standard_upgrade_v5_to_v6(&active)
+            .expect_err("a V4 parent must not enter the V5-to-V6 path");
+        assert!(matches!(
+            error,
+            super::StandardUpgradeError::Prepare {
+                source: orna_compiler::PrepareStandardUpgradeError::StandardLibraryAlreadyInstalled { revision }
+            } if revision == super::STANDARD_LIBRARY_V4_REVISION_ID
+        ));
+    }
+
+    #[test]
+    fn retains_and_verifies_v6_action_standard_snapshot() {
+        let snapshot = super::retained_standard_library_v6_snapshot()
+            .expect("the retained V6 action source is valid");
+        assert_eq!(snapshot.source().units().len(), 6);
+        assert_eq!(snapshot.source().parent(), Some(super::STANDARD_SOURCE_V5_REVISION_ID));
+        assert_eq!(snapshot.source().units()[5].id(), super::STD_ACTION_SOURCE_UNIT_ID);
+        assert_eq!(snapshot.source().units()[5].logical_path(), super::STD_ACTION_SOURCE_LOGICAL_PATH);
+        assert_eq!(snapshot.executables().len(), 2);
+        assert_eq!(
+            snapshot
+                .origins()
+                .iter()
+                .filter(|origin| origin.source().source_unit() == super::STD_ACTION_SOURCE_UNIT_ID)
+                .count(),
+            3
+        );
+        let verified = super::verify_standard_library_v6_snapshot(snapshot)
+            .expect("the retained V6 action source verifies");
+        assert_eq!(verified.revision(), super::STANDARD_LIBRARY_V6_REVISION_ID);
+        assert!(super::registered_opaque_codecs(&verified).is_ok());
+    }
+
+    #[test]
+    fn v6_action_codec_accepts_bounded_length_prefixed_bytes() {
+        let verified = super::verify_standard_library_v6_snapshot(
+            super::retained_standard_library_v6_snapshot()
+                .expect("the retained V6 action source is valid"),
+        )
+        .expect("the retained V6 action source verifies");
+        let registry = super::registered_opaque_codecs(&verified)
+            .expect("the V6 opaque codecs register");
+        let active = empty_version_two_active_revision(&verified);
+        let mut payload = Vec::from(super::ACTION_MAGIC.as_bytes());
+        payload.extend_from_slice(&3_u32.to_be_bytes());
+        payload.extend_from_slice(&[0xa5, 0x00, 0xff]);
+        let value = OpaqueValue::new(&active, &registry, super::STD_ACTION_TYPE_ID, &payload)
+            .expect("the framed action payload is accepted");
+        assert_eq!(value.canonical_payload(), payload.as_slice());
+    }
+
+    #[test]
+    fn v6_manifest_appends_action_without_changing_v5_catalogue_content() {
+        let v5 = super::standard_library_v5_manifest().expect("the V5 manifest is valid");
+        let v6 = super::standard_library_v6_manifest().expect("the V6 manifest is valid");
+        assert_eq!(v6.catalogue().schemas().len(), v5.catalogue().schemas().len() + 1);
+        assert_eq!(
+            v6.catalogue().value_types().len(),
+            v5.catalogue().value_types().len() + 1
+        );
+        assert_eq!(
+            v6.catalogue().type_bindings().len(),
+            v5.catalogue().type_bindings().len() + 1
+        );
+        assert_eq!(v6.catalogue().functions(), v5.catalogue().functions());
+        assert_eq!(v6.action_source_unit(), super::STD_ACTION_SOURCE_UNIT_ID);
+        assert_eq!(v6.action_source_logical_path(), super::STD_ACTION_SOURCE_LOGICAL_PATH);
+    }
+
+
 }
