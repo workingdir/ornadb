@@ -2060,6 +2060,48 @@ mod tests {
         }
     }
 
+    struct DropSignal(Arc<AtomicBool>);
+
+    impl Drop for DropSignal {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+
+    #[derive(Clone)]
+    struct ShutdownResourceDispatch {
+        started: Arc<Notify>,
+        dropped: Arc<AtomicBool>,
+    }
+
+    impl DispatchService for ShutdownResourceDispatch {
+        fn start(
+            &self,
+            _session: AuthenticatedSession,
+            _stream: u64,
+            _call: RawCall,
+        ) -> StartedDispatch {
+            panic!("resource transport test does not issue a raw call")
+        }
+
+        fn start_resource(
+            &self,
+            _session: AuthenticatedSession,
+            _request: ResourceRequest,
+            _resources: LocalRawSocketResources,
+        ) -> Option<StartedResourceDispatch> {
+            let started = Arc::clone(&self.started);
+            let dropped = Arc::clone(&self.dropped);
+            Some(StartedResourceDispatch {
+                future: Box::pin(async move {
+                    let _drop_signal = DropSignal(dropped);
+                    started.notify_one();
+                    std::future::pending::<ResourceDispatchCompletion>().await
+                }),
+            })
+        }
+    }
+
     #[derive(Clone)]
     struct TestDispatch {
         actions: Arc<Vec<ServerAction>>,
@@ -2419,6 +2461,46 @@ mod tests {
 
         client.shutdown().await.unwrap();
         server_task.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn server_shutdown_cancels_active_resource_without_emitting_a_terminal_frame() {
+        let (version, revision) = constructed_test_version();
+        let (active, registry) = match &version {
+            RawProtocolVersion::Constructed(active, registry) => (active.clone(), registry.clone()),
+            _ => unreachable!("constructed test version"),
+        };
+        let encoded = encode_resource_client_frame(
+            &active,
+            &registry,
+            &ResourceClientFrame::Request(resource_request(revision)),
+        )
+        .unwrap();
+        let started = Arc::new(Notify::new());
+        let dropped = Arc::new(AtomicBool::new(false));
+        let dispatcher = ShutdownResourceDispatch {
+            started: Arc::clone(&started),
+            dropped: Arc::clone(&dropped),
+        };
+        let (shutdown_sender, shutdown) = watch::channel(false);
+        let (server, mut client) = UnixStream::pair().unwrap();
+        let server_task = tokio::spawn(drive_versioned_authenticated_stream_until_shutdown(
+            dispatcher,
+            test_session(),
+            version,
+            server,
+            LocalRawSocketResources::new(),
+            shutdown,
+        ));
+
+        client.write_all(&encoded).await.unwrap();
+        started.notified().await;
+        shutdown_sender.send(true).unwrap();
+        server_task.await.unwrap().unwrap();
+
+        let mut byte = [0_u8; 1];
+        assert_eq!(client.read(&mut byte).await.unwrap(), 0);
+        assert!(dropped.load(Ordering::SeqCst));
     }
 
     #[tokio::test]
