@@ -2,9 +2,13 @@
 
 use std::{collections::HashMap, error::Error, fmt, hash::Hash};
 
-use orna_artifact::server_parameter_echo::ServerParameterEchoError;
+use orna_artifact::{
+    client_plan::ResourceKind,
+    server_parameter_echo::ServerParameterEchoError,
+};
 use orna_core::{
-    CatalogueRevisionId, FieldId, FunctionId, FunctionRevisionId, ParameterId, SchemaId, StateSlotId,
+    CallSiteId, CatalogueRevisionId, FieldId, FunctionId, FunctionRevisionId, ParameterId,
+    SchemaId, StateSlotId,
     SourceUnitId, StandardLibraryRevisionId, TypeBindingId, TypeId,
     canonical_hash::CanonicalHashError,
     catalogue::{
@@ -1015,6 +1019,18 @@ pub(crate) enum CheckedClientExpression {
         /// The source location of the complete call.
         location: SourceLocation,
     },
+    /// A suspension over one checked CLIENT resource expression (ADR 0077).
+    Await {
+        /// The resource expression evaluated by the local runtime.
+        expression: Box<CheckedClientExpression>,
+        /// The source location of the complete await expression.
+        location: SourceLocation,
+    },
+    /// A checked CLIENT-to-SERVER resource operation value (ADR 0077).
+    Resource {
+        /// The resolved resource operation metadata and bound arguments.
+        operation: CheckedResourceOperation,
+    },
     /// A text literal value.
     String {
         /// The unescaped text value.
@@ -1061,6 +1077,39 @@ pub(crate) enum CheckedClientExpression {
         /// The source location of the complete expression.
         location: SourceLocation,
     },
+}
+
+/// One checked CLIENT-to-SERVER resource operation.
+///
+/// The operation retains only checked identities. In particular, the target
+/// is a SERVER function, arguments are bound to that function's stable
+/// parameters, and the result type is derived from the target declaration.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct CheckedResourceOperation {
+    pub(super) kind: ResourceKind,
+    pub(super) target: CheckedFunctionId,
+    pub(super) call_site: CallSiteId,
+    pub(super) arguments: Vec<(CheckedParameterId, CheckedClientExpression)>,
+    pub(super) result_type: SemanticType<CheckedTypeId>,
+    pub(super) standard_result_type: Option<TypeId>,
+    pub(super) location: SourceLocation,
+}
+
+impl CheckedResourceOperation {
+    /// Returns the scalar/stream resource kind.
+    pub(crate) const fn kind(&self) -> ResourceKind { self.kind }
+    /// Returns the checked SERVER target function identity.
+    pub(crate) const fn target(&self) -> CheckedFunctionId { self.target }
+    /// Returns the deterministic call-site identity.
+    pub(crate) const fn call_site(&self) -> CallSiteId { self.call_site }
+    /// Returns canonical parameter-to-expression argument pairs.
+    pub(crate) fn arguments(&self) -> &[(CheckedParameterId, CheckedClientExpression)] { &self.arguments }
+    /// Returns the checked target-derived result type.
+    pub(crate) const fn result_type(&self) -> SemanticType<CheckedTypeId> { self.result_type }
+    /// Returns the durable standard value-type identity when one exists.
+    pub(crate) const fn standard_result_type(&self) -> Option<TypeId> { self.standard_result_type }
+    /// Returns the source location of the constructor expression.
+    pub(crate) fn location(&self) -> &SourceLocation { &self.location }
 }
 
 /// The checked argument source of one CLIENT capability requirement.
