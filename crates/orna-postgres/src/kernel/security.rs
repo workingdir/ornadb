@@ -4,7 +4,7 @@ use orna_client::{
     ClientExecutionError, ClientExecutionResult, ClientResourceExecutor, ClientStateStore,
     evaluate_client_function_with_grants as evaluate_authorised_client_function,
     evaluate_client_function_with_grants_and_arguments as evaluate_authorised_client_function_with_arguments,
-    evaluate_client_function_with_state_and_grants_and_arguments_and_executor as evaluate_authorised_client_function_with_arguments_and_executor,
+    evaluate_client_function_with_state_and_grants_and_arguments_and_executor_with_parent_invocation as evaluate_authorised_client_function_with_arguments_and_executor,
 };
 use orna_artifact::client_plan::{CAPABILITY_FORMAT_VERSION, CapabilityClientPlan};
 use orna_core::{
@@ -917,6 +917,7 @@ impl PostgresKernel {
                                     &[],
                                     &self.capability_grants,
                                     &mut state,
+                                    invocation,
                                     executor,
                                 )
                             } else {
