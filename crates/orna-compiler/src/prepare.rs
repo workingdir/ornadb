@@ -9,6 +9,7 @@ use std::{
 
 use orna_artifact::{
     client_plan::{
+        ACTION_FORMAT_VERSION as CLIENT_PLAN_ACTION_VERSION, ActionClientPlan, ActionOperationNode,
         CAPABILITY_FORMAT_VERSION as CLIENT_PLAN_CAPABILITY_VERSION, CapabilityArgumentSource,
         CapabilityClientPlan, CapabilityRequirement, ClientExpressionNode, ClientLocal,
         ClientLocalKind, ClientPlan, ClientStatement,
@@ -86,7 +87,7 @@ use crate::{
     resolver::{
         CheckedClientExpression, CheckedClientFunctionBody, CheckedClientLocal,
         CheckedClientLocalKind, CheckedClientStateSlot, CheckedClientStatement, CheckedFieldRename,
-        CheckedResourceOperation, CheckedStateDefault, CheckedStateScope, UNIQUE_FIELD_MESSAGE,
+        CheckedActionOperation, CheckedResourceOperation, CheckedStateDefault, CheckedStateScope, UNIQUE_FIELD_MESSAGE,
         durable_state_slot_id, supports_unique_text_or_required_reference,
     },
 };
@@ -4219,6 +4220,12 @@ fn client_expression_locations<'a>(
                 client_expression_locations(argument, locations);
             }
         }
+        CheckedClientExpression::Action { operation } => {
+            locations.push(operation.location());
+            for (_, argument) in operation.arguments() {
+                client_expression_locations(argument, locations);
+            }
+        }
         CheckedClientExpression::String { location, .. }
         | CheckedClientExpression::Integer { location, .. }
         | CheckedClientExpression::Boolean { location, .. }
@@ -5589,9 +5596,20 @@ fn client_capability_requirement(
     CapabilityRequirement::new(capability.name().to_owned(), argument)
 }
 
+fn client_expression_contains_action(expression: &CheckedClientExpression) -> bool {
+    match expression {
+        CheckedClientExpression::Action { .. } => true,
+        CheckedClientExpression::Await { expression, .. } => client_expression_contains_action(expression),
+        CheckedClientExpression::Resource { operation } => operation.arguments().iter().any(|(_, value)| client_expression_contains_action(value)),
+        CheckedClientExpression::Call { arguments, .. } => arguments.iter().any(|(_, value)| client_expression_contains_action(value)),
+        CheckedClientExpression::Concat { left, right, .. } => client_expression_contains_action(left) || client_expression_contains_action(right),
+        CheckedClientExpression::String { .. } | CheckedClientExpression::Integer { .. } | CheckedClientExpression::Boolean { .. } | CheckedClientExpression::ParameterRead { .. } | CheckedClientExpression::LocalRead { .. } | CheckedClientExpression::FieldPath { .. } => false,
+    }
+}
+
 fn client_expression_contains_resource(expression: &CheckedClientExpression) -> bool {
     match expression {
-        CheckedClientExpression::Await { .. } | CheckedClientExpression::Resource { .. } => true,
+        CheckedClientExpression::Await { .. } | CheckedClientExpression::Resource { .. } | CheckedClientExpression::Action { .. } => true,
         CheckedClientExpression::Call { arguments, .. } => arguments
             .iter()
             .any(|(_, argument)| client_expression_contains_resource(argument)),
@@ -6424,9 +6442,14 @@ impl<'a> CandidateBuilder<'a> {
                 )
             }
             ValidatedClientBody::Expression(expression) => {
+                let contains_action = client_expression_contains_action(expression);
                 let contains_resource = client_expression_contains_resource(expression);
                 let expression = self.client_expression_node(expression)?;
-                if contains_resource {
+                if contains_action {
+                    let plan = ActionClientPlan::new(match expression { ClientExpressionNode::Action { operation } => operation, _ => return Err(PrepareError::InvalidCheckedBundle { reason: "checked CLIENT action expression is not a root action" }) });
+                    let payload = plan.encode().map_err(|_| PrepareError::InvalidCheckedBundle { reason: "checked CLIENT action plan exceeds client-plan limits" })?;
+                    (CLIENT_PLAN_ACTION_VERSION, payload, InnerClientPlan::Action(plan))
+                } else if contains_resource {
                     let plan = ResourceClientPlan::new(expression);
                     let payload =
                         plan.encode()
@@ -6457,6 +6480,9 @@ impl<'a> CandidateBuilder<'a> {
                 statements,
                 return_expression,
             } => {
+                if client_expression_contains_action(return_expression) || statements.iter().any(|statement| client_expression_contains_action(statement.expression())) {
+                    return Err(PrepareError::InvalidCheckedBundle { reason: "checked CLIENT action is only supported in expression bodies" });
+                }
                 let function_id = self.identities.function(validated.id)?;
                 let local_ids: HashMap<u32, LocalId> = locals
                     .iter()
@@ -6540,10 +6566,15 @@ impl<'a> CandidateBuilder<'a> {
                 return_expression,
                 states,
             } => {
+                let contains_action = client_expression_contains_action(return_expression);
                 let contains_resource = client_expression_contains_resource(return_expression);
                 let expression = self.client_expression_node(return_expression)?;
                 if states.is_empty() {
-                    if contains_resource {
+                    if contains_action {
+                        let plan = ActionClientPlan::new(match expression { ClientExpressionNode::Action { operation } => operation, _ => return Err(PrepareError::InvalidCheckedBundle { reason: "checked CLIENT action expression is not a root action" }) });
+                        let payload = plan.encode().map_err(|_| PrepareError::InvalidCheckedBundle { reason: "checked CLIENT action plan exceeds client-plan limits" })?;
+                        (CLIENT_PLAN_ACTION_VERSION, payload, InnerClientPlan::Action(plan))
+                    } else if contains_resource {
                         let plan = ResourceClientPlan::new(expression);
                         let payload = plan.encode().map_err(|_| {
                             PrepareError::InvalidCheckedBundle {
@@ -6569,6 +6600,9 @@ impl<'a> CandidateBuilder<'a> {
                         )
                     }
                 } else {
+                    if contains_action {
+                        return Err(PrepareError::InvalidCheckedBundle { reason: "checked CLIENT action is only supported in expression bodies" });
+                    }
                     let function_id = self.identities.function(validated.id)?;
                     let slots = states
                         .iter()
@@ -6708,6 +6742,9 @@ impl<'a> CandidateBuilder<'a> {
             CheckedClientExpression::Resource { operation } => ClientExpressionNode::Resource {
                 operation: self.client_resource_operation(operation)?,
             },
+            CheckedClientExpression::Action { operation } => ClientExpressionNode::Action {
+                operation: self.client_action_operation(operation)?,
+            },
             CheckedClientExpression::String { value, .. } => ClientExpressionNode::String {
                 value: value.clone(),
             },
@@ -6772,6 +6809,24 @@ impl<'a> CandidateBuilder<'a> {
             return Ok(self.active.pair());
         }
         Err(existing_mismatch(DefinitionIdentity::Function(function)))
+    }
+
+    fn client_action_operation(
+        &self,
+        operation: &CheckedActionOperation,
+    ) -> Result<ActionOperationNode, PrepareError> {
+        let result_type = match operation.standard_result_type() {
+            Some(type_id) => type_id,
+            None => match operation.result_type() {
+                SemanticType::Named(type_id) | SemanticType::Reference { target: type_id } => self.identities.type_id(type_id)?,
+                SemanticType::Scalar(_) => return Err(PrepareError::InvalidCheckedBundle { reason: "checked CLIENT action result has no durable value type identity" }),
+            },
+        };
+        let mut arguments = operation.arguments().iter().map(|(parameter, value)| Ok((self.identities.parameter(*parameter)?, self.client_expression_node(value)?))).collect::<Result<Vec<_>, PrepareError>>()?;
+        arguments.sort_by_key(|(parameter, _)| *parameter);
+        let target = self.identities.function(operation.target())?;
+        let target_revision = self.resource_target_revision(operation.target(), target)?;
+        Ok(ActionOperationNode::new(operation.target_domain(), target, target_revision, operation.call_site(), arguments, result_type))
     }
 
     fn client_resource_operation(
