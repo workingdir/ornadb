@@ -20,9 +20,10 @@ use orna_core::{
     FieldId, FunctionId, FunctionRevisionId, ObjectId, ParameterId, SourceUnitId, TypeId,
     canonical_hash::artifact_payload_digest,
     catalogue::{
-        CatalogueSnapshot, FunctionDefinition, FunctionDomain, FunctionReturn, FunctionSecurity,
-        FunctionTransaction, FunctionVolatility, ParameterDefinition, QualifiedSemanticName,
-        TypeLookupName, ValueTypeKind, ValueTypeMutability, ValueTypePersistence,
+        CatalogueSnapshot, FunctionDefinition, FunctionDomain, FunctionReturn,
+        FunctionReturnColumnDefinition, FunctionSecurity, FunctionTransaction, FunctionVolatility,
+        ParameterDefinition, QualifiedSemanticName, TypeLookupName, ValueTypeKind,
+        ValueTypeMutability, ValueTypePersistence,
     },
     invocation::InvocationOutputRequirement,
     presenter::{OutputResolutionError, PresenterEntry, PresenterRegistry},
@@ -1201,13 +1202,20 @@ async fn execute_active_transaction(
         artifact.version(),
         artifact.payload(),
     )?;
+    // Resource dispatch admits scalar functions, while the canonical SELECT
+    // planner/result model is row-shaped. Adapt scalars to one internal value
+    // column so all existing validation, lowering, and canonical RuntimeValue
+    // decoding stay on the same path as ROWS execution.
+    let scalar_execution_function = scalar_execution_function(function);
+    let execution_function = scalar_execution_function.as_ref().unwrap_or(function);
+    let scalar_result = scalar_execution_function.is_some();
     let (columns, lowered, cardinality) = match &decoded {
         DecodedServerPlan::V1(plan) => {
-            validate_function_signature(function)?;
+            validate_function_signature(execution_function)?;
             validate_no_arguments(arguments)?;
-            validate_plan(active, function, plan)?;
-            validate_reference_evidence(active, function, plan)?;
-            let columns = result_columns_for_projections(function, &plan.projections)?;
+            validate_plan(active, execution_function, plan)?;
+            validate_reference_evidence(active, execution_function, plan)?;
+            let columns = result_columns_for_projections(execution_function, &plan.projections)?;
             validate_target_entries(
                 active.catalogue(),
                 active.catalogue_hash_context(),
@@ -1221,25 +1229,33 @@ async fn execute_active_transaction(
                 plan,
                 &columns,
             )?;
-            (columns, lowered, ResultCardinality::BoundedMany)
+            (
+                columns,
+                lowered,
+                if scalar_result {
+                    ResultCardinality::ExactlyOne
+                } else {
+                    ResultCardinality::BoundedMany
+                },
+            )
         }
         DecodedServerPlan::V2(plan) => {
-            validate_identity_selected_function_signature(active.catalogue(), function)?;
+            validate_identity_selected_function_signature(active.catalogue(), execution_function)?;
             validate_identity_selected_plan(
                 active.catalogue(),
                 active.catalogue_hash_context(),
-                function,
+                execution_function,
                 plan,
             )?;
-            validate_identity_selected_reference_evidence(active, function, plan)?;
+            validate_identity_selected_reference_evidence(active, execution_function, plan)?;
             let object = validate_identity_selected_arguments(
                 active.catalogue(),
                 active.catalogue_hash_context(),
-                function,
+                execution_function,
                 plan,
                 arguments,
             )?;
-            let columns = result_columns_for_projections(function, plan.projections())?;
+            let columns = result_columns_for_projections(execution_function, plan.projections())?;
             validate_target_entries(
                 active.catalogue(),
                 active.catalogue_hash_context(),
@@ -1254,19 +1270,27 @@ async fn execute_active_transaction(
                 &columns,
                 object,
             )?;
-            (columns, lowered, ResultCardinality::AtMostOne)
+            (
+                columns,
+                lowered,
+                if scalar_result {
+                    ResultCardinality::ExactlyOne
+                } else {
+                    ResultCardinality::AtMostOne
+                },
+            )
         }
         DecodedServerPlan::V3(plan) => {
-            validate_distinct_function_signature(function)?;
+            validate_distinct_function_signature(execution_function)?;
             validate_no_arguments(arguments)?;
             validate_distinct_plan(
                 active.catalogue(),
                 active.catalogue_hash_context(),
-                function,
+                execution_function,
                 plan,
             )?;
-            validate_distinct_reference_evidence(active, function, plan)?;
-            let columns = result_columns_for_projections(function, plan.projections())?;
+            validate_distinct_reference_evidence(active, execution_function, plan)?;
+            let columns = result_columns_for_projections(execution_function, plan.projections())?;
             validate_target_entries(
                 active.catalogue(),
                 active.catalogue_hash_context(),
@@ -1280,25 +1304,33 @@ async fn execute_active_transaction(
                 plan,
                 &columns,
             )?;
-            (columns, lowered, ResultCardinality::BoundedMany)
+            (
+                columns,
+                lowered,
+                if scalar_result {
+                    ResultCardinality::ExactlyOne
+                } else {
+                    ResultCardinality::BoundedMany
+                },
+            )
         }
         DecodedServerPlan::V4(plan) => {
-            validate_unique_text_selected_function_signature(function)?;
+            validate_unique_text_selected_function_signature(execution_function)?;
             validate_unique_text_selected_plan(
                 active.catalogue(),
                 active.catalogue_hash_context(),
-                function,
+                execution_function,
                 plan,
             )?;
-            validate_unique_text_selected_reference_evidence(active, function, plan)?;
+            validate_unique_text_selected_reference_evidence(active, execution_function, plan)?;
             let selector = validate_unique_text_selected_arguments(
                 active.catalogue(),
                 active.catalogue_hash_context(),
-                function,
+                execution_function,
                 plan,
                 arguments,
             )?;
-            let columns = result_columns_for_projections(function, plan.projections())?;
+            let columns = result_columns_for_projections(execution_function, plan.projections())?;
             validate_target_entries(
                 active.catalogue(),
                 active.catalogue_hash_context(),
@@ -1313,7 +1345,15 @@ async fn execute_active_transaction(
                 &columns,
                 selector,
             )?;
-            (columns, lowered, ResultCardinality::AtMostOne)
+            (
+                columns,
+                lowered,
+                if scalar_result {
+                    ResultCardinality::ExactlyOne
+                } else {
+                    ResultCardinality::AtMostOne
+                },
+            )
         }
     };
     let statement = transaction
@@ -1345,6 +1385,34 @@ async fn execute_active_transaction(
         context.function(),
         revision.id(),
         rows,
+    ))
+}
+
+/// Adapts one scalar SERVER signature to the internal one-column result model.
+///
+/// The SQL planner and decoder intentionally operate on ResultRows. A scalar
+/// resource therefore uses the same validated plan with a synthetic value
+/// column, while retaining the scalar's exact resolved type. This is an
+/// execution-only view; the recovered catalogue definition is never replaced
+/// or persisted.
+fn scalar_execution_function(function: &FunctionDefinition) -> Option<FunctionDefinition> {
+    let FunctionReturn::Single(result_type) = function.return_type() else {
+        return None;
+    };
+    Some(FunctionDefinition::new(
+        function.id(),
+        function.name().clone(),
+        function.domain(),
+        function.parameters().to_vec(),
+        FunctionReturn::Rows(vec![FunctionReturnColumnDefinition::new(
+            "value",
+            0,
+            *result_type,
+        )]),
+        function.current_revision(),
+        function.security(),
+        function.transaction(),
+        function.volatility(),
     ))
 }
 
@@ -4508,6 +4576,7 @@ fn expected_postgres_type(
 enum ResultCardinality {
     BoundedMany,
     AtMostOne,
+    ExactlyOne,
 }
 
 impl ResultCardinality {
@@ -4515,7 +4584,20 @@ impl ResultCardinality {
         match self {
             Self::BoundedMany => Ok(()),
             Self::AtMostOne => validate_identity_selected_cardinality(row_count),
+            Self::ExactlyOne if row_count > 1 => Err(server_error(ServerSelectError::Cardinality {
+                rule: "a scalar SERVER SELECT returned more than one row",
+            })),
+            Self::ExactlyOne => Ok(()),
         }
+    }
+
+    fn finish(self, row_count: usize) -> Result<(), PostgresKernelError> {
+        if matches!(self, Self::ExactlyOne) && row_count == 0 {
+            return Err(server_error(ServerSelectError::Cardinality {
+                rule: "a scalar SERVER SELECT returned zero rows",
+            }));
+        }
+        Ok(())
     }
 }
 
@@ -4599,6 +4681,7 @@ async fn stream_rows(
         }
         rows.push(ResultRow::new(values));
     }
+    shape.cardinality.finish(rows.len())?;
     ResultRows::new(shape.columns.to_vec(), rows)
         .map_err(ServerSelectError::ReturnedRows)
         .map_err(server_error)
@@ -5698,6 +5781,92 @@ mod tests {
         };
         assert_eq!(actual_parameter, parameter);
         assert_eq!(rule, expected);
+    }
+
+    #[test]
+    fn scalar_execution_adapts_single_result_and_preserves_canonical_value() {
+        let function = function(
+            FunctionDomain::Server,
+            Vec::new(),
+            FunctionReturn::Single(ResolvedType::scalar(StandardScalar::Integer)),
+            FunctionSecurity::Invoker,
+            Some(FunctionTransaction::ReadOnly),
+        );
+        let adapted = scalar_execution_function(&function).expect("scalar adapts");
+        let FunctionReturn::Rows(columns) = adapted.return_type() else {
+            panic!("scalar execution view must be row-shaped");
+        };
+        assert_eq!(columns.len(), 1);
+        assert_eq!(columns[0].name(), "value");
+        assert_eq!(columns[0].resolved_type(), ResolvedType::scalar(StandardScalar::Integer));
+
+        let (catalogue, _, _, _) = catalogue();
+        let context = CatalogueHashContext::version_one();
+        let rows = ResultRows::new(
+            [ResultColumn::new(
+                "value",
+                ResolvedType::scalar(StandardScalar::Integer),
+                false,
+            )
+            .expect("scalar result column is valid")],
+            [ResultRow::new([RuntimeValue::Integer(42)])],
+        )
+        .expect("scalar result rows are valid");
+        let result = ServerSelectResult::new(
+            RevisionPair::new(
+                SourceRevisionId::from_bytes([0x51; 16]),
+                CatalogueRevisionId::from_bytes([0x52; 16]),
+            ),
+            function.id(),
+            function.current_revision(),
+            rows,
+        );
+        assert_eq!(
+            into_raw_server_values_for_context(&catalogue, &context, function.id(), result)
+                .expect("canonical scalar value conversion succeeds"),
+            vec![RuntimeValue::Integer(42)]
+        );
+    }
+
+    #[test]
+    fn scalar_execution_rejects_wrong_projection_type_and_cardinality() {
+        let standard = presenter_standard();
+        let active = presenter_active(&standard);
+        let function = function(
+            FunctionDomain::Server,
+            Vec::new(),
+            FunctionReturn::Single(ResolvedType::scalar(StandardScalar::Boolean)),
+            FunctionSecurity::Invoker,
+            Some(FunctionTransaction::ReadOnly),
+        );
+        let adapted = scalar_execution_function(&function).expect("scalar adapts");
+        let plan = ServerPlan {
+            scan: Scan {
+                input: 0,
+                object_type: PRESENTER_OBJECT_TYPE,
+            },
+            projections: vec![Expression {
+                kind: ExpressionKind::ObjectReference { input: 0 },
+                value_type: ValueType {
+                    resolved_type: ResolvedType::reference(PRESENTER_OBJECT_TYPE),
+                    nullable: false,
+                },
+            }],
+            selection: None,
+            ordering: Vec::new(),
+        };
+        assert_plan_rule(
+            validate_plan(&active, &adapted, &plan),
+            "projection type must equal its ROWS column",
+        );
+        assert!(matches!(
+            ResultCardinality::ExactlyOne.validate(2),
+            Err(PostgresKernelError::ServerSelect(ServerSelectError::Cardinality { .. }))
+        ));
+        assert!(matches!(
+            ResultCardinality::ExactlyOne.finish(0),
+            Err(PostgresKernelError::ServerSelect(ServerSelectError::Cardinality { .. }))
+        ));
     }
 
     #[test]
