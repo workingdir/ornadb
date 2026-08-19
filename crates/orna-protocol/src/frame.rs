@@ -3,10 +3,10 @@
 use std::{collections::BTreeMap, error::Error, fmt};
 
 use orna_core::{
-    FunctionId, InvocationId, ParameterId, TypeId,
+    CallSiteId, FunctionId, InvocationId, ParameterId, TypeId,
     catalogue::CatalogueSnapshot,
     invocation::{InvokeEvent, InvokeRequest, invocation_carrier_type_id},
-    revision::ActiveDatabaseRevision,
+    revision::{ActiveDatabaseRevision, RevisionPair},
     system::{SYS_INVOKE_EVENT_TYPE_ID, SYS_INVOKE_REQUEST_TYPE_ID},
     types::TypeDescriptor,
     value::{OpaqueCodecRegistry, RuntimeValue},
@@ -41,6 +41,24 @@ const CANONICAL_VALUE_EVENT_KIND: u8 = 0x01;
 const CALL_COMPLETED_TAG: u8 = 0x83;
 const CALL_FAILED_TAG: u8 = 0x84;
 const CALL_CANCELLED_TAG: u8 = 0x85;
+const RESOURCE_MARKER: &[u8; 15] = b"ORNA-RESOURCE/1";
+const RESOURCE_HEADER_LENGTH: usize = RESOURCE_MARKER.len() + 1 + 1 + 4;
+const RESOURCE_REQUEST_TAG: u8 = 0x01;
+const RESOURCE_WINDOW_UPDATE_TAG: u8 = 0x02;
+const RESOURCE_CANCEL_TAG: u8 = 0x03;
+const RESOURCE_ACCEPTED_TAG: u8 = 0x81;
+const RESOURCE_VALUES_TAG: u8 = 0x82;
+const RESOURCE_COMPLETED_TAG: u8 = 0x83;
+const RESOURCE_FAILED_TAG: u8 = 0x84;
+const RESOURCE_CANCELLED_TAG: u8 = 0x85;
+/// The largest number of canonical arguments in one resource request.
+pub const MAX_RESOURCE_ARGUMENTS: usize = 256;
+/// The largest number of values in one resource batch.
+pub const MAX_RESOURCE_BATCH_ITEMS: usize = 65_535;
+/// The largest cumulative item count reported by one resource.
+pub const MAX_RESOURCE_TOTAL_ITEMS: u64 = u32::MAX as u64;
+/// The largest item or byte credit retained by one resource stream.
+pub const MAX_RESOURCE_WINDOW: u64 = MAX_CHANNEL_WINDOW;
 /// The largest payload accepted by one raw-call frame.
 pub const MAX_FRAME_PAYLOAD_LENGTH: usize = 16 * 1024 * 1024 + 64;
 
@@ -363,6 +381,191 @@ pub enum ServerFrame {
         token: [u8; 8],
     },
 }
+
+/// The target kind of one asynchronous resource request.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ResourceKind {
+    /// A single scalar result.
+    Single,
+    /// A streamed sequence of non-empty value batches.
+    Stream,
+}
+
+/// The structured reason attached to a resource cancellation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ResourceCancellationCode {
+    /// The client explicitly cancelled the request.
+    ClientRequested,
+    /// A dependency invalidated the resource generation.
+    DependencyInvalidated,
+    /// The parent invocation was cancelled.
+    ParentInvocationCancelled,
+    /// The runtime is shutting down.
+    RuntimeShutdown,
+    /// The authenticated connection closed.
+    ConnectionClosed,
+    /// The server cancelled the nested invocation.
+    ServerRequested,
+}
+
+/// Compatibility alias for callers that name the field's value a reason.
+pub type ResourceCancelReason = ResourceCancellationCode;
+
+/// One canonical parameter/value pair in a resource request.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ResourceArgument {
+    /// The stable parameter identity.
+    pub parameter: ParameterId,
+    /// The canonical typed argument value.
+    pub value: RuntimeValue,
+}
+
+/// The client request that creates one resource generation.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ResourceRequest {
+    pub stream_id: u64,
+    pub request_id: InvocationId,
+    pub parent_invocation_id: InvocationId,
+    pub call_site_id: CallSiteId,
+    pub target_function_id: FunctionId,
+    pub target_revision: RevisionPair,
+    pub generation: u64,
+    pub resource_kind: ResourceKind,
+    pub arguments: Vec<ResourceArgument>,
+    pub item_window: u64,
+    pub byte_window: u64,
+}
+
+/// The server acceptance binding a request to its nested invocation.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ResourceAccepted {
+    pub stream_id: u64,
+    pub request_id: InvocationId,
+    pub nested_invocation_id: InvocationId,
+    pub target_revision: RevisionPair,
+    pub resource_kind: ResourceKind,
+}
+
+/// One non-empty canonical value batch from the server.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ResourceValues {
+    pub stream_id: u64,
+    pub request_id: InvocationId,
+    pub batch_sequence: u64,
+    pub item_count: u32,
+    pub byte_count: u32,
+    pub values: Vec<RuntimeValue>,
+}
+
+/// The successful terminal resource frame.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ResourceCompleted {
+    pub stream_id: u64,
+    pub request_id: InvocationId,
+    pub final_batch_sequence: u64,
+    pub total_items: u64,
+}
+
+/// The failed terminal resource frame.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ResourceFailed {
+    pub stream_id: u64,
+    pub request_id: InvocationId,
+    pub failure: CallFailure,
+}
+
+/// The cancelled terminal resource frame.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ResourceCancelled {
+    pub stream_id: u64,
+    pub request_id: InvocationId,
+    pub reason: ResourceCancellationCode,
+}
+
+/// Additional item and byte credit for a live resource stream.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ResourceWindowUpdate {
+    pub stream_id: u64,
+    pub request_id: InvocationId,
+    pub add_items: u64,
+    pub add_bytes: u64,
+}
+
+/// A client request to cancel one resource.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ResourceCancel {
+    pub stream_id: u64,
+    pub request_id: InvocationId,
+    pub reason: ResourceCancellationCode,
+}
+
+/// Named aliases for integrations that suffix wire structures with Frame.
+pub type ResourceRequestFrame = ResourceRequest;
+pub type ResourceAcceptedFrame = ResourceAccepted;
+pub type ResourceValuesFrame = ResourceValues;
+pub type ResourceCompletedFrame = ResourceCompleted;
+pub type ResourceFailedFrame = ResourceFailed;
+pub type ResourceCancelledFrame = ResourceCancelled;
+pub type ResourceWindowUpdateFrame = ResourceWindowUpdate;
+pub type ResourceCancelFrame = ResourceCancel;
+
+/// A client-to-server ORNA-RESOURCE/1 frame.
+#[derive(Clone, Debug, PartialEq)]
+pub enum ResourceClientFrame {
+    Request(ResourceRequest),
+    WindowUpdate(ResourceWindowUpdate),
+    Cancel(ResourceCancel),
+}
+
+/// A server-to-client ORNA-RESOURCE/1 frame.
+#[derive(Clone, Debug, PartialEq)]
+pub enum ResourceServerFrame {
+    Accepted(ResourceAccepted),
+    Values(ResourceValues),
+    Completed(ResourceCompleted),
+    Failed(ResourceFailed),
+    Cancelled(ResourceCancelled),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ResourceFrameDisposition { Applied, DroppedLate }
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ResourceConnectionError {
+    InvalidFrame { source: FrameCodecError },
+    UnknownStream { stream_id: u64 },
+    MismatchedRequest { stream_id: u64 },
+    WrongState { stream_id: u64 },
+    StreamNotIncreasing { stream_id: u64, previous: u64 },
+    TooManyLiveResources,
+    BatchSequenceMismatch { stream_id: u64, expected: u64, actual: u64 },
+    InsufficientCredit { stream_id: u64, item_available: u64, item_required: u64, byte_available: u64, byte_required: u64 },
+    ResourceTotalMismatch { stream_id: u64, expected: u64, actual: u64 },
+    ResourceBatchMismatch { stream_id: u64 },
+    ResourceAcceptanceMismatch { stream_id: u64 },
+    SequenceExhausted { stream_id: u64 },
+}
+
+impl fmt::Display for ResourceConnectionError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidFrame { .. } => formatter.write_str("invalid resource frame"),
+            Self::UnknownStream { .. } => formatter.write_str("unknown resource stream"),
+            Self::MismatchedRequest { .. } => formatter.write_str("resource request identity mismatches stream"),
+            Self::WrongState { .. } => formatter.write_str("resource frame violates stream state"),
+            Self::StreamNotIncreasing { .. } => formatter.write_str("resource stream id is not increasing"),
+            Self::TooManyLiveResources => formatter.write_str("too many live resource streams"),
+            Self::BatchSequenceMismatch { .. } => formatter.write_str("resource batch sequence is not contiguous"),
+            Self::InsufficientCredit { .. } => formatter.write_str("resource stream credit is insufficient"),
+            Self::ResourceTotalMismatch { .. } => formatter.write_str("resource total item count mismatches stream"),
+            Self::ResourceBatchMismatch { .. } => formatter.write_str("resource batch metadata mismatches values"),
+            Self::ResourceAcceptanceMismatch { .. } => formatter.write_str("resource acceptance does not match request"),
+            Self::SequenceExhausted { .. } => formatter.write_str("resource batch sequence is exhausted"),
+        }
+    }
+}
+
+impl std::error::Error for ResourceConnectionError {}
 
 /// One typed argument retained for a dispatched raw call.
 #[derive(Clone, Debug, PartialEq)]
@@ -1217,6 +1420,241 @@ impl ProtocolConnection {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ResourcePhase { Requested, Live }
+
+#[derive(Clone, Debug, PartialEq)]
+struct ResourceState {
+    request_id: InvocationId,
+    target_revision: RevisionPair,
+    resource_kind: ResourceKind,
+    phase: ResourcePhase,
+    accepted: bool,
+    item_window: u64,
+    byte_window: u64,
+    next_batch_sequence: u64,
+    last_batch_sequence: Option<u64>,
+    total_items: u64,
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ResourceProtocolConnection {
+    high_water_mark: Option<u64>,
+    streams: BTreeMap<u64, ResourceState>,
+    terminal: BTreeMap<u64, InvocationId>,
+}
+
+impl ResourceProtocolConnection {
+    pub const fn new() -> Self {
+        Self { high_water_mark: None, streams: BTreeMap::new(), terminal: BTreeMap::new() }
+    }
+
+    pub const fn high_water_mark(&self) -> Option<u64> { self.high_water_mark }
+
+    pub fn live_resources(&self) -> usize { self.streams.len() }
+
+    pub fn receive(&mut self, frame: ResourceClientFrame) -> Result<ResourceFrameDisposition, ResourceConnectionError> {
+        match frame {
+            ResourceClientFrame::Request(request) => self.open(request),
+            ResourceClientFrame::WindowUpdate(update) => self.window_update(update),
+            ResourceClientFrame::Cancel(cancel) => self.cancel(cancel),
+        }
+    }
+
+    pub fn open(&mut self, request: ResourceRequest) -> Result<ResourceFrameDisposition, ResourceConnectionError> {
+        require_resource_stream(request.stream_id).map_err(|source| ResourceConnectionError::InvalidFrame { source })?;
+        require_resource_kind_windows(request.resource_kind, request.item_window, request.byte_window)
+            .map_err(|source| ResourceConnectionError::InvalidFrame { source })?;
+        validate_resource_arguments(&request.arguments)
+            .map_err(|source| ResourceConnectionError::InvalidFrame { source })?;
+        for argument in &request.arguments {
+            require_resource_value(&argument.value)
+                .map_err(|source| ResourceConnectionError::InvalidFrame { source })?;
+        }
+        if let Some(previous) = self.high_water_mark {
+            if request.stream_id <= previous {
+                return Err(ResourceConnectionError::StreamNotIncreasing { stream_id: request.stream_id, previous });
+            }
+        }
+        if self.streams.len() == MAX_LIVE_STREAMS {
+            return Err(ResourceConnectionError::TooManyLiveResources);
+        }
+        if self.streams.contains_key(&request.stream_id) || self.terminal.contains_key(&request.stream_id) {
+            return Err(ResourceConnectionError::StreamNotIncreasing { stream_id: request.stream_id, previous: self.high_water_mark.unwrap_or(0) });
+        }
+        self.high_water_mark = Some(request.stream_id);
+        self.streams.insert(request.stream_id, ResourceState {
+            request_id: request.request_id,
+            target_revision: request.target_revision,
+            resource_kind: request.resource_kind,
+            phase: ResourcePhase::Requested,
+            accepted: false,
+            item_window: request.item_window,
+            byte_window: request.byte_window,
+            next_batch_sequence: 0,
+            last_batch_sequence: None,
+            total_items: 0,
+        });
+        Ok(ResourceFrameDisposition::Applied)
+    }
+
+    pub fn apply(&mut self, frame: ResourceServerFrame) -> Result<ResourceFrameDisposition, ResourceConnectionError> {
+        match frame {
+            ResourceServerFrame::Accepted(frame) => self.accepted(frame),
+            ResourceServerFrame::Values(frame) => self.values(frame),
+            ResourceServerFrame::Completed(frame) => self.completed(frame),
+            ResourceServerFrame::Failed(frame) => self.terminal_frame(frame.stream_id, frame.request_id),
+            ResourceServerFrame::Cancelled(frame) => self.terminal_frame(frame.stream_id, frame.request_id),
+        }
+    }
+
+    fn check_terminal(&self, stream_id: u64, request_id: InvocationId) -> Result<Option<ResourceFrameDisposition>, ResourceConnectionError> {
+        if let Some(expected) = self.terminal.get(&stream_id) {
+            if *expected == request_id {
+                return Ok(Some(ResourceFrameDisposition::DroppedLate));
+            }
+            return Err(ResourceConnectionError::MismatchedRequest { stream_id });
+        }
+        Ok(None)
+    }
+
+    fn state_for(&self, stream_id: u64, request_id: InvocationId) -> Result<&ResourceState, ResourceConnectionError> {
+        let state = self.streams.get(&stream_id).ok_or(ResourceConnectionError::UnknownStream { stream_id })?;
+        if state.request_id != request_id {
+            return Err(ResourceConnectionError::MismatchedRequest { stream_id });
+        }
+        Ok(state)
+    }
+
+    fn accepted(&mut self, frame: ResourceAccepted) -> Result<ResourceFrameDisposition, ResourceConnectionError> {
+        if let Some(disposition) = self.check_terminal(frame.stream_id, frame.request_id)? { return Ok(disposition); }
+        let state = self.state_for(frame.stream_id, frame.request_id)?;
+        if state.target_revision != frame.target_revision || state.resource_kind != frame.resource_kind {
+            return Err(ResourceConnectionError::ResourceAcceptanceMismatch { stream_id: frame.stream_id });
+        }
+        if state.accepted { return Err(ResourceConnectionError::WrongState { stream_id: frame.stream_id }); }
+        if !matches!(state.phase, ResourcePhase::Requested) {
+            return Err(ResourceConnectionError::WrongState { stream_id: frame.stream_id });
+        }
+        let state = self.streams.get_mut(&frame.stream_id).expect("resource state checked");
+        state.accepted = true;
+        if matches!(state.phase, ResourcePhase::Requested) { state.phase = ResourcePhase::Live; }
+        Ok(ResourceFrameDisposition::Applied)
+    }
+
+    fn values(&mut self, frame: ResourceValues) -> Result<ResourceFrameDisposition, ResourceConnectionError> {
+        if let Some(disposition) = self.check_terminal(frame.stream_id, frame.request_id)? { return Ok(disposition); }
+        let state = self.state_for(frame.stream_id, frame.request_id)?;
+        if !(state.accepted && matches!(state.phase, ResourcePhase::Live)) {
+            return Err(ResourceConnectionError::WrongState { stream_id: frame.stream_id });
+        }
+        if frame.values.iter().any(|value| invocation_carrier_type_id(value).is_some()) {
+            let carrier = frame.values.iter().find_map(invocation_carrier_type_id).expect("carrier checked");
+            return Err(ResourceConnectionError::InvalidFrame { source: FrameCodecError::InvocationCarrierNotAccepted { carrier } });
+        }
+        if frame.values.is_empty() || frame.item_count == 0 || frame.item_count as usize != frame.values.len() {
+            return Err(ResourceConnectionError::ResourceBatchMismatch { stream_id: frame.stream_id });
+        }
+        if matches!(state.resource_kind, ResourceKind::Single) && state.last_batch_sequence.is_some() {
+            return Err(ResourceConnectionError::WrongState { stream_id: frame.stream_id });
+        }
+        if frame.batch_sequence != state.next_batch_sequence {
+            return Err(ResourceConnectionError::BatchSequenceMismatch { stream_id: frame.stream_id, expected: state.next_batch_sequence, actual: frame.batch_sequence });
+        }
+        let required_items = u64::from(frame.item_count);
+        let required_bytes = u64::from(frame.byte_count);
+        if required_items > state.item_window || required_bytes > state.byte_window {
+            return Err(ResourceConnectionError::InsufficientCredit { stream_id: frame.stream_id, item_available: state.item_window, item_required: required_items, byte_available: state.byte_window, byte_required: required_bytes });
+        }
+        let total_items = state.total_items.checked_add(required_items).ok_or(ResourceConnectionError::ResourceTotalMismatch { stream_id: frame.stream_id, expected: MAX_RESOURCE_TOTAL_ITEMS, actual: u64::MAX })?;
+        require_resource_total_items(total_items).map_err(|source| ResourceConnectionError::InvalidFrame { source })?;
+        let next_sequence = state.next_batch_sequence.checked_add(1).ok_or(ResourceConnectionError::SequenceExhausted { stream_id: frame.stream_id })?;
+        let state = self.streams.get_mut(&frame.stream_id).expect("resource state checked");
+        state.item_window -= required_items;
+        state.byte_window -= required_bytes;
+        state.next_batch_sequence = next_sequence;
+        state.last_batch_sequence = Some(frame.batch_sequence);
+        state.total_items = total_items;
+        Ok(ResourceFrameDisposition::Applied)
+    }
+
+    fn completed(&mut self, frame: ResourceCompleted) -> Result<ResourceFrameDisposition, ResourceConnectionError> {
+        if let Some(disposition) = self.check_terminal(frame.stream_id, frame.request_id)? { return Ok(disposition); }
+        let state = self.state_for(frame.stream_id, frame.request_id)?;
+        if !(state.accepted && matches!(state.phase, ResourcePhase::Live)) {
+            return Err(ResourceConnectionError::WrongState { stream_id: frame.stream_id });
+        }
+        if matches!(state.resource_kind, ResourceKind::Single) && state.last_batch_sequence.is_none() {
+            return Err(ResourceConnectionError::WrongState { stream_id: frame.stream_id });
+        }
+        let expected_sequence = state.last_batch_sequence.unwrap_or(0);
+        if frame.final_batch_sequence != expected_sequence {
+            return Err(ResourceConnectionError::BatchSequenceMismatch { stream_id: frame.stream_id, expected: expected_sequence, actual: frame.final_batch_sequence });
+        }
+        if frame.total_items != state.total_items {
+            return Err(ResourceConnectionError::ResourceTotalMismatch { stream_id: frame.stream_id, expected: state.total_items, actual: frame.total_items });
+        }
+        self.finish(frame.stream_id, frame.request_id);
+        Ok(ResourceFrameDisposition::Applied)
+    }
+
+    fn terminal_frame(&mut self, stream_id: u64, request_id: InvocationId) -> Result<ResourceFrameDisposition, ResourceConnectionError> {
+        if let Some(disposition) = self.check_terminal(stream_id, request_id)? { return Ok(disposition); }
+        let _ = self.state_for(stream_id, request_id)?;
+        self.finish(stream_id, request_id);
+        Ok(ResourceFrameDisposition::Applied)
+    }
+
+    fn window_update(&mut self, update: ResourceWindowUpdate) -> Result<ResourceFrameDisposition, ResourceConnectionError> {
+        if let Some(disposition) = self.check_terminal(update.stream_id, update.request_id)? { return Ok(disposition); }
+        let state = self.state_for(update.stream_id, update.request_id)?;
+        if !state.accepted || !matches!(state.phase, ResourcePhase::Live) {
+            return Err(ResourceConnectionError::WrongState { stream_id: update.stream_id });
+        }
+        require_resource_window_addition(update.add_items, update.add_bytes).map_err(|source| ResourceConnectionError::InvalidFrame { source })?;
+        let items = state.item_window.checked_add(update.add_items).filter(|value| *value <= MAX_RESOURCE_WINDOW);
+        let bytes = state.byte_window.checked_add(update.add_bytes).filter(|value| *value <= MAX_RESOURCE_WINDOW);
+        let (Some(items), Some(bytes)) = (items, bytes) else {
+            return Err(ResourceConnectionError::InvalidFrame { source: FrameCodecError::ResourceWindowOverflow });
+        };
+        let state = self.streams.get_mut(&update.stream_id).expect("resource state checked");
+        state.item_window = items;
+        state.byte_window = bytes;
+        Ok(ResourceFrameDisposition::Applied)
+    }
+
+    fn cancel(&mut self, cancel: ResourceCancel) -> Result<ResourceFrameDisposition, ResourceConnectionError> {
+        if let Some(disposition) = self.check_terminal(cancel.stream_id, cancel.request_id)? { return Ok(disposition); }
+        let state = self.state_for(cancel.stream_id, cancel.request_id)?;
+        if matches!(state.phase, ResourcePhase::Requested | ResourcePhase::Live) {
+            self.finish(cancel.stream_id, cancel.request_id);
+            return Ok(ResourceFrameDisposition::Applied);
+        }
+        Err(ResourceConnectionError::WrongState { stream_id: cancel.stream_id })
+    }
+
+    fn finish(&mut self, stream_id: u64, request_id: InvocationId) {
+        self.streams.remove(&stream_id);
+        self.terminal.insert(stream_id, request_id);
+        while self.terminal.len() > MAX_LIVE_STREAMS {
+            let Some(stream) = self.terminal.keys().next().copied() else { break; };
+            self.terminal.remove(&stream);
+        }
+    }
+
+    pub fn shutdown(&mut self) -> usize {
+        let finished = self.streams.len();
+        let streams: Vec<_> = self.streams.iter().map(|(stream, state)| (*stream, state.request_id)).collect();
+        self.streams.clear();
+        for (stream, request_id) in streams { self.terminal.insert(stream, request_id); }
+        while self.terminal.len() > MAX_LIVE_STREAMS {
+            let Some(stream) = self.terminal.keys().next().copied() else { break; };
+            self.terminal.remove(&stream);
+        }
+        finished
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum RawCallClientPhase {
     AwaitingAcceptance,
     Running,
@@ -1587,6 +2025,38 @@ pub enum FrameCodecError {
         /// The carrier identity found in the envelope.
         actual: TypeId,
     },
+    /// A resource frame does not contain the ORNA-RESOURCE/1 marker.
+    ResourceInvalidMarker,
+    /// A resource frame tag is not defined for its direction.
+    ResourceUnknownTag { tag: u8 },
+    /// A resource frame has the opposite direction's tag.
+    ResourceWrongDirection { tag: u8 },
+    /// A resource frame payload has a malformed shape.
+    ResourceMalformedPayload,
+    /// A resource request or batch has too many entries.
+    TooManyResourceEntries { actual: usize, maximum: usize },
+    /// Resource arguments are not strictly ascending by ParameterId.
+    NonCanonicalResourceArgumentOrder { previous: ParameterId, current: ParameterId },
+    /// A resource request repeats one ParameterId.
+    DuplicateResourceArgument { parameter: ParameterId },
+    /// A resource values frame is empty.
+    EmptyResourceValues,
+    /// A resource value batch's declared count does not match its values.
+    ResourceItemCountMismatch { declared: u32, actual: usize },
+    /// A resource value batch's declared bytes do not match its encoded values.
+    ResourceByteCountMismatch { declared: u32, actual: usize },
+    /// A resource cancellation code is not defined.
+    InvalidResourceCancellationCode { value: u8 },
+    /// A resource kind is not defined.
+    InvalidResourceKind { value: u8 },
+    /// A resource stream id must be non-zero.
+    InvalidResourceStream { stream_id: u64 },
+    /// A resource window exceeds the configured maximum.
+    ResourceWindowExceeded { actual: u64, maximum: u64 },
+    /// A resource window addition overflows or exceeds the configured maximum.
+    ResourceWindowOverflow,
+    /// A completed resource reports too many total items.
+    ResourceTotalItemsExceeded { actual: u64, maximum: u64 },
     /// A failure payload is not one of the four closed values.
     InvalidFailure {
         /// The invalid four-byte failure value.
@@ -1680,6 +2150,46 @@ impl fmt::Display for FrameCodecError {
             }
             Self::InvocationCarrierWrongType { .. } => {
                 formatter.write_str("sealed invocation carrier identity is invalid")
+            }
+            Self::ResourceInvalidMarker => {
+                formatter.write_str("resource frame marker is invalid")
+            }
+            Self::ResourceUnknownTag { .. } => formatter.write_str("resource frame tag is unknown"),
+            Self::ResourceWrongDirection { .. } => {
+                formatter.write_str("resource frame has the wrong direction")
+            }
+            Self::ResourceMalformedPayload => {
+                formatter.write_str("resource frame payload is malformed")
+            }
+            Self::TooManyResourceEntries { .. } => {
+                formatter.write_str("resource frame has too many entries")
+            }
+            Self::NonCanonicalResourceArgumentOrder { .. } => {
+                formatter.write_str("resource arguments are not in canonical order")
+            }
+            Self::DuplicateResourceArgument { .. } => {
+                formatter.write_str("resource arguments contain a duplicate parameter")
+            }
+            Self::EmptyResourceValues => formatter.write_str("resource values frame is empty"),
+            Self::ResourceItemCountMismatch { .. } => {
+                formatter.write_str("resource item count does not match values")
+            }
+            Self::ResourceByteCountMismatch { .. } => {
+                formatter.write_str("resource byte count does not match values")
+            }
+            Self::InvalidResourceCancellationCode { .. } => {
+                formatter.write_str("resource cancellation code is invalid")
+            }
+            Self::InvalidResourceKind { .. } => formatter.write_str("resource kind is invalid"),
+            Self::InvalidResourceStream { .. } => {
+                formatter.write_str("resource stream id is invalid")
+            }
+            Self::ResourceWindowExceeded { .. } => {
+                formatter.write_str("resource window exceeds the configured maximum")
+            }
+            Self::ResourceWindowOverflow => formatter.write_str("resource window overflows"),
+            Self::ResourceTotalItemsExceeded { .. } => {
+                formatter.write_str("resource total item count exceeds the configured maximum")
             }
             Self::InvalidFailure { .. } => formatter.write_str("raw-call failure value is invalid"),
             Self::EmptyEventBatch => formatter.write_str("raw-call event batch is empty"),
@@ -1898,6 +2408,795 @@ pub fn decode_invocation_event_batch(
         return Err(FrameCodecError::TrailingEventBytes);
     }
     InvocationEventBatch::new(records)
+}
+
+/// Encodes one complete ORNA-RESOURCE/1 client frame.
+pub fn encode_resource_client_frame(
+    active: &ActiveDatabaseRevision,
+    registry: &OpaqueCodecRegistry,
+    frame: &ResourceClientFrame,
+) -> Result<Vec<u8>, FrameCodecError> {
+    match frame {
+        ResourceClientFrame::Request(request) => encode_resource_request(active, registry, request),
+        ResourceClientFrame::WindowUpdate(update) => {
+            encode_resource_window_update(update)
+        }
+        ResourceClientFrame::Cancel(cancel) => encode_resource_cancel(cancel),
+    }
+}
+
+/// Decodes one complete ORNA-RESOURCE/1 client frame.
+pub fn decode_resource_client_frame(
+    active: &ActiveDatabaseRevision,
+    registry: &OpaqueCodecRegistry,
+    encoded: &[u8],
+) -> Result<ResourceClientFrame, FrameCodecError> {
+    let (tag, payload) = decode_resource_envelope(encoded)?;
+    match tag {
+        RESOURCE_REQUEST_TAG => Ok(ResourceClientFrame::Request(decode_resource_request(
+            active, registry, payload,
+        )?)),
+        RESOURCE_WINDOW_UPDATE_TAG => Ok(ResourceClientFrame::WindowUpdate(
+            decode_resource_window_update(payload)?,
+        )),
+        RESOURCE_CANCEL_TAG => Ok(ResourceClientFrame::Cancel(decode_resource_cancel(payload)?)),
+        RESOURCE_ACCEPTED_TAG..=RESOURCE_CANCELLED_TAG => {
+            Err(FrameCodecError::ResourceWrongDirection { tag })
+        }
+        tag => Err(FrameCodecError::ResourceUnknownTag { tag }),
+    }
+}
+
+/// Encodes one ORNA-RESOURCE/1 request with canonical typed argument values.
+pub fn encode_resource_request(
+    active: &ActiveDatabaseRevision,
+    registry: &OpaqueCodecRegistry,
+    request: &ResourceRequest,
+) -> Result<Vec<u8>, FrameCodecError> {
+    require_resource_stream(request.stream_id)?;
+    require_resource_kind_windows(request.resource_kind, request.item_window, request.byte_window)?;
+    validate_resource_arguments(&request.arguments)?;
+    let mut payload = Vec::new();
+    payload.extend_from_slice(&request.stream_id.to_be_bytes());
+    payload.extend_from_slice(&request.request_id.to_bytes());
+    payload.extend_from_slice(&request.parent_invocation_id.to_bytes());
+    payload.extend_from_slice(&request.call_site_id.to_bytes());
+    payload.extend_from_slice(&request.target_function_id.to_bytes());
+    append_revision_pair(&mut payload, request.target_revision);
+    payload.extend_from_slice(&request.generation.to_be_bytes());
+    payload.push(resource_kind_wire(request.resource_kind));
+    let argument_count = u32::try_from(request.arguments.len()).map_err(|_| {
+        FrameCodecError::TooManyResourceEntries {
+            actual: request.arguments.len(),
+            maximum: MAX_RESOURCE_ARGUMENTS,
+        }
+    })?;
+    payload.extend_from_slice(&argument_count.to_be_bytes());
+    for argument in &request.arguments {
+        require_resource_value(&argument.value)?;
+        payload.extend_from_slice(&argument.parameter.to_bytes());
+        let value = FrameVersion::Constructed(active, registry)
+            .encode_value(&argument.value)
+            .map_err(|source| FrameCodecError::Value { source })?;
+        append_length_delimited(&mut payload, &value)?;
+    }
+    payload.extend_from_slice(&request.item_window.to_be_bytes());
+    payload.extend_from_slice(&request.byte_window.to_be_bytes());
+    encode_resource_envelope(RESOURCE_REQUEST_TAG, &payload)
+}
+
+/// Decodes one ORNA-RESOURCE/1 request from its payload or complete frame.
+pub fn decode_resource_request(
+    active: &ActiveDatabaseRevision,
+    registry: &OpaqueCodecRegistry,
+    encoded: &[u8],
+) -> Result<ResourceRequest, FrameCodecError> {
+    let payload = if encoded.starts_with(RESOURCE_MARKER) {
+        let (tag, payload) = decode_resource_envelope(encoded)?;
+        if tag != RESOURCE_REQUEST_TAG {
+            return Err(FrameCodecError::ResourceWrongDirection { tag });
+        }
+        payload
+    } else {
+        require_resource_payload_limit(encoded.len())?;
+        encoded
+    };
+    let mut cursor = 0;
+    let stream_id = resource_u64(payload, &mut cursor)?;
+    require_resource_stream(stream_id)?;
+    let request_id = resource_id(payload, &mut cursor, InvocationId::from_bytes)?;
+    let parent_invocation_id = resource_id(payload, &mut cursor, InvocationId::from_bytes)?;
+    let call_site_id = resource_id(payload, &mut cursor, CallSiteId::from_bytes)?;
+    let target_function_id = resource_id(payload, &mut cursor, FunctionId::from_bytes)?;
+    let target_revision = parse_revision_pair(payload, &mut cursor)?;
+    let generation = resource_u64(payload, &mut cursor)?;
+    let resource_kind = resource_kind_from_wire(resource_u8(payload, &mut cursor)?)?;
+    let argument_count = resource_u32(payload, &mut cursor)? as usize;
+    if argument_count > MAX_RESOURCE_ARGUMENTS {
+        return Err(FrameCodecError::TooManyResourceEntries {
+            actual: argument_count,
+            maximum: MAX_RESOURCE_ARGUMENTS,
+        });
+    }
+    let mut arguments = Vec::with_capacity(argument_count);
+    let mut previous = None;
+    for _ in 0..argument_count {
+        let parameter = resource_id(payload, &mut cursor, ParameterId::from_bytes)?;
+        if let Some(previous) = previous {
+            if parameter == previous {
+                return Err(FrameCodecError::DuplicateResourceArgument { parameter });
+            }
+            if parameter < previous {
+                return Err(FrameCodecError::NonCanonicalResourceArgumentOrder {
+                    previous,
+                    current: parameter,
+                });
+            }
+        }
+        previous = Some(parameter);
+        let encoded_value = resource_bytes(payload, &mut cursor)?;
+        let value = FrameVersion::Constructed(active, registry)
+            .decode_value(encoded_value)
+            .map_err(|source| FrameCodecError::Value { source })?;
+        require_resource_value(&value)?;
+        arguments.push(ResourceArgument { parameter, value });
+    }
+    let item_window = resource_u64(payload, &mut cursor)?;
+    let byte_window = resource_u64(payload, &mut cursor)?;
+    if cursor != payload.len() {
+        return Err(FrameCodecError::TrailingBytes {
+            declared: cursor,
+            actual: payload.len(),
+        });
+    }
+    require_resource_kind_windows(resource_kind, item_window, byte_window)?;
+    Ok(ResourceRequest {
+        stream_id,
+        request_id,
+        parent_invocation_id,
+        call_site_id,
+        target_function_id,
+        target_revision,
+        generation,
+        resource_kind,
+        arguments,
+        item_window,
+        byte_window,
+    })
+}
+
+/// Encodes one server acceptance frame.
+pub fn encode_resource_accepted(frame: &ResourceAccepted) -> Result<Vec<u8>, FrameCodecError> {
+    require_resource_stream(frame.stream_id)?;
+    let mut payload = Vec::with_capacity(8 + 16 + 16 + 32 + 1);
+    payload.extend_from_slice(&frame.stream_id.to_be_bytes());
+    payload.extend_from_slice(&frame.request_id.to_bytes());
+    payload.extend_from_slice(&frame.nested_invocation_id.to_bytes());
+    append_revision_pair(&mut payload, frame.target_revision);
+    payload.push(resource_kind_wire(frame.resource_kind));
+    encode_resource_envelope(RESOURCE_ACCEPTED_TAG, &payload)
+}
+
+/// Encodes one non-empty server values frame.
+pub fn encode_resource_values(
+    active: &ActiveDatabaseRevision,
+    registry: &OpaqueCodecRegistry,
+    frame: &ResourceValues,
+) -> Result<Vec<u8>, FrameCodecError> {
+    require_resource_stream(frame.stream_id)?;
+    if frame.values.is_empty() {
+        return Err(FrameCodecError::EmptyResourceValues);
+    }
+    if frame.values.len() > MAX_RESOURCE_BATCH_ITEMS {
+        return Err(FrameCodecError::TooManyResourceEntries {
+            actual: frame.values.len(),
+            maximum: MAX_RESOURCE_BATCH_ITEMS,
+        });
+    }
+    let mut encoded_values = Vec::with_capacity(frame.values.len());
+    let mut byte_count = 0usize;
+    for value in &frame.values {
+        require_resource_value(value)?;
+        let encoded = FrameVersion::Constructed(active, registry)
+            .encode_value(value)
+            .map_err(|source| FrameCodecError::Value { source })?;
+        byte_count = byte_count.checked_add(encoded.len()).ok_or(
+            FrameCodecError::ResourceByteCountMismatch {
+                declared: frame.byte_count,
+                actual: usize::MAX,
+            },
+        )?;
+        encoded_values.push(encoded);
+    }
+    let item_count = u32::try_from(frame.values.len()).map_err(|_| {
+        FrameCodecError::TooManyResourceEntries {
+            actual: frame.values.len(),
+            maximum: MAX_RESOURCE_BATCH_ITEMS,
+        }
+    })?;
+    let actual_bytes = u32::try_from(byte_count).map_err(|_| FrameCodecError::PayloadTooLarge {
+        actual: byte_count,
+        maximum: MAX_FRAME_PAYLOAD_LENGTH,
+    })?;
+    if frame.item_count != item_count {
+        return Err(FrameCodecError::ResourceItemCountMismatch {
+            declared: frame.item_count,
+            actual: frame.values.len(),
+        });
+    }
+    if frame.byte_count != actual_bytes {
+        return Err(FrameCodecError::ResourceByteCountMismatch {
+            declared: frame.byte_count,
+            actual: byte_count,
+        });
+    }
+    let mut payload = Vec::new();
+    payload.extend_from_slice(&frame.stream_id.to_be_bytes());
+    payload.extend_from_slice(&frame.request_id.to_bytes());
+    payload.extend_from_slice(&frame.batch_sequence.to_be_bytes());
+    payload.extend_from_slice(&item_count.to_be_bytes());
+    payload.extend_from_slice(&actual_bytes.to_be_bytes());
+    for encoded in encoded_values {
+        append_length_delimited(&mut payload, &encoded)?;
+    }
+    encode_resource_envelope(RESOURCE_VALUES_TAG, &payload)
+}
+
+/// Decodes one server acceptance frame.
+pub fn decode_resource_accepted(encoded: &[u8]) -> Result<ResourceAccepted, FrameCodecError> {
+    let (tag, payload) = decode_resource_envelope(encoded)?;
+    if tag != RESOURCE_ACCEPTED_TAG {
+        return Err(FrameCodecError::ResourceWrongDirection { tag });
+    }
+    let mut cursor = 0;
+    let stream_id = resource_u64(payload, &mut cursor)?;
+    require_resource_stream(stream_id)?;
+    let request_id = resource_id(payload, &mut cursor, InvocationId::from_bytes)?;
+    let nested_invocation_id = resource_id(payload, &mut cursor, InvocationId::from_bytes)?;
+    let target_revision = parse_revision_pair(payload, &mut cursor)?;
+    let resource_kind = resource_kind_from_wire(resource_u8(payload, &mut cursor)?)?;
+    require_resource_end(payload, cursor)?;
+    Ok(ResourceAccepted {
+        stream_id,
+        request_id,
+        nested_invocation_id,
+        target_revision,
+        resource_kind,
+    })
+}
+
+/// Decodes one server values frame.
+pub fn decode_resource_values(
+    active: &ActiveDatabaseRevision,
+    registry: &OpaqueCodecRegistry,
+    encoded: &[u8],
+) -> Result<ResourceValues, FrameCodecError> {
+    let (tag, payload) = decode_resource_envelope(encoded)?;
+    if tag != RESOURCE_VALUES_TAG {
+        return Err(FrameCodecError::ResourceWrongDirection { tag });
+    }
+    let mut cursor = 0;
+    let stream_id = resource_u64(payload, &mut cursor)?;
+    require_resource_stream(stream_id)?;
+    let request_id = resource_id(payload, &mut cursor, InvocationId::from_bytes)?;
+    let batch_sequence = resource_u64(payload, &mut cursor)?;
+    let item_count = resource_u32(payload, &mut cursor)?;
+    if item_count == 0 || item_count as usize > MAX_RESOURCE_BATCH_ITEMS {
+        return Err(if item_count == 0 {
+            FrameCodecError::EmptyResourceValues
+        } else {
+            FrameCodecError::TooManyResourceEntries {
+                actual: item_count as usize,
+                maximum: MAX_RESOURCE_BATCH_ITEMS,
+            }
+        });
+    }
+    let byte_count = resource_u32(payload, &mut cursor)?;
+    if byte_count as usize > MAX_FRAME_PAYLOAD_LENGTH {
+        return Err(FrameCodecError::PayloadTooLarge {
+            actual: byte_count as usize,
+            maximum: MAX_FRAME_PAYLOAD_LENGTH,
+        });
+    }
+    let mut values = Vec::with_capacity(item_count as usize);
+    let mut actual_bytes = 0usize;
+    for _ in 0..item_count {
+        let encoded_value = resource_bytes(payload, &mut cursor)?;
+        actual_bytes = actual_bytes.checked_add(encoded_value.len()).ok_or(
+            FrameCodecError::ResourceByteCountMismatch {
+                declared: byte_count,
+                actual: usize::MAX,
+            },
+        )?;
+        let value = FrameVersion::Constructed(active, registry)
+            .decode_value(encoded_value)
+            .map_err(|source| FrameCodecError::Value { source })?;
+        require_resource_value(&value)?;
+        values.push(value);
+    }
+    require_resource_end(payload, cursor)?;
+    if actual_bytes != byte_count as usize {
+        return Err(FrameCodecError::ResourceByteCountMismatch {
+            declared: byte_count,
+            actual: actual_bytes,
+        });
+    }
+    Ok(ResourceValues {
+        stream_id,
+        request_id,
+        batch_sequence,
+        item_count,
+        byte_count,
+        values,
+    })
+}
+
+/// Encodes one successful terminal frame.
+pub fn encode_resource_completed(frame: &ResourceCompleted) -> Result<Vec<u8>, FrameCodecError> {
+    require_resource_stream(frame.stream_id)?;
+    require_resource_total_items(frame.total_items)?;
+    let mut payload = Vec::with_capacity(8 + 16 + 8 + 8);
+    payload.extend_from_slice(&frame.stream_id.to_be_bytes());
+    payload.extend_from_slice(&frame.request_id.to_bytes());
+    payload.extend_from_slice(&frame.final_batch_sequence.to_be_bytes());
+    payload.extend_from_slice(&frame.total_items.to_be_bytes());
+    encode_resource_envelope(RESOURCE_COMPLETED_TAG, &payload)
+}
+
+/// Decodes one successful terminal frame.
+pub fn decode_resource_completed(encoded: &[u8]) -> Result<ResourceCompleted, FrameCodecError> {
+    let (tag, payload) = decode_resource_envelope(encoded)?;
+    if tag != RESOURCE_COMPLETED_TAG {
+        return Err(FrameCodecError::ResourceWrongDirection { tag });
+    }
+    let mut cursor = 0;
+    let stream_id = resource_u64(payload, &mut cursor)?;
+    require_resource_stream(stream_id)?;
+    let request_id = resource_id(payload, &mut cursor, InvocationId::from_bytes)?;
+    let final_batch_sequence = resource_u64(payload, &mut cursor)?;
+    let total_items = resource_u64(payload, &mut cursor)?;
+    require_resource_end(payload, cursor)?;
+    require_resource_total_items(total_items)?;
+    Ok(ResourceCompleted {
+        stream_id,
+        request_id,
+        final_batch_sequence,
+        total_items,
+    })
+}
+
+/// Encodes one failed terminal frame.
+pub fn encode_resource_failed(frame: &ResourceFailed) -> Result<Vec<u8>, FrameCodecError> {
+    require_resource_stream(frame.stream_id)?;
+    let mut payload = Vec::with_capacity(8 + 16 + 4);
+    payload.extend_from_slice(&frame.stream_id.to_be_bytes());
+    payload.extend_from_slice(&frame.request_id.to_bytes());
+    payload.extend_from_slice(&frame.failure.wire());
+    encode_resource_envelope(RESOURCE_FAILED_TAG, &payload)
+}
+
+/// Decodes one failed terminal frame.
+pub fn decode_resource_failed(encoded: &[u8]) -> Result<ResourceFailed, FrameCodecError> {
+    let (tag, payload) = decode_resource_envelope(encoded)?;
+    if tag != RESOURCE_FAILED_TAG {
+        return Err(FrameCodecError::ResourceWrongDirection { tag });
+    }
+    let mut cursor = 0;
+    let stream_id = resource_u64(payload, &mut cursor)?;
+    require_resource_stream(stream_id)?;
+    let request_id = resource_id(payload, &mut cursor, InvocationId::from_bytes)?;
+    let failure = CallFailure::from_wire(resource_fixed::<4>(payload, &mut cursor)?)?;
+    require_resource_end(payload, cursor)?;
+    Ok(ResourceFailed {
+        stream_id,
+        request_id,
+        failure,
+    })
+}
+
+/// Encodes one cancelled terminal frame.
+pub fn encode_resource_cancelled(frame: &ResourceCancelled) -> Result<Vec<u8>, FrameCodecError> {
+    require_resource_stream(frame.stream_id)?;
+    let mut payload = Vec::with_capacity(8 + 16 + 1);
+    payload.extend_from_slice(&frame.stream_id.to_be_bytes());
+    payload.extend_from_slice(&frame.request_id.to_bytes());
+    payload.push(resource_cancellation_wire(frame.reason));
+    encode_resource_envelope(RESOURCE_CANCELLED_TAG, &payload)
+}
+
+/// Decodes one cancelled terminal frame.
+pub fn decode_resource_cancelled(encoded: &[u8]) -> Result<ResourceCancelled, FrameCodecError> {
+    let (tag, payload) = decode_resource_envelope(encoded)?;
+    if tag != RESOURCE_CANCELLED_TAG {
+        return Err(FrameCodecError::ResourceWrongDirection { tag });
+    }
+    let mut cursor = 0;
+    let stream_id = resource_u64(payload, &mut cursor)?;
+    require_resource_stream(stream_id)?;
+    let request_id = resource_id(payload, &mut cursor, InvocationId::from_bytes)?;
+    let reason = resource_cancellation_from_wire(resource_u8(payload, &mut cursor)?)?;
+    require_resource_end(payload, cursor)?;
+    Ok(ResourceCancelled {
+        stream_id,
+        request_id,
+        reason,
+    })
+}
+
+/// Encodes one window-update control frame.
+pub fn encode_resource_window_update(
+    frame: &ResourceWindowUpdate,
+) -> Result<Vec<u8>, FrameCodecError> {
+    require_resource_stream(frame.stream_id)?;
+    require_resource_window_addition(frame.add_items, frame.add_bytes)?;
+    let mut payload = Vec::with_capacity(8 + 16 + 8 + 8);
+    payload.extend_from_slice(&frame.stream_id.to_be_bytes());
+    payload.extend_from_slice(&frame.request_id.to_bytes());
+    payload.extend_from_slice(&frame.add_items.to_be_bytes());
+    payload.extend_from_slice(&frame.add_bytes.to_be_bytes());
+    encode_resource_envelope(RESOURCE_WINDOW_UPDATE_TAG, &payload)
+}
+
+/// Decodes one window-update control frame.
+pub fn decode_resource_window_update(
+    encoded: &[u8],
+) -> Result<ResourceWindowUpdate, FrameCodecError> {
+    let payload = if encoded.starts_with(RESOURCE_MARKER) {
+        let (tag, payload) = decode_resource_envelope(encoded)?;
+        if tag != RESOURCE_WINDOW_UPDATE_TAG {
+            return Err(FrameCodecError::ResourceWrongDirection { tag });
+        }
+        payload
+    } else {
+        require_resource_payload_limit(encoded.len())?;
+        encoded
+    };
+    let mut cursor = 0;
+    let stream_id = resource_u64(payload, &mut cursor)?;
+    require_resource_stream(stream_id)?;
+    let request_id = resource_id(payload, &mut cursor, InvocationId::from_bytes)?;
+    let add_items = resource_u64(payload, &mut cursor)?;
+    let add_bytes = resource_u64(payload, &mut cursor)?;
+    require_resource_end(payload, cursor)?;
+    require_resource_window_addition(add_items, add_bytes)?;
+    Ok(ResourceWindowUpdate {
+        stream_id,
+        request_id,
+        add_items,
+        add_bytes,
+    })
+}
+
+/// Encodes one cancellation control frame.
+pub fn encode_resource_cancel(frame: &ResourceCancel) -> Result<Vec<u8>, FrameCodecError> {
+    require_resource_stream(frame.stream_id)?;
+    let mut payload = Vec::with_capacity(8 + 16 + 1);
+    payload.extend_from_slice(&frame.stream_id.to_be_bytes());
+    payload.extend_from_slice(&frame.request_id.to_bytes());
+    payload.push(resource_cancellation_wire(frame.reason));
+    encode_resource_envelope(RESOURCE_CANCEL_TAG, &payload)
+}
+
+/// Decodes one cancellation control frame.
+pub fn decode_resource_cancel(encoded: &[u8]) -> Result<ResourceCancel, FrameCodecError> {
+    let payload = if encoded.starts_with(RESOURCE_MARKER) {
+        let (tag, payload) = decode_resource_envelope(encoded)?;
+        if tag != RESOURCE_CANCEL_TAG {
+            return Err(FrameCodecError::ResourceWrongDirection { tag });
+        }
+        payload
+    } else {
+        require_resource_payload_limit(encoded.len())?;
+        encoded
+    };
+    let mut cursor = 0;
+    let stream_id = resource_u64(payload, &mut cursor)?;
+    require_resource_stream(stream_id)?;
+    let request_id = resource_id(payload, &mut cursor, InvocationId::from_bytes)?;
+    let reason = resource_cancellation_from_wire(resource_u8(payload, &mut cursor)?)?;
+    require_resource_end(payload, cursor)?;
+    Ok(ResourceCancel {
+        stream_id,
+        request_id,
+        reason,
+    })
+}
+
+/// Encodes one complete ORNA-RESOURCE/1 server frame.
+pub fn encode_resource_server_frame(
+    active: &ActiveDatabaseRevision,
+    registry: &OpaqueCodecRegistry,
+    frame: &ResourceServerFrame,
+) -> Result<Vec<u8>, FrameCodecError> {
+    match frame {
+        ResourceServerFrame::Accepted(frame) => encode_resource_accepted(frame),
+        ResourceServerFrame::Values(frame) => encode_resource_values(active, registry, frame),
+        ResourceServerFrame::Completed(frame) => encode_resource_completed(frame),
+        ResourceServerFrame::Failed(frame) => encode_resource_failed(frame),
+        ResourceServerFrame::Cancelled(frame) => encode_resource_cancelled(frame),
+    }
+}
+
+/// Decodes one complete ORNA-RESOURCE/1 server frame.
+pub fn decode_resource_server_frame(
+    active: &ActiveDatabaseRevision,
+    registry: &OpaqueCodecRegistry,
+    encoded: &[u8],
+) -> Result<ResourceServerFrame, FrameCodecError> {
+    let (tag, _) = decode_resource_envelope(encoded)?;
+    match tag {
+        RESOURCE_ACCEPTED_TAG => Ok(ResourceServerFrame::Accepted(decode_resource_accepted(encoded)?)),
+        RESOURCE_VALUES_TAG => Ok(ResourceServerFrame::Values(decode_resource_values(
+            active, registry, encoded,
+        )?)),
+        RESOURCE_COMPLETED_TAG => Ok(ResourceServerFrame::Completed(decode_resource_completed(encoded)?)),
+        RESOURCE_FAILED_TAG => Ok(ResourceServerFrame::Failed(decode_resource_failed(encoded)?)),
+        RESOURCE_CANCELLED_TAG => Ok(ResourceServerFrame::Cancelled(decode_resource_cancelled(encoded)?)),
+        RESOURCE_REQUEST_TAG..=RESOURCE_CANCEL_TAG => {
+            Err(FrameCodecError::ResourceWrongDirection { tag })
+        }
+        tag => Err(FrameCodecError::ResourceUnknownTag { tag }),
+    }
+}
+
+fn require_resource_value(value: &RuntimeValue) -> Result<(), FrameCodecError> {
+    if let Some(carrier) = invocation_carrier_type_id(value) {
+        return Err(FrameCodecError::InvocationCarrierNotAccepted { carrier });
+    }
+    Ok(())
+}
+
+fn validate_resource_arguments(arguments: &[ResourceArgument]) -> Result<(), FrameCodecError> {
+    if arguments.len() > MAX_RESOURCE_ARGUMENTS {
+        return Err(FrameCodecError::TooManyResourceEntries {
+            actual: arguments.len(),
+            maximum: MAX_RESOURCE_ARGUMENTS,
+        });
+    }
+    let mut previous = None;
+    for argument in arguments {
+        if let Some(previous) = previous {
+            if argument.parameter == previous {
+                return Err(FrameCodecError::DuplicateResourceArgument {
+                    parameter: argument.parameter,
+                });
+            }
+            if argument.parameter < previous {
+                return Err(FrameCodecError::NonCanonicalResourceArgumentOrder {
+                    previous,
+                    current: argument.parameter,
+                });
+            }
+        }
+        previous = Some(argument.parameter);
+    }
+    Ok(())
+}
+
+fn append_revision_pair(payload: &mut Vec<u8>, revision: RevisionPair) {
+    payload.extend_from_slice(&revision.source().to_bytes());
+    payload.extend_from_slice(&revision.catalogue().to_bytes());
+}
+
+fn parse_revision_pair(payload: &[u8], cursor: &mut usize) -> Result<RevisionPair, FrameCodecError> {
+    let source = resource_id(payload, cursor, orna_core::SourceRevisionId::from_bytes)?;
+    let catalogue = resource_id(payload, cursor, orna_core::CatalogueRevisionId::from_bytes)?;
+    Ok(RevisionPair::new(source, catalogue))
+}
+
+fn resource_kind_wire(kind: ResourceKind) -> u8 {
+    match kind {
+        ResourceKind::Single => 0x01,
+        ResourceKind::Stream => 0x02,
+    }
+}
+
+fn resource_kind_from_wire(value: u8) -> Result<ResourceKind, FrameCodecError> {
+    match value {
+        0x01 => Ok(ResourceKind::Single),
+        0x02 => Ok(ResourceKind::Stream),
+        value => Err(FrameCodecError::InvalidResourceKind { value }),
+    }
+}
+
+fn resource_cancellation_wire(reason: ResourceCancellationCode) -> u8 {
+    match reason {
+        ResourceCancellationCode::ClientRequested => 0x01,
+        ResourceCancellationCode::DependencyInvalidated => 0x02,
+        ResourceCancellationCode::ParentInvocationCancelled => 0x03,
+        ResourceCancellationCode::RuntimeShutdown => 0x04,
+        ResourceCancellationCode::ConnectionClosed => 0x05,
+        ResourceCancellationCode::ServerRequested => 0x06,
+    }
+}
+
+fn resource_cancellation_from_wire(value: u8) -> Result<ResourceCancellationCode, FrameCodecError> {
+    match value {
+        0x01 => Ok(ResourceCancellationCode::ClientRequested),
+        0x02 => Ok(ResourceCancellationCode::DependencyInvalidated),
+        0x03 => Ok(ResourceCancellationCode::ParentInvocationCancelled),
+        0x04 => Ok(ResourceCancellationCode::RuntimeShutdown),
+        0x05 => Ok(ResourceCancellationCode::ConnectionClosed),
+        0x06 => Ok(ResourceCancellationCode::ServerRequested),
+        value => Err(FrameCodecError::InvalidResourceCancellationCode { value }),
+    }
+}
+
+fn require_resource_stream(stream_id: u64) -> Result<(), FrameCodecError> {
+    if stream_id == 0 {
+        Err(FrameCodecError::InvalidResourceStream { stream_id })
+    } else {
+        Ok(())
+    }
+}
+
+fn require_resource_window(window: u64) -> Result<(), FrameCodecError> {
+    if window > MAX_RESOURCE_WINDOW {
+        Err(FrameCodecError::ResourceWindowExceeded {
+            actual: window,
+            maximum: MAX_RESOURCE_WINDOW,
+        })
+    } else {
+        Ok(())
+    }
+}
+
+fn require_resource_kind_windows(
+    kind: ResourceKind,
+    item_window: u64,
+    byte_window: u64,
+) -> Result<(), FrameCodecError> {
+    require_resource_window(item_window)?;
+    require_resource_window(byte_window)?;
+    if matches!(kind, ResourceKind::Stream) && (item_window == 0 || byte_window == 0) {
+        return Err(FrameCodecError::ResourceWindowOverflow);
+    }
+    Ok(())
+}
+
+fn require_resource_window_addition(add_items: u64, add_bytes: u64) -> Result<(), FrameCodecError> {
+    if add_items == 0 && add_bytes == 0 {
+        return Err(FrameCodecError::ResourceWindowOverflow);
+    }
+    require_resource_window(add_items)?;
+    require_resource_window(add_bytes)
+}
+
+fn require_resource_total_items(total_items: u64) -> Result<(), FrameCodecError> {
+    if total_items > MAX_RESOURCE_TOTAL_ITEMS {
+        Err(FrameCodecError::ResourceTotalItemsExceeded {
+            actual: total_items,
+            maximum: MAX_RESOURCE_TOTAL_ITEMS,
+        })
+    } else {
+        Ok(())
+    }
+}
+
+fn append_length_delimited(payload: &mut Vec<u8>, bytes: &[u8]) -> Result<(), FrameCodecError> {
+    let length = u32::try_from(bytes.len()).map_err(|_| FrameCodecError::PayloadTooLarge {
+        actual: bytes.len(),
+        maximum: MAX_FRAME_PAYLOAD_LENGTH,
+    })?;
+    payload.extend_from_slice(&length.to_be_bytes());
+    payload.extend_from_slice(bytes);
+    require_resource_payload_limit(payload.len())
+}
+
+fn encode_resource_envelope(tag: u8, payload: &[u8]) -> Result<Vec<u8>, FrameCodecError> {
+    require_resource_payload_limit(payload.len())?;
+    let length = u32::try_from(payload.len()).map_err(|_| FrameCodecError::PayloadTooLarge {
+        actual: payload.len(),
+        maximum: MAX_FRAME_PAYLOAD_LENGTH,
+    })?;
+    let mut encoded = Vec::with_capacity(RESOURCE_HEADER_LENGTH + payload.len());
+    encoded.extend_from_slice(RESOURCE_MARKER);
+    encoded.push(tag);
+    encoded.push(0);
+    encoded.extend_from_slice(&length.to_be_bytes());
+    encoded.extend_from_slice(payload);
+    Ok(encoded)
+}
+
+fn decode_resource_envelope(encoded: &[u8]) -> Result<(u8, &[u8]), FrameCodecError> {
+    if encoded.len() < RESOURCE_HEADER_LENGTH {
+        return Err(FrameCodecError::TruncatedHeader { actual: encoded.len() });
+    }
+    if &encoded[..RESOURCE_MARKER.len()] != RESOURCE_MARKER {
+        return Err(FrameCodecError::ResourceInvalidMarker);
+    }
+    let tag = encoded[RESOURCE_MARKER.len()];
+    let flags = encoded[RESOURCE_MARKER.len() + 1];
+    if flags != 0 {
+        return Err(FrameCodecError::NonZeroFlags { flags });
+    }
+    let length_start = RESOURCE_MARKER.len() + 2;
+    let declared = u32::from_be_bytes(
+        encoded[length_start..length_start + 4]
+            .try_into()
+            .expect("resource header length checked"),
+    ) as usize;
+    require_resource_payload_limit(declared)?;
+    let actual = encoded.len() - RESOURCE_HEADER_LENGTH;
+    if actual < declared {
+        return Err(FrameCodecError::TruncatedPayload { declared, actual });
+    }
+    if actual > declared {
+        return Err(FrameCodecError::TrailingBytes { declared, actual });
+    }
+    Ok((tag, &encoded[RESOURCE_HEADER_LENGTH..]))
+}
+
+fn require_resource_payload_limit(actual: usize) -> Result<(), FrameCodecError> {
+    if actual <= MAX_FRAME_PAYLOAD_LENGTH {
+        Ok(())
+    } else {
+        Err(FrameCodecError::PayloadTooLarge {
+            actual,
+            maximum: MAX_FRAME_PAYLOAD_LENGTH,
+        })
+    }
+}
+
+fn resource_u8(payload: &[u8], cursor: &mut usize) -> Result<u8, FrameCodecError> {
+    Ok(resource_fixed::<1>(payload, cursor)?[0])
+}
+
+fn resource_u32(payload: &[u8], cursor: &mut usize) -> Result<u32, FrameCodecError> {
+    Ok(u32::from_be_bytes(resource_fixed::<4>(payload, cursor)?))
+}
+
+fn resource_u64(payload: &[u8], cursor: &mut usize) -> Result<u64, FrameCodecError> {
+    Ok(u64::from_be_bytes(resource_fixed::<8>(payload, cursor)?))
+}
+
+fn resource_id<T>(
+    payload: &[u8],
+    cursor: &mut usize,
+    from_bytes: fn([u8; 16]) -> T,
+) -> Result<T, FrameCodecError> {
+    Ok(from_bytes(resource_fixed::<16>(payload, cursor)?))
+}
+
+fn resource_fixed<const N: usize>(
+    payload: &[u8],
+    cursor: &mut usize,
+) -> Result<[u8; N], FrameCodecError> {
+    let end = cursor
+        .checked_add(N)
+        .ok_or(FrameCodecError::ResourceMalformedPayload)?;
+    if end > payload.len() {
+        return Err(FrameCodecError::ResourceMalformedPayload);
+    }
+    let bytes = payload[*cursor..end]
+        .try_into()
+        .expect("resource fixed length checked");
+    *cursor = end;
+    Ok(bytes)
+}
+
+fn resource_bytes<'a>(payload: &'a [u8], cursor: &mut usize) -> Result<&'a [u8], FrameCodecError> {
+    let length = resource_u32(payload, cursor)? as usize;
+    let end = cursor
+        .checked_add(length)
+        .ok_or(FrameCodecError::ResourceMalformedPayload)?;
+    if end > payload.len() {
+        return Err(FrameCodecError::ResourceMalformedPayload);
+    }
+    let bytes = &payload[*cursor..end];
+    *cursor = end;
+    Ok(bytes)
+}
+
+fn require_resource_end(payload: &[u8], cursor: usize) -> Result<(), FrameCodecError> {
+    if cursor == payload.len() {
+        Ok(())
+    } else {
+        Err(FrameCodecError::TrailingBytes {
+            declared: cursor,
+            actual: payload.len(),
+        })
+    }
 }
 
 /// Encodes one complete client frame.
@@ -4487,5 +5786,384 @@ mod tests {
                 }
             }
         }
+    }
+
+    fn resource_request_fixture() -> ResourceRequest {
+        ResourceRequest {
+            stream_id: 1,
+            request_id: InvocationId::from_bytes([0x02; 16]),
+            parent_invocation_id: InvocationId::from_bytes([0x03; 16]),
+            call_site_id: orna_core::CallSiteId::from_bytes([0x04; 16]),
+            target_function_id: FunctionId::from_bytes([0x05; 16]),
+            target_revision: RevisionPair::new(
+                SourceRevisionId::from_bytes([0x06; 16]),
+                CatalogueRevisionId::from_bytes([0x07; 16]),
+            ),
+            generation: 9,
+            resource_kind: ResourceKind::Single,
+            arguments: Vec::new(),
+            item_window: 10,
+            byte_window: 11,
+        }
+    }
+
+    #[test]
+    fn resource_request_has_deterministic_wire_order_and_exact_round_trip() {
+        let active = empty_active_revision();
+        let registry = test_registry();
+        let request = resource_request_fixture();
+        let encoded = encode_resource_request(&active, &registry, &request).unwrap();
+        let mut expected = Vec::new();
+        expected.extend_from_slice(b"ORNA-RESOURCE/1");
+        expected.extend_from_slice(&[RESOURCE_REQUEST_TAG, 0]);
+        expected.extend_from_slice(&133_u32.to_be_bytes());
+        expected.extend_from_slice(&1_u64.to_be_bytes());
+        expected.extend_from_slice(&[0x02; 16]);
+        expected.extend_from_slice(&[0x03; 16]);
+        expected.extend_from_slice(&[0x04; 16]);
+        expected.extend_from_slice(&[0x05; 16]);
+        expected.extend_from_slice(&[0x06; 16]);
+        expected.extend_from_slice(&[0x07; 16]);
+        expected.extend_from_slice(&9_u64.to_be_bytes());
+        expected.extend_from_slice(&[0x01, 0, 0, 0, 0]);
+        expected.extend_from_slice(&10_u64.to_be_bytes());
+        expected.extend_from_slice(&11_u64.to_be_bytes());
+        assert_eq!(encoded, expected);
+        let decoded = decode_resource_request(&active, &registry, &encoded).unwrap();
+        assert_eq!(decoded, request);
+        assert_eq!(encode_resource_request(&active, &registry, &decoded), Ok(encoded));
+    }
+
+    #[test]
+    fn resource_values_round_trip_preserves_canonical_value_bytes() {
+        let active = empty_active_revision();
+        let registry = test_registry();
+        let value = RuntimeValue::Integer(7);
+        let value_bytes = encode_constructed_value(&active, &registry, &value).unwrap();
+        let frame = ResourceValues {
+            stream_id: 2,
+            request_id: InvocationId::from_bytes([0x12; 16]),
+            batch_sequence: 0,
+            item_count: 1,
+            byte_count: value_bytes.len() as u32,
+            values: vec![value],
+        };
+        let encoded = encode_resource_values(&active, &registry, &frame).unwrap();
+        let decoded = decode_resource_values(&active, &registry, &encoded).unwrap();
+        assert_eq!(decoded, frame);
+        assert_eq!(encode_resource_values(&active, &registry, &decoded), Ok(encoded));
+    }
+
+    #[test]
+    fn resource_request_rejects_duplicate_and_noncanonical_arguments() {
+        let active = empty_active_revision();
+        let registry = test_registry();
+        let duplicate = ResourceRequest {
+            arguments: vec![
+                ResourceArgument {
+                    parameter: ParameterId::from_bytes([1; 16]),
+                    value: RuntimeValue::Integer(1),
+                },
+                ResourceArgument {
+                    parameter: ParameterId::from_bytes([1; 16]),
+                    value: RuntimeValue::Integer(2),
+                },
+            ],
+            ..resource_request_fixture()
+        };
+        assert!(matches!(
+            encode_resource_request(&active, &registry, &duplicate),
+            Err(FrameCodecError::DuplicateResourceArgument { .. })
+        ));
+        let descending = ResourceRequest {
+            arguments: vec![
+                ResourceArgument {
+                    parameter: ParameterId::from_bytes([2; 16]),
+                    value: RuntimeValue::Integer(1),
+                },
+                ResourceArgument {
+                    parameter: ParameterId::from_bytes([1; 16]),
+                    value: RuntimeValue::Integer(2),
+                },
+            ],
+            ..resource_request_fixture()
+        };
+        assert!(matches!(
+            encode_resource_request(&active, &registry, &descending),
+            Err(FrameCodecError::NonCanonicalResourceArgumentOrder { .. })
+        ));
+        let mut canonical = resource_request_fixture();
+        canonical.arguments = vec![
+            ResourceArgument {
+                parameter: ParameterId::from_bytes([1; 16]),
+                value: RuntimeValue::Integer(1),
+            },
+            ResourceArgument {
+                parameter: ParameterId::from_bytes([2; 16]),
+                value: RuntimeValue::Integer(2),
+            },
+        ];
+        let valid = encode_resource_request(&active, &registry, &canonical).unwrap();
+        let first_value = encode_constructed_value(&active, &registry, &RuntimeValue::Integer(1)).unwrap();
+        let second_parameter_offset = RESOURCE_HEADER_LENGTH + 117 + 16 + 4 + first_value.len();
+        let mut duplicate = valid.clone();
+        duplicate[second_parameter_offset..second_parameter_offset + 16].copy_from_slice(&[1; 16]);
+        assert!(matches!(
+            decode_resource_request(&active, &registry, &duplicate),
+            Err(FrameCodecError::DuplicateResourceArgument { .. })
+        ));
+        let mut descending_wire = valid;
+        descending_wire[second_parameter_offset..second_parameter_offset + 16].copy_from_slice(&[0; 16]);
+        assert!(matches!(
+            decode_resource_request(&active, &registry, &descending_wire),
+            Err(FrameCodecError::NonCanonicalResourceArgumentOrder { .. })
+        ));
+        let mut bytes = encode_resource_request(&active, &registry, &resource_request_fixture()).unwrap();
+        bytes.extend_from_slice(&[0]);
+        assert!(matches!(
+            decode_resource_request(&active, &registry, &bytes),
+            Err(FrameCodecError::TrailingBytes { .. })
+        ));
+    }
+
+    #[test]
+    fn resource_decoder_rejects_malformed_kind_windows_and_overflow() {
+        let active = empty_active_revision();
+        let registry = test_registry();
+        let mut request = resource_request_fixture();
+        request.resource_kind = ResourceKind::Stream;
+        request.item_window = 0;
+        assert!(matches!(
+            encode_resource_request(&active, &registry, &request),
+            Err(FrameCodecError::ResourceWindowOverflow)
+        ));
+        request.item_window = 1;
+        request.byte_window = 1;
+        assert!(encode_resource_request(&active, &registry, &request).is_ok());
+        request.item_window = MAX_RESOURCE_WINDOW;
+        request.byte_window = MAX_RESOURCE_WINDOW;
+        assert!(encode_resource_request(&active, &registry, &request).is_ok());
+        request.item_window = MAX_RESOURCE_WINDOW + 1;
+        assert!(matches!(
+            encode_resource_request(&active, &registry, &request),
+            Err(FrameCodecError::ResourceWindowExceeded { .. })
+        ));
+        let mut encoded = encode_resource_request(&active, &registry, &resource_request_fixture()).unwrap();
+        let kind_offset = RESOURCE_HEADER_LENGTH + 8 + 16 + 16 + 16 + 16 + 16 + 16 + 8;
+        encoded[kind_offset] = 0xff;
+        assert!(matches!(
+            decode_resource_request(&active, &registry, &encoded),
+            Err(FrameCodecError::InvalidResourceKind { value: 0xff })
+        ));
+        let update = ResourceWindowUpdate {
+            stream_id: 1,
+            request_id: InvocationId::from_bytes([1; 16]),
+            add_items: MAX_RESOURCE_WINDOW + 1,
+            add_bytes: 1,
+        };
+        assert!(matches!(
+            encode_resource_window_update(&update),
+            Err(FrameCodecError::ResourceWindowExceeded { .. })
+        ));
+        let lower_update = ResourceWindowUpdate {
+            stream_id: 1,
+            request_id: InvocationId::from_bytes([1; 16]),
+            add_items: 1,
+            add_bytes: 1,
+        };
+        assert!(encode_resource_window_update(&lower_update).is_ok());
+        let upper_update = ResourceWindowUpdate {
+            add_items: MAX_RESOURCE_WINDOW,
+            add_bytes: MAX_RESOURCE_WINDOW,
+            ..lower_update
+        };
+        assert!(encode_resource_window_update(&upper_update).is_ok());
+        let completed = ResourceCompleted {
+            stream_id: 1,
+            request_id: InvocationId::from_bytes([1; 16]),
+            final_batch_sequence: 0,
+            total_items: u64::MAX,
+        };
+        assert!(matches!(
+            encode_resource_completed(&completed),
+            Err(FrameCodecError::ResourceTotalItemsExceeded { .. })
+        ));
+    }
+
+    #[test]
+    fn resource_frames_reject_sealed_invocation_carriers_as_ordinary_values() {
+        let active = empty_active_revision();
+        let registry = test_registry();
+        let carrier = RuntimeValue::InvokeRequest(minimal_request(None));
+        let request = ResourceRequest {
+            arguments: vec![ResourceArgument {
+                parameter: ParameterId::from_bytes([0x08; 16]),
+                value: carrier.clone(),
+            }],
+            ..resource_request_fixture()
+        };
+        assert_eq!(
+            encode_resource_request(&active, &registry, &request),
+            Err(FrameCodecError::InvocationCarrierNotAccepted {
+                carrier: SYS_INVOKE_REQUEST_TYPE_ID,
+            })
+        );
+
+        let value_bytes = encode_constructed_value(&active, &registry, &carrier).unwrap();
+        let values = ResourceValues {
+            stream_id: 1,
+            request_id: InvocationId::from_bytes([0x12; 16]),
+            batch_sequence: 0,
+            item_count: 1,
+            byte_count: value_bytes.len() as u32,
+            values: vec![carrier],
+        };
+        assert_eq!(
+            encode_resource_values(&active, &registry, &values),
+            Err(FrameCodecError::InvocationCarrierNotAccepted {
+                carrier: SYS_INVOKE_REQUEST_TYPE_ID,
+            })
+        );
+    }
+
+    #[test]
+    fn resource_frame_family_round_trips_through_directional_dispatch() {
+        let active = empty_active_revision();
+        let registry = test_registry();
+        let request_id = InvocationId::from_bytes([0x31; 16]);
+        let revision = RevisionPair::new(
+            SourceRevisionId::from_bytes([0x32; 16]),
+            CatalogueRevisionId::from_bytes([0x33; 16]),
+        );
+        let value = RuntimeValue::Integer(7);
+        let value_bytes = encode_constructed_value(&active, &registry, &value).unwrap();
+        let server_frames = [
+            ResourceServerFrame::Accepted(ResourceAccepted {
+                stream_id: 4,
+                request_id,
+                nested_invocation_id: InvocationId::from_bytes([0x34; 16]),
+                target_revision: revision,
+                resource_kind: ResourceKind::Stream,
+            }),
+            ResourceServerFrame::Values(ResourceValues {
+                stream_id: 4,
+                request_id,
+                batch_sequence: 0,
+                item_count: 1,
+                byte_count: value_bytes.len() as u32,
+                values: vec![value.clone()],
+            }),
+            ResourceServerFrame::Completed(ResourceCompleted {
+                stream_id: 4,
+                request_id,
+                final_batch_sequence: 0,
+                total_items: 1,
+            }),
+            ResourceServerFrame::Failed(ResourceFailed {
+                stream_id: 4,
+                request_id,
+                failure: CallFailure::TargetUnavailable,
+            }),
+            ResourceServerFrame::Cancelled(ResourceCancelled {
+                stream_id: 4,
+                request_id,
+                reason: ResourceCancellationCode::ClientRequested,
+            }),
+        ];
+        for frame in server_frames {
+            let encoded = encode_resource_server_frame(&active, &registry, &frame).unwrap();
+            assert!(encoded.starts_with(RESOURCE_MARKER));
+            assert_eq!(decode_resource_server_frame(&active, &registry, &encoded), Ok(frame));
+        }
+
+        let controls = [
+            ResourceClientFrame::WindowUpdate(ResourceWindowUpdate {
+                stream_id: 4,
+                request_id,
+                add_items: 1,
+                add_bytes: 2,
+            }),
+            ResourceClientFrame::Cancel(ResourceCancel {
+                stream_id: 4,
+                request_id,
+                reason: ResourceCancellationCode::ParentInvocationCancelled,
+            }),
+        ];
+        for frame in controls {
+            let encoded = encode_resource_client_frame(&active, &registry, &frame).unwrap();
+            assert_eq!(decode_resource_client_frame(&active, &registry, &encoded), Ok(frame));
+            let mut trailing = encoded;
+            trailing.push(0);
+            assert!(matches!(
+                decode_resource_client_frame(&active, &registry, &trailing),
+                Err(FrameCodecError::TrailingBytes { .. })
+            ));
+        }
+    }
+    #[test]
+    fn resource_connection_tracks_acceptance_credit_sequence_and_terminal_late_frames() {
+        let active = empty_active_revision();
+        let registry = test_registry();
+        let value = RuntimeValue::Integer(7);
+        let value_bytes = encode_constructed_value(&active, &registry, &value).unwrap();
+        let mut request = resource_request_fixture();
+        request.resource_kind = ResourceKind::Stream;
+        request.item_window = 1;
+        request.byte_window = value_bytes.len() as u64;
+        let request_id = request.request_id;
+        let mut connection = ResourceProtocolConnection::new();
+        assert_eq!(connection.open(request.clone()), Ok(ResourceFrameDisposition::Applied));
+        let accepted = ResourceAccepted {
+            stream_id: request.stream_id,
+            request_id,
+            nested_invocation_id: InvocationId::from_bytes([0x55; 16]),
+            target_revision: request.target_revision,
+            resource_kind: ResourceKind::Stream,
+        };
+        assert_eq!(connection.apply(ResourceServerFrame::Accepted(accepted)), Ok(ResourceFrameDisposition::Applied));
+        let values = ResourceValues {
+            stream_id: request.stream_id,
+            request_id,
+            batch_sequence: 0,
+            item_count: 1,
+            byte_count: value_bytes.len() as u32,
+            values: vec![value.clone()],
+        };
+        assert_eq!(connection.apply(ResourceServerFrame::Values(values.clone())), Ok(ResourceFrameDisposition::Applied));
+        let mut exhausted = values.clone();
+        exhausted.batch_sequence = 1;
+        assert_eq!(connection.apply(ResourceServerFrame::Values(exhausted)), Err(ResourceConnectionError::InsufficientCredit { stream_id: 1, item_available: 0, item_required: 1, byte_available: 0, byte_required: value_bytes.len() as u64 }));
+        assert_eq!(connection.apply(ResourceServerFrame::Values(values.clone())), Err(ResourceConnectionError::BatchSequenceMismatch { stream_id: 1, expected: 1, actual: 0 }));
+        assert_eq!(connection.receive(ResourceClientFrame::WindowUpdate(ResourceWindowUpdate { stream_id: 1, request_id, add_items: 0, add_bytes: 0 })), Err(ResourceConnectionError::InvalidFrame { source: FrameCodecError::ResourceWindowOverflow }));
+        assert_eq!(connection.receive(ResourceClientFrame::WindowUpdate(ResourceWindowUpdate { stream_id: 1, request_id, add_items: 1, add_bytes: 1 })), Ok(ResourceFrameDisposition::Applied));
+        assert_eq!(connection.apply(ResourceServerFrame::Completed(ResourceCompleted { stream_id: 1, request_id, final_batch_sequence: 0, total_items: 1 })), Ok(ResourceFrameDisposition::Applied));
+        assert_eq!(connection.apply(ResourceServerFrame::Values(values)), Ok(ResourceFrameDisposition::DroppedLate));
+        assert_eq!(connection.receive(ResourceClientFrame::Cancel(ResourceCancel { stream_id: 1, request_id, reason: ResourceCancellationCode::ClientRequested })), Ok(ResourceFrameDisposition::DroppedLate));
+    }
+
+    #[test]
+    fn resource_connection_cancellation_and_shutdown_drop_late_frames() {
+        let mut request = resource_request_fixture();
+        request.stream_id = 2;
+        request.request_id = InvocationId::from_bytes([0x44; 16]);
+        request.resource_kind = ResourceKind::Stream;
+        let request_id = request.request_id;
+        let mut connection = ResourceProtocolConnection::new();
+        assert_eq!(connection.receive(ResourceClientFrame::Request(request.clone())), Ok(ResourceFrameDisposition::Applied));
+        let accepted = ResourceAccepted { stream_id: 2, request_id, nested_invocation_id: InvocationId::from_bytes([0x56; 16]), target_revision: request.target_revision, resource_kind: ResourceKind::Stream };
+        assert_eq!(connection.apply(ResourceServerFrame::Accepted(accepted.clone())), Ok(ResourceFrameDisposition::Applied));
+        assert_eq!(connection.receive(ResourceClientFrame::Cancel(ResourceCancel { stream_id: 2, request_id, reason: ResourceCancellationCode::ClientRequested })), Ok(ResourceFrameDisposition::Applied));
+        assert_eq!(connection.apply(ResourceServerFrame::Accepted(accepted)), Ok(ResourceFrameDisposition::DroppedLate));
+        assert_eq!(connection.apply(ResourceServerFrame::Values(ResourceValues { stream_id: 2, request_id, batch_sequence: 0, item_count: 1, byte_count: 1, values: vec![RuntimeValue::Integer(1)] })), Ok(ResourceFrameDisposition::DroppedLate));
+        assert_eq!(connection.apply(ResourceServerFrame::Completed(ResourceCompleted { stream_id: 2, request_id, final_batch_sequence: 0, total_items: 0 })), Ok(ResourceFrameDisposition::DroppedLate));
+        assert_eq!(connection.apply(ResourceServerFrame::Failed(ResourceFailed { stream_id: 2, request_id, failure: CallFailure::InternalFailure })), Ok(ResourceFrameDisposition::DroppedLate));
+        assert_eq!(connection.apply(ResourceServerFrame::Cancelled(ResourceCancelled { stream_id: 2, request_id, reason: ResourceCancellationCode::ClientRequested })), Ok(ResourceFrameDisposition::DroppedLate));
+
+        let mut second = resource_request_fixture();
+        second.stream_id = 3;
+        second.request_id = InvocationId::from_bytes([0x45; 16]);
+        assert_eq!(connection.open(second.clone()), Ok(ResourceFrameDisposition::Applied));
+        assert_eq!(connection.shutdown(), 1);
+        assert_eq!(connection.apply(ResourceServerFrame::Failed(ResourceFailed { stream_id: 3, request_id: second.request_id, failure: CallFailure::InternalFailure })), Ok(ResourceFrameDisposition::DroppedLate));
     }
 }
