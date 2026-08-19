@@ -33,6 +33,9 @@ const VALID_SOURCE: &str = concat!(
     "AS SELECT probe.stored FROM product_test.probe probe;\n",
 );
 
+/// The accepted CLIENT source fixture shared with the syntax parser test.
+const ACCEPTED_CLIENT_SOURCE: &str = include_str!("../../orna-syntax/testdata/accepted-client.orna");
+
 /// The broken source used for negative diagnostics tests.
 const BROKEN_SOURCE: &str = "CREATE SCHEMA broken_test;\n\
 CREATE SERVER FUNCTION broken_test.f()\n\
@@ -208,6 +211,33 @@ fn serves_diagnostics_for_valid_and_broken_documents() {
     assert!(
         codes.iter().any(|code| code.starts_with("ORNA")),
         "diagnostic codes: {codes:?}"
+    );
+
+    client.shutdown();
+}
+
+#[test]
+fn serves_accepted_client_fixture_without_diagnostics_and_with_symbols() {
+    let mut client = Client::spawn();
+    initialize(&mut client);
+    let uri = "file:///test/accepted-client.orna";
+
+    open_document(&mut client, uri, ACCEPTED_CLIENT_SOURCE, 1);
+    let diagnostics = client.read_notification("textDocument/publishDiagnostics");
+    assert_eq!(diagnostics["uri"], uri);
+    assert_eq!(diagnostics["diagnostics"], json!([]), "accepted CLIENT source clean");
+
+    let symbols = client.request(
+        "textDocument/documentSymbol",
+        json!({ "textDocument": { "uri": uri } }),
+    );
+    let symbols = symbols.as_array().expect("document symbols");
+    assert!(
+        symbols.iter().any(|symbol| {
+            symbol["detail"] == "client function"
+                && matches!(symbol["name"].as_str(), Some("enabled" | "stateful"))
+        }),
+        "accepted CLIENT function symbol present: {symbols:?}"
     );
 
     client.shutdown();
