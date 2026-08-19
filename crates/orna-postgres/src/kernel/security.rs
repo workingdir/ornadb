@@ -17,7 +17,9 @@ use orna_core::{
         InvocationParameterSelector, InvocationTarget as InvocationRequestTarget, InvokeEvent,
         InvokeValue, ProtectedInvocationDecision, decide_protected_invocation,
     },
-    revision::{ActiveDatabaseRevision, RevisionPair, StandardExecutable},
+    revision::{
+        ActiveDatabaseRevision, CatalogueHashContext, RevisionPair, StandardExecutable,
+    },
     security::{
         AuthenticatedSession, CATALOGUE_HEALTH_FUNCTION_ID, CATALOGUE_HEALTH_SERVICE_PRINCIPAL_ID,
         ExecuteDecision, ExecuteDenial, ExecuteGrant, InspectDenial, InspectEpochScope,
@@ -65,7 +67,7 @@ use crate::{
         raw_server_reference_mutation_target, raw_server_reference_value_update_target_is_selected,
         raw_server_update_target_is_unavailable,
     },
-    server_runtime::configure_and_recover,
+    server_runtime::{configure_and_recover, runtime_types_match},
 };
 
 /// The owned value result of one authenticated raw call.
@@ -685,7 +687,11 @@ impl PostgresKernel {
                                 request.resource_kind,
                             ) => failed(CallFailure::TargetUnavailable),
                             Some(definition) => match
-                                bind_authenticated_resource_arguments(definition, &request.arguments)
+                                bind_authenticated_resource_arguments(
+                                    active.catalogue_hash_context(),
+                                    definition,
+                                    &request.arguments,
+                                )
                             {
                                 None => failed(CallFailure::TargetUnavailable),
                                 Some(arguments) => {
@@ -1720,6 +1726,7 @@ fn resource_target_shape_is_supported(
 }
 
 fn bind_authenticated_resource_arguments(
+    context: &CatalogueHashContext,
     definition: &FunctionDefinition,
     arguments: &[ResourceArgument],
 ) -> Option<Vec<FunctionArgument>> {
@@ -1740,7 +1747,7 @@ fn bind_authenticated_resource_arguments(
         let RuntimeType::Flat(actual) = argument.value.runtime_type() else {
             return None;
         };
-        if actual != parameter.resolved_type() {
+        if !runtime_types_match(context, actual, parameter.resolved_type()) {
             return None;
         }
         bound.push(FunctionArgument::new(argument.parameter, argument.value.clone()).ok()?);
@@ -4895,16 +4902,36 @@ mod tests {
             ResourceArgument { parameter: first, value: RuntimeValue::Integer(7) },
             ResourceArgument { parameter: second, value: RuntimeValue::Boolean(true) },
         ];
-        assert!(bind_authenticated_resource_arguments(&function, &canonical).is_some());
+        assert!(bind_authenticated_resource_arguments(
+            &CatalogueHashContext::version_one(),
+            &function,
+            &canonical,
+        )
+        .is_some());
 
         let wrong_order = vec![canonical[1].clone(), canonical[0].clone()];
-        assert!(bind_authenticated_resource_arguments(&function, &wrong_order).is_none());
+        assert!(bind_authenticated_resource_arguments(
+            &CatalogueHashContext::version_one(),
+            &function,
+            &wrong_order,
+        )
+        .is_none());
         let wrong_type = vec![
             ResourceArgument { parameter: first, value: RuntimeValue::Boolean(true) },
             canonical[1].clone(),
         ];
-        assert!(bind_authenticated_resource_arguments(&function, &wrong_type).is_none());
-        assert!(bind_authenticated_resource_arguments(&function, &canonical[..1]).is_none());
+        assert!(bind_authenticated_resource_arguments(
+            &CatalogueHashContext::version_one(),
+            &function,
+            &wrong_type,
+        )
+        .is_none());
+        assert!(bind_authenticated_resource_arguments(
+            &CatalogueHashContext::version_one(),
+            &function,
+            &canonical[..1],
+        )
+        .is_none());
     }
 
     #[test]
