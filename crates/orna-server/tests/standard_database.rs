@@ -5133,8 +5133,8 @@ async fn installed_resource_socket_delivers_values_and_enforces_windows_and_gran
         kernel.replace_security_snapshot(&denied_security).await?;
         let denied_request = ResourceRequest {
             stream_id: 3,
-            request_id: InvocationId::from_bytes([0x61; 16]),
-            parent_invocation_id: InvocationId::from_bytes([0x62; 16]),
+            request_id: InvocationId::from_bytes([0x71; 16]),
+            parent_invocation_id: InvocationId::from_bytes([0x72; 16]),
             ..scalar_request
         };
         let (server, client) = StandardUnixStream::pair()?;
@@ -5220,7 +5220,88 @@ async fn installed_resource_socket_delivers_values_and_enforces_windows_and_gran
             !audit_text.contains("resource-value")
                 && !audit_text.contains("resource-value-2"),
             "resource audit evidence retained raw argument or result detail",
-        )
+        )?;
+
+        let audit_session = database.open().await?;
+        let audit_operation = async {
+            let rows = audit_session
+                .client()
+                .query(
+                    "SELECT resource.request_id, resource.parent_invocation_id,
+                            resource.call_site_id, resource.nested_invocation_id,
+                            resource.target_function_id, resource.source_revision_id,
+                            resource.catalogue_revision_id, resource.session_principal_id,
+                            resource.decision_outcome, resource.terminal_outcome,
+                            resource.item_count, resource.byte_count,
+                            invocation.outcome AS invocation_outcome
+                     FROM _orna_kernel.resource_audit_events AS resource
+                     JOIN _orna_kernel.invocation_audit_events AS invocation
+                       ON invocation.invocation_id = resource.nested_invocation_id
+                     ORDER BY resource.sequence",
+                    &[],
+                )
+                .await?;
+            require(
+                rows.len() == 7,
+                "resource audit did not retain one terminal row for each request",
+            )?;
+            let expected = [
+                ([0x41; 16], [0x42; 16], Some(scalar_target), "allowed", "completed", Some(1_i64)),
+                ([0x51; 16], [0x52; 16], Some(all_target), "allowed", "completed", Some(2_i64)),
+                ([0x53; 16], [0x54; 16], Some(scalar_target), "allowed", "completed", Some(1_i64)),
+                ([0x55; 16], [0x56; 16], Some(all_target), "allowed", "completed", Some(2_i64)),
+                ([0x57; 16], [0x58; 16], Some(scalar_target), "allowed", "completed", Some(1_i64)),
+                ([0x61; 16], [0x62; 16], None, "denied", "cancelled", None),
+                ([0x71; 16], [0x72; 16], None, "denied", "failed", None),
+            ];
+            for (index, row) in rows.iter().enumerate() {
+                let request_id: Vec<u8> = row.try_get("request_id")?;
+                let parent_invocation_id: Vec<u8> = row.try_get("parent_invocation_id")?;
+                let call_site_id: Vec<u8> = row.try_get("call_site_id")?;
+                let nested_invocation_id: Vec<u8> = row.try_get("nested_invocation_id")?;
+                let target_function_id: Option<Vec<u8>> = row.try_get("target_function_id")?;
+                let source_revision_id: Option<Vec<u8>> = row.try_get("source_revision_id")?;
+                let catalogue_revision_id: Option<Vec<u8>> =
+                    row.try_get("catalogue_revision_id")?;
+                let session_principal_id: Vec<u8> = row.try_get("session_principal_id")?;
+                let decision_outcome: String = row.try_get("decision_outcome")?;
+                let terminal_outcome: String = row.try_get("terminal_outcome")?;
+                let item_count: Option<i64> = row.try_get("item_count")?;
+                let byte_count: Option<i64> = row.try_get("byte_count")?;
+                let invocation_outcome: String = row.try_get("invocation_outcome")?;
+                let (request, parent, target, decision, terminal, count) = expected[index];
+                let target = target.map(|function| function.to_bytes().to_vec());
+                require(
+                    request_id == request
+                        && parent_invocation_id == parent
+                        && call_site_id == call_site.to_bytes().to_vec()
+                        && nested_invocation_id.len() == 16
+                        && target_function_id == target
+                        && source_revision_id
+                            == target.as_ref().map(|_| active.pair().source().to_bytes().to_vec())
+                        && catalogue_revision_id
+                            == target
+                                .as_ref()
+                                .map(|_| active.pair().catalogue().to_bytes().to_vec())
+                        && session_principal_id == RAW_CLIENT_USER.to_bytes().to_vec()
+                        && decision_outcome == decision
+                        && terminal_outcome == terminal
+                        && item_count == count
+                        && byte_count.is_none()
+                        && invocation_outcome == decision,
+                    "resource audit row did not preserve exact request correlation and terminal outcome",
+                )?;
+            }
+            Ok(())
+        }
+        .await;
+        finish_session(
+            audit_operation,
+            audit_session.shutdown().await,
+            "resource audit correlation",
+        )?;
+
+        Ok(())
     })
     .await
 }
