@@ -176,14 +176,30 @@ const RAW_STREAM_RESOURCE_CLIENT_SOURCE: &str = "CREATE CLIENT FUNCTION resource
     AWAIT std.data.stream_resource(target => resource_fixture.resource,\n\
       arguments => std.call.args(p_marker => p_marker));\n";
 const RAW_PROCEDURAL_RESOURCE_SERVER_SOURCE: &str = "CREATE SCHEMA procedural_fixture;\n\
+    CREATE TYPE procedural_fixture.probe AS OBJECT (marker TEXT UNIQUE NOT NULL);\n\
+    CREATE SERVER FUNCTION procedural_fixture.create(p_marker TEXT)\n\
+    RETURNS ROWS (created REF procedural_fixture.probe) SECURITY INVOKER\n\
+    TRANSACTION ATOMIC VOLATILITY VOLATILE\n\
+    AS INSERT INTO procedural_fixture.probe AS made (marker)\n\
+    VALUES (p_marker) RETURNING REF(made);\n\
     CREATE SERVER FUNCTION procedural_fixture.resource(p_marker TEXT)\n\
-    RETURNS TEXT SECURITY INVOKER TRANSACTION READ ONLY VOLATILITY STABLE\n\
-    AS SELECT p_marker;\n";
+    RETURNS ROWS (value TEXT) SECURITY INVOKER TRANSACTION READ ONLY VOLATILITY STABLE\n\
+    AS SELECT probe.marker FROM procedural_fixture.probe probe\n\
+    WHERE probe.marker = p_marker;\n";
 const RAW_PROCEDURAL_RESOURCE_CLIENT_SOURCE: &str = "CREATE CLIENT FUNCTION procedural_fixture.call(p_marker TEXT) RETURNS TEXT IS\n\
     BEGIN\n\
-        LET result TEXT := AWAIT std.data.resource(\n\
+        LET result TEXT := AWAIT std.data.stream_resource(\n\
             target => procedural_fixture.resource,\n\
             arguments => std.call.args(p_marker => p_marker)\n\
+        );\n\
+        result := result || '-assigned';\n\
+        RETURN result;\n\
+    END;\n\
+    CREATE CLIENT FUNCTION procedural_fixture.host() RETURNS TEXT IS\n\
+    BEGIN\n\
+        LET result TEXT := AWAIT std.data.stream_resource(\n\
+            target => procedural_fixture.resource,\n\
+            arguments => std.call.args(p_marker => 'installed-marker')\n\
         );\n\
         result := result || '-assigned';\n\
         RETURN result;\n\
@@ -1958,9 +1974,10 @@ async fn proves_installed_orna_invoke_end_to_end_against_postgres() -> TestResul
 #[ignore = "requires the Compose PostgreSQL development service"]
 async fn proves_procedural_client_resource_through_installed_evaluator() -> TestResult<()> {
     with_test_database(|database| async move {
-        let kernel = open_standard_database(kernel(&database)?).await.map_err(|error| {
-            failure(format!("open standard database failed: {error:?}"))
-        })?;
+        let uid = nix::unistd::geteuid().as_raw();
+        let kernel = open_standard_database(kernel(&database)?)
+            .await
+            .map_err(|error| failure(format!("open standard database failed: {error:?}")))?;
         let active = kernel
             .recover()
             .await
@@ -1974,13 +1991,44 @@ async fn proves_procedural_client_resource_through_installed_evaluator() -> Test
             .map_err(|error| failure(format!("installed standard source check failed: {error:?}")))?;
         let (active, client, target, parameter) =
             install_procedural_resource_client_fixture(&kernel, &active, &standard).await?;
+        let host = active
+            .catalogue()
+            .functions()
+            .iter()
+            .find(|function| function.name().parts() == ["procedural_fixture", "host"])
+            .ok_or_else(|| failure("procedural resource fixture is missing its host CLIENT function"))?
+            .id();
+        let create = active
+            .catalogue()
+            .functions()
+            .iter()
+            .find(|function| function.name().parts() == ["procedural_fixture", "create"])
+            .ok_or_else(|| failure("procedural resource fixture is missing its create function"))?
+            .id();
+        let create_parameter = active
+            .catalogue()
+            .function_by_id(create)
+            .ok_or_else(|| failure("procedural resource create disappeared from the catalogue"))?
+            .parameter_by_name("p_marker")
+            .ok_or_else(|| failure("procedural resource create has no p_marker parameter"))?
+            .id();
+        kernel
+            .execute_server_insert(
+                create,
+                &[FunctionArgument::new(
+                    create_parameter,
+                    RuntimeValue::Text("installed-marker".to_owned()),
+                )?],
+            )
+            .await
+            .map_err(|error| failure(format!("insert procedural resource fixture row failed: {error:?}")))?;
         let functions = active
             .catalogue()
             .functions()
             .iter()
             .map(FunctionDefinition::id)
             .collect::<Vec<_>>();
-        let security = SecuritySnapshot::new(
+        let security = SecuritySnapshot::new_with_local_peer_credentials(
             active.pair(),
             functions,
             vec![Principal::new(
@@ -1989,7 +2037,12 @@ async fn proves_procedural_client_resource_through_installed_evaluator() -> Test
                 PrincipalStatus::Active,
             )],
             vec![],
-            vec![ExecuteGrant::new(RAW_CLIENT_USER, client)],
+            vec![
+                ExecuteGrant::new(RAW_CLIENT_USER, client),
+                ExecuteGrant::new(RAW_CLIENT_USER, target),
+                ExecuteGrant::new(RAW_CLIENT_USER, host),
+            ],
+            vec![LocalPeerCredential::new(uid, RAW_CLIENT_USER)],
         )?;
         let security = kernel.replace_security_snapshot(&security).await?;
         let session = security.bind_authenticated_session(RAW_CLIENT_USER, vec![])?;
@@ -2014,9 +2067,17 @@ async fn proves_procedural_client_resource_through_installed_evaluator() -> Test
             .ok_or_else(|| failure("procedural resource target disappeared from the catalogue"))?
             .return_type()
         {
-            FunctionReturn::Single(resolved) => *resolved,
-            _ => return Err(failure("procedural resource target is not scalar")),
+            FunctionReturn::Rows(columns) if columns.len() == 1 => columns[0].resolved_type(),
+            _ => return Err(failure("procedural resource target is not a one-column stream")),
         };
+        let target_parameter = active
+            .catalogue()
+            .function_by_id(target)
+            .ok_or_else(|| failure("procedural resource target disappeared from the catalogue"))?
+            .parameters()
+            .first()
+            .ok_or_else(|| failure("procedural resource target has no p_marker parameter"))?
+            .id();
         let mut seen = None;
         let mut executor = DeterministicClientResourceExecutor::new(|request: &ClientResourceRequest| {
             seen = Some((
@@ -2044,8 +2105,34 @@ async fn proves_procedural_client_resource_through_installed_evaluator() -> Test
                 && seen_key.principal() == RAW_CLIENT_USER
                 && seen_key.invalidation_token() == active.catalogue_hash()
                 && seen_type == expected_type
-                && seen_arguments == vec![argument.clone()],
+                && seen_arguments.len() == 1
+                && seen_arguments[0].parameter() == target_parameter
+                && seen_arguments[0].value() == argument.value(),
             "installed procedural resource request lost target revision, type, or arguments",
+        )?;
+
+        let standard = active
+            .catalogue_hash_context()
+            .standard()
+            .ok_or_else(|| failure("procedural resource proof has no standard context"))?;
+        let registry = registered_opaque_codecs(standard)?;
+        let mut expected =
+            encode_constructed_value(&active, &registry, &RuntimeValue::Text("installed-marker-assigned".to_owned()))?;
+        expected.push(b'\n');
+        let invoke_target = InvocationRequestTarget::qualified_name(QualifiedSemanticName::new([
+            "procedural_fixture",
+            "host",
+        ])?)?;
+        let (outcome, stdout, stderr) = installed_invoke_run(
+            &database,
+            installed_invoke_request(invoke_target, vec![], true, false),
+        )
+        .await?;
+        require(
+            outcome == Ok(InstalledInvokeOutcome::Completed)
+                && stdout == expected
+                && stderr.is_empty(),
+            "installed invoke did not execute the SERVER resource through its host executor",
         )?;
 
         let unavailable = evaluate_client_function_with_arguments(
@@ -8978,6 +9065,9 @@ async fn install_procedural_resource_client_fixture(
     standard: &CheckedStandardLibrary,
 ) -> TestResult<(orna_core::revision::ActiveDatabaseRevision, FunctionId, FunctionId, ParameterId)> {
     let append_source = |active: &orna_core::revision::ActiveDatabaseRevision, body: &str| -> TestResult<SourceBundle> {
+        if active.source().units().is_empty() {
+            return Ok(SourceBundle::new([SourceUnit::new("resource_fixture.sql", body.to_owned())])?);
+        }
         let last_ordinal = active
             .source()
             .units()
@@ -9033,7 +9123,7 @@ async fn install_procedural_resource_client_fixture(
         .iter()
         .find(|function| function.name().parts() == ["procedural_fixture", "resource"])
         .ok_or_else(|| failure("procedural resource fixture is missing its SERVER target"))?;
-    let parameter = target_definition
+    let target_parameter = target_definition
         .parameters()
         .first()
         .ok_or_else(|| failure("procedural resource target is missing p_marker"))?
@@ -9046,8 +9136,8 @@ async fn install_procedural_resource_client_fixture(
         .find(|function| function.name().parts() == ["procedural_fixture", "call"])
         .ok_or_else(|| failure("procedural resource fixture is missing its CLIENT function"))?;
     let target_type = match target_definition.return_type() {
-        FunctionReturn::Single(resolved) => *resolved,
-        _ => return Err(failure("procedural resource target is not scalar")),
+        FunctionReturn::Rows(columns) if columns.len() == 1 => columns[0].resolved_type(),
+        _ => return Err(failure("procedural resource target is not a one-column stream")),
     };
     require(
         client_definition.return_type() == &FunctionReturn::Single(target_type),
@@ -9070,15 +9160,20 @@ async fn install_procedural_resource_client_fixture(
         return Err(failure("procedural CLIENT LET did not retain a resource operation"));
     };
     require(
-        operation.kind() == orna_artifact::client_plan::ResourceKind::Scalar
+        operation.kind() == orna_artifact::client_plan::ResourceKind::Stream
             && operation.target() == target
             && operation.target_revision() == active.pair()
             && operation.arguments().len() == 1
-            && operation.arguments()[0].0 == parameter,
-        "procedural CLIENT artifact lost scalar target or pinned revision metadata",
+            && operation.arguments()[0].0 == target_parameter,
+        "procedural CLIENT artifact lost stream target or pinned revision metadata",
     )?;
+    let client_parameter = client_definition
+        .parameters()
+        .first()
+        .ok_or_else(|| failure("procedural CLIENT fixture is missing p_marker"))?
+        .id();
     let client = client_definition.id();
-    Ok((active, client, target, parameter))
+    Ok((active, client, target, client_parameter))
 }
 
 async fn install_stream_resource_client_fixture(

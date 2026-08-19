@@ -27,10 +27,12 @@ use std::{
     error::Error,
     fmt,
     io::{self, IsTerminal, Write},
+    thread,
 };
 
+use orna_client::{ClientResourceCompletion, ClientResourceExecutor, ClientResourceRequest};
 use orna_core::{
-    FunctionRevisionId, TypeId,
+    CallSiteId, FunctionRevisionId, InvocationId, TypeId,
     catalogue::{FunctionDefinition, FunctionReturn, QualifiedSemanticName},
     invocation::InvocationCarrierConstructionError,
     invocation::{
@@ -42,16 +44,32 @@ use orna_core::{
     },
     invocation_binding::{CliArgumentInput, bind_cli_arguments},
     revision::{ActiveDatabaseRevision, VerifiedStandardLibrarySnapshot},
+    security::AuthenticatedSession,
     types::{ResolvedType, StandardScalar, TypeDescriptor},
     value::RuntimeValue,
 };
-use orna_postgres::{PostgresKernel, PostgresKernelError, SealedInvocationResult};
-use orna_protocol::{encode_constructed_value, encode_invoke_request};
+use orna_postgres::{
+    AuthenticatedServerResourceResult, PostgresKernel, PostgresKernelError, SealedInvocationResult,
+};
+use orna_protocol::{
+    MAX_RESOURCE_WINDOW, ResourceArgument, ResourceKind as ProtocolResourceKind, ResourceRequest,
+    encode_constructed_value, encode_invoke_request,
+};
 use orna_standard::{
     STD_IO_BYTE_STREAM_TYPE_ID, STD_TERMINAL_DOCUMENT_TYPE_ID, registered_opaque_codecs,
 };
 
 use crate::{EmbeddedHostError, inspect_ready_embedded_host};
+
+/// The stable CLIENT failure code for a denied SERVER resource request.
+const SERVER_RESOURCE_DENIED_CODE: &str = "server.resource.execute-denied";
+/// The stable CLIENT failure code for an unavailable SERVER resource target.
+const SERVER_RESOURCE_UNAVAILABLE_CODE: &str = "server.resource.target-unavailable";
+/// The stable CLIENT failure code for an internal SERVER resource failure.
+const SERVER_RESOURCE_INTERNAL_CODE: &str = "server.resource.internal-failure";
+/// The stable CLIENT failure code for a result shape that the scalar evaluator
+/// cannot publish.
+const SERVER_RESOURCE_SHAPE_CODE: &str = "server.resource.invalid-result-shape";
 
 /// The sealed connection protocol major offered by every host run.
 const CONNECTION_PROTOCOL_MAJOR: u16 = 5;
@@ -258,6 +276,123 @@ struct ResolvedTarget<'a> {
     revision_pin: String,
 }
 
+/// Runs one scalar SERVER resource request for the installed CLIENT evaluator.
+///
+/// The CLIENT evaluator is synchronous, while the authenticated PostgreSQL
+/// resource boundary is asynchronous. The adapter therefore runs the resource
+/// operation on a separate current-thread runtime and connection. This keeps
+/// the resource transaction outside the sealed invocation transaction and
+/// avoids re-entering the installed host runtime.
+struct InstalledResourceExecutor {
+    kernel: PostgresKernel,
+    session: AuthenticatedSession,
+    active: ActiveDatabaseRevision,
+    next_stream_id: u64,
+}
+
+impl InstalledResourceExecutor {
+    fn new(
+        kernel: PostgresKernel,
+        session: AuthenticatedSession,
+        active: ActiveDatabaseRevision,
+    ) -> Self {
+        Self {
+            kernel,
+            session,
+            active,
+            next_stream_id: 1,
+        }
+    }
+}
+
+impl ClientResourceExecutor for InstalledResourceExecutor {
+    fn execute(&mut self, request: ClientResourceRequest) -> ClientResourceCompletion {
+        let Some(next_stream_id) = self.next_stream_id.checked_add(1) else {
+            return request.failed(SERVER_RESOURCE_INTERNAL_CODE.to_owned());
+        };
+        let stream_id = self.next_stream_id;
+        self.next_stream_id = next_stream_id;
+        let target = request.target();
+        let resource_kind = match self
+            .active
+            .catalogue()
+            .function_by_id(target.function())
+            .map(FunctionDefinition::return_type)
+        {
+            Some(FunctionReturn::Single(_)) => ProtocolResourceKind::Single,
+            Some(FunctionReturn::Rows(columns)) if columns.len() == 1 => {
+                ProtocolResourceKind::Stream
+            }
+            _ => return request.failed(SERVER_RESOURCE_SHAPE_CODE.to_owned()),
+        };
+        let protocol_request = ResourceRequest {
+            stream_id,
+            request_id: InvocationId::new(),
+            parent_invocation_id: InvocationId::new(),
+            call_site_id: CallSiteId::from_bytes([0; 16]),
+            target_function_id: target.function(),
+            target_revision: target.revision(),
+            generation: request.generation().value(),
+            resource_kind,
+            arguments: request
+                .arguments()
+                .iter()
+                .map(|argument| ResourceArgument {
+                    parameter: argument.parameter(),
+                    value: argument.value().clone(),
+                })
+                .collect(),
+            item_window: 1,
+            byte_window: MAX_RESOURCE_WINDOW,
+        };
+        let kernel = self.kernel.clone();
+        let session = self.session.clone();
+        let outcome = thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|_| ())?;
+            runtime
+                .block_on(
+                    kernel.dispatch_authenticated_server_resource(&session, &protocol_request),
+                )
+                .map_err(|_| ())
+        })
+        .join()
+        .map_err(|_| ())
+        .and_then(|result| result);
+
+        match outcome {
+            Ok(AuthenticatedServerResourceResult::Completed {
+                resource_kind: completed_kind,
+                values,
+                ..
+            }) if completed_kind == resource_kind && values.len() == 1 => request.ready(
+                values
+                    .into_iter()
+                    .next()
+                    .expect("one resource value was checked"),
+            ),
+            Ok(AuthenticatedServerResourceResult::Failed { failure, .. }) => {
+                request.failed(server_resource_failure_code(failure).to_owned())
+            }
+            Ok(AuthenticatedServerResourceResult::Completed { .. }) => {
+                request.failed(SERVER_RESOURCE_SHAPE_CODE.to_owned())
+            }
+            Err(()) => request.failed(SERVER_RESOURCE_INTERNAL_CODE.to_owned()),
+        }
+    }
+}
+
+const fn server_resource_failure_code(failure: orna_protocol::CallFailure) -> &'static str {
+    match failure {
+        orna_protocol::CallFailure::ExecuteDenied => SERVER_RESOURCE_DENIED_CODE,
+        orna_protocol::CallFailure::TargetUnavailable => SERVER_RESOURCE_UNAVAILABLE_CODE,
+        orna_protocol::CallFailure::ClientEvaluationFailed
+        | orna_protocol::CallFailure::InternalFailure => SERVER_RESOURCE_INTERNAL_CODE,
+    }
+}
+
 /// Runs one installed sealed `orna invoke` command in-process.
 ///
 /// The host inspection retains the package and instance guards for the
@@ -363,8 +498,15 @@ async fn host_invoke(
         .authenticate_local_peer(uid)
         .await
         .map_err(map_authentication_error)?;
+    let mut resource_executor =
+        InstalledResourceExecutor::new(kernel.clone(), session.clone(), active.clone());
     let result = kernel
-        .dispatch_sealed_sys_invoke(&session, CONNECTION_PROTOCOL_MAJOR, &retained)
+        .dispatch_sealed_sys_invoke_with_resource_executor(
+            &session,
+            CONNECTION_PROTOCOL_MAJOR,
+            &retained,
+            Some(&mut resource_executor),
+        )
         .await
         .map_err(map_dispatch_error)?;
 
