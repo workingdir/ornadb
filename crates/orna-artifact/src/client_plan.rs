@@ -502,7 +502,7 @@ impl ResourceClientPlan {
 
     /// Encodes this plan into its exact version-6 bytes.
     pub fn encode(&self) -> Result<Vec<u8>, ClientPlanError> {
-        validate_resource_await_placement(&self.expression, false)?;
+        validate_resource_await_placement(&self.expression, true, false)?;
         let mut bytes = Vec::new();
         bytes.extend_from_slice(&MAGIC);
         bytes.extend_from_slice(&RESOURCE_FORMAT_VERSION.to_be_bytes());
@@ -561,7 +561,7 @@ impl ResourceClientPlan {
             &mut resource_count,
         )?;
         reader.require_finished()?;
-        validate_resource_await_placement(&expression, false)?;
+        validate_resource_await_placement(&expression, true, false)?;
         if resource_count == 0 {
             return Err(ClientPlanError::InvalidResourceOperationCount { actual: 0 });
         }
@@ -1394,36 +1394,40 @@ fn validate_resource_arguments(
 /// Verifies the closed placement rule for version-six resource expressions.
 ///
 /// A resource constructor is only meaningful as the direct operand of one
-/// `AWAIT`. Keep this check at the artifact boundary as well as in the
+/// root `AWAIT`. Keep this check at the artifact boundary as well as in the
 /// compiler/runtime: decoded bytes are untrusted and the runtime must not
-/// receive a bare resource value or an `AWAIT` over an ordinary expression.
+/// receive a bare resource value, an `AWAIT` over an ordinary expression, or
+/// a suspension nested inside another expression.
 fn validate_resource_await_placement(
     node: &ClientExpressionNode,
+    allow_await: bool,
     awaited_operand: bool,
 ) -> Result<(), ClientPlanError> {
     match node {
         ClientExpressionNode::Await { expression } => {
-            if !matches!(expression.as_ref(), ClientExpressionNode::Resource { .. }) {
+            if !allow_await
+                || !matches!(expression.as_ref(), ClientExpressionNode::Resource { .. })
+            {
                 return Err(ClientPlanError::InvalidExpressionNode(NODE_AWAIT));
             }
-            validate_resource_await_placement(expression, true)?;
+            validate_resource_await_placement(expression, false, true)?;
         }
         ClientExpressionNode::Resource { operation } => {
             if !awaited_operand {
                 return Err(ClientPlanError::InvalidExpressionNode(NODE_RESOURCE));
             }
             for (_, value) in &operation.arguments {
-                validate_resource_await_placement(value, false)?;
+                validate_resource_await_placement(value, false, false)?;
             }
         }
         ClientExpressionNode::Call { arguments, .. } => {
             for (_, value) in arguments {
-                validate_resource_await_placement(value, false)?;
+                validate_resource_await_placement(value, false, false)?;
             }
         }
         ClientExpressionNode::Concat { left, right } => {
-            validate_resource_await_placement(left, false)?;
-            validate_resource_await_placement(right, false)?;
+            validate_resource_await_placement(left, false, false)?;
+            validate_resource_await_placement(right, false, false)?;
         }
         ClientExpressionNode::String { .. }
         | ClientExpressionNode::Integer { .. }
@@ -3548,6 +3552,30 @@ mod tests {
         assert_eq!(
             bare.encode(),
             Err(ClientPlanError::InvalidExpressionNode(NODE_RESOURCE))
+        );
+
+        let nested_await = ResourceClientPlan::new(ClientExpressionNode::Call {
+            function: FunctionId::from_bytes([0x61; 16]),
+            arguments: vec![(
+                ParameterId::from_bytes([0x62; 16]),
+                resource_plan().expression().clone(),
+            )],
+        });
+        assert_eq!(
+            nested_await.encode(),
+            Err(ClientPlanError::InvalidExpressionNode(NODE_AWAIT))
+        );
+
+        let encoded_resource = resource_plan().encode().expect("resource plan encodes");
+        let mut nested_await_bytes = encoded_resource[..13].to_vec();
+        nested_await_bytes.push(NODE_CALL);
+        nested_await_bytes.extend_from_slice(&[0x61; 16]);
+        nested_await_bytes.extend_from_slice(&1_u32.to_be_bytes());
+        nested_await_bytes.extend_from_slice(&[0x62; 16]);
+        nested_await_bytes.extend_from_slice(&encoded_resource[13..]);
+        assert_eq!(
+            ResourceClientPlan::decode(&nested_await_bytes),
+            Err(ClientPlanError::InvalidExpressionNode(NODE_AWAIT))
         );
     }
 
