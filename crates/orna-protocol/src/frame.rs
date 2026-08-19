@@ -1597,6 +1597,9 @@ impl ResourceProtocolConnection {
         if frame.values.is_empty() || frame.item_count == 0 || frame.item_count as usize != frame.values.len() {
             return Err(ResourceConnectionError::ResourceBatchMismatch { stream_id: frame.stream_id });
         }
+        if matches!(state.resource_kind, ResourceKind::Single) && frame.item_count != 1 {
+            return Err(ResourceConnectionError::ResourceBatchMismatch { stream_id: frame.stream_id });
+        }
         if matches!(state.resource_kind, ResourceKind::Single) && state.last_batch_sequence.is_some() {
             return Err(ResourceConnectionError::WrongState { stream_id: frame.stream_id });
         }
@@ -6369,6 +6372,39 @@ mod tests {
             ),
             Ok(ResourceFrameDisposition::Applied)
         );
+    }
+
+    #[test]
+    fn resource_connection_rejects_multi_value_scalar_batches() {
+        let request = resource_request_fixture();
+        let request_id = request.request_id;
+        let mut connection = ResourceProtocolConnection::new();
+        assert_eq!(connection.open(request.clone()), Ok(ResourceFrameDisposition::Applied));
+        assert_eq!(
+            connection.apply(ResourceServerFrame::Accepted(ResourceAccepted {
+                stream_id: request.stream_id,
+                request_id,
+                nested_invocation_id: InvocationId::from_bytes([0x55; 16]),
+                target_revision: request.target_revision,
+                resource_kind: ResourceKind::Single,
+            })),
+            Ok(ResourceFrameDisposition::Applied),
+        );
+
+        assert_eq!(
+            connection.apply(ResourceServerFrame::Values(ResourceValues {
+                stream_id: request.stream_id,
+                request_id,
+                batch_sequence: 0,
+                item_count: 2,
+                byte_count: 2,
+                values: vec![RuntimeValue::Integer(1), RuntimeValue::Integer(2)],
+            })),
+            Err(ResourceConnectionError::ResourceBatchMismatch {
+                stream_id: request.stream_id,
+            }),
+        );
+        assert_eq!(connection.live_resources(), 1);
     }
 
     #[test]
