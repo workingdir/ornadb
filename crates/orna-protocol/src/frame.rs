@@ -1506,6 +1506,29 @@ impl ResourceProtocolConnection {
             ResourceServerFrame::Cancelled(frame) => self.terminal_frame(frame.stream_id, frame.request_id),
         }
     }
+
+    /// Applies one server frame after validating its canonical ORV5/ORV6
+    /// values and declared byte count.
+    ///
+    /// [`Self::apply`] operates on an already decoded frame and therefore
+    /// cannot reconstruct the active-revision-dependent value bytes. Adapters
+    /// that receive values from an in-memory producer (rather than through
+    /// [`decode_resource_server_frame`]) must use this entry point so a forged
+    /// `byte_count` cannot consume less credit than the canonical values
+    /// require. Validation happens before any state transition or credit
+    /// mutation.
+    pub fn apply_constructed(
+        &mut self,
+        active: &ActiveDatabaseRevision,
+        registry: &OpaqueCodecRegistry,
+        frame: ResourceServerFrame,
+    ) -> Result<ResourceFrameDisposition, ResourceConnectionError> {
+        if let ResourceServerFrame::Values(values) = &frame {
+            encode_resource_values(active, registry, values)
+                .map_err(|source| ResourceConnectionError::InvalidFrame { source })?;
+        }
+        self.apply(frame)
+    }
     /// Applies the terminal cancellation response after the client has already
     /// moved the request into its terminal late-frame state.
     ///
@@ -6125,6 +6148,68 @@ mod tests {
             ));
         }
     }
+    #[test]
+    fn constructed_resource_application_rejects_forged_byte_count_before_credit() {
+        let active = empty_active_revision();
+        let registry = test_registry();
+        let value = RuntimeValue::Integer(7);
+        let value_bytes = encode_constructed_value(&active, &registry, &value).unwrap();
+        let mut request = resource_request_fixture();
+        request.resource_kind = ResourceKind::Stream;
+        request.item_window = 1;
+        request.byte_window = value_bytes.len() as u64;
+        let request_id = request.request_id;
+        let mut connection = ResourceProtocolConnection::new();
+        connection.open(request.clone()).unwrap();
+        connection
+            .apply(ResourceServerFrame::Accepted(ResourceAccepted {
+                stream_id: request.stream_id,
+                request_id,
+                nested_invocation_id: InvocationId::from_bytes([0x55; 16]),
+                target_revision: request.target_revision,
+                resource_kind: ResourceKind::Stream,
+            }))
+            .unwrap();
+
+        let forged = ResourceValues {
+            stream_id: request.stream_id,
+            request_id,
+            batch_sequence: 0,
+            item_count: 1,
+            byte_count: 0,
+            values: vec![value.clone()],
+        };
+        assert!(matches!(
+            connection.apply_constructed(
+                &active,
+                &registry,
+                ResourceServerFrame::Values(forged),
+            ),
+            Err(ResourceConnectionError::InvalidFrame {
+                source: FrameCodecError::ResourceByteCountMismatch {
+                    declared: 0,
+                    actual,
+                },
+            }) if actual == value_bytes.len()
+        ));
+        assert_eq!(connection.live_resources(), 1);
+        assert_eq!(
+            connection.apply_constructed(
+                &active,
+                &registry,
+                ResourceServerFrame::Values(ResourceValues {
+                    stream_id: request.stream_id,
+                    request_id,
+                    batch_sequence: 0,
+                    item_count: 1,
+                    byte_count: value_bytes.len() as u32,
+                    values: vec![value],
+                }),
+            ),
+            Ok(ResourceFrameDisposition::Applied)
+        );
+    }
+
     #[test]
     fn resource_connection_tracks_acceptance_credit_sequence_and_terminal_late_frames() {
         let active = empty_active_revision();
