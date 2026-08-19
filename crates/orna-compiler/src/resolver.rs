@@ -43,6 +43,7 @@ pub use model::{
 };
 pub(crate) use model::{
     CheckedClientExpression, CheckedClientFunctionBody, CheckedClientStateSlot, CheckedFieldRename,
+    CheckedResourceOperation,
     CheckedStateDefault, CheckedStateScope, CheckedStateSlotId, CheckedServerFunctionBody,
     QueryCatalogue, QueryField, QueryObjectType, ResolutionCatalogue, STD_JSON_CONTRACT,
     STD_UI_CONTRACT,
@@ -55,10 +56,13 @@ use std::{
     fmt,
 };
 
-use orna_artifact::server_json_encode::{self, JsonEncodePlan};
+use orna_artifact::{
+    client_plan::ResourceKind,
+    server_json_encode::{self, JsonEncodePlan},
+};
 use orna_artifact::server_parameter_echo::{self, ServerParameterEcho};
 use orna_core::{
-    ExpressionId, FunctionId, FunctionRevisionId, ParameterId, SchemaId, StateSlotId, TypeId,
+    CallSiteId, ExpressionId, FunctionId, FunctionRevisionId, ParameterId, SchemaId, StateSlotId, TypeId,
     canonical_hash::{
         artifact_payload_digest, function_declaration_digest, function_semantic_digest_with_version,
     },
@@ -2917,6 +2921,7 @@ struct ResolvedServerFunctionReturnColumn {
     name: String,
     ordinal: u32,
     semantic_type: SemanticType<CheckedTypeId>,
+    standard_value_type: Option<TypeId>,
     location: SourceLocation,
     reference_location: Option<SourceLocation>,
 }
@@ -2925,6 +2930,8 @@ struct ResolvedServerFunctionReturnColumn {
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum ResolvedServerFunctionReturn {
     Single {
+        semantic_type: SemanticType<CheckedTypeId>,
+        standard_value_type: Option<TypeId>,
         location: SourceLocation,
     },
     Rows {
@@ -3458,6 +3465,7 @@ fn check_application_parsed(
             &submitted_ids,
             &query_catalogue,
             &server_names,
+            &client_resource_targets(&function_inputs, base, standard),
             base,
             &mut diagnostics,
             standard,
@@ -4521,6 +4529,14 @@ struct ClientExpressionTarget {
     return_type: ClientExpressionType,
 }
 
+#[derive(Clone)]
+struct ClientResourceTarget {
+    kind: ResourceKind,
+    id: CheckedFunctionId,
+    parameters: Vec<ClientExpressionParameter>,
+    result_type: ClientExpressionType,
+}
+
 fn standard_scalar_type_id(
     standard: Option<&CheckedStandardLibrary>,
     scalar: StandardScalar,
@@ -4642,6 +4658,118 @@ fn client_expression_targets(
     targets
 }
 
+fn client_resource_call_site_id(
+    location: &SourceLocation,
+    owner: &QualifiedSemanticName,
+) -> CallSiteId {
+    let path = location.logical_path().as_bytes();
+    let mut payload = Vec::with_capacity(path.len() + 32);
+    payload.extend_from_slice(&(path.len() as u64).to_be_bytes());
+    payload.extend_from_slice(path);
+    payload.extend_from_slice(&(location.span().start() as u64).to_be_bytes());
+    payload.extend_from_slice(&(location.span().end() as u64).to_be_bytes());
+    // A call-site identifies the compiled source location in its owning
+    // CLIENT function. The target and its revision are separate resource
+    // identity fields, so retargeting does not change the call-site identity.
+    let owner = owner.to_string();
+    payload.extend_from_slice(&(owner.len() as u64).to_be_bytes());
+    payload.extend_from_slice(owner.as_bytes());
+    let digest = artifact_payload_digest(&payload).expect("resource call-site payload is bounded");
+    CallSiteId::from_bytes(digest.to_bytes()[..16].try_into().expect("digest has 16-byte prefix"))
+}
+
+fn client_resource_result_type(
+    return_type: &ResolvedServerFunctionReturn,
+    kind: ResourceKind,
+) -> Option<ClientExpressionType> {
+    match (kind, return_type) {
+        (ResourceKind::Scalar, ResolvedServerFunctionReturn::Single { semantic_type, standard_value_type, .. }) => {
+            Some(ClientExpressionType { semantic_type: *semantic_type, standard_value_type: *standard_value_type })
+        }
+        // The current artifact/result model carries one durable item type.
+        // Refuse a multi-column ROWS result rather than silently treating its
+        // first column as the stream item type.
+        (ResourceKind::Stream, ResolvedServerFunctionReturn::Rows { columns, .. })
+            if columns.len() == 1 =>
+        {
+            columns.first().map(|column| ClientExpressionType {
+                semantic_type: column.semantic_type,
+                standard_value_type: column.standard_value_type,
+            })
+        }
+        _ => None,
+    }
+}
+
+fn client_resource_targets(
+    inputs: &[ResolvedServerFunctionInput<'_>],
+    base: &CatalogueSnapshot,
+    standard: Option<&CheckedStandardLibrary>,
+) -> HashMap<QualifiedSemanticName, ClientResourceTarget> {
+    let mut targets = HashMap::new();
+    for input in inputs {
+        let Some(result_type) = client_resource_result_type(
+            &input.return_type,
+            ResourceKind::Scalar,
+        ).or_else(|| client_resource_result_type(&input.return_type, ResourceKind::Stream)) else {
+            continue;
+        };
+        let kind = match &input.return_type {
+            ResolvedServerFunctionReturn::Single { .. } => ResourceKind::Scalar,
+            ResolvedServerFunctionReturn::Rows { .. } => ResourceKind::Stream,
+        };
+        targets.insert(input.name.clone(), ClientResourceTarget {
+            kind,
+            id: input.id,
+            parameters: input.parameters.iter().map(|parameter| ClientExpressionParameter {
+                id: parameter.id,
+                name: parameter.name.clone(),
+                expression_type: ClientExpressionType {
+                    semantic_type: parameter.semantic_type,
+                    standard_value_type: parameter.standard_value_type,
+                },
+            }).collect(),
+            result_type,
+        });
+    }
+    for function in base.functions() {
+        if function.domain() != FunctionDomain::Server || targets.contains_key(function.name()) {
+            continue;
+        }
+        let (kind, result_type) = match function.return_type() {
+            FunctionReturn::Single(resolved) => (ResourceKind::Scalar, client_expression_type_from_core(*resolved, standard)),
+            FunctionReturn::Rows(columns) if columns.len() == 1 => (
+                ResourceKind::Stream,
+                columns
+                    .first()
+                    .and_then(|column| client_expression_type_from_core(column.resolved_type(), standard)),
+            ),
+            FunctionReturn::Rows(_) => (ResourceKind::Stream, None),
+        };
+        let Some(result_type) = result_type else { continue; };
+        let Some(parameters) = function
+            .parameters()
+            .iter()
+            .map(|parameter| {
+                client_expression_type_from_core(parameter.resolved_type(), standard).map(
+                    |expression_type| ClientExpressionParameter {
+                        id: CheckedParameterId::Existing(parameter.id()),
+                        name: parameter.name().to_owned(),
+                        expression_type,
+                    },
+                )
+            })
+            .collect::<Option<Vec<_>>>()
+        else {
+            // An unrepresentable parameter must not disappear from the
+            // target signature and make an incomplete call look bound.
+            continue;
+        };
+        targets.insert(function.name().clone(), ClientResourceTarget { kind, id: CheckedFunctionId::Existing(function.id()), parameters, result_type });
+    }
+    targets
+}
+
 fn client_expression_type_is_evaluable(
     expression_type: ClientExpressionType,
     standard: Option<&CheckedStandardLibrary>,
@@ -4684,11 +4812,184 @@ fn client_expression_types_compatible(
             || actual.standard_value_type == expected.standard_value_type)
 }
 
+fn resource_constructor_kind(name: &QualifiedSemanticName) -> Option<ResourceKind> {
+    if name == &QualifiedSemanticName::new(["std", "data", "resource"]).ok()? {
+        Some(ResourceKind::Scalar)
+    } else if name == &QualifiedSemanticName::new(["std", "data", "stream_resource"]).ok()? {
+        Some(ResourceKind::Stream)
+    } else {
+        None
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn check_resource_constructor(
+    expression: &ClientExpression,
+    input: &ResolvedClientFunctionInput<'_>,
+    targets: &HashMap<QualifiedSemanticName, ClientExpressionTarget>,
+    resource_targets: &HashMap<QualifiedSemanticName, ClientResourceTarget>,
+    query_catalogue: &ResolutionCatalogue<CheckedTypeId, CheckedFieldId>,
+    base: &CatalogueSnapshot,
+    server_names: &[QualifiedSemanticName],
+    standard: Option<&CheckedStandardLibrary>,
+    diagnostics: &mut Vec<CompilerDiagnostic>,
+    references: &mut Vec<CheckedDefinitionReference>,
+    used_capabilities: &mut HashSet<QualifiedSemanticName>,
+) -> Option<(CheckedClientExpression, ClientExpressionType)> {
+    let ClientExpression::Call { callee, arguments, span } = expression else {
+        diagnostics.push(diagnostic(DiagnosticCode::DomainIncompatible, "AWAIT requires a std.data.resource or std.data.stream_resource constructor", input.logical_path, expression.span()));
+        return None;
+    };
+    let constructor_name = semantic_name(callee);
+    let Some(kind) = resource_constructor_kind(&constructor_name) else {
+        diagnostics.push(diagnostic(DiagnosticCode::DomainIncompatible, "AWAIT operand must be a resource constructor", input.logical_path, span));
+        return None;
+    };
+    if arguments.len() != 2 {
+        diagnostics.push(diagnostic(DiagnosticCode::TypeMismatch, "resource constructor requires exactly one target and one arguments value", input.logical_path, span));
+        return None;
+    }
+    let mut target_expression = None;
+    let mut arguments_expression = None;
+    for argument in arguments {
+        let Some(name) = &argument.name else {
+            diagnostics.push(diagnostic(DiagnosticCode::TypeMismatch, "resource constructor arguments must be named target and arguments", input.logical_path, &argument.span));
+            return None;
+        };
+        match semantic_part(name).as_str() {
+            "target" if target_expression.is_none() => target_expression = Some(&argument.value),
+            "arguments" if arguments_expression.is_none() => arguments_expression = Some(&argument.value),
+            "target" | "arguments" => {
+                diagnostics.push(diagnostic(DiagnosticCode::DuplicateDefinition, "duplicate resource constructor argument", input.logical_path, &argument.span));
+                return None;
+            }
+            _ => {
+                diagnostics.push(diagnostic(DiagnosticCode::UnknownQualifiedName, "resource constructor accepts only target and arguments", input.logical_path, &argument.span));
+                return None;
+            }
+        }
+    }
+    let (Some(target_expression), Some(arguments_expression)) = (target_expression, arguments_expression) else {
+        diagnostics.push(diagnostic(DiagnosticCode::TypeMismatch, "resource constructor requires both target and arguments", input.logical_path, span));
+        return None;
+    };
+    let ClientExpression::FieldPath { root, members, .. } = target_expression else {
+        diagnostics.push(diagnostic(DiagnosticCode::TypeMismatch, "resource target must be a qualified SERVER function name", input.logical_path, target_expression.span()));
+        return None;
+    };
+    if members.is_empty() {
+        diagnostics.push(diagnostic(DiagnosticCode::TypeMismatch, "resource target must include a schema and function name", input.logical_path, target_expression.span()));
+        return None;
+    }
+    let mut target_parts = Vec::with_capacity(members.len() + 1);
+    target_parts.push(semantic_part(root));
+    target_parts.extend(members.iter().map(semantic_part));
+    let Ok(target_name) = QualifiedSemanticName::new(target_parts) else {
+        diagnostics.push(diagnostic(DiagnosticCode::UnknownQualifiedName, "resource target must be a qualified SERVER function name", input.logical_path, target_expression.span()));
+        return None;
+    };
+    let Some(target) = resource_targets.get(&target_name) else {
+        let message = if targets.contains_key(&target_name)
+            || base.function_by_name(&target_name).is_some_and(|function| function.domain() == FunctionDomain::Client)
+        {
+            format!("resource target {target_name} must be a SERVER function")
+        } else {
+            format!("unknown SERVER resource target {target_name}")
+        };
+        diagnostics.push(diagnostic(
+            if targets.contains_key(&target_name) || base.function_by_name(&target_name).is_some_and(|function| function.domain() == FunctionDomain::Client) {
+                DiagnosticCode::DomainIncompatible
+            } else {
+                DiagnosticCode::UnknownQualifiedName
+            },
+            message,
+            input.logical_path,
+            target_expression.span(),
+        ));
+        return None;
+    };
+    if target.kind != kind {
+        diagnostics.push(diagnostic(DiagnosticCode::TypeMismatch, format!("resource constructor kind does not match SERVER target {target_name}"), input.logical_path, target_expression.span()));
+        return None;
+    }
+    let ClientExpression::Call { callee: args_callee, arguments: target_arguments, .. } = arguments_expression else {
+        diagnostics.push(diagnostic(DiagnosticCode::TypeMismatch, "resource arguments must be a std.call.args value", input.logical_path, arguments_expression.span()));
+        return None;
+    };
+    if semantic_name(args_callee) != QualifiedSemanticName::new(["std", "call", "args"]).expect("std.call.args is valid") {
+        diagnostics.push(diagnostic(DiagnosticCode::TypeMismatch, "resource arguments must be a std.call.args value", input.logical_path, arguments_expression.span()));
+        return None;
+    }
+    let mut bound = vec![false; target.parameters.len()];
+    let mut positional = 0usize;
+    let mut checked_arguments = Vec::with_capacity(target_arguments.len());
+    for argument in target_arguments {
+        let parameter_index = if let Some(name) = &argument.name {
+            let parameter_name = semantic_part(name);
+            let Some(index) = target.parameters.iter().position(|parameter| parameter.name == parameter_name) else {
+                diagnostics.push(diagnostic(DiagnosticCode::UnknownQualifiedName, format!("unknown SERVER resource parameter {parameter_name}"), input.logical_path, &argument.span));
+                return None;
+            };
+            index
+        } else {
+            while positional < bound.len() && bound[positional] { positional += 1; }
+            if positional >= bound.len() {
+                diagnostics.push(diagnostic(DiagnosticCode::TypeMismatch, format!("too many arguments for SERVER resource target {target_name}"), input.logical_path, &argument.span));
+                return None;
+            }
+            let index = positional;
+            positional += 1;
+            index
+        };
+        if bound[parameter_index] {
+            diagnostics.push(diagnostic(DiagnosticCode::DuplicateDefinition, format!("duplicate SERVER resource parameter {}", target.parameters[parameter_index].name), input.logical_path, &argument.span));
+            return None;
+        }
+        let (checked, expression_type) = check_client_expression(&argument.value, input, targets, resource_targets, query_catalogue, base, server_names, standard, diagnostics, references, used_capabilities)?;
+        let parameter = &target.parameters[parameter_index];
+        if !client_expression_types_compatible(expression_type, parameter.expression_type) {
+            diagnostics.push(diagnostic(DiagnosticCode::TypeMismatch, format!("resource argument does not match SERVER parameter {}", parameter.name), input.logical_path, &argument.span));
+            return None;
+        }
+        bound[parameter_index] = true;
+        checked_arguments.push((parameter.id, checked));
+    }
+    if bound.iter().any(|bound| !bound) {
+        diagnostics.push(diagnostic(DiagnosticCode::TypeMismatch, format!("missing argument for SERVER resource target {target_name}"), input.logical_path, span));
+        return None;
+    }
+    checked_arguments.sort_by_key(|(parameter, _)| {
+        target
+            .parameters
+            .iter()
+            .position(|candidate| candidate.id == *parameter)
+            .expect("bound resource parameter belongs to target")
+    });
+    let operation_location = location(input.logical_path, span);
+    let call_site = client_resource_call_site_id(&operation_location, &input.name);
+    references.push(CheckedDefinitionReference {
+        target: CheckedDefinitionReferenceTarget::Function(target.id),
+        kind: DefinitionReferenceKind::FunctionCall,
+        location: operation_location.clone(),
+    });
+    let operation = CheckedResourceOperation {
+        kind,
+        target: target.id,
+        call_site,
+        arguments: checked_arguments,
+        result_type: target.result_type.semantic_type,
+        standard_result_type: target.result_type.standard_value_type,
+        location: operation_location,
+    };
+    Some((CheckedClientExpression::Resource { operation }, target.result_type))
+}
+
 #[allow(clippy::too_many_arguments)]
 fn check_client_expression(
     expression: &ClientExpression,
     input: &ResolvedClientFunctionInput<'_>,
     targets: &HashMap<QualifiedSemanticName, ClientExpressionTarget>,
+    resource_targets: &HashMap<QualifiedSemanticName, ClientResourceTarget>,
     query_catalogue: &ResolutionCatalogue<CheckedTypeId, CheckedFieldId>,
     base: &CatalogueSnapshot,
     server_names: &[QualifiedSemanticName],
@@ -4699,6 +5000,28 @@ fn check_client_expression(
 ) -> Option<(CheckedClientExpression, ClientExpressionType)> {
     let expression_location = || location(input.logical_path, expression.span());
     match expression {
+        ClientExpression::Await { expression, span } => {
+            let (checked_resource, result_type) = check_resource_constructor(
+                expression,
+                input,
+                targets,
+                resource_targets,
+                query_catalogue,
+                base,
+                server_names,
+                standard,
+                diagnostics,
+                references,
+                used_capabilities,
+            )?;
+            Some((
+                CheckedClientExpression::Await {
+                    expression: Box::new(checked_resource),
+                    location: location(input.logical_path, span),
+                },
+                result_type,
+            ))
+        }
         ClientExpression::StringLiteral { value, source } => {
             let expression_type = ClientExpressionType {
                 semantic_type: SemanticType::scalar(StandardScalar::CharacterLargeObject),
@@ -4851,6 +5174,7 @@ fn check_client_expression(
                 left,
                 input,
                 targets,
+                resource_targets,
                 query_catalogue,
                 base,
                 server_names,
@@ -4863,6 +5187,7 @@ fn check_client_expression(
                 right,
                 input,
                 targets,
+                resource_targets,
                 query_catalogue,
                 base,
                 server_names,
@@ -4899,6 +5224,15 @@ fn check_client_expression(
             span,
         } => {
             let name = semantic_name(callee);
+            if resource_constructor_kind(&name).is_some() {
+                diagnostics.push(diagnostic(
+                    DiagnosticCode::DomainIncompatible,
+                    "resource constructors are only valid as an AWAIT operand",
+                    input.logical_path,
+                    span,
+                ));
+                return None;
+            }
             let Some(target) = targets.get(&name) else {
                 let message = if server_names.contains(&name)
                     || base
@@ -4971,6 +5305,7 @@ fn check_client_expression(
                     &argument.value,
                     input,
                     targets,
+                    resource_targets,
                     query_catalogue,
                     base,
                     server_names,
@@ -5069,6 +5404,43 @@ pub(crate) fn durable_state_slot_id(function: FunctionId, name: &str) -> StateSl
     StateSlotId::from_bytes(bytes)
 }
 
+fn validate_client_await_positions(
+    expression: &ClientExpression,
+    allow_await: bool,
+    input: &ResolvedClientFunctionInput<'_>,
+    diagnostics: &mut Vec<CompilerDiagnostic>,
+) {
+    match expression {
+        ClientExpression::Await { expression, span } => {
+            if !allow_await {
+                diagnostics.push(diagnostic(
+                    DiagnosticCode::DomainIncompatible,
+                    "AWAIT is only valid as the CLIENT body return expression",
+                    input.logical_path,
+                    span,
+                ));
+            }
+            // The resource constructor is a non-blocking value operation; an
+            // AWAIT operand cannot itself contain another suspension.
+            validate_client_await_positions(expression, false, input, diagnostics);
+        }
+        ClientExpression::Call { arguments, .. } => {
+            for argument in arguments {
+                validate_client_await_positions(&argument.value, false, input, diagnostics);
+            }
+        }
+        ClientExpression::Concat { left, right, .. } => {
+            validate_client_await_positions(left, false, input, diagnostics);
+            validate_client_await_positions(right, false, input, diagnostics);
+        }
+        ClientExpression::StringLiteral { .. }
+        | ClientExpression::IntegerLiteral { .. }
+        | ClientExpression::BooleanLiteral { .. }
+        | ClientExpression::ParameterRead { .. }
+        | ClientExpression::FieldPath { .. } => {}
+    }
+}
+
 fn unsupported_client_state_reference(
     expression: &ClientExpression,
     input: &ResolvedClientFunctionInput<'_>,
@@ -5084,6 +5456,7 @@ fn unsupported_client_state_reference(
             Some(parameter.span.clone())
         }
         ClientExpression::FieldPath { root, .. } if is_state(root) => Some(root.span.clone()),
+        ClientExpression::Await { expression, .. } => unsupported_client_state_reference(expression, input, state_names),
         ClientExpression::Call { arguments, .. } => arguments
             .iter()
             .find_map(|argument| unsupported_client_state_reference(&argument.value, input, state_names)),
@@ -5103,6 +5476,7 @@ fn check_client_functions(
     submitted_ids: &HashMap<QualifiedSemanticName, SubmittedType>,
     query_catalogue: &ResolutionCatalogue<CheckedTypeId, CheckedFieldId>,
     server_names: &[QualifiedSemanticName],
+    resource_targets: &HashMap<QualifiedSemanticName, ClientResourceTarget>,
     base: &CatalogueSnapshot,
     diagnostics: &mut Vec<CompilerDiagnostic>,
     standard: Option<&CheckedStandardLibrary>,
@@ -5148,12 +5522,18 @@ fn check_client_functions(
                         Vec::new(),
                     )
                 } else if let Some(expression) = input.body.as_expression() {
+                    let diagnostics_before = diagnostics.len();
+                    validate_client_await_positions(expression, true, input, diagnostics);
+                    if diagnostics.len() != diagnostics_before {
+                        return None;
+                    }
                     let mut references = Vec::new();
                     let mut used_capabilities = HashSet::new();
                     let (checked, expression_type) = check_client_expression(
                         expression,
                         input,
                         &targets,
+                        resource_targets,
                         query_catalogue,
                         base,
                         server_names,
@@ -5240,6 +5620,11 @@ fn check_client_functions(
                             StateDefault::Unset => CheckedStateDefault::Unset,
                             StateDefault::Null => CheckedStateDefault::Null,
                             StateDefault::Expression(expression) => {
+                                let diagnostics_before = diagnostics.len();
+                                validate_client_await_positions(expression, false, input, diagnostics);
+                                if diagnostics.len() != diagnostics_before {
+                                    return None;
+                                }
                                 if let Some(span) = unsupported_client_state_reference(
                                     expression,
                                     input,
@@ -5257,6 +5642,7 @@ fn check_client_functions(
                                     expression,
                                     input,
                                     &targets,
+                                    resource_targets,
                                     query_catalogue,
                                     base,
                                     server_names,
@@ -5313,10 +5699,16 @@ fn check_client_functions(
                         ));
                         return None;
                     }
+                    let diagnostics_before = diagnostics.len();
+                    validate_client_await_positions(expression, true, input, diagnostics);
+                    if diagnostics.len() != diagnostics_before {
+                        return None;
+                    }
                     let (checked_return, return_type) = check_client_expression(
                         expression,
                         input,
                         &targets,
+                        resource_targets,
                         query_catalogue,
                         base,
                         server_names,
@@ -5662,6 +6054,8 @@ fn resolve_server_function_return(
                 type_use_location(specification, logical_path),
             );
             ResolvedServerFunctionReturn::Single {
+                semantic_type: resolved.semantic_type,
+                standard_value_type: resolved.standard_value_type,
                 location: location(logical_path, specification.span()),
             }
         }),
@@ -5713,6 +6107,7 @@ fn resolve_server_function_return(
                     name,
                     ordinal: column.order as u32,
                     semantic_type: resolved_type.semantic_type,
+                    standard_value_type: resolved_type.standard_value_type,
                     location: location(logical_path, &column.span),
                     reference_location: reference_location(
                         &column.type_specification,
@@ -5779,7 +6174,7 @@ fn check_server_functions(
         };
         let (columns, return_location) = match &input.return_type {
             ResolvedServerFunctionReturn::Rows { columns, location } => (columns, location),
-            ResolvedServerFunctionReturn::Single { location } => {
+            ResolvedServerFunctionReturn::Single { location, .. } => {
                 diagnostics.push(DiagnosticCode::semantic(
                     DiagnosticCode::TypeMismatch,
                     format!("{body_name} SERVER functions require RETURNS ROWS (...)"),
@@ -20560,6 +20955,96 @@ mod tests {
             ),
             "wrong ui export binding",
         );
+    }
+
+    #[test]
+    fn accepts_scalar_resource_with_named_call_arguments() {
+        let base = CatalogueSnapshot::new_with_functions(
+            CatalogueRevisionId::from_bytes([0x41; 16]),
+            vec![SchemaDefinition::new(
+                SchemaId::from_bytes([0x42; 16]),
+                QualifiedSemanticName::new(["tasks"]).unwrap(),
+            )],
+            Vec::new(),
+            vec![FunctionDefinition::new(
+                FunctionId::from_bytes([0x43; 16]),
+                QualifiedSemanticName::new(["tasks", "find"]).unwrap(),
+                FunctionDomain::Server,
+                vec![parameter(
+                    0x44,
+                    "p_name",
+                    0,
+                    ResolvedType::Scalar(StandardScalar::CharacterLargeObject),
+                )],
+                FunctionReturn::Single(ResolvedType::Scalar(StandardScalar::CharacterLargeObject)),
+                FunctionRevisionId::from_bytes([0x45; 16]),
+                FunctionSecurity::Invoker,
+                Some(FunctionTransaction::ReadOnly),
+                FunctionVolatility::Stable,
+            )],
+        )
+        .unwrap();
+        let source = "CREATE SCHEMA ui; CREATE CLIENT FUNCTION ui.find(p_name TEXT) RETURNS TEXT AS \
+            AWAIT std.data.resource(target => tasks.find, arguments => std.call.args(p_name => p_name));";
+        let report = check(&bundle([("resource.orna", source)]), &base);
+        assert!(report.diagnostics().is_empty(), "{:?}", report.diagnostics());
+        let checked = report.checked_bundle().expect("resource source checks");
+        let function = checked
+            .client_functions()
+            .iter()
+            .find(|function| function.name().to_string() == "ui.find")
+            .expect("checked CLIENT resource function");
+        let CheckedClientFunctionBody::Expression { expression } = function.body() else {
+            panic!("resource body must be an expression");
+        };
+        let super::CheckedClientExpression::Await { expression, .. } = expression else {
+            panic!("resource body must await the resource");
+        };
+        let super::CheckedClientExpression::Resource { operation } = expression.as_ref() else {
+            panic!("await operand must be a resource");
+        };
+        assert_eq!(operation.kind(), orna_artifact::client_plan::ResourceKind::Scalar);
+        assert_eq!(operation.arguments().len(), 1);
+        assert_eq!(
+            operation.target(),
+            super::CheckedFunctionId::Existing(FunctionId::from_bytes([0x43; 16]))
+        );
+    }
+
+    #[test]
+    fn rejects_await_nested_in_non_suspending_expression() {
+        let base = CatalogueSnapshot::new_with_functions(
+            CatalogueRevisionId::from_bytes([0x41; 16]),
+            vec![SchemaDefinition::new(
+                SchemaId::from_bytes([0x42; 16]),
+                QualifiedSemanticName::new(["tasks"]).unwrap(),
+            )],
+            Vec::new(),
+            vec![FunctionDefinition::new(
+                FunctionId::from_bytes([0x43; 16]),
+                QualifiedSemanticName::new(["tasks", "find"]).unwrap(),
+                FunctionDomain::Server,
+                vec![parameter(
+                    0x44,
+                    "p_name",
+                    0,
+                    ResolvedType::Scalar(StandardScalar::CharacterLargeObject),
+                )],
+                FunctionReturn::Single(ResolvedType::Scalar(StandardScalar::CharacterLargeObject)),
+                FunctionRevisionId::from_bytes([0x45; 16]),
+                FunctionSecurity::Invoker,
+                Some(FunctionTransaction::ReadOnly),
+                FunctionVolatility::Stable,
+            )],
+        )
+        .unwrap();
+        let source = "CREATE SCHEMA ui; CREATE CLIENT FUNCTION ui.find(p_name TEXT) RETURNS TEXT AS \
+            std.concat(AWAIT std.data.resource(target => tasks.find, arguments => std.call.args(p_name => p_name)), 'x');";
+        let report = check(&bundle([("resource.orna", source)]), &base);
+        assert!(report.diagnostics().iter().any(|diagnostic| {
+            diagnostic.code() == DiagnosticCode::DomainIncompatible
+                && diagnostic.message().contains("AWAIT is only valid")
+        }));
     }
 
     #[test]
