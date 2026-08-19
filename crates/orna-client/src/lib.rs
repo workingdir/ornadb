@@ -18,7 +18,7 @@ use orna_artifact::client_plan::{
     StateDefault, StateScope,
 };
 use orna_core::{
-    FunctionId, FunctionRevisionId, LocalId, ParameterId, PrincipalId, StateSlotId, TypeId,
+    CallSiteId, FunctionId, FunctionRevisionId, InvocationId, LocalId, ParameterId, PrincipalId, StateSlotId, TypeId,
     canonical_hash::{CanonicalHashError, catalogue_digest_with_context},
     catalogue::{
         FunctionDomain, FunctionReturn, FunctionSecurity, FunctionVolatility, TypeDefinition,
@@ -40,12 +40,14 @@ use orna_standard::{RegisteredOpaqueCodecsError, registered_opaque_codecs};
 
 pub mod capability;
 
-/// The active revision and function revision selected for one CLIENT execution.
+/// The active revision, function revision, and root invocation selected for
+/// one CLIENT execution.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ClientExecutionContext {
     pair: RevisionPair,
     function: FunctionId,
     function_revision: FunctionRevisionId,
+    parent_invocation_id: InvocationId,
 }
 
 impl ClientExecutionContext {
@@ -62,6 +64,11 @@ impl ClientExecutionContext {
     /// Returns the selected immutable function revision identity.
     pub const fn function_revision(&self) -> FunctionRevisionId {
         self.function_revision
+    }
+
+    /// Returns the root invocation identity used by resource requests.
+    pub const fn parent_invocation_id(&self) -> InvocationId {
+        self.parent_invocation_id
     }
 }
 
@@ -333,6 +340,34 @@ impl fmt::Display for ClientResourceError {
 
 impl Error for ClientResourceError {}
 
+/// The invocation identity that a CLIENT resource request uses for server
+/// correlation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ClientResourceInvocationContext {
+    parent_invocation_id: InvocationId,
+    call_site_id: CallSiteId,
+}
+
+impl ClientResourceInvocationContext {
+    /// Creates one resource request invocation context.
+    pub const fn new(parent_invocation_id: InvocationId, call_site_id: CallSiteId) -> Self {
+        Self {
+            parent_invocation_id,
+            call_site_id,
+        }
+    }
+
+    /// Returns the enclosing invocation identity.
+    pub const fn parent_invocation_id(self) -> InvocationId {
+        self.parent_invocation_id
+    }
+
+    /// Returns the compiled resource call-site identity.
+    pub const fn call_site_id(self) -> CallSiteId {
+        self.call_site_id
+    }
+}
+
 /// One request submitted to a CLIENT resource executor.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ClientResourceRequest {
@@ -340,6 +375,7 @@ pub struct ClientResourceRequest {
     generation: ClientResourceGeneration,
     expected_type: ResolvedType,
     arguments: Vec<FunctionArgument>,
+    invocation_context: Option<ClientResourceInvocationContext>,
 }
 
 impl ClientResourceRequest {
@@ -349,6 +385,7 @@ impl ClientResourceRequest {
         generation: ClientResourceGeneration,
         expected_type: ResolvedType,
         arguments: Vec<FunctionArgument>,
+        invocation_context: Option<ClientResourceInvocationContext>,
     ) -> Result<Self, ClientResourceError> {
         if active.pair() != key.target().revision() {
             return Err(ClientResourceError::RevisionMismatch {
@@ -377,6 +414,7 @@ impl ClientResourceRequest {
             generation,
             expected_type,
             arguments,
+            invocation_context,
         })
     }
 
@@ -403,6 +441,11 @@ impl ClientResourceRequest {
     /// Returns the canonical parameter-ordered arguments.
     pub fn arguments(&self) -> &[FunctionArgument] {
         &self.arguments
+    }
+
+    /// Returns the invocation context when the evaluator supplied one.
+    pub const fn invocation_context(&self) -> Option<ClientResourceInvocationContext> {
+        self.invocation_context
     }
 
     /// Creates a successful completion for this request.
@@ -514,7 +557,6 @@ impl ClientResource {
             failure: None,
         }
     }
-
     /// Returns the complete cache identity.
     pub const fn key(&self) -> ClientResourceKey {
         self.key
@@ -553,10 +595,32 @@ impl ClientResource {
         Ok(generation)
     }
 
-    /// Starts a request after validating its active target and argument digest.
+    /// Starts a request without an enclosing invocation context.
+    ///
+    /// This compatibility entrypoint is for local resource lifecycle users.
+    /// Installed host evaluation uses [`Self::begin_request_with_context`].
     pub fn begin_request(
         &mut self,
         active: &ActiveDatabaseRevision,
+        arguments: Vec<FunctionArgument>,
+    ) -> Result<ClientResourceRequest, ClientResourceError> {
+        self.begin_request_inner(active, None, arguments)
+    }
+
+    /// Starts a request with its enclosing invocation and compiled call site.
+    pub fn begin_request_with_context(
+        &mut self,
+        active: &ActiveDatabaseRevision,
+        invocation_context: ClientResourceInvocationContext,
+        arguments: Vec<FunctionArgument>,
+    ) -> Result<ClientResourceRequest, ClientResourceError> {
+        self.begin_request_inner(active, Some(invocation_context), arguments)
+    }
+
+    fn begin_request_inner(
+        &mut self,
+        active: &ActiveDatabaseRevision,
+        invocation_context: Option<ClientResourceInvocationContext>,
         arguments: Vec<FunctionArgument>,
     ) -> Result<ClientResourceRequest, ClientResourceError> {
         let generation = self.next_generation()?;
@@ -566,12 +630,14 @@ impl ClientResource {
             generation,
             self.expected_type,
             arguments,
+            invocation_context,
         )?;
         self.generation = generation;
         self.status = ClientResourceStatus::Loading;
         self.clear_result();
         Ok(request)
     }
+
 
     /// Applies one executor completion through the resource invariants.
     pub fn apply_completion(
@@ -1950,6 +2016,7 @@ pub fn evaluate_client_function_in_state_context(
         declarations,
         grants,
         state,
+        InvocationId::new(),
         None,
     )
 }
@@ -1973,13 +2040,14 @@ pub fn evaluate_client_function_with_arguments_and_executor(
 ) -> Result<ClientExecutionResult, ClientExecutionError> {
     let mut state = ClientStateStore::new();
     let grants = capability::LocalCapabilityGrantSet::new();
-    evaluate_client_function_with_state_and_grants_and_arguments_and_executor(
+    evaluate_client_function_with_state_and_grants_and_arguments_and_executor_with_parent_invocation(
         active,
         authorisation,
         arguments,
         &[],
         &grants,
         &mut state,
+        InvocationId::new(),
         executor,
     )
 }
@@ -1998,6 +2066,30 @@ pub fn evaluate_client_function_with_state_and_grants_and_arguments_and_executor
     state: &mut ClientStateStore,
     executor: &mut dyn ClientResourceExecutor,
 ) -> Result<ClientExecutionResult, ClientExecutionError> {
+    evaluate_client_function_with_state_and_grants_and_arguments_and_executor_with_parent_invocation(
+        active,
+        authorisation,
+        arguments,
+        declarations,
+        grants,
+        state,
+        InvocationId::new(),
+        executor,
+    )
+}
+
+/// Evaluates one CLIENT function with a caller-owned resource executor and an
+/// enclosing root invocation identity.
+pub fn evaluate_client_function_with_state_and_grants_and_arguments_and_executor_with_parent_invocation(
+    active: &ActiveDatabaseRevision,
+    authorisation: &AuthorisedInvocation,
+    arguments: &[FunctionArgument],
+    declarations: &[capability::LocalCapabilityDeclaration],
+    grants: &capability::LocalCapabilityGrantSet,
+    state: &mut ClientStateStore,
+    parent_invocation_id: InvocationId,
+    executor: &mut dyn ClientResourceExecutor,
+) -> Result<ClientExecutionResult, ClientExecutionError> {
     let state_context = ClientStateContext::default_for(authorisation.target().function());
     evaluate_client_function_in_state_context_with_executor(
         active,
@@ -2007,6 +2099,7 @@ pub fn evaluate_client_function_with_state_and_grants_and_arguments_and_executor
         declarations,
         grants,
         state,
+        parent_invocation_id,
         Some(executor),
     )
 }
@@ -2019,6 +2112,7 @@ fn evaluate_client_function_in_state_context_with_executor(
     declarations: &[capability::LocalCapabilityDeclaration],
     grants: &capability::LocalCapabilityGrantSet,
     state: &mut ClientStateStore,
+    parent_invocation_id: InvocationId,
     mut executor: Option<&mut dyn ClientResourceExecutor>,
 ) -> Result<ClientExecutionResult, ClientExecutionError> {
     let target = authorisation.target();
@@ -2043,6 +2137,7 @@ fn evaluate_client_function_in_state_context_with_executor(
         &mut staged,
         0,
         authorisation.session_principal(),
+        parent_invocation_id,
         &mut executor,
     )?;
     *state = staged;
@@ -2059,6 +2154,7 @@ fn evaluate_function(
     state: &mut ClientStateStore,
     depth: usize,
     principal: PrincipalId,
+    parent_invocation_id: InvocationId,
     executor: &mut Option<&mut dyn ClientResourceExecutor>,
 ) -> Result<(ClientExecutionContext, RuntimeValue), ClientExecutionError> {
     let pair = active.pair();
@@ -2077,6 +2173,7 @@ fn evaluate_function(
         pair,
         function,
         function_revision: revision.id(),
+        parent_invocation_id,
     };
     // A version-5 capability envelope is decoded before function-shape
     // validation (work ADR 0060). Its inner plan version classifies the
@@ -2950,9 +3047,16 @@ fn evaluate_resource_expression(
             ClientResourceExecutionError::ExecutorUnavailable,
         ));
     };
-    let request = resource.begin_request(active, evaluated).map_err(|source| {
-        evaluate_resource_error(context, ClientResourceExecutionError::Invalid(source))
-    })?;
+    let request = resource
+        .begin_request_with_context(
+            active,
+            ClientResourceInvocationContext::new(
+                context.parent_invocation_id(),
+                operation.call_site_id(),
+            ),
+            evaluated,
+        )
+        .map_err(|source| evaluate_resource_error(context, ClientResourceExecutionError::Invalid(source)))?;
     let completion = executor.execute(request);
     resource.apply_completion(active, completion).map_err(|source| {
         evaluate_resource_error(context, ClientResourceExecutionError::Invalid(source))
@@ -3082,7 +3186,16 @@ fn evaluate_expression(
                 evaluated.push((*parameter, value));
             }
             let (_, value) = evaluate_function(
-                active, *function, evaluated, declarations, grants, state, depth + 1, principal, executor,
+                active,
+                *function,
+                evaluated,
+                declarations,
+                grants,
+                state,
+                depth + 1,
+                principal,
+                context.parent_invocation_id(),
+                executor,
             )?;
             Ok(value)
         }
@@ -4963,11 +5076,13 @@ mod tests {
             CatalogueRevisionId::from_bytes([4; 16]),
         );
         let target = FunctionId::from_bytes([0xd1; 16]);
+        let parent_invocation_id = orna_core::InvocationId::from_bytes([0x91; 16]);
+        let call_site_id = orna_core::CallSiteId::from_bytes([0x82; 16]);
         let operation = orna_artifact::client_plan::ResourceOperationNode::new(
             orna_artifact::client_plan::ResourceKind::Scalar,
             target,
             target_revision,
-            orna_core::CallSiteId::from_bytes([0x82; 16]),
+            call_site_id,
             vec![(
                 ParameterId::from_bytes([0xd3; 16]),
                 orna_artifact::client_plan::ClientExpressionNode::ParameterRead {
@@ -5017,6 +5132,10 @@ mod tests {
         let argument = FunctionArgument::new(parameter, RuntimeValue::Text("/tmp".to_owned())).unwrap();
         let mut executor = super::DeterministicClientResourceExecutor::new(
             |request: &super::ClientResourceRequest| {
+                assert_eq!(
+                    request.invocation_context(),
+                    Some(super::ClientResourceInvocationContext::new(parent_invocation_id, call_site_id)),
+                );
                 assert_eq!(request.key().target(), InvocationTarget::new(target, pair));
                 assert_eq!(request.arguments().len(), 1);
                 assert_eq!(
@@ -5031,13 +5150,14 @@ mod tests {
             },
         );
 
-        let result = super::evaluate_client_function_with_state_and_grants_and_arguments_and_executor(
+        let result = super::evaluate_client_function_with_state_and_grants_and_arguments_and_executor_with_parent_invocation(
             &active,
             &authorise(pair, function),
             &[argument],
             &[],
             &grants,
             &mut super::ClientStateStore::new(),
+            parent_invocation_id,
             &mut executor,
         )
         .unwrap();
@@ -6413,14 +6533,10 @@ mod tests {
 
         assert_eq!(error.pair(), pair);
         assert_eq!(error.function(), function);
-        assert_eq!(
-            error.context().copied(),
-            Some(super::ClientExecutionContext {
-                pair,
-                function,
-                function_revision,
-            })
-        );
+        let context = error.context().expect("invalid function error context");
+        assert_eq!(context.pair(), pair);
+        assert_eq!(context.function(), function);
+        assert_eq!(context.function_revision(), function_revision);
         assert!(matches!(
             error,
             super::ClientExecutionError::InvalidFunction {
@@ -6664,6 +6780,7 @@ mod tests {
             pair,
             function,
             function_revision,
+            parent_invocation_id: orna_core::InvocationId::from_bytes([0; 16]),
         };
         let rules = [
             (
@@ -6936,15 +7053,10 @@ mod tests {
 
             assert_eq!(error.pair(), pair, "{name}");
             assert_eq!(error.function(), function, "{name}");
-            assert_eq!(
-                error.context().copied(),
-                Some(super::ClientExecutionContext {
-                    pair,
-                    function,
-                    function_revision,
-                }),
-                "{name}"
-            );
+            let context = error.context().expect("invalid function error context");
+            assert_eq!(context.pair(), pair, "{name}");
+            assert_eq!(context.function(), function, "{name}");
+            assert_eq!(context.function_revision(), function_revision, "{name}");
             assert!(matches!(
                 error,
                 super::ClientExecutionError::InvalidFunction { rule: actual, .. }
