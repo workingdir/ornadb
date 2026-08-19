@@ -61,6 +61,7 @@ pub(crate) enum SyntaxKind {
     ClientExternalContractBody,
     ClientCallExpression,
     ClientCallArgument,
+    ClientAwaitExpression,
     ClientConcatExpression,
     NumberLiteral,
     ExportTypeStatement,
@@ -129,18 +130,19 @@ impl Language for OrnaLanguage {
             37 => SyntaxKind::ClientExternalContractBody,
             38 => SyntaxKind::ClientCallExpression,
             39 => SyntaxKind::ClientCallArgument,
-            40 => SyntaxKind::ClientConcatExpression,
-            41 => SyntaxKind::NumberLiteral,
-            42 => SyntaxKind::ExportTypeStatement,
-            43 => SyntaxKind::ValueField,
-            44 => SyntaxKind::ListTypeSpecification,
-            45 => SyntaxKind::SetTypeSpecification,
-            46 => SyntaxKind::MapTypeSpecification,
-            47 => SyntaxKind::OptionTypeSpecification,
-            48 => SyntaxKind::StreamTypeSpecification,
-            49 => SyntaxKind::ClientStateBlockBody,
-            50 => SyntaxKind::ClientStateDeclaration,
-            51 => SyntaxKind::ClientStateReturnStatement,
+            40 => SyntaxKind::ClientAwaitExpression,
+            41 => SyntaxKind::ClientConcatExpression,
+            42 => SyntaxKind::NumberLiteral,
+            43 => SyntaxKind::ExportTypeStatement,
+            44 => SyntaxKind::ValueField,
+            45 => SyntaxKind::ListTypeSpecification,
+            46 => SyntaxKind::SetTypeSpecification,
+            47 => SyntaxKind::MapTypeSpecification,
+            48 => SyntaxKind::OptionTypeSpecification,
+            49 => SyntaxKind::StreamTypeSpecification,
+            50 => SyntaxKind::ClientStateBlockBody,
+            51 => SyntaxKind::ClientStateDeclaration,
+            52 => SyntaxKind::ClientStateReturnStatement,
             _ => panic!("unknown Orna syntax kind"),
         }
     }
@@ -832,10 +834,11 @@ impl<'source> Parser<'source> {
 
     /// Parses one closed CLIENT expression (ADR 0068).
     ///
-    /// The expression surface is: a call, a string/integer/Boolean literal,
-    /// a parameter read, a field path from a parameter, and left-associative
-    /// `||` concatenation. This parser is deliberately closed: it never
-    /// accepts arithmetic, comparisons, parentheses, or SQL fragments.
+    /// The expression surface is a call, a string/integer/Boolean literal, a
+    /// parameter read, a field path from a parameter, `AWAIT` over one nested
+    /// client expression, and left-associative `||` concatenation. This parser
+    /// is deliberately closed: it never accepts arithmetic, comparisons,
+    /// parentheses, or SQL fragments.
     fn parse_client_expression(&mut self) -> Option<ClientExpression> {
         let mut left = self.parse_client_primary_expression()?;
         loop {
@@ -864,6 +867,9 @@ impl<'source> Parser<'source> {
             self.error_current("ORNA0001", "expected a CLIENT expression");
             return None;
         };
+        if token.is_word("AWAIT") {
+            return self.parse_client_await_expression();
+        }
         if token.kind == TokenKind::StringLiteral {
             self.bump();
             return Some(ClientExpression::StringLiteral {
@@ -996,6 +1002,26 @@ impl<'source> Parser<'source> {
                 end,
             },
         })
+    }
+
+    fn parse_client_await_expression(&mut self) -> Option<ClientExpression> {
+        let start = self.current()?.span().start;
+        self.builder
+            .start_node(SyntaxKind::ClientAwaitExpression.into());
+        self.bump(); // consume AWAIT
+        self.skip_trivia();
+        let result = self.parse_client_expression().map(|expression| {
+            let span = SourceSpan {
+                start,
+                end: expression.span().end,
+            };
+            ClientExpression::Await {
+                expression: Box::new(expression),
+                span,
+            }
+        });
+        self.builder.finish_node();
+        result
     }
 
     fn parse_client_call(
