@@ -35,6 +35,19 @@ postgres-status:
 postgres-health:
     docker compose exec postgres pg_isready --username=ornadb_dev --dbname=ornadb_dev
 
+# Run only the installed resource transport durability proof.
+kernel-resource-audit-proof:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cleanup() {
+        docker compose stop postgres || true
+    }
+    trap cleanup EXIT
+    docker compose up --detach --wait postgres
+    export ORNA_TEST_POSTGRES_ADMIN_URL='host=127.0.0.1 port=55432 user=ornadb_dev password=ornadb_dev_password'
+    export ORNA_TEST_POSTGRES_URL='host=127.0.0.1 port=55432 user=ornadb_dev password=ornadb_dev_password dbname=ornadb_dev'
+    cargo test --package orna-server --test standard_database installed_resource_socket_delivers_values_and_enforces_windows_and_grants -- --ignored --exact --test-threads=1
+
 # Run every ignored PostgreSQL integration test against an isolated database.
 kernel-test:
     #!/usr/bin/env bash
