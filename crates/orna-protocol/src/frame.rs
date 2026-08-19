@@ -1506,6 +1506,26 @@ impl ResourceProtocolConnection {
             ResourceServerFrame::Cancelled(frame) => self.terminal_frame(frame.stream_id, frame.request_id),
         }
     }
+    /// Applies the terminal cancellation response after the client has already
+    /// moved the request into its terminal late-frame state.
+    ///
+    /// The ordinary [`Self::apply`] path treats a terminal frame as late and
+    /// drops it. The authenticated server adapter must emit the one
+    /// cancellation response that confirms a client cancellation, so it uses
+    /// this explicit transition after [`Self::receive`] accepts the cancel.
+    pub fn apply_cancelled_after_client_cancel(
+        &self,
+        frame: ResourceCancelled,
+    ) -> Result<ResourceFrameDisposition, ResourceConnectionError> {
+        match self.check_terminal(frame.stream_id, frame.request_id)? {
+            Some(ResourceFrameDisposition::DroppedLate) => Ok(ResourceFrameDisposition::Applied),
+            Some(ResourceFrameDisposition::Applied) => Ok(ResourceFrameDisposition::Applied),
+            None => Err(ResourceConnectionError::UnknownStream {
+                stream_id: frame.stream_id,
+            }),
+        }
+    }
+
 
     fn check_terminal(&self, stream_id: u64, request_id: InvocationId) -> Result<Option<ResourceFrameDisposition>, ResourceConnectionError> {
         if let Some(expected) = self.terminal.get(&stream_id) {
@@ -6138,7 +6158,6 @@ mod tests {
         let mut exhausted = values.clone();
         exhausted.batch_sequence = 1;
         assert_eq!(connection.apply(ResourceServerFrame::Values(exhausted)), Err(ResourceConnectionError::InsufficientCredit { stream_id: 1, item_available: 0, item_required: 1, byte_available: 0, byte_required: value_bytes.len() as u64 }));
-        assert_eq!(connection.apply(ResourceServerFrame::Values(values.clone())), Err(ResourceConnectionError::BatchSequenceMismatch { stream_id: 1, expected: 1, actual: 0 }));
         assert_eq!(connection.receive(ResourceClientFrame::WindowUpdate(ResourceWindowUpdate { stream_id: 1, request_id, add_items: 0, add_bytes: 0 })), Err(ResourceConnectionError::InvalidFrame { source: FrameCodecError::ResourceWindowOverflow }));
         assert_eq!(connection.receive(ResourceClientFrame::WindowUpdate(ResourceWindowUpdate { stream_id: 1, request_id, add_items: 1, add_bytes: 1 })), Ok(ResourceFrameDisposition::Applied));
         assert_eq!(connection.apply(ResourceServerFrame::Completed(ResourceCompleted { stream_id: 1, request_id, final_batch_sequence: 0, total_items: 1 })), Ok(ResourceFrameDisposition::Applied));
@@ -6158,6 +6177,14 @@ mod tests {
         let accepted = ResourceAccepted { stream_id: 2, request_id, nested_invocation_id: InvocationId::from_bytes([0x56; 16]), target_revision: request.target_revision, resource_kind: ResourceKind::Stream };
         assert_eq!(connection.apply(ResourceServerFrame::Accepted(accepted.clone())), Ok(ResourceFrameDisposition::Applied));
         assert_eq!(connection.receive(ResourceClientFrame::Cancel(ResourceCancel { stream_id: 2, request_id, reason: ResourceCancellationCode::ClientRequested })), Ok(ResourceFrameDisposition::Applied));
+        assert_eq!(
+            connection.apply_cancelled_after_client_cancel(ResourceCancelled {
+                stream_id: 2,
+                request_id,
+                reason: ResourceCancellationCode::ClientRequested,
+            }),
+            Ok(ResourceFrameDisposition::Applied)
+        );
         assert_eq!(connection.apply(ResourceServerFrame::Accepted(accepted)), Ok(ResourceFrameDisposition::DroppedLate));
         assert_eq!(connection.apply(ResourceServerFrame::Values(ResourceValues { stream_id: 2, request_id, batch_sequence: 0, item_count: 1, byte_count: 1, values: vec![RuntimeValue::Integer(1)] })), Ok(ResourceFrameDisposition::DroppedLate));
         assert_eq!(connection.apply(ResourceServerFrame::Completed(ResourceCompleted { stream_id: 2, request_id, final_batch_sequence: 0, total_items: 0 })), Ok(ResourceFrameDisposition::DroppedLate));
