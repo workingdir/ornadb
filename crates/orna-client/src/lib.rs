@@ -11,14 +11,14 @@ use std::{
 
 use orna_artifact::client_plan::{
     CAPABILITY_FORMAT_VERSION, CapabilityArgumentSource, CapabilityClientPlan,
-    ClientExpressionNode, ClientPlan, ClientPlanError, EXPRESSION_FORMAT_VERSION,
+    ClientExpressionNode, ClientLocal, ClientLocalKind, ClientPlan, ClientPlanError, EXPRESSION_FORMAT_VERSION,
     ExpressionClientPlan, FORMAT_IDENTITY, FORMAT_VERSION, InnerClientPlan,
-    LANGUAGE_VERSION_IDENTITY, OPAQUE_FORMAT_VERSION, OpaqueClientPlan, RESOURCE_FORMAT_VERSION,
-    ResourceClientPlan, ResourceKind, ResourceOperationNode, STATE_FORMAT_VERSION, StateClientPlan,
+    LANGUAGE_VERSION_IDENTITY, OPAQUE_FORMAT_VERSION, OpaqueClientPlan, RESOURCE_FORMAT_VERSION, PROCEDURAL_FORMAT_VERSION,
+    ProceduralClientPlan, ResourceClientPlan, ResourceKind, ResourceOperationNode, STATE_FORMAT_VERSION, StateClientPlan,
     StateDefault, StateScope,
 };
 use orna_core::{
-    FunctionId, FunctionRevisionId, ParameterId, PrincipalId, StateSlotId, TypeId,
+    FunctionId, FunctionRevisionId, LocalId, ParameterId, PrincipalId, StateSlotId, TypeId,
     canonical_hash::{CanonicalHashError, catalogue_digest_with_context},
     catalogue::{
         FunctionDomain, FunctionReturn, FunctionSecurity, FunctionVolatility, TypeDefinition,
@@ -2082,6 +2082,7 @@ fn evaluate_function(
         return_shape,
         artifact_version,
     )?;
+    let mut local_environment = ClientLocalEnvironment::new();
     let value = match &envelope {
         Some(plan) => evaluate_capability_plan(
             active,
@@ -2094,6 +2095,7 @@ fn evaluate_function(
             depth,
             principal,
             executor,
+            &mut local_environment,
         )?,
         None => evaluate_plan(
             active,
@@ -2107,6 +2109,7 @@ fn evaluate_function(
             depth,
             principal,
             executor,
+            &mut local_environment,
         )?,
     };
     Ok((context, value))
@@ -2148,6 +2151,7 @@ fn evaluate_plan(
     depth: usize,
     principal: PrincipalId,
     executor: &mut Option<&mut dyn ClientResourceExecutor>,
+    local_environment: &mut ClientLocalEnvironment,
 ) -> Result<RuntimeValue, ClientExecutionError> {
     match return_shape {
         ClientReturnShape::LegacyBoolean | ClientReturnShape::StandardBoolean(_) => {
@@ -2175,6 +2179,7 @@ fn evaluate_plan(
                 depth,
                 principal,
                 executor,
+                local_environment,
             )
         }
         ClientReturnShape::State(expected) => {
@@ -2192,6 +2197,25 @@ fn evaluate_plan(
                 depth,
                 principal,
                 executor,
+                local_environment,
+            )
+        }
+        ClientReturnShape::Procedural(expected) => {
+            let plan = ProceduralClientPlan::decode(payload)
+                .map_err(|source| ClientExecutionError::InvalidArtifact { context, source })?;
+            evaluate_procedural_plan(
+                active,
+                &plan,
+                context,
+                expected,
+                arguments,
+                declarations,
+                grants,
+                state,
+                depth,
+                principal,
+                executor,
+                local_environment,
             )
         }
         ClientReturnShape::Resource(expected) => {
@@ -2209,6 +2233,7 @@ fn evaluate_plan(
                 depth,
                 principal,
                 executor,
+                local_environment,
             )
         }
         ClientReturnShape::OtherValue => unreachable!("definition references were validated"),
@@ -2267,6 +2292,7 @@ fn evaluate_expression_plan(
     depth: usize,
     principal: PrincipalId,
     executor: &mut Option<&mut dyn ClientResourceExecutor>,
+    local_environment: &mut ClientLocalEnvironment,
 ) -> Result<RuntimeValue, ClientExecutionError> {
     let value = evaluate_expression(
         active,
@@ -2279,6 +2305,7 @@ fn evaluate_expression_plan(
         depth,
         principal,
         executor,
+        local_environment,
     )?;
     if runtime_value_matches(active, &value, expected) {
         Ok(value)
@@ -2303,6 +2330,7 @@ fn evaluate_state_plan(
     depth: usize,
     principal: PrincipalId,
     executor: &mut Option<&mut dyn ClientResourceExecutor>,
+    local_environment: &mut ClientLocalEnvironment,
 ) -> Result<RuntimeValue, ClientExecutionError> {
     initialize_client_state(
         active,
@@ -2315,6 +2343,7 @@ fn evaluate_state_plan(
         depth,
         principal,
         executor,
+        local_environment,
     )?;
     evaluate_expression_plan(
         active,
@@ -2328,6 +2357,7 @@ fn evaluate_state_plan(
         depth,
         principal,
         executor,
+        local_environment,
     )
 }
 
@@ -2343,6 +2373,7 @@ fn evaluate_resource_plan(
     depth: usize,
     principal: PrincipalId,
     executor: &mut Option<&mut dyn ClientResourceExecutor>,
+    local_environment: &mut ClientLocalEnvironment,
 ) -> Result<RuntimeValue, ClientExecutionError> {
     evaluate_expression_plan(
         active,
@@ -2356,6 +2387,7 @@ fn evaluate_resource_plan(
         depth,
         principal,
         executor,
+        local_environment,
     )
 }
 
@@ -2366,6 +2398,134 @@ fn evaluate_resource_plan(
 /// plans: the caller's declaration list is not consulted, so a recursive
 /// CLIENT call validates its own stored requirements instead of inheriting
 /// the parent declaration list.
+fn evaluate_procedural_plan(
+    active: &ActiveDatabaseRevision,
+    plan: &ProceduralClientPlan,
+    context: ClientExecutionContext,
+    expected: ResolvedType,
+    arguments: &[(ParameterId, RuntimeValue)],
+    declarations: &[capability::LocalCapabilityDeclaration],
+    grants: &capability::LocalCapabilityGrantSet,
+    state: &mut ClientStateStore,
+    depth: usize,
+    principal: PrincipalId,
+    executor: &mut Option<&mut dyn ClientResourceExecutor>,
+    local_environment: &mut ClientLocalEnvironment,
+) -> Result<RuntimeValue, ClientExecutionError> {
+    for statement in plan.statements() {
+        let local_id = statement.local();
+        let Some(local) = plan.locals().iter().find(|candidate| candidate.local_id() == local_id) else {
+            return Err(expression_error(context, ClientExpressionError::ParameterNotBound));
+        };
+        match statement {
+            orna_artifact::client_plan::ClientStatement::Let { expression, .. } => {
+                if local_environment.contains_key(&local_id) {
+                    return Err(expression_error(context, ClientExpressionError::InvalidCall));
+                }
+                let binding = evaluate_procedural_local(
+                    active, local, expression, context, arguments, declarations, grants, state,
+                    depth, principal, executor, local_environment,
+                )?;
+                local_environment.insert(local_id, binding);
+            }
+            orna_artifact::client_plan::ClientStatement::Assignment { expression, .. } => {
+                if !local_environment.contains_key(&local_id) {
+                    return Err(expression_error(context, ClientExpressionError::ParameterNotBound));
+                }
+                let binding = evaluate_procedural_local(
+                    active, local, expression, context, arguments, declarations, grants, state,
+                    depth, principal, executor, local_environment,
+                )?;
+                local_environment.insert(local_id, binding);
+            }
+        }
+    }
+    let value = evaluate_expression(
+        active, plan.return_expression(), context, arguments, declarations, grants, state, depth,
+        principal, executor, local_environment,
+    )?;
+    if runtime_value_matches(active, &value, expected) {
+        Ok(value)
+    } else {
+        Err(expression_error(context, ClientExpressionError::TypeMismatch))
+    }
+}
+
+fn evaluate_procedural_local(
+    active: &ActiveDatabaseRevision,
+    local: &ClientLocal,
+    expression: &ClientExpressionNode,
+    context: ClientExecutionContext,
+    arguments: &[(ParameterId, RuntimeValue)],
+    declarations: &[capability::LocalCapabilityDeclaration],
+    grants: &capability::LocalCapabilityGrantSet,
+    state: &mut ClientStateStore,
+    depth: usize,
+    principal: PrincipalId,
+    executor: &mut Option<&mut dyn ClientResourceExecutor>,
+    local_environment: &mut ClientLocalEnvironment,
+) -> Result<ClientLocalBinding, ClientExecutionError> {
+    match local.kind() {
+        ClientLocalKind::Value => {
+            if procedural_resource_kind_for_runtime(expression, local_environment).is_some() {
+                return Err(expression_error(context, ClientExpressionError::TypeMismatch));
+            }
+            let expected = resolve_state_slot_type(active, local.type_id())
+                .ok_or_else(|| expression_error(context, ClientExpressionError::TypeMismatch))?;
+            let value = evaluate_expression_plan(
+                active, expression, context, expected, arguments, declarations, grants, state, depth,
+                principal, executor, local_environment,
+            )?;
+            Ok(ClientLocalBinding::Value(value))
+        }
+        ClientLocalKind::Resource(kind) => {
+            let ClientExpressionNode::Resource { operation } = expression else {
+                let ClientExpressionNode::LocalRead { local: source } = expression else {
+                    return Err(expression_error(context, ClientExpressionError::TypeMismatch));
+                };
+                let Some(ClientLocalBinding::Resource(operation)) = local_environment.get(source) else {
+                    return Err(expression_error(context, ClientExpressionError::ParameterNotBound));
+                };
+                validate_procedural_resource_binding(active, local, kind, operation, context)?;
+                return Ok(ClientLocalBinding::Resource(operation.clone()));
+            };
+            validate_procedural_resource_binding(active, local, kind, operation, context)?;
+            Ok(ClientLocalBinding::Resource(operation.clone()))
+        }
+    }
+}
+
+fn procedural_resource_kind_for_runtime(
+    expression: &ClientExpressionNode,
+    local_environment: &ClientLocalEnvironment,
+) -> Option<ResourceKind> {
+    match expression {
+        ClientExpressionNode::Resource { operation } => Some(operation.kind()),
+        ClientExpressionNode::LocalRead { local } => match local_environment.get(local) {
+            Some(ClientLocalBinding::Resource(operation)) => Some(operation.kind()),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+fn validate_procedural_resource_binding(
+    active: &ActiveDatabaseRevision,
+    local: &ClientLocal,
+    kind: ResourceKind,
+    operation: &ResourceOperationNode,
+    context: ClientExecutionContext,
+) -> Result<(), ClientExecutionError> {
+    if operation.kind() != kind {
+        return Err(expression_error(context, ClientExpressionError::TypeMismatch));
+    }
+    let resolved = resource_operation_result_type(active, operation, context)?;
+    if !resource_type_matches_id(active, resolved, local.type_id()) {
+        return Err(expression_error(context, ClientExpressionError::TypeMismatch));
+    }
+    Ok(())
+}
+
 fn evaluate_capability_plan(
     active: &ActiveDatabaseRevision,
     plan: &CapabilityClientPlan,
@@ -2377,6 +2537,7 @@ fn evaluate_capability_plan(
     depth: usize,
     principal: PrincipalId,
     executor: &mut Option<&mut dyn ClientResourceExecutor>,
+    local_environment: &mut ClientLocalEnvironment,
 ) -> Result<RuntimeValue, ClientExecutionError> {
     match plan.inner_plan() {
         InnerClientPlan::Boolean(inner) => Ok(RuntimeValue::Boolean(inner.returned_boolean())),
@@ -2402,6 +2563,7 @@ fn evaluate_capability_plan(
                 depth,
                 principal,
                 executor,
+                local_environment,
             )
         }
         InnerClientPlan::State(inner) => {
@@ -2420,6 +2582,16 @@ fn evaluate_capability_plan(
                 depth,
                 principal,
                 executor,
+                local_environment,
+            )
+        }
+        InnerClientPlan::Procedural(inner) => {
+            let ClientReturnShape::Procedural(expected) = return_shape else {
+                unreachable!("function shape was validated against the inner plan version");
+            };
+            evaluate_procedural_plan(
+                active, inner, context, expected, arguments, &[], grants, state, depth, principal,
+                executor, local_environment,
             )
         }
         InnerClientPlan::Resource(inner) => {
@@ -2438,6 +2610,7 @@ fn evaluate_capability_plan(
                 depth,
                 principal,
                 executor,
+                local_environment,
             )
         }
     }
@@ -2564,6 +2737,7 @@ fn evaluate_resource_expression(
     depth: usize,
     principal: PrincipalId,
     executor: &mut Option<&mut dyn ClientResourceExecutor>,
+    local_environment: &mut ClientLocalEnvironment,
 ) -> Result<RuntimeValue, ClientExecutionError> {
     let Some(executor) = executor.as_deref_mut() else {
         return Err(evaluate_resource_error(
@@ -2601,6 +2775,7 @@ fn evaluate_resource_expression(
             depth,
             principal,
             &mut Some(executor),
+            local_environment,
         )?;
         let Some(parameter_definition) = target_definition
             .parameters()
@@ -2722,36 +2897,29 @@ fn evaluate_expression(
     depth: usize,
     principal: PrincipalId,
     executor: &mut Option<&mut dyn ClientResourceExecutor>,
+    local_environment: &mut ClientLocalEnvironment,
 ) -> Result<RuntimeValue, ClientExecutionError> {
     match expression {
-        ClientExpressionNode::Await { expression } => {
-            if !matches!(expression.as_ref(), ClientExpressionNode::Resource { .. }) {
-                return Err(expression_error(context, ClientExpressionError::InvalidCall));
+        ClientExpressionNode::Await { expression } => match expression.as_ref() {
+            ClientExpressionNode::Resource { operation } => evaluate_resource_expression(
+                active, operation, context, arguments, declarations, grants, state, depth, principal,
+                executor, local_environment,
+            ),
+            ClientExpressionNode::LocalRead { local } => {
+                let Some(ClientLocalBinding::Resource(operation)) = local_environment.get(local) else {
+                    return Err(expression_error(context, ClientExpressionError::ParameterNotBound));
+                };
+                let operation = operation.clone();
+                evaluate_resource_expression(
+                    active, &operation, context, arguments, declarations, grants, state, depth, principal,
+                    executor, local_environment,
+                )
             }
-            evaluate_expression(
-                active,
-                expression,
-                context,
-                arguments,
-                declarations,
-                grants,
-                state,
-                depth,
-                principal,
-                executor,
-            )
-        }
+            _ => Err(expression_error(context, ClientExpressionError::InvalidCall)),
+        },
         ClientExpressionNode::Resource { operation } => evaluate_resource_expression(
-            active,
-            operation,
-            context,
-            arguments,
-            declarations,
-            grants,
-            state,
-            depth,
-            principal,
-            executor,
+            active, operation, context, arguments, declarations, grants, state, depth, principal,
+            executor, local_environment,
         ),
         ClientExpressionNode::String { value } => Ok(RuntimeValue::Text(value.clone())),
         ClientExpressionNode::Integer { value } => i32::try_from(*value)
@@ -2763,102 +2931,57 @@ fn evaluate_expression(
             .find(|(candidate, _)| candidate == parameter)
             .map(|(_, value)| value.clone())
             .ok_or_else(|| expression_error(context, ClientExpressionError::ParameterNotBound)),
+        ClientExpressionNode::LocalRead { local } => match local_environment.get(local) {
+            Some(ClientLocalBinding::Value(value)) => Ok(value.clone()),
+            Some(ClientLocalBinding::Resource(_)) => {
+                Err(expression_error(context, ClientExpressionError::TypeMismatch))
+            }
+            None => Err(expression_error(context, ClientExpressionError::ParameterNotBound)),
+        },
         ClientExpressionNode::FieldPath { root, fields } => {
             let value = arguments
                 .iter()
                 .find(|(candidate, _)| candidate == root)
                 .map(|(_, value)| value)
-                .ok_or_else(|| {
-                    expression_error(context, ClientExpressionError::ParameterNotBound)
-                })?;
+                .ok_or_else(|| expression_error(context, ClientExpressionError::ParameterNotBound))?;
             evaluate_field_path(active, value, fields, context)
         }
         ClientExpressionNode::Concat { left, right } => {
             let left = evaluate_expression(
-                active,
-                left,
-                context,
-                arguments,
-                declarations,
-                grants,
-                state,
-                depth,
-                principal,
-                executor,
+                active, left, context, arguments, declarations, grants, state, depth, principal,
+                executor, local_environment,
             )?;
             let right = evaluate_expression(
-                active,
-                right,
-                context,
-                arguments,
-                declarations,
-                grants,
-                state,
-                depth,
-                principal,
-                executor,
+                active, right, context, arguments, declarations, grants, state, depth, principal,
+                executor, local_environment,
             )?;
             let (RuntimeValue::Text(left), RuntimeValue::Text(right)) = (left, right) else {
-                return Err(expression_error(
-                    context,
-                    ClientExpressionError::TypeMismatch,
-                ));
+                return Err(expression_error(context, ClientExpressionError::TypeMismatch));
             };
             Ok(RuntimeValue::Text(format!("{left}{right}")))
         }
-        ClientExpressionNode::Call {
-            function,
-            arguments: bound,
-        } => {
+        ClientExpressionNode::Call { function, arguments: bound } => {
             if depth >= orna_artifact::client_plan::MAX_EXPRESSION_DEPTH {
-                return Err(expression_error(
-                    context,
-                    ClientExpressionError::RecursionLimit,
-                ));
+                return Err(expression_error(context, ClientExpressionError::RecursionLimit));
             }
             let mut evaluated = Vec::with_capacity(bound.len());
             for (parameter, expression) in bound {
-                if evaluated
-                    .iter()
-                    .any(|(candidate, _)| candidate == parameter)
-                {
-                    return Err(expression_error(
-                        context,
-                        ClientExpressionError::InvalidCall,
-                    ));
+                if evaluated.iter().any(|(candidate, _)| candidate == parameter) {
+                    return Err(expression_error(context, ClientExpressionError::InvalidCall));
                 }
                 let value = evaluate_expression(
-                    active,
-                    expression,
-                    context,
-                    arguments,
-                    declarations,
-                    grants,
-                    state,
-                    depth,
-                    principal,
-                    executor,
+                    active, expression, context, arguments, declarations, grants, state, depth, principal,
+                    executor, local_environment,
                 )?;
                 evaluated.push((*parameter, value));
             }
             let (_, value) = evaluate_function(
-                active,
-                *function,
-                evaluated,
-                declarations,
-                grants,
-                state,
-                depth + 1,
-                principal,
-                executor,
+                active, *function, evaluated, declarations, grants, state, depth + 1, principal, executor,
             )?;
             Ok(value)
         }
         ClientExpressionNode::ExternalContract { identity } => {
-            Err(ClientExecutionError::ExternalContract {
-                context,
-                identity: identity.clone(),
-            })
+            Err(ClientExecutionError::ExternalContract { context, identity: identity.clone() })
         }
     }
 }
@@ -3098,6 +3221,7 @@ fn initialize_client_state(
     depth: usize,
     principal: PrincipalId,
     executor: &mut Option<&mut dyn ClientResourceExecutor>,
+    local_environment: &mut ClientLocalEnvironment,
 ) -> Result<(), ClientExecutionError> {
     for slot in plan.slots() {
         let key = state.key_for(context.function(), slot.state_slot_id());
@@ -3147,6 +3271,7 @@ fn initialize_client_state(
                     depth,
                     principal,
                     executor,
+                    local_environment,
                 )?;
                 if !runtime_value_matches(active, &value, resolved) {
                     return Err(state_error(
@@ -3240,6 +3365,14 @@ fn invalid_active_revision(
     }
 }
 
+type ClientLocalEnvironment = HashMap<LocalId, ClientLocalBinding>;
+
+#[derive(Clone, Debug)]
+enum ClientLocalBinding {
+    Value(RuntimeValue),
+    Resource(ResourceOperationNode),
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ClientReturnShape {
     LegacyBoolean,
@@ -3248,6 +3381,7 @@ enum ClientReturnShape {
     Expression(ResolvedType),
     State(ResolvedType),
     Resource(ResolvedType),
+    Procedural(ResolvedType),
     OtherValue,
     Unsupported,
 }
@@ -3259,13 +3393,15 @@ fn classify_client_return(
 ) -> ClientReturnShape {
     let expression_eligible = matches!(
         artifact_version,
-        EXPRESSION_FORMAT_VERSION | STATE_FORMAT_VERSION | RESOURCE_FORMAT_VERSION
+        EXPRESSION_FORMAT_VERSION | STATE_FORMAT_VERSION | RESOURCE_FORMAT_VERSION | PROCEDURAL_FORMAT_VERSION
     );
     let expression_shape = |resolved_type: ResolvedType| {
         if artifact_version == STATE_FORMAT_VERSION {
             ClientReturnShape::State(resolved_type)
         } else if artifact_version == RESOURCE_FORMAT_VERSION {
             ClientReturnShape::Resource(resolved_type)
+        } else if artifact_version == PROCEDURAL_FORMAT_VERSION {
+            ClientReturnShape::Procedural(resolved_type)
         } else {
             ClientReturnShape::Expression(resolved_type)
         }
@@ -3343,7 +3479,7 @@ fn validate_function_shape(
     }
     if !matches!(
         artifact_version,
-        EXPRESSION_FORMAT_VERSION | STATE_FORMAT_VERSION | RESOURCE_FORMAT_VERSION
+        EXPRESSION_FORMAT_VERSION | STATE_FORMAT_VERSION | RESOURCE_FORMAT_VERSION | PROCEDURAL_FORMAT_VERSION
     ) && !definition.parameters().is_empty()
     {
         return Err(invalid_function(context, ClientExecutionRule::Parameters));
@@ -3394,6 +3530,7 @@ fn validate_selected_references(
                 ClientReturnShape::Expression(_)
                 | ClientReturnShape::State(_)
                 | ClientReturnShape::Resource(_)
+                | ClientReturnShape::Procedural(_)
             ) {
                 if selected.iter().any(|reference| {
                     !matches!(
@@ -3437,6 +3574,7 @@ fn validate_selected_references(
                             ClientReturnShape::Expression(_)
                             | ClientReturnShape::State(_)
                             | ClientReturnShape::Resource(_)
+                            | ClientReturnShape::Procedural(_)
                             | ClientReturnShape::OtherValue
                             | ClientReturnShape::Unsupported => false,
                         }
@@ -3474,6 +3612,7 @@ fn validate_artifact(
         ClientReturnShape::LegacyBoolean | ClientReturnShape::StandardBoolean(_) => FORMAT_VERSION,
         ClientReturnShape::Opaque(_) => OPAQUE_FORMAT_VERSION,
         ClientReturnShape::Expression(_) => EXPRESSION_FORMAT_VERSION,
+        ClientReturnShape::Procedural(_) => PROCEDURAL_FORMAT_VERSION,
         ClientReturnShape::State(_) => STATE_FORMAT_VERSION,
         ClientReturnShape::Resource(_) => RESOURCE_FORMAT_VERSION,
         ClientReturnShape::OtherValue => unreachable!("definition references were validated"),
@@ -3506,7 +3645,7 @@ mod tests {
     use std::time::SystemTime;
 
     use orna_core::{
-        CatalogueRevisionId, FunctionId, FunctionRevisionId, ParameterId, PrincipalId, SchemaId,
+        CatalogueRevisionId, FunctionId, FunctionRevisionId, LocalId, ParameterId, PrincipalId, SchemaId,
         SourceBundleId, SourceRevisionId, SourceUnitId, StateSlotId, TypeId,
         canonical_hash::{
             artifact_payload_digest, catalogue_digest, catalogue_digest_with_context,
@@ -4561,6 +4700,197 @@ mod tests {
             result.value(),
             &RuntimeValue::Text("hello world".to_owned())
         );
+    }
+
+    #[test]
+    fn procedural_literals_and_assignments_use_declaration_locals() {
+        let local = LocalId::from_bytes([0xc1; 16]);
+        let text_type = orna_standard::CHARACTER_LARGE_OBJECT_TYPE_ID;
+        let plan = orna_artifact::client_plan::ProceduralClientPlan::new(
+            vec![orna_artifact::client_plan::ClientLocal::new(local, text_type, orna_artifact::client_plan::ClientLocalKind::Value)],
+            vec![
+                orna_artifact::client_plan::ClientStatement::let_(local, orna_artifact::client_plan::ClientExpressionNode::String { value: "first".to_owned() }),
+                orna_artifact::client_plan::ClientStatement::assignment(local, orna_artifact::client_plan::ClientExpressionNode::String { value: "second".to_owned() }),
+            ],
+            orna_artifact::client_plan::ClientExpressionNode::LocalRead { local },
+        );
+        let payload = orna_artifact::client_plan::CapabilityClientPlan::new(
+            orna_artifact::client_plan::InnerClientPlan::Procedural(plan),
+            vec![orna_artifact::client_plan::CapabilityRequirement::new("std.fs.read", orna_artifact::client_plan::CapabilityArgumentSource::Text("/tmp".to_owned()))],
+        ).encode().unwrap();
+        let (active, function, pair, _, _) = version_five_expression_active_with_parameter(payload);
+        let grant = super::capability::LocalCapabilityGrant::new(super::capability::LocalCapabilityName::StdFsRead, super::capability::LocalCapabilityScope::path("/tmp").unwrap()).unwrap();
+        let grants = super::capability::LocalCapabilityGrantSet::from_grants([grant]).unwrap();
+        let argument = FunctionArgument::new(ParameterId::from_bytes([0xb1; 16]), RuntimeValue::Text("/tmp".to_owned())).unwrap();
+        let result = super::evaluate_client_function_with_grants_and_arguments(&active, &authorise(pair, function), &[argument], &[], &grants).unwrap();
+        assert_eq!(result.value(), &RuntimeValue::Text("second".to_owned()));
+    }
+
+    #[test]
+    fn procedural_await_without_executor_fails_closed() {
+        let text_type = orna_standard::CHARACTER_LARGE_OBJECT_TYPE_ID;
+        let function = FunctionId::from_bytes([6; 16]);
+        let pair = RevisionPair::new(SourceRevisionId::from_bytes([3; 16]), CatalogueRevisionId::from_bytes([4; 16]));
+        let operation = orna_artifact::client_plan::ResourceOperationNode::new(orna_artifact::client_plan::ResourceKind::Scalar, function, pair, orna_core::CallSiteId::from_bytes([8; 16]), Vec::new(), text_type);
+        let plan = orna_artifact::client_plan::ProceduralClientPlan::new(Vec::new(), Vec::new(), orna_artifact::client_plan::ClientExpressionNode::Await { expression: Box::new(orna_artifact::client_plan::ClientExpressionNode::Resource { operation }) });
+        let payload = orna_artifact::client_plan::CapabilityClientPlan::new(
+            orna_artifact::client_plan::InnerClientPlan::Procedural(plan),
+            vec![orna_artifact::client_plan::CapabilityRequirement::new("std.fs.read", orna_artifact::client_plan::CapabilityArgumentSource::Text("/tmp".to_owned()))],
+        ).encode().unwrap();
+        let (active, function, pair, _, _) = version_five_expression_active_with_parameter(payload);
+        let grant = super::capability::LocalCapabilityGrant::new(super::capability::LocalCapabilityName::StdFsRead, super::capability::LocalCapabilityScope::path("/tmp").unwrap()).unwrap();
+        let grants = super::capability::LocalCapabilityGrantSet::from_grants([grant]).unwrap();
+        let argument = FunctionArgument::new(ParameterId::from_bytes([0xb1; 16]), RuntimeValue::Text("/tmp".to_owned())).unwrap();
+        let error = super::evaluate_client_function_with_grants_and_arguments(&active, &authorise(pair, function), &[argument], &[], &grants).unwrap_err();
+        assert!(matches!(error, super::ClientExecutionError::ResourceEvaluation { source: super::ClientResourceExecutionError::ExecutorUnavailable, .. }));
+    }
+
+
+    #[test]
+    fn procedural_scalar_resource_local_awaits_through_assignment_with_executor_value() {
+        let local = LocalId::from_bytes([0xc2; 16]);
+        let text_type = orna_standard::CHARACTER_LARGE_OBJECT_TYPE_ID;
+        let target_revision = RevisionPair::new(
+            SourceRevisionId::from_bytes([3; 16]),
+            CatalogueRevisionId::from_bytes([4; 16]),
+        );
+        let target = FunctionId::from_bytes([0xd1; 16]);
+        let operation = orna_artifact::client_plan::ResourceOperationNode::new(
+            orna_artifact::client_plan::ResourceKind::Scalar,
+            target,
+            target_revision,
+            orna_core::CallSiteId::from_bytes([0x82; 16]),
+            Vec::new(),
+            text_type,
+        );
+        let plan = orna_artifact::client_plan::ProceduralClientPlan::new(
+            vec![orna_artifact::client_plan::ClientLocal::new(
+                local,
+                text_type,
+                orna_artifact::client_plan::ClientLocalKind::Resource(
+                    orna_artifact::client_plan::ResourceKind::Scalar,
+                ),
+            )],
+            vec![
+                orna_artifact::client_plan::ClientStatement::let_(
+                    local,
+                    orna_artifact::client_plan::ClientExpressionNode::Resource { operation: operation.clone() },
+                ),
+                orna_artifact::client_plan::ClientStatement::assignment(
+                    local,
+                    orna_artifact::client_plan::ClientExpressionNode::LocalRead { local },
+                ),
+            ],
+            orna_artifact::client_plan::ClientExpressionNode::Await {
+                expression: Box::new(orna_artifact::client_plan::ClientExpressionNode::LocalRead { local }),
+            },
+        );
+        let payload = orna_artifact::client_plan::CapabilityClientPlan::new(
+            orna_artifact::client_plan::InnerClientPlan::Procedural(plan),
+            vec![orna_artifact::client_plan::CapabilityRequirement::new(
+                "std.fs.read",
+                orna_artifact::client_plan::CapabilityArgumentSource::Text("/tmp".to_owned()),
+            )],
+        )
+        .encode()
+        .unwrap();
+        let (active, function, pair, _, parameter) = version_five_expression_active_with_parameter(payload);
+        let grant = super::capability::LocalCapabilityGrant::new(
+            super::capability::LocalCapabilityName::StdFsRead,
+            super::capability::LocalCapabilityScope::path("/tmp").unwrap(),
+        )
+        .unwrap();
+        let grants = super::capability::LocalCapabilityGrantSet::from_grants([grant]).unwrap();
+        let argument = FunctionArgument::new(parameter, RuntimeValue::Text("/tmp".to_owned())).unwrap();
+        let mut executor = super::DeterministicClientResourceExecutor::new(
+            |request: &super::ClientResourceRequest| {
+                assert_eq!(request.key().target(), InvocationTarget::new(target, pair));
+                assert!(request.arguments().is_empty());
+                Ok(RuntimeValue::Text("executor-value".to_owned()))
+            },
+        );
+
+        let result = super::evaluate_client_function_with_state_and_grants_and_arguments_and_executor(
+            &active,
+            &authorise(pair, function),
+            &[argument],
+            &[],
+            &grants,
+            &mut super::ClientStateStore::new(),
+            &mut executor,
+        )
+        .unwrap();
+
+        assert_eq!(result.value(), &RuntimeValue::Text("executor-value".to_owned()));
+    }
+
+
+    #[test]
+    fn procedural_scalar_resource_local_await_without_executor_fails_closed() {
+        let local = LocalId::from_bytes([0xc3; 16]);
+        let text_type = orna_standard::CHARACTER_LARGE_OBJECT_TYPE_ID;
+        let pair = RevisionPair::new(
+            SourceRevisionId::from_bytes([3; 16]),
+            CatalogueRevisionId::from_bytes([4; 16]),
+        );
+        let operation = orna_artifact::client_plan::ResourceOperationNode::new(
+            orna_artifact::client_plan::ResourceKind::Scalar,
+            FunctionId::from_bytes([0xd1; 16]),
+            pair,
+            orna_core::CallSiteId::from_bytes([0x83; 16]),
+            Vec::new(),
+            text_type,
+        );
+        let plan = orna_artifact::client_plan::ProceduralClientPlan::new(
+            vec![orna_artifact::client_plan::ClientLocal::new(
+                local,
+                text_type,
+                orna_artifact::client_plan::ClientLocalKind::Resource(
+                    orna_artifact::client_plan::ResourceKind::Scalar,
+                ),
+            )],
+            vec![orna_artifact::client_plan::ClientStatement::let_(
+                local,
+                orna_artifact::client_plan::ClientExpressionNode::Resource { operation },
+            )],
+            orna_artifact::client_plan::ClientExpressionNode::Await {
+                expression: Box::new(orna_artifact::client_plan::ClientExpressionNode::LocalRead { local }),
+            },
+        );
+        let payload = orna_artifact::client_plan::CapabilityClientPlan::new(
+            orna_artifact::client_plan::InnerClientPlan::Procedural(plan),
+            vec![orna_artifact::client_plan::CapabilityRequirement::new(
+                "std.fs.read",
+                orna_artifact::client_plan::CapabilityArgumentSource::Text("/tmp".to_owned()),
+            )],
+        )
+        .encode()
+        .unwrap();
+        let (active, function, pair, _, parameter) = version_five_expression_active_with_parameter(payload);
+        let grant = super::capability::LocalCapabilityGrant::new(
+            super::capability::LocalCapabilityName::StdFsRead,
+            super::capability::LocalCapabilityScope::path("/tmp").unwrap(),
+        )
+        .unwrap();
+        let grants = super::capability::LocalCapabilityGrantSet::from_grants([grant]).unwrap();
+        let argument = FunctionArgument::new(parameter, RuntimeValue::Text("/tmp".to_owned())).unwrap();
+
+        let error = super::evaluate_client_function_with_grants_and_arguments(
+            &active,
+            &authorise(pair, function),
+            &[argument],
+            &[],
+            &grants,
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            error,
+            super::ClientExecutionError::ResourceEvaluation {
+                source: super::ClientResourceExecutionError::ExecutorUnavailable,
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -7306,14 +7636,56 @@ mod tests {
             None,
             FunctionVolatility::Immutable,
         );
+        let resource_target = FunctionDefinition::new(
+            FunctionId::from_bytes([0xd1; 16]),
+            QualifiedSemanticName::new(["app", "resource"]).unwrap(),
+            FunctionDomain::Server,
+            Vec::new(),
+            FunctionReturn::Single(ResolvedType::Value(
+                orna_standard::CHARACTER_LARGE_OBJECT_TYPE_ID,
+            )),
+            FunctionRevisionId::from_bytes([0xd2; 16]),
+            FunctionSecurity::Invoker,
+            None,
+            FunctionVolatility::Stable,
+        );
         let catalogue = CatalogueSnapshot::new_with_functions(
             version_one.catalogue().revision(),
             version_one.catalogue().schemas().to_vec(),
             version_one.catalogue().object_types().to_vec(),
-            vec![function.clone()],
+            vec![function.clone(), resource_target.clone()],
         )
         .unwrap();
         let prior_revision = &version_one.function_revisions()[0];
+        let resource_payload = vec![0x53];
+        let resource_artifact = ExecutableArtifact::new(
+            ExecutableArtifactKind::Server,
+            "orna.server-plan",
+            1,
+            resource_payload.clone(),
+            artifact_payload_digest(&resource_payload).unwrap(),
+        )
+        .unwrap();
+        let resource_revision = FunctionRevisionRecord::new(
+            resource_target.id(),
+            FunctionRevisionId::from_bytes([0xd2; 16]),
+            prior_revision.revision_number(),
+            prior_revision.declaration_origin(),
+            prior_revision.declaration_content_hash(),
+            function_semantic_digest_with_version(
+                FunctionSemanticHashVersion::Version2,
+                &resource_target,
+                prior_revision.language_version(),
+                &resource_artifact,
+                &[],
+                &[],
+            )
+            .unwrap(),
+            prior_revision.language_version(),
+            resource_artifact,
+        )
+        .unwrap()
+        .with_semantic_hash_version(FunctionSemanticHashVersion::Version2);
         let artifact = ExecutableArtifact::new(
             ExecutableArtifactKind::Client,
             "orna.client-plan",
@@ -7351,11 +7723,16 @@ mod tests {
             },
             prior_revision.declaration_origin(),
         ));
+        origins.push(DefinitionOrigin::new(
+            DefinitionIdentity::Function(resource_target.id()),
+            prior_revision.declaration_origin(),
+        ));
+        let revisions = vec![revision, resource_revision];
         let context = orna_core::revision::CatalogueHashContext::version_two(standard);
         let catalogue_hash = catalogue_digest_with_context(
             &context,
             &catalogue,
-            std::slice::from_ref(&revision),
+            &revisions,
             version_one.expressions(),
             &origins,
             &[],
@@ -7369,7 +7746,7 @@ mod tests {
                 catalogue_hash,
                 ActiveRevisionContent::new(
                     version_one.expressions().to_vec(),
-                    vec![revision],
+                    revisions,
                     origins,
                     Vec::new(),
                 ),
@@ -7386,6 +7763,7 @@ mod tests {
             parameter.id(),
         )
     }
+
 
     fn boolean_parameter() -> ParameterDefinition {
         ParameterDefinition::new(
