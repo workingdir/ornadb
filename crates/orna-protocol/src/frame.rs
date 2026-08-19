@@ -1653,7 +1653,10 @@ impl ResourceProtocolConnection {
     fn window_update(&mut self, update: ResourceWindowUpdate) -> Result<ResourceFrameDisposition, ResourceConnectionError> {
         if let Some(disposition) = self.check_terminal(update.stream_id, update.request_id)? { return Ok(disposition); }
         let state = self.state_for(update.stream_id, update.request_id)?;
-        if !state.accepted || !matches!(state.phase, ResourcePhase::Live) {
+        if state.resource_kind != ResourceKind::Stream
+            || !state.accepted
+            || !matches!(state.phase, ResourcePhase::Live)
+        {
             return Err(ResourceConnectionError::WrongState { stream_id: update.stream_id });
         }
         require_resource_window_addition(update.add_items, update.add_bytes).map_err(|source| ResourceConnectionError::InvalidFrame { source })?;
@@ -6372,6 +6375,37 @@ mod tests {
             ),
             Ok(ResourceFrameDisposition::Applied)
         );
+    }
+
+    #[test]
+    fn resource_connection_rejects_window_updates_for_scalar_resources() {
+        let request = resource_request_fixture();
+        let request_id = request.request_id;
+        let mut connection = ResourceProtocolConnection::new();
+        assert_eq!(connection.open(request.clone()), Ok(ResourceFrameDisposition::Applied));
+        assert_eq!(
+            connection.apply(ResourceServerFrame::Accepted(ResourceAccepted {
+                stream_id: request.stream_id,
+                request_id,
+                nested_invocation_id: InvocationId::from_bytes([0x57; 16]),
+                target_revision: request.target_revision,
+                resource_kind: ResourceKind::Single,
+            })),
+            Ok(ResourceFrameDisposition::Applied),
+        );
+
+        assert_eq!(
+            connection.receive(ResourceClientFrame::WindowUpdate(ResourceWindowUpdate {
+                stream_id: request.stream_id,
+                request_id,
+                add_items: 1,
+                add_bytes: 1,
+            })),
+            Err(ResourceConnectionError::WrongState {
+                stream_id: request.stream_id,
+            }),
+        );
+        assert_eq!(connection.live_resources(), 1);
     }
 
     #[test]
