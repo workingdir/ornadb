@@ -4868,6 +4868,54 @@ mod tests {
     }
 
     #[test]
+    fn parses_accepted_client_fixture_losslessly_with_expression_and_state_bodies() {
+        let source = include_str!("../testdata/accepted-client.orna");
+        let parsed = parse(source);
+
+        assert!(parsed.diagnostics().is_empty(), "{:?}", parsed.diagnostics());
+        assert_eq!(parsed.syntax().text(), source);
+        assert_eq!(parsed.schemas().len(), 1);
+        assert_eq!(parsed.schemas()[0].name.parts[0].text, "accepted_client");
+        assert_eq!(parsed.client_functions().len(), 2);
+
+        let expression = &parsed.client_functions()[0];
+        assert_eq!(expression.name.parts[0].text, "accepted_client");
+        assert_eq!(expression.name.parts[1].text, "enabled");
+        let ClientFunctionBody::Expression { expression } = &expression.body else {
+            panic!("expected an expression CLIENT body");
+        };
+        assert!(matches!(
+            expression,
+            ClientExpression::BooleanLiteral { value: true, .. }
+        ));
+
+        let stateful = &parsed.client_functions()[1];
+        assert_eq!(stateful.name.parts[0].text, "accepted_client");
+        assert_eq!(stateful.name.parts[1].text, "stateful");
+        let ClientFunctionBody::StateBlock(block) = &stateful.body else {
+            panic!("expected a state CLIENT body");
+        };
+        assert_eq!(block.states.len(), 1);
+        assert!(block.locals.is_empty());
+        assert!(block.statements.is_empty());
+        let state = &block.states[0];
+        assert_eq!(state.name.text, "ready");
+        assert!(matches!(
+            &state.type_specification,
+            TypeSpecification::Named(name) if name.parts[0].text == "BOOLEAN"
+        ));
+        assert_eq!(state.scope, StateScope::Local);
+        assert!(matches!(
+            &state.default,
+            StateDefault::Expression(ClientExpression::BooleanLiteral { value: true, .. })
+        ));
+        assert!(matches!(
+            block.return_expression.as_ref(),
+            Some(ClientExpression::BooleanLiteral { value: true, .. })
+        ));
+    }
+
+    #[test]
     fn retains_client_parameters_and_non_boolean_return_types_for_semantic_checks() {
         let source = "CREATE CLIENT FUNCTION examples.with_parameter(p_value TEXT) RETURNS BOOLEAN RETURN TRUE;\n\
             CREATE CLIENT FUNCTION examples.ui() RETURNS UI RETURN FALSE;\n\
