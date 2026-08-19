@@ -1066,6 +1066,16 @@ fn resource_completion_actions(
     }
 }
 
+fn resource_action_request_id(action: &ResourceServerFrame) -> orna_core::InvocationId {
+    match action {
+        ResourceServerFrame::Accepted(frame) => frame.request_id,
+        ResourceServerFrame::Values(frame) => frame.request_id,
+        ResourceServerFrame::Completed(frame) => frame.request_id,
+        ResourceServerFrame::Failed(frame) => frame.request_id,
+        ResourceServerFrame::Cancelled(frame) => frame.request_id,
+    }
+}
+
 fn resource_internal_failure(request: &ResourceRequest) -> VecDeque<ResourceServerFrame> {
     VecDeque::from([ResourceServerFrame::Failed(orna_protocol::ResourceFailed {
         stream_id: request.stream_id,
@@ -1332,9 +1342,19 @@ async fn handle_resource_frame<D: DispatchService>(
         ResourceClientFrame::Cancel(cancel) => Some(*cancel),
         _ => None,
     };
-    let disposition = connection
-        .receive(frame)
-        .map_err(|source| LocalRawSocketError::ResourceConnection { source })?;
+    let committed_completion = cancellation.is_some_and(|cancel| {
+        pending
+            .get(&cancel.stream_id)
+            .and_then(|completion| completion.actions.front())
+            .is_some_and(|action| resource_action_request_id(action) == cancel.request_id)
+    });
+    let disposition = if committed_completion {
+        ResourceFrameDisposition::Applied
+    } else {
+        connection
+            .receive(frame)
+            .map_err(|source| LocalRawSocketError::ResourceConnection { source })?
+    };
     if matches!(disposition, ResourceFrameDisposition::DroppedLate) {
         return Ok(true);
     }
@@ -1361,6 +1381,7 @@ async fn handle_resource_frame<D: DispatchService>(
     }
 
     if let Some(cancel) = cancellation
+        && !committed_completion
         && matches!(disposition, ResourceFrameDisposition::Applied)
     {
         cancelled.insert(cancel.stream_id);
@@ -2378,6 +2399,27 @@ mod tests {
             )
             .await
             .is_err()
+        );
+
+        let cancel = encode_resource_client_frame(
+            &active,
+            &registry,
+            &ResourceClientFrame::Cancel(ResourceCancel {
+                stream_id: 1,
+                request_id,
+                reason: ResourceCancellationCode::ClientRequested,
+            }),
+        )
+        .unwrap();
+        client.write_all(&cancel).await.unwrap();
+        assert!(
+            timeout(
+                Duration::from_millis(50),
+                read_resource_server_frame(&mut client, &active, &registry),
+            )
+            .await
+            .is_err(),
+            "a committed completion must win over a later cancellation"
         );
 
         let update = encode_resource_client_frame(
