@@ -25,8 +25,8 @@ pub use model::{
     CheckedStandardLibrary, CheckedStandardParameterEcho, CheckedStandardSchema,
     CheckedStandardTerminalPresentTable, CheckedStandardTypeBinding, CheckedStandardTypeReference,
     CheckedStandardValueType, CheckedTypeUseKind, CheckedValueTypeUse, ConstantValue,
-    STANDARD_LIBRARY_V3_REVISION_ID, STANDARD_LIBRARY_V4_REVISION_ID, STANDARD_LIBRARY_V5_REVISION_ID,
-    STD_CSV_ENCODE_FUNCTION_ID,
+    STANDARD_LIBRARY_V3_REVISION_ID, STANDARD_LIBRARY_V4_REVISION_ID,
+    STANDARD_LIBRARY_V5_REVISION_ID, STD_CSV_ENCODE_FUNCTION_ID,
     STD_CSV_ENCODE_FUNCTION_REVISION_ID, STD_CSV_ENCODE_PARAMETER_ID, STD_DATA_ROWS_TYPE_ID,
     STD_DATA_SCHEMA_ID, STD_INTEGER_TYPE_ID, STD_INVOKE_ECHO_FUNCTION_ID,
     STD_INVOKE_ECHO_FUNCTION_REVISION_ID, STD_INVOKE_ECHO_PARAMETER_ID,
@@ -34,17 +34,16 @@ pub use model::{
     STD_IO_BYTE_STREAM_TYPE_ID, STD_IO_SCHEMA_ID, STD_JSON_ENCODE_FUNCTION_ID,
     STD_JSON_ENCODE_FUNCTION_REVISION_ID, STD_JSON_ENCODE_PARAMETER_ID, STD_JSON_SCHEMA_ID,
     STD_JSON_SOURCE_UNIT_ID, STD_JSON_VALUE_TYPE_ID, STD_OUTPUT_SOURCE_UNIT_ID,
-    STD_TERMINAL_DOCUMENT_TYPE_ID,
-    STD_TERMINAL_PRESENT_TABLE_FUNCTION_ID, STD_TERMINAL_PRESENT_TABLE_FUNCTION_REVISION_ID,
-    STD_TERMINAL_PRESENT_TABLE_PARAMETER_ID, STD_TERMINAL_SCHEMA_ID, STD_TYPES_SOURCE_UNIT_ID,
-    STD_UI_SCHEMA_ID, STD_UI_SOURCE_UNIT_ID, STD_UI_TYPE_ID, SemanticType,
-    StandardApplicationCheckContext, StandardApplicationCheckReport,
+    STD_TERMINAL_DOCUMENT_TYPE_ID, STD_TERMINAL_PRESENT_TABLE_FUNCTION_ID,
+    STD_TERMINAL_PRESENT_TABLE_FUNCTION_REVISION_ID, STD_TERMINAL_PRESENT_TABLE_PARAMETER_ID,
+    STD_TERMINAL_SCHEMA_ID, STD_TYPES_SOURCE_UNIT_ID, STD_UI_SCHEMA_ID, STD_UI_SOURCE_UNIT_ID,
+    STD_UI_TYPE_ID, SemanticType, StandardApplicationCheckContext, StandardApplicationCheckReport,
     StandardApplicationContextError, StandardLibraryCheckError,
 };
 pub(crate) use model::{
-    CheckedClientExpression, CheckedClientFunctionBody, CheckedClientStateSlot, CheckedFieldRename,
-    CheckedResourceOperation,
-    CheckedStateDefault, CheckedStateScope, CheckedStateSlotId, CheckedServerFunctionBody,
+    CheckedClientExpression, CheckedClientFunctionBody, CheckedClientLocal, CheckedClientLocalKind,
+    CheckedClientStateSlot, CheckedClientStatement, CheckedFieldRename, CheckedResourceOperation,
+    CheckedServerFunctionBody, CheckedStateDefault, CheckedStateScope, CheckedStateSlotId,
     QueryCatalogue, QueryField, QueryObjectType, ResolutionCatalogue, STD_JSON_CONTRACT,
     STD_UI_CONTRACT,
 };
@@ -56,13 +55,14 @@ use std::{
     fmt,
 };
 
+use orna_artifact::server_parameter_echo::{self, ServerParameterEcho};
 use orna_artifact::{
     client_plan::ResourceKind,
     server_json_encode::{self, JsonEncodePlan},
 };
-use orna_artifact::server_parameter_echo::{self, ServerParameterEcho};
 use orna_core::{
-    CallSiteId, ExpressionId, FunctionId, FunctionRevisionId, ParameterId, SchemaId, StateSlotId, TypeId,
+    CallSiteId, ExpressionId, FunctionId, FunctionRevisionId, ParameterId, SchemaId, StateSlotId,
+    TypeId,
     canonical_hash::{
         artifact_payload_digest, function_declaration_digest, function_semantic_digest_with_version,
     },
@@ -85,8 +85,8 @@ use orna_core::{
     types::{ResolvedType, StandardScalar},
 };
 use orna_syntax::{
-    CapabilitySpecification, ClientExpression, ClientFunctionDeclaration,
-    FieldRenameDeclaration, FunctionReturnType, FunctionSecurity as SyntaxFunctionSecurity,
+    CapabilitySpecification, ClientExpression, ClientFunctionDeclaration, FieldRenameDeclaration,
+    FunctionReturnType, FunctionSecurity as SyntaxFunctionSecurity,
     FunctionTransaction as SyntaxFunctionTransaction,
     FunctionVolatility as SyntaxFunctionVolatility, ObjectTypeDeclaration, OnDeletePolicy,
     PrimitiveValueTypePersistence, QualifiedName, RecordValueTypeDeclaration, SelectQuantifier,
@@ -801,7 +801,13 @@ fn check_standard_library_source_v5_parts(
             diagnostics: report.diagnostics().to_vec(),
         });
     }
-    let [parsed_types, parsed_invoke, parsed_output, parsed_ui, parsed_json] = report.units()
+    let [
+        parsed_types,
+        parsed_invoke,
+        parsed_output,
+        parsed_ui,
+        parsed_json,
+    ] = report.units()
     else {
         return Err(StandardLibraryCheckError::SourceMismatch);
     };
@@ -847,12 +853,7 @@ fn check_standard_library_source_v5_parts(
         invoke_unit,
         parsed_invoke,
     )?;
-    reconcile_standard_output_unit(
-        output_unit,
-        parsed_output,
-        catalogue,
-        &origin_partitions.2,
-    )?;
+    reconcile_standard_output_unit(output_unit, parsed_output, catalogue, &origin_partitions.2)?;
     reconcile_standard_ui_unit(ui_unit, parsed_ui, catalogue, &origin_partitions.3)?;
     reconcile_standard_json_unit(json_unit, parsed_json, catalogue, &json_origins)?;
     let [json_function] = parsed_json.parsed().server_functions() else {
@@ -1429,7 +1430,9 @@ fn reconcile_standard_json_unit(
     let expected_json_binding_name = QualifiedSemanticName::new(["std", "jsonvalue"])
         .expect("the fixed standard export is valid");
     let json_binding = catalogue
-        .type_binding_by_name(&TypeLookupName::qualified(expected_json_binding_name.clone()))
+        .type_binding_by_name(&TypeLookupName::qualified(
+            expected_json_binding_name.clone(),
+        ))
         .ok_or(StandardLibraryCheckError::SourceMismatch)?;
     let json_export_source = unquoted_semantic_name(&json_export.source_type)?;
     let TypeExportTarget::Qualified { name } = &json_export.target else {
@@ -1438,8 +1441,7 @@ fn reconcile_standard_json_unit(
     if json_export_source != json_type_name
         || unquoted_semantic_name(name)? != expected_json_binding_name
         || !matches!(json_binding.kind(), TypeBindingKind::Qualified)
-        || json_binding.name()
-            != &TypeLookupName::qualified(expected_json_binding_name.clone())
+        || json_binding.name() != &TypeLookupName::qualified(expected_json_binding_name.clone())
         || json_binding.target() != STD_JSON_VALUE_TYPE_ID
     {
         return Err(StandardLibraryCheckError::SourceMismatch);
@@ -4037,7 +4039,10 @@ fn resolve_client_function_inputs<'a>(
         let base_function = base.function_by_name(&name);
         let expression_body = declaration.body.as_expression().is_some()
             || declaration.body.as_external_contract().is_some()
-            || declaration.body.as_state_block().is_some();
+            || declaration
+                .body
+                .as_state_block()
+                .is_some_and(|block| block.states.is_empty());
         if !expression_body && !declaration.parameters.is_empty() {
             diagnostics.push(diagnostic(
                 DiagnosticCode::DomainIncompatible,
@@ -4515,7 +4520,17 @@ struct ClientExpressionType {
     standard_value_type: Option<orna_core::TypeId>,
 }
 
-type ClientLocalEnvironment = HashMap<String, (CheckedClientExpression, ClientExpressionType)>;
+#[derive(Clone)]
+struct ClientLocalBinding {
+    checked: CheckedClientExpression,
+    expression_type: ClientExpressionType,
+    // Procedural locals are read by ordinal. Legacy state-block locals keep
+    // their old substitution behaviour and therefore have no ordinal.
+    ordinal: Option<u32>,
+    kind: CheckedClientLocalKind,
+}
+
+type ClientLocalEnvironment = HashMap<String, ClientLocalBinding>;
 
 #[derive(Clone)]
 struct ClientExpressionParameter {
@@ -4677,7 +4692,11 @@ fn client_resource_call_site_id(
     payload.extend_from_slice(&(owner.len() as u64).to_be_bytes());
     payload.extend_from_slice(owner.as_bytes());
     let digest = artifact_payload_digest(&payload).expect("resource call-site payload is bounded");
-    CallSiteId::from_bytes(digest.to_bytes()[..16].try_into().expect("digest has 16-byte prefix"))
+    CallSiteId::from_bytes(
+        digest.to_bytes()[..16]
+            .try_into()
+            .expect("digest has 16-byte prefix"),
+    )
 }
 
 fn client_resource_result_type(
@@ -4685,9 +4704,17 @@ fn client_resource_result_type(
     kind: ResourceKind,
 ) -> Option<ClientExpressionType> {
     match (kind, return_type) {
-        (ResourceKind::Scalar, ResolvedServerFunctionReturn::Single { semantic_type, standard_value_type, .. }) => {
-            Some(ClientExpressionType { semantic_type: *semantic_type, standard_value_type: *standard_value_type })
-        }
+        (
+            ResourceKind::Scalar,
+            ResolvedServerFunctionReturn::Single {
+                semantic_type,
+                standard_value_type,
+                ..
+            },
+        ) => Some(ClientExpressionType {
+            semantic_type: *semantic_type,
+            standard_value_type: *standard_value_type,
+        }),
         // The current artifact/result model carries one durable item type.
         // Refuse a multi-column ROWS result rather than silently treating its
         // first column as the stream item type.
@@ -4710,45 +4737,57 @@ fn client_resource_targets(
 ) -> HashMap<QualifiedSemanticName, ClientResourceTarget> {
     let mut targets = HashMap::new();
     for input in inputs {
-        let Some(result_type) = client_resource_result_type(
-            &input.return_type,
-            ResourceKind::Scalar,
-        ).or_else(|| client_resource_result_type(&input.return_type, ResourceKind::Stream)) else {
+        let Some(result_type) =
+            client_resource_result_type(&input.return_type, ResourceKind::Scalar)
+                .or_else(|| client_resource_result_type(&input.return_type, ResourceKind::Stream))
+        else {
             continue;
         };
         let kind = match &input.return_type {
             ResolvedServerFunctionReturn::Single { .. } => ResourceKind::Scalar,
             ResolvedServerFunctionReturn::Rows { .. } => ResourceKind::Stream,
         };
-        targets.insert(input.name.clone(), ClientResourceTarget {
-            kind,
-            id: input.id,
-            parameters: input.parameters.iter().map(|parameter| ClientExpressionParameter {
-                id: parameter.id,
-                name: parameter.name.clone(),
-                expression_type: ClientExpressionType {
-                    semantic_type: parameter.semantic_type,
-                    standard_value_type: parameter.standard_value_type,
-                },
-            }).collect(),
-            result_type,
-        });
+        targets.insert(
+            input.name.clone(),
+            ClientResourceTarget {
+                kind,
+                id: input.id,
+                parameters: input
+                    .parameters
+                    .iter()
+                    .map(|parameter| ClientExpressionParameter {
+                        id: parameter.id,
+                        name: parameter.name.clone(),
+                        expression_type: ClientExpressionType {
+                            semantic_type: parameter.semantic_type,
+                            standard_value_type: parameter.standard_value_type,
+                        },
+                    })
+                    .collect(),
+                result_type,
+            },
+        );
     }
     for function in base.functions() {
         if function.domain() != FunctionDomain::Server || targets.contains_key(function.name()) {
             continue;
         }
         let (kind, result_type) = match function.return_type() {
-            FunctionReturn::Single(resolved) => (ResourceKind::Scalar, client_expression_type_from_core(*resolved, standard)),
+            FunctionReturn::Single(resolved) => (
+                ResourceKind::Scalar,
+                client_expression_type_from_core(*resolved, standard),
+            ),
             FunctionReturn::Rows(columns) if columns.len() == 1 => (
                 ResourceKind::Stream,
-                columns
-                    .first()
-                    .and_then(|column| client_expression_type_from_core(column.resolved_type(), standard)),
+                columns.first().and_then(|column| {
+                    client_expression_type_from_core(column.resolved_type(), standard)
+                }),
             ),
             FunctionReturn::Rows(_) => (ResourceKind::Stream, None),
         };
-        let Some(result_type) = result_type else { continue; };
+        let Some(result_type) = result_type else {
+            continue;
+        };
         let Some(parameters) = function
             .parameters()
             .iter()
@@ -4767,7 +4806,15 @@ fn client_resource_targets(
             // target signature and make an incomplete call look bound.
             continue;
         };
-        targets.insert(function.name().clone(), ClientResourceTarget { kind, id: CheckedFunctionId::Existing(function.id()), parameters, result_type });
+        targets.insert(
+            function.name().clone(),
+            ClientResourceTarget {
+                kind,
+                id: CheckedFunctionId::Existing(function.id()),
+                parameters,
+                result_type,
+            },
+        );
     }
     targets
 }
@@ -4841,7 +4888,7 @@ fn check_resource_constructor(
 ) -> Option<(CheckedClientExpression, ClientExpressionType)> {
     if let ClientExpression::LocalRead { local } = expression {
         let name = semantic_part(local);
-        let Some((checked, expression_type)) = locals.get(&name) else {
+        let Some(binding) = locals.get(&name) else {
             diagnostics.push(diagnostic(
                 DiagnosticCode::UnknownQualifiedName,
                 format!("unknown CLIENT local {name}"),
@@ -4850,7 +4897,7 @@ fn check_resource_constructor(
             ));
             return None;
         };
-        if !matches!(checked, CheckedClientExpression::Resource { .. }) {
+        if !matches!(binding.kind, CheckedClientLocalKind::Resource(..)) {
             diagnostics.push(diagnostic(
                 DiagnosticCode::DomainIncompatible,
                 format!("CLIENT local {name} is not a resource"),
@@ -4859,70 +4906,144 @@ fn check_resource_constructor(
             ));
             return None;
         }
-        return Some((checked.clone(), *expression_type));
+        return Some((
+            binding.ordinal.map_or_else(
+                || binding.checked.clone(),
+                |ordinal| CheckedClientExpression::LocalRead {
+                    local: ordinal,
+                    location: location(input.logical_path, &local.span),
+                },
+            ),
+            binding.expression_type,
+        ));
     }
-    let ClientExpression::Call { callee, arguments, span } = expression else {
-        diagnostics.push(diagnostic(DiagnosticCode::DomainIncompatible, "AWAIT requires a std.data.resource or std.data.stream_resource constructor", input.logical_path, expression.span()));
+    let ClientExpression::Call {
+        callee,
+        arguments,
+        span,
+    } = expression
+    else {
+        diagnostics.push(diagnostic(
+            DiagnosticCode::DomainIncompatible,
+            "AWAIT requires a std.data.resource or std.data.stream_resource constructor",
+            input.logical_path,
+            expression.span(),
+        ));
         return None;
     };
     let constructor_name = semantic_name(callee);
     let Some(kind) = resource_constructor_kind(&constructor_name) else {
-        diagnostics.push(diagnostic(DiagnosticCode::DomainIncompatible, "AWAIT operand must be a resource constructor", input.logical_path, span));
+        diagnostics.push(diagnostic(
+            DiagnosticCode::DomainIncompatible,
+            "AWAIT operand must be a resource constructor",
+            input.logical_path,
+            span,
+        ));
         return None;
     };
     if arguments.len() != 2 {
-        diagnostics.push(diagnostic(DiagnosticCode::TypeMismatch, "resource constructor requires exactly one target and one arguments value", input.logical_path, span));
+        diagnostics.push(diagnostic(
+            DiagnosticCode::TypeMismatch,
+            "resource constructor requires exactly one target and one arguments value",
+            input.logical_path,
+            span,
+        ));
         return None;
     }
     let mut target_expression = None;
     let mut arguments_expression = None;
     for argument in arguments {
         let Some(name) = &argument.name else {
-            diagnostics.push(diagnostic(DiagnosticCode::TypeMismatch, "resource constructor arguments must be named target and arguments", input.logical_path, &argument.span));
+            diagnostics.push(diagnostic(
+                DiagnosticCode::TypeMismatch,
+                "resource constructor arguments must be named target and arguments",
+                input.logical_path,
+                &argument.span,
+            ));
             return None;
         };
         match semantic_part(name).as_str() {
             "target" if target_expression.is_none() => target_expression = Some(&argument.value),
-            "arguments" if arguments_expression.is_none() => arguments_expression = Some(&argument.value),
+            "arguments" if arguments_expression.is_none() => {
+                arguments_expression = Some(&argument.value)
+            }
             "target" | "arguments" => {
-                diagnostics.push(diagnostic(DiagnosticCode::DuplicateDefinition, "duplicate resource constructor argument", input.logical_path, &argument.span));
+                diagnostics.push(diagnostic(
+                    DiagnosticCode::DuplicateDefinition,
+                    "duplicate resource constructor argument",
+                    input.logical_path,
+                    &argument.span,
+                ));
                 return None;
             }
             _ => {
-                diagnostics.push(diagnostic(DiagnosticCode::UnknownQualifiedName, "resource constructor accepts only target and arguments", input.logical_path, &argument.span));
+                diagnostics.push(diagnostic(
+                    DiagnosticCode::UnknownQualifiedName,
+                    "resource constructor accepts only target and arguments",
+                    input.logical_path,
+                    &argument.span,
+                ));
                 return None;
             }
         }
     }
-    let (Some(target_expression), Some(arguments_expression)) = (target_expression, arguments_expression) else {
-        diagnostics.push(diagnostic(DiagnosticCode::TypeMismatch, "resource constructor requires both target and arguments", input.logical_path, span));
+    let (Some(target_expression), Some(arguments_expression)) =
+        (target_expression, arguments_expression)
+    else {
+        diagnostics.push(diagnostic(
+            DiagnosticCode::TypeMismatch,
+            "resource constructor requires both target and arguments",
+            input.logical_path,
+            span,
+        ));
         return None;
     };
     let ClientExpression::FieldPath { root, members, .. } = target_expression else {
-        diagnostics.push(diagnostic(DiagnosticCode::TypeMismatch, "resource target must be a qualified SERVER function name", input.logical_path, target_expression.span()));
+        diagnostics.push(diagnostic(
+            DiagnosticCode::TypeMismatch,
+            "resource target must be a qualified SERVER function name",
+            input.logical_path,
+            target_expression.span(),
+        ));
         return None;
     };
     if members.is_empty() {
-        diagnostics.push(diagnostic(DiagnosticCode::TypeMismatch, "resource target must include a schema and function name", input.logical_path, target_expression.span()));
+        diagnostics.push(diagnostic(
+            DiagnosticCode::TypeMismatch,
+            "resource target must include a schema and function name",
+            input.logical_path,
+            target_expression.span(),
+        ));
         return None;
     }
     let mut target_parts = Vec::with_capacity(members.len() + 1);
     target_parts.push(semantic_part(root));
     target_parts.extend(members.iter().map(semantic_part));
     let Ok(target_name) = QualifiedSemanticName::new(target_parts) else {
-        diagnostics.push(diagnostic(DiagnosticCode::UnknownQualifiedName, "resource target must be a qualified SERVER function name", input.logical_path, target_expression.span()));
+        diagnostics.push(diagnostic(
+            DiagnosticCode::UnknownQualifiedName,
+            "resource target must be a qualified SERVER function name",
+            input.logical_path,
+            target_expression.span(),
+        ));
         return None;
     };
     let Some(target) = resource_targets.get(&target_name) else {
         let message = if targets.contains_key(&target_name)
-            || base.function_by_name(&target_name).is_some_and(|function| function.domain() == FunctionDomain::Client)
+            || base
+                .function_by_name(&target_name)
+                .is_some_and(|function| function.domain() == FunctionDomain::Client)
         {
             format!("resource target {target_name} must be a SERVER function")
         } else {
             format!("unknown SERVER resource target {target_name}")
         };
         diagnostics.push(diagnostic(
-            if targets.contains_key(&target_name) || base.function_by_name(&target_name).is_some_and(|function| function.domain() == FunctionDomain::Client) {
+            if targets.contains_key(&target_name)
+                || base
+                    .function_by_name(&target_name)
+                    .is_some_and(|function| function.domain() == FunctionDomain::Client)
+            {
                 DiagnosticCode::DomainIncompatible
             } else {
                 DiagnosticCode::UnknownQualifiedName
@@ -4934,15 +5055,37 @@ fn check_resource_constructor(
         return None;
     };
     if target.kind != kind {
-        diagnostics.push(diagnostic(DiagnosticCode::TypeMismatch, format!("resource constructor kind does not match SERVER target {target_name}"), input.logical_path, target_expression.span()));
+        diagnostics.push(diagnostic(
+            DiagnosticCode::TypeMismatch,
+            format!("resource constructor kind does not match SERVER target {target_name}"),
+            input.logical_path,
+            target_expression.span(),
+        ));
         return None;
     }
-    let ClientExpression::Call { callee: args_callee, arguments: target_arguments, .. } = arguments_expression else {
-        diagnostics.push(diagnostic(DiagnosticCode::TypeMismatch, "resource arguments must be a std.call.args value", input.logical_path, arguments_expression.span()));
+    let ClientExpression::Call {
+        callee: args_callee,
+        arguments: target_arguments,
+        ..
+    } = arguments_expression
+    else {
+        diagnostics.push(diagnostic(
+            DiagnosticCode::TypeMismatch,
+            "resource arguments must be a std.call.args value",
+            input.logical_path,
+            arguments_expression.span(),
+        ));
         return None;
     };
-    if semantic_name(args_callee) != QualifiedSemanticName::new(["std", "call", "args"]).expect("std.call.args is valid") {
-        diagnostics.push(diagnostic(DiagnosticCode::TypeMismatch, "resource arguments must be a std.call.args value", input.logical_path, arguments_expression.span()));
+    if semantic_name(args_callee)
+        != QualifiedSemanticName::new(["std", "call", "args"]).expect("std.call.args is valid")
+    {
+        diagnostics.push(diagnostic(
+            DiagnosticCode::TypeMismatch,
+            "resource arguments must be a std.call.args value",
+            input.logical_path,
+            arguments_expression.span(),
+        ));
         return None;
     }
     let mut bound = vec![false; target.parameters.len()];
@@ -4951,15 +5094,31 @@ fn check_resource_constructor(
     for argument in target_arguments {
         let parameter_index = if let Some(name) = &argument.name {
             let parameter_name = semantic_part(name);
-            let Some(index) = target.parameters.iter().position(|parameter| parameter.name == parameter_name) else {
-                diagnostics.push(diagnostic(DiagnosticCode::UnknownQualifiedName, format!("unknown SERVER resource parameter {parameter_name}"), input.logical_path, &argument.span));
+            let Some(index) = target
+                .parameters
+                .iter()
+                .position(|parameter| parameter.name == parameter_name)
+            else {
+                diagnostics.push(diagnostic(
+                    DiagnosticCode::UnknownQualifiedName,
+                    format!("unknown SERVER resource parameter {parameter_name}"),
+                    input.logical_path,
+                    &argument.span,
+                ));
                 return None;
             };
             index
         } else {
-            while positional < bound.len() && bound[positional] { positional += 1; }
+            while positional < bound.len() && bound[positional] {
+                positional += 1;
+            }
             if positional >= bound.len() {
-                diagnostics.push(diagnostic(DiagnosticCode::TypeMismatch, format!("too many arguments for SERVER resource target {target_name}"), input.logical_path, &argument.span));
+                diagnostics.push(diagnostic(
+                    DiagnosticCode::TypeMismatch,
+                    format!("too many arguments for SERVER resource target {target_name}"),
+                    input.logical_path,
+                    &argument.span,
+                ));
                 return None;
             }
             let index = positional;
@@ -4967,20 +5126,54 @@ fn check_resource_constructor(
             index
         };
         if bound[parameter_index] {
-            diagnostics.push(diagnostic(DiagnosticCode::DuplicateDefinition, format!("duplicate SERVER resource parameter {}", target.parameters[parameter_index].name), input.logical_path, &argument.span));
+            diagnostics.push(diagnostic(
+                DiagnosticCode::DuplicateDefinition,
+                format!(
+                    "duplicate SERVER resource parameter {}",
+                    target.parameters[parameter_index].name
+                ),
+                input.logical_path,
+                &argument.span,
+            ));
             return None;
         }
-        let (checked, expression_type) = check_client_expression(&argument.value, input, targets, resource_targets, query_catalogue, base, server_names, standard, diagnostics, references, used_capabilities, locals)?;
+        let (checked, expression_type) = check_client_expression(
+            &argument.value,
+            input,
+            targets,
+            resource_targets,
+            query_catalogue,
+            base,
+            server_names,
+            standard,
+            diagnostics,
+            references,
+            used_capabilities,
+            locals,
+        )?;
         let parameter = &target.parameters[parameter_index];
         if !client_expression_types_compatible(expression_type, parameter.expression_type) {
-            diagnostics.push(diagnostic(DiagnosticCode::TypeMismatch, format!("resource argument does not match SERVER parameter {}", parameter.name), input.logical_path, &argument.span));
+            diagnostics.push(diagnostic(
+                DiagnosticCode::TypeMismatch,
+                format!(
+                    "resource argument does not match SERVER parameter {}",
+                    parameter.name
+                ),
+                input.logical_path,
+                &argument.span,
+            ));
             return None;
         }
         bound[parameter_index] = true;
         checked_arguments.push((parameter.id, checked));
     }
     if bound.iter().any(|bound| !bound) {
-        diagnostics.push(diagnostic(DiagnosticCode::TypeMismatch, format!("missing argument for SERVER resource target {target_name}"), input.logical_path, span));
+        diagnostics.push(diagnostic(
+            DiagnosticCode::TypeMismatch,
+            format!("missing argument for SERVER resource target {target_name}"),
+            input.logical_path,
+            span,
+        ));
         return None;
     }
     checked_arguments.sort_by_key(|(parameter, _)| {
@@ -5006,7 +5199,10 @@ fn check_resource_constructor(
         standard_result_type: target.result_type.standard_value_type,
         location: operation_location,
     };
-    Some((CheckedClientExpression::Resource { operation }, target.result_type))
+    Some((
+        CheckedClientExpression::Resource { operation },
+        target.result_type,
+    ))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -5093,8 +5289,17 @@ fn check_client_expression(
         }
         ClientExpression::ParameterRead { parameter } => {
             let name = semantic_part(parameter);
-            if let Some((checked, expression_type)) = locals.get(&name) {
-                return Some((checked.clone(), *expression_type));
+            if let Some(binding) = locals.get(&name) {
+                return Some((
+                    binding.ordinal.map_or_else(
+                        || binding.checked.clone(),
+                        |ordinal| CheckedClientExpression::LocalRead {
+                            local: ordinal,
+                            location: expression_location(),
+                        },
+                    ),
+                    binding.expression_type,
+                ));
             }
             let Some(parameter) = input
                 .parameters
@@ -5122,7 +5327,7 @@ fn check_client_expression(
         }
         ClientExpression::LocalRead { local } => {
             let name = semantic_part(local);
-            let Some((checked, expression_type)) = locals.get(&name) else {
+            let Some(binding) = locals.get(&name) else {
                 diagnostics.push(diagnostic(
                     DiagnosticCode::UnknownQualifiedName,
                     format!("unknown CLIENT local {name}"),
@@ -5131,7 +5336,16 @@ fn check_client_expression(
                 ));
                 return None;
             };
-            Some((checked.clone(), *expression_type))
+            Some((
+                binding.ordinal.map_or_else(
+                    || binding.checked.clone(),
+                    |ordinal| CheckedClientExpression::LocalRead {
+                        local: ordinal,
+                        location: expression_location(),
+                    },
+                ),
+                binding.expression_type,
+            ))
         }
         ClientExpression::FieldPath {
             root,
@@ -5418,6 +5632,45 @@ fn client_local_resource_kind(source: &SourceSlice) -> Option<ResourceKind> {
     }
 }
 
+fn client_type_specification_from_source(source: &SourceSlice) -> Option<TypeSpecification> {
+    let text = source.text.trim();
+    let normalized: String = text
+        .chars()
+        .filter(|character| !character.is_ascii_whitespace())
+        .collect();
+    let large_object = match normalized.to_ascii_uppercase().as_str() {
+        "CHARACTERLARGEOBJECT" => Some(StandardLargeObjectKind::Character),
+        "BINARYLARGEOBJECT" => Some(StandardLargeObjectKind::Binary),
+        _ => None,
+    };
+    if let Some(kind) = large_object {
+        return Some(TypeSpecification::StandardLargeObject {
+            kind,
+            source: source.clone(),
+        });
+    }
+    if text.is_empty()
+        || text.split('.').any(|part| {
+            part.is_empty()
+                || part.chars().any(|character| {
+                    !(character.is_ascii_alphanumeric() || character == '_' || character == '"')
+                })
+        })
+    {
+        return None;
+    }
+    let parts = text
+        .split('.')
+        .map(|part| orna_syntax::NamePart {
+            text: part.to_owned(),
+            span: source.span.clone(),
+        })
+        .collect::<Vec<_>>();
+    Some(TypeSpecification::Named(QualifiedName {
+        parts,
+        span: source.span.clone(),
+    }))
+}
 fn client_contract_identity(source: &SourceSlice) -> Option<String> {
     let identity = decode_string_literal(source)?;
     let (name, version) = identity.rsplit_once('@')?;
@@ -5512,23 +5765,27 @@ fn unsupported_client_state_reference(
     let parameter_name = |name: &orna_syntax::NamePart| semantic_part(name);
     let is_state = |name: &orna_syntax::NamePart| {
         let name = parameter_name(name);
-        state_names.contains(&name) && !input.parameters.iter().any(|parameter| parameter.name == name)
+        state_names.contains(&name)
+            && !input
+                .parameters
+                .iter()
+                .any(|parameter| parameter.name == name)
     };
     match expression {
         ClientExpression::ParameterRead { parameter } if is_state(parameter) => {
             Some(parameter.span.clone())
         }
         ClientExpression::FieldPath { root, .. } if is_state(root) => Some(root.span.clone()),
-        ClientExpression::Await { expression, .. } => unsupported_client_state_reference(expression, input, state_names),
-        ClientExpression::Call { arguments, .. } => arguments
-            .iter()
-            .find_map(|argument| unsupported_client_state_reference(&argument.value, input, state_names)),
-        ClientExpression::Concat { left, right, .. } => unsupported_client_state_reference(
-            left,
-            input,
-            state_names,
-        )
-        .or_else(|| unsupported_client_state_reference(right, input, state_names)),
+        ClientExpression::Await { expression, .. } => {
+            unsupported_client_state_reference(expression, input, state_names)
+        }
+        ClientExpression::Call { arguments, .. } => arguments.iter().find_map(|argument| {
+            unsupported_client_state_reference(&argument.value, input, state_names)
+        }),
+        ClientExpression::Concat { left, right, .. } => {
+            unsupported_client_state_reference(left, input, state_names)
+                .or_else(|| unsupported_client_state_reference(right, input, state_names))
+        }
         ClientExpression::StringLiteral { .. }
         | ClientExpression::IntegerLiteral { .. }
         | ClientExpression::BooleanLiteral { .. }
@@ -5649,7 +5906,151 @@ fn check_client_functions(
                         location(input.logical_path, expression.span()),
                         references,
                     )
-                } else if let Some(block) = input.body.as_state_block() {
+                } else if let Some(block) = input.body.as_state_block().filter(|block| block.states.is_empty()) {
+    let mut references = Vec::new();
+    let mut used_capabilities = HashSet::new();
+    let mut locals = ClientLocalEnvironment::new();
+    let mut checked_locals = Vec::new();
+    let mut statements = Vec::new();
+    let mut next_ordinal = 0_u32;
+
+    for local in &block.locals {
+        let local_name = semantic_part(&local.name);
+        if locals.contains_key(&local_name) {
+            diagnostics.push(diagnostic(DiagnosticCode::DuplicateDefinition, format!("duplicate CLIENT local definition {local_name} in {}", input.name), input.logical_path, &local.name.span));
+            return None;
+        }
+        let Some(kind) = client_local_resource_kind(&local.type_source) else {
+            diagnostics.push(diagnostic(DiagnosticCode::TypeMismatch, format!("CLIENT local {local_name} must declare std.data.Resource<T> or std.data.StreamResource<T>"), input.logical_path, &local.type_source.span));
+            return None;
+        };
+        let diagnostics_before = diagnostics.len();
+        validate_client_await_positions(&local.expression, false, input, diagnostics);
+        if diagnostics.len() != diagnostics_before { return None; }
+        let (checked, expression_type) = check_resource_constructor(&local.expression, input, &targets, resource_targets, query_catalogue, base, server_names, standard, diagnostics, &mut references, &mut used_capabilities, &locals)?;
+        let actual_kind = match &checked {
+            CheckedClientExpression::Resource { operation } => operation.kind,
+            _ => unreachable!("resource constructor checker returns a resource"),
+        };
+        if actual_kind != kind {
+            diagnostics.push(diagnostic(DiagnosticCode::TypeMismatch, format!("CLIENT local {local_name} type does not match its resource constructor"), input.logical_path, &local.type_source.span));
+            return None;
+        }
+        let ordinal = next_ordinal; next_ordinal += 1;
+        checked_locals.push(CheckedClientLocal { ordinal, name: local_name.clone(), semantic_type: expression_type.semantic_type, standard_value_type: expression_type.standard_value_type, kind: CheckedClientLocalKind::Resource(kind), location: location(input.logical_path, &local.span) });
+        locals.insert(local_name, ClientLocalBinding { checked: checked.clone(), expression_type, ordinal: Some(ordinal), kind: CheckedClientLocalKind::Resource(kind) });
+        statements.push(CheckedClientStatement::Let { local: ordinal, expression: checked });
+    }
+
+    for statement in &block.statements {
+        match statement {
+            orna_syntax::ClientProceduralStatement::Let(statement) => {
+                let local_name = semantic_part(&statement.name);
+                if locals.contains_key(&local_name) {
+                    diagnostics.push(diagnostic(DiagnosticCode::DuplicateDefinition, format!("duplicate CLIENT local definition {local_name} in {}", input.name), input.logical_path, &statement.name.span));
+                    return None;
+                }
+                let diagnostics_before = diagnostics.len();
+                validate_client_await_positions(&statement.expression, true, input, diagnostics);
+                if diagnostics.len() != diagnostics_before { return None; }
+                let declared_resource_kind = statement.type_source.as_ref().and_then(client_local_resource_kind);
+                let direct_resource = matches!(&statement.expression, ClientExpression::Call { callee, .. } if resource_constructor_kind(&semantic_name(callee)).is_some());
+                let (checked, expression_type, kind) = if declared_resource_kind.is_some() || direct_resource {
+                    if !direct_resource {
+                        diagnostics.push(diagnostic(DiagnosticCode::TypeMismatch, format!("CLIENT local {local_name} resource type requires a resource constructor"), input.logical_path, &statement.span));
+                        return None;
+                    }
+                    let (checked, expression_type) = check_resource_constructor(&statement.expression, input, &targets, resource_targets, query_catalogue, base, server_names, standard, diagnostics, &mut references, &mut used_capabilities, &locals)?;
+                    let actual_kind = match &checked {
+                        CheckedClientExpression::Resource { operation } => operation.kind,
+                        _ => unreachable!("resource constructor checker returns a resource"),
+                    };
+                    if let Some(expected_kind) = declared_resource_kind {
+                        if actual_kind != expected_kind {
+                            diagnostics.push(diagnostic(DiagnosticCode::TypeMismatch, format!("CLIENT local {local_name} type does not match its resource constructor"), input.logical_path, statement.type_source.as_ref().map_or(&statement.span, |source| &source.span)));
+                            return None;
+                        }
+                    }
+                    (checked, expression_type, CheckedClientLocalKind::Resource(actual_kind))
+                } else {
+                    let (checked, expression_type) = check_client_expression(&statement.expression, input, &targets, resource_targets, query_catalogue, base, server_names, standard, diagnostics, &mut references, &mut used_capabilities, &locals)?;
+                    if !client_expression_type_is_evaluable(expression_type, standard) {
+                        diagnostics.push(diagnostic(DiagnosticCode::TypeMismatch, "this CLIENT local type is not supported by the local evaluator", input.logical_path, &statement.span));
+                        return None;
+                    }
+                    if let Some(source) = &statement.type_source {
+                        let Some(specification) = client_type_specification_from_source(source) else {
+                            diagnostics.push(diagnostic(DiagnosticCode::TypeMismatch, format!("unsupported CLIENT local type for {local_name}"), input.logical_path, &source.span));
+                            return None;
+                        };
+                        let resolved = resolve_application_type_with_named_standard(&specification, submitted_ids, input.logical_path, diagnostics, standard, true)?;
+                        let expected = ClientExpressionType { semantic_type: resolved.semantic_type, standard_value_type: resolved.standard_value_type };
+                        if !client_expression_types_compatible(expression_type, expected) {
+                            diagnostics.push(diagnostic(DiagnosticCode::TypeMismatch, format!("CLIENT local {local_name} initializer does not match its declared type"), input.logical_path, &statement.span));
+                            return None;
+                        }
+                    }
+                    (checked, expression_type, CheckedClientLocalKind::Value)
+                };
+                let ordinal = next_ordinal; next_ordinal += 1;
+                checked_locals.push(CheckedClientLocal { ordinal, name: local_name.clone(), semantic_type: expression_type.semantic_type, standard_value_type: expression_type.standard_value_type, kind, location: location(input.logical_path, &statement.span) });
+                locals.insert(local_name, ClientLocalBinding { checked: checked.clone(), expression_type, ordinal: Some(ordinal), kind });
+                statements.push(CheckedClientStatement::Let { local: ordinal, expression: checked });
+            }
+            orna_syntax::ClientProceduralStatement::Assignment(statement) => {
+                let local_name = semantic_part(&statement.target);
+                let Some(binding) = locals.get(&local_name).cloned() else {
+                    diagnostics.push(diagnostic(DiagnosticCode::UnknownQualifiedName, format!("unknown CLIENT local {local_name}"), input.logical_path, &statement.target.span));
+                    return None;
+                };
+                let diagnostics_before = diagnostics.len();
+                validate_client_await_positions(&statement.expression, true, input, diagnostics);
+                if diagnostics.len() != diagnostics_before { return None; }
+                let direct_resource = matches!(&statement.expression, ClientExpression::Call { callee, .. } if resource_constructor_kind(&semantic_name(callee)).is_some());
+                let (checked, expression_type) = if matches!(binding.kind, CheckedClientLocalKind::Resource(_)) && direct_resource {
+                    check_resource_constructor(&statement.expression, input, &targets, resource_targets, query_catalogue, base, server_names, standard, diagnostics, &mut references, &mut used_capabilities, &locals)?
+                } else {
+                    check_client_expression(&statement.expression, input, &targets, resource_targets, query_catalogue, base, server_names, standard, diagnostics, &mut references, &mut used_capabilities, &locals)?
+                };
+                if !client_expression_types_compatible(expression_type, binding.expression_type) || (matches!(binding.kind, CheckedClientLocalKind::Resource(_)) != matches!(checked, CheckedClientExpression::Resource { .. })) {
+                    diagnostics.push(diagnostic(DiagnosticCode::TypeMismatch, format!("CLIENT assignment to local {local_name} does not match its declared type"), input.logical_path, &statement.span));
+                    return None;
+                }
+                statements.push(CheckedClientStatement::Assignment { local: binding.ordinal.expect("procedural local has ordinal"), expression: checked.clone() });
+                if let Some(binding) = locals.get_mut(&local_name) { binding.checked = checked; }
+            }
+        }
+    }
+    let Some(expression) = block.return_expression.as_ref() else {
+        diagnostics.push(diagnostic(DiagnosticCode::DomainIncompatible, "CLIENT procedural bodies must return an expression", input.logical_path, &block.span));
+        return None;
+    };
+    let diagnostics_before = diagnostics.len();
+    validate_client_await_positions(expression, true, input, diagnostics);
+    if diagnostics.len() != diagnostics_before { return None; }
+    let (checked_return, return_type) = check_client_expression(expression, input, &targets, resource_targets, query_catalogue, base, server_names, standard, diagnostics, &mut references, &mut used_capabilities, &locals)?;
+    if !client_expression_types_compatible(return_type, ClientExpressionType { semantic_type: input.return_type, standard_value_type: input.standard_value_type }) {
+        diagnostics.push(diagnostic(DiagnosticCode::TypeMismatch, "this CLIENT function must return the declared value type", input.logical_path, expression.span()));
+        return None;
+    }
+    for capability in input.capabilities {
+        let capability_name = semantic_name(&capability.name);
+        if !used_capabilities.contains(&capability_name) {
+            diagnostics.push(diagnostic(DiagnosticCode::CapabilityRequirement, format!("declared CLIENT capability {capability_name} is not exercised"), input.logical_path, &input.declaration_span));
+            return None;
+        }
+    }
+    (CheckedClientFunctionBody::Procedural { locals: checked_locals, statements, return_expression: checked_return }, return_type, location(input.logical_path, expression.span()), references)
+} else if let Some(block) = input.body.as_state_block() {
+                    if !block.locals.is_empty() || !block.statements.is_empty() {
+                        diagnostics.push(diagnostic(
+                            DiagnosticCode::DomainIncompatible,
+                            "CLIENT state blocks do not support procedural statements",
+                            input.logical_path,
+                            &block.span,
+                        ));
+                        return None;
+                    }
                     let mut references = Vec::new();
                     let mut used_capabilities = HashSet::new();
                     let mut state_names = HashSet::new();
@@ -5816,7 +6217,7 @@ fn check_client_functions(
                             ));
                             return None;
                         }
-                        locals.insert(local_name, (checked, expression_type));
+                        locals.insert(local_name, ClientLocalBinding { checked, expression_type, ordinal: None, kind: CheckedClientLocalKind::Resource(actual_kind) });
                     }
                     let Some(expression) = block.return_expression.as_ref() else {
                         diagnostics.push(diagnostic(
@@ -5950,6 +6351,7 @@ fn check_client_functions(
                     );
                 }
                 CheckedClientFunctionBody::Expression { .. }
+                | CheckedClientFunctionBody::Procedural { .. }
                 | CheckedClientFunctionBody::StateBlock { .. } => {
                     let resolved = ResolvedApplicationType {
                         semantic_type: body_type.semantic_type,
@@ -8668,10 +9070,10 @@ mod tests {
         CheckAssignments, CheckedApplicationTypeUse, CheckedDefinitionReferenceTarget,
         CheckedStandardExecutable, CheckedStandardJsonEncode, CheckedStandardParameterEcho,
         CheckedStandardTerminalPresentTable, CheckedStateDefault, CheckedTypeId,
-        CheckedTypeUseKind, CheckedValueTypeUse, ConstantValue, DiagnosticCode, IdentityAssignments,
-        NewApplicationCheckError, STANDARD_LIBRARY_V3_REVISION_ID, STANDARD_LIBRARY_V4_REVISION_ID,
-        STD_DATA_ROWS_TYPE_ID, STD_DATA_SCHEMA_ID, STD_INTEGER_TYPE_ID,
-        STD_INVOKE_ECHO_FUNCTION_ID, STD_INVOKE_ECHO_FUNCTION_REVISION_ID,
+        CheckedTypeUseKind, CheckedValueTypeUse, ConstantValue, DiagnosticCode,
+        IdentityAssignments, NewApplicationCheckError, STANDARD_LIBRARY_V3_REVISION_ID,
+        STANDARD_LIBRARY_V4_REVISION_ID, STD_DATA_ROWS_TYPE_ID, STD_DATA_SCHEMA_ID,
+        STD_INTEGER_TYPE_ID, STD_INVOKE_ECHO_FUNCTION_ID, STD_INVOKE_ECHO_FUNCTION_REVISION_ID,
         STD_INVOKE_ECHO_PARAMETER_ID, STD_INVOKE_ECHO_REVISION_NUMBER, STD_INVOKE_SCHEMA_ID,
         STD_INVOKE_SOURCE_UNIT_ID, STD_IO_BYTE_STREAM_TYPE_ID, STD_IO_SCHEMA_ID,
         STD_JSON_ENCODE_FUNCTION_ID, STD_JSON_ENCODE_FUNCTION_REVISION_ID,
@@ -16448,13 +16850,20 @@ mod tests {
             STATE count INTEGER; \
             BEGIN RETURN 'ready'; END;";
         let report = check(&bundle([("client.orna", valid)]), &empty_catalogue());
-        assert!(report.diagnostics().is_empty(), "{:?}", report.diagnostics());
+        assert!(
+            report.diagnostics().is_empty(),
+            "{:?}",
+            report.diagnostics()
+        );
         let function = &report.checked_bundle().unwrap().client_functions()[0];
         let CheckedClientFunctionBody::StateBlock { states, .. } = function.body() else {
             panic!("expected checked CLIENT state block");
         };
         assert_eq!(states.len(), 3);
-        assert!(matches!(states[0].default(), CheckedStateDefault::Expression(_)));
+        assert!(matches!(
+            states[0].default(),
+            CheckedStateDefault::Expression(_)
+        ));
         assert!(matches!(states[1].default(), CheckedStateDefault::Null));
         assert!(matches!(states[2].default(), CheckedStateDefault::Unset));
 
@@ -16462,8 +16871,15 @@ mod tests {
             STATE value TEXT; STATE value INTEGER; BEGIN RETURN 'ready'; END;";
         let report = check(&bundle([("client.orna", duplicate)]), &empty_catalogue());
         assert_eq!(report.diagnostics().len(), 1);
-        assert_eq!(report.diagnostics()[0].code(), DiagnosticCode::DuplicateDefinition);
-        assert!(report.diagnostics()[0].message().contains("duplicate state definition"));
+        assert_eq!(
+            report.diagnostics()[0].code(),
+            DiagnosticCode::DuplicateDefinition
+        );
+        assert!(
+            report.diagnostics()[0]
+                .message()
+                .contains("duplicate state definition")
+        );
 
         let bad_default = "CREATE SCHEMA examples; CREATE CLIENT FUNCTION examples.state() RETURNS TEXT IS \
             STATE value TEXT DEFAULT 1; BEGIN RETURN 'ready'; END;";
@@ -16483,6 +16899,90 @@ mod tests {
         assert_eq!(
             report.diagnostics()[0].message(),
             "this CLIENT function must return the declared value type"
+        );
+    }
+
+    #[test]
+    fn accepts_procedural_client_statements_without_state_declarations() {
+        let source = "CREATE SCHEMA examples; \
+            CREATE CLIENT FUNCTION examples.procedural() RETURNS TEXT IS \
+            BEGIN LET value := 'first'; value := 'second'; RETURN value; END;";
+        let report = check(&bundle([("client.orna", source)]), &empty_catalogue());
+        assert!(
+            report.diagnostics().is_empty(),
+            "{:?}",
+            report.diagnostics()
+        );
+        let function = &report.checked_bundle().unwrap().client_functions()[0];
+        let CheckedClientFunctionBody::Procedural {
+            locals,
+            statements,
+            return_expression,
+        } = function.body()
+        else {
+            panic!("expected checked procedural CLIENT body");
+        };
+        assert_eq!(locals.len(), 1);
+        assert_eq!(locals[0].ordinal(), 0);
+        assert_eq!(statements.len(), 2);
+        assert!(matches!(
+            statements[0],
+            super::CheckedClientStatement::Let { local: 0, .. }
+        ));
+        assert!(matches!(
+            statements[1],
+            super::CheckedClientStatement::Assignment { local: 0, .. }
+        ));
+        assert!(matches!(
+            return_expression,
+            super::CheckedClientExpression::LocalRead { local: 0, .. }
+        ));
+    }
+
+    #[test]
+    fn rejects_state_blocks_mixed_with_procedural_declarations() {
+        let source = "CREATE SCHEMA examples; CREATE CLIENT FUNCTION examples.mixed() RETURNS BOOLEAN IS STATE value TEXT; BEGIN LET other := 'x'; RETURN TRUE; END;";
+        let report = check(&bundle([("client.orna", source)]), &empty_catalogue());
+        assert_eq!(report.diagnostics().len(), 1);
+        assert_eq!(
+            report.diagnostics()[0].code(),
+            DiagnosticCode::DomainIncompatible
+        );
+        assert_eq!(
+            report.diagnostics()[0].message(),
+            "CLIENT state blocks do not support procedural statements"
+        );
+    }
+
+    #[test]
+    fn rejects_procedural_unknown_locals_types_and_await_operands() {
+        let unknown = "CREATE SCHEMA examples; CREATE CLIENT FUNCTION examples.bad() RETURNS TEXT IS BEGIN missing := 'x'; RETURN 'ok'; END;";
+        let report = check(&bundle([("client.orna", unknown)]), &empty_catalogue());
+        assert_eq!(report.diagnostics().len(), 1);
+        assert_eq!(
+            report.diagnostics()[0].code(),
+            DiagnosticCode::UnknownQualifiedName
+        );
+
+        let wrong_type = "CREATE SCHEMA examples; CREATE CLIENT FUNCTION examples.bad() RETURNS INTEGER IS BEGIN LET value INTEGER := 'wrong'; RETURN value; END;";
+        let report = check(&bundle([("client.orna", wrong_type)]), &empty_catalogue());
+        assert!(
+            report
+                .diagnostics()
+                .iter()
+                .any(|diagnostic| diagnostic.code() == DiagnosticCode::TypeMismatch)
+        );
+
+        let bad_await = "CREATE SCHEMA examples; CREATE CLIENT FUNCTION examples.bad() RETURNS TEXT IS BEGIN LET value := AWAIT 1; RETURN value; END;";
+        let report = check(&bundle([("client.orna", bad_await)]), &empty_catalogue());
+        assert!(
+            report
+                .diagnostics()
+                .iter()
+                .any(
+                    |diagnostic| diagnostic.code() == DiagnosticCode::DomainIncompatible
+                        && diagnostic.message().contains("AWAIT requires")
+                )
         );
     }
 
@@ -17832,13 +18332,9 @@ mod tests {
             "std/present.orna",
             STD_JSON_ENCODE_SOURCE,
         );
-        let expected = expected_standard_json_executable(
-            &declaration,
-            &catalogue,
-            &origins,
-            &stored_unit,
-        )
-        .expect("the canonical JSON executable is valid");
+        let expected =
+            expected_standard_json_executable(&declaration, &catalogue, &origins, &stored_unit)
+                .expect("the canonical JSON executable is valid");
         let revision = expected.revision();
         let tampered_revision = FunctionRevisionRecord::new(
             revision.function(),
@@ -21131,7 +21627,11 @@ mod tests {
         let source = "CREATE SCHEMA ui; CREATE CLIENT FUNCTION ui.find(p_name TEXT) RETURNS TEXT AS \
             AWAIT std.data.resource(target => tasks.find, arguments => std.call.args(p_name => p_name));";
         let report = check(&bundle([("resource.orna", source)]), &base);
-        assert!(report.diagnostics().is_empty(), "{:?}", report.diagnostics());
+        assert!(
+            report.diagnostics().is_empty(),
+            "{:?}",
+            report.diagnostics()
+        );
         let checked = report.checked_bundle().expect("resource source checks");
         let function = checked
             .client_functions()
@@ -21147,7 +21647,10 @@ mod tests {
         let super::CheckedClientExpression::Resource { operation } = expression.as_ref() else {
             panic!("await operand must be a resource");
         };
-        assert_eq!(operation.kind(), orna_artifact::client_plan::ResourceKind::Scalar);
+        assert_eq!(
+            operation.kind(),
+            orna_artifact::client_plan::ResourceKind::Scalar
+        );
         assert_eq!(operation.arguments().len(), 1);
         assert_eq!(
             operation.target(),
