@@ -13,8 +13,9 @@ use orna_artifact::client_plan::{
     CAPABILITY_FORMAT_VERSION, CapabilityArgumentSource, CapabilityClientPlan,
     ClientExpressionNode, ClientPlan, ClientPlanError, EXPRESSION_FORMAT_VERSION,
     ExpressionClientPlan, FORMAT_IDENTITY, FORMAT_VERSION, InnerClientPlan,
-    LANGUAGE_VERSION_IDENTITY, OPAQUE_FORMAT_VERSION, OpaqueClientPlan, STATE_FORMAT_VERSION,
-    StateClientPlan, StateDefault, StateScope,
+    LANGUAGE_VERSION_IDENTITY, OPAQUE_FORMAT_VERSION, OpaqueClientPlan, RESOURCE_FORMAT_VERSION,
+    ResourceClientPlan, ResourceKind, ResourceOperationNode, STATE_FORMAT_VERSION, StateClientPlan,
+    StateDefault, StateScope,
 };
 use orna_core::{
     FunctionId, FunctionRevisionId, ParameterId, PrincipalId, StateSlotId, TypeId,
@@ -1418,6 +1419,41 @@ impl fmt::Display for ClientExpressionError {
 
 impl Error for ClientExpressionError {}
 
+/// A CLIENT resource could not produce a value for an expression.
+#[non_exhaustive]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ClientResourceExecutionError {
+    /// No explicit resource executor was supplied by the caller.
+    ExecutorUnavailable,
+    /// The resource completed with a redacted structured failure code.
+    Failed(String),
+    /// The resource was cancelled before a value became available.
+    Cancelled,
+    /// The resource lifecycle or request invariants rejected the operation.
+    Invalid(ClientResourceError),
+}
+
+impl fmt::Display for ClientResourceExecutionError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::ExecutorUnavailable => formatter
+                .write_str("CLIENT resource execution requires an explicit resource executor"),
+            Self::Failed(code) => write!(formatter, "CLIENT resource failed: {code}"),
+            Self::Cancelled => formatter.write_str("CLIENT resource was cancelled"),
+            Self::Invalid(source) => source.fmt(formatter),
+        }
+    }
+}
+
+impl Error for ClientResourceExecutionError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Invalid(source) => Some(source),
+            Self::ExecutorUnavailable | Self::Failed(_) | Self::Cancelled => None,
+        }
+    }
+}
+
 /// A version-four CLIENT state failure (work ADR 0069).
 #[non_exhaustive]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1552,6 +1588,13 @@ pub enum ClientExecutionError {
         /// The closed state failure.
         source: ClientStateError,
     },
+    /// A version-six resource expression could not produce a checked value.
+    ResourceEvaluation {
+        /// The resolved execution context.
+        context: ClientExecutionContext,
+        /// The closed resource failure.
+        source: ClientResourceExecutionError,
+    },
 }
 impl ClientExecutionError {
     /// Returns the active revision pair associated with this error.
@@ -1565,7 +1608,8 @@ impl ClientExecutionError {
             | Self::CapabilityDenied { context, .. }
             | Self::ExpressionEvaluation { context, .. }
             | Self::ExternalContract { context, .. }
-            | Self::StateEvaluation { context, .. } => context.pair(),
+            | Self::StateEvaluation { context, .. }
+            | Self::ResourceEvaluation { context, .. } => context.pair(),
         }
     }
 
@@ -1581,7 +1625,8 @@ impl ClientExecutionError {
             | Self::CapabilityDenied { context, .. }
             | Self::ExpressionEvaluation { context, .. }
             | Self::ExternalContract { context, .. }
-            | Self::StateEvaluation { context, .. } => context.function(),
+            | Self::StateEvaluation { context, .. }
+            | Self::ResourceEvaluation { context, .. } => context.function(),
         }
     }
 
@@ -1597,7 +1642,8 @@ impl ClientExecutionError {
             | Self::CapabilityDenied { context, .. }
             | Self::ExpressionEvaluation { context, .. }
             | Self::ExternalContract { context, .. }
-            | Self::StateEvaluation { context, .. } => Some(context),
+            | Self::StateEvaluation { context, .. }
+            | Self::ResourceEvaluation { context, .. } => Some(context),
         }
     }
 }
@@ -1628,6 +1674,7 @@ impl fmt::Display for ClientExecutionError {
                 "the CLIENT runtime contract {identity} is not available"
             ),
             Self::StateEvaluation { source, .. } => source.fmt(formatter),
+            Self::ResourceEvaluation { source, .. } => source.fmt(formatter),
         }
     }
 }
@@ -1638,6 +1685,7 @@ impl Error for ClientExecutionError {
             Self::InvalidArtifact { source, .. } => Some(source),
             Self::InvalidOpaqueValue { source, .. } => Some(source),
             Self::StateEvaluation { source, .. } => Some(source),
+            Self::ResourceEvaluation { source, .. } => source.source(),
             Self::AuthorisationMismatch { .. }
             | Self::FunctionNotFound { .. }
             | Self::InvalidFunction { .. }
@@ -1784,6 +1832,11 @@ pub fn evaluate_client_function_with_state_and_grants_and_arguments(
 }
 
 /// Evaluates one CLIENT function in an explicit root state context.
+///
+/// Resource and `AWAIT` expressions fail closed because no external executor
+/// is owned by this compatibility entrypoint. Call
+/// [`evaluate_client_function_with_state_and_grants_and_arguments_and_executor`]
+/// when the host owns the resource work boundary.
 pub fn evaluate_client_function_in_state_context(
     active: &ActiveDatabaseRevision,
     authorisation: &AuthorisedInvocation,
@@ -1792,6 +1845,85 @@ pub fn evaluate_client_function_in_state_context(
     declarations: &[capability::LocalCapabilityDeclaration],
     grants: &capability::LocalCapabilityGrantSet,
     state: &mut ClientStateStore,
+) -> Result<ClientExecutionResult, ClientExecutionError> {
+    evaluate_client_function_in_state_context_with_executor(
+        active,
+        authorisation,
+        state_context,
+        arguments,
+        declarations,
+        grants,
+        state,
+        None,
+    )
+}
+
+/// Evaluates one closed CLIENT function with a caller-owned resource executor.
+pub fn evaluate_client_function_with_executor(
+    active: &ActiveDatabaseRevision,
+    authorisation: &AuthorisedInvocation,
+    executor: &mut dyn ClientResourceExecutor,
+) -> Result<ClientExecutionResult, ClientExecutionError> {
+    evaluate_client_function_with_arguments_and_executor(active, authorisation, &[], executor)
+}
+
+/// Evaluates one CLIENT function with invocation arguments and a caller-owned
+/// resource executor.
+pub fn evaluate_client_function_with_arguments_and_executor(
+    active: &ActiveDatabaseRevision,
+    authorisation: &AuthorisedInvocation,
+    arguments: &[FunctionArgument],
+    executor: &mut dyn ClientResourceExecutor,
+) -> Result<ClientExecutionResult, ClientExecutionError> {
+    let mut state = ClientStateStore::new();
+    let grants = capability::LocalCapabilityGrantSet::new();
+    evaluate_client_function_with_state_and_grants_and_arguments_and_executor(
+        active,
+        authorisation,
+        arguments,
+        &[],
+        &grants,
+        &mut state,
+        executor,
+    )
+}
+
+/// Evaluates one CLIENT function with a caller-owned resource executor.
+///
+/// The executor is the only seam that may perform external work. It receives
+/// validated, principal- and revision-scoped requests; this evaluator never
+/// invents transport or server execution.
+pub fn evaluate_client_function_with_state_and_grants_and_arguments_and_executor(
+    active: &ActiveDatabaseRevision,
+    authorisation: &AuthorisedInvocation,
+    arguments: &[FunctionArgument],
+    declarations: &[capability::LocalCapabilityDeclaration],
+    grants: &capability::LocalCapabilityGrantSet,
+    state: &mut ClientStateStore,
+    executor: &mut dyn ClientResourceExecutor,
+) -> Result<ClientExecutionResult, ClientExecutionError> {
+    let state_context = ClientStateContext::default_for(authorisation.target().function());
+    evaluate_client_function_in_state_context_with_executor(
+        active,
+        authorisation,
+        &state_context,
+        arguments,
+        declarations,
+        grants,
+        state,
+        Some(executor),
+    )
+}
+
+fn evaluate_client_function_in_state_context_with_executor(
+    active: &ActiveDatabaseRevision,
+    authorisation: &AuthorisedInvocation,
+    state_context: &ClientStateContext,
+    arguments: &[FunctionArgument],
+    declarations: &[capability::LocalCapabilityDeclaration],
+    grants: &capability::LocalCapabilityGrantSet,
+    state: &mut ClientStateStore,
+    mut executor: Option<&mut dyn ClientResourceExecutor>,
 ) -> Result<ClientExecutionResult, ClientExecutionError> {
     let target = authorisation.target();
     if target.revision() != active.pair() {
@@ -1814,6 +1946,8 @@ pub fn evaluate_client_function_in_state_context(
         grants,
         &mut staged,
         0,
+        authorisation.session_principal(),
+        &mut executor,
     )?;
     *state = staged;
     let (context, value) = result;
@@ -1828,6 +1962,8 @@ fn evaluate_function(
     grants: &capability::LocalCapabilityGrantSet,
     state: &mut ClientStateStore,
     depth: usize,
+    principal: PrincipalId,
+    executor: &mut Option<&mut dyn ClientResourceExecutor>,
 ) -> Result<(ClientExecutionContext, RuntimeValue), ClientExecutionError> {
     let pair = active.pair();
     let definition = active
@@ -1950,6 +2086,8 @@ fn evaluate_function(
             grants,
             state,
             depth,
+            principal,
+            executor,
         )?,
         None => evaluate_plan(
             active,
@@ -1961,6 +2099,8 @@ fn evaluate_function(
             grants,
             state,
             depth,
+            principal,
+            executor,
         )?,
     };
     Ok((context, value))
@@ -2000,6 +2140,8 @@ fn evaluate_plan(
     grants: &capability::LocalCapabilityGrantSet,
     state: &mut ClientStateStore,
     depth: usize,
+    principal: PrincipalId,
+    executor: &mut Option<&mut dyn ClientResourceExecutor>,
 ) -> Result<RuntimeValue, ClientExecutionError> {
     match return_shape {
         ClientReturnShape::LegacyBoolean | ClientReturnShape::StandardBoolean(_) => {
@@ -2025,6 +2167,8 @@ fn evaluate_plan(
                 grants,
                 state,
                 depth,
+                principal,
+                executor,
             )
         }
         ClientReturnShape::State(expected) => {
@@ -2040,6 +2184,25 @@ fn evaluate_plan(
                 grants,
                 state,
                 depth,
+                principal,
+                executor,
+            )
+        }
+        ClientReturnShape::Resource(expected) => {
+            let plan = ResourceClientPlan::decode(payload)
+                .map_err(|source| ClientExecutionError::InvalidArtifact { context, source })?;
+            evaluate_resource_plan(
+                active,
+                &plan,
+                context,
+                expected,
+                arguments,
+                declarations,
+                grants,
+                state,
+                depth,
+                principal,
+                executor,
             )
         }
         ClientReturnShape::OtherValue => unreachable!("definition references were validated"),
@@ -2096,6 +2259,8 @@ fn evaluate_expression_plan(
     grants: &capability::LocalCapabilityGrantSet,
     state: &mut ClientStateStore,
     depth: usize,
+    principal: PrincipalId,
+    executor: &mut Option<&mut dyn ClientResourceExecutor>,
 ) -> Result<RuntimeValue, ClientExecutionError> {
     let value = evaluate_expression(
         active,
@@ -2106,6 +2271,8 @@ fn evaluate_expression_plan(
         grants,
         state,
         depth,
+        principal,
+        executor,
     )?;
     if runtime_value_matches(active, &value, expected) {
         Ok(value)
@@ -2128,6 +2295,8 @@ fn evaluate_state_plan(
     grants: &capability::LocalCapabilityGrantSet,
     state: &mut ClientStateStore,
     depth: usize,
+    principal: PrincipalId,
+    executor: &mut Option<&mut dyn ClientResourceExecutor>,
 ) -> Result<RuntimeValue, ClientExecutionError> {
     initialize_client_state(
         active,
@@ -2138,6 +2307,8 @@ fn evaluate_state_plan(
         grants,
         state,
         depth,
+        principal,
+        executor,
     )?;
     evaluate_expression_plan(
         active,
@@ -2149,6 +2320,36 @@ fn evaluate_state_plan(
         grants,
         state,
         depth,
+        principal,
+        executor,
+    )
+}
+
+fn evaluate_resource_plan(
+    active: &ActiveDatabaseRevision,
+    plan: &ResourceClientPlan,
+    context: ClientExecutionContext,
+    expected: ResolvedType,
+    arguments: &[(ParameterId, RuntimeValue)],
+    declarations: &[capability::LocalCapabilityDeclaration],
+    grants: &capability::LocalCapabilityGrantSet,
+    state: &mut ClientStateStore,
+    depth: usize,
+    principal: PrincipalId,
+    executor: &mut Option<&mut dyn ClientResourceExecutor>,
+) -> Result<RuntimeValue, ClientExecutionError> {
+    evaluate_expression_plan(
+        active,
+        plan.expression(),
+        context,
+        expected,
+        arguments,
+        declarations,
+        grants,
+        state,
+        depth,
+        principal,
+        executor,
     )
 }
 
@@ -2168,6 +2369,8 @@ fn evaluate_capability_plan(
     grants: &capability::LocalCapabilityGrantSet,
     state: &mut ClientStateStore,
     depth: usize,
+    principal: PrincipalId,
+    executor: &mut Option<&mut dyn ClientResourceExecutor>,
 ) -> Result<RuntimeValue, ClientExecutionError> {
     match plan.inner_plan() {
         InnerClientPlan::Boolean(inner) => Ok(RuntimeValue::Boolean(inner.returned_boolean())),
@@ -2191,6 +2394,8 @@ fn evaluate_capability_plan(
                 grants,
                 state,
                 depth,
+                principal,
+                executor,
             )
         }
         InnerClientPlan::State(inner) => {
@@ -2207,8 +2412,280 @@ fn evaluate_capability_plan(
                 grants,
                 state,
                 depth,
+                principal,
+                executor,
             )
         }
+        InnerClientPlan::Resource(inner) => {
+            let ClientReturnShape::Resource(expected) = return_shape else {
+                unreachable!("function shape was validated against the inner plan version");
+            };
+            evaluate_resource_plan(
+                active,
+                inner,
+                context,
+                expected,
+                arguments,
+                &[],
+                grants,
+                state,
+                depth,
+                principal,
+                executor,
+            )
+        }
+    }
+}
+
+fn evaluate_resource_error(
+    context: ClientExecutionContext,
+    source: ClientResourceExecutionError,
+) -> ClientExecutionError {
+    ClientExecutionError::ResourceEvaluation { context, source }
+}
+
+fn resource_type_matches_id(
+    active: &ActiveDatabaseRevision,
+    resolved: ResolvedType,
+    type_id: TypeId,
+) -> bool {
+    match resolved {
+        ResolvedType::Scalar(scalar) => active
+            .catalogue_hash_context()
+            .standard()
+            .and_then(|standard| standard.catalogue().value_type_by_id(type_id))
+            .is_some_and(|definition| {
+                definition.representation_contract()
+                    == match scalar {
+                        StandardScalar::Boolean => "orna.kernel.value.boolean@1",
+                        StandardScalar::Integer => "orna.kernel.value.integer@1",
+                        StandardScalar::BigInt => "orna.kernel.value.bigint@1",
+                        StandardScalar::Float => "orna.kernel.value.float@1",
+                        StandardScalar::CharacterLargeObject => {
+                            "orna.kernel.value.character-large-object@1"
+                        }
+                        StandardScalar::BinaryLargeObject => {
+                            "orna.kernel.value.binary-large-object@1"
+                        }
+                        _ => return false,
+                    }
+            }),
+        ResolvedType::Value(actual)
+        | ResolvedType::Named(actual)
+        | ResolvedType::Reference { target: actual } => actual == type_id,
+    }
+}
+
+fn resource_operation_result_type(
+    active: &ActiveDatabaseRevision,
+    operation: &ResourceOperationNode,
+    context: ClientExecutionContext,
+) -> Result<ResolvedType, ClientExecutionError> {
+    let target = InvocationTarget::new(operation.target_function(), operation.target_revision());
+    let invalid = ||
+        evaluate_resource_error(
+            context,
+            ClientResourceExecutionError::Invalid(ClientResourceError::TargetMismatch {
+                expected: target,
+            }),
+        );
+    if target.revision() != active.pair()
+        || !active_supports_invocation_target(active, target)
+    {
+        return Err(invalid());
+    }
+    let Some(definition) = active.catalogue().function_by_id(operation.target_function()) else {
+        return Err(invalid());
+    };
+    if definition.domain() != FunctionDomain::Server {
+        return Err(invalid());
+    }
+    let (expected_kind, expected) = match (operation.kind(), definition.return_type()) {
+        (ResourceKind::Scalar, FunctionReturn::Single(resolved)) => {
+            (ResourceKind::Scalar, *resolved)
+        }
+        (ResourceKind::Stream, FunctionReturn::Rows(columns)) => {
+            let Some(column) = columns.first() else {
+                return Err(evaluate_resource_error(
+                    context,
+                    ClientResourceExecutionError::Invalid(ClientResourceError::TypeMismatch),
+                ));
+            };
+            (ResourceKind::Stream, column.resolved_type())
+        }
+        _ => {
+            return Err(evaluate_resource_error(
+                context,
+                ClientResourceExecutionError::Invalid(ClientResourceError::TypeMismatch),
+            ));
+        }
+    };
+    if expected_kind != operation.kind()
+        || !resource_type_matches_id(active, expected, operation.declared_result_type())
+    {
+        return Err(evaluate_resource_error(
+            context,
+            ClientResourceExecutionError::Invalid(ClientResourceError::TypeMismatch),
+        ));
+    }
+    Ok(expected)
+}
+
+fn evaluate_resource_expression(
+    active: &ActiveDatabaseRevision,
+    operation: &ResourceOperationNode,
+    context: ClientExecutionContext,
+    arguments: &[(ParameterId, RuntimeValue)],
+    declarations: &[capability::LocalCapabilityDeclaration],
+    grants: &capability::LocalCapabilityGrantSet,
+    state: &mut ClientStateStore,
+    depth: usize,
+    principal: PrincipalId,
+    executor: &mut Option<&mut dyn ClientResourceExecutor>,
+) -> Result<RuntimeValue, ClientExecutionError> {
+    let Some(executor) = executor.as_deref_mut() else {
+        return Err(evaluate_resource_error(
+            context,
+            ClientResourceExecutionError::ExecutorUnavailable,
+        ));
+    };
+    let expected_type = resource_operation_result_type(active, operation, context)?;
+    let Some(target_definition) = active.catalogue().function_by_id(operation.target_function()) else {
+        return Err(evaluate_resource_error(
+            context,
+            ClientResourceExecutionError::Invalid(ClientResourceError::TargetMismatch {
+                expected: InvocationTarget::new(operation.target_function(), operation.target_revision()),
+            }),
+        ));
+    };
+    let mut evaluated = Vec::with_capacity(operation.arguments().len());
+    for (parameter, expression) in operation.arguments() {
+        if evaluated.iter().any(|candidate: &FunctionArgument| candidate.parameter() == *parameter) {
+            return Err(evaluate_resource_error(
+                context,
+                ClientResourceExecutionError::Invalid(ClientResourceError::DuplicateArgument {
+                    parameter: *parameter,
+                }),
+            ));
+        }
+        let value = evaluate_expression(
+            active,
+            expression,
+            context,
+            arguments,
+            declarations,
+            grants,
+            state,
+            depth,
+            principal,
+            &mut Some(executor),
+        )?;
+        let Some(parameter_definition) = target_definition
+            .parameters()
+            .iter()
+            .find(|candidate| candidate.id() == *parameter)
+        else {
+            return Err(evaluate_resource_error(
+                context,
+                ClientResourceExecutionError::Invalid(ClientResourceError::DuplicateArgument {
+                    parameter: *parameter,
+                }),
+            ));
+        };
+        if !runtime_value_matches(active, &value, parameter_definition.resolved_type()) {
+            return Err(evaluate_resource_error(
+                context,
+                ClientResourceExecutionError::Invalid(ClientResourceError::TypeMismatch),
+            ));
+        }
+        let argument = FunctionArgument::new(*parameter, value).map_err(|_| {
+            evaluate_resource_error(
+                context,
+                ClientResourceExecutionError::Invalid(ClientResourceError::ArgumentEncoding),
+            )
+        })?;
+        evaluated.push(argument);
+    }
+    let digest = ClientResourceKey::canonical_arguments_digest(active, &evaluated)
+        .map_err(|source| evaluate_resource_error(context, ClientResourceExecutionError::Invalid(source)))?;
+    // The active catalogue hash is the deterministic invalidation identity in
+    // this runtime seam; external data epochs belong to the host executor.
+    let key = ClientResourceKey::new(
+        InvocationTarget::new(operation.target_function(), operation.target_revision()),
+        principal,
+        digest,
+        active.catalogue_hash(),
+    );
+    let resource = state.get_or_create_resource(key, expected_type);
+    match resource.status() {
+        ClientResourceStatus::Ready => {
+            return resource.value().cloned().ok_or_else(|| {
+                evaluate_resource_error(
+                    context,
+                    ClientResourceExecutionError::Invalid(ClientResourceError::InvalidTransition {
+                        status: ClientResourceStatus::Ready,
+                    }),
+                )
+            });
+        }
+        ClientResourceStatus::Failed => {
+            let code = resource
+                .failure()
+                .map(|failure| failure.code().to_owned())
+                .unwrap_or_else(|| "resource.failed".to_owned());
+            return Err(evaluate_resource_error(
+                context,
+                ClientResourceExecutionError::Failed(code),
+            ));
+        }
+        ClientResourceStatus::Cancelled => {
+            return Err(evaluate_resource_error(
+                context,
+                ClientResourceExecutionError::Cancelled,
+            ));
+        }
+        ClientResourceStatus::Loading => {
+            return Err(evaluate_resource_error(
+                context,
+                ClientResourceExecutionError::Invalid(ClientResourceError::InvalidTransition {
+                    status: ClientResourceStatus::Loading,
+                }),
+            ));
+        }
+        ClientResourceStatus::Idle => {}
+    }
+    let request = resource.begin_request(active, evaluated).map_err(|source| {
+        evaluate_resource_error(context, ClientResourceExecutionError::Invalid(source))
+    })?;
+    let completion = executor.execute(request);
+    resource.apply_completion(active, completion).map_err(|source| {
+        evaluate_resource_error(context, ClientResourceExecutionError::Invalid(source))
+    })?;
+    match resource.status() {
+        ClientResourceStatus::Ready => resource.value().cloned().ok_or_else(|| {
+            evaluate_resource_error(
+                context,
+                ClientResourceExecutionError::Invalid(ClientResourceError::TypeMismatch),
+            )
+        }),
+        ClientResourceStatus::Failed => {
+            let code = resource
+                .failure()
+                .map(|failure| failure.code().to_owned())
+                .unwrap_or_else(|| "resource.failed".to_owned());
+            Err(evaluate_resource_error(
+                context,
+                ClientResourceExecutionError::Failed(code),
+            ))
+        }
+        ClientResourceStatus::Cancelled => Err(evaluate_resource_error(
+            context,
+            ClientResourceExecutionError::Cancelled,
+        )),
+        status => Err(evaluate_resource_error(
+            context,
+            ClientResourceExecutionError::Invalid(ClientResourceError::InvalidTransition { status }),
+        )),
     }
 }
 
@@ -2221,8 +2698,39 @@ fn evaluate_expression(
     grants: &capability::LocalCapabilityGrantSet,
     state: &mut ClientStateStore,
     depth: usize,
+    principal: PrincipalId,
+    executor: &mut Option<&mut dyn ClientResourceExecutor>,
 ) -> Result<RuntimeValue, ClientExecutionError> {
     match expression {
+        ClientExpressionNode::Await { expression } => {
+            if !matches!(expression.as_ref(), ClientExpressionNode::Resource { .. }) {
+                return Err(expression_error(context, ClientExpressionError::InvalidCall));
+            }
+            evaluate_expression(
+                active,
+                expression,
+                context,
+                arguments,
+                declarations,
+                grants,
+                state,
+                depth,
+                principal,
+                executor,
+            )
+        }
+        ClientExpressionNode::Resource { operation } => evaluate_resource_expression(
+            active,
+            operation,
+            context,
+            arguments,
+            declarations,
+            grants,
+            state,
+            depth,
+            principal,
+            executor,
+        ),
         ClientExpressionNode::String { value } => Ok(RuntimeValue::Text(value.clone())),
         ClientExpressionNode::Integer { value } => i32::try_from(*value)
             .map(RuntimeValue::Integer)
@@ -2253,6 +2761,8 @@ fn evaluate_expression(
                 grants,
                 state,
                 depth,
+                principal,
+                executor,
             )?;
             let right = evaluate_expression(
                 active,
@@ -2263,6 +2773,8 @@ fn evaluate_expression(
                 grants,
                 state,
                 depth,
+                principal,
+                executor,
             )?;
             let (RuntimeValue::Text(left), RuntimeValue::Text(right)) = (left, right) else {
                 return Err(expression_error(
@@ -2302,6 +2814,8 @@ fn evaluate_expression(
                     grants,
                     state,
                     depth,
+                    principal,
+                    executor,
                 )?;
                 evaluated.push((*parameter, value));
             }
@@ -2313,6 +2827,8 @@ fn evaluate_expression(
                 grants,
                 state,
                 depth + 1,
+                principal,
+                executor,
             )?;
             Ok(value)
         }
@@ -2558,6 +3074,8 @@ fn initialize_client_state(
     grants: &capability::LocalCapabilityGrantSet,
     state: &mut ClientStateStore,
     depth: usize,
+    principal: PrincipalId,
+    executor: &mut Option<&mut dyn ClientResourceExecutor>,
 ) -> Result<(), ClientExecutionError> {
     for slot in plan.slots() {
         let key = state.key_for(context.function(), slot.state_slot_id());
@@ -2605,6 +3123,8 @@ fn initialize_client_state(
                     grants,
                     state,
                     depth,
+                    principal,
+                    executor,
                 )?;
                 if !runtime_value_matches(active, &value, resolved) {
                     return Err(state_error(
@@ -2705,6 +3225,7 @@ enum ClientReturnShape {
     Opaque(TypeId),
     Expression(ResolvedType),
     State(ResolvedType),
+    Resource(ResolvedType),
     OtherValue,
     Unsupported,
 }
@@ -2716,11 +3237,13 @@ fn classify_client_return(
 ) -> ClientReturnShape {
     let expression_eligible = matches!(
         artifact_version,
-        EXPRESSION_FORMAT_VERSION | STATE_FORMAT_VERSION
+        EXPRESSION_FORMAT_VERSION | STATE_FORMAT_VERSION | RESOURCE_FORMAT_VERSION
     );
     let expression_shape = |resolved_type: ResolvedType| {
         if artifact_version == STATE_FORMAT_VERSION {
             ClientReturnShape::State(resolved_type)
+        } else if artifact_version == RESOURCE_FORMAT_VERSION {
+            ClientReturnShape::Resource(resolved_type)
         } else {
             ClientReturnShape::Expression(resolved_type)
         }
@@ -2798,7 +3321,7 @@ fn validate_function_shape(
     }
     if !matches!(
         artifact_version,
-        EXPRESSION_FORMAT_VERSION | STATE_FORMAT_VERSION
+        EXPRESSION_FORMAT_VERSION | STATE_FORMAT_VERSION | RESOURCE_FORMAT_VERSION
     ) && !definition.parameters().is_empty()
     {
         return Err(invalid_function(context, ClientExecutionRule::Parameters));
@@ -2846,7 +3369,9 @@ fn validate_selected_references(
             }
             if matches!(
                 return_shape,
-                ClientReturnShape::Expression(_) | ClientReturnShape::State(_)
+                ClientReturnShape::Expression(_)
+                | ClientReturnShape::State(_)
+                | ClientReturnShape::Resource(_)
             ) {
                 if selected.iter().any(|reference| {
                     !matches!(
@@ -2889,6 +3414,7 @@ fn validate_selected_references(
                             }
                             ClientReturnShape::Expression(_)
                             | ClientReturnShape::State(_)
+                            | ClientReturnShape::Resource(_)
                             | ClientReturnShape::OtherValue
                             | ClientReturnShape::Unsupported => false,
                         }
@@ -2927,6 +3453,7 @@ fn validate_artifact(
         ClientReturnShape::Opaque(_) => OPAQUE_FORMAT_VERSION,
         ClientReturnShape::Expression(_) => EXPRESSION_FORMAT_VERSION,
         ClientReturnShape::State(_) => STATE_FORMAT_VERSION,
+        ClientReturnShape::Resource(_) => RESOURCE_FORMAT_VERSION,
         ClientReturnShape::OtherValue => unreachable!("definition references were validated"),
         ClientReturnShape::Unsupported => unreachable!("function shape was validated"),
     };
