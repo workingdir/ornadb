@@ -12,9 +12,11 @@ use orna_artifact::{
         CAPABILITY_FORMAT_VERSION as CLIENT_PLAN_CAPABILITY_VERSION, CapabilityArgumentSource,
         CapabilityClientPlan, CapabilityRequirement, ClientExpressionNode, ClientPlan,
         InnerClientPlan, StateClientPlan, StateDefault, StateScope, StateSlot,
+        ResourceClientPlan, ResourceOperationNode,
         EXPRESSION_FORMAT_VERSION as CLIENT_PLAN_EXPRESSION_VERSION,
         ExpressionClientPlan, STATE_FORMAT_VERSION as CLIENT_PLAN_STATE_VERSION,
         FORMAT_IDENTITY as CLIENT_PLAN_FORMAT, FORMAT_VERSION as CLIENT_PLAN_VERSION,
+        RESOURCE_FORMAT_VERSION as CLIENT_PLAN_RESOURCE_VERSION,
         LANGUAGE_VERSION_IDENTITY as CLIENT_PLAN_LANGUAGE_VERSION,
     },
     constant_expression::{
@@ -82,7 +84,8 @@ use crate::{
     relational::{supports_server_select_distinct, supports_server_select_equality},
     resolver::{
         durable_state_slot_id, CheckedClientExpression, CheckedClientFunctionBody,
-        CheckedClientStateSlot, CheckedFieldRename, CheckedStateDefault, CheckedStateScope,
+        CheckedClientStateSlot, CheckedFieldRename, CheckedResourceOperation, CheckedStateDefault,
+        CheckedStateScope,
         UNIQUE_FIELD_MESSAGE, supports_unique_text_or_required_reference,
     },
 };
@@ -4174,6 +4177,19 @@ fn client_expression_locations<'a>(
                 client_expression_locations(argument, locations);
             }
         }
+        CheckedClientExpression::Await {
+            expression,
+            location,
+        } => {
+            locations.push(location);
+            client_expression_locations(expression, locations);
+        }
+        CheckedClientExpression::Resource { operation } => {
+            locations.push(operation.location());
+            for (_, argument) in operation.arguments() {
+                client_expression_locations(argument, locations);
+            }
+        }
         CheckedClientExpression::String { location, .. }
         | CheckedClientExpression::Integer { location, .. }
         | CheckedClientExpression::Boolean { location, .. }
@@ -5513,6 +5529,24 @@ fn client_capability_requirement(
     CapabilityRequirement::new(capability.name().to_owned(), argument)
 }
 
+fn client_expression_contains_resource(expression: &CheckedClientExpression) -> bool {
+    match expression {
+        CheckedClientExpression::Await { .. } | CheckedClientExpression::Resource { .. } => true,
+        CheckedClientExpression::Call { arguments, .. } => arguments
+            .iter()
+            .any(|(_, argument)| client_expression_contains_resource(argument)),
+        CheckedClientExpression::Concat { left, right, .. } => {
+            client_expression_contains_resource(left)
+                || client_expression_contains_resource(right)
+        }
+        CheckedClientExpression::String { .. }
+        | CheckedClientExpression::Integer { .. }
+        | CheckedClientExpression::Boolean { .. }
+        | CheckedClientExpression::ParameterRead { .. }
+        | CheckedClientExpression::FieldPath { .. } => false,
+    }
+}
+
 impl<'a> CandidateBuilder<'a> {
     fn new(
         parse_report: &'a ParseReport,
@@ -6324,34 +6358,62 @@ impl<'a> CandidateBuilder<'a> {
                 )
             }
             ValidatedClientBody::Expression(expression) => {
+                let contains_resource = client_expression_contains_resource(expression);
                 let expression = self.client_expression_node(expression)?;
-                let plan = ExpressionClientPlan::new(expression);
-                let payload = plan.encode().map_err(|_| PrepareError::InvalidCheckedBundle {
-                    reason: "checked CLIENT expression exceeds client-plan limits",
-                })?;
-                (
-                    CLIENT_PLAN_EXPRESSION_VERSION,
-                    payload,
-                    InnerClientPlan::Expression(plan),
-                )
-            }
-            ValidatedClientBody::StateBlock {
-                return_expression,
-                states,
-            } => {
-                let expression = self.client_expression_node(return_expression)?;
-                if states.is_empty() {
+                if contains_resource {
+                    let plan = ResourceClientPlan::new(expression);
+                    let payload = plan.encode().map_err(|_| PrepareError::InvalidCheckedBundle {
+                        reason: "checked CLIENT resource plan exceeds client-plan limits",
+                    })?;
+                    (
+                        CLIENT_PLAN_RESOURCE_VERSION,
+                        payload,
+                        InnerClientPlan::Resource(plan),
+                    )
+                } else {
                     let plan = ExpressionClientPlan::new(expression);
-                    let payload =
-                        plan.encode()
-                            .map_err(|_| PrepareError::InvalidCheckedBundle {
-                                reason: "checked CLIENT expression exceeds client-plan limits",
-                            })?;
+                    let payload = plan.encode().map_err(|_| PrepareError::InvalidCheckedBundle {
+                        reason: "checked CLIENT expression exceeds client-plan limits",
+                    })?;
                     (
                         CLIENT_PLAN_EXPRESSION_VERSION,
                         payload,
                         InnerClientPlan::Expression(plan),
                     )
+                }
+            }
+            ValidatedClientBody::StateBlock {
+                return_expression,
+                states,
+            } => {
+                let contains_resource = client_expression_contains_resource(return_expression);
+                let expression = self.client_expression_node(return_expression)?;
+                if states.is_empty() {
+                    if contains_resource {
+                        let plan = ResourceClientPlan::new(expression);
+                        let payload =
+                            plan.encode()
+                                .map_err(|_| PrepareError::InvalidCheckedBundle {
+                                    reason: "checked CLIENT resource plan exceeds client-plan limits",
+                                })?;
+                        (
+                            CLIENT_PLAN_RESOURCE_VERSION,
+                            payload,
+                            InnerClientPlan::Resource(plan),
+                        )
+                    } else {
+                        let plan = ExpressionClientPlan::new(expression);
+                        let payload =
+                            plan.encode()
+                                .map_err(|_| PrepareError::InvalidCheckedBundle {
+                                    reason: "checked CLIENT expression exceeds client-plan limits",
+                                })?;
+                        (
+                            CLIENT_PLAN_EXPRESSION_VERSION,
+                            payload,
+                            InnerClientPlan::Expression(plan),
+                        )
+                    }
                 } else {
                     let function_id = self.identities.function(validated.id)?;
                     let slots = states
@@ -6474,6 +6536,12 @@ impl<'a> CandidateBuilder<'a> {
                     })
                     .collect::<Result<Vec<_>, PrepareError>>()?,
             },
+            CheckedClientExpression::Await { expression, .. } => ClientExpressionNode::Await {
+                expression: Box::new(self.client_expression_node(expression)?),
+            },
+            CheckedClientExpression::Resource { operation } => ClientExpressionNode::Resource {
+                operation: self.client_resource_operation(operation)?,
+            },
             CheckedClientExpression::String { value, .. } => ClientExpressionNode::String {
                 value: value.clone(),
             },
@@ -6502,6 +6570,75 @@ impl<'a> CandidateBuilder<'a> {
                 right: Box::new(self.client_expression_node(right)?),
             },
         })
+    }
+
+    fn resource_target_revision(
+        &self,
+        target: CheckedFunctionId,
+        function: FunctionId,
+    ) -> Result<RevisionPair, PrepareError> {
+        // A target declared in this candidate is pinned to the candidate pair,
+        // including an existing function identity whose declaration is being
+        // replaced.  A target not submitted in the candidate remains pinned to
+        // the active database pair.
+        if self
+            .checked
+            .server_functions()
+            .iter()
+            .any(|candidate| candidate.id() == target)
+        {
+            return Ok(RevisionPair::new(
+                self.source.revision.id(),
+                self.catalogue_revision,
+            ));
+        }
+        if self.active.catalogue().function_by_id(function).is_some() {
+            return Ok(self.active.pair());
+        }
+        Err(existing_mismatch(DefinitionIdentity::Function(function)))
+    }
+
+    fn client_resource_operation(
+        &self,
+        operation: &CheckedResourceOperation,
+    ) -> Result<ResourceOperationNode, PrepareError> {
+        let result_type = match operation.standard_result_type() {
+            Some(type_id) => type_id,
+            None => match operation.result_type() {
+                SemanticType::Named(type_id) | SemanticType::Reference { target: type_id } => {
+                    self.identities.type_id(type_id)?
+                }
+                SemanticType::Scalar(_) => {
+                    return Err(PrepareError::InvalidCheckedBundle {
+                        reason: "checked CLIENT resource result has no durable value type identity",
+                    });
+                }
+            },
+        };
+        let mut arguments = operation
+            .arguments()
+            .iter()
+            .map(|(parameter, value)| {
+                Ok((
+                    self.identities.parameter(*parameter)?,
+                    self.client_expression_node(value)?,
+                ))
+            })
+            .collect::<Result<Vec<_>, PrepareError>>()?;
+        // The artifact contract is ordered by durable ParameterId. Resolver
+        // identities may be provisional and declaration order is not a valid
+        // substitute once the identity map allocates durable IDs.
+        arguments.sort_by_key(|(parameter, _)| *parameter);
+        let target = self.identities.function(operation.target())?;
+        let target_revision = self.resource_target_revision(operation.target(), target)?;
+        Ok(ResourceOperationNode::new(
+            operation.kind(),
+            target,
+            target_revision,
+            operation.call_site(),
+            arguments,
+            result_type,
+        ))
     }
 
     fn client_function_references(
