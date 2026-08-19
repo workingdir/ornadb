@@ -1855,10 +1855,7 @@ impl SignatureEvidence {
                     },
                 );
             };
-            if slot_owner != owner
-                || ordinal != 0
-                || slot.flattened_ordinal != function.parameters().len() as u32
-            {
+            if slot_owner != owner || ordinal != 0 {
                 return Err(
                     PrepareStandardApplicationError::FunctionTypeReferenceMismatch {
                         function: owner,

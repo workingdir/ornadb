@@ -7407,8 +7407,12 @@ fn collect_standard_type_references(
                     .copied()
                     .unwrap_or(usize::MAX),
                 declaration_start: function.location.span().start(),
-                parameter_ordinals: HashMap::new(),
-                return_offset: 0,
+                parameter_ordinals: function
+                    .parameters
+                    .iter()
+                    .map(|parameter| (parameter.id, parameter.ordinal))
+                    .collect(),
+                return_offset: function.parameters.len() as u32,
             },
         );
     }
