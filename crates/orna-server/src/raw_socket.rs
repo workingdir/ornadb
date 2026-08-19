@@ -2293,6 +2293,7 @@ mod tests {
         }
     }
 
+
     #[derive(Clone)]
     struct MixedResourceDispatch {
         started: Arc<Notify>,
@@ -2625,10 +2626,8 @@ mod tests {
             _ => unreachable!("constructed test version"),
         };
         let started = Arc::new(Notify::new());
-        let cancelled = Arc::new(AtomicBool::new(false));
-        let dispatcher = BlockingResourceDispatch {
+        let dispatcher = MixedResourceDispatch {
             started: Arc::clone(&started),
-            cancelled: Arc::clone(&cancelled),
         };
         let (server, mut client) = UnixStream::pair().unwrap();
         let server_task = tokio::spawn(drive_versioned_authenticated_stream_until_shutdown(
@@ -2671,13 +2670,27 @@ mod tests {
             )
             .await
             .unwrap();
+        let scalar_failure = read_resource_server_frame(&mut client, &active, &registry).await;
+        assert!(
+            matches!(
+                scalar_failure,
+                ResourceServerFrame::Failed(frame)
+                    if frame.stream_id == 1
+                        && frame.request_id == scalar_request_id
+                        && frame.failure == orna_protocol::CallFailure::InternalFailure
+            ),
+            "unexpected scalar failure frame: {scalar_failure:?}"
+        );
 
         let mut unrelated = resource_request(revision);
         unrelated.stream_id = 2;
         unrelated.request_id = InvocationId::from_bytes([0x22; 16]);
         unrelated.resource_kind = ResourceKind::Stream;
         unrelated.item_window = 1;
-        unrelated.byte_window = 1;
+        let value_bytes =
+            orna_protocol::encode_constructed_value(&active, &registry, &RuntimeValue::Integer(7))
+                .unwrap();
+        unrelated.byte_window = value_bytes.len() as u64;
         client
             .write_all(
                 &encode_resource_client_frame(
@@ -2689,17 +2702,29 @@ mod tests {
             )
             .await
             .unwrap();
-        started.notified().await;
+        assert!(matches!(
+            read_resource_server_frame(&mut client, &active, &registry).await,
+            ResourceServerFrame::Accepted(frame)
+                if frame.stream_id == unrelated.stream_id
+                    && frame.request_id == unrelated.request_id
+        ));
+        assert!(matches!(
+            read_resource_server_frame(&mut client, &active, &registry).await,
+            ResourceServerFrame::Values(frame)
+                if frame.stream_id == unrelated.stream_id
+                    && frame.values == vec![RuntimeValue::Integer(7)]
+        ));
 
         client
             .write_all(
                 &encode_resource_client_frame(
                     &active,
                     &registry,
-                    &ResourceClientFrame::Cancel(ResourceCancel {
+                    &ResourceClientFrame::WindowUpdate(ResourceWindowUpdate {
                         stream_id: unrelated.stream_id,
                         request_id: unrelated.request_id,
-                        reason: ResourceCancellationCode::ClientRequested,
+                        add_items: 1,
+                        add_bytes: value_bytes.len() as u64,
                     }),
                 )
                 .unwrap(),
@@ -2709,19 +2734,16 @@ mod tests {
 
         assert!(matches!(
             read_resource_server_frame(&mut client, &active, &registry).await,
-            ResourceServerFrame::Failed(frame)
-                if frame.stream_id == 1
-                    && frame.request_id == scalar_request_id
-                    && frame.failure == orna_protocol::CallFailure::InternalFailure
+            ResourceServerFrame::Values(frame)
+                if frame.stream_id == unrelated.stream_id
+                    && frame.values == vec![RuntimeValue::Integer(8)]
         ));
         assert!(matches!(
             read_resource_server_frame(&mut client, &active, &registry).await,
-            ResourceServerFrame::Cancelled(frame)
+            ResourceServerFrame::Completed(frame)
                 if frame.stream_id == unrelated.stream_id
-                    && frame.request_id == unrelated.request_id
-                    && frame.reason == ResourceCancellationCode::ClientRequested
+                    && frame.total_items == 2
         ));
-        assert!(cancelled.load(Ordering::SeqCst));
 
         client.shutdown().await.unwrap();
         server_task.await.unwrap().unwrap();
