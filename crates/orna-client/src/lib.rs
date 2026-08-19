@@ -413,6 +413,13 @@ impl ClientResourceRequest {
             value,
         }
     }
+    /// Creates a non-terminal completion for this request.
+    pub fn pending(self) -> ClientResourceCompletion {
+        ClientResourceCompletion::Pending {
+            key: self.key,
+            generation: self.generation,
+        }
+    }
 
     /// Creates a failed completion for this request.
     pub fn failed(self, code: String) -> ClientResourceCompletion {
@@ -435,6 +442,13 @@ pub enum ClientResourceCompletion {
         generation: ClientResourceGeneration,
         /// The returned runtime value.
         value: RuntimeValue,
+    },
+    /// The request remains active and will complete through a later call.
+    Pending {
+        /// The resource identity that created the request.
+        key: ClientResourceKey,
+        /// The active request generation.
+        generation: ClientResourceGeneration,
     },
     /// One structured failure produced by the request.
     Failed {
@@ -573,6 +587,10 @@ impl ClientResource {
             } => {
                 self.require_key(key)?;
                 self.publish_ready(active, generation, value)
+            }
+            ClientResourceCompletion::Pending { key, generation } => {
+                self.require_key(key)?;
+                self.require_loading(generation)
             }
             ClientResourceCompletion::Failed {
                 key,
@@ -1489,6 +1507,13 @@ impl Error for ClientExpressionError {}
 pub enum ClientResourceExecutionError {
     /// No explicit resource executor was supplied by the caller.
     ExecutorUnavailable,
+    /// The resource request is active and has not produced a terminal result.
+    Pending {
+        /// The resource identity waiting for completion.
+        key: ClientResourceKey,
+        /// The active request generation.
+        generation: ClientResourceGeneration,
+    },
     /// The resource completed with a redacted structured failure code.
     Failed(String),
     /// The resource was cancelled before a value became available.
@@ -1503,6 +1528,13 @@ impl fmt::Display for ClientResourceExecutionError {
             Self::ExecutorUnavailable => formatter
                 .write_str("CLIENT resource execution requires an explicit resource executor"),
             Self::Failed(code) => write!(formatter, "CLIENT resource failed: {code}"),
+            Self::Pending { generation, .. } => {
+                write!(
+                    formatter,
+                    "CLIENT resource request is pending at generation {}",
+                    generation.value(),
+                )
+            }
             Self::Cancelled => formatter.write_str("CLIENT resource was cancelled"),
             Self::Invalid(source) => source.fmt(formatter),
         }
@@ -1513,7 +1545,7 @@ impl Error for ClientResourceExecutionError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::Invalid(source) => Some(source),
-            Self::ExecutorUnavailable | Self::Failed(_) | Self::Cancelled => None,
+            Self::ExecutorUnavailable | Self::Pending { .. } | Self::Failed(_) | Self::Cancelled => None,
         }
     }
 }
@@ -2797,12 +2829,6 @@ fn evaluate_resource_expression(
     executor: &mut Option<&mut dyn ClientResourceExecutor>,
     local_environment: &mut ClientLocalEnvironment,
 ) -> Result<RuntimeValue, ClientExecutionError> {
-    let Some(executor) = executor.as_deref_mut() else {
-        return Err(evaluate_resource_error(
-            context,
-            ClientResourceExecutionError::ExecutorUnavailable,
-        ));
-    };
     let expected_type = resource_operation_result_type(active, operation, context)?;
     let Some(target_definition) = active.catalogue().function_by_id(operation.target_function()) else {
         return Err(evaluate_resource_error(
@@ -2832,7 +2858,7 @@ fn evaluate_resource_expression(
             state,
             depth,
             principal,
-            &mut Some(executor),
+            executor,
             local_environment,
         )?;
         let Some(parameter_definition) = target_definition
@@ -2910,13 +2936,20 @@ fn evaluate_resource_expression(
         ClientResourceStatus::Loading => {
             return Err(evaluate_resource_error(
                 context,
-                ClientResourceExecutionError::Invalid(ClientResourceError::InvalidTransition {
-                    status: ClientResourceStatus::Loading,
-                }),
+                ClientResourceExecutionError::Pending {
+                    key: resource.key(),
+                    generation: resource.generation(),
+                },
             ));
         }
         ClientResourceStatus::Idle => {}
     }
+    let Some(executor) = executor.as_deref_mut() else {
+        return Err(evaluate_resource_error(
+            context,
+            ClientResourceExecutionError::ExecutorUnavailable,
+        ));
+    };
     let request = resource.begin_request(active, evaluated).map_err(|source| {
         evaluate_resource_error(context, ClientResourceExecutionError::Invalid(source))
     })?;
@@ -2944,6 +2977,13 @@ fn evaluate_resource_expression(
         ClientResourceStatus::Cancelled => Err(evaluate_resource_error(
             context,
             ClientResourceExecutionError::Cancelled,
+        )),
+        ClientResourceStatus::Loading => Err(evaluate_resource_error(
+            context,
+            ClientResourceExecutionError::Pending {
+                key: resource.key(),
+                generation: resource.generation(),
+            },
         )),
         status => Err(evaluate_resource_error(
             context,
@@ -4054,6 +4094,48 @@ mod tests {
     }
 
     #[test]
+    fn client_resource_pending_completion_preserves_loading_until_resume() {
+        let (active, function, pair, _) = version_one_active_with_shape(
+            FunctionDomain::Client,
+            Vec::new(),
+            FunctionReturn::Single(ResolvedType::Scalar(StandardScalar::Boolean)),
+            FunctionSecurity::Invoker,
+            FunctionVolatility::Immutable,
+        );
+        let digest = super::ClientResourceKey::canonical_arguments_digest(&active, &[]).unwrap();
+        let key = super::ClientResourceKey::new(
+            InvocationTarget::new(function, pair),
+            PrincipalId::from_bytes([0x7a; 16]),
+            digest,
+            Sha256Digest::from_bytes([0x22; 32]),
+        );
+        let mut resource =
+            super::ClientResource::new(key, ResolvedType::Scalar(StandardScalar::Boolean));
+        let request = resource.begin_request(&active, Vec::new()).unwrap();
+        let generation = request.generation();
+
+        resource
+            .apply_completion(&active, request.pending())
+            .expect("pending completion should retain the active generation");
+        assert_eq!(resource.status(), super::ClientResourceStatus::Loading);
+        assert_eq!(resource.value(), None);
+        assert_eq!(resource.failure(), None);
+
+        resource
+            .apply_completion(
+                &active,
+                super::ClientResourceCompletion::Ready {
+                    key,
+                    generation,
+                    value: RuntimeValue::Boolean(true),
+                },
+            )
+            .expect("the matching completion should resume the resource");
+        assert_eq!(resource.status(), super::ClientResourceStatus::Ready);
+        assert_eq!(resource.value(), Some(&RuntimeValue::Boolean(true)));
+    }
+
+    #[test]
     fn client_resource_executor_rejects_digest_duplicates_stale_and_cancelled() {
         let (active, function, pair, _) = version_one_active_with_shape(
             FunctionDomain::Client,
@@ -4841,9 +4923,23 @@ mod tests {
     #[test]
     fn procedural_await_without_executor_fails_closed() {
         let text_type = orna_standard::CHARACTER_LARGE_OBJECT_TYPE_ID;
-        let function = FunctionId::from_bytes([6; 16]);
-        let pair = RevisionPair::new(SourceRevisionId::from_bytes([3; 16]), CatalogueRevisionId::from_bytes([4; 16]));
-        let operation = orna_artifact::client_plan::ResourceOperationNode::new(orna_artifact::client_plan::ResourceKind::Scalar, function, pair, orna_core::CallSiteId::from_bytes([8; 16]), Vec::new(), text_type);
+        let pair = RevisionPair::new(
+            SourceRevisionId::from_bytes([3; 16]),
+            CatalogueRevisionId::from_bytes([4; 16]),
+        );
+        let operation = orna_artifact::client_plan::ResourceOperationNode::new(
+            orna_artifact::client_plan::ResourceKind::Scalar,
+            FunctionId::from_bytes([0xd1; 16]),
+            pair,
+            orna_core::CallSiteId::from_bytes([8; 16]),
+            vec![(
+                ParameterId::from_bytes([0xd3; 16]),
+                orna_artifact::client_plan::ClientExpressionNode::ParameterRead {
+                    parameter: ParameterId::from_bytes([0xb1; 16]),
+                },
+            )],
+            text_type,
+        );
         let plan = orna_artifact::client_plan::ProceduralClientPlan::new(Vec::new(), Vec::new(), orna_artifact::client_plan::ClientExpressionNode::Await { expression: Box::new(orna_artifact::client_plan::ClientExpressionNode::Resource { operation }) });
         let payload = orna_artifact::client_plan::CapabilityClientPlan::new(
             orna_artifact::client_plan::InnerClientPlan::Procedural(plan),
