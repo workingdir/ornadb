@@ -1360,7 +1360,9 @@ async fn handle_resource_frame<D: DispatchService>(
         }
     }
 
-    if let Some(cancel) = cancellation {
+    if let Some(cancel) = cancellation
+        && matches!(disposition, ResourceFrameDisposition::Applied)
+    {
         cancelled.insert(cancel.stream_id);
         if let Some(task) = tasks.remove(&cancel.stream_id) {
             task.abort();
@@ -1400,10 +1402,25 @@ async fn flush_resource_pending(
                 break;
             };
             let action = canonical_resource_action(version, action)?;
-            match connection
-                .apply(action.clone())
-                .map_err(|source| LocalRawSocketError::ResourceConnection { source })?
-            {
+            let disposition = match &action {
+                ResourceServerFrame::Cancelled(frame) => {
+                    match connection.apply_cancelled_after_client_cancel(*frame) {
+                        Ok(disposition) => disposition,
+                        Err(ResourceConnectionError::InsufficientCredit { .. }) => break,
+                        Err(source) => {
+                            return Err(LocalRawSocketError::ResourceConnection { source });
+                        }
+                    }
+                }
+                _ => match connection.apply(action.clone()) {
+                    Ok(disposition) => disposition,
+                    Err(ResourceConnectionError::InsufficientCredit { .. }) => break,
+                    Err(source) => {
+                        return Err(LocalRawSocketError::ResourceConnection { source });
+                    }
+                },
+            };
+            match disposition {
                 ResourceFrameDisposition::DroppedLate => {
                     pending
                         .get_mut(&stream_id)
@@ -1808,8 +1825,9 @@ mod tests {
         value::{EnumValue, RuntimeValue},
     };
     use orna_protocol::{
-        Channel, ClientFrame, Event, MAX_RESOURCE_WINDOW, ResourceClientFrame, ResourceKind,
-        ResourceRequest, ResourceServerFrame, ServerFrame, decode_catalogue_server_frame,
+        Channel, ClientFrame, Event, MAX_RESOURCE_WINDOW, ResourceCancel, ResourceCancellationCode,
+        ResourceClientFrame, ResourceKind, ResourceRequest, ResourceServerFrame,
+        ResourceWindowUpdate, ServerFrame, decode_catalogue_server_frame,
         decode_resource_server_frame, decode_server_frame, encode_catalogue_client_frame,
         encode_client_frame, encode_resource_client_frame,
     };
@@ -1919,6 +1937,43 @@ mod tests {
         decode_resource_server_frame(active, registry, &encoded).unwrap()
     }
 
+    fn resource_actions(
+        request: &ResourceRequest,
+        values: Vec<RuntimeValue>,
+    ) -> VecDeque<ResourceServerFrame> {
+        let total_items = values.len() as u64;
+        let final_batch_sequence = total_items.saturating_sub(1);
+        let mut actions = VecDeque::with_capacity(values.len() + 2);
+        actions.push_back(ResourceServerFrame::Accepted(
+            orna_protocol::ResourceAccepted {
+                stream_id: request.stream_id,
+                request_id: request.request_id,
+                nested_invocation_id: InvocationId::from_bytes([0x21; 16]),
+                target_revision: request.target_revision,
+                resource_kind: request.resource_kind,
+            },
+        ));
+        for (batch_sequence, value) in values.into_iter().enumerate() {
+            actions.push_back(ResourceServerFrame::Values(orna_protocol::ResourceValues {
+                stream_id: request.stream_id,
+                request_id: request.request_id,
+                batch_sequence: batch_sequence as u64,
+                item_count: 1,
+                byte_count: 0,
+                values: vec![value],
+            }));
+        }
+        actions.push_back(ResourceServerFrame::Completed(
+            orna_protocol::ResourceCompleted {
+                stream_id: request.stream_id,
+                request_id: request.request_id,
+                final_batch_sequence,
+                total_items,
+            },
+        ));
+        actions
+    }
+
     #[derive(Clone)]
     struct ResourceDispatch;
 
@@ -1938,32 +1993,68 @@ mod tests {
             request: ResourceRequest,
             _resources: LocalRawSocketResources,
         ) -> Option<StartedResourceDispatch> {
-            let accepted = ResourceServerFrame::Accepted(orna_protocol::ResourceAccepted {
-                stream_id: request.stream_id,
-                request_id: request.request_id,
-                nested_invocation_id: InvocationId::from_bytes([0x21; 16]),
-                target_revision: request.target_revision,
-                resource_kind: request.resource_kind,
-            });
-            let values = ResourceServerFrame::Values(orna_protocol::ResourceValues {
-                stream_id: request.stream_id,
-                request_id: request.request_id,
-                batch_sequence: 0,
-                item_count: 1,
-                byte_count: 0,
-                values: vec![RuntimeValue::Integer(7)],
-            });
-            let completed = ResourceServerFrame::Completed(orna_protocol::ResourceCompleted {
-                stream_id: request.stream_id,
-                request_id: request.request_id,
-                final_batch_sequence: 0,
-                total_items: 1,
-            });
+            let actions = resource_actions(&request, vec![RuntimeValue::Integer(7)]);
+            Some(StartedResourceDispatch {
+                future: Box::pin(async move { ResourceDispatchCompletion { actions } }),
+            })
+        }
+    }
+
+    #[derive(Clone)]
+    struct MultiValueResourceDispatch;
+
+    impl DispatchService for MultiValueResourceDispatch {
+        fn start(
+            &self,
+            _session: AuthenticatedSession,
+            _stream: u64,
+            _call: RawCall,
+        ) -> StartedDispatch {
+            panic!("resource transport test does not issue a raw call")
+        }
+
+        fn start_resource(
+            &self,
+            _session: AuthenticatedSession,
+            request: ResourceRequest,
+            _resources: LocalRawSocketResources,
+        ) -> Option<StartedResourceDispatch> {
+            let actions = resource_actions(
+                &request,
+                vec![RuntimeValue::Integer(7), RuntimeValue::Integer(8)],
+            );
+            Some(StartedResourceDispatch {
+                future: Box::pin(async move { ResourceDispatchCompletion { actions } }),
+            })
+        }
+    }
+
+    #[derive(Clone)]
+    struct BlockingResourceDispatch {
+        started: Arc<Notify>,
+    }
+
+    impl DispatchService for BlockingResourceDispatch {
+        fn start(
+            &self,
+            _session: AuthenticatedSession,
+            _stream: u64,
+            _call: RawCall,
+        ) -> StartedDispatch {
+            panic!("resource transport test does not issue a raw call")
+        }
+
+        fn start_resource(
+            &self,
+            _session: AuthenticatedSession,
+            _request: ResourceRequest,
+            _resources: LocalRawSocketResources,
+        ) -> Option<StartedResourceDispatch> {
+            let started = Arc::clone(&self.started);
             Some(StartedResourceDispatch {
                 future: Box::pin(async move {
-                    ResourceDispatchCompletion {
-                        actions: VecDeque::from([accepted, values, completed]),
-                    }
+                    started.notify_one();
+                    std::future::pending::<ResourceDispatchCompletion>().await
                 }),
             })
         }
@@ -2136,6 +2227,7 @@ mod tests {
             _ => unreachable!("constructed test version"),
         };
         let request = resource_request(revision);
+        let request_id = request.request_id;
         let encoded = encode_resource_client_frame(
             &active,
             &registry,
@@ -2169,6 +2261,160 @@ mod tests {
             read_resource_server_frame(&mut client, &active, &registry).await,
             ResourceServerFrame::Completed(frame)
                 if frame.final_batch_sequence == 0 && frame.total_items == 1
+        ));
+        let cancel = encode_resource_client_frame(
+            &active,
+            &registry,
+            &ResourceClientFrame::Cancel(ResourceCancel {
+                stream_id: 1,
+                request_id,
+                reason: ResourceCancellationCode::ClientRequested,
+            }),
+        )
+        .unwrap();
+        client.write_all(&cancel).await.unwrap();
+        assert!(
+            timeout(
+                Duration::from_millis(50),
+                read_resource_server_frame(&mut client, &active, &registry),
+            )
+            .await
+            .is_err()
+        );
+
+        client.shutdown().await.unwrap();
+        server_task.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn constructed_resource_stream_resumes_after_window_update() {
+        let (version, revision) = constructed_test_version();
+        let (active, registry) = match &version {
+            RawProtocolVersion::Constructed(active, registry) => (active.clone(), registry.clone()),
+            _ => unreachable!("constructed test version"),
+        };
+        let value_bytes =
+            orna_protocol::encode_constructed_value(&active, &registry, &RuntimeValue::Integer(7))
+                .unwrap();
+        let mut request = resource_request(revision);
+        request.resource_kind = ResourceKind::Stream;
+        request.item_window = 1;
+        request.byte_window = value_bytes.len() as u64;
+        let request_id = request.request_id;
+        let encoded = encode_resource_client_frame(
+            &active,
+            &registry,
+            &ResourceClientFrame::Request(request),
+        )
+        .unwrap();
+        let (server, mut client) = UnixStream::pair().unwrap();
+        let server_task = tokio::spawn(drive_versioned_authenticated_stream_until_shutdown(
+            MultiValueResourceDispatch,
+            test_session(),
+            version,
+            server,
+            LocalRawSocketResources::new(),
+            watch::channel(false).1,
+        ));
+
+        client.write_all(&encoded).await.unwrap();
+        assert!(matches!(
+            read_resource_server_frame(&mut client, &active, &registry).await,
+            ResourceServerFrame::Accepted(_)
+        ));
+        assert!(matches!(
+            read_resource_server_frame(&mut client, &active, &registry).await,
+            ResourceServerFrame::Values(frame)
+                if frame.values == vec![RuntimeValue::Integer(7)]
+                    && frame.item_count == 1
+                    && frame.byte_count == value_bytes.len() as u32
+        ));
+        assert!(
+            timeout(
+                Duration::from_millis(50),
+                read_resource_server_frame(&mut client, &active, &registry),
+            )
+            .await
+            .is_err()
+        );
+
+        let update = encode_resource_client_frame(
+            &active,
+            &registry,
+            &ResourceClientFrame::WindowUpdate(ResourceWindowUpdate {
+                stream_id: 1,
+                request_id,
+                add_items: 1,
+                add_bytes: value_bytes.len() as u64,
+            }),
+        )
+        .unwrap();
+        client.write_all(&update).await.unwrap();
+        assert!(matches!(
+            read_resource_server_frame(&mut client, &active, &registry).await,
+            ResourceServerFrame::Values(frame)
+                if frame.values == vec![RuntimeValue::Integer(8)]
+                    && frame.batch_sequence == 1
+                    && frame.item_count == 1
+                    && frame.byte_count == value_bytes.len() as u32
+        ));
+        assert!(matches!(
+            read_resource_server_frame(&mut client, &active, &registry).await,
+            ResourceServerFrame::Completed(frame)
+                if frame.final_batch_sequence == 1 && frame.total_items == 2
+        ));
+
+        client.shutdown().await.unwrap();
+        server_task.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn constructed_resource_cancellation_wins_before_dispatch_completion() {
+        let (version, revision) = constructed_test_version();
+        let (active, registry) = match &version {
+            RawProtocolVersion::Constructed(active, registry) => (active.clone(), registry.clone()),
+            _ => unreachable!("constructed test version"),
+        };
+        let request = resource_request(revision);
+        let request_id = request.request_id;
+        let encoded = encode_resource_client_frame(
+            &active,
+            &registry,
+            &ResourceClientFrame::Request(request),
+        )
+        .unwrap();
+        let started = Arc::new(Notify::new());
+        let (server, mut client) = UnixStream::pair().unwrap();
+        let server_task = tokio::spawn(drive_versioned_authenticated_stream_until_shutdown(
+            BlockingResourceDispatch {
+                started: Arc::clone(&started),
+            },
+            test_session(),
+            version,
+            server,
+            LocalRawSocketResources::new(),
+            watch::channel(false).1,
+        ));
+
+        client.write_all(&encoded).await.unwrap();
+        started.notified().await;
+        let cancel = encode_resource_client_frame(
+            &active,
+            &registry,
+            &ResourceClientFrame::Cancel(ResourceCancel {
+                stream_id: 1,
+                request_id,
+                reason: ResourceCancellationCode::ClientRequested,
+            }),
+        )
+        .unwrap();
+        client.write_all(&cancel).await.unwrap();
+        assert!(matches!(
+            read_resource_server_frame(&mut client, &active, &registry).await,
+            ResourceServerFrame::Cancelled(frame)
+                if frame.stream_id == 1
+                    && frame.request_id == request_id
+                    && frame.reason == ResourceCancellationCode::ClientRequested
         ));
 
         client.shutdown().await.unwrap();
