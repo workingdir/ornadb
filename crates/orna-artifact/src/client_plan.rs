@@ -1,4 +1,4 @@
-//! Canonical `orna.client-plan` artefact formats, versions 1, 2, 3, and 4.
+//! Canonical `orna.client-plan` artefact formats, versions 1, 2, 3, 4, 5, and 6.
 //!
 //! The first CLIENT function slice has one operation: return a non-null
 //! BOOLEAN constant. The complete encoding is:
@@ -82,7 +82,10 @@
 
 use std::fmt;
 
-use orna_core::{FieldId, FunctionId, ParameterId, StateSlotId, TypeId};
+use orna_core::{
+    revision::RevisionPair, CallSiteId, CatalogueRevisionId, FieldId, FunctionId, ParameterId,
+    SourceRevisionId, StateSlotId, TypeId,
+};
 
 /// The stable public identity of this artefact format.
 pub const FORMAT_IDENTITY: &str = "orna.client-plan";
@@ -114,6 +117,13 @@ pub const MAX_STATE_SLOTS: usize = 64;
 /// The client-plan version that carries one inner plan and the owning
 /// function's ordered, closed capability requirements (work ADR 0060).
 pub const CAPABILITY_FORMAT_VERSION: u32 = 5;
+/// The client-plan version that carries a closed expression tree with checked
+/// CLIENT-to-SERVER resource operation nodes (work ADR 0077).
+pub const RESOURCE_FORMAT_VERSION: u32 = 6;
+/// The maximum number of resource operation nodes in one resource plan.
+pub const MAX_RESOURCE_OPERATIONS: usize = 64;
+/// The maximum number of arguments in one resource operation.
+pub const MAX_RESOURCE_ARGUMENTS: usize = 64;
 /// The maximum number of capability requirements in one capability plan.
 pub const MAX_CAPABILITY_REQUIREMENTS: usize = 64;
 /// The maximum encoded length of one capability requirement name.
@@ -126,8 +136,13 @@ const RETURN_OPAQUE_OPERATION: u8 = 2;
 const RETURN_EXPRESSION_OPERATION: u8 = 3;
 const RETURN_STATE_OPERATION: u8 = 4;
 const RETURN_CAPABILITY_OPERATION: u8 = 5;
+const RETURN_RESOURCE_OPERATION: u8 = 6;
 const CAPABILITY_ARGUMENT_TEXT: u8 = 1;
 const CAPABILITY_ARGUMENT_PARAMETER: u8 = 2;
+const RESOURCE_KIND_SCALAR: u8 = 1;
+const RESOURCE_KIND_STREAM: u8 = 2;
+const NODE_AWAIT: u8 = 9;
+const NODE_RESOURCE: u8 = 10;
 const ENCODED_LENGTH: usize = MAGIC.len() + size_of::<u32>() + 2;
 const OPAQUE_PAYLOAD_LENGTH: usize = 16;
 const OPAQUE_ENCODED_LENGTH: usize =
@@ -292,6 +307,16 @@ pub struct ExpressionClientPlan {
 /// One closed CLIENT expression-tree node (work ADR 0068).
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ClientExpressionNode {
+    /// A suspension expression that resumes with the resource value.
+    Await {
+        /// The resource expression being awaited.
+        expression: Box<ClientExpressionNode>,
+    },
+    /// A checked CLIENT-to-SERVER resource operation value.
+    Resource {
+        /// The target, revision, call-site, arguments, and result type.
+        operation: ResourceOperationNode,
+    },
     /// A call to one CLIENT function with bound arguments.
     Call {
         /// The called function identity.
@@ -345,6 +370,194 @@ impl ExpressionClientPlan {
     pub fn new(expression: ClientExpressionNode) -> Self {
         Self { expression }
     }
+}
+
+
+/// The kind of server result represented by a resource operation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ResourceKind {
+    /// One scalar result value.
+    Scalar,
+    /// A bounded stream of result batches.
+    Stream,
+}
+
+impl ResourceKind {
+    const fn tag(self) -> u8 {
+        match self {
+            Self::Scalar => RESOURCE_KIND_SCALAR,
+            Self::Stream => RESOURCE_KIND_STREAM,
+        }
+    }
+}
+
+/// One checked CLIENT-to-SERVER resource operation node (work ADR 0077).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ResourceOperationNode {
+    kind: ResourceKind,
+    target: FunctionId,
+    target_revision: RevisionPair,
+    call_site: CallSiteId,
+    arguments: Vec<(ParameterId, ClientExpressionNode)>,
+    result_type: TypeId,
+}
+
+impl ResourceOperationNode {
+    /// Creates a resource node from its checked target and argument metadata.
+    pub fn new(
+        kind: ResourceKind,
+        target: FunctionId,
+        target_revision: RevisionPair,
+        call_site: CallSiteId,
+        arguments: Vec<(ParameterId, ClientExpressionNode)>,
+        result_type: TypeId,
+    ) -> Self {
+        Self {
+            kind,
+            target,
+            target_revision,
+            call_site,
+            arguments,
+            result_type,
+        }
+    }
+
+    /// Returns whether the target produces a scalar or stream result.
+    pub const fn kind(&self) -> ResourceKind {
+        self.kind
+    }
+
+    /// Returns the resolved SERVER target function identity.
+    pub const fn target(&self) -> FunctionId {
+        self.target
+    }
+
+    /// Returns the resolved SERVER target function identity.
+    pub const fn target_function(&self) -> FunctionId {
+        self.target
+    }
+
+    /// Returns the pinned source and catalogue revision pair.
+    pub const fn target_revision(&self) -> RevisionPair {
+        self.target_revision
+    }
+
+    /// Returns the stable compiled call-site identity.
+    pub const fn call_site(&self) -> CallSiteId {
+        self.call_site
+    }
+
+    /// Returns the stable compiled call-site identity.
+    pub const fn call_site_id(&self) -> CallSiteId {
+        self.call_site
+    }
+
+    /// Returns canonical parameter-to-expression pairs.
+    pub fn arguments(&self) -> &[(ParameterId, ClientExpressionNode)] {
+        &self.arguments
+    }
+
+    /// Returns the target declaration's result type identity.
+    pub const fn result_type(&self) -> TypeId {
+        self.result_type
+    }
+
+    /// Returns the target declaration's result type identity.
+    pub const fn declared_result_type(&self) -> TypeId {
+        self.result_type
+    }
+}
+
+/// A checked version-6 CLIENT plan containing resource operation nodes in a
+/// closed expression tree.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ResourceClientPlan {
+    expression: ClientExpressionNode,
+}
+
+impl ResourceClientPlan {
+    /// Creates a resource plan from a checked expression tree.
+    pub fn new(expression: ClientExpressionNode) -> Self {
+        Self { expression }
+    }
+
+    /// Returns the closed expression tree.
+    pub const fn expression(&self) -> &ClientExpressionNode {
+        &self.expression
+    }
+
+    /// Returns the canonical artefact version for this plan.
+    pub const fn format_version(&self) -> u32 {
+        RESOURCE_FORMAT_VERSION
+    }
+
+    /// Encodes this plan into its exact version-6 bytes.
+    pub fn encode(&self) -> Result<Vec<u8>, ClientPlanError> {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&MAGIC);
+        bytes.extend_from_slice(&RESOURCE_FORMAT_VERSION.to_be_bytes());
+        bytes.push(RETURN_RESOURCE_OPERATION);
+        let mut writer = NodeWriter::new();
+        let mut expression_count = 0;
+        let mut resource_count = 0;
+        encode_expression_node_with_resources(
+            &self.expression,
+            &mut writer,
+            0,
+            &mut expression_count,
+            true,
+            &mut resource_count,
+        )?;
+        if resource_count == 0 {
+            return Err(ClientPlanError::InvalidResourceOperationCount { actual: 0 });
+        }
+        bytes.extend_from_slice(&writer.finish());
+        if bytes.len() > MAX_ARTIFACT_BYTES {
+            return Err(ClientPlanError::ArtifactSizeLimit {
+                size: bytes.len(),
+                maximum: MAX_ARTIFACT_BYTES,
+            });
+        }
+        Ok(bytes)
+    }
+
+    /// Decodes exactly one canonical version-6 resource client-plan.
+    pub fn decode(bytes: &[u8]) -> Result<Self, ClientPlanError> {
+        if bytes.len() > MAX_ARTIFACT_BYTES {
+            return Err(ClientPlanError::ArtifactSizeLimit {
+                size: bytes.len(),
+                maximum: MAX_ARTIFACT_BYTES,
+            });
+        }
+        let mut reader = Reader::new(bytes);
+        if reader.array::<8>()? != MAGIC {
+            return Err(ClientPlanError::InvalidMagic);
+        }
+        let version = reader.u32()?;
+        if version != RESOURCE_FORMAT_VERSION {
+            return Err(ClientPlanError::UnsupportedVersion(version));
+        }
+        let operation = reader.u8()?;
+        if operation != RETURN_RESOURCE_OPERATION {
+            return Err(ClientPlanError::InvalidOperation(operation));
+        }
+        let mut expression_count = 0;
+        let mut resource_count = 0;
+        let expression = decode_expression_node_with_resources(
+            &mut reader,
+            0,
+            &mut expression_count,
+            true,
+            &mut resource_count,
+        )?;
+        if resource_count == 0 {
+            return Err(ClientPlanError::InvalidResourceOperationCount { actual: 0 });
+        }
+        reader.require_finished()?;
+        Ok(Self::new(expression))
+    }
+}
+impl ExpressionClientPlan {
 
     /// Returns the closed expression tree.
     pub const fn expression(&self) -> &ClientExpressionNode {
@@ -956,6 +1169,18 @@ fn encode_expression_node(
     depth: usize,
     count: &mut usize,
 ) -> Result<(), ClientPlanError> {
+    let mut resource_count = 0;
+    encode_expression_node_with_resources(node, writer, depth, count, false, &mut resource_count)
+}
+
+fn encode_expression_node_with_resources(
+    node: &ClientExpressionNode,
+    writer: &mut NodeWriter,
+    depth: usize,
+    count: &mut usize,
+    allow_resources: bool,
+    resource_count: &mut usize,
+) -> Result<(), ClientPlanError> {
     if depth > MAX_EXPRESSION_DEPTH {
         return Err(ClientPlanError::ExpressionDepthExceeded);
     }
@@ -964,6 +1189,26 @@ fn encode_expression_node(
         return Err(ClientPlanError::ExpressionNodeCountExceeded);
     }
     match node {
+        ClientExpressionNode::Await { expression } => {
+            if !allow_resources {
+                return Err(ClientPlanError::InvalidExpressionNode(NODE_AWAIT));
+            }
+            writer.push(NODE_AWAIT);
+            encode_expression_node_with_resources(
+                expression,
+                writer,
+                depth + 1,
+                count,
+                allow_resources,
+                resource_count,
+            )?;
+        }
+        ClientExpressionNode::Resource { operation } => {
+            if !allow_resources {
+                return Err(ClientPlanError::InvalidExpressionNode(NODE_RESOURCE));
+            }
+            encode_resource_operation(operation, writer, depth, count, resource_count)?;
+        }
         ClientExpressionNode::Call {
             function,
             arguments,
@@ -983,7 +1228,14 @@ fn encode_expression_node(
             writer.extend(&length.to_be_bytes());
             for (parameter, value) in arguments {
                 writer.extend(&parameter.to_bytes());
-                encode_expression_node(value, writer, depth + 1, count)?;
+                encode_expression_node_with_resources(
+                    value,
+                    writer,
+                    depth + 1,
+                    count,
+                    allow_resources,
+                    resource_count,
+                )?;
             }
         }
         ClientExpressionNode::String { value } => {
@@ -1027,8 +1279,22 @@ fn encode_expression_node(
         }
         ClientExpressionNode::Concat { left, right } => {
             writer.push(NODE_CONCAT);
-            encode_expression_node(left, writer, depth + 1, count)?;
-            encode_expression_node(right, writer, depth + 1, count)?;
+            encode_expression_node_with_resources(
+                left,
+                writer,
+                depth + 1,
+                count,
+                allow_resources,
+                resource_count,
+            )?;
+            encode_expression_node_with_resources(
+                right,
+                writer,
+                depth + 1,
+                count,
+                allow_resources,
+                resource_count,
+            )?;
         }
         ClientExpressionNode::ExternalContract { identity } => {
             writer.push(NODE_EXTERNAL_CONTRACT);
@@ -1045,11 +1311,83 @@ fn encode_expression_node(
     Ok(())
 }
 
+
+fn encode_resource_operation(
+    operation: &ResourceOperationNode,
+    writer: &mut NodeWriter,
+    depth: usize,
+    count: &mut usize,
+    resource_count: &mut usize,
+) -> Result<(), ClientPlanError> {
+    *resource_count += 1;
+    if *resource_count > MAX_RESOURCE_OPERATIONS {
+        return Err(ClientPlanError::ResourceOperationLimitExceeded {
+            limit: MAX_RESOURCE_OPERATIONS,
+        });
+    }
+    validate_resource_arguments(&operation.arguments)?;
+    writer.push(NODE_RESOURCE);
+    writer.push(operation.kind.tag());
+    writer.extend(&operation.target.to_bytes());
+    writer.extend(&operation.target_revision.source().to_bytes());
+    writer.extend(&operation.target_revision.catalogue().to_bytes());
+    writer.extend(&operation.call_site.to_bytes());
+    let argument_count = u32::try_from(operation.arguments.len()).map_err(|_| {
+        ClientPlanError::ResourceArgumentLimitExceeded {
+            limit: MAX_RESOURCE_ARGUMENTS,
+        }
+    })?;
+    writer.extend(&argument_count.to_be_bytes());
+    for (parameter, value) in &operation.arguments {
+        writer.extend(&parameter.to_bytes());
+        encode_expression_node_with_resources(value, writer, depth + 1, count, true, resource_count)?;
+    }
+    writer.extend(&operation.result_type.to_bytes());
+    Ok(())
+}
+
+fn validate_resource_arguments(
+    arguments: &[(ParameterId, ClientExpressionNode)],
+) -> Result<(), ClientPlanError> {
+    if arguments.len() > MAX_RESOURCE_ARGUMENTS {
+        return Err(ClientPlanError::ResourceArgumentLimitExceeded {
+            limit: MAX_RESOURCE_ARGUMENTS,
+        });
+    }
+    let mut previous = None;
+    for (parameter, _) in arguments {
+        if let Some(previous) = previous {
+            match parameter.cmp(&previous) {
+                std::cmp::Ordering::Less => {
+                    return Err(ClientPlanError::NonCanonicalResourceArgumentOrder)
+                }
+                std::cmp::Ordering::Equal => {
+                    return Err(ClientPlanError::DuplicateResourceArgument(*parameter))
+                }
+                std::cmp::Ordering::Greater => {}
+            }
+        }
+        previous = Some(*parameter);
+    }
+    Ok(())
+}
+
 /// Decodes one expression node recursively with the closed limits.
 fn decode_expression_node(
     reader: &mut Reader<'_>,
     depth: usize,
     count: &mut usize,
+) -> Result<ClientExpressionNode, ClientPlanError> {
+    let mut resource_count = 0;
+    decode_expression_node_with_resources(reader, depth, count, false, &mut resource_count)
+}
+
+fn decode_expression_node_with_resources(
+    reader: &mut Reader<'_>,
+    depth: usize,
+    count: &mut usize,
+    allow_resources: bool,
+    resource_count: &mut usize,
 ) -> Result<ClientExpressionNode, ClientPlanError> {
     if depth > MAX_EXPRESSION_DEPTH {
         return Err(ClientPlanError::ExpressionDepthExceeded);
@@ -1060,6 +1398,28 @@ fn decode_expression_node(
     }
     let tag = reader.u8()?;
     match tag {
+        NODE_AWAIT => {
+            if !allow_resources {
+                return Err(ClientPlanError::InvalidExpressionNode(NODE_AWAIT));
+            }
+            Ok(ClientExpressionNode::Await {
+                expression: Box::new(decode_expression_node_with_resources(
+                    reader,
+                    depth + 1,
+                    count,
+                    allow_resources,
+                    resource_count,
+                )?),
+            })
+        }
+        NODE_RESOURCE => {
+            if !allow_resources {
+                return Err(ClientPlanError::InvalidExpressionNode(NODE_RESOURCE));
+            }
+            Ok(ClientExpressionNode::Resource {
+                operation: decode_resource_operation(reader, depth, count, resource_count)?,
+            })
+        }
         NODE_CALL => {
             let function = FunctionId::from_bytes(reader.array()?);
             let length = reader.u32()? as usize;
@@ -1071,7 +1431,13 @@ fn decode_expression_node(
             let mut arguments = Vec::with_capacity(length);
             for _ in 0..length {
                 let parameter = ParameterId::from_bytes(reader.array()?);
-                let value = decode_expression_node(reader, depth + 1, count)?;
+                let value = decode_expression_node_with_resources(
+                    reader,
+                    depth + 1,
+                    count,
+                    allow_resources,
+                    resource_count,
+                )?;
                 arguments.push((parameter, value));
             }
             Ok(ClientExpressionNode::Call {
@@ -1121,8 +1487,20 @@ fn decode_expression_node(
             Ok(ClientExpressionNode::FieldPath { root, fields })
         }
         NODE_CONCAT => {
-            let left = decode_expression_node(reader, depth + 1, count)?;
-            let right = decode_expression_node(reader, depth + 1, count)?;
+            let left = decode_expression_node_with_resources(
+                reader,
+                depth + 1,
+                count,
+                allow_resources,
+                resource_count,
+            )?;
+            let right = decode_expression_node_with_resources(
+                reader,
+                depth + 1,
+                count,
+                allow_resources,
+                resource_count,
+            )?;
             Ok(ClientExpressionNode::Concat {
                 left: Box::new(left),
                 right: Box::new(right),
@@ -1140,6 +1518,71 @@ fn decode_expression_node(
     }
 }
 
+
+fn decode_resource_operation(
+    reader: &mut Reader<'_>,
+    depth: usize,
+    count: &mut usize,
+    resource_count: &mut usize,
+) -> Result<ResourceOperationNode, ClientPlanError> {
+    *resource_count += 1;
+    if *resource_count > MAX_RESOURCE_OPERATIONS {
+        return Err(ClientPlanError::ResourceOperationLimitExceeded {
+            limit: MAX_RESOURCE_OPERATIONS,
+        });
+    }
+    let kind = match reader.u8()? {
+        RESOURCE_KIND_SCALAR => ResourceKind::Scalar,
+        RESOURCE_KIND_STREAM => ResourceKind::Stream,
+        tag => return Err(ClientPlanError::InvalidResourceKind(tag)),
+    };
+    let target = FunctionId::from_bytes(reader.array()?);
+    let target_revision = RevisionPair::new(
+        SourceRevisionId::from_bytes(reader.array()?),
+        CatalogueRevisionId::from_bytes(reader.array()?),
+    );
+    let call_site = CallSiteId::from_bytes(reader.array()?);
+    let argument_count = reader.u32()? as usize;
+    if argument_count > MAX_RESOURCE_ARGUMENTS {
+        return Err(ClientPlanError::ResourceArgumentLimitExceeded {
+            limit: MAX_RESOURCE_ARGUMENTS,
+        });
+    }
+    let mut arguments = Vec::with_capacity(argument_count);
+    let mut previous = None;
+    for _ in 0..argument_count {
+        let parameter = ParameterId::from_bytes(reader.array()?);
+        if let Some(previous) = previous {
+            match parameter.cmp(&previous) {
+                std::cmp::Ordering::Less => {
+                    return Err(ClientPlanError::NonCanonicalResourceArgumentOrder)
+                }
+                std::cmp::Ordering::Equal => {
+                    return Err(ClientPlanError::DuplicateResourceArgument(parameter))
+                }
+                std::cmp::Ordering::Greater => {}
+            }
+        }
+        previous = Some(parameter);
+        let value = decode_expression_node_with_resources(
+            reader,
+            depth + 1,
+            count,
+            true,
+            resource_count,
+        )?;
+        arguments.push((parameter, value));
+    }
+    let result_type = TypeId::from_bytes(reader.array()?);
+    Ok(ResourceOperationNode::new(
+        kind,
+        target,
+        target_revision,
+        call_site,
+        arguments,
+        result_type,
+    ))
+}
 /// An error returned for an invalid or unsupported client-plan artefact.
 #[non_exhaustive]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1168,6 +1611,27 @@ pub enum ClientPlanError {
         /// The exceeded limit.
         limit: usize,
     },
+    /// A resource operation uses an unknown scalar/stream tag.
+    InvalidResourceKind(u8),
+    /// A version-6 plan contains no resource operation nodes.
+    InvalidResourceOperationCount {
+        /// The non-canonical count from the artefact.
+        actual: u32,
+    },
+    /// A version-6 plan exceeds its resource operation limit.
+    ResourceOperationLimitExceeded {
+        /// The exceeded limit.
+        limit: usize,
+    },
+    /// A resource operation exceeds its argument limit.
+    ResourceArgumentLimitExceeded {
+        /// The exceeded limit.
+        limit: usize,
+    },
+    /// A resource argument parameter identity occurs more than once.
+    DuplicateResourceArgument(ParameterId),
+    /// Resource arguments are not sorted by ascending ParameterId.
+    NonCanonicalResourceArgumentOrder,
     /// A version-4 state slot uses an unknown scope tag.
     InvalidStateScope(u8),
     /// A version-4 state slot uses an unknown default tag.
@@ -1266,6 +1730,27 @@ impl fmt::Display for ClientPlanError {
                 formatter,
                 "client-plan expression collection exceeds the limit {limit}"
             ),
+            Self::InvalidResourceKind(tag) => {
+                write!(formatter, "invalid client-plan resource kind tag {tag}")
+            }
+            Self::InvalidResourceOperationCount { actual } => write!(
+                formatter,
+                "invalid client-plan resource operation count {actual}; a resource plan requires at least one operation"
+            ),
+            Self::ResourceOperationLimitExceeded { limit } => write!(
+                formatter,
+                "client-plan resource operation count exceeds the limit {limit}"
+            ),
+            Self::ResourceArgumentLimitExceeded { limit } => write!(
+                formatter,
+                "client-plan resource argument count exceeds the limit {limit}"
+            ),
+            Self::DuplicateResourceArgument(parameter) => {
+                write!(formatter, "duplicate client-plan resource argument {parameter}")
+            }
+            Self::NonCanonicalResourceArgumentOrder => {
+                formatter.write_str("client-plan resource arguments are not in canonical ParameterId order")
+            }
             Self::InvalidStateScope(tag) => {
                 write!(formatter, "invalid client-plan state scope tag {tag}")
             }
@@ -2846,6 +3331,213 @@ mod tests {
                 CapabilityClientPlan::decode(&encoded[..length]),
                 Err(ClientPlanError::Truncated),
                 "prefix length {length} must be truncated"
+            );
+        }
+    }
+
+    #[test]
+    fn expression_plan_rejects_resource_nodes_outside_version_six() {
+        let await_expression = ClientExpressionNode::Await {
+            expression: Box::new(ClientExpressionNode::Boolean { value: true }),
+        };
+        assert_eq!(
+            ExpressionClientPlan::new(await_expression).encode(),
+            Err(ClientPlanError::InvalidExpressionNode(NODE_AWAIT))
+        );
+
+        let resource_expression = ClientExpressionNode::Resource {
+            operation: ResourceOperationNode::new(
+                ResourceKind::Scalar,
+                FunctionId::from_bytes([0x21; 16]),
+                RevisionPair::new(
+                    SourceRevisionId::from_bytes([0x22; 16]),
+                    CatalogueRevisionId::from_bytes([0x23; 16]),
+                ),
+                CallSiteId::from_bytes([0x24; 16]),
+                Vec::new(),
+                TypeId::from_bytes([0x25; 16]),
+            ),
+        };
+        assert_eq!(
+            ExpressionClientPlan::new(resource_expression).encode(),
+            Err(ClientPlanError::InvalidExpressionNode(NODE_RESOURCE))
+        );
+    }
+    fn resource_plan() -> ResourceClientPlan {
+        ResourceClientPlan::new(ClientExpressionNode::Await {
+            expression: Box::new(ClientExpressionNode::Resource {
+                operation: ResourceOperationNode::new(
+                    ResourceKind::Stream,
+                    FunctionId::from_bytes([0x21; 16]),
+                    RevisionPair::new(
+                        SourceRevisionId::from_bytes([0x22; 16]),
+                        CatalogueRevisionId::from_bytes([0x23; 16]),
+                    ),
+                    CallSiteId::from_bytes([0x24; 16]),
+                    vec![
+                        (
+                            ParameterId::from_bytes([0x31; 16]),
+                            ClientExpressionNode::ParameterRead {
+                                parameter: ParameterId::from_bytes([0x41; 16]),
+                            },
+                        ),
+                        (
+                            ParameterId::from_bytes([0x32; 16]),
+                            ClientExpressionNode::Boolean { value: true },
+                        ),
+                    ],
+                    TypeId::from_bytes([0x51; 16]),
+                ),
+            }),
+        })
+    }
+
+    #[test]
+    fn resource_plan_round_trips_kind_revision_call_site_arguments_and_await() {
+        let plan = resource_plan();
+        let encoded = plan.encode().expect("resource plan encodes");
+        assert_eq!(&encoded[..8], &MAGIC);
+        assert_eq!(
+            &encoded[8..12],
+            &RESOURCE_FORMAT_VERSION.to_be_bytes()
+        );
+        assert_eq!(encoded[12], RETURN_RESOURCE_OPERATION);
+        assert_eq!(encoded[13], NODE_AWAIT);
+        assert_eq!(encoded[14], NODE_RESOURCE);
+        let decoded = ResourceClientPlan::decode(&encoded).expect("resource plan decodes");
+        assert_eq!(decoded, plan);
+        assert_eq!(decoded.format_version(), RESOURCE_FORMAT_VERSION);
+        let ClientExpressionNode::Await { expression } = decoded.expression() else {
+            panic!("resource plan root must be await");
+        };
+        let ClientExpressionNode::Resource { operation } = expression.as_ref() else {
+            panic!("await operand must be a resource");
+        };
+        assert_eq!(operation.kind(), ResourceKind::Stream);
+        assert_eq!(operation.target(), FunctionId::from_bytes([0x21; 16]));
+        assert_eq!(operation.target_revision().source(), SourceRevisionId::from_bytes([0x22; 16]));
+        assert_eq!(operation.call_site(), CallSiteId::from_bytes([0x24; 16]));
+        assert_eq!(operation.arguments().len(), 2);
+        assert_eq!(operation.result_type(), TypeId::from_bytes([0x51; 16]));
+    }
+
+    #[test]
+    fn resource_plan_rejects_noncanonical_and_duplicate_arguments() {
+        let operation = |arguments| {
+            ResourceOperationNode::new(
+                ResourceKind::Scalar,
+                FunctionId::from_bytes([0x21; 16]),
+                RevisionPair::new(
+                    SourceRevisionId::from_bytes([0x22; 16]),
+                    CatalogueRevisionId::from_bytes([0x23; 16]),
+                ),
+                CallSiteId::from_bytes([0x24; 16]),
+                arguments,
+                TypeId::from_bytes([0x51; 16]),
+            )
+        };
+        let unsorted = ResourceClientPlan::new(ClientExpressionNode::Resource {
+            operation: operation(vec![
+                (
+                    ParameterId::from_bytes([0x32; 16]),
+                    ClientExpressionNode::Boolean { value: true },
+                ),
+                (
+                    ParameterId::from_bytes([0x31; 16]),
+                    ClientExpressionNode::Boolean { value: false },
+                ),
+            ]),
+        });
+        assert_eq!(
+            unsorted.encode(),
+            Err(ClientPlanError::NonCanonicalResourceArgumentOrder)
+        );
+        let duplicate = ResourceClientPlan::new(ClientExpressionNode::Resource {
+            operation: operation(vec![
+                (
+                    ParameterId::from_bytes([0x31; 16]),
+                    ClientExpressionNode::Boolean { value: true },
+                ),
+                (
+                    ParameterId::from_bytes([0x31; 16]),
+                    ClientExpressionNode::Boolean { value: false },
+                ),
+            ]),
+        });
+        assert_eq!(
+            duplicate.encode(),
+            Err(ClientPlanError::DuplicateResourceArgument(
+                ParameterId::from_bytes([0x31; 16])
+            ))
+        );
+    }
+
+    #[test]
+    fn resource_plan_rejects_malformed_kind_and_limits() {
+        let mut invalid_kind = resource_plan().encode().expect("resource plan encodes");
+        invalid_kind[15] = 9;
+        assert_eq!(
+            ResourceClientPlan::decode(&invalid_kind),
+            Err(ClientPlanError::InvalidResourceKind(9))
+        );
+        let second_parameter_offset = 13 + 1 + 1 + 1 + 16 + 16 + 16 + 16 + 4 + 16 + 17;
+        let mut noncanonical = resource_plan().encode().expect("resource plan encodes");
+        noncanonical[second_parameter_offset..second_parameter_offset + 16]
+            .copy_from_slice(&[0x30; 16]);
+        assert_eq!(
+            ResourceClientPlan::decode(&noncanonical),
+            Err(ClientPlanError::NonCanonicalResourceArgumentOrder)
+        );
+        let mut duplicate = resource_plan().encode().expect("resource plan encodes");
+        duplicate[second_parameter_offset..second_parameter_offset + 16]
+            .copy_from_slice(&[0x31; 16]);
+        assert_eq!(
+            ResourceClientPlan::decode(&duplicate),
+            Err(ClientPlanError::DuplicateResourceArgument(
+                ParameterId::from_bytes([0x31; 16])
+            ))
+        );
+
+        let empty = ResourceClientPlan::new(ClientExpressionNode::Boolean { value: true });
+        assert_eq!(
+            empty.encode(),
+            Err(ClientPlanError::InvalidResourceOperationCount { actual: 0 })
+        );
+
+
+        let oversized = ResourceClientPlan::new(ClientExpressionNode::Resource {
+            operation: ResourceOperationNode::new(
+                ResourceKind::Scalar,
+                FunctionId::from_bytes([0x21; 16]),
+                RevisionPair::new(
+                    SourceRevisionId::from_bytes([0x22; 16]),
+                    CatalogueRevisionId::from_bytes([0x23; 16]),
+                ),
+                CallSiteId::from_bytes([0x24; 16]),
+                (0..=MAX_RESOURCE_ARGUMENTS)
+                    .map(|index| {
+                        (
+                            ParameterId::from_bytes([index as u8; 16]),
+                            ClientExpressionNode::Boolean { value: true },
+                        )
+                    })
+                    .collect(),
+                TypeId::from_bytes([0x51; 16]),
+            ),
+        });
+        assert_eq!(
+            oversized.encode(),
+            Err(ClientPlanError::ResourceArgumentLimitExceeded {
+                limit: MAX_RESOURCE_ARGUMENTS
+            })
+        );
+
+        let encoded = resource_plan().encode().expect("resource plan encodes");
+        for length in 0..encoded.len() {
+            assert_eq!(
+                ResourceClientPlan::decode(&encoded[..length]),
+                Err(ClientPlanError::Truncated),
+                "resource prefix length {length} must be truncated"
             );
         }
     }
