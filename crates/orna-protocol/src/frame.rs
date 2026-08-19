@@ -2479,15 +2479,15 @@ pub fn decode_resource_client_frame(
     registry: &OpaqueCodecRegistry,
     encoded: &[u8],
 ) -> Result<ResourceClientFrame, FrameCodecError> {
-    let (tag, payload) = decode_resource_envelope(encoded)?;
+    let (tag, _) = decode_resource_envelope(encoded)?;
     match tag {
         RESOURCE_REQUEST_TAG => Ok(ResourceClientFrame::Request(decode_resource_request(
-            active, registry, payload,
+            active, registry, encoded,
         )?)),
         RESOURCE_WINDOW_UPDATE_TAG => Ok(ResourceClientFrame::WindowUpdate(
-            decode_resource_window_update(payload)?,
+            decode_resource_window_update(encoded)?,
         )),
-        RESOURCE_CANCEL_TAG => Ok(ResourceClientFrame::Cancel(decode_resource_cancel(payload)?)),
+        RESOURCE_CANCEL_TAG => Ok(ResourceClientFrame::Cancel(decode_resource_cancel(encoded)?)),
         RESOURCE_ACCEPTED_TAG..=RESOURCE_CANCELLED_TAG => {
             Err(FrameCodecError::ResourceWrongDirection { tag })
         }
@@ -2533,22 +2533,16 @@ pub fn encode_resource_request(
     encode_resource_envelope(RESOURCE_REQUEST_TAG, &payload)
 }
 
-/// Decodes one ORNA-RESOURCE/1 request from its payload or complete frame.
+/// Decodes one complete ORNA-RESOURCE/1 request frame.
 pub fn decode_resource_request(
     active: &ActiveDatabaseRevision,
     registry: &OpaqueCodecRegistry,
     encoded: &[u8],
 ) -> Result<ResourceRequest, FrameCodecError> {
-    let payload = if encoded.starts_with(RESOURCE_MARKER) {
-        let (tag, payload) = decode_resource_envelope(encoded)?;
-        if tag != RESOURCE_REQUEST_TAG {
-            return Err(FrameCodecError::ResourceWrongDirection { tag });
-        }
-        payload
-    } else {
-        require_resource_payload_limit(encoded.len())?;
-        encoded
-    };
+    let (tag, payload) = decode_resource_envelope(encoded)?;
+    if tag != RESOURCE_REQUEST_TAG {
+        return Err(FrameCodecError::ResourceWrongDirection { tag });
+    }
     let mut cursor = 0;
     let stream_id = resource_u64(payload, &mut cursor)?;
     require_resource_stream(stream_id)?;
@@ -2889,16 +2883,10 @@ pub fn encode_resource_window_update(
 pub fn decode_resource_window_update(
     encoded: &[u8],
 ) -> Result<ResourceWindowUpdate, FrameCodecError> {
-    let payload = if encoded.starts_with(RESOURCE_MARKER) {
-        let (tag, payload) = decode_resource_envelope(encoded)?;
-        if tag != RESOURCE_WINDOW_UPDATE_TAG {
-            return Err(FrameCodecError::ResourceWrongDirection { tag });
-        }
-        payload
-    } else {
-        require_resource_payload_limit(encoded.len())?;
-        encoded
-    };
+    let (tag, payload) = decode_resource_envelope(encoded)?;
+    if tag != RESOURCE_WINDOW_UPDATE_TAG {
+        return Err(FrameCodecError::ResourceWrongDirection { tag });
+    }
     let mut cursor = 0;
     let stream_id = resource_u64(payload, &mut cursor)?;
     require_resource_stream(stream_id)?;
@@ -2927,16 +2915,10 @@ pub fn encode_resource_cancel(frame: &ResourceCancel) -> Result<Vec<u8>, FrameCo
 
 /// Decodes one cancellation control frame.
 pub fn decode_resource_cancel(encoded: &[u8]) -> Result<ResourceCancel, FrameCodecError> {
-    let payload = if encoded.starts_with(RESOURCE_MARKER) {
-        let (tag, payload) = decode_resource_envelope(encoded)?;
-        if tag != RESOURCE_CANCEL_TAG {
-            return Err(FrameCodecError::ResourceWrongDirection { tag });
-        }
-        payload
-    } else {
-        require_resource_payload_limit(encoded.len())?;
-        encoded
-    };
+    let (tag, payload) = decode_resource_envelope(encoded)?;
+    if tag != RESOURCE_CANCEL_TAG {
+        return Err(FrameCodecError::ResourceWrongDirection { tag });
+    }
     let mut cursor = 0;
     let stream_id = resource_u64(payload, &mut cursor)?;
     require_resource_stream(stream_id)?;
@@ -5881,6 +5863,40 @@ mod tests {
         assert_eq!(decoded, request);
         assert_eq!(encode_resource_request(&active, &registry, &decoded), Ok(encoded));
     }
+    #[test]
+    fn resource_request_and_controls_reject_unframed_payloads() {
+        let active = empty_active_revision();
+        let registry = test_registry();
+        let request = encode_resource_request(&active, &registry, &resource_request_fixture()).unwrap();
+        assert!(matches!(
+            decode_resource_request(&active, &registry, &request[RESOURCE_HEADER_LENGTH..]),
+            Err(FrameCodecError::ResourceInvalidMarker)
+        ));
+
+        let window = encode_resource_window_update(&ResourceWindowUpdate {
+            stream_id: 1,
+            request_id: InvocationId::from_bytes([0x21; 16]),
+            add_items: 1,
+            add_bytes: 2,
+        })
+        .unwrap();
+        assert!(matches!(
+            decode_resource_window_update(&window[RESOURCE_HEADER_LENGTH..]),
+            Err(FrameCodecError::ResourceInvalidMarker)
+        ));
+
+        let cancel = encode_resource_cancel(&ResourceCancel {
+            stream_id: 1,
+            request_id: InvocationId::from_bytes([0x22; 16]),
+            reason: ResourceCancellationCode::ClientRequested,
+        })
+        .unwrap();
+        assert!(matches!(
+            decode_resource_cancel(&cancel[RESOURCE_HEADER_LENGTH..]),
+            Err(FrameCodecError::ResourceInvalidMarker)
+        ));
+    }
+
 
     #[test]
     fn resource_values_round_trip_preserves_canonical_value_bytes() {
