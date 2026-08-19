@@ -1844,7 +1844,7 @@ fn resource_values_from_server_result(
     let rows = result.into_rows().into_rows();
     let mut values = Vec::with_capacity(rows.len());
     for row in rows {
-        let value = row.into_values().into_iter().next()?;
+        let [value] = row.into_values().try_into().ok()?;
         if !resource_result_value_is_supported(&value) {
             return None;
         }
@@ -5205,7 +5205,7 @@ mod tests {
         system::{
             SYS_SECURITY_CREATE_PRINCIPAL_FUNCTION_ID, SYS_SECURITY_GRANT_PRIVILEGE_FUNCTION_ID,
         },
-        value::{EnumValue, RuntimeFloat},
+        value::{EnumValue, ResultColumn, ResultRow, ResultRows, RuntimeFloat},
     };
     use std::time::UNIX_EPOCH;
 
@@ -5289,6 +5289,42 @@ mod tests {
             &multi_rows,
             ProtocolResourceKind::Stream,
         ));
+    }
+
+    #[test]
+    fn resource_result_rejects_rows_with_extra_columns() {
+        use orna_core::types::{ResolvedType, StandardScalar};
+
+        let pair = RevisionPair::new(
+            SourceRevisionId::from_bytes([0x71; 16]),
+            CatalogueRevisionId::from_bytes([0x72; 16]),
+        );
+        let rows = ResultRows::new(
+            [
+                ResultColumn::new(
+                    "first",
+                    ResolvedType::scalar(StandardScalar::Integer),
+                    false,
+                )
+                .expect("first column is valid"),
+                ResultColumn::new(
+                    "second",
+                    ResolvedType::scalar(StandardScalar::Integer),
+                    false,
+                )
+                .expect("second column is valid"),
+            ],
+            [ResultRow::new([RuntimeValue::Integer(1), RuntimeValue::Integer(2)])],
+        )
+        .expect("two-column result rows are valid");
+        let result = ServerSelectResult::new(
+            pair,
+            RAW_CALL_FUNCTION,
+            FunctionRevisionId::from_bytes([0x73; 16]),
+            rows,
+        );
+
+        assert!(resource_values_from_server_result(ProtocolResourceKind::Stream, result).is_none());
     }
 
     #[test]
