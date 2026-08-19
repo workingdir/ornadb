@@ -1,6 +1,7 @@
 # ADR 0076: Headless Runtime ABI Conformance Boundary
 
-**Status:** Proposed
+**Status:** Accepted
+
 
 ## Decision
 
@@ -11,11 +12,11 @@ from work ADR 0062 and exercises the C-shaped lifecycle in
 load a shared library, open a database connection, authenticate, call a SERVER
 function, or become a production runtime.
 
-This is a contract proposal for the deferred candidate in
-`spec/docs/49-gap-research-and-contract-plan.md:46-54`. It does not promote the
-canonical runtime API from `CURRENT PROPOSAL` to an accepted specification.
-The canonical specification remains authoritative until a corresponding spec
-ADR accepts the ABI.
+The test-only boundary is accepted by spec ADR 0016. It does not promote the
+canonical runtime API from `CURRENT PROPOSAL` to an accepted production ABI.
+The canonical specification remains authoritative for the production runtime
+surface.
+
 
 The smallest reversible implementation is a `#[cfg(test)]` conformance module
 in `crates/orna-client`. It owns a fake descriptor, a C-shaped fixture table,
@@ -29,7 +30,8 @@ than a Rust-shaped substitute. The loader accepts the exact fixture table and
 calls its `describe` entry point deterministically. It uses existing Rust
 ownership and does not expose a new public runtime API.
 
-## Contract proposed for acceptance
+## Accepted conformance contract
+
 
 ### Identity and compatibility
 
@@ -199,20 +201,14 @@ The Rust proof runs through the normal package test command with the focused
 runtime-conformance filter. No native runtime or live PostgreSQL proof is part
 of this first slice.
 
-## Implementation plan after acceptance
+## Implementation plan
 
-1. Accept the canonical runtime ABI contract in the spec repository, add the
-   `STALE_REVISION` status and any missing event payload fields, and keep the
-   header and API pages consistent. Do not change the provisional UI value
-   codec in ADR 0062 unless the accepted ABI explicitly replaces it.
-2. Update this work ADR to `Accepted` and add its implementation order to the
-   work decision index.
-3. Add one `#[cfg(test)]` module in `crates/orna-client/src/lib.rs` or one
+1. Add one `#[cfg(test)]` module in `crates/orna-client/src/lib.rs` or one
    private test module beside it. Reuse `RuntimeValue`, `RevisionPair`, the
    existing canonical value codec, and the deterministic resource lifecycle
    patterns. Do not modify `orna-server`, `orna-protocol`, or
    `orna-system-tests` for the first proof.
-4. Add the focused descriptor, ownership, batch, event, cancellation, and
+2. Add the focused descriptor, ownership, batch, event, cancellation, and
    shutdown tests, then run the C syntax check, the focused `orna-client`
    tests, `cargo check --workspace --all-targets`, and the workspace gate.
 
@@ -222,14 +218,17 @@ fixture, but it must separately accept shared-library loading, platform
 selection, event-loop integration, native ownership, and toolkit-specific
 behaviour.
 
+The canonical status change, header update, and work ADR acceptance are already
+complete. The remaining work is the private fixture and its focused proof.
+
 ## Alternatives considered
 
 ### Implement Qt, GTK, or Web first
 
 This would force unresolved allocator, thread, callback, shutdown, and event
 semantics into a toolkit adapter. It would also add native deployment and
-platform failures before the semantic contract is testable. Rejected until the
-headless contract is accepted.
+platform failures before the semantic contract is testable. Rejected for this
+slice; production runtimes remain deferred.
 
 ### Add a public runtime loader now
 
@@ -246,23 +245,24 @@ pattern and fixture source, not as an ABI substitute.
 
 ### Treat the C header as already accepted
 
-The header is explicitly a design draft and leaves the value representation,
-ownership, thread rules, re-entrancy, cancellation, and shutdown ordering open.
-Using it as a production contract would violate the source-of-truth status.
-Rejected.
+The header remains a design draft for production use and leaves the
+production value representation, ownership, thread rules, re-entrancy,
+cancellation, and shutdown ordering open. Spec ADR 0016 accepts only the
+constrained test-only fixture contract. Treating the header as a production
+contract would violate the source-of-truth status. Rejected.
 
 ## Deferred surface
 
 Native runtime libraries, automatic platform selection, shared-library trust
 and discovery, graphical widgets, accessibility bridges, browser deployment,
 production event-loop integration, and runtime-specific opaque layout state
-remain outside this proposal. CLIENT-to-SERVER resources and reflective
-protocol gateways remain governed by their own contract work.
+remain outside this accepted test-only boundary. CLIENT-to-SERVER resources
+and reflective protocol gateways remain governed by their own contract work.
 
 ## Precedence
 
 The canonical specification and accepted spec ADRs remain authoritative. Work
 ADRs 0062 and 0063 remain authoritative for the provisional `std.ui.UI` value
 and TTY runtime selection. Work ADR 0074 remains authoritative for the
-executor-independent CLIENT resource seam. This proposal narrows only the
-shape of a future test-only conformance slice.
+executor-independent CLIENT resource seam. This ADR defines the accepted
+test-only conformance boundary and does not accept the production runtime ABI.
