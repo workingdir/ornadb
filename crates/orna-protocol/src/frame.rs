@@ -4081,6 +4081,19 @@ mod tests {
                 .unwrap();
         registered_opaque_codecs(&standard).unwrap()
     }
+    fn resource_hex(input: &str) -> Vec<u8> {
+        assert_eq!(input.len() % 2, 0);
+        input
+            .as_bytes()
+            .chunks_exact(2)
+            .map(|pair| {
+                let high = (pair[0] as char).to_digit(16).unwrap();
+                let low = (pair[1] as char).to_digit(16).unwrap();
+                ((high << 4) | low) as u8
+            })
+            .collect()
+    }
+
 
     fn minimal_request(idempotency_key: Option<Vec<u8>>) -> InvokeRequest {
         InvokeRequest::new(InvokeRequestInput {
@@ -5896,6 +5909,144 @@ mod tests {
             Err(FrameCodecError::ResourceInvalidMarker)
         ));
     }
+    #[test]
+    fn resource_frames_have_exact_golden_bytes() {
+        let active = empty_active_revision();
+        let registry = test_registry();
+        let request_id = InvocationId::from_bytes([0x31; 16]);
+        let revision = RevisionPair::new(
+            SourceRevisionId::from_bytes([0x32; 16]),
+            CatalogueRevisionId::from_bytes([0x33; 16]),
+        );
+
+        let accepted = ResourceAccepted {
+            stream_id: 4,
+            request_id,
+            nested_invocation_id: InvocationId::from_bytes([0x34; 16]),
+            target_revision: revision,
+            resource_kind: ResourceKind::Stream,
+        };
+        assert_eq!(
+            encode_resource_accepted(&accepted).unwrap(),
+            resource_hex(concat!(
+                "4f524e412d5245534f555243452f31810000000049",
+                "0000000000000004",
+                "31313131313131313131313131313131",
+                "34343434343434343434343434343434",
+                "32323232323232323232323232323232",
+                "33333333333333333333333333333333",
+                "02",
+            ))
+        );
+
+        let value = RuntimeValue::Integer(7);
+        let value_bytes = encode_constructed_value(&active, &registry, &value).unwrap();
+        assert_eq!(
+            value_bytes,
+            resource_hex("4f52563503000000000000000000000000000000020000000400000007")
+        );
+        let values = ResourceValues {
+            stream_id: 4,
+            request_id,
+            batch_sequence: 0,
+            item_count: 1,
+            byte_count: value_bytes.len() as u32,
+            values: vec![value],
+        };
+        assert_eq!(
+            encode_resource_values(&active, &registry, &values).unwrap(),
+            resource_hex(concat!(
+                "4f524e412d5245534f555243452f31820000000049",
+                "0000000000000004",
+                "31313131313131313131313131313131",
+                "0000000000000000",
+                "00000001",
+                "0000001d",
+                "0000001d",
+                "4f52563503000000000000000000000000000000020000000400000007",
+            ))
+        );
+
+        let completed = ResourceCompleted {
+            stream_id: 4,
+            request_id,
+            final_batch_sequence: 0,
+            total_items: 1,
+        };
+        assert_eq!(
+            encode_resource_completed(&completed).unwrap(),
+            resource_hex(concat!(
+                "4f524e412d5245534f555243452f31830000000028",
+                "0000000000000004",
+                "31313131313131313131313131313131",
+                "0000000000000000",
+                "0000000000000001",
+            ))
+        );
+
+        let failed = ResourceFailed {
+            stream_id: 4,
+            request_id,
+            failure: CallFailure::TargetUnavailable,
+        };
+        assert_eq!(
+            encode_resource_failed(&failed).unwrap(),
+            resource_hex(concat!(
+                "4f524e412d5245534f555243452f3184000000001c",
+                "0000000000000004",
+                "31313131313131313131313131313131",
+                "02000100",
+            ))
+        );
+
+        let cancelled = ResourceCancelled {
+            stream_id: 4,
+            request_id,
+            reason: ResourceCancellationCode::ClientRequested,
+        };
+        assert_eq!(
+            encode_resource_cancelled(&cancelled).unwrap(),
+            resource_hex(concat!(
+                "4f524e412d5245534f555243452f31850000000019",
+                "0000000000000004",
+                "31313131313131313131313131313131",
+                "01",
+            ))
+        );
+
+        let window = ResourceWindowUpdate {
+            stream_id: 4,
+            request_id,
+            add_items: 1,
+            add_bytes: 2,
+        };
+        assert_eq!(
+            encode_resource_window_update(&window).unwrap(),
+            resource_hex(concat!(
+                "4f524e412d5245534f555243452f31020000000028",
+                "0000000000000004",
+                "31313131313131313131313131313131",
+                "0000000000000001",
+                "0000000000000002",
+            ))
+        );
+
+        let cancel = ResourceCancel {
+            stream_id: 4,
+            request_id,
+            reason: ResourceCancellationCode::ParentInvocationCancelled,
+        };
+        assert_eq!(
+            encode_resource_cancel(&cancel).unwrap(),
+            resource_hex(concat!(
+                "4f524e412d5245534f555243452f31030000000019",
+                "0000000000000004",
+                "31313131313131313131313131313131",
+                "03",
+            ))
+        );
+    }
+
 
 
     #[test]
