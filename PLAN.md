@@ -34,6 +34,31 @@ Current accepted implementation evidence:
 The canonical research plan confirms this boundary in
 `../spec/docs/49-gap-research-and-contract-plan.md:14-19,39-43,77-93`.
 
+## Post-audit status
+
+The accepted implementation audit found no missing executable slice in the
+current locked scope. The canonical status locks the function, invocation,
+identity, USER state, Inspector, and reflective-gateway directions
+(`../spec/docs/02-status-decisions.md:5-29`), but the executable details for
+non-TTY runtimes, resource inspection, and gateways remain proposal-level in
+the canonical gap plan (`../spec/docs/49-gap-research-and-contract-plan.md:14-19,39-43`).
+
+The accepted closed slices have focused proof in the repository, including:
+
+- offline source checking and filesystem/network no-write checks in
+  `crates/orna-server/tests/source_check.rs`;
+- CLIENT capability and resource lifecycle rejection tests in
+  `crates/orna-client/src/lib.rs`;
+- installed standard-library, capability, and JSON presenter proofs in
+  `crates/orna-server/tests/standard_database.rs`;
+- framed LSP navigation proof in `crates/orna-lsp/tests/lsp_e2e.rs`.
+
+These tests do not remove the two external evidence blockers: the fresh
+network-disabled Debian 12 host proof remains unavailable, and the
+same-major embedded-engine transition remains deferred until a real
+predecessor edge exists. No proposal-level implementation should start
+without the acceptance gate above.
+
 ## Non-negotiable contract gate
 
 No implementation phase may start for a proposal-level surface until a new
