@@ -10,14 +10,15 @@ use std::{
 use orna_artifact::{
     client_plan::{
         CAPABILITY_FORMAT_VERSION as CLIENT_PLAN_CAPABILITY_VERSION, CapabilityArgumentSource,
-        CapabilityClientPlan, CapabilityRequirement, ClientExpressionNode, ClientPlan,
-        InnerClientPlan, StateClientPlan, StateDefault, StateScope, StateSlot,
-        ResourceClientPlan, ResourceOperationNode,
-        EXPRESSION_FORMAT_VERSION as CLIENT_PLAN_EXPRESSION_VERSION,
-        ExpressionClientPlan, STATE_FORMAT_VERSION as CLIENT_PLAN_STATE_VERSION,
+        CapabilityClientPlan, CapabilityRequirement, ClientExpressionNode, ClientLocal,
+        ClientLocalKind, ClientPlan, ClientStatement,
+        EXPRESSION_FORMAT_VERSION as CLIENT_PLAN_EXPRESSION_VERSION, ExpressionClientPlan,
         FORMAT_IDENTITY as CLIENT_PLAN_FORMAT, FORMAT_VERSION as CLIENT_PLAN_VERSION,
-        RESOURCE_FORMAT_VERSION as CLIENT_PLAN_RESOURCE_VERSION,
-        LANGUAGE_VERSION_IDENTITY as CLIENT_PLAN_LANGUAGE_VERSION,
+        InnerClientPlan, LANGUAGE_VERSION_IDENTITY as CLIENT_PLAN_LANGUAGE_VERSION,
+        PROCEDURAL_FORMAT_VERSION as CLIENT_PLAN_PROCEDURAL_VERSION, ProceduralClientPlan,
+        RESOURCE_FORMAT_VERSION as CLIENT_PLAN_RESOURCE_VERSION, ResourceClientPlan,
+        ResourceOperationNode, STATE_FORMAT_VERSION as CLIENT_PLAN_STATE_VERSION, StateClientPlan,
+        StateDefault, StateScope, StateSlot,
     },
     constant_expression::{
         ConstantExpression, ConstantExpressionError, FORMAT_IDENTITY as CONSTANT_FORMAT,
@@ -39,9 +40,9 @@ use orna_artifact::{
     },
 };
 use orna_core::{
-    CatalogueRevisionId, ExpressionId, FieldId, FunctionId, FunctionRevisionId, ParameterId,
-    SchemaId, SourceBundleId, SourceRevisionId, SourceUnitId, StandardLibraryRevisionId,
-    TypeBindingId, TypeId,
+    CatalogueRevisionId, ExpressionId, FieldId, FunctionId, FunctionRevisionId, LocalId,
+    ParameterId, SchemaId, SourceBundleId, SourceRevisionId, SourceUnitId,
+    StandardLibraryRevisionId, TypeBindingId, TypeId,
     canonical_hash::{
         CanonicalHashError, artifact_payload_digest, catalogue_digest,
         catalogue_digest_with_context, function_declaration_digest, function_semantic_digest,
@@ -83,10 +84,10 @@ use crate::{
     },
     relational::{supports_server_select_distinct, supports_server_select_equality},
     resolver::{
-        durable_state_slot_id, CheckedClientExpression, CheckedClientFunctionBody,
-        CheckedClientStateSlot, CheckedFieldRename, CheckedResourceOperation, CheckedStateDefault,
-        CheckedStateScope,
-        UNIQUE_FIELD_MESSAGE, supports_unique_text_or_required_reference,
+        CheckedClientExpression, CheckedClientFunctionBody, CheckedClientLocal,
+        CheckedClientLocalKind, CheckedClientStateSlot, CheckedClientStatement, CheckedFieldRename,
+        CheckedResourceOperation, CheckedStateDefault, CheckedStateScope, UNIQUE_FIELD_MESSAGE,
+        durable_state_slot_id, supports_unique_text_or_required_reference,
     },
 };
 
@@ -1606,6 +1607,11 @@ struct ValidatedClientReturn {
 enum ValidatedClientBody {
     BooleanLiteral(bool),
     Expression(CheckedClientExpression),
+    Procedural {
+        locals: Vec<CheckedClientLocal>,
+        statements: Vec<CheckedClientStatement>,
+        return_expression: CheckedClientExpression,
+    },
     StateBlock {
         return_expression: CheckedClientExpression,
         states: Vec<CheckedClientStateSlot>,
@@ -3877,6 +3883,15 @@ fn validate_client_function_preflight(
         CheckedClientFunctionBody::Expression { expression } => {
             ValidatedClientBody::Expression(expression.clone())
         }
+        CheckedClientFunctionBody::Procedural {
+            locals,
+            statements,
+            return_expression,
+        } => ValidatedClientBody::Procedural {
+            locals: locals.clone(),
+            statements: statements.clone(),
+            return_expression: return_expression.clone(),
+        },
         CheckedClientFunctionBody::ExternalContract { identity, .. } => {
             ValidatedClientBody::ExternalContract(identity.clone())
         }
@@ -4151,6 +4166,17 @@ fn standard_checked_locations<'a>(
             CheckedClientFunctionBody::Expression { expression } => {
                 client_expression_locations(expression, &mut locations);
             }
+            CheckedClientFunctionBody::Procedural {
+                locals,
+                statements,
+                return_expression,
+            } => {
+                locations.extend(locals.iter().map(|local| local.location()));
+                for statement in statements {
+                    client_expression_locations(statement.expression(), &mut locations);
+                }
+                client_expression_locations(return_expression, &mut locations);
+            }
             CheckedClientFunctionBody::StateBlock { .. } => {}
             #[cfg(test)]
             CheckedClientFunctionBody::Unsupported => {}
@@ -4197,6 +4223,7 @@ fn client_expression_locations<'a>(
         | CheckedClientExpression::Integer { location, .. }
         | CheckedClientExpression::Boolean { location, .. }
         | CheckedClientExpression::ParameterRead { location, .. }
+        | CheckedClientExpression::LocalRead { location, .. }
         | CheckedClientExpression::FieldPath { location, .. } => locations.push(location),
         CheckedClientExpression::Concat {
             left,
@@ -4684,16 +4711,19 @@ impl IdentityMap {
         // durable artifact.
         for function in checked.client_functions() {
             for reference in function.references() {
-                let CheckedDefinitionReferenceTarget::Function(
-                    CheckedFunctionId::Existing(function_id),
-                ) = reference.target()
+                let CheckedDefinitionReferenceTarget::Function(CheckedFunctionId::Existing(
+                    function_id,
+                )) = reference.target()
                 else {
                     continue;
                 };
                 let Some(active_function) = active.catalogue().function_by_id(function_id) else {
                     return Err(existing_mismatch(DefinitionIdentity::Function(function_id)));
                 };
-                result.functions.entry(CheckedFunctionId::Existing(function_id)).or_insert(function_id);
+                result
+                    .functions
+                    .entry(CheckedFunctionId::Existing(function_id))
+                    .or_insert(function_id);
                 for parameter in active_function.parameters() {
                     result
                         .parameters
@@ -5566,15 +5596,24 @@ fn client_expression_contains_resource(expression: &CheckedClientExpression) -> 
             .iter()
             .any(|(_, argument)| client_expression_contains_resource(argument)),
         CheckedClientExpression::Concat { left, right, .. } => {
-            client_expression_contains_resource(left)
-                || client_expression_contains_resource(right)
+            client_expression_contains_resource(left) || client_expression_contains_resource(right)
         }
         CheckedClientExpression::String { .. }
         | CheckedClientExpression::Integer { .. }
         | CheckedClientExpression::Boolean { .. }
         | CheckedClientExpression::ParameterRead { .. }
+        | CheckedClientExpression::LocalRead { .. }
         | CheckedClientExpression::FieldPath { .. } => false,
     }
+}
+fn durable_client_local_id(function: FunctionId, ordinal: u32) -> LocalId {
+    let mut payload = function.to_bytes().to_vec();
+    payload.extend_from_slice(&ordinal.to_be_bytes());
+    let digest =
+        artifact_payload_digest(&payload).expect("client local identity payload is bounded");
+    let mut bytes = [0; 16];
+    bytes.copy_from_slice(&digest.to_bytes()[..16]);
+    LocalId::from_bytes(bytes)
 }
 
 impl<'a> CandidateBuilder<'a> {
@@ -6389,9 +6428,11 @@ impl<'a> CandidateBuilder<'a> {
                 let expression = self.client_expression_node(expression)?;
                 if contains_resource {
                     let plan = ResourceClientPlan::new(expression);
-                    let payload = plan.encode().map_err(|_| PrepareError::InvalidCheckedBundle {
-                        reason: "checked CLIENT resource plan exceeds client-plan limits",
-                    })?;
+                    let payload =
+                        plan.encode()
+                            .map_err(|_| PrepareError::InvalidCheckedBundle {
+                                reason: "checked CLIENT resource plan exceeds client-plan limits",
+                            })?;
                     (
                         CLIENT_PLAN_RESOURCE_VERSION,
                         payload,
@@ -6399,15 +6440,101 @@ impl<'a> CandidateBuilder<'a> {
                     )
                 } else {
                     let plan = ExpressionClientPlan::new(expression);
-                    let payload = plan.encode().map_err(|_| PrepareError::InvalidCheckedBundle {
-                        reason: "checked CLIENT expression exceeds client-plan limits",
-                    })?;
+                    let payload =
+                        plan.encode()
+                            .map_err(|_| PrepareError::InvalidCheckedBundle {
+                                reason: "checked CLIENT expression exceeds client-plan limits",
+                            })?;
                     (
                         CLIENT_PLAN_EXPRESSION_VERSION,
                         payload,
                         InnerClientPlan::Expression(plan),
                     )
                 }
+            }
+            ValidatedClientBody::Procedural {
+                locals,
+                statements,
+                return_expression,
+            } => {
+                let function_id = self.identities.function(validated.id)?;
+                let local_ids: HashMap<u32, LocalId> = locals
+                    .iter()
+                    .map(|local| {
+                        (
+                            local.ordinal(),
+                            durable_client_local_id(function_id, local.ordinal()),
+                        )
+                    })
+                    .collect();
+                let artifact_locals = locals
+                    .iter()
+                    .map(|local| {
+                        let type_id = local
+                            .standard_value_type()
+                            .or_else(|| match local.semantic_type() {
+                                SemanticType::Named(id)
+                                | SemanticType::Reference { target: id } => {
+                                    self.identities.type_id(id).ok()
+                                }
+                                SemanticType::Scalar(_) => None,
+                            })
+                            .ok_or(PrepareError::InvalidCheckedBundle {
+                                reason: "checked CLIENT local has no durable value type identity",
+                            })?;
+                        let local_id = *local_ids.get(&local.ordinal()).ok_or(
+                            PrepareError::InvalidCheckedBundle {
+                                reason: "checked CLIENT local identity map is incomplete",
+                            },
+                        )?;
+                        let kind = match local.kind() {
+                            CheckedClientLocalKind::Value => ClientLocalKind::Value,
+                            CheckedClientLocalKind::Resource(kind) => {
+                                ClientLocalKind::Resource(kind)
+                            }
+                        };
+                        Ok(ClientLocal::new(local_id, type_id, kind))
+                    })
+                    .collect::<Result<Vec<_>, PrepareError>>()?;
+                let artifact_statements = statements
+                    .iter()
+                    .map(|statement| {
+                        let local_id = *local_ids.get(&statement.local()).ok_or(
+                            PrepareError::InvalidCheckedBundle {
+                                reason: "checked CLIENT statement targets an unknown local",
+                            },
+                        )?;
+                        let expression = self.client_expression_node_with_locals(
+                            statement.expression(),
+                            &local_ids,
+                        )?;
+                        Ok(match statement {
+                            CheckedClientStatement::Let { .. } => {
+                                ClientStatement::let_(local_id, expression)
+                            }
+                            CheckedClientStatement::Assignment { .. } => {
+                                ClientStatement::assignment(local_id, expression)
+                            }
+                        })
+                    })
+                    .collect::<Result<Vec<_>, PrepareError>>()?;
+                let return_expression =
+                    self.client_expression_node_with_locals(return_expression, &local_ids)?;
+                let plan = ProceduralClientPlan::new(
+                    artifact_locals,
+                    artifact_statements,
+                    return_expression,
+                );
+                let payload = plan
+                    .encode()
+                    .map_err(|_| PrepareError::InvalidCheckedBundle {
+                        reason: "checked CLIENT procedural plan exceeds client-plan limits",
+                    })?;
+                (
+                    CLIENT_PLAN_PROCEDURAL_VERSION,
+                    payload,
+                    InnerClientPlan::Procedural(plan),
+                )
             }
             ValidatedClientBody::StateBlock {
                 return_expression,
@@ -6418,11 +6545,11 @@ impl<'a> CandidateBuilder<'a> {
                 if states.is_empty() {
                     if contains_resource {
                         let plan = ResourceClientPlan::new(expression);
-                        let payload =
-                            plan.encode()
-                                .map_err(|_| PrepareError::InvalidCheckedBundle {
-                                    reason: "checked CLIENT resource plan exceeds client-plan limits",
-                                })?;
+                        let payload = plan.encode().map_err(|_| {
+                            PrepareError::InvalidCheckedBundle {
+                                reason: "checked CLIENT resource plan exceeds client-plan limits",
+                            }
+                        })?;
                         (
                             CLIENT_PLAN_RESOURCE_VERSION,
                             payload,
@@ -6464,9 +6591,11 @@ impl<'a> CandidateBuilder<'a> {
                 let plan = ExpressionClientPlan::new(ClientExpressionNode::ExternalContract {
                     identity: identity.clone(),
                 });
-                let payload = plan.encode().map_err(|_| PrepareError::InvalidCheckedBundle {
-                    reason: "checked CLIENT external contract exceeds client-plan limits",
-                })?;
+                let payload = plan
+                    .encode()
+                    .map_err(|_| PrepareError::InvalidCheckedBundle {
+                        reason: "checked CLIENT external contract exceeds client-plan limits",
+                    })?;
                 (
                     CLIENT_PLAN_EXPRESSION_VERSION,
                     payload,
@@ -6546,6 +6675,14 @@ impl<'a> CandidateBuilder<'a> {
         &self,
         expression: &CheckedClientExpression,
     ) -> Result<ClientExpressionNode, PrepareError> {
+        self.client_expression_node_with_locals(expression, &HashMap::new())
+    }
+
+    fn client_expression_node_with_locals(
+        &self,
+        expression: &CheckedClientExpression,
+        local_ids: &HashMap<u32, LocalId>,
+    ) -> Result<ClientExpressionNode, PrepareError> {
         Ok(match expression {
             CheckedClientExpression::Call {
                 function,
@@ -6558,13 +6695,15 @@ impl<'a> CandidateBuilder<'a> {
                     .map(|(parameter, value)| {
                         Ok((
                             self.identities.parameter(*parameter)?,
-                            self.client_expression_node(value)?,
+                            self.client_expression_node_with_locals(value, local_ids)?,
                         ))
                     })
                     .collect::<Result<Vec<_>, PrepareError>>()?,
             },
             CheckedClientExpression::Await { expression, .. } => ClientExpressionNode::Await {
-                expression: Box::new(self.client_expression_node(expression)?),
+                expression: Box::new(
+                    self.client_expression_node_with_locals(expression, local_ids)?,
+                ),
             },
             CheckedClientExpression::Resource { operation } => ClientExpressionNode::Resource {
                 operation: self.client_resource_operation(operation)?,
@@ -6583,6 +6722,16 @@ impl<'a> CandidateBuilder<'a> {
                     parameter: self.identities.parameter(*parameter)?,
                 }
             }
+            CheckedClientExpression::LocalRead { local, .. } => {
+                let local =
+                    local_ids
+                        .get(local)
+                        .copied()
+                        .ok_or(PrepareError::InvalidCheckedBundle {
+                            reason: "checked CLIENT local read has no durable local identity",
+                        })?;
+                ClientExpressionNode::LocalRead { local }
+            }
             CheckedClientExpression::FieldPath { root, fields, .. } => {
                 ClientExpressionNode::FieldPath {
                     root: self.identities.parameter(*root)?,
@@ -6593,8 +6742,8 @@ impl<'a> CandidateBuilder<'a> {
                 }
             }
             CheckedClientExpression::Concat { left, right, .. } => ClientExpressionNode::Concat {
-                left: Box::new(self.client_expression_node(left)?),
-                right: Box::new(self.client_expression_node(right)?),
+                left: Box::new(self.client_expression_node_with_locals(left, local_ids)?),
+                right: Box::new(self.client_expression_node_with_locals(right, local_ids)?),
             },
         })
     }
@@ -6657,8 +6806,16 @@ impl<'a> CandidateBuilder<'a> {
         // substitute once the identity map allocates durable IDs.
         arguments.sort_by_key(|(parameter, _)| *parameter);
         let target = self.identities.function(operation.target())?;
-        let target_is_server = self.checked.server_functions().iter().any(|candidate| candidate.id() == operation.target())
-            || self.active.catalogue().function_by_id(target).is_some_and(|candidate| candidate.domain() == FunctionDomain::Server);
+        let target_is_server = self
+            .checked
+            .server_functions()
+            .iter()
+            .any(|candidate| candidate.id() == operation.target())
+            || self
+                .active
+                .catalogue()
+                .function_by_id(target)
+                .is_some_and(|candidate| candidate.domain() == FunctionDomain::Server);
         if !target_is_server {
             return Err(PrepareError::InvalidCheckedBundle {
                 reason: "checked CLIENT resource target is not a SERVER function",
@@ -6681,9 +6838,8 @@ impl<'a> CandidateBuilder<'a> {
         revision: FunctionRevisionId,
         validated: &ValidatedClient,
     ) -> Result<Vec<DefinitionReference>, PrepareError> {
-        let mut references = Vec::with_capacity(
-            validated.references.len() + validated.parameters.len() + 1,
-        );
+        let mut references =
+            Vec::with_capacity(validated.references.len() + validated.parameters.len() + 1);
         let mut remaining_references = validated.references.iter().collect::<Vec<_>>();
         if let Some(signature_evidence) = self.mode.signature_evidence() {
             for signature_slot in signature_evidence.function_slots(validated.id) {
@@ -6734,12 +6890,7 @@ impl<'a> CandidateBuilder<'a> {
                     }
                 };
                 references.push(DefinitionReference::new(
-                    function,
-                    revision,
-                    ordinal,
-                    target,
-                    kind,
-                    origin,
+                    function, revision, ordinal, target, kind, origin,
                 ));
             }
         } else {
@@ -6771,11 +6922,12 @@ impl<'a> CandidateBuilder<'a> {
             ));
         }
         for reference in remaining_references {
-            let ordinal =
-                u32::try_from(references.len()).map_err(|_| PrepareError::ReferenceCountExceedsU32 {
+            let ordinal = u32::try_from(references.len()).map_err(|_| {
+                PrepareError::ReferenceCountExceedsU32 {
                     function: validated.id,
                     count: validated.references.len() + validated.parameters.len() + 1,
-                })?;
+                }
+            })?;
             references.push(DefinitionReference::new(
                 function,
                 revision,
@@ -12890,11 +13042,18 @@ mod tests {
             BEGIN RETURN TRUE; END;";
         let bundle = SourceBundle::new([SourceUnit::new("application.orna", source)]).unwrap();
         let report = check_standard_application(&bundle, &context);
-        assert!(report.diagnostics().is_empty(), "{:?}", report.diagnostics());
+        assert!(
+            report.diagnostics().is_empty(),
+            "{:?}",
+            report.diagnostics()
+        );
 
         let prepared = prepare_standard_application(&report, active.pair(), &active).unwrap();
         let revision = &prepared.new_function_revisions()[0];
-        assert_eq!(revision.artifact().version(), CLIENT_PLAN_EXPRESSION_VERSION);
+        assert_eq!(
+            revision.artifact().version(),
+            CLIENT_PLAN_EXPRESSION_VERSION
+        );
         let plan = ExpressionClientPlan::decode(revision.artifact().payload()).unwrap();
         assert_eq!(
             plan.expression(),
@@ -12940,11 +13099,9 @@ mod tests {
             ),
         ];
         let plan = CapabilityClientPlan::new(
-            InnerClientPlan::Expression(ExpressionClientPlan::new(
-                ClientExpressionNode::String {
-                    value: "ready".to_owned(),
-                },
-            )),
+            InnerClientPlan::Expression(ExpressionClientPlan::new(ClientExpressionNode::String {
+                value: "ready".to_owned(),
+            })),
             requirements,
         );
         assert_eq!(plan.format_version(), CLIENT_PLAN_CAPABILITY_VERSION);
