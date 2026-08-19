@@ -1211,6 +1211,8 @@ async fn proves_standard_invocation_dogfooding_through_sealed_sys_invoke() -> Te
 
         // A direct raw call to the same standard target returns EXECUTE_DENIED,
         // records exactly one denied decision, and executes no artifact.
+        kernel.replace_security_snapshot(&security).await?;
+
         let security_events_before = kernel.recover_security_audit_events().await?;
         let raw = kernel
             .dispatch_authenticated_raw_call_with_arguments(
@@ -10384,4 +10386,134 @@ fn require(condition: bool, message: &'static str) -> TestResult<()> {
     } else {
         Err(failure(message))
     }
+}
+
+/// Proves one accepted application SERVER function survives the user-facing
+/// source/check/install/grant/invoke path and renders its typed result.
+#[tokio::test]
+#[ignore = "requires the Compose PostgreSQL development service"]
+async fn proves_installed_server_function_dogfood_source_through_orna_invoke() -> TestResult<()> {
+    const INPUT: i32 = 73;
+
+    with_test_database(|database| async move {
+        let uid = nix::unistd::geteuid().as_raw();
+        let kernel = kernel(&database)?;
+        kernel.bootstrap().await?;
+        let empty = kernel.recover().await?;
+        let standard_upgrade = orna_standard::prepare_standard_upgrade_v1_to_v2(&empty)?;
+        let installed_standard = kernel.apply_standard_upgrade(&standard_upgrade).await?;
+        let standard = installed_standard
+            .catalogue_hash_context()
+            .standard()
+            .ok_or_else(|| failure("the installed standard snapshot was not pinned"))?;
+        let context = StandardApplicationCheckContext::try_new(
+            installed_standard.catalogue(),
+            standard_upgrade.checked_standard_library(),
+        )?;
+        let source = SourceBundle::new([SourceUnit::new(
+            "fixtures/server_function_dogfood.orna",
+            include_str!("fixtures/server_function_dogfood.orna"),
+        )])?;
+        let report = check_standard_application(&source, &context);
+        if !report.diagnostics().is_empty() {
+            return Err(failure(format!(
+                "the accepted SERVER dogfood source did not check: {:?}",
+                report.diagnostics(),
+            )));
+        }
+        let active = kernel
+            .apply(&prepare_standard_application(
+                &report,
+                installed_standard.pair(),
+                &installed_standard,
+            )?)
+            .await?;
+        let read_id = active
+            .catalogue()
+            .functions()
+            .iter()
+            .find(|function| function.name().parts() == ["dogfood", "read"])
+            .ok_or_else(|| failure("the installed dogfood source is missing dogfood.read"))?
+            .id();
+        let mut function_targets = active
+            .catalogue()
+            .functions()
+            .iter()
+            .map(|function| SecurityFunctionTarget::application(function.id()))
+            .collect::<Vec<_>>();
+        function_targets.push(SecurityFunctionTarget::verified_standard(
+            STD_INVOKE_ECHO_FUNCTION_ID,
+            standard.revision(),
+            STD_INVOKE_ECHO_FUNCTION_REVISION_ID,
+        ));
+        let security = SecuritySnapshot::new_with_function_targets_and_local_peer_credentials(
+            active.pair(),
+            function_targets,
+            vec![Principal::new(
+                RAW_CLIENT_USER,
+                PrincipalKind::User,
+                PrincipalStatus::Active,
+            )],
+            vec![],
+            vec![ExecuteGrant::new(RAW_CLIENT_USER, read_id)],
+            vec![LocalPeerCredential::new(uid, RAW_CLIENT_USER)],
+        )?;
+        kernel.replace_security_snapshot(&security).await?;
+        let object = active
+            .catalogue()
+            .object_types()
+            .iter()
+            .find(|object| object.name().parts() == ["dogfood", "item"])
+            .ok_or_else(|| failure("the installed dogfood source is missing dogfood.item"))?;
+        let field = object
+            .fields()
+            .iter()
+            .find(|field| field.name() == "value")
+            .ok_or_else(|| failure("the installed dogfood source is missing dogfood.item.value"))?;
+        let table = format!("t_{:032x}", u128::from_be_bytes(object.id().to_bytes()));
+        let column = format!("f_{:032x}", u128::from_be_bytes(field.id().to_bytes()));
+        let object_id = format!("{:032x}", u128::from_be_bytes([0x91; 16]));
+        run_database_statement(
+            &database,
+            &format!(
+                "INSERT INTO _orna_data.{table} (_orna_object_id, {column}) VALUES (decode('{object_id}', 'hex'), {INPUT})"
+            ),
+        )
+        .await?;
+        let registry = registered_opaque_codecs(standard)?;
+        let mut expected = encode_constructed_value(
+            &active,
+            &registry,
+            &RuntimeValue::Integer(INPUT),
+        )?;
+        expected.push(b'\n');
+
+        let (read_outcome, read_stdout, read_stderr) = installed_invoke_run(
+            &database,
+            installed_invoke_request(
+                InvocationRequestTarget::qualified_name(QualifiedSemanticName::new([
+                    "dogfood", "read",
+                ])?)?,
+                vec![],
+                true,
+                false,
+            ),
+        )
+        .await?;
+        require(
+            read_outcome == Ok(InstalledInvokeOutcome::Completed),
+            "the installed SERVER dogfood read invocation did not complete",
+        )?;
+        require(
+            read_stdout == expected,
+            "the installed SERVER dogfood read invocation returned the wrong value",
+        )?;
+        require(
+            read_stderr.is_empty(),
+            "the quiet SERVER dogfood read invocation wrote progress diagnostics",
+        )?;
+
+        require_no_database_sessions(&database).await
+    })
+    .await
 }
