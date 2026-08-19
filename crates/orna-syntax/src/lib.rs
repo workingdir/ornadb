@@ -713,10 +713,11 @@ pub enum ClientFunctionBody {
         /// The exact contract identity spelling and source span.
         identity: SourceSlice,
     },
-    /// A closed state-declaration block with one return statement.
+    /// A closed state or procedural local-binding block with one return statement.
     ///
-    /// The block body accepts only `STATE` declarations before `BEGIN` and
-    /// exactly one `RETURN` statement before `END` (work ADR 0069).
+    /// The block body accepts only `STATE` declarations or `LET` local
+    /// bindings before `BEGIN` and exactly one `RETURN` statement before
+    /// `END`.
     StateBlock(ClientStateBlockBody),
 }
 
@@ -804,28 +805,37 @@ pub struct StateDeclaration {
     /// The span from `STATE` through the terminating semicolon.
     pub span: SourceSpan,
 }
-
-/// The single-return body of a CLIENT state block (work ADR 0069).
+/// A closed state/procedural CLIENT block with declarations and one return.
 ///
-/// The closed body shape is:
-///
-/// ```text
-/// IS
-///     { state_declaration }
-/// BEGIN
-///     RETURN [ expression ] ;
-/// END
-/// ```
-///
-/// The return expression uses the closed ADR 0068 CLIENT expression
-/// vocabulary. The body has exactly one return statement.
+/// The block body accepts `STATE` declarations or `LET` local bindings before
+/// `BEGIN` and exactly one `RETURN` statement before `END`. Existing state
+/// blocks leave `locals` empty.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClientStateBlockBody {
     /// The state declarations in source order.
     pub states: Vec<StateDeclaration>,
+    /// The local resource bindings in source order.
+    pub locals: Vec<ClientLocalBinding>,
     /// The parsed return expression when the statement names one.
     pub return_expression: Option<ClientExpression>,
     /// The span from the `IS` keyword through the closing `END`.
+    pub span: SourceSpan,
+}
+
+/// One local binding in a procedural CLIENT block.
+///
+/// The type source remains lossless here because resource result descriptors
+/// are resolved by the compiler, while the existing syntax type grammar does
+/// not represent `Resource<TABLE(...)>`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClientLocalBinding {
+    /// The local name as written.
+    pub name: NamePart,
+    /// The exact declared type source between the name and `:=`.
+    pub type_source: SourceSlice,
+    /// The resource constructor expression.
+    pub expression: ClientExpression,
+    /// The span from `LET` through the terminating semicolon.
     pub span: SourceSpan,
 }
 
@@ -867,6 +877,11 @@ pub enum ClientExpression {
         /// The parameter name as written.
         parameter: NamePart,
     },
+    /// A read of one procedural local binding.
+    LocalRead {
+        /// The local name as written.
+        local: NamePart,
+    },
     /// A path from one declared parameter through object fields.
     FieldPath {
         /// The parameter at the start of the path.
@@ -907,6 +922,7 @@ impl ClientExpression {
             | Self::IntegerLiteral { source, .. }
             | Self::BooleanLiteral { source, .. } => &source.span,
             Self::ParameterRead { parameter } => &parameter.span,
+            Self::LocalRead { local } => &local.span,
         }
     }
 }
@@ -5200,6 +5216,68 @@ mod tests {
     }
 
     #[test]
+    fn parses_client_local_resource_binding_and_await_return() {
+        let source = "CREATE CLIENT FUNCTION studio.overdue_rows(p_owner REF studio.owner)\n\
+            RETURNS TEXT IS\n\
+            LET rows std.data.Resource<TABLE(task_id UUID, title TEXT)> :=\n\
+                std.data.resource(\n\
+                    target => tasks.overdue,\n\
+                    arguments => std.call.args(p_owner => p_owner)\n\
+                );\n\
+            BEGIN\n\
+                RETURN AWAIT rows;\n\
+            END;";
+        let parsed = parse(source);
+
+        assert!(parsed.diagnostics().is_empty(), "{:?}", parsed.diagnostics());
+        assert_eq!(parsed.syntax().text(), source);
+        assert_eq!(
+            parsed
+                .syntax()
+                .root()
+                .descendants()
+                .filter(|node| node.kind() == SyntaxKind::ClientLocalBinding)
+                .count(),
+            1
+        );
+        let ClientFunctionBody::StateBlock(block) = &parsed.client_functions()[0].body else {
+            panic!("expected a procedural CLIENT block");
+        };
+        assert!(block.states.is_empty());
+        assert_eq!(block.locals.len(), 1);
+        let local = &block.locals[0];
+        assert_eq!(local.name.text, "rows");
+        assert_eq!(
+            local.type_source.text,
+            "std.data.Resource<TABLE(task_id UUID, title TEXT)>"
+        );
+        assert_eq!(
+            local.type_source.span,
+            SourceSpan {
+                start: source.find("std.data.Resource").expect("local type"),
+                end: source[..source.find(":=").expect("initializer marker")]
+                    .trim_end()
+                    .len(),
+            }
+        );
+        let ClientExpression::Call { callee, .. } = &local.expression else {
+            panic!("expected a resource constructor call");
+        };
+        assert_eq!(
+            callee.parts.iter().map(|part| part.text.as_str()).collect::<Vec<_>>(),
+            ["std", "data", "resource"]
+        );
+        let Some(ClientExpression::Await { expression, .. }) = block.return_expression.as_ref()
+        else {
+            panic!("expected an AWAIT return expression");
+        };
+        assert!(matches!(
+            expression.as_ref(),
+            ClientExpression::LocalRead { local } if local.text == "rows"
+        ));
+    }
+
+    #[test]
     fn reports_malformed_client_await_operands_without_widening_expression_syntax() {
         for expression in ["AWAIT;", "AWAIT (value);", "AWAIT AWAIT;"] {
             let source = format!(
@@ -5522,21 +5600,21 @@ mod tests {
     }
 
     #[test]
-    fn rejects_unsupported_procedural_statements_in_client_state_blocks() {
+    fn rejects_malformed_and_unsupported_procedural_statements_in_client_state_blocks() {
         let cases = [
             (
                 "CREATE CLIENT FUNCTION examples.bad() RETURNS BOOLEAN IS LET x = 1; BEGIN RETURN TRUE; END;",
-                "CLIENT state blocks accept only STATE declarations before BEGIN",
-                "LET",
+                "CLIENT local bindings require a declared type and ':=' initializer",
+                "=",
             ),
             (
                 "CREATE CLIENT FUNCTION examples.bad() RETURNS BOOLEAN IS STATE count TEXT; BEGIN RETURN 1; RETURN 2; END;",
-                "CLIENT state blocks accept only a single RETURN statement",
+                "CLIENT blocks accept only a single RETURN statement",
                 "RETURN 2",
             ),
             (
                 "CREATE CLIENT FUNCTION examples.bad() RETURNS BOOLEAN IS BEGIN IF x THEN RETURN TRUE; END;",
-                "CLIENT state blocks accept only a single RETURN statement",
+                "CLIENT blocks accept only a single RETURN statement",
                 "IF",
             ),
         ];
