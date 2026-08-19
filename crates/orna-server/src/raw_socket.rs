@@ -1215,6 +1215,7 @@ async fn drive_versioned_authenticated_stream_until_shutdown<D: DispatchService>
             &version,
             &mut resource_connection,
             &mut resource_pending,
+            &mut resource_requests,
             &mut writer,
             &mut shutdown,
         )
@@ -1343,8 +1344,7 @@ async fn drive_versioned_authenticated_stream_until_shutdown<D: DispatchService>
             Next::Completion(None) => {}
             Next::ResourceCompletion(Some((stream_id, completion))) => {
                 resource_tasks.remove(&stream_id);
-                resource_requests.remove(&stream_id);
-                if !resource_cancelled.remove(&stream_id) {
+                if !resource_cancelled.contains(&stream_id) {
                     resource_pending.insert(stream_id, completion);
                 }
             }
@@ -1367,15 +1367,21 @@ async fn drive_versioned_authenticated_stream_until_shutdown<D: DispatchService>
     for (_, task) in std::mem::take(&mut resource_tasks) {
         let _ = task.await;
     }
+    resource_connection.shutdown();
     drain_resource_completions(
         &mut resource_completion_receiver,
         &mut resource_pending,
         &mut resource_cancelled,
         &mut resource_tasks,
-        &mut resource_requests,
     );
     let mut cancellation_audit_failure = None;
-    for (_, request) in std::mem::take(&mut resource_requests) {
+    for (stream_id, request) in std::mem::take(&mut resource_requests) {
+        let committed = resource_pending
+            .get(&stream_id)
+            .is_some_and(|completion| completion.actions.iter().any(resource_action_is_terminal));
+        if committed || resource_cancelled.contains(&stream_id) {
+            continue;
+        }
         if let Err(source) = dispatcher
             .cancel_resource(session.clone(), request)
             .await
@@ -1404,12 +1410,10 @@ fn drain_resource_completions(
     pending: &mut BTreeMap<u64, ResourceDispatchCompletion>,
     cancelled: &mut BTreeSet<u64>,
     tasks: &mut BTreeMap<u64, JoinHandle<()>>,
-    requests: &mut BTreeMap<u64, ResourceRequest>,
 ) -> BTreeSet<u64> {
     let mut completed = BTreeSet::new();
     while let Ok((stream_id, completion)) = completion_receiver.try_recv() {
         tasks.remove(&stream_id);
-        requests.remove(&stream_id);
         if cancelled.remove(&stream_id) {
             continue;
         }
@@ -1418,6 +1422,15 @@ fn drain_resource_completions(
     }
     completed
 }
+fn resource_action_is_terminal(action: &ResourceServerFrame) -> bool {
+    matches!(
+        action,
+        ResourceServerFrame::Completed(_)
+            | ResourceServerFrame::Failed(_)
+            | ResourceServerFrame::Cancelled(_)
+    )
+}
+
 
 #[allow(clippy::too_many_arguments)]
 async fn handle_resource_frame<D: DispatchService>(
@@ -1461,7 +1474,6 @@ async fn handle_resource_frame<D: DispatchService>(
             pending,
             cancelled,
             tasks,
-            requests,
         );
         committed_completion = completed.contains(&cancel.stream_id)
             || pending
@@ -1512,7 +1524,7 @@ async fn handle_resource_frame<D: DispatchService>(
         && matches!(disposition, ResourceFrameDisposition::Applied)
     {
         cancelled.insert(cancel.stream_id);
-        let request = requests.remove(&cancel.stream_id).ok_or_else(|| {
+        let request = requests.get(&cancel.stream_id).cloned().ok_or_else(|| {
             LocalRawSocketError::ResourceConnection {
                 source: ResourceConnectionError::UnknownStream {
                     stream_id: cancel.stream_id,
@@ -1540,11 +1552,11 @@ async fn handle_resource_frame<D: DispatchService>(
     }
     Ok(true)
 }
-
 async fn flush_resource_pending(
     version: &RawProtocolVersion,
     connection: &mut ResourceProtocolConnection,
     pending: &mut BTreeMap<u64, ResourceDispatchCompletion>,
+    requests: &mut BTreeMap<u64, ResourceRequest>,
     stream: &mut OwnedWriteHalf,
     shutdown: &mut watch::Receiver<bool>,
 ) -> Result<bool, LocalRawSocketError> {
@@ -1579,11 +1591,15 @@ async fn flush_resource_pending(
             };
             match disposition {
                 ResourceFrameDisposition::DroppedLate => {
+                    let terminal = resource_action_is_terminal(&action);
                     pending
                         .get_mut(&stream_id)
                         .expect("pending resource completion exists")
                         .actions
                         .pop_front();
+                    if terminal {
+                        requests.remove(&stream_id);
+                    }
                     continue;
                 }
                 ResourceFrameDisposition::Applied => {}
@@ -1594,11 +1610,15 @@ async fn flush_resource_pending(
             if !write_encoded_frame(stream, &encoded, shutdown).await? {
                 return Ok(false);
             }
+            let terminal = resource_action_is_terminal(&action);
             pending
                 .get_mut(&stream_id)
                 .expect("pending resource completion exists")
                 .actions
                 .pop_front();
+            if terminal {
+                requests.remove(&stream_id);
+            }
         }
     }
     Ok(true)
@@ -2764,7 +2784,20 @@ mod tests {
                 .and_then(|completion| completion.actions.front()),
             Some(ResourceServerFrame::Accepted(_))
         ));
+        assert!(requests.contains_key(&request.stream_id));
         assert!(!hook_called.load(Ordering::SeqCst));
+        assert!(flush_resource_pending(
+            &version,
+            &mut connection,
+            &mut pending,
+            &mut requests,
+            &mut writer,
+            &mut shutdown,
+        )
+        .await
+        .unwrap());
+        assert!(pending.is_empty());
+        assert!(!requests.contains_key(&request.stream_id));
     }
 
     #[tokio::test]
