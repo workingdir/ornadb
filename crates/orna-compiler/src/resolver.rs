@@ -4039,10 +4039,7 @@ fn resolve_client_function_inputs<'a>(
         let base_function = base.function_by_name(&name);
         let expression_body = declaration.body.as_expression().is_some()
             || declaration.body.as_external_contract().is_some()
-            || declaration
-                .body
-                .as_state_block()
-                .is_some_and(|block| block.states.is_empty());
+            || declaration.body.as_state_block().is_some();
         if !expression_body && !declaration.parameters.is_empty() {
             diagnostics.push(diagnostic(
                 DiagnosticCode::DomainIncompatible,
@@ -5617,18 +5614,256 @@ fn check_client_expression(
 }
 
 fn client_local_resource_kind(source: &SourceSlice) -> Option<ResourceKind> {
-    let normalized: String = source
-        .text
-        .chars()
-        .filter(|character| !character.is_ascii_whitespace())
-        .flat_map(char::to_lowercase)
-        .collect();
-    if normalized.starts_with("std.data.resource<") && normalized.ends_with('>') {
-        Some(ResourceKind::Scalar)
-    } else if normalized.starts_with("std.data.streamresource<") && normalized.ends_with('>') {
-        Some(ResourceKind::Stream)
+    let mut parser = ClientResourceTypeParser::new(&source.text);
+    let outer = parser.parse_qualified_name()?;
+    let kind = if outer.len() == 3
+        && outer[0].eq_ignore_ascii_case("std")
+        && outer[1].eq_ignore_ascii_case("data")
+        && outer[2].eq_ignore_ascii_case("resource")
+    {
+        ResourceKind::Scalar
+    } else if outer.len() == 3
+        && outer[0].eq_ignore_ascii_case("std")
+        && outer[1].eq_ignore_ascii_case("data")
+        && outer[2].eq_ignore_ascii_case("streamresource")
+    {
+        ResourceKind::Stream
     } else {
-        None
+        return None;
+    };
+    if !parser.consume(b'<') || !parser.parse_type() || !parser.consume(b'>') || !parser.is_end() {
+        return None;
+    }
+    Some(kind)
+}
+
+/// A syntax-only parser for the descriptor inside a CLIENT resource local
+/// type. The target SERVER declaration remains authoritative for the resolved
+/// result type; this parser only rejects empty or malformed descriptors.
+struct ClientResourceTypeParser<'a> {
+    text: &'a str,
+    offset: usize,
+    invalid_trivia: bool,
+}
+
+impl<'a> ClientResourceTypeParser<'a> {
+    const MAX_TYPE_DEPTH: usize = 32;
+
+    fn new(text: &'a str) -> Self {
+        Self {
+            text,
+            offset: 0,
+            invalid_trivia: false,
+        }
+    }
+
+    fn is_end(&mut self) -> bool {
+        self.skip_trivia();
+        !self.invalid_trivia && self.offset == self.text.len()
+    }
+
+    fn skip_trivia(&mut self) {
+        loop {
+            while self
+                .text
+                .get(self.offset..)
+                .and_then(|text| text.chars().next())
+                .is_some_and(char::is_whitespace)
+            {
+                let width = self.text[self.offset..]
+                    .chars()
+                    .next()
+                    .expect("character exists")
+                    .len_utf8();
+                self.offset += width;
+            }
+            let Some(remaining) = self.text.get(self.offset..) else {
+                return;
+            };
+            if remaining.starts_with("--") {
+                self.offset += 2;
+                while let Some(character) = self.text[self.offset..].chars().next() {
+                    self.offset += character.len_utf8();
+                    if character == '\n' {
+                        break;
+                    }
+                }
+                continue;
+            }
+            if remaining.starts_with("/*") {
+                let Some(end) = remaining[2..].find("*/") else {
+                    self.invalid_trivia = true;
+                    self.offset = self.text.len();
+                    return;
+                };
+                self.offset += end + 4;
+                continue;
+            }
+            return;
+        }
+    }
+
+    fn consume(&mut self, expected: u8) -> bool {
+        self.skip_trivia();
+        if self.text.as_bytes().get(self.offset) == Some(&expected) {
+            self.offset += 1;
+            true
+        } else {
+            false
+        }
+    }
+
+    fn parse_identifier(&mut self) -> Option<String> {
+        self.skip_trivia();
+        let start = self.offset;
+        if self.text.as_bytes().get(self.offset) == Some(&b'"') {
+            self.offset += 1;
+            while let Some(character) = self.text[self.offset..].chars().next() {
+                self.offset += character.len_utf8();
+                if character == '"' {
+                    if self.text.as_bytes().get(self.offset) == Some(&b'"') {
+                        self.offset += 1;
+                    } else {
+                        return Some(self.text[start..self.offset].to_owned());
+                    }
+                }
+            }
+            return None;
+        }
+        let first = self.text[self.offset..].chars().next()?;
+        if first != '_' && !first.is_alphabetic() {
+            return None;
+        }
+        self.offset += first.len_utf8();
+        while let Some(character) = self.text[self.offset..].chars().next() {
+            if character != '_' && !character.is_alphabetic() && !character.is_numeric() {
+                break;
+            }
+            self.offset += character.len_utf8();
+        }
+        Some(self.text[start..self.offset].to_owned())
+    }
+
+    fn parse_qualified_name(&mut self) -> Option<Vec<String>> {
+        let mut parts = vec![self.parse_identifier()?];
+        while self.consume(b'.') {
+            parts.push(self.parse_identifier()?);
+        }
+        Some(parts)
+    }
+
+    fn consume_keyword(&mut self, keyword: &str) -> bool {
+        self.skip_trivia();
+        let saved = self.offset;
+        if self.text.as_bytes().get(saved) == Some(&b'"') {
+            return false;
+        }
+        let Some(identifier) = self.parse_identifier() else {
+            return false;
+        };
+        if identifier.eq_ignore_ascii_case(keyword) {
+            true
+        } else {
+            self.offset = saved;
+            false
+        }
+    }
+
+    fn parse_type(&mut self) -> bool {
+        self.parse_type_at_depth(0)
+    }
+
+    fn parse_type_at_depth(&mut self, depth: usize) -> bool {
+        if depth > Self::MAX_TYPE_DEPTH {
+            return false;
+        }
+        let saved = self.offset;
+        if self.consume_keyword("REF") {
+            return self.parse_type_at_depth(depth + 1)
+                && self.parse_optional_suffix(depth + 1);
+        }
+        for keyword in ["LIST", "SET", "OPTION", "STREAM", "MAP"] {
+            self.offset = saved;
+            if !self.consume_keyword(keyword) {
+                continue;
+            }
+            if !self.consume(b'<') || !self.parse_type_at_depth(depth + 1) {
+                return false;
+            }
+            if keyword == "MAP"
+                && (!self.consume(b',') || !self.parse_type_at_depth(depth + 1))
+            {
+                return false;
+            }
+            return self.consume(b'>') && self.parse_optional_suffix(depth + 1);
+        }
+        self.offset = saved;
+        if self.parse_standard_large_object() {
+            return self.parse_optional_suffix(depth + 1);
+        }
+        self.offset = saved;
+        for keyword in ["TABLE", "RECORD"] {
+            self.offset = saved;
+            if !self.consume_keyword(keyword) {
+                continue;
+            }
+            if self.peek(b'(') {
+                return self.parse_record(depth + 1)
+                    && self.parse_optional_suffix(depth + 1);
+            }
+            break;
+        }
+        self.offset = saved;
+        self.parse_qualified_name().is_some()
+            && self.parse_optional_suffix(depth + 1)
+    }
+
+    fn parse_standard_large_object(&mut self) -> bool {
+        let saved = self.offset;
+        if (self.consume_keyword("CHARACTER") || self.consume_keyword("BINARY"))
+            && self.consume_keyword("LARGE")
+            && self.consume_keyword("OBJECT")
+        {
+            true
+        } else {
+            self.offset = saved;
+            false
+        }
+    }
+
+    fn parse_record(&mut self, depth: usize) -> bool {
+        if !self.consume(b'(') {
+            return false;
+        }
+        if self.consume(b')') {
+            return true;
+        }
+        loop {
+            if self.parse_identifier().is_none() || !self.parse_type_at_depth(depth + 1) {
+                return false;
+            }
+            if self.consume(b')') {
+                return true;
+            }
+            if !self.consume(b',') {
+                return false;
+            }
+        }
+    }
+
+    fn parse_optional_suffix(&mut self, mut depth: usize) -> bool {
+        while self.consume(b'?') {
+            depth += 1;
+            if depth > Self::MAX_TYPE_DEPTH {
+                return false;
+            }
+        }
+        true
+    }
+
+    fn peek(&mut self, expected: u8) -> bool {
+        self.skip_trivia();
+        self.text.as_bytes().get(self.offset) == Some(&expected)
     }
 }
 
@@ -5846,7 +6081,17 @@ fn check_client_functions(
                         location(input.logical_path, &body_source.span),
                         Vec::new(),
                     )
-                } else if let Some(expression) = input.body.as_expression() {
+                } else if let Some(expression) = input.body.as_expression().or_else(|| {
+                    input
+                        .body
+                        .as_state_block()
+                        .filter(|block| {
+                            block.states.is_empty()
+                                && block.locals.is_empty()
+                                && block.statements.is_empty()
+                        })
+                        .and_then(|block| block.return_expression.as_ref())
+                }) {
                     let diagnostics_before = diagnostics.len();
                     validate_client_await_positions(expression, true, input, diagnostics);
                     if diagnostics.len() != diagnostics_before {
@@ -16903,6 +17148,41 @@ mod tests {
     }
 
     #[test]
+    fn accepts_parameters_on_client_state_blocks() {
+        let source = "CREATE SCHEMA examples; \
+            CREATE CLIENT FUNCTION examples.state(p TEXT) RETURNS TEXT IS \
+            STATE value TEXT; BEGIN RETURN p; END;";
+        let report = check(&bundle([("client.orna", source)]), &empty_catalogue());
+        assert!(
+            report.diagnostics().is_empty(),
+            "{:?}",
+            report.diagnostics()
+        );
+        let function = &report.checked_bundle().unwrap().client_functions()[0];
+        assert_eq!(function.parameters().len(), 1);
+        assert!(matches!(
+            function.body(),
+            CheckedClientFunctionBody::StateBlock { states, .. } if states.len() == 1
+        ));
+    }
+
+    #[test]
+    fn keeps_empty_no_state_client_blocks_as_expression_bodies() {
+        let source = "CREATE SCHEMA examples;             CREATE CLIENT FUNCTION examples.identity(p TEXT) RETURNS TEXT IS             BEGIN RETURN p; END;";
+        let report = check(&bundle([("client.orna", source)]), &empty_catalogue());
+        assert!(
+            report.diagnostics().is_empty(),
+            "{:?}",
+            report.diagnostics()
+        );
+        let function = &report.checked_bundle().unwrap().client_functions()[0];
+        let CheckedClientFunctionBody::Expression { expression } = function.body() else {
+            panic!("expected an expression CLIENT body");
+        };
+        assert!(matches!(expression, super::CheckedClientExpression::ParameterRead { .. }));
+    }
+
+    #[test]
     fn accepts_procedural_client_statements_without_state_declarations() {
         let source = "CREATE SCHEMA examples; \
             CREATE CLIENT FUNCTION examples.procedural() RETURNS TEXT IS \
@@ -21656,6 +21936,58 @@ mod tests {
             operation.target(),
             super::CheckedFunctionId::Existing(FunctionId::from_bytes([0x43; 16]))
         );
+    }
+
+    #[test]
+    fn rejects_malformed_client_resource_local_descriptors() {
+        let base = CatalogueSnapshot::new_with_functions(
+            CatalogueRevisionId::from_bytes([0x41; 16]),
+            vec![SchemaDefinition::new(
+                SchemaId::from_bytes([0x42; 16]),
+                QualifiedSemanticName::new(["tasks"]).unwrap(),
+            )],
+            Vec::new(),
+            vec![FunctionDefinition::new(
+                FunctionId::from_bytes([0x43; 16]),
+                QualifiedSemanticName::new(["tasks", "find"]).unwrap(),
+                FunctionDomain::Server,
+                vec![parameter(
+                    0x44,
+                    "p_name",
+                    0,
+                    ResolvedType::Scalar(StandardScalar::CharacterLargeObject),
+                )],
+                FunctionReturn::Single(ResolvedType::Scalar(StandardScalar::CharacterLargeObject)),
+                FunctionRevisionId::from_bytes([0x45; 16]),
+                FunctionSecurity::Invoker,
+                Some(FunctionTransaction::ReadOnly),
+                FunctionVolatility::Stable,
+            )],
+        )
+        .unwrap();
+        for (descriptor, source) in [
+            (
+                "",
+                "CREATE SCHEMA ui; CREATE CLIENT FUNCTION ui.find(p_name TEXT) RETURNS TEXT IS \
+                 LET rows std.data.Resource<> := std.data.resource(target => tasks.find, arguments => std.call.args(p_name => p_name)); \
+                 BEGIN RETURN AWAIT rows; END;",
+            ),
+            (
+                "not-a-type",
+                "CREATE SCHEMA ui; CREATE CLIENT FUNCTION ui.find(p_name TEXT) RETURNS TEXT IS \
+                 LET rows std.data.Resource<not-a-type> := std.data.resource(target => tasks.find, arguments => std.call.args(p_name => p_name)); \
+                 BEGIN RETURN AWAIT rows; END;",
+            ),
+        ] {
+            let report = check(&bundle([("resource.orna", source)]), &base);
+            assert_eq!(report.diagnostics().len(), 1, "{descriptor:?}");
+            assert_eq!(report.diagnostics()[0].code(), DiagnosticCode::TypeMismatch);
+            assert_eq!(
+                report.diagnostics()[0].message(),
+                "CLIENT local rows must declare std.data.Resource<T> or std.data.StreamResource<T>"
+            );
+            assert_no_checked_bundle(&report);
+        }
     }
 
     #[test]
