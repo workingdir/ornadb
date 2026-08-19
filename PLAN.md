@@ -61,13 +61,13 @@ This work has three separate goals:
    graphical runtimes, Inspector projections, and reflective gateways stay
    out of these fixtures until their contracts become executable.
 
-The first practical sequence is:
-
-- complete the accepted CLIENT expression and state syntax;
+- use the existing accepted CLIENT expression and state syntax as the first
+  source base, then extend it only when the corresponding contract is accepted;
 - add a grammar conformance gate for the accepted subset;
-- move one more accepted presenter or launcher path into `.orna` source;
-- make that source run through an installed proof;
-- then repeat the same pattern for accepted state, resource, Inspector, and
+- add one complete accepted server-function dogfood program, then identify the
+  next presenter or launcher path that can move into `.orna` source;
+- make each source program run through an installed proof;
+- then repeat the same pattern for accepted resource and later Inspector or
   gateway contracts as each contract becomes executable.
 
 This is a product requirement, not optional documentation polish. A fully
