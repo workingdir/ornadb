@@ -2,14 +2,10 @@
 
 use std::{collections::HashMap, error::Error, fmt, hash::Hash};
 
-use orna_artifact::{
-    client_plan::ResourceKind,
-    server_parameter_echo::ServerParameterEchoError,
-};
+use orna_artifact::{client_plan::ResourceKind, server_parameter_echo::ServerParameterEchoError};
 use orna_core::{
     CallSiteId, CatalogueRevisionId, FieldId, FunctionId, FunctionRevisionId, ParameterId,
-    SchemaId, StateSlotId,
-    SourceUnitId, StandardLibraryRevisionId, TypeBindingId, TypeId,
+    SchemaId, SourceUnitId, StandardLibraryRevisionId, StateSlotId, TypeBindingId, TypeId,
     canonical_hash::CanonicalHashError,
     catalogue::{
         CatalogueSnapshot, FunctionDomain, FunctionSecurity, FunctionTransaction,
@@ -950,6 +946,82 @@ impl CheckedBundle {
     }
 }
 
+/// A checked CLIENT local binding kind.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum CheckedClientLocalKind {
+    /// A value evaluated by the local runtime.
+    Value,
+    /// A resource handle that is evaluated when an AWAIT reads it.
+    Resource(ResourceKind),
+}
+
+/// One checked CLIENT local binding.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct CheckedClientLocal {
+    pub(super) ordinal: u32,
+    pub(super) name: String,
+    pub(super) semantic_type: SemanticType<CheckedTypeId>,
+    pub(super) standard_value_type: Option<TypeId>,
+    pub(super) kind: CheckedClientLocalKind,
+    pub(super) location: SourceLocation,
+}
+impl CheckedClientLocal {
+    pub(crate) const fn location(&self) -> &SourceLocation {
+        &self.location
+    }
+}
+
+impl CheckedClientLocal {
+    pub(crate) const fn ordinal(&self) -> u32 {
+        self.ordinal
+    }
+
+    pub(crate) const fn semantic_type(&self) -> SemanticType<CheckedTypeId> {
+        self.semantic_type
+    }
+
+    pub(crate) const fn standard_value_type(&self) -> Option<TypeId> {
+        self.standard_value_type
+    }
+
+    pub(crate) const fn kind(&self) -> CheckedClientLocalKind {
+        self.kind
+    }
+}
+
+/// One checked procedural CLIENT statement.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum CheckedClientStatement {
+    /// Declares and initialises one local binding.
+    Let {
+        /// The local ordinal declared by this statement.
+        local: u32,
+        /// The checked initial expression.
+        expression: CheckedClientExpression,
+    },
+    /// Replaces one existing local binding.
+    Assignment {
+        /// The local ordinal assigned by this statement.
+        local: u32,
+        /// The checked replacement expression.
+        expression: CheckedClientExpression,
+    },
+}
+
+impl CheckedClientStatement {
+    pub(crate) const fn local(&self) -> u32 {
+        match self {
+            Self::Let { local, .. } | Self::Assignment { local, .. } => *local,
+        }
+    }
+
+    pub(crate) fn expression(&self) -> &CheckedClientExpression {
+        match self {
+            Self::Let { expression, .. } | Self::Assignment { expression, .. } => expression,
+        }
+    }
+}
+
 /// A checked CLIENT function body.
 #[non_exhaustive]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -965,6 +1037,15 @@ pub(crate) enum CheckedClientFunctionBody {
     Expression {
         /// The checked expression returned by the function.
         expression: CheckedClientExpression,
+    },
+    /// A procedural CLIENT body with ordered local declarations and statements.
+    Procedural {
+        /// The local bindings in declaration order.
+        locals: Vec<CheckedClientLocal>,
+        /// The procedural statements in source order.
+        statements: Vec<CheckedClientStatement>,
+        /// The final checked return expression.
+        return_expression: CheckedClientExpression,
     },
     /// A closed CLIENT state block with ordered slot metadata and one return expression (ADR 0069).
     StateBlock {
@@ -994,9 +1075,10 @@ impl CheckedClientFunctionBody {
     pub(crate) fn as_boolean_literal(&self) -> Option<(bool, &SourceLocation)> {
         match self {
             Self::BooleanLiteral { value, location } => Some((*value, location)),
-            Self::Expression { .. } | Self::StateBlock { .. } | Self::ExternalContract { .. } => {
-                None
-            }
+            Self::Expression { .. }
+            | Self::Procedural { .. }
+            | Self::StateBlock { .. }
+            | Self::ExternalContract { .. } => None,
             #[cfg(test)]
             Self::Unsupported => None,
         }
@@ -1059,6 +1141,13 @@ pub(crate) enum CheckedClientExpression {
         /// The source location of the read.
         location: SourceLocation,
     },
+    /// A read of one checked procedural local binding.
+    LocalRead {
+        /// The local declaration ordinal.
+        local: u32,
+        /// The source location of the read.
+        location: SourceLocation,
+    },
     /// A path from one parameter through object fields.
     FieldPath {
         /// The parameter at the start of the path.
@@ -1097,19 +1186,33 @@ pub(crate) struct CheckedResourceOperation {
 
 impl CheckedResourceOperation {
     /// Returns the scalar/stream resource kind.
-    pub(crate) const fn kind(&self) -> ResourceKind { self.kind }
+    pub(crate) const fn kind(&self) -> ResourceKind {
+        self.kind
+    }
     /// Returns the checked SERVER target function identity.
-    pub(crate) const fn target(&self) -> CheckedFunctionId { self.target }
+    pub(crate) const fn target(&self) -> CheckedFunctionId {
+        self.target
+    }
     /// Returns the deterministic call-site identity.
-    pub(crate) const fn call_site(&self) -> CallSiteId { self.call_site }
+    pub(crate) const fn call_site(&self) -> CallSiteId {
+        self.call_site
+    }
     /// Returns canonical parameter-to-expression argument pairs.
-    pub(crate) fn arguments(&self) -> &[(CheckedParameterId, CheckedClientExpression)] { &self.arguments }
+    pub(crate) fn arguments(&self) -> &[(CheckedParameterId, CheckedClientExpression)] {
+        &self.arguments
+    }
     /// Returns the checked target-derived result type.
-    pub(crate) const fn result_type(&self) -> SemanticType<CheckedTypeId> { self.result_type }
+    pub(crate) const fn result_type(&self) -> SemanticType<CheckedTypeId> {
+        self.result_type
+    }
     /// Returns the durable standard value-type identity when one exists.
-    pub(crate) const fn standard_result_type(&self) -> Option<TypeId> { self.standard_result_type }
+    pub(crate) const fn standard_result_type(&self) -> Option<TypeId> {
+        self.standard_result_type
+    }
     /// Returns the source location of the constructor expression.
-    pub(crate) fn location(&self) -> &SourceLocation { &self.location }
+    pub(crate) fn location(&self) -> &SourceLocation {
+        &self.location
+    }
 }
 
 /// The checked argument source of one CLIENT capability requirement.
@@ -1211,7 +1314,6 @@ impl CheckedClientStateSlot {
     pub(crate) fn name(&self) -> &str {
         &self.name
     }
-
 
     pub(crate) const fn semantic_type(&self) -> SemanticType<CheckedTypeId> {
         self.semantic_type
