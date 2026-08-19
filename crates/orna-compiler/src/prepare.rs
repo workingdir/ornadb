@@ -4676,6 +4676,33 @@ impl IdentityMap {
                 }
             }
         }
+
+        // CLIENT expressions may target functions that are already installed
+        // and therefore are not part of this checked bundle.  Their stable
+        // function and parameter identities still have to be present in the
+        // map before resource (or ordinary CLIENT-call) lowering can emit a
+        // durable artifact.
+        for function in checked.client_functions() {
+            for reference in function.references() {
+                let CheckedDefinitionReferenceTarget::Function(
+                    CheckedFunctionId::Existing(function_id),
+                ) = reference.target()
+                else {
+                    continue;
+                };
+                let Some(active_function) = active.catalogue().function_by_id(function_id) else {
+                    return Err(existing_mismatch(DefinitionIdentity::Function(function_id)));
+                };
+                result.functions.entry(CheckedFunctionId::Existing(function_id)).or_insert(function_id);
+                for parameter in active_function.parameters() {
+                    result
+                        .parameters
+                        .entry(CheckedParameterId::Existing(parameter.id()))
+                        .or_insert(parameter.id());
+                }
+            }
+        }
+
         Ok(result)
     }
 
@@ -6630,6 +6657,13 @@ impl<'a> CandidateBuilder<'a> {
         // substitute once the identity map allocates durable IDs.
         arguments.sort_by_key(|(parameter, _)| *parameter);
         let target = self.identities.function(operation.target())?;
+        let target_is_server = self.checked.server_functions().iter().any(|candidate| candidate.id() == operation.target())
+            || self.active.catalogue().function_by_id(target).is_some_and(|candidate| candidate.domain() == FunctionDomain::Server);
+        if !target_is_server {
+            return Err(PrepareError::InvalidCheckedBundle {
+                reason: "checked CLIENT resource target is not a SERVER function",
+            });
+        }
         let target_revision = self.resource_target_revision(operation.target(), target)?;
         Ok(ResourceOperationNode::new(
             operation.kind(),

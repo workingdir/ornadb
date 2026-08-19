@@ -4515,6 +4515,8 @@ struct ClientExpressionType {
     standard_value_type: Option<orna_core::TypeId>,
 }
 
+type ClientLocalEnvironment = HashMap<String, (CheckedClientExpression, ClientExpressionType)>;
+
 #[derive(Clone)]
 struct ClientExpressionParameter {
     id: CheckedParameterId,
@@ -4835,7 +4837,30 @@ fn check_resource_constructor(
     diagnostics: &mut Vec<CompilerDiagnostic>,
     references: &mut Vec<CheckedDefinitionReference>,
     used_capabilities: &mut HashSet<QualifiedSemanticName>,
+    locals: &ClientLocalEnvironment,
 ) -> Option<(CheckedClientExpression, ClientExpressionType)> {
+    if let ClientExpression::LocalRead { local } = expression {
+        let name = semantic_part(local);
+        let Some((checked, expression_type)) = locals.get(&name) else {
+            diagnostics.push(diagnostic(
+                DiagnosticCode::UnknownQualifiedName,
+                format!("unknown CLIENT local {name}"),
+                input.logical_path,
+                &local.span,
+            ));
+            return None;
+        };
+        if !matches!(checked, CheckedClientExpression::Resource { .. }) {
+            diagnostics.push(diagnostic(
+                DiagnosticCode::DomainIncompatible,
+                format!("CLIENT local {name} is not a resource"),
+                input.logical_path,
+                &local.span,
+            ));
+            return None;
+        }
+        return Some((checked.clone(), *expression_type));
+    }
     let ClientExpression::Call { callee, arguments, span } = expression else {
         diagnostics.push(diagnostic(DiagnosticCode::DomainIncompatible, "AWAIT requires a std.data.resource or std.data.stream_resource constructor", input.logical_path, expression.span()));
         return None;
@@ -4945,7 +4970,7 @@ fn check_resource_constructor(
             diagnostics.push(diagnostic(DiagnosticCode::DuplicateDefinition, format!("duplicate SERVER resource parameter {}", target.parameters[parameter_index].name), input.logical_path, &argument.span));
             return None;
         }
-        let (checked, expression_type) = check_client_expression(&argument.value, input, targets, resource_targets, query_catalogue, base, server_names, standard, diagnostics, references, used_capabilities)?;
+        let (checked, expression_type) = check_client_expression(&argument.value, input, targets, resource_targets, query_catalogue, base, server_names, standard, diagnostics, references, used_capabilities, locals)?;
         let parameter = &target.parameters[parameter_index];
         if !client_expression_types_compatible(expression_type, parameter.expression_type) {
             diagnostics.push(diagnostic(DiagnosticCode::TypeMismatch, format!("resource argument does not match SERVER parameter {}", parameter.name), input.logical_path, &argument.span));
@@ -4997,6 +5022,7 @@ fn check_client_expression(
     diagnostics: &mut Vec<CompilerDiagnostic>,
     references: &mut Vec<CheckedDefinitionReference>,
     used_capabilities: &mut HashSet<QualifiedSemanticName>,
+    locals: &ClientLocalEnvironment,
 ) -> Option<(CheckedClientExpression, ClientExpressionType)> {
     let expression_location = || location(input.logical_path, expression.span());
     match expression {
@@ -5013,6 +5039,7 @@ fn check_client_expression(
                 diagnostics,
                 references,
                 used_capabilities,
+                locals,
             )?;
             Some((
                 CheckedClientExpression::Await {
@@ -5066,6 +5093,9 @@ fn check_client_expression(
         }
         ClientExpression::ParameterRead { parameter } => {
             let name = semantic_part(parameter);
+            if let Some((checked, expression_type)) = locals.get(&name) {
+                return Some((checked.clone(), *expression_type));
+            }
             let Some(parameter) = input
                 .parameters
                 .iter()
@@ -5089,6 +5119,19 @@ fn check_client_expression(
                     standard_value_type: parameter.standard_value_type,
                 },
             ))
+        }
+        ClientExpression::LocalRead { local } => {
+            let name = semantic_part(local);
+            let Some((checked, expression_type)) = locals.get(&name) else {
+                diagnostics.push(diagnostic(
+                    DiagnosticCode::UnknownQualifiedName,
+                    format!("unknown CLIENT local {name}"),
+                    input.logical_path,
+                    &local.span,
+                ));
+                return None;
+            };
+            Some((checked.clone(), *expression_type))
         }
         ClientExpression::FieldPath {
             root,
@@ -5182,6 +5225,7 @@ fn check_client_expression(
                 diagnostics,
                 references,
                 used_capabilities,
+                locals,
             )?;
             let (right_checked, right_type) = check_client_expression(
                 right,
@@ -5195,6 +5239,7 @@ fn check_client_expression(
                 diagnostics,
                 references,
                 used_capabilities,
+                locals,
             )?;
             let text = SemanticType::scalar(StandardScalar::CharacterLargeObject);
             if left_type.semantic_type != text || right_type.semantic_type != text {
@@ -5313,6 +5358,7 @@ fn check_client_expression(
                     diagnostics,
                     references,
                     used_capabilities,
+                    locals,
                 )?;
                 let parameter = &target.parameters[parameter_index];
                 if !client_expression_types_compatible(expression_type, parameter.expression_type) {
@@ -5353,6 +5399,22 @@ fn check_client_expression(
                 target.return_type,
             ))
         }
+    }
+}
+
+fn client_local_resource_kind(source: &SourceSlice) -> Option<ResourceKind> {
+    let normalized: String = source
+        .text
+        .chars()
+        .filter(|character| !character.is_ascii_whitespace())
+        .flat_map(char::to_lowercase)
+        .collect();
+    if normalized.starts_with("std.data.resource<") && normalized.ends_with('>') {
+        Some(ResourceKind::Scalar)
+    } else if normalized.starts_with("std.data.streamresource<") && normalized.ends_with('>') {
+        Some(ResourceKind::Stream)
+    } else {
+        None
     }
 }
 
@@ -5437,6 +5499,7 @@ fn validate_client_await_positions(
         | ClientExpression::IntegerLiteral { .. }
         | ClientExpression::BooleanLiteral { .. }
         | ClientExpression::ParameterRead { .. }
+        | ClientExpression::LocalRead { .. }
         | ClientExpression::FieldPath { .. } => {}
     }
 }
@@ -5466,7 +5529,12 @@ fn unsupported_client_state_reference(
             state_names,
         )
         .or_else(|| unsupported_client_state_reference(right, input, state_names)),
-        _ => None,
+        ClientExpression::StringLiteral { .. }
+        | ClientExpression::IntegerLiteral { .. }
+        | ClientExpression::BooleanLiteral { .. }
+        | ClientExpression::ParameterRead { .. }
+        | ClientExpression::LocalRead { .. }
+        | ClientExpression::FieldPath { .. } => None,
     }
 }
 
@@ -5529,6 +5597,7 @@ fn check_client_functions(
                     }
                     let mut references = Vec::new();
                     let mut used_capabilities = HashSet::new();
+                    let locals = ClientLocalEnvironment::new();
                     let (checked, expression_type) = check_client_expression(
                         expression,
                         input,
@@ -5541,6 +5610,7 @@ fn check_client_functions(
                         diagnostics,
                         &mut references,
                         &mut used_capabilities,
+                        &locals,
                     )?;
                     if !client_expression_types_compatible(
                         expression_type,
@@ -5650,6 +5720,7 @@ fn check_client_functions(
                                     diagnostics,
                                     &mut references,
                                     &mut used_capabilities,
+                                    &ClientLocalEnvironment::new(),
                                 )?;
                                 if !client_expression_types_compatible(expression_type, state_type) {
                                     diagnostics.push(diagnostic(
@@ -5678,6 +5749,74 @@ fn check_client_functions(
                             default,
                             location: location(input.logical_path, &state.span),
                         });
+                    }
+                    let mut locals = ClientLocalEnvironment::new();
+                    for local in &block.locals {
+                        let local_name = semantic_part(&local.name);
+                        if locals.contains_key(&local_name) {
+                            diagnostics.push(diagnostic(
+                                DiagnosticCode::DuplicateDefinition,
+                                format!("duplicate CLIENT local definition {local_name} in {}", input.name),
+                                input.logical_path,
+                                &local.name.span,
+                            ));
+                            return None;
+                        }
+                        let diagnostics_before = diagnostics.len();
+                        validate_client_await_positions(&local.expression, false, input, diagnostics);
+                        if diagnostics.len() != diagnostics_before {
+                            return None;
+                        }
+                        if let Some(span) = unsupported_client_state_reference(
+                            &local.expression,
+                            input,
+                            &state_names,
+                        ) {
+                            diagnostics.push(diagnostic(
+                                DiagnosticCode::DomainIncompatible,
+                                "CLIENT state references are not supported in expressions",
+                                input.logical_path,
+                                &span,
+                            ));
+                            return None;
+                        }
+                        let (checked, expression_type) = check_resource_constructor(
+                            &local.expression,
+                            input,
+                            &targets,
+                            resource_targets,
+                            query_catalogue,
+                            base,
+                            server_names,
+                            standard,
+                            diagnostics,
+                            &mut references,
+                            &mut used_capabilities,
+                            &locals,
+                        )?;
+                        let Some(expected_kind) = client_local_resource_kind(&local.type_source) else {
+                            diagnostics.push(diagnostic(
+                                DiagnosticCode::TypeMismatch,
+                                format!("CLIENT local {local_name} must declare std.data.Resource<T> or std.data.StreamResource<T>"),
+                                input.logical_path,
+                                &local.type_source.span,
+                            ));
+                            return None;
+                        };
+                        let actual_kind = match &checked {
+                            CheckedClientExpression::Resource { operation } => operation.kind,
+                            _ => unreachable!("resource constructor checker returns a resource"),
+                        };
+                        if actual_kind != expected_kind {
+                            diagnostics.push(diagnostic(
+                                DiagnosticCode::TypeMismatch,
+                                format!("CLIENT local {local_name} type does not match its resource constructor"),
+                                input.logical_path,
+                                &local.type_source.span,
+                            ));
+                            return None;
+                        }
+                        locals.insert(local_name, (checked, expression_type));
                     }
                     let Some(expression) = block.return_expression.as_ref() else {
                         diagnostics.push(diagnostic(
@@ -5716,6 +5855,7 @@ fn check_client_functions(
                         diagnostics,
                         &mut references,
                         &mut used_capabilities,
+                        &locals,
                     )?;
                     if !client_expression_types_compatible(
                         return_type,
