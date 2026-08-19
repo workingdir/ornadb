@@ -17220,6 +17220,71 @@ mod tests {
     }
 
     #[test]
+    fn accepts_procedural_scalar_resource_local_await() {
+        let base = CatalogueSnapshot::new_with_functions(
+            CatalogueRevisionId::from_bytes([0x41; 16]),
+            vec![SchemaDefinition::new(
+                SchemaId::from_bytes([0x42; 16]),
+                QualifiedSemanticName::new(["tasks"]).unwrap(),
+            )],
+            Vec::new(),
+            vec![FunctionDefinition::new(
+                FunctionId::from_bytes([0x43; 16]),
+                QualifiedSemanticName::new(["tasks", "find"]).unwrap(),
+                FunctionDomain::Server,
+                vec![parameter(
+                    0x44,
+                    "p_name",
+                    0,
+                    ResolvedType::Scalar(StandardScalar::CharacterLargeObject),
+                )],
+                FunctionReturn::Single(ResolvedType::Scalar(StandardScalar::CharacterLargeObject)),
+                FunctionRevisionId::from_bytes([0x45; 16]),
+                FunctionSecurity::Invoker,
+                Some(FunctionTransaction::ReadOnly),
+                FunctionVolatility::Stable,
+            )],
+        )
+        .unwrap();
+        let source = "CREATE SCHEMA ui; CREATE CLIENT FUNCTION ui.find(p_name TEXT) RETURNS TEXT IS \
+            LET rows std.data.Resource<TEXT> := std.data.resource(target => tasks.find, arguments => std.call.args(p_name => p_name)); \
+            BEGIN RETURN AWAIT rows; END;";
+        let report = check(&bundle([("resource.orna", source)]), &base);
+        assert!(
+            report.diagnostics().is_empty(),
+            "{:#?}",
+            report.diagnostics()
+        );
+        let function = &report.checked_bundle().expect("resource source checks").client_functions()[0];
+        let CheckedClientFunctionBody::Procedural {
+            locals,
+            statements,
+            return_expression,
+        } = function.body()
+        else {
+            panic!("expected a checked procedural CLIENT body");
+        };
+        assert_eq!(locals.len(), 1);
+        assert_eq!(locals[0].ordinal(), 0);
+        assert_eq!(
+            locals[0].kind(),
+            super::CheckedClientLocalKind::Resource(orna_artifact::client_plan::ResourceKind::Scalar)
+        );
+        assert_eq!(statements.len(), 1);
+        assert!(matches!(
+            &statements[0],
+            super::CheckedClientStatement::Let { local: 0, expression: super::CheckedClientExpression::Resource { operation } }
+                if operation.kind() == orna_artifact::client_plan::ResourceKind::Scalar
+                    && operation.target() == super::CheckedFunctionId::Existing(FunctionId::from_bytes([0x43; 16]))
+        ));
+        assert!(matches!(
+            return_expression,
+            super::CheckedClientExpression::Await { expression, .. }
+                if matches!(expression.as_ref(), super::CheckedClientExpression::LocalRead { local: 0, .. })
+        ));
+    }
+
+    #[test]
     fn rejects_state_blocks_mixed_with_procedural_declarations() {
         let source = "CREATE SCHEMA examples; CREATE CLIENT FUNCTION examples.mixed() RETURNS BOOLEAN IS STATE value TEXT; BEGIN LET other := 'x'; RETURN TRUE; END;";
         let report = check(&bundle([("client.orna", source)]), &empty_catalogue());
