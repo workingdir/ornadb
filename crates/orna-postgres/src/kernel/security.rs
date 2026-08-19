@@ -1522,6 +1522,55 @@ impl PostgresKernel {
         finish_security_session(operation, session.shutdown().await)
     }
 
+    /// Records a redacted cancelled resource terminal in its own transaction.
+    ///
+    /// The request is untrusted metadata: no target is retained unless a later
+    /// adapter path proves it independently. The kernel generates the nested
+    /// invocation identity and writes the matching unresolved invocation audit
+    /// row before committing the terminal record.
+    pub async fn record_cancelled_resource_audit(
+        &self,
+        authenticated_session: &AuthenticatedSession,
+        request: &ResourceRequest,
+    ) -> Result<(), PostgresKernelError> {
+        let mut session = self.open().await?;
+        let operation = async {
+            let transaction = session
+                .client
+                .build_transaction()
+                .isolation_level(IsolationLevel::ReadCommitted)
+                .start()
+                .await
+                .map_err(PostgresKernelError::Database)?;
+            require_current_migrations(&transaction).await?;
+            let nested_invocation_id = InvocationId::new();
+            append_unresolved_invocation_audit(
+                &transaction,
+                authenticated_session,
+                nested_invocation_id,
+            )
+            .await?;
+            append_resource_audit_event(
+                &transaction,
+                authenticated_session,
+                request,
+                nested_invocation_id,
+                SecurityAuditOutcome::Denied,
+                ResourceAuditTerminalOutcome::Cancelled,
+                None,
+                None,
+                None,
+            )
+            .await?;
+            transaction
+                .commit()
+                .await
+                .map_err(PostgresKernelError::Database)
+        }
+        .await;
+        finish_security_session(operation, session.shutdown().await)
+    }
+
     /// Installs the fixed local service identity used by catalogue health.
     ///
     /// Repeating the exact UID is idempotent. A partial or conflicting durable
@@ -2396,6 +2445,114 @@ pub(crate) async fn append_invocation_audit_event(
         .map_err(PostgresKernelError::Database)?;
     Ok(event_id)
 }
+/// The terminal state retained for one authenticated resource request.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ResourceAuditTerminalOutcome {
+    /// The target returned its complete bounded result.
+    Completed,
+    /// The request was denied or execution failed before a result completed.
+    Failed,
+    /// Cancellation won before a terminal result was committed.
+    Cancelled,
+}
+
+/// Appends one redacted resource terminal row in the caller's transaction.
+///
+/// This helper deliberately accepts only identity, decision, terminal, target,
+/// and bounded count metadata. Arguments and returned values never cross this
+/// boundary. A target is retained only when the caller has recovered an exact
+/// active target; unresolved or stale targets must pass None.
+pub(crate) async fn append_resource_audit_event(
+    transaction: &Transaction<'_>,
+    authenticated_session: &AuthenticatedSession,
+    request: &ResourceRequest,
+    nested_invocation_id: InvocationId,
+    decision: SecurityAuditOutcome,
+    terminal: ResourceAuditTerminalOutcome,
+    target: Option<InvocationTarget>,
+    item_count: Option<u64>,
+    byte_count: Option<u64>,
+) -> Result<(), PostgresKernelError> {
+    let item_count = item_count
+        .map(|count| i64::try_from(count).map_err(|_| resource_audit_invariant(
+            &request.request_id.canonical(),
+            "resource item count must fit a signed 64-bit database count",
+        )))
+        .transpose()?;
+    let byte_count = byte_count
+        .map(|count| i64::try_from(count).map_err(|_| resource_audit_invariant(
+            &request.request_id.canonical(),
+            "resource byte count must fit a signed 64-bit database count",
+        )))
+        .transpose()?;
+    let event_id = InvocationAuditEventId::new();
+    let event_id_bytes = event_id.to_bytes().to_vec();
+    let request_id = request.request_id.to_bytes().to_vec();
+    let nested_invocation_id_bytes = nested_invocation_id.to_bytes().to_vec();
+    let parent_invocation_id = request.parent_invocation_id.to_bytes().to_vec();
+    let call_site_id = request.call_site_id.to_bytes().to_vec();
+    let session_principal = authenticated_session.principal().to_bytes().to_vec();
+    let (target_function, source_revision, catalogue_revision) = target
+        .map(|target| (
+            Some(target.function().to_bytes().to_vec()),
+            Some(target.revision().source().to_bytes().to_vec()),
+            Some(target.revision().catalogue().to_bytes().to_vec()),
+        ))
+        .unwrap_or((None, None, None));
+    let decision = encode_resource_audit_decision(decision);
+    let terminal = encode_resource_audit_terminal(terminal);
+    transaction
+        .execute(
+            "INSERT INTO _orna_kernel.resource_audit_events
+                 (event_id, request_id, nested_invocation_id, parent_invocation_id,
+                  call_site_id, target_function_id, source_revision_id,
+                  catalogue_revision_id, session_principal_id, decision_outcome,
+                  terminal_outcome, item_count, byte_count)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)",
+            &[
+                &event_id_bytes,
+                &request_id,
+                &nested_invocation_id_bytes,
+                &parent_invocation_id,
+                &call_site_id,
+                &target_function,
+                &source_revision,
+                &catalogue_revision,
+                &session_principal,
+                &decision,
+                &terminal,
+                &item_count,
+                &byte_count,
+            ],
+        )
+        .await
+        .map_err(PostgresKernelError::Database)?;
+    Ok(())
+}
+
+fn encode_resource_audit_decision(decision: SecurityAuditOutcome) -> &'static str {
+    match decision {
+        SecurityAuditOutcome::Allowed => "allowed",
+        SecurityAuditOutcome::Denied => "denied",
+    }
+}
+
+fn encode_resource_audit_terminal(terminal: ResourceAuditTerminalOutcome) -> &'static str {
+    match terminal {
+        ResourceAuditTerminalOutcome::Completed => "completed",
+        ResourceAuditTerminalOutcome::Failed => "failed",
+        ResourceAuditTerminalOutcome::Cancelled => "cancelled",
+    }
+}
+
+fn resource_audit_invariant(record: &str, rule: &'static str) -> PostgresKernelError {
+    PostgresKernelError::DurableInvariant {
+        relation: "_orna_kernel.resource_audit_events",
+        record: record.to_owned(),
+        rule,
+    }
+}
+
 /// One privately resolved sealed invocation target for the PostgreSQL kernel.
 ///
 /// This mirrors the closed resolution inside `orna-core` so the durable audit
@@ -3483,7 +3640,255 @@ pub(crate) async fn recover_invocation_audit_events(
             require_invocation_audit_target(transaction, target, &record).await?;
         }
     }
+    recover_resource_audit_events(transaction).await?;
     Ok(())
+}
+
+async fn recover_resource_audit_events(
+    transaction: &Transaction<'_>,
+) -> Result<(), PostgresKernelError> {
+    require_resource_audit_relation_columns(transaction).await?;
+    let rows = transaction
+        .query(
+            "SELECT sequence, event_id, recorded_at, request_id,
+                    nested_invocation_id, parent_invocation_id, call_site_id,
+                    target_function_id, source_revision_id, catalogue_revision_id,
+                    session_principal_id, decision_outcome, terminal_outcome,
+                    item_count, byte_count
+             FROM _orna_kernel.resource_audit_events
+             ORDER BY sequence",
+            &[],
+        )
+        .await
+        .map_err(PostgresKernelError::Database)?;
+    for row in &rows {
+        let sequence: i64 = resource_audit_column(row, "selected row", "sequence")?;
+        let record = sequence.to_string();
+        if sequence <= 0 {
+            return Err(resource_audit_invariant(
+                &record,
+                "generated resource audit sequence must be positive",
+            ));
+        }
+        let _: SystemTime = resource_audit_column(row, &record, "recorded_at")?;
+        let _: [u8; 16] = resource_audit_id(row, &record, "event_id")?;
+        let request_id = InvocationId::from_bytes(resource_audit_id(row, &record, "request_id")?);
+        let nested = InvocationId::from_bytes(resource_audit_id(
+            row,
+            &record,
+            "nested_invocation_id",
+        )?);
+        let _: [u8; 16] = resource_audit_id(row, &record, "parent_invocation_id")?;
+        let _: [u8; 16] = resource_audit_id(row, &record, "call_site_id")?;
+        let target_function = resource_audit_optional_id(row, &record, "target_function_id")?
+            .map(FunctionId::from_bytes);
+        let source = resource_audit_optional_id(row, &record, "source_revision_id")?
+            .map(SourceRevisionId::from_bytes);
+        let catalogue = resource_audit_optional_id(row, &record, "catalogue_revision_id")?
+            .map(CatalogueRevisionId::from_bytes);
+        if (target_function.is_some(), source.is_some(), catalogue.is_some())
+            != (true, true, true)
+            && (target_function.is_some(), source.is_some(), catalogue.is_some())
+                != (false, false, false)
+        {
+            return Err(resource_audit_invariant(
+                &record,
+                "target and pinned revision evidence must be present together",
+            ));
+        }
+        let session_principal = PrincipalId::from_bytes(resource_audit_id(
+            row,
+            &record,
+            "session_principal_id",
+        )?);
+        let decision: String = resource_audit_column(row, &record, "decision_outcome")?;
+        let terminal: String = resource_audit_column(row, &record, "terminal_outcome")?;
+        if !matches!(decision.as_str(), "allowed" | "denied") {
+            return Err(resource_audit_invariant(
+                &record,
+                "resource decision outcome must be allowed or denied",
+            ));
+        }
+        if !matches!(terminal.as_str(), "completed" | "failed" | "cancelled") {
+            return Err(resource_audit_invariant(
+                &record,
+                "resource terminal outcome must be completed, failed, or cancelled",
+            ));
+        }
+        let item_count: Option<i64> = resource_audit_column(row, &record, "item_count")?;
+        let byte_count: Option<i64> = resource_audit_column(row, &record, "byte_count")?;
+        if item_count.is_some_and(|count| count < 0) || byte_count.is_some_and(|count| count < 0) {
+            return Err(resource_audit_invariant(
+                &record,
+                "resource audit counts must be non-negative",
+            ));
+        }
+        if terminal != "completed" && (item_count.is_some() || byte_count.is_some()) {
+            return Err(resource_audit_invariant(
+                &record,
+                "only completed resource audits may retain result counts",
+            ));
+        }
+        if terminal == "completed" && decision != "allowed" {
+            return Err(resource_audit_invariant(
+                &record,
+                "completed resource audit requires an allowed decision",
+            ));
+        }
+        let invocation = transaction
+            .query_opt(
+                "SELECT outcome, session_principal_id, function_id,
+                        source_revision_id, catalogue_revision_id
+                 FROM _orna_kernel.invocation_audit_events
+                 WHERE invocation_id = $1",
+                &[&nested.to_bytes().to_vec()],
+            )
+            .await
+            .map_err(PostgresKernelError::Database)?
+            .ok_or_else(|| {
+                resource_audit_invariant(
+                    &record,
+                    "nested resource invocation audit evidence is missing",
+                )
+            })?;
+        let invocation_outcome: String = resource_audit_column(
+            &invocation,
+            &record,
+            "outcome",
+        )?;
+        let expected_invocation_outcome = decision.as_str();
+        if invocation_outcome != expected_invocation_outcome {
+            return Err(resource_audit_invariant(
+                &record,
+                "nested invocation outcome does not match resource decision",
+            ));
+        }
+        let invocation_session: Vec<u8> = resource_audit_column(
+            &invocation,
+            &record,
+            "session_principal_id",
+        )?;
+        if invocation_session != session_principal.to_bytes() {
+            return Err(resource_audit_invariant(
+                &record,
+                "nested invocation session principal does not match resource audit",
+            ));
+        }
+        if let (Some(function), Some(source), Some(catalogue)) =
+            (target_function, source, catalogue)
+        {
+            let invocation_function: Option<Vec<u8>> = resource_audit_column(
+                &invocation,
+                &record,
+                "function_id",
+            )?;
+            let invocation_source: Option<Vec<u8>> = resource_audit_column(
+                &invocation,
+                &record,
+                "source_revision_id",
+            )?;
+            let invocation_catalogue: Option<Vec<u8>> = resource_audit_column(
+                &invocation,
+                &record,
+                "catalogue_revision_id",
+            )?;
+            if invocation_function.as_deref() != Some(function.to_bytes().as_slice())
+                || invocation_source.as_deref() != Some(source.to_bytes().as_slice())
+                || invocation_catalogue.as_deref() != Some(catalogue.to_bytes().as_slice())
+            {
+                return Err(resource_audit_invariant(
+                    &record,
+                    "nested invocation target does not match resource audit",
+                ));
+            }
+            require_invocation_audit_target(
+                transaction,
+                InvocationTarget::new(function, RevisionPair::new(source, catalogue)),
+                &record,
+            )
+            .await?;
+        }
+        let _ = request_id;
+    }
+    Ok(())
+}
+
+async fn require_resource_audit_relation_columns(
+    transaction: &Transaction<'_>,
+) -> Result<(), PostgresKernelError> {
+    let rows = transaction
+        .query(
+            "SELECT attribute.attname
+             FROM pg_catalog.pg_attribute AS attribute
+             JOIN pg_catalog.pg_class AS class ON class.oid = attribute.attrelid
+             JOIN pg_catalog.pg_namespace AS namespace ON namespace.oid = class.relnamespace
+             WHERE namespace.nspname = '_orna_kernel'
+               AND class.relname = 'resource_audit_events'
+               AND attribute.attnum > 0
+               AND NOT attribute.attisdropped
+             ORDER BY attribute.attnum",
+            &[],
+        )
+        .await
+        .map_err(PostgresKernelError::Database)?;
+    let names = rows
+        .iter()
+        .map(|row| resource_audit_column(row, "relation", "attname"))
+        .collect::<Result<Vec<String>, _>>()?;
+    let expected = [
+        "sequence", "event_id", "recorded_at", "request_id",
+        "nested_invocation_id", "parent_invocation_id", "call_site_id",
+        "target_function_id", "source_revision_id", "catalogue_revision_id",
+        "session_principal_id", "decision_outcome", "terminal_outcome",
+        "item_count", "byte_count",
+    ];
+    if names != expected {
+        return Err(resource_audit_invariant(
+            "relation",
+            "resource audit relation has unsupported disclosure-bearing columns",
+        ));
+    }
+    Ok(())
+}
+
+fn resource_audit_optional_id(
+    row: &Row,
+    record: &str,
+    column: &'static str,
+) -> Result<Option<[u8; 16]>, PostgresKernelError> {
+    let bytes: Option<Vec<u8>> = resource_audit_column(row, record, column)?;
+    bytes
+        .map(|bytes| {
+            bytes.try_into().map_err(|_| {
+                resource_audit_invariant(record, "resource audit identity must be exactly sixteen bytes")
+            })
+        })
+        .transpose()
+}
+
+fn resource_audit_id(
+    row: &Row,
+    record: &str,
+    column: &'static str,
+) -> Result<[u8; 16], PostgresKernelError> {
+    let bytes: Vec<u8> = resource_audit_column(row, record, column)?;
+    bytes.try_into().map_err(|_| {
+        resource_audit_invariant(record, "resource audit identity must be exactly sixteen bytes")
+    })
+}
+
+fn resource_audit_column<T: FromSqlOwned>(
+    row: &Row,
+    record: &str,
+    column: &'static str,
+) -> Result<T, PostgresKernelError> {
+    row.try_get(column).map_err(|source| PostgresKernelError::RowDecode {
+        relation: "_orna_kernel.resource_audit_events",
+        record: record.to_owned(),
+        column,
+        rule: "resource audit column must use its exact PostgreSQL type",
+        source,
+    })
 }
 
 fn decode_invocation_audit_decision(
