@@ -47,10 +47,12 @@ use orna_core::{
     security::{
         ExecuteDecision, ExecuteDenial, ExecuteGrant, InvocationTarget,
         LocalPeerAuthenticationError, LocalPeerCredential, Principal, PrincipalKind,
-        PrincipalStatus, RoleMembership, SecurityAuditDecision, SecurityAuditDenial,
+        PrincipalStatus, PrivilegeClass, PrivilegeDenial, PrivilegeGrant, RoleMembership,
+        SecurityAdminAuditOperation, SecurityAuditDecision, SecurityAuditDenial,
         SecurityAuditEvent, SecurityAuditKind, SecurityAuditOutcome, SecuritySnapshot,
         SecuritySnapshotError, SessionBindingError,
     },
+    system::SYS_SECURITY_CREATE_PRINCIPAL_FUNCTION_ID,
     types::{ResolvedType, StandardScalar, TypeDescriptor, TypeDescriptorKind},
     value::RuntimeValue,
 };
@@ -2189,6 +2191,151 @@ async fn recovers_closed_security_audit_history_and_rejects_tamper() -> TestResu
             session.shutdown().await,
             "security audit tamper retention checks",
         )?;
+        require_no_session_leaks(&database).await
+    })
+    .await
+}
+#[tokio::test]
+#[ignore = "requires the Compose PostgreSQL development service"]
+async fn recovers_security_admin_audit_with_exact_redacted_shape() -> TestResult<()> {
+    const ADMIN: PrincipalId = PrincipalId::from_bytes([0x71; 16]);
+    const USER: PrincipalId = PrincipalId::from_bytes([0x72; 16]);
+    const CREATED: PrincipalId = PrincipalId::from_bytes([0x73; 16]);
+
+    with_test_database(|database| async move {
+        let kernel = kernel(&database)?;
+        kernel.bootstrap().await?;
+        let active = kernel.recover().await?;
+        let security =
+            SecuritySnapshot::new_with_function_targets_local_peer_credentials_and_privilege_grants(
+                active.pair(),
+                vec![],
+                vec![
+                    Principal::new(ADMIN, PrincipalKind::User, PrincipalStatus::Active),
+                    Principal::new(USER, PrincipalKind::User, PrincipalStatus::Active),
+                ],
+                vec![],
+                vec![],
+                vec![],
+                vec![PrivilegeGrant::new(
+                    ADMIN,
+                    PrivilegeClass::SecurityAdmin,
+                    None,
+                )?],
+            )?;
+        let security = kernel.replace_security_snapshot(&security).await?;
+        let admin_session = security.bind_authenticated_session(ADMIN, vec![])?;
+        let user_session = security.bind_authenticated_session(USER, vec![])?;
+
+        kernel
+            .create_principal(&admin_session, CREATED, PrincipalKind::User)
+            .await?;
+        let denied = kernel
+            .create_principal(&user_session, CREATED, PrincipalKind::User)
+            .await
+            .expect_err("an unprivileged session must be denied");
+        require(
+            matches!(
+                denied,
+                PostgresKernelError::SecurityAdminDenied {
+                    reason: PrivilegeDenial::MissingPrivilege {
+                        requested: PrivilegeClass::SecurityAdmin,
+                    },
+                }
+            ),
+            "SecurityAdmin denial returned the wrong typed error",
+        )?;
+
+        let reopened = PostgresKernel::new(database.config()?);
+        let events = reopened.recover_security_audit_events().await?;
+        require(
+            events.len() == 2,
+            format!(
+                "fresh recovery returned {} security-admin events instead of 2",
+                events.len()
+            ),
+        )?;
+        let allowed = &events[0].decision();
+        require(
+            allowed.kind() == SecurityAuditKind::SecurityAdmin
+                && allowed.outcome() == SecurityAuditOutcome::Allowed
+                && allowed.session_principal() == Some(ADMIN)
+                && allowed.security_admin_operation()
+                    == Some(SecurityAdminAuditOperation::CreatePrincipal)
+                && allowed.security_admin_target() == Some(SYS_SECURITY_CREATE_PRINCIPAL_FUNCTION_ID)
+                && allowed.security_admin_denial().is_none()
+                && allowed.effective_principal().is_none()
+                && allowed.authorising_principal().is_none()
+                && allowed.target().is_none(),
+            "fresh recovery changed the allowed SecurityAdmin decision shape",
+        )?;
+        let denied = &events[1].decision();
+        require(
+            denied.kind() == SecurityAuditKind::SecurityAdmin
+                && denied.outcome() == SecurityAuditOutcome::Denied
+                && denied.session_principal() == Some(USER)
+                && denied.security_admin_operation()
+                    == Some(SecurityAdminAuditOperation::CreatePrincipal)
+                && denied.security_admin_target() == Some(SYS_SECURITY_CREATE_PRINCIPAL_FUNCTION_ID)
+                && denied.security_admin_denial()
+                    == Some(PrivilegeDenial::MissingPrivilege {
+                        requested: PrivilegeClass::SecurityAdmin,
+                    })
+                && denied.effective_principal().is_none()
+                && denied.authorising_principal().is_none()
+                && denied.target().is_none(),
+            "fresh recovery changed the denied SecurityAdmin decision shape",
+        )?;
+
+        let session = database.open().await?;
+        let rows = session
+            .client()
+            .query(
+                "SELECT event_kind, outcome, session_principal_id,
+                        effective_principal_id, authorising_principal_id, function_id,
+                        source_revision_id, catalogue_revision_id, denial_reason
+                 FROM _orna_kernel.security_audit_events
+                 ORDER BY sequence",
+                &[],
+            )
+            .await?;
+        require(rows.len() == 2, "durable SecurityAdmin audit row count changed")?;
+        for (row, principal, detail) in [
+            (&rows[0], ADMIN, "security_admin:create_principal"),
+            (
+                &rows[1],
+                USER,
+                "security_admin:create_principal:missing-privilege",
+            ),
+        ] {
+            let event_kind: String = row.try_get(0)?;
+            let outcome: String = row.try_get(1)?;
+            let session_principal: Vec<u8> = row.try_get(2)?;
+            let effective_principal: Option<Vec<u8>> = row.try_get(3)?;
+            let authorising_principal: Option<Vec<u8>> = row.try_get(4)?;
+            let function: Vec<u8> = row.try_get(5)?;
+            let source_revision: Option<Vec<u8>> = row.try_get(6)?;
+            let catalogue_revision: Option<Vec<u8>> = row.try_get(7)?;
+            let denial_reason: Option<String> = row.try_get(8)?;
+            require(
+                event_kind == "security_admin"
+                    && outcome
+                        == if principal == ADMIN {
+                            "allowed"
+                        } else {
+                            "denied"
+                        }
+                    && session_principal == principal.to_bytes()
+                    && function == SYS_SECURITY_CREATE_PRINCIPAL_FUNCTION_ID.to_bytes()
+                    && effective_principal.is_none()
+                    && authorising_principal.is_none()
+                    && source_revision.is_none()
+                    && catalogue_revision.is_none()
+                    && denial_reason.as_deref() == Some(detail),
+                "durable SecurityAdmin audit row contains an unexpected payload",
+            )?;
+        }
+        finish_session(Ok(()), session.shutdown().await, "security-admin audit redaction")?;
         require_no_session_leaks(&database).await
     })
     .await

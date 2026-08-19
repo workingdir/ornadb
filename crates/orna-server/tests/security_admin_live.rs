@@ -20,9 +20,15 @@ use orna_core::{
     FunctionId, PrincipalId,
     security::{
         ExecuteGrant, LocalPeerCredential, Principal, PrincipalKind, PrincipalStatus,
-        PrivilegeClass, PrivilegeGrant, SecurityFunctionTarget, SecuritySnapshot,
+        PrivilegeClass, PrivilegeGrant, RoleMembership, SecurityAdminAuditOperation,
+        SecurityAuditKind, SecurityAuditOutcome, SecurityFunctionTarget, SecuritySnapshot,
     },
     source::{SourceBundle, SourceUnit},
+};
+use orna_core::system::{
+    SYS_SECURITY_CREATE_PRINCIPAL_FUNCTION_ID, SYS_SECURITY_CREATE_ROLE_FUNCTION_ID,
+    SYS_SECURITY_DISABLE_PRINCIPAL_FUNCTION_ID, SYS_SECURITY_GRANT_PRIVILEGE_FUNCTION_ID,
+    SYS_SECURITY_GRANT_ROLE_FUNCTION_ID,
 };
 use orna_compiler::{
     STD_INVOKE_ECHO_FUNCTION_ID, STD_INVOKE_ECHO_FUNCTION_REVISION_ID,
@@ -320,6 +326,193 @@ async fn proves_installed_security_admin_end_to_end() -> TestResult<()> {
             outcome == Ok(InstalledSecurityAdminOutcome::Completed),
             "disable_principal must complete",
         )?;
+
+        // The injected-kernel seam starts after the installed-host inspection;
+        // hostile service/package endpoint checks belong to the offline CLI
+        // boundary and are intentionally not claimed by this proof.
+        let snapshot = kernel(&database)
+            .recover_security_snapshot()
+            .await
+            .map_err(|error| failure(format!("post-mutation security recover failed: {error}")))?;
+        require(
+            snapshot
+                .principals()
+                .any(|principal| {
+                    principal.id() == SECOND_PRINCIPAL
+                        && principal.status() == PrincipalStatus::Disabled
+                }),
+            "disable_principal did not persist the disabled principal state",
+        )?;
+        require(
+            snapshot
+                .memberships()
+                .any(|membership| {
+                    membership == RoleMembership::new(ROLE_PRINCIPAL, SECOND_PRINCIPAL)
+                }),
+            "grant_role did not persist the role membership",
+        )?;
+        require(
+            snapshot.privilege_grants().any(|grant| {
+                grant.grantee() == ROLE_PRINCIPAL
+                    && grant.class() == PrivilegeClass::Execute
+                    && grant.object() == Some(application_function)
+            }),
+            "grant_privilege did not persist the role's object-scoped execute grant",
+        )?;
+
+        // The role grant remains visible to the durable role check after the
+        // later disable mutation; disabling the member does not rewrite the
+        // role's own privilege row.
+        let (outcome, stdout) = admin_run(
+            &database,
+            InstalledSecurityAdminOperation::HasPrivilege {
+                principal: ROLE_PRINCIPAL,
+                class: PrivilegeClass::Execute,
+                object: Some(application_function),
+            },
+        )
+        .await?;
+        require(
+            outcome == Ok(InstalledSecurityAdminOutcome::Completed),
+            "post-mutation role has_privilege must complete",
+        )?;
+        let text = String::from_utf8(stdout)
+            .map_err(|_| failure("the post-mutation has_privilege stdout was not UTF-8"))?;
+        require(
+            text.contains("\"result\":true"),
+            "post-mutation role has_privilege lost the execute grant: {text}",
+        )?;
+
+        // A disabled principal remains unusable at the recovered execute
+        // decision boundary, rather than merely carrying a disabled row.
+        let (outcome, stdout) = admin_run(
+            &database,
+            InstalledSecurityAdminOperation::CanExecute {
+                principal: SECOND_PRINCIPAL,
+                function: application_function,
+            },
+        )
+        .await?;
+        require(
+            outcome == Ok(InstalledSecurityAdminOutcome::Completed),
+            "post-mutation disabled can_execute must complete",
+        )?;
+        let text = String::from_utf8(stdout)
+            .map_err(|_| failure("the disabled can_execute stdout was not UTF-8"))?;
+        require(
+            text.contains("\"result\":false")
+                && text.contains("\"reason\":\"execute:invalid-session\""),
+            "disabled principal was not rejected by can_execute: {text}",
+        )?;
+
+        let expected_audits = [
+            (
+                SecurityAdminAuditOperation::CreatePrincipal,
+                SYS_SECURITY_CREATE_PRINCIPAL_FUNCTION_ID,
+                "security_admin:create_principal",
+            ),
+            (
+                SecurityAdminAuditOperation::CreateRole,
+                SYS_SECURITY_CREATE_ROLE_FUNCTION_ID,
+                "security_admin:create_role",
+            ),
+            (
+                SecurityAdminAuditOperation::GrantRole,
+                SYS_SECURITY_GRANT_ROLE_FUNCTION_ID,
+                "security_admin:grant_role",
+            ),
+            (
+                SecurityAdminAuditOperation::GrantPrivilege,
+                SYS_SECURITY_GRANT_PRIVILEGE_FUNCTION_ID,
+                "security_admin:grant_privilege",
+            ),
+            (
+                SecurityAdminAuditOperation::DisablePrincipal,
+                SYS_SECURITY_DISABLE_PRINCIPAL_FUNCTION_ID,
+                "security_admin:disable_principal",
+            ),
+        ];
+        let events = kernel(&database)
+            .recover_security_audit_events()
+            .await
+            .map_err(|error| failure(format!("security-admin audit recover failed: {error}")))?;
+        let security_admin_events = events
+            .iter()
+            .filter(|event| event.decision().kind() == SecurityAuditKind::SecurityAdmin)
+            .collect::<Vec<_>>();
+        require(
+            security_admin_events.len() == expected_audits.len(),
+            format!(
+                "expected {} security-admin audit events, found {}",
+                expected_audits.len(),
+                security_admin_events.len()
+            ),
+        )?;
+        for (event, (operation, target, _)) in
+            security_admin_events.iter().zip(expected_audits.iter())
+        {
+            let decision = event.decision();
+            require(
+                decision.outcome() == SecurityAuditOutcome::Allowed
+                    && decision.session_principal() == Some(ADMIN_PRINCIPAL)
+                    && decision.security_admin_operation() == Some(*operation)
+                    && decision.security_admin_target() == Some(*target)
+                    && decision.security_admin_denial().is_none(),
+                format!(
+                    "security-admin audit event {} lost exact operation/principal/target evidence",
+                    event.sequence()
+                ),
+            )?;
+        }
+
+        // The protected row carries only the closed operation detail. Exact
+        // equality rejects argument-bearing details (principal IDs, role
+        // members, classes, objects, or any other payload), while the NULL
+        // columns prove this event is not an invocation/revision record.
+        let audit_session = database.open().await?;
+        let rows = audit_session
+            .client()
+            .query(
+                "SELECT event_kind, outcome, session_principal_id,
+                        effective_principal_id, authorising_principal_id,
+                        function_id, source_revision_id, catalogue_revision_id,
+                        denial_reason
+                 FROM _orna_kernel.security_audit_events
+                 WHERE event_kind = 'security_admin'
+                 ORDER BY sequence",
+                &[],
+            )
+            .await?;
+        audit_session.shutdown().await?;
+        require(
+            rows.len() == expected_audits.len(),
+            "protected security-admin row count differs from recovered history",
+        )?;
+        for (row, (_, target, detail)) in rows.iter().zip(expected_audits.iter()) {
+            let event_kind: String = row.try_get("event_kind")?;
+            let outcome: String = row.try_get("outcome")?;
+            let session_principal: Vec<u8> = row.try_get("session_principal_id")?;
+            let effective_principal: Option<Vec<u8>> =
+                row.try_get("effective_principal_id")?;
+            let authorising_principal: Option<Vec<u8>> =
+                row.try_get("authorising_principal_id")?;
+            let function: Vec<u8> = row.try_get("function_id")?;
+            let source_revision: Option<Vec<u8>> = row.try_get("source_revision_id")?;
+            let catalogue_revision: Option<Vec<u8>> = row.try_get("catalogue_revision_id")?;
+            let denial_reason: Option<String> = row.try_get("denial_reason")?;
+            require(
+                event_kind == "security_admin"
+                    && outcome == "allowed"
+                    && session_principal == ADMIN_PRINCIPAL.to_bytes().to_vec()
+                    && effective_principal.is_none()
+                    && authorising_principal.is_none()
+                    && function == target.to_bytes().to_vec()
+                    && source_revision.is_none()
+                    && catalogue_revision.is_none()
+                    && denial_reason.as_deref() == Some(*detail),
+                format!("security-admin row contains unexpected payload or shape: {row:?}"),
+            )?;
+        }
 
         Ok(())
     })
