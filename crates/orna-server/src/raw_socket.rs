@@ -23,7 +23,7 @@ use std::{
 
 use orna_core::{
     catalogue::CatalogueSnapshot, revision::ActiveDatabaseRevision, security::AuthenticatedSession,
-    value::OpaqueCodecRegistry,
+    value::{OpaqueCodecRegistry, RuntimeValue},
 };
 use orna_postgres::{PostgresKernel, PostgresKernelError};
 use orna_protocol::{
@@ -33,7 +33,8 @@ use orna_protocol::{
     ResourceServerFrame, ServerAction, ServerFrame, decode_active_client_frame,
     decode_catalogue_client_frame, decode_client_frame, decode_constructed_client_frame,
     decode_registered_client_frame, decode_resource_client_frame, encode_active_server_frame,
-    encode_catalogue_server_frame, encode_constructed_server_frame, encode_registered_server_frame,
+    encode_catalogue_server_frame, encode_constructed_server_frame, encode_constructed_value,
+    encode_registered_server_frame,
     encode_resource_server_frame, encode_server_frame,
 };
 use orna_standard::{RegisteredOpaqueCodecsError, registered_opaque_codecs};
@@ -962,6 +963,7 @@ trait DispatchService: Clone + Send + Sync + 'static {
         _session: AuthenticatedSession,
         _request: ResourceRequest,
         _resources: LocalRawSocketResources,
+        _version: RawProtocolVersion,
     ) -> Option<StartedResourceDispatch> {
         None
     }
@@ -1000,6 +1002,7 @@ impl DispatchService for RawDispatchService {
         session: AuthenticatedSession,
         request: ResourceRequest,
         resources: LocalRawSocketResources,
+        version: RawProtocolVersion,
     ) -> Option<StartedResourceDispatch> {
         let kernel = self.kernel.clone();
         let future = Box::pin(async move {
@@ -1008,7 +1011,7 @@ impl DispatchService for RawDispatchService {
                 .dispatch_authenticated_server_resource(&session, &request)
                 .await;
             ResourceDispatchCompletion {
-                actions: resource_completion_actions(&request, result),
+                actions: resource_completion_actions(&version, &request, result),
             }
         });
         Some(StartedResourceDispatch { future })
@@ -1029,6 +1032,7 @@ impl DispatchService for RawDispatchService {
 }
 
 fn resource_completion_actions(
+    version: &RawProtocolVersion,
     request: &ResourceRequest,
     result: Result<orna_postgres::AuthenticatedServerResourceResult, PostgresKernelError>,
 ) -> VecDeque<ResourceServerFrame> {
@@ -1069,7 +1073,10 @@ fn resource_completion_actions(
                     request_id,
                     batch_sequence,
                     item_count: 1,
-                    byte_count: 0,
+                    byte_count: match resource_value_byte_count(version, &value) {
+                        Ok(byte_count) => byte_count,
+                        Err(_) => return resource_internal_failure(request),
+                    },
                     values: vec![value],
                 }));
             }
@@ -1096,6 +1103,22 @@ fn resource_completion_actions(
         }
         Err(_) => resource_internal_failure(request),
     }
+}
+
+fn resource_value_byte_count(
+    version: &RawProtocolVersion,
+    value: &RuntimeValue,
+) -> Result<u32, FrameCodecError> {
+    let RawProtocolVersion::Constructed(active, registry) = version else {
+        return Err(FrameCodecError::ResourceRequiresConstructed);
+    };
+    let actual = encode_constructed_value(active, registry, value)
+        .map_err(|source| FrameCodecError::Value { source })?
+        .len();
+    u32::try_from(actual).map_err(|_| FrameCodecError::PayloadTooLarge {
+        actual,
+        maximum: MAX_FRAME_PAYLOAD_LENGTH,
+    })
 }
 
 fn resource_action_request_id(action: &ResourceServerFrame) -> orna_core::InvocationId {
@@ -1402,7 +1425,7 @@ async fn handle_resource_frame<D: DispatchService>(
     _reservation: PayloadReservation,
     dispatcher: &D,
     session: &AuthenticatedSession,
-    _version: &RawProtocolVersion,
+    version: &RawProtocolVersion,
     resources: &LocalRawSocketResources,
     connection: &mut ResourceProtocolConnection,
     pending: &mut BTreeMap<u64, ResourceDispatchCompletion>,
@@ -1459,7 +1482,12 @@ async fn handle_resource_frame<D: DispatchService>(
 
     if let Some(request) = request {
         if let Some(StartedResourceDispatch { future }) =
-            dispatcher.start_resource(session.clone(), request.clone(), resources.clone())
+            dispatcher.start_resource(
+                session.clone(),
+                request.clone(),
+                resources.clone(),
+                version.clone(),
+            )
         {
             let stream_id = request.stream_id;
             let sender = completion_sender.clone();
@@ -1531,7 +1559,6 @@ async fn flush_resource_pending(
                 pending.remove(&stream_id);
                 break;
             };
-            let action = canonical_resource_action(version, action)?;
             let disposition = match &action {
                 ResourceServerFrame::Cancelled(frame) => {
                     match connection.apply_cancelled_after_client_cancel(*frame) {
@@ -1575,30 +1602,6 @@ async fn flush_resource_pending(
         }
     }
     Ok(true)
-}
-
-fn canonical_resource_action(
-    version: &RawProtocolVersion,
-    action: ResourceServerFrame,
-) -> Result<ResourceServerFrame, LocalRawSocketError> {
-    let ResourceServerFrame::Values(mut values) = action else {
-        return Ok(action);
-    };
-    values.byte_count = 0;
-    match version.encode_resource_server_frame(&ResourceServerFrame::Values(values.clone())) {
-        Ok(_) => Ok(ResourceServerFrame::Values(values)),
-        Err(FrameCodecError::ResourceByteCountMismatch { actual, .. }) => {
-            let byte_count = u32::try_from(actual).map_err(|_| LocalRawSocketError::Frame {
-                source: FrameCodecError::ResourceByteCountMismatch {
-                    declared: 0,
-                    actual,
-                },
-            })?;
-            values.byte_count = byte_count;
-            Ok(ResourceServerFrame::Values(values))
-        }
-        Err(source) => Err(LocalRawSocketError::Frame { source }),
-    }
 }
 
 async fn write_encoded_frame(
@@ -2050,6 +2053,38 @@ mod tests {
         }
     }
 
+    #[test]
+    fn resource_completion_values_declare_exact_encoded_byte_count() {
+        let (version, revision) = constructed_test_version();
+        let request = resource_request(revision);
+        let value = RuntimeValue::Integer(7);
+        let expected = match &version {
+            RawProtocolVersion::Constructed(active, registry) => {
+                orna_protocol::encode_constructed_value(active, registry, &value)
+                    .expect("resource value encodes")
+                    .len() as u32
+            }
+            _ => unreachable!("constructed test version"),
+        };
+        let actions = resource_completion_actions(
+            &version,
+            &request,
+            Ok(orna_postgres::AuthenticatedServerResourceResult::Completed {
+                stream_id: request.stream_id,
+                request_id: request.request_id,
+                nested_invocation_id: InvocationId::from_bytes([0x21; 16]),
+                target_revision: request.target_revision,
+                resource_kind: request.resource_kind,
+                values: vec![value],
+            }),
+        );
+
+        let Some(ResourceServerFrame::Values(frame)) = actions.get(1) else {
+            panic!("resource completion contains a values frame");
+        };
+        assert_eq!(frame.byte_count, expected);
+    }
+
     async fn read_resource_server_frame(
         stream: &mut UnixStream,
         active: &orna_core::revision::ActiveDatabaseRevision,
@@ -2068,6 +2103,7 @@ mod tests {
     }
 
     fn resource_actions(
+        version: &RawProtocolVersion,
         request: &ResourceRequest,
         values: Vec<RuntimeValue>,
     ) -> VecDeque<ResourceServerFrame> {
@@ -2089,7 +2125,8 @@ mod tests {
                 request_id: request.request_id,
                 batch_sequence: batch_sequence as u64,
                 item_count: 1,
-                byte_count: 0,
+                byte_count: resource_value_byte_count(version, &value)
+                    .expect("resource value encodes"),
                 values: vec![value],
             }));
         }
@@ -2122,8 +2159,9 @@ mod tests {
             _session: AuthenticatedSession,
             request: ResourceRequest,
             _resources: LocalRawSocketResources,
+            version: RawProtocolVersion,
         ) -> Option<StartedResourceDispatch> {
-            let actions = resource_actions(&request, vec![RuntimeValue::Integer(7)]);
+            let actions = resource_actions(&version, &request, vec![RuntimeValue::Integer(7)]);
             Some(StartedResourceDispatch {
                 future: Box::pin(async move { ResourceDispatchCompletion { actions } }),
             })
@@ -2148,8 +2186,10 @@ mod tests {
             _session: AuthenticatedSession,
             request: ResourceRequest,
             _resources: LocalRawSocketResources,
+            version: RawProtocolVersion,
         ) -> Option<StartedResourceDispatch> {
             let actions = resource_actions(
+                &version,
                 &request,
                 vec![RuntimeValue::Integer(7), RuntimeValue::Integer(8)],
             );
@@ -2180,6 +2220,7 @@ mod tests {
             _session: AuthenticatedSession,
             _request: ResourceRequest,
             _resources: LocalRawSocketResources,
+            _version: RawProtocolVersion,
         ) -> Option<StartedResourceDispatch> {
             let started = Arc::clone(&self.started);
             Some(StartedResourceDispatch {
@@ -2233,6 +2274,7 @@ mod tests {
             _session: AuthenticatedSession,
             _request: ResourceRequest,
             _resources: LocalRawSocketResources,
+            _version: RawProtocolVersion,
         ) -> Option<StartedResourceDispatch> {
             let started = Arc::clone(&self.started);
             let dropped = Arc::clone(&self.dropped);
@@ -2687,7 +2729,7 @@ mod tests {
             .send((
                 request.stream_id,
                 ResourceDispatchCompletion {
-                    actions: resource_actions(&request, vec![RuntimeValue::Integer(7)]),
+                    actions: resource_actions(&version, &request, vec![RuntimeValue::Integer(7)]),
                 },
             ))
             .unwrap();
