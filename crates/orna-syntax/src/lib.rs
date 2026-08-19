@@ -876,6 +876,13 @@ pub enum ClientExpression {
         /// The span from the root through the final field.
         span: SourceSpan,
     },
+    /// A suspension over one closed CLIENT expression.
+    Await {
+        /// The expression whose resource result is awaited.
+        expression: Box<ClientExpression>,
+        /// The span from `AWAIT` through the awaited expression.
+        span: SourceSpan,
+    },
     /// A left-associative text concatenation.
     Concat {
         /// The expression to the left of `||`.
@@ -892,9 +899,10 @@ impl ClientExpression {
     #[must_use]
     pub fn span(&self) -> &SourceSpan {
         match self {
-            Self::Call { span, .. } | Self::FieldPath { span, .. } | Self::Concat { span, .. } => {
-                span
-            }
+            Self::Call { span, .. }
+            | Self::FieldPath { span, .. }
+            | Self::Await { span, .. }
+            | Self::Concat { span, .. } => span,
             Self::StringLiteral { source, .. }
             | Self::IntegerLiteral { source, .. }
             | Self::BooleanLiteral { source, .. } => &source.span,
@@ -5101,6 +5109,117 @@ mod tests {
         assert_eq!(members.len(), 1);
         assert_eq!(members[0].text, "code");
     }
+
+    #[test]
+    fn parses_client_await_expression_losslessly_with_complete_span() {
+        let source = "CREATE CLIENT FUNCTION examples.awaited(p_value TEXT) RETURNS TEXT AS\n\
+            AWAIT /* preserve */ std.data.resource(\n\
+                target => tasks.get,\n\
+                arguments => std.call.args(p_value => p_value)\n\
+            );";
+        let parsed = parse(source);
+
+        assert!(parsed.diagnostics().is_empty(), "{:?}", parsed.diagnostics());
+        assert_eq!(parsed.syntax().text(), source);
+        assert_eq!(
+            parsed
+                .syntax()
+                .root()
+                .descendants()
+                .filter(|node| node.kind() == SyntaxKind::ClientAwaitExpression)
+                .count(),
+            1
+        );
+        let ClientFunctionBody::Expression { expression } = &parsed.client_functions()[0].body
+        else {
+            panic!("expected an expression body");
+        };
+        let ClientExpression::Await {
+            expression: awaited,
+            span,
+        } = expression
+        else {
+            panic!("expected an AWAIT expression");
+        };
+        let expected_start = source.find("AWAIT").expect("AWAIT keyword");
+        let expected_end = source.rfind(';').expect("function terminator");
+        assert_eq!(
+            span,
+            &SourceSpan {
+                start: expected_start,
+                end: expected_end,
+            }
+        );
+        let ClientExpression::Call { callee, .. } = awaited.as_ref() else {
+            panic!("expected AWAIT to wrap a call expression");
+        };
+        assert_eq!(
+            callee.parts.iter().map(|part| part.text.as_str()).collect::<Vec<_>>(),
+            ["std", "data", "resource"]
+        );
+    }
+
+    #[test]
+    fn parses_nested_client_await_expressions_in_state_positions() {
+        let source = "CREATE CLIENT FUNCTION examples.awaited() RETURNS TEXT IS\n\
+            STATE value TEXT DEFAULT AWAIT AWAIT std.data.resource();\n\
+        BEGIN\n\
+            RETURN AWAIT value;\n\
+        END;";
+        let parsed = parse(source);
+
+        assert!(parsed.diagnostics().is_empty(), "{:?}", parsed.diagnostics());
+        assert_eq!(parsed.syntax().text(), source);
+        assert_eq!(
+            parsed
+                .syntax()
+                .root()
+                .descendants()
+                .filter(|node| node.kind() == SyntaxKind::ClientAwaitExpression)
+                .count(),
+            3
+        );
+        let ClientFunctionBody::StateBlock(block) = &parsed.client_functions()[0].body else {
+            panic!("expected a state block");
+        };
+        let StateDefault::Expression(default) = &block.states[0].default else {
+            panic!("expected a default expression");
+        };
+        let ClientExpression::Await {
+            expression: nested,
+            ..
+        } = default
+        else {
+            panic!("expected an outer AWAIT in the state default");
+        };
+        assert!(matches!(nested.as_ref(), ClientExpression::Await { .. }));
+        assert!(matches!(
+            block.return_expression.as_ref(),
+            Some(ClientExpression::Await { .. })
+        ));
+    }
+
+    #[test]
+    fn reports_malformed_client_await_operands_without_widening_expression_syntax() {
+        for expression in ["AWAIT;", "AWAIT (value);", "AWAIT AWAIT;"] {
+            let source = format!(
+                "CREATE CLIENT FUNCTION examples.awaited() RETURNS TEXT AS {expression}"
+            );
+            let parsed = parse(&source);
+
+            assert_eq!(parsed.syntax().text(), source);
+            assert!(parsed.client_functions().is_empty(), "{expression:?}");
+            assert!(
+                parsed
+                    .diagnostics()
+                    .iter()
+                    .any(|diagnostic| diagnostic.message == "expected a CLIENT expression"),
+                "{expression:?}: {:?}",
+                parsed.diagnostics()
+            );
+        }
+    }
+
 
     #[test]
     fn rejects_client_expression_trailing_dots() {
