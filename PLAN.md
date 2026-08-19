@@ -91,6 +91,14 @@ Evidence and boundaries:
   source-diff, LSP, and embedded slices have implementation and focused proof
   evidence. The remaining embedded items are external evidence or a future
   predecessor release, not code gaps.
+Follow-up scope checks for language/compiler, storage/transactions,
+security/authentication, and tooling/operations found the same result:
+accepted contracts have implementation and focused proof evidence. The
+legacy unchecked rows in `../spec/IMPLEMENTATION_CHECKLIST.md` do not
+override the canonical status or accepted work ADRs. No accepted code gap is
+available for the next implementation step; work must either close the
+recorded Debian host evidence blocker or wait for an accepted proposal
+contract.
 
 The next contract order is:
 
