@@ -450,6 +450,7 @@ dependencies = [
  "orna-core",
  "orna-protocol",
  "orna-standard",
+ "serde_json",
  "sha2",
 ]
 
