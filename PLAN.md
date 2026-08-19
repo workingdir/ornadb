@@ -34,6 +34,45 @@ Current accepted implementation evidence:
 The canonical research plan confirms this boundary in
 `../spec/docs/49-gap-research-and-contract-plan.md:14-19,39-43,77-93`.
 
+## Language and standard-library dogfooding
+
+The answer to the current concern is yes: future work must make Orna
+programs more useful as source, not only as examples around Rust-backed kernel
+contracts. The current `stdlib/std/*.orna` files are intentionally small
+because the accepted slices still expose sealed host boundaries. That is a
+valid boundary for implementation, but it is not a sufficient language
+dogfooding story.
+
+This work has three separate goals:
+
+1. **Grammar integration.** Keep `spec/spec/orna.ebnf` as the canonical
+   proposal source, then connect accepted productions to parser fixtures,
+   syntax-tree tests, diagnostics, editor grammars, and runnable source
+   examples. Do not generate or freeze the parser from the current proposal
+   until the grammar status changes.
+2. **Standard-library source parity.** For every accepted standard function or
+   value contract, prefer a real `.orna` declaration and body where the
+   language can express it. Keep Rust code only at explicit kernel, codec,
+   security, storage, or host-runtime boundaries. Each remaining sealed
+   boundary must have a documented reason and a focused proof.
+3. **Runnable dogfood applications.** Add small source programs that use the
+   accepted language and standard library through the same parse, check,
+   install, and invoke path as user programs. Proposal-only resources,
+   graphical runtimes, Inspector projections, and reflective gateways stay
+   out of these fixtures until their contracts become executable.
+
+The first practical sequence is:
+
+- complete the accepted CLIENT expression and state syntax;
+- add a grammar conformance gate for the accepted subset;
+- move one more accepted presenter or launcher path into `.orna` source;
+- make that source run through an installed proof;
+- then repeat the same pattern for accepted state, resource, Inspector, and
+  gateway contracts as each contract becomes executable.
+
+This is a product requirement, not optional documentation polish. A fully
+featured language needs source users can read, modify, check, and run.
+
 ## Post-audit status
 
 The accepted implementation audit found no missing executable slice in the
