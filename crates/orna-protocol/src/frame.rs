@@ -2025,6 +2025,8 @@ pub enum FrameCodecError {
         /// The carrier identity found in the envelope.
         actual: TypeId,
     },
+    /// A resource frame requires the constructed value protocol.
+    ResourceRequiresConstructed,
     /// A resource frame does not contain the ORNA-RESOURCE/1 marker.
     ResourceInvalidMarker,
     /// A resource frame tag is not defined for its direction.
@@ -2150,6 +2152,9 @@ impl fmt::Display for FrameCodecError {
             }
             Self::InvocationCarrierWrongType { .. } => {
                 formatter.write_str("sealed invocation carrier identity is invalid")
+            }
+            Self::ResourceRequiresConstructed => {
+                formatter.write_str("resource frames require the constructed value protocol")
             }
             Self::ResourceInvalidMarker => {
                 formatter.write_str("resource frame marker is invalid")
