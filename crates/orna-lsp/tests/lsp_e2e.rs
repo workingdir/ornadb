@@ -465,7 +465,7 @@ fn serves_rich_hover_content() {
 }
 
 #[test]
-fn serves_hover_and_definition() {
+fn serves_hover_definition_and_references() {
     let mut client = Client::spawn();
     initialize(&mut client);
     let uri = "file:///test/nav.orna";
@@ -501,6 +501,57 @@ fn serves_hover_and_definition() {
         definition["range"]["start"]["line"], 2,
         "type declaration line: {definition}"
     );
+
+    // References for the field selected in the SELECT projection.
+    let references = client.request(
+        "textDocument/references",
+        json!({
+            "textDocument": { "uri": uri },
+            "position": { "line": 15, "character": 21 },
+            "context": { "includeDeclaration": true },
+        }),
+    );
+    let reference_locations: Vec<(u64, u64, u64, u64)> = references
+        .as_array()
+        .expect("references")
+        .iter()
+        .map(|reference| {
+            assert_eq!(reference["uri"], uri, "reference URI: {reference}");
+            (
+                reference["range"]["start"]["line"]
+                    .as_u64()
+                    .expect("start line"),
+                reference["range"]["start"]["character"]
+                    .as_u64()
+                    .expect("start character"),
+                reference["range"]["end"]["line"]
+                    .as_u64()
+                    .expect("end line"),
+                reference["range"]["end"]["character"]
+                    .as_u64()
+                    .expect("end character"),
+            )
+        })
+        .collect();
+    // The initial navigation implementation reports every highlighted
+    // same-spelling occurrence, including the return-column spelling.
+    let expected_references = [
+        (3, 4, 3, 10),
+        (9, 43, 9, 49),
+        (13, 14, 13, 20),
+        (15, 16, 15, 22),
+    ];
+    assert_eq!(
+        reference_locations.len(),
+        expected_references.len(),
+        "reference count: {references}"
+    );
+    for expected in expected_references {
+        assert!(
+            reference_locations.contains(&expected),
+            "missing reference {expected:?}: {references}"
+        );
+    }
 
     client.shutdown();
 }
