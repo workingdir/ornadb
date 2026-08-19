@@ -1834,7 +1834,10 @@ impl SignatureEvidence {
         for function in checked.client_functions() {
             let owner = function.id();
             let slots = self.function_slots(owner).collect::<Vec<_>>();
-            let [slot] = slots.as_slice() else {
+            let Some(slot) = slots
+                .iter()
+                .find(|slot| matches!(slot.kind, crate::CheckedTypeUseKind::Return { .. }))
+            else {
                 return Err(
                     PrepareStandardApplicationError::FunctionTypeReferenceMismatch {
                         function: owner,
@@ -1852,7 +1855,10 @@ impl SignatureEvidence {
                     },
                 );
             };
-            if slot_owner != owner || ordinal != 0 || slot.flattened_ordinal != 0 {
+            if slot_owner != owner
+                || ordinal != 0
+                || slot.flattened_ordinal != function.parameters().len() as u32
+            {
                 return Err(
                     PrepareStandardApplicationError::FunctionTypeReferenceMismatch {
                         function: owner,
@@ -6157,7 +6163,7 @@ impl<'a> CandidateBuilder<'a> {
                         self.source
                             .declaration(self.parse_report, &client.location)?,
                     )?;
-                    self.push_origin(DefinitionIdentity::Function(function), &client.location)?;
+                    self.push_client_function_origins(&client, function)?;
                     StandardUpgradeFunctionPlan {
                         revision: plan,
                         declaration_origin,
@@ -6291,10 +6297,7 @@ impl<'a> CandidateBuilder<'a> {
         )?;
         let references =
             self.rebind_function_references(function_id, revision_id, &initial_references);
-        self.push_origin(
-            DefinitionIdentity::Function(function_id),
-            &validated.location,
-        )?;
+        self.push_client_function_origins(validated, function_id)?;
         self.functions.push(definition);
         self.current_function_revisions.push(current_revision);
         self.references.extend(references);
@@ -6647,38 +6650,100 @@ impl<'a> CandidateBuilder<'a> {
         revision: FunctionRevisionId,
         validated: &ValidatedClient,
     ) -> Result<Vec<DefinitionReference>, PrepareError> {
-        let mut references = Vec::with_capacity(validated.references.len() + 1);
-        let return_target = match validated.return_target {
-            EvidenceTarget::Value(type_id) => DefinitionReferenceTarget::ValueType(type_id),
-            EvidenceTarget::Named(type_id) => {
-                DefinitionReferenceTarget::ValueType(self.identities.type_id(type_id)?)
+        let mut references = Vec::with_capacity(
+            validated.references.len() + validated.parameters.len() + 1,
+        );
+        let mut remaining_references = validated.references.iter().collect::<Vec<_>>();
+        if let Some(signature_evidence) = self.mode.signature_evidence() {
+            for signature_slot in signature_evidence.function_slots(validated.id) {
+                let ordinal = u32::try_from(references.len()).map_err(|_| {
+                    PrepareError::ReferenceCountExceedsU32 {
+                        function: validated.id,
+                        count: references.len(),
+                    }
+                })?;
+                if signature_slot.flattened_ordinal != ordinal {
+                    return Err(PrepareError::InvalidCheckedBundle {
+                        reason: "checked standard CLIENT signature has a non-contiguous slot sequence",
+                    });
+                }
+                let (target, kind, origin) = match signature_slot.target {
+                    EvidenceTarget::Value(target) => (
+                        DefinitionReferenceTarget::ValueType(target),
+                        DefinitionReferenceKind::NamedType,
+                        self.source.origin(&signature_slot.location)?,
+                    ),
+                    EvidenceTarget::Named(target) => (
+                        DefinitionReferenceTarget::ValueType(self.identities.type_id(target)?),
+                        DefinitionReferenceKind::NamedType,
+                        self.source.origin(&signature_slot.location)?,
+                    ),
+                    EvidenceTarget::ObjectReference(target) => {
+                        let target = CheckedDefinitionReferenceTarget::ObjectType(target);
+                        let Some(index) = remaining_references.iter().position(|reference| {
+                            reference.target() == target
+                                && reference.kind() == DefinitionReferenceKind::ObjectReference
+                                && reference.location() == &signature_slot.location
+                        }) else {
+                            return Err(PrepareError::InvalidCheckedBundle {
+                                reason: "checked standard CLIENT object signature has no exact definition reference",
+                            });
+                        };
+                        let reference = remaining_references.remove(index);
+                        (
+                            self.identities.reference_target(reference.target())?,
+                            reference.kind(),
+                            self.source.origin(reference.location())?,
+                        )
+                    }
+                    EvidenceTarget::Unknown => {
+                        return Err(PrepareError::InvalidCheckedBundle {
+                            reason: "checked standard CLIENT signature has an unknown declaration use",
+                        });
+                    }
+                };
+                references.push(DefinitionReference::new(
+                    function,
+                    revision,
+                    ordinal,
+                    target,
+                    kind,
+                    origin,
+                ));
             }
-            EvidenceTarget::ObjectReference(type_id) => {
-                DefinitionReferenceTarget::ObjectType(self.identities.type_id(type_id)?)
-            }
-            EvidenceTarget::Unknown => {
-                return Err(PrepareError::InvalidCheckedBundle {
-                    reason: "checked CLIENT return type has no durable identity",
-                });
-            }
-        };
-        references.push(DefinitionReference::new(
-            function,
-            revision,
-            0,
-            return_target,
-            if matches!(validated.return_target, EvidenceTarget::ObjectReference(_)) {
-                DefinitionReferenceKind::ObjectReference
-            } else {
-                DefinitionReferenceKind::NamedType
-            },
-            self.source.origin(&validated.return_location)?,
-        ));
-        for (index, reference) in validated.references.iter().enumerate() {
+        } else {
+            let return_target = match validated.return_target {
+                EvidenceTarget::Value(type_id) => DefinitionReferenceTarget::ValueType(type_id),
+                EvidenceTarget::Named(type_id) => {
+                    DefinitionReferenceTarget::ValueType(self.identities.type_id(type_id)?)
+                }
+                EvidenceTarget::ObjectReference(type_id) => {
+                    DefinitionReferenceTarget::ObjectType(self.identities.type_id(type_id)?)
+                }
+                EvidenceTarget::Unknown => {
+                    return Err(PrepareError::InvalidCheckedBundle {
+                        reason: "checked CLIENT return type has no durable identity",
+                    });
+                }
+            };
+            references.push(DefinitionReference::new(
+                function,
+                revision,
+                0,
+                return_target,
+                if matches!(validated.return_target, EvidenceTarget::ObjectReference(_)) {
+                    DefinitionReferenceKind::ObjectReference
+                } else {
+                    DefinitionReferenceKind::NamedType
+                },
+                self.source.origin(&validated.return_location)?,
+            ));
+        }
+        for reference in remaining_references {
             let ordinal =
-                u32::try_from(index + 1).map_err(|_| PrepareError::ReferenceCountExceedsU32 {
+                u32::try_from(references.len()).map_err(|_| PrepareError::ReferenceCountExceedsU32 {
                     function: validated.id,
-                    count: validated.references.len() + 1,
+                    count: validated.references.len() + validated.parameters.len() + 1,
                 })?;
             references.push(DefinitionReference::new(
                 function,
@@ -7262,6 +7327,24 @@ impl<'a> CandidateBuilder<'a> {
                     ordinal: column.ordinal(),
                 },
                 column.location(),
+            )?;
+        }
+        Ok(())
+    }
+
+    fn push_client_function_origins(
+        &mut self,
+        checked: &ValidatedClient,
+        function: FunctionId,
+    ) -> Result<(), PrepareError> {
+        self.push_origin(DefinitionIdentity::Function(function), &checked.location)?;
+        for parameter in &checked.parameters {
+            self.push_origin(
+                DefinitionIdentity::Parameter {
+                    owner: function,
+                    parameter: self.identities.parameter(parameter.id())?,
+                },
+                parameter.location(),
             )?;
         }
         Ok(())
