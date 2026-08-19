@@ -5,7 +5,9 @@ use std::{
     time::Duration,
 };
 
-use orna_artifact::client_plan::{OPAQUE_FORMAT_VERSION, OpaqueClientPlan};
+use orna_artifact::client_plan::{
+    ClientExpressionNode, OPAQUE_FORMAT_VERSION, OpaqueClientPlan, ResourceClientPlan,
+};
 use orna_client::{
     ClientExecutionError,
     capability::{
@@ -20,8 +22,8 @@ use orna_compiler::{
     check_standard_application, prepare, prepare_standard_application,
 };
 use orna_core::{
-    CatalogueRevisionId, FunctionId, FunctionRevisionId, InvocationId, ObjectId, ParameterId,
-    PrincipalId, SourceBundleId, SourceRevisionId, TypeId,
+    CallSiteId, CatalogueRevisionId, FunctionId, FunctionRevisionId, InvocationId, ObjectId,
+    ParameterId, PrincipalId, SourceBundleId, SourceRevisionId, TypeId,
     canonical_hash::{
         artifact_payload_digest, catalogue_digest_with_context,
         function_semantic_digest_with_version, source_bundle_digest, source_revision_record_digest,
@@ -56,12 +58,14 @@ use orna_core::{
     value::{EnumValue, FunctionArgument, OpaqueValue, RecordValue, RuntimeValue},
 };
 use orna_postgres::{
-    AuthenticatedRawCallResult, PostgresKernel, PostgresKernelError, SealedInvocationResult,
-    ServerInsertError, ServerMutationError, ServerUpdateError,
+    AuthenticatedRawCallResult, AuthenticatedServerResourceResult, PostgresKernel,
+    PostgresKernelError, SealedInvocationResult, ServerInsertError, ServerMutationError,
+    ServerUpdateError,
 };
 use orna_protocol::{
     CallFailure, Channel, ClientFrame, ConnectionError, Event, ProtocolConnection, RawCall,
-    ServerAction, ServerFrame, decode_active_server_frame, decode_constructed_server_frame,
+    ResourceArgument, ResourceKind, ResourceRequest, ServerAction, ServerFrame,
+    decode_active_server_frame, decode_constructed_server_frame,
     decode_invocation_event_batch, decode_registered_server_frame, decode_server_frame,
     encode_active_client_frame, encode_active_server_frame, encode_client_frame,
     encode_constructed_client_frame, encode_constructed_value, encode_invocation_event_batch,
@@ -146,6 +150,13 @@ const RAW_EXTERNAL_CAPABILITY_SOURCE: &str = "CREATE SCHEMA cap;\n\
     CREATE EXTERNAL CLIENT FUNCTION cap.read() RETURNS TEXT\n\
     RUNTIME CONTRACT 'std.fs.read@1'\n\
     REQUIRES CAPABILITY std.fs.read('/home/bob');\n";
+const RAW_STREAM_RESOURCE_CLIENT_SOURCE: &str = "CREATE SCHEMA resource;\n\
+    CREATE SERVER FUNCTION resource.resource(p_value INTEGER)\n\
+    RETURNS ROWS (value INTEGER) SECURITY INVOKER\n\
+    TRANSACTION READ ONLY VOLATILITY STABLE AS SELECT p_value;\n\
+    CREATE CLIENT FUNCTION resource.call(p_value INTEGER) RETURNS INTEGER AS\n\
+    AWAIT std.data.stream_resource(target => resource.resource,\n\
+      arguments => std.call.args(p_value => p_value));\n";
 /// One Integer single-parameter INSERT and one public Integer reader.
 const RAW_CLIENT_INT_INSERT_SOURCE: &str = "CREATE SCHEMA raw_int_insert;\n\
     CREATE TYPE raw_int_insert.int_probe AS OBJECT (\n\
@@ -4333,6 +4344,137 @@ async fn server_raw_integer_dispatch_denies_then_grants_and_audits_exact_values(
 
 #[tokio::test]
 #[ignore = "requires the Compose PostgreSQL development service"]
+async fn authenticated_stream_resource_dispatches_allowed_and_denied_with_redacted_audit() -> TestResult<()> {
+    const RESOURCE_VALUE: i32 = 73;
+    with_test_database(|database| async move {
+        let kernel = kernel(&database)?;
+        let (active, standard_upgrade, _client_function, _server_function) =
+            install_raw_client_fixture(&kernel).await?;
+        let (active, _resource_client, target, parameter, call_site) =
+            install_stream_resource_client_fixture(&kernel, &active, &standard_upgrade).await?;
+        let principal = Principal::new(
+            RAW_CLIENT_USER,
+            PrincipalKind::User,
+            PrincipalStatus::Active,
+        );
+        let request = ResourceRequest {
+            stream_id: 73,
+            request_id: InvocationId::from_bytes([0x31; 16]),
+            parent_invocation_id: InvocationId::from_bytes([0x32; 16]),
+            call_site_id: call_site,
+            target_function_id: target,
+            target_revision: active.pair(),
+            generation: 1,
+            resource_kind: ResourceKind::Stream,
+            arguments: vec![ResourceArgument {
+                parameter,
+                value: RuntimeValue::Integer(RESOURCE_VALUE),
+            }],
+            item_window: 1,
+            byte_window: 1024,
+        };
+        let functions = active
+            .catalogue()
+            .functions()
+            .iter()
+            .map(|function| function.id())
+            .collect::<Vec<_>>();
+        let snapshot = |grants| {
+            SecuritySnapshot::new_with_function_targets(
+                active.pair(),
+                functions
+                    .iter()
+                    .copied()
+                    .map(SecurityFunctionTarget::application)
+                    .collect(),
+                vec![principal],
+                vec![],
+                grants,
+            )
+            .expect("the stream resource security snapshot is valid")
+        };
+
+        let allowed = kernel
+            .replace_security_snapshot(&snapshot(vec![ExecuteGrant::new(RAW_CLIENT_USER, target)]))
+            .await?;
+        let session = allowed.bind_authenticated_session(RAW_CLIENT_USER, vec![])?;
+        let completed = kernel
+            .dispatch_authenticated_server_resource(&session, &request)
+            .await?;
+        let nested = match completed {
+            AuthenticatedServerResourceResult::Completed {
+                stream_id,
+                request_id,
+                nested_invocation_id,
+                target_revision,
+                resource_kind,
+                values,
+            } => {
+                require(stream_id == request.stream_id, "stream resource changed stream identity")?;
+                require(request_id == request.request_id, "stream resource changed request identity")?;
+                require(target_revision == active.pair(), "stream resource changed active revision")?;
+                require(resource_kind == ResourceKind::Stream, "stream resource changed result kind")?;
+                require(values == [RuntimeValue::Integer(RESOURCE_VALUE)], "stream resource returned the wrong integer")?;
+                require(
+                    nested_invocation_id != InvocationId::from_bytes([0; 16])
+                        && nested_invocation_id != request.request_id
+                        && nested_invocation_id != request.parent_invocation_id,
+                    "stream resource did not generate a nested invocation identity",
+                )?;
+                nested_invocation_id
+            }
+            AuthenticatedServerResourceResult::Failed { failure: call_failure, .. } => {
+                return Err(failure(format!("stream resource unexpectedly failed: {call_failure:?}")));
+            }
+        };
+
+        let denied = kernel
+            .replace_security_snapshot(&snapshot(vec![]))
+            .await?;
+        let denied_session = denied.bind_authenticated_session(RAW_CLIENT_USER, vec![])?;
+        let failed = kernel
+            .dispatch_authenticated_server_resource(&denied_session, &request)
+            .await?;
+        require(
+            failed
+                == AuthenticatedServerResourceResult::Failed {
+                    stream_id: request.stream_id,
+                    request_id: request.request_id,
+                    failure: CallFailure::ExecuteDenied,
+                },
+            "stream resource without its EXECUTE grant was not denied",
+        )?;
+
+        let audits = kernel.recover_security_audit_events().await?;
+        require(
+            audits.len() == 2
+                && audits[0].decision().kind() == SecurityAuditKind::Execute
+                && audits[0].decision().outcome() == SecurityAuditOutcome::Allowed
+                && audits[0].decision().target() == Some(InvocationTarget::new(target, active.pair()))
+                && audits[0].decision().effective_principal() == Some(RAW_CLIENT_USER)
+                && audits[0].decision().authorising_principal() == Some(RAW_CLIENT_USER)
+                && audits[1].decision().kind() == SecurityAuditKind::Execute
+                && audits[1].decision().outcome() == SecurityAuditOutcome::Denied
+                && audits[1].decision().target() == Some(InvocationTarget::new(target, active.pair()))
+                && audits[1].decision().denial()
+                    == Some(SecurityAuditDenial::Execute(ExecuteDenial::MissingExecuteGrant))
+                && audits[1].decision().effective_principal().is_none()
+                && audits[1].decision().authorising_principal().is_none(),
+            "stream resource audit evidence exposed an unredacted decision",
+        )?;
+        let audit_text = format!("{audits:?}");
+        require(
+            !audit_text.contains(&format!("Integer({RESOURCE_VALUE})"))
+                && !audit_text.contains(&nested.canonical()),
+            "resource audit evidence retained raw argument or result detail",
+        )?;
+        require_no_database_sessions(&database).await
+    })
+    .await
+}
+
+#[tokio::test]
+#[ignore = "requires the Compose PostgreSQL development service"]
 async fn raw_argument_pair_socket_binds_reverse_order_by_parameter_identity() -> TestResult<()> {
     with_test_database(|database| async move {
         let kernel = kernel(&database)?;
@@ -7908,6 +8050,87 @@ async fn install_raw_client_fixture(
         .id();
     Ok((active, standard_upgrade, client, server))
 }
+async fn install_stream_resource_client_fixture(
+    kernel: &PostgresKernel,
+    active: &orna_core::revision::ActiveDatabaseRevision,
+    standard_upgrade: &orna_standard::StandardUpgrade,
+) -> TestResult<(
+    orna_core::revision::ActiveDatabaseRevision,
+    FunctionId,
+    FunctionId,
+    ParameterId,
+    CallSiteId,
+)> {
+    let context = StandardApplicationCheckContext::try_new(
+        active.catalogue(),
+        standard_upgrade.checked_standard_library(),
+    )?;
+    let source = SourceBundle::new([SourceUnit::new(
+        "resource.orna",
+        RAW_STREAM_RESOURCE_CLIENT_SOURCE,
+    )])?;
+    let report = check_standard_application(&source, &context);
+    require(
+        report.diagnostics().is_empty(),
+        "stream CLIENT resource fixture did not compile",
+    )?;
+    let active = kernel
+        .apply(&prepare_standard_application(
+            &report,
+            active.pair(),
+            active,
+        )?)
+        .await?;
+    let target = active
+        .catalogue()
+        .functions()
+        .iter()
+        .find(|function| function.name().parts() == ["resource", "resource"])
+        .ok_or_else(|| failure("resource fixture is missing resource.resource"))?;
+    let parameter = target
+        .parameters()
+        .first()
+        .ok_or_else(|| failure("resource fixture target is missing p_value"))?
+        .id();
+    let target_result_type = match target.return_type() {
+        FunctionReturn::Rows(columns) if columns.len() == 1 => columns[0].resolved_type(),
+        _ => return Err(failure("resource fixture target is not a one-column INTEGER stream")),
+    };
+    let target = target.id();
+    let client_definition = active
+        .catalogue()
+        .functions()
+        .iter()
+        .find(|function| function.name().parts() == ["resource", "call"])
+        .ok_or_else(|| failure("stream CLIENT resource fixture is missing resource.call"))?;
+    require(
+        client_definition.return_type() == &FunctionReturn::Single(target_result_type),
+        "stream CLIENT resource fixture did not retain the checked INTEGER result",
+    )?;
+    let client = client_definition.id();
+    let revision = active
+        .function_revisions()
+        .iter()
+        .find(|revision| revision.function() == client)
+        .ok_or_else(|| failure("scalar CLIENT resource fixture is missing its revision"))?;
+    let plan = ResourceClientPlan::decode(revision.artifact().payload())?;
+    let ClientExpressionNode::Await { expression } = plan.expression() else {
+        return Err(failure("stream CLIENT resource plan is not an awaited resource"));
+    };
+    let ClientExpressionNode::Resource { operation } = expression.as_ref() else {
+        return Err(failure("stream CLIENT resource plan is not a resource operation"));
+    };
+    require(
+        operation.kind() == orna_artifact::client_plan::ResourceKind::Stream
+            && operation.target() == target
+            && operation.target_revision() == active.pair()
+            && operation.arguments().len() == 1
+            && operation.arguments()[0].0 == parameter,
+        "stream CLIENT resource plan did not retain canonical target metadata",
+    )?;
+    Ok((active, client, target, parameter, operation.call_site_id()))
+}
+
 async fn install_expression_client_fixture(
     kernel: &PostgresKernel,
 ) -> TestResult<(
