@@ -339,6 +339,9 @@ impl ClientResourceRequest {
                 expected: key.target(),
             });
         }
+        if !active_resource_result_type_matches(active, key.target(), expected_type) {
+            return Err(ClientResourceError::TypeMismatch);
+        }
         let arguments = canonical_resource_arguments(&arguments)?;
         let actual = canonical_resource_argument_digest(active, &arguments)?;
         if actual != key.arguments_digest() {
@@ -578,6 +581,9 @@ impl ClientResource {
             return Err(ClientResourceError::TargetMismatch {
                 expected: self.key.target(),
             });
+        }
+        if !active_resource_result_type_matches(active, self.key.target(), self.expected_type) {
+            return Err(ClientResourceError::TypeMismatch);
         }
         if !runtime_value_matches(active, &value, self.expected_type) {
             return Err(ClientResourceError::TypeMismatch);
@@ -2444,6 +2450,22 @@ fn evaluate_resource_error(
     ClientExecutionError::ResourceEvaluation { context, source }
 }
 
+fn active_resource_result_type_matches(
+    active: &ActiveDatabaseRevision,
+    target: InvocationTarget,
+    expected: ResolvedType,
+) -> bool {
+    let Some(definition) = active.catalogue().function_by_id(target.function()) else {
+        return false;
+    };
+    match definition.return_type() {
+        FunctionReturn::Single(resolved) => *resolved == expected,
+        FunctionReturn::Rows(columns) => columns
+            .first()
+            .is_some_and(|column| column.resolved_type() == expected),
+    }
+}
+
 fn resource_type_matches_id(
     active: &ActiveDatabaseRevision,
     resolved: ResolvedType,
@@ -3682,6 +3704,33 @@ mod tests {
 
         assert_eq!(
             resource.publish_ready(&active, generation, RuntimeValue::Integer(4)),
+            Err(super::ClientResourceError::TypeMismatch),
+        );
+        assert_eq!(resource.status(), super::ClientResourceStatus::Loading);
+        assert_eq!(resource.value(), None);
+    }
+
+    #[test]
+    fn client_resource_rejects_expected_type_that_differs_from_target_declaration() {
+        let (active, function, pair, _) = version_one_active_with_shape(
+            FunctionDomain::Server,
+            Vec::new(),
+            FunctionReturn::Single(ResolvedType::Scalar(StandardScalar::Boolean)),
+            FunctionSecurity::Invoker,
+            FunctionVolatility::Immutable,
+        );
+        let key = super::ClientResourceKey::new(
+            InvocationTarget::new(function, pair),
+            PrincipalId::from_bytes([0x7a; 16]),
+            Sha256Digest::from_bytes([0x33; 32]),
+            Sha256Digest::from_bytes([0x34; 32]),
+        );
+        let mut resource =
+            super::ClientResource::new(key, ResolvedType::Scalar(StandardScalar::Integer));
+        let generation = resource.begin_loading().unwrap();
+
+        assert_eq!(
+            resource.publish_ready(&active, generation, RuntimeValue::Integer(7)),
             Err(super::ClientResourceError::TypeMismatch),
         );
         assert_eq!(resource.status(), super::ClientResourceStatus::Loading);
