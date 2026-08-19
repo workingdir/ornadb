@@ -233,6 +233,16 @@ pub enum ClientResourceError {
         /// The repeated parameter identity.
         parameter: ParameterId,
     },
+    /// A target parameter is absent from a request.
+    MissingArgument {
+        /// The required parameter identity.
+        parameter: ParameterId,
+    },
+    /// A request contains a parameter that the target does not declare.
+    UnknownArgument {
+        /// The undeclared parameter identity.
+        parameter: ParameterId,
+    },
     /// The request arguments do not match the resource key digest.
     ArgumentDigestMismatch {
         /// The digest retained by the resource key.
@@ -289,6 +299,18 @@ impl fmt::Display for ClientResourceError {
                     "CLIENT resource argument repeats parameter {parameter}"
                 )
             }
+            Self::MissingArgument { parameter } => {
+                write!(
+                    formatter,
+                    "CLIENT resource request is missing target parameter {parameter}"
+                )
+            }
+            Self::UnknownArgument { parameter } => {
+                write!(
+                    formatter,
+                    "CLIENT resource request contains unknown target parameter {parameter}"
+                )
+            }
             Self::ArgumentDigestMismatch { expected, actual } => write!(
                 formatter,
                 "CLIENT resource argument digest {:?} does not match expected {:?}",
@@ -342,7 +364,7 @@ impl ClientResourceRequest {
         if !active_resource_result_type_matches(active, key.target(), expected_type) {
             return Err(ClientResourceError::TypeMismatch);
         }
-        let arguments = canonical_resource_arguments(&arguments)?;
+        let arguments = validate_resource_arguments(active, key.target(), &arguments)?;
         let actual = canonical_resource_argument_digest(active, &arguments)?;
         if actual != key.arguments_digest() {
             return Err(ClientResourceError::ArgumentDigestMismatch {
@@ -689,6 +711,42 @@ fn canonical_resource_arguments(
         if pair[0].parameter() == pair[1].parameter() {
             return Err(ClientResourceError::DuplicateArgument {
                 parameter: pair[0].parameter(),
+            });
+        }
+    }
+    Ok(arguments)
+}
+
+fn validate_resource_arguments(
+    active: &ActiveDatabaseRevision,
+    target: InvocationTarget,
+    arguments: &[FunctionArgument],
+) -> Result<Vec<FunctionArgument>, ClientResourceError> {
+    let Some(definition) = active.catalogue().function_by_id(target.function()) else {
+        return Err(ClientResourceError::TargetMismatch { expected: target });
+    };
+    let arguments = canonical_resource_arguments(arguments)?;
+    for argument in &arguments {
+        let Some(parameter) = definition
+            .parameters()
+            .iter()
+            .find(|candidate| candidate.id() == argument.parameter())
+        else {
+            return Err(ClientResourceError::UnknownArgument {
+                parameter: argument.parameter(),
+            });
+        };
+        if !runtime_value_matches(active, argument.value(), parameter.resolved_type()) {
+            return Err(ClientResourceError::TypeMismatch);
+        }
+    }
+    for parameter in definition.parameters() {
+        if !arguments
+            .iter()
+            .any(|argument| argument.parameter() == parameter.id())
+        {
+            return Err(ClientResourceError::MissingArgument {
+                parameter: parameter.id(),
             });
         }
     }
@@ -2784,7 +2842,7 @@ fn evaluate_resource_expression(
         else {
             return Err(evaluate_resource_error(
                 context,
-                ClientResourceExecutionError::Invalid(ClientResourceError::DuplicateArgument {
+                ClientResourceExecutionError::Invalid(ClientResourceError::UnknownArgument {
                     parameter: *parameter,
                 }),
             ));
@@ -2803,6 +2861,14 @@ fn evaluate_resource_expression(
         })?;
         evaluated.push(argument);
     }
+    let evaluated = validate_resource_arguments(
+        active,
+        InvocationTarget::new(operation.target_function(), operation.target_revision()),
+        &evaluated,
+    )
+    .map_err(|source| {
+        evaluate_resource_error(context, ClientResourceExecutionError::Invalid(source))
+    })?;
     let digest = ClientResourceKey::canonical_arguments_digest(active, &evaluated)
         .map_err(|source| evaluate_resource_error(context, ClientResourceExecutionError::Invalid(source)))?;
     // The active catalogue hash is the deterministic invalidation identity in
@@ -4066,7 +4132,6 @@ mod tests {
 
     #[test]
     fn client_resource_accepts_supported_scalar_runtime_values() {
-        let (active, function, pair, _) = version_one_active(true);
         let cases = [
             (
                 ResolvedType::Scalar(StandardScalar::BigInt),
@@ -4083,6 +4148,13 @@ mod tests {
         ];
 
         for (index, (expected, value)) in cases.into_iter().enumerate() {
+            let (active, function, pair, _) = version_one_active_with_shape(
+                FunctionDomain::Client,
+                Vec::new(),
+                FunctionReturn::Single(expected),
+                FunctionSecurity::Invoker,
+                FunctionVolatility::Immutable,
+            );
             let key = super::ClientResourceKey::new(
                 InvocationTarget::new(function, pair),
                 PrincipalId::from_bytes([0x7a; 16]),
@@ -4727,6 +4799,46 @@ mod tests {
     }
 
     #[test]
+    fn resource_request_rejects_missing_target_arguments() {
+        let text_type = orna_standard::CHARACTER_LARGE_OBJECT_TYPE_ID;
+        let pair = RevisionPair::new(
+            SourceRevisionId::from_bytes([3; 16]),
+            CatalogueRevisionId::from_bytes([4; 16]),
+        );
+        let payload = orna_artifact::client_plan::CapabilityClientPlan::new(
+            orna_artifact::client_plan::InnerClientPlan::Boolean(
+                orna_artifact::client_plan::ClientPlan::return_boolean(false),
+            ),
+            vec![orna_artifact::client_plan::CapabilityRequirement::new(
+                "std.fs.read",
+                orna_artifact::client_plan::CapabilityArgumentSource::Text("/tmp".to_owned()),
+            )],
+        )
+        .encode()
+        .unwrap();
+        let (active, _, _, _, _) = version_five_expression_active_with_parameter(payload);
+        let digest = super::ClientResourceKey::canonical_arguments_digest(&active, &[]).unwrap();
+        let key = super::ClientResourceKey::new(
+            InvocationTarget::new(FunctionId::from_bytes([0xd1; 16]), pair),
+            PrincipalId::from_bytes([0x71; 16]),
+            digest,
+            active.catalogue_hash(),
+        );
+        let mut resource = super::ClientResource::new(
+            key,
+            ResolvedType::Value(text_type),
+        );
+
+        let error = resource.begin_request(&active, Vec::new()).unwrap_err();
+
+        assert!(matches!(
+            error,
+            super::ClientResourceError::MissingArgument { parameter }
+                if parameter == ParameterId::from_bytes([0xd3; 16])
+        ));
+    }
+
+    #[test]
     fn procedural_await_without_executor_fails_closed() {
         let text_type = orna_standard::CHARACTER_LARGE_OBJECT_TYPE_ID;
         let function = FunctionId::from_bytes([6; 16]);
@@ -4760,7 +4872,12 @@ mod tests {
             target,
             target_revision,
             orna_core::CallSiteId::from_bytes([0x82; 16]),
-            Vec::new(),
+            vec![(
+                ParameterId::from_bytes([0xd3; 16]),
+                orna_artifact::client_plan::ClientExpressionNode::ParameterRead {
+                    parameter: ParameterId::from_bytes([0xb1; 16]),
+                },
+            )],
             text_type,
         );
         let plan = orna_artifact::client_plan::ProceduralClientPlan::new(
@@ -4805,7 +4922,15 @@ mod tests {
         let mut executor = super::DeterministicClientResourceExecutor::new(
             |request: &super::ClientResourceRequest| {
                 assert_eq!(request.key().target(), InvocationTarget::new(target, pair));
-                assert!(request.arguments().is_empty());
+                assert_eq!(request.arguments().len(), 1);
+                assert_eq!(
+                    request.arguments()[0].parameter(),
+                    ParameterId::from_bytes([0xd3; 16]),
+                );
+                assert_eq!(
+                    request.arguments()[0].value(),
+                    &RuntimeValue::Text("/tmp".to_owned()),
+                );
                 Ok(RuntimeValue::Text("executor-value".to_owned()))
             },
         );
@@ -4838,7 +4963,12 @@ mod tests {
             FunctionId::from_bytes([0xd1; 16]),
             pair,
             orna_core::CallSiteId::from_bytes([0x83; 16]),
-            Vec::new(),
+            vec![(
+                ParameterId::from_bytes([0xd3; 16]),
+                orna_artifact::client_plan::ClientExpressionNode::ParameterRead {
+                    parameter: ParameterId::from_bytes([0xb1; 16]),
+                },
+            )],
             text_type,
         );
         let plan = orna_artifact::client_plan::ProceduralClientPlan::new(
@@ -7636,11 +7766,18 @@ mod tests {
             None,
             FunctionVolatility::Immutable,
         );
+        let resource_parameter = ParameterDefinition::new(
+            ParameterId::from_bytes([0xd3; 16]),
+            "p_resource",
+            0,
+            ResolvedType::Value(orna_standard::CHARACTER_LARGE_OBJECT_TYPE_ID),
+            None,
+        );
         let resource_target = FunctionDefinition::new(
             FunctionId::from_bytes([0xd1; 16]),
             QualifiedSemanticName::new(["app", "resource"]).unwrap(),
             FunctionDomain::Server,
-            Vec::new(),
+            vec![resource_parameter.clone()],
             FunctionReturn::Single(ResolvedType::Value(
                 orna_standard::CHARACTER_LARGE_OBJECT_TYPE_ID,
             )),
@@ -7725,6 +7862,13 @@ mod tests {
         ));
         origins.push(DefinitionOrigin::new(
             DefinitionIdentity::Function(resource_target.id()),
+            prior_revision.declaration_origin(),
+        ));
+        origins.push(DefinitionOrigin::new(
+            DefinitionIdentity::Parameter {
+                owner: resource_target.id(),
+                parameter: resource_parameter.id(),
+            },
             prior_revision.declaration_origin(),
         ));
         let revisions = vec![revision, resource_revision];
