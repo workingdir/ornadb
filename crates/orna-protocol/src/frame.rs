@@ -5926,18 +5926,17 @@ mod tests {
             target_revision: revision,
             resource_kind: ResourceKind::Stream,
         };
-        assert_eq!(
-            encode_resource_accepted(&accepted).unwrap(),
-            resource_hex(concat!(
-                "4f524e412d5245534f555243452f31810000000049",
-                "0000000000000004",
-                "31313131313131313131313131313131",
-                "34343434343434343434343434343434",
-                "32323232323232323232323232323232",
-                "33333333333333333333333333333333",
-                "02",
-            ))
-        );
+        let accepted_wire = resource_hex(concat!(
+            "4f524e412d5245534f555243452f31810000000049",
+            "0000000000000004",
+            "31313131313131313131313131313131",
+            "34343434343434343434343434343434",
+            "32323232323232323232323232323232",
+            "33333333333333333333333333333333",
+            "02",
+        ));
+        assert_eq!(encode_resource_accepted(&accepted).unwrap(), accepted_wire);
+        assert_eq!(decode_resource_accepted(&accepted_wire), Ok(accepted));
 
         let value = RuntimeValue::Integer(7);
         let value_bytes = encode_constructed_value(&active, &registry, &value).unwrap();
@@ -5973,46 +5972,43 @@ mod tests {
             final_batch_sequence: 0,
             total_items: 1,
         };
-        assert_eq!(
-            encode_resource_completed(&completed).unwrap(),
-            resource_hex(concat!(
-                "4f524e412d5245534f555243452f31830000000028",
-                "0000000000000004",
-                "31313131313131313131313131313131",
-                "0000000000000000",
-                "0000000000000001",
-            ))
-        );
+        let completed_wire = resource_hex(concat!(
+            "4f524e412d5245534f555243452f31830000000028",
+            "0000000000000004",
+            "31313131313131313131313131313131",
+            "0000000000000000",
+            "0000000000000001",
+        ));
+        assert_eq!(encode_resource_completed(&completed).unwrap(), completed_wire);
+        assert_eq!(decode_resource_completed(&completed_wire), Ok(completed));
 
         let failed = ResourceFailed {
             stream_id: 4,
             request_id,
             failure: CallFailure::TargetUnavailable,
         };
-        assert_eq!(
-            encode_resource_failed(&failed).unwrap(),
-            resource_hex(concat!(
-                "4f524e412d5245534f555243452f3184000000001c",
-                "0000000000000004",
-                "31313131313131313131313131313131",
-                "02000100",
-            ))
-        );
+        let failed_wire = resource_hex(concat!(
+            "4f524e412d5245534f555243452f3184000000001c",
+            "0000000000000004",
+            "31313131313131313131313131313131",
+            "02000100",
+        ));
+        assert_eq!(encode_resource_failed(&failed).unwrap(), failed_wire);
+        assert_eq!(decode_resource_failed(&failed_wire), Ok(failed));
 
         let cancelled = ResourceCancelled {
             stream_id: 4,
             request_id,
             reason: ResourceCancellationCode::ClientRequested,
         };
-        assert_eq!(
-            encode_resource_cancelled(&cancelled).unwrap(),
-            resource_hex(concat!(
-                "4f524e412d5245534f555243452f31850000000019",
-                "0000000000000004",
-                "31313131313131313131313131313131",
-                "01",
-            ))
-        );
+        let cancelled_wire = resource_hex(concat!(
+            "4f524e412d5245534f555243452f31850000000019",
+            "0000000000000004",
+            "31313131313131313131313131313131",
+            "01",
+        ));
+        assert_eq!(encode_resource_cancelled(&cancelled).unwrap(), cancelled_wire);
+        assert_eq!(decode_resource_cancelled(&cancelled_wire), Ok(cancelled));
 
         let window = ResourceWindowUpdate {
             stream_id: 4,
@@ -6020,31 +6016,29 @@ mod tests {
             add_items: 1,
             add_bytes: 2,
         };
-        assert_eq!(
-            encode_resource_window_update(&window).unwrap(),
-            resource_hex(concat!(
-                "4f524e412d5245534f555243452f31020000000028",
-                "0000000000000004",
-                "31313131313131313131313131313131",
-                "0000000000000001",
-                "0000000000000002",
-            ))
-        );
+        let window_wire = resource_hex(concat!(
+            "4f524e412d5245534f555243452f31020000000028",
+            "0000000000000004",
+            "31313131313131313131313131313131",
+            "0000000000000001",
+            "0000000000000002",
+        ));
+        assert_eq!(encode_resource_window_update(&window).unwrap(), window_wire);
+        assert_eq!(decode_resource_window_update(&window_wire), Ok(window));
 
         let cancel = ResourceCancel {
             stream_id: 4,
             request_id,
             reason: ResourceCancellationCode::ParentInvocationCancelled,
         };
-        assert_eq!(
-            encode_resource_cancel(&cancel).unwrap(),
-            resource_hex(concat!(
-                "4f524e412d5245534f555243452f31030000000019",
-                "0000000000000004",
-                "31313131313131313131313131313131",
-                "03",
-            ))
-        );
+        let cancel_wire = resource_hex(concat!(
+            "4f524e412d5245534f555243452f31030000000019",
+            "0000000000000004",
+            "31313131313131313131313131313131",
+            "03",
+        ));
+        assert_eq!(encode_resource_cancel(&cancel).unwrap(), cancel_wire);
+        assert_eq!(decode_resource_cancel(&cancel_wire), Ok(cancel));
     }
 
 
