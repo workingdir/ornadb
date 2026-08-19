@@ -625,6 +625,7 @@ impl PostgresKernel {
             let active = configure_and_recover(&transaction).await?;
             let security = recover_security_snapshot_for_active(&transaction, &active).await?;
             let invocation = InvocationId::new();
+            let mut audit_decision = SecurityAuditOutcome::Denied;
             let failed = |failure| AuthenticatedServerResourceResult::Failed {
                 stream_id: request.stream_id,
                 request_id: request.request_id,
@@ -672,6 +673,7 @@ impl PostgresKernel {
                         failed(CallFailure::ExecuteDenied)
                     }
                     ExecuteDecision::Allowed(authorisation) => {
+                        audit_decision = SecurityAuditOutcome::Allowed;
                         append_allowed_invocation_audit(
                             &transaction,
                             &security,
@@ -761,6 +763,28 @@ impl PostgresKernel {
                     }
                 }
             };
+            let (terminal, audit_target, item_count) = match &result {
+                AuthenticatedServerResourceResult::Completed { values, .. } => (
+                    ResourceAuditTerminalOutcome::Completed,
+                    Some(InvocationTarget::new(request.target_function_id, active.pair())),
+                    Some(values.len() as u64),
+                ),
+                AuthenticatedServerResourceResult::Failed { .. } => {
+                    (ResourceAuditTerminalOutcome::Failed, None, None)
+                }
+            };
+            append_resource_audit_event(
+                &transaction,
+                authenticated_session,
+                request,
+                invocation,
+                audit_decision,
+                terminal,
+                audit_target,
+                item_count,
+                None,
+            )
+            .await?;
             transaction
                 .commit()
                 .await
