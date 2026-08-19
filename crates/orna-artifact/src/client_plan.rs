@@ -892,8 +892,9 @@ impl CapabilityRequirement {
 
 /// The inner plan carried by one version-5 capability envelope.
 ///
-/// The envelope holds a complete decoded version 1-4 client plan so the
-/// runtime can evaluate it directly after the capability gate admits it.
+/// The envelope holds a complete decoded version 1-4 or version-6 client
+/// plan so the runtime can evaluate it directly after the capability gate
+/// admits it.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum InnerClientPlan {
     /// A version-1 Boolean-constant plan.
@@ -904,6 +905,8 @@ pub enum InnerClientPlan {
     Expression(ExpressionClientPlan),
     /// A version-4 state plan.
     State(StateClientPlan),
+    /// A version-6 resource-operation plan.
+    Resource(ResourceClientPlan),
 }
 
 impl InnerClientPlan {
@@ -914,6 +917,7 @@ impl InnerClientPlan {
             Self::Opaque(_) => OPAQUE_FORMAT_VERSION,
             Self::Expression(_) => EXPRESSION_FORMAT_VERSION,
             Self::State(_) => STATE_FORMAT_VERSION,
+            Self::Resource(_) => RESOURCE_FORMAT_VERSION,
         }
     }
 
@@ -924,13 +928,14 @@ impl InnerClientPlan {
             Self::Opaque(plan) => Ok(plan.encode()),
             Self::Expression(plan) => plan.encode(),
             Self::State(plan) => plan.encode(),
+            Self::Resource(plan) => plan.encode(),
         }
     }
 }
 
-/// A checked version-5 CLIENT plan that carries one version 1-4 inner plan
-/// and the owning function's ordered, closed capability requirements
-/// (work ADR 0060).
+/// A checked version-5 CLIENT plan that carries one version 1-4 or version-6
+/// inner plan and the owning function's ordered, closed capability
+/// requirements (work ADR 0060).
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CapabilityClientPlan {
     inner_plan_version: u32,
@@ -1080,6 +1085,9 @@ impl CapabilityClientPlan {
                 InnerClientPlan::Expression(ExpressionClientPlan::decode(inner_payload)?)
             }
             STATE_FORMAT_VERSION => InnerClientPlan::State(StateClientPlan::decode(inner_payload)?),
+            RESOURCE_FORMAT_VERSION => {
+                InnerClientPlan::Resource(ResourceClientPlan::decode(inner_payload)?)
+            }
             version => return Err(ClientPlanError::UnsupportedInnerVersion(version)),
         };
         let requirement_count = reader.u32()?;
@@ -3320,6 +3328,26 @@ mod tests {
             &CapabilityArgumentSource::Parameter("p_host".to_owned())
         );
     }
+    #[test]
+    fn capability_plan_round_trips_resource_inner_plan() {
+        let plan = CapabilityClientPlan::new(
+            InnerClientPlan::Resource(resource_plan()),
+            vec![CapabilityRequirement::new(
+                "std.data.query",
+                CapabilityArgumentSource::Parameter("p_owner".to_owned()),
+            )],
+        );
+        let encoded = plan.encode().expect("resource capability plan encodes");
+        let decoded =
+            CapabilityClientPlan::decode(&encoded).expect("resource capability plan decodes");
+        assert_eq!(decoded, plan);
+        assert_eq!(decoded.inner_plan_version(), RESOURCE_FORMAT_VERSION);
+        assert!(matches!(
+            decoded.inner_plan(),
+            InnerClientPlan::Resource(_)
+        ));
+    }
+
 
     #[test]
     fn capability_plan_rejects_every_truncated_prefix() {
