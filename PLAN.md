@@ -59,6 +59,57 @@ same-major embedded-engine transition remains deferred until a real
 predecessor edge exists. No proposal-level implementation should start
 without the acceptance gate above.
 
+## 2026-08-19 contract research checkpoint
+
+A read-only review of the three deferred contract surfaces and an independent
+locked-scope audit found no missing accepted executable slice. The current
+runtime header passes its C syntax check, but its semantic contract remains
+open.
+
+Evidence and boundaries:
+
+- Runtime ABI: `../spec/api/runtime-abi.md`,
+  `../spec/api/ui-runtime.md`, and
+  `../spec/spec/orna_runtime_abi_v1.h` leave value ownership, callback
+  lifetime, thread and re-entry rules, atomic batches, typed events,
+  cancellation, and shutdown behaviour unresolved. Work ADR 0076 is a
+  proposal only.
+- CLIENT-to-SERVER resources: `../spec/docs/21-resources-actions-streams.md`
+  is a current proposal. ADRs 0071 and 0074 provide only the
+  executor-independent identity, generation, completion, and stale-result
+  checks. They do not define source syntax, transport frames, scheduling,
+  server execution, audit events, or stream backpressure.
+- Reflective gateways:
+  `../spec/docs/19-reflective-gateways.md`,
+  `../spec/api/protocol-gateways.md`, and
+  `../spec/docs/27-wire-protocol.md` lock the direction but not the
+  Endpoint, Exposure, Service, authentication, version pinning, conversion,
+  redaction, or protocol lifecycle contracts. Existing code must remain on
+  the sealed `sys.invoke` boundary.
+- Locked scope: the accepted CLIENT, USER state, resource lifecycle,
+  identity/ORV6, JSON V5, security-admin, presenter, Inspector-core,
+  source-diff, LSP, and embedded slices have implementation and focused proof
+  evidence. The remaining embedded items are external evidence or a future
+  predecessor release, not code gaps.
+
+The next contract order is:
+
+1. Accept the test-only headless runtime conformance boundary in ADR 0076.
+   It is the smallest reversible contract and is a prerequisite for runtime
+   events and later Inspector projections.
+2. Accept the CLIENT-to-SERVER asynchronous resource contract, including
+   syntax, versioned request/completion frames, principal derivation,
+   capability checks, cancellation, backpressure, shutdown, and audit events.
+3. Accept the ordinary CLIENT Inspector projection after the runtime and
+   resource contracts define its epoch and redaction inputs.
+4. Accept the reflective gateway contract separately, then implement its
+   disabled/enabled exposure proof through sealed `sys.invoke`.
+
+No implementation starts for these surfaces until the acceptance gate below
+has an accepted contract, exact error and ownership rules, compatibility
+rules, cancellation behaviour, focused tests, an integration or live proof,
+and an explicit file and artefact list.
+
 ## Non-negotiable contract gate
 
 No implementation phase may start for a proposal-level surface until a new
