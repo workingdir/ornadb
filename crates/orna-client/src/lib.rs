@@ -7074,7 +7074,6 @@ mod runtime_abi {
         pub(super) const SetAccessibility: Self = Self(11);
     }
 
-
     #[repr(C)]
     #[derive(Clone, Copy)]
     pub(super) struct MountNode {
@@ -7205,8 +7204,7 @@ mod runtime_abi {
         pub(super) as_: RuntimeEventArgs,
     }
 
-    pub(super) type LogFn =
-        unsafe extern "C" fn(*mut c_void, u32, StringView, StringView);
+    pub(super) type LogFn = unsafe extern "C" fn(*mut c_void, u32, StringView, StringView);
     pub(super) type EmitRuntimeEventFn =
         unsafe extern "C" fn(*mut c_void, RuntimeHandle, *const RuntimeEvent) -> Status;
     pub(super) type CompleteModelRequestFn =
@@ -7266,8 +7264,7 @@ mod runtime_abi {
         *const SurfaceCreateOptions,
         *mut SurfaceHandle,
     ) -> Status;
-    pub(super) type DestroySurfaceFn =
-        unsafe extern "C" fn(RuntimeHandle, SurfaceHandle) -> Status;
+    pub(super) type DestroySurfaceFn = unsafe extern "C" fn(RuntimeHandle, SurfaceHandle) -> Status;
     pub(super) type ApplyUiBatchFn =
         unsafe extern "C" fn(RuntimeHandle, SurfaceHandle, *const UiBatch) -> Status;
     pub(super) type SetSurfaceVisibleFn =
@@ -7278,8 +7275,7 @@ mod runtime_abi {
         unsafe extern "C" fn(RuntimeHandle, SurfaceHandle, *mut OwnedBytes) -> Status;
     pub(super) type ApplyModelRowsFn =
         unsafe extern "C" fn(RuntimeHandle, RequestHandle, ValueRef) -> Status;
-    pub(super) type CancelRequestFn =
-        unsafe extern "C" fn(RuntimeHandle, RequestHandle) -> Status;
+    pub(super) type CancelRequestFn = unsafe extern "C" fn(RuntimeHandle, RequestHandle) -> Status;
 
     #[repr(C)]
     #[derive(Clone, Copy)]
@@ -7514,11 +7510,10 @@ mod runtime_conformance {
     use std::{
         collections::{BTreeMap, HashMap, HashSet, VecDeque},
         ffi::{c_char, c_void},
-        ptr,
-        slice,
+        ptr, slice,
         sync::{
-            atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
             Arc, Condvar, LazyLock, Mutex, MutexGuard, TryLockError,
+            atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
         },
         thread::{self, ThreadId},
     };
@@ -7527,7 +7522,6 @@ mod runtime_conformance {
     unsafe impl Sync for ContractVersion {}
     unsafe impl Sync for SinkOffer {}
     unsafe impl Sync for Descriptor {}
-
 
     const ABI_MAJOR: u32 = 1;
     const ABI_MINOR: u32 = 0;
@@ -7616,7 +7610,6 @@ mod runtime_conformance {
 
     unsafe fn owned_text(view: StringView) -> Option<String> {
         unsafe { text(view) }.map(ToOwned::to_owned)
-
     }
 
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -7829,7 +7822,9 @@ mod runtime_conformance {
             return;
         }
 
-        let record = allocations.remove(&key).expect("allocation record should exist");
+        let record = allocations
+            .remove(&key)
+            .expect("allocation record should exist");
         record.counters.releases.fetch_add(1, Ordering::SeqCst);
         drop(record);
     }
@@ -7900,7 +7895,10 @@ mod runtime_conformance {
     impl CallbackLog {
         fn record(&mut self, kind: CallbackKind) {
             let sequence = self.next_sequence;
-            self.next_sequence = self.next_sequence.checked_add(1).expect("callback sequence exhausted");
+            self.next_sequence = self
+                .next_sequence
+                .checked_add(1)
+                .expect("callback sequence exhausted");
             self.sequence.push(CallbackRecord {
                 sequence,
                 terminal: self.terminal,
@@ -7947,7 +7945,12 @@ mod runtime_conformance {
             self.node_surfaces.insert(node, surface);
         }
 
-        fn register_action(&mut self, action: ActionHandle, surface: SurfaceHandle, input_type: String) {
+        fn register_action(
+            &mut self,
+            action: ActionHandle,
+            surface: SurfaceHandle,
+            input_type: String,
+        ) {
             self.known_actions.insert(action);
             self.live_actions.insert(action);
             self.action_surfaces.insert(action, surface);
@@ -8100,7 +8103,6 @@ mod runtime_conformance {
             Ok(())
         }
 
-
         fn check_node_on_surface(
             &self,
             node: NodeHandle,
@@ -8108,7 +8110,10 @@ mod runtime_conformance {
         ) -> Result<(), Status> {
             self.check_node(node)?;
             if self.node_surfaces.get(&node) != Some(&surface) {
-                return Err(status(StatusCode::InvalidArgument, b"node belongs to another surface"));
+                return Err(status(
+                    StatusCode::InvalidArgument,
+                    b"node belongs to another surface",
+                ));
             }
             Ok(())
         }
@@ -8128,16 +8133,25 @@ mod runtime_conformance {
             Ok(())
         }
 
-        fn check_action_payload_type(&self, action: ActionHandle, payload: ValueRef) -> Result<(), Status> {
+        fn check_action_payload_type(
+            &self,
+            action: ActionHandle,
+            payload: ValueRef,
+        ) -> Result<(), Status> {
             let Some(actual) = (unsafe { text(payload.type_name) }) else {
-                return Err(status(StatusCode::InvalidArgument, b"invalid action payload"));
+                return Err(status(
+                    StatusCode::InvalidArgument,
+                    b"invalid action payload",
+                ));
             };
             if self.action_input_types.get(&action).map(String::as_str) != Some(actual) {
-                return Err(status(StatusCode::InvalidArgument, b"action payload type mismatch"));
+                return Err(status(
+                    StatusCode::InvalidArgument,
+                    b"action payload type mismatch",
+                ));
             }
             Ok(())
         }
-
 
         fn check_request_model(
             &self,
@@ -8176,14 +8190,20 @@ mod runtime_conformance {
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         let key = context as usize;
-        assert!(registry.entries.insert(
-            key,
-            ContextEntry {
-                pointer: key,
-                active: true,
-                in_flight: 0,
-            },
-        ).is_none(), "client context is already registered");
+        assert!(
+            registry
+                .entries
+                .insert(
+                    key,
+                    ContextEntry {
+                        pointer: key,
+                        active: true,
+                        in_flight: 0,
+                    },
+                )
+                .is_none(),
+            "client context is already registered"
+        );
     }
 
     fn unregister_context(context: *mut c_void) {
@@ -8198,7 +8218,10 @@ mod runtime_conformance {
             return;
         }
         loop {
-            let in_flight = registry.entries.get(&key).map_or(0, |entry| entry.in_flight);
+            let in_flight = registry
+                .entries
+                .get(&key)
+                .map_or(0, |entry| entry.in_flight);
             if in_flight == 0 {
                 break;
             }
@@ -8303,7 +8326,10 @@ mod runtime_conformance {
                 handles.check_node_on_surface(value.node, value.surface)?;
                 handles.check_action_on_surface(value.action, value.surface)?;
                 if !RuntimeState::valid_value_ref(value.payload) {
-                    return Err(status(StatusCode::InvalidArgument, b"invalid action payload"));
+                    return Err(status(
+                        StatusCode::InvalidArgument,
+                        b"invalid action payload",
+                    ));
                 }
                 handles.check_action_payload_type(value.action, value.payload)?;
                 Ok((value.surface, 0))
@@ -8314,11 +8340,17 @@ mod runtime_conformance {
                 if value.action != 0 {
                     handles.check_action_on_surface(value.action, value.surface)?;
                     if !RuntimeState::valid_value_ref(value.payload) {
-                        return Err(status(StatusCode::InvalidArgument, b"invalid focus payload"));
+                        return Err(status(
+                            StatusCode::InvalidArgument,
+                            b"invalid focus payload",
+                        ));
                     }
                     handles.check_action_payload_type(value.action, value.payload)?;
                 } else if !RuntimeState::valid_value_ref(value.payload) {
-                    return Err(status(StatusCode::InvalidArgument, b"invalid focus payload"));
+                    return Err(status(
+                        StatusCode::InvalidArgument,
+                        b"invalid focus payload",
+                    ));
                 }
                 Ok((value.surface, 0))
             }
@@ -8326,7 +8358,10 @@ mod runtime_conformance {
                 let value = unsafe { event.as_.layout_state };
                 handles.check_node_on_surface(value.node, value.surface)?;
                 let Some(name) = (unsafe { text(value.semantic_state_name) }) else {
-                    return Err(status(StatusCode::InvalidArgument, b"invalid layout state name"));
+                    return Err(status(
+                        StatusCode::InvalidArgument,
+                        b"invalid layout state name",
+                    ));
                 };
                 if name.is_empty()
                     || !RuntimeState::valid_value_ref(value.semantic_state)
@@ -8376,7 +8411,10 @@ mod runtime_conformance {
                 }
                 Ok((0, 0))
             }
-            _ => Err(status(StatusCode::InvalidArgument, b"unknown runtime event")),
+            _ => Err(status(
+                StatusCode::InvalidArgument,
+                b"unknown runtime event",
+            )),
         }
     }
 
@@ -8386,7 +8424,10 @@ mod runtime_conformance {
         event: *const RuntimeEvent,
     ) -> Status {
         if context.is_null() || event.is_null() {
-            return status(StatusCode::InvalidArgument, b"missing event callback argument");
+            return status(
+                StatusCode::InvalidArgument,
+                b"missing event callback argument",
+            );
         }
         let Some(result) = with_registered_context(context, |context| {
             if runtime == 0 || context.runtime.load(Ordering::SeqCst) != runtime {
@@ -8405,7 +8446,10 @@ mod runtime_conformance {
                 _ => None,
             };
             let reenter = {
-                let mut log = context.log.lock().unwrap_or_else(|error| error.into_inner());
+                let mut log = context
+                    .log
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner());
                 if log.terminal {
                     return status(StatusCode::Failed, b"runtime is shut down");
                 }
@@ -8423,12 +8467,18 @@ mod runtime_conformance {
             };
             if reenter {
                 let result = unsafe { fixture_poll(runtime, 0) };
-                let mut log = context.log.lock().unwrap_or_else(|error| error.into_inner());
+                let mut log = context
+                    .log
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner());
                 log.reentry_status = Some(result.code);
             }
             ok()
         }) else {
-            return status(StatusCode::InvalidArgument, b"unregistered callback context");
+            return status(
+                StatusCode::InvalidArgument,
+                b"unregistered callback context",
+            );
         };
         result
     }
@@ -8443,7 +8493,10 @@ mod runtime_conformance {
         }
         let Some(result) = with_registered_context(context, |context| {
             {
-                let log = context.log.lock().unwrap_or_else(|error| error.into_inner());
+                let log = context
+                    .log
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner());
                 if log.terminal {
                     return status(StatusCode::Failed, b"runtime is shut down");
                 }
@@ -8469,7 +8522,10 @@ mod runtime_conformance {
                     return error;
                 }
             }
-            let mut log = context.log.lock().unwrap_or_else(|error| error.into_inner());
+            let mut log = context
+                .log
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
             if log.terminal {
                 return status(StatusCode::Failed, b"runtime is shut down");
             }
@@ -8477,7 +8533,10 @@ mod runtime_conformance {
             log.record(CallbackKind::Completion(request));
             ok()
         }) else {
-            return status(StatusCode::InvalidArgument, b"unregistered callback context");
+            return status(
+                StatusCode::InvalidArgument,
+                b"unregistered callback context",
+            );
         };
         result
     }
@@ -8492,7 +8551,10 @@ mod runtime_conformance {
         }
         let Some(result) = with_registered_context(context, |context| {
             {
-                let log = context.log.lock().unwrap_or_else(|error| error.into_inner());
+                let log = context
+                    .log
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner());
                 if log.terminal {
                     return status(StatusCode::Failed, b"runtime is shut down");
                 }
@@ -8521,7 +8583,10 @@ mod runtime_conformance {
                     return error;
                 }
             }
-            let mut log = context.log.lock().unwrap_or_else(|error| error.into_inner());
+            let mut log = context
+                .log
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
             if log.terminal {
                 return status(StatusCode::Failed, b"runtime is shut down");
             }
@@ -8529,11 +8594,13 @@ mod runtime_conformance {
             log.record(CallbackKind::Failure(request, failure.code));
             ok()
         }) else {
-            return status(StatusCode::InvalidArgument, b"unregistered callback context");
+            return status(
+                StatusCode::InvalidArgument,
+                b"unregistered callback context",
+            );
         };
         result
     }
-
 
     unsafe extern "C" fn client_read_action_metadata(
         context: *mut c_void,
@@ -8558,7 +8625,10 @@ mod runtime_conformance {
             }
             ok()
         }) else {
-            return status(StatusCode::InvalidArgument, b"unregistered callback context");
+            return status(
+                StatusCode::InvalidArgument,
+                b"unregistered callback context",
+            );
         };
         result
     }
@@ -8580,7 +8650,10 @@ mod runtime_conformance {
             }
             ok()
         }) else {
-            return status(StatusCode::InvalidArgument, b"unregistered callback context");
+            return status(
+                StatusCode::InvalidArgument,
+                b"unregistered callback context",
+            );
         };
         result
     }
@@ -8624,7 +8697,10 @@ mod runtime_conformance {
                 || (bytes.len == 0 && !bytes.data.is_null())
                 || (bytes.len > 0 && bytes.data.is_null())
             {
-                return Err(status(StatusCode::InvalidArgument, b"invalid value encoding"));
+                return Err(status(
+                    StatusCode::InvalidArgument,
+                    b"invalid value encoding",
+                ));
             }
             let canonical_encoding = if bytes.len == 0 {
                 Vec::new()
@@ -8776,7 +8852,10 @@ mod runtime_conformance {
             return false;
         };
         value.len() == 2
-            && value.get("type").and_then(serde_json::Value::as_str).is_some()
+            && value
+                .get("type")
+                .and_then(serde_json::Value::as_str)
+                .is_some()
             && value.contains_key("value")
     }
 
@@ -8785,9 +8864,18 @@ mod runtime_conformance {
             return false;
         };
         value.len() == 3
-            && value.get("id").and_then(serde_json::Value::as_str).is_some()
-            && value.get("name").and_then(serde_json::Value::as_str).is_some()
-            && value.get("version").and_then(serde_json::Value::as_str).is_some()
+            && value
+                .get("id")
+                .and_then(serde_json::Value::as_str)
+                .is_some()
+            && value
+                .get("name")
+                .and_then(serde_json::Value::as_str)
+                .is_some()
+            && value
+                .get("version")
+                .and_then(serde_json::Value::as_str)
+                .is_some()
     }
 
     fn valid_action(value: &serde_json::Value) -> bool {
@@ -8811,14 +8899,12 @@ mod runtime_conformance {
         let Some(value) = value.as_object() else {
             return value.is_null();
         };
-        value.keys().all(|key| {
-            matches!(
-                key.as_str(),
-                "source_unit_id" | "start" | "end"
-            )
-        }) && value
-            .get("source_unit_id")
-            .is_none_or(|source_unit_id| source_unit_id.is_string())
+        value
+            .keys()
+            .all(|key| matches!(key.as_str(), "source_unit_id" | "start" | "end"))
+            && value
+                .get("source_unit_id")
+                .is_none_or(|source_unit_id| source_unit_id.is_string())
             && value
                 .get("start")
                 .is_none_or(|start| start.as_i64().is_some())
@@ -8869,7 +8955,10 @@ mod runtime_conformance {
                 {
                     return false;
                 }
-                let Some(properties) = value.get("properties").and_then(serde_json::Value::as_object) else {
+                let Some(properties) = value
+                    .get("properties")
+                    .and_then(serde_json::Value::as_object)
+                else {
                     return false;
                 };
                 if !properties.values().all(valid_typed_value) {
@@ -8885,13 +8974,12 @@ mod runtime_conformance {
                 }) {
                     return false;
                 }
-                let Some(actions) = value.get("actions").and_then(serde_json::Value::as_object) else {
+                let Some(actions) = value.get("actions").and_then(serde_json::Value::as_object)
+                else {
                     return false;
                 };
                 actions.values().all(valid_action)
-                    && value
-                        .get("source_origin")
-                        .is_none_or(valid_source_origin)
+                    && value.get("source_origin").is_none_or(valid_source_origin)
             }
             _ => false,
         }
@@ -8904,7 +8992,11 @@ mod runtime_conformance {
         let Ok(body_length) = u32::try_from(frame.len() - 14) else {
             return false;
         };
-        let declared_length = u32::from_be_bytes(frame[10..14].try_into().expect("frame length is four bytes"));
+        let declared_length = u32::from_be_bytes(
+            frame[10..14]
+                .try_into()
+                .expect("frame length is four bytes"),
+        );
         declared_length == body_length
             && serde_json::from_slice::<serde_json::Value>(&frame[14..])
                 .is_ok_and(|value| valid_ui_value(&value))
@@ -8946,9 +9038,11 @@ mod runtime_conformance {
                 Some(token)
             } else {
                 self.action_aliases.get(&token).copied().filter(|action| {
-                    self.node_state
-                        .values()
-                        .any(|node| node.actions.values().any(|binding| binding.action == *action))
+                    self.node_state.values().any(|node| {
+                        node.actions
+                            .values()
+                            .any(|binding| binding.action == *action)
+                    })
                 })
             }
         }
@@ -8998,7 +9092,6 @@ mod runtime_conformance {
         }
     }
 
-
     #[derive(Clone, Copy)]
     struct RequestRecord {
         surface: SurfaceHandle,
@@ -9013,8 +9106,10 @@ mod runtime_conformance {
 
     impl OwnedValueRef {
         fn from_ref(value: ValueRef) -> Self {
-            let type_name = unsafe { slice::from_raw_parts(value.type_name.data.cast::<u8>(), value.type_name.len) }
-                .to_vec();
+            let type_name = unsafe {
+                slice::from_raw_parts(value.type_name.data.cast::<u8>(), value.type_name.len)
+            }
+            .to_vec();
             let canonical_encoding = if value.canonical_encoding.len == 0 {
                 Vec::new()
             } else {
@@ -9107,7 +9202,6 @@ mod runtime_conformance {
             code: StatusCode,
             message: Vec<u8>,
         },
-
     }
     impl OwnedRuntimeEvent {
         fn from_event(event: &RuntimeEvent) -> Result<Self, Status> {
@@ -9168,7 +9262,10 @@ mod runtime_conformance {
                         message: owned_string_view(status.message),
                     })
                 }
-                _ => Err(status(StatusCode::InvalidArgument, b"unknown runtime event")),
+                _ => Err(status(
+                    StatusCode::InvalidArgument,
+                    b"unknown runtime event",
+                )),
             }
         }
 
@@ -9371,7 +9468,6 @@ mod runtime_conformance {
             handle
         }
 
-
         fn operational(&self) -> Result<(), Status> {
             if self.terminal || self.shutdown_requested {
                 Err(status(StatusCode::Failed, b"runtime is shutting down"))
@@ -9382,7 +9478,10 @@ mod runtime_conformance {
 
         fn check_surface(&self, handle: SurfaceHandle) -> Result<(), Status> {
             if handle == 0 || !self.known_surfaces.contains(&handle) {
-                return Err(status(StatusCode::InvalidArgument, b"foreign surface handle"));
+                return Err(status(
+                    StatusCode::InvalidArgument,
+                    b"foreign surface handle",
+                ));
             }
             if self.retired_handles.contains(&handle) || !self.surfaces.contains_key(&handle) {
                 return Err(status(StatusCode::NotFound, b"surface handle is not live"));
@@ -9395,7 +9494,10 @@ mod runtime_conformance {
                 return Err(status(StatusCode::InvalidArgument, b"foreign node handle"));
             }
             if self.retired_handles.contains(&handle)
-                || !self.surfaces.values().any(|surface| surface.nodes.contains(&handle))
+                || !self
+                    .surfaces
+                    .values()
+                    .any(|surface| surface.nodes.contains(&handle))
             {
                 return Err(status(StatusCode::NotFound, b"node handle is not live"));
             }
@@ -9404,7 +9506,10 @@ mod runtime_conformance {
 
         fn check_action(&self, handle: ActionHandle) -> Result<(), Status> {
             if handle == 0 || !self.known_actions.contains(&handle) {
-                return Err(status(StatusCode::InvalidArgument, b"foreign action handle"));
+                return Err(status(
+                    StatusCode::InvalidArgument,
+                    b"foreign action handle",
+                ));
             }
             if self.retired_handles.contains(&handle)
                 || !self.surfaces.values().any(|surface| {
@@ -9424,7 +9529,10 @@ mod runtime_conformance {
                 return Err(status(StatusCode::InvalidArgument, b"foreign model handle"));
             }
             if self.retired_handles.contains(&handle)
-                || !self.requests.values().any(|request| request._model == handle)
+                || !self
+                    .requests
+                    .values()
+                    .any(|request| request._model == handle)
             {
                 return Err(status(StatusCode::NotFound, b"model handle is not live"));
             }
@@ -9433,7 +9541,10 @@ mod runtime_conformance {
 
         fn check_request(&self, handle: RequestHandle) -> Result<(), Status> {
             if handle == 0 || !self.known_requests.contains(&handle) {
-                return Err(status(StatusCode::InvalidArgument, b"foreign request handle"));
+                return Err(status(
+                    StatusCode::InvalidArgument,
+                    b"foreign request handle",
+                ));
             }
             if self.retired_handles.contains(&handle) || !self.requests.contains_key(&handle) {
                 return Err(status(StatusCode::NotFound, b"request handle is not live"));
@@ -9455,7 +9566,10 @@ mod runtime_conformance {
                 .nodes
                 .contains(&node)
             {
-                return Err(status(StatusCode::InvalidArgument, b"node belongs to another surface"));
+                return Err(status(
+                    StatusCode::InvalidArgument,
+                    b"node belongs to another surface",
+                ));
             }
             Ok(())
         }
@@ -9473,7 +9587,11 @@ mod runtime_conformance {
                 .expect("surface checked above")
                 .node_state
                 .values()
-                .any(|node| node.actions.values().any(|binding| binding.action == action));
+                .any(|node| {
+                    node.actions
+                        .values()
+                        .any(|binding| binding.action == action)
+                });
             if !belongs {
                 return Err(status(
                     StatusCode::InvalidArgument,
@@ -9489,7 +9607,10 @@ mod runtime_conformance {
             payload: ValueRef,
         ) -> Result<(), Status> {
             let Some(actual) = (unsafe { text(payload.type_name) }) else {
-                return Err(status(StatusCode::InvalidArgument, b"invalid action payload"));
+                return Err(status(
+                    StatusCode::InvalidArgument,
+                    b"invalid action payload",
+                ));
             };
             let expected = self
                 .surfaces
@@ -9504,11 +9625,13 @@ mod runtime_conformance {
                         .map(|binding| binding.input_type.as_str())
                 });
             if expected != Some(actual) {
-                return Err(status(StatusCode::InvalidArgument, b"action payload type mismatch"));
+                return Err(status(
+                    StatusCode::InvalidArgument,
+                    b"action payload type mismatch",
+                ));
             }
             Ok(())
         }
-
 
         fn check_request_model(
             &self,
@@ -9545,17 +9668,24 @@ mod runtime_conformance {
                         .get(owner)
                         .is_some_and(|state| state.resolve_node(token).is_some());
                 return Err(if live_elsewhere {
-                    status(StatusCode::InvalidArgument, b"node belongs to another surface")
+                    status(
+                        StatusCode::InvalidArgument,
+                        b"node belongs to another surface",
+                    )
                 } else {
                     status(StatusCode::NotFound, b"node handle is not live")
                 });
             }
             if self.known_nodes.contains(&token) {
-                let live_elsewhere = self.surfaces.iter().any(|(owner, state)| {
-                    *owner != surface && state.nodes.contains(&token)
-                });
+                let live_elsewhere = self
+                    .surfaces
+                    .iter()
+                    .any(|(owner, state)| *owner != surface && state.nodes.contains(&token));
                 return Err(if live_elsewhere {
-                    status(StatusCode::InvalidArgument, b"node belongs to another surface")
+                    status(
+                        StatusCode::InvalidArgument,
+                        b"node belongs to another surface",
+                    )
                 } else {
                     status(StatusCode::NotFound, b"node handle is not live")
                 });
@@ -9588,7 +9718,10 @@ mod runtime_conformance {
                         .get(owner)
                         .is_some_and(|state| state.resolve_action(token).is_some());
                 return Err(if live_elsewhere {
-                    status(StatusCode::InvalidArgument, b"action belongs to another surface")
+                    status(
+                        StatusCode::InvalidArgument,
+                        b"action belongs to another surface",
+                    )
                 } else {
                     status(StatusCode::NotFound, b"action handle is not live")
                 });
@@ -9598,24 +9731,35 @@ mod runtime_conformance {
                     *owner != surface && state.resolve_action(token).is_some()
                 });
                 return Err(if live_elsewhere {
-                    status(StatusCode::InvalidArgument, b"action belongs to another surface")
+                    status(
+                        StatusCode::InvalidArgument,
+                        b"action belongs to another surface",
+                    )
                 } else {
                     status(StatusCode::NotFound, b"action handle is not live")
                 });
             }
             if self.known_handles.contains(&token) {
-                return Err(status(StatusCode::InvalidArgument, b"foreign action handle"));
+                return Err(status(
+                    StatusCode::InvalidArgument,
+                    b"foreign action handle",
+                ));
             }
             if is_reserved_handle(token) {
-                return Err(status(StatusCode::InvalidArgument, b"foreign action handle"));
+                return Err(status(
+                    StatusCode::InvalidArgument,
+                    b"foreign action handle",
+                ));
             }
             Err(status(StatusCode::NotFound, b"action handle is not live"))
         }
 
-
         fn check_runtime(&self, runtime: RuntimeHandle) -> Result<(), Status> {
             if runtime == 0 || self.handle != runtime {
-                return Err(status(StatusCode::InvalidArgument, b"foreign runtime handle"));
+                return Err(status(
+                    StatusCode::InvalidArgument,
+                    b"foreign runtime handle",
+                ));
             }
             Ok(())
         }
@@ -9650,14 +9794,20 @@ mod runtime_conformance {
                     .is_some_and(|message| message.as_bytes() == status_message(status.code))
         }
 
-        fn validate_event(&self, event: &RuntimeEvent) -> Result<(SurfaceHandle, RequestHandle), Status> {
+        fn validate_event(
+            &self,
+            event: &RuntimeEvent,
+        ) -> Result<(SurfaceHandle, RequestHandle), Status> {
             match event.kind {
                 EventKind::Action => {
                     let value = unsafe { event.as_.action };
                     self.check_node_on_surface(value.node, value.surface)?;
                     self.check_action_on_surface(value.action, value.surface)?;
                     if !Self::valid_value_ref(value.payload) {
-                        return Err(status(StatusCode::InvalidArgument, b"invalid action payload"));
+                        return Err(status(
+                            StatusCode::InvalidArgument,
+                            b"invalid action payload",
+                        ));
                     }
                     self.check_action_payload_type(value.action, value.surface, value.payload)?;
                     Ok((value.surface, 0))
@@ -9668,11 +9818,17 @@ mod runtime_conformance {
                     if value.action != 0 {
                         self.check_action_on_surface(value.action, value.surface)?;
                         if !Self::valid_value_ref(value.payload) {
-                            return Err(status(StatusCode::InvalidArgument, b"invalid focus payload"));
+                            return Err(status(
+                                StatusCode::InvalidArgument,
+                                b"invalid focus payload",
+                            ));
                         }
                         self.check_action_payload_type(value.action, value.surface, value.payload)?;
                     } else if !Self::valid_value_ref(value.payload) {
-                        return Err(status(StatusCode::InvalidArgument, b"invalid focus payload"));
+                        return Err(status(
+                            StatusCode::InvalidArgument,
+                            b"invalid focus payload",
+                        ));
                     }
                     Ok((value.surface, 0))
                 }
@@ -9680,7 +9836,10 @@ mod runtime_conformance {
                     let value = unsafe { event.as_.layout_state };
                     self.check_node_on_surface(value.node, value.surface)?;
                     let Some(name) = (unsafe { text(value.semantic_state_name) }) else {
-                        return Err(status(StatusCode::InvalidArgument, b"invalid layout state name"));
+                        return Err(status(
+                            StatusCode::InvalidArgument,
+                            b"invalid layout state name",
+                        ));
                     };
                     if name.is_empty()
                         || !Self::valid_value_ref(value.semantic_state)
@@ -9718,7 +9877,10 @@ mod runtime_conformance {
                     }
                     Ok((0, 0))
                 }
-                _ => Err(status(StatusCode::InvalidArgument, b"unknown runtime event")),
+                _ => Err(status(
+                    StatusCode::InvalidArgument,
+                    b"unknown runtime event",
+                )),
             }
         }
 
@@ -9750,7 +9912,6 @@ mod runtime_conformance {
             }
             ok()
         }
-
 
         fn create_surface(
             &mut self,
@@ -9803,7 +9964,9 @@ mod runtime_conformance {
             let requests = self
                 .requests
                 .iter()
-                .filter_map(|(request, record)| (record.surface == surface).then_some((*request, *record)))
+                .filter_map(|(request, record)| {
+                    (record.surface == surface).then_some((*request, *record))
+                })
                 .collect::<Vec<_>>();
             let result = self.drain_events();
             if result.code != StatusCode::Ok {
@@ -9932,11 +10095,18 @@ mod runtime_conformance {
                     match operation.kind {
                         UiOperationKind::MountNode => {
                             let value = unsafe { operation.as_.mount_node };
-                            let Some(contract) = (unsafe { owned_text(value.contract_name) }) else {
-                                return Err(status(StatusCode::InvalidArgument, b"invalid node contract"));
+                            let Some(contract) = (unsafe { owned_text(value.contract_name) })
+                            else {
+                                return Err(status(
+                                    StatusCode::InvalidArgument,
+                                    b"invalid node contract",
+                                ));
                             };
                             let Some(slot) = (unsafe { owned_text(value.slot) }) else {
-                                return Err(status(StatusCode::InvalidArgument, b"invalid node slot"));
+                                return Err(status(
+                                    StatusCode::InvalidArgument,
+                                    b"invalid node slot",
+                                ));
                             };
                             let parent = if value.parent == 0 {
                                 0
@@ -9946,7 +10116,10 @@ mod runtime_conformance {
                                         if error.code == StatusCode::NotFound
                                             && !self.known_handles.contains(&value.parent)
                                         {
-                                            status(StatusCode::InvalidArgument, b"invalid mount parent")
+                                            status(
+                                                StatusCode::InvalidArgument,
+                                                b"invalid mount parent",
+                                            )
                                         } else {
                                             error
                                         }
@@ -9960,23 +10133,40 @@ mod runtime_conformance {
                                 || value.contract_major != 1
                                 || value.contract_minor != 0
                             {
-                                return Err(status(StatusCode::InvalidArgument, b"invalid mount operation"));
+                                return Err(status(
+                                    StatusCode::InvalidArgument,
+                                    b"invalid mount operation",
+                                ));
                             }
                             if let Some(owner) = self.node_tokens.get(&value.node) {
-                                return Err(if *owner == handle || !self.surfaces.contains_key(owner) {
-                                    status(StatusCode::NotFound, b"node handle is not live")
-                                } else {
-                                    status(StatusCode::InvalidArgument, b"node belongs to another surface")
-                                });
+                                return Err(
+                                    if *owner == handle || !self.surfaces.contains_key(owner) {
+                                        status(StatusCode::NotFound, b"node handle is not live")
+                                    } else {
+                                        status(
+                                            StatusCode::InvalidArgument,
+                                            b"node belongs to another surface",
+                                        )
+                                    },
+                                );
                             }
                             if self.retired_handles.contains(&value.node) {
-                                return Err(status(StatusCode::NotFound, b"node handle is not live"));
+                                return Err(status(
+                                    StatusCode::NotFound,
+                                    b"node handle is not live",
+                                ));
                             }
                             if self.known_handles.contains(&value.node) {
-                                return Err(status(StatusCode::InvalidArgument, b"foreign node handle"));
+                                return Err(status(
+                                    StatusCode::InvalidArgument,
+                                    b"foreign node handle",
+                                ));
                             }
                             if self.action_tokens.contains_key(&value.node) {
-                                return Err(status(StatusCode::InvalidArgument, b"foreign node handle"));
+                                return Err(status(
+                                    StatusCode::InvalidArgument,
+                                    b"foreign node handle",
+                                ));
                             }
                             let ordinal_limit = if parent == 0 {
                                 next.roots.len()
@@ -9987,11 +10177,17 @@ mod runtime_conformance {
                                     .map_or(0, Vec::len)
                             };
                             if value.ordinal > ordinal_limit {
-                                return Err(status(StatusCode::InvalidArgument, b"invalid mount ordinal"));
+                                return Err(status(
+                                    StatusCode::InvalidArgument,
+                                    b"invalid mount ordinal",
+                                ));
                             }
                             let explicit_key = ValueData::from_ref(value.explicit_key)?;
                             if !reserve_alias(value.node) {
-                                return Err(status(StatusCode::InvalidArgument, b"foreign node handle"));
+                                return Err(status(
+                                    StatusCode::InvalidArgument,
+                                    b"foreign node handle",
+                                ));
                             }
                             reserved_node_tokens.push(value.node);
                             self.node_tokens.insert(value.node, handle);
@@ -10031,27 +10227,35 @@ mod runtime_conformance {
                         UiOperationKind::UnmountNode => {
                             let token = unsafe { operation.as_.unmount_node };
                             let node = self.resolve_node_token(handle, &next, token)?;
-                            if !next.remove_subtree(
-                                node,
-                                &mut retired_nodes,
-                                &mut retired_actions,
-                            ) {
-                                return Err(status(StatusCode::NotFound, b"node handle is not live"));
+                            if !next.remove_subtree(node, &mut retired_nodes, &mut retired_actions)
+                            {
+                                return Err(status(
+                                    StatusCode::NotFound,
+                                    b"node handle is not live",
+                                ));
                             }
                             next.records.push(format!("unmount:{node}"));
                         }
                         UiOperationKind::SetProperty | UiOperationKind::ClearProperty => {
                             let value = unsafe { operation.as_.set_property };
                             let Some(property) = (unsafe { owned_text(value.property) }) else {
-                                return Err(status(StatusCode::InvalidArgument, b"invalid property"));
+                                return Err(status(
+                                    StatusCode::InvalidArgument,
+                                    b"invalid property",
+                                ));
                             };
                             let node = self.resolve_node_token(handle, &next, value.node)?;
                             if property.is_empty() {
-                                return Err(status(StatusCode::InvalidArgument, b"invalid property"));
+                                return Err(status(
+                                    StatusCode::InvalidArgument,
+                                    b"invalid property",
+                                ));
                             }
                             let state = next.node_state.get_mut(&node).expect("live node state");
                             if operation.kind == UiOperationKind::SetProperty {
-                                state.properties.insert(property.clone(), ValueData::from_ref(value.value)?);
+                                state
+                                    .properties
+                                    .insert(property.clone(), ValueData::from_ref(value.value)?);
                             } else {
                                 state.properties.remove(&property);
                             }
@@ -10065,17 +10269,26 @@ mod runtime_conformance {
                         | UiOperationKind::MoveChild => {
                             let value = unsafe { operation.as_.child };
                             let Some(slot) = (unsafe { owned_text(value.slot) }) else {
-                                return Err(status(StatusCode::InvalidArgument, b"invalid child slot"));
+                                return Err(status(
+                                    StatusCode::InvalidArgument,
+                                    b"invalid child slot",
+                                ));
                             };
                             let parent = self.resolve_node_token(handle, &next, value.parent)?;
                             let child = self.resolve_node_token(handle, &next, value.child)?;
                             if slot.is_empty() || parent == child {
-                                return Err(status(StatusCode::InvalidArgument, b"invalid child operation"));
+                                return Err(status(
+                                    StatusCode::InvalidArgument,
+                                    b"invalid child operation",
+                                ));
                             }
                             let mut ancestor = parent;
                             while ancestor != 0 {
                                 if ancestor == child {
-                                    return Err(status(StatusCode::InvalidArgument, b"child cycle"));
+                                    return Err(status(
+                                        StatusCode::InvalidArgument,
+                                        b"child cycle",
+                                    ));
                                 }
                                 ancestor = next
                                     .node_state
@@ -10091,7 +10304,10 @@ mod runtime_conformance {
                                     .and_then(|children| children.get(value.ordinal))
                                     == Some(&child);
                                 if !valid {
-                                    return Err(status(StatusCode::NotFound, b"child is not mounted in slot"));
+                                    return Err(status(
+                                        StatusCode::NotFound,
+                                        b"child is not mounted in slot",
+                                    ));
                                 }
                                 next.detach_child(child);
                                 let child_state =
@@ -10105,10 +10321,16 @@ mod runtime_conformance {
                                     .is_some_and(|state| state.parent != 0)
                                     || next.roots.contains(&child);
                                 if kind == UiOperationKind::InsertChild && attached {
-                                    return Err(status(StatusCode::InvalidArgument, b"child is already mounted"));
+                                    return Err(status(
+                                        StatusCode::InvalidArgument,
+                                        b"child is already mounted",
+                                    ));
                                 }
                                 if kind == UiOperationKind::MoveChild && !attached {
-                                    return Err(status(StatusCode::NotFound, b"child is not mounted"));
+                                    return Err(status(
+                                        StatusCode::NotFound,
+                                        b"child is not mounted",
+                                    ));
                                 }
                                 next.detach_child(child);
                                 let ordinal_limit = next
@@ -10117,7 +10339,10 @@ mod runtime_conformance {
                                     .and_then(|state| state.children.get(&slot))
                                     .map_or(0, Vec::len);
                                 if value.ordinal > ordinal_limit {
-                                    return Err(status(StatusCode::InvalidArgument, b"invalid child ordinal"));
+                                    return Err(status(
+                                        StatusCode::InvalidArgument,
+                                        b"invalid child ordinal",
+                                    ));
                                 }
                                 next.node_state
                                     .get_mut(&parent)
@@ -10139,14 +10364,23 @@ mod runtime_conformance {
                         UiOperationKind::BindAction | UiOperationKind::UnbindAction => {
                             let value = unsafe { operation.as_.bind_action };
                             let Some(event_name) = (unsafe { owned_text(value.event_name) }) else {
-                                return Err(status(StatusCode::InvalidArgument, b"invalid action event"));
+                                return Err(status(
+                                    StatusCode::InvalidArgument,
+                                    b"invalid action event",
+                                ));
                             };
                             let Some(input_type) = (unsafe { owned_text(value.input_type) }) else {
-                                return Err(status(StatusCode::InvalidArgument, b"invalid action input type"));
+                                return Err(status(
+                                    StatusCode::InvalidArgument,
+                                    b"invalid action input type",
+                                ));
                             };
                             let node = self.resolve_node_token(handle, &next, value.node)?;
                             if event_name.is_empty() {
-                                return Err(status(StatusCode::InvalidArgument, b"invalid action event"));
+                                return Err(status(
+                                    StatusCode::InvalidArgument,
+                                    b"invalid action event",
+                                ));
                             }
                             if operation.kind == UiOperationKind::BindAction {
                                 if value.action == 0
@@ -10154,23 +10388,43 @@ mod runtime_conformance {
                                     || next.resolve_action(value.action).is_some()
                                     || input_type.is_empty()
                                 {
-                                    return Err(status(StatusCode::InvalidArgument, b"invalid action operation"));
+                                    return Err(status(
+                                        StatusCode::InvalidArgument,
+                                        b"invalid action operation",
+                                    ));
                                 }
                                 if let Some(owner) = self.action_tokens.get(&value.action) {
-                                    return Err(if *owner == handle || !self.surfaces.contains_key(owner) {
-                                        status(StatusCode::NotFound, b"action handle is not live")
-                                    } else {
-                                        status(StatusCode::InvalidArgument, b"action belongs to another surface")
-                                    });
+                                    return Err(
+                                        if *owner == handle || !self.surfaces.contains_key(owner) {
+                                            status(
+                                                StatusCode::NotFound,
+                                                b"action handle is not live",
+                                            )
+                                        } else {
+                                            status(
+                                                StatusCode::InvalidArgument,
+                                                b"action belongs to another surface",
+                                            )
+                                        },
+                                    );
                                 }
                                 if self.retired_handles.contains(&value.action) {
-                                    return Err(status(StatusCode::NotFound, b"action handle is not live"));
+                                    return Err(status(
+                                        StatusCode::NotFound,
+                                        b"action handle is not live",
+                                    ));
                                 }
                                 if self.known_handles.contains(&value.action) {
-                                    return Err(status(StatusCode::InvalidArgument, b"foreign action handle"));
+                                    return Err(status(
+                                        StatusCode::InvalidArgument,
+                                        b"foreign action handle",
+                                    ));
                                 }
                                 if self.node_tokens.contains_key(&value.action) {
-                                    return Err(status(StatusCode::InvalidArgument, b"foreign action handle"));
+                                    return Err(status(
+                                        StatusCode::InvalidArgument,
+                                        b"foreign action handle",
+                                    ));
                                 }
                                 if next
                                     .node_state
@@ -10179,10 +10433,16 @@ mod runtime_conformance {
                                     .actions
                                     .contains_key(&event_name)
                                 {
-                                    return Err(status(StatusCode::InvalidArgument, b"action event is already bound"));
+                                    return Err(status(
+                                        StatusCode::InvalidArgument,
+                                        b"action event is already bound",
+                                    ));
                                 }
                                 if !reserve_alias(value.action) {
-                                    return Err(status(StatusCode::InvalidArgument, b"foreign action handle"));
+                                    return Err(status(
+                                        StatusCode::InvalidArgument,
+                                        b"foreign action handle",
+                                    ));
                                 }
                                 reserved_action_tokens.push(value.action);
                                 self.action_tokens.insert(value.action, handle);
@@ -10195,21 +10455,28 @@ mod runtime_conformance {
                                     .get_mut(&node)
                                     .expect("live node state")
                                     .actions
-                                    .insert(event_name.clone(), ActionBinding {
-                                        action: actual,
-                                        input_type,
-                                    });
+                                    .insert(
+                                        event_name.clone(),
+                                        ActionBinding {
+                                            action: actual,
+                                            input_type,
+                                        },
+                                    );
                                 next.records
                                     .push(format!("action:{node}:{actual}:{event_name}"));
                             } else {
-                                let actual = self.resolve_action_token(handle, &next, value.action)?;
+                                let actual =
+                                    self.resolve_action_token(handle, &next, value.action)?;
                                 let binding_matches = next
                                     .node_state
                                     .get(&node)
                                     .and_then(|state| state.actions.get(&event_name))
                                     .is_some_and(|binding| binding.action == actual);
                                 if !binding_matches {
-                                    return Err(status(StatusCode::NotFound, b"action handle is not bound"));
+                                    return Err(status(
+                                        StatusCode::NotFound,
+                                        b"action handle is not bound",
+                                    ));
                                 }
                                 next.node_state
                                     .get_mut(&node)
@@ -10218,15 +10485,21 @@ mod runtime_conformance {
                                     .remove(&event_name);
                                 next.action_aliases.retain(|_, mapped| *mapped != actual);
                                 retired_actions.push(actual);
-                            next.records
-                                .push(format!("action:{}:{}:{}", node, actual, event_name));
+                                next.records
+                                    .push(format!("action:{}:{}:{}", node, actual, event_name));
                             }
                         }
                         UiOperationKind::SetFocus | UiOperationKind::SetAccessibility => {
-                            return Err(status(StatusCode::Unsupported, b"operation is not in the fixture"));
+                            return Err(status(
+                                StatusCode::Unsupported,
+                                b"operation is not in the fixture",
+                            ));
                         }
                         _ => {
-                            return Err(status(StatusCode::InvalidArgument, b"unknown UI operation"));
+                            return Err(status(
+                                StatusCode::InvalidArgument,
+                                b"unknown UI operation",
+                            ));
                         }
                     }
                 }
@@ -10243,7 +10516,10 @@ mod runtime_conformance {
                 let mut reservations = HANDLE_RESERVATIONS
                     .lock()
                     .unwrap_or_else(|poisoned| poisoned.into_inner());
-                for token in reserved_node_tokens.iter().chain(reserved_action_tokens.iter()) {
+                for token in reserved_node_tokens
+                    .iter()
+                    .chain(reserved_action_tokens.iter())
+                {
                     reservations.remove(token);
                 }
                 for node in &allocated_nodes {
@@ -10262,7 +10538,10 @@ mod runtime_conformance {
             }
             self.retired_handles.extend(retired_nodes.iter().copied());
             self.retired_handles.extend(retired_actions.iter().copied());
-            let surface = self.surfaces.get_mut(&handle).expect("surface checked above");
+            let surface = self
+                .surfaces
+                .get_mut(&handle)
+                .expect("surface checked above");
             *surface = next;
             let mut handles = self
                 .context()
@@ -10395,12 +10674,14 @@ mod runtime_conformance {
             if result.code != StatusCode::Ok {
                 return result;
             }
-            let record = self.requests.remove(&request).expect("request checked above");
+            let record = self
+                .requests
+                .remove(&request)
+                .expect("request checked above");
             self.cancelled_requests.insert(request, record);
             let failure = status(StatusCode::Cancelled, b"request cancelled");
-            let result = unsafe {
-                (self.client.fail_model_request)(self.client.context, request, failure)
-            };
+            let result =
+                unsafe { (self.client.fail_model_request)(self.client.context, request, failure) };
             if let Some(surface) = self.surfaces.get_mut(&record.surface) {
                 surface.owned_handles.remove(&request);
                 surface.owned_handles.remove(&record._model);
@@ -10441,9 +10722,8 @@ mod runtime_conformance {
             if !Self::valid_value_ref(rows) {
                 return status(StatusCode::InvalidArgument, b"invalid model result");
             }
-            let result = unsafe {
-                (self.client.complete_model_request)(self.client.context, request, rows)
-            };
+            let result =
+                unsafe { (self.client.complete_model_request)(self.client.context, request, rows) };
             self.requests.remove(&request);
             if let Some(surface_state) = self.surfaces.get_mut(&record.surface) {
                 surface_state.owned_handles.remove(&request);
@@ -10494,7 +10774,11 @@ mod runtime_conformance {
                 return result;
             }
             self.terminal = true;
-            let mut log = self.context().log.lock().unwrap_or_else(|error| error.into_inner());
+            let mut log = self
+                .context()
+                .log
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
             log.mark_terminal();
             ok()
         }
@@ -10551,12 +10835,9 @@ mod runtime_conformance {
         &GLOBAL
     }
 
-
     fn serial_lock() -> MutexGuard<'static, ()> {
         static SERIAL: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
-        SERIAL
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
+        SERIAL.lock().unwrap_or_else(|error| error.into_inner())
     }
 
     fn with_runtime<F>(runtime: RuntimeHandle, operation: F) -> Status
@@ -10655,7 +10936,9 @@ mod runtime_conformance {
     }
 
     unsafe extern "C" fn fixture_start(runtime: RuntimeHandle) -> Status {
-        with_runtime(runtime, |state| state.operational().map_or_else(|error| error, |_| ok()))
+        with_runtime(runtime, |state| {
+            state.operational().map_or_else(|error| error, |_| ok())
+        })
     }
 
     unsafe extern "C" fn fixture_poll(runtime: RuntimeHandle, _timeout_ms: u32) -> Status {
@@ -10815,9 +11098,8 @@ mod runtime_conformance {
                 },
             };
             let mut surface = 0;
-            let result = unsafe {
-                (FIXTURE_API.create_surface)(self.runtime, &options, &mut surface)
-            };
+            let result =
+                unsafe { (FIXTURE_API.create_surface)(self.runtime, &options, &mut surface) };
             assert_eq!(result.code, StatusCode::Ok);
             surface
         }
@@ -10833,15 +11115,20 @@ mod runtime_conformance {
                 owner: ptr::null_mut(),
                 release: release_owned,
             };
-            let result = unsafe {
-                (FIXTURE_API.capture_semantic_state)(self.runtime, surface, &mut output)
-            };
+            let result =
+                unsafe { (FIXTURE_API.capture_semantic_state)(self.runtime, surface, &mut output) };
             assert_eq!(result.code, StatusCode::Ok);
             let bytes = if output.len == 0 {
-                assert!(output.data.is_null(), "empty owned bytes must have a null data pointer");
+                assert!(
+                    output.data.is_null(),
+                    "empty owned bytes must have a null data pointer"
+                );
                 Vec::new()
             } else {
-                assert!(!output.data.is_null(), "non-empty owned bytes must have a data pointer");
+                assert!(
+                    !output.data.is_null(),
+                    "non-empty owned bytes must have a data pointer"
+                );
                 unsafe { slice::from_raw_parts(output.data, output.len).to_vec() }
             };
             unsafe {
@@ -10861,26 +11148,44 @@ mod runtime_conformance {
         fn start_model_request(&self, surface: SurfaceHandle) -> (ModelHandle, RequestHandle) {
             let guard = global().lock().unwrap_or_else(|error| error.into_inner());
             let mut guard = guard;
-            let state = guard.runtime.as_mut().expect("fixture runtime should exist");
+            let state = guard
+                .runtime
+                .as_mut()
+                .expect("fixture runtime should exist");
             state
                 .start_model_request(surface)
                 .expect("fixture callback should accept model request")
         }
         fn queue_event(&self, event: RuntimeEvent) -> StatusCode {
             let mut guard = global().lock().unwrap_or_else(|error| error.into_inner());
-            let state = guard.runtime.as_mut().expect("fixture runtime should exist");
+            let state = guard
+                .runtime
+                .as_mut()
+                .expect("fixture runtime should exist");
             state.emit(event).code
         }
 
         fn fail_next_model_callback(&self) {
-            self.client.fail_model_callback.store(true, Ordering::SeqCst);
+            self.client
+                .fail_model_callback
+                .store(true, Ordering::SeqCst);
         }
 
         fn node_and_action(&self, surface: SurfaceHandle) -> (NodeHandle, ActionHandle) {
             let guard = global().lock().unwrap_or_else(|error| error.into_inner());
-            let state = guard.runtime.as_ref().expect("fixture runtime should exist");
-            let surface_state = state.surfaces.get(&surface).expect("surface should be live");
-            let node = *surface_state.nodes.iter().next().expect("surface should have a node");
+            let state = guard
+                .runtime
+                .as_ref()
+                .expect("fixture runtime should exist");
+            let surface_state = state
+                .surfaces
+                .get(&surface)
+                .expect("surface should be live");
+            let node = *surface_state
+                .nodes
+                .iter()
+                .next()
+                .expect("surface should have a node");
             let action = surface_state
                 .node_state
                 .get(&node)
@@ -10909,7 +11214,10 @@ mod runtime_conformance {
         fn emit_diagnostic(&self) -> StatusCode {
             let guard = global().lock().unwrap_or_else(|error| error.into_inner());
             let mut guard = guard;
-            let state = guard.runtime.as_mut().expect("fixture runtime should exist");
+            let state = guard
+                .runtime
+                .as_mut()
+                .expect("fixture runtime should exist");
             let result = state.emit_diagnostic(status(StatusCode::Failed, b"fixture diagnostic"));
             if result.code != StatusCode::Ok {
                 return result.code;
@@ -10921,12 +11229,20 @@ mod runtime_conformance {
         }
 
         fn set_reentry(&self) {
-            let mut log = self.client.log.lock().unwrap_or_else(|error| error.into_inner());
+            let mut log = self
+                .client
+                .log
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
             log.reenter = true;
         }
 
         fn callback_log(&self) -> CallbackLogSnapshot {
-            let log = self.client.log.lock().unwrap_or_else(|error| error.into_inner());
+            let log = self
+                .client
+                .log
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
             CallbackLogSnapshot {
                 events: log.events.clone(),
                 action_payloads: log.action_payloads.clone(),
@@ -11073,7 +11389,11 @@ mod runtime_conformance {
     fn frame_body(frame: &[u8]) -> &[u8] {
         assert!(frame.starts_with(b"ORNA-UI/1 "));
         assert!(frame.len() >= 14);
-        let body_length = u32::from_be_bytes(frame[10..14].try_into().expect("frame length is four bytes"));
+        let body_length = u32::from_be_bytes(
+            frame[10..14]
+                .try_into()
+                .expect("frame length is four bytes"),
+        );
         assert_eq!(frame.len(), 14 + body_length as usize);
         &frame[14..]
     }
@@ -11137,7 +11457,8 @@ mod runtime_conformance {
             features: ptr::null(),
             feature_count: 0,
         };
-        static DUPLICATE_FEATURES: [StringView; 2] = [view(b"accessibility"), view(b"accessibility")];
+        static DUPLICATE_FEATURES: [StringView; 2] =
+            [view(b"accessibility"), view(b"accessibility")];
         static DUPLICATE_FEATURE_CONTRACT: ContractVersion = ContractVersion {
             name: view(b"std.ui.UI"),
             major: 1,
@@ -11145,7 +11466,6 @@ mod runtime_conformance {
             features: DUPLICATE_FEATURES.as_ptr(),
             feature_count: DUPLICATE_FEATURES.len(),
         };
-
 
         let mut duplicate = DESCRIPTOR;
         duplicate.contracts = DUPLICATES.as_ptr();
@@ -11180,7 +11500,6 @@ mod runtime_conformance {
             validate_descriptor(&malformed_thread_model),
             Err(LoadError::Descriptor("thread model"))
         );
-
 
         let mut malformed = DESCRIPTOR;
         malformed.sinks = ptr::null();
@@ -11238,7 +11557,12 @@ mod runtime_conformance {
         );
 
         let mut invalid_mount = mount(1, 0, view(b"slot"));
-        invalid_mount.as_.mount_node.explicit_key.canonical_encoding.len = MAX_VIEW_BYTES + 1;
+        invalid_mount
+            .as_
+            .mount_node
+            .explicit_key
+            .canonical_encoding
+            .len = MAX_VIEW_BYTES + 1;
         assert_eq!(
             session.apply(surface, &batch(1, &[invalid_mount])),
             StatusCode::InvalidArgument
@@ -11255,15 +11579,20 @@ mod runtime_conformance {
             session.apply(surface, &batch(1, &[invalid_mount])),
             StatusCode::InvalidArgument
         );
-        assert_eq!(frame_body(&session.capture(surface)), b"{\"kind\":\"empty\"}");
+        assert_eq!(
+            frame_body(&session.capture(surface)),
+            b"{\"kind\":\"empty\"}"
+        );
     }
-
 
     #[test]
     fn borrowed_batch_input_is_not_retained_and_capture_preserves_values() {
         let session = FixtureSession::new();
         let surface = session.create_surface(b"Borrowed input");
-        assert_eq!(frame_body(&session.capture(surface)), b"{\"kind\":\"empty\"}");
+        assert_eq!(
+            frame_body(&session.capture(surface)),
+            b"{\"kind\":\"empty\"}"
+        );
 
         let mut slot = *b"slot";
         let slot_view = StringView {
@@ -11280,7 +11609,10 @@ mod runtime_conformance {
                 len: key.len(),
             },
         };
-        assert_eq!(session.apply(surface, &batch(1, &[operation])), StatusCode::Ok);
+        assert_eq!(
+            session.apply(surface, &batch(1, &[operation])),
+            StatusCode::Ok
+        );
         slot.copy_from_slice(b"xxxx");
         key.copy_from_slice(b"other");
 
@@ -11306,7 +11638,8 @@ mod runtime_conformance {
             release: release_owned,
         };
         assert_eq!(
-            unsafe { (FIXTURE_API.capture_semantic_state)(session.runtime, surface, &mut output) }.code,
+            unsafe { (FIXTURE_API.capture_semantic_state)(session.runtime, surface, &mut output) }
+                .code,
             StatusCode::Ok,
         );
         let baseline_unknown = UNKNOWN_RELEASES.load(Ordering::SeqCst);
@@ -11325,7 +11658,10 @@ mod runtime_conformance {
         unsafe {
             (output.release)(output.owner, output.data, output.len);
         }
-        assert_eq!(UNKNOWN_RELEASES.load(Ordering::SeqCst), baseline_unknown + 1);
+        assert_eq!(
+            UNKNOWN_RELEASES.load(Ordering::SeqCst),
+            baseline_unknown + 1
+        );
         let mut opaque = OwnedBytes {
             data: ptr::null_mut(),
             len: 0,
@@ -11333,7 +11669,8 @@ mod runtime_conformance {
             release: release_owned,
         };
         assert_eq!(
-            unsafe { (FIXTURE_API.capture_opaque_state)(session.runtime, surface, &mut opaque) }.code,
+            unsafe { (FIXTURE_API.capture_opaque_state)(session.runtime, surface, &mut opaque) }
+                .code,
             StatusCode::Ok,
         );
         assert!(opaque.data.is_null());
@@ -11351,14 +11688,18 @@ mod runtime_conformance {
             release: release_owned,
         };
         assert_eq!(
-            unsafe { (FIXTURE_API.capture_semantic_state)(session.runtime, surface, &mut second) }.code,
+            unsafe { (FIXTURE_API.capture_semantic_state)(session.runtime, surface, &mut second) }
+                .code,
             StatusCode::Ok,
         );
         let wrong_owner = (second.owner as usize + 1) as *mut c_void;
         unsafe {
             (second.release)(wrong_owner, second.data, second.len);
         }
-        assert_eq!(UNKNOWN_RELEASES.load(Ordering::SeqCst), baseline_unknown + 2);
+        assert_eq!(
+            UNKNOWN_RELEASES.load(Ordering::SeqCst),
+            baseline_unknown + 2
+        );
         unsafe {
             (second.release)(second.owner, second.data, second.len);
         }
@@ -11387,7 +11728,10 @@ mod runtime_conformance {
         let session = FixtureSession::new();
         let surface = session.create_surface(b"Handle provenance");
         let foreign = 0xffff_u64;
-        assert_eq!(session.destroy_surface(foreign), StatusCode::InvalidArgument);
+        assert_eq!(
+            session.destroy_surface(foreign),
+            StatusCode::InvalidArgument
+        );
         let operations = [mount(9, foreign, view(b"root"))];
         assert_eq!(
             session.apply(surface, &batch(1, &operations)),
@@ -11397,11 +11741,10 @@ mod runtime_conformance {
         assert_eq!(session.destroy_surface(surface), StatusCode::NotFound);
 
         let runtime = session.runtime;
-        let cross_thread = thread::spawn(move || unsafe {
-            (FIXTURE_API.poll_event_loop)(runtime, 0).code
-        })
-        .join()
-        .expect("cross-thread probe should join");
+        let cross_thread =
+            thread::spawn(move || unsafe { (FIXTURE_API.poll_event_loop)(runtime, 0).code })
+                .join()
+                .expect("cross-thread probe should join");
         assert_eq!(cross_thread, StatusCode::Busy);
     }
     #[test]
@@ -11424,30 +11767,61 @@ mod runtime_conformance {
         assert_eq!(
             session.apply(
                 owner,
-                &batch(2, &[bind_action(0x2001, view(b"activate"), 0x2002, view(b"bool"))])
+                &batch(
+                    2,
+                    &[bind_action(
+                        0x2001,
+                        view(b"activate"),
+                        0x2002,
+                        view(b"bool")
+                    )]
+                )
             ),
             StatusCode::Ok
         );
         assert_eq!(
             session.apply(
                 other,
-                &batch(2, &[bind_action(0x3001, view(b"activate"), 0x2002, view(b"bool"))])
+                &batch(
+                    2,
+                    &[bind_action(
+                        0x3001,
+                        view(b"activate"),
+                        0x2002,
+                        view(b"bool")
+                    )]
+                )
             ),
             StatusCode::InvalidArgument
         );
         assert_eq!(
             session.apply(
                 owner,
-                &batch(3, &[unbind_action(0x2001, view(b"activate"), 0x2002, view(b"bool"))])
+                &batch(
+                    3,
+                    &[unbind_action(
+                        0x2001,
+                        view(b"activate"),
+                        0x2002,
+                        view(b"bool")
+                    )]
+                )
             ),
             StatusCode::Ok
         );
         assert_eq!(
             session.apply(
                 owner,
-                &batch(4, &[bind_action(0x2001, view(b"activate"), 0x2002, view(b"bool"))])
+                &batch(
+                    4,
+                    &[bind_action(
+                        0x2001,
+                        view(b"activate"),
+                        0x2002,
+                        view(b"bool")
+                    )]
+                )
             ),
-
             StatusCode::NotFound
         );
         assert_eq!(
@@ -11478,15 +11852,25 @@ mod runtime_conformance {
         assert_eq!(
             session.apply(
                 surface,
-                &batch(2, &[bind_action(node_token, view(b"activate"), action_token, view(b"bool"))])
+                &batch(
+                    2,
+                    &[bind_action(
+                        node_token,
+                        view(b"activate"),
+                        action_token,
+                        view(b"bool")
+                    )]
+                )
             ),
             StatusCode::Ok
         );
         let captured = session.capture(surface);
         let aliased_action_id = format!("\"action_id\":\"{action_token}\"");
-        assert!(!captured.windows(aliased_action_id.len()).any(|window| {
-            window == aliased_action_id.as_bytes()
-        }));
+        assert!(
+            !captured
+                .windows(aliased_action_id.len())
+                .any(|window| { window == aliased_action_id.as_bytes() })
+        );
         assert!(captured.windows(8).any(|window| window == b"activate"));
     }
 
@@ -11499,7 +11883,13 @@ mod runtime_conformance {
         let operations = [
             unmount(foreign),
             set_property(foreign, view(b"title")),
-            child_operation(UiOperationKind::InsertChild, foreign, view(b"slot"), 0x7001, 0),
+            child_operation(
+                UiOperationKind::InsertChild,
+                foreign,
+                view(b"slot"),
+                0x7001,
+                0,
+            ),
             bind_action(foreign, view(b"submit"), 0x7002, view(b"std.json.Value")),
             unbind_action(foreign, view(b"submit"), 0x7002, view(b"std.json.Value")),
         ];
@@ -11528,7 +11918,10 @@ mod runtime_conformance {
             set_property(0x7fff, view(b"title")),
         ];
 
-        assert_eq!(session.apply(surface, &batch(1, &failed)), StatusCode::NotFound);
+        assert_eq!(
+            session.apply(surface, &batch(1, &failed)),
+            StatusCode::NotFound
+        );
         assert!(!is_reserved_handle(alias));
         assert!(!is_reserved_handle(alias + 1));
         assert_eq!(
@@ -11546,15 +11939,18 @@ mod runtime_conformance {
             StatusCode::Ok
         );
         assert_eq!(
-            session.apply(
-                surface,
-                &batch(2, &[mount(0x4002, 0x4001, view(b"child"))])
-            ),
+            session.apply(surface, &batch(2, &[mount(0x4002, 0x4001, view(b"child"))])),
             StatusCode::Ok
         );
         let before = session.capture(surface);
         let invalid_insert = [
-            child_operation(UiOperationKind::InsertChild, 0x4001, view(b"other"), 0x4002, 0),
+            child_operation(
+                UiOperationKind::InsertChild,
+                0x4001,
+                view(b"other"),
+                0x4002,
+                0,
+            ),
             set_property(0x4002, view(b"title")),
         ];
         assert_eq!(
@@ -11604,7 +12000,10 @@ mod runtime_conformance {
             mount(0x1001, 0, view(b"root")),
             set_property(0x1001, view(b"title")),
         ];
-        assert_eq!(session.apply(surface, &batch(1, &operations)), StatusCode::Ok);
+        assert_eq!(
+            session.apply(surface, &batch(1, &operations)),
+            StatusCode::Ok
+        );
         let before = session.capture(surface);
 
         let malformed = [UiOperation {
@@ -11643,7 +12042,10 @@ mod runtime_conformance {
             set_property(0x7201, view(b"\x08\x0c")),
         ];
 
-        assert_eq!(session.apply(surface, &batch(1, &operations)), StatusCode::Ok);
+        assert_eq!(
+            session.apply(surface, &batch(1, &operations)),
+            StatusCode::Ok
+        );
         let frame = session.capture(surface);
         assert!(valid_canonical_frame(&frame));
         assert_eq!(
@@ -11654,7 +12056,8 @@ mod runtime_conformance {
 
     #[test]
     fn canonical_frame_validation_rejects_invalid_headers_lengths_and_values() {
-        let valid = encode_surface_state(&[], &HashMap::new()).expect("empty semantic state should encode");
+        let valid =
+            encode_surface_state(&[], &HashMap::new()).expect("empty semantic state should encode");
         assert!(valid_canonical_frame(&valid));
 
         let mut wrong_magic = valid.clone();
@@ -11666,7 +12069,9 @@ mod runtime_conformance {
         assert!(!valid_canonical_frame(&wrong_length));
 
         assert!(!valid_canonical_frame(b"ORNA-UI/1 \0\0\0\x08not json"));
-        assert!(!valid_canonical_frame(b"ORNA-UI/1 \0\0\0\x0f{\"kind\":\"node\"}"));
+        assert!(!valid_canonical_frame(
+            b"ORNA-UI/1 \0\0\0\x0f{\"kind\":\"node\"}"
+        ));
     }
 
     #[test]
@@ -11698,7 +12103,6 @@ mod runtime_conformance {
         assert_eq!(output.len, 0);
     }
 
-
     #[test]
     fn callbacks_are_fifo_reentrant_calls_are_busy_and_requests_complete_once() {
         let session = FixtureSession::new();
@@ -11718,9 +12122,15 @@ mod runtime_conformance {
         assert_eq!(log.completions, vec![request]);
         assert_eq!(log.sequence.len(), 3);
         assert_eq!(log.sequence[0].sequence, 0);
-        assert_eq!(log.sequence[0].kind, CallbackKind::Event(log.events[0].clone()));
+        assert_eq!(
+            log.sequence[0].kind,
+            CallbackKind::Event(log.events[0].clone())
+        );
         assert_eq!(log.sequence[1].sequence, 1);
-        assert_eq!(log.sequence[1].kind, CallbackKind::Event(log.events[1].clone()));
+        assert_eq!(
+            log.sequence[1].kind,
+            CallbackKind::Event(log.events[1].clone())
+        );
         assert_eq!(log.sequence[2].sequence, 2);
         assert_eq!(log.sequence[2].kind, CallbackKind::Completion(request));
         assert!(log.sequence.iter().all(|record| !record.terminal));
@@ -11737,7 +12147,10 @@ mod runtime_conformance {
         assert_eq!(log.events[0].kind, EventKind::ModelRangeRequest);
         assert_eq!(log.events[0].request, request);
         assert_eq!(log.sequence.len(), 1);
-        assert_eq!(log.sequence[0].kind, CallbackKind::Event(log.events[0].clone()));
+        assert_eq!(
+            log.sequence[0].kind,
+            CallbackKind::Event(log.events[0].clone())
+        );
         assert!(!log.sequence[0].terminal);
     }
     #[test]
@@ -11748,7 +12161,10 @@ mod runtime_conformance {
             mount(0x7001, 0, view(b"root")),
             bind_action(0x7001, view(b"submit"), 0x7101, view(b"std.json.Value")),
         ];
-        assert_eq!(session.apply(surface, &batch(1, &operations)), StatusCode::Ok);
+        assert_eq!(
+            session.apply(surface, &batch(1, &operations)),
+            StatusCode::Ok
+        );
         let (node, action) = session.node_and_action(surface);
         let mut payload = b"before".to_vec();
         let event = RuntimeEvent {
@@ -11772,7 +12188,10 @@ mod runtime_conformance {
         assert_eq!(session.queue_event(event), StatusCode::Ok);
         payload.copy_from_slice(b"after!");
         assert_eq!(session.poll(), StatusCode::Ok);
-        assert_eq!(session.callback_log().action_payloads, vec![b"before".to_vec()]);
+        assert_eq!(
+            session.callback_log().action_payloads,
+            vec![b"before".to_vec()]
+        );
     }
 
     #[test]
@@ -11783,7 +12202,10 @@ mod runtime_conformance {
             mount(0x5001, 0, view(b"root")),
             bind_action(0x5001, view(b"submit"), 0x6001, view(b"std.json.Value")),
         ];
-        assert_eq!(session.apply(surface, &batch(1, &operations)), StatusCode::Ok);
+        assert_eq!(
+            session.apply(surface, &batch(1, &operations)),
+            StatusCode::Ok
+        );
         let (node, action) = session.node_and_action(surface);
         let context = (&*session.client as *const ClientContext).cast_mut().cast();
 
@@ -11834,10 +12256,10 @@ mod runtime_conformance {
             },
         };
         assert_eq!(
-            unsafe { client_emit_runtime_event(context, session.runtime, &foreign_value_event) }.code,
+            unsafe { client_emit_runtime_event(context, session.runtime, &foreign_value_event) }
+                .code,
             StatusCode::InvalidArgument
         );
-
 
         let focus_event = RuntimeEvent {
             kind: EventKind::FocusChanged,
@@ -11896,7 +12318,10 @@ mod runtime_conformance {
 
         let log = session.callback_log();
         assert_eq!(
-            log.events.iter().map(|event| event.kind).collect::<Vec<_>>(),
+            log.events
+                .iter()
+                .map(|event| event.kind)
+                .collect::<Vec<_>>(),
             vec![
                 EventKind::Action,
                 EventKind::FocusChanged,
@@ -11949,7 +12374,10 @@ mod runtime_conformance {
             StatusCode::InvalidArgument,
         );
         assert_eq!(
-            unsafe { client_fail_model_request(context, request, status(StatusCode::Failed, b"failure")) }.code,
+            unsafe {
+                client_fail_model_request(context, request, status(StatusCode::Failed, b"failure"))
+            }
+            .code,
             StatusCode::Failed,
         );
         let mut metadata = OwnedBytes {
@@ -12044,7 +12472,10 @@ mod runtime_conformance {
             StatusCode::NotFound
         );
         assert_eq!(
-            unsafe { client_fail_model_request(context, failed, status(StatusCode::Failed, b"fixture")) }.code,
+            unsafe {
+                client_fail_model_request(context, failed, status(StatusCode::Failed, b"fixture"))
+            }
+            .code,
             StatusCode::Ok
         );
         assert_eq!(
@@ -12057,7 +12488,10 @@ mod runtime_conformance {
         assert_eq!(log.failures, vec![(failed, StatusCode::Failed)]);
         assert_eq!(log.sequence.len(), 4);
         assert_eq!(log.sequence[2].kind, CallbackKind::Completion(completed));
-        assert_eq!(log.sequence[3].kind, CallbackKind::Failure(failed, StatusCode::Failed));
+        assert_eq!(
+            log.sequence[3].kind,
+            CallbackKind::Failure(failed, StatusCode::Failed)
+        );
         assert!(!log.terminal);
     }
 
@@ -12117,17 +12551,27 @@ mod runtime_conformance {
         let log = session.callback_log();
         assert_eq!(
             log.failures,
-            vec![(cancelled, StatusCode::Cancelled), (pending, StatusCode::Cancelled)]
+            vec![
+                (cancelled, StatusCode::Cancelled),
+                (pending, StatusCode::Cancelled)
+            ]
         );
-        assert!(log.events.iter().any(|event| {
-            event.kind == EventKind::SurfaceClosed && event.surface == surface
-        }));
+        assert!(
+            log.events.iter().any(|event| {
+                event.kind == EventKind::SurfaceClosed && event.surface == surface
+            })
+        );
         assert!(log.terminal);
-        assert_eq!(log.sequence.last().map(|record| &record.kind), Some(&CallbackKind::Terminal));
+        assert_eq!(
+            log.sequence.last().map(|record| &record.kind),
+            Some(&CallbackKind::Terminal)
+        );
         assert!(log.sequence.last().is_some_and(|record| record.terminal));
-        assert!(log.sequence[..log.sequence.len() - 1]
-            .iter()
-            .all(|record| !record.terminal));
+        assert!(
+            log.sequence[..log.sequence.len() - 1]
+                .iter()
+                .all(|record| !record.terminal)
+        );
         let context = (&*session.client as *const ClientContext).cast_mut().cast();
         let post_terminal = RuntimeEvent {
             kind: EventKind::Diagnostic,
@@ -12154,15 +12598,21 @@ mod runtime_conformance {
         assert_eq!(session.emit_diagnostic(), StatusCode::Ok);
         assert_eq!(session.destroy_surface(surface), StatusCode::Ok);
         let log = session.callback_log();
-        assert_eq!(log.events[0], EventRecord {
-            kind: EventKind::Diagnostic,
-            surface: 0,
-            request: 0,
-        });
-        assert_eq!(log.events[1], EventRecord {
-            kind: EventKind::SurfaceClosed,
-            surface,
-            request: 0,
-        });
+        assert_eq!(
+            log.events[0],
+            EventRecord {
+                kind: EventKind::Diagnostic,
+                surface: 0,
+                request: 0,
+            }
+        );
+        assert_eq!(
+            log.events[1],
+            EventRecord {
+                kind: EventKind::SurfaceClosed,
+                surface,
+                request: 0,
+            }
+        );
     }
 }
