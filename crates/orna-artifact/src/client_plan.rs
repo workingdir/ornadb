@@ -1,4 +1,4 @@
-//! Canonical `orna.client-plan` artefact formats, versions 1, 2, 3, 4, 5, and 6.
+//! Canonical `orna.client-plan` artefact formats, versions 1 through 8.
 //!
 //! The first CLIENT function slice has one operation: return a non-null
 //! BOOLEAN constant. The complete encoding is:
@@ -52,14 +52,14 @@
 //! shape, the depth cap, the node-count cap, and per-node limits, so an
 //! untrusted artefact cannot exhaust the evaluator.
 //!
-//! Version 5 (work ADR 0060) wraps one complete version 1-4, version 6, or version 7
+//! Version 5 (work ADR 0060) wraps one complete version 1-4, version 6, version 7, or version 8
 //! with the owning function's ordered, closed capability requirements:
 //!
 //! ```text
 //! magic[8] = ORNACP\0\0
 //! version: u32 big-endian = 5
 //! operation: u8 = 5
-//! inner plan version: u32 big-endian = 1|2|3|4|6
+//! inner plan version: u32 big-endian = 1|2|3|4|6|7|8
 //! inner payload length: u32 big-endian
 //! inner payload: complete inner client-plan artefact bytes
 //! capability count: u32 big-endian, 1..=MAX_CAPABILITY_REQUIREMENTS
@@ -101,6 +101,25 @@
 //!
 //! Procedural expressions additionally admit `LocalRead` nodes and the v6
 //! resource/`AWAIT` nodes; versions 1-6 reject `LocalRead` as an unknown node.
+//!
+//! Version 8 carries one checked CLIENT action operation. Its descriptor is:
+//!
+//! ```text
+//! magic[8] = ORNACP\0\0
+//! version: u32 big-endian = 8
+//! operation: u8 = 8
+//! domain: u8 = 1|2 (CLIENT|SERVER)
+//! target: FunctionId[16]
+//! target revision: SourceRevisionId[16] CatalogueRevisionId[16]
+//! call site: CallSiteId[16]
+//! result type: TypeId[16]
+//! argument count: u32 big-endian, 0..=MAX_ACTION_ARGUMENTS
+//! argument: ParameterId[16] expression node
+//! ```
+//!
+//! Action arguments are encoded with the closed expression node set. Action
+//! nodes cannot nest inside action arguments, and arguments are ordered by
+//! ascending `ParameterId`.
 //!
 //! The version 1-4 formats contain no source text, source locations, Orna
 //! names, or backend values.
@@ -148,10 +167,14 @@ pub const RESOURCE_FORMAT_VERSION: u32 = 6;
 /// The client-plan version that carries ordered procedural local declarations,
 /// statements, and one final return expression (work ADR 0077).
 pub const PROCEDURAL_FORMAT_VERSION: u32 = 7;
+/// The client-plan version that carries one checked CLIENT action operation.
+pub const ACTION_FORMAT_VERSION: u32 = 8;
 /// The maximum number of resource operation nodes in one resource plan.
 pub const MAX_RESOURCE_OPERATIONS: usize = 64;
 /// The maximum number of arguments in one resource operation.
 pub const MAX_RESOURCE_ARGUMENTS: usize = 64;
+/// The maximum number of arguments in one action operation.
+pub const MAX_ACTION_ARGUMENTS: usize = 64;
 /// The maximum number of local declarations in one procedural plan.
 pub const MAX_PROCEDURAL_LOCALS: usize = 64;
 /// The maximum number of ordered statements in one procedural plan.
@@ -170,6 +193,7 @@ const RETURN_STATE_OPERATION: u8 = 4;
 const RETURN_CAPABILITY_OPERATION: u8 = 5;
 const RETURN_RESOURCE_OPERATION: u8 = 6;
 const RETURN_PROCEDURAL_OPERATION: u8 = 7;
+const RETURN_ACTION_OPERATION: u8 = 8;
 const CAPABILITY_ARGUMENT_TEXT: u8 = 1;
 const CAPABILITY_ARGUMENT_PARAMETER: u8 = 2;
 const RESOURCE_KIND_SCALAR: u8 = 1;
@@ -190,6 +214,7 @@ const NODE_FIELD_PATH: u8 = 6;
 const NODE_CONCAT: u8 = 7;
 const NODE_EXTERNAL_CONTRACT: u8 = 8;
 const NODE_LOCAL_READ: u8 = 11;
+const NODE_ACTION: u8 = 12;
 
 const PROCEDURAL_STATEMENT_LET: u8 = 1;
 const PROCEDURAL_STATEMENT_ASSIGNMENT: u8 = 2;
@@ -356,6 +381,11 @@ pub enum ClientExpressionNode {
     Resource {
         /// The target, revision, call-site, arguments, and result type.
         operation: ResourceOperationNode,
+    },
+    /// A checked CLIENT action operation value.
+    Action {
+        /// The target, revision, call-site, arguments, and result type.
+        operation: ActionOperationNode,
     },
     /// A call to one CLIENT function with bound arguments.
     Call {
@@ -821,6 +851,134 @@ impl ResourceOperationNode {
     }
 }
 
+/// The execution domain of one checked CLIENT action target.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ActionTargetDomain {
+    /// Invoke another CLIENT function locally.
+    Client,
+    /// Submit a SERVER function through the authenticated server boundary.
+    Server,
+}
+
+impl ActionTargetDomain {
+    const fn tag(self) -> u8 {
+        match self {
+            Self::Client => 1,
+            Self::Server => 2,
+        }
+    }
+}
+
+/// One checked CLIENT action operation node (work ADR 0079).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ActionOperationNode {
+    domain: ActionTargetDomain,
+    target: FunctionId,
+    target_revision: RevisionPair,
+    call_site: CallSiteId,
+    arguments: Vec<(ParameterId, ClientExpressionNode)>,
+    result_type: TypeId,
+}
+
+impl ActionOperationNode {
+    /// Creates an action node from its checked target and argument metadata.
+    pub fn new(
+        domain: ActionTargetDomain,
+        target: FunctionId,
+        target_revision: RevisionPair,
+        call_site: CallSiteId,
+        arguments: Vec<(ParameterId, ClientExpressionNode)>,
+        result_type: TypeId,
+    ) -> Self {
+        Self {
+            domain,
+            target,
+            target_revision,
+            call_site,
+            arguments,
+            result_type,
+        }
+    }
+
+    /// Returns the CLIENT or SERVER target domain.
+    pub const fn domain(&self) -> ActionTargetDomain {
+        self.domain
+    }
+
+    /// Returns the resolved action target function identity.
+    pub const fn target(&self) -> FunctionId {
+        self.target
+    }
+
+    /// Returns the resolved action target function identity.
+    pub const fn target_function(&self) -> FunctionId {
+        self.target
+    }
+
+    /// Returns the pinned source and catalogue revision pair.
+    pub const fn target_revision(&self) -> RevisionPair {
+        self.target_revision
+    }
+
+    /// Returns the stable compiled call-site identity.
+    pub const fn call_site(&self) -> CallSiteId {
+        self.call_site
+    }
+
+    /// Returns the stable compiled call-site identity.
+    pub const fn call_site_id(&self) -> CallSiteId {
+        self.call_site
+    }
+
+    /// Returns canonical parameter-to-expression pairs.
+    pub fn arguments(&self) -> &[(ParameterId, ClientExpressionNode)] {
+        &self.arguments
+    }
+
+    /// Returns the target declaration's result type identity.
+    pub const fn result_type(&self) -> TypeId {
+        self.result_type
+    }
+
+    /// Returns the target declaration's result type identity.
+    pub const fn declared_result_type(&self) -> TypeId {
+        self.result_type
+    }
+}
+
+/// A checked version-8 CLIENT plan carrying one action operation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ActionClientPlan {
+    operation: ActionOperationNode,
+}
+
+impl ActionClientPlan {
+    /// Creates an action plan from one checked operation.
+    pub fn new(operation: ActionOperationNode) -> Self {
+        Self { operation }
+    }
+
+    /// Returns the checked action operation.
+    pub const fn operation(&self) -> &ActionOperationNode {
+        &self.operation
+    }
+
+    /// Returns the canonical artefact version for this plan.
+    pub const fn format_version(&self) -> u32 {
+        ACTION_FORMAT_VERSION
+    }
+
+    /// Encodes this plan into its exact version-8 bytes.
+    pub fn encode(&self) -> Result<Vec<u8>, ClientPlanError> {
+        encode_action_plan(self)
+    }
+
+    /// Decodes exactly one canonical version-8 action client-plan artefact.
+    pub fn decode(bytes: &[u8]) -> Result<Self, ClientPlanError> {
+        decode_action_plan(bytes)
+    }
+}
+
 /// A checked version-6 CLIENT plan containing resource operation nodes in a
 /// closed expression tree.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1242,8 +1400,8 @@ impl CapabilityRequirement {
 
 /// The inner plan carried by one version-5 capability envelope.
 ///
-/// The envelope holds a complete decoded version 1-4, version-6, or
-/// version-7 client plan so the runtime can evaluate it directly after the capability gate
+/// The envelope holds a complete decoded version 1-4, version-6, version-7, or
+/// version-8 client plan so the runtime can evaluate it directly after the capability gate
 /// admits it.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum InnerClientPlan {
@@ -1259,6 +1417,8 @@ pub enum InnerClientPlan {
     Resource(ResourceClientPlan),
     /// A version-7 procedural plan.
     Procedural(ProceduralClientPlan),
+    /// A version-8 action plan.
+    Action(ActionClientPlan),
 }
 
 impl InnerClientPlan {
@@ -1271,6 +1431,7 @@ impl InnerClientPlan {
             Self::State(_) => STATE_FORMAT_VERSION,
             Self::Resource(_) => RESOURCE_FORMAT_VERSION,
             Self::Procedural(_) => PROCEDURAL_FORMAT_VERSION,
+            Self::Action(_) => ACTION_FORMAT_VERSION,
         }
     }
 
@@ -1283,12 +1444,13 @@ impl InnerClientPlan {
             Self::State(plan) => plan.encode(),
             Self::Resource(plan) => plan.encode(),
             Self::Procedural(plan) => plan.encode(),
+            Self::Action(plan) => plan.encode(),
         }
     }
 }
 
 /// A checked version-5 CLIENT plan that carries one version 1-4, version-6,
-/// or version-7 inner plan and the owning function's ordered, closed capability
+/// version-7, or version-8 inner plan and the owning function's ordered, closed capability
 /// requirements (work ADR 0060).
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CapabilityClientPlan {
@@ -1445,6 +1607,7 @@ impl CapabilityClientPlan {
             PROCEDURAL_FORMAT_VERSION => {
                 InnerClientPlan::Procedural(ProceduralClientPlan::decode(inner_payload)?)
             }
+            ACTION_FORMAT_VERSION => InnerClientPlan::Action(ActionClientPlan::decode(inner_payload)?),
             version => return Err(ClientPlanError::UnsupportedInnerVersion(version)),
         };
         let requirement_count = reader.u32()?;
@@ -1588,6 +1751,9 @@ fn encode_expression_node_with_resources(
                 allow_local,
                 resource_count,
             )?;
+        }
+        ClientExpressionNode::Action { .. } => {
+            return Err(ClientPlanError::InvalidExpressionNode(NODE_ACTION));
         }
         ClientExpressionNode::Call {
             function,
@@ -1741,6 +1907,96 @@ fn encode_resource_operation(
         )?;
     }
     writer.extend(&operation.result_type.to_bytes());
+    Ok(())
+}
+
+fn encode_action_plan(plan: &ActionClientPlan) -> Result<Vec<u8>, ClientPlanError> {
+    let operation = &plan.operation;
+    validate_action_arguments(&operation.arguments)?;
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(&MAGIC);
+    bytes.extend_from_slice(&ACTION_FORMAT_VERSION.to_be_bytes());
+    bytes.push(RETURN_ACTION_OPERATION);
+    let mut writer = NodeWriter::new();
+    writer.push(operation.domain.tag());
+    writer.extend(&operation.target.to_bytes());
+    writer.extend(&operation.target_revision.source().to_bytes());
+    writer.extend(&operation.target_revision.catalogue().to_bytes());
+    writer.extend(&operation.call_site.to_bytes());
+    writer.extend(&operation.result_type.to_bytes());
+    writer.extend(&(operation.arguments.len() as u32).to_be_bytes());
+    let mut expression_count = 0;
+    for (parameter, value) in &operation.arguments {
+        writer.extend(&parameter.to_bytes());
+        encode_expression_node(value, &mut writer, 0, &mut expression_count)?;
+    }
+    bytes.extend_from_slice(&writer.finish());
+    if bytes.len() > MAX_ARTIFACT_BYTES {
+        return Err(ClientPlanError::ArtifactSizeLimit { size: bytes.len(), maximum: MAX_ARTIFACT_BYTES });
+    }
+    Ok(bytes)
+}
+
+fn decode_action_plan(bytes: &[u8]) -> Result<ActionClientPlan, ClientPlanError> {
+    if bytes.len() > MAX_ARTIFACT_BYTES {
+        return Err(ClientPlanError::ArtifactSizeLimit { size: bytes.len(), maximum: MAX_ARTIFACT_BYTES });
+    }
+    let mut reader = Reader::new(bytes);
+    if reader.array::<8>()? != MAGIC { return Err(ClientPlanError::InvalidMagic); }
+    let version = reader.u32()?;
+    if version != ACTION_FORMAT_VERSION { return Err(ClientPlanError::UnsupportedVersion(version)); }
+    let operation = reader.u8()?;
+    if operation != RETURN_ACTION_OPERATION { return Err(ClientPlanError::InvalidOperation(operation)); }
+    let domain = match reader.u8()? {
+        1 => ActionTargetDomain::Client,
+        2 => ActionTargetDomain::Server,
+        tag => return Err(ClientPlanError::InvalidActionDomain(tag)),
+    };
+    let target = FunctionId::from_bytes(reader.array()?);
+    let target_revision = RevisionPair::new(SourceRevisionId::from_bytes(reader.array()?), CatalogueRevisionId::from_bytes(reader.array()?));
+    let call_site = CallSiteId::from_bytes(reader.array()?);
+    let result_type = TypeId::from_bytes(reader.array()?);
+    let argument_count = reader.u32()? as usize;
+    if argument_count > MAX_ACTION_ARGUMENTS {
+        return Err(ClientPlanError::ActionArgumentLimitExceeded { limit: MAX_ACTION_ARGUMENTS });
+    }
+    let mut arguments = Vec::with_capacity(argument_count);
+    let mut previous = None;
+    let mut expression_count = 0;
+    for _ in 0..argument_count {
+        let parameter = ParameterId::from_bytes(reader.array()?);
+        if let Some(previous) = previous {
+            match parameter.cmp(&previous) {
+                std::cmp::Ordering::Less => return Err(ClientPlanError::NonCanonicalActionArgumentOrder),
+                std::cmp::Ordering::Equal => return Err(ClientPlanError::DuplicateActionArgument(parameter)),
+                std::cmp::Ordering::Greater => {}
+            }
+        }
+        previous = Some(parameter);
+        let value = decode_expression_node(&mut reader, 0, &mut expression_count)?;
+        arguments.push((parameter, value));
+    }
+    reader.require_finished()?;
+    Ok(ActionClientPlan::new(ActionOperationNode::new(domain, target, target_revision, call_site, arguments, result_type)))
+}
+
+fn validate_action_arguments(
+    arguments: &[(ParameterId, ClientExpressionNode)],
+) -> Result<(), ClientPlanError> {
+    if arguments.len() > MAX_ACTION_ARGUMENTS {
+        return Err(ClientPlanError::ActionArgumentLimitExceeded { limit: MAX_ACTION_ARGUMENTS });
+    }
+    let mut previous = None;
+    for (parameter, _) in arguments {
+        if let Some(previous) = previous {
+            match parameter.cmp(&previous) {
+                std::cmp::Ordering::Less => return Err(ClientPlanError::NonCanonicalActionArgumentOrder),
+                std::cmp::Ordering::Equal => return Err(ClientPlanError::DuplicateActionArgument(*parameter)),
+                std::cmp::Ordering::Greater => {}
+            }
+        }
+        previous = Some(*parameter);
+    }
     Ok(())
 }
 
@@ -1951,6 +2207,9 @@ fn validate_procedural_expression(
         | ClientExpressionNode::ParameterRead { .. }
         | ClientExpressionNode::FieldPath { .. }
         | ClientExpressionNode::ExternalContract { .. } => {}
+        ClientExpressionNode::Action { .. } => {
+            return Err(ClientPlanError::InvalidExpressionNode(NODE_ACTION));
+        }
     }
     Ok(())
 }
@@ -1999,6 +2258,9 @@ fn validate_resource_await_placement(
         | ClientExpressionNode::LocalRead { .. }
         | ClientExpressionNode::FieldPath { .. }
         | ClientExpressionNode::ExternalContract { .. } => {}
+        ClientExpressionNode::Action { .. } => {
+            return Err(ClientPlanError::InvalidExpressionNode(NODE_ACTION));
+        }
     }
     Ok(())
 }
@@ -2262,6 +2524,17 @@ pub enum ClientPlanError {
         /// The exceeded limit.
         limit: usize,
     },
+    /// An action operation uses an unknown CLIENT/SERVER domain tag.
+    InvalidActionDomain(u8),
+    /// An action operation exceeds its argument limit.
+    ActionArgumentLimitExceeded {
+        /// The exceeded limit.
+        limit: usize,
+    },
+    /// An action argument parameter identity occurs more than once.
+    DuplicateActionArgument(ParameterId),
+    /// Action arguments are not sorted by ascending ParameterId.
+    NonCanonicalActionArgumentOrder,
     /// A resource operation uses an unknown scalar/stream tag.
     InvalidResourceKind(u8),
     /// A version-6 plan contains no resource operation nodes.
@@ -2420,6 +2693,18 @@ impl fmt::Display for ClientPlanError {
                 formatter,
                 "client-plan expression collection exceeds the limit {limit}"
             ),
+            Self::InvalidActionDomain(tag) => {
+                write!(formatter, "invalid client-plan action domain tag {tag}")
+            }
+            Self::ActionArgumentLimitExceeded { limit } => write!(
+                formatter,
+                "client-plan action argument count exceeds the limit {limit}"
+            ),
+            Self::DuplicateActionArgument(parameter) => {
+                write!(formatter, "duplicate client-plan action argument {parameter}")
+            }
+            Self::NonCanonicalActionArgumentOrder => formatter
+                .write_str("client-plan action arguments are not in canonical ParameterId order"),
             Self::InvalidResourceKind(tag) => {
                 write!(formatter, "invalid client-plan resource kind tag {tag}")
             }
@@ -4710,4 +4995,165 @@ mod tests {
             Err(ClientPlanError::MissingProceduralLet(local))
         );
     }
+
+    fn action_plan() -> ActionClientPlan {
+        let parameter = ParameterId::from_bytes([0x31; 16]);
+        ActionClientPlan::new(ActionOperationNode::new(
+            ActionTargetDomain::Server,
+            FunctionId::from_bytes([0x21; 16]),
+            RevisionPair::new(
+                SourceRevisionId::from_bytes([0x41; 16]),
+                CatalogueRevisionId::from_bytes([0x42; 16]),
+            ),
+            CallSiteId::from_bytes([0x43; 16]),
+            vec![(
+                parameter,
+                ClientExpressionNode::String {
+                    value: "owner".to_owned(),
+                },
+            )],
+            TypeId::from_bytes([0x44; 16]),
+        ))
+    }
+
+    #[test]
+    fn action_plan_round_trips_canonical_descriptor_and_accessors() {
+        let plan = action_plan();
+        let bytes = plan.encode().expect("the action plan encodes");
+        let mut expected = Vec::new();
+        expected.extend_from_slice(&MAGIC);
+        expected.extend_from_slice(&ACTION_FORMAT_VERSION.to_be_bytes());
+        expected.push(RETURN_ACTION_OPERATION);
+        expected.push(2);
+        expected.extend_from_slice(&[0x21; 16]);
+        expected.extend_from_slice(&[0x41; 16]);
+        expected.extend_from_slice(&[0x42; 16]);
+        expected.extend_from_slice(&[0x43; 16]);
+        expected.extend_from_slice(&[0x44; 16]);
+        expected.extend_from_slice(&1_u32.to_be_bytes());
+        expected.extend_from_slice(&[0x31; 16]);
+        expected.push(NODE_STRING);
+        expected.extend_from_slice(&5_u32.to_be_bytes());
+        expected.extend_from_slice(b"owner");
+        assert_eq!(bytes, expected);
+
+        let decoded = ActionClientPlan::decode(&bytes).expect("the action plan decodes");
+        assert_eq!(decoded, plan);
+        assert_eq!(decoded.format_version(), ACTION_FORMAT_VERSION);
+        assert_eq!(decoded.operation().domain(), ActionTargetDomain::Server);
+        assert_eq!(decoded.operation().target(), FunctionId::from_bytes([0x21; 16]));
+        assert_eq!(decoded.operation().target_function(), FunctionId::from_bytes([0x21; 16]));
+        assert_eq!(decoded.operation().target_revision(), RevisionPair::new(
+            SourceRevisionId::from_bytes([0x41; 16]),
+            CatalogueRevisionId::from_bytes([0x42; 16]),
+        ));
+        assert_eq!(decoded.operation().call_site(), CallSiteId::from_bytes([0x43; 16]));
+        assert_eq!(decoded.operation().call_site_id(), CallSiteId::from_bytes([0x43; 16]));
+        assert_eq!(decoded.operation().arguments().len(), 1);
+        assert_eq!(decoded.operation().result_type(), TypeId::from_bytes([0x44; 16]));
+        assert_eq!(decoded.operation().declared_result_type(), TypeId::from_bytes([0x44; 16]));
+    }
+
+    #[test]
+    fn action_plan_rejects_malformed_domain_order_trailing_and_expression_tags() {
+        let encoded = action_plan().encode().expect("the action plan encodes");
+        let count_offset = 8 + 4 + 1 + 1 + 16 * 5;
+        let argument_offset = count_offset + 4;
+        let expression_tag_offset = argument_offset + 16;
+
+        let mut invalid_domain = encoded.clone();
+        invalid_domain[13] = 3;
+        assert_eq!(ActionClientPlan::decode(&invalid_domain), Err(ClientPlanError::InvalidActionDomain(3)));
+
+        let mut trailing = encoded.clone();
+        trailing.push(0);
+        assert_eq!(ActionClientPlan::decode(&trailing), Err(ClientPlanError::TrailingBytes));
+
+        let mut truncated = encoded.clone();
+        truncated.pop();
+        assert_eq!(ActionClientPlan::decode(&truncated), Err(ClientPlanError::Truncated));
+
+        let mut invalid_node = encoded;
+        invalid_node[expression_tag_offset] = 0xff;
+        assert_eq!(ActionClientPlan::decode(&invalid_node), Err(ClientPlanError::InvalidExpressionNode(0xff)));
+
+        let nested = ActionClientPlan::new(ActionOperationNode::new(
+            ActionTargetDomain::Client,
+            FunctionId::from_bytes([0x51; 16]),
+            RevisionPair::new(
+                SourceRevisionId::from_bytes([0x52; 16]),
+                CatalogueRevisionId::from_bytes([0x53; 16]),
+            ),
+            CallSiteId::from_bytes([0x54; 16]),
+            vec![(
+                ParameterId::from_bytes([0x55; 16]),
+                ClientExpressionNode::Action {
+                    operation: action_plan().operation().clone(),
+                },
+            )],
+            TypeId::from_bytes([0x56; 16]),
+        ));
+        assert_eq!(nested.encode(), Err(ClientPlanError::InvalidExpressionNode(NODE_ACTION)));
+        assert_eq!(ExpressionClientPlan::new(ClientExpressionNode::Action {
+            operation: action_plan().operation().clone(),
+        }).encode(), Err(ClientPlanError::InvalidExpressionNode(NODE_ACTION)));
+    }
+
+    #[test]
+    fn action_plan_rejects_duplicate_unsorted_and_oversized_arguments() {
+        let first = ParameterId::from_bytes([0x10; 16]);
+        let second = ParameterId::from_bytes([0x20; 16]);
+        let value = ClientExpressionNode::Boolean { value: true };
+        let unsorted = ActionClientPlan::new(ActionOperationNode::new(
+            ActionTargetDomain::Client,
+            FunctionId::from_bytes([0x61; 16]),
+            RevisionPair::new(SourceRevisionId::from_bytes([0x62; 16]), CatalogueRevisionId::from_bytes([0x63; 16])),
+            CallSiteId::from_bytes([0x64; 16]),
+            vec![(second, value.clone()), (first, value.clone())],
+            TypeId::from_bytes([0x65; 16]),
+        ));
+        assert_eq!(unsorted.encode(), Err(ClientPlanError::NonCanonicalActionArgumentOrder));
+
+        let duplicate = ActionClientPlan::new(ActionOperationNode::new(
+            ActionTargetDomain::Client,
+            FunctionId::from_bytes([0x61; 16]),
+            RevisionPair::new(SourceRevisionId::from_bytes([0x62; 16]), CatalogueRevisionId::from_bytes([0x63; 16])),
+            CallSiteId::from_bytes([0x64; 16]),
+            vec![(first, value.clone()), (first, value)],
+            TypeId::from_bytes([0x65; 16]),
+        ));
+        assert_eq!(duplicate.encode(), Err(ClientPlanError::DuplicateActionArgument(first)));
+
+        let oversized = ActionClientPlan::new(ActionOperationNode::new(
+            ActionTargetDomain::Client,
+            FunctionId::from_bytes([0x66; 16]),
+            RevisionPair::new(SourceRevisionId::from_bytes([0x67; 16]), CatalogueRevisionId::from_bytes([0x68; 16])),
+            CallSiteId::from_bytes([0x69; 16]),
+            (0..=MAX_ACTION_ARGUMENTS).map(|index| (
+                ParameterId::from_bytes([index as u8; 16]),
+                ClientExpressionNode::Boolean { value: false },
+            )).collect(),
+            TypeId::from_bytes([0x6a; 16]),
+        ));
+        assert_eq!(oversized.encode(), Err(ClientPlanError::ActionArgumentLimitExceeded { limit: MAX_ACTION_ARGUMENTS }));
+
+        let mut crafted = action_plan().encode().expect("the action plan encodes");
+        let count_offset = 8 + 4 + 1 + 1 + 16 * 5;
+        crafted[count_offset..count_offset + 4].copy_from_slice(&((MAX_ACTION_ARGUMENTS + 1) as u32).to_be_bytes());
+        assert_eq!(ActionClientPlan::decode(&crafted), Err(ClientPlanError::ActionArgumentLimitExceeded { limit: MAX_ACTION_ARGUMENTS }));
+    }
+
+    #[test]
+    fn capability_plan_accepts_version_eight_action_inner_plan() {
+        let inner = InnerClientPlan::Action(action_plan());
+        let plan = CapabilityClientPlan::new(inner.clone(), vec![CapabilityRequirement::new(
+            "std.action.trigger",
+            CapabilityArgumentSource::Parameter("p_action".to_owned()),
+        )]);
+        let bytes = plan.encode().expect("the capability plan encodes");
+        let decoded = CapabilityClientPlan::decode(&bytes).expect("the capability plan decodes");
+        assert_eq!(decoded.inner_plan_version(), ACTION_FORMAT_VERSION);
+        assert_eq!(decoded.inner_plan(), &inner);
+    }
+
 }
