@@ -174,7 +174,7 @@ pub struct ServerSelectResult {
 }
 
 impl ServerSelectResult {
-    fn new(
+    pub(crate) fn new(
         pair: RevisionPair,
         function: FunctionId,
         revision: FunctionRevisionId,
