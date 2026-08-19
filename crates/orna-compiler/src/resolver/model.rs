@@ -2,7 +2,7 @@
 
 use std::{collections::HashMap, error::Error, fmt, hash::Hash};
 
-use orna_artifact::{client_plan::ResourceKind, server_parameter_echo::ServerParameterEchoError};
+use orna_artifact::{client_plan::{ActionTargetDomain, ResourceKind}, server_parameter_echo::ServerParameterEchoError};
 use orna_core::{
     CallSiteId, CatalogueRevisionId, FieldId, FunctionId, FunctionRevisionId, ParameterId,
     SchemaId, SourceUnitId, StandardLibraryRevisionId, StateSlotId, TypeBindingId, TypeId,
@@ -1113,6 +1113,11 @@ pub(crate) enum CheckedClientExpression {
         /// The resolved resource operation metadata and bound arguments.
         operation: CheckedResourceOperation,
     },
+    /// A checked CLIENT action operation value.
+    Action {
+        /// The resolved action operation metadata and bound arguments.
+        operation: CheckedActionOperation,
+    },
     /// A text literal value.
     String {
         /// The unescaped text value.
@@ -1213,6 +1218,28 @@ impl CheckedResourceOperation {
     pub(crate) fn location(&self) -> &SourceLocation {
         &self.location
     }
+}
+
+/// One checked CLIENT action operation (ADR 0079).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct CheckedActionOperation {
+    pub(super) target_domain: ActionTargetDomain,
+    pub(super) target: CheckedFunctionId,
+    pub(super) call_site: CallSiteId,
+    pub(super) arguments: Vec<(CheckedParameterId, CheckedClientExpression)>,
+    pub(super) result_type: SemanticType<CheckedTypeId>,
+    pub(super) standard_result_type: Option<TypeId>,
+    pub(super) location: SourceLocation,
+}
+
+impl CheckedActionOperation {
+    pub(crate) const fn target_domain(&self) -> ActionTargetDomain { self.target_domain }
+    pub(crate) const fn target(&self) -> CheckedFunctionId { self.target }
+    pub(crate) const fn call_site(&self) -> CallSiteId { self.call_site }
+    pub(crate) fn arguments(&self) -> &[(CheckedParameterId, CheckedClientExpression)] { &self.arguments }
+    pub(crate) const fn result_type(&self) -> SemanticType<CheckedTypeId> { self.result_type }
+    pub(crate) const fn standard_result_type(&self) -> Option<TypeId> { self.standard_result_type }
+    pub(crate) fn location(&self) -> &SourceLocation { &self.location }
 }
 
 /// The checked argument source of one CLIENT capability requirement.
@@ -1949,6 +1976,11 @@ pub const STD_UI_TYPE_ID: TypeId =
     TypeId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x13]);
 /// The fixed ADR 0062 `std.ui.UI` kernel representation contract.
 pub const STD_UI_CONTRACT: &str = "orna.std.value.ui@1";
+/// The fixed ADR 0079 `std.action.Action` value-type identity: `...20`.
+pub const STD_ACTION_TYPE_ID: TypeId =
+    TypeId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x20]);
+/// The fixed ADR 0079 `std.action.Action` kernel representation contract.
+pub const STD_ACTION_CONTRACT: &str = "orna.std.value.action@1";
 /// The fixed ADR 0055 `std.invoke` schema identity: 15 zero bytes then `0x03`.
 pub const STD_INVOKE_SCHEMA_ID: SchemaId =
     SchemaId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x03]);
