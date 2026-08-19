@@ -2119,6 +2119,19 @@ async fn proves_procedural_client_resource_through_installed_evaluator() -> Test
         let mut expected =
             encode_constructed_value(&active, &registry, &RuntimeValue::Text("installed-marker-assigned".to_owned()))?;
         expected.push(b'\n');
+        let host_revision = active
+            .function_revisions()
+            .iter()
+            .find(|revision| revision.function() == host)
+            .ok_or_else(|| failure("procedural resource host is missing its function revision"))?;
+        let host_plan = ProceduralClientPlan::decode(host_revision.artifact().payload())?;
+        let ClientExpressionNode::Await { expression } = host_plan.statements()[0].expression() else {
+            return Err(failure("procedural resource host did not retain AWAIT"));
+        };
+        let ClientExpressionNode::Resource { operation } = expression.as_ref() else {
+            return Err(failure("procedural resource host did not retain a resource operation"));
+        };
+        let host_call_site = operation.call_site_id();
         let invoke_target = InvocationRequestTarget::qualified_name(QualifiedSemanticName::new([
             "procedural_fixture",
             "host",
@@ -2133,6 +2146,38 @@ async fn proves_procedural_client_resource_through_installed_evaluator() -> Test
                 && stdout == expected
                 && stderr.is_empty(),
             "installed invoke did not execute the SERVER resource through its host executor",
+        )?;
+        let target_bytes = target.to_bytes().to_vec();
+        let host_bytes = host.to_bytes().to_vec();
+        let audit_session = database.open().await?;
+        let audit_operation = async {
+            let row = audit_session
+                .client()
+                .query_one(
+                    "SELECT resource.parent_invocation_id, resource.call_site_id
+                     FROM _orna_kernel.resource_audit_events AS resource
+                     JOIN _orna_kernel.invocation_audit_events AS invocation
+                       ON invocation.invocation_id = resource.parent_invocation_id
+                     WHERE resource.target_function_id = $1
+                       AND invocation.function_id = $2
+                     ORDER BY resource.sequence DESC
+                     LIMIT 1",
+                    &[&target_bytes, &host_bytes],
+                )
+                .await?;
+            let parent_invocation_id: Vec<u8> = row.try_get("parent_invocation_id")?;
+            let call_site_id: Vec<u8> = row.try_get("call_site_id")?;
+            require(
+                parent_invocation_id.len() == 16
+                    && call_site_id == host_call_site.to_bytes().to_vec(),
+                "installed resource audit lost the root invocation or compiled call-site identity",
+            )
+        }
+        .await;
+        finish_session(
+            audit_operation,
+            audit_session.shutdown().await,
+            "installed resource identity audit",
         )?;
 
         let unavailable = evaluate_client_function_with_arguments(
