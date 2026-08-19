@@ -52,14 +52,14 @@
 //! shape, the depth cap, the node-count cap, and per-node limits, so an
 //! untrusted artefact cannot exhaust the evaluator.
 //!
-//! Version 5 (work ADR 0060) wraps one complete version 1-4 client plan
+//! Version 5 (work ADR 0060) wraps one complete version 1-4 or version 6
 //! with the owning function's ordered, closed capability requirements:
 //!
 //! ```text
 //! magic[8] = ORNACP\0\0
 //! version: u32 big-endian = 5
 //! operation: u8 = 5
-//! inner plan version: u32 big-endian = 1|2|3|4
+//! inner plan version: u32 big-endian = 1|2|3|4|6
 //! inner payload length: u32 big-endian
 //! inner payload: complete inner client-plan artefact bytes
 //! capability count: u32 big-endian, 1..=MAX_CAPABILITY_REQUIREMENTS
@@ -76,6 +76,15 @@
 //! `CapabilitySpecification` form (a qualified name plus exactly one text
 //! or parameter argument source); names and argument sources travel as
 //! plain text so the envelope stays independent of the client grant model.
+//!
+//! Version 6 (work ADR 0077) carries one closed tree containing resource
+//! operations. A resource operation is encoded as: kind `u8` (`1` scalar,
+//! `2` stream), target `FunctionId[16]`, source and catalogue revision IDs
+//! (`16` bytes each), `CallSiteId[16]`, argument count `u32`, ascending
+//! `ParameterId[16]` plus expression pairs, and declared result `TypeId[16]`.
+//! `AWAIT` is tag `9` and must directly wrap a resource node (tag `10`).
+//! Resource plans reject a bare resource, an await over another expression,
+//! and any trailing bytes.
 //!
 //! The version 1-4 formats contain no source text, source locations, Orna
 //! names, or backend values.
@@ -493,6 +502,7 @@ impl ResourceClientPlan {
 
     /// Encodes this plan into its exact version-6 bytes.
     pub fn encode(&self) -> Result<Vec<u8>, ClientPlanError> {
+        validate_resource_await_placement(&self.expression, false)?;
         let mut bytes = Vec::new();
         bytes.extend_from_slice(&MAGIC);
         bytes.extend_from_slice(&RESOURCE_FORMAT_VERSION.to_be_bytes());
@@ -550,10 +560,11 @@ impl ResourceClientPlan {
             true,
             &mut resource_count,
         )?;
+        reader.require_finished()?;
+        validate_resource_await_placement(&expression, false)?;
         if resource_count == 0 {
             return Err(ClientPlanError::InvalidResourceOperationCount { actual: 0 });
         }
-        reader.require_finished()?;
         Ok(Self::new(expression))
     }
 }
@@ -1376,6 +1387,50 @@ fn validate_resource_arguments(
             }
         }
         previous = Some(*parameter);
+    }
+    Ok(())
+}
+
+/// Verifies the closed placement rule for version-six resource expressions.
+///
+/// A resource constructor is only meaningful as the direct operand of one
+/// `AWAIT`. Keep this check at the artifact boundary as well as in the
+/// compiler/runtime: decoded bytes are untrusted and the runtime must not
+/// receive a bare resource value or an `AWAIT` over an ordinary expression.
+fn validate_resource_await_placement(
+    node: &ClientExpressionNode,
+    awaited_operand: bool,
+) -> Result<(), ClientPlanError> {
+    match node {
+        ClientExpressionNode::Await { expression } => {
+            if !matches!(expression.as_ref(), ClientExpressionNode::Resource { .. }) {
+                return Err(ClientPlanError::InvalidExpressionNode(NODE_AWAIT));
+            }
+            validate_resource_await_placement(expression, true)?;
+        }
+        ClientExpressionNode::Resource { operation } => {
+            if !awaited_operand {
+                return Err(ClientPlanError::InvalidExpressionNode(NODE_RESOURCE));
+            }
+            for (_, value) in &operation.arguments {
+                validate_resource_await_placement(value, false)?;
+            }
+        }
+        ClientExpressionNode::Call { arguments, .. } => {
+            for (_, value) in arguments {
+                validate_resource_await_placement(value, false)?;
+            }
+        }
+        ClientExpressionNode::Concat { left, right } => {
+            validate_resource_await_placement(left, false)?;
+            validate_resource_await_placement(right, false)?;
+        }
+        ClientExpressionNode::String { .. }
+        | ClientExpressionNode::Integer { .. }
+        | ClientExpressionNode::Boolean { .. }
+        | ClientExpressionNode::ParameterRead { .. }
+        | ClientExpressionNode::FieldPath { .. }
+        | ClientExpressionNode::ExternalContract { .. } => {}
     }
     Ok(())
 }
@@ -3443,10 +3498,57 @@ mod tests {
         };
         assert_eq!(operation.kind(), ResourceKind::Stream);
         assert_eq!(operation.target(), FunctionId::from_bytes([0x21; 16]));
-        assert_eq!(operation.target_revision().source(), SourceRevisionId::from_bytes([0x22; 16]));
-        assert_eq!(operation.call_site(), CallSiteId::from_bytes([0x24; 16]));
+        assert_eq!(
+            operation.target_revision().source(),
+            SourceRevisionId::from_bytes([0x22; 16])
+        );
+        assert_eq!(
+            operation.target_revision().catalogue(),
+            CatalogueRevisionId::from_bytes([0x23; 16])
+        );
+        assert_eq!(operation.call_site_id(), CallSiteId::from_bytes([0x24; 16]));
         assert_eq!(operation.arguments().len(), 2);
-        assert_eq!(operation.result_type(), TypeId::from_bytes([0x51; 16]));
+        assert_eq!(operation.declared_result_type(), TypeId::from_bytes([0x51; 16]));
+    }
+
+    #[test]
+    fn resource_plan_rejects_invalid_await_placement() {
+        let mut await_non_resource = Vec::new();
+        await_non_resource.extend_from_slice(&MAGIC);
+        await_non_resource.extend_from_slice(&RESOURCE_FORMAT_VERSION.to_be_bytes());
+        await_non_resource.push(RETURN_RESOURCE_OPERATION);
+        await_non_resource.push(NODE_AWAIT);
+        await_non_resource.push(NODE_BOOLEAN);
+        await_non_resource.push(1);
+        assert_eq!(
+            ResourceClientPlan::decode(&await_non_resource),
+            Err(ClientPlanError::InvalidExpressionNode(NODE_AWAIT))
+        );
+
+        let mut bare_resource = resource_plan().encode().expect("resource plan encodes");
+        bare_resource.remove(13);
+        assert_eq!(
+            ResourceClientPlan::decode(&bare_resource),
+            Err(ClientPlanError::InvalidExpressionNode(NODE_RESOURCE))
+        );
+
+        let bare = ResourceClientPlan::new(ClientExpressionNode::Resource {
+            operation: ResourceOperationNode::new(
+                ResourceKind::Scalar,
+                FunctionId::from_bytes([0x21; 16]),
+                RevisionPair::new(
+                    SourceRevisionId::from_bytes([0x22; 16]),
+                    CatalogueRevisionId::from_bytes([0x23; 16]),
+                ),
+                CallSiteId::from_bytes([0x24; 16]),
+                Vec::new(),
+                TypeId::from_bytes([0x25; 16]),
+            ),
+        });
+        assert_eq!(
+            bare.encode(),
+            Err(ClientPlanError::InvalidExpressionNode(NODE_RESOURCE))
+        );
     }
 
     #[test]
@@ -3464,33 +3566,37 @@ mod tests {
                 TypeId::from_bytes([0x51; 16]),
             )
         };
-        let unsorted = ResourceClientPlan::new(ClientExpressionNode::Resource {
-            operation: operation(vec![
-                (
-                    ParameterId::from_bytes([0x32; 16]),
-                    ClientExpressionNode::Boolean { value: true },
-                ),
-                (
-                    ParameterId::from_bytes([0x31; 16]),
-                    ClientExpressionNode::Boolean { value: false },
-                ),
-            ]),
+        let unsorted = ResourceClientPlan::new(ClientExpressionNode::Await {
+            expression: Box::new(ClientExpressionNode::Resource {
+                operation: operation(vec![
+                    (
+                        ParameterId::from_bytes([0x32; 16]),
+                        ClientExpressionNode::Boolean { value: true },
+                    ),
+                    (
+                        ParameterId::from_bytes([0x31; 16]),
+                        ClientExpressionNode::Boolean { value: false },
+                    ),
+                ]),
+            }),
         });
         assert_eq!(
             unsorted.encode(),
             Err(ClientPlanError::NonCanonicalResourceArgumentOrder)
         );
-        let duplicate = ResourceClientPlan::new(ClientExpressionNode::Resource {
-            operation: operation(vec![
-                (
-                    ParameterId::from_bytes([0x31; 16]),
-                    ClientExpressionNode::Boolean { value: true },
-                ),
-                (
-                    ParameterId::from_bytes([0x31; 16]),
-                    ClientExpressionNode::Boolean { value: false },
-                ),
-            ]),
+        let duplicate = ResourceClientPlan::new(ClientExpressionNode::Await {
+            expression: Box::new(ClientExpressionNode::Resource {
+                operation: operation(vec![
+                    (
+                        ParameterId::from_bytes([0x31; 16]),
+                        ClientExpressionNode::Boolean { value: true },
+                    ),
+                    (
+                        ParameterId::from_bytes([0x31; 16]),
+                        ClientExpressionNode::Boolean { value: false },
+                    ),
+                ]),
+            }),
         });
         assert_eq!(
             duplicate.encode(),
@@ -3532,26 +3638,27 @@ mod tests {
             Err(ClientPlanError::InvalidResourceOperationCount { actual: 0 })
         );
 
-
-        let oversized = ResourceClientPlan::new(ClientExpressionNode::Resource {
-            operation: ResourceOperationNode::new(
-                ResourceKind::Scalar,
-                FunctionId::from_bytes([0x21; 16]),
-                RevisionPair::new(
-                    SourceRevisionId::from_bytes([0x22; 16]),
-                    CatalogueRevisionId::from_bytes([0x23; 16]),
+        let oversized = ResourceClientPlan::new(ClientExpressionNode::Await {
+            expression: Box::new(ClientExpressionNode::Resource {
+                operation: ResourceOperationNode::new(
+                    ResourceKind::Scalar,
+                    FunctionId::from_bytes([0x21; 16]),
+                    RevisionPair::new(
+                        SourceRevisionId::from_bytes([0x22; 16]),
+                        CatalogueRevisionId::from_bytes([0x23; 16]),
+                    ),
+                    CallSiteId::from_bytes([0x24; 16]),
+                    (0..=MAX_RESOURCE_ARGUMENTS)
+                        .map(|index| {
+                            (
+                                ParameterId::from_bytes([index as u8; 16]),
+                                ClientExpressionNode::Boolean { value: true },
+                            )
+                        })
+                        .collect(),
+                    TypeId::from_bytes([0x51; 16]),
                 ),
-                CallSiteId::from_bytes([0x24; 16]),
-                (0..=MAX_RESOURCE_ARGUMENTS)
-                    .map(|index| {
-                        (
-                            ParameterId::from_bytes([index as u8; 16]),
-                            ClientExpressionNode::Boolean { value: true },
-                        )
-                    })
-                    .collect(),
-                TypeId::from_bytes([0x51; 16]),
-            ),
+            }),
         });
         assert_eq!(
             oversized.encode(),
@@ -3561,6 +3668,24 @@ mod tests {
         );
 
         let encoded = resource_plan().encode().expect("resource plan encodes");
+        let mut trailing = encoded.clone();
+        trailing.push(0);
+        assert_eq!(
+            ResourceClientPlan::decode(&trailing),
+            Err(ClientPlanError::TrailingBytes)
+        );
+        let mut wrong_version = encoded.clone();
+        wrong_version[8..12].copy_from_slice(&CAPABILITY_FORMAT_VERSION.to_be_bytes());
+        assert_eq!(
+            ResourceClientPlan::decode(&wrong_version),
+            Err(ClientPlanError::UnsupportedVersion(CAPABILITY_FORMAT_VERSION))
+        );
+        let mut wrong_operation = encoded.clone();
+        wrong_operation[12] = RETURN_EXPRESSION_OPERATION;
+        assert_eq!(
+            ResourceClientPlan::decode(&wrong_operation),
+            Err(ClientPlanError::InvalidOperation(RETURN_EXPRESSION_OPERATION))
+        );
         for length in 0..encoded.len() {
             assert_eq!(
                 ResourceClientPlan::decode(&encoded[..length]),
