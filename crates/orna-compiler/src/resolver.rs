@@ -41,11 +41,11 @@ pub use model::{
     StandardApplicationContextError, StandardLibraryCheckError,
 };
 pub(crate) use model::{
-    CheckedClientExpression, CheckedClientFunctionBody, CheckedClientLocal, CheckedClientLocalKind,
+    CheckedActionOperation, CheckedClientExpression, CheckedClientFunctionBody, CheckedClientLocal, CheckedClientLocalKind,
     CheckedClientStateSlot, CheckedClientStatement, CheckedFieldRename, CheckedResourceOperation,
     CheckedServerFunctionBody, CheckedStateDefault, CheckedStateScope, CheckedStateSlotId,
     QueryCatalogue, QueryField, QueryObjectType, ResolutionCatalogue, STD_JSON_CONTRACT,
-    STD_UI_CONTRACT,
+    STD_UI_CONTRACT, STD_ACTION_CONTRACT, STD_ACTION_TYPE_ID,
 };
 use model::{CheckedEnumType, CheckedRecordValueField, CheckedRecordValueType};
 
@@ -3464,6 +3464,7 @@ fn check_application_parsed(
             .collect::<Vec<_>>();
         check_client_functions(
             &client_inputs,
+            &function_inputs,
             &submitted_ids,
             &query_catalogue,
             &server_names,
@@ -4544,6 +4545,29 @@ struct ClientExpressionTarget {
 }
 
 #[derive(Clone)]
+struct ClientActionTarget {
+    domain: orna_artifact::client_plan::ActionTargetDomain,
+    id: CheckedFunctionId,
+    parameters: Vec<ClientExpressionParameter>,
+    return_type: ClientExpressionType,
+}
+
+fn action_result_type_is_durable(result_type: ClientExpressionType) -> bool {
+    result_type.standard_value_type.is_some()
+        || matches!(result_type.semantic_type, SemanticType::Named(_) | SemanticType::Reference { .. })
+}
+
+fn action_target_parameters(parameters: &[ResolvedServerFunctionParameter]) -> Option<Vec<ClientExpressionParameter>> {
+    parameters.iter().map(|parameter| {
+        Some(ClientExpressionParameter {
+            id: parameter.id,
+            name: parameter.name.clone(),
+            expression_type: ClientExpressionType { semantic_type: parameter.semantic_type, standard_value_type: parameter.standard_value_type },
+        })
+    }).collect()
+}
+
+#[derive(Clone)]
 struct ClientResourceTarget {
     kind: ResourceKind,
     id: CheckedFunctionId,
@@ -4668,6 +4692,47 @@ fn client_expression_targets(
                 return_type,
             },
         );
+    }
+    targets
+}
+
+fn client_action_targets(
+    client_inputs: &[ResolvedClientFunctionInput<'_>],
+    server_inputs: &[ResolvedServerFunctionInput<'_>],
+    base: &CatalogueSnapshot,
+    standard: Option<&CheckedStandardLibrary>,
+) -> HashMap<QualifiedSemanticName, ClientActionTarget> {
+    let mut targets = HashMap::new();
+    for input in client_inputs {
+        let return_type = ClientExpressionType { semantic_type: input.return_type, standard_value_type: input.standard_value_type };
+        if !action_result_type_is_durable(return_type) { continue; }
+        let Some(parameters) = action_target_parameters(&input.parameters) else { continue; };
+        targets.insert(input.name.clone(), ClientActionTarget { domain: orna_artifact::client_plan::ActionTargetDomain::Client, id: input.id, parameters, return_type });
+    }
+    for input in server_inputs {
+        let ResolvedServerFunctionReturn::Single { semantic_type, standard_value_type, .. } = input.return_type else { continue; };
+        let return_type = ClientExpressionType { semantic_type, standard_value_type };
+        if !action_result_type_is_durable(return_type) { continue; }
+        let Some(parameters) = action_target_parameters(&input.parameters) else { continue; };
+        targets.insert(input.name.clone(), ClientActionTarget { domain: orna_artifact::client_plan::ActionTargetDomain::Server, id: input.id, parameters, return_type });
+    }
+    for function in base.functions() {
+        if targets.contains_key(function.name()) { continue; }
+        let return_type = match function.return_type() {
+            FunctionReturn::Single(resolved) => client_expression_type_from_core(*resolved, standard),
+            FunctionReturn::Rows(_) => None,
+        };
+        let Some(return_type) = return_type.filter(|value| action_result_type_is_durable(*value)) else { continue; };
+        let Some(parameters) = function.parameters().iter().map(|parameter| {
+            client_expression_type_from_core(parameter.resolved_type(), standard).map(|expression_type| ClientExpressionParameter { id: CheckedParameterId::Existing(parameter.id()), name: parameter.name().to_owned(), expression_type })
+        }).collect::<Option<Vec<_>>>() else { continue; };
+        targets.insert(function.name().clone(), ClientActionTarget {
+            domain: match function.domain() {
+                FunctionDomain::Client => orna_artifact::client_plan::ActionTargetDomain::Client,
+                FunctionDomain::Server => orna_artifact::client_plan::ActionTargetDomain::Server,
+            },
+            id: CheckedFunctionId::Existing(function.id()), parameters, return_type,
+        });
     }
     targets
 }
@@ -4873,6 +4938,7 @@ fn check_resource_constructor(
     expression: &ClientExpression,
     input: &ResolvedClientFunctionInput<'_>,
     targets: &HashMap<QualifiedSemanticName, ClientExpressionTarget>,
+    action_targets: &HashMap<QualifiedSemanticName, ClientActionTarget>,
     resource_targets: &HashMap<QualifiedSemanticName, ClientResourceTarget>,
     query_catalogue: &ResolutionCatalogue<CheckedTypeId, CheckedFieldId>,
     base: &CatalogueSnapshot,
@@ -5138,6 +5204,7 @@ fn check_resource_constructor(
             &argument.value,
             input,
             targets,
+            action_targets,
             resource_targets,
             query_catalogue,
             base,
@@ -5203,10 +5270,77 @@ fn check_resource_constructor(
 }
 
 #[allow(clippy::too_many_arguments)]
+fn check_action_constructor(
+    expression: &ClientExpression,
+    input: &ResolvedClientFunctionInput<'_>,
+    targets: &HashMap<QualifiedSemanticName, ClientExpressionTarget>,
+    action_targets: &HashMap<QualifiedSemanticName, ClientActionTarget>,
+    resource_targets: &HashMap<QualifiedSemanticName, ClientResourceTarget>,
+    query_catalogue: &ResolutionCatalogue<CheckedTypeId, CheckedFieldId>,
+    base: &CatalogueSnapshot,
+    server_names: &[QualifiedSemanticName],
+    standard: Option<&CheckedStandardLibrary>,
+    diagnostics: &mut Vec<CompilerDiagnostic>,
+    references: &mut Vec<CheckedDefinitionReference>,
+    used_capabilities: &mut HashSet<QualifiedSemanticName>,
+    locals: &ClientLocalEnvironment,
+) -> Option<(CheckedClientExpression, ClientExpressionType)> {
+    let action_name = QualifiedSemanticName::new(["std", "action", "call"]).expect("std.action.call is valid");
+    let Some(action_type) = standard.and_then(|standard| standard.value_types().iter().find(|value| value.id() == STD_ACTION_TYPE_ID && value.kind() == ValueTypeKind::Opaque && value.representation_contract() == STD_ACTION_CONTRACT)).map(|_| ClientExpressionType { semantic_type: SemanticType::Named(CheckedTypeId::Existing(STD_ACTION_TYPE_ID)), standard_value_type: None }) else {
+        diagnostics.push(diagnostic(DiagnosticCode::TypeMismatch, "the checked standard library does not provide std.action.Action", input.logical_path, expression.span()));
+        return None;
+    };
+    let ClientExpression::Call { callee, arguments, span } = expression else { return None; };
+    if semantic_name(callee) != action_name { return None; }
+    if arguments.len() != 2 {
+        diagnostics.push(diagnostic(DiagnosticCode::TypeMismatch, "std.action.call requires exactly one target and one arguments value", input.logical_path, span));
+        return None;
+    }
+    let mut target_expression = None;
+    let mut arguments_expression = None;
+    for argument in arguments {
+        let Some(name) = &argument.name else { diagnostics.push(diagnostic(DiagnosticCode::TypeMismatch, "std.action.call arguments must be named target and arguments", input.logical_path, &argument.span)); return None; };
+        match semantic_part(name).as_str() {
+            "target" if target_expression.is_none() => target_expression = Some(&argument.value),
+            "arguments" if arguments_expression.is_none() => arguments_expression = Some(&argument.value),
+            "target" | "arguments" => { diagnostics.push(diagnostic(DiagnosticCode::DuplicateDefinition, "duplicate std.action.call argument", input.logical_path, &argument.span)); return None; }
+            _ => { diagnostics.push(diagnostic(DiagnosticCode::UnknownQualifiedName, "std.action.call accepts only target and arguments", input.logical_path, &argument.span)); return None; }
+        }
+    }
+    let (Some(target_expression), Some(arguments_expression)) = (target_expression, arguments_expression) else { diagnostics.push(diagnostic(DiagnosticCode::TypeMismatch, "std.action.call requires both target and arguments", input.logical_path, span)); return None; };
+    let ClientExpression::FieldPath { root, members, .. } = target_expression else { diagnostics.push(diagnostic(DiagnosticCode::TypeMismatch, "std.action.call target must be a qualified function name", input.logical_path, target_expression.span())); return None; };
+    if members.is_empty() { diagnostics.push(diagnostic(DiagnosticCode::TypeMismatch, "std.action.call target must include a schema and function name", input.logical_path, target_expression.span())); return None; }
+    let mut target_parts = Vec::with_capacity(members.len() + 1); target_parts.push(semantic_part(root)); target_parts.extend(members.iter().map(semantic_part));
+    let Ok(target_name) = QualifiedSemanticName::new(target_parts) else { diagnostics.push(diagnostic(DiagnosticCode::UnknownQualifiedName, "std.action.call target must be a qualified function name", input.logical_path, target_expression.span())); return None; };
+    let Some(target) = action_targets.get(&target_name) else {
+        let message = if server_names.contains(&target_name) || base.function_by_name(&target_name).is_some() { format!("std.action.call target {target_name} does not return one durable value") } else { format!("unknown std.action.call target {target_name}") };
+        diagnostics.push(diagnostic(DiagnosticCode::UnknownQualifiedName, message, input.logical_path, target_expression.span())); return None;
+    };
+    let ClientExpression::Call { callee: args_callee, arguments: target_arguments, .. } = arguments_expression else { diagnostics.push(diagnostic(DiagnosticCode::TypeMismatch, "std.action.call arguments must be a std.call.args value", input.logical_path, arguments_expression.span())); return None; };
+    if semantic_name(args_callee) != QualifiedSemanticName::new(["std", "call", "args"]).expect("std.call.args is valid") { diagnostics.push(diagnostic(DiagnosticCode::TypeMismatch, "std.action.call arguments must be a std.call.args value", input.logical_path, arguments_expression.span())); return None; }
+    let mut bound = vec![false; target.parameters.len()]; let mut positional = 0usize; let mut checked_arguments = Vec::with_capacity(target_arguments.len());
+    for argument in target_arguments {
+        let parameter_index = if let Some(name) = &argument.name { let parameter_name = semantic_part(name); let Some(index) = target.parameters.iter().position(|parameter| parameter.name == parameter_name) else { diagnostics.push(diagnostic(DiagnosticCode::UnknownQualifiedName, format!("unknown std.action.call parameter {parameter_name}"), input.logical_path, &argument.span)); return None; }; index } else { while positional < bound.len() && bound[positional] { positional += 1; } if positional >= bound.len() { diagnostics.push(diagnostic(DiagnosticCode::TypeMismatch, format!("too many arguments for std.action.call target {target_name}"), input.logical_path, &argument.span)); return None; } let index = positional; positional += 1; index };
+        if bound[parameter_index] { diagnostics.push(diagnostic(DiagnosticCode::DuplicateDefinition, format!("duplicate std.action.call parameter {}", target.parameters[parameter_index].name), input.logical_path, &argument.span)); return None; }
+        let (checked, expression_type) = check_client_expression(&argument.value, input, targets, action_targets, resource_targets, query_catalogue, base, server_names, standard, diagnostics, references, used_capabilities, locals)?;
+        let parameter = &target.parameters[parameter_index];
+        if !client_expression_types_compatible(expression_type, parameter.expression_type) { diagnostics.push(diagnostic(DiagnosticCode::TypeMismatch, format!("std.action.call argument does not match parameter {}", parameter.name), input.logical_path, &argument.span)); return None; }
+        bound[parameter_index] = true; checked_arguments.push((parameter.id, checked));
+    }
+    if bound.iter().any(|bound| !bound) { diagnostics.push(diagnostic(DiagnosticCode::TypeMismatch, format!("missing argument for std.action.call target {target_name}"), input.logical_path, span)); return None; }
+    checked_arguments.sort_by_key(|(parameter, _)| target.parameters.iter().position(|candidate| candidate.id == *parameter).expect("bound action parameter belongs to target"));
+    let operation_location = location(input.logical_path, span);
+    references.push(CheckedDefinitionReference { target: CheckedDefinitionReferenceTarget::Function(target.id), kind: DefinitionReferenceKind::FunctionCall, location: operation_location.clone() });
+    let operation = CheckedActionOperation { target_domain: target.domain, target: target.id, call_site: client_resource_call_site_id(&operation_location, &input.name), arguments: checked_arguments, result_type: target.return_type.semantic_type, standard_result_type: target.return_type.standard_value_type, location: operation_location };
+    Some((CheckedClientExpression::Action { operation }, action_type))
+}
+
+#[allow(clippy::too_many_arguments)]
 fn check_client_expression(
     expression: &ClientExpression,
     input: &ResolvedClientFunctionInput<'_>,
     targets: &HashMap<QualifiedSemanticName, ClientExpressionTarget>,
+    action_targets: &HashMap<QualifiedSemanticName, ClientActionTarget>,
     resource_targets: &HashMap<QualifiedSemanticName, ClientResourceTarget>,
     query_catalogue: &ResolutionCatalogue<CheckedTypeId, CheckedFieldId>,
     base: &CatalogueSnapshot,
@@ -5224,6 +5358,7 @@ fn check_client_expression(
                 expression,
                 input,
                 targets,
+                action_targets,
                 resource_targets,
                 query_catalogue,
                 base,
@@ -5428,6 +5563,7 @@ fn check_client_expression(
                 left,
                 input,
                 targets,
+                action_targets,
                 resource_targets,
                 query_catalogue,
                 base,
@@ -5442,6 +5578,7 @@ fn check_client_expression(
                 right,
                 input,
                 targets,
+                action_targets,
                 resource_targets,
                 query_catalogue,
                 base,
@@ -5480,6 +5617,9 @@ fn check_client_expression(
             span,
         } => {
             let name = semantic_name(callee);
+            if name == QualifiedSemanticName::new(["std", "action", "call"]).expect("std.action.call is valid") {
+                return check_action_constructor(expression, input, targets, action_targets, resource_targets, query_catalogue, base, server_names, standard, diagnostics, references, used_capabilities, locals);
+            }
             if resource_constructor_kind(&name).is_some() {
                 diagnostics.push(diagnostic(
                     DiagnosticCode::DomainIncompatible,
@@ -5561,6 +5701,7 @@ fn check_client_expression(
                     &argument.value,
                     input,
                     targets,
+                    action_targets,
                     resource_targets,
                     query_catalogue,
                     base,
@@ -6033,6 +6174,7 @@ fn unsupported_client_state_reference(
 #[allow(clippy::too_many_arguments)]
 fn check_client_functions(
     inputs: &[ResolvedClientFunctionInput<'_>],
+    server_inputs: &[ResolvedServerFunctionInput<'_>],
     submitted_ids: &HashMap<QualifiedSemanticName, SubmittedType>,
     query_catalogue: &ResolutionCatalogue<CheckedTypeId, CheckedFieldId>,
     server_names: &[QualifiedSemanticName],
@@ -6043,6 +6185,7 @@ fn check_client_functions(
     uses: &mut Vec<CheckedApplicationTypeUse>,
 ) -> Vec<CheckedClientFunction> {
     let targets = client_expression_targets(inputs, base, standard);
+    let action_targets = client_action_targets(inputs, server_inputs, base, standard);
     inputs
         .iter()
         .filter_map(|input| {
@@ -6104,6 +6247,7 @@ fn check_client_functions(
                         expression,
                         input,
                         &targets,
+                        &action_targets,
                         resource_targets,
                         query_catalogue,
                         base,
@@ -6172,7 +6316,7 @@ fn check_client_functions(
         let diagnostics_before = diagnostics.len();
         validate_client_await_positions(&local.expression, false, input, diagnostics);
         if diagnostics.len() != diagnostics_before { return None; }
-        let (checked, expression_type) = check_resource_constructor(&local.expression, input, &targets, resource_targets, query_catalogue, base, server_names, standard, diagnostics, &mut references, &mut used_capabilities, &locals)?;
+        let (checked, expression_type) = check_resource_constructor(&local.expression, input, &targets, &action_targets, resource_targets, query_catalogue, base, server_names, standard, diagnostics, &mut references, &mut used_capabilities, &locals)?;
         let actual_kind = match &checked {
             CheckedClientExpression::Resource { operation } => operation.kind,
             _ => unreachable!("resource constructor checker returns a resource"),
@@ -6205,7 +6349,7 @@ fn check_client_functions(
                         diagnostics.push(diagnostic(DiagnosticCode::TypeMismatch, format!("CLIENT local {local_name} resource type requires a resource constructor"), input.logical_path, &statement.span));
                         return None;
                     }
-                    let (checked, expression_type) = check_resource_constructor(&statement.expression, input, &targets, resource_targets, query_catalogue, base, server_names, standard, diagnostics, &mut references, &mut used_capabilities, &locals)?;
+                    let (checked, expression_type) = check_resource_constructor(&statement.expression, input, &targets, &action_targets, resource_targets, query_catalogue, base, server_names, standard, diagnostics, &mut references, &mut used_capabilities, &locals)?;
                     let actual_kind = match &checked {
                         CheckedClientExpression::Resource { operation } => operation.kind,
                         _ => unreachable!("resource constructor checker returns a resource"),
@@ -6218,7 +6362,7 @@ fn check_client_functions(
                     }
                     (checked, expression_type, CheckedClientLocalKind::Resource(actual_kind))
                 } else {
-                    let (checked, expression_type) = check_client_expression(&statement.expression, input, &targets, resource_targets, query_catalogue, base, server_names, standard, diagnostics, &mut references, &mut used_capabilities, &locals)?;
+                    let (checked, expression_type) = check_client_expression(&statement.expression, input, &targets, &action_targets, resource_targets, query_catalogue, base, server_names, standard, diagnostics, &mut references, &mut used_capabilities, &locals)?;
                     if !client_expression_type_is_evaluable(expression_type, standard) {
                         diagnostics.push(diagnostic(DiagnosticCode::TypeMismatch, "this CLIENT local type is not supported by the local evaluator", input.logical_path, &statement.span));
                         return None;
@@ -6253,9 +6397,9 @@ fn check_client_functions(
                 if diagnostics.len() != diagnostics_before { return None; }
                 let direct_resource = matches!(&statement.expression, ClientExpression::Call { callee, .. } if resource_constructor_kind(&semantic_name(callee)).is_some());
                 let (checked, expression_type) = if matches!(binding.kind, CheckedClientLocalKind::Resource(_)) && direct_resource {
-                    check_resource_constructor(&statement.expression, input, &targets, resource_targets, query_catalogue, base, server_names, standard, diagnostics, &mut references, &mut used_capabilities, &locals)?
+                    check_resource_constructor(&statement.expression, input, &targets, &action_targets, resource_targets, query_catalogue, base, server_names, standard, diagnostics, &mut references, &mut used_capabilities, &locals)?
                 } else {
-                    check_client_expression(&statement.expression, input, &targets, resource_targets, query_catalogue, base, server_names, standard, diagnostics, &mut references, &mut used_capabilities, &locals)?
+                    check_client_expression(&statement.expression, input, &targets, &action_targets, resource_targets, query_catalogue, base, server_names, standard, diagnostics, &mut references, &mut used_capabilities, &locals)?
                 };
                 if !client_expression_types_compatible(expression_type, binding.expression_type) || (matches!(binding.kind, CheckedClientLocalKind::Resource(_)) != matches!(checked, CheckedClientExpression::Resource { .. })) {
                     diagnostics.push(diagnostic(DiagnosticCode::TypeMismatch, format!("CLIENT assignment to local {local_name} does not match its declared type"), input.logical_path, &statement.span));
@@ -6273,7 +6417,7 @@ fn check_client_functions(
     let diagnostics_before = diagnostics.len();
     validate_client_await_positions(expression, true, input, diagnostics);
     if diagnostics.len() != diagnostics_before { return None; }
-    let (checked_return, return_type) = check_client_expression(expression, input, &targets, resource_targets, query_catalogue, base, server_names, standard, diagnostics, &mut references, &mut used_capabilities, &locals)?;
+    let (checked_return, return_type) = check_client_expression(expression, input, &targets, &action_targets, resource_targets, query_catalogue, base, server_names, standard, diagnostics, &mut references, &mut used_capabilities, &locals)?;
     if !client_expression_types_compatible(return_type, ClientExpressionType { semantic_type: input.return_type, standard_value_type: input.standard_value_type }) {
         diagnostics.push(diagnostic(DiagnosticCode::TypeMismatch, "this CLIENT function must return the declared value type", input.logical_path, expression.span()));
         return None;
@@ -6358,6 +6502,7 @@ fn check_client_functions(
                                     expression,
                                     input,
                                     &targets,
+                                    &action_targets,
                                     resource_targets,
                                     query_catalogue,
                                     base,
@@ -6430,6 +6575,7 @@ fn check_client_functions(
                             &local.expression,
                             input,
                             &targets,
+                            &action_targets,
                             resource_targets,
                             query_catalogue,
                             base,
@@ -6493,6 +6639,7 @@ fn check_client_functions(
                         expression,
                         input,
                         &targets,
+                        &action_targets,
                         resource_targets,
                         query_catalogue,
                         base,
