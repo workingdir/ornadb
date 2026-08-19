@@ -1,0 +1,9 @@
+CREATE SCHEMA std.action;
+
+CREATE TYPE std.action.Action AS VALUE
+    OPAQUE
+    KERNEL CONTRACT 'orna.std.value.action@1'
+    IMMUTABLE
+    TRANSIENT;
+
+EXPORT TYPE std.action.Action AS std.Action;

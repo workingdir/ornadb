@@ -1096,6 +1096,13 @@ enum OpaquePayloadContract {
         /// The exact ASCII magic prefix, including any separating space.
         magic: String,
     },
+    /// `MAGIC <len:u32 be> <bytes>`: a fixed ASCII magic prefix, then a
+    /// big-endian `u32` body length, then exactly that many bytes and no
+    /// trailing bytes.
+    LengthPrefixedBytes {
+        /// The exact ASCII magic prefix, including any separating space.
+        magic: String,
+    },
     /// `MAGIC <len:u32 be> <canonical JSON UTF-8 bytes>`: a fixed ASCII magic
     /// prefix, then a big-endian `u32` body length, then exactly that many
     /// canonical JSON UTF-8 bytes and no trailing bytes.
@@ -1164,6 +1171,25 @@ impl OpaqueCodecRegistration {
             semantic_name,
             representation_contract: representation_contract.into(),
             contract: OpaquePayloadContract::LengthPrefixedUtf8 { magic },
+        })
+    }
+
+    /// Declares a framed codec whose canonical form is
+    /// `MAGIC <len:u32 be> <bytes>` with exactly that many body bytes and no
+    /// trailing bytes.
+    pub fn length_prefixed_bytes(
+        opaque_type: TypeId,
+        semantic_name: QualifiedSemanticName,
+        representation_contract: impl Into<String>,
+        magic: impl Into<String>,
+    ) -> Result<Self, OpaqueCodecRegistryError> {
+        let magic = magic.into();
+        validate_codec_magic(opaque_type, &magic)?;
+        Ok(Self {
+            opaque_type,
+            semantic_name,
+            representation_contract: representation_contract.into(),
+            contract: OpaquePayloadContract::LengthPrefixedBytes { magic },
         })
     }
 
@@ -1322,6 +1348,9 @@ fn validate_opaque_payload(
         OpaquePayloadContract::LengthPrefixedUtf8 { magic } => {
             validate_length_prefixed_utf8(opaque_type, magic.as_bytes(), payload)
         }
+        OpaquePayloadContract::LengthPrefixedBytes { magic } => {
+            validate_length_prefixed_bytes(opaque_type, magic.as_bytes(), payload)
+        }
         OpaquePayloadContract::LengthPrefixedCanonicalJson { magic } => {
             validate_length_prefixed_canonical_json(opaque_type, magic.as_bytes(), payload)
         }
@@ -1401,6 +1430,36 @@ fn validate_length_prefixed_utf8(
     let body = &payload[prefix_length..];
     if std::str::from_utf8(body).is_err() {
         return Err(OpaqueValueError::InvalidUtf8Body { opaque_type });
+    }
+    Ok(())
+}
+
+/// Validates `MAGIC <len:u32 be> <bytes>` with exactly `len` body bytes.
+fn validate_length_prefixed_bytes(
+    opaque_type: TypeId,
+    magic: &[u8],
+    payload: &[u8],
+) -> Result<(), OpaqueValueError> {
+    let prefix_length = magic
+        .len()
+        .checked_add(4)
+        .ok_or(OpaqueValueError::InvalidFrameLength { opaque_type })?;
+    if payload.len() < prefix_length || !payload.starts_with(magic) {
+        return Err(if payload.starts_with(magic) {
+            OpaqueValueError::InvalidFrameLength { opaque_type }
+        } else {
+            OpaqueValueError::InvalidMagic { opaque_type }
+        });
+    }
+    let body_length = u32::from_be_bytes(
+        payload[magic.len()..prefix_length]
+            .try_into()
+            .expect("the length prefix is exactly four bytes"),
+    ) as usize;
+    if body_length > MAX_OPAQUE_CODEC_PAYLOAD_LENGTH
+        || payload.len() != prefix_length + body_length
+    {
+        return Err(OpaqueValueError::InvalidFrameLength { opaque_type });
     }
     Ok(())
 }
