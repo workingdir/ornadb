@@ -17,9 +17,9 @@ use orna_client::{
     evaluate_client_function, evaluate_client_function_with_grants,
 };
 use orna_compiler::{
-    STD_INVOKE_ECHO_FUNCTION_ID, STD_INVOKE_ECHO_FUNCTION_REVISION_ID,
+    CheckedStandardLibrary, STD_INVOKE_ECHO_FUNCTION_ID, STD_INVOKE_ECHO_FUNCTION_REVISION_ID,
     STD_INVOKE_ECHO_PARAMETER_ID, StandardApplicationCheckContext, check,
-    check_standard_application, prepare, prepare_standard_application,
+    check_standard_application, check_standard_library_source, prepare, prepare_standard_application,
 };
 use orna_core::{
     CallSiteId, CatalogueRevisionId, FunctionId, FunctionRevisionId, InvocationId, ObjectId,
@@ -55,7 +55,7 @@ use orna_core::{
     source::{SourceBundle, SourceUnit},
     system::SYS_INVOKE_FUNCTION_ID,
     types::{ResolvedType, TypeDescriptor},
-    value::{EnumValue, FunctionArgument, OpaqueValue, RecordValue, RuntimeValue},
+    value::{EnumValue, FunctionArgument, OpaqueCodecRegistry, OpaqueValue, RecordValue, RuntimeValue},
 };
 use orna_postgres::{
     AuthenticatedRawCallResult, AuthenticatedServerResourceResult, PostgresKernel,
@@ -63,13 +63,14 @@ use orna_postgres::{
     ServerUpdateError,
 };
 use orna_protocol::{
-    CallFailure, Channel, ClientFrame, ConnectionError, Event, ProtocolConnection, RawCall,
-    ResourceArgument, ResourceKind, ResourceRequest, ServerAction, ServerFrame,
-    decode_active_server_frame, decode_constructed_server_frame,
-    decode_invocation_event_batch, decode_registered_server_frame, decode_server_frame,
+    CallFailure, Channel, ClientFrame, ConnectionError, Event, MAX_RESOURCE_WINDOW,
+    ProtocolConnection, RawCall, ResourceArgument, ResourceClientFrame, ResourceKind, ResourceRequest,
+    ResourceServerFrame, ResourceWindowUpdate, ServerAction, ServerFrame,
+    decode_active_server_frame, decode_constructed_server_frame, decode_invocation_event_batch,
+    decode_registered_server_frame, decode_server_frame, decode_resource_server_frame,
     encode_active_client_frame, encode_active_server_frame, encode_client_frame,
     encode_constructed_client_frame, encode_constructed_value, encode_invocation_event_batch,
-    encode_invoke_request, encode_registered_client_frame,
+    encode_invoke_request, encode_registered_client_frame, encode_resource_client_frame,
 };
 use orna_server::{
     InstalledInvokeError, InstalledInvokeErrorKind, InstalledInvokeOutcome, InstalledInvokeRequest,
@@ -162,6 +163,10 @@ const RAW_STREAM_RESOURCE_SERVER_SOURCE: &str = "CREATE SCHEMA resource_fixture;
     TRANSACTION READ ONLY VOLATILITY STABLE
     AS SELECT probe.marker FROM resource_fixture.probe probe
     WHERE probe.marker = p_marker;
+    CREATE SERVER FUNCTION resource_fixture.all()
+    RETURNS ROWS (value TEXT) SECURITY INVOKER
+    TRANSACTION READ ONLY VOLATILITY STABLE
+    AS SELECT probe.marker FROM resource_fixture.probe probe;
 ";
 const RAW_STREAM_RESOURCE_CLIENT_SOURCE: &str = "CREATE CLIENT FUNCTION resource_fixture.call(p_marker TEXT) RETURNS TEXT AS\n\
     AWAIT std.data.stream_resource(target => resource_fixture.resource,\n\
@@ -4363,7 +4368,7 @@ async fn authenticated_stream_resource_dispatches_allowed_and_denied_with_redact
             _server_function,
         ) = install_raw_client_fixture(&kernel).await?;
         let (active, _resource_client, target, parameter, call_site) =
-            install_stream_resource_client_fixture(&kernel, &active, &standard_upgrade)
+            install_stream_resource_client_fixture(&kernel, &active, standard_upgrade.checked_standard_library())
                 .await
                 .map_err(|error| failure(format!("install stream resource fixture failed: {error:?}")))?;
         let create = active
@@ -4507,6 +4512,381 @@ async fn authenticated_stream_resource_dispatches_allowed_and_denied_with_redact
             "resource audit evidence retained raw argument or result detail",
         )?;
         require_no_database_sessions(&database).await
+    })
+    .await
+}
+
+#[tokio::test]
+#[ignore = "requires the Compose PostgreSQL development service"]
+async fn installed_resource_socket_delivers_values_and_enforces_windows_and_grants() -> TestResult<()> {
+    with_test_database(|database| async move {
+        let kernel = open_standard_database(kernel(&database)?)
+            .await
+            .map_err(|error| failure(format!("open standard database failed: {error:?}")))?;
+        let active = kernel.recover().await?;
+        let standard_source = active
+            .catalogue_hash_context()
+            .standard()
+            .cloned()
+            .ok_or_else(|| failure("installed resource fixture has no checked standard source"))?;
+        let checked_standard = check_standard_library_source(&standard_source)
+            .map_err(|error| failure(format!("installed standard source check failed: {error:?}")))?;
+        let (active, _client_function, target, parameter, call_site) =
+            install_stream_resource_client_fixture(&kernel, &active, &checked_standard).await?;
+        let all_target = active
+            .catalogue()
+            .functions()
+            .iter()
+            .find(|function| function.name().parts() == ["resource_fixture", "all"])
+            .ok_or_else(|| failure("installed resource fixture is missing resource_fixture.all"))?
+            .id();
+        let create = active
+            .catalogue()
+            .functions()
+            .iter()
+            .find(|function| function.name().parts() == ["resource_fixture", "create"])
+            .ok_or_else(|| failure("installed resource fixture is missing resource_fixture.create"))?
+            .id();
+        let create_parameter = active
+            .catalogue()
+            .function_by_id(create)
+            .ok_or_else(|| failure("resource_fixture.create is absent from the active catalogue"))?
+            .parameter_by_name("p_marker")
+            .ok_or_else(|| failure("resource_fixture.create.p_marker is absent from the active catalogue"))?
+            .id();
+        for marker in ["resource-value", "resource-value-2"] {
+            kernel
+                .execute_server_insert(
+                    create,
+                    &[FunctionArgument::new(
+                        create_parameter,
+                        RuntimeValue::Text(marker.into()),
+                    )?],
+                )
+                .await
+                .map_err(|error| failure(format!("insert resource fixture row failed: {error:?}")))?;
+        }
+
+        let functions = active
+            .catalogue()
+            .functions()
+            .iter()
+            .map(|function| function.id())
+            .collect::<Vec<_>>();
+        let uid = nix::unistd::getuid().as_raw();
+        let principal = Principal::new(
+            RAW_CLIENT_USER,
+            PrincipalKind::User,
+            PrincipalStatus::Active,
+        );
+        let registry = registered_opaque_codecs(&standard_source)?;
+        let granted_security = SecuritySnapshot::new_with_local_peer_credentials(
+            active.pair(),
+            functions.clone(),
+            vec![principal],
+            vec![],
+            vec![
+                ExecuteGrant::new(RAW_CLIENT_USER, target),
+                ExecuteGrant::new(RAW_CLIENT_USER, all_target),
+            ],
+            vec![LocalPeerCredential::new(uid, RAW_CLIENT_USER)],
+        )?;
+        kernel.replace_security_snapshot(&granted_security).await?;
+
+        let scalar_request = ResourceRequest {
+            stream_id: 1,
+            request_id: InvocationId::from_bytes([0x41; 16]),
+            parent_invocation_id: InvocationId::from_bytes([0x42; 16]),
+            call_site_id: call_site,
+            target_function_id: target,
+            target_revision: active.pair(),
+            generation: 1,
+            resource_kind: ResourceKind::Stream,
+            arguments: vec![ResourceArgument {
+                parameter,
+                value: RuntimeValue::Text("resource-value".into()),
+            }],
+            item_window: 1,
+            byte_window: 1024,
+        };
+        let (server, client) = StandardUnixStream::pair()?;
+        client.set_nonblocking(true)?;
+        let mut client = UnixStream::from_std(client)?;
+        let connection = tokio::spawn(serve_local_raw_stream(
+            kernel.clone(),
+            server,
+            LocalRawSocketResources::new(),
+        ));
+        let scalar_operation = async {
+            client
+                .write_all(b"ORNA\x01\x00\x00\x05\x00\x00\x00\x00")
+                .await?;
+            let mut acknowledgement = [0_u8; 12];
+            client.read_exact(&mut acknowledgement).await?;
+            require(
+                acknowledgement == *b"ORNA\x81\x00\x00\x05\x00\x00\x00\x00",
+                "resource socket did not complete the constructed handshake",
+            )?;
+            send_resource_client_frame_to_socket(
+                &mut client,
+                &active,
+                &registry,
+                &ResourceClientFrame::Request(scalar_request.clone()),
+            )
+            .await?;
+            let accepted = read_resource_server_frame_from_socket(&mut client, &active, &registry).await?;
+            require(
+                matches!(
+                    accepted,
+                    ResourceServerFrame::Accepted(frame)
+                        if frame.stream_id == scalar_request.stream_id
+                            && frame.request_id == scalar_request.request_id
+                            && frame.target_revision == active.pair()
+                            && frame.resource_kind == ResourceKind::Stream
+                ),
+                "resource socket did not accept the scalar request",
+            )?;
+            let values = read_resource_server_frame_from_socket(&mut client, &active, &registry).await?;
+            require(
+                matches!(
+                    values,
+                    ResourceServerFrame::Values(frame)
+                        if frame.stream_id == scalar_request.stream_id
+                            && frame.batch_sequence == 0
+                            && frame.item_count == 1
+                            && frame.values == [RuntimeValue::Text("resource-value".into())]
+                ),
+                "resource socket returned the wrong scalar value",
+            )?;
+            let completed = read_resource_server_frame_from_socket(&mut client, &active, &registry).await?;
+            require(
+                matches!(
+                    completed,
+                    ResourceServerFrame::Completed(frame)
+                        if frame.stream_id == scalar_request.stream_id
+                            && frame.final_batch_sequence == 0
+                            && frame.total_items == 1
+                ),
+                "resource socket did not complete the scalar request",
+            )
+        }
+        .await;
+        let shutdown = client.shutdown().await.map_err(Into::into);
+        let connection = connection.await.map_err(Into::into).and_then(|result| {
+            result.map_err(|error| -> Box<dyn Error + Send + Sync> { Box::new(error) })
+        });
+        finish_session(
+            scalar_operation,
+            finish_session(shutdown, connection, "scalar resource socket cleanup"),
+            "scalar resource socket operation",
+        )?;
+
+        let stream_request = ResourceRequest {
+            stream_id: 2,
+            request_id: InvocationId::from_bytes([0x51; 16]),
+            parent_invocation_id: InvocationId::from_bytes([0x52; 16]),
+            call_site_id: call_site,
+            target_function_id: all_target,
+            target_revision: active.pair(),
+            generation: 1,
+            resource_kind: ResourceKind::Stream,
+            arguments: vec![],
+            item_window: 1,
+            byte_window: 1024,
+        };
+        let (server, client) = StandardUnixStream::pair()?;
+        client.set_nonblocking(true)?;
+        let mut client = UnixStream::from_std(client)?;
+        let connection = tokio::spawn(serve_local_raw_stream(
+            kernel.clone(),
+            server,
+            LocalRawSocketResources::new(),
+        ));
+        let stream_operation = async {
+            client
+                .write_all(b"ORNA\x01\x00\x00\x05\x00\x00\x00\x00")
+                .await?;
+            let mut acknowledgement = [0_u8; 12];
+            client.read_exact(&mut acknowledgement).await?;
+            require(
+                acknowledgement == *b"ORNA\x81\x00\x00\x05\x00\x00\x00\x00",
+                "resource stream socket did not complete the constructed handshake",
+            )?;
+            send_resource_client_frame_to_socket(
+                &mut client,
+                &active,
+                &registry,
+                &ResourceClientFrame::Request(stream_request.clone()),
+            )
+            .await?;
+            let accepted = read_resource_server_frame_from_socket(&mut client, &active, &registry).await?;
+            require(
+                matches!(accepted, ResourceServerFrame::Accepted(frame) if frame.stream_id == 2),
+                "resource stream socket did not accept the stream request",
+            )?;
+            let first_values = read_resource_server_frame_from_socket(&mut client, &active, &registry).await?;
+            require(
+                matches!(
+                    first_values,
+                    ResourceServerFrame::Values(frame)
+                        if frame.stream_id == 2
+                            && frame.batch_sequence == 0
+                            && frame.item_count == 1
+                            && frame.values.len() == 1
+                ),
+                "resource stream socket did not return the first bounded batch",
+            )?;
+            require(
+                timeout(
+                    Duration::from_millis(50),
+                    read_resource_server_frame_from_socket(&mut client, &active, &registry),
+                )
+                .await
+                .is_err(),
+                "resource stream socket returned data before the client restored credit",
+            )?;
+            send_resource_client_frame_to_socket(
+                &mut client,
+                &active,
+                &registry,
+                &ResourceClientFrame::WindowUpdate(ResourceWindowUpdate {
+                    stream_id: 2,
+                    request_id: stream_request.request_id,
+                    add_items: 1,
+                    add_bytes: MAX_RESOURCE_WINDOW - 1024,
+                }),
+            )
+            .await?;
+            let second_values = read_resource_server_frame_from_socket(&mut client, &active, &registry).await?;
+            require(
+                matches!(
+                    second_values,
+                    ResourceServerFrame::Values(frame)
+                        if frame.stream_id == 2
+                            && frame.batch_sequence == 1
+                            && frame.item_count == 1
+                            && frame.values.len() == 1
+                ),
+                "resource stream socket did not resume after the window update",
+            )?;
+            let completed = read_resource_server_frame_from_socket(&mut client, &active, &registry).await?;
+            require(
+                matches!(
+                    completed,
+                    ResourceServerFrame::Completed(frame)
+                        if frame.stream_id == 2
+                            && frame.final_batch_sequence == 1
+                            && frame.total_items == 2
+                ),
+                "resource stream socket did not complete after the resumed batch",
+            )
+        }
+        .await;
+        let shutdown = client.shutdown().await.map_err(Into::into);
+        let connection = connection.await.map_err(Into::into).and_then(|result| {
+            result.map_err(|error| -> Box<dyn Error + Send + Sync> { Box::new(error) })
+        });
+        finish_session(
+            stream_operation,
+            finish_session(shutdown, connection, "stream resource socket cleanup"),
+            "stream resource socket operation",
+        )?;
+
+        let denied_security = SecuritySnapshot::new_with_local_peer_credentials(
+            active.pair(),
+            functions,
+            vec![principal],
+            vec![],
+            vec![],
+            vec![LocalPeerCredential::new(uid, RAW_CLIENT_USER)],
+        )?;
+        kernel.replace_security_snapshot(&denied_security).await?;
+        let denied_request = ResourceRequest {
+            stream_id: 3,
+            request_id: InvocationId::from_bytes([0x61; 16]),
+            parent_invocation_id: InvocationId::from_bytes([0x62; 16]),
+            ..scalar_request
+        };
+        let (server, client) = StandardUnixStream::pair()?;
+        client.set_nonblocking(true)?;
+        let mut client = UnixStream::from_std(client)?;
+        let connection = tokio::spawn(serve_local_raw_stream(
+            kernel.clone(),
+            server,
+            LocalRawSocketResources::new(),
+        ));
+        let denied_operation = async {
+            client
+                .write_all(b"ORNA\x01\x00\x00\x05\x00\x00\x00\x00")
+                .await?;
+            let mut acknowledgement = [0_u8; 12];
+            client.read_exact(&mut acknowledgement).await?;
+            require(
+                acknowledgement == *b"ORNA\x81\x00\x00\x05\x00\x00\x00\x00",
+                "denied resource socket did not complete the constructed handshake",
+            )?;
+            send_resource_client_frame_to_socket(
+                &mut client,
+                &active,
+                &registry,
+                &ResourceClientFrame::Request(denied_request.clone()),
+            )
+            .await?;
+            let failed = read_resource_server_frame_from_socket(&mut client, &active, &registry).await?;
+            require(
+                matches!(
+                    failed,
+                    ResourceServerFrame::Failed(frame)
+                        if frame.stream_id == denied_request.stream_id
+                            && frame.request_id == denied_request.request_id
+                            && frame.failure == CallFailure::ExecuteDenied
+                ),
+                "resource socket did not return execute denial",
+            )
+        }
+        .await;
+        let shutdown = client.shutdown().await.map_err(Into::into);
+        let connection = connection.await.map_err(Into::into).and_then(|result| {
+            result.map_err(|error| -> Box<dyn Error + Send + Sync> { Box::new(error) })
+        });
+        finish_session(
+            denied_operation,
+            finish_session(shutdown, connection, "denied resource socket cleanup"),
+            "denied resource socket operation",
+        )?;
+
+        let audits = kernel.recover_security_audit_events().await?;
+        let expected: [(SecurityAuditKind, SecurityAuditOutcome, Option<InvocationTarget>); 6] = [
+            (SecurityAuditKind::Authentication, SecurityAuditOutcome::Allowed, None),
+            (
+                SecurityAuditKind::Execute,
+                SecurityAuditOutcome::Allowed,
+                Some(InvocationTarget::new(target, active.pair())),
+            ),
+            (SecurityAuditKind::Authentication, SecurityAuditOutcome::Allowed, None),
+            (
+                SecurityAuditKind::Execute,
+                SecurityAuditOutcome::Allowed,
+                Some(InvocationTarget::new(all_target, active.pair())),
+            ),
+            (SecurityAuditKind::Authentication, SecurityAuditOutcome::Allowed, None),
+            (
+                SecurityAuditKind::Execute,
+                SecurityAuditOutcome::Denied,
+                Some(InvocationTarget::new(target, active.pair())),
+            ),
+        ];
+        require(
+            audits.len() == expected.len()
+                && audits.iter().zip(expected).all(|(audit, (kind, outcome, target))| {
+                    audit.decision().kind() == kind
+                        && audit.decision().outcome() == outcome
+                        && audit.decision().target() == target
+                })
+                && audits[5].decision().denial()
+                    == Some(SecurityAuditDenial::Execute(ExecuteDenial::MissingExecuteGrant)),
+            "resource socket audit evidence did not record authentication, allows, and denial",
+        )
     })
     .await
 }
@@ -8020,6 +8400,35 @@ async fn require_invalid_local_raw_hello(
         "invalid protocol-5 hello did not close at the public handshake boundary",
     )
 }
+const RESOURCE_WIRE_HEADER_LENGTH: usize = 21;
+
+async fn read_resource_server_frame_from_socket(
+    stream: &mut UnixStream,
+    active: &ActiveDatabaseRevision,
+    registry: &OpaqueCodecRegistry,
+) -> TestResult<ResourceServerFrame> {
+    let mut header = [0_u8; RESOURCE_WIRE_HEADER_LENGTH];
+    stream.read_exact(&mut header).await?;
+    let payload_length = u32::from_be_bytes(header[17..21].try_into()?) as usize;
+    let mut encoded = header.to_vec();
+    encoded.resize(RESOURCE_WIRE_HEADER_LENGTH + payload_length, 0);
+    stream
+        .read_exact(&mut encoded[RESOURCE_WIRE_HEADER_LENGTH..])
+        .await?;
+    Ok(decode_resource_server_frame(active, registry, &encoded)?)
+}
+
+async fn send_resource_client_frame_to_socket(
+    stream: &mut UnixStream,
+    active: &ActiveDatabaseRevision,
+    registry: &OpaqueCodecRegistry,
+    frame: &ResourceClientFrame,
+) -> TestResult<()> {
+    let encoded = encode_resource_client_frame(active, registry, frame)?;
+    stream.write_all(&encoded).await?;
+    Ok(())
+}
+
 
 fn require_dispatch_failure(
     result: &orna_server::RawClientDispatchResult,
@@ -8091,7 +8500,7 @@ async fn install_raw_client_fixture(
 async fn install_stream_resource_client_fixture(
     kernel: &PostgresKernel,
     active: &orna_core::revision::ActiveDatabaseRevision,
-    standard_upgrade: &orna_standard::StandardUpgrade,
+    standard: &CheckedStandardLibrary,
 ) -> TestResult<(
     orna_core::revision::ActiveDatabaseRevision,
     FunctionId,
@@ -8100,6 +8509,9 @@ async fn install_stream_resource_client_fixture(
     CallSiteId,
 )> {
     let append_source = |active: &orna_core::revision::ActiveDatabaseRevision, body: &str| -> TestResult<SourceBundle> {
+        if active.source().units().is_empty() {
+            return Ok(SourceBundle::new([SourceUnit::new("resource_fixture.sql", body.to_owned())])?);
+        }
         let last_ordinal = active
             .source()
             .units()
@@ -8117,10 +8529,7 @@ async fn install_stream_resource_client_fixture(
             },
         ))?)
     };
-    let server_context = StandardApplicationCheckContext::try_new(
-        active.catalogue(),
-        standard_upgrade.checked_standard_library(),
-    )?;
+    let server_context = StandardApplicationCheckContext::try_new(active.catalogue(), standard)?;
     let server_source = append_source(active, RAW_STREAM_RESOURCE_SERVER_SOURCE)?;
     let server_report = check_standard_application(&server_source, &server_context);
     if !server_report.diagnostics().is_empty() {
@@ -8136,10 +8545,7 @@ async fn install_stream_resource_client_fixture(
         )
         .await
         .map_err(|error| failure(format!("server apply failed: {error:?}")))?;
-    let client_context = StandardApplicationCheckContext::try_new(
-        active.catalogue(),
-        standard_upgrade.checked_standard_library(),
-    )?;
+    let client_context = StandardApplicationCheckContext::try_new(active.catalogue(), standard)?;
     let client_source = append_source(&active, RAW_STREAM_RESOURCE_CLIENT_SOURCE)?;
     let client_report = check_standard_application(&client_source, &client_context);
     if !client_report.diagnostics().is_empty() {
