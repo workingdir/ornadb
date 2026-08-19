@@ -2,7 +2,9 @@ use rowan::{GreenNode, GreenNodeBuilder, Language};
 
 use crate::{
     CapabilitySpecification, ClientCallArgument, ClientExpression, ClientFunctionBody,
-    ClientFunctionDeclaration, ClientLocalBinding, ClientStateBlockBody, DeleteStatement, Diagnostic,
+    ClientFunctionDeclaration, ClientLocalBinding, ClientProceduralStatement,
+    ClientAssignmentStatement, ClientLetStatement, ClientStateBlockBody,
+    DeleteStatement, Diagnostic,
     EnumLabelDeclaration, EnumTypeDeclaration, FieldRenameDeclaration, FunctionReturnType,
     FunctionSecurity, FunctionTransaction, FunctionVolatility, InsertStatement, MutationValue,
     NamePart, NoInputParameterSelectBody, NullOrdering, ObjectFieldDeclaration, ObjectSource,
@@ -13,8 +15,8 @@ use crate::{
     RowsColumnDeclaration, SchemaDeclaration, SelectQuantifier, SelectQuery, ServerFunctionBody,
     ServerFunctionDeclaration, ServerFunctionParameter, SourceSlice, SourceSpan, SqlDeleteBody,
     SqlInsertBody, SqlQueryBody, SqlUpdateBody, StandardLargeObjectKind, StateDeclaration,
-    StateDefault, StateScope, SyntaxTree, TypeExportDeclaration, TypeExportTarget, TypeSpecification,
-    UpdateAssignment, UpdateStatement, ValueFieldDeclaration,
+    StateDefault, StateScope, SyntaxTree, TypeExportDeclaration, TypeExportTarget,
+    TypeSpecification, UpdateAssignment, UpdateStatement, ValueFieldDeclaration,
     lexer::{Token, TokenKind, lex},
 };
 
@@ -75,6 +77,9 @@ pub(crate) enum SyntaxKind {
     ClientStateDeclaration,
     ClientStateReturnStatement,
     ClientLocalBinding,
+    ClientProceduralStatement,
+    ClientProceduralLetStatement,
+    ClientAssignmentStatement,
 }
 
 impl From<SyntaxKind> for rowan::SyntaxKind {
@@ -145,6 +150,9 @@ impl Language for OrnaLanguage {
             51 => SyntaxKind::ClientStateDeclaration,
             52 => SyntaxKind::ClientStateReturnStatement,
             53 => SyntaxKind::ClientLocalBinding,
+            54 => SyntaxKind::ClientProceduralStatement,
+            55 => SyntaxKind::ClientProceduralLetStatement,
+            56 => SyntaxKind::ClientAssignmentStatement,
             _ => panic!("unknown Orna syntax kind"),
         }
     }
@@ -1186,15 +1194,17 @@ impl<'source> Parser<'source> {
     ///     { STATE identifier type_spec [SCOPE (LOCAL | SESSION | USER)]
     ///       [DEFAULT expression] ; }
     /// BEGIN
+    ///     { LET identifier [type_spec] := expression ; }
+    ///     { identifier := expression ; }
     ///     RETURN [ expression ] ;
     /// END
     /// ```
     ///
     /// The subset is deliberately closed: only `STATE` declarations or `LET`
-    /// local bindings may precede `BEGIN`, and exactly one `RETURN` statement
-    /// may follow it. Every other procedural statement is rejected with a
-    /// closed diagnostic. On failure the caller recovers to the statement
-    /// terminator.
+    /// local bindings may precede `BEGIN`; after `BEGIN`, `LET` and simple-name
+    /// assignments are retained before exactly one `RETURN`. Every other
+    /// procedural statement is rejected with a closed diagnostic. On failure
+    /// the caller recovers to the statement terminator.
     fn parse_client_state_block(&mut self) -> Option<ClientFunctionBody> {
         self.builder
             .start_node(SyntaxKind::ClientStateBlockBody.into());
@@ -1203,6 +1213,7 @@ impl<'source> Parser<'source> {
             self.bump();
             let mut states = Vec::new();
             let mut locals = Vec::new();
+            let mut statements = Vec::new();
             loop {
                 self.skip_trivia();
                 if self.current().is_some_and(|token| token.is_word("BEGIN")) {
@@ -1232,8 +1243,45 @@ impl<'source> Parser<'source> {
                 return None;
             }
             self.bump(); // BEGIN
-            self.skip_trivia();
-            if !self.current().is_some_and(|token| token.is_word("RETURN")) {
+            let mut local_names = locals
+                .iter()
+                .map(|local| local.name.clone())
+                .collect::<Vec<_>>();
+            loop {
+                self.skip_trivia();
+                if self.current().is_some_and(|token| token.is_word("RETURN")) {
+                    break;
+                }
+                let Some(token) = self.current() else {
+                    self.error_current(
+                        "ORNA0001",
+                        "CLIENT blocks require exactly one RETURN statement",
+                    );
+                    return None;
+                };
+                if token.is_word("LET") {
+                    let Some(mut statement) = self.parse_client_let_statement() else {
+                        return None;
+                    };
+                    statement.expression =
+                        rewrite_client_local_name_references(statement.expression, &local_names);
+                    local_names.push(statement.name.clone());
+                    statements.push(ClientProceduralStatement::Let(statement));
+                    continue;
+                }
+                if token.is_identifier()
+                    && self
+                        .peek_significant(1)
+                        .is_some_and(|next| next.text == ":")
+                {
+                    let Some(mut statement) = self.parse_client_assignment_statement() else {
+                        return None;
+                    };
+                    statement.expression =
+                        rewrite_client_local_name_references(statement.expression, &local_names);
+                    statements.push(ClientProceduralStatement::Assignment(statement));
+                    continue;
+                }
                 self.error_current(
                     "ORNA0001",
                     "CLIENT blocks accept only a single RETURN statement",
@@ -1241,8 +1289,8 @@ impl<'source> Parser<'source> {
                 return None;
             }
             let return_expression = self.parse_client_state_return()?;
-            let return_expression =
-                return_expression.map(|expression| rewrite_client_local_references(expression, &locals));
+            let return_expression = return_expression
+                .map(|expression| rewrite_client_local_name_references(expression, &local_names));
             self.skip_trivia();
             if self.current().is_some_and(|token| token.is_word("RETURN")) {
                 self.error_current(
@@ -1255,6 +1303,7 @@ impl<'source> Parser<'source> {
             Some(ClientFunctionBody::StateBlock(ClientStateBlockBody {
                 states,
                 locals,
+                statements,
                 return_expression,
                 span: SourceSpan {
                     start: block_start,
@@ -1336,6 +1385,120 @@ impl<'source> Parser<'source> {
                 },
             })
         })();
+        self.builder.finish_node();
+        result
+    }
+
+    /// Parses one procedural `LET name [type] := expression;` statement.
+    fn parse_client_let_statement(&mut self) -> Option<ClientLetStatement> {
+        self.builder
+            .start_node(SyntaxKind::ClientProceduralStatement.into());
+        self.builder
+            .start_node(SyntaxKind::ClientProceduralLetStatement.into());
+        let result = (|| {
+            let let_token = self.take_word("LET")?;
+            self.skip_trivia();
+            let name = self.expect_identifier("expected a local name after LET")?;
+            self.skip_trivia();
+            let type_source = if self.current().is_some_and(|token| token.text == ":") {
+                None
+            } else {
+                let type_start = self.current()?.range.start;
+                let mut type_end = type_start;
+                while self
+                    .current()
+                    .is_some_and(|token| !(token.kind == TokenKind::Other && token.text == ":"))
+                {
+                    if self.current().is_some_and(|token| token.kind == TokenKind::Semicolon) {
+                        self.error_current(
+                            "ORNA0001",
+                            "expected ':=' before the CLIENT local initializer",
+                        );
+                        return None;
+                    }
+                    let token = self.current().expect("type token exists");
+                    if !token.kind.is_trivia() {
+                        type_end = token.range.end;
+                    }
+                    self.bump();
+                }
+                if type_start == type_end {
+                    self.error_current("ORNA0001", "expected a local type before ':='");
+                    return None;
+                }
+                Some(SourceSlice {
+                    text: self.source[type_start..type_end].to_owned(),
+                    span: SourceSpan {
+                        start: type_start,
+                        end: type_end,
+                    },
+                })
+            };
+            self.take_symbol(":")?;
+            if self.take_symbol("=").is_none() {
+                self.error_current(
+                    "ORNA0001",
+                    "expected '=' after ':' in the CLIENT local binding",
+                );
+                return None;
+            }
+            self.skip_trivia();
+            let expression = self.parse_client_expression()?;
+            self.skip_trivia();
+            let semicolon = self.expect_kind(
+                TokenKind::Semicolon,
+                "expected ';' after the CLIENT local binding",
+            )?;
+            Some(ClientLetStatement {
+                name,
+                type_source,
+                expression,
+                span: SourceSpan {
+                    start: let_token.range.start,
+                    end: semicolon.end,
+                },
+            })
+        })();
+        self.builder.finish_node();
+        self.builder.finish_node();
+        result
+    }
+
+    /// Parses one procedural `name := expression;` assignment.
+    fn parse_client_assignment_statement(&mut self) -> Option<ClientAssignmentStatement> {
+        self.builder
+            .start_node(SyntaxKind::ClientProceduralStatement.into());
+        self.builder
+            .start_node(SyntaxKind::ClientAssignmentStatement.into());
+        let result = (|| {
+            let target = self.expect_identifier("expected an assignment target")?;
+            let target_start = target.span.start;
+            self.skip_trivia();
+            self.take_symbol(":")?;
+            if self.take_symbol("=").is_none() {
+                self.error_current(
+                    "ORNA0001",
+                    "expected '=' after ':' in the CLIENT assignment",
+                );
+                return None;
+            }
+            self.skip_trivia();
+            let expression = self.parse_client_expression()?;
+            self.skip_trivia();
+            let semicolon = self.expect_kind(
+                TokenKind::Semicolon,
+                "expected ';' after the CLIENT assignment",
+            )?;
+            Some(ClientAssignmentStatement {
+                target,
+                expression,
+                span: SourceSpan {
+                    start: target_start,
+                    end: semicolon.end,
+                },
+            })
+        })();
+        self.builder.finish_node();
         self.builder.finish_node();
         result
     }
@@ -3343,9 +3506,9 @@ impl<'source> Parser<'source> {
     }
 }
 
-fn rewrite_client_local_references(
+fn rewrite_client_local_name_references(
     expression: ClientExpression,
-    locals: &[ClientLocalBinding],
+    locals: &[NamePart],
 ) -> ClientExpression {
     let semantic_name = |name: &NamePart| {
         if name.text.starts_with('"') {
@@ -3357,7 +3520,7 @@ fn rewrite_client_local_references(
     let is_local = |name: &NamePart| {
         locals
             .iter()
-            .any(|local| semantic_name(&local.name) == semantic_name(name))
+            .any(|local| semantic_name(local) == semantic_name(name))
     };
     match expression {
         ClientExpression::ParameterRead { parameter } if is_local(&parameter) => {
@@ -3372,19 +3535,19 @@ fn rewrite_client_local_references(
             arguments: arguments
                 .into_iter()
                 .map(|argument| ClientCallArgument {
-                    value: rewrite_client_local_references(argument.value, locals),
+                    value: rewrite_client_local_name_references(argument.value, locals),
                     ..argument
                 })
                 .collect(),
             span,
         },
         ClientExpression::Await { expression, span } => ClientExpression::Await {
-            expression: Box::new(rewrite_client_local_references(*expression, locals)),
+            expression: Box::new(rewrite_client_local_name_references(*expression, locals)),
             span,
         },
         ClientExpression::Concat { left, right, span } => ClientExpression::Concat {
-            left: Box::new(rewrite_client_local_references(*left, locals)),
-            right: Box::new(rewrite_client_local_references(*right, locals)),
+            left: Box::new(rewrite_client_local_name_references(*left, locals)),
+            right: Box::new(rewrite_client_local_name_references(*right, locals)),
             span,
         },
         other => other,
