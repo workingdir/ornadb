@@ -10,7 +10,7 @@ use orna_core::{
     CatalogueRevisionId, FunctionId, FunctionRevisionId, InspectEpochId, InvocationAuditEventId,
     InvocationId, ObjectId, PrincipalId, SecurityAuditEventId, SourceRevisionId,
     StandardLibraryRevisionId,
-    catalogue::{FunctionDefinition, FunctionDomain},
+    catalogue::{FunctionDefinition, FunctionDomain, FunctionReturn},
     inspect::{InspectOutcomeKind, InspectPrivilege, InspectSnapshotOptions},
     invocation::{
         InvocationArgument, InvocationClientOffer, InvocationEventBody,
@@ -34,10 +34,11 @@ use orna_core::{
         system_function_by_id, system_function_by_name,
     },
     types::TypeDescriptor,
-    value::{FunctionArgument, OpaqueCodecRegistry, RecordValue, RuntimeValue},
+    value::{FunctionArgument, OpaqueCodecRegistry, RecordValue, RuntimeType, RuntimeValue},
 };
 use orna_protocol::{
-    InvocationEventBatch, InvocationEventRecord, RetainedInvokeRequest,
+    CallFailure, InvocationEventBatch, InvocationEventRecord, ResourceArgument,
+    ResourceKind as ProtocolResourceKind, ResourceRequest, RetainedInvokeRequest,
     decode_retained_invoke_request, encode_active_value,
 };
 use orna_standard::{
@@ -74,6 +75,40 @@ pub enum AuthenticatedRawCallResult {
     Client(RuntimeValue),
     /// Zero or more values returned in SERVER execution result order.
     Server(Vec<RuntimeValue>),
+}
+
+/// The owned result of one authenticated SERVER resource request.
+///
+/// A successful result contains the server-generated nested invocation identity
+/// and only values validated against the active SERVER target. A failed result
+/// carries the closed protocol failure class and no target, principal, grant,
+/// argument, or internal error detail.
+#[derive(Clone, Debug, PartialEq)]
+pub enum AuthenticatedServerResourceResult {
+    /// The target executed and produced its complete value sequence.
+    Completed {
+        /// The connection-local resource stream.
+        stream_id: u64,
+        /// The caller's request correlation identity.
+        request_id: InvocationId,
+        /// The server-generated nested invocation identity.
+        nested_invocation_id: InvocationId,
+        /// The active revision pair used for execution.
+        target_revision: RevisionPair,
+        /// The validated resource result kind.
+        resource_kind: ProtocolResourceKind,
+        /// Values in server result order. A scalar has exactly one value.
+        values: Vec<RuntimeValue>,
+    },
+    /// The request was denied or could not safely execute.
+    Failed {
+        /// The connection-local resource stream.
+        stream_id: u64,
+        /// The caller's request correlation identity.
+        request_id: InvocationId,
+        /// The closed public failure class.
+        failure: CallFailure,
+    },
 }
 
 /// The owned redacted result of one sealed `sys.invoke` dispatch.
@@ -558,6 +593,173 @@ impl PostgresKernel {
                 .await
                 .map_err(PostgresKernelError::Database)?;
             execution
+        }
+        .await;
+        finish_authenticated_server_select_session(operation, database_session.shutdown().await)
+    }
+
+    /// Dispatches one authenticated ORNA-RESOURCE target inside one transaction.
+    ///
+    /// The transport request is treated as untrusted metadata: the active
+    /// revision, target definition, parameter set, result shape, and security
+    /// principals are recovered by the kernel. The nested invocation identity
+    /// is generated here and never taken from the request. Denials and failures
+    /// return only the closed protocol failure class.
+    pub async fn dispatch_authenticated_server_resource(
+        &self,
+        authenticated_session: &AuthenticatedSession,
+        request: &ResourceRequest,
+    ) -> Result<AuthenticatedServerResourceResult, PostgresKernelError> {
+        let mut database_session = self.open().await?;
+        let operation = async {
+            let mut transaction = database_session
+                .client
+                .build_transaction()
+                .isolation_level(IsolationLevel::RepeatableRead)
+                .start()
+                .await
+                .map_err(PostgresKernelError::Database)?;
+            require_current_migrations(&transaction).await?;
+            let active = configure_and_recover(&transaction).await?;
+            let security = recover_security_snapshot_for_active(&transaction, &active).await?;
+            let invocation = InvocationId::new();
+            let failed = |failure| AuthenticatedServerResourceResult::Failed {
+                stream_id: request.stream_id,
+                request_id: request.request_id,
+                failure,
+            };
+
+            let result = if request.target_revision != active.pair() {
+                append_unresolved_invocation_audit(
+                    &transaction,
+                    authenticated_session,
+                    invocation,
+                )
+                .await?;
+                failed(CallFailure::TargetUnavailable)
+            } else {
+                let entry_target = InvocationTarget::new(SYS_INVOKE_FUNCTION_ID, active.pair());
+                match security.authorise_system_function(authenticated_session, entry_target) {
+                    ExecuteDecision::Denied(reason) => {
+                        let event_id = append_security_audit_event(
+                            &transaction,
+                            SecurityAuditDecision::execute_denied(
+                                authenticated_session,
+                                entry_target,
+                                reason,
+                            ),
+                        )
+                        .await?;
+                        append_linked_invocation_audit(&transaction, invocation, event_id).await?;
+                        failed(CallFailure::ExecuteDenied)
+                    }
+                    ExecuteDecision::Allowed(_) => {
+                        let target = InvocationTarget::new(request.target_function_id, active.pair());
+                        match security.authorise_execute(authenticated_session, target) {
+                    ExecuteDecision::Denied(reason) => {
+                        let event_id = append_security_audit_event(
+                            &transaction,
+                            SecurityAuditDecision::execute_denied(
+                                authenticated_session,
+                                target,
+                                reason,
+                            ),
+                        )
+                        .await?;
+                        append_linked_invocation_audit(&transaction, invocation, event_id).await?;
+                        failed(CallFailure::ExecuteDenied)
+                    }
+                    ExecuteDecision::Allowed(authorisation) => {
+                        append_allowed_invocation_audit(
+                            &transaction,
+                            &security,
+                            authenticated_session,
+                            target,
+                            invocation,
+                        )
+                        .await?;
+                        match active.catalogue().function_by_id(request.target_function_id) {
+                            None => failed(CallFailure::TargetUnavailable),
+                            Some(definition) if !resource_target_shape_is_supported(
+                                definition,
+                                request.resource_kind,
+                            ) => failed(CallFailure::TargetUnavailable),
+                            Some(definition) => match
+                                bind_authenticated_resource_arguments(definition, &request.arguments)
+                            {
+                                None => failed(CallFailure::TargetUnavailable),
+                                Some(arguments) => {
+                                    let savepoint = transaction
+                                .savepoint("authenticated_server_resource_execution")
+                                .await
+                                .map_err(PostgresKernelError::Database)?;
+                            let execution =
+                                execute_authorised_server_select(
+                                    &savepoint,
+                                    &active,
+                                    &authorisation,
+                                    &arguments,
+                                )
+                                .await;
+                            match execution {
+                                Ok(server) => {
+                                    let values = resource_values_from_server_result(
+                                        request.resource_kind,
+                                        server,
+                                    );
+                                    match values {
+                                        Some(values) => {
+                                            savepoint
+                                                .commit()
+                                                .await
+                                                .map_err(PostgresKernelError::Database)?;
+                                            AuthenticatedServerResourceResult::Completed {
+                                                stream_id: request.stream_id,
+                                                request_id: request.request_id,
+                                                nested_invocation_id: invocation,
+                                                target_revision: active.pair(),
+                                                resource_kind: request.resource_kind,
+                                                values,
+                                            }
+                                        }
+                                        None => {
+                                            savepoint
+                                                .rollback()
+                                                .await
+                                                .map_err(PostgresKernelError::Database)?;
+                                            failed(CallFailure::TargetUnavailable)
+                                        }
+                                    }
+                                }
+                                Err(error) => {
+                                    savepoint
+                                        .rollback()
+                                        .await
+                                        .map_err(PostgresKernelError::Database)?;
+                                    let failure = match error {
+                                        PostgresKernelError::ServerSelect(source)
+                                            if raw_server_target_is_unavailable(&source) =>
+                                        {
+                                            CallFailure::TargetUnavailable
+                                        }
+                                        _ => CallFailure::InternalFailure,
+                                    };
+                                    failed(failure)
+                                }
+                                    }
+                                }
+                            },
+                        }
+                    }
+                        }
+                    }
+                }
+            };
+            transaction
+                .commit()
+                .await
+                .map_err(PostgresKernelError::Database)?;
+            Ok(result)
         }
         .await;
         finish_authenticated_server_select_session(operation, database_session.shutdown().await)
@@ -1501,6 +1703,77 @@ impl PostgresKernel {
         .await;
         finish_security_session(operation, session.shutdown().await)
     }
+}
+
+fn resource_target_shape_is_supported(
+    definition: &FunctionDefinition,
+    kind: ProtocolResourceKind,
+) -> bool {
+    if definition.domain() != FunctionDomain::Server {
+        return false;
+    }
+    match (kind, definition.return_type()) {
+        (ProtocolResourceKind::Single, FunctionReturn::Single(_)) => true,
+        (ProtocolResourceKind::Stream, FunctionReturn::Rows(columns)) => !columns.is_empty(),
+        _ => false,
+    }
+}
+
+fn bind_authenticated_resource_arguments(
+    definition: &FunctionDefinition,
+    arguments: &[ResourceArgument],
+) -> Option<Vec<FunctionArgument>> {
+    if arguments.len() != definition.parameters().len() {
+        return None;
+    }
+    let mut previous = None;
+    let mut bound = Vec::with_capacity(arguments.len());
+    for argument in arguments {
+        if previous.is_some_and(|previous| argument.parameter <= previous) {
+            return None;
+        }
+        previous = Some(argument.parameter);
+        let parameter = definition.parameter_by_id(argument.parameter)?;
+        if matches!(argument.value, RuntimeValue::Opaque(_)) {
+            return None;
+        }
+        let RuntimeType::Flat(actual) = argument.value.runtime_type() else {
+            return None;
+        };
+        if actual != parameter.resolved_type() {
+            return None;
+        }
+        bound.push(FunctionArgument::new(argument.parameter, argument.value.clone()).ok()?);
+    }
+    Some(bound)
+}
+
+fn resource_result_value_is_supported(value: &RuntimeValue) -> bool {
+    !matches!(
+        value,
+        RuntimeValue::InvokeValue(_)
+            | RuntimeValue::InvokeRequest(_)
+            | RuntimeValue::InvokeEvent(_)
+    )
+}
+
+fn resource_values_from_server_result(
+    kind: ProtocolResourceKind,
+    result: ServerSelectResult,
+) -> Option<Vec<RuntimeValue>> {
+    let rows = result.into_rows().into_rows();
+    let mut values = Vec::with_capacity(rows.len());
+    for row in rows {
+        let value = row.into_values().into_iter().next()?;
+        if !resource_result_value_is_supported(&value) {
+            return None;
+        }
+        values.push(value);
+    }
+    if kind == ProtocolResourceKind::Single && values.len() != 1 {
+        return None;
+    }
+    Some(values)
 }
 
 async fn lock_catalogue_health_identity(
@@ -4502,6 +4775,111 @@ mod tests {
 
     const RAW_CALL_FUNCTION: FunctionId = FunctionId::from_bytes([0x61; 16]);
     const RAW_CALL_PARAMETER: ParameterId = ParameterId::from_bytes([0x62; 16]);
+
+    #[test]
+    fn resource_target_shape_matches_protocol_kind() {
+        use orna_core::{
+            catalogue::{FunctionReturn, FunctionSecurity, FunctionTransaction, FunctionVolatility,
+                FunctionReturnColumnDefinition, QualifiedSemanticName},
+            types::{ResolvedType, StandardScalar},
+        };
+
+        let function = FunctionDefinition::new(
+            RAW_CALL_FUNCTION,
+            QualifiedSemanticName::new(["app", "resource"]).expect("function name"),
+            FunctionDomain::Server,
+            Vec::new(),
+            FunctionReturn::Single(ResolvedType::scalar(StandardScalar::Integer)),
+            FunctionRevisionId::new(),
+            FunctionSecurity::Invoker,
+            Some(FunctionTransaction::ReadOnly),
+            FunctionVolatility::Stable,
+        );
+        assert!(resource_target_shape_is_supported(
+            &function,
+            ProtocolResourceKind::Single,
+        ));
+        assert!(!resource_target_shape_is_supported(
+            &function,
+            ProtocolResourceKind::Stream,
+        ));
+
+        let rows = FunctionDefinition::new(
+            RAW_CALL_FUNCTION,
+            QualifiedSemanticName::new(["app", "stream"]).expect("function name"),
+            FunctionDomain::Server,
+            Vec::new(),
+            FunctionReturn::Rows(vec![FunctionReturnColumnDefinition::new(
+                "value",
+                0,
+                ResolvedType::scalar(StandardScalar::Integer),
+            )]),
+            FunctionRevisionId::new(),
+            FunctionSecurity::Invoker,
+            Some(FunctionTransaction::ReadOnly),
+            FunctionVolatility::Stable,
+        );
+        assert!(resource_target_shape_is_supported(
+            &rows,
+            ProtocolResourceKind::Stream,
+        ));
+        assert!(!resource_target_shape_is_supported(
+            &rows,
+            ProtocolResourceKind::Single,
+        ));
+    }
+
+    #[test]
+    fn resource_arguments_require_canonical_complete_typed_set() {
+        use orna_core::{
+            catalogue::{FunctionSecurity, FunctionTransaction, FunctionVolatility,
+                ParameterDefinition, QualifiedSemanticName},
+            types::{ResolvedType, StandardScalar},
+        };
+
+        let first = ParameterId::from_bytes([0x01; 16]);
+        let second = ParameterId::from_bytes([0x02; 16]);
+        let function = FunctionDefinition::new(
+            RAW_CALL_FUNCTION,
+            QualifiedSemanticName::new(["app", "resource"]).expect("function name"),
+            FunctionDomain::Server,
+            vec![
+                ParameterDefinition::new(
+                    first,
+                    "first",
+                    0,
+                    ResolvedType::scalar(StandardScalar::Integer),
+                    None,
+                ),
+                ParameterDefinition::new(
+                    second,
+                    "second",
+                    1,
+                    ResolvedType::scalar(StandardScalar::Boolean),
+                    None,
+                ),
+            ],
+            FunctionReturn::Rows(Vec::new()),
+            FunctionRevisionId::new(),
+            FunctionSecurity::Invoker,
+            Some(FunctionTransaction::ReadOnly),
+            FunctionVolatility::Stable,
+        );
+        let canonical = vec![
+            ResourceArgument { parameter: first, value: RuntimeValue::Integer(7) },
+            ResourceArgument { parameter: second, value: RuntimeValue::Boolean(true) },
+        ];
+        assert!(bind_authenticated_resource_arguments(&function, &canonical).is_some());
+
+        let wrong_order = vec![canonical[1].clone(), canonical[0].clone()];
+        assert!(bind_authenticated_resource_arguments(&function, &wrong_order).is_none());
+        let wrong_type = vec![
+            ResourceArgument { parameter: first, value: RuntimeValue::Boolean(true) },
+            canonical[1].clone(),
+        ];
+        assert!(bind_authenticated_resource_arguments(&function, &wrong_type).is_none());
+        assert!(bind_authenticated_resource_arguments(&function, &canonical[..1]).is_none());
+    }
 
     #[test]
     fn invocation_audit_decision_uses_only_closed_execute_evidence() {
