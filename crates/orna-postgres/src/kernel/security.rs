@@ -1714,7 +1714,7 @@ fn resource_target_shape_is_supported(
     }
     match (kind, definition.return_type()) {
         (ProtocolResourceKind::Single, FunctionReturn::Single(_)) => true,
-        (ProtocolResourceKind::Stream, FunctionReturn::Rows(columns)) => !columns.is_empty(),
+        (ProtocolResourceKind::Stream, FunctionReturn::Rows(columns)) => columns.len() == 1,
         _ => false,
     }
 }
@@ -4826,6 +4826,32 @@ mod tests {
         assert!(!resource_target_shape_is_supported(
             &rows,
             ProtocolResourceKind::Single,
+        ));
+        let multi_rows = FunctionDefinition::new(
+            RAW_CALL_FUNCTION,
+            QualifiedSemanticName::new(["app", "multi_stream"]).expect("function name"),
+            FunctionDomain::Server,
+            Vec::new(),
+            FunctionReturn::Rows(vec![
+                FunctionReturnColumnDefinition::new(
+                    "first",
+                    0,
+                    ResolvedType::scalar(StandardScalar::Integer),
+                ),
+                FunctionReturnColumnDefinition::new(
+                    "second",
+                    1,
+                    ResolvedType::scalar(StandardScalar::Integer),
+                ),
+            ]),
+            FunctionRevisionId::new(),
+            FunctionSecurity::Invoker,
+            Some(FunctionTransaction::ReadOnly),
+            FunctionVolatility::Stable,
+        );
+        assert!(!resource_target_shape_is_supported(
+            &multi_rows,
+            ProtocolResourceKind::Stream,
         ));
     }
 
