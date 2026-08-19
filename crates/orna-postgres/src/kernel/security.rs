@@ -1,9 +1,10 @@
 use std::time::SystemTime;
 
 use orna_client::{
-    ClientExecutionError, ClientExecutionResult,
+    ClientExecutionError, ClientExecutionResult, ClientResourceExecutor, ClientStateStore,
     evaluate_client_function_with_grants as evaluate_authorised_client_function,
     evaluate_client_function_with_grants_and_arguments as evaluate_authorised_client_function_with_arguments,
+    evaluate_client_function_with_state_and_grants_and_arguments_and_executor as evaluate_authorised_client_function_with_arguments_and_executor,
 };
 use orna_artifact::client_plan::{CAPABILITY_FORMAT_VERSION, CapabilityClientPlan};
 use orna_core::{
@@ -811,13 +812,31 @@ impl PostgresKernel {
     ///
     /// The invocation first passes the protected `sys.invoke` gate. Application
     /// CLIENT targets use the same authorised local evaluator as the raw dispatch
-    /// path. Verified standard targets retain their sealed standard-only execution
     /// path.
     pub async fn dispatch_sealed_sys_invoke(
         &self,
         authenticated_session: &AuthenticatedSession,
         connection_protocol_major: u16,
         request: &RetainedInvokeRequest,
+    ) -> Result<SealedInvocationResult, PostgresKernelError> {
+        self.dispatch_sealed_sys_invoke_with_resource_executor(
+            authenticated_session,
+            connection_protocol_major,
+            request,
+            None,
+        )
+        .await
+    }
+
+    /// Dispatches one sealed invocation with an optional host-owned resource
+    /// executor for CLIENT resource expressions.
+    #[doc(hidden)]
+    pub async fn dispatch_sealed_sys_invoke_with_resource_executor(
+        &self,
+        authenticated_session: &AuthenticatedSession,
+        connection_protocol_major: u16,
+        request: &RetainedInvokeRequest,
+        mut resource_executor: Option<&mut dyn ClientResourceExecutor>,
     ) -> Result<SealedInvocationResult, PostgresKernelError> {
         let mut database_session = self.open().await?;
         let operation = async {
@@ -889,13 +908,26 @@ impl PostgresKernel {
                             };
                             let arguments =
                                 bind_sealed_invoke_arguments(definition, decoded.arguments())?;
-                            let execution = evaluate_authorised_client_function_with_arguments(
-                                &active,
-                                &authorisation,
-                                &arguments,
-                                &[],
-                                &self.capability_grants,
-                            )
+                            let execution = if let Some(executor) = resource_executor.as_deref_mut() {
+                                let mut state = ClientStateStore::new();
+                                evaluate_authorised_client_function_with_arguments_and_executor(
+                                    &active,
+                                    &authorisation,
+                                    &arguments,
+                                    &[],
+                                    &self.capability_grants,
+                                    &mut state,
+                                    executor,
+                                )
+                            } else {
+                                evaluate_authorised_client_function_with_arguments(
+                                    &active,
+                                    &authorisation,
+                                    &arguments,
+                                    &[],
+                                    &self.capability_grants,
+                                )
+                            }
                             .map_err(PostgresKernelError::ClientExecution);
                             append_client_capability_audit(
                                 &transaction,
