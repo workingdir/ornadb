@@ -308,6 +308,11 @@ pub enum LocalRawSocketError {
         /// The resource state-machine failure.
         source: ResourceConnectionError,
     },
+    /// Recording a resource cancellation audit failed.
+    ResourceCancellationAudit {
+        /// The protected cancellation-audit failure.
+        source: Box<PostgresKernelError>,
+    },
     /// One protected dispatch task failed outside its typed result.
     DispatchTask {
         /// The unexpected task failure.
@@ -336,6 +341,9 @@ impl fmt::Display for LocalRawSocketError {
             Self::Io { .. } => "local raw socket I/O failed",
             Self::Connection { .. } => "local raw socket state is invalid",
             Self::ResourceConnection { .. } => "local raw socket resource state is invalid",
+            Self::ResourceCancellationAudit { .. } => {
+                "local raw socket resource cancellation audit failed"
+            }
             Self::DispatchTask { .. } => "local raw socket dispatch task failed",
             Self::ConnectionTask { .. } => "local raw socket connection task failed",
         })
@@ -353,6 +361,7 @@ impl Error for LocalRawSocketError {
             Self::Frame { source } => Some(source),
             Self::Connection { source } => Some(source),
             Self::ResourceConnection { source } => Some(source),
+            Self::ResourceCancellationAudit { source } => Some(source),
             Self::DispatchTask { source } => Some(source),
             Self::ConnectionTask { source } => Some(source),
             Self::HandshakeTimeout
@@ -937,6 +946,8 @@ struct StartedResourceDispatch {
 
 type DispatchFuture = Pin<Box<dyn Future<Output = DispatchCompletion> + Send>>;
 type ResourceDispatchFuture = Pin<Box<dyn Future<Output = ResourceDispatchCompletion> + Send>>;
+type ResourceCancellationFuture =
+    Pin<Box<dyn Future<Output = Result<(), PostgresKernelError>> + Send>>;
 
 #[derive(Clone)]
 struct RawDispatchService {
@@ -956,6 +967,14 @@ trait DispatchService: Clone + Send + Sync + 'static {
     }
 
     fn cancelled(&self, _stream: u64) {}
+
+    fn cancel_resource(
+        &self,
+        _session: AuthenticatedSession,
+        _request: ResourceRequest,
+    ) -> ResourceCancellationFuture {
+        Box::pin(async { Ok(()) })
+    }
 }
 impl DispatchService for RawDispatchService {
     fn start(&self, session: AuthenticatedSession, stream: u64, call: RawCall) -> StartedDispatch {
@@ -993,6 +1012,19 @@ impl DispatchService for RawDispatchService {
             }
         });
         Some(StartedResourceDispatch { future })
+    }
+
+    fn cancel_resource(
+        &self,
+        session: AuthenticatedSession,
+        request: ResourceRequest,
+    ) -> ResourceCancellationFuture {
+        let kernel = self.kernel.clone();
+        Box::pin(async move {
+            kernel
+                .record_cancelled_resource_audit(&session, &request)
+                .await
+        })
     }
 }
 
@@ -1143,7 +1175,7 @@ async fn drive_versioned_authenticated_stream_until_shutdown<D: DispatchService>
     let (frame_sender, mut frame_receiver) = mpsc::channel(64);
     let reader_task = spawn_frame_reader(reader, version.clone(), resources.clone(), frame_sender);
     let (resource_completion_sender, mut resource_completion_receiver) =
-        mpsc::channel::<(u64, ResourceDispatchCompletion)>(64);
+        mpsc::unbounded_channel::<(u64, ResourceDispatchCompletion)>();
     let mut connection = ProtocolConnection::new();
     let mut resource_connection = ResourceProtocolConnection::new();
     let mut retained_payload = BTreeMap::<u64, Vec<PayloadReservation>>::new();
@@ -1152,6 +1184,7 @@ async fn drive_versioned_authenticated_stream_until_shutdown<D: DispatchService>
     let mut resource_cancelled = BTreeSet::<u64>::new();
     let mut resource_pending = BTreeMap::<u64, ResourceDispatchCompletion>::new();
     let mut resource_tasks = BTreeMap::<u64, JoinHandle<()>>::new();
+    let mut resource_requests = BTreeMap::<u64, ResourceRequest>::new();
     let mut tasks = JoinSet::<(u64, DispatchCompletion)>::new();
     let mut unstarted = VecDeque::<UnstartedDispatch>::new();
     let result = loop {
@@ -1257,7 +1290,9 @@ async fn drive_versioned_authenticated_stream_until_shutdown<D: DispatchService>
                             &mut resource_pending,
                             &mut resource_cancelled,
                             &mut resource_tasks,
+                            &mut resource_requests,
                             &resource_completion_sender,
+                            &mut resource_completion_receiver,
                             &mut writer,
                             &mut shutdown,
                         )
@@ -1285,6 +1320,7 @@ async fn drive_versioned_authenticated_stream_until_shutdown<D: DispatchService>
             Next::Completion(None) => {}
             Next::ResourceCompletion(Some((stream_id, completion))) => {
                 resource_tasks.remove(&stream_id);
+                resource_requests.remove(&stream_id);
                 if !resource_cancelled.remove(&stream_id) {
                     resource_pending.insert(stream_id, completion);
                 }
@@ -1302,11 +1338,33 @@ async fn drive_versioned_authenticated_stream_until_shutdown<D: DispatchService>
     while !unstarted.is_empty() {
         start_one_dispatch(&mut unstarted, &mut tasks);
     }
-    for (_, task) in resource_tasks {
+    for task in resource_tasks.values() {
         task.abort();
+    }
+    for (_, task) in std::mem::take(&mut resource_tasks) {
         let _ = task.await;
     }
-    let mut drain_failure = None;
+    drain_resource_completions(
+        &mut resource_completion_receiver,
+        &mut resource_pending,
+        &mut resource_cancelled,
+        &mut resource_tasks,
+        &mut resource_requests,
+    );
+    let mut cancellation_audit_failure = None;
+    for (_, request) in std::mem::take(&mut resource_requests) {
+        if let Err(source) = dispatcher
+            .cancel_resource(session.clone(), request)
+            .await
+        {
+            cancellation_audit_failure.get_or_insert(
+                LocalRawSocketError::ResourceCancellationAudit {
+                    source: Box::new(source),
+                },
+            );
+        }
+    }
+    let mut drain_failure = cancellation_audit_failure;
     while let Some(completion) = tasks.join_next().await {
         if let Err(source) = completion {
             drain_failure.get_or_insert(LocalRawSocketError::DispatchTask { source });
@@ -1318,6 +1376,26 @@ async fn drive_versioned_authenticated_stream_until_shutdown<D: DispatchService>
         (Ok(()), None) => Ok(()),
     }
 }
+fn drain_resource_completions(
+    completion_receiver: &mut mpsc::UnboundedReceiver<(u64, ResourceDispatchCompletion)>,
+    pending: &mut BTreeMap<u64, ResourceDispatchCompletion>,
+    cancelled: &mut BTreeSet<u64>,
+    tasks: &mut BTreeMap<u64, JoinHandle<()>>,
+    requests: &mut BTreeMap<u64, ResourceRequest>,
+) -> BTreeSet<u64> {
+    let mut completed = BTreeSet::new();
+    while let Ok((stream_id, completion)) = completion_receiver.try_recv() {
+        tasks.remove(&stream_id);
+        requests.remove(&stream_id);
+        if cancelled.remove(&stream_id) {
+            continue;
+        }
+        completed.insert(stream_id);
+        pending.insert(stream_id, completion);
+    }
+    completed
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn handle_resource_frame<D: DispatchService>(
     frame: ResourceClientFrame,
@@ -1330,7 +1408,9 @@ async fn handle_resource_frame<D: DispatchService>(
     pending: &mut BTreeMap<u64, ResourceDispatchCompletion>,
     cancelled: &mut BTreeSet<u64>,
     tasks: &mut BTreeMap<u64, JoinHandle<()>>,
-    completion_sender: &mpsc::Sender<(u64, ResourceDispatchCompletion)>,
+    requests: &mut BTreeMap<u64, ResourceRequest>,
+    completion_sender: &mpsc::UnboundedSender<(u64, ResourceDispatchCompletion)>,
+    completion_receiver: &mut mpsc::UnboundedReceiver<(u64, ResourceDispatchCompletion)>,
     _socket: &mut OwnedWriteHalf,
     _shutdown: &mut watch::Receiver<bool>,
 ) -> Result<bool, LocalRawSocketError> {
@@ -1342,12 +1422,30 @@ async fn handle_resource_frame<D: DispatchService>(
         ResourceClientFrame::Cancel(cancel) => Some(*cancel),
         _ => None,
     };
-    let committed_completion = cancellation.is_some_and(|cancel| {
+    let mut committed_completion = cancellation.is_some_and(|cancel| {
         pending
             .get(&cancel.stream_id)
             .and_then(|completion| completion.actions.front())
             .is_some_and(|action| resource_action_request_id(action) == cancel.request_id)
     });
+    if let Some(cancel) = cancellation.filter(|_| !committed_completion) {
+        if let Some(task) = tasks.remove(&cancel.stream_id) {
+            task.abort();
+            let _ = task.await;
+        }
+        let completed = drain_resource_completions(
+            completion_receiver,
+            pending,
+            cancelled,
+            tasks,
+            requests,
+        );
+        committed_completion = completed.contains(&cancel.stream_id)
+            || pending
+                .get(&cancel.stream_id)
+                .and_then(|completion| completion.actions.front())
+                .is_some_and(|action| resource_action_request_id(action) == cancel.request_id);
+    }
     let disposition = if committed_completion {
         ResourceFrameDisposition::Applied
     } else {
@@ -1367,8 +1465,9 @@ async fn handle_resource_frame<D: DispatchService>(
             let sender = completion_sender.clone();
             let task = tokio::spawn(async move {
                 let completion = future.await;
-                let _ = sender.send((stream_id, completion)).await;
+                let _ = sender.send((stream_id, completion));
             });
+            requests.insert(stream_id, request.clone());
             tasks.insert(stream_id, task);
         } else {
             pending.insert(
@@ -1385,9 +1484,19 @@ async fn handle_resource_frame<D: DispatchService>(
         && matches!(disposition, ResourceFrameDisposition::Applied)
     {
         cancelled.insert(cancel.stream_id);
-        if let Some(task) = tasks.remove(&cancel.stream_id) {
-            task.abort();
-        }
+        let request = requests.remove(&cancel.stream_id).ok_or_else(|| {
+            LocalRawSocketError::ResourceConnection {
+                source: ResourceConnectionError::UnknownStream {
+                    stream_id: cancel.stream_id,
+                },
+            }
+        })?;
+        dispatcher
+            .cancel_resource(session.clone(), request)
+            .await
+            .map_err(|source| LocalRawSocketError::ResourceCancellationAudit {
+                source: Box::new(source),
+            })?;
         pending.insert(
             cancel.stream_id,
             ResourceDispatchCompletion {
@@ -2053,6 +2162,7 @@ mod tests {
     #[derive(Clone)]
     struct BlockingResourceDispatch {
         started: Arc<Notify>,
+        cancelled: Arc<AtomicBool>,
     }
 
     impl DispatchService for BlockingResourceDispatch {
@@ -2079,6 +2189,18 @@ mod tests {
                 }),
             })
         }
+
+        fn cancel_resource(
+            &self,
+            _session: AuthenticatedSession,
+            _request: ResourceRequest,
+        ) -> ResourceCancellationFuture {
+            let cancelled = Arc::clone(&self.cancelled);
+            Box::pin(async move {
+                cancelled.store(true, Ordering::SeqCst);
+                Ok(())
+            })
+        }
     }
 
     struct DropSignal(Arc<AtomicBool>);
@@ -2093,6 +2215,7 @@ mod tests {
     struct ShutdownResourceDispatch {
         started: Arc<Notify>,
         dropped: Arc<AtomicBool>,
+        cancelled: Arc<AtomicBool>,
     }
 
     impl DispatchService for ShutdownResourceDispatch {
@@ -2119,6 +2242,18 @@ mod tests {
                     started.notify_one();
                     std::future::pending::<ResourceDispatchCompletion>().await
                 }),
+            })
+        }
+
+        fn cancel_resource(
+            &self,
+            _session: AuthenticatedSession,
+            _request: ResourceRequest,
+        ) -> ResourceCancellationFuture {
+            let cancelled = Arc::clone(&self.cancelled);
+            Box::pin(async move {
+                cancelled.store(true, Ordering::SeqCst);
+                Ok(())
             })
         }
     }
@@ -2468,10 +2603,12 @@ mod tests {
         )
         .unwrap();
         let started = Arc::new(Notify::new());
+        let cancelled = Arc::new(AtomicBool::new(false));
         let (server, mut client) = UnixStream::pair().unwrap();
         let server_task = tokio::spawn(drive_versioned_authenticated_stream_until_shutdown(
             BlockingResourceDispatch {
                 started: Arc::clone(&started),
+                cancelled: Arc::clone(&cancelled),
             },
             test_session(),
             version,
@@ -2500,9 +2637,92 @@ mod tests {
                     && frame.request_id == request_id
                     && frame.reason == ResourceCancellationCode::ClientRequested
         ));
+        assert!(cancelled.load(Ordering::SeqCst));
 
         client.shutdown().await.unwrap();
         server_task.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn queued_resource_completion_wins_over_cancellation() {
+        let (version, revision) = constructed_test_version();
+        let request = resource_request(revision);
+        let (server, _client) = UnixStream::pair().unwrap();
+        let (_reader, mut writer) = server.into_split();
+        let (completion_sender, mut completion_receiver) =
+            mpsc::unbounded_channel::<(u64, ResourceDispatchCompletion)>();
+        let mut connection = ResourceProtocolConnection::new();
+        let mut pending = BTreeMap::new();
+        let mut cancelled = BTreeSet::new();
+        let mut tasks = BTreeMap::new();
+        let mut requests = BTreeMap::new();
+        let resources = LocalRawSocketResources::new();
+        let (_shutdown_sender, mut shutdown) = watch::channel(false);
+        let hook_called = Arc::new(AtomicBool::new(false));
+        let dispatcher = BlockingResourceDispatch {
+            started: Arc::new(Notify::new()),
+            cancelled: Arc::clone(&hook_called),
+        };
+
+        handle_resource_frame(
+            ResourceClientFrame::Request(request.clone()),
+            PayloadReservation { _permit: None },
+            &dispatcher,
+            &test_session(),
+            &version,
+            &resources,
+            &mut connection,
+            &mut pending,
+            &mut cancelled,
+            &mut tasks,
+            &mut requests,
+            &completion_sender,
+            &mut completion_receiver,
+            &mut writer,
+            &mut shutdown,
+        )
+        .await
+        .unwrap();
+        completion_sender
+            .send((
+                request.stream_id,
+                ResourceDispatchCompletion {
+                    actions: resource_actions(&request, vec![RuntimeValue::Integer(7)]),
+                },
+            ))
+            .unwrap();
+
+        handle_resource_frame(
+            ResourceClientFrame::Cancel(ResourceCancel {
+                stream_id: request.stream_id,
+                request_id: request.request_id,
+                reason: ResourceCancellationCode::ClientRequested,
+            }),
+            PayloadReservation { _permit: None },
+            &dispatcher,
+            &test_session(),
+            &version,
+            &resources,
+            &mut connection,
+            &mut pending,
+            &mut cancelled,
+            &mut tasks,
+            &mut requests,
+            &completion_sender,
+            &mut completion_receiver,
+            &mut writer,
+            &mut shutdown,
+        )
+        .await
+        .unwrap();
+
+        assert!(matches!(
+            pending
+                .get(&request.stream_id)
+                .and_then(|completion| completion.actions.front()),
+            Some(ResourceServerFrame::Accepted(_))
+        ));
+        assert!(!hook_called.load(Ordering::SeqCst));
     }
 
     #[tokio::test]
@@ -2520,9 +2740,11 @@ mod tests {
         .unwrap();
         let started = Arc::new(Notify::new());
         let dropped = Arc::new(AtomicBool::new(false));
+        let cancelled = Arc::new(AtomicBool::new(false));
         let dispatcher = ShutdownResourceDispatch {
             started: Arc::clone(&started),
             dropped: Arc::clone(&dropped),
+            cancelled: Arc::clone(&cancelled),
         };
         let (shutdown_sender, shutdown) = watch::channel(false);
         let (server, mut client) = UnixStream::pair().unwrap();
@@ -2543,6 +2765,7 @@ mod tests {
         let mut byte = [0_u8; 1];
         assert_eq!(client.read(&mut byte).await.unwrap(), 0);
         assert!(dropped.load(Ordering::SeqCst));
+        assert!(cancelled.load(Ordering::SeqCst));
     }
 
     #[tokio::test]
