@@ -10500,10 +10500,12 @@ async fn proves_installed_server_function_dogfood_source_through_orna_invoke() -
             ),
         )
         .await?;
-        require(
-            read_outcome == Ok(InstalledInvokeOutcome::Completed),
-            "the installed SERVER dogfood read invocation did not complete",
-        )?;
+        if read_outcome != Ok(InstalledInvokeOutcome::Completed) {
+            return Err(failure(format!(
+                "the installed SERVER dogfood read invocation did not complete: {:?}, stdout={:?}, stderr={:?}",
+                read_outcome, read_stdout, read_stderr,
+            )));
+        }
         require(
             read_stdout == expected,
             "the installed SERVER dogfood read invocation returned the wrong value",
