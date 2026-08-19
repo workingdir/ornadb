@@ -6794,11 +6794,8 @@ impl<'a> CandidateBuilder<'a> {
         // including an existing function identity whose declaration is being
         // replaced.  A target not submitted in the candidate remains pinned to
         // the active database pair.
-        if self
-            .checked
-            .server_functions()
-            .iter()
-            .any(|candidate| candidate.id() == target)
+        if self.checked.server_functions().iter().any(|candidate| candidate.id() == target)
+            || self.checked.client_functions().iter().any(|candidate| candidate.id() == target)
         {
             return Ok(RevisionPair::new(
                 self.source.revision.id(),
