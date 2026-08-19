@@ -805,17 +805,21 @@ pub struct StateDeclaration {
     /// The span from `STATE` through the terminating semicolon.
     pub span: SourceSpan,
 }
-/// A closed state/procedural CLIENT block with declarations and one return.
+/// A closed state/procedural CLIENT block with declarations, procedural
+/// statements, and one return.
 ///
 /// The block body accepts `STATE` declarations or `LET` local bindings before
-/// `BEGIN` and exactly one `RETURN` statement before `END`. Existing state
-/// blocks leave `locals` empty.
+/// `BEGIN`, zero or more procedural statements after `BEGIN`, and exactly one
+/// `RETURN` statement before `END`. Existing state blocks leave `locals` and
+/// `statements` empty.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClientStateBlockBody {
     /// The state declarations in source order.
     pub states: Vec<StateDeclaration>,
     /// The local resource bindings in source order.
     pub locals: Vec<ClientLocalBinding>,
+    /// The procedural statements after `BEGIN`, in source order.
+    pub statements: Vec<ClientProceduralStatement>,
     /// The parsed return expression when the statement names one.
     pub return_expression: Option<ClientExpression>,
     /// The span from the `IS` keyword through the closing `END`.
@@ -836,6 +840,39 @@ pub struct ClientLocalBinding {
     /// The resource constructor expression.
     pub expression: ClientExpression,
     /// The span from `LET` through the terminating semicolon.
+    pub span: SourceSpan,
+}
+
+/// One procedural statement after `BEGIN` in a CLIENT block.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ClientProceduralStatement {
+    /// A local binding with an optional declared type.
+    Let(ClientLetStatement),
+    /// An assignment to a local or state name.
+    Assignment(ClientAssignmentStatement),
+}
+
+/// One procedural `LET` statement after `BEGIN`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClientLetStatement {
+    /// The local name as written.
+    pub name: NamePart,
+    /// The optional exact declared type source between the name and `:=`.
+    pub type_source: Option<SourceSlice>,
+    /// The initializer expression.
+    pub expression: ClientExpression,
+    /// The span from `LET` through the terminating semicolon.
+    pub span: SourceSpan,
+}
+
+/// One procedural assignment statement after `BEGIN`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClientAssignmentStatement {
+    /// The assigned name as written.
+    pub target: NamePart,
+    /// The assigned expression.
+    pub expression: ClientExpression,
+    /// The span from the target through the terminating semicolon.
     pub span: SourceSpan,
 }
 
@@ -1284,7 +1321,8 @@ mod tests {
     use crate::parser::SyntaxKind;
 
     use super::{
-        ClientExpression, ClientFunctionBody, FunctionReturnType, FunctionSecurity,
+        ClientExpression, ClientFunctionBody,
+        ClientProceduralStatement, FunctionReturnType, FunctionSecurity,
         FunctionTransaction, FunctionVolatility, InsertValue, MutationValue, NullOrdering,
         OnDeletePolicy, OptionTypeSpelling, OrderingDirection, PrimitiveValueTypePersistence,
         QueryExpression, RecordConstructorFieldValue, SelectQuantifier, ServerFunctionBody,
@@ -5275,6 +5313,58 @@ mod tests {
             expression.as_ref(),
             ClientExpression::LocalRead { local } if local.text == "rows"
         ));
+    }
+
+    #[test]
+    fn parses_post_begin_client_procedural_statements_losslessly() {
+        let source = "CREATE CLIENT FUNCTION examples.procedural() RETURNS INTEGER IS\n\
+            BEGIN\n\
+                LET x std.data.Resource<INTEGER> := AWAIT std.data.resource();\n\
+                x := AWAIT std.data.resource();\n\
+                RETURN x;\n\
+            END;";
+        let parsed = parse(source);
+
+        assert!(parsed.diagnostics().is_empty(), "{:?}", parsed.diagnostics());
+        assert_eq!(parsed.syntax().text(), source);
+        let ClientFunctionBody::StateBlock(block) = &parsed.client_functions()[0].body else {
+            panic!("expected a procedural CLIENT block");
+        };
+        assert!(block.states.is_empty());
+        assert!(block.locals.is_empty());
+        assert_eq!(block.statements.len(), 2);
+        let ClientProceduralStatement::Let(let_statement) = &block.statements[0] else {
+            panic!("expected a procedural LET statement");
+        };
+        assert_eq!(let_statement.name.text, "x");
+        assert_eq!(
+            let_statement.type_source.as_ref().map(|source| source.text.as_str()),
+            Some("std.data.Resource<INTEGER>")
+        );
+        assert!(matches!(
+            let_statement.expression,
+            ClientExpression::Await { .. }
+        ));
+        let ClientProceduralStatement::Assignment(assignment) = &block.statements[1] else {
+            panic!("expected a procedural assignment statement");
+        };
+        assert_eq!(assignment.target.text, "x");
+        assert!(matches!(
+            assignment.expression,
+            ClientExpression::Await { .. }
+        ));
+        assert!(matches!(
+            block.return_expression,
+            Some(ClientExpression::LocalRead { .. })
+        ));
+        assert_eq!(
+            &source[let_statement.span.start..let_statement.span.end],
+            "LET x std.data.Resource<INTEGER> := AWAIT std.data.resource();"
+        );
+        assert_eq!(
+            &source[assignment.span.start..assignment.span.end],
+            "x := AWAIT std.data.resource();"
+        );
     }
 
     #[test]
