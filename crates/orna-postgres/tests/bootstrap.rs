@@ -48,6 +48,7 @@ const EXPECTED_KERNEL_TABLES: &[&str] = &[
     "inspect_trace_events",
     "invocation_audit_events",
     "invocation_target_authorities",
+    "resource_audit_events",
     "schema_migrations",
     "security_audit_events",
     "security_execute_grants",
@@ -227,6 +228,11 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         "standard JSON executable format",
         include_str!("../migrations/0031_standard_json_executable_format.sql"),
     ),
+    (
+        32,
+        "protected resource audit",
+        include_str!("../migrations/0032_resource_audit.sql"),
+    ),
 ];
 const MIGRATION_DATA_STEP_SEPARATOR: &[u8] = b"\0orna.kernel.migration-step\0";
 const CANONICAL_HASH_V1_EMPTY_SEED_STEP: &[u8] = b"canonical-hash-v1-empty-seed/v1";
@@ -318,6 +324,7 @@ fn is_later_catalogue_relation(relation: &str) -> bool {
         || relation == "definition_references_enum_type_target_index"
         || relation.starts_with("definition_references_record_")
         || relation.starts_with("invocation_")
+        || relation.starts_with("resource_audit_")
         || relation.starts_with("inspect_")
         || relation.starts_with("standard_function_")
         || relation.starts_with("standard_catalogue_function")
@@ -871,8 +878,8 @@ async fn bootstrap_upgrades_the_registered_v20_empty_catalogue() -> TestResult<(
 
         let after = snapshot_upgrade_state(&database).await?;
         require(
-            after.migrations.len() == 31 && after.migrations[..20] == before.migrations[..],
-            format!("v21-v31 changed prior migration records: {:?}", after.migrations),
+            after.migrations.len() == 32 && after.migrations[..20] == before.migrations[..],
+            format!("v21-v32 changed prior migration records: {:?}", after.migrations),
         )?;
         require(
             after.migrations[20]
@@ -974,8 +981,17 @@ async fn bootstrap_upgrades_the_registered_v20_empty_catalogue() -> TestResult<(
             format!("v31 migration record is not exact: {:?}", after.migrations[30]),
         )?;
         require(
+            after.migrations[31]
+                == (
+                    32,
+                    "protected resource audit".to_owned(),
+                    expected_migration_checksum(32, MIGRATIONS[31].2),
+                ),
+            format!("v32 migration record is not exact: {:?}", after.migrations[31]),
+        )?;
+        require(
             after.active_pair == before.active_pair,
-            "v21-v30 changed the active revision pair",
+            "v21-v32 changed the active revision pair",
         )?;
 
         let recovered = kernel.recover().await?;
@@ -1645,8 +1661,8 @@ async fn bootstrap_upgrades_v5_write_reference_evidence_without_mutating_semanti
 
         let after = snapshot_upgrade_state(&database).await?;
         require(
-            after.migrations.len() == 31 && after.migrations[..5] == before.migrations[..],
-            format!("v6-v31 changed prior migration records: {:?}", after.migrations),
+            after.migrations.len() == 32 && after.migrations[..5] == before.migrations[..],
+            format!("v6-v32 changed prior migration records: {:?}", after.migrations),
         )?;
         require(
             after.migrations[5]
@@ -1883,6 +1899,15 @@ async fn bootstrap_upgrades_v5_write_reference_evidence_without_mutating_semanti
             format!("v31 migration record is not exact: {:?}", after.migrations[30]),
         )?;
         require(
+            after.migrations[31]
+                == (
+                    32,
+                    "protected resource audit".to_owned(),
+                    expected_migration_checksum(32, MIGRATIONS[31].2),
+                ),
+            format!("v32 migration record is not exact: {:?}", after.migrations[31]),
+        )?;
+        require(
             after.active_pair == before.active_pair,
             "v6 changed the active revision pair",
         )?;
@@ -1968,7 +1993,7 @@ async fn bootstrap_upgrades_registered_v6_without_standard_rows() -> TestResult<
 
         let after = snapshot_upgrade_state(&database).await?;
         require(
-            after.migrations.len() == 31
+            after.migrations.len() == 32
                 && after.migrations[..6] == before.migrations[..]
                 && after.migrations[6]
                     == (
@@ -2041,6 +2066,12 @@ async fn bootstrap_upgrades_registered_v6_without_standard_rows() -> TestResult<
                         31,
                         "standard JSON executable format".to_owned(),
                         expected_migration_checksum(31, MIGRATIONS[30].2),
+                    )
+                && after.migrations[31]
+                    == (
+                        32,
+                        "protected resource audit".to_owned(),
+                        expected_migration_checksum(32, MIGRATIONS[31].2),
                     ),
             format!("v6 upgrade produced unexpected migrations: {:?}", after.migrations),
         )?;
@@ -2235,7 +2266,7 @@ async fn bootstrap_upgrades_registered_v7_without_resolved_value_rows() -> TestR
         let after_surface = snapshot_catalogue_surface(&database).await?;
         let after_target_fks = snapshot_application_target_foreign_keys(&database).await?;
         require(
-            after.migrations.len() == 31
+            after.migrations.len() == 32
                 && after.migrations[..7] == before.migrations[..]
                 && after.migrations[7]
                     == (
@@ -2380,6 +2411,12 @@ async fn bootstrap_upgrades_registered_v7_without_resolved_value_rows() -> TestR
                         31,
                         "standard JSON executable format".to_owned(),
                         expected_migration_checksum(31, MIGRATIONS[30].2),
+                    )
+                && after.migrations[31]
+                    == (
+                        32,
+                        "protected resource audit".to_owned(),
+                        expected_migration_checksum(32, MIGRATIONS[31].2),
                     ),
             format!("v7 upgrade produced unexpected migrations: {:?}", after.migrations),
         )?;
@@ -2761,6 +2798,7 @@ async fn inspect_client(client: &Client) -> TestResult<()> {
     inspect_resolved_enum_storage(client, true).await?;
     inspect_record_value_storage(client).await?;
     inspect_security_snapshot_schema(client).await?;
+    inspect_resource_audit_schema(client).await?;
 
     for schema in ["_orna_kernel", "_orna_data"] {
         let role = "public";
@@ -3055,6 +3093,244 @@ async fn inspect_security_snapshot_schema(client: &Client) -> TestResult<()> {
         require(
             !value::<bool>(&row, 0)?,
             format!("PUBLIC has {privilege} on the protected audit sequence"),
+        )?;
+    }
+
+    Ok(())
+}
+
+async fn inspect_resource_audit_schema(client: &Client) -> TestResult<()> {
+    inspect_columns(
+        client,
+        "resource_audit_events",
+        &[
+            ("sequence", "bigint", "int8", "NO", None),
+            ("event_id", "bytea", "bytea", "NO", Some("")),
+            (
+                "recorded_at",
+                "timestamp without time zone",
+                "timestamp",
+                "NO",
+                None,
+            ),
+            ("request_id", "bytea", "bytea", "NO", Some("")),
+            (
+                "nested_invocation_id",
+                "bytea",
+                "bytea",
+                "NO",
+                Some(""),
+            ),
+            (
+                "parent_invocation_id",
+                "bytea",
+                "bytea",
+                "NO",
+                Some(""),
+            ),
+            ("call_site_id", "bytea", "bytea", "NO", Some("")),
+            (
+                "target_function_id",
+                "bytea",
+                "bytea",
+                "YES",
+                Some(""),
+            ),
+            (
+                "source_revision_id",
+                "bytea",
+                "bytea",
+                "YES",
+                Some(""),
+            ),
+            (
+                "catalogue_revision_id",
+                "bytea",
+                "bytea",
+                "YES",
+                Some(""),
+            ),
+            (
+                "session_principal_id",
+                "bytea",
+                "bytea",
+                "NO",
+                Some(""),
+            ),
+            (
+                "decision_outcome",
+                "text",
+                "text",
+                "NO",
+                Some(""),
+            ),
+            (
+                "terminal_outcome",
+                "text",
+                "text",
+                "NO",
+                Some(""),
+            ),
+            ("item_count", "bigint", "int8", "YES", Some("")),
+            ("byte_count", "bigint", "int8", "YES", Some("")),
+        ],
+    )
+    .await?;
+
+    for (constraint, expected) in [
+        (
+            "resource_audit_events_pkey",
+            "PRIMARY KEY (sequence)",
+        ),
+        (
+            "resource_audit_events_event_id_key",
+            "UNIQUE (event_id)",
+        ),
+        (
+            "resource_audit_events_request_id_key",
+            "UNIQUE (request_id)",
+        ),
+        (
+            "resource_audit_events_nested_invocation_id_key",
+            "UNIQUE (nested_invocation_id)",
+        ),
+        (
+            "resource_audit_events_identity_lengths",
+            "octet_length(event_id) = 16",
+        ),
+        (
+            "resource_audit_events_identity_lengths",
+            "octet_length(request_id) = 16",
+        ),
+        (
+            "resource_audit_events_identity_lengths",
+            "octet_length(nested_invocation_id) = 16",
+        ),
+        (
+            "resource_audit_events_identity_lengths",
+            "octet_length(parent_invocation_id) = 16",
+        ),
+        (
+            "resource_audit_events_identity_lengths",
+            "octet_length(call_site_id) = 16",
+        ),
+        (
+            "resource_audit_events_identity_lengths",
+            "octet_length(session_principal_id) = 16",
+        ),
+        (
+            "resource_audit_events_identity_lengths",
+            "octet_length(target_function_id) = 16",
+        ),
+        (
+            "resource_audit_events_identity_lengths",
+            "octet_length(source_revision_id) = 16",
+        ),
+        (
+            "resource_audit_events_identity_lengths",
+            "octet_length(catalogue_revision_id) = 16",
+        ),
+        (
+            "resource_audit_events_target_pair_check",
+            "(target_function_id IS NULL) = (source_revision_id IS NULL)",
+        ),
+        (
+            "resource_audit_events_target_pair_check",
+            "(target_function_id IS NULL) = (catalogue_revision_id IS NULL)",
+        ),
+        (
+            "resource_audit_events_decision_outcome_check",
+            "decision_outcome = ANY",
+        ),
+        (
+            "resource_audit_events_terminal_outcome_check",
+            "terminal_outcome = ANY",
+        ),
+        (
+            "resource_audit_events_counts_check",
+            "item_count >= 0",
+        ),
+        (
+            "resource_audit_events_counts_check",
+            "byte_count >= 0",
+        ),
+        (
+            "resource_audit_events_target_fk",
+            "FOREIGN KEY (catalogue_revision_id, target_function_id) REFERENCES _orna_kernel.catalogue_functions(catalogue_revision_id, function_id)",
+        ),
+        (
+            "resource_audit_events_revision_pair_fk",
+            "FOREIGN KEY (catalogue_revision_id, source_revision_id) REFERENCES _orna_kernel.catalogue_revisions(id, source_revision_id)",
+        ),
+        (
+            "resource_audit_events_nested_invocation_fk",
+            "FOREIGN KEY (nested_invocation_id) REFERENCES _orna_kernel.invocation_audit_events(invocation_id)",
+        ),
+    ] {
+        require_constraint(client, "resource_audit_events", constraint, expected).await?;
+    }
+
+    let identity = client
+        .query_one(
+            "SELECT is_identity, identity_generation
+             FROM information_schema.columns
+             WHERE table_schema = '_orna_kernel'
+               AND table_name = 'resource_audit_events'
+               AND column_name = 'sequence'",
+            &[],
+        )
+        .await?;
+    require(
+        value::<String>(&identity, 0)? == "YES"
+            && value::<String>(&identity, 1)? == "ALWAYS",
+        "resource audit sequence is not an always-generated identity",
+    )?;
+    require_count(
+        client,
+        "_orna_kernel.resource_audit_events",
+        "SELECT count(*) FROM _orna_kernel.resource_audit_events",
+        0,
+    )
+    .await?;
+
+    for privilege in [
+        "SELECT",
+        "INSERT",
+        "UPDATE",
+        "DELETE",
+        "TRUNCATE",
+        "REFERENCES",
+        "TRIGGER",
+        "MAINTAIN",
+    ] {
+        let relation = "_orna_kernel.resource_audit_events";
+        let row = client
+            .query_one(
+                "SELECT has_table_privilege('public', $1, $2)",
+                &[&relation, &privilege],
+            )
+            .await?;
+        let granted: bool = value(&row, 0)?;
+        require(
+            !granted,
+            format!("PUBLIC has {privilege} on protected table {relation}"),
+        )?;
+    }
+
+    for privilege in ["USAGE", "SELECT", "UPDATE"] {
+        let row = client
+            .query_one(
+                "SELECT has_sequence_privilege(
+                    'public',
+                    '_orna_kernel.resource_audit_events_sequence_seq',
+                    $1
+                 )",
+                &[&privilege],
+            )
+            .await?;
+        require(
+            !value::<bool>(&row, 0)?,
+            format!("PUBLIC has {privilege} on the protected resource audit sequence"),
         )?;
     }
 
