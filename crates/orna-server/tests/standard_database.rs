@@ -150,14 +150,22 @@ const RAW_EXTERNAL_CAPABILITY_SOURCE: &str = "CREATE SCHEMA cap;\n\
     CREATE EXTERNAL CLIENT FUNCTION cap.read() RETURNS TEXT\n\
     RUNTIME CONTRACT 'std.fs.read@1'\n\
     REQUIRES CAPABILITY std.fs.read('/home/bob');\n";
-const RAW_STREAM_RESOURCE_CLIENT_SOURCE: &str = "CREATE SCHEMA resource;\n\
-    CREATE SERVER FUNCTION resource.resource(p_value INTEGER)\n\
-    RETURNS ROWS (value INTEGER) SECURITY INVOKER\n\
-    TRANSACTION READ ONLY VOLATILITY STABLE AS SELECT p_value;\n\
-    CREATE CLIENT FUNCTION resource.call(p_value INTEGER) RETURNS INTEGER AS\n\
-    AWAIT std.data.stream_resource(target => resource.resource,\n\
-      arguments => std.call.args(p_value => p_value));\n";
-/// One Integer single-parameter INSERT and one public Integer reader.
+const RAW_STREAM_RESOURCE_SERVER_SOURCE: &str = "CREATE SCHEMA resource_fixture;\n\
+    CREATE TYPE resource_fixture.probe AS OBJECT (marker TEXT UNIQUE NOT NULL);\n\
+    CREATE SERVER FUNCTION resource_fixture.create(p_marker TEXT)\n\
+    RETURNS ROWS (created REF resource_fixture.probe) SECURITY INVOKER\n\
+    TRANSACTION ATOMIC VOLATILITY VOLATILE\n\
+    AS INSERT INTO resource_fixture.probe AS made (marker)\n\
+    VALUES (p_marker) RETURNING REF(made);\n\
+    CREATE SERVER FUNCTION resource_fixture.resource(p_marker TEXT)
+    RETURNS ROWS (value TEXT) SECURITY INVOKER
+    TRANSACTION READ ONLY VOLATILITY STABLE
+    AS SELECT probe.marker FROM resource_fixture.probe probe
+    WHERE probe.marker = p_marker;
+";
+const RAW_STREAM_RESOURCE_CLIENT_SOURCE: &str = "CREATE CLIENT FUNCTION resource_fixture.call(p_marker TEXT) RETURNS TEXT AS\n\
+    AWAIT std.data.stream_resource(target => resource_fixture.resource,\n\
+      arguments => std.call.args(p_marker => p_marker));\n";
 const RAW_CLIENT_INT_INSERT_SOURCE: &str = "CREATE SCHEMA raw_int_insert;\n\
     CREATE TYPE raw_int_insert.int_probe AS OBJECT (\n\
       stored INT NOT NULL\n\
@@ -4345,13 +4353,43 @@ async fn server_raw_integer_dispatch_denies_then_grants_and_audits_exact_values(
 #[tokio::test]
 #[ignore = "requires the Compose PostgreSQL development service"]
 async fn authenticated_stream_resource_dispatches_allowed_and_denied_with_redacted_audit() -> TestResult<()> {
-    const RESOURCE_VALUE: i32 = 73;
+    const RESOURCE_VALUE: &str = "resource-value";
     with_test_database(|database| async move {
         let kernel = kernel(&database)?;
-        let (active, standard_upgrade, _client_function, _server_function) =
-            install_raw_client_fixture(&kernel).await?;
+        let (
+            active,
+            standard_upgrade,
+            _client_function,
+            _server_function,
+        ) = install_raw_client_fixture(&kernel).await?;
         let (active, _resource_client, target, parameter, call_site) =
-            install_stream_resource_client_fixture(&kernel, &active, &standard_upgrade).await?;
+            install_stream_resource_client_fixture(&kernel, &active, &standard_upgrade)
+                .await
+                .map_err(|error| failure(format!("install stream resource fixture failed: {error:?}")))?;
+        let create = active
+            .catalogue()
+            .functions()
+            .iter()
+            .find(|function| function.name().parts() == ["resource_fixture", "create"])
+            .ok_or_else(|| failure("stream resource fixture is missing resource_fixture.create"))?
+            .id();
+        let create_parameter = active
+            .catalogue()
+            .function_by_id(create)
+            .ok_or_else(|| failure("resource_fixture.create is absent from the active catalogue"))?
+            .parameter_by_name("p_marker")
+            .ok_or_else(|| failure("resource_fixture.create.p_marker is absent from the active catalogue"))?
+            .id();
+        kernel
+            .execute_server_insert(
+                create,
+                &[FunctionArgument::new(
+                    create_parameter,
+                    RuntimeValue::Text(RESOURCE_VALUE.into()),
+                )?],
+            )
+            .await
+            .map_err(|error| failure(format!("insert stream resource fixture row failed: {error:?}")))?;
         let principal = Principal::new(
             RAW_CLIENT_USER,
             PrincipalKind::User,
@@ -4368,7 +4406,7 @@ async fn authenticated_stream_resource_dispatches_allowed_and_denied_with_redact
             resource_kind: ResourceKind::Stream,
             arguments: vec![ResourceArgument {
                 parameter,
-                value: RuntimeValue::Integer(RESOURCE_VALUE),
+                value: RuntimeValue::Text(RESOURCE_VALUE.into()),
             }],
             item_window: 1,
             byte_window: 1024,
@@ -4414,7 +4452,7 @@ async fn authenticated_stream_resource_dispatches_allowed_and_denied_with_redact
                 require(request_id == request.request_id, "stream resource changed request identity")?;
                 require(target_revision == active.pair(), "stream resource changed active revision")?;
                 require(resource_kind == ResourceKind::Stream, "stream resource changed result kind")?;
-                require(values == [RuntimeValue::Integer(RESOURCE_VALUE)], "stream resource returned the wrong integer")?;
+                require(values == [RuntimeValue::Text(RESOURCE_VALUE.into())], "stream resource returned the wrong text")?;
                 require(
                     nested_invocation_id != InvocationId::from_bytes([0; 16])
                         && nested_invocation_id != request.request_id
@@ -8061,58 +8099,94 @@ async fn install_stream_resource_client_fixture(
     ParameterId,
     CallSiteId,
 )> {
-    let context = StandardApplicationCheckContext::try_new(
+    let append_source = |active: &orna_core::revision::ActiveDatabaseRevision, body: &str| -> TestResult<SourceBundle> {
+        let last_ordinal = active
+            .source()
+            .units()
+            .len()
+            .checked_sub(1)
+            .ok_or_else(|| failure("stream resource fixture has no retained source unit"))?;
+        Ok(SourceBundle::new(active.source().units().iter().enumerate().map(
+            |(ordinal, unit)| {
+                let content = if ordinal == last_ordinal {
+                    format!("{}\n{}", unit.content(), body)
+                } else {
+                    unit.content().to_owned()
+                };
+                SourceUnit::new(unit.logical_path(), content)
+            },
+        ))?)
+    };
+    let server_context = StandardApplicationCheckContext::try_new(
         active.catalogue(),
         standard_upgrade.checked_standard_library(),
     )?;
-    let source = SourceBundle::new([SourceUnit::new(
-        "resource.orna",
-        RAW_STREAM_RESOURCE_CLIENT_SOURCE,
-    )])?;
-    let report = check_standard_application(&source, &context);
-    require(
-        report.diagnostics().is_empty(),
-        "stream CLIENT resource fixture did not compile",
-    )?;
+    let server_source = append_source(active, RAW_STREAM_RESOURCE_SERVER_SOURCE)?;
+    let server_report = check_standard_application(&server_source, &server_context);
+    if !server_report.diagnostics().is_empty() {
+        return Err(failure(format!(
+            "stream SERVER resource fixture did not compile: {:?}",
+            server_report.diagnostics(),
+        )));
+    }
     let active = kernel
-        .apply(&prepare_standard_application(
-            &report,
-            active.pair(),
-            active,
-        )?)
-        .await?;
+        .apply(
+            &prepare_standard_application(&server_report, active.pair(), active)
+                .map_err(|error| failure(format!("server prepare failed: {error:?}")))?,
+        )
+        .await
+        .map_err(|error| failure(format!("server apply failed: {error:?}")))?;
+    let client_context = StandardApplicationCheckContext::try_new(
+        active.catalogue(),
+        standard_upgrade.checked_standard_library(),
+    )?;
+    let client_source = append_source(&active, RAW_STREAM_RESOURCE_CLIENT_SOURCE)?;
+    let client_report = check_standard_application(&client_source, &client_context);
+    if !client_report.diagnostics().is_empty() {
+        return Err(failure(format!(
+            "stream CLIENT resource fixture did not compile: {:?}",
+            client_report.diagnostics(),
+        )));
+    }
+    let active = kernel
+        .apply(
+            &prepare_standard_application(&client_report, active.pair(), &active)
+                .map_err(|error| failure(format!("client prepare failed: {error:?}")))?,
+        )
+        .await
+        .map_err(|error| failure(format!("client apply failed: {error:?}")))?;
     let target = active
         .catalogue()
         .functions()
         .iter()
-        .find(|function| function.name().parts() == ["resource", "resource"])
-        .ok_or_else(|| failure("resource fixture is missing resource.resource"))?;
+        .find(|function| function.name().parts() == ["resource_fixture", "resource"])
+        .ok_or_else(|| failure("resource fixture is missing resource_fixture.resource"))?;
     let parameter = target
         .parameters()
         .first()
-        .ok_or_else(|| failure("resource fixture target is missing p_value"))?
+        .ok_or_else(|| failure("resource fixture target is missing p_marker"))?
         .id();
     let target_result_type = match target.return_type() {
         FunctionReturn::Rows(columns) if columns.len() == 1 => columns[0].resolved_type(),
-        _ => return Err(failure("resource fixture target is not a one-column INTEGER stream")),
+        _ => return Err(failure("resource fixture target is not a one-column TEXT stream")),
     };
     let target = target.id();
     let client_definition = active
         .catalogue()
         .functions()
         .iter()
-        .find(|function| function.name().parts() == ["resource", "call"])
+        .find(|function| function.name().parts() == ["resource_fixture", "call"])
         .ok_or_else(|| failure("stream CLIENT resource fixture is missing resource.call"))?;
     require(
         client_definition.return_type() == &FunctionReturn::Single(target_result_type),
-        "stream CLIENT resource fixture did not retain the checked INTEGER result",
+        "stream CLIENT resource fixture did not retain the checked TEXT result",
     )?;
     let client = client_definition.id();
     let revision = active
         .function_revisions()
         .iter()
         .find(|revision| revision.function() == client)
-        .ok_or_else(|| failure("scalar CLIENT resource fixture is missing its revision"))?;
+        .ok_or_else(|| failure("stream CLIENT resource fixture is missing its revision"))?;
     let plan = ResourceClientPlan::decode(revision.artifact().payload())?;
     let ClientExpressionNode::Await { expression } = plan.expression() else {
         return Err(failure("stream CLIENT resource plan is not an awaited resource"));
