@@ -11280,14 +11280,17 @@ mod runtime_conformance {
             }
             for (request, record) in requests {
                 let failure = status(StatusCode::Cancelled, b"request cancelled with surface");
-                self.requests.remove(&request);
-                // Surface teardown removes the request before the callback. A failed callback
-                // must not make a later teardown retry the terminal outcome.
-                self.retired_handles.insert(request);
-                self.retired_handles.insert(record._model);
                 let result = unsafe {
                     (self.client.fail_model_request)(self.client.context, request, failure)
                 };
+                if result.code != StatusCode::Ok {
+                    // Keep ownership until the cancellation outcome is delivered so a failed
+                    // callback can be retried by a later teardown or shutdown attempt.
+                    return result;
+                }
+                self.requests.remove(&request);
+                self.retired_handles.insert(request);
+                self.retired_handles.insert(record._model);
                 let mut handles = self
                     .context()
                     .handles
@@ -11296,9 +11299,6 @@ mod runtime_conformance {
                 handles.retire_request(request);
                 handles.retire_model(record._model);
                 drop(handles);
-                if result.code != StatusCode::Ok {
-                    return result;
-                }
             }
             ok()
         }
@@ -13804,18 +13804,18 @@ mod runtime_conformance {
     }
 
     #[test]
-    fn failed_surface_cancellation_retires_request_before_retry() {
+    fn failed_surface_cancellation_retries_request_before_surface_close() {
         let session = FixtureSession::new();
         let surface = session.create_surface(b"Failed cancellation");
         let (_, request) = session.start_model_request(surface);
         session.fail_next_model_callback();
 
         assert_eq!(session.destroy_surface(surface), StatusCode::Failed);
-        assert_eq!(session.apply_model_rows(request), StatusCode::NotFound);
         assert_eq!(session.destroy_surface(surface), StatusCode::Ok);
+        assert_eq!(session.apply_model_rows(request), StatusCode::NotFound);
 
         let log = session.callback_log();
-        assert_eq!(log.failures, Vec::new());
+        assert_eq!(log.failures, vec![(request, StatusCode::Cancelled)]);
         assert_eq!(
             log.events
                 .iter()
@@ -13823,6 +13823,36 @@ mod runtime_conformance {
                 .count(),
             1
         );
+    }
+
+    #[test]
+    fn shutdown_retries_failed_request_cancellation_without_losing_request() {
+        let session = FixtureSession::new();
+        let surface = session.create_surface(b"Shutdown retry");
+        let (_, request) = session.start_model_request(surface);
+        session.fail_next_model_callback();
+
+        assert_eq!(session.shutdown(), StatusCode::Failed);
+        let first = session.callback_log();
+        assert!(first.failures.is_empty());
+        assert!(!first.terminal);
+
+        assert_eq!(session.shutdown(), StatusCode::Ok);
+        let terminal = session.callback_log();
+        assert_eq!(terminal.failures, vec![(request, StatusCode::Cancelled)]);
+        assert_eq!(
+            terminal.failures.iter().filter(|(id, _)| *id == request).count(),
+            1
+        );
+        assert!(terminal.terminal);
+        assert_eq!(
+            terminal.sequence.last().map(|record| &record.kind),
+            Some(&CallbackKind::Terminal)
+        );
+
+        let sequence = terminal.sequence.clone();
+        assert_eq!(session.apply_model_rows(request), StatusCode::Failed);
+        assert_eq!(session.callback_log().sequence, sequence);
     }
 
     #[test]
