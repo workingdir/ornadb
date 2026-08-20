@@ -12559,6 +12559,83 @@ mod tests {
     }
 
     #[test]
+    fn accepts_client_action_call_with_canonical_server_target() {
+        let target_id = FunctionId::from_bytes([0x56; 16]);
+        let target_parameter_id = ParameterId::from_bytes([0x57; 16]);
+        let argument_type = ResolvedType::Scalar(StandardScalar::Integer);
+        let integer_type_id = TypeId::from_bytes([0x48; 16]);
+        let base = CatalogueSnapshot::new_with_functions(
+            CatalogueRevisionId::from_bytes([0x58; 16]),
+            vec![SchemaDefinition::new(
+                SchemaId::from_bytes([0x59; 16]),
+                QualifiedSemanticName::new(["tasks"]).unwrap(),
+            )],
+            Vec::new(),
+            vec![FunctionDefinition::new(
+                target_id,
+                QualifiedSemanticName::new(["tasks", "rebuild"]).unwrap(),
+                FunctionDomain::Server,
+                vec![ParameterDefinition::new(
+                    target_parameter_id,
+                    "p_value",
+                    0,
+                    argument_type,
+                    None,
+                )],
+                FunctionReturn::Single(argument_type),
+                FunctionRevisionId::from_bytes([0x5a; 16]),
+                FunctionSecurity::Invoker,
+                None,
+                FunctionVolatility::Immutable,
+            )],
+        )
+        .unwrap();
+        let standard =
+            check_standard_library_source(&verified_standard_library_with_action_for_test())
+                .unwrap();
+        let context = StandardApplicationCheckContext::try_new(&base, &standard).unwrap();
+        let source = "CREATE SCHEMA ui; CREATE CLIENT FUNCTION ui.run(p_value INTEGER) RETURNS std.Action AS std.action.call(target => tasks.rebuild, arguments => std.call.args(p_value => p_value));";
+        let report = check_standard_application(&bundle([("action-server.orna", source)]), &context);
+        assert!(report.diagnostics().is_empty(), "{:?}", report.diagnostics());
+
+        let function = report
+            .preparation_view()
+            .unwrap()
+            .checked()
+            .client_functions()
+            .iter()
+            .find(|function| function.name().to_string() == "ui.run")
+            .unwrap();
+        let caller_parameter_id = function.parameters()[0].id();
+        let CheckedClientFunctionBody::Expression { expression } = function.body() else {
+            panic!("expected an expression CLIENT action body");
+        };
+        let super::CheckedClientExpression::Action { operation } = expression else {
+            panic!("expected std.action.call to lower to an action operation");
+        };
+        assert_eq!(
+            operation.target_domain(),
+            orna_artifact::client_plan::ActionTargetDomain::Server
+        );
+        assert_eq!(operation.target(), super::CheckedFunctionId::Existing(target_id));
+        assert_eq!(operation.arguments().len(), 1);
+        assert_eq!(
+            operation.arguments()[0].0,
+            super::CheckedParameterId::Existing(target_parameter_id)
+        );
+        assert!(matches!(
+            &operation.arguments()[0].1,
+            super::CheckedClientExpression::ParameterRead { parameter, .. }
+                if *parameter == caller_parameter_id
+        ));
+        assert_eq!(
+            operation.result_type(),
+            super::SemanticType::Scalar(StandardScalar::Integer)
+        );
+        assert_eq!(operation.standard_result_type(), Some(integer_type_id));
+    }
+
+    #[test]
     fn accepts_transient_standard_opaque_action_target_result() {
         let target_id = FunctionId::from_bytes([0x5a; 16]);
         let action_type = ResolvedType::Named(STD_ACTION_TYPE_ID);
@@ -12641,7 +12718,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_unknown_and_malformed_action_call_targets_and_reserved_combinators() {
+    fn rejects_action_call_targets_reserved_combinators_and_argument_errors() {
         let target_id = FunctionId::from_bytes([0x61; 16]);
         let target_parameter_id = ParameterId::from_bytes([0x62; 16]);
         let argument_type = ResolvedType::Scalar(StandardScalar::Integer);
@@ -12753,6 +12830,26 @@ mod tests {
                 "std.action.parallel()",
                 DiagnosticCode::UnknownQualifiedName,
                 "unknown CLIENT function std.action.parallel",
+            ),
+            (
+                "std.action.call(target => tasks.run, arguments => std.call.args())",
+                DiagnosticCode::TypeMismatch,
+                "missing argument for std.action.call target tasks.run",
+            ),
+            (
+                "std.action.call(target => tasks.run, arguments => std.call.args(missing => p_value))",
+                DiagnosticCode::UnknownQualifiedName,
+                "unknown std.action.call parameter missing",
+            ),
+            (
+                "std.action.call(target => tasks.run, arguments => std.call.args(p_value => p_value, p_value => p_value))",
+                DiagnosticCode::DuplicateDefinition,
+                "duplicate std.action.call parameter p_value",
+            ),
+            (
+                "std.action.call(target => tasks.run, arguments => std.call.args(p_value => 'wrong'))",
+                DiagnosticCode::TypeMismatch,
+                "std.action.call argument does not match parameter p_value",
             ),
         ];
         for (index, (expression, code, message)) in cases.into_iter().enumerate() {
