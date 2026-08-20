@@ -17,7 +17,7 @@ use orna_client::{
         LocalCapabilityArgumentSource, LocalCapabilityDeclaration, LocalCapabilityGrant,
         LocalCapabilityGrantSet, LocalCapabilityName, LocalCapabilityScope,
     },
-    ClientResourceRequest, DeterministicClientResourceExecutor, evaluate_client_function,
+    ClientResourceRequest, evaluate_client_function,
     evaluate_client_function_with_arguments,
     evaluate_client_function_with_arguments_and_executor, evaluate_client_function_with_grants,
 };
@@ -84,8 +84,9 @@ use orna_server::{
     InstalledClientResourceExecutor, InstalledInvokeError, InstalledInvokeErrorKind,
     InstalledInvokeOutcome, InstalledInvokeRequest,
     LocalAuthenticationError, LocalRawSocketError, LocalRawSocketResources,
-    OpenStandardDatabaseError, RawClientDispatch, open_standard_database, run_invoke_with_kernel,
-    serve_local_raw_stream,
+    OpenStandardDatabaseError, RawClientDispatch, RawResourceRequestAuthorizer,
+    open_standard_database, run_invoke_with_kernel, serve_local_raw_stream,
+    serve_local_raw_stream_with_resource_authorizer,
 };
 use orna_standard::{
     BOOLEAN_TYPE_ID, BYTE_STREAM_MAGIC, JSON_MAGIC, OPAQUE_TOKEN_TYPE_ID,
@@ -145,6 +146,24 @@ impl ClientResourceExecutor for RecordingInstalledResourceExecutor {
         self.inner.cancel(request)
     }
 }
+struct DeterministicStreamResourceExecutor;
+
+impl ClientResourceExecutor for DeterministicStreamResourceExecutor {
+    fn execute(&mut self, request: ClientResourceRequest) -> ClientResourceCompletion {
+        request.stream_values(vec![
+            RuntimeValue::Text("stream-one".to_owned()),
+            RuntimeValue::Text("stream-two".to_owned()),
+        ])
+    }
+
+    fn poll(&mut self) -> Option<ClientResourceCompletion> {
+        None
+    }
+
+    fn cancel(&mut self, request: ClientResourceRequest) -> ClientResourceCompletion {
+        request.cancelled()
+    }
+}
 
 const RAW_CLIENT_FUNCTION_SOURCE: &str = "CREATE SCHEMA app;\n\
     CREATE TYPE app.stage AS ENUM ('lead', 'qualified');\n\
@@ -193,15 +212,11 @@ const RAW_EXPRESSION_CLIENT_FUNCTION_SOURCE: &str = "CREATE SCHEMA expr;\n\
     CREATE CLIENT FUNCTION expr.composed() RETURNS TEXT AS expr.literal() || ' world';\n\
     CREATE EXTERNAL CLIENT FUNCTION expr.external() RETURNS TEXT\n\
     RUNTIME CONTRACT 'expr.runtime@1';\n";
-const RAW_ACTION_SERVER_SOURCE: &str = "CREATE SCHEMA action_fixture;\n\
-    CREATE TYPE action_fixture.row AS OBJECT (value TEXT);\n\
-    CREATE SERVER FUNCTION action_fixture.read(p_value REF action_fixture.row)\n\
-    RETURNS ROWS (value TEXT) SECURITY INVOKER TRANSACTION READ ONLY VOLATILITY STABLE\n\
-    AS SELECT row.value FROM action_fixture.row row WHERE REF(row) = p_value;\n";
-const RAW_ACTION_CLIENT_SOURCE: &str = "CREATE CLIENT FUNCTION action_fixture.call(p_value REF action_fixture.row)\n\
+const RAW_ACTION_SERVER_SOURCE: &str = "CREATE SCHEMA action_fixture;\n";
+const RAW_ACTION_CLIENT_SOURCE: &str = "CREATE CLIENT FUNCTION action_fixture.call(p_value INTEGER)\n\
     RETURNS std.Action\n\
     AS std.action.call(\n\
-      target => action_fixture.read,\n\
+      target => std.invoke.echo,\n\
       arguments => std.call.args(p_value => p_value)\n\
     );\n";
 const RAW_EXTERNAL_CAPABILITY_SOURCE: &str = "CREATE SCHEMA cap;\n\
@@ -216,15 +231,15 @@ const RAW_STREAM_RESOURCE_SERVER_SOURCE: &str = "CREATE SCHEMA resource_fixture;
     AS INSERT INTO resource_fixture.probe AS made (marker, sequence)\n\
     VALUES (p_marker, p_sequence) RETURNING REF(made);\n\
     CREATE SERVER FUNCTION resource_fixture.resource(p_marker TEXT)\n\
-    RETURNS ROWS (value TEXT) SECURITY INVOKER\n\
+    RETURNS STREAM<TEXT> SECURITY INVOKER\n\
     TRANSACTION READ ONLY VOLATILITY STABLE\n\
     AS SELECT probe.marker FROM resource_fixture.probe probe\n\
     WHERE probe.marker = p_marker;\n\
     CREATE SERVER FUNCTION resource_fixture.all()\n\
-    RETURNS ROWS (value TEXT) SECURITY INVOKER\n\
+    RETURNS STREAM<TEXT> SECURITY INVOKER\n\
     TRANSACTION READ ONLY VOLATILITY STABLE\n\
     AS SELECT probe.marker FROM resource_fixture.probe probe ORDER BY probe.sequence;\n";
-const RAW_STREAM_RESOURCE_CLIENT_SOURCE: &str = "CREATE CLIENT FUNCTION resource_fixture.call(p_marker TEXT) RETURNS TEXT AS\n\
+const RAW_STREAM_RESOURCE_CLIENT_SOURCE: &str = "CREATE CLIENT FUNCTION resource_fixture.call(p_marker TEXT) RETURNS STREAM<TEXT> AS\n\
     AWAIT std.data.stream_resource(target => resource_fixture.resource,\n\
       arguments => std.call.args(p_marker => p_marker));\n";
 const RAW_PROCEDURAL_RESOURCE_SERVER_SOURCE: &str = "CREATE SCHEMA procedural_fixture;\n\
@@ -235,26 +250,24 @@ const RAW_PROCEDURAL_RESOURCE_SERVER_SOURCE: &str = "CREATE SCHEMA procedural_fi
     AS INSERT INTO procedural_fixture.probe AS made (marker)\n\
     VALUES (p_marker) RETURNING REF(made);\n\
     CREATE SERVER FUNCTION procedural_fixture.resource(p_marker TEXT)\n\
-    RETURNS ROWS (value TEXT) SECURITY INVOKER TRANSACTION READ ONLY VOLATILITY STABLE\n\
+    RETURNS STREAM<TEXT> SECURITY INVOKER TRANSACTION READ ONLY VOLATILITY STABLE\n\
     AS SELECT probe.marker FROM procedural_fixture.probe probe\n\
     WHERE probe.marker = p_marker;\n";
-const RAW_PROCEDURAL_RESOURCE_CLIENT_SOURCE: &str = "CREATE CLIENT FUNCTION procedural_fixture.call(p_marker TEXT) RETURNS TEXT IS\n\
+const RAW_PROCEDURAL_RESOURCE_CLIENT_SOURCE: &str = "CREATE CLIENT FUNCTION procedural_fixture.call(p_marker TEXT) RETURNS STREAM<TEXT> IS\n\
+    LET resource std.data.StreamResource<TEXT> := std.data.stream_resource(\n\
+        target => procedural_fixture.resource,\n\
+        arguments => std.call.args(p_marker => p_marker)\n\
+    );\n\
     BEGIN\n\
-        LET result TEXT := AWAIT std.data.stream_resource(\n\
-            target => procedural_fixture.resource,\n\
-            arguments => std.call.args(p_marker => p_marker)\n\
-        );\n\
-        result := result || '-assigned';\n\
-        RETURN result;\n\
+        RETURN AWAIT resource;\n\
     END;\n\
-    CREATE CLIENT FUNCTION procedural_fixture.host() RETURNS TEXT IS\n\
+    CREATE CLIENT FUNCTION procedural_fixture.host() RETURNS STREAM<TEXT> IS\n\
+    LET resource std.data.StreamResource<TEXT> := std.data.stream_resource(\n\
+        target => procedural_fixture.resource,\n\
+        arguments => std.call.args(p_marker => 'installed-marker')\n\
+    );\n\
     BEGIN\n\
-        LET result TEXT := AWAIT std.data.stream_resource(\n\
-            target => procedural_fixture.resource,\n\
-            arguments => std.call.args(p_marker => 'installed-marker')\n\
-        );\n\
-        result := result || '-assigned';\n\
-        RETURN result;\n\
+        RETURN AWAIT resource;\n\
     END;\n";
 const RAW_SCALAR_RESOURCE_CLIENT_SOURCE: &str = "CREATE SCHEMA scalar_fixture;\n\
     CREATE CLIENT FUNCTION scalar_fixture.call() RETURNS INTEGER AS\n\
@@ -2241,63 +2254,52 @@ async fn proves_procedural_client_resource_through_installed_evaluator() -> Test
             parameter,
             RuntimeValue::Text("installed-marker".to_owned()),
         )?;
-        let expected_type = match active
-            .catalogue()
-            .function_by_id(target)
-            .ok_or_else(|| failure("procedural resource target disappeared from the catalogue"))?
-            .return_type()
-        {
-            FunctionReturn::Rows(columns) if columns.len() == 1 => columns[0].resolved_type(),
-            _ => return Err(failure("procedural resource target is not a one-column stream")),
-        };
-        let target_parameter = active
-            .catalogue()
-            .function_by_id(target)
-            .ok_or_else(|| failure("procedural resource target disappeared from the catalogue"))?
-            .parameters()
-            .first()
-            .ok_or_else(|| failure("procedural resource target has no p_marker parameter"))?
-            .id();
-        let mut seen = None;
-        let mut executor = DeterministicClientResourceExecutor::new(|request: &ClientResourceRequest| {
-            seen = Some((
-                request.key(),
-                request.expected_type(),
-                request.arguments().to_vec(),
-            ));
-            Ok(RuntimeValue::Text("installed-marker".to_owned()))
-        });
+        let mut executor = DeterministicStreamResourceExecutor;
         let result = evaluate_client_function_with_arguments_and_executor(
             &active,
             &authorisation,
             std::slice::from_ref(&argument),
             &mut executor,
         )?;
-        require(
-            result.value() == &RuntimeValue::Text("installed-marker-assigned".to_owned()),
-            "procedural CLIENT LET/AWAIT/assignment did not return the typed executor value",
+        let list_descriptor = TypeDescriptor::list(TypeDescriptor::named(
+            orna_standard::CHARACTER_LARGE_OBJECT_TYPE_ID,
+        ))?;
+        let list = RuntimeValue::list(
+            &active,
+            list_descriptor.clone(),
+            vec![
+                RuntimeValue::Text("stream-one".to_owned()),
+                RuntimeValue::Text("stream-two".to_owned()),
+            ],
         )?;
-        let (seen_key, seen_type, seen_arguments) =
-            seen.ok_or_else(|| failure("procedural CLIENT evaluator did not submit a resource request"))?;
-        require(
-            seen_key.target() == InvocationTarget::new(target, active.pair())
-                && seen_key.target().revision() == active.pair()
-                && seen_key.principal() == RAW_CLIENT_USER
-                && seen_key.invalidation_token() == active.catalogue_hash()
-                && seen_type == expected_type
-                && seen_arguments.len() == 1
-                && seen_arguments[0].parameter() == target_parameter
-                && seen_arguments[0].value() == argument.value(),
-            "installed procedural resource request lost target revision, type, or arguments",
+        let expected_value = RuntimeValue::option(
+            &active,
+            TypeDescriptor::option(list_descriptor)?,
+            Some(list),
         )?;
-
+        require(
+            result.value() == &expected_value,
+            "procedural CLIENT LET/AWAIT did not return the expected typed stream value",
+        )?;
         let standard = active
             .catalogue_hash_context()
             .standard()
             .ok_or_else(|| failure("procedural resource proof has no standard context"))?;
         let registry = registered_opaque_codecs(standard)?;
-        let mut expected =
-            encode_constructed_value(&active, &registry, &RuntimeValue::Text("installed-marker-assigned".to_owned()))?;
+        let host_list_descriptor = TypeDescriptor::list(TypeDescriptor::named(
+            orna_standard::CHARACTER_LARGE_OBJECT_TYPE_ID,
+        ))?;
+        let host_list = RuntimeValue::list(
+            &active,
+            host_list_descriptor.clone(),
+            vec![RuntimeValue::Text("installed-marker".to_owned())],
+        )?;
+        let host_value = RuntimeValue::option(
+            &active,
+            TypeDescriptor::option(host_list_descriptor)?,
+            Some(host_list),
+        )?;
+        let mut expected = encode_constructed_value(&active, &registry, &host_value)?;
         expected.push(b'\n');
         let host_revision = active
             .function_revisions()
@@ -2305,12 +2307,19 @@ async fn proves_procedural_client_resource_through_installed_evaluator() -> Test
             .find(|revision| revision.function() == host)
             .ok_or_else(|| failure("procedural resource host is missing its function revision"))?;
         let host_plan = ProceduralClientPlan::decode(host_revision.artifact().payload())?;
-        let ClientExpressionNode::Await { expression } = host_plan.statements()[0].expression() else {
-            return Err(failure("procedural resource host did not retain AWAIT"));
-        };
-        let ClientExpressionNode::Resource { operation } = expression.as_ref() else {
+        let ClientExpressionNode::Resource { operation } = host_plan.statements()[0].expression() else {
             return Err(failure("procedural resource host did not retain a resource operation"));
         };
+        let ClientExpressionNode::Await { expression } = host_plan.return_expression() else {
+            return Err(failure("procedural resource host did not retain AWAIT"));
+        };
+        let ClientExpressionNode::LocalRead { local } = expression.as_ref() else {
+            return Err(failure("procedural resource host AWAIT did not retain the resource local read"));
+        };
+        require(
+            *local == host_plan.locals()[0].local_id(),
+            "procedural resource host AWAIT did not retain its resource local",
+        )?;
         let host_call_site = operation.call_site_id();
         let invoke_target = InvocationRequestTarget::qualified_name(QualifiedSemanticName::new([
             "procedural_fixture",
@@ -2334,7 +2343,10 @@ async fn proves_procedural_client_resource_through_installed_evaluator() -> Test
             let row = audit_session
                 .client()
                 .query_one(
-                    "SELECT resource.parent_invocation_id, resource.call_site_id
+                    "SELECT invocation.invocation_id, resource.parent_invocation_id,
+                            resource.request_id, resource.call_site_id,
+                            invocation.outcome, resource.decision_outcome,
+                            resource.terminal_outcome
                      FROM _orna_kernel.resource_audit_events AS resource
                      JOIN _orna_kernel.invocation_audit_events AS invocation
                        ON invocation.invocation_id = resource.parent_invocation_id
@@ -2345,12 +2357,26 @@ async fn proves_procedural_client_resource_through_installed_evaluator() -> Test
                     &[&target_bytes, &host_bytes],
                 )
                 .await?;
+            let root_invocation_id: Vec<u8> = row.try_get("invocation_id")?;
             let parent_invocation_id: Vec<u8> = row.try_get("parent_invocation_id")?;
+            let request_id: Vec<u8> = row.try_get("request_id")?;
             let call_site_id: Vec<u8> = row.try_get("call_site_id")?;
+            let invocation_outcome: String = row.try_get("outcome")?;
+            let decision_outcome: String = row.try_get("decision_outcome")?;
+            let terminal_outcome: String = row.try_get("terminal_outcome")?;
             require(
-                parent_invocation_id.len() == 16
+                root_invocation_id.len() == 16
+                    && parent_invocation_id == root_invocation_id
+                    && request_id.len() == 16
+                    && request_id != root_invocation_id
                     && call_site_id == host_call_site.to_bytes().to_vec(),
-                "installed resource audit lost the root invocation or compiled call-site identity",
+                "installed resource audit lost the exact root invocation or compiled call-site identity",
+            )?;
+            require(
+                invocation_outcome == "allowed"
+                    && decision_outcome == "allowed"
+                    && terminal_outcome == "completed",
+                "installed root/resource sequence did not retain allowed terminal audit evidence",
             )
         }
         .await;
@@ -2494,59 +2520,20 @@ async fn proves_server_action_resource_trigger_through_authenticated_executor() 
             .map_err(|error| failure(format!("installed standard source check failed: {error:?}")))?;
         let (active, client, target, client_parameter, target_parameter) =
             install_action_client_fixture(&kernel, &active, &standard).await?;
-        // Seed exactly the object referenced by the canonical action argument
-        // so the authenticated SERVER target emits one deterministic row.
-        let action_object = active
-            .catalogue()
-            .object_types()
-            .iter()
-            .find(|object| object.name().parts() == ["action_fixture", "row"])
-            .ok_or_else(|| failure("action fixture is missing its object type"))?;
-        let action_field = action_object
-            .fields()
-            .iter()
-            .find(|field| field.name() == "value")
-            .ok_or_else(|| failure("action fixture is missing its value field"))?;
-        let action_object_id = ObjectId::from_bytes([0x72; 16]);
-        let action_table = format!(
-            "t_{:032x}",
-            u128::from_be_bytes(action_object.id().to_bytes()),
-        );
-        let action_column = format!(
-            "f_{:032x}",
-            u128::from_be_bytes(action_field.id().to_bytes()),
-        );
-        let action_object_hex = format!(
-            "{:032x}",
-            u128::from_be_bytes(action_object_id.to_bytes()),
-        );
-        run_database_statement(
-            &database,
-            &format!(
-                "INSERT INTO _orna_data.{action_table} (_orna_object_id, {action_column}) \
-                 VALUES (decode('{action_object_hex}', 'hex'), 'installed-action')"
-            ),
-        )
-        .await?;
-        let mut functions = active
+        let mut function_targets = active
             .catalogue()
             .functions()
             .iter()
-            .map(FunctionDefinition::id)
+            .map(|function| SecurityFunctionTarget::application(function.id()))
             .collect::<Vec<_>>();
-        if let Some(standard) = active.catalogue_hash_context().standard() {
-            functions.extend(
-                standard
-                    .catalogue()
-                    .functions()
-                    .iter()
-                    .map(FunctionDefinition::id),
-            );
-        }
-        functions.sort_unstable();
-        let security = SecuritySnapshot::new_with_local_peer_credentials(
+        function_targets.push(SecurityFunctionTarget::verified_standard(
+            target,
+            standard.verified_snapshot().revision(),
+            STD_INVOKE_ECHO_FUNCTION_REVISION_ID,
+        ));
+        let security = SecuritySnapshot::new_with_function_targets_and_local_peer_credentials(
             active.pair(),
-            functions,
+            function_targets,
             vec![Principal::new(
                 RAW_CLIENT_USER,
                 PrincipalKind::User,
@@ -2572,15 +2559,7 @@ async fn proves_server_action_resource_trigger_through_authenticated_executor() 
         };
         let argument = FunctionArgument::new(
             client_parameter,
-            RuntimeValue::Reference {
-                target: active
-                    .catalogue()
-                    .function_by_id(target)
-                    .and_then(|function| function.parameter_by_name("p_value"))
-                    .and_then(|parameter| parameter.resolved_type().reference_target())
-                    .ok_or_else(|| failure("action target parameter is not a reference"))?,
-                object: action_object_id,
-            },
+            RuntimeValue::Integer(43),
         )?;
         let result = evaluate_client_function_with_arguments(
             &active,
@@ -2724,59 +2703,20 @@ async fn proves_server_action_denial_stays_inside_authenticated_resource_trigger
             .map_err(|error| failure(format!("action denial standard source check failed: {error:?}")))?;
         let (active, client, target, client_parameter, target_parameter) =
             install_action_client_fixture(&kernel, &active, &standard).await?;
-        // Seed the referenced object so a target execution cannot be confused
-        // with a denied request that happens to return no rows.
-        let action_object = active
-            .catalogue()
-            .object_types()
-            .iter()
-            .find(|object| object.name().parts() == ["action_fixture", "row"])
-            .ok_or_else(|| failure("action denial fixture is missing its object type"))?;
-        let action_field = action_object
-            .fields()
-            .iter()
-            .find(|field| field.name() == "value")
-            .ok_or_else(|| failure("action denial fixture is missing its value field"))?;
-        let action_object_id = ObjectId::from_bytes([0x72; 16]);
-        let action_table = format!(
-            "t_{:032x}",
-            u128::from_be_bytes(action_object.id().to_bytes()),
-        );
-        let action_column = format!(
-            "f_{:032x}",
-            u128::from_be_bytes(action_field.id().to_bytes()),
-        );
-        let action_object_hex = format!(
-            "{:032x}",
-            u128::from_be_bytes(action_object_id.to_bytes()),
-        );
-        run_database_statement(
-            &database,
-            &format!(
-                "INSERT INTO _orna_data.{action_table} (_orna_object_id, {action_column}) \
-                 VALUES (decode('{action_object_hex}', 'hex'), 'denied-action')"
-            ),
-        )
-        .await?;
-        let mut functions = active
+        let mut function_targets = active
             .catalogue()
             .functions()
             .iter()
-            .map(FunctionDefinition::id)
+            .map(|function| SecurityFunctionTarget::application(function.id()))
             .collect::<Vec<_>>();
-        if let Some(standard) = active.catalogue_hash_context().standard() {
-            functions.extend(
-                standard
-                    .catalogue()
-                    .functions()
-                    .iter()
-                    .map(FunctionDefinition::id),
-            );
-        }
-        functions.sort_unstable();
-        let security = SecuritySnapshot::new_with_local_peer_credentials(
+        function_targets.push(SecurityFunctionTarget::verified_standard(
+            target,
+            standard.verified_snapshot().revision(),
+            STD_INVOKE_ECHO_FUNCTION_REVISION_ID,
+        ));
+        let security = SecuritySnapshot::new_with_function_targets_and_local_peer_credentials(
             active.pair(),
-            functions,
+            function_targets,
             vec![Principal::new(
                 RAW_CLIENT_USER,
                 PrincipalKind::User,
@@ -2801,15 +2741,7 @@ async fn proves_server_action_denial_stays_inside_authenticated_resource_trigger
         };
         let argument = FunctionArgument::new(
             client_parameter,
-            RuntimeValue::Reference {
-                target: active
-                    .catalogue()
-                    .function_by_id(target)
-                    .and_then(|function| function.parameter_by_name("p_value"))
-                    .and_then(|parameter| parameter.resolved_type().reference_target())
-                    .ok_or_else(|| failure("action denial target parameter is not a reference"))?,
-                object: action_object_id,
-            },
+            RuntimeValue::Integer(43),
         )?;
         let result = evaluate_client_function_with_arguments(
             &active,
@@ -5367,6 +5299,8 @@ async fn authenticated_stream_resource_dispatches_allowed_and_denied_with_redact
             request_id: InvocationId::from_bytes([0x31; 16]),
             parent_invocation_id: InvocationId::from_bytes([0x32; 16]),
             call_site_id: call_site,
+            state_profile: String::new(),
+            function_instance_key: String::new(),
             target_function_id: target,
             target_revision: active.pair(),
             generation: 1,
@@ -5432,6 +5366,19 @@ async fn authenticated_stream_resource_dispatches_allowed_and_denied_with_redact
                 return Err(failure(format!("stream resource unexpectedly failed: {call_failure:?}")));
             }
         };
+        let duplicate = kernel
+            .dispatch_authenticated_server_resource(&session, &request)
+            .await?;
+        require(
+            duplicate
+                == AuthenticatedServerResourceResult::Failed {
+                    stream_id: request.stream_id,
+                    request_id: request.request_id,
+                    failure: CallFailure::InternalFailure,
+                },
+            "resource request identity was reused after its first dispatch",
+        )?;
+
         let denied_request = ResourceRequest {
             request_id: InvocationId::new(),
             ..request.clone()
@@ -5606,6 +5553,8 @@ async fn installed_resource_socket_delivers_values_and_enforces_windows_and_gran
             request_id: InvocationId::from_bytes([0x51; 16]),
             parent_invocation_id: InvocationId::from_bytes([0x52; 16]),
             call_site_id: call_site,
+            state_profile: String::new(),
+            function_instance_key: String::new(),
             target_function_id: all_target,
             target_revision: active.pair(),
             generation: 1,
@@ -5619,6 +5568,8 @@ async fn installed_resource_socket_delivers_values_and_enforces_windows_and_gran
             request_id: InvocationId::from_bytes([0x53; 16]),
             parent_invocation_id: InvocationId::from_bytes([0x54; 16]),
             call_site_id: call_site,
+            state_profile: String::new(),
+            function_instance_key: String::new(),
             target_function_id: target,
             target_revision: active.pair(),
             generation: 1,
@@ -5635,6 +5586,8 @@ async fn installed_resource_socket_delivers_values_and_enforces_windows_and_gran
             request_id: InvocationId::from_bytes([0x55; 16]),
             parent_invocation_id: InvocationId::from_bytes([0x56; 16]),
             call_site_id: call_site,
+            state_profile: String::new(),
+            function_instance_key: String::new(),
             target_function_id: all_target,
             target_revision: active.pair(),
             generation: 1,
@@ -5648,6 +5601,8 @@ async fn installed_resource_socket_delivers_values_and_enforces_windows_and_gran
             request_id: InvocationId::from_bytes([0x57; 16]),
             parent_invocation_id: InvocationId::from_bytes([0x58; 16]),
             call_site_id: call_site,
+            state_profile: String::new(),
+            function_instance_key: String::new(),
             target_function_id: target,
             target_revision: active.pair(),
             generation: 1,
@@ -5659,13 +5614,26 @@ async fn installed_resource_socket_delivers_values_and_enforces_windows_and_gran
             item_window: 1,
             byte_window: 1,
         };
+        let authorizer = RawResourceRequestAuthorizer::new();
+        for request in [
+            &stream_request,
+            &item_barrier_request,
+            &byte_request,
+            &byte_barrier_request,
+        ] {
+            require(
+                authorizer.expect(request),
+                "installed resource socket test could not register its request",
+            )?;
+        }
         let (server, client) = StandardUnixStream::pair()?;
         client.set_nonblocking(true)?;
         let mut client = UnixStream::from_std(client)?;
-        let connection = tokio::spawn(serve_local_raw_stream(
+        let connection = tokio::spawn(serve_local_raw_stream_with_resource_authorizer(
             kernel.clone(),
             server,
             LocalRawSocketResources::new(),
+            authorizer,
         ));
         let stream_operation = async {
             client
@@ -5686,10 +5654,14 @@ async fn installed_resource_socket_delivers_values_and_enforces_windows_and_gran
             )
             .await?;
             let accepted = read_resource_server_frame_from_socket(&mut client, &active, &registry).await?;
-            require(
-                matches!(accepted, ResourceServerFrame::Accepted(frame) if frame.stream_id == 2),
-                "resource stream socket did not accept the item-credit request",
-            )?;
+            if !matches!(
+                &accepted,
+                ResourceServerFrame::Accepted(frame) if frame.stream_id == 2
+            ) {
+                return Err(failure(format!(
+                    "resource stream socket returned an unexpected acceptance frame: {accepted:?}",
+                )));
+            }
             let (_, first_values) =
                 read_resource_server_frame_with_encoded(&mut client, &active, &registry).await?;
             require(
@@ -5726,7 +5698,12 @@ async fn installed_resource_socket_delivers_values_and_enforces_windows_and_gran
                 &ResourceClientFrame::Request(item_barrier_request.clone()),
             )
             .await?;
-            let item_barrier_accepted = read_resource_server_frame_from_socket(&mut client, &active, &registry).await?;
+            let item_barrier_accepted =
+                timeout(
+                    Duration::from_secs(5),
+                    read_resource_server_frame_from_socket(&mut client, &active, &registry),
+                )
+                .await??;
             require(
                 matches!(
                     item_barrier_accepted,
@@ -5922,19 +5899,13 @@ async fn installed_resource_socket_delivers_values_and_enforces_windows_and_gran
         // Authenticate and recover the socket before taking the fixture lock.
         // Catalogue recovery reads the fixture relation metadata.
         let waiter_session = database.open().await?;
-        let (server, client) = StandardUnixStream::pair()?;
-        client.set_nonblocking(true)?;
-        let mut client = UnixStream::from_std(client)?;
-        let connection = tokio::spawn(serve_local_raw_stream(
-            kernel.clone(),
-            server,
-            LocalRawSocketResources::new(),
-        ));
         let cancellation_request = ResourceRequest {
             stream_id: 6,
             request_id: InvocationId::from_bytes([0x61; 16]),
             parent_invocation_id: InvocationId::from_bytes([0x62; 16]),
             call_site_id: call_site,
+            state_profile: String::new(),
+            function_instance_key: String::new(),
             target_function_id: all_target,
             target_revision: active.pair(),
             generation: 1,
@@ -5943,6 +5914,20 @@ async fn installed_resource_socket_delivers_values_and_enforces_windows_and_gran
             item_window: 1,
             byte_window: MAX_RESOURCE_WINDOW,
         };
+        let authorizer = RawResourceRequestAuthorizer::new();
+        require(
+            authorizer.expect(&cancellation_request),
+            "cancellation resource socket test could not register its request",
+        )?;
+        let (server, client) = StandardUnixStream::pair()?;
+        client.set_nonblocking(true)?;
+        let mut client = UnixStream::from_std(client)?;
+        let connection = tokio::spawn(serve_local_raw_stream_with_resource_authorizer(
+            kernel.clone(),
+            server,
+            LocalRawSocketResources::new(),
+            authorizer.clone(),
+        ));
         let cancellation_operation = async {
             client
                 .write_all(b"ORNA\x01\x00\x00\x05\x00\x00\x00\x00")
@@ -6015,6 +6000,8 @@ async fn installed_resource_socket_delivers_values_and_enforces_windows_and_gran
                 request_id: InvocationId::from_bytes([0x81; 16]),
                 parent_invocation_id: InvocationId::from_bytes([0x82; 16]),
                 call_site_id: call_site,
+                state_profile: String::new(),
+                function_instance_key: String::new(),
                 target_function_id: target,
                 target_revision: active.pair(),
                 generation: 1,
@@ -6023,6 +6010,10 @@ async fn installed_resource_socket_delivers_values_and_enforces_windows_and_gran
                 item_window: 1,
                 byte_window: MAX_RESOURCE_WINDOW,
             };
+            require(
+                authorizer.expect(&replacement_request),
+                "replacement resource socket test could not register its request",
+            )?;
             send_resource_client_frame_to_socket(&mut client, &active, &registry, &ResourceClientFrame::Request(replacement_request.clone())).await?;
             let replacement_accepted = read_resource_server_frame_from_socket(&mut client, &active, &registry).await?;
             require(matches!(replacement_accepted, ResourceServerFrame::Accepted(frame) if frame.stream_id == replacement_request.stream_id), "resource executor was not reusable after cancellation")?;
@@ -6062,6 +6053,8 @@ async fn installed_resource_socket_delivers_values_and_enforces_windows_and_gran
             request_id: InvocationId::from_bytes([0x71; 16]),
             parent_invocation_id: InvocationId::from_bytes([0x72; 16]),
             call_site_id: call_site,
+            state_profile: String::new(),
+            function_instance_key: String::new(),
             target_function_id: target,
             target_revision: active.pair(),
             generation: 1,
@@ -6073,13 +6066,19 @@ async fn installed_resource_socket_delivers_values_and_enforces_windows_and_gran
             item_window: 1,
             byte_window: MAX_RESOURCE_WINDOW,
         };
+        let authorizer = RawResourceRequestAuthorizer::new();
+        require(
+            authorizer.expect(&denied_request),
+            "denied resource socket test could not register its request",
+        )?;
         let (server, client) = StandardUnixStream::pair()?;
         client.set_nonblocking(true)?;
         let mut client = UnixStream::from_std(client)?;
-        let connection = tokio::spawn(serve_local_raw_stream(
+        let connection = tokio::spawn(serve_local_raw_stream_with_resource_authorizer(
             kernel.clone(),
             server,
             LocalRawSocketResources::new(),
+            authorizer,
         ));
         let denied_operation = async {
             client
@@ -9853,23 +9852,25 @@ async fn install_scalar_resource_client_fixture(
             client_report.diagnostics(),
         )));
     }
+    let prepared = prepare_standard_application(&client_report, active.pair(), active)
+        .map_err(|error| failure(format!("scalar client prepare failed: {error:?}")))?;
+    let target_revision = prepared.candidate_pair();
     let active = kernel
-        .apply(
-            &prepare_standard_application(&client_report, active.pair(), active)
-                .map_err(|error| failure(format!("scalar client prepare failed: {error:?}")))?,
-        )
+        .apply(&prepared)
         .await
         .map_err(|error| failure(format!("scalar client apply failed: {error:?}")))?;
-    let target = standard
+    let target_definition = standard
         .verified_snapshot()
         .catalogue()
         .function_by_id(STD_INVOKE_ECHO_FUNCTION_ID)
         .ok_or_else(|| failure("installed standard is missing std.invoke.echo"))?;
-    let target_type = match target.return_type() {
-        FunctionReturn::Single(resolved) => *resolved,
+    let target_type = match target_definition.return_type() {
+        FunctionReturn::Single(ResolvedType::Scalar(orna_core::types::StandardScalar::Integer)) => {
+            ResolvedType::Value(orna_standard::STD_INTEGER_TYPE_ID)
+        }
         _ => return Err(failure("std.invoke.echo is not a single INTEGER result")),
     };
-    let target = target.id();
+    let target = target_definition.id();
     let client_definition = active
         .catalogue()
         .functions()
@@ -9893,16 +9894,23 @@ async fn install_scalar_resource_client_fixture(
     let ClientExpressionNode::Resource { operation } = expression.as_ref() else {
         return Err(failure("scalar CLIENT resource plan is not a resource operation"));
     };
-    require(
-        operation.kind() == orna_artifact::client_plan::ResourceKind::Scalar
-            && operation.target() == target
-            && operation.target_revision() == active.pair()
-            && operation.arguments().len() == 1
-            && operation.arguments()[0].0 == STD_INVOKE_ECHO_PARAMETER_ID
-            && operation.arguments()[0].1
-                == (ClientExpressionNode::Integer { value: 43 }),
-        "scalar CLIENT resource plan did not retain canonical target metadata",
-    )?;
+    if !(operation.kind() == orna_artifact::client_plan::ResourceKind::Scalar
+        && operation.target() == target
+        && operation.target_revision() == target_revision
+        && operation.arguments().len() == 1
+        && operation.arguments()[0].0 == STD_INVOKE_ECHO_PARAMETER_ID
+        && operation.arguments()[0].1 == (ClientExpressionNode::Integer { value: 43 }))
+    {
+        return Err(failure(format!(
+            "scalar CLIENT resource plan metadata mismatch: kind={:?} target={:?}/{:?} revision={:?}/{:?} arguments={:?}",
+            operation.kind(),
+            operation.target(),
+            target,
+            operation.target_revision(),
+            target_revision,
+            operation.arguments(),
+        )));
+    }
     Ok((active, client, target, operation.call_site_id()))
 }
 
@@ -9983,12 +9991,12 @@ async fn install_procedural_resource_client_fixture(
         .find(|function| function.name().parts() == ["procedural_fixture", "call"])
         .ok_or_else(|| failure("procedural resource fixture is missing its CLIENT function"))?;
     let target_type = match target_definition.return_type() {
-        FunctionReturn::Rows(columns) if columns.len() == 1 => columns[0].resolved_type(),
-        _ => return Err(failure("procedural resource target is not a one-column stream")),
+        FunctionReturn::Stream(resolved_type) => *resolved_type,
+        _ => return Err(failure("procedural resource target is not a TEXT stream")),
     };
     require(
-        client_definition.return_type() == &FunctionReturn::Single(target_type),
-        "procedural CLIENT fixture did not retain the target-derived TEXT result",
+        client_definition.return_type() == &FunctionReturn::Stream(target_type),
+        "procedural CLIENT fixture did not retain the target-derived TEXT stream result",
     )?;
     let revision = active
         .function_revisions()
@@ -9997,15 +10005,22 @@ async fn install_procedural_resource_client_fixture(
         .ok_or_else(|| failure("procedural CLIENT fixture is missing its function revision"))?;
     let plan = ProceduralClientPlan::decode(revision.artifact().payload())?;
     require(
-        plan.locals().len() == 1 && plan.statements().len() == 2,
-        "procedural CLIENT artifact did not retain one LET and one assignment",
+        plan.locals().len() == 1 && plan.statements().len() == 1,
+        "procedural CLIENT artifact did not retain one resource LET",
     )?;
-    let ClientExpressionNode::Await { expression } = plan.statements()[0].expression() else {
-        return Err(failure("procedural CLIENT LET did not retain AWAIT"));
-    };
-    let ClientExpressionNode::Resource { operation } = expression.as_ref() else {
+    let ClientExpressionNode::Resource { operation } = plan.statements()[0].expression() else {
         return Err(failure("procedural CLIENT LET did not retain a resource operation"));
     };
+    let ClientExpressionNode::Await { expression } = plan.return_expression() else {
+        return Err(failure("procedural CLIENT return did not retain AWAIT"));
+    };
+    let ClientExpressionNode::LocalRead { local } = expression.as_ref() else {
+        return Err(failure("procedural CLIENT AWAIT did not retain the resource local read"));
+    };
+    require(
+        *local == plan.locals()[0].local_id(),
+        "procedural CLIENT AWAIT did not retain the declared resource local",
+    )?;
     require(
         operation.kind() == orna_artifact::client_plan::ResourceKind::Stream
             && operation.target() == target
@@ -10075,8 +10090,18 @@ async fn install_stream_resource_client_fixture(
     let client_source = append_source(&active, RAW_STREAM_RESOURCE_CLIENT_SOURCE)?;
     let client_report = check_standard_application(&client_source, &client_context);
     if !client_report.diagnostics().is_empty() {
+        let target_present = active
+            .catalogue()
+            .function_by_name(&QualifiedSemanticName::new(["resource_fixture", "resource"]).unwrap())
+            .is_some();
         return Err(failure(format!(
-            "stream CLIENT resource fixture did not compile: {:?}",
+            "stream CLIENT resource fixture did not compile: target_present={target_present}, units={:?}, diagnostics={:?}",
+            active
+                .source()
+                .units()
+                .iter()
+                .map(|unit| (unit.logical_path(), unit.content().len()))
+                .collect::<Vec<_>>(),
             client_report.diagnostics(),
         )));
     }
@@ -10099,8 +10124,8 @@ async fn install_stream_resource_client_fixture(
         .ok_or_else(|| failure("resource fixture target is missing p_marker"))?
         .id();
     let target_result_type = match target.return_type() {
-        FunctionReturn::Rows(columns) if columns.len() == 1 => columns[0].resolved_type(),
-        _ => return Err(failure("resource fixture target is not a one-column TEXT stream")),
+        FunctionReturn::Stream(resolved_type) => *resolved_type,
+        _ => return Err(failure("resource fixture target is not a TEXT stream")),
     };
     let target = target.id();
     let client_definition = active
@@ -10110,8 +10135,8 @@ async fn install_stream_resource_client_fixture(
         .find(|function| function.name().parts() == ["resource_fixture", "call"])
         .ok_or_else(|| failure("stream CLIENT resource fixture is missing resource.call"))?;
     require(
-        client_definition.return_type() == &FunctionReturn::Single(target_result_type),
-        "stream CLIENT resource fixture did not retain the checked TEXT result",
+        client_definition.return_type() == &FunctionReturn::Stream(target_result_type),
+        "stream CLIENT resource fixture did not retain the checked STREAM<TEXT> result",
     )?;
     let client = client_definition.id();
     let revision = active
@@ -10259,12 +10284,11 @@ async fn install_action_client_fixture(
             &active,
         )?)
         .await?;
-    let target_definition = active
+    let target_definition = standard
+        .verified_snapshot()
         .catalogue()
-        .functions()
-        .iter()
-        .find(|function| function.name().parts() == ["action_fixture", "read"])
-        .ok_or_else(|| failure("action fixture is missing its SERVER target"))?;
+        .function_by_id(STD_INVOKE_ECHO_FUNCTION_ID)
+        .ok_or_else(|| failure("installed standard is missing std.invoke.echo SERVER target"))?;
     let target_parameter = target_definition
         .parameter_by_name("p_value")
         .ok_or_else(|| failure("action fixture SERVER target is missing p_value"))?
@@ -10755,7 +10779,7 @@ async fn assert_resource_audit_rows(
                  FROM _orna_kernel.resource_audit_events AS resource
                  JOIN _orna_kernel.invocation_audit_events AS invocation
                    ON invocation.invocation_id = resource.nested_invocation_id
-                 ORDER BY resource.sequence",
+                 ORDER BY resource.request_id",
                 &[],
             )
             .await?;
@@ -10764,13 +10788,13 @@ async fn assert_resource_audit_rows(
             "resource audit did not retain one terminal row for each request",
         )?;
         let expected = [
-            ([0x51; 16], [0x52; 16], Some(all_target), "allowed", "completed", Some(2_i64)),
-            ([0x53; 16], [0x54; 16], Some(target), "allowed", "completed", Some(1_i64)),
-            ([0x55; 16], [0x56; 16], Some(all_target), "allowed", "completed", Some(2_i64)),
-            ([0x57; 16], [0x58; 16], Some(target), "allowed", "completed", Some(1_i64)),
-            ([0x61; 16], [0x62; 16], None, "denied", "cancelled", None),
-            ([0x81; 16], [0x82; 16], Some(target), "allowed", "completed", Some(1_i64)),
-            ([0x71; 16], [0x72; 16], None, "denied", "failed", None),
+            ([0x51; 16], [0x52; 16], Some(all_target), "allowed", "completed", Some(2_i64), Some(80_i64)),
+            ([0x53; 16], [0x54; 16], Some(target), "allowed", "completed", Some(1_i64), Some(39_i64)),
+            ([0x55; 16], [0x56; 16], Some(all_target), "allowed", "completed", Some(2_i64), Some(80_i64)),
+            ([0x57; 16], [0x58; 16], Some(target), "allowed", "completed", Some(1_i64), Some(39_i64)),
+            ([0x61; 16], [0x62; 16], None, "denied", "cancelled", None, None),
+            ([0x71; 16], [0x72; 16], Some(target), "denied", "failed", None, None),
+            ([0x81; 16], [0x82; 16], Some(target), "allowed", "completed", Some(1_i64), Some(39_i64)),
         ];
         for (index, row) in rows.iter().enumerate() {
             let request_id: Vec<u8> = row.try_get("request_id")?;
@@ -10787,7 +10811,7 @@ async fn assert_resource_audit_rows(
             let item_count: Option<i64> = row.try_get("item_count")?;
             let byte_count: Option<i64> = row.try_get("byte_count")?;
             let invocation_outcome: String = row.try_get("invocation_outcome")?;
-            let (request, parent, target, decision, terminal, count) = expected[index];
+            let (request, parent, target, decision, terminal, count, bytes) = expected[index];
             let target = target.map(|function| function.to_bytes().to_vec());
             require(
                 request_id == request
@@ -10805,7 +10829,7 @@ async fn assert_resource_audit_rows(
                     && decision_outcome == decision
                     && terminal_outcome == terminal
                     && item_count == count
-                    && byte_count.is_none()
+                    && byte_count == bytes
                     && invocation_outcome == decision,
                 "resource audit row did not preserve exact request correlation and terminal outcome",
             )?;
