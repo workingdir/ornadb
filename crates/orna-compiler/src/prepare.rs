@@ -2191,6 +2191,29 @@ fn server_mutation_plan(
     })
 }
 
+/// Adapts a STREAM function to the row-shaped view required by the
+/// relational artifact validators. The durable catalogue keeps STREAM.
+fn query_planning_function(function: &FunctionDefinition) -> FunctionDefinition {
+    let FunctionReturn::Stream(element) = function.return_type() else {
+        return function.clone();
+    };
+    FunctionDefinition::new(
+        function.id(),
+        function.name().clone(),
+        function.domain(),
+        function.parameters().to_vec(),
+        FunctionReturn::Rows(vec![FunctionReturnColumnDefinition::new(
+            "value",
+            0,
+            *element,
+        )]),
+        function.current_revision(),
+        function.security(),
+        function.transaction(),
+        function.volatility(),
+    )
+}
+
 fn identity_selected_query_plan(
     plan: &crate::relational::IdentitySelectedQueryIr<TypeId, FieldId, FunctionId, ParameterId>,
     function: &FunctionDefinition,
@@ -7403,32 +7426,47 @@ impl<'a> CandidateBuilder<'a> {
                 ))
             })
             .collect::<Result<Vec<_>, PrepareError>>()?;
-        let return_columns = checked
-            .return_columns()
-            .iter()
-            .map(|column| {
-                Ok(FunctionReturnColumnDefinition::new(
-                    column.name(),
-                    column.ordinal(),
-                    self.declaration_type(
-                        column.semantic_type(),
-                        crate::CheckedTypeUseKind::Return {
-                            owner: checked.id(),
-                            ordinal: column.ordinal(),
-                        },
-                        consume_evidence,
-                        projection,
-                    )?,
-                ))
-            })
-            .collect::<Result<Vec<_>, PrepareError>>()?;
+        let return_type = match checked.return_type() {
+            crate::resolver::CheckedServerFunctionReturn::Rows(columns) => {
+                let return_columns = columns
+                    .iter()
+                    .map(|column| {
+                        Ok(FunctionReturnColumnDefinition::new(
+                            column.name(),
+                            column.ordinal(),
+                            self.declaration_type(
+                                column.semantic_type(),
+                                crate::CheckedTypeUseKind::Return {
+                                    owner: checked.id(),
+                                    ordinal: column.ordinal(),
+                                },
+                                consume_evidence,
+                                projection,
+                            )?,
+                        ))
+                    })
+                    .collect::<Result<Vec<_>, PrepareError>>()?;
+                FunctionReturn::Rows(return_columns)
+            }
+            crate::resolver::CheckedServerFunctionReturn::Stream { semantic_type, .. } => {
+                FunctionReturn::Stream(self.declaration_type(
+                    *semantic_type,
+                    crate::CheckedTypeUseKind::Return {
+                        owner: checked.id(),
+                        ordinal: 0,
+                    },
+                    consume_evidence,
+                    projection,
+                )?)
+            }
+        };
 
         Ok(FunctionDefinition::new(
             function_id,
             checked.name().clone(),
             FunctionDomain::Server,
             parameters,
-            FunctionReturn::Rows(return_columns),
+            return_type,
             current_revision,
             checked.security(),
             checked.transaction(),
@@ -7444,6 +7482,8 @@ impl<'a> CandidateBuilder<'a> {
         enum_types: &[EnumTypeDefinition],
         record_value_types: &[RecordValueTypeDefinition],
     ) -> Result<PreparedFunctionArtifact, PrepareError> {
+        let query_function = query_planning_function(function);
+
         if let Some(checked_plan) = checked.unique_text_selected_query_plan() {
             let plan = checked_plan.try_map_identities(
                 |id| self.identities.type_id(id),
@@ -7458,7 +7498,7 @@ impl<'a> CandidateBuilder<'a> {
                 .map(VerifiedStandardLibrarySnapshot::catalogue);
             let encoded = unique_text_selected_query_plan(
                 &plan,
-                function,
+                &query_function,
                 object_types,
                 standard,
                 &references,
@@ -7485,7 +7525,8 @@ impl<'a> CandidateBuilder<'a> {
                 |id| self.identities.parameter(id),
             )?;
             let references = self.mapped_references(checked)?;
-            let encoded = identity_selected_query_plan(&plan, function, object_types, &references)?;
+            let encoded =
+                identity_selected_query_plan(&plan, &query_function, object_types, &references)?;
             let payload = encoded.payload().to_vec();
             let hash = artifact_payload_digest(&payload)?;
             return Ok(PreparedFunctionArtifact {
@@ -7506,7 +7547,7 @@ impl<'a> CandidateBuilder<'a> {
                 |id| self.identities.field(id),
             )?;
             let references = self.mapped_references(checked)?;
-            let encoded = distinct_query_plan(&plan, function, object_types, &references)?;
+            let encoded = distinct_query_plan(&plan, &query_function, object_types, &references)?;
             let payload = encoded.payload().to_vec();
             let hash = artifact_payload_digest(&payload)?;
             return Ok(PreparedFunctionArtifact {
@@ -7527,7 +7568,8 @@ impl<'a> CandidateBuilder<'a> {
                 |id| self.identities.field(id),
             )?;
             let references = self.mapped_references(checked)?;
-            let payload = version_one_query_plan(&plan, function, object_types, &references)?;
+            let payload =
+                version_one_query_plan(&plan, &query_function, object_types, &references)?;
             let hash = artifact_payload_digest(&payload)?;
             return Ok(PreparedFunctionArtifact {
                 artifact: ExecutableArtifact::new(
