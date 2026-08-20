@@ -3483,13 +3483,15 @@ fn action_target_result_type(
     if definition.domain() != expected_domain {
         return Err(ClientActionError::TargetMismatch);
     }
-    let FunctionReturn::Single(resolved) = definition.return_type() else {
-        return Err(ClientActionError::ResultTypeMismatch);
+    let resolved = match definition.return_type() {
+        FunctionReturn::Single(resolved) => *resolved,
+        FunctionReturn::Rows(columns) if columns.len() == 1 => columns[0].resolved_type(),
+        FunctionReturn::Rows(_) => return Err(ClientActionError::ResultTypeMismatch),
     };
-    if !resource_type_matches_id(active, *resolved, descriptor.result_type) {
+    if !resource_type_matches_id(active, resolved, descriptor.result_type) {
         return Err(ClientActionError::ResultTypeMismatch);
     }
-    Ok(*resolved)
+    Ok(resolved)
 }
 
 fn validate_action_arguments(
@@ -3614,7 +3616,8 @@ pub fn complete_client_action(
         return Err(ClientActionError::StaleCompletion);
     }
     if resource.apply_completion(active, completion).is_err() {
-        return Err(ClientActionError::Executor(ACTION_FAILURE_CODE.to_owned()));
+        action_state.clear();
+        return Ok(redacted_action_failure());
     }
     let status = resource.status();
     if status == ClientResourceStatus::Loading { return Err(ClientActionError::Pending); }
@@ -3677,6 +3680,31 @@ fn client_action_target_is_provenance_safe(
             && reference.kind() == DefinitionReferenceKind::FunctionCall
             && reference.target() == DefinitionReferenceTarget::Function(target)
     })
+}
+
+/// Adapts nested CLIENT resource execution to the terminal action contract.
+///
+/// A nested resource has no continuation surface in action v1. If its executor reports
+/// `Pending`, cancel that request before publishing one redacted terminal action
+/// failure; otherwise the staged resource would keep a live request after the action has ended.
+struct ClientActionNestedExecutor<'a> {
+    inner: &'a mut dyn ClientResourceExecutor,
+}
+
+impl ClientResourceExecutor for ClientActionNestedExecutor<'_> {
+    fn execute(&mut self, request: ClientResourceRequest) -> ClientResourceCompletion {
+        let failure_request = request.clone();
+        let completion = self.inner.execute(request);
+        if matches!(completion, ClientResourceCompletion::Pending { .. }) {
+            let _ = self.inner.cancel(failure_request.clone());
+            return failure_request.failed(ACTION_FAILURE_CODE.to_owned());
+        }
+        completion
+    }
+
+    fn cancel(&mut self, request: ClientResourceRequest) -> ClientResourceCompletion {
+        self.inner.cancel(request)
+    }
 }
 
 pub fn trigger_client_action(
@@ -3746,13 +3774,43 @@ pub fn trigger_client_action(
             complete_client_action(active, action_state, completion)
         }
         ActionTargetDomain::Client => {
+            let key = ClientResourceKey::new(
+                target,
+                authorisation.session_principal(),
+                digest,
+                active.catalogue_hash(),
+            );
+            if let Some(resource) = action_state.resource_mut() {
+                if resource.status() == ClientResourceStatus::Loading {
+                    if resource.key() != key { return Err(ClientActionError::Executor(ACTION_FAILURE_CODE.to_owned())); }
+                    return Err(ClientActionError::Pending);
+                }
+                action_state.clear();
+            }
+            let mut resource = ClientResource::new(key, expected);
+            // Preserve a monotonic generation across terminal clears so an old
+            // completion can never be accepted by a later action.
+            resource.generation = ClientResourceGeneration(action_state.tombstone.value());
+            let request = resource
+                .begin_request_with_context(
+                    active,
+                    ClientResourceInvocationContext::new(parent.parent_invocation_id(), descriptor.call_site),
+                    values,
+                )
+                .map_err(ClientActionError::Arguments)?;
+            action_state.stage_invocation(request.request_id());
+            action_state.stage_request(request.clone());
+            action_state.set_resource(resource);
+
             let mut staged = state.clone();
-            let mut nested = Some(executor as &mut dyn ClientResourceExecutor);
+            let mut nested_executor = ClientActionNestedExecutor { inner: executor };
+            let mut nested = Some(&mut nested_executor as &mut dyn ClientResourceExecutor);
             let result = evaluate_function(
                 active,
                 descriptor.target,
-                values
-                    .into_iter()
+                request
+                    .arguments()
+                    .iter()
                     .map(|argument| (argument.parameter(), argument.value().clone()))
                     .collect(),
                 declarations,
@@ -3760,24 +3818,22 @@ pub fn trigger_client_action(
                 &mut staged,
                 0,
                 authorisation.session_principal(),
-                parent.parent_invocation_id(),
+                request.request_id(),
                 &mut nested,
             );
-            match result {
-                Ok(_) => {
-                    *state = staged;
-                    Ok(ClientActionOutcome::Completed)
-                }
+            let completion = match result {
+                Ok((_, value)) => request.ready(value),
                 Err(ClientExecutionError::ResourceEvaluation {
                     source: ClientResourceExecutionError::Cancelled,
                     ..
-                }) => Ok(ClientActionOutcome::Cancelled),
-                Err(ClientExecutionError::ResourceEvaluation {
-                    source: ClientResourceExecutionError::Failed(_),
-                    ..
-                }) => Ok(redacted_action_failure()),
-                Err(_) => Ok(redacted_action_failure()),
+                }) => request.cancelled(),
+                Err(_) => request.failed(ACTION_FAILURE_CODE.to_owned()),
+            };
+            let outcome = complete_client_action(active, action_state, completion)?;
+            if outcome == ClientActionOutcome::Completed {
+                *state = staged;
             }
+            Ok(outcome)
         }
     }
 }
@@ -4410,6 +4466,30 @@ fn validate_function_shape(
     Ok(return_shape)
 }
 
+fn is_expression_reference_allowed(
+    function: Option<&orna_core::catalogue::FunctionDefinition>,
+    reference: &orna_core::revision::DefinitionReference,
+) -> bool {
+    match reference.kind() {
+        DefinitionReferenceKind::FunctionCall
+        | DefinitionReferenceKind::NamedType
+        | DefinitionReferenceKind::ParameterRead
+        | DefinitionReferenceKind::QueryField
+        | DefinitionReferenceKind::Expression => true,
+        DefinitionReferenceKind::ObjectReference => {
+            let DefinitionReferenceTarget::ObjectType(target) = reference.target() else {
+                return false;
+            };
+            function.is_some_and(|definition| {
+                definition.parameters().iter().any(|parameter| {
+                    parameter.resolved_type().reference_target() == Some(target)
+                })
+            })
+        }
+        _ => false,
+    }
+}
+
 fn validate_selected_references(
     active: &ActiveDatabaseRevision,
     semantic_hash_version: FunctionSemanticHashVersion,
@@ -4424,6 +4504,7 @@ fn validate_selected_references(
                 && reference.source_revision() == context.function_revision()
         })
         .collect::<Vec<_>>();
+    let function = active.catalogue().function_by_id(context.function());
 
     match active.catalogue_hash_context() {
         orna_core::revision::CatalogueHashContext::Version1 => {
@@ -4446,16 +4527,10 @@ fn validate_selected_references(
                 | ClientReturnShape::Procedural(_)
                 | ClientReturnShape::Action(_)
             ) {
-                if selected.iter().any(|reference| {
-                    !matches!(
-                        reference.kind(),
-                        DefinitionReferenceKind::FunctionCall
-                            | DefinitionReferenceKind::NamedType
-                            | DefinitionReferenceKind::ParameterRead
-                            | DefinitionReferenceKind::QueryField
-                            | DefinitionReferenceKind::Expression
-                    )
-                }) {
+                if selected
+                    .iter()
+                    .any(|reference| !is_expression_reference_allowed(function, reference))
+                {
                     return Err(invalid_function(context, ClientExecutionRule::References));
                 }
                 return Ok(());
@@ -4566,7 +4641,7 @@ mod tests {
         trigger_client_action, ClientActionDescriptor, ClientActionError, ClientActionOutcome,
         ClientActionState, ClientExecutionContext, ClientResource, ClientResourceCompletion,
         ClientResourceKey, ClientResourceRequest, ClientResourceStatus, ClientStateStore,
-        DeterministicClientResourceExecutor, ACTION_FAILURE_CODE,
+        ClientResourceExecutor, DeterministicClientResourceExecutor, ACTION_FAILURE_CODE,
     };
     use orna_artifact::client_plan::ActionTargetDomain;
     use std::time::SystemTime;
@@ -4590,8 +4665,8 @@ mod tests {
             DefinitionIdentity, DefinitionOrigin, DefinitionReference, DefinitionReferenceKind,
             DefinitionReferenceTarget, DeployableRevision, ExecutableArtifact,
             ExecutableArtifactKind, FunctionRevisionRecord, FunctionSemanticHashVersion,
-            RevisionInvariantError, RevisionPair, Sha256Digest, SourceOrigin, StoredSourceRevision,
-            StoredSourceUnit,
+            RevisionInvariantError, RevisionPair, Sha256Digest, SourceOrigin,
+            StoredSourceRevision, StoredSourceUnit, VerifiedStandardLibrarySnapshot,
         },
         security::{
             AuthorisedInvocation, ExecuteDecision, ExecuteGrant, InvocationTarget, Principal,
@@ -4602,6 +4677,34 @@ mod tests {
         types::{ResolvedType, StandardScalar},
         value::{FunctionArgument, OpaqueValue, RuntimeFloat, RuntimeValue},
     };
+
+    #[derive(Default)]
+    struct RecordingActionExecutor {
+        executed: Vec<ClientResourceRequest>,
+        cancelled: Vec<ClientResourceRequest>,
+        result: Option<RuntimeValue>,
+    }
+
+    impl RecordingActionExecutor {
+        fn new(result: Option<RuntimeValue>) -> Self {
+            Self { result, ..Self::default() }
+        }
+    }
+
+    impl ClientResourceExecutor for RecordingActionExecutor {
+        fn execute(&mut self, request: ClientResourceRequest) -> ClientResourceCompletion {
+            self.executed.push(request.clone());
+            match self.result.clone() {
+                Some(value) => request.ready(value),
+                None => request.pending(),
+            }
+        }
+
+        fn cancel(&mut self, request: ClientResourceRequest) -> ClientResourceCompletion {
+            self.cancelled.push(request.clone());
+            request.cancelled()
+        }
+    }
 
     fn authorise(pair: RevisionPair, function: FunctionId) -> AuthorisedInvocation {
         let principal = PrincipalId::from_bytes([0x7a; 16]);
@@ -7507,6 +7610,72 @@ mod tests {
     }
 
     #[test]
+    fn expression_like_reference_validation_accepts_declared_ref_parameter_object_references() {
+        let function_id = FunctionId::from_bytes([0xd1; 16]);
+        let function_revision = FunctionRevisionId::from_bytes([0xd2; 16]);
+        let parameter_id = ParameterId::from_bytes([0xd3; 16]);
+        let object_type = TypeId::from_bytes([0xd4; 16]);
+        let function = FunctionDefinition::new(
+            function_id,
+            QualifiedSemanticName::new(["action_fixture", "call"]).unwrap(),
+            FunctionDomain::Client,
+            vec![ParameterDefinition::new(
+                parameter_id,
+                "p_value",
+                0,
+                ResolvedType::reference(object_type),
+                None,
+            )],
+            FunctionReturn::Single(ResolvedType::Value(orna_standard::STD_ACTION_TYPE_ID)),
+            function_revision,
+            FunctionSecurity::Invoker,
+            None,
+            FunctionVolatility::Immutable,
+        );
+        let source_origin =
+            SourceOrigin::new(SourceUnitId::from_bytes([0xd5; 16]), 0, 0).unwrap();
+        let reference = |kind, target| {
+            DefinitionReference::new(
+                function_id,
+                function_revision,
+                0,
+                target,
+                kind,
+                source_origin,
+            )
+        };
+
+        assert!(super::is_expression_reference_allowed(
+            Some(&function),
+            &reference(
+                DefinitionReferenceKind::ObjectReference,
+                DefinitionReferenceTarget::ObjectType(object_type),
+            ),
+        ));
+        assert!(!super::is_expression_reference_allowed(
+            Some(&function),
+            &reference(
+                DefinitionReferenceKind::ObjectReference,
+                DefinitionReferenceTarget::ObjectType(TypeId::from_bytes([0xd6; 16])),
+            ),
+        ));
+        assert!(!super::is_expression_reference_allowed(
+            Some(&function),
+            &reference(
+                DefinitionReferenceKind::WriteObject,
+                DefinitionReferenceTarget::ObjectType(object_type),
+            ),
+        ));
+        assert!(!super::is_expression_reference_allowed(
+            Some(&function),
+            &reference(
+                DefinitionReferenceKind::QueryObject,
+                DefinitionReferenceTarget::ObjectType(object_type),
+            ),
+        ));
+    }
+
+    #[test]
     fn public_errors_and_rules_preserve_the_closed_adr0015_surface() {
         use orna_artifact::client_plan::ClientPlan;
 
@@ -8231,6 +8400,20 @@ mod tests {
     ) -> FunctionSemanticHashVersion {
         semantic_hash_version
     }
+    fn standard_v5() -> VerifiedStandardLibrarySnapshot {
+        orna_standard::verify_standard_library_snapshot(
+            orna_standard::retained_standard_library_snapshot().unwrap(),
+        )
+        .unwrap()
+    }
+
+    fn standard_v6() -> VerifiedStandardLibrarySnapshot {
+        orna_standard::verify_standard_library_v6_snapshot(
+            orna_standard::retained_standard_library_v6_snapshot().unwrap(),
+        )
+        .unwrap()
+    }
+
 
     fn version_two_value_active(
         return_type: TypeId,
@@ -8241,14 +8424,15 @@ mod tests {
         RevisionPair,
         FunctionRevisionId,
     ) {
-        version_two_value_active_with_artifact(
+        version_two_active_with_artifact(
+            standard_v5(),
             return_type,
-            reference_target,
+            DefinitionReferenceTarget::ValueType(reference_target),
+            DefinitionReferenceKind::NamedType,
             1,
             b"ORNACP\0\0\0\0\0\x01\x01\x01".to_vec(),
         )
     }
-
     fn version_two_opaque_active(
         plan_type: TypeId,
         payload: [u8; 16],
@@ -8258,9 +8442,11 @@ mod tests {
         RevisionPair,
         FunctionRevisionId,
     ) {
-        version_two_value_active_with_artifact(
+        version_two_active_with_artifact(
+            standard_v5(),
             orna_standard::OPAQUE_TOKEN_TYPE_ID,
-            orna_standard::OPAQUE_TOKEN_TYPE_ID,
+            DefinitionReferenceTarget::ValueType(orna_standard::OPAQUE_TOKEN_TYPE_ID),
+            DefinitionReferenceKind::NamedType,
             orna_artifact::client_plan::OPAQUE_FORMAT_VERSION,
             orna_artifact::client_plan::OpaqueClientPlan::return_opaque(plan_type, payload)
                 .encode(),
@@ -8278,10 +8464,48 @@ mod tests {
         RevisionPair,
         FunctionRevisionId,
     ) {
-        let standard = orna_standard::verify_standard_library_snapshot(
-            orna_standard::retained_standard_library_snapshot().unwrap(),
+        version_two_active_with_artifact(
+            standard_v5(),
+            return_type,
+            DefinitionReferenceTarget::ValueType(reference_target),
+            DefinitionReferenceKind::NamedType,
+            artifact_version,
+            payload,
         )
-        .unwrap();
+    }
+
+    fn version_two_client_call_active() -> (
+        ActiveDatabaseRevision,
+        FunctionId,
+        RevisionPair,
+        FunctionRevisionId,
+    ) {
+        version_two_active_with_artifact(
+            standard_v6(),
+            orna_standard::BOOLEAN_TYPE_ID,
+            DefinitionReferenceTarget::Function(FunctionId::from_bytes([6; 16])),
+            DefinitionReferenceKind::FunctionCall,
+            orna_artifact::client_plan::EXPRESSION_FORMAT_VERSION,
+            orna_artifact::client_plan::ExpressionClientPlan::new(
+                orna_artifact::client_plan::ClientExpressionNode::Boolean { value: true },
+            )
+            .encode()
+            .unwrap(),
+        )
+    }
+    fn version_two_active_with_artifact(
+        standard: VerifiedStandardLibrarySnapshot,
+        return_type: TypeId,
+        reference_target: DefinitionReferenceTarget,
+        reference_kind: DefinitionReferenceKind,
+        artifact_version: u32,
+        payload: Vec<u8>,
+    ) -> (
+        ActiveDatabaseRevision,
+        FunctionId,
+        RevisionPair,
+        FunctionRevisionId,
+    ) {
         let (version_one, function_id, pair, function_revision_id) = version_one_active(true);
         let prior_function = version_one.catalogue().function_by_id(function_id).unwrap();
         let function = FunctionDefinition::new(
@@ -8315,8 +8539,8 @@ mod tests {
             function_id,
             function_revision_id,
             0,
-            DefinitionReferenceTarget::ValueType(reference_target),
-            DefinitionReferenceKind::NamedType,
+            reference_target,
+            reference_kind,
             prior_revision.declaration_origin(),
         );
         let semantic_hash = function_semantic_digest_with_version(
@@ -8857,6 +9081,156 @@ mod tests {
     }
 
 
+    fn version_six_client_resource_action_active(
+    ) -> (
+        ActiveDatabaseRevision,
+        FunctionId,
+        RevisionPair,
+        FunctionRevisionId,
+        ParameterId,
+    ) {
+        let pair = RevisionPair::new(
+            SourceRevisionId::from_bytes([3; 16]),
+            CatalogueRevisionId::from_bytes([4; 16]),
+        );
+        let target = FunctionId::from_bytes([0xd1; 16]);
+        let operation = orna_artifact::client_plan::ResourceOperationNode::new(
+            orna_artifact::client_plan::ResourceKind::Scalar,
+            target,
+            pair,
+            CallSiteId::from_bytes([0xe1; 16]),
+            vec![(
+                ParameterId::from_bytes([0xd3; 16]),
+                orna_artifact::client_plan::ClientExpressionNode::ParameterRead {
+                    parameter: ParameterId::from_bytes([0xb1; 16]),
+                },
+            )],
+            orna_standard::CHARACTER_LARGE_OBJECT_TYPE_ID,
+        );
+        let payload = orna_artifact::client_plan::CapabilityClientPlan::new(
+            orna_artifact::client_plan::InnerClientPlan::Resource(
+                orna_artifact::client_plan::ResourceClientPlan::new(
+                    orna_artifact::client_plan::ClientExpressionNode::Await {
+                        expression: Box::new(orna_artifact::client_plan::ClientExpressionNode::Resource {
+                            operation,
+                        }),
+                    },
+                ),
+            ),
+            vec![orna_artifact::client_plan::CapabilityRequirement::new(
+                "std.fs.read",
+                orna_artifact::client_plan::CapabilityArgumentSource::Parameter(
+                    "p_path".to_owned(),
+                ),
+            )],
+        )
+        .encode()
+        .unwrap();
+        let (base, function, pair, revision, parameter) =
+            version_five_expression_active_with_parameter(payload);
+        let origin = base.function_revisions()[0].declaration_origin();
+        let references = vec![
+            DefinitionReference::new(
+                function,
+                revision,
+                0,
+                DefinitionReferenceTarget::Function(function),
+                DefinitionReferenceKind::FunctionCall,
+                origin,
+            ),
+            DefinitionReference::new(
+                function,
+                revision,
+                1,
+                DefinitionReferenceTarget::Function(target),
+                DefinitionReferenceKind::FunctionCall,
+                origin,
+            ),
+        ];
+        let mut revisions = base.function_revisions().to_vec();
+        let client_revision = revisions
+            .iter()
+            .find(|candidate| candidate.function() == function)
+            .unwrap()
+            .clone();
+        let client_definition = base.catalogue().function_by_id(function).unwrap();
+        let client_semantic_hash = function_semantic_digest_with_version(
+            FunctionSemanticHashVersion::Version2,
+            client_definition,
+            client_revision.language_version(),
+            client_revision.artifact(),
+            base.expressions(),
+            &references,
+        )
+        .unwrap();
+        let rebuilt_client_revision = FunctionRevisionRecord::new(
+            client_revision.function(),
+            client_revision.id(),
+            client_revision.revision_number(),
+            client_revision.declaration_origin(),
+            client_revision.declaration_content_hash(),
+            client_semantic_hash,
+            client_revision.language_version(),
+            client_revision.artifact().clone(),
+        )
+        .unwrap()
+        .with_semantic_hash_version(FunctionSemanticHashVersion::Version2);
+        let client_revision_index = revisions
+            .iter()
+            .position(|candidate| candidate.function() == function)
+            .unwrap();
+        revisions[client_revision_index] = rebuilt_client_revision;
+        let context = orna_core::revision::CatalogueHashContext::version_two(standard_v6());
+        let catalogue_hash = catalogue_digest_with_context(
+            &context,
+            base.catalogue(),
+            &revisions,
+            base.expressions(),
+            base.origins(),
+            &references,
+        )
+        .unwrap();
+        let active = ActiveDatabaseRevision::new_with_catalogue_hash_context(
+            ActiveDatabaseRevisionInput::new(
+                pair,
+                base.source().clone(),
+                base.catalogue().clone(),
+                catalogue_hash,
+                ActiveRevisionContent::new(
+                    base.expressions().to_vec(),
+                    revisions,
+                    base.origins().to_vec(),
+                    references,
+                ),
+            ),
+            context,
+        )
+        .unwrap();
+        (active, function, pair, revision, parameter)
+    }
+
+    fn action_value(
+        active: &ActiveDatabaseRevision,
+        domain: ActionTargetDomain,
+        target: FunctionId,
+        pair: RevisionPair,
+        call_site: CallSiteId,
+        arguments: Vec<FunctionArgument>,
+        result_type: TypeId,
+    ) -> RuntimeValue {
+        let descriptor = ClientActionDescriptor::new(
+            domain, target, pair, call_site, arguments, result_type,
+        );
+        let payload = encode_action_payload(active, &descriptor).unwrap();
+        let registry = super::registered_opaque_codecs(
+            active.catalogue_hash_context().standard().unwrap(),
+        )
+        .unwrap();
+        RuntimeValue::Opaque(
+            OpaqueValue::new(active, &registry, super::STD_ACTION_TYPE_ID, payload).unwrap(),
+        )
+    }
+
     fn boolean_parameter() -> ParameterDefinition {
         ParameterDefinition::new(
             ParameterId::from_bytes([0xa1; 16]),
@@ -9103,6 +9477,195 @@ mod tests {
             Err(super::ClientActionError::InvalidValue)
         );
     }
+    #[test]
+    fn action_current_generation_malformed_completion_fails_and_clears_but_stale_stays_stale() {
+        let (active, function, pair, _) = version_one_active(true);
+        let principal = PrincipalId::from_bytes([0x7a; 16]);
+        let digest = ClientResourceKey::canonical_arguments_digest(&active, &[]).unwrap();
+        let key = ClientResourceKey::new(
+            InvocationTarget::new(function, pair),
+            principal,
+            digest,
+            active.catalogue_hash(),
+        );
+        let wrong_key = ClientResourceKey::new(
+            InvocationTarget::new(function, pair),
+            PrincipalId::from_bytes([0x7b; 16]),
+            digest,
+            active.catalogue_hash(),
+        );
+
+        let mut resource = ClientResource::new(key, ResolvedType::Scalar(StandardScalar::Boolean));
+        let request = resource.begin_request(&active, vec![]).unwrap();
+        let generation = request.generation();
+        let mut stale_state = ClientActionState::default();
+        stale_state.set_resource(resource);
+        assert_eq!(
+            complete_client_action(
+                &active,
+                &mut stale_state,
+                ClientResourceCompletion::Ready {
+                    key: wrong_key,
+                    generation,
+                    value: RuntimeValue::Boolean(true),
+                },
+            ),
+            Err(ClientActionError::StaleCompletion),
+        );
+        assert_eq!(stale_state.status(), ClientResourceStatus::Loading);
+
+        for completion in [
+            ClientResourceCompletion::Ready {
+                key,
+                generation,
+                value: RuntimeValue::Integer(1),
+            },
+            ClientResourceCompletion::Failed {
+                key,
+                generation,
+                code: String::new(),
+            },
+        ] {
+            let mut resource = ClientResource::new(key, ResolvedType::Scalar(StandardScalar::Boolean));
+            let request = resource.begin_request(&active, vec![]).unwrap();
+            assert_eq!(request.generation(), generation);
+            let mut action_state = ClientActionState::default();
+            action_state.set_resource(resource);
+            assert_eq!(
+                complete_client_action(&active, &mut action_state, completion),
+                Ok(ClientActionOutcome::Failed {
+                    code: ACTION_FAILURE_CODE.to_owned(),
+                }),
+            );
+            assert_eq!(action_state.status(), ClientResourceStatus::Idle);
+        }
+    }
+
+    #[test]
+    fn action_local_resource_pending_is_cancelled_and_fails_redacted_with_fresh_parent() {
+        let (active, function, pair, revision, parameter) = version_six_client_resource_action_active();
+        let auth = authorise(pair, function);
+        let enclosing_parent = InvocationId::from_bytes([0xf5; 16]);
+        let parent = ClientExecutionContext {
+            pair,
+            function,
+            function_revision: revision,
+            parent_invocation_id: enclosing_parent,
+        };
+        let argument = FunctionArgument::new(
+            parameter,
+            RuntimeValue::Text("/tmp/action".to_owned()),
+        )
+        .unwrap();
+        let action = action_value(
+            &active,
+            ActionTargetDomain::Client,
+            function,
+            pair,
+            CallSiteId::from_bytes([0xe2; 16]),
+            vec![argument],
+            orna_standard::CHARACTER_LARGE_OBJECT_TYPE_ID,
+        );
+        let mut state = ClientStateStore::default();
+        let mut action_state = ClientActionState::default();
+        let grant = capability::LocalCapabilityGrant::new(
+            capability::LocalCapabilityName::StdFsRead,
+            capability::LocalCapabilityScope::path("/tmp/action").unwrap(),
+        )
+        .unwrap();
+        let grants = capability::LocalCapabilityGrantSet::from_grants([grant]).unwrap();
+        let mut executor = RecordingActionExecutor::new(None);
+
+        for previous_parent in [None, Some(enclosing_parent)] {
+            assert_eq!(
+                trigger_client_action(
+                    &active,
+                    &action,
+                    &auth,
+                    &parent,
+                    &mut action_state,
+                    &[],
+                    &grants,
+                    &mut state,
+                    &mut executor,
+                ),
+                Ok(ClientActionOutcome::Failed {
+                    code: ACTION_FAILURE_CODE.to_owned(),
+                }),
+            );
+            assert_eq!(action_state.status(), ClientResourceStatus::Idle);
+            assert_eq!(executor.cancelled.len(), executor.executed.len());
+            let request = executor.executed.last().unwrap();
+            let cancelled = executor.cancelled.last().unwrap();
+            assert_eq!(request, cancelled);
+            let nested_parent = request
+                .invocation_context()
+                .expect("nested resource carries invocation provenance")
+                .parent_invocation_id();
+            assert_ne!(nested_parent, enclosing_parent);
+            if let Some(previous_parent) = previous_parent {
+                assert_ne!(nested_parent, previous_parent);
+            }
+            assert!(state.resource(request.key()).is_none());
+        }
+    }
+
+    #[test]
+    fn action_trigger_executes_a_local_client_target() {
+        let (active, target, pair, revision) = version_two_client_call_active();
+        let auth = authorise(pair, target);
+        let parent = ClientExecutionContext {
+            pair,
+            function: target,
+            function_revision: revision,
+            parent_invocation_id: InvocationId::from_bytes([0xf3; 16]),
+        };
+        let descriptor = ClientActionDescriptor::new(
+            ActionTargetDomain::Client,
+            target,
+            pair,
+            CallSiteId::from_bytes([0xf4; 16]),
+            Vec::new(),
+            orna_standard::BOOLEAN_TYPE_ID,
+        );
+        let payload = encode_action_payload(&active, &descriptor).unwrap();
+        let registry = super::registered_opaque_codecs(
+            active
+                .catalogue_hash_context()
+                .standard()
+                .expect("action test fixture has a standard snapshot"),
+        )
+        .unwrap();
+        let action = OpaqueValue::new(
+            &active,
+            &registry,
+            super::STD_ACTION_TYPE_ID,
+            payload,
+        )
+        .unwrap();
+        let mut state = ClientStateStore::default();
+        let mut action_state = ClientActionState::default();
+        let mut executor = DeterministicClientResourceExecutor::new(
+            |_: &ClientResourceRequest| Ok(RuntimeValue::Boolean(false)),
+        );
+
+        assert_eq!(
+            trigger_client_action(
+                &active,
+                &RuntimeValue::Opaque(action),
+                &auth,
+                &parent,
+                &mut action_state,
+                &[],
+                &capability::LocalCapabilityGrantSet::default(),
+                &mut state,
+                &mut executor,
+            ),
+            Ok(ClientActionOutcome::Completed),
+        );
+        assert_eq!(action_state.status(), ClientResourceStatus::Idle);
+    }
+
 
     #[test]
     fn action_trigger_rejects_unreferenced_target_provenance() {
@@ -14300,7 +14863,9 @@ mod runtime_conformance {
 
         let malformed = [UiOperation {
             kind: UiOperationKind::UnmountNode,
-            as_: UiOperationArgs { unmount_node: 99 },
+            as_: UiOperationArgs {
+                unmount_node: u64::MAX,
+            },
         }];
         assert_eq!(
             session.apply(surface, &batch(2, &malformed)),
