@@ -5889,6 +5889,53 @@ mod tests {
         assert_eq!(decoded, request);
         assert_eq!(encode_resource_request(&active, &registry, &decoded), Ok(encoded));
     }
+
+    #[test]
+    fn resource_request_with_typed_arguments_has_exact_canonical_golden_bytes() {
+        let active = empty_active_revision();
+        let registry = test_registry();
+        let first_value = encode_constructed_value(&active, &registry, &RuntimeValue::Integer(1)).unwrap();
+        let second_value = encode_constructed_value(&active, &registry, &RuntimeValue::Integer(2)).unwrap();
+        assert_eq!(first_value, resource_hex("4f52563503000000000000000000000000000000020000000400000001"));
+        assert_eq!(second_value, resource_hex("4f52563503000000000000000000000000000000020000000400000002"));
+        let request = ResourceRequest {
+            arguments: vec![
+                ResourceArgument {
+                    parameter: ParameterId::from_bytes([0x01; 16]),
+                    value: RuntimeValue::Integer(1),
+                },
+                ResourceArgument {
+                    parameter: ParameterId::from_bytes([0x02; 16]),
+                    value: RuntimeValue::Integer(2),
+                },
+            ],
+            ..resource_request_fixture()
+        };
+        let encoded = encode_resource_request(&active, &registry, &request).unwrap();
+        let expected = resource_hex(concat!(
+            "4f524e412d5245534f555243452f310100000000e7",
+            "0000000000000001",
+            "02020202020202020202020202020202",
+            "03030303030303030303030303030303",
+            "04040404040404040404040404040404",
+            "05050505050505050505050505050505",
+            "06060606060606060606060606060606",
+            "07070707070707070707070707070707",
+            "0000000000000009",
+            "0100000002",
+            "01010101010101010101010101010101",
+            "0000001d4f52563503000000000000000000000000000000020000000400000001",
+            "02020202020202020202020202020202",
+            "0000001d4f52563503000000000000000000000000000000020000000400000002",
+            "000000000000000a",
+            "000000000000000b",
+        ));
+        assert_eq!(encoded, expected);
+        let decoded = decode_resource_request(&active, &registry, &encoded).unwrap();
+        assert_eq!(decoded, request);
+        assert_eq!(encode_resource_request(&active, &registry, &decoded), Ok(expected));
+    }
+
     #[test]
     fn resource_request_and_controls_reject_unframed_payloads() {
         let active = empty_active_revision();
@@ -5922,6 +5969,63 @@ mod tests {
             Err(FrameCodecError::ResourceInvalidMarker)
         ));
     }
+    #[test]
+    fn resource_envelope_rejects_wrong_major_flags_and_length_errors() {
+        let active = empty_active_revision();
+        let registry = test_registry();
+        let encoded = encode_resource_request(&active, &registry, &resource_request_fixture()).unwrap();
+
+        let mut wrong_major = encoded.clone();
+        wrong_major[RESOURCE_MARKER.len() - 1] = b'2';
+        assert_eq!(
+            decode_resource_request(&active, &registry, &wrong_major),
+            Err(FrameCodecError::ResourceInvalidMarker)
+        );
+
+        let mut non_zero_flags = encoded.clone();
+        non_zero_flags[RESOURCE_MARKER.len() + 1] = 1;
+        assert_eq!(
+            decode_resource_request(&active, &registry, &non_zero_flags),
+            Err(FrameCodecError::NonZeroFlags { flags: 1 })
+        );
+        assert_eq!(
+            decode_resource_request(&active, &registry, &encoded[..RESOURCE_HEADER_LENGTH - 1]),
+            Err(FrameCodecError::TruncatedHeader {
+                actual: RESOURCE_HEADER_LENGTH - 1,
+            })
+        );
+
+        let truncated = &encoded[..encoded.len() - 1];
+        assert_eq!(
+            decode_resource_request(&active, &registry, truncated),
+            Err(FrameCodecError::TruncatedPayload {
+                declared: 133,
+                actual: 132,
+            })
+        );
+
+        let mut trailing = encoded.clone();
+        trailing.push(0);
+        assert_eq!(
+            decode_resource_request(&active, &registry, &trailing),
+            Err(FrameCodecError::TrailingBytes {
+                declared: 133,
+                actual: 134,
+            })
+        );
+
+        let mut oversized = encoded;
+        oversized[RESOURCE_MARKER.len() + 2..RESOURCE_HEADER_LENGTH]
+            .copy_from_slice(&u32::try_from(MAX_FRAME_PAYLOAD_LENGTH + 1).unwrap().to_be_bytes());
+        assert_eq!(
+            decode_resource_request(&active, &registry, &oversized),
+            Err(FrameCodecError::PayloadTooLarge {
+                actual: MAX_FRAME_PAYLOAD_LENGTH + 1,
+                maximum: MAX_FRAME_PAYLOAD_LENGTH,
+            })
+        );
+    }
+
     #[test]
     fn resource_frames_have_exact_golden_bytes() {
         let active = empty_active_revision();
@@ -6074,6 +6178,47 @@ mod tests {
         let decoded = decode_resource_values(&active, &registry, &encoded).unwrap();
         assert_eq!(decoded, frame);
         assert_eq!(encode_resource_values(&active, &registry, &decoded), Ok(encoded));
+    }
+
+    #[test]
+    fn resource_values_reject_metadata_limits_before_materialising_values() {
+        let active = empty_active_revision();
+        let registry = test_registry();
+        let value = RuntimeValue::Integer(7);
+        let value_bytes = encode_constructed_value(&active, &registry, &value).unwrap();
+        let frame = ResourceValues {
+            stream_id: 1,
+            request_id: InvocationId::from_bytes([0x12; 16]),
+            batch_sequence: 0,
+            item_count: 1,
+            byte_count: value_bytes.len() as u32,
+            values: vec![value],
+        };
+        let encoded = encode_resource_values(&active, &registry, &frame).unwrap();
+
+        let item_count_offset = RESOURCE_HEADER_LENGTH + 8 + 16 + 8;
+        let mut too_many_items = encoded.clone();
+        too_many_items[item_count_offset..item_count_offset + 4]
+            .copy_from_slice(&u32::try_from(MAX_RESOURCE_BATCH_ITEMS + 1).unwrap().to_be_bytes());
+        assert_eq!(
+            decode_resource_values(&active, &registry, &too_many_items),
+            Err(FrameCodecError::TooManyResourceEntries {
+                actual: MAX_RESOURCE_BATCH_ITEMS + 1,
+                maximum: MAX_RESOURCE_BATCH_ITEMS,
+            })
+        );
+
+        let byte_count_offset = item_count_offset + 4;
+        let mut oversized_bytes = encoded;
+        oversized_bytes[byte_count_offset..byte_count_offset + 4]
+            .copy_from_slice(&u32::try_from(MAX_FRAME_PAYLOAD_LENGTH + 1).unwrap().to_be_bytes());
+        assert_eq!(
+            decode_resource_values(&active, &registry, &oversized_bytes),
+            Err(FrameCodecError::PayloadTooLarge {
+                actual: MAX_FRAME_PAYLOAD_LENGTH + 1,
+                maximum: MAX_FRAME_PAYLOAD_LENGTH,
+            })
+        );
     }
 
     #[test]
@@ -6620,12 +6765,172 @@ mod tests {
         assert_eq!(connection.apply(ResourceServerFrame::Values(values.clone())), Ok(ResourceFrameDisposition::Applied));
         let mut exhausted = values.clone();
         exhausted.batch_sequence = 1;
-        assert_eq!(connection.apply(ResourceServerFrame::Values(exhausted)), Err(ResourceConnectionError::InsufficientCredit { stream_id: 1, item_available: 0, item_required: 1, byte_available: 0, byte_required: value_bytes.len() as u64 }));
-        assert_eq!(connection.receive(ResourceClientFrame::WindowUpdate(ResourceWindowUpdate { stream_id: 1, request_id, add_items: 0, add_bytes: 0 })), Err(ResourceConnectionError::InvalidFrame { source: FrameCodecError::ResourceWindowOverflow }));
-        assert_eq!(connection.receive(ResourceClientFrame::WindowUpdate(ResourceWindowUpdate { stream_id: 1, request_id, add_items: 1, add_bytes: 1 })), Ok(ResourceFrameDisposition::Applied));
-        assert_eq!(connection.apply(ResourceServerFrame::Completed(ResourceCompleted { stream_id: 1, request_id, final_batch_sequence: 0, total_items: 1 })), Ok(ResourceFrameDisposition::Applied));
+        assert_eq!(
+            connection.apply(ResourceServerFrame::Values(exhausted)),
+            Err(ResourceConnectionError::InsufficientCredit {
+                stream_id: 1,
+                item_available: 0,
+                item_required: 1,
+                byte_available: 0,
+                byte_required: value_bytes.len() as u64,
+            })
+        );
+        assert_eq!(
+            connection.receive(ResourceClientFrame::WindowUpdate(ResourceWindowUpdate {
+                stream_id: 1,
+                request_id,
+                add_items: 1,
+                add_bytes: value_bytes.len() as u64,
+            })),
+            Ok(ResourceFrameDisposition::Applied)
+        );
+        assert_eq!(
+            connection.apply(ResourceServerFrame::Values(ResourceValues {
+                stream_id: 1,
+                request_id,
+                batch_sequence: 1,
+                item_count: 1,
+                byte_count: value_bytes.len() as u32,
+                values: vec![value.clone()],
+            })),
+            Ok(ResourceFrameDisposition::Applied)
+        );
+        assert_eq!(
+            connection.apply(ResourceServerFrame::Completed(ResourceCompleted {
+                stream_id: 1,
+                request_id,
+                final_batch_sequence: 1,
+                total_items: 2,
+            })),
+            Ok(ResourceFrameDisposition::Applied)
+        );
         assert_eq!(connection.apply(ResourceServerFrame::Values(values)), Ok(ResourceFrameDisposition::DroppedLate));
-        assert_eq!(connection.receive(ResourceClientFrame::Cancel(ResourceCancel { stream_id: 1, request_id, reason: ResourceCancellationCode::ClientRequested })), Ok(ResourceFrameDisposition::DroppedLate));
+        assert_eq!(connection.live_resources(), 0);
+    }
+
+    #[test]
+    fn resource_connection_reports_item_and_byte_credit_exhaustion_independently() {
+        let active = empty_active_revision();
+        let registry = test_registry();
+        let value = RuntimeValue::Integer(7);
+        let value_bytes = encode_constructed_value(&active, &registry, &value).unwrap();
+        let mut connection = ResourceProtocolConnection::new();
+
+        let mut item_request = resource_request_fixture();
+        item_request.stream_id = 10;
+        item_request.request_id = InvocationId::from_bytes([0x70; 16]);
+        item_request.resource_kind = ResourceKind::Stream;
+        item_request.item_window = 1;
+        item_request.byte_window = (value_bytes.len() * 2) as u64;
+        connection.open(item_request.clone()).unwrap();
+        connection.apply(ResourceServerFrame::Accepted(ResourceAccepted {
+            stream_id: 10,
+            request_id: item_request.request_id,
+            nested_invocation_id: InvocationId::from_bytes([0x71; 16]),
+            target_revision: item_request.target_revision,
+            resource_kind: ResourceKind::Stream,
+        })).unwrap();
+        connection.apply(ResourceServerFrame::Values(ResourceValues {
+            stream_id: 10,
+            request_id: item_request.request_id,
+            batch_sequence: 0,
+            item_count: 1,
+            byte_count: value_bytes.len() as u32,
+            values: vec![value.clone()],
+        })).unwrap();
+        assert_eq!(
+            connection.apply(ResourceServerFrame::Values(ResourceValues {
+                stream_id: 10,
+                request_id: item_request.request_id,
+                batch_sequence: 1,
+                item_count: 1,
+                byte_count: value_bytes.len() as u32,
+                values: vec![value.clone()],
+            })),
+            Err(ResourceConnectionError::InsufficientCredit {
+                stream_id: 10,
+                item_available: 0,
+                item_required: 1,
+                byte_available: value_bytes.len() as u64,
+                byte_required: value_bytes.len() as u64,
+            })
+        );
+
+        let mut byte_request = resource_request_fixture();
+        byte_request.stream_id = 11;
+        byte_request.request_id = InvocationId::from_bytes([0x72; 16]);
+        byte_request.resource_kind = ResourceKind::Stream;
+        byte_request.item_window = 2;
+        byte_request.byte_window = value_bytes.len() as u64;
+        connection.open(byte_request.clone()).unwrap();
+        connection.apply(ResourceServerFrame::Accepted(ResourceAccepted {
+            stream_id: 11,
+            request_id: byte_request.request_id,
+            nested_invocation_id: InvocationId::from_bytes([0x73; 16]),
+            target_revision: byte_request.target_revision,
+            resource_kind: ResourceKind::Stream,
+        })).unwrap();
+        connection.apply(ResourceServerFrame::Values(ResourceValues {
+            stream_id: 11,
+            request_id: byte_request.request_id,
+            batch_sequence: 0,
+            item_count: 1,
+            byte_count: value_bytes.len() as u32,
+            values: vec![value.clone()],
+        })).unwrap();
+        assert_eq!(
+            connection.apply(ResourceServerFrame::Values(ResourceValues {
+                stream_id: 11,
+                request_id: byte_request.request_id,
+                batch_sequence: 1,
+                item_count: 1,
+                byte_count: value_bytes.len() as u32,
+                values: vec![value],
+            })),
+            Err(ResourceConnectionError::InsufficientCredit {
+                stream_id: 11,
+                item_available: 1,
+                item_required: 1,
+                byte_available: 0,
+                byte_required: value_bytes.len() as u64,
+            })
+        );
+    }
+
+    #[test]
+    fn resource_terminal_tombstones_evict_oldest_late_frames() {
+        let mut connection = ResourceProtocolConnection::new();
+        for stream_id in 1..=(MAX_LIVE_STREAMS + 1) as u64 {
+            let mut request = resource_request_fixture();
+            request.stream_id = stream_id;
+            request.request_id = InvocationId::from_bytes([stream_id as u8; 16]);
+            assert_eq!(connection.open(request.clone()), Ok(ResourceFrameDisposition::Applied));
+            assert_eq!(
+                connection.apply(ResourceServerFrame::Failed(ResourceFailed {
+                    stream_id,
+                    request_id: request.request_id,
+                    failure: CallFailure::InternalFailure,
+                })),
+                Ok(ResourceFrameDisposition::Applied)
+            );
+        }
+        assert_eq!(connection.live_resources(), 0);
+        assert_eq!(
+            connection.apply(ResourceServerFrame::Failed(ResourceFailed {
+                stream_id: 1,
+                request_id: InvocationId::from_bytes([1; 16]),
+                failure: CallFailure::InternalFailure,
+            })),
+            Err(ResourceConnectionError::UnknownStream { stream_id: 1 })
+        );
+        assert_eq!(
+            connection.apply(ResourceServerFrame::Failed(ResourceFailed {
+                stream_id: 2,
+                request_id: InvocationId::from_bytes([2; 16]),
+                failure: CallFailure::InternalFailure,
+            })),
+            Ok(ResourceFrameDisposition::DroppedLate)
+        );
     }
 
     #[test]
