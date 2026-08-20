@@ -811,8 +811,8 @@ impl PostgresKernel {
     /// pin.
     ///
     /// The invocation first passes the protected `sys.invoke` gate. Application
-    /// CLIENT targets use the same authorised local evaluator as the raw dispatch
-    /// path.
+    /// CLIENT targets use the local evaluator, while application SERVER targets
+    /// use the authenticated SERVER SELECT executor.
     pub async fn dispatch_sealed_sys_invoke(
         &self,
         authenticated_session: &AuthenticatedSession,
@@ -840,7 +840,7 @@ impl PostgresKernel {
     ) -> Result<SealedInvocationResult, PostgresKernelError> {
         let mut database_session = self.open().await?;
         let operation = async {
-            let transaction = database_session
+            let mut transaction = database_session
                 .client
                 .build_transaction()
                 .isolation_level(IsolationLevel::RepeatableRead)
@@ -885,14 +885,8 @@ impl PostgresKernel {
                                 "allowed sealed invocation target must resolve",
                             )
                         })?;
-                    let (value, security_target) = match target {
+                    let (values, security_target) = match target {
                         SealedResolvedTarget::Application(definition) => {
-                            if definition.domain() != FunctionDomain::Client {
-                                return Err(sealed_target_invariant(
-                                    &active,
-                                    "sealed application execution requires a CLIENT function",
-                                ));
-                            }
                             let security_target =
                                 InvocationTarget::new(definition.id(), active.pair());
                             let authorisation = match security
@@ -908,47 +902,100 @@ impl PostgresKernel {
                             };
                             let arguments =
                                 bind_sealed_invoke_arguments(definition, decoded.arguments())?;
-                            let execution = if let Some(executor) = resource_executor.as_deref_mut() {
-                                let mut state = ClientStateStore::new();
-                                evaluate_authorised_client_function_with_arguments_and_executor(
-                                    &active,
-                                    &authorisation,
-                                    &arguments,
-                                    &[],
-                                    &self.capability_grants,
-                                    &mut state,
-                                    invocation,
-                                    executor,
-                                )
-                            } else {
-                                evaluate_authorised_client_function_with_arguments(
-                                    &active,
-                                    &authorisation,
-                                    &arguments,
-                                    &[],
-                                    &self.capability_grants,
-                                )
-                            }
-                            .map_err(PostgresKernelError::ClientExecution);
-                            append_client_capability_audit(
-                                &transaction,
-                                authenticated_session,
-                                &active,
-                                security_target,
-                                &execution,
-                            )
-                            .await?;
-                            let value = match execution {
-                                Ok(result) => result.into_value(),
-                                Err(error) => {
-                                    transaction
+                            match definition.domain() {
+                                FunctionDomain::Client => {
+                                    let execution = if let Some(executor) =
+                                        resource_executor.as_deref_mut()
+                                    {
+                                        let mut state = ClientStateStore::new();
+                                        evaluate_authorised_client_function_with_arguments_and_executor(
+                                            &active,
+                                            &authorisation,
+                                            &arguments,
+                                            &[],
+                                            &self.capability_grants,
+                                            &mut state,
+                                            invocation,
+                                            executor,
+                                        )
+                                    } else {
+                                        evaluate_authorised_client_function_with_arguments(
+                                            &active,
+                                            &authorisation,
+                                            &arguments,
+                                            &[],
+                                            &self.capability_grants,
+                                        )
+                                    }
+                                    .map_err(PostgresKernelError::ClientExecution);
+                                    append_client_capability_audit(
+                                        &transaction,
+                                        authenticated_session,
+                                        &active,
+                                        security_target,
+                                        &execution,
+                                    )
+                                    .await?;
+                                    let value = match execution {
+                                        Ok(result) => result.into_value(),
+                                        Err(error) => {
+                                            transaction
+                                                .commit()
+                                                .await
+                                                .map_err(PostgresKernelError::Database)?;
+                                            return Err(error);
+                                        }
+                                    };
+                                    (vec![value], security_target)
+                                }
+                                FunctionDomain::Server => {
+                                    let kind = match definition.return_type() {
+                                        FunctionReturn::Single(_) => ProtocolResourceKind::Single,
+                                        FunctionReturn::Rows(columns) if columns.len() == 1 => {
+                                            ProtocolResourceKind::Stream
+                                        }
+                                        _ => {
+                                            return Err(sealed_target_invariant(
+                                                &active,
+                                                "sealed SERVER invocation requires one result column",
+                                            ));
+                                        }
+                                    };
+                                    let savepoint = transaction
+                                        .savepoint("sealed_server_execution")
+                                        .await
+                                        .map_err(PostgresKernelError::Database)?;
+                                    let execution = execute_authorised_server_select(
+                                        &savepoint,
+                                        &active,
+                                        &authorisation,
+                                        &arguments,
+                                    )
+                                    .await;
+                                    let server = match execution {
+                                        Ok(server) => server,
+                                        Err(error) => {
+                                            savepoint
+                                                .rollback()
+                                                .await
+                                                .map_err(PostgresKernelError::Database)?;
+                                            return Err(error);
+                                        }
+                                    };
+                                    let values = resource_values_from_server_result(kind, server)
+                                        .ok_or_else(|| {
+                                            sealed_target_invariant(
+                                                &active,
+                                                "sealed SERVER invocation result must be one value per row",
+                                            )
+                                        })?;
+                                    savepoint
                                         .commit()
                                         .await
                                         .map_err(PostgresKernelError::Database)?;
-                                    return Err(error);
+                                    (values, security_target)
                                 }
-                            };
-                            (value, security_target)
+                            }
                         }
                         SealedResolvedTarget::System(definition) => {
                             let security_target =
@@ -1013,7 +1060,7 @@ impl PostgresKernel {
                                     ));
                                 }
                             };
-                            (value, security_target)
+                            (vec![value], security_target)
                         }
                         SealedResolvedTarget::VerifiedStandard {
                             definition,
@@ -1047,11 +1094,19 @@ impl PostgresKernel {
                                 standard.revision(),
                                 executable.revision().id(),
                             );
-                            (value, security_target)
+                            (vec![value], security_target)
                         }
                     };
                     let events = match decoded.output_requirement() {
                         Some(requirement) => {
+                            let mut values = values;
+                            if values.len() != 1 {
+                                return Err(sealed_target_invariant(
+                                    &active,
+                                    "sealed output requirements require exactly one result value",
+                                ));
+                            }
+                            let value = values.pop().expect("one result value was checked");
                             match present_sealed_standard_output(
                                 requirement,
                                 value,
@@ -1080,10 +1135,10 @@ impl PostgresKernel {
                                 Err(SealedPresentationError::Kernel(error)) => return Err(error),
                             }
                         }
-                        None => Some(sealed_completed_events(
+                        None => Some(sealed_completed_events_from_values(
                             authenticated_session.principal(),
                             invocation,
-                            value,
+                            values,
                         )?),
                     };
                     match events {
@@ -2791,10 +2846,10 @@ fn bind_sealed_invoke_arguments(
 
 /// Builds the exact sealed Event sequence for one completed invocation.
 ///
-/// The batch carries `InvocationStarted(0)`, `ValueBatch(1)` with the
-/// presented value, and `InvocationCompleted(2)` as one contiguous outer
-/// record sequence `1, 2, 3`. A server adapter delivers this batch on the
-/// `RESULT_VALUES` channel and then completes the call.
+/// The batch carries `InvocationStarted(0)`, an optional non-empty
+/// `ValueBatch(1)`, and `InvocationCompleted` as one contiguous outer record
+/// sequence. A server adapter delivers this batch on the `RESULT_VALUES`
+/// channel and then completes the call.
 ///
 /// ADR 0057 step 7 passes either the canonical echo value (no output
 /// requirement) or the presented opaque value in the final `ValueBatch`.
@@ -2802,6 +2857,15 @@ pub(crate) fn sealed_completed_events(
     principal: PrincipalId,
     invocation: InvocationId,
     value: RuntimeValue,
+) -> Result<InvocationEventBatch, PostgresKernelError> {
+    sealed_completed_events_from_values(principal, invocation, vec![value])
+}
+
+/// Builds completed events from validated SERVER result values.
+fn sealed_completed_events_from_values(
+    principal: PrincipalId,
+    invocation: InvocationId,
+    values: Vec<RuntimeValue>,
 ) -> Result<InvocationEventBatch, PostgresKernelError> {
     let started = InvokeEvent::new(
         invocation,
@@ -2811,30 +2875,35 @@ pub(crate) fn sealed_completed_events(
         },
     )
     .map_err(PostgresKernelError::InvocationCarrier)?;
-    let values = InvokeEvent::new(
-        invocation,
-        1,
-        InvocationEventBody::value_batch(
-            None,
-            [InvokeValue::new(value.clone()).map_err(PostgresKernelError::InvocationCarrier)?],
+    let mut records = vec![InvocationEventRecord::new(1, started)];
+    let mut sequence = 1;
+    if !values.is_empty() {
+        let values = values
+            .into_iter()
+            .map(|value| {
+                InvokeValue::new(value).map_err(PostgresKernelError::InvocationCarrier)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let batch = InvokeEvent::new(
+            invocation,
+            sequence,
+            InvocationEventBody::value_batch(None, values)
+                .map_err(PostgresKernelError::InvocationCarrier)?,
         )
-        .map_err(PostgresKernelError::InvocationCarrier)?,
-    )
-    .map_err(PostgresKernelError::InvocationCarrier)?;
+        .map_err(PostgresKernelError::InvocationCarrier)?;
+        records.push(InvocationEventRecord::new(2, batch));
+        sequence += 1;
+    }
     let completed = InvokeEvent::new(
         invocation,
-        2,
+        sequence,
         InvocationEventBody::Completed {
             duration_nanoseconds: 0,
         },
     )
     .map_err(PostgresKernelError::InvocationCarrier)?;
-    InvocationEventBatch::new(vec![
-        InvocationEventRecord::new(1, started),
-        InvocationEventRecord::new(2, values),
-        InvocationEventRecord::new(3, completed),
-    ])
-    .map_err(PostgresKernelError::SealedInvocation)
+    records.push(InvocationEventRecord::new(sequence + 1, completed));
+    InvocationEventBatch::new(records).map_err(PostgresKernelError::SealedInvocation)
 }
 
 /// Captures one inspection epoch and its trace rows for a completed sealed
@@ -6140,4 +6209,46 @@ mod tests {
             }
         ));
     }
+
+    #[test]
+    fn sealed_completed_events_carry_all_server_values_in_one_batch() {
+        let events = sealed_completed_events_from_values(
+            PrincipalId::from_bytes([0x61; 16]),
+            InvocationId::from_bytes([0x62; 16]),
+            vec![RuntimeValue::Integer(1), RuntimeValue::Integer(2)],
+        )
+        .expect("server values form a valid event batch");
+        assert_eq!(events.records().len(), 3);
+        assert_eq!(events.records()[0].event().sequence(), 0);
+        assert_eq!(events.records()[1].event().sequence(), 1);
+        assert_eq!(events.records()[2].event().sequence(), 2);
+        let InvocationEventBody::ValueBatch { schema, values } = events.records()[1].event().body()
+        else {
+            panic!("expected one server ValueBatch event");
+        };
+        assert!(schema.is_none());
+        assert_eq!(values.len(), 2);
+        assert_eq!(values[0].value(), &RuntimeValue::Integer(1));
+        assert_eq!(values[1].value(), &RuntimeValue::Integer(2));
+    }
+
+    #[test]
+    fn sealed_completed_events_allow_an_empty_server_result() {
+        let events = sealed_completed_events_from_values(
+            PrincipalId::from_bytes([0x63; 16]),
+            InvocationId::from_bytes([0x64; 16]),
+            Vec::new(),
+        )
+        .expect("an empty server result still completes the invocation");
+        assert_eq!(events.records().len(), 2);
+        assert_eq!(events.records()[0].event().sequence(), 0);
+        assert_eq!(events.records()[1].event().sequence(), 1);
+        assert!(matches!(
+            events.records()[1].event().body(),
+            InvocationEventBody::Completed {
+                duration_nanoseconds: 0
+            }
+        ));
+    }
+
 }
