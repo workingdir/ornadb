@@ -259,10 +259,14 @@ fn expected_function_references(
     for parameter in function.parameters() {
         add_signature_reference(&mut expected, parameter.resolved_type());
     }
-    if let FunctionReturn::Rows(columns) = function.return_type() {
-        for column in columns {
-            add_signature_reference(&mut expected, column.resolved_type());
+    match function.return_type() {
+        FunctionReturn::Rows(columns) => {
+            for column in columns {
+                add_signature_reference(&mut expected, column.resolved_type());
+            }
         }
+        FunctionReturn::Stream(element) => add_signature_reference(&mut expected, *element),
+        FunctionReturn::Single(_) => {}
     }
     expected.extend_from_slice(body);
     expected
@@ -748,6 +752,35 @@ mod tests {
                 ),
                 body[0],
             ]
+        );
+        let stream_function = FunctionDefinition::new(
+            function.id(),
+            function.name().clone(),
+            FunctionDomain::Server,
+            function.parameters().to_vec(),
+            FunctionReturn::Stream(ResolvedType::reference(result_target)),
+            function.current_revision(),
+            FunctionSecurity::Invoker,
+            None,
+            FunctionVolatility::Stable,
+        );
+        assert_eq!(
+            expected_function_references(&stream_function, &body),
+            vec![
+                ExpectedDefinitionReference::new(
+                    DefinitionReferenceKind::NamedType,
+                    DefinitionReferenceTarget::ValueType(parameter_value),
+                ),
+                ExpectedDefinitionReference::new(
+                    DefinitionReferenceKind::ObjectReference,
+                    DefinitionReferenceTarget::ObjectType(parameter_target),
+                ),
+                ExpectedDefinitionReference::new(
+                    DefinitionReferenceKind::ObjectReference,
+                    DefinitionReferenceTarget::ObjectType(result_target),
+                ),
+                body[0],
+            ],
         );
     }
 
