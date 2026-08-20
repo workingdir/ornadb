@@ -558,6 +558,7 @@ pub enum ResourceConnectionError {
     WrongState { stream_id: u64 },
     StreamNotIncreasing { stream_id: u64, previous: u64 },
     TooManyLiveResources,
+    RequestIdHistoryExhausted,
     BatchSequenceMismatch { stream_id: u64, expected: u64, actual: u64 },
     InsufficientCredit { stream_id: u64, item_available: u64, item_required: u64, byte_available: u64, byte_required: u64 },
     ResourceTotalMismatch { stream_id: u64, expected: u64, actual: u64 },
@@ -576,6 +577,7 @@ impl fmt::Display for ResourceConnectionError {
             Self::WrongState { .. } => formatter.write_str("resource frame violates stream state"),
             Self::StreamNotIncreasing { .. } => formatter.write_str("resource stream id is not increasing"),
             Self::TooManyLiveResources => formatter.write_str("too many live resource streams"),
+            Self::RequestIdHistoryExhausted => formatter.write_str("resource request ID history is exhausted"),
             Self::BatchSequenceMismatch { .. } => formatter.write_str("resource batch sequence is not contiguous"),
             Self::InsufficientCredit { .. } => formatter.write_str("resource stream credit is insufficient"),
             Self::ResourceTotalMismatch { .. } => formatter.write_str("resource total item count mismatches stream"),
@@ -803,6 +805,8 @@ impl Error for ConnectionError {
 }
 
 const MAX_LIVE_STREAMS: usize = 64;
+/// The maximum number of unique resource request identities retained per connection.
+const MAX_REQUEST_ID_HISTORY: usize = MAX_LIVE_STREAMS * 2;
 const MAX_ARGUMENTS: usize = 256;
 const MAX_ARGUMENT_BYTES: usize = MAX_FRAME_PAYLOAD_LENGTH;
 /// The largest byte credit retained for one raw-call output channel.
@@ -1758,8 +1762,9 @@ pub struct ResourceProtocolConnection {
     streams: BTreeMap<u64, ResourceState>,
     /// Request IDs remain reserved for the whole connection lifetime.
     ///
-    /// Unlike terminal stream tombstones, this history is intentionally not
-    /// evicted: bounded cleanup must not permit request ID reuse.
+    /// Unlike terminal stream tombstones, this bounded history is never
+    /// evicted; once full, new request identities are rejected rather than
+    /// permitting reuse.
     request_ids: BTreeSet<InvocationId>,
     terminal: BTreeMap<u64, InvocationId>,
 }
@@ -1825,6 +1830,9 @@ impl ResourceProtocolConnection {
         }
         if self.request_ids.contains(&request.request_id) {
             return Err(ResourceConnectionError::DuplicateRequestId { request_id: request.request_id });
+        }
+        if self.request_ids.len() >= MAX_REQUEST_ID_HISTORY {
+            return Err(ResourceConnectionError::RequestIdHistoryExhausted);
         }
         if self.streams.len() == MAX_LIVE_STREAMS {
             return Err(ResourceConnectionError::TooManyLiveResources);
@@ -8099,4 +8107,65 @@ mod tests {
         assert_eq!(connection.open(second), Ok(ResourceFrameDisposition::Applied));
         assert_eq!(connection.live_resources(), 2);
     }
+    #[test]
+    fn resource_connection_bounds_request_id_history_without_eviction() {
+        let mut connection = ResourceProtocolConnection::new();
+        for stream_id in 1..=MAX_REQUEST_ID_HISTORY as u64 {
+            let mut request = resource_request_fixture();
+            request.stream_id = stream_id;
+            request.request_id = InvocationId::from_bytes([stream_id as u8; 16]);
+            assert_eq!(connection.open(request.clone()), Ok(ResourceFrameDisposition::Applied));
+            assert_eq!(
+                connection.apply(ResourceServerFrame::Failed(ResourceFailed {
+                    stream_id,
+                    request_id: request.request_id,
+                    failure: CallFailure::InternalFailure,
+                })),
+                Ok(ResourceFrameDisposition::Applied),
+            );
+        }
+
+        let mut exhausted = resource_request_fixture();
+        exhausted.stream_id = MAX_REQUEST_ID_HISTORY as u64 + 1;
+        exhausted.request_id = InvocationId::from_bytes([0xff; 16]);
+        let before_exhausted = connection.clone();
+        assert_eq!(
+            connection.open(exhausted),
+            Err(ResourceConnectionError::RequestIdHistoryExhausted),
+        );
+        assert_eq!(connection, before_exhausted);
+    }
+
+    #[test]
+    fn resource_connection_rejects_duplicate_request_id_when_history_is_exhausted() {
+        let mut connection = ResourceProtocolConnection::new();
+        for stream_id in 1..=MAX_REQUEST_ID_HISTORY as u64 {
+            let mut request = resource_request_fixture();
+            request.stream_id = stream_id;
+            request.request_id = InvocationId::from_bytes([stream_id as u8; 16]);
+            assert_eq!(connection.open(request.clone()), Ok(ResourceFrameDisposition::Applied));
+            assert_eq!(
+                connection.apply(ResourceServerFrame::Failed(ResourceFailed {
+                    stream_id,
+                    request_id: request.request_id,
+                    failure: CallFailure::InternalFailure,
+                })),
+                Ok(ResourceFrameDisposition::Applied),
+            );
+        }
+
+        let duplicate_request_id = InvocationId::from_bytes([1; 16]);
+        let mut duplicate = resource_request_fixture();
+        duplicate.stream_id = MAX_REQUEST_ID_HISTORY as u64 + 1;
+        duplicate.request_id = duplicate_request_id;
+        let before_duplicate = connection.clone();
+        assert_eq!(
+            connection.open(duplicate),
+            Err(ResourceConnectionError::DuplicateRequestId {
+                request_id: duplicate_request_id,
+            }),
+        );
+        assert_eq!(connection, before_duplicate);
+    }
+
 }
