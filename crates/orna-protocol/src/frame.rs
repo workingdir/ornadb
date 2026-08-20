@@ -457,6 +457,13 @@ pub struct ResourceValues {
     pub values: Vec<RuntimeValue>,
 }
 
+/// The currently available item and byte credit for one retained resource stream.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ResourceCredit {
+    pub item_available: u64,
+    pub byte_available: u64,
+}
+
 /// The successful terminal resource frame.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ResourceCompleted {
@@ -1451,6 +1458,28 @@ impl ResourceProtocolConnection {
     pub const fn high_water_mark(&self) -> Option<u64> { self.high_water_mark }
 
     pub fn live_resources(&self) -> usize { self.streams.len() }
+
+    /// Returns the current item and byte credit for a retained resource stream.
+    ///
+    /// This inspection does not mutate connection state. The request identity is
+    /// checked against the stream before its credit is returned.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ResourceConnectionError::UnknownStream`] when the stream is not
+    /// retained and [`ResourceConnectionError::MismatchedRequest`] when the
+    /// request identity does not match the retained stream.
+    pub fn resource_credit(
+        &self,
+        stream_id: u64,
+        request_id: InvocationId,
+    ) -> Result<ResourceCredit, ResourceConnectionError> {
+        let state = self.state_for(stream_id, request_id)?;
+        Ok(ResourceCredit {
+            item_available: state.item_window,
+            byte_available: state.byte_window,
+        })
+    }
 
     pub fn receive(&mut self, frame: ResourceClientFrame) -> Result<ResourceFrameDisposition, ResourceConnectionError> {
         match frame {
@@ -6731,6 +6760,126 @@ mod tests {
             Ok(ResourceFrameDisposition::Applied),
         );
         assert_eq!(connection.live_resources(), 0);
+    }
+
+    #[test]
+    fn resource_connection_reports_available_credit_for_live_stream() {
+        let mut request = resource_request_fixture();
+        request.resource_kind = ResourceKind::Stream;
+        request.item_window = 7;
+        request.byte_window = 11;
+        let request_id = request.request_id;
+        let mut connection = ResourceProtocolConnection::new();
+        connection.open(request.clone()).unwrap();
+        connection.apply(ResourceServerFrame::Accepted(ResourceAccepted {
+            stream_id: request.stream_id,
+            request_id,
+            nested_invocation_id: InvocationId::from_bytes([0x54; 16]),
+            target_revision: request.target_revision,
+            resource_kind: ResourceKind::Stream,
+        })).unwrap();
+        let before = connection.clone();
+
+        assert_eq!(
+            connection.resource_credit(request.stream_id, request_id),
+            Ok(ResourceCredit {
+                item_available: 7,
+                byte_available: 11,
+            }),
+        );
+        assert_eq!(connection, before);
+    }
+
+    #[test]
+    fn resource_connection_reports_zero_credit_after_values_exhaust_window() {
+        let active = empty_active_revision();
+        let registry = test_registry();
+        let value = RuntimeValue::Integer(7);
+        let value_bytes = encode_constructed_value(&active, &registry, &value).unwrap();
+        let mut request = resource_request_fixture();
+        request.resource_kind = ResourceKind::Stream;
+        request.item_window = 1;
+        request.byte_window = value_bytes.len() as u64;
+        let request_id = request.request_id;
+        let mut connection = ResourceProtocolConnection::new();
+        connection.open(request.clone()).unwrap();
+        connection.apply(ResourceServerFrame::Accepted(ResourceAccepted {
+            stream_id: request.stream_id,
+            request_id,
+            nested_invocation_id: InvocationId::from_bytes([0x55; 16]),
+            target_revision: request.target_revision,
+            resource_kind: ResourceKind::Stream,
+        })).unwrap();
+        connection.apply(ResourceServerFrame::Values(ResourceValues {
+            stream_id: request.stream_id,
+            request_id,
+            batch_sequence: 0,
+            item_count: 1,
+            byte_count: value_bytes.len() as u32,
+            values: vec![value],
+        })).unwrap();
+
+        assert_eq!(
+            connection.resource_credit(request.stream_id, request_id),
+            Ok(ResourceCredit {
+                item_available: 0,
+                byte_available: 0,
+            }),
+        );
+    }
+
+    #[test]
+    fn resource_connection_reports_credit_after_checked_window_update() {
+        let mut request = resource_request_fixture();
+        request.resource_kind = ResourceKind::Stream;
+        request.item_window = 2;
+        request.byte_window = 3;
+        let request_id = request.request_id;
+        let mut connection = ResourceProtocolConnection::new();
+        connection.open(request.clone()).unwrap();
+        connection.apply(ResourceServerFrame::Accepted(ResourceAccepted {
+            stream_id: request.stream_id,
+            request_id,
+            nested_invocation_id: InvocationId::from_bytes([0x56; 16]),
+            target_revision: request.target_revision,
+            resource_kind: ResourceKind::Stream,
+        })).unwrap();
+
+        assert_eq!(
+            connection.receive(ResourceClientFrame::WindowUpdate(ResourceWindowUpdate {
+                stream_id: request.stream_id,
+                request_id,
+                add_items: 4,
+                add_bytes: 5,
+            })),
+            Ok(ResourceFrameDisposition::Applied),
+        );
+        assert_eq!(
+            connection.resource_credit(request.stream_id, request_id),
+            Ok(ResourceCredit {
+                item_available: 6,
+                byte_available: 8,
+            }),
+        );
+    }
+
+    #[test]
+    fn resource_connection_rejects_credit_lookup_for_unknown_or_mismatched_request() {
+        let request = resource_request_fixture();
+        let request_id = request.request_id;
+        let mut connection = ResourceProtocolConnection::new();
+        connection.open(request.clone()).unwrap();
+
+        assert_eq!(
+            connection.resource_credit(request.stream_id, InvocationId::from_bytes([0x99; 16])),
+            Err(ResourceConnectionError::MismatchedRequest {
+                stream_id: request.stream_id,
+            }),
+        );
+        assert_eq!(
+            connection.resource_credit(99, request_id),
+            Err(ResourceConnectionError::UnknownStream { stream_id: 99 }),
+        );
     }
 
     #[test]
