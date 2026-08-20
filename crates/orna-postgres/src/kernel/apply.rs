@@ -1304,6 +1304,9 @@ fn validate_postgres_encodings(
                     let _ = encoder.type_columns(column.resolved_type(), false)?;
                 }
             }
+            FunctionReturn::Stream(resolved) => {
+                let _ = encoder.type_columns(*resolved, false)?;
+            }
         }
     }
     for origin in candidate.origins() {
@@ -1827,6 +1830,11 @@ async fn persist_standard_executable_fact(
         FunctionReturn::Rows(_) => {
             return Err(invariant(
                 "standard catalogue functions with ROWS results are not supported by standard persistence",
+            ));
+        }
+        FunctionReturn::Stream(_) => {
+            return Err(invariant(
+                "standard catalogue functions with STREAM results are not supported by standard persistence",
             ));
         }
     };
@@ -2443,6 +2451,27 @@ async fn persist_functions(
                 )
             }
             FunctionReturn::Rows(_) => ("rows", None, None, None, None, None, None, None),
+            FunctionReturn::Stream(value) => {
+                let TypeColumns {
+                    kind,
+                    scalar,
+                    target,
+                    value_type,
+                    standard_library_revision,
+                    enum_type,
+                    record_type,
+                } = encoder.type_columns(*value, false)?;
+                (
+                    "stream",
+                    Some(kind),
+                    scalar,
+                    target,
+                    value_type,
+                    standard_library_revision,
+                    enum_type,
+                    record_type,
+                )
+            }
         };
         transaction
             .execute(
