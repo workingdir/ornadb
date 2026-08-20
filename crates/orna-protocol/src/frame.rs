@@ -437,6 +437,8 @@ pub struct ResourceRequest {
     pub request_id: InvocationId,
     pub parent_invocation_id: InvocationId,
     pub call_site_id: CallSiteId,
+    pub state_profile: String,
+    pub function_instance_key: String,
     pub target_function_id: FunctionId,
     pub target_revision: RevisionPair,
     pub generation: u64,
@@ -2434,6 +2436,8 @@ pub enum FrameCodecError {
     ResourceWrongDirection { tag: u8 },
     /// A resource frame payload has a malformed shape.
     ResourceMalformedPayload,
+    /// A resource state-context text field is invalid UTF-8 or contains NUL.
+    ResourceInvalidText,
     /// A resource request or batch has too many entries.
     TooManyResourceEntries { actual: usize, maximum: usize },
     /// Resource arguments are not strictly ascending by ParameterId.
@@ -2564,6 +2568,9 @@ impl fmt::Display for FrameCodecError {
             }
             Self::ResourceMalformedPayload => {
                 formatter.write_str("resource frame payload is malformed")
+            }
+            Self::ResourceInvalidText => {
+                formatter.write_str("resource state-context text is invalid")
             }
             Self::TooManyResourceEntries { .. } => {
                 formatter.write_str("resource frame has too many entries")
@@ -2912,6 +2919,8 @@ pub fn encode_resource_request(
     payload.extend_from_slice(&request.request_id.to_bytes());
     payload.extend_from_slice(&request.parent_invocation_id.to_bytes());
     payload.extend_from_slice(&request.call_site_id.to_bytes());
+    append_resource_text(&mut payload, &request.state_profile)?;
+    append_resource_text(&mut payload, &request.function_instance_key)?;
     payload.extend_from_slice(&request.target_function_id.to_bytes());
     append_revision_pair(&mut payload, request.target_revision);
     payload.extend_from_slice(&request.generation.to_be_bytes());
@@ -2952,6 +2961,8 @@ pub fn decode_resource_request(
     let request_id = resource_id(payload, &mut cursor, InvocationId::from_bytes)?;
     let parent_invocation_id = resource_id(payload, &mut cursor, InvocationId::from_bytes)?;
     let call_site_id = resource_id(payload, &mut cursor, CallSiteId::from_bytes)?;
+    let state_profile = resource_text(payload, &mut cursor)?;
+    let function_instance_key = resource_text(payload, &mut cursor)?;
     let target_function_id = resource_id(payload, &mut cursor, FunctionId::from_bytes)?;
     let target_revision = parse_revision_pair(payload, &mut cursor)?;
     let generation = resource_u64(payload, &mut cursor)?;
@@ -3000,6 +3011,8 @@ pub fn decode_resource_request(
         request_id,
         parent_invocation_id,
         call_site_id,
+        state_profile,
+        function_instance_key,
         target_function_id,
         target_revision,
         generation,
@@ -3608,6 +3621,23 @@ fn resource_fixed<const N: usize>(
         .expect("resource fixed length checked");
     *cursor = end;
     Ok(bytes)
+}
+
+fn append_resource_text(payload: &mut Vec<u8>, value: &str) -> Result<(), FrameCodecError> {
+    if value.as_bytes().contains(&0) {
+        return Err(FrameCodecError::ResourceInvalidText);
+    }
+    append_length_delimited(payload, value.as_bytes())
+}
+
+fn resource_text(payload: &[u8], cursor: &mut usize) -> Result<String, FrameCodecError> {
+    let bytes = resource_bytes(payload, cursor)?;
+    if bytes.contains(&0) {
+        return Err(FrameCodecError::ResourceInvalidText);
+    }
+    std::str::from_utf8(bytes)
+        .map(str::to_owned)
+        .map_err(|_| FrameCodecError::ResourceInvalidText)
 }
 
 fn resource_bytes<'a>(payload: &'a [u8], cursor: &mut usize) -> Result<&'a [u8], FrameCodecError> {
@@ -6711,6 +6741,8 @@ mod tests {
             request_id: InvocationId::from_bytes([0x02; 16]),
             parent_invocation_id: InvocationId::from_bytes([0x03; 16]),
             call_site_id: orna_core::CallSiteId::from_bytes([0x04; 16]),
+            state_profile: String::new(),
+            function_instance_key: String::new(),
             target_function_id: FunctionId::from_bytes([0x05; 16]),
             target_revision: RevisionPair::new(
                 SourceRevisionId::from_bytes([0x06; 16]),
@@ -6733,11 +6765,13 @@ mod tests {
         let mut expected = Vec::new();
         expected.extend_from_slice(b"ORNA-RESOURCE/1");
         expected.extend_from_slice(&[RESOURCE_REQUEST_TAG, 0]);
-        expected.extend_from_slice(&133_u32.to_be_bytes());
+        expected.extend_from_slice(&141_u32.to_be_bytes());
         expected.extend_from_slice(&1_u64.to_be_bytes());
         expected.extend_from_slice(&[0x02; 16]);
         expected.extend_from_slice(&[0x03; 16]);
         expected.extend_from_slice(&[0x04; 16]);
+        expected.extend_from_slice(&0_u32.to_be_bytes());
+        expected.extend_from_slice(&0_u32.to_be_bytes());
         expected.extend_from_slice(&[0x05; 16]);
         expected.extend_from_slice(&[0x06; 16]);
         expected.extend_from_slice(&[0x07; 16]);
@@ -6774,11 +6808,13 @@ mod tests {
         };
         let encoded = encode_resource_request(&active, &registry, &request).unwrap();
         let expected = resource_hex(concat!(
-            "4f524e412d5245534f555243452f310100000000e7",
+            "4f524e412d5245534f555243452f310100000000ef",
             "0000000000000001",
             "02020202020202020202020202020202",
             "03030303030303030303030303030303",
             "04040404040404040404040404040404",
+            "00000000",
+            "00000000",
             "05050505050505050505050505050505",
             "06060606060606060606060606060606",
             "07070707070707070707070707070707",
@@ -6795,6 +6831,57 @@ mod tests {
         let decoded = decode_resource_request(&active, &registry, &encoded).unwrap();
         assert_eq!(decoded, request);
         assert_eq!(encode_resource_request(&active, &registry, &decoded), Ok(expected));
+    }
+
+    #[test]
+    fn resource_request_preserves_distinct_state_context_values() {
+        let active = empty_active_revision();
+        let registry = test_registry();
+        let mut first = resource_request_fixture();
+        first.state_profile = "profile-a".to_owned();
+        first.function_instance_key = "instance-a".to_owned();
+        let mut second = first.clone();
+        second.state_profile = "profile-b".to_owned();
+        second.function_instance_key = "instance-b".to_owned();
+        let first_decoded = decode_resource_request(
+            &active,
+            &registry,
+            &encode_resource_request(&active, &registry, &first).unwrap(),
+        )
+        .unwrap();
+        let second_decoded = decode_resource_request(
+            &active,
+            &registry,
+            &encode_resource_request(&active, &registry, &second).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(first_decoded.state_profile, "profile-a");
+        assert_eq!(first_decoded.function_instance_key, "instance-a");
+        assert_eq!(second_decoded.state_profile, "profile-b");
+        assert_eq!(second_decoded.function_instance_key, "instance-b");
+        assert_ne!(first_decoded, second_decoded);
+    }
+
+    #[test]
+    fn resource_request_rejects_nul_state_context_text() {
+        let active = empty_active_revision();
+        let registry = test_registry();
+        let mut request = resource_request_fixture();
+        request.state_profile = "bad\0profile".to_owned();
+        assert_eq!(
+            encode_resource_request(&active, &registry, &request),
+            Err(FrameCodecError::ResourceInvalidText),
+        );
+
+        let mut request = resource_request_fixture();
+        request.state_profile = "profile".to_owned();
+        let mut encoded = encode_resource_request(&active, &registry, &request).unwrap();
+        let profile_byte = RESOURCE_HEADER_LENGTH + 8 + 16 + 16 + 16 + 4;
+        encoded[profile_byte] = 0xff;
+        assert_eq!(
+            decode_resource_request(&active, &registry, &encoded),
+            Err(FrameCodecError::ResourceInvalidText),
+        );
     }
 
     #[test]
@@ -6860,8 +6947,8 @@ mod tests {
         assert_eq!(
             decode_resource_request(&active, &registry, truncated),
             Err(FrameCodecError::TruncatedPayload {
-                declared: 133,
-                actual: 132,
+                declared: 141,
+                actual: 140,
             })
         );
 
@@ -6870,8 +6957,8 @@ mod tests {
         assert_eq!(
             decode_resource_request(&active, &registry, &trailing),
             Err(FrameCodecError::TrailingBytes {
-                declared: 133,
-                actual: 134,
+                declared: 141,
+                actual: 142,
             })
         );
 
@@ -7133,7 +7220,7 @@ mod tests {
         ];
         let valid = encode_resource_request(&active, &registry, &canonical).unwrap();
         let first_value = encode_constructed_value(&active, &registry, &RuntimeValue::Integer(1)).unwrap();
-        let second_parameter_offset = RESOURCE_HEADER_LENGTH + 117 + 16 + 4 + first_value.len();
+        let second_parameter_offset = RESOURCE_HEADER_LENGTH + 125 + 16 + 4 + first_value.len();
         let mut duplicate = valid.clone();
         duplicate[second_parameter_offset..second_parameter_offset + 16].copy_from_slice(&[1; 16]);
         assert!(matches!(
@@ -7204,7 +7291,7 @@ mod tests {
             Err(FrameCodecError::ResourceWindowExceeded { .. })
         ));
         let mut encoded = encode_resource_request(&active, &registry, &resource_request_fixture()).unwrap();
-        let kind_offset = RESOURCE_HEADER_LENGTH + 8 + 16 + 16 + 16 + 16 + 16 + 16 + 8;
+        let kind_offset = RESOURCE_HEADER_LENGTH + 8 + 16 + 16 + 16 + 4 + 4 + 16 + 16 + 16 + 8;
         encoded[kind_offset] = 0xff;
         assert!(matches!(
             decode_resource_request(&active, &registry, &encoded),
