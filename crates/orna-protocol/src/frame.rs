@@ -1803,6 +1803,8 @@ impl ResourceProtocolConnection {
         }
     }
 
+    /// Opens one resource stream and reserves its request identity.
+    ///
     pub fn open(&mut self, request: ResourceRequest) -> Result<ResourceFrameDisposition, ResourceConnectionError> {
         require_resource_stream(request.stream_id).map_err(|source| ResourceConnectionError::InvalidFrame { source })?;
         require_resource_kind_windows(request.resource_kind, request.item_window, request.byte_window)
@@ -1818,14 +1820,14 @@ impl ResourceProtocolConnection {
                 return Err(ResourceConnectionError::StreamNotIncreasing { stream_id: request.stream_id, previous });
             }
         }
-        if self.streams.len() == MAX_LIVE_STREAMS {
-            return Err(ResourceConnectionError::TooManyLiveResources);
-        }
         if self.streams.contains_key(&request.stream_id) || self.terminal.contains_key(&request.stream_id) {
             return Err(ResourceConnectionError::StreamNotIncreasing { stream_id: request.stream_id, previous: self.high_water_mark.unwrap_or(0) });
         }
         if self.request_ids.contains(&request.request_id) {
             return Err(ResourceConnectionError::DuplicateRequestId { request_id: request.request_id });
+        }
+        if self.streams.len() == MAX_LIVE_STREAMS {
+            return Err(ResourceConnectionError::TooManyLiveResources);
         }
         self.high_water_mark = Some(request.stream_id);
         self.request_ids.insert(request.request_id);
@@ -1897,12 +1899,22 @@ impl ResourceProtocolConnection {
     }
 
 
-    fn check_terminal(&self, stream_id: u64, request_id: InvocationId) -> Result<Option<ResourceFrameDisposition>, ResourceConnectionError> {
+    fn check_terminal(
+        &self,
+        stream_id: u64,
+        request_id: InvocationId,
+    ) -> Result<Option<ResourceFrameDisposition>, ResourceConnectionError> {
         if let Some(expected) = self.terminal.get(&stream_id) {
             if *expected == request_id {
                 return Ok(Some(ResourceFrameDisposition::DroppedLate));
             }
             return Err(ResourceConnectionError::MismatchedRequest { stream_id });
+        }
+        if !self.streams.contains_key(&stream_id)
+            && stream_id != 0
+            && self.high_water_mark.is_some_and(|high| stream_id <= high)
+        {
+            return Ok(Some(ResourceFrameDisposition::DroppedLate));
         }
         Ok(None)
     }
@@ -7989,7 +8001,7 @@ mod tests {
                 request_id: InvocationId::from_bytes([1; 16]),
                 failure: CallFailure::InternalFailure,
             })),
-            Err(ResourceConnectionError::UnknownStream { stream_id: 1 })
+            Ok(ResourceFrameDisposition::DroppedLate)
         );
         assert_eq!(
             connection.apply(ResourceServerFrame::Failed(ResourceFailed {
@@ -8071,6 +8083,7 @@ mod tests {
             Err(ResourceConnectionError::DuplicateRequestId { request_id }),
         );
     }
+
 
     #[test]
     fn resource_connection_accepts_distinct_request_ids_on_distinct_streams() {
