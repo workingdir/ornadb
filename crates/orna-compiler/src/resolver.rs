@@ -24069,7 +24069,7 @@ mod tests {
             panic!("prepared resource plan must contain a resource operation");
         };
         assert_eq!(operation.target(), STD_INVOKE_ECHO_FUNCTION_ID);
-        assert_eq!(operation.target_revision(), active.pair());
+        assert_eq!(operation.target_revision(), prepared.candidate_pair());
         assert_eq!(operation.arguments().len(), 1);
         assert_eq!(operation.arguments()[0].0, STD_INVOKE_ECHO_PARAMETER_ID);
         assert_eq!(
