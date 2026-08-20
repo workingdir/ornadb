@@ -1494,7 +1494,10 @@ pub(crate) async fn run_authenticated_server_resource_stream(
         let Some(ResourceProducerCommand::Pull(ResourceProducerPull { credit, response })) = command else {
             return Ok(ResourceProducerExit::Cancelled(ResourceProducerCancelled { response: None }));
         };
-        if credit.item_count == 0 || credit.byte_count == 0 {
+        let scalar = matches!(prepared.cardinality, ResultCardinality::ExactlyOne | ResultCardinality::AtMostOne);
+        if (credit.item_count == 0 && rows_seen == 0)
+            || (credit.byte_count == 0 && !scalar && rows_seen == 0)
+        {
             return Ok(ResourceProducerExit::Failed(ResourceProducerFailed {
                 response: Some(response),
                 error: server_error(ServerSelectError::Argument {
@@ -1623,8 +1626,53 @@ pub(crate) async fn run_authenticated_server_resource_stream(
                     }));
                 }
             };
+            if !matches!(prepared.cardinality, ResultCardinality::BoundedMany) {
+                let cancelled = cancellation.cancelled();
+                let next_row = stream.try_next();
+                futures_util::pin_mut!(cancelled, next_row);
+                let lookahead = match select(cancelled, next_row).await {
+                    Either::Left(((), _next_row)) => {
+                        return Ok(ResourceProducerExit::Cancelled(ResourceProducerCancelled {
+                            response: Some(response),
+                        }));
+                    }
+                    Either::Right((row, _cancelled)) => row,
+                };
+                match lookahead {
+                    Err(error) => {
+                        return Ok(ResourceProducerExit::Failed(ResourceProducerFailed {
+                            response: Some(response),
+                            error: PostgresKernelError::Database(error),
+                        }));
+                    }
+                    Ok(Some(_)) => {
+                        if let Err(error) = prepared
+                            .cardinality
+                            .validate(rows_seen.saturating_add(1))
+                        {
+                            return Ok(ResourceProducerExit::Failed(ResourceProducerFailed {
+                                response: Some(response),
+                                error,
+                            }));
+                        }
+                    }
+                    Ok(None) => {}
+                }
+            }
             (value, byte_count)
         };
+        if credit.item_count == 0 {
+            pending = Some((value, byte_count));
+            if response
+                .send(Ok(AuthenticatedServerResourceEvent::Waiting {
+                    required_bytes: byte_count,
+                }))
+                .is_err()
+            {
+                return Ok(ResourceProducerExit::Cancelled(ResourceProducerCancelled { response: None }));
+            }
+            continue;
+        }
         if byte_count > credit.byte_count {
             pending = Some((value, byte_count));
             if response
@@ -1750,7 +1798,8 @@ pub(crate) async fn run_authenticated_standard_resource_stream(
                 response: None,
             }));
         };
-        if credit.item_count == 0 || credit.byte_count == 0 {
+        if credit.item_count == 0 && !emitted
+        {
             return Ok(ResourceProducerExit::Failed(ResourceProducerFailed {
                 response: Some(response),
                 error: server_error(ServerSelectError::Argument {
