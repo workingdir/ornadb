@@ -4738,9 +4738,16 @@ impl IdentityMap {
                 else {
                     continue;
                 };
-                let Some(active_function) = active.catalogue().function_by_id(function_id) else {
-                    return Err(existing_mismatch(DefinitionIdentity::Function(function_id)));
-                };
+                let active_function = active
+                    .catalogue()
+                    .function_by_id(function_id)
+                    .or_else(|| {
+                        active
+                            .catalogue_hash_context()
+                            .standard()
+                            .and_then(|standard| standard.catalogue().function_by_id(function_id))
+                    })
+                    .ok_or_else(|| existing_mismatch(DefinitionIdentity::Function(function_id)))?;
                 result
                     .functions
                     .entry(CheckedFunctionId::Existing(function_id))
@@ -6878,7 +6885,13 @@ impl<'a> CandidateBuilder<'a> {
                 self.catalogue_revision,
             ));
         }
-        if self.active.catalogue().function_by_id(function).is_some() {
+        if self.active.catalogue().function_by_id(function).is_some()
+            || self
+                .active
+                .catalogue_hash_context()
+                .standard()
+                .is_some_and(|standard| standard.catalogue().function_by_id(function).is_some())
+        {
             return Ok(self.active.pair());
         }
         Err(existing_mismatch(DefinitionIdentity::Function(function)))
@@ -6992,7 +7005,13 @@ impl<'a> CandidateBuilder<'a> {
                 .active
                 .catalogue()
                 .function_by_id(target)
-                .is_some_and(|candidate| candidate.domain() == FunctionDomain::Server);
+                .is_some_and(|candidate| candidate.domain() == FunctionDomain::Server)
+            || self.active.catalogue_hash_context().standard().is_some_and(|standard| {
+                standard
+                    .catalogue()
+                    .function_by_id(target)
+                    .is_some_and(|candidate| candidate.domain() == FunctionDomain::Server)
+            });
         if !target_is_server {
             return Err(PrepareError::InvalidCheckedBundle {
                 reason: "checked CLIENT resource target is not a SERVER function",

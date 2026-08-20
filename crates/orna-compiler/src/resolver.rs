@@ -5231,53 +5231,64 @@ fn client_resource_targets(
             },
         );
     }
-    for function in base.functions() {
-        if function.domain() != FunctionDomain::Server || targets.contains_key(function.name()) {
+    let standard_functions = standard.map(|standard| {
+        standard
+            .verified_snapshot()
+            .catalogue()
+            .functions()
+    });
+    for functions in [Some(base.functions()), standard_functions] {
+        let Some(functions) = functions else {
             continue;
+        };
+        for function in functions {
+            if function.domain() != FunctionDomain::Server || targets.contains_key(function.name()) {
+                continue;
+            }
+            let (kind, result_type) = match function.return_type() {
+                FunctionReturn::Single(resolved) => (
+                    ResourceKind::Scalar,
+                    client_expression_type_from_core(*resolved, standard),
+                ),
+                FunctionReturn::Rows(columns) if columns.len() == 1 => (
+                    ResourceKind::Stream,
+                    columns.first().and_then(|column| {
+                        client_expression_type_from_core(column.resolved_type(), standard)
+                    }),
+                ),
+                FunctionReturn::Rows(_) => (ResourceKind::Stream, None),
+            };
+            let Some(result_type) = result_type else {
+                continue;
+            };
+            let Some(parameters) = function
+                .parameters()
+                .iter()
+                .map(|parameter| {
+                    client_expression_type_from_core(parameter.resolved_type(), standard).map(
+                        |expression_type| ClientExpressionParameter {
+                            id: CheckedParameterId::Existing(parameter.id()),
+                            name: parameter.name().to_owned(),
+                            expression_type,
+                        },
+                    )
+                })
+                .collect::<Option<Vec<_>>>()
+            else {
+                // An unrepresentable parameter must not disappear from the
+                // target signature and make an incomplete call look bound.
+                continue;
+            };
+            targets.insert(
+                function.name().clone(),
+                ClientResourceTarget {
+                    kind,
+                    id: CheckedFunctionId::Existing(function.id()),
+                    parameters,
+                    result_type,
+                },
+            );
         }
-        let (kind, result_type) = match function.return_type() {
-            FunctionReturn::Single(resolved) => (
-                ResourceKind::Scalar,
-                client_expression_type_from_core(*resolved, standard),
-            ),
-            FunctionReturn::Rows(columns) if columns.len() == 1 => (
-                ResourceKind::Stream,
-                columns.first().and_then(|column| {
-                    client_expression_type_from_core(column.resolved_type(), standard)
-                }),
-            ),
-            FunctionReturn::Rows(_) => (ResourceKind::Stream, None),
-        };
-        let Some(result_type) = result_type else {
-            continue;
-        };
-        let Some(parameters) = function
-            .parameters()
-            .iter()
-            .map(|parameter| {
-                client_expression_type_from_core(parameter.resolved_type(), standard).map(
-                    |expression_type| ClientExpressionParameter {
-                        id: CheckedParameterId::Existing(parameter.id()),
-                        name: parameter.name().to_owned(),
-                        expression_type,
-                    },
-                )
-            })
-            .collect::<Option<Vec<_>>>()
-        else {
-            // An unrepresentable parameter must not disappear from the
-            // target signature and make an incomplete call look bound.
-            continue;
-        };
-        targets.insert(
-            function.name().clone(),
-            ClientResourceTarget {
-                kind,
-                id: CheckedFunctionId::Existing(function.id()),
-                parameters,
-                result_type,
-            },
-        );
     }
     targets
 }
@@ -23404,6 +23415,127 @@ mod tests {
                 "EXPORT TYPE std.ui.UI AS std.Window;",
             ),
             "wrong ui export binding",
+        );
+    }
+
+    #[test]
+    fn checks_and_prepares_scalar_resource_against_standard_echo() {
+        let verified = verified_standard_v2_snapshot();
+        let standard = check_standard_library_source(&verified).unwrap();
+        let unit = StoredSourceUnit::new(
+            SourceUnitId::from_bytes([0x91; 16]),
+            0,
+            "application.orna",
+            "",
+            source_unit_content_digest("").unwrap(),
+        )
+        .unwrap();
+        let bundle_hash = source_bundle_digest(std::slice::from_ref(&unit)).unwrap();
+        let source = StoredSourceRevision::new(
+            SourceBundleId::from_bytes([0x92; 16]),
+            SourceRevisionId::from_bytes([0x93; 16]),
+            None,
+            vec![unit],
+            bundle_hash,
+            source_revision_record_digest(
+                SourceBundleId::from_bytes([0x92; 16]),
+                None,
+                bundle_hash,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let catalogue = CatalogueSnapshot::new_with_types(
+            CatalogueRevisionId::from_bytes([0x94; 16]),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        )
+        .unwrap();
+        let hash_context = CatalogueHashContext::version_two(verified.clone());
+        let catalogue_hash = catalogue_digest_with_context(
+            &hash_context,
+            &catalogue,
+            &[],
+            &[],
+            &[],
+            &[],
+        )
+        .unwrap();
+        let active = ActiveDatabaseRevision::new_with_catalogue_hash_context(
+            ActiveDatabaseRevisionInput::new(
+                RevisionPair::new(source.id(), catalogue.revision()),
+                source,
+                catalogue,
+                catalogue_hash,
+                ActiveRevisionContent::new(Vec::new(), Vec::new(), Vec::new(), Vec::new()),
+            ),
+            hash_context,
+        )
+        .unwrap();
+        let context = StandardApplicationCheckContext::try_new(active.catalogue(), &standard)
+            .unwrap();
+        let source = "CREATE SCHEMA scalar_fixture; CREATE CLIENT FUNCTION scalar_fixture.call() RETURNS INTEGER AS AWAIT std.data.resource(target => std.invoke.echo, arguments => std.call.args(p_value => 43));";
+        let report = check_standard_application(&bundle([("resource.orna", source)]), &context);
+        assert!(report.diagnostics().is_empty(), "{:?}", report.diagnostics());
+        let checked = report.preparation_view().unwrap().checked();
+        let function = checked
+            .client_functions()
+            .iter()
+            .find(|function| function.name().to_string() == "scalar_fixture.call")
+            .unwrap();
+        let CheckedClientFunctionBody::Expression { expression } = function.body() else {
+            panic!("resource body must be an expression");
+        };
+        let super::CheckedClientExpression::Await { expression, .. } = expression else {
+            panic!("resource body must await the resource");
+        };
+        let super::CheckedClientExpression::Resource { operation } = expression.as_ref() else {
+            panic!("await operand must be a resource");
+        };
+        assert_eq!(
+            operation.target(),
+            super::CheckedFunctionId::Existing(STD_INVOKE_ECHO_FUNCTION_ID)
+        );
+        assert_eq!(operation.arguments().len(), 1);
+        assert_eq!(
+            operation.arguments()[0].0,
+            super::CheckedParameterId::Existing(STD_INVOKE_ECHO_PARAMETER_ID)
+        );
+
+        let prepared = prepare_standard_application(&report, active.pair(), &active).unwrap();
+        let client = prepared
+            .candidate()
+            .functions()
+            .iter()
+            .find(|function| function.name().to_string() == "scalar_fixture.call")
+            .unwrap();
+        let revision = prepared
+            .current_function_revisions()
+            .unwrap()
+            .iter()
+            .find(|revision| revision.function() == client.id())
+            .unwrap();
+        let plan = orna_artifact::client_plan::ResourceClientPlan::decode(
+            revision.artifact().payload(),
+        )
+        .unwrap();
+        let orna_artifact::client_plan::ClientExpressionNode::Await { expression } = plan.expression()
+        else {
+            panic!("prepared resource plan must await the resource");
+        };
+        let orna_artifact::client_plan::ClientExpressionNode::Resource { operation } = expression.as_ref()
+        else {
+            panic!("prepared resource plan must contain a resource operation");
+        };
+        assert_eq!(operation.target(), STD_INVOKE_ECHO_FUNCTION_ID);
+        assert_eq!(operation.target_revision(), active.pair());
+        assert_eq!(operation.arguments().len(), 1);
+        assert_eq!(operation.arguments()[0].0, STD_INVOKE_ECHO_PARAMETER_ID);
+        assert_eq!(
+            operation.arguments()[0].1,
+            orna_artifact::client_plan::ClientExpressionNode::Integer { value: 43 }
         );
     }
 
