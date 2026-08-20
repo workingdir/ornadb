@@ -5102,6 +5102,50 @@ mod tests {
         assert_eq!(resource.failure(), None);
     }
 
+    #[test]
+    fn client_resource_ready_completion_wins_over_late_cancellation() {
+        let (active, function, pair, _) = version_one_active_with_shape(
+            FunctionDomain::Client,
+            Vec::new(),
+            FunctionReturn::Single(ResolvedType::Scalar(StandardScalar::Boolean)),
+            FunctionSecurity::Invoker,
+            FunctionVolatility::Immutable,
+        );
+        let digest = super::ClientResourceKey::canonical_arguments_digest(&active, &[]).unwrap();
+        let key = super::ClientResourceKey::new(
+            InvocationTarget::new(function, pair),
+            PrincipalId::from_bytes([0x7a; 16]),
+            digest,
+            Sha256Digest::from_bytes([0x22; 32]),
+        );
+        let mut resource =
+            super::ClientResource::new(key, ResolvedType::Scalar(StandardScalar::Boolean));
+        let request = resource.begin_request(&active, Vec::new()).unwrap();
+        let generation = request.generation();
+        let late_cancellation = request.clone().cancelled();
+
+        resource
+            .apply_completion(&active, request.ready(RuntimeValue::Boolean(true)))
+            .expect("the accepted completion should make the resource ready");
+        assert_eq!(resource.status(), super::ClientResourceStatus::Ready);
+        assert_eq!(resource.value(), Some(&RuntimeValue::Boolean(true)));
+
+        assert_eq!(
+            resource.cancel(generation),
+            Err(super::ClientResourceError::InvalidTransition {
+                status: super::ClientResourceStatus::Ready,
+            }),
+        );
+        assert_eq!(
+            resource.apply_completion(&active, late_cancellation),
+            Err(super::ClientResourceError::InvalidTransition {
+                status: super::ClientResourceStatus::Ready,
+            }),
+        );
+        assert_eq!(resource.status(), super::ClientResourceStatus::Ready);
+        assert_eq!(resource.value(), Some(&RuntimeValue::Boolean(true)));
+    }
+
 
     #[test]
     fn client_resource_executor_rejects_digest_duplicates_stale_and_cancelled() {
