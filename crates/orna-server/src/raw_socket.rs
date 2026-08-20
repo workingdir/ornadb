@@ -241,11 +241,17 @@ impl LocalRawSocketResources {
             .try_acquire_owned()
             .map_err(|_| LocalRawSocketError::KernelCapacity)
     }
-    async fn acquire_kernel_operation(&self) -> OwnedSemaphorePermit {
-        Arc::clone(&self.kernel_operations)
-            .acquire_owned()
-            .await
-            .expect("local raw socket kernel semaphore remains open")
+    async fn acquire_kernel_operation(
+        &self,
+        cancellation: &ResourceCancellation,
+    ) -> Option<OwnedSemaphorePermit> {
+        tokio::select! {
+            biased;
+            _ = cancellation.cancelled() => None,
+            permit = Arc::clone(&self.kernel_operations).acquire_owned() => Some(
+                permit.expect("local raw socket kernel semaphore remains open")
+            ),
+        }
     }
 }
 
@@ -1005,7 +1011,14 @@ impl DispatchService for RawDispatchService {
         let cancellation = ResourceCancellation::new();
         let operation_cancellation = cancellation.clone();
         let future = Box::pin(async move {
-            let _operation = resources.acquire_kernel_operation().await;
+            let Some(_operation) = resources
+                .acquire_kernel_operation(&operation_cancellation)
+                .await
+            else {
+                return ResourceDispatchCompletion {
+                    actions: VecDeque::new(),
+                };
+            };
             let result = kernel
                 .dispatch_authenticated_server_resource_with_cancellation(
                     &session,
@@ -2602,6 +2615,35 @@ mod tests {
         ));
         drop(operations);
         assert!(resources.reserve_kernel_operation().is_ok());
+    }
+
+    #[tokio::test]
+    async fn queued_resource_permit_waiter_completes_when_cancelled() {
+        let resources = LocalRawSocketResources::new();
+        let held: Vec<_> = (0..KERNEL_OPERATION_LIMIT)
+            .map(|_| resources.reserve_kernel_operation().expect("operation permit"))
+            .collect();
+        let cancellation = ResourceCancellation::new();
+        let waiter = tokio::spawn({
+            let resources = resources.clone();
+            let cancellation = cancellation.clone();
+            async move { resources.acquire_kernel_operation(&cancellation).await }
+        });
+
+        tokio::task::yield_now().await;
+        assert_eq!(resources.kernel_operations.available_permits(), 0);
+        assert!(cancellation.request_cancel());
+        let permit = timeout(Duration::from_millis(50), waiter)
+            .await
+            .expect("queued resource waiter joins after cancellation")
+            .expect("queued resource waiter task");
+        assert!(permit.is_none());
+        assert_eq!(resources.kernel_operations.available_permits(), 0);
+        drop(held);
+        assert_eq!(
+            resources.kernel_operations.available_permits(),
+            KERNEL_OPERATION_LIMIT
+        );
     }
 
     #[tokio::test]
