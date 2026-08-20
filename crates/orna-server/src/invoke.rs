@@ -32,7 +32,7 @@ use std::{
 
 use orna_client::{ClientResourceCompletion, ClientResourceExecutor, ClientResourceRequest};
 use orna_core::{
-    FunctionRevisionId, InvocationId, TypeId,
+    FunctionRevisionId, TypeId,
     catalogue::{FunctionDefinition, FunctionReturn, QualifiedSemanticName},
     invocation::InvocationCarrierConstructionError,
     invocation::{
@@ -330,7 +330,7 @@ impl ClientResourceExecutor for InstalledResourceExecutor {
         };
         let protocol_request = ResourceRequest {
             stream_id,
-            request_id: InvocationId::new(),
+            request_id: request.request_id(),
             parent_invocation_id: invocation_context.parent_invocation_id(),
             call_site_id: invocation_context.call_site_id(),
             target_function_id: target.function(),
