@@ -18,7 +18,8 @@ pub use frame::{
     RawCallClientResponse, RetainedInvokeRequest, ServerAction, ServerFrame,
     decode_active_client_frame, decode_active_server_frame, decode_catalogue_client_frame,
     decode_catalogue_server_frame, decode_client_frame, decode_constructed_client_frame,
-    decode_constructed_server_frame, decode_invocation_event_batch, decode_invoke_request,
+    decode_constructed_invocation_event_frame, decode_constructed_server_frame,
+    decode_invocation_event_batch, decode_invoke_request,
     decode_registered_client_frame, decode_registered_server_frame, decode_retained_invoke_request,
     decode_resource_accepted, decode_resource_cancel, decode_resource_cancelled,
     decode_resource_client_frame, decode_resource_completed, decode_resource_failed,
@@ -10338,10 +10339,14 @@ mod tests {
                     event: Event::Value(carrier.clone()),
                 }],
             };
-            assert_eq!(
-                encode_constructed_server_frame(&active, &registry, &event),
-                Err(rejection.clone())
-            );
+            if matches!(&carrier, RuntimeValue::InvokeEvent(_)) {
+                assert!(encode_constructed_server_frame(&active, &registry, &event).is_ok());
+            } else {
+                assert_eq!(
+                    encode_constructed_server_frame(&active, &registry, &event),
+                    Err(rejection.clone())
+                );
+            }
             let mut event_payload = vec![1];
             event_payload.extend_from_slice(&1_u16.to_be_bytes());
             event_payload.extend_from_slice(&1_u64.to_be_bytes());
