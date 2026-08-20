@@ -8,8 +8,7 @@ mod model;
 
 pub use identity::{
     CheckedExpressionId, CheckedFieldId, CheckedFunctionId, CheckedParameterId, CheckedSchemaId,
-    CheckedTypeId, ProvisionalExpressionId, ProvisionalFieldId, ProvisionalFunctionId,
-    ProvisionalParameterId, ProvisionalSchemaId, ProvisionalTypeId,
+    CheckedTypeId, ProvisionalExpressionId, ProvisionalFieldId,
 };
 pub use model::{
     CheckReport, CheckedApplicationTypeUse, CheckedBundle, CheckedClientCapability,
@@ -44,7 +43,8 @@ pub use model::{
 pub(crate) use model::{
     CheckedActionOperation, CheckedClientExpression, CheckedClientFunctionBody, CheckedClientLocal,
     CheckedClientLocalKind, CheckedClientStateSlot, CheckedClientStatement, CheckedFieldRename,
-    CheckedResourceOperation, CheckedServerFunctionBody, CheckedStateDefault, CheckedStateScope,
+    CheckedResourceOperation, CheckedServerFunctionBody, CheckedServerFunctionReturn,
+    CheckedStateDefault, CheckedStateScope,
     CheckedStateSlotId, QueryCatalogue, QueryField, QueryObjectType, ResolutionCatalogue,
     STD_ACTION_CONTRACT, STD_JSON_CONTRACT, STD_UI_CONTRACT,
 };
@@ -3132,6 +3132,12 @@ enum ResolvedServerFunctionReturn {
         standard_value_type: Option<TypeId>,
         location: SourceLocation,
     },
+    Stream {
+        semantic_type: SemanticType<CheckedTypeId>,
+        standard_value_type: Option<TypeId>,
+        location: SourceLocation,
+        reference_location: Option<SourceLocation>,
+    },
     Rows {
         columns: Vec<ResolvedServerFunctionReturnColumn>,
         location: SourceLocation,
@@ -4349,7 +4355,8 @@ fn resolve_client_function_inputs<'a>(
                     true,
                 )
             }
-            FunctionReturnType::Rows { span, .. } => {
+            FunctionReturnType::Rows { span, .. }
+            | FunctionReturnType::Stream { span, .. } => {
                 diagnostics.push(diagnostic(
                     DiagnosticCode::TypeMismatch,
                     if expression_body {
@@ -4375,7 +4382,8 @@ fn resolve_client_function_inputs<'a>(
         {
             let span = match &declaration.return_type {
                 FunctionReturnType::Single(specification) => specification.span(),
-                FunctionReturnType::Rows { span, .. } => span,
+                FunctionReturnType::Rows { span, .. }
+                | FunctionReturnType::Stream { span, .. } => span,
             };
             diagnostics.push(diagnostic(
                 DiagnosticCode::TypeMismatch,
@@ -4396,7 +4404,8 @@ fn resolve_client_function_inputs<'a>(
         {
             let span = match &declaration.return_type {
                 FunctionReturnType::Single(specification) => specification.span(),
-                FunctionReturnType::Rows { span, .. } => span,
+                FunctionReturnType::Rows { span, .. }
+                | FunctionReturnType::Stream { span, .. } => span,
             };
             diagnostics.push(diagnostic(
                 DiagnosticCode::TypeMismatch,
@@ -4985,7 +4994,7 @@ fn client_expression_targets(
             FunctionReturn::Single(resolved_type) => {
                 client_expression_type_from_core(*resolved_type, standard)
             }
-            FunctionReturn::Rows(_) => None,
+            FunctionReturn::Rows(_) | FunctionReturn::Stream(_) => None,
         }) else {
             continue;
         };
@@ -5063,7 +5072,8 @@ fn client_action_targets(
                         standard_value_type: column.standard_value_type,
                     }
                 }
-                ResolvedServerFunctionReturn::Rows { .. } => continue,
+                ResolvedServerFunctionReturn::Rows { .. }
+                | ResolvedServerFunctionReturn::Stream { .. } => continue,
             },
             standard,
         );
@@ -5094,7 +5104,7 @@ fn client_action_targets(
             FunctionReturn::Rows(columns) if columns.len() == 1 => columns.first().and_then(
                 |column| client_expression_type_from_core(column.resolved_type(), standard),
             ),
-            FunctionReturn::Rows(_) => None,
+            FunctionReturn::Rows(_) | FunctionReturn::Stream(_) => None,
         };
         let Some(return_type) = return_type
             .map(|value| client_action_result_type(value, standard))
@@ -5162,36 +5172,6 @@ fn client_resource_call_site_id(
     )
 }
 
-fn client_resource_result_type(
-    return_type: &ResolvedServerFunctionReturn,
-    kind: ResourceKind,
-) -> Option<ClientExpressionType> {
-    match (kind, return_type) {
-        (
-            ResourceKind::Scalar,
-            ResolvedServerFunctionReturn::Single {
-                semantic_type,
-                standard_value_type,
-                ..
-            },
-        ) => Some(ClientExpressionType {
-            semantic_type: *semantic_type,
-            standard_value_type: *standard_value_type,
-        }),
-        // The current artifact/result model carries one durable item type.
-        // Refuse a multi-column ROWS result rather than silently treating its
-        // first column as the stream item type.
-        (ResourceKind::Stream, ResolvedServerFunctionReturn::Rows { columns, .. })
-            if columns.len() == 1 =>
-        {
-            columns.first().map(|column| ClientExpressionType {
-                semantic_type: column.semantic_type,
-                standard_value_type: column.standard_value_type,
-            })
-        }
-        _ => None,
-    }
-}
 
 fn client_resource_targets(
     inputs: &[ResolvedServerFunctionInput<'_>],
@@ -5200,15 +5180,30 @@ fn client_resource_targets(
 ) -> HashMap<QualifiedSemanticName, ClientResourceTarget> {
     let mut targets = HashMap::new();
     for input in inputs {
-        let Some(result_type) =
-            client_resource_result_type(&input.return_type, ResourceKind::Scalar)
-                .or_else(|| client_resource_result_type(&input.return_type, ResourceKind::Stream))
-        else {
-            continue;
-        };
-        let kind = match &input.return_type {
-            ResolvedServerFunctionReturn::Single { .. } => ResourceKind::Scalar,
-            ResolvedServerFunctionReturn::Rows { .. } => ResourceKind::Stream,
+        let (kind, result_type) = match &input.return_type {
+            ResolvedServerFunctionReturn::Single {
+                semantic_type,
+                standard_value_type,
+                ..
+            } => (
+                ResourceKind::Scalar,
+                ClientExpressionType {
+                    semantic_type: *semantic_type,
+                    standard_value_type: *standard_value_type,
+                },
+            ),
+            ResolvedServerFunctionReturn::Stream {
+                semantic_type,
+                standard_value_type,
+                ..
+            } => (
+                ResourceKind::Stream,
+                ClientExpressionType {
+                    semantic_type: *semantic_type,
+                    standard_value_type: *standard_value_type,
+                },
+            ),
+            ResolvedServerFunctionReturn::Rows { .. } => continue,
         };
         targets.insert(
             input.name.clone(),
@@ -5250,13 +5245,11 @@ fn client_resource_targets(
                     ResourceKind::Scalar,
                     client_expression_type_from_core(*resolved, standard),
                 ),
-                FunctionReturn::Rows(columns) if columns.len() == 1 => (
+                FunctionReturn::Stream(resolved) => (
                     ResourceKind::Stream,
-                    columns.first().and_then(|column| {
-                        client_expression_type_from_core(column.resolved_type(), standard)
-                    }),
+                    client_expression_type_from_core(*resolved, standard),
                 ),
-                FunctionReturn::Rows(_) => (ResourceKind::Stream, None),
+                FunctionReturn::Rows(_) => continue,
             };
             let Some(result_type) = result_type else {
                 continue;
@@ -7425,7 +7418,7 @@ fn check_client_functions(
                     ));
                     return None;
                 };
-            references.extend(signature_references(&input.parameters, &[]));
+            references.extend(parameter_references(&input.parameters));
             match &body {
                 CheckedClientFunctionBody::BooleanLiteral { .. } => {
                     record_standard_value_type_use(
@@ -7700,6 +7693,28 @@ fn resolve_server_function_return(
                 location: location(logical_path, specification.span()),
             }
         }),
+        FunctionReturnType::Stream { element, span } => resolve_application_type(
+            element,
+            submitted_ids,
+            logical_path,
+            diagnostics,
+            standard,
+        )
+        .map(|resolved| {
+            record_standard_type_use(
+                uses,
+                standard,
+                CheckedTypeUseKind::Return { owner, ordinal: 0 },
+                resolved,
+                type_use_location(element, logical_path),
+            );
+            ResolvedServerFunctionReturn::Stream {
+                semantic_type: resolved.semantic_type,
+                standard_value_type: resolved.standard_value_type,
+                location: location(logical_path, span),
+                reference_location: reference_location(element, logical_path),
+            }
+        }),
         FunctionReturnType::Rows { columns, span } => {
             if columns.is_empty() {
                 diagnostics.push(diagnostic(
@@ -7813,8 +7828,22 @@ fn check_server_functions(
             ));
             continue;
         };
-        let (columns, return_location) = match &input.return_type {
-            ResolvedServerFunctionReturn::Rows { columns, location } => (columns, location),
+        let return_location = match &input.return_type {
+            ResolvedServerFunctionReturn::Single { location, .. }
+            | ResolvedServerFunctionReturn::Stream { location, .. }
+            | ResolvedServerFunctionReturn::Rows { location, .. } => location,
+        };
+        let columns: &[ResolvedServerFunctionReturnColumn] = match &input.return_type {
+            ResolvedServerFunctionReturn::Rows { columns, .. } => columns,
+            ResolvedServerFunctionReturn::Stream { .. } if body_name == "SELECT" => &[],
+            ResolvedServerFunctionReturn::Stream { .. } => {
+                diagnostics.push(DiagnosticCode::semantic(
+                    DiagnosticCode::TypeMismatch,
+                    "STREAM SERVER functions require a SELECT body",
+                    return_location.clone(),
+                ));
+                continue;
+            }
             ResolvedServerFunctionReturn::Single { location, .. } => {
                 diagnostics.push(DiagnosticCode::semantic(
                     DiagnosticCode::TypeMismatch,
@@ -7842,7 +7871,7 @@ fn check_server_functions(
                     };
                     if !query_return_matches(
                         query_check.plan().projections(),
-                        columns,
+                        &input.return_type,
                         return_location,
                         diagnostics,
                     ) {
@@ -7902,7 +7931,7 @@ fn check_server_functions(
                         };
                         if !query_return_matches(
                             query_check.plan().projections(),
-                            columns,
+                            &input.return_type,
                             return_location,
                             diagnostics,
                         ) {
@@ -7951,7 +7980,7 @@ fn check_server_functions(
                             };
                         if !query_return_matches(
                             query_check.plan().projections(),
-                            columns,
+                            &input.return_type,
                             return_location,
                             diagnostics,
                         ) {
@@ -8012,7 +8041,7 @@ fn check_server_functions(
                             };
                         if !query_return_matches(
                             query_check.plan().projections(),
-                            columns,
+                            &input.return_type,
                             return_location,
                             diagnostics,
                         ) {
@@ -8306,9 +8335,9 @@ fn check_server_functions(
             continue;
         };
 
-        let mut references = signature_references(&input.parameters, columns);
+        let mut references = signature_references(&input.parameters, &input.return_type);
         references.extend(body_references);
-        functions.push(checked_server_function(input, columns, body, references));
+        functions.push(checked_server_function(input, body, references));
     }
 
     if diagnostics.len() != diagnostics_before {
@@ -8463,49 +8492,83 @@ fn unique_text_selected_query_parameters(
 
 fn query_return_matches(
     projections: &[ExpressionIr<CheckedTypeId, CheckedFieldId>],
-    columns: &[ResolvedServerFunctionReturnColumn],
+    return_type: &ResolvedServerFunctionReturn,
     return_location: &SourceLocation,
     diagnostics: &mut Vec<CompilerDiagnostic>,
 ) -> bool {
-    if projections.len() != columns.len() {
-        diagnostics.push(DiagnosticCode::semantic(
-            DiagnosticCode::TypeMismatch,
-            format!(
-                "SELECT returns {} {}, but RETURNS ROWS (...) declares {} {}",
-                projections.len(),
-                if projections.len() == 1 {
-                    "column"
-                } else {
-                    "columns"
-                },
-                columns.len(),
-                if columns.len() == 1 {
-                    "column"
-                } else {
-                    "columns"
-                }
-            ),
-            return_location.clone(),
-        ));
-        return false;
-    }
+    match return_type {
+        ResolvedServerFunctionReturn::Rows { columns, .. } => {
+            if projections.len() != columns.len() {
+                diagnostics.push(DiagnosticCode::semantic(
+                    DiagnosticCode::TypeMismatch,
+                    format!(
+                        "SELECT returns {} {}, but RETURNS ROWS (...) declares {} {}",
+                        projections.len(),
+                        if projections.len() == 1 {
+                            "column"
+                        } else {
+                            "columns"
+                        },
+                        columns.len(),
+                        if columns.len() == 1 {
+                            "column"
+                        } else {
+                            "columns"
+                        }
+                    ),
+                    return_location.clone(),
+                ));
+                return false;
+            }
 
-    let mut matches_return = true;
-    for (projection, column) in projections.iter().zip(columns) {
-        if projection.value_type().semantic_type() != column.semantic_type {
-            diagnostics.push(DiagnosticCode::semantic(
-                DiagnosticCode::TypeMismatch,
-                format!(
-                    "SELECT column {} does not have the same type as RETURNS ROWS column {}",
-                    column.ordinal + 1,
-                    column.name
-                ),
-                column.location.clone(),
-            ));
-            matches_return = false;
+            let mut matches_return = true;
+            for (projection, column) in projections.iter().zip(columns) {
+                if projection.value_type().semantic_type() != column.semantic_type {
+                    diagnostics.push(DiagnosticCode::semantic(
+                        DiagnosticCode::TypeMismatch,
+                        format!(
+                            "SELECT column {} does not have the same type as RETURNS ROWS column {}",
+                            column.ordinal + 1,
+                            column.name
+                        ),
+                        column.location.clone(),
+                    ));
+                    matches_return = false;
+                }
+            }
+            matches_return
         }
+        ResolvedServerFunctionReturn::Stream {
+            semantic_type, ..
+        } => {
+            if projections.len() != 1 {
+                diagnostics.push(DiagnosticCode::semantic(
+                    DiagnosticCode::TypeMismatch,
+                    format!(
+                        "SELECT returns {} {}, but RETURNS STREAM<T> declares one element",
+                        projections.len(),
+                        if projections.len() == 1 {
+                            "column"
+                        } else {
+                            "columns"
+                        }
+                    ),
+                    return_location.clone(),
+                ));
+                return false;
+            }
+            if projections[0].value_type().semantic_type() != *semantic_type {
+                diagnostics.push(DiagnosticCode::semantic(
+                    DiagnosticCode::TypeMismatch,
+                    "SELECT column 1 does not have the same type as RETURNS STREAM<T> element",
+                    return_location.clone(),
+                ));
+                return false;
+            }
+            true
+        }
+        ResolvedServerFunctionReturn::Single { .. } => false,
     }
-    matches_return
 }
 
 fn mutation_parameters(
@@ -8532,7 +8595,6 @@ fn mutation_parameters(
 
 fn checked_server_function(
     input: &ResolvedServerFunctionInput<'_>,
-    columns: &[ResolvedServerFunctionReturnColumn],
     body: CheckedServerFunctionBody,
     references: Vec<CheckedDefinitionReference>,
 ) -> CheckedServerFunction {
@@ -8551,16 +8613,35 @@ fn checked_server_function(
                 location: parameter.location,
             })
             .collect(),
-        return_columns: columns
-            .iter()
-            .cloned()
-            .map(|column| CheckedServerFunctionReturnColumn {
-                name: column.name,
-                ordinal: column.ordinal,
-                semantic_type: column.semantic_type,
-                location: column.location,
-            })
-            .collect(),
+        return_type: match &input.return_type {
+            ResolvedServerFunctionReturn::Rows { columns, .. } => {
+                CheckedServerFunctionReturn::Rows(
+                    columns
+                        .iter()
+                        .cloned()
+                        .map(|column| CheckedServerFunctionReturnColumn {
+                            name: column.name,
+                            ordinal: column.ordinal,
+                            semantic_type: column.semantic_type,
+                            location: column.location,
+                        })
+                        .collect(),
+                )
+            }
+            ResolvedServerFunctionReturn::Stream {
+                semantic_type,
+                standard_value_type,
+                location,
+                ..
+            } => CheckedServerFunctionReturn::Stream {
+                semantic_type: *semantic_type,
+                standard_value_type: *standard_value_type,
+                location: location.clone(),
+            },
+            ResolvedServerFunctionReturn::Single { .. } => {
+                panic!("checked SERVER functions reject scalar return shapes")
+            }
+        },
         security: input.security,
         transaction: input.transaction,
         volatility: input.volatility,
@@ -8702,20 +8783,42 @@ fn checked_query_catalogue(
     .expect("checked definitions satisfy resolver-local query catalogue invariants")
 }
 
+fn parameter_references(
+    parameters: &[ResolvedServerFunctionParameter],
+) -> Vec<CheckedDefinitionReference> {
+    parameters
+        .iter()
+        .filter_map(|parameter| {
+            object_reference(
+                parameter.semantic_type,
+                parameter.reference_location.as_ref(),
+            )
+        })
+        .collect()
+}
+
 fn signature_references(
     parameters: &[ResolvedServerFunctionParameter],
-    columns: &[ResolvedServerFunctionReturnColumn],
+    return_type: &ResolvedServerFunctionReturn,
 ) -> Vec<CheckedDefinitionReference> {
-    let mut references = Vec::new();
-    references.extend(parameters.iter().filter_map(|parameter| {
-        object_reference(
-            parameter.semantic_type,
-            parameter.reference_location.as_ref(),
-        )
-    }));
-    references.extend(columns.iter().filter_map(|column| {
-        object_reference(column.semantic_type, column.reference_location.as_ref())
-    }));
+    let mut references = parameter_references(parameters);
+    match return_type {
+        ResolvedServerFunctionReturn::Rows { columns, .. } => {
+            references.extend(columns.iter().filter_map(|column| {
+                object_reference(column.semantic_type, column.reference_location.as_ref())
+            }));
+        }
+        ResolvedServerFunctionReturn::Stream {
+            semantic_type,
+            reference_location,
+            ..
+        } => {
+            if let Some(reference) = object_reference(*semantic_type, reference_location.as_ref()) {
+                references.push(reference);
+            }
+        }
+        ResolvedServerFunctionReturn::Single { .. } => {}
+    }
     references
 }
 
@@ -18238,6 +18341,77 @@ mod tests {
         assert_eq!(functions[1].security(), FunctionSecurity::Invoker);
         assert_eq!(functions[1].transaction(), None);
         assert_eq!(functions[1].volatility(), FunctionVolatility::Volatile);
+    }
+
+    #[test]
+    fn resolves_server_stream_element_and_preserves_checked_shape() {
+        let source = "CREATE SCHEMA tasks; CREATE TYPE tasks.task AS OBJECT (title TEXT); \
+            CREATE SERVER FUNCTION tasks.events() RETURNS STREAM<TEXT> \
+            AS SELECT t.title FROM tasks.task t;";
+        let report = check(&bundle([("stream.orna", source)]), &empty_catalogue());
+        assert!(report.diagnostics().is_empty(), "{:?}", report.diagnostics());
+        let function = &report.checked_bundle().unwrap().server_functions()[0];
+        let super::CheckedServerFunctionReturn::Stream {
+            semantic_type,
+            standard_value_type,
+            ..
+        } = function.return_type()
+        else {
+            panic!("expected a checked STREAM return");
+        };
+        assert_eq!(
+            *semantic_type,
+            SemanticType::scalar(StandardScalar::CharacterLargeObject)
+        );
+        assert_eq!(*standard_value_type, None);
+        assert!(function.return_columns().is_empty());
+    }
+
+    #[test]
+    fn discovers_stream_resource_target_with_resolved_element_type() {
+        let source = "CREATE SCHEMA tasks; CREATE TYPE tasks.task AS OBJECT (title TEXT); \
+            CREATE SERVER FUNCTION tasks.events() RETURNS STREAM<TEXT> \
+            AS SELECT t.title FROM tasks.task t; \
+            CREATE SCHEMA ui; CREATE CLIENT FUNCTION ui.read() RETURNS TEXT IS \
+            BEGIN RETURN AWAIT std.data.stream_resource(target => tasks.events, arguments => std.call.args()); END;";
+        let report = check(&bundle([("stream-resource.orna", source)]), &empty_catalogue());
+        assert!(report.diagnostics().is_empty(), "{:?}", report.diagnostics());
+        let client = &report.checked_bundle().unwrap().client_functions()[0];
+        let super::CheckedClientFunctionBody::Expression {
+            expression: return_expression,
+        } = client.body()
+        else {
+            panic!("expected a checked CLIENT expression body");
+        };
+        let super::CheckedClientExpression::Await { expression, .. } = return_expression else {
+            panic!("expected AWAIT expression");
+        };
+        let super::CheckedClientExpression::Resource { operation } = expression.as_ref() else {
+            panic!("expected stream resource expression");
+        };
+        assert_eq!(
+            operation.kind(),
+            orna_artifact::client_plan::ResourceKind::Stream
+        );
+        assert_eq!(
+            operation.result_type(),
+            SemanticType::scalar(StandardScalar::CharacterLargeObject)
+        );
+    }
+
+    #[test]
+    fn rejects_server_stream_queries_with_multiple_projected_columns() {
+        let source = "CREATE SCHEMA tasks; CREATE TYPE tasks.task AS OBJECT (title TEXT, done BOOL); \
+            CREATE SERVER FUNCTION tasks.events() RETURNS STREAM<TEXT> \
+            AS SELECT t.title, t.done FROM tasks.task t;";
+        let report = check(&bundle([("stream-shape.orna", source)]), &empty_catalogue());
+        assert_eq!(report.diagnostics().len(), 1, "{:?}", report.diagnostics());
+        assert_eq!(report.diagnostics()[0].code(), DiagnosticCode::TypeMismatch);
+        assert_eq!(
+            report.diagnostics()[0].message(),
+            "SELECT returns 2 columns, but RETURNS STREAM<T> declares one element"
+        );
+        assert_no_checked_bundle(&report);
     }
 
     #[test]
