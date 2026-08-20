@@ -4706,6 +4706,18 @@ mod tests {
         }
     }
 
+    struct FailingActionExecutor;
+
+    impl ClientResourceExecutor for FailingActionExecutor {
+        fn execute(&mut self, request: ClientResourceRequest) -> ClientResourceCompletion {
+            request.failed("secret.executor.detail".to_owned())
+        }
+
+        fn cancel(&mut self, request: ClientResourceRequest) -> ClientResourceCompletion {
+            request.cancelled()
+        }
+    }
+
     fn authorise(pair: RevisionPair, function: FunctionId) -> AuthorisedInvocation {
         let principal = PrincipalId::from_bytes([0x7a; 16]);
         let snapshot = SecuritySnapshot::new(
@@ -8594,6 +8606,124 @@ mod tests {
         (active, function_id, pair, function_revision_id)
     }
 
+    fn version_two_server_rows_active() -> (
+        ActiveDatabaseRevision,
+        FunctionId,
+        RevisionPair,
+        FunctionRevisionId,
+    ) {
+        let (initial, function_id, pair, function_revision_id) =
+            version_two_active_with_artifact(
+                standard_v6(),
+                orna_standard::BOOLEAN_TYPE_ID,
+                DefinitionReferenceTarget::ValueType(orna_standard::BOOLEAN_TYPE_ID),
+                DefinitionReferenceKind::NamedType,
+                1,
+                b"ORNACP\0\0\0\0\0\x01\x01\x01".to_vec(),
+            );
+        let prior_function = initial.catalogue().function_by_id(function_id).unwrap();
+        let function = FunctionDefinition::new(
+            function_id,
+            prior_function.name().clone(),
+            FunctionDomain::Server,
+            Vec::new(),
+            FunctionReturn::Rows(vec![
+                FunctionReturnColumnDefinition::new(
+                    "first",
+                    0,
+                    ResolvedType::value(orna_standard::BOOLEAN_TYPE_ID),
+                ),
+                FunctionReturnColumnDefinition::new(
+                    "second",
+                    1,
+                    ResolvedType::value(orna_standard::BOOLEAN_TYPE_ID),
+                ),
+            ]),
+            function_revision_id,
+            FunctionSecurity::Invoker,
+            None,
+            FunctionVolatility::Stable,
+        );
+        let catalogue = CatalogueSnapshot::new_with_functions(
+            initial.catalogue().revision(),
+            initial.catalogue().schemas().to_vec(),
+            initial.catalogue().object_types().to_vec(),
+            vec![function.clone()],
+        )
+        .unwrap();
+        let prior_revision = &initial.function_revisions()[0];
+        let payload = vec![0x53];
+        let artifact = ExecutableArtifact::new(
+            ExecutableArtifactKind::Server,
+            "orna.server-plan",
+            1,
+            payload.clone(),
+            artifact_payload_digest(&payload).unwrap(),
+        )
+        .unwrap();
+        let semantic_hash = function_semantic_digest_with_version(
+            FunctionSemanticHashVersion::Version2,
+            &function,
+            prior_revision.language_version(),
+            &artifact,
+            initial.expressions(),
+            &[],
+        )
+        .unwrap();
+        let revision = FunctionRevisionRecord::new(
+            function_id,
+            function_revision_id,
+            prior_revision.revision_number(),
+            prior_revision.declaration_origin(),
+            prior_revision.declaration_content_hash(),
+            semantic_hash,
+            prior_revision.language_version(),
+            artifact,
+        )
+        .unwrap()
+        .with_semantic_hash_version(FunctionSemanticHashVersion::Version2);
+        let mut origins = initial.origins().to_vec();
+        let FunctionReturn::Rows(columns) = function.return_type() else {
+            unreachable!("the multi-column fixture has a ROWS return");
+        };
+        origins.extend(columns.iter().map(|column| {
+            DefinitionOrigin::new(
+                DefinitionIdentity::FunctionReturnColumn {
+                    owner: function_id,
+                    ordinal: column.ordinal(),
+                },
+                prior_revision.declaration_origin(),
+            )
+        }));
+        let context = initial.catalogue_hash_context().clone();
+        let catalogue_hash = catalogue_digest_with_context(
+            &context,
+            &catalogue,
+            std::slice::from_ref(&revision),
+            initial.expressions(),
+            &origins,
+            &[],
+        )
+        .unwrap();
+        let active = ActiveDatabaseRevision::new_with_catalogue_hash_context(
+            ActiveDatabaseRevisionInput::new(
+                pair,
+                initial.source().clone(),
+                catalogue,
+                catalogue_hash,
+                ActiveRevisionContent::new(
+                    initial.expressions().to_vec(),
+                    vec![revision],
+                    origins,
+                    Vec::new(),
+                ),
+            ),
+            context,
+        )
+        .unwrap();
+        (active, function_id, pair, function_revision_id)
+    }
+
     fn version_four_state_active(
         return_type: TypeId,
         payload: Vec<u8>,
@@ -9343,6 +9473,414 @@ mod tests {
         .unwrap();
 
         (active, function, pair, function_revision)
+    }
+
+    #[test]
+    fn action_trigger_rejects_domain_mismatch_and_stale_revision() {
+        let (active, parent_function, pair, parent_revision, parameter) =
+            version_six_client_resource_action_active();
+        let target = FunctionId::from_bytes([0xd1; 16]);
+        let auth = authorise(pair, parent_function);
+        let parent = ClientExecutionContext {
+            pair,
+            function: parent_function,
+            function_revision: parent_revision,
+            parent_invocation_id: InvocationId::from_bytes([0xf6; 16]),
+        };
+        let argument = FunctionArgument::new(
+            parameter,
+            RuntimeValue::Text("/tmp/action".to_owned()),
+        )
+        .unwrap();
+        let mut state = ClientStateStore::default();
+        let mut action_state = ClientActionState::default();
+        let mut executor = RecordingActionExecutor::new(None);
+
+        let domain_mismatch = action_value(
+            &active,
+            ActionTargetDomain::Client,
+            target,
+            pair,
+            CallSiteId::from_bytes([0xf7; 16]),
+            vec![argument.clone()],
+            orna_standard::CHARACTER_LARGE_OBJECT_TYPE_ID,
+        );
+        assert_eq!(
+            trigger_client_action(
+                &active,
+                &domain_mismatch,
+                &auth,
+                &parent,
+                &mut action_state,
+                &[],
+                &capability::LocalCapabilityGrantSet::default(),
+                &mut state,
+                &mut executor,
+            ),
+            Err(ClientActionError::TargetMismatch),
+        );
+
+        let stale_pair = RevisionPair::new(
+            SourceRevisionId::from_bytes([0xf8; 16]),
+            pair.catalogue(),
+        );
+        let stale_target_revision = action_value(
+            &active,
+            ActionTargetDomain::Server,
+            target,
+            stale_pair,
+            CallSiteId::from_bytes([0xf9; 16]),
+            vec![argument],
+            orna_standard::CHARACTER_LARGE_OBJECT_TYPE_ID,
+        );
+        assert_eq!(
+            trigger_client_action(
+                &active,
+                &stale_target_revision,
+                &auth,
+                &parent,
+                &mut action_state,
+                &[],
+                &capability::LocalCapabilityGrantSet::default(),
+                &mut state,
+                &mut executor,
+            ),
+            Err(ClientActionError::RevisionMismatch),
+        );
+    }
+
+    #[test]
+    fn action_trigger_rejects_wrong_result_type_and_non_single_column_target() {
+        let (active, parent_function, pair, parent_revision, parameter) =
+            version_six_client_resource_action_active();
+        let target = FunctionId::from_bytes([0xd1; 16]);
+        let auth = authorise(pair, parent_function);
+        let parent = ClientExecutionContext {
+            pair,
+            function: parent_function,
+            function_revision: parent_revision,
+            parent_invocation_id: InvocationId::from_bytes([0xfa; 16]),
+        };
+        let argument = FunctionArgument::new(
+            parameter,
+            RuntimeValue::Text("/tmp/action".to_owned()),
+        )
+        .unwrap();
+        let wrong_type = action_value(
+            &active,
+            ActionTargetDomain::Server,
+            target,
+            pair,
+            CallSiteId::from_bytes([0xfb; 16]),
+            vec![argument],
+            orna_standard::INTEGER_TYPE_ID,
+        );
+        let mut state = ClientStateStore::default();
+        let mut action_state = ClientActionState::default();
+        let mut executor = RecordingActionExecutor::new(None);
+        assert_eq!(
+            trigger_client_action(
+                &active,
+                &wrong_type,
+                &auth,
+                &parent,
+                &mut action_state,
+                &[],
+                &capability::LocalCapabilityGrantSet::default(),
+                &mut state,
+                &mut executor,
+            ),
+            Err(ClientActionError::ResultTypeMismatch),
+        );
+
+        let (multi_column_active, multi_column_function, multi_column_pair, multi_column_revision) =
+            version_two_server_rows_active();
+        let multi_column_auth = authorise(multi_column_pair, multi_column_function);
+        let multi_column_parent = ClientExecutionContext {
+            pair: multi_column_pair,
+            function: multi_column_function,
+            function_revision: multi_column_revision,
+            parent_invocation_id: InvocationId::from_bytes([0xfc; 16]),
+        };
+        let multi_column_action = action_value(
+            &multi_column_active,
+            ActionTargetDomain::Server,
+            multi_column_function,
+            multi_column_pair,
+            CallSiteId::from_bytes([0xfd; 16]),
+            Vec::new(),
+            orna_standard::BOOLEAN_TYPE_ID,
+        );
+        let mut multi_column_state = ClientStateStore::default();
+        let mut multi_column_action_state = ClientActionState::default();
+        let mut multi_column_executor = RecordingActionExecutor::new(None);
+        assert_eq!(
+            trigger_client_action(
+                &multi_column_active,
+                &multi_column_action,
+                &multi_column_auth,
+                &multi_column_parent,
+                &mut multi_column_action_state,
+                &[],
+                &capability::LocalCapabilityGrantSet::default(),
+                &mut multi_column_state,
+                &mut multi_column_executor,
+            ),
+            Err(ClientActionError::ResultTypeMismatch),
+        );
+    }
+
+    #[test]
+    fn action_payload_rejects_malformed_and_noncanonical_frames() {
+        let (active, target, pair, _) = version_two_value_active(
+            orna_standard::INTEGER_TYPE_ID,
+            orna_standard::INTEGER_TYPE_ID,
+        );
+        let parameter = ParameterId::from_bytes([0x71; 16]);
+        let descriptor = ClientActionDescriptor::new(
+            ActionTargetDomain::Client,
+            target,
+            pair,
+            CallSiteId::from_bytes([0x72; 16]),
+            vec![FunctionArgument::new(parameter, RuntimeValue::Integer(7)).unwrap()],
+            orna_standard::INTEGER_TYPE_ID,
+        );
+        let payload = encode_action_payload(&active, &descriptor).unwrap();
+        let magic_length = super::ACTION_MAGIC.len();
+        let body_offset = magic_length + 4;
+        let metadata_length = 1 + (16 * 5);
+        let count_offset = body_offset + metadata_length;
+        let first_parameter_offset = count_offset + 4;
+        let frame_length_offset = first_parameter_offset + 16;
+        let frame_offset = frame_length_offset + 4;
+
+        let mut invalid_magic = payload.clone();
+        invalid_magic[0] ^= 0xff;
+
+        let mut truncated = payload.clone();
+        truncated.pop();
+
+        let mut invalid_count = payload.clone();
+        invalid_count[count_offset..count_offset + 4]
+            .copy_from_slice(&u32::MAX.to_be_bytes());
+
+        let two_argument_descriptor = ClientActionDescriptor::new(
+            ActionTargetDomain::Client,
+            target,
+            pair,
+            CallSiteId::from_bytes([0x73; 16]),
+            vec![
+                FunctionArgument::new(
+                    ParameterId::from_bytes([1; 16]),
+                    RuntimeValue::Integer(1),
+                )
+                .unwrap(),
+                FunctionArgument::new(
+                    ParameterId::from_bytes([2; 16]),
+                    RuntimeValue::Integer(2),
+                )
+                .unwrap(),
+            ],
+            orna_standard::INTEGER_TYPE_ID,
+        );
+        let two_argument_payload = encode_action_payload(&active, &two_argument_descriptor).unwrap();
+        let first_two_argument_offset = first_parameter_offset;
+        let first_frame_length = u32::from_be_bytes(
+            two_argument_payload[first_two_argument_offset + 16..first_two_argument_offset + 20]
+                .try_into()
+                .unwrap(),
+        ) as usize;
+        let second_parameter_offset =
+            first_two_argument_offset + 16 + 4 + first_frame_length;
+        let mut invalid_order = two_argument_payload;
+        invalid_order[second_parameter_offset..second_parameter_offset + 16]
+            .copy_from_slice(&[0; 16]);
+
+        let mut trailing = payload.clone();
+        trailing.push(0xaa);
+        let body_length = u32::from_be_bytes(
+            trailing[magic_length..magic_length + 4]
+                .try_into()
+                .unwrap(),
+        );
+        trailing[magic_length..magic_length + 4]
+            .copy_from_slice(&(body_length + 1).to_be_bytes());
+
+        let mut invalid_orv3_frame = payload;
+        invalid_orv3_frame[frame_offset..frame_offset + 4].copy_from_slice(b"ORV2");
+
+        for malformed in [
+            invalid_magic,
+            truncated,
+            invalid_count,
+            invalid_order,
+            trailing,
+            invalid_orv3_frame,
+        ] {
+            assert!(matches!(
+                decode_action_payload(&active, &malformed),
+                Err(ClientActionError::InvalidPayload(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn action_payload_encodes_multiple_arguments_in_parameter_order_and_round_trips() {
+        let (active, target, pair, _) = version_two_value_active(
+            orna_standard::INTEGER_TYPE_ID,
+            orna_standard::INTEGER_TYPE_ID,
+        );
+        let descriptor = ClientActionDescriptor::new(
+            ActionTargetDomain::Client,
+            target,
+            pair,
+            CallSiteId::from_bytes([0x74; 16]),
+            vec![
+                FunctionArgument::new(
+                    ParameterId::from_bytes([1; 16]),
+                    RuntimeValue::Integer(11),
+                )
+                .unwrap(),
+                FunctionArgument::new(
+                    ParameterId::from_bytes([2; 16]),
+                    RuntimeValue::Integer(22),
+                )
+                .unwrap(),
+            ],
+            orna_standard::INTEGER_TYPE_ID,
+        );
+        let payload = encode_action_payload(&active, &descriptor).unwrap();
+        let body_offset = super::ACTION_MAGIC.len() + 4;
+        let first_parameter_offset = body_offset + 1 + (16 * 5) + 4;
+        let first_frame_length = u32::from_be_bytes(
+            payload[first_parameter_offset + 16..first_parameter_offset + 20]
+                .try_into()
+                .unwrap(),
+        ) as usize;
+        let second_parameter_offset = first_parameter_offset + 16 + 4 + first_frame_length;
+        assert_eq!(&payload[first_parameter_offset..first_parameter_offset + 16], &[1; 16]);
+        assert_eq!(&payload[second_parameter_offset..second_parameter_offset + 16], &[2; 16]);
+
+        let decoded = decode_action_payload(&active, &payload).unwrap();
+        assert_eq!(decoded, descriptor);
+        assert_eq!(encode_action_payload(&active, &decoded).unwrap(), payload);
+    }
+
+    #[test]
+    fn action_trigger_rejects_repeated_pending_server_request_without_mutating_generation() {
+        let (active, parent_function, pair, parent_revision, _parameter) =
+            version_six_client_resource_action_active();
+        let target = FunctionId::from_bytes([0xd1; 16]);
+        let auth = authorise(pair, parent_function);
+        let parent = ClientExecutionContext {
+            pair,
+            function: parent_function,
+            function_revision: parent_revision,
+            parent_invocation_id: InvocationId::from_bytes([0xfe; 16]),
+        };
+        let argument = FunctionArgument::new(
+            ParameterId::from_bytes([0xd3; 16]),
+            RuntimeValue::Text("/tmp/action".to_owned()),
+        )
+        .unwrap();
+        let action = action_value(
+            &active,
+            ActionTargetDomain::Server,
+            target,
+            pair,
+            CallSiteId::from_bytes([0xff; 16]),
+            vec![argument],
+            orna_standard::CHARACTER_LARGE_OBJECT_TYPE_ID,
+        );
+        let mut state = ClientStateStore::default();
+        let mut action_state = ClientActionState::default();
+        let mut executor = RecordingActionExecutor::new(None);
+
+        assert_eq!(
+            trigger_client_action(
+                &active,
+                &action,
+                &auth,
+                &parent,
+                &mut action_state,
+                &[],
+                &capability::LocalCapabilityGrantSet::default(),
+                &mut state,
+                &mut executor,
+            ),
+            Err(ClientActionError::Pending),
+        );
+        let first_request = executor.executed[0].clone();
+        assert_eq!(action_state.status(), ClientResourceStatus::Loading);
+
+        // The one-active-action contract rejects a repeated trigger while loading.
+        assert_eq!(
+            trigger_client_action(
+                &active,
+                &action,
+                &auth,
+                &parent,
+                &mut action_state,
+                &[],
+                &capability::LocalCapabilityGrantSet::default(),
+                &mut state,
+                &mut executor,
+            ),
+            Err(ClientActionError::Pending),
+        );
+        assert_eq!(executor.executed.len(), 1);
+        assert_eq!(action_state.invocation_id(), Some(first_request.request_id()));
+        assert_eq!(action_state.generation(), Some(first_request.generation()));
+        assert_eq!(action_state.status(), ClientResourceStatus::Loading);
+    }
+
+    #[test]
+    fn action_trigger_redacts_executor_failure() {
+        let (active, parent_function, pair, parent_revision, _parameter) =
+            version_six_client_resource_action_active();
+        let target = FunctionId::from_bytes([0xd1; 16]);
+        let auth = authorise(pair, parent_function);
+        let parent = ClientExecutionContext {
+            pair,
+            function: parent_function,
+            function_revision: parent_revision,
+            parent_invocation_id: InvocationId::from_bytes([0x01; 16]),
+        };
+        let argument = FunctionArgument::new(
+            ParameterId::from_bytes([0xd3; 16]),
+            RuntimeValue::Text("/tmp/action".to_owned()),
+        )
+        .unwrap();
+        let action = action_value(
+            &active,
+            ActionTargetDomain::Server,
+            target,
+            pair,
+            CallSiteId::from_bytes([0x02; 16]),
+            vec![argument],
+            orna_standard::CHARACTER_LARGE_OBJECT_TYPE_ID,
+        );
+        let mut state = ClientStateStore::default();
+        let mut action_state = ClientActionState::default();
+        let mut executor = FailingActionExecutor;
+
+        assert_eq!(
+            trigger_client_action(
+                &active,
+                &action,
+                &auth,
+                &parent,
+                &mut action_state,
+                &[],
+                &capability::LocalCapabilityGrantSet::default(),
+                &mut state,
+                &mut executor,
+            ),
+            Ok(ClientActionOutcome::Failed {
+                code: ACTION_FAILURE_CODE.to_owned(),
+            }),
+        );
+        assert_eq!(action_state.status(), ClientResourceStatus::Idle);
     }
 
     #[test]
