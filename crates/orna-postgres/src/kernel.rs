@@ -58,8 +58,11 @@ pub use apply::StandardContextIdentity;
 pub use bootstrap::ActiveRevision;
 pub use orna_core::inspect::InspectSnapshotEpoch;
 pub use security::{
-    AuthenticatedRawCallResult, AuthenticatedServerResourceResult, RecordArgumentPreflight,
-    ResourceCancellation, SealedInvocationResult,
+    AuthenticatedRawCallResult, AuthenticatedServerResourceAccepted,
+    AuthenticatedServerResourceEvent, AuthenticatedServerResourceKind,
+    AuthenticatedServerResourceProducer, AuthenticatedServerResourceResult,
+    AuthenticatedServerResourceStart, RecordArgumentPreflight, ResourceCancellation,
+    ResourceCredit, SealedInvocationResult,
 };
 pub use server_execution::{ServerSelectContext, ServerSelectError, ServerSelectResult};
 pub use server_mutation_execution::{
