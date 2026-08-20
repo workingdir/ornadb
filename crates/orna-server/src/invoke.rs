@@ -276,22 +276,28 @@ struct ResolvedTarget<'a> {
     revision_pin: String,
 }
 
-/// Runs one scalar SERVER resource request for the installed CLIENT evaluator.
+/// Executes one CLIENT resource or SERVER action request through the
+/// authenticated installed-server boundary.
 ///
 /// The CLIENT evaluator is synchronous, while the authenticated PostgreSQL
 /// resource boundary is asynchronous. The adapter therefore runs the resource
 /// operation on a separate current-thread runtime and connection. This keeps
 /// the resource transaction outside the sealed invocation transaction and
 /// avoids re-entering the installed host runtime.
-struct InstalledResourceExecutor {
+///
+/// The adapter owns the transport stream allocation. It does not accept
+/// caller-supplied authority; the authenticated session remains the source of
+/// the server decision.
+pub struct InstalledClientResourceExecutor {
     kernel: PostgresKernel,
     session: AuthenticatedSession,
     active: ActiveDatabaseRevision,
     next_stream_id: u64,
 }
 
-impl InstalledResourceExecutor {
-    fn new(
+impl InstalledClientResourceExecutor {
+    /// Creates an executor for one authenticated installed database revision.
+    pub fn new(
         kernel: PostgresKernel,
         session: AuthenticatedSession,
         active: ActiveDatabaseRevision,
@@ -305,7 +311,7 @@ impl InstalledResourceExecutor {
     }
 }
 
-impl ClientResourceExecutor for InstalledResourceExecutor {
+impl ClientResourceExecutor for InstalledClientResourceExecutor {
     fn execute(&mut self, request: ClientResourceRequest) -> ClientResourceCompletion {
         let Some(next_stream_id) = self.next_stream_id.checked_add(1) else {
             return request.failed(SERVER_RESOURCE_INTERNAL_CODE.to_owned());
@@ -502,7 +508,7 @@ async fn host_invoke(
         .await
         .map_err(map_authentication_error)?;
     let mut resource_executor =
-        InstalledResourceExecutor::new(kernel.clone(), session.clone(), active.clone());
+        InstalledClientResourceExecutor::new(kernel.clone(), session.clone(), active.clone());
     let result = kernel
         .dispatch_sealed_sys_invoke_with_resource_executor(
             &session,
