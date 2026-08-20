@@ -1045,7 +1045,7 @@ fn validate_resolved_type_slots(
             )?;
         }
         match function.return_type() {
-            FunctionReturn::Single(resolved_type) => validate_resolved_type_slot(
+            FunctionReturn::Single(resolved_type) | FunctionReturn::Stream(resolved_type) => validate_resolved_type_slot(
                 context,
                 DefinitionIdentity::Function(function.id()),
                 *resolved_type,
@@ -1655,6 +1655,10 @@ fn encode_function_return(
             encoder.u8(1);
             encode_resolved_type(encoder, *resolved_type);
         }
+        FunctionReturn::Stream(resolved_type) => {
+            encoder.u8(3);
+            encode_resolved_type(encoder, *resolved_type);
+        }
         FunctionReturn::Rows(columns) => {
             encoder.u8(2);
             let columns = sorted_by_key(columns, |column| column.ordinal());
@@ -1981,7 +1985,7 @@ fn definition_identity_exists(
         DefinitionIdentity::FunctionReturnColumn { owner, ordinal } => catalogue
             .function_by_id(owner)
             .is_some_and(|function| match function.return_type() {
-                FunctionReturn::Single(_) => false,
+                FunctionReturn::Single(_) | FunctionReturn::Stream(_) => false,
                 FunctionReturn::Rows(columns) => {
                     columns.iter().any(|column| column.ordinal() == ordinal)
                 }
@@ -3909,6 +3913,45 @@ mod tests {
         let mut value = Encoder::new(&[]);
         encode_resolved_type(&mut value, ResolvedType::value(type_id));
         assert_eq!(value.bytes, [vec![4], id::<44>().to_vec()].concat());
+    }
+
+    #[test]
+    fn function_return_encoding_assigns_distinct_shape_tags() {
+        let type_id = TypeId::from_bytes(id::<45>());
+
+        let mut single = Encoder::new(&[]);
+        encode_function_return(
+            &mut single,
+            &FunctionReturn::Single(ResolvedType::named(type_id)),
+            ReturnColumnNames::Include,
+        )
+        .unwrap();
+
+        let mut rows = Encoder::new(&[]);
+        encode_function_return(
+            &mut rows,
+            &FunctionReturn::Rows(vec![FunctionReturnColumnDefinition::new(
+                "item",
+                0,
+                ResolvedType::named(type_id),
+            )]),
+            ReturnColumnNames::Include,
+        )
+        .unwrap();
+
+        let mut stream = Encoder::new(&[]);
+        encode_function_return(
+            &mut stream,
+            &FunctionReturn::Stream(ResolvedType::named(type_id)),
+            ReturnColumnNames::Include,
+        )
+        .unwrap();
+
+        assert_eq!(single.bytes[0], 1);
+        assert_eq!(rows.bytes[0], 2);
+        assert_eq!(stream.bytes, [vec![3, 2], id::<45>().to_vec()].concat());
+        assert_ne!(stream.bytes, single.bytes);
+        assert_ne!(stream.bytes, rows.bytes);
     }
 
     #[test]
