@@ -47,9 +47,13 @@ use orna_core::{
     revision::{ActiveDatabaseRevision, VerifiedStandardLibrarySnapshot},
     security::AuthenticatedSession,
     types::{ResolvedType, StandardScalar, TypeDescriptor},
-    value::RuntimeValue,
+    value::{OpaqueCodecRegistry, RuntimeValue},
 };
-use orna_postgres::{PostgresKernel, PostgresKernelError, SealedInvocationResult};
+use orna_postgres::{
+    AuthenticatedServerResourceEvent,
+    AuthenticatedServerResourceStart, PostgresKernel, PostgresKernelError,
+    ResourceCancellation, ResourceCredit, SealedInvocationResult,
+};
 use orna_protocol::{
     CallFailure, MAX_FRAME_PAYLOAD_LENGTH, MAX_RESOURCE_WINDOW, ResourceArgument, ResourceCancel,
     ResourceCancellationCode, ResourceClientFrame, ResourceKind as ProtocolResourceKind,
@@ -65,10 +69,10 @@ use tokio::sync::mpsc::error::TryRecvError;
 use tokio::sync::mpsc::{self, Receiver, Sender, UnboundedReceiver, UnboundedSender};
 
 use crate::{
-    EmbeddedHostError, LocalRawSocketResources, inspect_ready_embedded_host, serve_local_raw_stream,
+    EmbeddedHostError, LocalRawSocketResources, inspect_ready_embedded_host,
+    serve_local_raw_stream,
 };
 
-const INSTALLED_RESOURCE_SOCKET: &str = "/run/orna/default/orna.sock";
 const CONSTRUCTED_CLIENT_HELLO: [u8; 12] = *b"ORNA\x01\x00\x00\x05\x00\x00\x00\x00";
 const CONSTRUCTED_SERVER_ACK: [u8; 12] = *b"ORNA\x81\x00\x00\x05\x00\x00\x00\x00";
 const RESOURCE_MARKER: &[u8; 15] = b"ORNA-RESOURCE/1";
@@ -296,9 +300,16 @@ struct PersistentResourceTransport {
     protocol: ResourceProtocolConnection,
     server_task: Option<thread::JoinHandle<()>>,
 }
+struct AuthenticatedResourceTransport {
+    kernel: PostgresKernel,
+    session: AuthenticatedSession,
+    transport: PersistentResourceTransport,
+}
+
 
 enum ResourceTransportSource {
     Installed(PersistentResourceTransport),
+    Authenticated(AuthenticatedResourceTransport),
     Injected(InjectedResourceTransport),
 }
 
@@ -349,20 +360,35 @@ impl ResourceTransportSource {
         match self {
             Self::Installed(transport)
             | Self::Injected(InjectedResourceTransport::Stream(transport)) => transport,
+            Self::Authenticated(transport) => &mut transport.transport,
             Self::Injected(InjectedResourceTransport::Factory { transport, .. }) => transport,
         }
     }
+    fn bind_authenticated(
+        self,
+        kernel: &PostgresKernel,
+        session: &AuthenticatedSession,
+        _active: &ActiveDatabaseRevision,
+        _registry: &OpaqueCodecRegistry,
+    ) -> Self {
+        match self {
+            Self::Installed(transport) => Self::Authenticated(AuthenticatedResourceTransport {
+                kernel: kernel.clone(),
+                session: session.clone(),
+                transport,
+            }),
+            source => source,
+        }
+    }
+
 
     fn take_connection(
         &mut self,
     ) -> Result<(StandardUnixStream, bool, ResourceProtocolConnection), ()> {
         if self.persistent().stream.is_none() {
             match self {
-                Self::Installed(transport) => {
-                    transport.stream = Some(
-                        StandardUnixStream::connect(INSTALLED_RESOURCE_SOCKET).map_err(|_| ())?,
-                    );
-                }
+                Self::Installed(_) => return Err(()),
+                Self::Authenticated(_) => return Err(()),
                 Self::Injected(InjectedResourceTransport::Stream(transport)) => {
                     if transport.stream.is_none() {
                         return Err(());
@@ -458,15 +484,19 @@ pub struct InstalledClientResourceExecutor {
 impl InstalledClientResourceExecutor {
     /// Creates an executor for one authenticated installed database revision.
     pub fn new(
-        _kernel: PostgresKernel,
-        _session: AuthenticatedSession,
+        kernel: PostgresKernel,
+        session: AuthenticatedSession,
         active: ActiveDatabaseRevision,
     ) -> Self {
         Self {
             active,
             next_stream_id: 1,
-            transport: Some(ResourceTransportSource::Installed(
-                PersistentResourceTransport::empty(),
+            transport: Some(ResourceTransportSource::Authenticated(
+                AuthenticatedResourceTransport {
+                    kernel,
+                    session,
+                    transport: PersistentResourceTransport::empty(),
+                },
             )),
             pending: None,
             detached: Vec::new(),
@@ -575,9 +605,6 @@ impl ClientResourceExecutor for InstalledClientResourceExecutor {
                     return;
                 };
                 let outcome = (|| {
-                    let (stream, handshake_complete, protocol) = worker_transport
-                        .take_connection()
-                        .map_err(|_| ResourceTransportFailure::Transport)?;
                     let registry = active
                         .catalogue_hash_context()
                         .standard()
@@ -587,24 +614,43 @@ impl ClientResourceExecutor for InstalledClientResourceExecutor {
                         .enable_all()
                         .build()
                         .map_err(|_| ResourceTransportFailure::Transport)?;
-                    let run = runtime.block_on(run_resource_transport(
-                        stream,
-                        handshake_complete,
-                        protocol,
-                        active,
-                        registry,
-                        protocol_request,
-                        expected_type,
-                        resource_kind,
-                        control_receiver,
-                        &sender,
-                    ))?;
-                    let stream = run
-                        .stream
-                        .into_std()
-                        .map_err(|_| ResourceTransportFailure::Transport)?;
-                    worker_transport.restore_connection(stream, true, run.protocol);
-                    Ok(run.outcome)
+                    match &worker_transport {
+                        ResourceTransportSource::Authenticated(transport) => runtime
+                            .block_on(run_authenticated_resource_transport(
+                                transport.kernel.clone(),
+                                transport.session.clone(),
+                                active,
+                                registry,
+                                protocol_request,
+                                expected_type,
+                                resource_kind,
+                                control_receiver,
+                                &sender,
+                            )),
+                        _ => {
+                            let (stream, handshake_complete, protocol) = worker_transport
+                                .take_connection()
+                                .map_err(|_| ResourceTransportFailure::Transport)?;
+                            let run = runtime.block_on(run_resource_transport(
+                                stream,
+                                handshake_complete,
+                                protocol,
+                                active,
+                                registry,
+                                protocol_request,
+                                expected_type,
+                                resource_kind,
+                                control_receiver,
+                                &sender,
+                            ))?;
+                            let stream = run
+                                .stream
+                                .into_std()
+                                .map_err(|_| ResourceTransportFailure::Transport)?;
+                            worker_transport.restore_connection(stream, true, run.protocol);
+                            Ok(run.outcome)
+                        }
+                    }
                 })();
                 if outcome.is_err() {
                     worker_transport.reset();
@@ -909,6 +955,185 @@ fn resource_transport_disposition_action(
         }
         (false, orna_protocol::ResourceFrameDisposition::DroppedLate, _) => {
             ResourceFrameDispositionAction::Reject
+        }
+    }
+}
+
+async fn run_authenticated_resource_transport(
+    kernel: PostgresKernel,
+    session: AuthenticatedSession,
+    active: ActiveDatabaseRevision,
+    _registry: orna_core::value::OpaqueCodecRegistry,
+    request: ResourceRequest,
+    expected_type: ResolvedType,
+    resource_kind: ProtocolResourceKind,
+    mut controls: UnboundedReceiver<ResourceTransportControl>,
+    completion_sender: &Sender<Result<ResourceTransportOutcome, ResourceTransportFailure>>,
+) -> Result<ResourceTransportOutcome, ResourceTransportFailure> {
+    let cancellation = ResourceCancellation::new();
+    let start = kernel.start_authenticated_server_resource_producer(&session, &request, &cancellation);
+    tokio::pin!(start);
+    let started = tokio::select! {
+        biased;
+        control = controls.recv() => match control {
+            Some(_control) => {
+                cancellation.request_cancel();
+                return Ok(ResourceTransportOutcome::Cancelled);
+            }
+            None => return Err(ResourceTransportFailure::Transport),
+        },
+        started = &mut start => started
+            .map_err(|_| ResourceTransportFailure::Transport)?,
+    };
+    let producer = match started {
+        AuthenticatedServerResourceStart::Accepted(producer) => producer,
+        AuthenticatedServerResourceStart::Failed { failure, .. } => {
+            return Ok(ResourceTransportOutcome::Failed { failure });
+        }
+    };
+    let accepted = producer.accepted();
+    let accepted_kind = match resource_kind {
+        ProtocolResourceKind::Single => {
+            orna_postgres::AuthenticatedServerResourceKind::Single
+        }
+        ProtocolResourceKind::Stream => orna_postgres::AuthenticatedServerResourceKind::Stream,
+    };
+    if accepted.stream_id != request.stream_id
+        || accepted.request_id != request.request_id
+        || accepted.target_revision != request.target_revision
+        || accepted.resource_kind != accepted_kind
+    {
+        producer.cancel();
+        return Err(ResourceTransportFailure::Shape);
+    }
+
+    let mut scalar_value = None;
+    let mut next_batch_sequence = 0_u64;
+    let mut total_items = 0_u64;
+    let mut total_bytes = 0_u64;
+    let mut byte_credit = MAX_RESOURCE_WINDOW;
+    loop {
+        // A scalar value is followed by a zero-credit terminal probe. The
+        // producer accepts that probe only after the row has been delivered;
+        // ResourceCredit::new intentionally rejects zero credit for requests.
+        let credit = if matches!(resource_kind, ProtocolResourceKind::Single)
+            && scalar_value.is_some()
+        {
+            ResourceCredit {
+                item_count: 0,
+                byte_count: 0,
+            }
+        } else {
+            ResourceCredit::new(1, byte_credit).ok_or(ResourceTransportFailure::Shape)?
+        };
+        let event = tokio::select! {
+            biased;
+            control = controls.recv() => match control {
+                Some(_control) => {
+                    producer.cancel();
+                    return Ok(ResourceTransportOutcome::Cancelled);
+                }
+                None => return Err(ResourceTransportFailure::Transport),
+            },
+            event = producer.pull(credit) => event.map_err(|_| ResourceTransportFailure::Transport)?,
+        };
+        match event {
+            AuthenticatedServerResourceEvent::Values {
+                batch_sequence,
+                item_count,
+                byte_count,
+                values,
+            } => {
+                if values.is_empty()
+                    || item_count == 0
+                    || item_count as usize != values.len()
+                    || batch_sequence != next_batch_sequence
+                    || byte_count == 0
+                {
+                    producer.cancel();
+                    return Err(ResourceTransportFailure::Shape);
+                }
+                for value in &values {
+                    if !runtime_value_matches_type(&active, value, expected_type) {
+                        producer.cancel();
+                        return Err(ResourceTransportFailure::Shape);
+                    }
+                }
+                next_batch_sequence = next_batch_sequence
+                    .checked_add(1)
+                    .ok_or(ResourceTransportFailure::Shape)?;
+                total_items = total_items
+                    .checked_add(u64::from(item_count))
+                    .ok_or(ResourceTransportFailure::Shape)?;
+                total_bytes = total_bytes
+                    .checked_add(byte_count)
+                    .ok_or(ResourceTransportFailure::Shape)?;
+                match resource_kind {
+                    ProtocolResourceKind::Single => {
+                        if values.len() != 1 || scalar_value.is_some() {
+                            producer.cancel();
+                            return Err(ResourceTransportFailure::Shape);
+                        }
+                        scalar_value = values.into_iter().next();
+                    }
+                    ProtocolResourceKind::Stream => {
+                        let sent = send_resource_outcome(
+                            completion_sender,
+                            &mut controls,
+                            Ok(ResourceTransportOutcome::StreamValues(values)),
+                        )
+                        .await;
+                        match sent {
+                            Ok(Some(_control)) => {
+                                producer.cancel();
+                                return Ok(ResourceTransportOutcome::Cancelled);
+                            }
+                            Ok(None) => {}
+                            Err(error) => {
+                                producer.cancel();
+                                return Err(error);
+                            }
+                        }
+                    }
+                }
+            }
+            AuthenticatedServerResourceEvent::Completed {
+                final_batch_sequence,
+                total_items: completed_items,
+                total_bytes: completed_bytes,
+            } => {
+                let expected_final_batch = next_batch_sequence.saturating_sub(1);
+                if final_batch_sequence != expected_final_batch
+                    || completed_items != total_items
+                    || completed_bytes != total_bytes
+                {
+                    producer.cancel();
+                    return Err(ResourceTransportFailure::Shape);
+                }
+                return match resource_kind {
+                    ProtocolResourceKind::Single => scalar_value
+                        .map(ResourceTransportOutcome::Ready)
+                        .ok_or(ResourceTransportFailure::Shape),
+                    ProtocolResourceKind::Stream => Ok(ResourceTransportOutcome::StreamCompleted)
+                };
+            }
+            AuthenticatedServerResourceEvent::Failed { failure } => {
+                if scalar_value.is_some() {
+                    producer.cancel();
+                    return Err(ResourceTransportFailure::Shape);
+                }
+                return Ok(ResourceTransportOutcome::Failed { failure });
+            }
+            AuthenticatedServerResourceEvent::Cancelled => {
+                return Ok(ResourceTransportOutcome::Cancelled);
+            }
+            AuthenticatedServerResourceEvent::Waiting { required_bytes } => {
+                if required_bytes == 0 || required_bytes > MAX_RESOURCE_WINDOW {
+                    producer.cancel();
+                    return Err(ResourceTransportFailure::Shape);
+                }
+                byte_credit = required_bytes;
+            }
         }
     }
 }
@@ -1488,6 +1713,7 @@ async fn host_invoke(
         .authenticate_local_peer(uid)
         .await
         .map_err(map_authentication_error)?;
+    let transport = transport.bind_authenticated(&kernel, &session, &active, &registry);
     let mut resource_executor = InstalledClientResourceExecutor {
         active: active.clone(),
         next_stream_id: 1,
