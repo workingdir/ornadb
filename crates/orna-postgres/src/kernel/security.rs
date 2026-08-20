@@ -683,11 +683,39 @@ impl PostgresKernel {
     /// principals are recovered by the kernel. The nested invocation identity
     /// is generated here and never taken from the request. Denials and failures
     /// return only the closed protocol failure class.
+    /// Dispatches one authenticated ORNA-RESOURCE target without exposing
+    /// cancellation state to callers that do not own the transport request.
     pub async fn dispatch_authenticated_server_resource(
         &self,
         authenticated_session: &AuthenticatedSession,
         request: &ResourceRequest,
     ) -> Result<AuthenticatedServerResourceResult, PostgresKernelError> {
+        let cancellation = ResourceCancellation::new();
+        match self
+            .dispatch_authenticated_server_resource_with_cancellation(
+                authenticated_session,
+                request,
+                &cancellation,
+            )
+            .await?
+        {
+            Some(result) => Ok(result),
+            None => Err(PostgresKernelError::DurableInvariant {
+                relation: "resource cancellation",
+                record: request.request_id.canonical(),
+                rule: "uncancellable resource dispatch returned no terminal result",
+            }),
+        }
+    }
+
+    /// Dispatches one authenticated ORNA-RESOURCE target with cooperative
+    /// cancellation owned by the transport adapter.
+    pub async fn dispatch_authenticated_server_resource_with_cancellation(
+        &self,
+        authenticated_session: &AuthenticatedSession,
+        request: &ResourceRequest,
+        cancellation: &ResourceCancellation,
+    ) -> Result<Option<AuthenticatedServerResourceResult>, PostgresKernelError> {
         let mut database_session = self.open().await?;
         let operation = async {
             let mut transaction = database_session
@@ -839,6 +867,13 @@ impl PostgresKernel {
                     }
                 }
             };
+            if !cancellation.try_begin_commit() {
+                transaction
+                    .rollback()
+                    .await
+                    .map_err(PostgresKernelError::Database)?;
+                return Ok(None);
+            }
             let (terminal, audit_target, item_count) = match &result {
                 AuthenticatedServerResourceResult::Completed { values, .. } => (
                     ResourceAuditTerminalOutcome::Completed,
@@ -865,10 +900,21 @@ impl PostgresKernel {
                 .commit()
                 .await
                 .map_err(PostgresKernelError::Database)?;
-            Ok(result)
+            cancellation.commit_finished();
+            Ok(Some(result))
         }
         .await;
-        finish_authenticated_server_select_session(operation, database_session.shutdown().await)
+        let result =
+            finish_authenticated_server_select_session(operation, database_session.shutdown().await);
+        match result {
+            Ok(Some(result)) => Ok(Some(result)),
+            Ok(None) => {
+                self.record_cancelled_resource_audit(authenticated_session, request)
+                    .await?;
+                Ok(None)
+            }
+            Err(error) => Err(error),
+        }
     }
 
     /// Dispatches one sealed `sys.invoke` Request inside one transaction.
