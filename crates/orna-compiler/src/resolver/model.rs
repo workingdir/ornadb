@@ -1377,6 +1377,15 @@ impl CheckedClientStateSlot {
     }
 }
 
+/// The declared result shape of a checked CLIENT function.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum CheckedClientReturnShape {
+    /// One value is returned.
+    Single,
+    /// Zero or more values of the checked return element type are returned.
+    Stream,
+}
+
 /// A checked CLIENT function with a closed Boolean constant body.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CheckedClientFunction {
@@ -1385,6 +1394,7 @@ pub struct CheckedClientFunction {
     pub(super) domain: FunctionDomain,
     pub(super) parameters: Vec<CheckedServerFunctionParameter>,
     pub(super) return_type: SemanticType<CheckedTypeId>,
+    pub(super) return_shape: CheckedClientReturnShape,
     pub(super) security: orna_core::catalogue::FunctionSecurity,
     pub(super) transaction: Option<orna_core::catalogue::FunctionTransaction>,
     pub(super) volatility: orna_core::catalogue::FunctionVolatility,
@@ -1415,9 +1425,14 @@ impl CheckedClientFunction {
         &self.parameters
     }
 
-    /// Returns the checked scalar return type.
+    /// Returns the checked return element type.
     pub const fn return_type(&self) -> SemanticType<CheckedTypeId> {
         self.return_type
+    }
+
+    /// Returns the checked CLIENT result shape.
+    pub(crate) const fn return_shape(&self) -> CheckedClientReturnShape {
+        self.return_shape
     }
 
     /// Returns the function security context mode.
