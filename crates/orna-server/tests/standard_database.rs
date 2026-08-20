@@ -2291,7 +2291,8 @@ async fn proves_expression_client_functions_through_installed_invoke() -> TestRe
             .ok_or_else(|| failure("the external CLIENT contract unexpectedly completed"))?;
         require(
             error.kind() == InstalledInvokeErrorKind::Internal
-                && error.message().contains("expr.runtime@1")
+                && error.message() == "sealed dispatch failed"
+                && !error.message().contains("expr.runtime@1")
                 && stdout.is_empty()
                 && stderr.is_empty(),
             "the external CLIENT contract did not fail closed through installed invoke",
