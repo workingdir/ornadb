@@ -79,9 +79,17 @@ separate release action.
 - [x] Add sealed system identity calls, ORV6 SET transport, and the
   `std.json.Value` standard snapshot with persisted V5 executable recovery
   (work ADRs 0072, 0073, and 0075).
-- [ ] Implement the ordinary CLIENT Inspector after the canonical
-  RESOURCE, UI runtime-contract, and CLIENT-to-SERVER invocation contracts
-  become accepted executable specifications.
+- [x] Add the test-only headless runtime conformance fixture and focused
+  lifecycle proof (work ADR 0076).
+- [x] Add the CLIENT-to-SERVER resource language surface, including typed
+  resource and stream constructors with `AWAIT` (work ADR 0077).
+- [x] Add authenticated `ORNA-RESOURCE/1` transport, stream credits,
+  cancellation, terminal ordering, and bounded scheduling (work ADR 0078).
+- [x] Add CLIENT action values and `std.action.call`, including checked plans
+  and trigger lifecycle proof (work ADR 0079).
+- [ ] Implement the ordinary CLIENT Inspector; the production graphical
+  runtime/UI sink contract remains proposal-only, and an accepted executable
+  Inspector contract is still required.
 - [ ] Implement reflective JSON-RPC and MCP gateway programs after the
   canonical Exposure and Service value contracts become accepted executable
   specifications.
