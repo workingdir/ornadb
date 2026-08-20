@@ -7,13 +7,16 @@ const RESOURCE_CANCELLATION_RUNNING: u8 = 0;
 const RESOURCE_CANCELLATION_REQUESTED: u8 = 1;
 const RESOURCE_CANCELLATION_COMMIT_STARTED: u8 = 2;
 const RESOURCE_CANCELLATION_COMMITTED: u8 = 3;
+const RESOURCE_CANCELLATION_ACCEPTANCE_COMMIT_STARTED: u8 = 4;
+const RESOURCE_CANCELLATION_ACCEPTANCE_CANCEL_REQUESTED: u8 = 5;
 const MAX_RESOURCE_CREDIT: u64 = 1024 * 1024 * 1024;
 
-/// Coordinates cancellation with the terminal resource commit.
+/// Coordinates cancellation with resource acceptance and terminal commits.
 ///
-/// The state transition is the resource cancellation linearisation point:
-/// cancellation wins only while the request is still running. Once commit
-/// starts, the terminal result wins even if a later cancellation arrives.
+/// Each commit-start transition is a cancellation linearisation point:
+/// cancellation wins only while the request is still running. Once either
+/// acceptance or terminal commit starts, that commit wins even if a later
+/// cancellation arrives.
 #[derive(Clone, Debug)]
 pub struct ResourceCancellation {
     state: Arc<Mutex<u8>>,
@@ -36,11 +39,16 @@ impl ResourceCancellation {
                 .state
                 .lock()
                 .expect("resource cancellation state is not poisoned");
-            if *state != RESOURCE_CANCELLATION_RUNNING {
-                false
-            } else {
-                *state = RESOURCE_CANCELLATION_REQUESTED;
-                true
+            match *state {
+                RESOURCE_CANCELLATION_RUNNING => {
+                    *state = RESOURCE_CANCELLATION_REQUESTED;
+                    true
+                }
+                RESOURCE_CANCELLATION_ACCEPTANCE_COMMIT_STARTED => {
+                    *state = RESOURCE_CANCELLATION_ACCEPTANCE_CANCEL_REQUESTED;
+                    false
+                }
+                _ => false,
             }
         };
         if won {
@@ -51,11 +59,24 @@ impl ResourceCancellation {
 
     /// Returns whether cancellation has won the terminal commit race.
     pub fn is_requested(&self) -> bool {
+        matches!(
+            *self
+                .state
+                .lock()
+                .expect("resource cancellation state is not poisoned"),
+            RESOURCE_CANCELLATION_REQUESTED
+                | RESOURCE_CANCELLATION_ACCEPTANCE_CANCEL_REQUESTED
+        )
+    }
+
+    /// Returns whether cancellation arrived during acceptance commit.
+    #[doc(hidden)]
+    pub fn is_acceptance_cancellation_requested(&self) -> bool {
         *self
             .state
             .lock()
             .expect("resource cancellation state is not poisoned")
-            == RESOURCE_CANCELLATION_REQUESTED
+            == RESOURCE_CANCELLATION_ACCEPTANCE_CANCEL_REQUESTED
     }
 
     /// Waits until cancellation wins the terminal commit race.
@@ -66,6 +87,38 @@ impl ResourceCancellation {
                 return;
             }
             notified.await;
+        }
+    }
+
+    /// Starts the durable acceptance commit if cancellation has not won.
+    #[doc(hidden)]
+    pub fn try_begin_acceptance_commit(&self) -> bool {
+        let mut state = self
+            .state
+            .lock()
+            .expect("resource cancellation state is not poisoned");
+        if *state != RESOURCE_CANCELLATION_RUNNING {
+            return false;
+        }
+        *state = RESOURCE_CANCELLATION_ACCEPTANCE_COMMIT_STARTED;
+        true
+    }
+
+    /// Reopens terminal cancellation after durable acceptance has committed.
+    #[doc(hidden)]
+    pub fn acceptance_commit_finished(&self) {
+        let mut state = self
+            .state
+            .lock()
+            .expect("resource cancellation state is not poisoned");
+        match *state {
+            RESOURCE_CANCELLATION_ACCEPTANCE_COMMIT_STARTED => {
+                *state = RESOURCE_CANCELLATION_RUNNING;
+            }
+            RESOURCE_CANCELLATION_ACCEPTANCE_CANCEL_REQUESTED => {
+                *state = RESOURCE_CANCELLATION_REQUESTED;
+            }
+            _ => {}
         }
     }
 
@@ -96,10 +149,11 @@ impl ResourceCancellation {
 
 use orna_client::{
     ClientExecutionError, ClientExecutionResult, ClientResourceCompletion,
-    ClientResourceExecutionError, ClientResourceExecutor, ClientStateStore,
+    ClientResourceExecutionError, ClientResourceExecutor, ClientStateContext, ClientStateStore,
+    evaluate_client_function_in_state_context_with_grants_and_arguments as evaluate_authorised_client_function_with_state_context_and_arguments,
+    evaluate_client_function_in_state_context_with_grants_and_arguments_and_executor_with_parent_invocation as evaluate_authorised_client_function_with_state_context_and_arguments_and_executor,
     evaluate_client_function_with_grants as evaluate_authorised_client_function,
     evaluate_client_function_with_grants_and_arguments as evaluate_authorised_client_function_with_arguments,
-    evaluate_client_function_with_state_and_grants_and_arguments_and_executor_with_parent_invocation as evaluate_authorised_client_function_with_arguments_and_executor,
 };
 use orna_artifact::client_plan::{CAPABILITY_FORMAT_VERSION, CapabilityClientPlan, ResourceKind};
 use orna_core::{
@@ -508,6 +562,545 @@ impl AuthenticatedRawCallResult {
     }
 }
 
+/// The closed pre-accept result of one retained sealed invocation.
+///
+/// Entry denial and malformed/protocol-incompatible requests never receive an
+/// invocation identity. An accepted continuation owns the pinned decode context
+/// and can be handed to the post-accept preparation step exactly once.
+#[doc(hidden)]
+pub enum SealedInvocationPreflight {
+    /// The request was rejected before acceptance.
+    Rejected { failure: CallFailure },
+    /// The request passed the protected entry and request checks.
+    Accepted(SealedInvocationContinuation),
+}
+
+/// The private, one-shot continuation created after sealed preflight.
+#[doc(hidden)]
+pub struct SealedInvocationContinuation {
+    kernel: PostgresKernel,
+    authenticated_session: AuthenticatedSession,
+    active: ActiveDatabaseRevision,
+    security: SecuritySnapshot,
+    registry: OpaqueCodecRegistry,
+    decoded: orna_core::invocation::InvokeRequest,
+    request: RetainedInvokeRequest,
+    invocation: InvocationId,
+    started_events: InvocationEventBatch,
+}
+
+impl SealedInvocationContinuation {
+    /// Returns the identity that will be shared by every invocation event.
+    pub const fn invocation(&self) -> InvocationId {
+        self.invocation
+    }
+
+    /// Returns the start-only Event batch queued before target work.
+    pub fn started_events(&self) -> &InvocationEventBatch {
+        &self.started_events
+    }
+}
+
+impl std::fmt::Debug for SealedInvocationContinuation {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("SealedInvocationContinuation")
+            .field("invocation", &self.invocation)
+            .finish_non_exhaustive()
+    }
+}
+
+impl std::fmt::Debug for SealedInvocationPreflight {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Rejected { failure } => formatter
+                .debug_struct("SealedInvocationPreflight::Rejected")
+                .field("failure", failure)
+                .finish(),
+            Self::Accepted(continuation) => formatter
+                .debug_tuple("SealedInvocationPreflight::Accepted")
+                .field(continuation)
+                .finish(),
+        }
+    }
+}
+
+/// The closed result of one accepted continuation after its start Event.
+#[doc(hidden)]
+#[derive(Clone, Debug, PartialEq)]
+pub enum SealedInvocationExecution {
+    /// A normal sealed invocation result (including redacted failures).
+    Result(SealedInvocationResult),
+    /// Cancellation won before new evaluator/target work began.
+    Cancelled { invocation: InvocationId },
+}
+
+/// The post-accept operation owns all pinned state needed for one execution.
+#[doc(hidden)]
+pub struct SealedInvocationOperation {
+    kernel: PostgresKernel,
+    authenticated_session: AuthenticatedSession,
+    active: ActiveDatabaseRevision,
+    security: SecuritySnapshot,
+    registry: OpaqueCodecRegistry,
+    decoded: orna_core::invocation::InvokeRequest,
+    request: RetainedInvokeRequest,
+    invocation: InvocationId,
+    started_events: InvocationEventBatch,
+    outcome: SealedInvocationPreparedOutcome,
+    consumed: bool,
+}
+
+impl SealedInvocationOperation {
+    /// Returns the invocation identity.
+    pub const fn invocation(&self) -> InvocationId {
+        self.invocation
+    }
+
+    /// Returns the start-only Event batch. No target or result is included.
+    pub fn started_events(&self) -> &InvocationEventBatch {
+        &self.started_events
+    }
+    /// Returns the immutable active revision pinned during preflight.
+    #[doc(hidden)]
+    pub fn active_revision(&self) -> ActiveDatabaseRevision {
+        self.active.clone()
+    }
+}
+
+impl std::fmt::Debug for SealedInvocationOperation {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("SealedInvocationOperation")
+            .field("invocation", &self.invocation)
+            .finish_non_exhaustive()
+    }
+}
+
+enum SealedInvocationPreparedOutcome {
+    TargetDenied {
+        security_target: Option<InvocationTarget>,
+        denial: Option<ExecuteDenial>,
+    },
+    BindFailure {
+        target: PreparedSealedTarget,
+        security_target: InvocationTarget,
+        authorisation: AuthorisedInvocation,
+    },
+    Allowed {
+        target: PreparedSealedTarget,
+        security_target: InvocationTarget,
+        authorisation: AuthorisedInvocation,
+    },
+}
+
+#[derive(Clone)]
+enum PreparedSealedTarget {
+    Application {
+        definition: FunctionDefinition,
+    },
+    System {
+        definition: SystemFunctionDefinition,
+    },
+    VerifiedStandard {
+        definition: FunctionDefinition,
+        executable: StandardExecutable,
+    },
+}
+
+impl PreparedSealedTarget {
+    fn function(&self) -> FunctionId {
+        match self {
+            Self::Application { definition } | Self::VerifiedStandard { definition, .. } => {
+                definition.id()
+            }
+            Self::System { definition } => definition.id(),
+        }
+    }
+
+    fn from_resolved(target: SealedResolvedTarget<'_>) -> Self {
+        match target {
+            SealedResolvedTarget::Application(definition) => Self::Application {
+                definition: definition.clone(),
+            },
+            SealedResolvedTarget::System(definition) => Self::System { definition },
+            SealedResolvedTarget::VerifiedStandard {
+                definition,
+                executable,
+            } => Self::VerifiedStandard {
+                definition: definition.clone(),
+                executable: executable.clone(),
+            },
+        }
+    }
+}
+
+fn sealed_started_events(
+    invocation: InvocationId,
+) -> Result<InvocationEventBatch, PostgresKernelError> {
+    let started = InvokeEvent::new(
+        invocation,
+        0,
+        InvocationEventBody::Started {
+            visible_principal: None,
+        },
+    )
+    .map_err(PostgresKernelError::InvocationCarrier)?;
+    InvocationEventBatch::new(vec![InvocationEventRecord::new(1, started)])
+        .map_err(PostgresKernelError::SealedInvocation)
+}
+
+impl PostgresKernel {
+    /// Validates the protected entry and retained request before acceptance.
+    ///
+    /// This method does not resolve the requested target or append invocation
+    /// audit evidence. It returns only a closed public rejection or an
+    /// accepted continuation carrying the pinned decode context.
+    #[doc(hidden)]
+    pub async fn validate_sealed_sys_invoke(
+        &self,
+        authenticated_session: &AuthenticatedSession,
+        connection_protocol_major: u16,
+        request: &RetainedInvokeRequest,
+    ) -> Result<SealedInvocationPreflight, PostgresKernelError> {
+        let mut database_session = self.open().await?;
+        let operation = async {
+            let transaction = database_session
+                .client
+                .build_transaction()
+                .isolation_level(IsolationLevel::RepeatableRead)
+                .start()
+                .await
+                .map_err(PostgresKernelError::Database)?;
+            require_current_migrations(&transaction).await?;
+            let active = configure_and_recover(&transaction).await?;
+            let security = recover_security_snapshot_for_active(&transaction, &active).await?;
+            let system_target = InvocationTarget::new(SYS_INVOKE_FUNCTION_ID, active.pair());
+            // ADR 0054 requires the protected entry decision to precede any
+            // retained Request decoding. An unauthorized caller therefore gets
+            // only the closed EXECUTE_DENIED result, even for malformed bytes.
+            if !matches!(
+                security.authorise_system_function(authenticated_session, system_target),
+                ExecuteDecision::Allowed(_)
+            ) {
+                transaction
+                    .rollback()
+                    .await
+                    .map_err(PostgresKernelError::Database)?;
+                return Ok(SealedInvocationPreflight::Rejected {
+                    failure: CallFailure::ExecuteDenied,
+                });
+            }
+            let standard = active.catalogue_hash_context().standard().ok_or_else(|| {
+                PostgresKernelError::DurableInvariant {
+                    relation: "_orna_kernel.active_revision",
+                    record: active.pair().catalogue().canonical(),
+                    rule: "sealed sys.invoke requires the accepted verified standard snapshot",
+                }
+            })?;
+            let registry = registered_opaque_codecs(standard).map_err(|_| {
+                PostgresKernelError::DurableInvariant {
+                    relation: "_orna_kernel.standard_library_revisions",
+                    record: standard.revision().canonical(),
+                    rule: "the verified standard snapshot must bind its opaque codec registry",
+                }
+            })?;
+            let decoded = match decode_retained_invoke_request(&active, &registry, request) {
+                Ok(decoded) => decoded,
+                Err(_) => {
+                    transaction
+                        .rollback()
+                        .await
+                        .map_err(PostgresKernelError::Database)?;
+                    return Ok(SealedInvocationPreflight::Rejected {
+                        failure: CallFailure::InternalFailure,
+                    });
+                }
+            };
+            if decoded.client_offer().protocol_major() != connection_protocol_major {
+                transaction
+                    .rollback()
+                    .await
+                    .map_err(PostgresKernelError::Database)?;
+                return Ok(SealedInvocationPreflight::Rejected {
+                    failure: CallFailure::InternalFailure,
+                });
+            }
+            transaction
+                .rollback()
+                .await
+                .map_err(PostgresKernelError::Database)?;
+            let invocation = InvocationId::new();
+            let started_events = sealed_started_events(invocation)?;
+            Ok(SealedInvocationPreflight::Accepted(
+                SealedInvocationContinuation {
+                    kernel: self.clone(),
+                    authenticated_session: authenticated_session.clone(),
+                    active,
+                    security,
+                    registry,
+                    decoded,
+                    request: request.clone(),
+                    invocation,
+                    started_events,
+                },
+            ))
+        }
+        .await;
+        finish_authenticated_server_select_session(operation, database_session.shutdown().await)
+    }
+}
+
+impl SealedInvocationContinuation {
+    /// Prepares the accepted invocation after the caller has sent
+    /// `CALL_ACCEPTED` and before target execution starts.
+    ///
+    /// Target resolution, binding, and the protected decision remain private in
+    /// this outcome. The operation commits their durable audit before dispatch
+    /// evaluates defaults or the target.
+    #[doc(hidden)]
+    pub async fn prepare_sealed_sys_invoke_after_accept(
+        self,
+    ) -> Result<SealedInvocationOperation, PostgresKernelError> {
+        let SealedInvocationContinuation {
+            kernel,
+            authenticated_session,
+            active,
+            security,
+            registry,
+            decoded,
+            request,
+            invocation,
+            started_events,
+        } = self;
+        let outcome = match resolve_sealed_target(&active, decoded.target()) {
+            Some(target) => {
+                let security_target = sealed_security_target(&active, target);
+                match authorise_sealed_target(&security, &authenticated_session, security_target) {
+                    ExecuteDecision::Allowed(authorisation) => {
+                        let bind_ok = match &target {
+                            SealedResolvedTarget::Application(definition)
+                            | SealedResolvedTarget::VerifiedStandard { definition, .. } => {
+                                bind_sealed_invoke_arguments(definition, decoded.arguments())
+                                    .is_ok()
+                            }
+                            SealedResolvedTarget::System(_) => true,
+                        };
+                        let prepared_target = PreparedSealedTarget::from_resolved(target);
+                        if bind_ok {
+                            SealedInvocationPreparedOutcome::Allowed {
+                                target: prepared_target,
+                                security_target,
+                                authorisation,
+                            }
+                        } else {
+                            SealedInvocationPreparedOutcome::BindFailure {
+                                target: prepared_target,
+                                security_target,
+                                authorisation,
+                            }
+                        }
+                    }
+                    ExecuteDecision::Denied(denial) => {
+                        SealedInvocationPreparedOutcome::TargetDenied {
+                            security_target: Some(security_target),
+                            denial: Some(denial),
+                        }
+                    }
+                }
+            }
+            None => SealedInvocationPreparedOutcome::TargetDenied {
+                security_target: None,
+                denial: None,
+            },
+        };
+        Ok(SealedInvocationOperation {
+            kernel,
+            authenticated_session,
+            active,
+            security,
+            registry,
+            decoded,
+            request,
+            invocation,
+            started_events,
+            outcome,
+            consumed: false,
+        })
+    }
+}
+
+impl SealedInvocationOperation {
+    async fn append_prepared_audit(&self) -> Result<(), PostgresKernelError> {
+        let mut database_session = self.kernel.open().await?;
+        let operation = async {
+            let transaction = database_session
+                .client
+                .build_transaction()
+                .isolation_level(IsolationLevel::RepeatableRead)
+                .start()
+                .await
+                .map_err(PostgresKernelError::Database)?;
+            require_current_migrations(&transaction).await?;
+            let active = configure_and_recover(&transaction).await?;
+            if active.pair() != self.active.pair() {
+                return Err(PostgresKernelError::DurableInvariant {
+                    relation: "_orna_kernel.active_revision",
+                    record: self.invocation.canonical(),
+                    rule: "sealed invocation active revision changed before audit",
+                });
+            }
+            let security = recover_security_snapshot_for_active(&transaction, &active).await?;
+            if !security_snapshots_match(&security, &self.security) {
+                return Err(PostgresKernelError::DurableInvariant {
+                    relation: "_orna_kernel.security_audit_events",
+                    record: self.invocation.canonical(),
+                    rule: "sealed invocation security snapshot changed before audit",
+                });
+            }
+            match &self.outcome {
+                SealedInvocationPreparedOutcome::Allowed {
+                    target,
+                    security_target,
+                    authorisation,
+                }
+                | SealedInvocationPreparedOutcome::BindFailure {
+                    target,
+                    security_target,
+                    authorisation,
+                } => {
+                    if target.function() != security_target.function()
+                        || authorisation.target() != *security_target
+                        || authorisation.target().revision() != self.active.pair()
+                    {
+                        return Err(PostgresKernelError::DurableInvariant {
+                            relation: "_orna_kernel.invocation_audit_events",
+                            record: self.invocation.canonical(),
+                            rule: "prepared invocation authorisation must retain the pinned revision",
+                        });
+                    }
+                    append_allowed_invocation_audit_evidence(
+                        &transaction,
+                        authorisation,
+                        self.invocation,
+                    )
+                    .await?;
+                }
+                SealedInvocationPreparedOutcome::TargetDenied {
+                    security_target: Some(target),
+                    denial: Some(reason),
+                } => {
+                    let event_id = append_security_audit_event(
+                        &transaction,
+                        SecurityAuditDecision::execute_denied(
+                            &self.authenticated_session,
+                            *target,
+                            *reason,
+                        ),
+                    )
+                    .await?;
+                    append_linked_invocation_audit(&transaction, self.invocation, event_id).await?;
+                }
+                SealedInvocationPreparedOutcome::TargetDenied {
+                    security_target: None,
+                    denial: None,
+                } => {
+                    append_unresolved_invocation_audit(
+                        &transaction,
+                        &self.authenticated_session,
+                        self.invocation,
+                    )
+                    .await?;
+                }
+                SealedInvocationPreparedOutcome::TargetDenied { .. } => {
+                    return Err(PostgresKernelError::DurableInvariant {
+                        relation: "_orna_kernel.invocation_audit_events",
+                        record: self.invocation.canonical(),
+                        rule: "target denial must retain both target and denial or neither",
+                    });
+                }
+            }
+            transaction
+                .commit()
+                .await
+                .map_err(PostgresKernelError::Database)?;
+            Ok(())
+        }
+        .await;
+        finish_authenticated_server_select_session(operation, database_session.shutdown().await)
+    }
+
+    /// Executes the accepted invocation after its start Event is delivered.
+    #[doc(hidden)]
+    pub async fn execute_after_started(
+        &mut self,
+        resource_executor: Option<&mut dyn ClientResourceExecutor>,
+        state: &mut ClientStateStore,
+        capability_audit_appended: &mut bool,
+        cancellation: &ResourceCancellation,
+    ) -> Result<SealedInvocationExecution, PostgresKernelError> {
+        if self.consumed {
+            return Err(PostgresKernelError::DurableInvariant {
+                relation: "sealed invocation operation",
+                record: self.invocation.canonical(),
+                rule: "execute_after_started may only be called once",
+            });
+        }
+        self.consumed = true;
+        self.append_prepared_audit().await?;
+        if cancellation.is_requested() {
+            return Ok(SealedInvocationExecution::Cancelled {
+                invocation: self.invocation,
+            });
+        }
+        let bind_failure = matches!(
+            &self.outcome,
+            SealedInvocationPreparedOutcome::BindFailure { .. }
+        );
+        let target_denied = matches!(
+            &self.outcome,
+            SealedInvocationPreparedOutcome::TargetDenied { .. }
+        );
+        if bind_failure {
+            return Ok(SealedInvocationExecution::Result(sealed_failure_result(
+                self.invocation,
+                SealedInvocationFailureClass::Bind,
+            )?));
+        }
+        if target_denied {
+            return Ok(SealedInvocationExecution::Result(
+                SealedInvocationResult::Denied {
+                    invocation: self.invocation,
+                },
+            ));
+        }
+        let result = self
+            .kernel
+            .dispatch_sealed_sys_invoke_with_resource_executor_and_state_internal(
+                &self.authenticated_session,
+                self.decoded.client_offer().protocol_major(),
+                &self.request,
+                resource_executor,
+                state,
+                self.invocation,
+                capability_audit_appended,
+                Some(&self.decoded),
+                Some((&self.active, &self.security)),
+                Some(&self.registry),
+                Some(&self.outcome),
+                true,
+                Some(cancellation),
+            )
+            .await;
+        match result {
+            Ok(result) => Ok(SealedInvocationExecution::Result(result)),
+            Err(PostgresKernelError::ClientExecution(ClientExecutionError::ResourceEvaluation { source: ClientResourceExecutionError::Cancelled, .. })) =>
+                Ok(SealedInvocationExecution::Cancelled { invocation: self.invocation }),
+            Err(error) => Err(error),
+        }
+    }
+}
+
 impl PostgresKernel {
     /// Dispatches one authenticated parameter-free raw call inside one transaction.
     ///
@@ -878,6 +1471,46 @@ impl PostgresKernel {
         finish_authenticated_server_select_session(operation, database_session.shutdown().await)
     }
 
+    /// Reserves one resource request identity before any target work starts.
+    ///
+    /// The reservation is committed independently of the execution transaction,
+    /// so cancellation or rollback cannot make an identity reusable. The unique
+    /// primary key serializes concurrent authenticated connections in PostgreSQL.
+    async fn reserve_resource_request_id(
+        &self,
+        request_id: InvocationId,
+    ) -> Result<bool, PostgresKernelError> {
+        let mut session = self.open().await?;
+        let reservation = async {
+            let transaction = session
+                .client
+                .transaction()
+                .await
+                .map_err(PostgresKernelError::Database)?;
+            let request_id = request_id.to_bytes().to_vec();
+            let inserted = transaction
+                .execute(
+                    "INSERT INTO _orna_kernel.resource_request_history (request_id)
+                     VALUES ($1)
+                     ON CONFLICT (request_id) DO NOTHING",
+                    &[&request_id],
+                )
+                .await
+                .map_err(PostgresKernelError::Database)?;
+            transaction
+                .commit()
+                .await
+                .map_err(PostgresKernelError::Database)?;
+            Ok(inserted == 1)
+        }
+        .await;
+        let shutdown = session.shutdown().await;
+        match (reservation, shutdown) {
+            (Ok(reserved), Ok(())) => Ok(reserved),
+            (Err(error), _) | (Ok(_), Err(error)) => Err(error),
+        }
+    }
+
     /// Dispatches one authenticated ORNA-RESOURCE target inside one transaction.
     ///
     /// The transport request is treated as untrusted metadata: the active
@@ -918,6 +1551,14 @@ impl PostgresKernel {
         request: &ResourceRequest,
         cancellation: &ResourceCancellation,
     ) -> Result<Option<AuthenticatedServerResourceResult>, PostgresKernelError> {
+        validate_resource_state_context(request)?;
+        if !self.reserve_resource_request_id(request.request_id).await? {
+            return Ok(Some(AuthenticatedServerResourceResult::Failed {
+                stream_id: request.stream_id,
+                request_id: request.request_id,
+                failure: CallFailure::InternalFailure,
+            }));
+        }
         let mut database_session = self.open().await?;
         let operation = async {
             let mut transaction = database_session
@@ -984,6 +1625,7 @@ impl PostgresKernel {
                             }
                             Some(resolved_target) => {
                                 let target = resolved_target.target();
+                                completed_target = Some(target);
                                 match security.authorise_execute(authenticated_session, target) {
                             ExecuteDecision::Denied(reason) => {
                                 let event_id = append_security_audit_event(
@@ -1013,7 +1655,6 @@ impl PostgresKernel {
                                     invocation,
                                 )
                                 .await?;
-                                completed_target = Some(target);
                                 let definition = resolved_target.definition();
                                 if !resource_target_shape_is_supported(
                                     definition,
@@ -1119,9 +1760,11 @@ impl PostgresKernel {
                     })?),
                     Some(values.len() as u64),
                 ),
-                AuthenticatedServerResourceResult::Failed { .. } => {
-                    (ResourceAuditTerminalOutcome::Failed, None, None)
-                }
+                AuthenticatedServerResourceResult::Failed { .. } => (
+                    ResourceAuditTerminalOutcome::Failed,
+                    completed_target,
+                    None,
+                ),
             };
             append_resource_audit_event(
                 &transaction,
@@ -1167,6 +1810,14 @@ impl PostgresKernel {
         request: &ResourceRequest,
         cancellation: &ResourceCancellation,
     ) -> Result<AuthenticatedServerResourceStart, PostgresKernelError> {
+        validate_resource_state_context(request)?;
+        if !self.reserve_resource_request_id(request.request_id).await? {
+            return Ok(AuthenticatedServerResourceStart::Failed {
+                stream_id: request.stream_id,
+                request_id: request.request_id,
+                failure: CallFailure::InternalFailure,
+            });
+        }
         let (commands, command_receiver) = tokio::sync::mpsc::channel(1);
         let (ready_sender, ready_receiver) = tokio::sync::oneshot::channel();
         let request_id = request.request_id;
@@ -1268,12 +1919,47 @@ impl PostgresKernel {
         authenticated_session: &AuthenticatedSession,
         connection_protocol_major: u16,
         request: &RetainedInvokeRequest,
-        mut resource_executor: Option<&mut dyn ClientResourceExecutor>,
+        resource_executor: Option<&mut dyn ClientResourceExecutor>,
         state: &mut ClientStateStore,
         invocation: InvocationId,
         capability_audit_appended: &mut bool,
     ) -> Result<SealedInvocationResult, PostgresKernelError> {
+        self.dispatch_sealed_sys_invoke_with_resource_executor_and_state_internal(
+            authenticated_session,
+            connection_protocol_major,
+            request,
+            resource_executor,
+            state,
+            invocation,
+            capability_audit_appended,
+            None,
+            None,
+            None,
+            None,
+            false,
+            None,
+        )
+        .await
+    }
+
+    async fn dispatch_sealed_sys_invoke_with_resource_executor_and_state_internal(
+        &self,
+        authenticated_session: &AuthenticatedSession,
+        connection_protocol_major: u16,
+        request: &RetainedInvokeRequest,
+        mut resource_executor: Option<&mut dyn ClientResourceExecutor>,
+        state: &mut ClientStateStore,
+        invocation: InvocationId,
+        capability_audit_appended: &mut bool,
+        pinned_decoded: Option<&orna_core::invocation::InvokeRequest>,
+        pinned_context: Option<(&ActiveDatabaseRevision, &SecuritySnapshot)>,
+        pinned_registry: Option<&OpaqueCodecRegistry>,
+        prepared_outcome: Option<&SealedInvocationPreparedOutcome>,
+        pre_audited: bool,
+        cancellation: Option<&ResourceCancellation>,
+    ) -> Result<SealedInvocationResult, PostgresKernelError> {
         let mut database_session = self.open().await?;
+        let mut invocation_audit_appended = pre_audited;
         let operation = async {
             loop {
             let transaction = database_session
@@ -1286,6 +1972,22 @@ impl PostgresKernel {
             require_current_migrations(&transaction).await?;
             let active = configure_and_recover(&transaction).await?;
             let security = recover_security_snapshot_for_active(&transaction, &active).await?;
+            if let Some((pinned_active, pinned_security)) = pinned_context {
+                if active.pair() != pinned_active.pair() {
+                    return Err(PostgresKernelError::DurableInvariant {
+                        relation: "_orna_kernel.active_revision",
+                        record: invocation.canonical(),
+                        rule: "sealed invocation active revision changed before execution",
+                    });
+                }
+                if !security_snapshots_match(&security, pinned_security) {
+                    return Err(PostgresKernelError::DurableInvariant {
+                        relation: "_orna_kernel.security_audit_events",
+                        record: invocation.canonical(),
+                        rule: "sealed invocation security snapshot changed before execution",
+                    });
+                }
+            }
             let standard = active.catalogue_hash_context().standard().ok_or_else(|| {
                 PostgresKernelError::DurableInvariant {
                     relation: "_orna_kernel.active_revision",
@@ -1293,40 +1995,69 @@ impl PostgresKernel {
                     rule: "sealed sys.invoke requires the accepted verified standard snapshot",
                 }
             })?;
-            let registry = registered_opaque_codecs(standard).map_err(|_| {
-                PostgresKernelError::DurableInvariant {
-                    relation: "_orna_kernel.standard_library_revisions",
-                    record: standard.revision().canonical(),
-                    rule: "the verified standard snapshot must bind its opaque codec registry",
-                }
-            })?;
-            let decoded = decode_retained_invoke_request(&active, &registry, request)
-                .map_err(PostgresKernelError::SealedInvocation)?;
+            let registry = match pinned_registry {
+                Some(registry) => registry.clone(),
+                None => registered_opaque_codecs(standard).map_err(|_| {
+                    PostgresKernelError::DurableInvariant {
+                        relation: "_orna_kernel.standard_library_revisions",
+                        record: standard.revision().canonical(),
+                        rule: "the verified standard snapshot must bind its opaque codec registry",
+                    }
+                })?,
+            };
+            let decoded = match pinned_decoded {
+                Some(decoded) => decoded.clone(),
+                None => decode_retained_invoke_request(&active, &registry, request)
+                    .map_err(PostgresKernelError::SealedInvocation)?,
+            };
             let system_target = InvocationTarget::new(SYS_INVOKE_FUNCTION_ID, active.pair());
-            let decision = decide_protected_invocation(
-                &security,
-                authenticated_session,
-                system_target,
-                &active,
-                connection_protocol_major,
-                &decoded,
-            );
+            let decision = match prepared_outcome {
+                Some(SealedInvocationPreparedOutcome::Allowed { .. }) => {
+                    ProtectedInvocationDecision::Allowed
+                }
+                Some(_) => {
+                    return Err(sealed_target_invariant(
+                        &active,
+                        "prepared sealed dispatch requires an allowed pinned outcome",
+                    ));
+                }
+                None => decide_protected_invocation(
+                    &security,
+                    authenticated_session,
+                    system_target,
+                    &active,
+                    connection_protocol_major,
+                    &decoded,
+                ),
+            };
             let result = match decision {
                 ProtectedInvocationDecision::Allowed => {
-                    let target =
-                        resolve_sealed_target(&active, decoded.target()).ok_or_else(|| {
-                            sealed_target_invariant(
+                    let (target, security_target, authorisation) = match prepared_outcome {
+                        Some(SealedInvocationPreparedOutcome::Allowed {
+                            target,
+                            security_target,
+                            authorisation,
+                        }) => (target.clone(), *security_target, authorisation.clone()),
+                        Some(_) => {
+                            return Err(sealed_target_invariant(
                                 &active,
-                                "allowed sealed invocation target must resolve",
-                            )
-                        })?;
-                    let (values, security_target) = match target {
-                        SealedResolvedTarget::Application(definition) => {
-                            let security_target =
-                                InvocationTarget::new(definition.id(), active.pair());
-                            let authorisation = match security
-                                .authorise_execute(authenticated_session, security_target)
-                            {
+                                "prepared sealed dispatch requires an allowed pinned target",
+                            ));
+                        }
+                        None => {
+                            let resolved =
+                                resolve_sealed_target(&active, decoded.target()).ok_or_else(|| {
+                                    sealed_target_invariant(
+                                        &active,
+                                        "allowed sealed invocation target must resolve",
+                                    )
+                                })?;
+                            let security_target = sealed_security_target(&active, resolved);
+                            let authorisation = match authorise_sealed_target(
+                                &security,
+                                authenticated_session,
+                                security_target,
+                            ) {
                                 ExecuteDecision::Allowed(authorisation) => authorisation,
                                 ExecuteDecision::Denied(_) => {
                                     return Err(sealed_target_invariant(
@@ -1335,16 +2066,48 @@ impl PostgresKernel {
                                     ));
                                 }
                             };
+                            (
+                                PreparedSealedTarget::from_resolved(resolved),
+                                security_target,
+                                authorisation,
+                            )
+                        }
+                    };
+                    let (values, security_target) = match &target {
+                        PreparedSealedTarget::Application { definition } => {
                             match definition.domain() {
                                 FunctionDomain::Client => {
+                                    if !invocation_audit_appended {
+                                        append_allowed_invocation_audit_evidence(
+                                            &transaction,
+                                            &authorisation,
+                                            invocation,
+                                        )
+                                        .await?;
+                                        invocation_audit_appended = true;
+                                    }
                                     let arguments =
                                         bind_sealed_invoke_arguments(definition, decoded.arguments())?;
+                                    let state_context = ClientStateContext::new(
+                                        definition.id(),
+                                        decoded
+                                            .state_profile()
+                                            .map_or_else(String::new, str::to_owned),
+                                        String::new(),
+                                    )
+                                    .map_err(|_| {
+                                        sealed_target_invariant(
+                                            &active,
+                                            "sealed invocation state profile must be canonical",
+                                        )
+                                    })?;
                                     let execution = if let Some(executor) =
                                         resource_executor.as_deref_mut()
                                     {
-                                        evaluate_authorised_client_function_with_arguments_and_executor(
+                                        evaluate_authorised_client_function_with_state_context_and_arguments_and_executor(
                                             &active,
                                             &authorisation,
+                                            &state_context,
                                             &arguments,
                                             &[],
                                             &self.capability_grants,
@@ -1353,12 +2116,14 @@ impl PostgresKernel {
                                             executor,
                                         )
                                     } else {
-                                        evaluate_authorised_client_function_with_arguments(
+                                        evaluate_authorised_client_function_with_state_context_and_arguments(
                                             &active,
                                             &authorisation,
+                                            &state_context,
                                             &arguments,
                                             &[],
                                             &self.capability_grants,
+                                            state,
                                         )
                                     }
                                     .map_err(PostgresKernelError::ClientExecution);
@@ -1411,7 +2176,12 @@ impl PostgresKernel {
                                                 return Err(error);
                                             };
                                             let completion = loop {
-                                                let Some(completion) = executor.poll() else {
+                                                let completion = if cancellation.is_some_and(ResourceCancellation::is_requested) {
+                                                    executor.cancel_pending().or_else(|| executor.poll())
+                                                } else {
+                                                    executor.poll()
+                                                };
+                                                let Some(completion) = completion else {
                                                     tokio::time::sleep(std::time::Duration::from_millis(10)).await;
                                                     continue;
                                                 };
@@ -1499,19 +2269,22 @@ impl PostgresKernel {
                                     (vec![value], security_target)
                                 }
                                 FunctionDomain::Server => {
-                                    if append_allowed_invocation_audit_evidence(
-                                        &transaction,
-                                        &authorisation,
-                                        invocation,
-                                    )
-                                    .await
-                                    .is_err() {
+                                    if !invocation_audit_appended
+                                        && append_allowed_invocation_audit_evidence(
+                                            &transaction,
+                                            &authorisation,
+                                            invocation,
+                                        )
+                                        .await
+                                        .is_err()
+                                    {
                                         let _ = transaction.rollback().await;
                                         return sealed_failure_result(
                                             invocation,
                                             SealedInvocationFailureClass::Internal,
                                         );
                                     }
+                                    invocation_audit_appended = true;
                                     if transaction.commit().await.is_err() {
                                         return sealed_failure_result(
                                             invocation,
@@ -1521,6 +2294,7 @@ impl PostgresKernel {
                                     return execute_sealed_server_after_audit(
                                         &mut database_session.client,
                                         &active,
+                                        &security,
                                         &registry,
                                         authenticated_session,
                                         definition,
@@ -1533,16 +2307,16 @@ impl PostgresKernel {
                                 }
                             }
                         }
-                        SealedResolvedTarget::System(definition) => {
-                            let security_target =
-                                InvocationTarget::new(definition.id(), active.pair());
-                            if !matches!(
-                                security.authorise_system_function(
-                                    authenticated_session,
-                                    security_target,
-                                ),
-                                ExecuteDecision::Allowed(_)
-                            ) {
+                        PreparedSealedTarget::System { definition } => {
+                            if !invocation_audit_appended
+                                && !matches!(
+                                    security.authorise_system_function(
+                                        authenticated_session,
+                                        security_target,
+                                    ),
+                                    ExecuteDecision::Allowed(_)
+                                )
+                            {
                                 return Err(sealed_target_invariant(
                                     &active,
                                     "allowed sealed system invocation must re-authorise its target",
@@ -1598,7 +2372,7 @@ impl PostgresKernel {
                             };
                             (vec![value], security_target)
                         }
-                        SealedResolvedTarget::VerifiedStandard {
+                        PreparedSealedTarget::VerifiedStandard {
                             definition,
                             executable,
                         } => {
@@ -1624,12 +2398,6 @@ impl PostgresKernel {
                                     ));
                                 }
                             };
-                            let security_target = InvocationTarget::verified_standard(
-                                definition.id(),
-                                active.pair(),
-                                standard.revision(),
-                                executable.revision().id(),
-                            );
                             (vec![value], security_target)
                         }
                     };
@@ -1658,14 +2426,17 @@ impl PostgresKernel {
                                     SealedPresentationError::OutputResolution(_)
                                     | SealedPresentationError::NoPath,
                                 ) => {
-                                    append_allowed_invocation_audit(
-                                        &transaction,
-                                        &security,
-                                        authenticated_session,
-                                        security_target,
-                                        invocation,
-                                    )
-                                    .await?;
+                                    if !invocation_audit_appended {
+                                        append_allowed_invocation_audit(
+                                            &transaction,
+                                            &security,
+                                            authenticated_session,
+                                            security_target,
+                                            invocation,
+                                        )
+                                        .await?;
+                                        invocation_audit_appended = true;
+                                    }
                                     None
                                 }
                                 Err(SealedPresentationError::Kernel(error)) => return Err(error),
@@ -1679,14 +2450,17 @@ impl PostgresKernel {
                     };
                     match events {
                         Some(events) => {
-                            append_allowed_invocation_audit(
-                                &transaction,
-                                &security,
-                                authenticated_session,
-                                security_target,
-                                invocation,
-                            )
-                            .await?;
+                            if !invocation_audit_appended {
+                                append_allowed_invocation_audit(
+                                    &transaction,
+                                    &security,
+                                    authenticated_session,
+                                    security_target,
+                                    invocation,
+                                )
+                                .await?;
+                                invocation_audit_appended = true;
+                            }
                             capture_sealed_invocation_snapshot(
                                 &transaction,
                                 &active,
@@ -2483,6 +3257,55 @@ async fn commit_accepted_resource_cancelled_audit(
 }
 
 
+async fn commit_post_acceptance_resource_error_audit(
+    kernel: &PostgresKernel,
+    authenticated_session: &AuthenticatedSession,
+    request: &ResourceRequest,
+    cancellation: &ResourceCancellation,
+    invocation: InvocationId,
+    target: Option<InvocationTarget>,
+) -> Result<(), PostgresKernelError> {
+    let mut session = kernel.open().await?;
+    let operation = async {
+        let transaction = session
+            .client
+            .build_transaction()
+            .isolation_level(IsolationLevel::ReadCommitted)
+            .start()
+            .await
+            .map_err(PostgresKernelError::Database)?;
+        require_current_migrations(&transaction).await?;
+        let commit_started = cancellation.try_begin_commit();
+        let terminal = if commit_started {
+            ResourceAuditTerminalOutcome::Failed
+        } else {
+            ResourceAuditTerminalOutcome::Cancelled
+        };
+        append_resource_audit_event(
+            &transaction,
+            authenticated_session,
+            request,
+            invocation,
+            SecurityAuditOutcome::Allowed,
+            terminal,
+            target,
+            None,
+            None,
+        )
+        .await?;
+        transaction
+            .commit()
+            .await
+            .map_err(PostgresKernelError::Database)?;
+        if commit_started {
+            cancellation.commit_finished();
+        }
+        Ok(())
+    }
+    .await;
+    finish_authenticated_server_select_session(operation, session.shutdown().await)
+}
+
 async fn run_authenticated_server_resource_producer_task(
     kernel: PostgresKernel,
     authenticated_session: AuthenticatedSession,
@@ -2531,60 +3354,71 @@ async fn run_authenticated_server_resource_producer_task(
                 append_linked_invocation_audit(&transaction, invocation, event_id).await?;
                 failure = Some(CallFailure::ExecuteDenied);
             }
-            ExecuteDecision::Allowed(_) => match resolve_resource_target(&active, request.target_function_id) {
-                None => {
-                    append_unresolved_invocation_audit(&transaction, &authenticated_session, invocation)
+            ExecuteDecision::Allowed(_) => {
+                match resolve_resource_target(&active, request.target_function_id) {
+                    None => {
+                        append_unresolved_invocation_audit(
+                            &transaction,
+                            &authenticated_session,
+                            invocation,
+                        )
                         .await?;
-                    failure = Some(CallFailure::TargetUnavailable);
-                }
-                Some(resolved_target) => {
-                    let target = resolved_target.target();
-                    match security.authorise_execute(&authenticated_session, target) {
-                        ExecuteDecision::Denied(reason) => {
-                            let event_id = append_security_audit_event(
-                                &transaction,
-                                SecurityAuditDecision::execute_denied(
+                        failure = Some(CallFailure::TargetUnavailable);
+                    }
+                    Some(resolved_target) => {
+                        let target = resolved_target.target();
+                        completed_target = Some(target);
+                        match security.authorise_execute(&authenticated_session, target) {
+                            ExecuteDecision::Denied(reason) => {
+                                let event_id = append_security_audit_event(
+                                    &transaction,
+                                    SecurityAuditDecision::execute_denied(
+                                        &authenticated_session,
+                                        target,
+                                        reason,
+                                    ),
+                                )
+                                .await?;
+                                append_linked_invocation_audit(&transaction, invocation, event_id)
+                                    .await?;
+                                failure = Some(CallFailure::ExecuteDenied);
+                            }
+                            ExecuteDecision::Allowed(allowed) => {
+                                audit_decision = SecurityAuditOutcome::Allowed;
+                                append_allowed_invocation_audit(
+                                    &transaction,
+                                    &security,
                                     &authenticated_session,
                                     target,
-                                    reason,
-                                ),
-                            )
-                            .await?;
-                            append_linked_invocation_audit(&transaction, invocation, event_id).await?;
-                            failure = Some(CallFailure::ExecuteDenied);
-                        }
-                        ExecuteDecision::Allowed(allowed) => {
-                            audit_decision = SecurityAuditOutcome::Allowed;
-                            append_allowed_invocation_audit(
-                                &transaction,
-                                &security,
-                                &authenticated_session,
-                                target,
-                                invocation,
-                            )
-                            .await?;
-                            completed_target = Some(target);
-                            let definition = resolved_target.definition();
-                            if !resource_target_shape_is_supported(definition, request.resource_kind) {
-                                failure = Some(CallFailure::TargetUnavailable);
-                            } else {
-                                match bind_authenticated_resource_arguments(
-                                    active.catalogue_hash_context(),
+                                    invocation,
+                                )
+                                .await?;
+                                let definition = resolved_target.definition();
+                                if !resource_target_shape_is_supported(
                                     definition,
-                                    &request.arguments,
+                                    request.resource_kind,
                                 ) {
-                                    Some(arguments) => {
-                                        standard_executable = resolved_target.executable().cloned();
-                                        authorisation = Some(allowed);
-                                        bound_arguments = Some(arguments);
+                                    failure = Some(CallFailure::TargetUnavailable);
+                                } else {
+                                    match bind_authenticated_resource_arguments(
+                                        active.catalogue_hash_context(),
+                                        definition,
+                                        &request.arguments,
+                                    ) {
+                                        Some(arguments) => {
+                                            standard_executable =
+                                                resolved_target.executable().cloned();
+                                            authorisation = Some(allowed);
+                                            bound_arguments = Some(arguments);
+                                        }
+                                        None => failure = Some(CallFailure::TargetUnavailable),
                                     }
-                                    None => failure = Some(CallFailure::TargetUnavailable),
                                 }
                             }
                         }
                     }
                 }
-            },
+            }
         }
     }
 
@@ -2626,7 +3460,7 @@ async fn run_authenticated_server_resource_producer_task(
                 invocation,
                 audit_decision,
                 ResourceAuditTerminalOutcome::Failed,
-                None,
+                completed_target,
                 None,
                 None,
             )
@@ -2667,6 +3501,184 @@ async fn run_authenticated_server_resource_producer_task(
         &active,
         "accepted resource producer must retain bound arguments",
     ))?;
+    // The accepted identity is externally visible, so commit its allowed
+    // security/invocation/resource evidence before publishing Accepted. A
+    // cancellation that already won before this boundary must not expose an
+    // accepted stream without its durable audit row.
+    if !cancellation.try_begin_acceptance_commit() {
+        let operation = async {
+            transaction
+                .rollback()
+                .await
+                .map_err(PostgresKernelError::Database)?;
+            kernel
+                .record_cancelled_resource_audit(&authenticated_session, &request)
+                .await
+        }
+        .await;
+        let result = finish_authenticated_server_select_session(
+            operation,
+            database_session.shutdown().await,
+        );
+        match result {
+            Ok(()) => {
+                let _ = ready_sender.send(Ok(ResourceProducerReady::Failed {
+                    stream_id: request.stream_id,
+                    request_id: request.request_id,
+                    failure: CallFailure::InternalFailure,
+                }));
+            }
+            Err(error) => {
+                let _ = ready_sender.send(Err(error));
+            }
+        }
+        return Ok(());
+    }
+    let operation = transaction
+        .commit()
+        .await
+        .map_err(PostgresKernelError::Database);
+    if operation.is_ok() {
+        cancellation.acceptance_commit_finished();
+    }
+    if let Err(error) = operation {
+        let result = finish_authenticated_server_select_session(
+            Err(error),
+            database_session.shutdown().await,
+        );
+        let _ = ready_sender.send(result.map(|()| ResourceProducerReady::Failed {
+            stream_id: request.stream_id,
+            request_id: request.request_id,
+            failure: CallFailure::InternalFailure,
+        }));
+        return Ok(());
+    }
+    let mut transaction_error = None;
+    let transaction = match database_session
+        .client
+        .build_transaction()
+        .isolation_level(IsolationLevel::RepeatableRead)
+        .start()
+        .await
+        .map_err(PostgresKernelError::Database)
+    {
+        Ok(transaction) => Some(transaction),
+        Err(error) => {
+            transaction_error = Some(error);
+            None
+        }
+    };
+    if let Some(_error) = transaction_error {
+        drop(transaction);
+        let operation = commit_post_acceptance_resource_error_audit(
+            &kernel,
+            &authenticated_session,
+            &request,
+            &cancellation,
+            invocation,
+            completed_target,
+        )
+        .await;
+        let result = finish_authenticated_server_select_session(
+            operation,
+            database_session.shutdown().await,
+        );
+        let _ = ready_sender.send(result.map(|()| ResourceProducerReady::Failed {
+            stream_id: request.stream_id,
+            request_id: request.request_id,
+            failure: CallFailure::InternalFailure,
+        }));
+        return Ok(());
+    }
+    let transaction = transaction.ok_or_else(|| {
+        sealed_target_invariant(
+            &active,
+            "resource producer transaction was absent without a start error",
+        )
+    })?;
+    if let Err(_error) = require_current_migrations(&transaction).await {
+        let _ = transaction.rollback().await;
+        let operation = commit_post_acceptance_resource_error_audit(
+            &kernel,
+            &authenticated_session,
+            &request,
+            &cancellation,
+            invocation,
+            completed_target,
+        )
+        .await;
+        let result = finish_authenticated_server_select_session(
+            operation,
+            database_session.shutdown().await,
+        );
+        let _ = ready_sender.send(result.map(|()| ResourceProducerReady::Failed {
+            stream_id: request.stream_id,
+            request_id: request.request_id,
+            failure: CallFailure::InternalFailure,
+        }));
+        return Ok(());
+    }
+    let execution_validation = async {
+        lock_active_revision(&transaction, active.pair()).await?;
+        let execution_active = configure_and_recover(&transaction).await?;
+        if execution_active.pair() != active.pair() {
+            return Err(PostgresKernelError::SecurityRevisionMismatch {
+                expected: active.pair(),
+                active: execution_active.pair(),
+            });
+        }
+        let execution_security =
+            recover_security_snapshot_for_active(&transaction, &execution_active).await?;
+        if !security_snapshots_match(&execution_security, &security) {
+            return Err(PostgresKernelError::SecurityFunctionSetMismatch);
+        }
+        Ok::<(), PostgresKernelError>(())
+    }
+    .await;
+    if execution_validation.is_err() {
+        let _ = transaction.rollback().await;
+        let operation = commit_post_acceptance_resource_error_audit(
+            &kernel,
+            &authenticated_session,
+            &request,
+            &cancellation,
+            invocation,
+            completed_target,
+        )
+        .await;
+        let result = finish_authenticated_server_select_session(
+            operation,
+            database_session.shutdown().await,
+        );
+        let _ = ready_sender.send(result.map(|()| ResourceProducerReady::Failed {
+            stream_id: request.stream_id,
+            request_id: request.request_id,
+            failure: CallFailure::InternalFailure,
+        }));
+        return Ok(());
+    }
+
+    if cancellation.is_requested() {
+        let operation = commit_accepted_resource_cancelled_audit(
+            transaction,
+            &authenticated_session,
+            &request,
+            invocation,
+            completed_target,
+        )
+        .await;
+        let result = finish_authenticated_server_select_session(
+            operation,
+            database_session.shutdown().await,
+        );
+        let _ = ready_sender.send(result.map(|()| ResourceProducerReady::Failed {
+            stream_id: request.stream_id,
+            request_id: request.request_id,
+            failure: CallFailure::InternalFailure,
+        }));
+        return Ok(());
+    }
+
     let accepted = AuthenticatedServerResourceAccepted {
         stream_id: request.stream_id,
         request_id: request.request_id,
@@ -2808,7 +3820,7 @@ async fn run_authenticated_server_resource_producer_task(
                     invocation,
                     SecurityAuditOutcome::Allowed,
                     ResourceAuditTerminalOutcome::Failed,
-                    None,
+                    completed_target,
                     None,
                     None,
                 )
@@ -2846,6 +3858,13 @@ async fn run_authenticated_server_resource_producer_task(
     match (terminal_error, database_session.shutdown().await) {
         (Some(error), _) => Err(error),
         (None, shutdown) => shutdown,
+    }
+}
+
+fn sealed_server_result_kind(return_type: &FunctionReturn) -> Option<ProtocolResourceKind> {
+    match return_type {
+        FunctionReturn::Single(_) => Some(ProtocolResourceKind::Single),
+        FunctionReturn::Stream(_) | FunctionReturn::Rows(_) => Some(ProtocolResourceKind::Stream),
     }
 }
 
@@ -2967,6 +3986,7 @@ async fn execute_sealed_server_target(
 async fn execute_sealed_server_after_audit(
     client: &mut tokio_postgres::Client,
     active: &ActiveDatabaseRevision,
+    pinned_security: &SecuritySnapshot,
     registry: &OpaqueCodecRegistry,
     authenticated_session: &AuthenticatedSession,
     definition: &FunctionDefinition,
@@ -3024,6 +4044,26 @@ async fn execute_sealed_server_after_audit(
         )
         .await;
     }
+    let execution_security =
+        match recover_security_snapshot_for_active(&transaction, &execution_active).await {
+            Ok(security) => security,
+            Err(_) => {
+                return finish_sealed_failure(
+                    transaction,
+                    invocation,
+                    SealedInvocationFailureClass::Internal,
+                )
+                .await;
+            }
+        };
+    if !security_snapshots_match(&execution_security, pinned_security) {
+        return finish_sealed_failure(
+            transaction,
+            invocation,
+            SealedInvocationFailureClass::Internal,
+        )
+        .await;
+    }
     let arguments = match bind_sealed_invoke_arguments(definition, decoded.arguments()) {
         Ok(arguments) => arguments,
         Err(_) => {
@@ -3035,10 +4075,9 @@ async fn execute_sealed_server_after_audit(
             .await;
         }
     };
-    let kind = match definition.return_type() {
-        FunctionReturn::Single(_) => ProtocolResourceKind::Single,
-        FunctionReturn::Stream(_) => ProtocolResourceKind::Stream,
-        _ => {
+    let kind = match sealed_server_result_kind(definition.return_type()) {
+        Some(kind) => kind,
+        None => {
             return finish_sealed_failure(
                 transaction,
                 invocation,
@@ -3795,6 +4834,7 @@ pub(crate) async fn append_resource_audit_event(
     item_count: Option<u64>,
     byte_count: Option<u64>,
 ) -> Result<(), PostgresKernelError> {
+    validate_resource_state_context(request)?;
     let item_count = item_count
         .map(|count| i64::try_from(count).map_err(|_| resource_audit_invariant(
             &request.request_id.canonical(),
@@ -3867,6 +4907,22 @@ fn encode_resource_audit_terminal(terminal: ResourceAuditTerminalOutcome) -> &'s
     }
 }
 
+fn validate_resource_state_context(
+    request: &ResourceRequest,
+) -> Result<(), PostgresKernelError> {
+    ClientStateContext::new(
+        request.target_function_id,
+        request.state_profile.clone(),
+        request.function_instance_key.clone(),
+    )
+    .map(|_| ())
+    .map_err(|_| PostgresKernelError::DurableInvariant {
+        relation: "resource request",
+        record: request.request_id.canonical(),
+        rule: "resource state context must contain valid text",
+    })
+}
+
 fn resource_audit_invariant(record: &str, rule: &'static str) -> PostgresKernelError {
     PostgresKernelError::DurableInvariant {
         relation: "_orna_kernel.resource_audit_events",
@@ -3883,6 +4939,7 @@ fn resource_audit_invariant(record: &str, rule: &'static str) -> PostgresKernelE
 /// verified-standard target carries the exact executable and standard
 /// revisions of the pinned snapshot. A system target carries only its sealed
 /// registry definition.
+#[derive(Clone, Copy)]
 enum SealedResolvedTarget<'a> {
     Application(&'a FunctionDefinition),
     System(SystemFunctionDefinition),
@@ -6790,6 +7847,10 @@ mod tests {
             &multi_rows,
             ProtocolResourceKind::Stream,
         ));
+        assert_eq!(
+            sealed_server_result_kind(rows.return_type()),
+            Some(ProtocolResourceKind::Stream),
+        );
     }
 
     #[test]
@@ -7831,6 +8892,20 @@ mod tests {
         assert!(cancellation.request_cancel());
         assert!(!cancellation.try_begin_commit());
         assert!(!cancellation.request_cancel());
+    }
+
+    #[test]
+    fn resource_acceptance_commit_preserves_cancellation() {
+        let cancellation = ResourceCancellation::new();
+
+        assert!(cancellation.try_begin_acceptance_commit());
+        assert!(!cancellation.request_cancel());
+        assert!(cancellation.is_acceptance_cancellation_requested());
+        assert!(cancellation.is_requested());
+        cancellation.acceptance_commit_finished();
+        assert!(!cancellation.is_acceptance_cancellation_requested());
+        assert!(cancellation.is_requested());
+        assert!(!cancellation.try_begin_commit());
     }
 
     #[test]
