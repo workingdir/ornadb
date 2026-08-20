@@ -1522,31 +1522,26 @@ async fn handle_resource_frame<D: DispatchService>(
                     resource_completion_is_terminal_for(completion, cancel.request_id)
                 });
         if !committed_completion && !cancelled.contains_key(&cancel.stream_id) {
-            let Some(request) = requests.get(&cancel.stream_id) else {
-                return Err(LocalRawSocketError::ResourceConnection {
-                    source: ResourceConnectionError::UnknownStream {
-                        stream_id: cancel.stream_id,
-                    },
-                });
-            };
-            if request.request_id != cancel.request_id {
-                return Err(LocalRawSocketError::ResourceConnection {
-                    source: ResourceConnectionError::MismatchedRequest {
-                        stream_id: cancel.stream_id,
-                    },
-                });
+            if let Some(request) = requests.get(&cancel.stream_id) {
+                if request.request_id != cancel.request_id {
+                    return Err(LocalRawSocketError::ResourceConnection {
+                        source: ResourceConnectionError::MismatchedRequest {
+                            stream_id: cancel.stream_id,
+                        },
+                    });
+                }
+                let Some(task) = tasks.get(&cancel.stream_id) else {
+                    return Err(LocalRawSocketError::ResourceConnection {
+                        source: ResourceConnectionError::UnknownStream {
+                            stream_id: cancel.stream_id,
+                        },
+                    });
+                };
+                if !task.cancellation.request_cancel() {
+                    return Ok(true);
+                }
+                cancellation_won = true;
             }
-            let Some(task) = tasks.get(&cancel.stream_id) else {
-                return Err(LocalRawSocketError::ResourceConnection {
-                    source: ResourceConnectionError::UnknownStream {
-                        stream_id: cancel.stream_id,
-                    },
-                });
-            };
-            if !task.cancellation.request_cancel() {
-                return Ok(true);
-            }
-            cancellation_won = true;
         }
     }
     let invalid_scalar_window_update = match &frame {
