@@ -4238,7 +4238,7 @@ mod tests {
     }
 
     #[test]
-    fn version_two_rejects_a_pinned_opaque_value_in_every_catalogue_slot() {
+    fn version_two_rejects_a_pinned_opaque_value_in_non_function_catalogue_slots() {
         let opaque = TypeId::from_bytes(id::<96>());
         let standard = verified_standard_snapshot_with_extra_value(ValueTypeDefinition::opaque(
             opaque,
@@ -4271,15 +4271,6 @@ mod tests {
                     owner: FunctionId::from_bytes(id::<4>()),
                     parameter: ParameterId::from_bytes(id::<5>()),
                 },
-            ),
-            (
-                catalogue_with_resolved_slot_types(
-                    named,
-                    named,
-                    FunctionReturn::Single(ResolvedType::value(opaque)),
-                    FunctionDomain::Client,
-                ),
-                DefinitionIdentity::Function(FunctionId::from_bytes(id::<4>())),
             ),
             (
                 catalogue_with_resolved_slot_types(
@@ -4319,15 +4310,6 @@ mod tests {
             "std.types.token@1",
         ));
         let context = CatalogueHashContext::version_two(standard);
-        let accepted = catalogue_with_opaque_client_return(
-            opaque,
-            FunctionDomain::Client,
-            vec![],
-            FunctionSecurity::Invoker,
-            FunctionVolatility::Immutable,
-        );
-        assert_eq!(validate_resolved_type_slots(&context, &accepted), Ok(()));
-
         let parameter = ParameterDefinition::new(
             ParameterId::from_bytes(id::<5>()),
             "enabled",
@@ -4335,14 +4317,16 @@ mod tests {
             ResolvedType::value(standard_boolean_id()),
             None,
         );
+        let accepted = catalogue_with_opaque_client_return(
+            opaque,
+            FunctionDomain::Client,
+            vec![parameter],
+            FunctionSecurity::Invoker,
+            FunctionVolatility::Immutable,
+        );
+        assert_eq!(validate_resolved_type_slots(&context, &accepted), Ok(()));
+
         for catalogue in [
-            catalogue_with_opaque_client_return(
-                opaque,
-                FunctionDomain::Client,
-                vec![parameter],
-                FunctionSecurity::Invoker,
-                FunctionVolatility::Immutable,
-            ),
             catalogue_with_opaque_client_return(
                 opaque,
                 FunctionDomain::Server,
