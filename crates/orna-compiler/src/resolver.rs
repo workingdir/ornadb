@@ -42,6 +42,7 @@ pub use model::{
 };
 pub(crate) use model::{
     CheckedActionOperation, CheckedClientExpression, CheckedClientFunctionBody, CheckedClientLocal,
+    CheckedClientReturnShape,
     CheckedClientLocalKind, CheckedClientStateSlot, CheckedClientStatement, CheckedFieldRename,
     CheckedResourceOperation, CheckedServerFunctionBody, CheckedServerFunctionReturn,
     CheckedStateDefault, CheckedStateScope,
@@ -3053,6 +3054,7 @@ struct ResolvedClientFunctionInput<'a> {
     return_type: SemanticType<CheckedTypeId>,
     standard_value_type: Option<orna_core::TypeId>,
     result_shape: ClientExpressionResultShape,
+    return_shape: CheckedClientReturnShape,
     body: &'a orna_syntax::ClientFunctionBody,
     capabilities: &'a [CapabilitySpecification],
     location: SourceLocation,
@@ -4392,6 +4394,10 @@ fn resolve_client_function_inputs<'a>(
             FunctionReturnType::Stream { .. } => ClientExpressionResultShape::OptionalList,
             FunctionReturnType::Single(_) | FunctionReturnType::Rows { .. } => ClientExpressionResultShape::Value,
         };
+        let return_shape = match result_shape {
+            ClientExpressionResultShape::Value => CheckedClientReturnShape::Single,
+            ClientExpressionResultShape::OptionalList => CheckedClientReturnShape::Stream,
+        };
         if !expression_body
             && return_type.semantic_type != SemanticType::scalar(StandardScalar::Boolean)
         {
@@ -4415,6 +4421,7 @@ fn resolve_client_function_inputs<'a>(
                     standard_value_type: return_type.standard_value_type,
                     result_shape,
                 },
+                base,
                 standard,
             )
         {
@@ -4431,7 +4438,12 @@ fn resolve_client_function_inputs<'a>(
             ));
             continue;
         }
-        if let FunctionReturnType::Single(specification) = &declaration.return_type {
+        if let FunctionReturnType::Single(specification)
+        | FunctionReturnType::Stream {
+            element: specification,
+            ..
+        } = &declaration.return_type
+        {
             record_standard_type_use(
                 uses,
                 standard,
@@ -4451,6 +4463,7 @@ fn resolve_client_function_inputs<'a>(
             return_type: return_type.semantic_type,
             standard_value_type: return_type.standard_value_type,
             result_shape,
+            return_shape,
             body: &declaration.body,
             location: location(header.logical_path, &declaration.span),
             declaration_span: declaration.span.clone(),
@@ -4944,6 +4957,18 @@ fn client_expression_type_from_core(
     resolved_type: ResolvedType,
     standard: Option<&CheckedStandardLibrary>,
 ) -> Option<ClientExpressionType> {
+    client_expression_type_from_core_with_shape(
+        resolved_type,
+        standard,
+        ClientExpressionResultShape::Value,
+    )
+}
+
+fn client_expression_type_from_core_with_shape(
+    resolved_type: ResolvedType,
+    standard: Option<&CheckedStandardLibrary>,
+    result_shape: ClientExpressionResultShape,
+) -> Option<ClientExpressionType> {
     let (semantic_type, standard_value_type) = match resolved_type {
         ResolvedType::Scalar(scalar) => (
             SemanticType::scalar(scalar),
@@ -4978,7 +5003,7 @@ fn client_expression_type_from_core(
     Some(ClientExpressionType {
         semantic_type,
         standard_value_type,
-        result_shape: ClientExpressionResultShape::Value,
+        result_shape,
     })
 }
 
@@ -5022,7 +5047,12 @@ fn client_expression_targets(
             FunctionReturn::Single(resolved_type) => {
                 client_expression_type_from_core(*resolved_type, standard)
             }
-            FunctionReturn::Rows(_) | FunctionReturn::Stream(_) => None,
+            FunctionReturn::Stream(resolved_type) => client_expression_type_from_core_with_shape(
+                *resolved_type,
+                standard,
+                ClientExpressionResultShape::OptionalList,
+            ),
+            FunctionReturn::Rows(_) => None,
         }) else {
             continue;
         };
@@ -5379,8 +5409,12 @@ fn client_resource_targets(
 
 fn client_expression_type_is_evaluable(
     expression_type: ClientExpressionType,
+    base: &CatalogueSnapshot,
     standard: Option<&CheckedStandardLibrary>,
 ) -> bool {
+    if expression_type.result_shape == ClientExpressionResultShape::OptionalList {
+        return client_resource_stream_type_is_supported(expression_type, base, standard);
+    }
     match expression_type.semantic_type {
         SemanticType::Scalar(scalar) => matches!(
             scalar,
@@ -6377,7 +6411,11 @@ fn check_client_expression(
                 locals,
             )?;
             let text = SemanticType::scalar(StandardScalar::CharacterLargeObject);
-            if left_type.semantic_type != text || right_type.semantic_type != text {
+            if left_type.semantic_type != text
+                || right_type.semantic_type != text
+                || left_type.result_shape != ClientExpressionResultShape::Value
+                || right_type.result_shape != ClientExpressionResultShape::Value
+            {
                 diagnostics.push(diagnostic(
                     DiagnosticCode::TypeMismatch,
                     "CLIENT concatenation requires TEXT expressions",
@@ -6467,6 +6505,15 @@ fn check_client_expression(
                 ));
                 return None;
             };
+            if target.return_type.result_shape == ClientExpressionResultShape::OptionalList {
+                diagnostics.push(diagnostic(
+                    DiagnosticCode::TypeMismatch,
+                    format!("CLIENT STREAM function {name} cannot be used as an expression operand"),
+                    input.logical_path,
+                    span,
+                ));
+                return None;
+            }
             used_capabilities.insert(name.clone());
             let mut bound = vec![false; target.parameters.len()];
             let mut positional = 0usize;
@@ -7180,7 +7227,7 @@ fn check_client_functions(
                     (checked, expression_type, CheckedClientLocalKind::Resource(actual_kind))
                 } else {
                     let (checked, expression_type) = check_client_expression(&statement.expression, input, &targets, &action_targets, resource_targets, query_catalogue, base, server_names, standard, diagnostics, &mut references, &mut used_capabilities, &locals)?;
-                    if !client_expression_type_is_evaluable(expression_type, standard) {
+                    if !client_expression_type_is_evaluable(expression_type, base, standard) {
                         diagnostics.push(diagnostic(DiagnosticCode::TypeMismatch, "this CLIENT local type is not supported by the local evaluator", input.logical_path, &statement.span));
                         return None;
                     }
@@ -7285,7 +7332,7 @@ fn check_client_functions(
                             standard_value_type: resolved.standard_value_type,
                             result_shape: ClientExpressionResultShape::Value,
                         };
-                        if !client_expression_type_is_evaluable(state_type, standard) {
+                        if !client_expression_type_is_evaluable(state_type, base, standard) {
                             diagnostics.push(diagnostic(
                                 DiagnosticCode::TypeMismatch,
                                 "this CLIENT state type is not supported by the local evaluator",
@@ -7611,6 +7658,7 @@ fn check_client_functions(
                     })
                     .collect(),
                 return_type: input.return_type,
+                return_shape: input.return_shape,
                 security: CatalogueFunctionSecurity::Invoker,
                 transaction: None,
                 volatility: CatalogueFunctionVolatility::Immutable,
@@ -10394,7 +10442,7 @@ mod tests {
         CheckAssignments, CheckedApplicationTypeUse, CheckedDefinitionReferenceTarget,
         CheckedStandardExecutable, CheckedStandardJsonEncode, CheckedStandardParameterEcho,
         CheckedStandardTerminalPresentTable, CheckedStateDefault, CheckedTypeId,
-        CheckedTypeUseKind, CheckedValueTypeUse, ClientExpressionResultShape, ClientExpressionType, ConstantValue, DiagnosticCode,
+        CheckedTypeUseKind, CheckedValueTypeUse, CheckedClientReturnShape, ClientExpressionResultShape, ClientExpressionType, ConstantValue, DiagnosticCode,
         IdentityAssignments, NewApplicationCheckError, STANDARD_LIBRARY_V3_REVISION_ID,
         STANDARD_LIBRARY_V4_REVISION_ID, STD_ACTION_CONTRACT, STD_ACTION_TYPE_ID,
         STD_DATA_ROWS_TYPE_ID, STD_DATA_SCHEMA_ID, STD_INTEGER_TYPE_ID,
@@ -13445,6 +13493,62 @@ mod tests {
                 literal_start,
                 literal_start + "TRUE".len(),
             )
+        );
+    }
+
+    #[test]
+    fn rejects_nested_client_stream_call_operands() {
+        let standard =
+            check_standard_library_source(&verified_standard_library_for_relational_test())
+                .unwrap();
+        let base = empty_catalogue();
+        let context = StandardApplicationCheckContext::try_new(&base, &standard).unwrap();
+        let source = "CREATE SCHEMA app; \
+            CREATE EXTERNAL CLIENT FUNCTION app.events() RETURNS STREAM<BOOLEAN> \
+            RUNTIME CONTRACT 'app.events@1'; \
+            CREATE CLIENT FUNCTION app.forward() RETURNS STREAM<BOOLEAN> IS BEGIN RETURN app.events(); END;";
+        let report = check_standard_application(&bundle([("stream-call.orna", source)]), &context);
+
+        assert!(report.diagnostics().iter().any(|diagnostic| {
+            diagnostic.code() == DiagnosticCode::TypeMismatch
+                && diagnostic.message().contains("CLIENT STREAM function app.events")
+        }), "{:?}", report.diagnostics());
+    }
+
+    #[test]
+    fn records_client_stream_return_shape_and_element_evidence() {
+        let standard =
+            check_standard_library_source(&verified_standard_library_for_relational_test())
+                .unwrap();
+        let base = empty_catalogue();
+        let context = StandardApplicationCheckContext::try_new(&base, &standard).unwrap();
+        let source = "CREATE SCHEMA app; \
+            CREATE EXTERNAL CLIENT FUNCTION app.events() RETURNS STREAM<BOOLEAN> \
+            RUNTIME CONTRACT 'app.events@1';";
+        let report = check_standard_application(&bundle([("stream-client.orna", source)]), &context);
+
+        assert!(report.diagnostics().is_empty(), "{:?}", report.diagnostics());
+        let view = report.preparation_view().unwrap();
+        let checked = view.checked();
+        let function = &checked.client_functions()[0];
+        assert_eq!(
+            function.return_shape(),
+            CheckedClientReturnShape::Stream,
+        );
+        assert_eq!(function.return_type(), SemanticType::scalar(StandardScalar::Boolean));
+        assert_eq!(view.uses().len(), 1);
+        assert_eq!(
+            view.uses()[0].kind(),
+            CheckedTypeUseKind::Return {
+                owner: function.id(),
+                ordinal: 0,
+            },
+        );
+        assert_eq!(
+            view.uses()[0]
+                .value()
+                .map(CheckedValueTypeUse::type_id),
+            Some(TypeId::from_bytes([3; 16])),
         );
     }
 
