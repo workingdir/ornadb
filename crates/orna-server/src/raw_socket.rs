@@ -199,6 +199,20 @@ impl RawProtocolVersion {
             }
         }
     }
+    fn apply_resource(
+        &self,
+        connection: &mut ResourceProtocolConnection,
+        frame: ResourceServerFrame,
+    ) -> Result<ResourceFrameDisposition, ResourceConnectionError> {
+        match self {
+            Self::Constructed(active, registry) => {
+                connection.apply_constructed(active, registry, frame)
+            }
+            Self::One | Self::Catalogue(_) | Self::Active(_) | Self::Registered(_, _) => {
+                connection.apply(frame)
+            }
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -2025,7 +2039,7 @@ async fn flush_resource_pending(
                         }
                     }
                 }
-                _ => match connection.apply(action.clone()) {
+                _ => match version.apply_resource(connection, action.clone()) {
                     Ok(disposition) => disposition,
                     Err(ResourceConnectionError::InsufficientCredit { .. }) => break,
                     Err(source) => {
@@ -2719,6 +2733,49 @@ mod tests {
             panic!("resource completion contains a values frame");
         };
         assert_eq!(frame.byte_count, expected);
+    }
+
+    #[test]
+    fn constructed_resource_values_validate_before_credit_mutation() {
+        let (version, revision) = constructed_test_version();
+        let request = resource_request(revision);
+        let mut connection = ResourceProtocolConnection::new();
+        connection
+            .receive(ResourceClientFrame::Request(request.clone()))
+            .expect("resource request opens");
+        connection
+            .apply(ResourceServerFrame::Accepted(orna_protocol::ResourceAccepted {
+                stream_id: request.stream_id,
+                request_id: request.request_id,
+                nested_invocation_id: InvocationId::from_bytes([0x21; 16]),
+                target_revision: request.target_revision,
+                resource_kind: ResourceKind::Single,
+            }))
+            .expect("resource request accepts");
+        let before = connection
+            .resource_credit(request.stream_id, request.request_id)
+            .expect("resource credit is available");
+        let result = version.apply_resource(
+            &mut connection,
+            ResourceServerFrame::Values(orna_protocol::ResourceValues {
+                stream_id: request.stream_id,
+                request_id: request.request_id,
+                batch_sequence: 0,
+                item_count: 1,
+                byte_count: 0,
+                values: vec![RuntimeValue::Integer(7)],
+            }),
+        );
+        assert!(matches!(
+            result,
+            Err(ResourceConnectionError::InvalidFrame { .. })
+        ));
+        assert_eq!(
+            connection
+                .resource_credit(request.stream_id, request.request_id)
+                .expect("resource credit remains available"),
+            before
+        );
     }
 
     async fn read_resource_server_frame(
