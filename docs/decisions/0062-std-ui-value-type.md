@@ -123,24 +123,23 @@ the UI transport open ("settle after the first Qt/TTY prototype"). The
 provisional frame is:
 
 ```text
-ORNA-UI/1 <len:u32 be> <utf-8 bytes>
+ORNA-UI/1 <len:u32 be> <canonical-json bytes>
 ```
 
 whose exact byte layout is the ASCII magic `ORNA-UI/1 ` (includes the
 separating space), a big-endian `u32` body length, then exactly that many
-UTF-8 bytes and no trailing bytes. The body is the canonical JSON of the
-UI value (spec `std-ui-value-v1.schema.json` diagnostic framing): one
-object that is exactly one of `empty`, `fragment`, or `node`, with the
-closed field shapes in that schema. The schema is stable for this
-snapshot.
+UTF-8 canonical JSON bytes and no trailing bytes. The body is the canonical
+JSON of the UI value (spec `std-ui-value-v1.schema.json` diagnostic framing):
+one object that is exactly one of `empty`, `fragment`, or `node`, with the
+closed field shapes in that schema. The schema is stable for this snapshot.
 
 The registered codec reuses the existing
-`OpaqueCodecRegistration::length_prefixed_utf8` constructor (verified at
-orna-core value.rs:1023) with magic `ORNA-UI/1 `. No new codec API is
-introduced in this slice; if a future ABI replaces the representation,
+`OpaqueCodecRegistration::length_prefixed_canonical_json` constructor
+(verified at orna-core value.rs:1214) with magic `ORNA-UI/1 `. No new codec
+API is introduced in this slice; if a future ABI replaces the representation,
 the new codec is a separate decision with a new contract version. This
-provisional codec is versioned by the magic (`/1`), so a later compact
-typed codec can coexist under a new magic.
+provisional codec is versioned by the magic (`/1`), so a later compact typed
+codec can coexist under a new magic.
 
 The V4 registration set in `registered_opaque_codecs` is the V3 set plus
 the UI registration. The V3 set (opaque token, terminal document, byte
