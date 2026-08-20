@@ -10,8 +10,9 @@ use orna_artifact::client_plan::{
     ProceduralClientPlan, ResourceClientPlan,
 };
 use orna_client::{
-    ClientActionOutcome, ClientActionState, ClientExecutionError, ClientResourceStatus, ClientStateStore,
-    decode_action_payload, trigger_client_action,
+    ClientActionError, ClientActionOutcome, ClientActionState, ClientExecutionError,
+    ClientResourceCompletion, ClientResourceExecutor, ClientResourceStatus, ClientStateStore,
+    complete_client_action, decode_action_payload, trigger_client_action,
     capability::{
         LocalCapabilityArgumentSource, LocalCapabilityDeclaration, LocalCapabilityGrant,
         LocalCapabilityGrantSet, LocalCapabilityName, LocalCapabilityScope,
@@ -80,7 +81,8 @@ use orna_protocol::{
     encode_resource_server_frame,
 };
 use orna_server::{
-    InstalledInvokeError, InstalledInvokeErrorKind, InstalledInvokeOutcome, InstalledInvokeRequest,
+    InstalledClientResourceExecutor, InstalledInvokeError, InstalledInvokeErrorKind,
+    InstalledInvokeOutcome, InstalledInvokeRequest,
     LocalAuthenticationError, LocalRawSocketError, LocalRawSocketResources,
     OpenStandardDatabaseError, RawClientDispatch, open_standard_database, run_invoke_with_kernel,
     serve_local_raw_stream,
@@ -107,6 +109,43 @@ mod postgres_test_support;
 use postgres_test_support::{TestDatabase, TestResult, failure, with_test_database};
 
 const RAW_CLIENT_SCHEMA_SOURCE: &str = "CREATE SCHEMA app;\n";
+struct RecordingInstalledResourceExecutor {
+    inner: InstalledClientResourceExecutor,
+    execute_count: usize,
+    poll_count: usize,
+}
+
+impl RecordingInstalledResourceExecutor {
+    fn new(
+        kernel: PostgresKernel,
+        session: AuthenticatedSession,
+        active: ActiveDatabaseRevision,
+        stream: StandardUnixStream,
+    ) -> Self {
+        Self {
+            inner: InstalledClientResourceExecutor::new_with_stream(kernel, session, active, stream),
+            execute_count: 0,
+            poll_count: 0,
+        }
+    }
+}
+
+impl ClientResourceExecutor for RecordingInstalledResourceExecutor {
+    fn execute(&mut self, request: ClientResourceRequest) -> ClientResourceCompletion {
+        self.execute_count += 1;
+        self.inner.execute(request)
+    }
+
+    fn poll(&mut self) -> Option<ClientResourceCompletion> {
+        self.poll_count += 1;
+        self.inner.poll()
+    }
+
+    fn cancel(&mut self, request: ClientResourceRequest) -> ClientResourceCompletion {
+        self.inner.cancel(request)
+    }
+}
+
 const RAW_CLIENT_FUNCTION_SOURCE: &str = "CREATE SCHEMA app;\n\
     CREATE TYPE app.stage AS ENUM ('lead', 'qualified');\n\
     CREATE TYPE app.request AS VALUE (stage app.stage) IMMUTABLE PERSISTABLE;\n\
@@ -218,6 +257,13 @@ const RAW_PROCEDURAL_RESOURCE_CLIENT_SOURCE: &str = "CREATE CLIENT FUNCTION proc
         result := result || '-assigned';\n\
         RETURN result;\n\
     END;\n";
+const RAW_SCALAR_RESOURCE_SERVER_SOURCE: &str = "CREATE SCHEMA scalar_fixture;\n\
+    CREATE SERVER FUNCTION scalar_fixture.resource()\n\
+    RETURNS TEXT SECURITY INVOKER TRANSACTION READ ONLY VOLATILITY STABLE\n\
+    AS SELECT 'scalar-marker';\n";
+const RAW_SCALAR_RESOURCE_CLIENT_SOURCE: &str = "CREATE CLIENT FUNCTION scalar_fixture.call() RETURNS TEXT AS\n\
+    AWAIT std.data.resource(target => scalar_fixture.resource,\n\
+      arguments => std.call.args());\n";
 const RAW_CLIENT_INT_INSERT_SOURCE: &str = "CREATE SCHEMA raw_int_insert;\n\
     CREATE TYPE raw_int_insert.int_probe AS OBJECT (\n\
       stored INT NOT NULL\n\
@@ -1988,6 +2034,115 @@ async fn proves_installed_orna_invoke_end_to_end_against_postgres() -> TestResul
 
 #[tokio::test]
 #[ignore = "requires the Compose PostgreSQL development service"]
+async fn proves_scalar_client_resource_pending_continues_through_installed_evaluator() -> TestResult<()> {
+    const CONNECTION_PROTOCOL_MAJOR: u16 = 5;
+
+    with_test_database(|database| async move {
+        let uid = nix::unistd::geteuid().as_raw();
+        let kernel = open_standard_database(kernel(&database)?)
+            .await
+            .map_err(|error| failure(format!("open standard database failed: {error:?}")))?;
+        let active = kernel
+            .recover()
+            .await
+            .map_err(|error| failure(format!("recover installed standard failed: {error:?}")))?;
+        let standard_source = active
+            .catalogue_hash_context()
+            .standard()
+            .cloned()
+            .ok_or_else(|| failure("scalar resource fixture has no checked standard source"))?;
+        let standard = check_standard_library_source(&standard_source)
+            .map_err(|error| failure(format!("installed standard source check failed: {error:?}")))?;
+        let (active, client, target, _call_site) =
+            install_scalar_resource_client_fixture(&kernel, &active, &standard).await?;
+        let functions = active
+            .catalogue()
+            .functions()
+            .iter()
+            .map(FunctionDefinition::id)
+            .collect::<Vec<_>>();
+        let security = SecuritySnapshot::new_with_local_peer_credentials(
+            active.pair(),
+            functions,
+            vec![Principal::new(
+                RAW_CLIENT_USER,
+                PrincipalKind::User,
+                PrincipalStatus::Active,
+            )],
+            vec![],
+            vec![
+                ExecuteGrant::new(RAW_CLIENT_USER, client),
+                ExecuteGrant::new(RAW_CLIENT_USER, target),
+            ],
+            vec![LocalPeerCredential::new(uid, RAW_CLIENT_USER)],
+        )?;
+        kernel.replace_security_snapshot(&security).await?;
+        let session = kernel.authenticate_local_peer(uid).await?;
+        let standard = active
+            .catalogue_hash_context()
+            .standard()
+            .ok_or_else(|| failure("scalar resource proof has no standard context"))?;
+        let registry = registered_opaque_codecs(standard)?;
+        let request = sealed_scalar_resource_request(client)?;
+        let retained = encode_invoke_request(&active, &registry, &request)?;
+        let (server, client_stream) = StandardUnixStream::pair()?;
+        client_stream.set_nonblocking(true)?;
+        let connection = tokio::spawn(serve_local_raw_stream(
+            kernel.clone(),
+            server,
+            LocalRawSocketResources::new(),
+        ));
+        let mut executor = RecordingInstalledResourceExecutor::new(
+            kernel.clone(),
+            session.clone(),
+            active.clone(),
+            client_stream,
+        );
+        let dispatch = kernel
+            .dispatch_sealed_sys_invoke_with_resource_executor(
+                &session,
+                CONNECTION_PROTOCOL_MAJOR,
+                &retained,
+                Some(&mut executor),
+            )
+            .await
+            .map_err(|error| failure(format!("scalar pending dispatch failed: {error:?}")));
+        let execute_count = executor.execute_count;
+        let poll_count = executor.poll_count;
+        drop(executor);
+        let connection = connection.await.map_err(Into::into).and_then(|result| {
+            result.map_err(|error| -> Box<dyn Error + Send + Sync> { Box::new(error) })
+        });
+        let dispatch = finish_session(dispatch, connection, "scalar pending socket cleanup")?;
+        let SealedInvocationResult::Completed { events, .. } = dispatch else {
+            return Err(failure("scalar pending resource did not complete the sealed invocation"));
+        };
+        let records = events.records();
+        require(
+            records.len() == 3
+                && records[0].event().kind() == InvocationEventKind::InvocationStarted
+                && records[1].event().kind() == InvocationEventKind::ValueBatch
+                && records[2].event().kind() == InvocationEventKind::InvocationCompleted,
+            "scalar pending resource did not retain the completed invocation event sequence",
+        )?;
+        let InvocationEventBody::ValueBatch { schema: None, values } = records[1].event().body() else {
+            return Err(failure("scalar pending resource completion did not carry a plain typed batch"));
+        };
+        require(
+            values.len() == 1
+                && values[0].value() == &RuntimeValue::Text("scalar-marker".to_owned()),
+            "scalar pending resource completion was not typed TEXT",
+        )?;
+        require(
+            execute_count == 1 && poll_count > 0,
+            "scalar pending resource did not execute once and continue through poll",
+        )
+    })
+    .await
+}
+
+#[tokio::test]
+#[ignore = "requires the Compose PostgreSQL development service"]
 async fn proves_procedural_client_resource_through_installed_evaluator() -> TestResult<()> {
     with_test_database(|database| async move {
         let uid = nix::unistd::geteuid().as_raw();
@@ -2438,9 +2593,21 @@ async fn proves_server_action_resource_trigger_through_authenticated_executor() 
         )?;
         let mut action_state = ClientActionState::default();
         let mut state = ClientStateStore::default();
+        let (server, client_stream) = StandardUnixStream::pair()?;
+        client_stream.set_nonblocking(true)?;
+        let connection = tokio::spawn(serve_local_raw_stream(
+            kernel.clone(),
+            server,
+            LocalRawSocketResources::new(),
+        ));
         let mut executor =
-            orna_server::InstalledClientResourceExecutor::new(kernel.clone(), session, active.clone());
-        let outcome = trigger_client_action(
+            orna_server::InstalledClientResourceExecutor::new_with_stream(
+                kernel.clone(),
+                session,
+                active.clone(),
+                client_stream,
+            );
+        let action_result = trigger_client_action(
             &active,
             result.value(),
             &authorisation,
@@ -2450,7 +2617,20 @@ async fn proves_server_action_resource_trigger_through_authenticated_executor() 
             &LocalCapabilityGrantSet::new(),
             &mut state,
             &mut executor,
-        )?;
+        );
+        let action_result = finish_pending_client_action(
+            &active,
+            &mut action_state,
+            &mut executor,
+            action_result,
+        )
+        .await
+        .map_err(|error| failure(format!("installed action resource completion failed: {error:?}")));
+        drop(executor);
+        let connection = connection.await.map_err(Into::into).and_then(|result| {
+            result.map_err(|error| -> Box<dyn Error + Send + Sync> { Box::new(error) })
+        });
+        let outcome = finish_session(action_result, connection, "installed action socket cleanup")?;
         require(
             outcome == ClientActionOutcome::Completed
                 && matches!(action_state.status(), ClientResourceStatus::Idle),
@@ -2644,9 +2824,21 @@ async fn proves_server_action_denial_stays_inside_authenticated_resource_trigger
         let invocation_rows_before = invocation_audit_rows(&database).await?;
         let mut action_state = ClientActionState::default();
         let mut state = ClientStateStore::default();
+        let (server, client_stream) = StandardUnixStream::pair()?;
+        client_stream.set_nonblocking(true)?;
+        let connection = tokio::spawn(serve_local_raw_stream(
+            kernel.clone(),
+            server,
+            LocalRawSocketResources::new(),
+        ));
         let mut executor =
-            orna_server::InstalledClientResourceExecutor::new(kernel.clone(), session, active.clone());
-        let outcome = trigger_client_action(
+            orna_server::InstalledClientResourceExecutor::new_with_stream(
+                kernel.clone(),
+                session,
+                active.clone(),
+                client_stream,
+            );
+        let action_result = trigger_client_action(
             &active,
             result.value(),
             &authorisation,
@@ -2656,7 +2848,20 @@ async fn proves_server_action_denial_stays_inside_authenticated_resource_trigger
             &LocalCapabilityGrantSet::new(),
             &mut state,
             &mut executor,
-        )?;
+        );
+        let action_result = finish_pending_client_action(
+            &active,
+            &mut action_state,
+            &mut executor,
+            action_result,
+        )
+        .await
+        .map_err(|error| failure(format!("installed action resource completion failed: {error:?}")));
+        drop(executor);
+        let connection = connection.await.map_err(Into::into).and_then(|result| {
+            result.map_err(|error| -> Box<dyn Error + Send + Sync> { Box::new(error) })
+        });
+        let outcome = finish_session(action_result, connection, "denied action socket cleanup")?;
         require(
             matches!(
                 outcome,
@@ -3247,6 +3452,26 @@ async fn installed_invoke_run(
     let outcome =
         run_invoke_with_kernel(kernel(database)?, request, &mut stdout, &mut stderr).await;
     Ok((outcome, stdout, stderr))
+}
+
+async fn finish_pending_client_action(
+    active: &ActiveDatabaseRevision,
+    action_state: &mut ClientActionState,
+    executor: &mut dyn ClientResourceExecutor,
+    mut result: Result<ClientActionOutcome, ClientActionError>,
+) -> Result<ClientActionOutcome, ClientActionError> {
+    loop {
+        if !matches!(result, Err(ClientActionError::Pending)) {
+            return result;
+        }
+        let completion = loop {
+            if let Some(completion) = executor.poll() {
+                break completion;
+            }
+            sleep(Duration::from_millis(10)).await;
+        };
+        result = complete_client_action(active, action_state, completion);
+    }
 }
 
 #[tokio::test]
@@ -9563,6 +9788,108 @@ async fn install_raw_client_fixture(
         .id();
     Ok((active, standard_upgrade, client, server))
 }
+async fn install_scalar_resource_client_fixture(
+    kernel: &PostgresKernel,
+    active: &orna_core::revision::ActiveDatabaseRevision,
+    standard: &CheckedStandardLibrary,
+) -> TestResult<(orna_core::revision::ActiveDatabaseRevision, FunctionId, FunctionId, CallSiteId)> {
+    let append_source = |active: &orna_core::revision::ActiveDatabaseRevision, body: &str| -> TestResult<SourceBundle> {
+        if active.source().units().is_empty() {
+            return Ok(SourceBundle::new([SourceUnit::new("resource_fixture.sql", body.to_owned())])?);
+        }
+        let last_ordinal = active
+            .source()
+            .units()
+            .len()
+            .checked_sub(1)
+            .ok_or_else(|| failure("scalar resource fixture has no retained source unit"))?;
+        Ok(SourceBundle::new(active.source().units().iter().enumerate().map(
+            |(ordinal, unit)| {
+                let content = if ordinal == last_ordinal {
+                    format!("{}\n{}", unit.content(), body)
+                } else {
+                    unit.content().to_owned()
+                };
+                SourceUnit::new(unit.logical_path(), content)
+            },
+        ))?)
+    };
+    let server_context = StandardApplicationCheckContext::try_new(active.catalogue(), standard)?;
+    let server_source = append_source(active, RAW_SCALAR_RESOURCE_SERVER_SOURCE)?;
+    let server_report = check_standard_application(&server_source, &server_context);
+    if !server_report.diagnostics().is_empty() {
+        return Err(failure(format!(
+            "scalar SERVER resource fixture did not compile: {:?}",
+            server_report.diagnostics(),
+        )));
+    }
+    let active = kernel
+        .apply(
+            &prepare_standard_application(&server_report, active.pair(), active)
+                .map_err(|error| failure(format!("scalar server prepare failed: {error:?}")))?,
+        )
+        .await
+        .map_err(|error| failure(format!("scalar server apply failed: {error:?}")))?;
+    let client_context = StandardApplicationCheckContext::try_new(active.catalogue(), standard)?;
+    let client_source = append_source(&active, RAW_SCALAR_RESOURCE_CLIENT_SOURCE)?;
+    let client_report = check_standard_application(&client_source, &client_context);
+    if !client_report.diagnostics().is_empty() {
+        return Err(failure(format!(
+            "scalar CLIENT resource fixture did not compile: {:?}",
+            client_report.diagnostics(),
+        )));
+    }
+    let active = kernel
+        .apply(
+            &prepare_standard_application(&client_report, active.pair(), &active)
+                .map_err(|error| failure(format!("scalar client prepare failed: {error:?}")))?,
+        )
+        .await
+        .map_err(|error| failure(format!("scalar client apply failed: {error:?}")))?;
+    let target = active
+        .catalogue()
+        .functions()
+        .iter()
+        .find(|function| function.name().parts() == ["scalar_fixture", "resource"])
+        .ok_or_else(|| failure("scalar resource fixture is missing its SERVER target"))?;
+    let target_type = match target.return_type() {
+        FunctionReturn::Single(resolved) => *resolved,
+        _ => return Err(failure("scalar resource target is not a single TEXT result")),
+    };
+    let target = target.id();
+    let client_definition = active
+        .catalogue()
+        .functions()
+        .iter()
+        .find(|function| function.name().parts() == ["scalar_fixture", "call"])
+        .ok_or_else(|| failure("scalar resource fixture is missing its CLIENT function"))?;
+    require(
+        client_definition.return_type() == &FunctionReturn::Single(target_type),
+        "scalar CLIENT resource fixture did not retain the checked TEXT result",
+    )?;
+    let client = client_definition.id();
+    let revision = active
+        .function_revisions()
+        .iter()
+        .find(|revision| revision.function() == client)
+        .ok_or_else(|| failure("scalar CLIENT resource fixture is missing its revision"))?;
+    let plan = ResourceClientPlan::decode(revision.artifact().payload())?;
+    let ClientExpressionNode::Await { expression } = plan.expression() else {
+        return Err(failure("scalar CLIENT resource plan is not an awaited resource"));
+    };
+    let ClientExpressionNode::Resource { operation } = expression.as_ref() else {
+        return Err(failure("scalar CLIENT resource plan is not a resource operation"));
+    };
+    require(
+        operation.kind() == orna_artifact::client_plan::ResourceKind::Scalar
+            && operation.target() == target
+            && operation.target_revision() == active.pair()
+            && operation.arguments().is_empty(),
+        "scalar CLIENT resource plan did not retain canonical target metadata",
+    )?;
+    Ok((active, client, target, operation.call_site_id()))
+}
+
 async fn install_procedural_resource_client_fixture(
     kernel: &PostgresKernel,
     active: &orna_core::revision::ActiveDatabaseRevision,
@@ -10499,6 +10826,41 @@ async fn require_no_database_sessions(database: &TestDatabase) -> TestResult<()>
         session.shutdown().await,
         "database session leak check",
     )
+}
+
+/// Builds one complete checked `sys.invoke` Request for a no-argument scalar CLIENT fixture.
+fn sealed_scalar_resource_request(client: FunctionId) -> TestResult<InvokeRequest> {
+    Ok(InvokeRequest::new(InvokeRequestInput {
+        target: InvocationRequestTarget::function_id(client),
+        arguments: Vec::new(),
+        caller_context: InvocationCallerContext::new(
+            InvocationCallerKind::TestRunner,
+            false,
+            false,
+            None,
+            None,
+            "en-GB",
+            "UTC",
+            None,
+        )?,
+        client_offer: InvocationClientOffer::new(
+            5,
+            "en-GB",
+            "UTC",
+            Vec::new(),
+            Vec::new(),
+            1_024,
+            0,
+            None,
+            None,
+        )?,
+        output_requirement: None,
+        state_profile: None,
+        trace_policy: InvocationTracePolicy::Off,
+        idempotency_key: None,
+        parent_invocation_id: None,
+        observer_context: None,
+    })?)
 }
 
 /// Builds one complete checked `sys.invoke` Request for `std.invoke.echo`.
