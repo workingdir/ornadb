@@ -407,7 +407,8 @@ where
 fn return_text(return_type: &orna_syntax::FunctionReturnType, text: &str) -> String {
     match return_type {
         orna_syntax::FunctionReturnType::Single(specification) => type_text(specification, text),
-        orna_syntax::FunctionReturnType::Rows { span, .. } => source_text_range(span, text),
+        orna_syntax::FunctionReturnType::Rows { span, .. }
+        | orna_syntax::FunctionReturnType::Stream { span, .. } => source_text_range(span, text),
     }
 }
 
