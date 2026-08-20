@@ -14,21 +14,23 @@ use orna_core::{
     catalogue::{FunctionDefinition, FunctionDomain, FunctionReturn},
     inspect::{InspectOutcomeKind, InspectPrivilege, InspectSnapshotOptions},
     invocation::{
-        InvocationArgument, InvocationClientOffer, InvocationEventBody,
-        InvocationParameterSelector, InvocationTarget as InvocationRequestTarget, InvokeEvent,
-        InvokeValue, ProtectedInvocationDecision, decide_protected_invocation,
+        InvocationArgument, InvocationClientOffer, InvocationEventBody, InvocationFailure,
+        InvocationFailurePhase, InvocationParameterSelector, InvocationRetryability,
+        InvocationTarget as InvocationRequestTarget, InvokeEvent, InvokeValue,
+        ProtectedInvocationDecision, decide_protected_invocation,
     },
     revision::{
         ActiveDatabaseRevision, CatalogueHashContext, RevisionPair, StandardExecutable,
     },
     security::{
-        AuthenticatedSession, CATALOGUE_HEALTH_FUNCTION_ID, CATALOGUE_HEALTH_SERVICE_PRINCIPAL_ID,
-        ExecuteDecision, ExecuteDenial, ExecuteGrant, InspectDenial, InspectEpochScope,
-        InvocationTarget, LocalPeerAuthenticationError, LocalPeerCredential, Principal,
-        PrincipalKind, PrincipalStatus, PrivilegeClass, PrivilegeDenial, PrivilegeGrant,
-        RoleMembership, SecurityAdminAuditOperation, SecurityAuditDecision, SecurityAuditDenial,
-        SecurityAuditEvent, SecurityAuditKind, SecurityAuditOutcome, SecurityFunctionTarget,
-        SecuritySnapshot, SessionBindingError, TargetClass, UserStateAuditOperation,
+        AuthenticatedSession, AuthorisedInvocation, CATALOGUE_HEALTH_FUNCTION_ID,
+        CATALOGUE_HEALTH_SERVICE_PRINCIPAL_ID, ExecuteDecision, ExecuteDenial, ExecuteGrant,
+        InspectDenial, InspectEpochScope, InvocationTarget, LocalPeerAuthenticationError,
+        LocalPeerCredential, Principal, PrincipalKind, PrincipalStatus, PrivilegeClass,
+        PrivilegeDenial, PrivilegeGrant, RoleMembership, SecurityAdminAuditOperation,
+        SecurityAuditDecision, SecurityAuditDenial, SecurityAuditEvent, SecurityAuditKind,
+        SecurityAuditOutcome, SecurityFunctionTarget, SecuritySnapshot, SessionBindingError,
+        TargetClass, UserStateAuditOperation,
     },
     system::{
         SYS_INVOKE_FUNCTION_ID, SYS_SECURITY_ACTIVE_ROLES_FUNCTION_ID,
@@ -131,10 +133,12 @@ pub enum SealedInvocationResult {
         /// `InvocationCompleted(2)` Event batch.
         events: InvocationEventBatch,
     },
-    /// The final allowed decision disclosed a redacted bind failure.
-    BindFailure {
-        /// The invocation identity.
+    /// The accepted invocation ended with one redacted failure Event sequence.
+    Failed {
+        /// The invocation identity shared by every retained Event.
         invocation: InvocationId,
+        /// The complete `InvocationStarted(0)`, `InvocationFailed(1)` batch.
+        events: InvocationEventBatch,
     },
     /// The invocation was denied without executing any artifact.
     Denied {
@@ -151,6 +155,13 @@ pub enum SealedInvocationResult {
         /// The invocation identity.
         invocation: InvocationId,
     },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SealedInvocationFailureClass {
+    Bind,
+    Target,
+    Internal,
 }
 
 /// One closed durable `sys.invoke` decision for the PostgreSQL kernel.
@@ -840,7 +851,7 @@ impl PostgresKernel {
     ) -> Result<SealedInvocationResult, PostgresKernelError> {
         let mut database_session = self.open().await?;
         let operation = async {
-            let mut transaction = database_session
+            let transaction = database_session
                 .client
                 .build_transaction()
                 .isolation_level(IsolationLevel::RepeatableRead)
@@ -900,10 +911,10 @@ impl PostgresKernel {
                                     ));
                                 }
                             };
-                            let arguments =
-                                bind_sealed_invoke_arguments(definition, decoded.arguments())?;
                             match definition.domain() {
                                 FunctionDomain::Client => {
+                                    let arguments =
+                                        bind_sealed_invoke_arguments(definition, decoded.arguments())?;
                                     let execution = if let Some(executor) =
                                         resource_executor.as_deref_mut()
                                     {
@@ -949,51 +960,37 @@ impl PostgresKernel {
                                     (vec![value], security_target)
                                 }
                                 FunctionDomain::Server => {
-                                    let kind = match definition.return_type() {
-                                        FunctionReturn::Single(_) => ProtocolResourceKind::Single,
-                                        FunctionReturn::Rows(columns) if columns.len() == 1 => {
-                                            ProtocolResourceKind::Stream
-                                        }
-                                        _ => {
-                                            return Err(sealed_target_invariant(
-                                                &active,
-                                                "sealed SERVER invocation requires one result column",
-                                            ));
-                                        }
-                                    };
-                                    let savepoint = transaction
-                                        .savepoint("sealed_server_execution")
-                                        .await
-                                        .map_err(PostgresKernelError::Database)?;
-                                    let execution = execute_authorised_server_select(
-                                        &savepoint,
-                                        &active,
+                                    if append_allowed_invocation_audit_evidence(
+                                        &transaction,
                                         &authorisation,
-                                        &arguments,
+                                        invocation,
+                                    )
+                                    .await
+                                    .is_err() {
+                                        let _ = transaction.rollback().await;
+                                        return sealed_failure_result(
+                                            invocation,
+                                            SealedInvocationFailureClass::Internal,
+                                        );
+                                    }
+                                    if transaction.commit().await.is_err() {
+                                        return sealed_failure_result(
+                                            invocation,
+                                            SealedInvocationFailureClass::Internal,
+                                        );
+                                    }
+                                    return execute_sealed_server_after_audit(
+                                        &mut database_session.client,
+                                        &active,
+                                        &registry,
+                                        authenticated_session,
+                                        definition,
+                                        &decoded,
+                                        security_target,
+                                        &authorisation,
+                                        invocation,
                                     )
                                     .await;
-                                    let server = match execution {
-                                        Ok(server) => server,
-                                        Err(error) => {
-                                            savepoint
-                                                .rollback()
-                                                .await
-                                                .map_err(PostgresKernelError::Database)?;
-                                            return Err(error);
-                                        }
-                                    };
-                                    let values = resource_values_from_server_result(kind, server)
-                                        .ok_or_else(|| {
-                                            sealed_target_invariant(
-                                                &active,
-                                                "sealed SERVER invocation result must be one value per row",
-                                            )
-                                        })?;
-                                    savepoint
-                                        .commit()
-                                        .await
-                                        .map_err(PostgresKernelError::Database)?;
-                                    (values, security_target)
                                 }
                             }
                         }
@@ -1183,7 +1180,13 @@ impl PostgresKernel {
                         invocation,
                     )
                     .await?;
-                    SealedInvocationResult::BindFailure { invocation }
+                    SealedInvocationResult::Failed {
+                        invocation,
+                        events: sealed_failure_events(
+                            invocation,
+                            SealedInvocationFailureClass::Bind,
+                        )?,
+                    }
                 }
                 ProtectedInvocationDecision::EntryDenied => {
                     let entry_target = InvocationTarget::new(SYS_INVOKE_FUNCTION_ID, active.pair());
@@ -1942,6 +1945,239 @@ fn resource_values_from_server_result(
         return None;
     }
     Some(values)
+}
+
+async fn execute_sealed_server_target(
+    transaction: &mut Transaction<'_>,
+    active: &ActiveDatabaseRevision,
+    authorisation: &AuthorisedInvocation,
+    arguments: &[FunctionArgument],
+    kind: ProtocolResourceKind,
+) -> Result<Vec<RuntimeValue>, SealedInvocationFailureClass> {
+    let savepoint = transaction
+        .savepoint("sealed_server_execution")
+        .await
+        .map_err(|_| SealedInvocationFailureClass::Internal)?;
+    let execution = execute_authorised_server_select(
+        &savepoint,
+        active,
+        authorisation,
+        arguments,
+    )
+    .await;
+    let server = match execution {
+        Ok(server) => server,
+        Err(_) => {
+            if savepoint.rollback().await.is_err() {
+                return Err(SealedInvocationFailureClass::Internal);
+            }
+            return Err(SealedInvocationFailureClass::Target);
+        }
+    };
+    let values = match resource_values_from_server_result(kind, server) {
+        Some(values) => values,
+        None => {
+            if savepoint.rollback().await.is_err() {
+                return Err(SealedInvocationFailureClass::Internal);
+            }
+            return Err(SealedInvocationFailureClass::Target);
+        }
+    };
+    savepoint
+        .commit()
+        .await
+        .map_err(|_| SealedInvocationFailureClass::Internal)?;
+    Ok(values)
+}
+
+async fn execute_sealed_server_after_audit(
+    client: &mut tokio_postgres::Client,
+    active: &ActiveDatabaseRevision,
+    registry: &OpaqueCodecRegistry,
+    authenticated_session: &AuthenticatedSession,
+    definition: &FunctionDefinition,
+    decoded: &orna_core::invocation::InvokeRequest,
+    security_target: InvocationTarget,
+    authorisation: &AuthorisedInvocation,
+    invocation: InvocationId,
+) -> Result<SealedInvocationResult, PostgresKernelError> {
+    let mut transaction = match client
+        .build_transaction()
+        .isolation_level(IsolationLevel::RepeatableRead)
+        .start()
+        .await
+    {
+        Ok(transaction) => transaction,
+        Err(_) => {
+            return sealed_failure_result(invocation, SealedInvocationFailureClass::Internal);
+        }
+    };
+    if require_current_migrations(&transaction).await.is_err() {
+        return finish_sealed_failure(
+            transaction,
+            invocation,
+            SealedInvocationFailureClass::Internal,
+        )
+        .await;
+    }
+    if lock_active_revision(&transaction, active.pair())
+        .await
+        .is_err()
+    {
+        return finish_sealed_failure(
+            transaction,
+            invocation,
+            SealedInvocationFailureClass::Internal,
+        )
+        .await;
+    }
+    let execution_active = match configure_and_recover(&transaction).await {
+        Ok(active) => active,
+        Err(_) => {
+            return finish_sealed_failure(
+                transaction,
+                invocation,
+                SealedInvocationFailureClass::Internal,
+            )
+            .await;
+        }
+    };
+    if execution_active.pair() != active.pair() {
+        return finish_sealed_failure(
+            transaction,
+            invocation,
+            SealedInvocationFailureClass::Internal,
+        )
+        .await;
+    }
+    let arguments = match bind_sealed_invoke_arguments(definition, decoded.arguments()) {
+        Ok(arguments) => arguments,
+        Err(_) => {
+            return finish_sealed_failure(
+                transaction,
+                invocation,
+                SealedInvocationFailureClass::Bind,
+            )
+            .await;
+        }
+    };
+    let kind = match definition.return_type() {
+        FunctionReturn::Single(_) => ProtocolResourceKind::Single,
+        FunctionReturn::Rows(columns) if columns.len() == 1 => ProtocolResourceKind::Stream,
+        _ => {
+            return finish_sealed_failure(
+                transaction,
+                invocation,
+                SealedInvocationFailureClass::Target,
+            )
+            .await;
+        }
+    };
+    let values = match execute_sealed_server_target(
+        &mut transaction,
+        active,
+        authorisation,
+        &arguments,
+        kind,
+    )
+    .await
+    {
+        Ok(values) => values,
+        Err(failure) => {
+            return finish_sealed_failure(transaction, invocation, failure).await;
+        }
+    };
+    let events = match decoded.output_requirement() {
+        Some(requirement) => {
+            if values.len() != 1 {
+                return finish_sealed_failure(
+                    transaction,
+                    invocation,
+                    SealedInvocationFailureClass::Target,
+                )
+                .await;
+            }
+            let value = values
+                .into_iter()
+                .next()
+                .expect("one result value was checked");
+            match present_sealed_standard_output(requirement, value, active, registry) {
+                Ok(presented) => match sealed_completed_events(
+                    authenticated_session.principal(),
+                    invocation,
+                    presented,
+                ) {
+                    Ok(events) => events,
+                    Err(_) => {
+                        return finish_sealed_failure(
+                            transaction,
+                            invocation,
+                            SealedInvocationFailureClass::Target,
+                        )
+                        .await;
+                    }
+                },
+                Err(
+                    SealedPresentationError::OutputResolution(_) | SealedPresentationError::NoPath,
+                ) => {
+                    if transaction.commit().await.is_err() {
+                        return sealed_failure_result(
+                            invocation,
+                            SealedInvocationFailureClass::Internal,
+                        );
+                    }
+                    return Ok(SealedInvocationResult::PresentationFailed { invocation });
+                }
+                Err(SealedPresentationError::Kernel(_)) => {
+                    return finish_sealed_failure(
+                        transaction,
+                        invocation,
+                        SealedInvocationFailureClass::Internal,
+                    )
+                    .await;
+                }
+            }
+        }
+        None => match sealed_completed_events_from_values(
+            authenticated_session.principal(),
+            invocation,
+            values,
+        ) {
+            Ok(events) => events,
+            Err(_) => {
+                return finish_sealed_failure(
+                    transaction,
+                    invocation,
+                    SealedInvocationFailureClass::Target,
+                )
+                .await;
+            }
+        },
+    };
+    if capture_sealed_invocation_snapshot(
+        &transaction,
+        active,
+        registry,
+        authenticated_session,
+        invocation,
+        security_target.function(),
+        &events,
+        decoded.client_offer(),
+    )
+    .await
+    .is_err()
+    {
+        return finish_sealed_failure(
+            transaction,
+            invocation,
+            SealedInvocationFailureClass::Internal,
+        )
+        .await;
+    }
+    if transaction.commit().await.is_err() {
+        return sealed_failure_result(invocation, SealedInvocationFailureClass::Internal);
+    }
+    Ok(SealedInvocationResult::Completed { invocation, events })
 }
 
 async fn lock_catalogue_health_identity(
@@ -2854,16 +3090,16 @@ fn bind_sealed_invoke_arguments(
 /// ADR 0057 step 7 passes either the canonical echo value (no output
 /// requirement) or the presented opaque value in the final `ValueBatch`.
 pub(crate) fn sealed_completed_events(
-    principal: PrincipalId,
+    _principal: PrincipalId,
     invocation: InvocationId,
     value: RuntimeValue,
 ) -> Result<InvocationEventBatch, PostgresKernelError> {
-    sealed_completed_events_from_values(principal, invocation, vec![value])
+    sealed_completed_events_from_values(_principal, invocation, vec![value])
 }
 
 /// Builds completed events from validated SERVER result values.
 fn sealed_completed_events_from_values(
-    principal: PrincipalId,
+    _principal: PrincipalId,
     invocation: InvocationId,
     values: Vec<RuntimeValue>,
 ) -> Result<InvocationEventBatch, PostgresKernelError> {
@@ -2871,7 +3107,7 @@ fn sealed_completed_events_from_values(
         invocation,
         0,
         InvocationEventBody::Started {
-            visible_principal: Some(principal),
+            visible_principal: None,
         },
     )
     .map_err(PostgresKernelError::InvocationCarrier)?;
@@ -2904,6 +3140,67 @@ fn sealed_completed_events_from_values(
     .map_err(PostgresKernelError::InvocationCarrier)?;
     records.push(InvocationEventRecord::new(sequence + 1, completed));
     InvocationEventBatch::new(records).map_err(PostgresKernelError::SealedInvocation)
+}
+
+fn sealed_failure_events(
+    invocation: InvocationId,
+    failure: SealedInvocationFailureClass,
+) -> Result<InvocationEventBatch, PostgresKernelError> {
+    let (phase, code, message, retryability) = match failure {
+        SealedInvocationFailureClass::Bind => (
+            InvocationFailurePhase::Bind,
+            "INVOKE_BIND_FAILED",
+            "invocation arguments were not accepted",
+            InvocationRetryability::No,
+        ),
+        SealedInvocationFailureClass::Target => (
+            InvocationFailurePhase::Target,
+            "INVOKE_TARGET_FAILED",
+            "invocation target failed",
+            InvocationRetryability::Unknown,
+        ),
+        SealedInvocationFailureClass::Internal => (
+            InvocationFailurePhase::Internal,
+            "INVOKE_INTERNAL_FAILURE",
+            "invocation could not complete",
+            InvocationRetryability::Unknown,
+        ),
+    };
+    let started = InvokeEvent::new(
+        invocation,
+        0,
+        InvocationEventBody::Started {
+            visible_principal: None,
+        },
+    )
+    .map_err(PostgresKernelError::InvocationCarrier)?;
+    let failure = InvocationFailure::new(phase, code, message, None, retryability)
+        .map_err(PostgresKernelError::InvocationCarrier)?;
+    let failed = InvokeEvent::new(invocation, 1, InvocationEventBody::Failed(failure))
+        .map_err(PostgresKernelError::InvocationCarrier)?;
+    InvocationEventBatch::new(vec![
+        InvocationEventRecord::new(1, started),
+        InvocationEventRecord::new(2, failed),
+    ])
+    .map_err(PostgresKernelError::SealedInvocation)
+}
+
+fn sealed_failure_result(
+    invocation: InvocationId,
+    failure: SealedInvocationFailureClass,
+) -> Result<SealedInvocationResult, PostgresKernelError> {
+    let events = sealed_failure_events(invocation, failure)?;
+    Ok(SealedInvocationResult::Failed { invocation, events })
+}
+
+async fn finish_sealed_failure(
+    transaction: Transaction<'_>,
+    invocation: InvocationId,
+    failure: SealedInvocationFailureClass,
+) -> Result<SealedInvocationResult, PostgresKernelError> {
+    let events = sealed_failure_events(invocation, failure)?;
+    let _ = transaction.rollback().await;
+    Ok(SealedInvocationResult::Failed { invocation, events })
 }
 
 /// Captures one inspection epoch and its trace rows for a completed sealed
@@ -2971,6 +3268,19 @@ async fn append_allowed_invocation_audit(
     let event_id = append_security_audit_event(
         transaction,
         SecurityAuditDecision::execute_allowed(&authorisation),
+    )
+    .await?;
+    append_linked_invocation_audit(transaction, invocation, event_id).await
+}
+
+async fn append_allowed_invocation_audit_evidence(
+    transaction: &Transaction<'_>,
+    authorisation: &AuthorisedInvocation,
+    invocation: InvocationId,
+) -> Result<(), PostgresKernelError> {
+    let event_id = append_security_audit_event(
+        transaction,
+        SecurityAuditDecision::execute_allowed(authorisation),
     )
     .await?;
     append_linked_invocation_audit(transaction, invocation, event_id).await
@@ -6189,8 +6499,8 @@ mod tests {
         assert!(matches!(
             records[0].event().body(),
             InvocationEventBody::Started {
-                visible_principal: Some(actual)
-            } if *actual == principal
+                visible_principal: None
+            }
         ));
         match records[1].event().body() {
             InvocationEventBody::ValueBatch { schema, values } => {
@@ -6251,4 +6561,28 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn sealed_failure_events_are_redacted_and_closed() {
+        let invocation = InvocationId::from_bytes([0x71; 16]);
+        let events = sealed_failure_events(
+            invocation,
+            SealedInvocationFailureClass::Target,
+        )
+        .expect("the failure events are valid");
+        assert_eq!(events.records().len(), 2);
+        assert!(matches!(
+            events.records()[0].event().body(),
+            InvocationEventBody::Started {
+                visible_principal: None
+            }
+        ));
+        let InvocationEventBody::Failed(failure) = events.records()[1].event().body() else {
+            panic!("expected an InvocationFailed event");
+        };
+        assert_eq!(failure.phase(), InvocationFailurePhase::Target);
+        assert_eq!(failure.code(), "INVOKE_TARGET_FAILED");
+        assert_eq!(failure.message(), "invocation target failed");
+        assert!(failure.details().is_none());
+        assert_eq!(failure.retryability(), InvocationRetryability::Unknown);
+    }
 }
