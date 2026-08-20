@@ -86,7 +86,8 @@ use crate::{
     relational::{supports_server_select_distinct, supports_server_select_equality},
     resolver::{
         CheckedActionOperation, CheckedClientExpression, CheckedClientFunctionBody,
-        CheckedClientLocal, CheckedClientLocalKind, CheckedClientStateSlot, CheckedClientStatement,
+        CheckedClientLocal, CheckedClientLocalKind, CheckedClientReturnShape,
+        CheckedClientStateSlot, CheckedClientStatement,
         CheckedFieldRename, CheckedResourceOperation, CheckedStateDefault, CheckedStateScope,
         UNIQUE_FIELD_MESSAGE, durable_state_slot_id, supports_unique_text_or_required_reference,
     },
@@ -1645,6 +1646,7 @@ struct ValidatedClient {
     parameters: Vec<crate::CheckedServerFunctionParameter>,
     return_target: EvidenceTarget,
     return_semantic_type: SemanticType<CheckedTypeId>,
+    return_shape: CheckedClientReturnShape,
     return_location: SourceLocation,
     return_scalar: Option<StandardScalar>,
     body: ValidatedClientBody,
@@ -3964,6 +3966,7 @@ fn validate_client_function_preflight(
         parameters: function.parameters().to_vec(),
         return_target: return_evidence.target.clone(),
         return_semantic_type: return_evidence.semantic_type,
+        return_shape: function.return_shape(),
         return_location: return_evidence.location.clone(),
         return_scalar,
         body,
@@ -6452,6 +6455,11 @@ impl<'a> CandidateBuilder<'a> {
         consume_evidence: bool,
         projection: CandidateTypeProjection,
     ) -> Result<FunctionDefinition, PrepareError> {
+        let return_type = self.client_return_type(validated, consume_evidence, projection)?;
+        let return_type = match validated.return_shape {
+            CheckedClientReturnShape::Single => FunctionReturn::Single(return_type),
+            CheckedClientReturnShape::Stream => FunctionReturn::Stream(return_type),
+        };
         Ok(FunctionDefinition::new(
             self.identities.function(validated.id)?,
             validated.name.clone(),
@@ -6477,11 +6485,7 @@ impl<'a> CandidateBuilder<'a> {
                     ))
                 })
                 .collect::<Result<Vec<_>, PrepareError>>()?,
-            FunctionReturn::Single(self.client_return_type(
-                validated,
-                consume_evidence,
-                projection,
-            )?),
+            return_type,
             current_revision,
             validated.security,
             validated.transaction,
