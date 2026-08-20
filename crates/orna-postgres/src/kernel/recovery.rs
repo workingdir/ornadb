@@ -3250,6 +3250,7 @@ pub(super) enum LegacyResolvedTypeTupleMember {
     Parameter,
     ReturnColumn,
     SingleReturn,
+    StreamReturn,
 }
 
 impl LegacyResolvedTypeTupleMember {
@@ -3264,6 +3265,9 @@ impl LegacyResolvedTypeTupleMember {
             }
             Self::SingleReturn => {
                 "function return type columns must form one exact resolved type tuple"
+            }
+            Self::StreamReturn => {
+                "stream item type columns must form one exact resolved type tuple"
             }
         }
     }
@@ -3282,13 +3286,16 @@ impl LegacyResolvedTypeTupleMember {
             Self::SingleReturn => {
                 "function return type columns must form one exact supported scalar, object, value, enum, or record tuple"
             }
+            Self::StreamReturn => {
+                "stream item type columns must form one exact supported scalar, object, value, enum, or record tuple"
+            }
         }
     }
 
     const fn scalar_rule(self) -> &'static str {
         match self {
             Self::Field => "field scalar type must be an exact standard scalar name",
-            Self::Parameter | Self::ReturnColumn | Self::SingleReturn => {
+            Self::Parameter | Self::ReturnColumn | Self::SingleReturn | Self::StreamReturn => {
                 "resolved scalar type must be an exact standard scalar name"
             }
         }
@@ -4311,7 +4318,8 @@ fn validate_function_links(
             }
         }
         match function.return_type() {
-            orna_core::catalogue::FunctionReturn::Single(resolved_type) => {
+            orna_core::catalogue::FunctionReturn::Single(resolved_type)
+            | orna_core::catalogue::FunctionReturn::Stream(resolved_type) => {
                 validate_function_type(
                     catalogue,
                     *resolved_type,
@@ -4727,6 +4735,7 @@ mod tests {
             LegacyResolvedTypeTupleMember::Parameter,
             LegacyResolvedTypeTupleMember::ReturnColumn,
             LegacyResolvedTypeTupleMember::SingleReturn,
+            LegacyResolvedTypeTupleMember::StreamReturn,
         ] {
             let resolved_type = decode_resolved_type_tuple(
                 ResolvedTypeTuple {
@@ -5358,6 +5367,7 @@ mod tests {
             LegacyResolvedTypeTupleMember::Parameter,
             LegacyResolvedTypeTupleMember::ReturnColumn,
             LegacyResolvedTypeTupleMember::SingleReturn,
+            LegacyResolvedTypeTupleMember::StreamReturn,
         ] {
             let scalar_kind =
                 decode_legacy_resolved_type_tuple_kind(Some("scalar"), &record, member)
