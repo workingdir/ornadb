@@ -3052,6 +3052,7 @@ struct ResolvedClientFunctionInput<'a> {
     parameters: Vec<ResolvedServerFunctionParameter>,
     return_type: SemanticType<CheckedTypeId>,
     standard_value_type: Option<orna_core::TypeId>,
+    result_shape: ClientExpressionResultShape,
     body: &'a orna_syntax::ClientFunctionBody,
     capabilities: &'a [CapabilitySpecification],
     location: SourceLocation,
@@ -4355,6 +4356,16 @@ fn resolve_client_function_inputs<'a>(
                     true,
                 )
             }
+            FunctionReturnType::Stream { element, .. } if expression_body => {
+                resolve_application_type_with_named_standard(
+                    element,
+                    submitted_ids,
+                    header.logical_path,
+                    diagnostics,
+                    standard,
+                    true,
+                )
+            }
             FunctionReturnType::Rows { span, .. }
             | FunctionReturnType::Stream { span, .. } => {
                 diagnostics.push(diagnostic(
@@ -4377,6 +4388,10 @@ fn resolve_client_function_inputs<'a>(
         let Some(return_type) = return_type else {
             continue;
         };
+        let result_shape = match &declaration.return_type {
+            FunctionReturnType::Stream { .. } => ClientExpressionResultShape::OptionalList,
+            FunctionReturnType::Single(_) | FunctionReturnType::Rows { .. } => ClientExpressionResultShape::Value,
+        };
         if !expression_body
             && return_type.semantic_type != SemanticType::scalar(StandardScalar::Boolean)
         {
@@ -4398,6 +4413,7 @@ fn resolve_client_function_inputs<'a>(
                 ClientExpressionType {
                     semantic_type: return_type.semantic_type,
                     standard_value_type: return_type.standard_value_type,
+                    result_shape,
                 },
                 standard,
             )
@@ -4434,6 +4450,7 @@ fn resolve_client_function_inputs<'a>(
             parameters,
             return_type: return_type.semantic_type,
             standard_value_type: return_type.standard_value_type,
+            result_shape,
             body: &declaration.body,
             location: location(header.logical_path, &declaration.span),
             declaration_span: declaration.span.clone(),
@@ -4717,10 +4734,17 @@ fn validate_client_capability<'a>(
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ClientExpressionResultShape {
+    Value,
+    OptionalList,
+}
+
 #[derive(Clone, Copy)]
 struct ClientExpressionType {
     semantic_type: SemanticType<CheckedTypeId>,
     standard_value_type: Option<orna_core::TypeId>,
+    result_shape: ClientExpressionResultShape,
 }
 
 #[derive(Clone)]
@@ -4888,6 +4912,7 @@ fn action_target_parameters(
                 expression_type: ClientExpressionType {
                     semantic_type: parameter.semantic_type,
                     standard_value_type: parameter.standard_value_type,
+                    result_shape: ClientExpressionResultShape::Value,
                 },
         })
         })
@@ -4953,6 +4978,7 @@ fn client_expression_type_from_core(
     Some(ClientExpressionType {
         semantic_type,
         standard_value_type,
+        result_shape: ClientExpressionResultShape::Value,
     })
 }
 
@@ -4976,12 +5002,14 @@ fn client_expression_targets(
                         expression_type: ClientExpressionType {
                             semantic_type: parameter.semantic_type,
                             standard_value_type: parameter.standard_value_type,
+                            result_shape: ClientExpressionResultShape::Value,
                         },
                     })
                     .collect(),
                 return_type: ClientExpressionType {
                     semantic_type: input.return_type,
                     standard_value_type: input.standard_value_type,
+                    result_shape: input.result_shape,
                 },
             },
         );
@@ -5031,10 +5059,17 @@ fn client_action_targets(
 ) -> HashMap<QualifiedSemanticName, ClientActionTarget> {
     let mut targets = HashMap::new();
     for input in client_inputs {
+        // ADR 0079 defers stream actions. Client stream functions are valid
+        // expression producers, but they are not action targets until the
+        // action protocol has an explicit stream result contract.
+        if input.result_shape != ClientExpressionResultShape::Value {
+            continue;
+        }
         let return_type = client_action_result_type(
             ClientExpressionType {
                 semantic_type: input.return_type,
                 standard_value_type: input.standard_value_type,
+                result_shape: input.result_shape,
             },
             standard,
         );
@@ -5064,14 +5099,8 @@ fn client_action_targets(
                 } => ClientExpressionType {
                     semantic_type,
                     standard_value_type,
+                    result_shape: ClientExpressionResultShape::Value,
                 },
-                ResolvedServerFunctionReturn::Rows { ref columns, .. } if columns.len() == 1 => {
-                    let column = &columns[0];
-                    ClientExpressionType {
-                        semantic_type: column.semantic_type,
-                        standard_value_type: column.standard_value_type,
-                    }
-                }
                 ResolvedServerFunctionReturn::Rows { .. }
                 | ResolvedServerFunctionReturn::Stream { .. } => continue,
             },
@@ -5101,9 +5130,8 @@ fn client_action_targets(
             FunctionReturn::Single(resolved) => {
                 client_expression_type_from_core(*resolved, standard)
             }
-            FunctionReturn::Rows(columns) if columns.len() == 1 => columns.first().and_then(
-                |column| client_expression_type_from_core(column.resolved_type(), standard),
-            ),
+            // Action execution rejects ROWS and STREAM results (ADR 0079),
+            // including one-column ROWS that could otherwise look scalar.
             FunctionReturn::Rows(_) | FunctionReturn::Stream(_) => None,
         };
         let Some(return_type) = return_type
@@ -5173,6 +5201,56 @@ fn client_resource_call_site_id(
 }
 
 
+/// Returns whether a STREAM item can be materialised as the runtime
+/// canonical `OPTION<LIST<T>>` resource value.
+///
+/// The client runtime collection representation admits the six legacy scalar
+/// values, active enum/record identities, and active object references.
+/// Other scalar identities and opaque values may be valid function types but
+/// cannot be represented inside the list descriptor used for stream batches.
+fn client_resource_stream_type_is_supported(
+    expression_type: ClientExpressionType,
+    base: &CatalogueSnapshot,
+    standard: Option<&CheckedStandardLibrary>,
+) -> bool {
+    match expression_type.semantic_type {
+        SemanticType::Scalar(scalar) => matches!(
+            scalar,
+            StandardScalar::Boolean
+                | StandardScalar::Integer
+                | StandardScalar::BigInt
+                | StandardScalar::Float
+                | StandardScalar::CharacterLargeObject
+                | StandardScalar::BinaryLargeObject
+        ),
+        SemanticType::Named(CheckedTypeId::Provisional(_)) => true,
+        SemanticType::Reference {
+            target: CheckedTypeId::Provisional(_),
+        } => true,
+        SemanticType::Named(CheckedTypeId::Existing(type_id)) => {
+            base.enum_type_by_id(type_id).is_some()
+                || base.record_value_type_by_id(type_id).is_some()
+                || standard.is_some_and(|standard| {
+                    let catalogue = standard.verified_snapshot().catalogue();
+                    catalogue.enum_type_by_id(type_id).is_some()
+                        || catalogue.record_value_type_by_id(type_id).is_some()
+                })
+        }
+        SemanticType::Reference {
+            target: CheckedTypeId::Existing(type_id),
+        } => {
+            base.object_type_by_id(type_id).is_some()
+                || standard.is_some_and(|standard| {
+                    standard
+                        .verified_snapshot()
+                        .catalogue()
+                        .object_type_by_id(type_id)
+                        .is_some()
+                })
+        }
+    }
+}
+
 fn client_resource_targets(
     inputs: &[ResolvedServerFunctionInput<'_>],
     base: &CatalogueSnapshot,
@@ -5190,6 +5268,7 @@ fn client_resource_targets(
                 ClientExpressionType {
                     semantic_type: *semantic_type,
                     standard_value_type: *standard_value_type,
+                    result_shape: ClientExpressionResultShape::Value,
                 },
             ),
             ResolvedServerFunctionReturn::Stream {
@@ -5201,10 +5280,16 @@ fn client_resource_targets(
                 ClientExpressionType {
                     semantic_type: *semantic_type,
                     standard_value_type: *standard_value_type,
+                    result_shape: ClientExpressionResultShape::Value,
                 },
             ),
             ResolvedServerFunctionReturn::Rows { .. } => continue,
         };
+        if kind == ResourceKind::Stream
+            && !client_resource_stream_type_is_supported(result_type, base, standard)
+        {
+            continue;
+        }
         targets.insert(
             input.name.clone(),
             ClientResourceTarget {
@@ -5219,6 +5304,7 @@ fn client_resource_targets(
                         expression_type: ClientExpressionType {
                             semantic_type: parameter.semantic_type,
                             standard_value_type: parameter.standard_value_type,
+                            result_shape: ClientExpressionResultShape::Value,
                         },
                     })
                     .collect(),
@@ -5254,6 +5340,11 @@ fn client_resource_targets(
             let Some(result_type) = result_type else {
                 continue;
             };
+            if kind == ResourceKind::Stream
+                && !client_resource_stream_type_is_supported(result_type, base, standard)
+            {
+                continue;
+            }
             let Some(parameters) = function
                 .parameters()
                 .iter()
@@ -5324,6 +5415,7 @@ fn client_expression_types_compatible(
     expected: ClientExpressionType,
 ) -> bool {
     actual.semantic_type == expected.semantic_type
+        && actual.result_shape == expected.result_shape
         && (expected.standard_value_type.is_none()
             || actual.standard_value_type == expected.standard_value_type)
 }
@@ -5703,6 +5795,7 @@ fn check_action_constructor(
         .map(|_| ClientExpressionType {
             semantic_type: SemanticType::Named(CheckedTypeId::Existing(STD_ACTION_TYPE_ID)),
             standard_value_type: Some(STD_ACTION_TYPE_ID),
+            result_shape: ClientExpressionResultShape::Value,
         })
     else {
         diagnostics.push(diagnostic(
@@ -6041,6 +6134,23 @@ fn check_client_expression(
                 used_capabilities,
                 locals,
             )?;
+            let resource_kind = match &checked_resource {
+                CheckedClientExpression::Resource { operation } => Some(operation.kind()),
+                CheckedClientExpression::LocalRead { .. } => match expression.as_ref() {
+                    ClientExpression::LocalRead { local } => locals.get(&semantic_part(local)).and_then(|binding| match binding.kind {
+                        CheckedClientLocalKind::Resource(kind) => Some(kind),
+                        CheckedClientLocalKind::Value => None,
+                    }),
+                    _ => None,
+                },
+                _ => None,
+            };
+            let result_shape = if resource_kind == Some(ResourceKind::Stream) {
+                ClientExpressionResultShape::OptionalList
+            } else {
+                ClientExpressionResultShape::Value
+            };
+            let result_type = ClientExpressionType { result_shape, ..result_type };
             Some((
                 CheckedClientExpression::Await {
                     expression: Box::new(checked_resource),
@@ -6056,6 +6166,7 @@ fn check_client_expression(
                     standard,
                     StandardScalar::CharacterLargeObject,
                 ),
+                result_shape: ClientExpressionResultShape::Value,
             };
             Some((
                 CheckedClientExpression::String {
@@ -6069,6 +6180,7 @@ fn check_client_expression(
             let expression_type = ClientExpressionType {
                 semantic_type: SemanticType::scalar(StandardScalar::Integer),
                 standard_value_type: standard_scalar_type_id(standard, StandardScalar::Integer),
+                result_shape: ClientExpressionResultShape::Value,
             };
             Some((
                 CheckedClientExpression::Integer {
@@ -6082,6 +6194,7 @@ fn check_client_expression(
             let expression_type = ClientExpressionType {
                 semantic_type: SemanticType::scalar(StandardScalar::Boolean),
                 standard_value_type: standard_scalar_type_id(standard, StandardScalar::Boolean),
+                result_shape: ClientExpressionResultShape::Value,
             };
             Some((
                 CheckedClientExpression::Boolean {
@@ -6126,6 +6239,7 @@ fn check_client_expression(
                 ClientExpressionType {
                     semantic_type: parameter.semantic_type,
                     standard_value_type: parameter.standard_value_type,
+                    result_shape: ClientExpressionResultShape::Value,
                 },
             ))
         }
@@ -6199,6 +6313,7 @@ fn check_client_expression(
                 expression_type = Some(ClientExpressionType {
                     semantic_type: field.semantic_type(),
                     standard_value_type: field.standard_value_type(),
+                    result_shape: ClientExpressionResultShape::Value,
                 });
                 if let SemanticType::Reference { target: next } = field.semantic_type() {
                     owner = next;
@@ -6279,6 +6394,7 @@ fn check_client_expression(
                 },
                 ClientExpressionType {
                     semantic_type: text,
+                    result_shape: ClientExpressionResultShape::Value,
                     standard_value_type: left_type.standard_value_type,
                 },
             ))
@@ -6919,6 +7035,7 @@ fn check_client_functions(
                         ClientExpressionType {
                             semantic_type: input.return_type,
                             standard_value_type: input.standard_value_type,
+                            result_shape: input.result_shape,
                         },
                         location(input.logical_path, &body_source.span),
                         Vec::new(),
@@ -6962,6 +7079,7 @@ fn check_client_functions(
                         ClientExpressionType {
                             semantic_type: input.return_type,
                             standard_value_type: input.standard_value_type,
+                            result_shape: input.result_shape,
                         },
                     ) {
                         diagnostics.push(diagnostic(
@@ -7072,7 +7190,7 @@ fn check_client_functions(
                             return None;
                         };
                         let resolved = resolve_application_type_with_named_standard(&specification, submitted_ids, input.logical_path, diagnostics, standard, true)?;
-                        let expected = ClientExpressionType { semantic_type: resolved.semantic_type, standard_value_type: resolved.standard_value_type };
+                        let expected = ClientExpressionType { semantic_type: resolved.semantic_type, standard_value_type: resolved.standard_value_type, result_shape: ClientExpressionResultShape::Value };
                         if !client_expression_types_compatible(expression_type, expected) {
                             diagnostics.push(diagnostic(DiagnosticCode::TypeMismatch, format!("CLIENT local {local_name} initializer does not match its declared type"), input.logical_path, &statement.span));
                             return None;
@@ -7117,7 +7235,7 @@ fn check_client_functions(
     validate_client_await_positions(expression, true, input, diagnostics);
     if diagnostics.len() != diagnostics_before { return None; }
     let (checked_return, return_type) = check_client_expression(expression, input, &targets, &action_targets, resource_targets, query_catalogue, base, server_names, standard, diagnostics, &mut references, &mut used_capabilities, &locals)?;
-    if !client_expression_types_compatible(return_type, ClientExpressionType { semantic_type: input.return_type, standard_value_type: input.standard_value_type }) {
+    if !client_expression_types_compatible(return_type, ClientExpressionType { semantic_type: input.return_type, standard_value_type: input.standard_value_type, result_shape: input.result_shape }) {
         diagnostics.push(diagnostic(DiagnosticCode::TypeMismatch, "this CLIENT function must return the declared value type", input.logical_path, expression.span()));
         return None;
     }
@@ -7165,6 +7283,7 @@ fn check_client_functions(
                         let state_type = ClientExpressionType {
                             semantic_type: resolved.semantic_type,
                             standard_value_type: resolved.standard_value_type,
+                            result_shape: ClientExpressionResultShape::Value,
                         };
                         if !client_expression_type_is_evaluable(state_type, standard) {
                             diagnostics.push(diagnostic(
@@ -7354,6 +7473,7 @@ fn check_client_functions(
                         ClientExpressionType {
                             semantic_type: input.return_type,
                             standard_value_type: input.standard_value_type,
+                            result_shape: input.result_shape,
                         },
                     ) {
                         diagnostics.push(diagnostic(
@@ -7405,6 +7525,7 @@ fn check_client_functions(
                         ClientExpressionType {
                             semantic_type: input.return_type,
                             standard_value_type: input.standard_value_type,
+                            result_shape: input.result_shape,
                         },
                         location(input.logical_path, &contract.span),
                         Vec::new(),
@@ -10273,7 +10394,7 @@ mod tests {
         CheckAssignments, CheckedApplicationTypeUse, CheckedDefinitionReferenceTarget,
         CheckedStandardExecutable, CheckedStandardJsonEncode, CheckedStandardParameterEcho,
         CheckedStandardTerminalPresentTable, CheckedStateDefault, CheckedTypeId,
-        CheckedTypeUseKind, CheckedValueTypeUse, ConstantValue, DiagnosticCode,
+        CheckedTypeUseKind, CheckedValueTypeUse, ClientExpressionResultShape, ClientExpressionType, ConstantValue, DiagnosticCode,
         IdentityAssignments, NewApplicationCheckError, STANDARD_LIBRARY_V3_REVISION_ID,
         STANDARD_LIBRARY_V4_REVISION_ID, STD_ACTION_CONTRACT, STD_ACTION_TYPE_ID,
         STD_DATA_ROWS_TYPE_ID, STD_DATA_SCHEMA_ID, STD_INTEGER_TYPE_ID,
@@ -10292,6 +10413,7 @@ mod tests {
         check_standard_json_encode, check_standard_library_source,
         check_standard_library_source_v2_parts, check_standard_library_source_v3_parts,
         check_standard_library_source_v4_parts, check_standard_parameter_echo,
+        client_resource_stream_type_is_supported,
         check_standard_terminal_present_table,
         checked_standard_library_with_contract_overrides_for_test,
         expected_standard_json_executable, location, reconcile_standard_executable,
@@ -10335,6 +10457,46 @@ mod tests {
         parsed.object_types()[0].fields[0]
             .type_specification
             .clone()
+    }
+
+    #[test]
+    fn stream_resource_type_guard_matches_runtime_collection_scalar_boundary() {
+        let base = empty_catalogue();
+        let scalar = |semantic_type| ClientExpressionType {
+            semantic_type: SemanticType::Scalar(semantic_type),
+            standard_value_type: None,
+            result_shape: ClientExpressionResultShape::Value,
+        };
+
+        for supported in [
+            StandardScalar::Boolean,
+            StandardScalar::Integer,
+            StandardScalar::BigInt,
+            StandardScalar::Float,
+            StandardScalar::CharacterLargeObject,
+            StandardScalar::BinaryLargeObject,
+        ] {
+            assert!(client_resource_stream_type_is_supported(
+                scalar(supported),
+                &base,
+                None,
+            ));
+        }
+        for unsupported in [
+            StandardScalar::Decimal,
+            StandardScalar::Uuid,
+            StandardScalar::Date,
+            StandardScalar::Time,
+            StandardScalar::Timestamp,
+            StandardScalar::Duration,
+            StandardScalar::Void,
+        ] {
+            assert!(!client_resource_stream_type_is_supported(
+                scalar(unsupported),
+                &base,
+                None,
+            ));
+        }
     }
 
     #[test]
@@ -12747,6 +12909,73 @@ mod tests {
             super::SemanticType::Scalar(StandardScalar::Integer)
         );
         assert_eq!(operation.standard_result_type(), Some(integer_type_id));
+    }
+
+    #[test]
+    fn excludes_stream_and_one_column_rows_action_targets() {
+        let integer = ResolvedType::Scalar(StandardScalar::Integer);
+        let base = CatalogueSnapshot::new_with_functions(
+            CatalogueRevisionId::from_bytes([0x5a; 16]),
+            vec![SchemaDefinition::new(
+                SchemaId::from_bytes([0x5b; 16]),
+                QualifiedSemanticName::new(["tasks"]).unwrap(),
+            )],
+            Vec::new(),
+            vec![
+                FunctionDefinition::new(
+                    FunctionId::from_bytes([0x5c; 16]),
+                    QualifiedSemanticName::new(["tasks", "events"]).unwrap(),
+                    FunctionDomain::Server,
+                    Vec::new(),
+                    FunctionReturn::Stream(integer),
+                    FunctionRevisionId::from_bytes([0x5d; 16]),
+                    FunctionSecurity::Invoker,
+                    None,
+                    FunctionVolatility::Immutable,
+                ),
+                FunctionDefinition::new(
+                    FunctionId::from_bytes([0x5e; 16]),
+                    QualifiedSemanticName::new(["tasks", "rows"]).unwrap(),
+                    FunctionDomain::Server,
+                    Vec::new(),
+                    FunctionReturn::Rows(vec![rows_column("value", 0, integer)]),
+                    FunctionRevisionId::from_bytes([0x5f; 16]),
+                    FunctionSecurity::Invoker,
+                    None,
+                    FunctionVolatility::Immutable,
+                ),
+            ],
+        )
+        .unwrap();
+        let standard =
+            check_standard_library_source(&verified_standard_library_with_action_for_test())
+                .unwrap();
+        let context = StandardApplicationCheckContext::try_new(&base, &standard).unwrap();
+        let source = "CREATE SCHEMA ui; \
+            CREATE CLIENT FUNCTION ui.stream() RETURNS STREAM<INTEGER> IS \
+            BEGIN RETURN AWAIT std.data.stream_resource(target => tasks.events, arguments => std.call.args()); END; \
+            CREATE CLIENT FUNCTION ui.stream_action() RETURNS std.Action AS \
+            std.action.call(target => ui.stream, arguments => std.call.args()); \
+            CREATE CLIENT FUNCTION ui.rows_action() RETURNS std.Action AS \
+            std.action.call(target => tasks.rows, arguments => std.call.args());";
+        let report = check_standard_application(&bundle([("action-shapes.orna", source)]), &context);
+        let messages = report
+            .diagnostics()
+            .iter()
+            .map(|diagnostic| diagnostic.message())
+            .collect::<Vec<_>>();
+        assert!(
+            messages.iter().any(|message| *message == "unknown std.action.call target ui.stream"),
+            "{messages:?}"
+        );
+        assert_eq!(
+            messages
+                .iter()
+                .filter(|message| message.ends_with("does not return one durable value"))
+                .count(),
+            1,
+            "{messages:?}"
+        );
     }
 
     #[test]
@@ -18372,7 +18601,7 @@ mod tests {
         let source = "CREATE SCHEMA tasks; CREATE TYPE tasks.task AS OBJECT (title TEXT); \
             CREATE SERVER FUNCTION tasks.events() RETURNS STREAM<TEXT> \
             AS SELECT t.title FROM tasks.task t; \
-            CREATE SCHEMA ui; CREATE CLIENT FUNCTION ui.read() RETURNS TEXT IS \
+            CREATE SCHEMA ui; CREATE CLIENT FUNCTION ui.read() RETURNS STREAM<TEXT> IS \
             BEGIN RETURN AWAIT std.data.stream_resource(target => tasks.events, arguments => std.call.args()); END;";
         let report = check(&bundle([("stream-resource.orna", source)]), &empty_catalogue());
         assert!(report.diagnostics().is_empty(), "{:?}", report.diagnostics());
@@ -18397,6 +18626,38 @@ mod tests {
             operation.result_type(),
             SemanticType::scalar(StandardScalar::CharacterLargeObject)
         );
+    }
+
+    #[test]
+    fn stream_await_requires_optional_list_return_and_local_shape() {
+        let valid = "CREATE SCHEMA tasks; CREATE TYPE tasks.task AS OBJECT (title TEXT); \
+            CREATE SERVER FUNCTION tasks.events() RETURNS STREAM<TEXT> \
+            AS SELECT t.title FROM tasks.task t; \
+            CREATE SCHEMA ui; CREATE CLIENT FUNCTION ui.read() RETURNS STREAM<TEXT> IS \
+            LET rows std.data.StreamResource<TEXT> := std.data.stream_resource(target => tasks.events, arguments => std.call.args()); \
+            BEGIN RETURN AWAIT rows; END;";
+        let report = check(&bundle([("stream-await-valid.orna", valid)]), &empty_catalogue());
+        assert!(report.diagnostics().is_empty(), "{:?}", report.diagnostics());
+
+        let invalid_return = "CREATE SCHEMA tasks; CREATE TYPE tasks.task AS OBJECT (title TEXT); \
+            CREATE SERVER FUNCTION tasks.events() RETURNS STREAM<TEXT> \
+            AS SELECT t.title FROM tasks.task t; \
+            CREATE SCHEMA ui; CREATE CLIENT FUNCTION ui.read() RETURNS TEXT IS \
+            LET rows std.data.StreamResource<TEXT> := std.data.stream_resource(target => tasks.events, arguments => std.call.args()); \
+            BEGIN RETURN AWAIT rows; END;";
+        let report = check(&bundle([("stream-await-return.orna", invalid_return)]), &empty_catalogue());
+        assert_eq!(report.diagnostics().len(), 1, "{:?}", report.diagnostics());
+        assert_eq!(report.diagnostics()[0].code(), DiagnosticCode::TypeMismatch);
+
+        let invalid_assignment = "CREATE SCHEMA tasks; CREATE TYPE tasks.task AS OBJECT (title TEXT); \
+            CREATE SERVER FUNCTION tasks.events() RETURNS STREAM<TEXT> \
+            AS SELECT t.title FROM tasks.task t; \
+            CREATE SCHEMA ui; CREATE CLIENT FUNCTION ui.read() RETURNS STREAM<TEXT> IS \
+            LET rows TEXT := std.data.stream_resource(target => tasks.events, arguments => std.call.args()); \
+            BEGIN RETURN AWAIT rows; END;";
+        let report = check(&bundle([("stream-await-assignment.orna", invalid_assignment)]), &empty_catalogue());
+        assert_eq!(report.diagnostics().len(), 1, "{:?}", report.diagnostics());
+        assert_eq!(report.diagnostics()[0].code(), DiagnosticCode::TypeMismatch);
     }
 
     #[test]
