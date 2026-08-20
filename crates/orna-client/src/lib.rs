@@ -162,6 +162,30 @@ pub enum ClientActionOutcome {
     Failed { code: String },
     Cancelled,
 }
+
+const ACTION_FAILURE_CODE: &str = "action.failed";
+
+/// Caller-owned lifecycle state for one SERVER action trigger.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ClientActionState {
+    resource: Option<ClientResource>,
+}
+
+impl ClientActionState {
+    pub fn status(&self) -> ClientResourceStatus {
+        self.resource.as_ref().map_or(ClientResourceStatus::Idle, ClientResource::status)
+    }
+    pub fn generation(&self) -> Option<ClientResourceGeneration> {
+        self.resource.as_ref().map(ClientResource::generation)
+    }
+    fn resource_mut(&mut self) -> Option<&mut ClientResource> { self.resource.as_mut() }
+    fn set_resource(&mut self, resource: ClientResource) { self.resource = Some(resource); }
+    fn clear(&mut self) { self.resource = None; }
+}
+
+fn redacted_action_failure() -> ClientActionOutcome {
+    ClientActionOutcome::Failed { code: ACTION_FAILURE_CODE.to_owned() }
+}
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ClientActionError {
     InvalidValue,
@@ -3484,11 +3508,45 @@ fn evaluate_action_operation(
     Ok(RuntimeValue::Opaque(value))
 }
 
+pub fn complete_client_action(
+    active: &ActiveDatabaseRevision,
+    action_state: &mut ClientActionState,
+    completion: ClientResourceCompletion,
+) -> Result<ClientActionOutcome, ClientActionError> {
+    let Some(resource) = action_state.resource_mut() else {
+        return Err(ClientActionError::Executor(ACTION_FAILURE_CODE.to_owned()));
+    };
+    if resource.apply_completion(active, completion).is_err() {
+        action_state.clear();
+        return Err(ClientActionError::Executor(ACTION_FAILURE_CODE.to_owned()));
+    }
+    let status = resource.status();
+    if status == ClientResourceStatus::Loading { return Err(ClientActionError::Pending); }
+    let outcome = match status {
+        ClientResourceStatus::Ready => ClientActionOutcome::Completed,
+        ClientResourceStatus::Failed => redacted_action_failure(),
+        ClientResourceStatus::Cancelled => ClientActionOutcome::Cancelled,
+        ClientResourceStatus::Idle | ClientResourceStatus::Loading => unreachable!(),
+    };
+    action_state.clear();
+    Ok(outcome)
+}
+
+pub fn cancel_client_action(action_state: &mut ClientActionState) -> Result<ClientActionOutcome, ClientActionError> {
+    let Some(resource) = action_state.resource_mut() else { return Err(ClientActionError::Executor(ACTION_FAILURE_CODE.to_owned())); };
+    if resource.status() != ClientResourceStatus::Loading { return Err(ClientActionError::Executor(ACTION_FAILURE_CODE.to_owned())); }
+    let generation = resource.generation();
+    if resource.cancel(generation).is_err() { action_state.clear(); return Err(ClientActionError::Executor(ACTION_FAILURE_CODE.to_owned())); }
+    action_state.clear();
+    Ok(ClientActionOutcome::Cancelled)
+}
+
 pub fn trigger_client_action(
     active: &ActiveDatabaseRevision,
     action: &RuntimeValue,
     authorisation: &AuthorisedInvocation,
     parent: &ClientExecutionContext,
+    action_state: &mut ClientActionState,
     declarations: &[capability::LocalCapabilityDeclaration],
     grants: &capability::LocalCapabilityGrantSet,
     state: &mut ClientStateStore,
@@ -3517,32 +3575,24 @@ pub fn trigger_client_action(
                 digest,
                 active.catalogue_hash(),
             );
+            if let Some(resource) = action_state.resource_mut() {
+                if resource.status() == ClientResourceStatus::Loading {
+                    if resource.key() != key { return Err(ClientActionError::Executor(ACTION_FAILURE_CODE.to_owned())); }
+                    return Err(ClientActionError::Pending);
+                }
+                action_state.clear();
+            }
             let mut resource = ClientResource::new(key, expected);
             let request = resource
                 .begin_request_with_context(
                     active,
-                    ClientResourceInvocationContext::new(InvocationId::new(), descriptor.call_site),
+                    ClientResourceInvocationContext::new(parent.parent_invocation_id(), descriptor.call_site),
                     values,
                 )
                 .map_err(ClientActionError::Arguments)?;
+            action_state.set_resource(resource);
             let completion = executor.execute(request);
-            resource
-                .apply_completion(active, completion)
-                .map_err(|source| ClientActionError::Executor(source.to_string()))?;
-            match resource.status() {
-                ClientResourceStatus::Ready => Ok(ClientActionOutcome::Completed),
-                ClientResourceStatus::Failed => Ok(ClientActionOutcome::Failed {
-                    code: resource
-                        .failure()
-                        .map(|failure| failure.code().to_owned())
-                        .unwrap_or_else(|| "action.failed".to_owned()),
-                }),
-                ClientResourceStatus::Cancelled => Ok(ClientActionOutcome::Cancelled),
-                ClientResourceStatus::Loading => Err(ClientActionError::Pending),
-                status => Err(ClientActionError::Executor(format!(
-                    "invalid terminal status: {status:?}"
-                ))),
-            }
+            complete_client_action(active, action_state, completion)
         }
         ActionTargetDomain::Client => {
             let mut nested = Some(executor as &mut dyn ClientResourceExecutor);
@@ -3567,10 +3617,10 @@ pub fn trigger_client_action(
                     ..
                 }) => Ok(ClientActionOutcome::Cancelled),
                 Err(ClientExecutionError::ResourceEvaluation {
-                    source: ClientResourceExecutionError::Failed(code),
+                    source: ClientResourceExecutionError::Failed(_),
                     ..
-                }) => Ok(ClientActionOutcome::Failed { code }),
-                Err(error) => Err(ClientActionError::Evaluation(error.to_string())),
+                }) => Ok(redacted_action_failure()),
+                Err(_) => Ok(redacted_action_failure()),
             }
         }
     }
@@ -4355,7 +4405,7 @@ fn invalid_function(
 
 #[cfg(test)]
 mod tests {
-    use super::{capability, decode_action_payload, encode_action_payload, trigger_client_action, ClientActionDescriptor, ClientActionOutcome, ClientExecutionContext, ClientResourceRequest, ClientStateStore, DeterministicClientResourceExecutor};
+    use super::{capability, complete_client_action, decode_action_payload, encode_action_payload, trigger_client_action, ClientActionDescriptor, ClientActionError, ClientActionOutcome, ClientActionState, ClientExecutionContext, ClientResource, ClientResourceCompletion, ClientResourceKey, ClientResourceRequest, ClientResourceStatus, ClientStateStore, DeterministicClientResourceExecutor, ACTION_FAILURE_CODE};
     use orna_artifact::client_plan::{ActionTargetDomain, ClientExpressionNode};
     use std::time::SystemTime;
 
@@ -8783,6 +8833,28 @@ mod tests {
     }
 
     #[test]
+    fn action_pending_completion_retains_generation_and_redacts_failure() {
+        let (active, function, pair, _) = version_one_active(true);
+        let principal = PrincipalId::from_bytes([0x7a; 16]);
+        let digest = ClientResourceKey::canonical_arguments_digest(&active, &[]).unwrap();
+        let key = ClientResourceKey::new(
+            InvocationTarget::new(function, pair),
+            principal,
+            digest,
+            active.catalogue_hash(),
+        );
+        let mut resource = ClientResource::new(key, ResolvedType::Scalar(StandardScalar::Boolean));
+        let request = resource.begin_request(&active, vec![]).unwrap();
+        let generation = request.generation();
+        let mut action_state = ClientActionState { resource: Some(resource) };
+        assert_eq!(complete_client_action(&active, &mut action_state, request.pending()), Err(ClientActionError::Pending));
+        assert_eq!(action_state.generation(), Some(generation));
+        let failed = ClientResourceCompletion::Failed { key, generation, code: "secret.internal.detail".to_owned() };
+        assert_eq!(complete_client_action(&active, &mut action_state, failed), Ok(ClientActionOutcome::Failed { code: ACTION_FAILURE_CODE.to_owned() }));
+        assert_eq!(action_state.status(), ClientResourceStatus::Idle);
+    }
+
+    #[test]
     fn action_trigger_rejects_non_action_values() {
         let (active, function, pair, revision) = version_one_active(true);
         let auth = authorise(pair, function);
@@ -8793,6 +8865,7 @@ mod tests {
             parent_invocation_id: InvocationId::from_bytes([0xf1; 16]),
         };
         let mut state = ClientStateStore::default();
+        let mut action_state = ClientActionState::default();
         let mut executor = DeterministicClientResourceExecutor::new(|_: &ClientResourceRequest| {
             Ok(RuntimeValue::Boolean(true))
         });
@@ -8802,6 +8875,7 @@ mod tests {
                 &RuntimeValue::Boolean(true),
                 &auth,
                 &parent,
+                &mut action_state,
                 &[],
                 &capability::LocalCapabilityGrantSet::default(),
                 &mut state,
