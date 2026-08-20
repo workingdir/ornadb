@@ -217,6 +217,12 @@ const MIGRATIONS: &[Migration] = &[
         sql: include_str!("../../migrations/0032_resource_audit.sql"),
         data_step: None,
     },
+    Migration {
+        version: 33,
+        name: "stream function returns",
+        sql: include_str!("../../migrations/0033_stream_function_returns.sql"),
+        data_step: None,
+    },
 ];
 const MIGRATION_DATA_STEP_SEPARATOR: &[u8] = b"\0orna.kernel.migration-step\0";
 const CANONICAL_HASH_V1_EMPTY_SEED_STEP: &[u8] = b"canonical-hash-v1-empty-seed/v1";
@@ -913,7 +919,7 @@ mod tests {
             validated_migration_registry()
                 .expect("registry is valid")
                 .len(),
-            32
+            33
         );
         assert_eq!(MIGRATIONS[0].version, 1);
         assert_eq!(MIGRATIONS[1].version, 2);
@@ -947,6 +953,7 @@ mod tests {
         assert_eq!(MIGRATIONS[29].version, 30);
         assert_eq!(MIGRATIONS[30].version, 31);
         assert_eq!(MIGRATIONS[31].version, 32);
+        assert_eq!(MIGRATIONS[32].version, 33);
         assert_eq!(MIGRATIONS[5].name, "definition reference write evidence");
         assert_eq!(MIGRATIONS[6].name, "standard catalogue type storage");
         assert_eq!(MIGRATIONS[7].name, "resolved value type storage");
