@@ -94,7 +94,8 @@ impl ResourceCancellation {
 }
 
 use orna_client::{
-    ClientExecutionError, ClientExecutionResult, ClientResourceExecutor, ClientStateStore,
+    ClientExecutionError, ClientExecutionResult, ClientResourceCompletion,
+    ClientResourceExecutionError, ClientResourceExecutor, ClientStateStore,
     evaluate_client_function_with_grants as evaluate_authorised_client_function,
     evaluate_client_function_with_grants_and_arguments as evaluate_authorised_client_function_with_arguments,
     evaluate_client_function_with_state_and_grants_and_arguments_and_executor_with_parent_invocation as evaluate_authorised_client_function_with_arguments_and_executor,
@@ -986,10 +987,39 @@ impl PostgresKernel {
         authenticated_session: &AuthenticatedSession,
         connection_protocol_major: u16,
         request: &RetainedInvokeRequest,
+        resource_executor: Option<&mut dyn ClientResourceExecutor>,
+    ) -> Result<SealedInvocationResult, PostgresKernelError> {
+        let mut state = ClientStateStore::new();
+        let invocation = InvocationId::new();
+        let mut capability_audit_appended = false;
+        self.dispatch_sealed_sys_invoke_with_resource_executor_and_state(
+            authenticated_session,
+            connection_protocol_major,
+            request,
+            resource_executor,
+            &mut state,
+            invocation,
+            &mut capability_audit_appended,
+        )
+        .await
+    }
+
+    /// Dispatches one sealed invocation with an optional host-owned resource
+    /// executor for CLIENT resource expressions.
+    #[doc(hidden)]
+    pub async fn dispatch_sealed_sys_invoke_with_resource_executor_and_state(
+        &self,
+        authenticated_session: &AuthenticatedSession,
+        connection_protocol_major: u16,
+        request: &RetainedInvokeRequest,
         mut resource_executor: Option<&mut dyn ClientResourceExecutor>,
+        state: &mut ClientStateStore,
+        invocation: InvocationId,
+        capability_audit_appended: &mut bool,
     ) -> Result<SealedInvocationResult, PostgresKernelError> {
         let mut database_session = self.open().await?;
         let operation = async {
+            loop {
             let transaction = database_session
                 .client
                 .build_transaction()
@@ -1016,7 +1046,6 @@ impl PostgresKernel {
             })?;
             let decoded = decode_retained_invoke_request(&active, &registry, request)
                 .map_err(PostgresKernelError::SealedInvocation)?;
-            let invocation = InvocationId::new();
             let system_target = InvocationTarget::new(SYS_INVOKE_FUNCTION_ID, active.pair());
             let decision = decide_protected_invocation(
                 &security,
@@ -1057,14 +1086,13 @@ impl PostgresKernel {
                                     let execution = if let Some(executor) =
                                         resource_executor.as_deref_mut()
                                     {
-                                        let mut state = ClientStateStore::new();
                                         evaluate_authorised_client_function_with_arguments_and_executor(
                                             &active,
                                             &authorisation,
                                             &arguments,
                                             &[],
                                             &self.capability_grants,
-                                            &mut state,
+                                            state,
                                             invocation,
                                             executor,
                                         )
@@ -1078,22 +1106,116 @@ impl PostgresKernel {
                                         )
                                     }
                                     .map_err(PostgresKernelError::ClientExecution);
-                                    append_client_capability_audit(
-                                        &transaction,
-                                        authenticated_session,
-                                        &active,
-                                        security_target,
+                                    let capability_denied = matches!(
                                         &execution,
-                                    )
-                                    .await?;
+                                        Err(PostgresKernelError::ClientExecution(
+                                            ClientExecutionError::CapabilityDenied { .. }
+                                        ))
+                                    );
+                                    if !*capability_audit_appended || capability_denied {
+                                        append_client_capability_audit(
+                                            &transaction,
+                                            authenticated_session,
+                                            &active,
+                                            security_target,
+                                            &execution,
+                                        )
+                                        .await?;
+                                        if !capability_denied {
+                                            *capability_audit_appended = true;
+                                        }
+                                    }
                                     let value = match execution {
                                         Ok(result) => result.into_value(),
                                         Err(error) => {
+                                            let pending = match &error {
+                                                PostgresKernelError::ClientExecution(
+                                                    ClientExecutionError::ResourceEvaluation {
+                                                        context,
+                                                        source: ClientResourceExecutionError::Pending {
+                                                            key,
+                                                            generation,
+                                                        },
+                                                    },
+                                                ) => Some((*context, *key, *generation)),
+                                                _ => None,
+                                            };
+                                            let Some((context, key, generation)) = pending else {
+                                                transaction
+                                                    .commit()
+                                                    .await
+                                                    .map_err(PostgresKernelError::Database)?;
+                                                return Err(error);
+                                            };
                                             transaction
                                                 .commit()
                                                 .await
                                                 .map_err(PostgresKernelError::Database)?;
-                                            return Err(error);
+                                            let Some(executor) = resource_executor.as_deref_mut() else {
+                                                return Err(error);
+                                            };
+                                            let completion = loop {
+                                                let Some(completion) = executor.poll() else {
+                                                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                                                    continue;
+                                                };
+                                                let (completion_key, completion_generation) = match &completion {
+                                                    ClientResourceCompletion::Ready { key, generation, .. }
+                                                    | ClientResourceCompletion::Pending { key, generation }
+                                                    | ClientResourceCompletion::Failed { key, generation, .. }
+                                                    | ClientResourceCompletion::Cancelled { key, generation } => (*key, *generation),
+                                                };
+                                                if completion_key != key || completion_generation != generation {
+                                                    return Err(PostgresKernelError::ClientExecution(
+                                                        ClientExecutionError::ResourceEvaluation {
+                                                            context,
+                                                            source: ClientResourceExecutionError::Failed(
+                                                                "resource.executor.invalid_completion".to_owned(),
+                                                            ),
+                                                        },
+                                                    ));
+                                                }
+                                                if matches!(completion, ClientResourceCompletion::Pending { .. }) {
+                                                    return Err(PostgresKernelError::ClientExecution(
+                                                        ClientExecutionError::ResourceEvaluation {
+                                                            context,
+                                                            source: ClientResourceExecutionError::Failed(
+                                                                "resource.executor.invalid_completion".to_owned(),
+                                                            ),
+                                                        },
+                                                    ));
+                                                }
+                                                break completion;
+                                            };
+                                            let Some(resource) = state.resource_mut(key) else {
+                                                return Err(PostgresKernelError::ClientExecution(
+                                                    ClientExecutionError::ResourceEvaluation {
+                                                        context,
+                                                        source: ClientResourceExecutionError::Failed(
+                                                            "resource.executor.invalid_state".to_owned(),
+                                                        ),
+                                                    },
+                                                ));
+                                            };
+                                            if resource.key() != key || resource.generation() != generation {
+                                                return Err(PostgresKernelError::ClientExecution(
+                                                    ClientExecutionError::ResourceEvaluation {
+                                                        context,
+                                                        source: ClientResourceExecutionError::Failed(
+                                                            "resource.executor.invalid_state".to_owned(),
+                                                        ),
+                                                    },
+                                                ));
+                                            }
+                                            if let Err(source) = resource.apply_completion(&active, completion) {
+                                                return Err(PostgresKernelError::ClientExecution(
+                                                    ClientExecutionError::ResourceEvaluation {
+                                                        context,
+                                                        source: ClientResourceExecutionError::Invalid(source),
+                                                    },
+                                                ));
+                                            }
+                                            continue;
                                         }
                                     };
                                     (vec![value], security_target)
@@ -1391,7 +1513,8 @@ impl PostgresKernel {
                 .commit()
                 .await
                 .map_err(PostgresKernelError::Database)?;
-            Ok(result)
+            break Ok(result);
+            }
         }
         .await;
         finish_authenticated_server_select_session(operation, database_session.shutdown().await)
