@@ -691,6 +691,13 @@ pub enum ClientResourceCompletion {
 pub trait ClientResourceExecutor {
     /// Executes one request and returns its completion.
     fn execute(&mut self, request: ClientResourceRequest) -> ClientResourceCompletion;
+    /// Reports one terminal completion without blocking `execute`.
+    ///
+    /// Transport-backed executors use this to report terminal completions
+    /// without blocking `execute`; immediate executors keep the default.
+    fn poll(&mut self) -> Option<ClientResourceCompletion> {
+        None
+    }
     /// Cancels one live request and returns its terminal completion.
     ///
     /// The default completes the local lifecycle. A transport-backed executor
@@ -4727,6 +4734,22 @@ mod tests {
 
     struct FailingActionExecutor;
 
+    #[derive(Default)]
+    struct PollingTestExecutor {
+        pending: Option<ClientResourceRequest>,
+    }
+
+    impl ClientResourceExecutor for PollingTestExecutor {
+        fn execute(&mut self, request: ClientResourceRequest) -> ClientResourceCompletion {
+            self.pending = Some(request.clone());
+            request.pending()
+        }
+
+        fn poll(&mut self) -> Option<ClientResourceCompletion> {
+            self.pending.take().map(|request| request.ready(RuntimeValue::Boolean(true)))
+        }
+    }
+
     impl ClientResourceExecutor for FailingActionExecutor {
         fn execute(&mut self, request: ClientResourceRequest) -> ClientResourceCompletion {
             request.failed("secret.executor.detail".to_owned())
@@ -5090,6 +5113,33 @@ mod tests {
             .expect("the matching completion should resume the resource");
         assert_eq!(resource.status(), super::ClientResourceStatus::Ready);
         assert_eq!(resource.value(), Some(&RuntimeValue::Boolean(true)));
+    }
+
+    #[test]
+    fn resource_executor_poll_surfaces_pending_completion_without_affecting_immediate_executor() {
+        let (active, function, pair, _) = version_one_active(true);
+        let principal = PrincipalId::from_bytes([0x7a; 16]);
+        let digest = ClientResourceKey::canonical_arguments_digest(&active, &[]).unwrap();
+        let key = ClientResourceKey::new(
+            InvocationTarget::new(function, pair),
+            principal,
+            digest,
+            Sha256Digest::from_bytes([0x22; 32]),
+        );
+
+        let mut pending_resource = super::ClientResource::new(key, ResolvedType::Scalar(StandardScalar::Boolean));
+        let pending_request = pending_resource.begin_request(&active, vec![]).unwrap();
+        let expected_pending = pending_request.clone().pending();
+        let mut polling = PollingTestExecutor::default();
+        assert_eq!(polling.execute(pending_request), expected_pending);
+        assert_eq!(polling.poll(), Some(ClientResourceCompletion::Ready { key, generation: pending_resource.generation(), value: RuntimeValue::Boolean(true) }));
+        assert_eq!(polling.poll(), None);
+
+        let mut immediate_resource = super::ClientResource::new(key, ResolvedType::Scalar(StandardScalar::Boolean));
+        let immediate_request = immediate_resource.begin_request(&active, vec![]).unwrap();
+        let mut immediate = DeterministicClientResourceExecutor::new(|_: &ClientResourceRequest| Ok(RuntimeValue::Boolean(true)));
+        assert!(matches!(immediate.execute(immediate_request), ClientResourceCompletion::Ready { .. }));
+        assert_eq!(immediate.poll(), None);
     }
 
     #[test]
