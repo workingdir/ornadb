@@ -233,6 +233,11 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         "protected resource audit",
         include_str!("../migrations/0032_resource_audit.sql"),
     ),
+    (
+        33,
+        "stream function returns",
+        include_str!("../migrations/0033_stream_function_returns.sql"),
+    ),
 ];
 const MIGRATION_DATA_STEP_SEPARATOR: &[u8] = b"\0orna.kernel.migration-step\0";
 const CANONICAL_HASH_V1_EMPTY_SEED_STEP: &[u8] = b"canonical-hash-v1-empty-seed/v1";
@@ -878,8 +883,8 @@ async fn bootstrap_upgrades_the_registered_v20_empty_catalogue() -> TestResult<(
 
         let after = snapshot_upgrade_state(&database).await?;
         require(
-            after.migrations.len() == 32 && after.migrations[..20] == before.migrations[..],
-            format!("v21-v32 changed prior migration records: {:?}", after.migrations),
+            after.migrations.len() == 33 && after.migrations[..20] == before.migrations[..],
+            format!("v21-v33 changed prior migration records: {:?}", after.migrations),
         )?;
         require(
             after.migrations[20]
@@ -990,8 +995,17 @@ async fn bootstrap_upgrades_the_registered_v20_empty_catalogue() -> TestResult<(
             format!("v32 migration record is not exact: {:?}", after.migrations[31]),
         )?;
         require(
+            after.migrations[32]
+                == (
+                    33,
+                    "stream function returns".to_owned(),
+                    expected_migration_checksum(33, MIGRATIONS[32].2),
+                ),
+            format!("v33 migration record is not exact: {:?}", after.migrations[32]),
+        )?;
+        require(
             after.active_pair == before.active_pair,
-            "v21-v32 changed the active revision pair",
+            "v21-v33 changed the active revision pair",
         )?;
 
         let recovered = kernel.recover().await?;
@@ -1661,8 +1675,8 @@ async fn bootstrap_upgrades_v5_write_reference_evidence_without_mutating_semanti
 
         let after = snapshot_upgrade_state(&database).await?;
         require(
-            after.migrations.len() == 32 && after.migrations[..5] == before.migrations[..],
-            format!("v6-v32 changed prior migration records: {:?}", after.migrations),
+            after.migrations.len() == 33 && after.migrations[..5] == before.migrations[..],
+            format!("v6-v33 changed prior migration records: {:?}", after.migrations),
         )?;
         require(
             after.migrations[5]
@@ -1908,6 +1922,15 @@ async fn bootstrap_upgrades_v5_write_reference_evidence_without_mutating_semanti
             format!("v32 migration record is not exact: {:?}", after.migrations[31]),
         )?;
         require(
+            after.migrations[32]
+                == (
+                    33,
+                    "stream function returns".to_owned(),
+                    expected_migration_checksum(33, MIGRATIONS[32].2),
+                ),
+            format!("v33 migration record is not exact: {:?}", after.migrations[32]),
+        )?;
+        require(
             after.active_pair == before.active_pair,
             "v6 changed the active revision pair",
         )?;
@@ -1993,7 +2016,7 @@ async fn bootstrap_upgrades_registered_v6_without_standard_rows() -> TestResult<
 
         let after = snapshot_upgrade_state(&database).await?;
         require(
-            after.migrations.len() == 32
+            after.migrations.len() == 33
                 && after.migrations[..6] == before.migrations[..]
                 && after.migrations[6]
                     == (
@@ -2072,6 +2095,12 @@ async fn bootstrap_upgrades_registered_v6_without_standard_rows() -> TestResult<
                         32,
                         "protected resource audit".to_owned(),
                         expected_migration_checksum(32, MIGRATIONS[31].2),
+                    )
+                && after.migrations[32]
+                    == (
+                        33,
+                        "stream function returns".to_owned(),
+                        expected_migration_checksum(33, MIGRATIONS[32].2),
                     ),
             format!("v6 upgrade produced unexpected migrations: {:?}", after.migrations),
         )?;
@@ -2266,7 +2295,7 @@ async fn bootstrap_upgrades_registered_v7_without_resolved_value_rows() -> TestR
         let after_surface = snapshot_catalogue_surface(&database).await?;
         let after_target_fks = snapshot_application_target_foreign_keys(&database).await?;
         require(
-            after.migrations.len() == 32
+            after.migrations.len() == 33
                 && after.migrations[..7] == before.migrations[..]
                 && after.migrations[7]
                     == (
@@ -2417,6 +2446,12 @@ async fn bootstrap_upgrades_registered_v7_without_resolved_value_rows() -> TestR
                         32,
                         "protected resource audit".to_owned(),
                         expected_migration_checksum(32, MIGRATIONS[31].2),
+                    )
+                && after.migrations[32]
+                    == (
+                        33,
+                        "stream function returns".to_owned(),
+                        expected_migration_checksum(33, MIGRATIONS[32].2),
                     ),
             format!("v7 upgrade produced unexpected migrations: {:?}", after.migrations),
         )?;
@@ -3713,6 +3748,12 @@ async fn inspect_resolved_value_storage(
             false,
             false,
         ),
+        (
+            "catalogue_functions",
+            "catalogue_functions_return_shape_check",
+            false,
+            false,
+        ),
     ] {
         let definition =
             exact_resolved_type_constraint_definition(constraint).ok_or_else(|| {
@@ -3748,8 +3789,11 @@ fn exact_resolved_type_constraint_definition(constraint: &str) -> Option<&'stati
         "catalogue_functions_return_type_kind_check" => {
             "CHECK ((return_type_kind = ANY (ARRAY['scalar'::text, 'named'::text, 'reference'::text, 'value'::text, 'enum'::text, 'record'::text])))"
         }
+        "catalogue_functions_return_shape_check" => {
+            "CHECK ((return_shape = ANY (ARRAY['single'::text, 'rows'::text, 'stream'::text])))"
+        }
         "catalogue_functions_check1" => {
-            "CHECK ((((return_shape = 'rows'::text) AND (return_type_kind IS NULL) AND (return_scalar_type IS NULL) AND (return_target_type_id IS NULL) AND (return_value_type_id IS NULL) AND (return_standard_library_revision_id IS NULL) AND (return_enum_type_id IS NULL) AND (return_record_type_id IS NULL)) OR ((return_shape = 'single'::text) AND (((return_type_kind = 'scalar'::text) AND (return_scalar_type IS NOT NULL) AND (return_target_type_id IS NULL) AND (return_value_type_id IS NULL) AND (return_standard_library_revision_id IS NULL) AND (return_enum_type_id IS NULL) AND (return_record_type_id IS NULL)) OR ((return_type_kind = ANY (ARRAY['named'::text, 'reference'::text])) AND (return_scalar_type IS NULL) AND (return_target_type_id IS NOT NULL) AND (return_value_type_id IS NULL) AND (return_standard_library_revision_id IS NULL) AND (return_enum_type_id IS NULL) AND (return_record_type_id IS NULL)) OR ((return_type_kind = 'value'::text) AND (return_scalar_type IS NULL) AND (return_target_type_id IS NULL) AND (return_value_type_id IS NOT NULL) AND (return_standard_library_revision_id IS NOT NULL) AND (return_enum_type_id IS NULL) AND (return_record_type_id IS NULL)) OR ((return_type_kind = 'enum'::text) AND (return_scalar_type IS NULL) AND (return_target_type_id IS NULL) AND (return_value_type_id IS NULL) AND (return_standard_library_revision_id IS NULL) AND (return_enum_type_id IS NOT NULL) AND (return_record_type_id IS NULL)) OR ((return_type_kind = 'record'::text) AND (return_scalar_type IS NULL) AND (return_target_type_id IS NULL) AND (return_value_type_id IS NULL) AND (return_standard_library_revision_id IS NULL) AND (return_enum_type_id IS NULL) AND (return_record_type_id IS NOT NULL))))))"
+            "CHECK ((((return_shape = 'rows'::text) AND (return_type_kind IS NULL) AND (return_scalar_type IS NULL) AND (return_target_type_id IS NULL) AND (return_value_type_id IS NULL) AND (return_standard_library_revision_id IS NULL) AND (return_enum_type_id IS NULL) AND (return_record_type_id IS NULL)) OR ((return_shape = 'single'::text) AND (((return_type_kind = 'scalar'::text) AND (return_scalar_type IS NOT NULL) AND (return_target_type_id IS NULL) AND (return_value_type_id IS NULL) AND (return_standard_library_revision_id IS NULL) AND (return_enum_type_id IS NULL) AND (return_record_type_id IS NULL)) OR ((return_type_kind = ANY (ARRAY['named'::text, 'reference'::text])) AND (return_scalar_type IS NULL) AND (return_target_type_id IS NOT NULL) AND (return_value_type_id IS NULL) AND (return_standard_library_revision_id IS NULL) AND (return_enum_type_id IS NULL) AND (return_record_type_id IS NULL)) OR ((return_type_kind = 'value'::text) AND (return_scalar_type IS NULL) AND (return_target_type_id IS NULL) AND (return_value_type_id IS NOT NULL) AND (return_standard_library_revision_id IS NOT NULL) AND (return_enum_type_id IS NULL) AND (return_record_type_id IS NULL)) OR ((return_type_kind = 'enum'::text) AND (return_scalar_type IS NULL) AND (return_target_type_id IS NULL) AND (return_value_type_id IS NULL) AND (return_standard_library_revision_id IS NULL) AND (return_enum_type_id IS NOT NULL) AND (return_record_type_id IS NULL)) OR ((return_type_kind = 'record'::text) AND (return_scalar_type IS NULL) AND (return_target_type_id IS NULL) AND (return_value_type_id IS NULL) AND (return_standard_library_revision_id IS NULL) AND (return_enum_type_id IS NULL) AND (return_record_type_id IS NOT NULL)))) OR ((return_shape = 'stream'::text) AND (((return_type_kind = 'scalar'::text) AND (return_scalar_type IS NOT NULL) AND (return_target_type_id IS NULL) AND (return_value_type_id IS NULL) AND (return_standard_library_revision_id IS NULL) AND (return_enum_type_id IS NULL) AND (return_record_type_id IS NULL)) OR ((return_type_kind = ANY (ARRAY['named'::text, 'reference'::text])) AND (return_scalar_type IS NULL) AND (return_target_type_id IS NOT NULL) AND (return_value_type_id IS NULL) AND (return_standard_library_revision_id IS NULL) AND (return_enum_type_id IS NULL) AND (return_record_type_id IS NULL)) OR ((return_type_kind = 'value'::text) AND (return_scalar_type IS NULL) AND (return_target_type_id IS NULL) AND (return_value_type_id IS NOT NULL) AND (return_standard_library_revision_id IS NOT NULL) AND (return_enum_type_id IS NULL) AND (return_record_type_id IS NULL)) OR ((return_type_kind = 'enum'::text) AND (return_scalar_type IS NULL) AND (return_target_type_id IS NULL) AND (return_value_type_id IS NULL) AND (return_standard_library_revision_id IS NULL) AND (return_enum_type_id IS NOT NULL) AND (return_record_type_id IS NULL)) OR ((return_type_kind = 'record'::text) AND (return_scalar_type IS NULL) AND (return_target_type_id IS NULL) AND (return_value_type_id IS NULL) AND (return_standard_library_revision_id IS NULL) AND (return_enum_type_id IS NULL) AND (return_record_type_id IS NOT NULL))))))"
         }
         "cat_fields_val_type_len"
         | "cat_fn_params_val_type_len"
