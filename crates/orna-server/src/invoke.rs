@@ -23,6 +23,7 @@
 //! success without dispatching, authorising, or auditing.
 
 use std::{
+    collections::BTreeMap,
     error::Error,
     fmt,
     io::{self, IsTerminal, Write},
@@ -46,31 +47,34 @@ use orna_core::{
     invocation_binding::{CliArgumentInput, bind_cli_arguments},
     revision::{ActiveDatabaseRevision, VerifiedStandardLibrarySnapshot},
     security::AuthenticatedSession,
+    system::SYS_INVOKE_FUNCTION_ID,
     types::{ResolvedType, StandardScalar, TypeDescriptor},
     value::{OpaqueCodecRegistry, RuntimeValue},
 };
 use orna_postgres::{
-    AuthenticatedServerResourceEvent,
-    AuthenticatedServerResourceStart, PostgresKernel, PostgresKernelError,
+    AuthenticatedServerResourceEvent, AuthenticatedServerResourceStart, PostgresKernel,
     ResourceCancellation, ResourceCredit, SealedInvocationResult,
 };
 use orna_protocol::{
-    CallFailure, MAX_FRAME_PAYLOAD_LENGTH, MAX_RESOURCE_WINDOW, ResourceArgument, ResourceCancel,
-    ResourceCancellationCode, ResourceClientFrame, ResourceKind as ProtocolResourceKind,
-    ResourceProtocolConnection, ResourceRequest, ResourceServerFrame, ResourceWindowUpdate,
-    decode_resource_server_frame, encode_constructed_value, encode_invoke_request,
-    encode_resource_client_frame,
+    CallFailure, Channel, ClientFrame, Event, InvocationEventRecord, MAX_CHANNEL_WINDOW,
+    MAX_FRAME_PAYLOAD_LENGTH, MAX_RESOURCE_WINDOW, ProtocolConnection, ResourceArgument,
+    ResourceCancel, ResourceCancellationCode, ResourceClientFrame,
+    ResourceKind as ProtocolResourceKind, ResourceProtocolConnection, ResourceRequest,
+    ResourceServerFrame, ResourceWindowUpdate, ServerFrame,
+    decode_constructed_invocation_event_frame, decode_constructed_server_frame,
+    decode_resource_server_frame, encode_constructed_client_frame, encode_constructed_value,
+    encode_invoke_request, encode_resource_client_frame,
 };
 use orna_standard::{
     STD_IO_BYTE_STREAM_TYPE_ID, STD_TERMINAL_DOCUMENT_TYPE_ID, registered_opaque_codecs,
 };
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::mpsc::error::TryRecvError;
 use tokio::sync::mpsc::{self, Receiver, Sender, UnboundedReceiver, UnboundedSender};
 
 use crate::{
     EmbeddedHostError, LocalRawSocketResources, inspect_ready_embedded_host,
-    serve_local_raw_stream,
+    raw_socket::serve_local_raw_stream_with_broker,
 };
 
 const CONSTRUCTED_CLIENT_HELLO: [u8; 12] = *b"ORNA\x01\x00\x00\x05\x00\x00\x00\x00";
@@ -78,6 +82,12 @@ const CONSTRUCTED_SERVER_ACK: [u8; 12] = *b"ORNA\x81\x00\x00\x05\x00\x00\x00\x00
 const RESOURCE_MARKER: &[u8; 15] = b"ORNA-RESOURCE/1";
 const RESOURCE_HEADER_LENGTH: usize = 21;
 const RESOURCE_FRAME_TIMEOUT: Duration = Duration::from_secs(30);
+const BROKER_RESOURCE_COMPLETION_CAPACITY: usize = 2;
+/// Retain only a bounded recent history of terminal resource stream identities.
+///
+/// Resource stream IDs are monotonically allocated, so evicting the oldest
+/// tombstone cannot make a newer stream ID ambiguous with a reused one.
+const BROKER_RESOURCE_TOMBSTONE_CAPACITY: usize = 64;
 
 /// The stable CLIENT failure code for a denied SERVER resource request.
 const SERVER_RESOURCE_DENIED_CODE: &str = "server.resource.execute-denied";
@@ -308,21 +318,150 @@ struct AuthenticatedResourceTransport {
 
 
 enum ResourceTransportSource {
-    Installed(PersistentResourceTransport),
     Authenticated(AuthenticatedResourceTransport),
     Injected(InjectedResourceTransport),
 }
 
+#[derive(Clone)]
+pub(crate) struct SharedInvokeBroker {
+    commands: UnboundedSender<BrokerCommand>,
+    task: std::sync::Arc<tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>>,
+    resource_expectations: BrokerResourceExpectations,
+}
+
+/// Test-only authorisation state for manually driven installed resource
+/// sockets.
+///
+/// The installed host normally creates this state internally while it
+/// drives a sealed invocation. Direct protocol tests must register the
+/// exact resource requests that the client evaluator would have produced.
+#[doc(hidden)]
+#[derive(Clone)]
+pub struct RawResourceRequestAuthorizer {
+    broker: SharedInvokeBroker,
+}
+
+impl RawResourceRequestAuthorizer {
+    /// Creates an empty resource request authoriser.
+    #[doc(hidden)]
+    pub fn new() -> Self {
+        let (broker, _receiver) = SharedInvokeBroker::pending();
+        Self { broker }
+    }
+
+    /// Registers one exact resource request for the raw socket boundary.
+    #[doc(hidden)]
+    pub fn expect(&self, request: &ResourceRequest) -> bool {
+        self.broker.register_expected_resource_request(request)
+    }
+
+    pub(crate) fn broker(&self) -> SharedInvokeBroker {
+        self.broker.clone()
+    }
+}
+
+impl Default for RawResourceRequestAuthorizer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+
+enum BrokerCommand {
+    StartRoot {
+        request: orna_protocol::RetainedInvokeRequest,
+        response:
+            tokio::sync::oneshot::Sender<Result<SealedInvocationResult, ResourceTransportFailure>>,
+    },
+    StartResource {
+        request: ResourceRequest,
+        expected_type: ResolvedType,
+        resource_kind: ProtocolResourceKind,
+        completion: Sender<Result<ResourceTransportOutcome, ResourceTransportFailure>>,
+    },
+    CancelResource {
+        stream_id: u64,
+        request_id: orna_core::InvocationId,
+        reason: ResourceCancellationCode,
+    },
+    Shutdown,
+}
+
+struct BrokerRootState {
+    invocation: Option<orna_core::InvocationId>,
+    records: Vec<InvocationEventRecord>,
+    response:
+        tokio::sync::oneshot::Sender<Result<SealedInvocationResult, ResourceTransportFailure>>,
+}
+
+struct BrokerResourceState {
+    request: ResourceRequest,
+    expected_type: ResolvedType,
+    resource_kind: ProtocolResourceKind,
+    protocol: ResourceProtocolConnection,
+    completion: Sender<Result<ResourceTransportOutcome, ResourceTransportFailure>>,
+    accepted: bool,
+    scalar_value: Option<RuntimeValue>,
+    cancellation_requested: bool,
+    stream_values_seen: bool,
+}
+
+type BrokerResourceTombstones = BTreeMap<u64, orna_core::InvocationId>;
+type BrokerResourceExpectations =
+    std::sync::Arc<std::sync::Mutex<BTreeMap<u64, ResourceRequest>>>;
+
+const BROKER_RESOURCE_EXPECTATION_LOCK: &str = "broker resource expectation lock";
+
+impl SharedInvokeBroker {
+    pub(crate) fn register_expected_resource_request(&self, request: &ResourceRequest) -> bool {
+        let mut expectations = self
+            .resource_expectations
+            .lock()
+            .expect(BROKER_RESOURCE_EXPECTATION_LOCK);
+        if expectations.contains_key(&request.stream_id) {
+            return false;
+        }
+        expectations.insert(request.stream_id, request.clone());
+        true
+    }
+
+    pub(crate) fn take_expected_resource_request(
+        &self,
+        request: &ResourceRequest,
+    ) -> bool {
+        let mut expectations = self
+            .resource_expectations
+            .lock()
+            .expect(BROKER_RESOURCE_EXPECTATION_LOCK);
+        if !expectations
+            .get(&request.stream_id)
+            .is_some_and(|expected| expected == request)
+        {
+            return false;
+        }
+        expectations.remove(&request.stream_id);
+        true
+    }
+
+    fn discard_expected_resource_request(&self, stream_id: u64) {
+        self.resource_expectations
+            .lock()
+            .expect(BROKER_RESOURCE_EXPECTATION_LOCK)
+            .remove(&stream_id);
+    }
+
+    fn clear_resource_expectations(&self) {
+        self.resource_expectations
+            .lock()
+            .expect(BROKER_RESOURCE_EXPECTATION_LOCK)
+            .clear();
+    }
+}
+
+
 enum InjectedResourceTransport {
     /// A compatibility stream used by focused transport tests.
     Stream(PersistentResourceTransport),
-    /// A host-owned source that creates one local connection lazily and keeps
-    /// it alive for the executor lifetime.
-    Factory {
-        kernel: PostgresKernel,
-        resources: LocalRawSocketResources,
-        transport: PersistentResourceTransport,
-    },
 }
 
 struct PendingResourceTransport {
@@ -331,6 +470,14 @@ struct PendingResourceTransport {
     control: UnboundedSender<ResourceTransportControl>,
     transport_return: std::sync::Arc<std::sync::Mutex<Option<ResourceTransportSource>>>,
     worker: thread::JoinHandle<()>,
+    cancel_requested: bool,
+}
+
+struct PendingBrokerResource {
+    request: ClientResourceRequest,
+    receiver: Receiver<Result<ResourceTransportOutcome, ResourceTransportFailure>>,
+    control: SharedInvokeBroker,
+    stream_id: u64,
     cancel_requested: bool,
 }
 
@@ -358,68 +505,21 @@ impl PersistentResourceTransport {
 impl ResourceTransportSource {
     fn persistent(&mut self) -> &mut PersistentResourceTransport {
         match self {
-            Self::Installed(transport)
-            | Self::Injected(InjectedResourceTransport::Stream(transport)) => transport,
+            Self::Injected(InjectedResourceTransport::Stream(transport)) => transport,
             Self::Authenticated(transport) => &mut transport.transport,
-            Self::Injected(InjectedResourceTransport::Factory { transport, .. }) => transport,
         }
     }
-    fn bind_authenticated(
-        self,
-        kernel: &PostgresKernel,
-        session: &AuthenticatedSession,
-        _active: &ActiveDatabaseRevision,
-        _registry: &OpaqueCodecRegistry,
-    ) -> Self {
-        match self {
-            Self::Installed(transport) => Self::Authenticated(AuthenticatedResourceTransport {
-                kernel: kernel.clone(),
-                session: session.clone(),
-                transport,
-            }),
-            source => source,
-        }
-    }
-
 
     fn take_connection(
         &mut self,
     ) -> Result<(StandardUnixStream, bool, ResourceProtocolConnection), ()> {
         if self.persistent().stream.is_none() {
             match self {
-                Self::Installed(_) => return Err(()),
                 Self::Authenticated(_) => return Err(()),
                 Self::Injected(InjectedResourceTransport::Stream(transport)) => {
                     if transport.stream.is_none() {
                         return Err(());
                     }
-                }
-                Self::Injected(InjectedResourceTransport::Factory {
-                    kernel,
-                    resources,
-                    transport,
-                }) => {
-                    let (server, client) = StandardUnixStream::pair().map_err(|_| ())?;
-                    let server_kernel = kernel.clone();
-                    let server_resources = resources.clone();
-                    let server_task = thread::Builder::new()
-                        .name("orna-resource-server".to_owned())
-                        .spawn(move || {
-                            let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
-                                .enable_all()
-                                .build()
-                            else {
-                                return;
-                            };
-                            let _ = runtime.block_on(serve_local_raw_stream(
-                                server_kernel,
-                                server,
-                                server_resources,
-                            ));
-                        })
-                        .map_err(|_| ())?;
-                    transport.stream = Some(client);
-                    transport.server_task = Some(server_task);
                 }
             }
         }
@@ -476,9 +576,12 @@ impl Drop for PersistentResourceTransport {
 pub struct InstalledClientResourceExecutor {
     active: ActiveDatabaseRevision,
     next_stream_id: u64,
+    broker: Option<SharedInvokeBroker>,
     transport: Option<ResourceTransportSource>,
     pending: Option<PendingResourceTransport>,
+    broker_pending: Option<PendingBrokerResource>,
     detached: Vec<DetachedResourceTransport>,
+    cancellation: ResourceCancellation,
 }
 
 impl InstalledClientResourceExecutor {
@@ -491,6 +594,8 @@ impl InstalledClientResourceExecutor {
         Self {
             active,
             next_stream_id: 1,
+            broker: None,
+            broker_pending: None,
             transport: Some(ResourceTransportSource::Authenticated(
                 AuthenticatedResourceTransport {
                     kernel,
@@ -500,6 +605,7 @@ impl InstalledClientResourceExecutor {
             )),
             pending: None,
             detached: Vec::new(),
+            cancellation: ResourceCancellation::new(),
         }
     }
 
@@ -513,6 +619,8 @@ impl InstalledClientResourceExecutor {
         Self {
             active,
             next_stream_id: 1,
+            broker: None,
+            broker_pending: None,
             transport: Some(ResourceTransportSource::Injected(
                 InjectedResourceTransport::Stream(PersistentResourceTransport {
                     stream: Some(stream),
@@ -523,13 +631,67 @@ impl InstalledClientResourceExecutor {
             )),
             pending: None,
             detached: Vec::new(),
+            cancellation: ResourceCancellation::new(),
         }
+    }
+
+    #[doc(hidden)]
+    pub(crate) fn new_with_broker(
+        active: ActiveDatabaseRevision,
+        broker: SharedInvokeBroker,
+        cancellation: ResourceCancellation,
+    ) -> Self {
+        Self {
+            active,
+            next_stream_id: 1,
+            broker: Some(broker),
+            transport: None,
+            pending: None,
+            broker_pending: None,
+            detached: Vec::new(),
+            cancellation,
+        }
+    }
+    fn poll_broker(&mut self) -> Option<ClientResourceCompletion> {
+        if self.cancellation.is_requested() {
+            if let Some(pending) = self.broker_pending.as_mut()
+                && !pending.cancel_requested
+            {
+                let _ = pending.control.commands.send(BrokerCommand::CancelResource {
+                    stream_id: pending.stream_id,
+                    request_id: pending.request.request_id(),
+                    reason: ResourceCancellationCode::ParentInvocationCancelled,
+                });
+                pending.cancel_requested = true;
+            }
+        }
+        let pending = self.broker_pending.as_mut()?;
+        let result = match pending.receiver.try_recv() {
+            Ok(result) => result,
+            Err(TryRecvError::Empty) => return None,
+            Err(TryRecvError::Disconnected) => Err(ResourceTransportFailure::Transport),
+        };
+        let stream_values = matches!(&result, Ok(ResourceTransportOutcome::StreamValues(_)));
+        if stream_values && pending.cancel_requested {
+            return self.poll_broker();
+        }
+        if stream_values {
+            return Some(map_resource_transport_completion(
+                pending.request.clone(),
+                result,
+            ));
+        }
+        let pending = self
+            .broker_pending
+            .take()
+            .expect("broker pending checked above");
+        Some(map_resource_transport_completion(pending.request, result))
     }
 }
 
 impl ClientResourceExecutor for InstalledClientResourceExecutor {
     fn execute(&mut self, request: ClientResourceRequest) -> ClientResourceCompletion {
-        if self.pending.is_some() {
+        if self.pending.is_some() || self.broker_pending.is_some() {
             return request.failed(SERVER_RESOURCE_INTERNAL_CODE.to_owned());
         }
         let Some(next_stream_id) = self.next_stream_id.checked_add(1) else {
@@ -571,6 +733,8 @@ impl ClientResourceExecutor for InstalledClientResourceExecutor {
             request_id: request.request_id(),
             parent_invocation_id: invocation_context.parent_invocation_id(),
             call_site_id: invocation_context.call_site_id(),
+            state_profile: invocation_context.state_profile().to_owned(),
+            function_instance_key: invocation_context.function_instance_key().to_owned(),
             target_function_id: target.function(),
             target_revision: target.revision(),
             generation: request.generation().value(),
@@ -586,6 +750,38 @@ impl ClientResourceExecutor for InstalledClientResourceExecutor {
             item_window: 1,
             byte_window: MAX_RESOURCE_WINDOW,
         };
+        if let Some(broker) = self.broker.clone() {
+            if !broker.register_expected_resource_request(&protocol_request) {
+                return request.failed(SERVER_RESOURCE_INTERNAL_CODE.to_owned());
+            }
+            let (completion, receiver) = mpsc::channel(BROKER_RESOURCE_COMPLETION_CAPACITY);
+            if broker
+                .commands
+                .send(BrokerCommand::StartResource {
+                    request: protocol_request,
+                    expected_type: request.expected_type(),
+                    resource_kind,
+                    completion,
+                })
+                .is_err()
+            {
+                broker.discard_expected_resource_request(stream_id);
+                return request.failed(SERVER_RESOURCE_INTERNAL_CODE.to_owned());
+            }
+            let pending = ClientResourceCompletion::Pending {
+                request_id: request.request_id(),
+                key: request.key(),
+                generation: request.generation(),
+            };
+            self.broker_pending = Some(PendingBrokerResource {
+                stream_id,
+                request,
+                receiver,
+                control: broker,
+                cancel_requested: false,
+            });
+            return pending;
+        }
         let Some(worker_transport) = self.transport.take() else {
             return request.failed(SERVER_RESOURCE_INTERNAL_CODE.to_owned());
         };
@@ -687,6 +883,19 @@ impl ClientResourceExecutor for InstalledClientResourceExecutor {
     }
 
     fn poll(&mut self) -> Option<ClientResourceCompletion> {
+        if self.broker_pending.is_some() {
+            return self.poll_broker();
+        }
+        if self.cancellation.is_requested() {
+            if let Some(pending) = self.pending.as_mut()
+                && !pending.cancel_requested
+            {
+                let _ = pending.control.send(ResourceTransportControl::Cancel(
+                    ResourceCancellationCode::ParentInvocationCancelled,
+                ));
+                pending.cancel_requested = true;
+            }
+        }
         loop {
             let (result, cancel_requested, request) = {
                 let pending = self.pending.as_mut()?;
@@ -718,7 +927,58 @@ impl ClientResourceExecutor for InstalledClientResourceExecutor {
         }
     }
 
+    fn cancel_pending(&mut self) -> Option<ClientResourceCompletion> {
+        if self.broker_pending.is_some() {
+            return self.poll_broker();
+        }
+        if self.pending.is_some() {
+            // The direct transport has its own cancellation state because it
+            // is not connected to the invocation's broker cancellation token.
+            // Request it here, then let `poll` send the protocol cancel once.
+            let _ = self.cancellation.request_cancel();
+            return self.poll();
+        }
+        None
+    }
+
     fn cancel(&mut self, request: ClientResourceRequest) -> ClientResourceCompletion {
+        if let Some(mut pending) = self.broker_pending.take() {
+            if pending.request.request_id() != request.request_id()
+                || pending.request.key() != request.key()
+                || pending.request.generation() != request.generation()
+            {
+                self.broker_pending = Some(pending);
+                return request.failed(SERVER_RESOURCE_INTERNAL_CODE.to_owned());
+            }
+            if pending.cancel_requested {
+                self.broker_pending = Some(pending);
+                return request.pending();
+            }
+            match pending.receiver.try_recv() {
+                Ok(Ok(ResourceTransportOutcome::StreamValues(_))) => {}
+                Ok(result @ Ok(_)) | Ok(result @ Err(_)) => {
+                    return map_resource_transport_completion(pending.request, result);
+                }
+                Err(TryRecvError::Disconnected) => {
+                    return map_resource_transport_completion(
+                        pending.request,
+                        Err(ResourceTransportFailure::Transport),
+                    );
+                }
+                Err(TryRecvError::Empty) => {}
+            }
+            let _ = pending
+                .control
+                .commands
+                .send(BrokerCommand::CancelResource {
+                    stream_id: pending.stream_id,
+                    request_id: pending.request.request_id(),
+                    reason: ResourceCancellationCode::ClientRequested,
+                });
+            pending.cancel_requested = true;
+            self.broker_pending = Some(pending);
+            return request.pending();
+        }
         let Some(mut pending) = self.pending.take() else {
             return request.failed(SERVER_RESOURCE_INTERNAL_CODE.to_owned());
         };
@@ -770,6 +1030,16 @@ impl ClientResourceExecutor for InstalledClientResourceExecutor {
 }
 impl Drop for InstalledClientResourceExecutor {
     fn drop(&mut self) {
+        if let Some(pending) = self.broker_pending.take() {
+            let _ = pending
+                .control
+                .commands
+                .send(BrokerCommand::CancelResource {
+                    stream_id: pending.stream_id,
+                    request_id: pending.request.request_id(),
+                    reason: ResourceCancellationCode::RuntimeShutdown,
+                });
+        }
         if let Some(pending) = self.pending.take() {
             drop(pending.receiver);
             let _ = pending.control.send(ResourceTransportControl::Shutdown);
@@ -798,24 +1068,30 @@ fn map_resource_transport_completion(
             request.failed(SERVER_RESOURCE_SHAPE_CODE.to_owned())
         }
         Err(ResourceTransportFailure::Cancelled) => request.cancelled(),
+        Err(ResourceTransportFailure::RootSealedDispatchInternal) => {
+            request.failed(SERVER_RESOURCE_INTERNAL_CODE.to_owned())
+        }
         Err(ResourceTransportFailure::Transport) => {
             request.failed(SERVER_RESOURCE_INTERNAL_CODE.to_owned())
         }
     }
 }
 
-enum ResourceTransportFailure {
-    Transport,
-    Shape,
-    Cancelled,
-}
-
+#[derive(Debug)]
 enum ResourceTransportOutcome {
     Ready(RuntimeValue),
     StreamValues(Vec<RuntimeValue>),
     StreamCompleted,
     Failed { failure: CallFailure },
     Cancelled,
+}
+
+#[derive(Debug)]
+enum ResourceTransportFailure {
+    Transport,
+    Shape,
+    Cancelled,
+    RootSealedDispatchInternal,
 }
 
 struct ResourceTransportRun {
@@ -829,6 +1105,743 @@ enum ResourceFrameResult {
     Completed,
     Failed(CallFailure),
     Cancelled,
+}
+
+impl SharedInvokeBroker {
+    fn pending() -> (Self, UnboundedReceiver<BrokerCommand>) {
+        let (commands, receiver) = mpsc::unbounded_channel();
+        (
+            Self {
+                commands,
+                task: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
+                resource_expectations: std::sync::Arc::new(std::sync::Mutex::new(BTreeMap::new())),
+            },
+            receiver,
+        )
+    }
+
+
+    async fn activate(
+        &self,
+        stream: StandardUnixStream,
+        active: ActiveDatabaseRevision,
+        registry: OpaqueCodecRegistry,
+        receiver: UnboundedReceiver<BrokerCommand>,
+    ) -> Result<(), ResourceTransportFailure> {
+        stream
+            .set_nonblocking(true)
+            .map_err(|_| ResourceTransportFailure::Transport)?;
+        let mut stream = tokio::net::UnixStream::from_std(stream)
+            .map_err(|_| ResourceTransportFailure::Transport)?;
+        tokio::time::timeout(
+            RESOURCE_FRAME_TIMEOUT,
+            stream.write_all(&CONSTRUCTED_CLIENT_HELLO),
+        )
+        .await
+        .map_err(|_| ResourceTransportFailure::Transport)?
+        .map_err(|_| ResourceTransportFailure::Transport)?;
+        let mut acknowledgement = [0_u8; CONSTRUCTED_SERVER_ACK.len()];
+        tokio::time::timeout(
+            RESOURCE_FRAME_TIMEOUT,
+            stream.read_exact(&mut acknowledgement),
+        )
+        .await
+        .map_err(|_| ResourceTransportFailure::Transport)?
+        .map_err(|_| ResourceTransportFailure::Transport)?;
+        if acknowledgement != CONSTRUCTED_SERVER_ACK {
+            return Err(ResourceTransportFailure::Transport);
+        }
+        let task = tokio::spawn(run_shared_invoke_broker(stream, active, registry, receiver));
+        *self.task.lock().await = Some(task);
+        Ok(())
+    }
+
+    async fn shutdown(&self) {
+        let _ = self.commands.send(BrokerCommand::Shutdown);
+        let task = self.task.lock().await.take();
+        if let Some(task) = task {
+            let _ = task.await;
+        }
+        self.clear_resource_expectations();
+    }
+
+    async fn invoke(
+        &self,
+        request: orna_protocol::RetainedInvokeRequest,
+    ) -> Result<SealedInvocationResult, ResourceTransportFailure> {
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        self.commands
+            .send(BrokerCommand::StartRoot {
+                request,
+                response: sender,
+            })
+            .map_err(|_| ResourceTransportFailure::Transport)?;
+        receiver
+            .await
+            .map_err(|_| ResourceTransportFailure::Transport)?
+    }
+}
+
+struct BrokerWireFrame {
+    resource: bool,
+    bytes: Vec<u8>,
+}
+
+async fn read_shared_broker_frame<R>(
+    stream: &mut R,
+) -> Result<BrokerWireFrame, ResourceTransportFailure>
+where
+    R: AsyncRead + Unpin,
+{
+    let mut prefix = [0_u8; RESOURCE_MARKER.len()];
+    tokio::time::timeout(RESOURCE_FRAME_TIMEOUT, stream.read_exact(&mut prefix))
+        .await
+        .map_err(|_| ResourceTransportFailure::Transport)?
+        .map_err(|_| ResourceTransportFailure::Transport)?;
+    let resource = &prefix == RESOURCE_MARKER;
+    let header_length = if resource { RESOURCE_HEADER_LENGTH } else { 18 };
+    let mut header = prefix.to_vec();
+    header.resize(header_length, 0);
+    tokio::time::timeout(
+        RESOURCE_FRAME_TIMEOUT,
+        stream.read_exact(&mut header[RESOURCE_MARKER.len()..]),
+    )
+    .await
+    .map_err(|_| ResourceTransportFailure::Transport)?
+    .map_err(|_| ResourceTransportFailure::Transport)?;
+    let declared_offset = if resource { 17..21 } else { 14..18 };
+    let payload_length = u32::from_be_bytes(
+        header[declared_offset]
+            .try_into()
+            .expect("shared broker frame header has a fixed length"),
+    ) as usize;
+    if payload_length > MAX_FRAME_PAYLOAD_LENGTH {
+        return Err(ResourceTransportFailure::Shape);
+    }
+    let mut bytes = header;
+    bytes.resize(header_length + payload_length, 0);
+    tokio::time::timeout(
+        RESOURCE_FRAME_TIMEOUT,
+        stream.read_exact(&mut bytes[header_length..]),
+    )
+    .await
+    .map_err(|_| ResourceTransportFailure::Transport)?
+    .map_err(|_| ResourceTransportFailure::Transport)?;
+    Ok(BrokerWireFrame { resource, bytes })
+}
+
+async fn read_shared_broker_frames<R>(
+    mut stream: R,
+    sender: Sender<Result<BrokerWireFrame, ResourceTransportFailure>>,
+) where
+    R: AsyncRead + Unpin,
+{
+    loop {
+        let result = read_shared_broker_frame(&mut stream).await;
+        let failed = result.is_err();
+        if sender.send(result).await.is_err() || failed {
+            return;
+        }
+    }
+}
+
+async fn write_shared_broker_frame<W>(
+    stream: &mut W,
+    bytes: &[u8],
+) -> Result<(), ResourceTransportFailure>
+where
+    W: AsyncWrite + Unpin,
+{
+    tokio::time::timeout(RESOURCE_FRAME_TIMEOUT, stream.write_all(bytes))
+        .await
+        .map_err(|_| ResourceTransportFailure::Transport)?
+        .map_err(|_| ResourceTransportFailure::Transport)
+}
+
+async fn run_shared_invoke_broker(
+    stream: tokio::net::UnixStream,
+    active: ActiveDatabaseRevision,
+    registry: OpaqueCodecRegistry,
+    mut commands: UnboundedReceiver<BrokerCommand>,
+) {
+    let (reader, mut stream) = stream.into_split();
+    let (frame_sender, mut frames) = mpsc::channel(1);
+    let reader_task = tokio::spawn(read_shared_broker_frames(reader, frame_sender));
+    let mut connection = ProtocolConnection::new();
+    let mut root: Option<BrokerRootState> = None;
+    let mut resources: BTreeMap<u64, BrokerResourceState> = BTreeMap::new();
+    let mut resource_tombstones = BrokerResourceTombstones::new();
+    let mut resource_high_water_mark = None;
+    loop {
+        enum BrokerNext {
+            Command(Option<BrokerCommand>),
+            Frame(Option<Result<BrokerWireFrame, ResourceTransportFailure>>),
+        }
+        let next = tokio::select! {
+            command = commands.recv() => BrokerNext::Command(command),
+            frame = frames.recv() => BrokerNext::Frame(frame),
+        };
+        match next {
+            BrokerNext::Command(Some(command)) => {
+                if handle_shared_broker_command(
+                    command,
+                    &mut stream,
+                    &active,
+                    &registry,
+                    &mut connection,
+                    &mut root,
+                    &mut resources,
+                    &mut resource_high_water_mark,
+                )
+                .await
+                .is_err()
+                {
+                    break;
+                }
+            }
+            BrokerNext::Command(None) => break,
+            BrokerNext::Frame(Some(Ok(frame))) => {
+                if handle_shared_broker_frame(
+                    frame,
+                    &mut stream,
+                    &active,
+                    &registry,
+                    &mut root,
+                    &mut resources,
+                    &mut resource_tombstones,
+                )
+                .await
+                .is_err()
+                {
+                    break;
+                }
+            }
+            BrokerNext::Frame(Some(Err(_))) | BrokerNext::Frame(None) => break,
+        }
+    }
+    reader_task.abort();
+    let _ = reader_task.await;
+    if let Some(root) = root.take() {
+        let _ = root.response.send(Err(ResourceTransportFailure::Transport));
+    }
+    for (_, resource) in resources {
+        let _ = resource
+            .completion
+            .send(Err(ResourceTransportFailure::Transport))
+            .await;
+    }
+}
+
+async fn handle_shared_broker_command<W>(
+    command: BrokerCommand,
+    stream: &mut W,
+    active: &ActiveDatabaseRevision,
+    registry: &OpaqueCodecRegistry,
+    connection: &mut ProtocolConnection,
+    root: &mut Option<BrokerRootState>,
+    resources: &mut BTreeMap<u64, BrokerResourceState>,
+    resource_high_water_mark: &mut Option<u64>,
+) -> Result<(), ResourceTransportFailure>
+where
+    W: AsyncWrite + Unpin,
+{
+    match command {
+        BrokerCommand::StartRoot { request, response } => {
+            if root.is_some() {
+                let _ = response.send(Err(ResourceTransportFailure::Transport));
+                return Ok(());
+            }
+            let frames = [
+                ClientFrame::CallRawStart {
+                    stream: 1,
+                    function: SYS_INVOKE_FUNCTION_ID,
+                },
+                ClientFrame::WindowUpdate {
+                    stream: 1,
+                    channel: Channel::ResultValues,
+                    credit: MAX_CHANNEL_WINDOW,
+                },
+                ClientFrame::CallInvokeRequest { stream: 1, request },
+                ClientFrame::CallArgumentsComplete { stream: 1 },
+            ];
+            for frame in frames {
+                connection
+                    .receive_constructed(active, registry, frame.clone())
+                    .map_err(|_| ResourceTransportFailure::Shape)?;
+                let encoded = encode_constructed_client_frame(active, registry, &frame)
+                    .map_err(|_| ResourceTransportFailure::Shape)?;
+                write_shared_broker_frame(stream, &encoded).await?;
+            }
+            *root = Some(BrokerRootState {
+                invocation: None,
+                records: Vec::new(),
+                response,
+            });
+        }
+        BrokerCommand::StartResource {
+            request,
+            expected_type,
+            resource_kind,
+            completion,
+        } => {
+            let stream_id = request.stream_id;
+            if resource_high_water_mark.is_some_and(|previous| stream_id <= previous) {
+                return Err(ResourceTransportFailure::Shape);
+            }
+            let mut protocol = ResourceProtocolConnection::new();
+            protocol
+                .open(request.clone())
+                .map_err(|_| ResourceTransportFailure::Shape)?;
+            let encoded = encode_resource_client_frame(
+                active,
+                registry,
+                &ResourceClientFrame::Request(request.clone()),
+            )
+            .map_err(|_| ResourceTransportFailure::Shape)?;
+            resources.insert(
+                stream_id,
+                BrokerResourceState {
+                    request,
+                    expected_type,
+                    resource_kind,
+                    protocol,
+                    completion,
+                    accepted: false,
+                    scalar_value: None,
+                    cancellation_requested: false,
+                    stream_values_seen: false,
+                },
+            );
+            *resource_high_water_mark = Some(stream_id);
+            write_shared_broker_frame(stream, &encoded).await?;
+        }
+        BrokerCommand::CancelResource {
+            stream_id,
+            request_id,
+            reason,
+        } => {
+            let Some(state) = resources.get_mut(&stream_id) else {
+                return Ok(());
+            };
+            let cancel = ResourceClientFrame::Cancel(ResourceCancel {
+                stream_id,
+                request_id,
+                reason,
+            });
+            state
+                .protocol
+                .receive(cancel.clone())
+                .map_err(|_| ResourceTransportFailure::Shape)?;
+            state.cancellation_requested = true;
+            let encoded = encode_resource_client_frame(active, registry, &cancel)
+                .map_err(|_| ResourceTransportFailure::Shape)?;
+            write_shared_broker_frame(stream, &encoded).await?;
+        }
+        BrokerCommand::Shutdown => {
+            if root.is_some() {
+                let cancel = ClientFrame::CallCancel { stream: 1 };
+                let _ = connection.receive_constructed(active, registry, cancel.clone());
+                if let Ok(encoded) = encode_constructed_client_frame(active, registry, &cancel) {
+                    let _ = write_shared_broker_frame(stream, &encoded).await;
+                }
+            }
+            for state in resources.values_mut() {
+                if state.cancellation_requested {
+                    continue;
+                }
+                let cancel = ResourceClientFrame::Cancel(ResourceCancel {
+                    stream_id: state.request.stream_id,
+                    request_id: state.request.request_id,
+                    reason: ResourceCancellationCode::RuntimeShutdown,
+                });
+                let _ = state.protocol.receive(cancel.clone());
+                if let Ok(encoded) = encode_resource_client_frame(active, registry, &cancel) {
+                    let _ = write_shared_broker_frame(stream, &encoded).await;
+                }
+            }
+            return Err(ResourceTransportFailure::Transport);
+        }
+    }
+    Ok(())
+}
+
+fn resource_server_frame_identity(frame: &ResourceServerFrame) -> (u64, orna_core::InvocationId) {
+    match frame {
+        ResourceServerFrame::Accepted(value) => (value.stream_id, value.request_id),
+        ResourceServerFrame::Values(value) => (value.stream_id, value.request_id),
+        ResourceServerFrame::Completed(value) => (value.stream_id, value.request_id),
+        ResourceServerFrame::Failed(value) => (value.stream_id, value.request_id),
+        ResourceServerFrame::Cancelled(value) => (value.stream_id, value.request_id),
+    }
+}
+
+fn remember_broker_resource_terminal(
+    tombstones: &mut BrokerResourceTombstones,
+    stream_id: u64,
+    request_id: orna_core::InvocationId,
+) {
+    tombstones.insert(stream_id, request_id);
+    while tombstones.len() > BROKER_RESOURCE_TOMBSTONE_CAPACITY {
+        let Some(stream_id) = tombstones.keys().next().copied() else {
+            break;
+        };
+        tombstones.remove(&stream_id);
+    }
+}
+
+async fn handle_shared_broker_frame<W>(
+    frame: BrokerWireFrame,
+    stream: &mut W,
+    active: &ActiveDatabaseRevision,
+    registry: &OpaqueCodecRegistry,
+    root: &mut Option<BrokerRootState>,
+    resources: &mut BTreeMap<u64, BrokerResourceState>,
+    resource_tombstones: &mut BrokerResourceTombstones,
+) -> Result<(), ResourceTransportFailure>
+where
+    W: AsyncWrite + Unpin,
+{
+    if frame.resource {
+        let decoded = decode_resource_server_frame(active, registry, &frame.bytes)
+            .map_err(|_| ResourceTransportFailure::Shape)?;
+        let (stream_id, request_id) = resource_server_frame_identity(&decoded);
+        if let Some(expected_request_id) = resource_tombstones.get(&stream_id) {
+            if *expected_request_id != request_id {
+                return Err(ResourceTransportFailure::Shape);
+            }
+            // The broker has already published this stream terminal outcome.
+            // Keep the connection alive for the root call and every other resource.
+            return Ok(());
+        }
+        let Some(mut state) = resources.remove(&stream_id) else {
+            return Err(ResourceTransportFailure::Shape);
+        };
+        let keep =
+            handle_shared_resource_frame(&mut state, decoded, stream, active, registry).await?;
+        if keep {
+            resources.insert(stream_id, state);
+        } else {
+            remember_broker_resource_terminal(
+                resource_tombstones,
+                stream_id,
+                state.request.request_id,
+            );
+        }
+        return Ok(());
+    }
+    let decoded = decode_constructed_invocation_event_frame(active, registry, &frame.bytes)
+        .or_else(|_| decode_constructed_server_frame(active, registry, &frame.bytes))
+        .map_err(|_| ResourceTransportFailure::Shape)?;
+    let Some(state) = root.as_mut() else {
+        return Err(ResourceTransportFailure::Shape);
+    };
+    match decoded {
+        ServerFrame::CallAccepted {
+            stream: 1,
+            invocation,
+        } => state.invocation = Some(invocation),
+        ServerFrame::EventBatch {
+            stream: 1,
+            channel: Channel::ResultValues,
+            events,
+        } => {
+            for record in events {
+                let Event::Value(RuntimeValue::InvokeEvent(event)) = record.event else {
+                    return Err(ResourceTransportFailure::Shape);
+                };
+                if state
+                    .invocation
+                    .is_some_and(|invocation| event.invocation_id() != invocation)
+                {
+                    return Err(ResourceTransportFailure::Shape);
+                }
+                if state.records.is_empty() && (record.sequence != 1 || event.sequence() != 0) {
+                    return Err(ResourceTransportFailure::Shape);
+                }
+                if state.records.last().is_some_and(|last| {
+                    last.outer_sequence().checked_add(1) != Some(record.sequence)
+                        || last.event().sequence().checked_add(1) != Some(event.sequence())
+                }) {
+                    return Err(ResourceTransportFailure::Shape);
+                }
+                state
+                    .records
+                    .push(InvocationEventRecord::new(record.sequence, event));
+            }
+        }
+        ServerFrame::CallCompleted { stream: 1 } => {
+            let state = root.take().expect("root state checked above");
+            let invocation = state
+                .invocation
+                .unwrap_or_else(orna_core::InvocationId::new);
+            if state.records.is_empty() {
+                let _ = state
+                    .response
+                    .send(Ok(SealedInvocationResult::Denied { invocation }));
+            } else {
+                match reconstruct_shared_root_result(invocation, state.records) {
+                    Ok(result) => {
+                        let _ = state.response.send(Ok(result));
+                    }
+                    Err(ResourceTransportFailure::Cancelled) => {
+                        let _ = state
+                            .response
+                            .send(Err(ResourceTransportFailure::Cancelled));
+                    }
+                    Err(error) => {
+                        let _ = state.response.send(Err(error));
+                        return Err(ResourceTransportFailure::Shape);
+                    }
+                }
+            }
+        }
+        ServerFrame::CallFailed { stream: 1, failure } => {
+            let state = root.take().expect("root state checked above");
+            let invocation = state
+                .invocation
+                .unwrap_or_else(orna_core::InvocationId::new);
+            let result = if failure == CallFailure::ExecuteDenied {
+                Ok(SealedInvocationResult::Denied { invocation })
+            } else {
+                Err(ResourceTransportFailure::Transport)
+            };
+            let _ = state.response.send(result);
+        }
+        ServerFrame::CallCancelled { stream: 1 } => {
+            let state = root.take().expect("root state checked above");
+            let _ = state
+                .response
+                .send(Err(ResourceTransportFailure::Cancelled));
+        }
+        _ => return Err(ResourceTransportFailure::Shape),
+    }
+    Ok(())
+}
+
+fn reconstruct_shared_root_result(
+    invocation: orna_core::InvocationId,
+    records: Vec<InvocationEventRecord>,
+) -> Result<SealedInvocationResult, ResourceTransportFailure> {
+    let events = orna_protocol::InvocationEventBatch::new(records)
+        .map_err(|_| ResourceTransportFailure::Shape)?;
+    let Some(last) = events.records().last() else {
+        return Err(ResourceTransportFailure::Shape);
+    };
+    match last.event().body() {
+        InvocationEventBody::Failed(failure) if failure.code() == "INVOKE_DENIED" => {
+            Ok(SealedInvocationResult::Denied { invocation })
+        }
+        InvocationEventBody::Failed(failure) if failure.code() == "INVOKE_PRESENTATION_FAILURE" => {
+            Ok(SealedInvocationResult::PresentationFailed { invocation })
+        }
+        InvocationEventBody::Failed(failure) if failure.code() == "INVOKE_INTERNAL_FAILURE" => {
+            Err(ResourceTransportFailure::RootSealedDispatchInternal)
+        }
+        InvocationEventBody::Failed(_) => Ok(SealedInvocationResult::Failed { invocation, events }),
+        InvocationEventBody::Completed { .. } => {
+            Ok(SealedInvocationResult::Completed { invocation, events })
+        }
+        InvocationEventBody::Cancelled { .. } => Err(ResourceTransportFailure::Cancelled),
+        _ => Err(ResourceTransportFailure::Shape),
+    }
+}
+
+/// Publishes a terminal resource result without turning an allowed
+/// cancellation race into a shared broker failure.
+///
+/// A cancelled resource may outlive the evaluator that owns its completion
+/// receiver. In that case a committed terminal frame is still a local stream
+/// completion, not a transport failure for the root invocation. A live
+/// resource with a closed receiver remains a genuine broker transport error.
+async fn send_shared_resource_terminal(
+    state: &BrokerResourceState,
+    outcome: Result<ResourceTransportOutcome, ResourceTransportFailure>,
+) -> Result<(), ResourceTransportFailure> {
+    match state.completion.send(outcome).await {
+        Ok(()) => Ok(()),
+        Err(_) if state.cancellation_requested => Ok(()),
+        Err(_) => Err(ResourceTransportFailure::Transport),
+    }
+}
+
+async fn handle_shared_resource_frame<W>(
+    state: &mut BrokerResourceState,
+    frame: ResourceServerFrame,
+    stream: &mut W,
+    active: &ActiveDatabaseRevision,
+    registry: &OpaqueCodecRegistry,
+) -> Result<bool, ResourceTransportFailure>
+where
+    W: AsyncWrite + Unpin,
+{
+    let disposition = if state.cancellation_requested {
+        if let ResourceServerFrame::Cancelled(cancelled) = &frame {
+            state
+                .protocol
+                .apply_cancelled_after_client_cancel(*cancelled)
+                .map_err(|_| ResourceTransportFailure::Shape)?
+        } else {
+            state
+                .protocol
+                .apply_constructed(active, registry, frame.clone())
+                .map_err(|_| ResourceTransportFailure::Shape)?
+        }
+    } else {
+        state
+            .protocol
+            .apply_constructed(active, registry, frame.clone())
+            .map_err(|_| ResourceTransportFailure::Shape)?
+    };
+    // A terminal frame marked DroppedLate can still be the committed server
+    // result: cancellation closed the client-side protocol before that result
+    // reached this broker. Drain late non-terminals, but publish this terminal
+    // when its receiver is still live before removing the broker state.
+    let late_terminal = state.cancellation_requested
+        && matches!(disposition, orna_protocol::ResourceFrameDisposition::DroppedLate)
+        && matches!(
+            &frame,
+            ResourceServerFrame::Completed(_)
+                | ResourceServerFrame::Failed(_)
+                | ResourceServerFrame::Cancelled(_)
+        );
+    match frame {
+        ResourceServerFrame::Accepted(value) => {
+            if value.request_id != state.request.request_id
+                || value.target_revision != state.request.target_revision
+                || value.resource_kind != state.resource_kind
+            {
+                return Err(ResourceTransportFailure::Shape);
+            }
+            state.accepted = true;
+        }
+        ResourceServerFrame::Values(value) => {
+            if value.request_id != state.request.request_id
+                || value.values.is_empty()
+                || value.item_count == 0
+                || value.item_count as usize != value.values.len()
+                || value.byte_count == 0
+                || (matches!(state.resource_kind, ProtocolResourceKind::Single)
+                    && (value.values.len() != 1 || state.scalar_value.is_some()))
+                || value
+                    .values
+                    .iter()
+                    .any(|item| !runtime_value_matches_type(active, item, state.expected_type))
+            {
+                return Err(ResourceTransportFailure::Shape);
+            }
+            if state.cancellation_requested {
+                if matches!(
+                    disposition,
+                    orna_protocol::ResourceFrameDisposition::DroppedLate
+                ) && matches!(state.resource_kind, ProtocolResourceKind::Single)
+                {
+                    state.scalar_value = value.values.into_iter().next();
+                }
+                return Ok(true);
+            }
+            match state.resource_kind {
+                ProtocolResourceKind::Single => {
+                    state.scalar_value = value.values.into_iter().next()
+                }
+                ProtocolResourceKind::Stream => {
+                    state.stream_values_seen = true;
+                    state
+                        .completion
+                        .send(Ok(ResourceTransportOutcome::StreamValues(value.values)))
+                        .await
+                        .map_err(|_| ResourceTransportFailure::Transport)?;
+                    let update = ResourceWindowUpdate {
+                        stream_id: value.stream_id,
+                        request_id: value.request_id,
+                        add_items: u64::from(value.item_count),
+                        add_bytes: u64::from(value.byte_count),
+                    };
+                    state
+                        .protocol
+                        .receive(orna_protocol::ResourceClientFrame::WindowUpdate(update))
+                        .map_err(|_| ResourceTransportFailure::Shape)?;
+                    let encoded = encode_resource_client_frame(
+                        active,
+                        registry,
+                        &orna_protocol::ResourceClientFrame::WindowUpdate(update),
+                    )
+                    .map_err(|_| ResourceTransportFailure::Shape)?;
+                    write_shared_broker_frame(stream, &encoded).await?;
+                }
+            }
+        }
+        ResourceServerFrame::Completed(value) => {
+            if value.request_id != state.request.request_id {
+                return Err(ResourceTransportFailure::Shape);
+            }
+            if !state.accepted {
+                if late_terminal {
+                    send_shared_resource_terminal(
+                        state,
+                        Err(ResourceTransportFailure::Shape),
+                    )
+                    .await?;
+                    return Ok(false);
+                }
+                return Err(ResourceTransportFailure::Shape);
+            }
+            let outcome = match state.resource_kind {
+                ProtocolResourceKind::Single => {
+                    let Some(value) = state.scalar_value.take() else {
+                        if late_terminal {
+                            send_shared_resource_terminal(
+                                state,
+                                Err(ResourceTransportFailure::Shape),
+                            )
+                            .await?;
+                            return Ok(false);
+                        }
+                        return Err(ResourceTransportFailure::Shape);
+                    };
+                    ResourceTransportOutcome::Ready(value)
+                }
+                ProtocolResourceKind::Stream => ResourceTransportOutcome::StreamCompleted,
+            };
+            send_shared_resource_terminal(state, Ok(outcome)).await?;
+            return Ok(false);
+        }
+        ResourceServerFrame::Failed(value) => {
+            if value.request_id != state.request.request_id {
+                return Err(ResourceTransportFailure::Shape);
+            }
+            if state.scalar_value.is_some() {
+                if late_terminal {
+                    send_shared_resource_terminal(
+                        state,
+                        Err(ResourceTransportFailure::Shape),
+                    )
+                    .await?;
+                    return Ok(false);
+                }
+                return Err(ResourceTransportFailure::Shape);
+            }
+            send_shared_resource_terminal(
+                state,
+                Ok(ResourceTransportOutcome::Failed {
+                    failure: value.failure,
+                }),
+            )
+            .await?;
+            return Ok(false);
+        }
+        ResourceServerFrame::Cancelled(value) => {
+            if value.request_id != state.request.request_id {
+                return Err(ResourceTransportFailure::Shape);
+            }
+            send_shared_resource_terminal(
+                state,
+                Ok(ResourceTransportOutcome::Cancelled),
+            )
+            .await?;
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 async fn send_resource_cancel(
@@ -929,6 +1942,22 @@ enum ResourceFrameDispositionAction {
     Reject,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ResourceTransportCancellationAction {
+    ReturnCancelled,
+    ContinueCommitted,
+}
+
+fn resource_transport_cancellation_action(
+    cancellation_won: bool,
+) -> ResourceTransportCancellationAction {
+    if cancellation_won {
+        ResourceTransportCancellationAction::ReturnCancelled
+    } else {
+        ResourceTransportCancellationAction::ContinueCommitted
+    }
+}
+
 /// Decides what a server frame means after the client has requested cancel.
 ///
 /// The local connection stays live after sending `RESOURCE_CANCEL`: an
@@ -977,8 +2006,16 @@ async fn run_authenticated_resource_transport(
         biased;
         control = controls.recv() => match control {
             Some(_control) => {
-                cancellation.request_cancel();
-                return Ok(ResourceTransportOutcome::Cancelled);
+                match resource_transport_cancellation_action(cancellation.request_cancel()) {
+                    ResourceTransportCancellationAction::ReturnCancelled => {
+                        return Ok(ResourceTransportOutcome::Cancelled);
+                    }
+                    ResourceTransportCancellationAction::ContinueCommitted => {
+                        (&mut start)
+                            .await
+                            .map_err(|_| ResourceTransportFailure::Transport)?
+                    }
+                }
             }
             None => return Err(ResourceTransportFailure::Transport),
         },
@@ -1007,6 +2044,13 @@ async fn run_authenticated_resource_transport(
         return Err(ResourceTransportFailure::Shape);
     }
 
+    if cancellation.is_requested() {
+        // Cancellation can arrive after the acceptance commit check and before
+        // the producer publishes its acceptance. Do not issue a pull to a
+        // producer that is already terminating without a response.
+        drop(producer);
+        return Ok(ResourceTransportOutcome::Cancelled);
+    }
     let mut scalar_value = None;
     let mut next_batch_sequence = 0_u64;
     let mut total_items = 0_u64;
@@ -1026,16 +2070,26 @@ async fn run_authenticated_resource_transport(
         } else {
             ResourceCredit::new(1, byte_credit).ok_or(ResourceTransportFailure::Shape)?
         };
+        let pull = producer.pull(credit);
+        tokio::pin!(pull);
         let event = tokio::select! {
             biased;
             control = controls.recv() => match control {
                 Some(_control) => {
-                    producer.cancel();
-                    return Ok(ResourceTransportOutcome::Cancelled);
+                    match resource_transport_cancellation_action(producer.cancel()) {
+                        ResourceTransportCancellationAction::ReturnCancelled => {
+                            return Ok(ResourceTransportOutcome::Cancelled);
+                        }
+                        ResourceTransportCancellationAction::ContinueCommitted => {
+                            (&mut pull)
+                                .await
+                                .map_err(|_| ResourceTransportFailure::Transport)?
+                        }
+                    }
                 }
                 None => return Err(ResourceTransportFailure::Transport),
             },
-            event = producer.pull(credit) => event.map_err(|_| ResourceTransportFailure::Transport)?,
+            event = &mut pull => event.map_err(|_| ResourceTransportFailure::Transport)?,
         };
         match event {
             AuthenticatedServerResourceEvent::Values {
@@ -1077,18 +2131,33 @@ async fn run_authenticated_resource_transport(
                         scalar_value = values.into_iter().next();
                     }
                     ProtocolResourceKind::Stream => {
-                        let sent = send_resource_outcome(
-                            completion_sender,
-                            &mut controls,
-                            Ok(ResourceTransportOutcome::StreamValues(values)),
-                        )
-                        .await;
+                        let send = completion_sender
+                            .send(Ok(ResourceTransportOutcome::StreamValues(values)));
+                        tokio::pin!(send);
+                        let sent = tokio::select! {
+                            biased;
+                            result = &mut send => result
+                                .map(|_| ())
+                                .map_err(|_| ResourceTransportFailure::Transport),
+                            control = controls.recv() => match control {
+                                Some(_control) => {
+                                    match resource_transport_cancellation_action(producer.cancel()) {
+                                        ResourceTransportCancellationAction::ReturnCancelled => {
+                                            return Ok(ResourceTransportOutcome::Cancelled);
+                                        }
+                                        ResourceTransportCancellationAction::ContinueCommitted => {
+                                            (&mut send)
+                                                .await
+                                                .map(|_| ())
+                                                .map_err(|_| ResourceTransportFailure::Transport)
+                                        }
+                                    }
+                                }
+                                None => Err(ResourceTransportFailure::Transport),
+                            },
+                        };
                         match sent {
-                            Ok(Some(_control)) => {
-                                producer.cancel();
-                                return Ok(ResourceTransportOutcome::Cancelled);
-                            }
-                            Ok(None) => {}
+                            Ok(()) => {}
                             Err(error) => {
                                 producer.cancel();
                                 return Err(error);
@@ -1619,13 +2688,7 @@ pub fn run_installed_invoke(
             )
         })?;
 
-    runtime.block_on(host_invoke(
-        kernel,
-        request,
-        stdout,
-        stderr,
-        ResourceTransportSource::Installed(PersistentResourceTransport::empty()),
-    ))
+    runtime.block_on(host_invoke(kernel, request, stdout, stderr))
 }
 
 /// Runs one installed sealed `orna invoke` command against a caller-supplied
@@ -1644,18 +2707,7 @@ pub async fn run_invoke_with_kernel(
     stdout: &mut impl Write,
     stderr: &mut impl Write,
 ) -> Result<InstalledInvokeOutcome, InstalledInvokeError> {
-    host_invoke(
-        kernel.clone(),
-        request,
-        stdout,
-        stderr,
-        ResourceTransportSource::Injected(InjectedResourceTransport::Factory {
-            kernel,
-            resources: LocalRawSocketResources::new(),
-            transport: PersistentResourceTransport::empty(),
-        }),
-    )
-    .await
+    host_invoke(kernel, request, stdout, stderr).await
 }
 
 async fn host_invoke(
@@ -1663,7 +2715,6 @@ async fn host_invoke(
     request: InstalledInvokeRequest,
     stdout: &mut impl Write,
     stderr: &mut impl Write,
-    transport: ResourceTransportSource,
 ) -> Result<InstalledInvokeOutcome, InstalledInvokeError> {
     let active = kernel.recover().await.map_err(|_| {
         InstalledInvokeError::new(
@@ -1708,28 +2759,64 @@ async fn host_invoke(
         )
     })?;
 
-    let uid = nix::unistd::geteuid().as_raw();
-    let session = kernel
-        .authenticate_local_peer(uid)
-        .await
-        .map_err(map_authentication_error)?;
-    let transport = transport.bind_authenticated(&kernel, &session, &active, &registry);
-    let mut resource_executor = InstalledClientResourceExecutor {
-        active: active.clone(),
-        next_stream_id: 1,
-        transport: Some(transport),
-        pending: None,
-        detached: Vec::new(),
-    };
-    let result = kernel
-        .dispatch_sealed_sys_invoke_with_resource_executor(
-            &session,
-            CONNECTION_PROTOCOL_MAJOR,
-            &retained,
-            Some(&mut resource_executor),
+    let (server_end, client_end) = StandardUnixStream::pair().map_err(|_| {
+        InstalledInvokeError::new(
+            InstalledInvokeErrorKind::Authentication,
+            "the local invoke connection could not be created".to_owned(),
         )
+    })?;
+    let (broker, receiver) = SharedInvokeBroker::pending();
+    let mut server_task = tokio::spawn(serve_local_raw_stream_with_broker(
+        kernel.clone(),
+        server_end,
+        LocalRawSocketResources::new(),
+        Some(broker.clone()),
+    ));
+    if broker
+        .activate(client_end, active.clone(), registry.clone(), receiver)
         .await
-        .map_err(map_dispatch_error)?;
+        .is_err()
+    {
+        broker.shutdown().await;
+        if tokio::time::timeout(RESOURCE_FRAME_TIMEOUT, &mut server_task)
+            .await
+            .is_err()
+        {
+            server_task.abort();
+            let _ = server_task.await;
+        }
+        return Err(InstalledInvokeError::new(
+            InstalledInvokeErrorKind::Authentication,
+            "the local invoke connection could not authenticate".to_owned(),
+        ));
+    }
+    let result = broker.invoke(retained).await.map_err(|error| match error {
+        ResourceTransportFailure::Cancelled => InstalledInvokeError::new(
+            InstalledInvokeErrorKind::Cancelled,
+            "invocation cancelled".to_owned(),
+        ),
+        ResourceTransportFailure::Shape => InstalledInvokeError::new(
+            InstalledInvokeErrorKind::Internal,
+            "the local invoke connection returned an invalid frame".to_owned(),
+        ),
+        ResourceTransportFailure::RootSealedDispatchInternal => InstalledInvokeError::new(
+            InstalledInvokeErrorKind::Internal,
+            "sealed dispatch failed".to_owned(),
+        ),
+        ResourceTransportFailure::Transport => InstalledInvokeError::new(
+            InstalledInvokeErrorKind::Internal,
+            "the local invoke connection failed".to_owned(),
+        ),
+    });
+    broker.shutdown().await;
+    if tokio::time::timeout(RESOURCE_FRAME_TIMEOUT, &mut server_task)
+        .await
+        .is_err()
+    {
+        server_task.abort();
+        let _ = server_task.await;
+    }
+    let result = result?;
 
     render_result(&result, request.no_progress, stdout, stderr, &mut |value| {
         encode_constructed_value(&active, &registry, value).map_err(|_| {
@@ -2391,23 +3478,6 @@ fn map_host_error(error: EmbeddedHostError) -> InstalledInvokeError {
     )
 }
 
-fn map_authentication_error(error: PostgresKernelError) -> InstalledInvokeError {
-    match error {
-        PostgresKernelError::LocalPeerAuthentication(_) => InstalledInvokeError::new(
-            InstalledInvokeErrorKind::Authentication,
-            "the local peer could not be authenticated".to_owned(),
-        ),
-        other => map_dispatch_error(other),
-    }
-}
-
-fn map_dispatch_error(_error: PostgresKernelError) -> InstalledInvokeError {
-    InstalledInvokeError::new(
-        InstalledInvokeErrorKind::Internal,
-        "sealed dispatch failed".to_owned(),
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2428,7 +3498,7 @@ mod tests {
         value::RuntimeValue,
     };
     use orna_protocol::{
-        InvocationEventBatch, InvocationEventRecord, ResourceAccepted, ResourceCompleted,
+        InvocationEventBatch, InvocationEventRecord, ResourceAccepted, ResourceCompleted, ResourceFailed,
         ResourceValues, decode_resource_client_frame, encode_resource_server_frame,
     };
     use orna_standard::{
@@ -2483,6 +3553,640 @@ mod tests {
         .expect("event batch")
     }
 
+    #[tokio::test]
+    async fn shared_broker_reader_retains_partial_frames_across_polling() {
+        let (mut client, server) = tokio::io::duplex(64);
+        let (sender, mut receiver) = mpsc::channel(1);
+        let reader = tokio::spawn(read_shared_broker_frames(server, sender));
+        let frame = [0_u8; 18];
+        client.write_all(&frame[..5]).await.expect("partial frame write");
+        assert!(tokio::time::timeout(Duration::from_millis(10), receiver.recv())
+            .await
+            .is_err());
+        client.write_all(&frame[5..]).await.expect("frame remainder write");
+        let decoded = tokio::time::timeout(Duration::from_secs(1), receiver.recv())
+            .await
+            .expect("frame arrives")
+            .expect("reader remains connected")
+            .expect("valid frame");
+        assert_eq!(decoded.bytes, frame);
+        reader.abort();
+        let _ = reader.await;
+    }
+
+    #[tokio::test]
+    async fn broker_stream_completion_queue_is_finite() {
+        let (sender, mut receiver) = mpsc::channel::<Result<ResourceTransportOutcome, ResourceTransportFailure>>(
+            BROKER_RESOURCE_COMPLETION_CAPACITY,
+        );
+        for _ in 0..BROKER_RESOURCE_COMPLETION_CAPACITY {
+            sender
+                .send(Ok(ResourceTransportOutcome::StreamCompleted))
+                .await
+                .expect("queue accepts its configured capacity");
+        }
+        assert!(tokio::time::timeout(
+            Duration::from_millis(10),
+            sender.send(Ok(ResourceTransportOutcome::StreamCompleted)),
+        )
+        .await
+        .is_err());
+        let _ = receiver.recv().await;
+    }
+
+    #[tokio::test]
+    async fn shared_broker_drops_known_terminal_frames_and_rejects_unknown_streams() {
+        let (active, registry) = transport_test_context();
+        let request = transport_test_request(active.pair(), 1);
+        let accepted = ResourceAccepted {
+            stream_id: request.stream_id,
+            request_id: request.request_id,
+            nested_invocation_id: InvocationId::from_bytes([0x40; 16]),
+            target_revision: request.target_revision,
+            resource_kind: request.resource_kind,
+        };
+        let value = RuntimeValue::Integer(7);
+        let byte_count = encode_constructed_value(&active, &registry, &value)
+            .expect("encoded resource value")
+            .len() as u32;
+        let values = ResourceValues {
+            stream_id: request.stream_id,
+            request_id: request.request_id,
+            batch_sequence: 0,
+            item_count: 1,
+            byte_count,
+            values: vec![value],
+        };
+        let completed = ResourceCompleted {
+            stream_id: request.stream_id,
+            request_id: request.request_id,
+            final_batch_sequence: 0,
+            total_items: 1,
+        };
+        let protocol = {
+            let mut protocol = ResourceProtocolConnection::new();
+            protocol.open(request.clone()).expect("resource request opens");
+            protocol
+        };
+        let (completion, mut completions) = mpsc::channel(2);
+        let mut resources = BTreeMap::from([(
+            request.stream_id,
+            BrokerResourceState {
+                request: request.clone(),
+                expected_type: ResolvedType::Scalar(StandardScalar::Integer),
+                resource_kind: ProtocolResourceKind::Single,
+                protocol,
+                completion,
+                accepted: false,
+                scalar_value: None,
+                cancellation_requested: false,
+                stream_values_seen: false,
+            },
+        )]);
+        let mut tombstones = BrokerResourceTombstones::new();
+        let mut root = None;
+        let (_reader, mut writer) = tokio::io::duplex(128);
+
+        for frame in [
+            ResourceServerFrame::Accepted(accepted),
+            ResourceServerFrame::Values(values),
+            ResourceServerFrame::Completed(completed),
+        ] {
+            let bytes = encode_resource_server_frame(&active, &registry, &frame)
+                .expect("encoded resource response");
+            handle_shared_broker_frame(
+                BrokerWireFrame { resource: true, bytes },
+                &mut writer,
+                &active,
+                &registry,
+                &mut root,
+                &mut resources,
+                &mut tombstones,
+            )
+            .await
+            .expect("valid resource response");
+        }
+        assert!(resources.is_empty());
+        assert_eq!(tombstones.len(), 1);
+        assert!(matches!(
+            completions.recv().await,
+            Some(Ok(ResourceTransportOutcome::Ready(RuntimeValue::Integer(7))))
+        ));
+
+        let late_bytes = encode_resource_server_frame(
+            &active,
+            &registry,
+            &ResourceServerFrame::Completed(completed),
+        )
+        .expect("encoded late resource response");
+        handle_shared_broker_frame(
+            BrokerWireFrame {
+                resource: true,
+                bytes: late_bytes,
+            },
+            &mut writer,
+            &active,
+            &registry,
+            &mut root,
+            &mut resources,
+            &mut tombstones,
+        )
+        .await
+        .expect("late terminal response is dropped");
+        assert!(completions.try_recv().is_err());
+        assert!(resources.is_empty());
+        assert_eq!(tombstones.len(), 1);
+
+        let mismatched_bytes = encode_resource_server_frame(
+            &active,
+            &registry,
+            &ResourceServerFrame::Completed(ResourceCompleted {
+                request_id: InvocationId::from_bytes([0xaa; 16]),
+                ..completed
+            }),
+        )
+        .expect("encoded mismatched late resource response");
+        assert!(matches!(
+            handle_shared_broker_frame(
+                BrokerWireFrame {
+                    resource: true,
+                    bytes: mismatched_bytes,
+                },
+                &mut writer,
+                &active,
+                &registry,
+                &mut root,
+                &mut resources,
+                &mut tombstones,
+            )
+            .await,
+            Err(ResourceTransportFailure::Shape)
+        ));
+
+        let unknown_request = transport_test_request(active.pair(), 2);
+        let unknown_bytes = encode_resource_server_frame(
+            &active,
+            &registry,
+            &ResourceServerFrame::Failed(ResourceFailed {
+                stream_id: unknown_request.stream_id,
+                request_id: unknown_request.request_id,
+                failure: CallFailure::ExecuteDenied,
+            }),
+        )
+        .expect("encoded unknown resource response");
+        assert!(matches!(
+            handle_shared_broker_frame(
+                BrokerWireFrame {
+                    resource: true,
+                    bytes: unknown_bytes,
+                },
+                &mut writer,
+                &active,
+                &registry,
+                &mut root,
+                &mut resources,
+                &mut tombstones,
+            )
+            .await,
+            Err(ResourceTransportFailure::Shape)
+        ));
+    }
+
+    #[test]
+    fn shared_broker_resource_expectations_require_exact_request_identity() {
+        let (active, _) = transport_test_context();
+        let (broker, _receiver) = SharedInvokeBroker::pending();
+        let request = transport_test_request(active.pair(), 1);
+        assert!(broker.register_expected_resource_request(&request));
+        assert!(!broker.register_expected_resource_request(&request));
+
+        let mut mismatched = request.clone();
+        mismatched.generation += 1;
+        assert!(!broker.take_expected_resource_request(&mismatched));
+        assert!(broker.take_expected_resource_request(&request));
+        assert!(!broker.take_expected_resource_request(&request));
+    }
+
+    #[test]
+    fn shared_broker_terminal_tombstones_are_bounded() {
+        let mut tombstones = BrokerResourceTombstones::new();
+        for stream_id in 1..=(BROKER_RESOURCE_TOMBSTONE_CAPACITY as u64 + 1) {
+            remember_broker_resource_terminal(
+                &mut tombstones,
+                stream_id,
+                InvocationId::from_bytes([stream_id as u8; 16]),
+            );
+        }
+        assert_eq!(tombstones.len(), BROKER_RESOURCE_TOMBSTONE_CAPACITY);
+        assert!(!tombstones.contains_key(&1));
+        assert!(tombstones.contains_key(&(BROKER_RESOURCE_TOMBSTONE_CAPACITY as u64 + 1)));
+    }
+
+    #[test]
+    fn shared_broker_reconstructs_completed_root_events() {
+        let events = echo_events();
+        let invocation = events.records()[0].event().invocation_id();
+        let result = reconstruct_shared_root_result(invocation, events.records().to_vec())
+            .expect("completed root result");
+        assert!(matches!(result, SealedInvocationResult::Completed { .. }));
+    }
+
+    #[test]
+    fn shared_broker_reconstructs_failed_root_events() {
+        let invocation = InvocationId::new();
+        let started = InvokeEvent::new(
+            invocation,
+            0,
+            InvocationEventBody::Started {
+                visible_principal: None,
+            },
+        )
+        .expect("started event");
+        let failure = orna_core::invocation::InvocationFailure::new(
+            orna_core::invocation::InvocationFailurePhase::Target,
+            "TARGET_FAILED",
+            "invocation failed",
+            None,
+            orna_core::invocation::InvocationRetryability::No,
+        )
+        .expect("failure event");
+        let failed = InvokeEvent::new(invocation, 1, InvocationEventBody::Failed(failure))
+            .expect("failed event");
+        let result = reconstruct_shared_root_result(
+            invocation,
+            vec![
+                InvocationEventRecord::new(1, started),
+                InvocationEventRecord::new(2, failed),
+            ],
+        )
+        .expect("failed root result");
+        assert!(matches!(result, SealedInvocationResult::Failed { .. }));
+    }
+
+    #[test]
+    fn shared_broker_maps_redacted_root_failure_classes() {
+        let redacted_result = |code: &str| {
+            let invocation = InvocationId::new();
+            let started = InvokeEvent::new(
+                invocation,
+                0,
+                InvocationEventBody::Started {
+                    visible_principal: None,
+                },
+            )
+            .expect("started event");
+            let failure = orna_core::invocation::InvocationFailure::new(
+                orna_core::invocation::InvocationFailurePhase::Internal,
+                code,
+                "redacted failure",
+                None,
+                orna_core::invocation::InvocationRetryability::No,
+            )
+            .expect("failure event");
+            let failed = InvokeEvent::new(invocation, 1, InvocationEventBody::Failed(failure))
+                .expect("failed event");
+            reconstruct_shared_root_result(
+                invocation,
+                vec![
+                    InvocationEventRecord::new(1, started),
+                    InvocationEventRecord::new(2, failed),
+                ],
+            )
+        };
+        assert!(matches!(
+            redacted_result("INVOKE_DENIED"),
+            Ok(SealedInvocationResult::Denied { .. })
+        ));
+        assert!(matches!(
+            redacted_result("INVOKE_PRESENTATION_FAILURE"),
+            Ok(SealedInvocationResult::PresentationFailed { .. })
+        ));
+        assert!(matches!(
+            redacted_result("INVOKE_INTERNAL_FAILURE"),
+            Err(ResourceTransportFailure::RootSealedDispatchInternal)
+        ));
+    }
+
+    #[test]
+    fn shared_broker_maps_cancelled_root_terminal_to_cancelled_transport() {
+        let invocation = InvocationId::new();
+        let started = InvokeEvent::new(
+            invocation,
+            0,
+            InvocationEventBody::Started {
+                visible_principal: None,
+            },
+        )
+        .expect("started event");
+        let cancelled = InvokeEvent::new(
+            invocation,
+            1,
+            InvocationEventBody::Cancelled { reason: None },
+        )
+        .expect("cancelled event");
+        let result = reconstruct_shared_root_result(
+            invocation,
+            vec![
+                InvocationEventRecord::new(1, started),
+                InvocationEventRecord::new(2, cancelled),
+            ],
+        );
+        assert!(matches!(result, Err(ResourceTransportFailure::Cancelled)));
+    }
+
+    #[tokio::test]
+    async fn broker_publishes_late_committed_failure_after_cancel() {
+        let (active, registry) = transport_test_context();
+        let request = transport_test_request(active.pair(), 1);
+        let nested_invocation_id = InvocationId::from_bytes([0x40; 16]);
+        let accepted = ResourceAccepted {
+            stream_id: request.stream_id,
+            request_id: request.request_id,
+            nested_invocation_id,
+            target_revision: request.target_revision,
+            resource_kind: request.resource_kind,
+        };
+        let mut protocol = ResourceProtocolConnection::new();
+        protocol.open(request.clone()).expect("resource request opens");
+        protocol
+            .apply_constructed(
+                &active,
+                &registry,
+                ResourceServerFrame::Accepted(accepted),
+            )
+            .expect("resource acceptance applies");
+        protocol
+            .receive(ResourceClientFrame::Cancel(ResourceCancel {
+                stream_id: request.stream_id,
+                request_id: request.request_id,
+                reason: ResourceCancellationCode::ParentInvocationCancelled,
+            }))
+            .expect("resource cancellation applies");
+        let (completion, mut completions) = mpsc::channel(2);
+        let mut state = BrokerResourceState {
+            request: request.clone(),
+            expected_type: ResolvedType::Scalar(StandardScalar::Integer),
+            resource_kind: ProtocolResourceKind::Single,
+            protocol,
+            completion,
+            accepted: true,
+            scalar_value: None,
+            cancellation_requested: true,
+            stream_values_seen: false,
+        };
+        let (_reader, mut writer) = tokio::io::duplex(128);
+        let keep = handle_shared_resource_frame(
+            &mut state,
+            ResourceServerFrame::Failed(ResourceFailed {
+                stream_id: request.stream_id,
+                request_id: request.request_id,
+                failure: CallFailure::ExecuteDenied,
+            }),
+            &mut writer,
+            &active,
+            &registry,
+        )
+        .await
+        .expect("late committed failure is valid");
+        assert!(!keep);
+        assert!(matches!(
+            completions.recv().await,
+            Some(Ok(ResourceTransportOutcome::Failed {
+                failure: CallFailure::ExecuteDenied
+            }))
+        ));
+    }
+
+    #[tokio::test]
+    async fn broker_publishes_late_committed_completed_after_cancel() {
+        let (active, registry) = transport_test_context();
+        let request = transport_test_request(active.pair(), 1);
+        let accepted = ResourceAccepted {
+            stream_id: request.stream_id,
+            request_id: request.request_id,
+            nested_invocation_id: InvocationId::from_bytes([0x40; 16]),
+            target_revision: request.target_revision,
+            resource_kind: request.resource_kind,
+        };
+        let value = RuntimeValue::Integer(7);
+        let byte_count = encode_constructed_value(&active, &registry, &value)
+            .expect("encoded resource value")
+            .len() as u32;
+        let values = ResourceValues {
+            stream_id: request.stream_id,
+            request_id: request.request_id,
+            batch_sequence: 0,
+            item_count: 1,
+            byte_count,
+            values: vec![value],
+        };
+        let mut protocol = ResourceProtocolConnection::new();
+        protocol.open(request.clone()).expect("resource request opens");
+        protocol
+            .apply_constructed(&active, &registry, ResourceServerFrame::Accepted(accepted))
+            .expect("resource acceptance applies");
+        protocol
+            .receive(ResourceClientFrame::Cancel(ResourceCancel {
+                stream_id: request.stream_id,
+                request_id: request.request_id,
+                reason: ResourceCancellationCode::ParentInvocationCancelled,
+            }))
+            .expect("resource cancellation applies");
+        let (completion, mut completions) = mpsc::channel(2);
+        let mut state = BrokerResourceState {
+            request: request.clone(),
+            expected_type: ResolvedType::Scalar(StandardScalar::Integer),
+            resource_kind: ProtocolResourceKind::Single,
+            protocol,
+            completion,
+            accepted: true,
+            scalar_value: None,
+            cancellation_requested: true,
+            stream_values_seen: false,
+        };
+        let (_reader, mut writer) = tokio::io::duplex(128);
+        assert!(
+            handle_shared_resource_frame(
+                &mut state,
+                ResourceServerFrame::Values(values),
+                &mut writer,
+                &active,
+                &registry,
+            )
+            .await
+            .expect("late committed values are drained")
+        );
+        let keep = handle_shared_resource_frame(
+            &mut state,
+            ResourceServerFrame::Completed(ResourceCompleted {
+                stream_id: request.stream_id,
+                request_id: request.request_id,
+                final_batch_sequence: 0,
+                total_items: 1,
+            }),
+            &mut writer,
+            &active,
+            &registry,
+        )
+        .await
+        .expect("late committed completion is published");
+        assert!(!keep);
+        assert!(matches!(
+            completions.recv().await,
+            Some(Ok(ResourceTransportOutcome::Ready(RuntimeValue::Integer(7))))
+        ));
+    }
+
+    #[tokio::test]
+    async fn broker_publishes_failure_for_dropped_late_completed_without_value() {
+        let (active, registry) = transport_test_context();
+        let request = transport_test_request(active.pair(), 1);
+        let accepted = ResourceAccepted {
+            stream_id: request.stream_id,
+            request_id: request.request_id,
+            nested_invocation_id: InvocationId::from_bytes([0x40; 16]),
+            target_revision: request.target_revision,
+            resource_kind: request.resource_kind,
+        };
+        let mut protocol = ResourceProtocolConnection::new();
+        protocol.open(request.clone()).expect("resource request opens");
+        protocol
+            .apply_constructed(&active, &registry, ResourceServerFrame::Accepted(accepted))
+            .expect("resource acceptance applies");
+        protocol
+            .receive(ResourceClientFrame::Cancel(ResourceCancel {
+                stream_id: request.stream_id,
+                request_id: request.request_id,
+                reason: ResourceCancellationCode::ParentInvocationCancelled,
+            }))
+            .expect("resource cancellation applies");
+        let (completion, mut completions) = mpsc::channel(2);
+        let mut state = BrokerResourceState {
+            request: request.clone(),
+            expected_type: ResolvedType::Scalar(StandardScalar::Integer),
+            resource_kind: ProtocolResourceKind::Single,
+            protocol,
+            completion,
+            accepted: true,
+            scalar_value: None,
+            cancellation_requested: true,
+            stream_values_seen: false,
+        };
+        let (_reader, mut writer) = tokio::io::duplex(128);
+        let keep = handle_shared_resource_frame(
+            &mut state,
+            ResourceServerFrame::Completed(ResourceCompleted {
+                stream_id: request.stream_id,
+                request_id: request.request_id,
+                final_batch_sequence: 0,
+                total_items: 1,
+            }),
+            &mut writer,
+            &active,
+            &registry,
+        )
+        .await
+        .expect("late committed completion closes the resource");
+        assert!(!keep);
+        assert!(matches!(
+            completions.recv().await,
+            Some(Err(ResourceTransportFailure::Shape))
+        ));
+    }
+
+    #[tokio::test]
+    async fn broker_publishes_failure_before_acceptance_after_cancel() {
+        let (active, registry) = transport_test_context();
+        let request = transport_test_request(active.pair(), 1);
+        let mut protocol = ResourceProtocolConnection::new();
+        protocol.open(request.clone()).expect("resource request opens");
+        protocol
+            .receive(ResourceClientFrame::Cancel(ResourceCancel {
+                stream_id: request.stream_id,
+                request_id: request.request_id,
+                reason: ResourceCancellationCode::ParentInvocationCancelled,
+            }))
+            .expect("resource cancellation applies");
+        let (completion, mut completions) = mpsc::channel(2);
+        let mut state = BrokerResourceState {
+            request: request.clone(),
+            expected_type: ResolvedType::Scalar(StandardScalar::Integer),
+            resource_kind: ProtocolResourceKind::Single,
+            protocol,
+            completion,
+            accepted: false,
+            scalar_value: None,
+            cancellation_requested: true,
+            stream_values_seen: false,
+        };
+        let (_reader, mut writer) = tokio::io::duplex(128);
+        let keep = handle_shared_resource_frame(
+            &mut state,
+            ResourceServerFrame::Failed(ResourceFailed {
+                stream_id: request.stream_id,
+                request_id: request.request_id,
+                failure: CallFailure::ExecuteDenied,
+            }),
+            &mut writer,
+            &active,
+            &registry,
+        )
+        .await
+        .expect("late failure closes the resource");
+        assert!(!keep);
+        assert!(matches!(
+            completions.recv().await,
+            Some(Ok(ResourceTransportOutcome::Failed {
+                failure: CallFailure::ExecuteDenied
+            }))
+        ));
+    }
+
+    #[tokio::test]
+    async fn cancelled_resource_terminal_ignores_closed_completion_receiver() {
+        let (active, _) = transport_test_context();
+        let request = transport_test_request(active.pair(), 1);
+        let (completion, receiver) = mpsc::channel(1);
+        drop(receiver);
+        let state = BrokerResourceState {
+            request,
+            expected_type: ResolvedType::Scalar(StandardScalar::Integer),
+            resource_kind: ProtocolResourceKind::Single,
+            protocol: ResourceProtocolConnection::new(),
+            completion,
+            accepted: true,
+            scalar_value: None,
+            cancellation_requested: true,
+            stream_values_seen: false,
+        };
+        send_shared_resource_terminal(&state, Ok(ResourceTransportOutcome::Cancelled))
+            .await
+            .expect("cancelled receiver closure is local completion");
+    }
+
+    #[tokio::test]
+    async fn live_resource_terminal_rejects_closed_completion_receiver() {
+        let (active, _) = transport_test_context();
+        let request = transport_test_request(active.pair(), 1);
+        let (completion, receiver) = mpsc::channel(1);
+        drop(receiver);
+        let state = BrokerResourceState {
+            request,
+            expected_type: ResolvedType::Scalar(StandardScalar::Integer),
+            resource_kind: ProtocolResourceKind::Single,
+            protocol: ResourceProtocolConnection::new(),
+            completion,
+            accepted: true,
+            scalar_value: None,
+            cancellation_requested: false,
+            stream_values_seen: false,
+        };
+        assert!(matches!(
+            send_shared_resource_terminal(&state, Ok(ResourceTransportOutcome::Cancelled)).await,
+            Err(ResourceTransportFailure::Transport)
+        ));
+    }
+
     #[test]
     fn cancellation_disposition_preserves_committed_terminals_and_drops_late_frames() {
         use orna_protocol::ResourceFrameDisposition::{Applied, DroppedLate};
@@ -2506,6 +4210,18 @@ mod tests {
         assert_eq!(
             resource_transport_disposition_action(DroppedLate, false, true),
             ResourceFrameDispositionAction::Reject,
+        );
+    }
+
+    #[test]
+    fn cancellation_decision_only_returns_cancelled_when_request_wins() {
+        assert_eq!(
+            resource_transport_cancellation_action(true),
+            ResourceTransportCancellationAction::ReturnCancelled,
+        );
+        assert_eq!(
+            resource_transport_cancellation_action(false),
+            ResourceTransportCancellationAction::ContinueCommitted,
         );
     }
 
@@ -3066,6 +4782,8 @@ mod tests {
             request_id: InvocationId::from_bytes([stream_id as u8; 16]),
             parent_invocation_id: InvocationId::from_bytes([0x21; 16]),
             call_site_id: orna_core::CallSiteId::from_bytes([0x22; 16]),
+            state_profile: String::new(),
+            function_instance_key: String::new(),
             target_function_id: FunctionId::from_bytes([0x23; 16]),
             target_revision: revision,
             generation: stream_id,
