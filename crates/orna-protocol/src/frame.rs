@@ -6443,6 +6443,57 @@ mod tests {
     }
 
     #[test]
+    fn resource_connection_rejects_acceptance_identity_mismatches_without_mutating_state() {
+        let request = resource_request_fixture();
+        let request_id = request.request_id;
+        let mut connection = ResourceProtocolConnection::new();
+        assert_eq!(connection.open(request.clone()), Ok(ResourceFrameDisposition::Applied));
+
+        assert_eq!(
+            connection.apply(ResourceServerFrame::Accepted(ResourceAccepted {
+                stream_id: request.stream_id,
+                request_id,
+                nested_invocation_id: InvocationId::from_bytes([0x59; 16]),
+                target_revision: request.target_revision,
+                resource_kind: ResourceKind::Stream,
+            })),
+            Err(ResourceConnectionError::ResourceAcceptanceMismatch {
+                stream_id: request.stream_id,
+            }),
+        );
+        assert_eq!(connection.live_resources(), 1);
+
+        assert_eq!(
+            connection.apply(ResourceServerFrame::Accepted(ResourceAccepted {
+                stream_id: request.stream_id,
+                request_id,
+                nested_invocation_id: InvocationId::from_bytes([0x5a; 16]),
+                target_revision: RevisionPair::new(
+                    SourceRevisionId::from_bytes([0x60; 16]),
+                    CatalogueRevisionId::from_bytes([0x61; 16]),
+                ),
+                resource_kind: request.resource_kind,
+            })),
+            Err(ResourceConnectionError::ResourceAcceptanceMismatch {
+                stream_id: request.stream_id,
+            }),
+        );
+        assert_eq!(connection.live_resources(), 1);
+
+        assert_eq!(
+            connection.apply(ResourceServerFrame::Accepted(ResourceAccepted {
+                stream_id: request.stream_id,
+                request_id,
+                nested_invocation_id: InvocationId::from_bytes([0x62; 16]),
+                target_revision: request.target_revision,
+                resource_kind: request.resource_kind,
+            })),
+            Ok(ResourceFrameDisposition::Applied),
+        );
+        assert_eq!(connection.live_resources(), 1);
+    }
+
+    #[test]
     fn resource_connection_rejects_multi_value_scalar_batches() {
         let request = resource_request_fixture();
         let request_id = request.request_id;
