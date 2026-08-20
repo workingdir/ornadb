@@ -16,6 +16,7 @@ const RESOURCE_CANCELLATION_COMMITTED: u8 = 3;
 #[derive(Clone, Debug)]
 pub struct ResourceCancellation {
     state: Arc<Mutex<u8>>,
+    notify: Arc<tokio::sync::Notify>,
 }
 
 impl ResourceCancellation {
@@ -23,20 +24,48 @@ impl ResourceCancellation {
     pub fn new() -> Self {
         Self {
             state: Arc::new(Mutex::new(RESOURCE_CANCELLATION_RUNNING)),
+            notify: Arc::new(tokio::sync::Notify::new()),
         }
     }
 
     /// Requests cancellation and returns whether this request won the race.
     pub fn request_cancel(&self) -> bool {
-        let mut state = self
+        let won = {
+            let mut state = self
+                .state
+                .lock()
+                .expect("resource cancellation state is not poisoned");
+            if *state != RESOURCE_CANCELLATION_RUNNING {
+                false
+            } else {
+                *state = RESOURCE_CANCELLATION_REQUESTED;
+                true
+            }
+        };
+        if won {
+            self.notify.notify_waiters();
+        }
+        won
+    }
+
+    /// Returns whether cancellation has won the terminal commit race.
+    pub fn is_requested(&self) -> bool {
+        *self
             .state
             .lock()
-            .expect("resource cancellation state is not poisoned");
-        if *state != RESOURCE_CANCELLATION_RUNNING {
-            return false;
+            .expect("resource cancellation state is not poisoned")
+            == RESOURCE_CANCELLATION_REQUESTED
+    }
+
+    /// Waits until cancellation wins the terminal commit race.
+    pub async fn cancelled(&self) {
+        loop {
+            let notified = self.notify.notified();
+            if self.is_requested() {
+                return;
+            }
+            notified.await;
         }
-        *state = RESOURCE_CANCELLATION_REQUESTED;
-        true
     }
 
     /// Starts the terminal commit if cancellation has not won.

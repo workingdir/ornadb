@@ -25,7 +25,7 @@ use orna_core::{
     catalogue::CatalogueSnapshot, revision::ActiveDatabaseRevision, security::AuthenticatedSession,
     value::{OpaqueCodecRegistry, RuntimeValue},
 };
-use orna_postgres::{PostgresKernel, PostgresKernelError};
+use orna_postgres::{PostgresKernel, PostgresKernelError, ResourceCancellation};
 use orna_protocol::{
     CallFailure, ClientAction, ClientFrame, ConnectionError, FrameCodecError,
     MAX_FRAME_PAYLOAD_LENGTH, ProtocolConnection, RawCall, ResourceClientFrame,
@@ -943,12 +943,16 @@ struct ResourceDispatchCompletion {
 
 struct StartedResourceDispatch {
     future: ResourceDispatchFuture,
+    cancellation: ResourceCancellation,
+}
+
+struct ResourceTask {
+    handle: JoinHandle<()>,
+    cancellation: ResourceCancellation,
 }
 
 type DispatchFuture = Pin<Box<dyn Future<Output = DispatchCompletion> + Send>>;
 type ResourceDispatchFuture = Pin<Box<dyn Future<Output = ResourceDispatchCompletion> + Send>>;
-type ResourceCancellationFuture =
-    Pin<Box<dyn Future<Output = Result<(), PostgresKernelError>> + Send>>;
 
 #[derive(Clone)]
 struct RawDispatchService {
@@ -969,15 +973,8 @@ trait DispatchService: Clone + Send + Sync + 'static {
     }
 
     fn cancelled(&self, _stream: u64) {}
-
-    fn cancel_resource(
-        &self,
-        _session: AuthenticatedSession,
-        _request: ResourceRequest,
-    ) -> ResourceCancellationFuture {
-        Box::pin(async { Ok(()) })
-    }
 }
+
 impl DispatchService for RawDispatchService {
     fn start(&self, session: AuthenticatedSession, stream: u64, call: RawCall) -> StartedDispatch {
         let dispatch = RawClientDispatch::new(self.kernel.clone(), session, stream, call);
@@ -1005,28 +1002,27 @@ impl DispatchService for RawDispatchService {
         version: RawProtocolVersion,
     ) -> Option<StartedResourceDispatch> {
         let kernel = self.kernel.clone();
+        let cancellation = ResourceCancellation::new();
+        let operation_cancellation = cancellation.clone();
         let future = Box::pin(async move {
             let _operation = resources.acquire_kernel_operation().await;
             let result = kernel
-                .dispatch_authenticated_server_resource(&session, &request)
+                .dispatch_authenticated_server_resource_with_cancellation(
+                    &session,
+                    &request,
+                    &operation_cancellation,
+                )
                 .await;
-            ResourceDispatchCompletion {
-                actions: resource_completion_actions(&version, &request, result),
-            }
+            let actions = match result {
+                Ok(Some(result)) => resource_completion_actions(&version, &request, Ok(result)),
+                Ok(None) => VecDeque::new(),
+                Err(error) => resource_completion_actions(&version, &request, Err(error)),
+            };
+            ResourceDispatchCompletion { actions }
         });
-        Some(StartedResourceDispatch { future })
-    }
-
-    fn cancel_resource(
-        &self,
-        session: AuthenticatedSession,
-        request: ResourceRequest,
-    ) -> ResourceCancellationFuture {
-        let kernel = self.kernel.clone();
-        Box::pin(async move {
-            kernel
-                .record_cancelled_resource_audit(&session, &request)
-                .await
+        Some(StartedResourceDispatch {
+            future,
+            cancellation,
         })
     }
 }
@@ -1204,9 +1200,9 @@ async fn drive_versioned_authenticated_stream_until_shutdown<D: DispatchService>
     let mut retained_payload = BTreeMap::<u64, Vec<PayloadReservation>>::new();
     let mut cancelled = BTreeSet::<u64>::new();
     let mut pending = BTreeMap::<u64, DispatchCompletion>::new();
-    let mut resource_cancelled = BTreeSet::<u64>::new();
+    let mut resource_cancelled = BTreeMap::<u64, orna_protocol::ResourceCancel>::new();
     let mut resource_pending = BTreeMap::<u64, ResourceDispatchCompletion>::new();
-    let mut resource_tasks = BTreeMap::<u64, JoinHandle<()>>::new();
+    let mut resource_tasks = BTreeMap::<u64, ResourceTask>::new();
     let mut resource_requests = BTreeMap::<u64, ResourceRequest>::new();
     let mut tasks = JoinSet::<(u64, DispatchCompletion)>::new();
     let mut unstarted = VecDeque::<UnstartedDispatch>::new();
@@ -1344,9 +1340,12 @@ async fn drive_versioned_authenticated_stream_until_shutdown<D: DispatchService>
             Next::Completion(None) => {}
             Next::ResourceCompletion(Some((stream_id, completion))) => {
                 resource_tasks.remove(&stream_id);
-                if !resource_cancelled.contains(&stream_id) {
-                    resource_pending.insert(stream_id, completion);
-                }
+                store_resource_completion(
+                    stream_id,
+                    completion,
+                    &mut resource_pending,
+                    &mut resource_cancelled,
+                );
             }
             Next::ResourceCompletion(None) => {}
             Next::Shutdown => break Ok(()),
@@ -1362,10 +1361,10 @@ async fn drive_versioned_authenticated_stream_until_shutdown<D: DispatchService>
         start_one_dispatch(&mut unstarted, &mut tasks);
     }
     for task in resource_tasks.values() {
-        task.abort();
+        task.cancellation.request_cancel();
     }
     for (_, task) in std::mem::take(&mut resource_tasks) {
-        let _ = task.await;
+        let _ = task.handle.await;
     }
     resource_connection.shutdown();
     drain_resource_completions(
@@ -1374,26 +1373,7 @@ async fn drive_versioned_authenticated_stream_until_shutdown<D: DispatchService>
         &mut resource_cancelled,
         &mut resource_tasks,
     );
-    let mut cancellation_audit_failure = None;
-    for (stream_id, request) in std::mem::take(&mut resource_requests) {
-        let committed = resource_pending
-            .get(&stream_id)
-            .is_some_and(|completion| completion.actions.iter().any(resource_action_is_terminal));
-        if committed || resource_cancelled.contains(&stream_id) {
-            continue;
-        }
-        if let Err(source) = dispatcher
-            .cancel_resource(session.clone(), request)
-            .await
-        {
-            cancellation_audit_failure.get_or_insert(
-                LocalRawSocketError::ResourceCancellationAudit {
-                    source: Box::new(source),
-                },
-            );
-        }
-    }
-    let mut drain_failure = cancellation_audit_failure;
+    let mut drain_failure = None;
     while let Some(completion) = tasks.join_next().await {
         if let Err(source) = completion {
             drain_failure.get_or_insert(LocalRawSocketError::DispatchTask { source });
@@ -1408,19 +1388,47 @@ async fn drive_versioned_authenticated_stream_until_shutdown<D: DispatchService>
 fn drain_resource_completions(
     completion_receiver: &mut mpsc::UnboundedReceiver<(u64, ResourceDispatchCompletion)>,
     pending: &mut BTreeMap<u64, ResourceDispatchCompletion>,
-    cancelled: &mut BTreeSet<u64>,
-    tasks: &mut BTreeMap<u64, JoinHandle<()>>,
+    cancelled: &mut BTreeMap<u64, orna_protocol::ResourceCancel>,
+    tasks: &mut BTreeMap<u64, ResourceTask>,
 ) -> BTreeSet<u64> {
     let mut completed = BTreeSet::new();
     while let Ok((stream_id, completion)) = completion_receiver.try_recv() {
         tasks.remove(&stream_id);
-        if cancelled.remove(&stream_id) {
-            continue;
-        }
         completed.insert(stream_id);
-        pending.insert(stream_id, completion);
+        store_resource_completion(stream_id, completion, pending, cancelled);
     }
     completed
+}
+
+fn store_resource_completion(
+    stream_id: u64,
+    completion: ResourceDispatchCompletion,
+    pending: &mut BTreeMap<u64, ResourceDispatchCompletion>,
+    cancelled: &mut BTreeMap<u64, orna_protocol::ResourceCancel>,
+) {
+    if pending.contains_key(&stream_id) {
+        cancelled.remove(&stream_id);
+        return;
+    }
+    let completion = match cancelled.remove(&stream_id) {
+        Some(cancel) if completion.actions.is_empty() => cancelled_resource_completion(cancel),
+        _ => completion,
+    };
+    pending.insert(stream_id, completion);
+}
+
+fn cancelled_resource_completion(
+    cancel: orna_protocol::ResourceCancel,
+) -> ResourceDispatchCompletion {
+    ResourceDispatchCompletion {
+        actions: VecDeque::from([ResourceServerFrame::Cancelled(
+            orna_protocol::ResourceCancelled {
+                stream_id: cancel.stream_id,
+                request_id: cancel.request_id,
+                reason: cancel.reason,
+            },
+        )]),
+    }
 }
 fn resource_action_is_terminal(action: &ResourceServerFrame) -> bool {
     matches!(
@@ -1442,8 +1450,8 @@ async fn handle_resource_frame<D: DispatchService>(
     resources: &LocalRawSocketResources,
     connection: &mut ResourceProtocolConnection,
     pending: &mut BTreeMap<u64, ResourceDispatchCompletion>,
-    cancelled: &mut BTreeSet<u64>,
-    tasks: &mut BTreeMap<u64, JoinHandle<()>>,
+    cancelled: &mut BTreeMap<u64, orna_protocol::ResourceCancel>,
+    tasks: &mut BTreeMap<u64, ResourceTask>,
     requests: &mut BTreeMap<u64, ResourceRequest>,
     completion_sender: &mpsc::UnboundedSender<(u64, ResourceDispatchCompletion)>,
     completion_receiver: &mut mpsc::UnboundedReceiver<(u64, ResourceDispatchCompletion)>,
@@ -1465,10 +1473,6 @@ async fn handle_resource_frame<D: DispatchService>(
             .is_some_and(|action| resource_action_request_id(action) == cancel.request_id)
     });
     if let Some(cancel) = cancellation.filter(|_| !committed_completion) {
-        if let Some(task) = tasks.remove(&cancel.stream_id) {
-            task.abort();
-            let _ = task.await;
-        }
         let completed = drain_resource_completions(
             completion_receiver,
             pending,
@@ -1497,11 +1501,9 @@ async fn handle_resource_frame<D: DispatchService>(
             Ok(disposition) => disposition,
             Err(ResourceConnectionError::WrongState { stream_id })
                 if invalid_scalar_window_update => {
-                    if let Some(task) = tasks.remove(&stream_id) {
-                        task.abort();
-                        let _ = task.await;
+                    if let Some(task) = tasks.get(&stream_id) {
+                        task.cancellation.request_cancel();
                     }
-                    cancelled.insert(stream_id);
                     let request = requests
                         .get(&stream_id)
                         .expect("scalar resource request exists")
@@ -1520,24 +1522,30 @@ async fn handle_resource_frame<D: DispatchService>(
     if matches!(disposition, ResourceFrameDisposition::DroppedLate) {
         return Ok(true);
     }
-
     if let Some(request) = request {
-        if let Some(StartedResourceDispatch { future }) =
-            dispatcher.start_resource(
-                session.clone(),
-                request.clone(),
-                resources.clone(),
-                version.clone(),
-            )
-        {
+        if let Some(StartedResourceDispatch {
+            future,
+            cancellation,
+        }) = dispatcher.start_resource(
+            session.clone(),
+            request.clone(),
+            resources.clone(),
+            version.clone(),
+        ) {
             let stream_id = request.stream_id;
             let sender = completion_sender.clone();
-            let task = tokio::spawn(async move {
+            let handle = tokio::spawn(async move {
                 let completion = future.await;
                 let _ = sender.send((stream_id, completion));
             });
             requests.insert(stream_id, request.clone());
-            tasks.insert(stream_id, task);
+            tasks.insert(
+                stream_id,
+                ResourceTask {
+                    handle,
+                    cancellation,
+                },
+            );
         } else {
             pending.insert(
                 request.stream_id,
@@ -1547,37 +1555,26 @@ async fn handle_resource_frame<D: DispatchService>(
             );
         }
     }
-
     if let Some(cancel) = cancellation
         && !committed_completion
         && matches!(disposition, ResourceFrameDisposition::Applied)
     {
-        cancelled.insert(cancel.stream_id);
-        let request = requests.get(&cancel.stream_id).cloned().ok_or_else(|| {
-            LocalRawSocketError::ResourceConnection {
+        if !requests.contains_key(&cancel.stream_id) {
+            return Err(LocalRawSocketError::ResourceConnection {
                 source: ResourceConnectionError::UnknownStream {
                     stream_id: cancel.stream_id,
                 },
-            }
-        })?;
-        dispatcher
-            .cancel_resource(session.clone(), request)
-            .await
-            .map_err(|source| LocalRawSocketError::ResourceCancellationAudit {
-                source: Box::new(source),
-            })?;
-        pending.insert(
-            cancel.stream_id,
-            ResourceDispatchCompletion {
-                actions: VecDeque::from([ResourceServerFrame::Cancelled(
-                    orna_protocol::ResourceCancelled {
-                        stream_id: cancel.stream_id,
-                        request_id: cancel.request_id,
-                        reason: cancel.reason,
-                    },
-                )]),
-            },
-        );
+            });
+        }
+        let Some(task) = tasks.get(&cancel.stream_id) else {
+            return Err(LocalRawSocketError::ResourceConnection {
+                source: ResourceConnectionError::UnknownStream {
+                    stream_id: cancel.stream_id,
+                },
+            });
+        };
+        cancelled.insert(cancel.stream_id, cancel);
+        task.cancellation.request_cancel();
     }
     Ok(true)
 }
@@ -2213,6 +2210,7 @@ mod tests {
             let actions = resource_actions(&version, &request, vec![RuntimeValue::Integer(7)]);
             Some(StartedResourceDispatch {
                 future: Box::pin(async move { ResourceDispatchCompletion { actions } }),
+                cancellation: ResourceCancellation::new(),
             })
         }
     }
@@ -2244,6 +2242,7 @@ mod tests {
             );
             Some(StartedResourceDispatch {
                 future: Box::pin(async move { ResourceDispatchCompletion { actions } }),
+                cancellation: ResourceCancellation::new(),
             })
         }
     }
@@ -2272,23 +2271,23 @@ mod tests {
             _version: RawProtocolVersion,
         ) -> Option<StartedResourceDispatch> {
             let started = Arc::clone(&self.started);
+            let cancelled = Arc::clone(&self.cancelled);
+            let cancellation = ResourceCancellation::new();
+            let operation_cancellation = cancellation.clone();
             Some(StartedResourceDispatch {
                 future: Box::pin(async move {
                     started.notify_one();
-                    std::future::pending::<ResourceDispatchCompletion>().await
+                    tokio::select! {
+                        _ = operation_cancellation.cancelled() => {
+                            cancelled.store(true, Ordering::SeqCst);
+                            ResourceDispatchCompletion {
+                                actions: VecDeque::new(),
+                            }
+                        }
+                        completion = std::future::pending::<ResourceDispatchCompletion>() => completion,
+                    }
                 }),
-            })
-        }
-
-        fn cancel_resource(
-            &self,
-            _session: AuthenticatedSession,
-            _request: ResourceRequest,
-        ) -> ResourceCancellationFuture {
-            let cancelled = Arc::clone(&self.cancelled);
-            Box::pin(async move {
-                cancelled.store(true, Ordering::SeqCst);
-                Ok(())
+                cancellation,
             })
         }
     }
@@ -2318,11 +2317,21 @@ mod tests {
         ) -> Option<StartedResourceDispatch> {
             if request.stream_id == 1 {
                 let started = Arc::clone(&self.started);
+                let cancellation = ResourceCancellation::new();
+                let operation_cancellation = cancellation.clone();
                 return Some(StartedResourceDispatch {
                     future: Box::pin(async move {
                         started.notify_one();
-                        std::future::pending::<ResourceDispatchCompletion>().await
+                        tokio::select! {
+                            _ = operation_cancellation.cancelled() => {
+                                ResourceDispatchCompletion {
+                                    actions: VecDeque::new(),
+                                }
+                            }
+                            completion = std::future::pending::<ResourceDispatchCompletion>() => completion,
+                        }
                     }),
+                    cancellation,
                 });
             }
             let actions = resource_actions(
@@ -2332,6 +2341,7 @@ mod tests {
             );
             Some(StartedResourceDispatch {
                 future: Box::pin(async move { ResourceDispatchCompletion { actions } }),
+                cancellation: ResourceCancellation::new(),
             })
         }
     }
@@ -2370,24 +2380,24 @@ mod tests {
         ) -> Option<StartedResourceDispatch> {
             let started = Arc::clone(&self.started);
             let dropped = Arc::clone(&self.dropped);
+            let cancelled = Arc::clone(&self.cancelled);
+            let cancellation = ResourceCancellation::new();
+            let operation_cancellation = cancellation.clone();
             Some(StartedResourceDispatch {
                 future: Box::pin(async move {
                     let _drop_signal = DropSignal(dropped);
                     started.notify_one();
-                    std::future::pending::<ResourceDispatchCompletion>().await
+                    tokio::select! {
+                        _ = operation_cancellation.cancelled() => {
+                            cancelled.store(true, Ordering::SeqCst);
+                            ResourceDispatchCompletion {
+                                actions: VecDeque::new(),
+                            }
+                        }
+                        completion = std::future::pending::<ResourceDispatchCompletion>() => completion,
+                    }
                 }),
-            })
-        }
-
-        fn cancel_resource(
-            &self,
-            _session: AuthenticatedSession,
-            _request: ResourceRequest,
-        ) -> ResourceCancellationFuture {
-            let cancelled = Arc::clone(&self.cancelled);
-            Box::pin(async move {
-                cancelled.store(true, Ordering::SeqCst);
-                Ok(())
+                cancellation,
             })
         }
     }
@@ -2918,8 +2928,8 @@ mod tests {
             mpsc::unbounded_channel::<(u64, ResourceDispatchCompletion)>();
         let mut connection = ResourceProtocolConnection::new();
         let mut pending = BTreeMap::new();
-        let mut cancelled = BTreeSet::new();
-        let mut tasks = BTreeMap::new();
+        let mut cancelled = BTreeMap::new();
+        let mut tasks: BTreeMap<u64, ResourceTask> = BTreeMap::new();
         let mut requests = BTreeMap::new();
         let resources = LocalRawSocketResources::new();
         let (_shutdown_sender, mut shutdown) = watch::channel(false);
