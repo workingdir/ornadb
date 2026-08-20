@@ -17,8 +17,7 @@
 //!   stream bytes through `orna-runtime-tty` (ADR 0057 step 9); every other
 //!   value keeps its canonical ORV5 typed encoding, one value per record,
 //!   without progress or warning interleave;
-//! - a `Denied` result prints one redacted denial line to stderr and exits 4;
-//! - a bind failure prints one redacted bind line to stderr and exits 1.
+//! - `InvocationFailed` events print one redacted failure line to stderr and exit 1.
 //!
 //! `--explain` renders the resolution and sealed request facts and exits
 //! success without dispatching, authorising, or auditing.
@@ -850,10 +849,8 @@ fn render_result(
         SealedInvocationResult::Completed { events, .. } => {
             render_event_stream(events, no_progress, stdout, stderr, encode)
         }
-        SealedInvocationResult::BindFailure { .. } => {
-            writeln!(stderr, "orna: invoke: invocation binding failed")
-                .map_err(presentation_error)?;
-            Ok(InstalledInvokeOutcome::TargetFailure)
+        SealedInvocationResult::Failed { events, .. } => {
+            render_event_stream(events, no_progress, stdout, stderr, encode)
         }
         SealedInvocationResult::Denied { .. } => {
             writeln!(stderr, "orna: invoke: invocation denied").map_err(presentation_error)?;
@@ -1190,10 +1187,10 @@ fn map_authentication_error(error: PostgresKernelError) -> InstalledInvokeError 
     }
 }
 
-fn map_dispatch_error(error: PostgresKernelError) -> InstalledInvokeError {
+fn map_dispatch_error(_error: PostgresKernelError) -> InstalledInvokeError {
     InstalledInvokeError::new(
         InstalledInvokeErrorKind::Internal,
-        format!("sealed dispatch failed: {error}"),
+        "sealed dispatch failed".to_owned(),
     )
 }
 
@@ -1206,7 +1203,10 @@ mod tests {
             FunctionDomain, FunctionReturn, FunctionSecurity, FunctionVolatility,
             ParameterDefinition,
         },
-        invocation::{InvokeEvent, InvokeValue},
+        invocation::{
+            InvocationFailure, InvocationFailurePhase, InvocationRetryability, InvokeEvent,
+            InvokeValue,
+        },
         types::StandardScalar,
         value::RuntimeValue,
     };
@@ -1335,19 +1335,41 @@ mod tests {
     }
 
     #[test]
-    fn bind_failure_prints_one_redacted_line_and_exits_target_failure() {
+    fn failed_event_prints_one_redacted_line_and_exits_target_failure() {
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
-        let result = SealedInvocationResult::BindFailure {
-            invocation: InvocationId::new(),
-        };
+        let invocation = InvocationId::new();
+        let started = InvokeEvent::new(
+            invocation,
+            0,
+            InvocationEventBody::Started {
+                visible_principal: None,
+            },
+        )
+        .expect("started event");
+        let failure = InvocationFailure::new(
+            InvocationFailurePhase::Bind,
+            "INVOKE_BIND_FAILED",
+            "invocation arguments were not accepted",
+            None,
+            InvocationRetryability::No,
+        )
+        .expect("failure body");
+        let failed = InvokeEvent::new(invocation, 1, InvocationEventBody::Failed(failure))
+            .expect("failed event");
+        let events = InvocationEventBatch::new(vec![
+            InvocationEventRecord::new(1, started),
+            InvocationEventRecord::new(2, failed),
+        ])
+        .expect("event batch");
+        let result = SealedInvocationResult::Failed { invocation, events };
         let outcome = render_result(&result, false, &mut stdout, &mut stderr, &mut encoder)
             .expect("rendering succeeds");
         assert_eq!(outcome, InstalledInvokeOutcome::TargetFailure);
         assert!(stdout.is_empty());
         assert_eq!(
             String::from_utf8(stderr).expect("stderr is text"),
-            "orna: invoke: invocation binding failed\n"
+            "orna: invoke: invocation started\norna: invoke: invocation failed\n"
         );
     }
 
