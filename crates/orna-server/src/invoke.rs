@@ -27,7 +27,6 @@ use std::{
     fmt,
     io::{self, IsTerminal, Write},
     os::unix::net::UnixStream as StandardUnixStream,
-    sync::mpsc::{self, Receiver, TryRecvError},
     thread,
     time::Duration,
 };
@@ -57,14 +56,15 @@ use orna_protocol::{
     CallFailure, MAX_FRAME_PAYLOAD_LENGTH, MAX_RESOURCE_WINDOW, ResourceArgument,
     ResourceCancel, ResourceCancellationCode, ResourceClientFrame,
     ResourceKind as ProtocolResourceKind, ResourceProtocolConnection, ResourceRequest,
-    ResourceServerFrame, decode_resource_server_frame, encode_constructed_value, encode_invoke_request,
-    encode_resource_client_frame,
+    ResourceServerFrame, ResourceWindowUpdate, decode_resource_server_frame,
+    encode_constructed_value, encode_invoke_request, encode_resource_client_frame,
 };
 use orna_standard::{
     STD_IO_BYTE_STREAM_TYPE_ID, STD_TERMINAL_DOCUMENT_TYPE_ID, registered_opaque_codecs,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
+use tokio::sync::mpsc::{self, Receiver, Sender, UnboundedReceiver, UnboundedSender};
+use tokio::sync::mpsc::error::TryRecvError;
 
 use crate::{
     EmbeddedHostError, LocalRawSocketResources, inspect_ready_embedded_host, serve_local_raw_stream,
@@ -294,7 +294,19 @@ struct ResolvedTarget<'a> {
 
 enum ResourceTransportSource {
     Installed,
-    Injected(Option<StandardUnixStream>),
+    Injected(InjectedResourceTransport),
+}
+
+enum InjectedResourceTransport {
+    /// A compatibility one-shot stream used by focused transport tests.
+    Stream(Option<StandardUnixStream>),
+    /// A host-owned source that creates one local connection per resource
+    /// request. Keeping the kernel and admission resources here avoids
+    /// consuming the source after the first request.
+    Factory {
+        kernel: PostgresKernel,
+        resources: LocalRawSocketResources,
+    },
 }
 
 struct PendingResourceTransport {
@@ -305,16 +317,49 @@ struct PendingResourceTransport {
     cancel_requested: bool,
 }
 
+struct DetachedResourceTransport {
+    control: UnboundedSender<ResourceTransportControl>,
+    worker: thread::JoinHandle<()>,
+}
+
 enum ResourceTransportControl {
     Cancel(ResourceCancellationCode),
     Shutdown,
 }
 
 impl ResourceTransportSource {
-    fn take_stream(&mut self) -> Result<StandardUnixStream, ()> {
+    fn take_stream(
+        &mut self,
+    ) -> Result<(StandardUnixStream, Option<thread::JoinHandle<()>>), ()> {
         match self {
-            Self::Installed => StandardUnixStream::connect(INSTALLED_RESOURCE_SOCKET).map_err(|_| ()),
-            Self::Injected(stream) => stream.take().ok_or(()),
+            Self::Installed => StandardUnixStream::connect(INSTALLED_RESOURCE_SOCKET)
+                .map(|stream| (stream, None))
+                .map_err(|_| ()),
+            Self::Injected(InjectedResourceTransport::Stream(stream)) => {
+                stream.take().map(|stream| (stream, None)).ok_or(())
+            }
+            Self::Injected(InjectedResourceTransport::Factory { kernel, resources }) => {
+                let (server, client) = StandardUnixStream::pair().map_err(|_| ())?;
+                let server_kernel = kernel.clone();
+                let server_resources = resources.clone();
+                let server_task = thread::Builder::new()
+                    .name("orna-resource-server".to_owned())
+                    .spawn(move || {
+                        let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
+                            .enable_all()
+                            .build()
+                        else {
+                            return;
+                        };
+                        let _ = runtime.block_on(serve_local_raw_stream(
+                            server_kernel,
+                            server,
+                            server_resources,
+                        ));
+                    })
+                    .map_err(|_| ())?;
+                Ok((client, Some(server_task)))
+            }
         }
     }
 }
@@ -336,6 +381,7 @@ pub struct InstalledClientResourceExecutor {
     next_stream_id: u64,
     transport: ResourceTransportSource,
     pending: Option<PendingResourceTransport>,
+    detached: Vec<DetachedResourceTransport>,
 }
 
 impl InstalledClientResourceExecutor {
@@ -350,6 +396,7 @@ impl InstalledClientResourceExecutor {
             next_stream_id: 1,
             transport: ResourceTransportSource::Installed,
             pending: None,
+            detached: Vec::new(),
         }
     }
 
@@ -363,8 +410,28 @@ impl InstalledClientResourceExecutor {
         Self {
             active,
             next_stream_id: 1,
-            transport: ResourceTransportSource::Injected(Some(stream)),
+            transport: ResourceTransportSource::Injected(InjectedResourceTransport::Stream(
+                Some(stream),
+            )),
             pending: None,
+            detached: Vec::new(),
+        }
+    }
+
+    fn new_with_factory(
+        active: ActiveDatabaseRevision,
+        kernel: PostgresKernel,
+        resources: LocalRawSocketResources,
+    ) -> Self {
+        Self {
+            active,
+            next_stream_id: 1,
+            transport: ResourceTransportSource::Injected(InjectedResourceTransport::Factory {
+                kernel,
+                resources,
+            }),
+            pending: None,
+            detached: Vec::new(),
         }
     }
 }
@@ -380,12 +447,17 @@ impl ClientResourceExecutor for InstalledClientResourceExecutor {
         let stream_id = self.next_stream_id;
         self.next_stream_id = next_stream_id;
         let target = request.target();
-        let (resource_kind, return_type) = match self
+        let target_definition = self
             .active
             .catalogue()
             .function_by_id(target.function())
-            .map(FunctionDefinition::return_type)
-        {
+            .or_else(|| {
+                self.active
+                    .catalogue_hash_context()
+                    .standard()
+                    .and_then(|standard| standard.catalogue().function_by_id(target.function()))
+            });
+        let (resource_kind, return_type) = match target_definition.map(FunctionDefinition::return_type) {
             Some(FunctionReturn::Single(return_type)) =>
                 (ProtocolResourceKind::Single, *return_type),
             Some(FunctionReturn::Rows(columns)) if columns.len() == 1 => (
@@ -420,30 +492,42 @@ impl ClientResourceExecutor for InstalledClientResourceExecutor {
             item_window: 1,
             byte_window: MAX_RESOURCE_WINDOW,
         };
-        let worker_transport = match &mut self.transport {
+        let mut worker_transport = match &mut self.transport {
             ResourceTransportSource::Installed => ResourceTransportSource::Installed,
-            ResourceTransportSource::Injected(stream) => {
-                ResourceTransportSource::Injected(stream.take())
+            ResourceTransportSource::Injected(InjectedResourceTransport::Stream(stream)) => {
+                ResourceTransportSource::Injected(InjectedResourceTransport::Stream(stream.take()))
             }
+            ResourceTransportSource::Injected(InjectedResourceTransport::Factory {
+                kernel,
+                resources,
+            }) => ResourceTransportSource::Injected(InjectedResourceTransport::Factory {
+                kernel: kernel.clone(),
+                resources: resources.clone(),
+            }),
         };
         if matches!(
             &worker_transport,
-            ResourceTransportSource::Injected(None)
+            ResourceTransportSource::Injected(InjectedResourceTransport::Stream(None))
         ) {
             return request.failed(SERVER_RESOURCE_INTERNAL_CODE.to_owned());
         }
-        let (sender, receiver) = mpsc::sync_channel(1);
-        let (control, control_receiver) = tokio::sync::mpsc::unbounded_channel();
+        let (sender, receiver) = mpsc::channel(1);
+        let (control, control_receiver) = mpsc::unbounded_channel();
         let active = self.active.clone();
         let expected_type = request.expected_type();
         let worker = thread::Builder::new()
             .name("orna-resource-transport".to_owned())
             .spawn(move || {
-                let mut worker_transport = worker_transport;
+                let stream = worker_transport.take_stream();
+                let (stream, server_task) = match stream {
+                    Ok(stream) => stream,
+                    Err(()) => {
+                        let _ = sender.blocking_send(Err(ResourceTransportFailure::Transport));
+                        return;
+                    }
+                };
+                let mut stream = Some(stream);
                 let outcome = (|| {
-                    let stream = worker_transport
-                        .take_stream()
-                        .map_err(|_| ResourceTransportFailure::Transport)?;
                     let registry = active
                         .catalogue_hash_context()
                         .standard()
@@ -454,21 +538,29 @@ impl ClientResourceExecutor for InstalledClientResourceExecutor {
                         .build()
                         .map_err(|_| ResourceTransportFailure::Transport)?;
                     runtime.block_on(run_resource_transport(
-                        stream,
+                        stream
+                            .take()
+                            .ok_or(ResourceTransportFailure::Transport)?,
                         active,
                         registry,
                         protocol_request,
                         expected_type,
                         resource_kind,
                         control_receiver,
+                        &sender,
                     ))
                 })();
-                let _ = sender.send(outcome);
+                drop(stream);
+                if let Some(server_task) = server_task {
+                    let _ = server_task.join();
+                }
+                let _ = sender.blocking_send(outcome);
             });
         let Ok(worker) = worker else {
             return request.failed(SERVER_RESOURCE_INTERNAL_CODE.to_owned());
         };
         let pending = ClientResourceCompletion::Pending {
+            request_id: request.request_id(),
             key: request.key(),
             generation: request.generation(),
         };
@@ -483,47 +575,89 @@ impl ClientResourceExecutor for InstalledClientResourceExecutor {
     }
 
     fn poll(&mut self) -> Option<ClientResourceCompletion> {
-        let result = self.pending.as_ref()?.receiver.try_recv();
-        let result = match result {
-            Ok(result) => result,
-            Err(TryRecvError::Empty) => return None,
-            Err(TryRecvError::Disconnected) => Err(ResourceTransportFailure::Transport),
-        };
-        let pending = self
-            .pending
-            .take()
-            .expect("pending resource transport was checked above");
-        let _ = pending.worker.join();
-        Some(map_resource_transport_completion(pending.request, result))
+        loop {
+            let (result, cancel_requested, request) = {
+                let pending = self.pending.as_mut()?;
+                let result = match pending.receiver.try_recv() {
+                    Ok(result) => result,
+                    Err(TryRecvError::Empty) => return None,
+                    Err(TryRecvError::Disconnected) => {
+                        Err(ResourceTransportFailure::Transport)
+                    }
+                };
+                (result, pending.cancel_requested, pending.request.clone())
+            };
+            let stream_values = matches!(
+                &result,
+                Ok(ResourceTransportOutcome::StreamValues(_))
+            );
+            if stream_values && !cancel_requested {
+                return Some(map_resource_transport_completion(request, result));
+            }
+            if stream_values {
+                continue;
+            }
+            let pending = self
+                .pending
+                .take()
+                .expect("pending resource transport was checked above");
+            let _ = pending.worker.join();
+            return Some(map_resource_transport_completion(pending.request, result));
+        }
     }
 
     fn cancel(&mut self, request: ClientResourceRequest) -> ClientResourceCompletion {
-        let Some(pending) = self.pending.as_mut() else {
+        let Some(mut pending) = self.pending.take() else {
             return request.failed(SERVER_RESOURCE_INTERNAL_CODE.to_owned());
         };
         if pending.request.request_id() != request.request_id()
             || pending.request.key() != request.key()
             || pending.request.generation() != request.generation()
         {
+            self.pending = Some(pending);
             return request.failed(SERVER_RESOURCE_INTERNAL_CODE.to_owned());
         }
-        if !pending.cancel_requested {
-            pending.cancel_requested = true;
-            let _ = pending
-                .control
-                .send(ResourceTransportControl::Cancel(ResourceCancellationCode::ClientRequested));
+        if pending.cancel_requested {
+            self.pending = Some(pending);
+            return request.pending();
         }
+        loop {
+            match pending.receiver.try_recv() {
+                Ok(Ok(ResourceTransportOutcome::StreamValues(_))) => {}
+                Ok(result @ Ok(_)) | Ok(result @ Err(_)) => {
+                    let _ = pending.worker.join();
+                    return map_resource_transport_completion(pending.request, result);
+                }
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => {
+                    let _ = pending.worker.join();
+                    return map_resource_transport_completion(
+                        pending.request,
+                        Err(ResourceTransportFailure::Transport),
+                    );
+                }
+            }
+        }
+        pending.cancel_requested = true;
+        let _ = pending
+            .control
+            .send(ResourceTransportControl::Cancel(ResourceCancellationCode::ClientRequested));
+        self.pending = Some(pending);
         request.pending()
     }
-}
 
+}
 impl Drop for InstalledClientResourceExecutor {
     fn drop(&mut self) {
-        let Some(pending) = self.pending.take() else {
-            return;
-        };
-        let _ = pending.control.send(ResourceTransportControl::Shutdown);
-        let _ = pending.worker.join();
+        if let Some(pending) = self.pending.take() {
+            drop(pending.receiver);
+            let _ = pending.control.send(ResourceTransportControl::Shutdown);
+            let _ = pending.worker.join();
+        }
+        for detached in self.detached.drain(..) {
+            let _ = detached.control.send(ResourceTransportControl::Shutdown);
+            let _ = detached.worker.join();
+        }
     }
 }
 
@@ -533,6 +667,8 @@ fn map_resource_transport_completion(
 ) -> ClientResourceCompletion {
     match outcome {
         Ok(ResourceTransportOutcome::Ready(value)) => request.ready(value),
+        Ok(ResourceTransportOutcome::StreamValues(values)) => request.stream_values(values),
+        Ok(ResourceTransportOutcome::StreamCompleted) => request.stream_completed(),
         Ok(ResourceTransportOutcome::Failed { failure }) => {
             request.failed(server_resource_failure_code(failure).to_owned())
         }
@@ -553,13 +689,15 @@ enum ResourceTransportFailure {
 
 enum ResourceTransportOutcome {
     Ready(RuntimeValue),
+    StreamValues(Vec<RuntimeValue>),
+    StreamCompleted,
     Failed { failure: CallFailure },
     Cancelled,
 }
 
 enum ResourceFrameResult {
     Continue,
-    Ready(RuntimeValue),
+    Completed,
     Failed(CallFailure),
     Cancelled,
 }
@@ -637,6 +775,64 @@ fn pre_request_control_outcome(
     }
 }
 
+async fn send_resource_outcome(
+    sender: &Sender<Result<ResourceTransportOutcome, ResourceTransportFailure>>,
+    controls: &mut UnboundedReceiver<ResourceTransportControl>,
+    outcome: Result<ResourceTransportOutcome, ResourceTransportFailure>,
+) -> Result<Option<ResourceTransportControl>, ResourceTransportFailure> {
+    tokio::select! {
+        biased;
+        result = sender.send(outcome) => {
+            result
+                .map(|_| None)
+                .map_err(|_| ResourceTransportFailure::Transport)
+        }
+        control = controls.recv() => match control {
+            Some(control) => Ok(Some(control)),
+            None => Err(ResourceTransportFailure::Transport),
+        },
+    }
+}
+
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ResourceFrameDispositionAction {
+    Apply,
+    Drain,
+    Drop,
+    Reject,
+}
+
+/// Decides what a server frame means after the client has requested cancel.
+///
+/// The local connection stays live after sending `RESOURCE_CANCEL`: an
+/// already-committed server terminal frame is therefore `Applied` and wins,
+/// while `Accepted`/`Values` are drained without publication. A
+/// `DroppedLate` frame is already after a terminal transition and is never
+/// published. The rule is independent of scalar versus stream; only the
+/// caller's publication policy differs for those resource kinds.
+fn resource_transport_disposition_action(
+    disposition: orna_protocol::ResourceFrameDisposition,
+    cancellation_requested: bool,
+    terminal: bool,
+) -> ResourceFrameDispositionAction {
+    match (cancellation_requested, disposition, terminal) {
+        (false, orna_protocol::ResourceFrameDisposition::Applied, _)
+        | (true, orna_protocol::ResourceFrameDisposition::Applied, true) => {
+            ResourceFrameDispositionAction::Apply
+        }
+        (true, orna_protocol::ResourceFrameDisposition::Applied, false) => {
+            ResourceFrameDispositionAction::Drain
+        }
+        (true, orna_protocol::ResourceFrameDisposition::DroppedLate, _) => {
+            ResourceFrameDispositionAction::Drop
+        }
+        (false, orna_protocol::ResourceFrameDisposition::DroppedLate, _) => {
+            ResourceFrameDispositionAction::Reject
+        }
+    }
+}
+
 async fn run_resource_transport(
     stream: StandardUnixStream,
     active: ActiveDatabaseRevision,
@@ -645,6 +841,7 @@ async fn run_resource_transport(
     expected_type: ResolvedType,
     resource_kind: ProtocolResourceKind,
     mut controls: UnboundedReceiver<ResourceTransportControl>,
+    completion_sender: &Sender<Result<ResourceTransportOutcome, ResourceTransportFailure>>,
 ) -> Result<ResourceTransportOutcome, ResourceTransportFailure> {
     stream
         .set_nonblocking(true)
@@ -698,6 +895,7 @@ async fn run_resource_transport(
 
     let mut accepted = false;
     let mut scalar_value = None;
+    let mut stream_values_seen = false;
     let mut cancellation_requested = false;
     loop {
         let frame = loop {
@@ -734,9 +932,8 @@ async fn run_resource_transport(
             }
             break frame.expect("resource frame branch produced no frame")?;
         };
-        if matches!(&frame, ResourceServerFrame::Failed(_) | ResourceServerFrame::Cancelled(_))
-            && scalar_value.is_some()
-        {
+
+        if matches!(&frame, ResourceServerFrame::Failed(_)) && scalar_value.is_some() {
             return Err(ResourceTransportFailure::Shape);
         }
         let is_accepted = match &frame {
@@ -748,16 +945,25 @@ async fn run_resource_transport(
             }
             _ => false,
         };
-        let value = match &frame {
+        let value_batch = match &frame {
             ResourceServerFrame::Values(values) => {
-                if values.values.len() != 1 || scalar_value.is_some() {
+                if values.values.is_empty()
+                    || values.item_count == 0
+                    || values.item_count as usize != values.values.len()
+                {
                     return Err(ResourceTransportFailure::Shape);
                 }
-                let value = values.values[0].clone();
-                if !runtime_value_matches_type(&active, &value, expected_type) {
+                if matches!(resource_kind, ProtocolResourceKind::Single)
+                    && (values.values.len() != 1 || scalar_value.is_some())
+                {
                     return Err(ResourceTransportFailure::Shape);
                 }
-                Some(value)
+                for value in &values.values {
+                    if !runtime_value_matches_type(&active, value, expected_type) {
+                        return Err(ResourceTransportFailure::Shape);
+                    }
+                }
+                Some((values.values.clone(), values.item_count, values.byte_count))
             }
             _ => None,
         };
@@ -765,12 +971,7 @@ async fn run_resource_transport(
             ResourceServerFrame::Accepted(_) | ResourceServerFrame::Values(_) => {
                 ResourceFrameResult::Continue
             }
-            ResourceServerFrame::Completed(_) => {
-                let value = scalar_value
-                    .clone()
-                    .ok_or(ResourceTransportFailure::Shape)?;
-                ResourceFrameResult::Ready(value)
-            }
+            ResourceServerFrame::Completed(_) => ResourceFrameResult::Completed,
             ResourceServerFrame::Failed(frame) => ResourceFrameResult::Failed(frame.failure),
             ResourceServerFrame::Cancelled(_) => ResourceFrameResult::Cancelled,
         };
@@ -792,26 +993,130 @@ async fn run_resource_transport(
                 .apply_constructed(&active, &registry, frame)
                 .map_err(|_| ResourceTransportFailure::Shape)?,
         };
-        if !matches!(disposition, orna_protocol::ResourceFrameDisposition::Applied) {
-            return Err(ResourceTransportFailure::Shape);
+        match resource_transport_disposition_action(
+            disposition,
+            cancellation_requested,
+            matches!(
+                &response,
+                ResourceFrameResult::Completed
+                    | ResourceFrameResult::Failed(_)
+                    | ResourceFrameResult::Cancelled
+            ),
+        ) {
+            ResourceFrameDispositionAction::Reject => {
+                return Err(ResourceTransportFailure::Shape);
+            }
+            ResourceFrameDispositionAction::Drop => continue,
+            ResourceFrameDispositionAction::Apply | ResourceFrameDispositionAction::Drain => {}
         }
         if is_accepted {
             accepted = true;
         }
-        if let Some(value) = value {
-            scalar_value = Some(value);
+        if let Some((values, item_count, byte_count)) = value_batch {
+            match resource_kind {
+                ProtocolResourceKind::Single => {
+                    scalar_value = values.into_iter().next();
+                }
+                ProtocolResourceKind::Stream => {
+                    // Drain late values after cancellation without publishing or crediting them.
+                    if !cancellation_requested {
+                        if let Some(control) = send_resource_outcome(
+                            completion_sender,
+                            &mut controls,
+                            Ok(ResourceTransportOutcome::StreamValues(values)),
+                        )
+                        .await?
+                        {
+                            if !cancellation_requested {
+                                let reason = match control {
+                                    ResourceTransportControl::Cancel(reason) => reason,
+                                    ResourceTransportControl::Shutdown => {
+                                        ResourceCancellationCode::RuntimeShutdown
+                                    }
+                                };
+                                send_resource_cancel(
+                                    &mut stream,
+                                    &active,
+                                    &registry,
+                                    stream_id,
+                                    request_id,
+                                    reason,
+                                )
+                                .await?;
+                                cancellation_requested = true;
+                            }
+                            continue;
+                        }
+                        stream_values_seen = true;
+                        let update = ResourceWindowUpdate {
+                            stream_id,
+                            request_id,
+                            add_items: u64::from(item_count),
+                            add_bytes: u64::from(byte_count),
+                        };
+                        if !matches!(
+                            connection
+                                .receive(ResourceClientFrame::WindowUpdate(update))
+                                .map_err(|_| ResourceTransportFailure::Shape)?,
+                            orna_protocol::ResourceFrameDisposition::Applied
+                        ) {
+                            return Err(ResourceTransportFailure::Shape);
+                        }
+                        let encoded_update = encode_resource_client_frame(
+                            &active,
+                            &registry,
+                            &ResourceClientFrame::WindowUpdate(update),
+                        )
+                        .map_err(|_| ResourceTransportFailure::Shape)?;
+                        if let Some(control) = write_resource_transport_stage(
+                            &mut stream,
+                            &encoded_update,
+                            &mut controls,
+                        )
+                        .await?
+                        {
+                            if !cancellation_requested {
+                                let reason = match control {
+                                    ResourceTransportControl::Cancel(reason) => reason,
+                                    ResourceTransportControl::Shutdown => {
+                                        ResourceCancellationCode::RuntimeShutdown
+                                    }
+                                };
+                                send_resource_cancel(
+                                    &mut stream,
+                                    &active,
+                                    &registry,
+                                    stream_id,
+                                    request_id,
+                                    reason,
+                                )
+                                .await?;
+                                cancellation_requested = true;
+                            }
+                        }
+                    }
+                }
+            }
         }
         match response {
             ResourceFrameResult::Continue => {
-                if scalar_value.is_some() && !accepted {
+                if (scalar_value.is_some() || stream_values_seen) && !accepted {
                     return Err(ResourceTransportFailure::Shape);
                 }
             }
-            ResourceFrameResult::Ready(value) => {
-                if !accepted || scalar_value.is_none() {
+            ResourceFrameResult::Completed => {
+                if !accepted {
                     return Err(ResourceTransportFailure::Shape);
                 }
-                return Ok(ResourceTransportOutcome::Ready(value));
+                match resource_kind {
+                    ProtocolResourceKind::Single => {
+                        let value = scalar_value.ok_or(ResourceTransportFailure::Shape)?;
+                        return Ok(ResourceTransportOutcome::Ready(value));
+                    }
+                    ProtocolResourceKind::Stream => {
+                        return Ok(ResourceTransportOutcome::StreamCompleted);
+                    }
+                }
             }
             ResourceFrameResult::Failed(failure) => {
                 if scalar_value.is_some() {
@@ -820,15 +1125,11 @@ async fn run_resource_transport(
                 return Ok(ResourceTransportOutcome::Failed { failure });
             }
             ResourceFrameResult::Cancelled => {
-                if scalar_value.is_some() {
-                    return Err(ResourceTransportFailure::Shape);
-                }
                 return Ok(ResourceTransportOutcome::Cancelled);
             }
         }
     }
 }
-
 async fn read_resource_server_frame(
     stream: &mut tokio::net::UnixStream,
     active: &ActiveDatabaseRevision,
@@ -1032,35 +1333,17 @@ pub async fn run_invoke_with_kernel(
     stdout: &mut impl Write,
     stderr: &mut impl Write,
 ) -> Result<InstalledInvokeOutcome, InstalledInvokeError> {
-    let (server, client) = StandardUnixStream::pair().map_err(|_| {
-        InstalledInvokeError::new(
-            InstalledInvokeErrorKind::Internal,
-            "the injected resource socket could not be created".to_owned(),
-        )
-    })?;
-    let server_kernel = kernel.clone();
-    let server_task = thread::spawn(move || {
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .map_err(|_| ())?;
-        runtime.block_on(serve_local_raw_stream(
-            server_kernel,
-            server,
-            LocalRawSocketResources::new(),
-        ))
-        .map_err(|_| ())
-    });
-    let result = host_invoke(
-        kernel,
+    host_invoke(
+        kernel.clone(),
         request,
         stdout,
         stderr,
-        ResourceTransportSource::Injected(Some(client)),
+        ResourceTransportSource::Injected(InjectedResourceTransport::Factory {
+            kernel,
+            resources: LocalRawSocketResources::new(),
+        }),
     )
-    .await;
-    let _ = server_task.join();
-    result
+    .await
 }
 
 async fn host_invoke(
@@ -1122,17 +1405,22 @@ async fn host_invoke(
         ResourceTransportSource::Installed => {
             InstalledClientResourceExecutor::new(kernel.clone(), session.clone(), active.clone())
         }
-        ResourceTransportSource::Injected(Some(stream)) => InstalledClientResourceExecutor::new_with_stream(
-            kernel.clone(),
-            session.clone(),
-            active.clone(),
-            stream,
-        ),
-        ResourceTransportSource::Injected(None) => {
+        ResourceTransportSource::Injected(InjectedResourceTransport::Stream(Some(stream))) => {
+            InstalledClientResourceExecutor::new_with_stream(
+                kernel.clone(),
+                session.clone(),
+                active.clone(),
+                stream,
+            )
+        }
+        ResourceTransportSource::Injected(InjectedResourceTransport::Stream(None)) => {
             return Err(InstalledInvokeError::new(
                 InstalledInvokeErrorKind::Internal,
                 "the injected resource socket was unavailable".to_owned(),
             ));
+        }
+        ResourceTransportSource::Injected(InjectedResourceTransport::Factory { kernel, resources }) => {
+            InstalledClientResourceExecutor::new_with_factory(active.clone(), kernel, resources)
         }
     };
     let result = kernel
@@ -1885,6 +2173,32 @@ mod tests {
             InvocationEventRecord::new(3, completed),
         ])
         .expect("event batch")
+    }
+
+    #[test]
+    fn cancellation_disposition_preserves_committed_terminals_and_drops_late_frames() {
+        use orna_protocol::ResourceFrameDisposition::{Applied, DroppedLate};
+
+        assert_eq!(
+            resource_transport_disposition_action(Applied, true, true),
+            ResourceFrameDispositionAction::Apply,
+        );
+        assert_eq!(
+            resource_transport_disposition_action(Applied, true, false),
+            ResourceFrameDispositionAction::Drain,
+        );
+        assert_eq!(
+            resource_transport_disposition_action(DroppedLate, true, true),
+            ResourceFrameDispositionAction::Drop,
+        );
+        assert_eq!(
+            resource_transport_disposition_action(DroppedLate, true, false),
+            ResourceFrameDispositionAction::Drop,
+        );
+        assert_eq!(
+            resource_transport_disposition_action(DroppedLate, false, true),
+            ResourceFrameDispositionAction::Reject,
+        );
     }
 
     #[test]
