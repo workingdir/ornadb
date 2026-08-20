@@ -2301,8 +2301,14 @@ async fn proves_expression_client_functions_through_installed_invoke() -> TestRe
 }
 #[tokio::test]
 #[ignore = "requires the Compose PostgreSQL development service"]
-async fn proves_server_action_through_authenticated_installed_executor() -> TestResult<()> {
+async fn proves_server_action_resource_trigger_through_authenticated_executor() -> TestResult<()> {
     with_test_database(|database| async move {
+        // This proof starts at the authenticated resource-trigger contract.
+        // The sealed sys.invoke path evaluates a CLIENT root and returns its
+        // opaque std.Action value, but it does not expose the
+        // ClientExecutionContext or trigger that action. The direct sealed
+        // SERVER dogfood proof above covers the outer sealed gate; keeping
+        // those seams separate avoids inventing an action-trigger API here.
         let uid = nix::unistd::geteuid().as_raw();
         let kernel = kernel(&database)?;
         kernel.bootstrap().await?;
@@ -2389,7 +2395,7 @@ async fn proves_server_action_through_authenticated_installed_executor() -> Test
             vec![LocalPeerCredential::new(uid, RAW_CLIENT_USER)],
         )?;
         let security = kernel.replace_security_snapshot(&security).await?;
-        let session = security.bind_authenticated_session(RAW_CLIENT_USER, vec![])?;
+        let session = kernel.authenticate_local_peer(uid).await?;
         let authorisation = match security.authorise_execute(
             &session,
             InvocationTarget::new(client, active.pair()),
@@ -2457,7 +2463,10 @@ async fn proves_server_action_through_authenticated_installed_executor() -> Test
             let row = audit_session
                 .client()
                 .query_one(
-                    "SELECT parent_invocation_id, call_site_id, target_function_id, decision_outcome, terminal_outcome
+                    "SELECT parent_invocation_id, nested_invocation_id, request_id,
+                            call_site_id, target_function_id, source_revision_id,
+                            catalogue_revision_id, decision_outcome, terminal_outcome,
+                            item_count, byte_count
                      FROM _orna_kernel.resource_audit_events
                      WHERE parent_invocation_id = $1 AND target_function_id = $2
                      ORDER BY sequence DESC
@@ -2466,17 +2475,29 @@ async fn proves_server_action_through_authenticated_installed_executor() -> Test
                 )
                 .await?;
             let parent: Vec<u8> = row.try_get("parent_invocation_id")?;
+            let nested_invocation: Vec<u8> = row.try_get("nested_invocation_id")?;
+            let request_id: Vec<u8> = row.try_get("request_id")?;
             let call_site: Vec<u8> = row.try_get("call_site_id")?;
             let audited_target: Vec<u8> = row.try_get("target_function_id")?;
+            let source_revision: Vec<u8> = row.try_get("source_revision_id")?;
+            let catalogue_revision: Vec<u8> = row.try_get("catalogue_revision_id")?;
             let decision: &str = row.try_get("decision_outcome")?;
             let terminal: &str = row.try_get("terminal_outcome")?;
+            let item_count: Option<i64> = row.try_get("item_count")?;
+            let byte_count: Option<i64> = row.try_get("byte_count")?;
             require(
                 parent == parent_invocation_id
+                    && nested_invocation.len() == 16
+                    && request_id.len() == 16
                     && call_site == call_site_bytes
                     && audited_target == target_bytes
+                    && source_revision == active.pair().source().to_bytes().to_vec()
+                    && catalogue_revision == active.pair().catalogue().to_bytes().to_vec()
                     && decision == "allowed"
-                    && terminal == "completed",
-                "SERVER action did not retain its authenticated resource audit evidence",
+                    && terminal == "completed"
+                    && item_count == Some(1)
+                    && byte_count.is_none(),
+                "SERVER action did not retain its authenticated redacted resource audit evidence",
             )
         }
         .await;
@@ -2491,7 +2512,7 @@ async fn proves_server_action_through_authenticated_installed_executor() -> Test
 
 #[tokio::test]
 #[ignore = "requires the Compose PostgreSQL development service"]
-async fn proves_server_action_denial_stays_inside_authenticated_sys_invoke() -> TestResult<()> {
+async fn proves_server_action_denial_stays_inside_authenticated_resource_trigger() -> TestResult<()> {
     with_test_database(|database| async move {
         let uid = nix::unistd::geteuid().as_raw();
         let kernel = kernel(&database)?;
@@ -2576,7 +2597,7 @@ async fn proves_server_action_denial_stays_inside_authenticated_sys_invoke() -> 
             vec![LocalPeerCredential::new(uid, RAW_CLIENT_USER)],
         )?;
         let security = kernel.replace_security_snapshot(&security).await?;
-        let session = security.bind_authenticated_session(RAW_CLIENT_USER, vec![])?;
+        let session = kernel.authenticate_local_peer(uid).await?;
         let authorisation = match security.authorise_execute(
             &session,
             InvocationTarget::new(client, active.pair()),
@@ -2636,8 +2657,10 @@ async fn proves_server_action_denial_stays_inside_authenticated_sys_invoke() -> 
             &mut executor,
         )?;
         require(
-            matches!(outcome, ClientActionOutcome::Failed { .. })
-                && matches!(action_state.status(), ClientResourceStatus::Idle),
+            matches!(
+                outcome,
+                ClientActionOutcome::Failed { code } if code == "action.failed"
+            ) && matches!(action_state.status(), ClientResourceStatus::Idle),
             "denied SERVER action did not fail closed through the installed executor",
         )?;
         let security_events_after = kernel.recover_security_audit_events().await?;
