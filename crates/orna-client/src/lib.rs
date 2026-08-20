@@ -164,25 +164,60 @@ pub enum ClientActionOutcome {
 }
 
 const ACTION_FAILURE_CODE: &str = "action.failed";
+// Keep action framing within the shared opaque codec payload ceiling.
+const MAX_ACTION_PAYLOAD_LENGTH: usize = 16 * 1024 * 1024;
 
 /// Caller-owned lifecycle state for one SERVER action trigger.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct ClientActionState {
     resource: Option<ClientResource>,
+    request: Option<ClientResourceRequest>,
+    tombstone: ClientResourceGeneration,
+    invocation_id: Option<InvocationId>,
 }
 
+impl Default for ClientActionState {
+    fn default() -> Self {
+        Self {
+            resource: None,
+            request: None,
+            tombstone: ClientResourceGeneration(0),
+            invocation_id: None,
+        }
+    }
+}
 impl ClientActionState {
     pub fn status(&self) -> ClientResourceStatus {
-        self.resource.as_ref().map_or(ClientResourceStatus::Idle, ClientResource::status)
+        self.resource
+            .as_ref()
+            .map_or(ClientResourceStatus::Idle, ClientResource::status)
     }
+    /// Returns the active request generation.
     pub fn generation(&self) -> Option<ClientResourceGeneration> {
         self.resource.as_ref().map(ClientResource::generation)
     }
+    /// Returns the fresh identity assigned to the currently staged action.
+    pub fn invocation_id(&self) -> Option<InvocationId> { self.invocation_id }
     fn resource_mut(&mut self) -> Option<&mut ClientResource> { self.resource.as_mut() }
-    fn set_resource(&mut self, resource: ClientResource) { self.resource = Some(resource); }
-    fn clear(&mut self) { self.resource = None; }
+    fn set_resource(&mut self, resource: ClientResource) {
+        if resource.generation().value() > self.tombstone.value() { self.tombstone = resource.generation(); }
+        self.resource = Some(resource);
+    }
+    fn stage_request(&mut self, request: ClientResourceRequest) {
+        self.request = Some(request);
+    }
+    fn stage_invocation(&mut self, invocation_id: InvocationId) { self.invocation_id = Some(invocation_id); }
+    fn clear(&mut self) {
+        if let Some(resource) = self.resource.take() {
+            if resource.generation().value() > self.tombstone.value() {
+                self.tombstone = resource.generation();
+            }
+        }
+        self.request = None;
+        self.invocation_id = None;
+    }
+    fn is_stale(&self, generation: ClientResourceGeneration) -> bool { generation.value() <= self.tombstone.value() }
 }
-
 fn redacted_action_failure() -> ClientActionOutcome {
     ClientActionOutcome::Failed { code: ACTION_FAILURE_CODE.to_owned() }
 }
@@ -196,6 +231,7 @@ pub enum ClientActionError {
     ResultTypeMismatch,
     Arguments(ClientResourceError),
     Pending,
+    StaleCompletion,
     Executor(String),
     Evaluation(String),
 }
@@ -212,6 +248,7 @@ impl fmt::Display for ClientActionError {
             Self::ResultTypeMismatch => f.write_str("the CLIENT action result type is invalid"),
             Self::Arguments(e) => e.fmt(f),
             Self::Pending => f.write_str("the CLIENT action remains pending"),
+            Self::StaleCompletion => f.write_str("the CLIENT action completion is stale"),
             Self::Executor(m) => write!(f, "the CLIENT action executor failed: {m}"),
             Self::Evaluation(m) => write!(f, "the CLIENT action target failed evaluation: {m}"),
         }
@@ -494,6 +531,7 @@ impl ClientResourceInvocationContext {
 /// One request submitted to a CLIENT resource executor.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ClientResourceRequest {
+    request_id: InvocationId,
     key: ClientResourceKey,
     generation: ClientResourceGeneration,
     expected_type: ResolvedType,
@@ -533,12 +571,18 @@ impl ClientResourceRequest {
             });
         }
         Ok(Self {
+            request_id: InvocationId::new(),
             key,
             generation,
             expected_type,
             arguments,
             invocation_context,
         })
+    }
+
+    /// Returns the fresh request identity used for transport correlation.
+    pub const fn request_id(&self) -> InvocationId {
+        self.request_id
     }
 
     /// Returns the complete resource identity carried by this request.
@@ -647,6 +691,13 @@ pub enum ClientResourceCompletion {
 pub trait ClientResourceExecutor {
     /// Executes one request and returns its completion.
     fn execute(&mut self, request: ClientResourceRequest) -> ClientResourceCompletion;
+    /// Cancels one live request and returns its terminal completion.
+    ///
+    /// The default completes the local lifecycle. A transport-backed executor
+    /// can override this method to send its protocol cancellation control.
+    fn cancel(&mut self, request: ClientResourceRequest) -> ClientResourceCompletion {
+        request.cancelled()
+    }
 }
 
 /// A deterministic immediate executor for host glue and focused tests.
@@ -3283,12 +3334,39 @@ pub fn encode_action_payload(
             .map_err(|source| action_payload_error(source.to_string()))?;
         let length = u32::try_from(frame.len())
             .map_err(|_| action_payload_error("argument frame is too large"))?;
+        let additional = 4usize
+            .checked_add(frame.len())
+            .ok_or_else(|| action_payload_error("action payload is too large"))?;
+        let next_len = body
+            .len()
+            .checked_add(additional)
+            .ok_or_else(|| action_payload_error("action payload is too large"))?;
+        let payload_len = ACTION_MAGIC
+            .len()
+            .checked_add(4)
+            .and_then(|prefix| prefix.checked_add(next_len))
+            .ok_or_else(|| action_payload_error("action payload is too large"))?;
+        if payload_len > MAX_ACTION_PAYLOAD_LENGTH {
+            return Err(action_payload_error("action payload is too large"));
+        }
+        body.try_reserve(additional)
+            .map_err(|_| action_payload_error("action payload allocation failed"))?;
         body.extend_from_slice(&length.to_be_bytes());
         body.extend_from_slice(&frame);
     }
     let length = u32::try_from(body.len())
         .map_err(|_| action_payload_error("action payload is too large"))?;
-    let mut payload = Vec::with_capacity(ACTION_MAGIC.len() + 4 + body.len());
+    let payload_len = ACTION_MAGIC
+        .len()
+        .checked_add(4)
+        .and_then(|prefix| prefix.checked_add(body.len()))
+        .ok_or_else(|| action_payload_error("action payload is too large"))?;
+    if payload_len > MAX_ACTION_PAYLOAD_LENGTH {
+        return Err(action_payload_error("action payload is too large"));
+    }
+    let mut payload = Vec::new();
+    payload.try_reserve(payload_len)
+        .map_err(|_| action_payload_error("action payload allocation failed"))?;
     payload.extend_from_slice(ACTION_MAGIC.as_bytes());
     payload.extend_from_slice(&length.to_be_bytes());
     payload.extend_from_slice(&body);
@@ -3322,6 +3400,9 @@ pub fn decode_action_payload(
     let mut cursor = magic.len();
     let body_length = u32::from_be_bytes(payload[cursor..cursor + 4].try_into().unwrap()) as usize;
     cursor += 4;
+    if payload.len() > MAX_ACTION_PAYLOAD_LENGTH || body_length > MAX_ACTION_PAYLOAD_LENGTH {
+        return Err(action_payload_error("action payload is too large"));
+    }
     if body_length != payload.len() - cursor {
         return Err(action_payload_error("action payload length does not match"));
     }
@@ -3340,6 +3421,9 @@ pub fn decode_action_payload(
         action_take(body, &mut offset, 16)?.try_into().unwrap(),
     );
     let target_revision = RevisionPair::new(source, catalogue);
+    if target_revision != active.pair() {
+        return Err(ClientActionError::RevisionMismatch);
+    }
     let call_site = CallSiteId::from_bytes(action_take(body, &mut offset, 16)?.try_into().unwrap());
     let result_type = TypeId::from_bytes(action_take(body, &mut offset, 16)?.try_into().unwrap());
     let count = u32::from_be_bytes(action_take(body, &mut offset, 4)?.try_into().unwrap()) as usize;
@@ -3513,11 +3597,23 @@ pub fn complete_client_action(
     action_state: &mut ClientActionState,
     completion: ClientResourceCompletion,
 ) -> Result<ClientActionOutcome, ClientActionError> {
-    let Some(resource) = action_state.resource_mut() else {
-        return Err(ClientActionError::Executor(ACTION_FAILURE_CODE.to_owned()));
+    let (completion_key, completion_generation) = match &completion {
+        ClientResourceCompletion::Ready { key, generation, .. }
+        | ClientResourceCompletion::Pending { key, generation }
+        | ClientResourceCompletion::Failed { key, generation, .. }
+        | ClientResourceCompletion::Cancelled { key, generation } => (*key, *generation),
     };
+    let Some(resource) = action_state.resource_mut() else {
+        return if action_state.is_stale(completion_generation) {
+            Err(ClientActionError::StaleCompletion)
+        } else {
+            Err(ClientActionError::Executor(ACTION_FAILURE_CODE.to_owned()))
+        };
+    };
+    if completion_generation != resource.generation() || completion_key != resource.key() {
+        return Err(ClientActionError::StaleCompletion);
+    }
     if resource.apply_completion(active, completion).is_err() {
-        action_state.clear();
         return Err(ClientActionError::Executor(ACTION_FAILURE_CODE.to_owned()));
     }
     let status = resource.status();
@@ -3541,6 +3637,48 @@ pub fn cancel_client_action(action_state: &mut ClientActionState) -> Result<Clie
     Ok(ClientActionOutcome::Cancelled)
 }
 
+/// Cancels one pending SERVER action through its resource executor.
+///
+/// The executor owns the transport control. A terminal completion clears the
+/// action state; a pending completion retains it for a later completion.
+pub fn cancel_client_action_with_executor(
+    active: &ActiveDatabaseRevision,
+    action_state: &mut ClientActionState,
+    executor: &mut dyn ClientResourceExecutor,
+) -> Result<ClientActionOutcome, ClientActionError> {
+    let Some(resource) = action_state.resource.as_ref() else {
+        return Err(ClientActionError::Executor(ACTION_FAILURE_CODE.to_owned()));
+    };
+    if resource.status() != ClientResourceStatus::Loading {
+        return Err(ClientActionError::Executor(ACTION_FAILURE_CODE.to_owned()));
+    }
+    let Some(request) = action_state.request.clone() else {
+        return Err(ClientActionError::Executor(ACTION_FAILURE_CODE.to_owned()));
+    };
+    let completion = executor.cancel(request);
+    complete_client_action(active, action_state, completion)
+}
+
+fn client_action_target_is_provenance_safe(
+    active: &ActiveDatabaseRevision,
+    parent: ClientExecutionContext,
+    target: FunctionId,
+) -> bool {
+    if active
+        .catalogue()
+        .function_by_id(parent.function())
+        .is_none_or(|definition| definition.domain() != FunctionDomain::Client)
+    {
+        return false;
+    }
+    active.references().iter().any(|reference| {
+        reference.source_function() == parent.function()
+            && reference.source_revision() == parent.function_revision()
+            && reference.kind() == DefinitionReferenceKind::FunctionCall
+            && reference.target() == DefinitionReferenceTarget::Function(target)
+    })
+}
+
 pub fn trigger_client_action(
     active: &ActiveDatabaseRevision,
     action: &RuntimeValue,
@@ -3552,9 +3690,14 @@ pub fn trigger_client_action(
     state: &mut ClientStateStore,
     executor: &mut dyn ClientResourceExecutor,
 ) -> Result<ClientActionOutcome, ClientActionError> {
-    if parent.pair() != active.pair() {
+    if parent.pair() != active.pair()
+        || authorisation.target().revision() != active.pair()
+        || authorisation.target().function() != parent.function()
+    {
         return Err(ClientActionError::RevisionMismatch);
     }
+    validate_active_catalogue(active, parent.function())
+        .map_err(|_| ClientActionError::TargetMismatch)?;
     let RuntimeValue::Opaque(value) = action else {
         return Err(ClientActionError::InvalidValue);
     };
@@ -3567,6 +3710,9 @@ pub fn trigger_client_action(
     let target = InvocationTarget::new(descriptor.target, descriptor.target_revision);
     let digest = ClientResourceKey::canonical_arguments_digest(active, &values)
         .map_err(ClientActionError::Arguments)?;
+    if !client_action_target_is_provenance_safe(active, *parent, descriptor.target) {
+        return Err(ClientActionError::TargetMismatch);
+    }
     match descriptor.domain {
         ActionTargetDomain::Server => {
             let key = ClientResourceKey::new(
@@ -3583,6 +3729,9 @@ pub fn trigger_client_action(
                 action_state.clear();
             }
             let mut resource = ClientResource::new(key, expected);
+            // Preserve a monotonic generation across terminal clears so an old
+            // completion can never be accepted by a later action.
+            resource.generation = ClientResourceGeneration(action_state.tombstone.value());
             let request = resource
                 .begin_request_with_context(
                     active,
@@ -3590,13 +3739,16 @@ pub fn trigger_client_action(
                     values,
                 )
                 .map_err(ClientActionError::Arguments)?;
+            action_state.stage_invocation(request.request_id());
+            action_state.stage_request(request.clone());
             action_state.set_resource(resource);
             let completion = executor.execute(request);
             complete_client_action(active, action_state, completion)
         }
         ActionTargetDomain::Client => {
+            let mut staged = state.clone();
             let mut nested = Some(executor as &mut dyn ClientResourceExecutor);
-            match evaluate_function(
+            let result = evaluate_function(
                 active,
                 descriptor.target,
                 values
@@ -3605,13 +3757,17 @@ pub fn trigger_client_action(
                     .collect(),
                 declarations,
                 grants,
-                state,
+                &mut staged,
                 0,
                 authorisation.session_principal(),
                 parent.parent_invocation_id(),
                 &mut nested,
-            ) {
-                Ok(_) => Ok(ClientActionOutcome::Completed),
+            );
+            match result {
+                Ok(_) => {
+                    *state = staged;
+                    Ok(ClientActionOutcome::Completed)
+                }
                 Err(ClientExecutionError::ResourceEvaluation {
                     source: ClientResourceExecutionError::Cancelled,
                     ..
@@ -4405,8 +4561,14 @@ fn invalid_function(
 
 #[cfg(test)]
 mod tests {
-    use super::{capability, complete_client_action, decode_action_payload, encode_action_payload, trigger_client_action, ClientActionDescriptor, ClientActionError, ClientActionOutcome, ClientActionState, ClientExecutionContext, ClientResource, ClientResourceCompletion, ClientResourceKey, ClientResourceRequest, ClientResourceStatus, ClientStateStore, DeterministicClientResourceExecutor, ACTION_FAILURE_CODE};
-    use orna_artifact::client_plan::{ActionTargetDomain, ClientExpressionNode};
+    use super::{
+        capability, complete_client_action, decode_action_payload, encode_action_payload,
+        trigger_client_action, ClientActionDescriptor, ClientActionError, ClientActionOutcome,
+        ClientActionState, ClientExecutionContext, ClientResource, ClientResourceCompletion,
+        ClientResourceKey, ClientResourceRequest, ClientResourceStatus, ClientStateStore,
+        DeterministicClientResourceExecutor, ACTION_FAILURE_CODE,
+    };
+    use orna_artifact::client_plan::ActionTargetDomain;
     use std::time::SystemTime;
 
     use orna_core::{
@@ -4438,7 +4600,7 @@ mod tests {
         source::{SourceBundle, SourceUnit},
         state::{UserStateCell, UserStateKey, UserStateWriteOutcome, UserStateWriteResult},
         types::{ResolvedType, StandardScalar},
-        value::{FunctionArgument, RuntimeFloat, RuntimeValue},
+        value::{FunctionArgument, OpaqueValue, RuntimeFloat, RuntimeValue},
     };
 
     fn authorise(pair: RevisionPair, function: FunctionId) -> AuthorisedInvocation {
@@ -4735,15 +4897,17 @@ mod tests {
             .begin_request(&active, vec![first.clone(), second.clone()])
             .unwrap();
         assert_eq!(request.arguments()[0].parameter(), second.parameter());
+        let first_request_id = request.request_id();
         let completion = super::ClientResourceExecutor::execute(&mut executor, request);
         resource.apply_completion(&active, completion).unwrap();
         assert_eq!(resource.status(), super::ClientResourceStatus::Ready);
         assert_eq!(resource.value(), Some(&RuntimeValue::Boolean(true)));
 
-        let failed = resource
+        let second_request = resource
             .begin_request(&active, vec![first, second])
-            .unwrap()
-            .failed("resource.denied".to_owned());
+            .unwrap();
+        assert_ne!(second_request.request_id(), first_request_id);
+        let failed = second_request.failed("resource.denied".to_owned());
         resource.apply_completion(&active, failed).unwrap();
         assert_eq!(resource.status(), super::ClientResourceStatus::Failed);
         assert_eq!(
@@ -8830,6 +8994,22 @@ mod tests {
         let mut trailing = payload.clone();
         trailing.push(0);
         assert!(decode_action_payload(&active, &trailing).is_err());
+        let stale_descriptor = ClientActionDescriptor::new(
+            ActionTargetDomain::Client,
+            target,
+            RevisionPair::new(
+                SourceRevisionId::from_bytes([0x73; 16]),
+                pair.catalogue(),
+            ),
+            CallSiteId::from_bytes([0x74; 16]),
+            vec![FunctionArgument::new(parameter, RuntimeValue::Integer(7)).unwrap()],
+            orna_standard::INTEGER_TYPE_ID,
+        );
+        let stale_payload = encode_action_payload(&active, &stale_descriptor).unwrap();
+        assert_eq!(
+            decode_action_payload(&active, &stale_payload),
+            Err(ClientActionError::RevisionMismatch),
+        );
     }
 
     #[test]
@@ -8846,12 +9026,51 @@ mod tests {
         let mut resource = ClientResource::new(key, ResolvedType::Scalar(StandardScalar::Boolean));
         let request = resource.begin_request(&active, vec![]).unwrap();
         let generation = request.generation();
-        let mut action_state = ClientActionState { resource: Some(resource) };
+        let mut action_state = ClientActionState::default();
+        action_state.set_resource(resource);
         assert_eq!(complete_client_action(&active, &mut action_state, request.pending()), Err(ClientActionError::Pending));
         assert_eq!(action_state.generation(), Some(generation));
         let failed = ClientResourceCompletion::Failed { key, generation, code: "secret.internal.detail".to_owned() };
         assert_eq!(complete_client_action(&active, &mut action_state, failed), Ok(ClientActionOutcome::Failed { code: ACTION_FAILURE_CODE.to_owned() }));
         assert_eq!(action_state.status(), ClientResourceStatus::Idle);
+    }
+
+    #[test]
+    fn action_cancellation_uses_executor_and_rejects_late_completion() {
+        let (active, function, pair, _) = version_one_active(true);
+        let principal = PrincipalId::from_bytes([0x7a; 16]);
+        let digest = ClientResourceKey::canonical_arguments_digest(&active, &[]).unwrap();
+        let key = ClientResourceKey::new(
+            InvocationTarget::new(function, pair),
+            principal,
+            digest,
+            active.catalogue_hash(),
+        );
+        let mut resource = ClientResource::new(key, ResolvedType::Scalar(StandardScalar::Boolean));
+        let request = resource.begin_request(&active, vec![]).unwrap();
+        let mut action_state = ClientActionState::default();
+        action_state.set_resource(resource);
+        action_state.stage_invocation(request.request_id());
+        action_state.stage_request(request.clone());
+        assert_eq!(action_state.invocation_id(), Some(request.request_id()));
+        let mut executor = DeterministicClientResourceExecutor::new(
+            |_: &ClientResourceRequest| Ok(RuntimeValue::Boolean(true)),
+        );
+
+        assert_eq!(
+            super::cancel_client_action_with_executor(
+                &active,
+                &mut action_state,
+                &mut executor,
+            ),
+            Ok(ClientActionOutcome::Cancelled),
+        );
+        assert_eq!(action_state.status(), ClientResourceStatus::Idle);
+        assert_eq!(
+            complete_client_action(&active, &mut action_state, request.ready(RuntimeValue::Boolean(true))),
+            Err(ClientActionError::StaleCompletion),
+        );
+        assert_eq!(action_state.generation(), None);
     }
 
     #[test]
@@ -8882,6 +9101,94 @@ mod tests {
                 &mut executor
             ),
             Err(super::ClientActionError::InvalidValue)
+        );
+    }
+
+    #[test]
+    fn action_trigger_rejects_unreferenced_target_provenance() {
+        let (original_active, target, pair, revision) = version_two_value_active(
+            orna_standard::INTEGER_TYPE_ID,
+            orna_standard::INTEGER_TYPE_ID,
+        );
+        let standard_v6 = orna_standard::verify_standard_library_v6_snapshot(
+            orna_standard::retained_standard_library_v6_snapshot().unwrap(),
+        )
+        .unwrap();
+        let context = orna_core::revision::CatalogueHashContext::version_two(standard_v6);
+        let catalogue_hash = catalogue_digest_with_context(
+            &context,
+            original_active.catalogue(),
+            original_active.function_revisions(),
+            original_active.expressions(),
+            original_active.origins(),
+            original_active.references(),
+        )
+        .unwrap();
+        let active = ActiveDatabaseRevision::new_with_catalogue_hash_context(
+            ActiveDatabaseRevisionInput::new(
+                pair,
+                original_active.source().clone(),
+                original_active.catalogue().clone(),
+                catalogue_hash,
+                ActiveRevisionContent::new(
+                    original_active.expressions().to_vec(),
+                    original_active.function_revisions().to_vec(),
+                    original_active.origins().to_vec(),
+                    original_active.references().to_vec(),
+                ),
+            ),
+            context,
+        )
+        .unwrap();
+        let descriptor = ClientActionDescriptor::new(
+            ActionTargetDomain::Client,
+            target,
+            pair,
+            CallSiteId::from_bytes([0x75; 16]),
+            Vec::new(),
+            orna_standard::INTEGER_TYPE_ID,
+        );
+        let payload = encode_action_payload(&active, &descriptor).unwrap();
+        let registry = super::registered_opaque_codecs(
+            active
+                .catalogue_hash_context()
+                .standard()
+                .expect("action test fixture has a standard snapshot"),
+        )
+        .unwrap();
+        let action = OpaqueValue::new(
+            &active,
+            &registry,
+            super::STD_ACTION_TYPE_ID,
+            payload,
+        )
+        .unwrap();
+        let auth = authorise(pair, target);
+        let parent = ClientExecutionContext {
+            pair,
+            function: target,
+            function_revision: revision,
+            parent_invocation_id: InvocationId::from_bytes([0xf2; 16]),
+        };
+        let mut state = ClientStateStore::default();
+        let mut action_state = ClientActionState::default();
+        let mut executor = DeterministicClientResourceExecutor::new(
+            |_: &ClientResourceRequest| Ok(RuntimeValue::Integer(1)),
+        );
+
+        assert_eq!(
+            trigger_client_action(
+                &active,
+                &RuntimeValue::Opaque(action),
+                &auth,
+                &parent,
+                &mut action_state,
+                &[],
+                &capability::LocalCapabilityGrantSet::default(),
+                &mut state,
+                &mut executor,
+            ),
+            Err(ClientActionError::TargetMismatch),
         );
     }
 
