@@ -4771,14 +4771,42 @@ fn action_result_type_is_durable(
                         .verified_snapshot()
                         .catalogue()
                         .value_type_by_id(type_id)
-                        .is_some_and(|value| {
-                            value.persistence() == ValueTypePersistence::Persistable
-                        })
+                        .is_some()
                 })
         )
 }
 
-fn action_argument_type_is_orv3_encodable(expression_type: ClientExpressionType) -> bool {
+fn client_action_result_type(
+    result_type: ClientExpressionType,
+    standard: Option<&CheckedStandardLibrary>,
+) -> ClientExpressionType {
+    if result_type.standard_value_type.is_some() {
+        return result_type;
+    }
+    let SemanticType::Named(CheckedTypeId::Existing(type_id)) = result_type.semantic_type else {
+        return result_type;
+    };
+    if standard.is_some_and(|standard| {
+        standard
+            .verified_snapshot()
+            .catalogue()
+            .value_type_by_id(type_id)
+            .is_some()
+    }) {
+        ClientExpressionType {
+            standard_value_type: Some(type_id),
+            ..result_type
+        }
+    } else {
+        result_type
+    }
+}
+
+fn action_argument_type_is_orv3_encodable(
+    expression_type: ClientExpressionType,
+    base: &CatalogueSnapshot,
+    standard: Option<&CheckedStandardLibrary>,
+) -> bool {
     matches!(
         expression_type.semantic_type,
         SemanticType::Scalar(
@@ -4792,7 +4820,51 @@ fn action_argument_type_is_orv3_encodable(expression_type: ClientExpressionType)
     ) || matches!(
         expression_type.semantic_type,
         SemanticType::Reference { .. }
+    ) || matches!(
+        expression_type.semantic_type,
+        SemanticType::Named(type_id)
+            if match type_id {
+                CheckedTypeId::Provisional(_) => true,
+                CheckedTypeId::Existing(type_id) => {
+                    base.enum_type_by_id(type_id).is_some()
+                        || base.record_value_type_by_id(type_id).is_some()
+                        || standard.is_some_and(|standard| {
+                            let catalogue = standard.verified_snapshot().catalogue();
+                            catalogue.enum_type_by_id(type_id).is_some()
+                                || catalogue.record_value_type_by_id(type_id).is_some()
+                        })
+                }
+            }
     )
+}
+
+fn client_expression_contains_await_or_resource(
+    expression: &CheckedClientExpression,
+    locals: &ClientLocalEnvironment,
+) -> bool {
+    match expression {
+        CheckedClientExpression::Await { .. } | CheckedClientExpression::Resource { .. } => true,
+        CheckedClientExpression::Call { arguments, .. } => arguments
+            .iter()
+            .any(|(_, argument)| client_expression_contains_await_or_resource(argument, locals)),
+        CheckedClientExpression::Action { operation } => operation
+            .arguments()
+            .iter()
+            .any(|(_, argument)| client_expression_contains_await_or_resource(argument, locals)),
+        CheckedClientExpression::Concat { left, right, .. } => {
+            client_expression_contains_await_or_resource(left, locals)
+                || client_expression_contains_await_or_resource(right, locals)
+        }
+        CheckedClientExpression::LocalRead { local, .. } => locals.values().any(|binding| {
+            binding.ordinal == Some(*local)
+                && matches!(binding.kind, CheckedClientLocalKind::Resource(_))
+        }),
+        CheckedClientExpression::String { .. }
+        | CheckedClientExpression::Integer { .. }
+        | CheckedClientExpression::Boolean { .. }
+        | CheckedClientExpression::ParameterRead { .. }
+        | CheckedClientExpression::FieldPath { .. } => false,
+    }
 }
 
 fn action_target_parameters(
@@ -4950,10 +5022,13 @@ fn client_action_targets(
 ) -> HashMap<QualifiedSemanticName, ClientActionTarget> {
     let mut targets = HashMap::new();
     for input in client_inputs {
-        let return_type = ClientExpressionType {
-            semantic_type: input.return_type,
-            standard_value_type: input.standard_value_type,
-        };
+        let return_type = client_action_result_type(
+            ClientExpressionType {
+                semantic_type: input.return_type,
+                standard_value_type: input.standard_value_type,
+            },
+            standard,
+        );
         if !action_result_type_is_durable(return_type, standard) {
             continue;
         }
@@ -4971,24 +5046,27 @@ fn client_action_targets(
         );
     }
     for input in server_inputs {
-        let return_type = match input.return_type {
-            ResolvedServerFunctionReturn::Single {
-                semantic_type,
-                standard_value_type,
-                ..
-            } => ClientExpressionType {
-                semantic_type,
-                standard_value_type,
-            },
-            ResolvedServerFunctionReturn::Rows { ref columns, .. } if columns.len() == 1 => {
-                let column = &columns[0];
-                ClientExpressionType {
-                    semantic_type: column.semantic_type,
-                    standard_value_type: column.standard_value_type,
+        let return_type = client_action_result_type(
+            match input.return_type {
+                ResolvedServerFunctionReturn::Single {
+                    semantic_type,
+                    standard_value_type,
+                    ..
+                } => ClientExpressionType {
+                    semantic_type,
+                    standard_value_type,
+                },
+                ResolvedServerFunctionReturn::Rows { ref columns, .. } if columns.len() == 1 => {
+                    let column = &columns[0];
+                    ClientExpressionType {
+                        semantic_type: column.semantic_type,
+                        standard_value_type: column.standard_value_type,
+                    }
                 }
-            }
-            ResolvedServerFunctionReturn::Rows { .. } => continue,
-        };
+                ResolvedServerFunctionReturn::Rows { .. } => continue,
+            },
+            standard,
+        );
         if !action_result_type_is_durable(return_type, standard) {
             continue;
         }
@@ -5018,8 +5096,9 @@ fn client_action_targets(
             ),
             FunctionReturn::Rows(_) => None,
         };
-        let Some(return_type) =
-            return_type.filter(|value| action_result_type_is_durable(*value, standard))
+        let Some(return_type) = return_type
+            .map(|value| client_action_result_type(value, standard))
+            .filter(|value| action_result_type_is_durable(*value, standard))
         else {
             continue;
         };
@@ -5619,7 +5698,7 @@ fn check_action_constructor(
         })
         .map(|_| ClientExpressionType {
             semantic_type: SemanticType::Named(CheckedTypeId::Existing(STD_ACTION_TYPE_ID)),
-            standard_value_type: None,
+            standard_value_type: Some(STD_ACTION_TYPE_ID),
         })
     else {
         diagnostics.push(diagnostic(
@@ -5774,7 +5853,7 @@ fn check_action_constructor(
     if target
         .parameters
         .iter()
-        .any(|parameter| !action_argument_type_is_orv3_encodable(parameter.expression_type))
+        .any(|parameter| !action_argument_type_is_orv3_encodable(parameter.expression_type, base, standard))
     {
         diagnostics.push(diagnostic(
             DiagnosticCode::TypeMismatch,
@@ -5851,6 +5930,18 @@ fn check_action_constructor(
             locals,
         )?;
         let parameter = &target.parameters[parameter_index];
+        if client_expression_contains_await_or_resource(&checked, locals) {
+            diagnostics.push(diagnostic(
+                DiagnosticCode::TypeMismatch,
+                format!(
+                    "std.action.call argument for parameter {} is not ORV3-encodable",
+                    parameter.name
+                ),
+                input.logical_path,
+                &argument.span,
+            ));
+            return None;
+        }
         if !client_expression_types_compatible(expression_type, parameter.expression_type) {
             diagnostics.push(diagnostic(
                 DiagnosticCode::TypeMismatch,
@@ -5863,7 +5954,7 @@ fn check_action_constructor(
             ));
             return None;
         }
-        if !action_argument_type_is_orv3_encodable(expression_type) {
+        if !action_argument_type_is_orv3_encodable(expression_type, base, standard) {
             diagnostics.push(diagnostic(
                 DiagnosticCode::TypeMismatch,
                 format!(
@@ -6213,6 +6304,21 @@ fn check_client_expression(
                     used_capabilities,
                     locals,
                 );
+            }
+            if name
+                == QualifiedSemanticName::new(["std", "action", "sequence"])
+                    .expect("std.action.sequence is valid")
+                || name
+                    == QualifiedSemanticName::new(["std", "action", "parallel"])
+                        .expect("std.action.parallel is valid")
+            {
+                diagnostics.push(diagnostic(
+                    DiagnosticCode::UnknownQualifiedName,
+                    format!("unknown CLIENT function {name}"),
+                    input.logical_path,
+                    span,
+                ));
+                return None;
             }
             if resource_constructor_kind(&name).is_some() {
                 diagnostics.push(diagnostic(
@@ -12453,6 +12559,88 @@ mod tests {
     }
 
     #[test]
+    fn accepts_transient_standard_opaque_action_target_result() {
+        let target_id = FunctionId::from_bytes([0x5a; 16]);
+        let action_type = ResolvedType::Named(STD_ACTION_TYPE_ID);
+        let base = CatalogueSnapshot::new_with_functions(
+            CatalogueRevisionId::from_bytes([0x5b; 16]),
+            vec![SchemaDefinition::new(
+                SchemaId::from_bytes([0x5c; 16]),
+                QualifiedSemanticName::new(["tasks"]).unwrap(),
+            )],
+            Vec::new(),
+            vec![FunctionDefinition::new(
+                target_id,
+                QualifiedSemanticName::new(["tasks", "run"]).unwrap(),
+                FunctionDomain::Client,
+                Vec::new(),
+                FunctionReturn::Single(action_type),
+                FunctionRevisionId::from_bytes([0x5d; 16]),
+                FunctionSecurity::Invoker,
+                None,
+                FunctionVolatility::Immutable,
+            )],
+        )
+        .unwrap();
+        let standard =
+            check_standard_library_source(&verified_standard_library_with_action_for_test())
+                .unwrap();
+        let context = StandardApplicationCheckContext::try_new(&base, &standard).unwrap();
+        let source = "CREATE SCHEMA ui; CREATE CLIENT FUNCTION ui.run() RETURNS std.Action AS std.action.call(target => tasks.run, arguments => std.call.args());";
+        let report = check_standard_application(&bundle([("action-transient.orna", source)]), &context);
+        assert!(report.diagnostics().is_empty(), "{:?}", report.diagnostics());
+        let function = report
+            .preparation_view()
+            .unwrap()
+            .checked()
+            .client_functions()
+            .iter()
+            .find(|function| function.name().to_string() == "ui.run")
+            .unwrap();
+        let CheckedClientFunctionBody::Expression { expression } = function.body() else {
+            panic!("expected an expression CLIENT action body");
+        };
+        let super::CheckedClientExpression::Action { operation } = expression else {
+            panic!("expected std.action.call to lower to an action operation");
+        };
+        assert_eq!(operation.target(), super::CheckedFunctionId::Existing(target_id));
+        assert_eq!(operation.result_type(), super::SemanticType::Named(super::CheckedTypeId::Existing(STD_ACTION_TYPE_ID)));
+        assert_eq!(operation.standard_result_type(), Some(STD_ACTION_TYPE_ID));
+    }
+
+    #[test]
+    fn accepts_orv3_enum_and_record_action_arguments() {
+        let standard =
+            check_standard_library_source(&verified_standard_library_with_action_for_test())
+                .unwrap();
+        let base = empty_catalogue();
+        let context = StandardApplicationCheckContext::try_new(&base, &standard).unwrap();
+        let source = "CREATE SCHEMA app; \
+            CREATE TYPE app.phase AS ENUM ('ready', 'done'); \
+            CREATE TYPE app.status AS VALUE (active INTEGER) IMMUTABLE PERSISTABLE; \
+            CREATE CLIENT FUNCTION app.target(p_phase app.phase, p_status app.status) RETURNS INTEGER AS 1; \
+            CREATE CLIENT FUNCTION app.run(p_phase app.phase, p_status app.status) RETURNS std.Action AS \
+                std.action.call(target => app.target, arguments => std.call.args(p_phase => p_phase, p_status => p_status));";
+        let report = check_standard_application(&bundle([("action-orv3.orna", source)]), &context);
+        assert!(report.diagnostics().is_empty(), "{:?}", report.diagnostics());
+        let function = report
+            .preparation_view()
+            .unwrap()
+            .checked()
+            .client_functions()
+            .iter()
+            .find(|function| function.name().to_string() == "app.run")
+            .unwrap();
+        let CheckedClientFunctionBody::Expression { expression } = function.body() else {
+            panic!("expected an expression CLIENT action body");
+        };
+        let super::CheckedClientExpression::Action { operation } = expression else {
+            panic!("expected std.action.call to lower to an action operation");
+        };
+        assert_eq!(operation.arguments().len(), 2);
+    }
+
+    #[test]
     fn rejects_unknown_and_malformed_action_call_targets_and_reserved_combinators() {
         let target_id = FunctionId::from_bytes([0x61; 16]);
         let target_parameter_id = ParameterId::from_bytes([0x62; 16]);
@@ -12460,12 +12648,21 @@ mod tests {
         let target_bad_id = FunctionId::from_bytes([0x66; 16]);
         let bad_parameter_id = ParameterId::from_bytes([0x67; 16]);
         let target_bad_result_id = FunctionId::from_bytes([0x69; 16]);
+        let application_enum_type_id = TypeId::from_bytes([0x6b; 16]);
         let action_type = ResolvedType::Named(STD_ACTION_TYPE_ID);
-        let base = CatalogueSnapshot::new_with_functions(
+        let bad_result_type = ResolvedType::Named(application_enum_type_id);
+        let base = CatalogueSnapshot::new_with_functions_and_enum_types(
             CatalogueRevisionId::from_bytes([0x63; 16]),
             vec![SchemaDefinition::new(
                 SchemaId::from_bytes([0x64; 16]),
                 QualifiedSemanticName::new(["tasks"]).unwrap(),
+            )],
+            Vec::new(),
+            Vec::new(),
+            vec![EnumTypeDefinition::new(
+                application_enum_type_id,
+                QualifiedSemanticName::new(["tasks", "status"]).unwrap(),
+                ["ready", "done"],
             )],
             Vec::new(),
             vec![
@@ -12508,7 +12705,7 @@ mod tests {
                     QualifiedSemanticName::new(["tasks", "bad_return"]).unwrap(),
                     FunctionDomain::Client,
                     Vec::new(),
-                    FunctionReturn::Single(action_type),
+                    FunctionReturn::Single(bad_result_type),
                     FunctionRevisionId::from_bytes([0x6a; 16]),
                     FunctionSecurity::Invoker,
                     None,
@@ -18391,6 +18588,68 @@ mod tests {
             super::CheckedClientExpression::Await { expression, .. }
                 if matches!(expression.as_ref(), super::CheckedClientExpression::LocalRead { local: 0, .. })
         ));
+    }
+
+    #[test]
+    fn rejects_resource_local_as_action_argument() {
+        let resource_target_id = FunctionId::from_bytes([0x71; 16]);
+        let action_target_id = FunctionId::from_bytes([0x72; 16]);
+        let action_parameter_id = ParameterId::from_bytes([0x73; 16]);
+        let integer_type = ResolvedType::Scalar(StandardScalar::Integer);
+        let base = CatalogueSnapshot::new_with_functions(
+            CatalogueRevisionId::from_bytes([0x74; 16]),
+            vec![SchemaDefinition::new(
+                SchemaId::from_bytes([0x75; 16]),
+                QualifiedSemanticName::new(["tasks"]).unwrap(),
+            )],
+            Vec::new(),
+            vec![
+                FunctionDefinition::new(
+                    resource_target_id,
+                    QualifiedSemanticName::new(["tasks", "find"]).unwrap(),
+                    FunctionDomain::Server,
+                    Vec::new(),
+                    FunctionReturn::Single(integer_type),
+                    FunctionRevisionId::from_bytes([0x76; 16]),
+                    FunctionSecurity::Invoker,
+                    None,
+                    FunctionVolatility::Stable,
+                ),
+                FunctionDefinition::new(
+                    action_target_id,
+                    QualifiedSemanticName::new(["tasks", "run"]).unwrap(),
+                    FunctionDomain::Client,
+                    vec![ParameterDefinition::new(
+                        action_parameter_id,
+                        "p_value",
+                        0,
+                        integer_type,
+                        None,
+                    )],
+                    FunctionReturn::Single(ResolvedType::Scalar(StandardScalar::Integer)),
+                    FunctionRevisionId::from_bytes([0x77; 16]),
+                    FunctionSecurity::Invoker,
+                    None,
+                    FunctionVolatility::Immutable,
+                ),
+            ],
+        )
+        .unwrap();
+        let standard =
+            check_standard_library_source(&verified_standard_library_with_action_for_test())
+                .unwrap();
+        let context = StandardApplicationCheckContext::try_new(&base, &standard).unwrap();
+        let source = "CREATE SCHEMA ui; CREATE CLIENT FUNCTION ui.run() RETURNS std.Action IS \
+            LET rows std.data.Resource<INTEGER> := std.data.resource(target => tasks.find, arguments => std.call.args()); \
+            BEGIN RETURN std.action.call(target => tasks.run, arguments => std.call.args(p_value => rows)); END;";
+        let report = check_standard_application(&bundle([("action-resource.orna", source)]), &context);
+        assert_eq!(report.diagnostics().len(), 1, "{:?}", report.diagnostics());
+        assert_eq!(report.diagnostics()[0].code(), DiagnosticCode::TypeMismatch);
+        assert_eq!(
+            report.diagnostics()[0].message(),
+            "std.action.call argument for parameter p_value is not ORV3-encodable"
+        );
+        assert!(report.checked_bundle().is_none());
     }
 
     #[test]
