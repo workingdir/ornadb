@@ -1,6 +1,6 @@
 //! Bounded raw-call protocol frames and connection state.
 
-use std::{collections::BTreeMap, error::Error, fmt};
+use std::{collections::{BTreeMap, BTreeSet}, error::Error, fmt};
 
 use orna_core::{
     CallSiteId, FunctionId, InvocationId, ParameterId, TypeId,
@@ -552,6 +552,7 @@ pub enum ResourceConnectionError {
     InvalidFrame { source: FrameCodecError },
     UnknownStream { stream_id: u64 },
     MismatchedRequest { stream_id: u64 },
+    DuplicateRequestId { request_id: InvocationId },
     WrongState { stream_id: u64 },
     StreamNotIncreasing { stream_id: u64, previous: u64 },
     TooManyLiveResources,
@@ -569,6 +570,7 @@ impl fmt::Display for ResourceConnectionError {
             Self::InvalidFrame { .. } => formatter.write_str("invalid resource frame"),
             Self::UnknownStream { .. } => formatter.write_str("unknown resource stream"),
             Self::MismatchedRequest { .. } => formatter.write_str("resource request identity mismatches stream"),
+            Self::DuplicateRequestId { .. } => formatter.write_str("resource request ID was already used on this connection"),
             Self::WrongState { .. } => formatter.write_str("resource frame violates stream state"),
             Self::StreamNotIncreasing { .. } => formatter.write_str("resource stream id is not increasing"),
             Self::TooManyLiveResources => formatter.write_str("too many live resource streams"),
@@ -1752,12 +1754,17 @@ struct ResourceState {
 pub struct ResourceProtocolConnection {
     high_water_mark: Option<u64>,
     streams: BTreeMap<u64, ResourceState>,
+    /// Request IDs remain reserved for the whole connection lifetime.
+    ///
+    /// Unlike terminal stream tombstones, this history is intentionally not
+    /// evicted: bounded cleanup must not permit request ID reuse.
+    request_ids: BTreeSet<InvocationId>,
     terminal: BTreeMap<u64, InvocationId>,
 }
 
 impl ResourceProtocolConnection {
     pub const fn new() -> Self {
-        Self { high_water_mark: None, streams: BTreeMap::new(), terminal: BTreeMap::new() }
+        Self { high_water_mark: None, streams: BTreeMap::new(), request_ids: BTreeSet::new(), terminal: BTreeMap::new() }
     }
 
     pub const fn high_water_mark(&self) -> Option<u64> { self.high_water_mark }
@@ -1815,7 +1822,11 @@ impl ResourceProtocolConnection {
         if self.streams.contains_key(&request.stream_id) || self.terminal.contains_key(&request.stream_id) {
             return Err(ResourceConnectionError::StreamNotIncreasing { stream_id: request.stream_id, previous: self.high_water_mark.unwrap_or(0) });
         }
+        if self.request_ids.contains(&request.request_id) {
+            return Err(ResourceConnectionError::DuplicateRequestId { request_id: request.request_id });
+        }
         self.high_water_mark = Some(request.stream_id);
+        self.request_ids.insert(request.request_id);
         self.streams.insert(request.stream_id, ResourceState {
             request_id: request.request_id,
             target_revision: request.target_revision,
@@ -7935,5 +7946,57 @@ mod tests {
         assert_eq!(connection.open(second.clone()), Ok(ResourceFrameDisposition::Applied));
         assert_eq!(connection.shutdown(), 1);
         assert_eq!(connection.apply(ResourceServerFrame::Failed(ResourceFailed { stream_id: 3, request_id: second.request_id, failure: CallFailure::InternalFailure })), Ok(ResourceFrameDisposition::DroppedLate));
+    }
+
+    #[test]
+    fn resource_connection_rejects_request_id_reuse_across_streams_and_after_cleanup() {
+        let mut first = resource_request_fixture();
+        first.stream_id = 1;
+        first.request_id = InvocationId::from_bytes([0x71; 16]);
+        let mut duplicate = first.clone();
+        duplicate.stream_id = 2;
+        let mut connection = ResourceProtocolConnection::new();
+
+        assert_eq!(connection.open(first.clone()), Ok(ResourceFrameDisposition::Applied));
+        let before_duplicate = connection.clone();
+        assert_eq!(
+            connection.open(duplicate),
+            Err(ResourceConnectionError::DuplicateRequestId {
+                request_id: first.request_id,
+            }),
+        );
+        assert_eq!(connection, before_duplicate);
+
+        assert_eq!(
+            connection.apply(ResourceServerFrame::Failed(ResourceFailed {
+                stream_id: first.stream_id,
+                request_id: first.request_id,
+                failure: CallFailure::InternalFailure,
+            })),
+            Ok(ResourceFrameDisposition::Applied),
+        );
+
+        let request_id = first.request_id;
+        let mut after_cleanup = first;
+        after_cleanup.stream_id = 3;
+        assert_eq!(
+            connection.open(after_cleanup),
+            Err(ResourceConnectionError::DuplicateRequestId { request_id }),
+        );
+    }
+
+    #[test]
+    fn resource_connection_accepts_distinct_request_ids_on_distinct_streams() {
+        let mut first = resource_request_fixture();
+        first.stream_id = 1;
+        first.request_id = InvocationId::from_bytes([0x72; 16]);
+        let mut second = first.clone();
+        second.stream_id = 2;
+        second.request_id = InvocationId::from_bytes([0x73; 16]);
+        let mut connection = ResourceProtocolConnection::new();
+
+        assert_eq!(connection.open(first), Ok(ResourceFrameDisposition::Applied));
+        assert_eq!(connection.open(second), Ok(ResourceFrameDisposition::Applied));
+        assert_eq!(connection.live_resources(), 2);
     }
 }
