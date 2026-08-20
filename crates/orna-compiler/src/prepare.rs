@@ -1215,6 +1215,8 @@ enum CandidateResolvedType {
         type_id: TypeId,
         compatibility: StandardScalar,
     },
+    /// A standard opaque value has no legacy scalar compatibility form.
+    StandardOpaqueValue(TypeId),
     Named(TypeId),
     Reference(TypeId),
 }
@@ -1240,7 +1242,9 @@ impl CandidateResolvedType {
         match self {
             Self::LegacyScalar(scalar) => ResolvedType::Scalar(scalar),
             Self::StandardValue { compatibility, .. } => ResolvedType::Scalar(compatibility),
-            Self::Named(type_id) => ResolvedType::Named(type_id),
+            Self::StandardOpaqueValue(type_id) | Self::Named(type_id) => {
+                ResolvedType::Named(type_id)
+            }
             Self::Reference(target) => ResolvedType::Reference { target },
         }
     }
@@ -1322,8 +1326,18 @@ impl CandidateLoweringMode {
                     type_id,
                     compatibility,
                 } => self.lower_durable_standard_value(type_id, compatibility),
+                CandidateResolvedType::StandardOpaqueValue(type_id) => {
+                    self.lower_durable_standard_opaque_value(type_id)
+                }
                 candidate => candidate.compatibility_type(),
             },
+        }
+    }
+
+    fn lower_durable_standard_opaque_value(self, type_id: TypeId) -> ResolvedType {
+        match self {
+            Self::LegacyV1 | Self::StandardV1Match => ResolvedType::Named(type_id),
+            Self::StandardV2Plan | Self::StandardV2 => ResolvedType::Value(type_id),
         }
     }
 
@@ -6994,6 +7008,18 @@ impl<'a> CandidateBuilder<'a> {
             result_type,
         ))
     }
+    fn client_named_type_id(&self, id: CheckedTypeId) -> Result<TypeId, PrepareError> {
+        if let CheckedTypeId::Existing(type_id) = id
+            && self
+                .mode
+                .durable_standard_catalogue()
+                .is_some_and(|catalogue| catalogue.value_type_by_id(type_id).is_some())
+        {
+            return Ok(type_id);
+        }
+        self.identities.type_id(id)
+    }
+
 
     fn client_function_references(
         &self,
@@ -7024,7 +7050,7 @@ impl<'a> CandidateBuilder<'a> {
                         self.source.origin(&signature_slot.location)?,
                     ),
                     EvidenceTarget::Named(target) => (
-                        DefinitionReferenceTarget::ValueType(self.identities.type_id(target)?),
+                        DefinitionReferenceTarget::ValueType(self.client_named_type_id(target)?),
                         DefinitionReferenceKind::NamedType,
                         self.source.origin(&signature_slot.location)?,
                     ),
@@ -7060,7 +7086,7 @@ impl<'a> CandidateBuilder<'a> {
             let return_target = match validated.return_target {
                 EvidenceTarget::Value(type_id) => DefinitionReferenceTarget::ValueType(type_id),
                 EvidenceTarget::Named(type_id) => {
-                    DefinitionReferenceTarget::ValueType(self.identities.type_id(type_id)?)
+                    DefinitionReferenceTarget::ValueType(self.client_named_type_id(type_id)?)
                 }
                 EvidenceTarget::ObjectReference(type_id) => {
                     DefinitionReferenceTarget::ObjectType(self.identities.type_id(type_id)?)
@@ -7303,9 +7329,18 @@ impl<'a> CandidateBuilder<'a> {
             (SemanticType::Named(target), EvidenceTarget::Named(evidence))
                 if target == evidence =>
             {
-                Ok(CandidateResolvedType::Named(
-                    self.identities.type_id(target)?,
-                ))
+                let CheckedTypeId::Existing(type_id) = target else {
+                    return Err(invalid_checked_declaration_type_evidence());
+                };
+                if self
+                    .mode
+                    .durable_standard_catalogue()
+                    .is_some_and(|catalogue| catalogue.value_type_by_id(type_id).is_some())
+                {
+                    Ok(CandidateResolvedType::StandardOpaqueValue(type_id))
+                } else {
+                    Ok(CandidateResolvedType::Named(self.client_named_type_id(target)?))
+                }
             }
             (SemanticType::Reference { target }, EvidenceTarget::ObjectReference(evidence))
                 if target == evidence =>
