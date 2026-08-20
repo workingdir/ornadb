@@ -1,6 +1,8 @@
 //! Local evaluation for closed CLIENT functions.
 
-use orna_protocol::{ClientFrame, encode_active_client_frame};
+use orna_protocol::{
+    ClientFrame, decode_active_value, encode_active_client_frame, encode_active_value,
+};
 use sha2::{Digest, Sha256};
 use std::{
     collections::{HashMap, hash_map::Entry},
@@ -14,7 +16,8 @@ use orna_artifact::client_plan::{
     ClientExpressionNode, ClientLocal, ClientLocalKind, ClientPlan, ClientPlanError, EXPRESSION_FORMAT_VERSION,
     ExpressionClientPlan, FORMAT_IDENTITY, FORMAT_VERSION, InnerClientPlan,
     LANGUAGE_VERSION_IDENTITY, OPAQUE_FORMAT_VERSION, OpaqueClientPlan, RESOURCE_FORMAT_VERSION, PROCEDURAL_FORMAT_VERSION,
-    ProceduralClientPlan, ResourceClientPlan, ResourceKind, ResourceOperationNode, STATE_FORMAT_VERSION, StateClientPlan,
+    ActionClientPlan, ActionTargetDomain, ProceduralClientPlan, ResourceClientPlan, ResourceKind,
+    ResourceOperationNode, STATE_FORMAT_VERSION, StateClientPlan,
     StateDefault, StateScope,
 };
 use orna_core::{
@@ -36,7 +39,10 @@ use orna_core::{
     types::{ResolvedType, StandardScalar},
     value::{FunctionArgument, OpaqueValue, OpaqueValueError, RuntimeValue},
 };
-use orna_standard::{RegisteredOpaqueCodecsError, registered_opaque_codecs};
+use orna_standard::{
+    ACTION_MAGIC, RegisteredOpaqueCodecsError, STD_ACTION_TYPE_ID,
+    registered_opaque_codecs,
+};
 
 pub mod capability;
 
@@ -95,6 +101,99 @@ impl ClientExecutionResult {
         self.value
     }
 }
+
+
+/// Authority-free call descriptor carried by a transient std.action.Action.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ClientActionDescriptor {
+    domain: ActionTargetDomain,
+    target: FunctionId,
+    target_revision: RevisionPair,
+    call_site: CallSiteId,
+    result_type: TypeId,
+    arguments: Vec<FunctionArgument>,
+}
+impl ClientActionDescriptor {
+    pub fn new(
+        domain: ActionTargetDomain,
+        target: FunctionId,
+        target_revision: RevisionPair,
+        call_site: CallSiteId,
+        arguments: Vec<FunctionArgument>,
+        result_type: TypeId,
+    ) -> Self {
+        Self {
+            domain,
+            target,
+            target_revision,
+            call_site,
+            result_type,
+            arguments,
+        }
+    }
+    pub const fn domain(&self) -> ActionTargetDomain {
+        self.domain
+    }
+    pub const fn target(&self) -> FunctionId {
+        self.target
+    }
+    pub const fn target_revision(&self) -> RevisionPair {
+        self.target_revision
+    }
+    pub const fn call_site(&self) -> CallSiteId {
+        self.call_site
+    }
+    pub const fn result_type(&self) -> TypeId {
+        self.result_type
+    }
+    pub fn arguments(&self) -> &[FunctionArgument] {
+        &self.arguments
+    }
+    pub fn encode_payload(
+        &self,
+        active: &ActiveDatabaseRevision,
+    ) -> Result<Vec<u8>, ClientActionError> {
+        encode_action_payload(active, self)
+    }
+}
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ClientActionOutcome {
+    Completed,
+    Failed { code: String },
+    Cancelled,
+}
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ClientActionError {
+    InvalidValue,
+    InvalidPayload(String),
+    Registry(String),
+    RevisionMismatch,
+    TargetMismatch,
+    ResultTypeMismatch,
+    Arguments(ClientResourceError),
+    Pending,
+    Executor(String),
+    Evaluation(String),
+}
+impl fmt::Display for ClientActionError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidValue => f.write_str("the CLIENT action value is invalid"),
+            Self::InvalidPayload(m) => write!(f, "the CLIENT action payload is invalid: {m}"),
+            Self::Registry(m) => write!(f, "the CLIENT action codec registry is invalid: {m}"),
+            Self::RevisionMismatch => {
+                f.write_str("the CLIENT action target revision is not active")
+            }
+            Self::TargetMismatch => f.write_str("the CLIENT action target is invalid"),
+            Self::ResultTypeMismatch => f.write_str("the CLIENT action result type is invalid"),
+            Self::Arguments(e) => e.fmt(f),
+            Self::Pending => f.write_str("the CLIENT action remains pending"),
+            Self::Executor(m) => write!(f, "the CLIENT action executor failed: {m}"),
+            Self::Evaluation(m) => write!(f, "the CLIENT action target failed evaluation: {m}"),
+        }
+    }
+}
+impl Error for ClientActionError {}
 /// The cache identity for one CLIENT resource request.
 ///
 /// All four components are part of the cache boundary. A resource result must
@@ -2405,6 +2504,11 @@ fn evaluate_plan(
                 local_environment,
             )
         }
+        ClientReturnShape::Action(_expected) => {
+            let plan = ActionClientPlan::decode(payload)
+                .map_err(|source| ClientExecutionError::InvalidArtifact { context, source })?;
+            evaluate_action_operation(active, plan.operation(), context, arguments, declarations, grants, state, depth, principal, executor, local_environment)
+        }
         ClientReturnShape::Resource(expected) => {
             let plan = ResourceClientPlan::decode(payload)
                 .map_err(|source| ClientExecutionError::InvalidArtifact { context, source })?;
@@ -2781,6 +2885,10 @@ fn evaluate_capability_plan(
                 executor, local_environment,
             )
         }
+        InnerClientPlan::Action(inner) => {
+            let ClientReturnShape::Action(_expected) = return_shape else { unreachable!("function shape was validated against the inner plan version"); };
+            evaluate_action_operation(active, inner.operation(), context, arguments, &[], grants, state, depth, principal, executor, local_environment)
+        }
         InnerClientPlan::Resource(inner) => {
             let ClientReturnShape::Resource(expected) = return_shape else {
                 unreachable!("function shape was validated against the inner plan version");
@@ -3096,6 +3204,358 @@ fn evaluate_resource_expression(
     }
 }
 
+fn action_payload_error(message: impl Into<String>) -> ClientActionError {
+    ClientActionError::InvalidPayload(message.into())
+}
+
+pub fn encode_action_payload(
+    active: &ActiveDatabaseRevision,
+    descriptor: &ClientActionDescriptor,
+) -> Result<Vec<u8>, ClientActionError> {
+    for pair in descriptor.arguments.windows(2) {
+        if pair[0].parameter() >= pair[1].parameter() {
+            return Err(action_payload_error(
+                "arguments are not in ascending parameter order",
+            ));
+        }
+    }
+    if descriptor.arguments.len() > orna_artifact::client_plan::MAX_ACTION_ARGUMENTS {
+        return Err(action_payload_error("too many action arguments"));
+    }
+    let mut body = Vec::new();
+    body.push(match descriptor.domain {
+        ActionTargetDomain::Client => 1,
+        ActionTargetDomain::Server => 2,
+    });
+    body.extend_from_slice(&descriptor.target.to_bytes());
+    body.extend_from_slice(&descriptor.target_revision.source().to_bytes());
+    body.extend_from_slice(&descriptor.target_revision.catalogue().to_bytes());
+    body.extend_from_slice(&descriptor.call_site.to_bytes());
+    body.extend_from_slice(&descriptor.result_type.to_bytes());
+    body.extend_from_slice(&(descriptor.arguments.len() as u32).to_be_bytes());
+    for argument in &descriptor.arguments {
+        body.extend_from_slice(&argument.parameter().to_bytes());
+        let frame = encode_active_value(active, argument.value())
+            .map_err(|source| action_payload_error(source.to_string()))?;
+        let length = u32::try_from(frame.len())
+            .map_err(|_| action_payload_error("argument frame is too large"))?;
+        body.extend_from_slice(&length.to_be_bytes());
+        body.extend_from_slice(&frame);
+    }
+    let length = u32::try_from(body.len())
+        .map_err(|_| action_payload_error("action payload is too large"))?;
+    let mut payload = Vec::with_capacity(ACTION_MAGIC.len() + 4 + body.len());
+    payload.extend_from_slice(ACTION_MAGIC.as_bytes());
+    payload.extend_from_slice(&length.to_be_bytes());
+    payload.extend_from_slice(&body);
+    Ok(payload)
+}
+
+fn action_take<'a>(
+    body: &'a [u8],
+    offset: &mut usize,
+    length: usize,
+) -> Result<&'a [u8], ClientActionError> {
+    let end = offset
+        .checked_add(length)
+        .ok_or_else(|| action_payload_error("action payload overflow"))?;
+    if end > body.len() {
+        return Err(action_payload_error("truncated action payload"));
+    }
+    let value = &body[*offset..end];
+    *offset = end;
+    Ok(value)
+}
+
+pub fn decode_action_payload(
+    active: &ActiveDatabaseRevision,
+    payload: &[u8],
+) -> Result<ClientActionDescriptor, ClientActionError> {
+    let magic = ACTION_MAGIC.as_bytes();
+    if payload.len() < magic.len() + 4 || !payload.starts_with(magic) {
+        return Err(action_payload_error("invalid action magic"));
+    }
+    let mut cursor = magic.len();
+    let body_length = u32::from_be_bytes(payload[cursor..cursor + 4].try_into().unwrap()) as usize;
+    cursor += 4;
+    if body_length != payload.len() - cursor {
+        return Err(action_payload_error("action payload length does not match"));
+    }
+    let body = &payload[cursor..];
+    let mut offset = 0usize;
+    let domain = match action_take(body, &mut offset, 1)?[0] {
+        1 => ActionTargetDomain::Client,
+        2 => ActionTargetDomain::Server,
+        _ => return Err(action_payload_error("unknown action domain")),
+    };
+    let target = FunctionId::from_bytes(action_take(body, &mut offset, 16)?.try_into().unwrap());
+    let source = orna_core::SourceRevisionId::from_bytes(
+        action_take(body, &mut offset, 16)?.try_into().unwrap(),
+    );
+    let catalogue = orna_core::CatalogueRevisionId::from_bytes(
+        action_take(body, &mut offset, 16)?.try_into().unwrap(),
+    );
+    let target_revision = RevisionPair::new(source, catalogue);
+    let call_site = CallSiteId::from_bytes(action_take(body, &mut offset, 16)?.try_into().unwrap());
+    let result_type = TypeId::from_bytes(action_take(body, &mut offset, 16)?.try_into().unwrap());
+    let count = u32::from_be_bytes(action_take(body, &mut offset, 4)?.try_into().unwrap()) as usize;
+    if count > orna_artifact::client_plan::MAX_ACTION_ARGUMENTS {
+        return Err(action_payload_error("too many action arguments"));
+    }
+    let mut arguments = Vec::with_capacity(count);
+    let mut previous = None;
+    for _ in 0..count {
+        let parameter =
+            ParameterId::from_bytes(action_take(body, &mut offset, 16)?.try_into().unwrap());
+        if previous.is_some_and(|value| parameter <= value) {
+            return Err(action_payload_error("action arguments are not canonical"));
+        }
+        previous = Some(parameter);
+        let frame_length =
+            u32::from_be_bytes(action_take(body, &mut offset, 4)?.try_into().unwrap()) as usize;
+        let frame = action_take(body, &mut offset, frame_length)?;
+        let value = decode_active_value(active, frame)
+            .map_err(|source| action_payload_error(source.to_string()))?;
+        arguments.push(
+            FunctionArgument::new(parameter, value)
+                .map_err(|source| action_payload_error(source.to_string()))?,
+        );
+    }
+    if offset != body.len() {
+        return Err(action_payload_error("trailing action payload bytes"));
+    }
+    let descriptor = ClientActionDescriptor::new(
+        domain,
+        target,
+        target_revision,
+        call_site,
+        arguments,
+        result_type,
+    );
+    if encode_action_payload(active, &descriptor)? != payload {
+        return Err(action_payload_error("non-canonical action payload"));
+    }
+    Ok(descriptor)
+}
+
+fn action_target_result_type(
+    active: &ActiveDatabaseRevision,
+    descriptor: &ClientActionDescriptor,
+) -> Result<ResolvedType, ClientActionError> {
+    if descriptor.target_revision != active.pair() {
+        return Err(ClientActionError::RevisionMismatch);
+    }
+    let Some(definition) = active.catalogue().function_by_id(descriptor.target) else {
+        return Err(ClientActionError::TargetMismatch);
+    };
+    let expected_domain = match descriptor.domain {
+        ActionTargetDomain::Client => FunctionDomain::Client,
+        ActionTargetDomain::Server => FunctionDomain::Server,
+    };
+    if definition.domain() != expected_domain {
+        return Err(ClientActionError::TargetMismatch);
+    }
+    let FunctionReturn::Single(resolved) = definition.return_type() else {
+        return Err(ClientActionError::ResultTypeMismatch);
+    };
+    if !resource_type_matches_id(active, *resolved, descriptor.result_type) {
+        return Err(ClientActionError::ResultTypeMismatch);
+    }
+    Ok(*resolved)
+}
+
+fn validate_action_arguments(
+    active: &ActiveDatabaseRevision,
+    descriptor: &ClientActionDescriptor,
+) -> Result<Vec<FunctionArgument>, ClientActionError> {
+    let Some(definition) = active.catalogue().function_by_id(descriptor.target) else {
+        return Err(ClientActionError::TargetMismatch);
+    };
+    if descriptor.arguments.len() != definition.parameters().len() {
+        return Err(ClientActionError::Arguments(
+            ClientResourceError::TypeMismatch,
+        ));
+    }
+    let mut previous = None;
+    for argument in &descriptor.arguments {
+        if previous.is_some_and(|value| argument.parameter() <= value) {
+            return Err(ClientActionError::Arguments(
+                ClientResourceError::DuplicateArgument {
+                    parameter: argument.parameter(),
+                },
+            ));
+        }
+        previous = Some(argument.parameter());
+        let Some(parameter) = definition
+            .parameters()
+            .iter()
+            .find(|candidate| candidate.id() == argument.parameter())
+        else {
+            return Err(ClientActionError::Arguments(
+                ClientResourceError::UnknownArgument {
+                    parameter: argument.parameter(),
+                },
+            ));
+        };
+        if !runtime_value_matches(active, argument.value(), parameter.resolved_type()) {
+            return Err(ClientActionError::Arguments(
+                ClientResourceError::TypeMismatch,
+            ));
+        }
+    }
+    Ok(descriptor.arguments.clone())
+}
+
+fn evaluate_action_operation(
+    active: &ActiveDatabaseRevision,
+    operation: &orna_artifact::client_plan::ActionOperationNode,
+    context: ClientExecutionContext,
+    arguments: &[(ParameterId, RuntimeValue)],
+    declarations: &[capability::LocalCapabilityDeclaration],
+    grants: &capability::LocalCapabilityGrantSet,
+    state: &mut ClientStateStore,
+    depth: usize,
+    principal: PrincipalId,
+    executor: &mut Option<&mut dyn ClientResourceExecutor>,
+    local_environment: &mut ClientLocalEnvironment,
+) -> Result<RuntimeValue, ClientExecutionError> {
+    let mut values = Vec::with_capacity(operation.arguments().len());
+    for (parameter, expression) in operation.arguments() {
+        let value = evaluate_expression(
+            active,
+            expression,
+            context,
+            arguments,
+            declarations,
+            grants,
+            state,
+            depth,
+            principal,
+            executor,
+            local_environment,
+        )?;
+        values.push(
+            FunctionArgument::new(*parameter, value)
+                .map_err(|_| expression_error(context, ClientExpressionError::InvalidCall))?,
+        );
+    }
+    let descriptor = ClientActionDescriptor::new(
+        operation.domain(),
+        operation.target(),
+        operation.target_revision(),
+        operation.call_site_id(),
+        values,
+        operation.result_type(),
+    );
+    action_target_result_type(active, &descriptor)
+        .map_err(|_| expression_error(context, ClientExpressionError::InvalidCall))?;
+    validate_action_arguments(active, &descriptor)
+        .map_err(|_| expression_error(context, ClientExpressionError::InvalidCall))?;
+    let payload = encode_action_payload(active, &descriptor)
+        .map_err(|_| expression_error(context, ClientExpressionError::InvalidCall))?;
+    let standard = active
+        .catalogue_hash_context()
+        .standard()
+        .ok_or_else(|| expression_error(context, ClientExpressionError::TypeMismatch))?;
+    let registry = registered_opaque_codecs(standard)
+        .map_err(|_| expression_error(context, ClientExpressionError::TypeMismatch))?;
+    let value = OpaqueValue::new(active, &registry, STD_ACTION_TYPE_ID, payload)
+        .map_err(|_| expression_error(context, ClientExpressionError::TypeMismatch))?;
+    Ok(RuntimeValue::Opaque(value))
+}
+
+pub fn trigger_client_action(
+    active: &ActiveDatabaseRevision,
+    action: &RuntimeValue,
+    authorisation: &AuthorisedInvocation,
+    parent: &ClientExecutionContext,
+    declarations: &[capability::LocalCapabilityDeclaration],
+    grants: &capability::LocalCapabilityGrantSet,
+    state: &mut ClientStateStore,
+    executor: &mut dyn ClientResourceExecutor,
+) -> Result<ClientActionOutcome, ClientActionError> {
+    if parent.pair() != active.pair() {
+        return Err(ClientActionError::RevisionMismatch);
+    }
+    let RuntimeValue::Opaque(value) = action else {
+        return Err(ClientActionError::InvalidValue);
+    };
+    if value.opaque_type() != STD_ACTION_TYPE_ID {
+        return Err(ClientActionError::InvalidValue);
+    }
+    let descriptor = decode_action_payload(active, value.canonical_payload())?;
+    let expected = action_target_result_type(active, &descriptor)?;
+    let values = validate_action_arguments(active, &descriptor)?;
+    let target = InvocationTarget::new(descriptor.target, descriptor.target_revision);
+    let digest = ClientResourceKey::canonical_arguments_digest(active, &values)
+        .map_err(ClientActionError::Arguments)?;
+    match descriptor.domain {
+        ActionTargetDomain::Server => {
+            let key = ClientResourceKey::new(
+                target,
+                authorisation.session_principal(),
+                digest,
+                active.catalogue_hash(),
+            );
+            let mut resource = ClientResource::new(key, expected);
+            let request = resource
+                .begin_request_with_context(
+                    active,
+                    ClientResourceInvocationContext::new(InvocationId::new(), descriptor.call_site),
+                    values,
+                )
+                .map_err(ClientActionError::Arguments)?;
+            let completion = executor.execute(request);
+            resource
+                .apply_completion(active, completion)
+                .map_err(|source| ClientActionError::Executor(source.to_string()))?;
+            match resource.status() {
+                ClientResourceStatus::Ready => Ok(ClientActionOutcome::Completed),
+                ClientResourceStatus::Failed => Ok(ClientActionOutcome::Failed {
+                    code: resource
+                        .failure()
+                        .map(|failure| failure.code().to_owned())
+                        .unwrap_or_else(|| "action.failed".to_owned()),
+                }),
+                ClientResourceStatus::Cancelled => Ok(ClientActionOutcome::Cancelled),
+                ClientResourceStatus::Loading => Err(ClientActionError::Pending),
+                status => Err(ClientActionError::Executor(format!(
+                    "invalid terminal status: {status:?}"
+                ))),
+            }
+        }
+        ActionTargetDomain::Client => {
+            let mut nested = Some(executor as &mut dyn ClientResourceExecutor);
+            match evaluate_function(
+                active,
+                descriptor.target,
+                values
+                    .into_iter()
+                    .map(|argument| (argument.parameter(), argument.value().clone()))
+                    .collect(),
+                declarations,
+                grants,
+                state,
+                0,
+                authorisation.session_principal(),
+                parent.parent_invocation_id(),
+                &mut nested,
+            ) {
+                Ok(_) => Ok(ClientActionOutcome::Completed),
+                Err(ClientExecutionError::ResourceEvaluation {
+                    source: ClientResourceExecutionError::Cancelled,
+                    ..
+                }) => Ok(ClientActionOutcome::Cancelled),
+                Err(ClientExecutionError::ResourceEvaluation {
+                    source: ClientResourceExecutionError::Failed(code),
+                    ..
+                }) => Ok(ClientActionOutcome::Failed { code }),
+                Err(error) => Err(ClientActionError::Evaluation(error.to_string())),
+            }
+        }
+    }
+}
+
 fn evaluate_expression(
     active: &ActiveDatabaseRevision,
     expression: &ClientExpressionNode,
@@ -3128,6 +3588,10 @@ fn evaluate_expression(
             _ => Err(expression_error(context, ClientExpressionError::InvalidCall)),
         },
         ClientExpressionNode::Resource { operation } => evaluate_resource_expression(
+            active, operation, context, arguments, declarations, grants, state, depth, principal,
+            executor, local_environment,
+        ),
+        ClientExpressionNode::Action { operation } => evaluate_action_operation(
             active, operation, context, arguments, declarations, grants, state, depth, principal,
             executor, local_environment,
         ),
@@ -3601,6 +4065,7 @@ enum ClientReturnShape {
     State(ResolvedType),
     Resource(ResolvedType),
     Procedural(ResolvedType),
+    Action(TypeId),
     OtherValue,
     Unsupported,
 }
@@ -3612,7 +4077,7 @@ fn classify_client_return(
 ) -> ClientReturnShape {
     let expression_eligible = matches!(
         artifact_version,
-        EXPRESSION_FORMAT_VERSION | STATE_FORMAT_VERSION | RESOURCE_FORMAT_VERSION | PROCEDURAL_FORMAT_VERSION
+        EXPRESSION_FORMAT_VERSION | STATE_FORMAT_VERSION | RESOURCE_FORMAT_VERSION | PROCEDURAL_FORMAT_VERSION | orna_artifact::client_plan::ACTION_FORMAT_VERSION
     );
     let expression_shape = |resolved_type: ResolvedType| {
         if artifact_version == STATE_FORMAT_VERSION {
@@ -3650,6 +4115,9 @@ fn classify_client_return(
         return ClientReturnShape::Unsupported;
     }
     if let Some(type_id) = resolved_type.value_type() {
+        if artifact_version == orna_artifact::client_plan::ACTION_FORMAT_VERSION && type_id == STD_ACTION_TYPE_ID {
+            return ClientReturnShape::Action(type_id);
+        }
         let Some(definition) = active
             .catalogue_hash_context()
             .standard()
@@ -3698,7 +4166,7 @@ fn validate_function_shape(
     }
     if !matches!(
         artifact_version,
-        EXPRESSION_FORMAT_VERSION | STATE_FORMAT_VERSION | RESOURCE_FORMAT_VERSION | PROCEDURAL_FORMAT_VERSION
+        EXPRESSION_FORMAT_VERSION | STATE_FORMAT_VERSION | RESOURCE_FORMAT_VERSION | PROCEDURAL_FORMAT_VERSION | orna_artifact::client_plan::ACTION_FORMAT_VERSION
     ) && !definition.parameters().is_empty()
     {
         return Err(invalid_function(context, ClientExecutionRule::Parameters));
@@ -3750,6 +4218,7 @@ fn validate_selected_references(
                 | ClientReturnShape::State(_)
                 | ClientReturnShape::Resource(_)
                 | ClientReturnShape::Procedural(_)
+                | ClientReturnShape::Action(_)
             ) {
                 if selected.iter().any(|reference| {
                     !matches!(
@@ -3789,6 +4258,10 @@ fn validate_selected_references(
                                 return_type == type_id
                                     && definition
                                         .is_some_and(|value| value.kind() == ValueTypeKind::Opaque)
+                            }
+                            ClientReturnShape::Action(return_type) => {
+                                return_type == type_id && type_id == STD_ACTION_TYPE_ID
+                                    && definition.is_some_and(|value| value.kind() == ValueTypeKind::Opaque)
                             }
                             ClientReturnShape::Expression(_)
                             | ClientReturnShape::State(_)
@@ -3834,6 +4307,7 @@ fn validate_artifact(
         ClientReturnShape::Procedural(_) => PROCEDURAL_FORMAT_VERSION,
         ClientReturnShape::State(_) => STATE_FORMAT_VERSION,
         ClientReturnShape::Resource(_) => RESOURCE_FORMAT_VERSION,
+        ClientReturnShape::Action(_) => orna_artifact::client_plan::ACTION_FORMAT_VERSION,
         ClientReturnShape::OtherValue => unreachable!("definition references were validated"),
         ClientReturnShape::Unsupported => unreachable!("function shape was validated"),
     };
@@ -3861,10 +4335,12 @@ fn invalid_function(
 
 #[cfg(test)]
 mod tests {
+    use super::{capability, decode_action_payload, encode_action_payload, trigger_client_action, ClientActionDescriptor, ClientActionOutcome, ClientExecutionContext, ClientResourceRequest, ClientStateStore, DeterministicClientResourceExecutor};
+    use orna_artifact::client_plan::{ActionTargetDomain, ClientExpressionNode};
     use std::time::SystemTime;
 
     use orna_core::{
-        CatalogueRevisionId, FunctionId, FunctionRevisionId, LocalId, ParameterId, PrincipalId, SchemaId,
+        CallSiteId, CatalogueRevisionId, FunctionId, FunctionRevisionId, InvocationId, LocalId, ParameterId, PrincipalId, SchemaId,
         SourceBundleId, SourceRevisionId, SourceUnitId, StateSlotId, TypeId,
         canonical_hash::{
             artifact_payload_digest, catalogue_digest, catalogue_digest_with_context,
@@ -8229,6 +8705,83 @@ mod tests {
         .unwrap();
 
         (active, function, pair, function_revision)
+    }
+
+    #[test]
+    fn action_payload_round_trip_and_rejects_trailing_bytes() {
+        let (active, target, pair, _) = version_two_value_active(
+            orna_standard::INTEGER_TYPE_ID,
+            orna_standard::INTEGER_TYPE_ID,
+        );
+        let parameter = ParameterId::from_bytes([0x71; 16]);
+        let descriptor = ClientActionDescriptor::new(
+            ActionTargetDomain::Client,
+            target,
+            pair,
+            CallSiteId::from_bytes([0x72; 16]),
+            vec![FunctionArgument::new(parameter, RuntimeValue::Integer(7)).unwrap()],
+            orna_standard::INTEGER_TYPE_ID,
+        );
+        let payload = encode_action_payload(&active, &descriptor).unwrap();
+        assert_eq!(
+            decode_action_payload(&active, &payload).unwrap(),
+            descriptor
+        );
+        let mut trailing = payload.clone();
+        trailing.push(0);
+        assert!(decode_action_payload(&active, &trailing).is_err());
+    }
+
+    #[test]
+    fn action_trigger_rejects_non_action_values() {
+        let (active, function, pair, revision) = version_one_active(true);
+        let auth = authorise(pair, function);
+        let parent = ClientExecutionContext {
+            pair,
+            function,
+            function_revision: revision,
+            parent_invocation_id: InvocationId::from_bytes([0xf1; 16]),
+        };
+        let mut state = ClientStateStore::default();
+        let mut executor = DeterministicClientResourceExecutor::new(|_: &ClientResourceRequest| {
+            Ok(RuntimeValue::Boolean(true))
+        });
+        assert_eq!(
+            trigger_client_action(
+                &active,
+                &RuntimeValue::Boolean(true),
+                &auth,
+                &parent,
+                &[],
+                &capability::LocalCapabilityGrantSet::default(),
+                &mut state,
+                &mut executor
+            ),
+            Err(super::ClientActionError::InvalidValue)
+        );
+    }
+
+    #[test]
+    fn action_payload_rejects_noncanonical_argument_order() {
+        let (active, target, pair, _) = version_two_value_active(
+            orna_standard::INTEGER_TYPE_ID,
+            orna_standard::INTEGER_TYPE_ID,
+        );
+        let first =
+            FunctionArgument::new(ParameterId::from_bytes([2; 16]), RuntimeValue::Integer(1))
+                .unwrap();
+        let second =
+            FunctionArgument::new(ParameterId::from_bytes([1; 16]), RuntimeValue::Integer(2))
+                .unwrap();
+        let descriptor = ClientActionDescriptor::new(
+            ActionTargetDomain::Client,
+            target,
+            pair,
+            CallSiteId::from_bytes([3; 16]),
+            vec![first, second],
+            orna_standard::INTEGER_TYPE_ID,
+        );
+        assert!(encode_action_payload(&active, &descriptor).is_err());
     }
 }
 
