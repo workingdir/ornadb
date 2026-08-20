@@ -571,6 +571,14 @@ impl ClientResourceRequest {
             code,
         }
     }
+    /// Creates a cancelled completion for this request.
+    pub fn cancelled(self) -> ClientResourceCompletion {
+        ClientResourceCompletion::Cancelled {
+            key: self.key,
+            generation: self.generation,
+        }
+    }
+
 }
 
 /// One result returned by a CLIENT resource executor.
@@ -601,6 +609,14 @@ pub enum ClientResourceCompletion {
         /// The stable failure code.
         code: String,
     },
+    /// One terminal cancellation produced by the request.
+    Cancelled {
+        /// The resource identity that created the request.
+        key: ClientResourceKey,
+        /// The request generation.
+        generation: ClientResourceGeneration,
+    },
+
 }
 
 /// A runtime adapter that evaluates one resource request.
@@ -752,6 +768,10 @@ impl ClientResource {
             } => {
                 self.require_key(key)?;
                 self.publish_ready(active, generation, value)
+            }
+            ClientResourceCompletion::Cancelled { key, generation } => {
+                self.require_key(key)?;
+                self.cancel(generation)
             }
             ClientResourceCompletion::Pending { key, generation } => {
                 self.require_key(key)?;
@@ -4723,6 +4743,36 @@ mod tests {
         assert_eq!(resource.status(), super::ClientResourceStatus::Ready);
         assert_eq!(resource.value(), Some(&RuntimeValue::Boolean(true)));
     }
+
+    #[test]
+    fn client_resource_cancelled_completion_terminates_current_generation() {
+        let (active, function, pair, _) = version_one_active_with_shape(
+            FunctionDomain::Client,
+            Vec::new(),
+            FunctionReturn::Single(ResolvedType::Scalar(StandardScalar::Boolean)),
+            FunctionSecurity::Invoker,
+            FunctionVolatility::Immutable,
+        );
+        let digest = super::ClientResourceKey::canonical_arguments_digest(&active, &[]).unwrap();
+        let key = super::ClientResourceKey::new(
+            InvocationTarget::new(function, pair),
+            PrincipalId::from_bytes([0x7a; 16]),
+            digest,
+            Sha256Digest::from_bytes([0x22; 32]),
+        );
+        let mut resource =
+            super::ClientResource::new(key, ResolvedType::Scalar(StandardScalar::Boolean));
+        let request = resource.begin_request(&active, Vec::new()).unwrap();
+
+        resource
+            .apply_completion(&active, request.cancelled())
+            .expect("matching cancellation should terminate the active generation");
+
+        assert_eq!(resource.status(), super::ClientResourceStatus::Cancelled);
+        assert_eq!(resource.value(), None);
+        assert_eq!(resource.failure(), None);
+    }
+
 
     #[test]
     fn client_resource_executor_rejects_digest_duplicates_stale_and_cancelled() {
