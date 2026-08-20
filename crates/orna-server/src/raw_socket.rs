@@ -1286,6 +1286,9 @@ fn schedule_resource_pulls(
         {
             continue;
         }
+        if completion.producer_waiting_bytes.is_some() && credit.item_available == 0 {
+            continue;
+        }
         let Some(credit) = resource_producer_credit(
             accepted,
             credit.item_available,
@@ -1322,24 +1325,34 @@ fn schedule_resource_pulls(
 
 /// Builds one bounded producer pull from the connection's available credit.
 ///
-/// A scalar resource has exactly one value credit, which is consumed when its
-/// value batch is applied. The producer still needs one subsequent pull to
-/// observe end-of-input and emit `Completed`; that pull emits no value, so it
-/// may reuse one item of producer credit after the scalar item window reaches
-/// zero. Byte credit remains unchanged and is still required by the producer.
+/// A producer pull never grants more than one value. When a live resource has
+/// exhausted either client window, the raw scheduler may issue an internal
+/// terminal-only probe; producers must not emit a value from that probe.
 fn resource_producer_credit(
     accepted: AuthenticatedServerResourceAccepted,
     item_available: u64,
     byte_available: u64,
 ) -> Option<ResourceCredit> {
-    let item_count = if item_available == 0
-        && matches!(accepted.resource_kind, AuthenticatedServerResourceKind::Single)
+    if matches!(accepted.resource_kind, AuthenticatedServerResourceKind::Stream)
+        && (item_available == 0 || byte_available == 0)
     {
-        1
-    } else {
-        item_available.min(1)
-    };
-    ResourceCredit::new(item_count, byte_available)
+        return Some(ResourceCredit {
+            item_count: item_available.min(1),
+            byte_count: byte_available,
+        });
+    }
+    if matches!(accepted.resource_kind, AuthenticatedServerResourceKind::Single)
+        && (item_available == 0 || byte_available == 0)
+    {
+        // A scalar terminal pull is an internal EOF probe. It carries no
+        // value credit when either client window is exhausted; the producer
+        // accepts it only after the scalar value has already been delivered.
+        return Some(ResourceCredit {
+            item_count: item_available.min(1),
+            byte_count: byte_available,
+        });
+    }
+    ResourceCredit::new(item_available.min(1), byte_available)
 }
 
 #[cfg(test)]
@@ -2429,7 +2442,7 @@ mod tests {
     }
 
     #[test]
-    fn scalar_terminal_pull_reuses_item_credit_without_changing_stream_credit() {
+    fn exhausted_resource_credit_schedules_terminal_probes_without_value_credit() {
         let (_version, revision) = constructed_test_version();
         let request = resource_request(revision);
         let scalar = AuthenticatedServerResourceAccepted {
@@ -2468,7 +2481,10 @@ mod tests {
         assert_eq!(available.item_available, 0);
         assert_eq!(
             resource_producer_credit(scalar, available.item_available, available.byte_available),
-            ResourceCredit::new(1, available.byte_available),
+            Some(ResourceCredit {
+                item_count: 0,
+                byte_count: available.byte_available,
+            }),
         );
         let exhausted = (available.item_available, available.byte_available);
 
@@ -2476,8 +2492,34 @@ mod tests {
             resource_kind: AuthenticatedServerResourceKind::Stream,
             ..scalar
         };
-        assert_eq!(resource_producer_credit(stream, exhausted.0, exhausted.1), None);
-        assert_eq!(resource_producer_credit(scalar, 0, 0), None);
+        assert_eq!(
+            resource_producer_credit(stream, exhausted.0, exhausted.1),
+            Some(ResourceCredit {
+                item_count: 0,
+                byte_count: exhausted.1,
+            })
+        );
+        assert_eq!(
+            resource_producer_credit(stream, 1, 0),
+            Some(ResourceCredit {
+                item_count: 1,
+                byte_count: 0,
+            })
+        );
+        assert_eq!(
+            resource_producer_credit(scalar, 0, 0),
+            Some(ResourceCredit {
+                item_count: 0,
+                byte_count: 0,
+            })
+        );
+        assert_eq!(
+            resource_producer_credit(scalar, 1, 0),
+            Some(ResourceCredit {
+                item_count: 1,
+                byte_count: 0,
+            })
+        );
     }
 
     #[test]
@@ -3007,7 +3049,9 @@ mod tests {
             RawProtocolVersion::Constructed(active, registry) => (active.clone(), registry.clone()),
             _ => unreachable!("constructed test version"),
         };
-        let request = resource_request(revision);
+        let mut request = resource_request(revision);
+        request.byte_window = resource_value_byte_count(&version, &RuntimeValue::Integer(7))
+            .expect("scalar value byte count") as u64;
         let request_id = request.request_id;
         let encoded = encode_resource_client_frame(
             &active,
