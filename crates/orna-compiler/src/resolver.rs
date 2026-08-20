@@ -26,7 +26,8 @@ pub use model::{
     CheckedStandardTerminalPresentTable, CheckedStandardTypeBinding, CheckedStandardTypeReference,
     CheckedStandardValueType, CheckedTypeUseKind, CheckedValueTypeUse, ConstantValue,
     STANDARD_LIBRARY_V3_REVISION_ID, STANDARD_LIBRARY_V4_REVISION_ID,
-    STANDARD_LIBRARY_V5_REVISION_ID, STD_CSV_ENCODE_FUNCTION_ID,
+    STANDARD_LIBRARY_V5_REVISION_ID, STANDARD_LIBRARY_V6_REVISION_ID, STD_ACTION_SCHEMA_ID,
+    STD_ACTION_SOURCE_UNIT_ID, STD_ACTION_TYPE_ID, STD_CSV_ENCODE_FUNCTION_ID,
     STD_CSV_ENCODE_FUNCTION_REVISION_ID, STD_CSV_ENCODE_PARAMETER_ID, STD_DATA_ROWS_TYPE_ID,
     STD_DATA_SCHEMA_ID, STD_INTEGER_TYPE_ID, STD_INVOKE_ECHO_FUNCTION_ID,
     STD_INVOKE_ECHO_FUNCTION_REVISION_ID, STD_INVOKE_ECHO_PARAMETER_ID,
@@ -45,7 +46,7 @@ pub(crate) use model::{
     CheckedClientLocalKind, CheckedClientStateSlot, CheckedClientStatement, CheckedFieldRename,
     CheckedResourceOperation, CheckedServerFunctionBody, CheckedStateDefault, CheckedStateScope,
     CheckedStateSlotId, QueryCatalogue, QueryField, QueryObjectType, ResolutionCatalogue,
-    STD_ACTION_CONTRACT, STD_ACTION_TYPE_ID, STD_JSON_CONTRACT, STD_UI_CONTRACT,
+    STD_ACTION_CONTRACT, STD_JSON_CONTRACT, STD_UI_CONTRACT,
 };
 use model::{CheckedEnumType, CheckedRecordValueField, CheckedRecordValueType};
 
@@ -386,6 +387,7 @@ pub fn check_standard_library_source(
     match snapshot.digest_version() {
         StandardLibraryDigestVersion::Version1 => check_standard_library_source_v1(snapshot),
         StandardLibraryDigestVersion::Version2 => match snapshot.revision() {
+            STANDARD_LIBRARY_V6_REVISION_ID => check_standard_library_source_v6(snapshot),
             STANDARD_LIBRARY_V5_REVISION_ID => check_standard_library_source_v5(snapshot),
             STANDARD_LIBRARY_V4_REVISION_ID => check_standard_library_source_v4(snapshot),
             STANDARD_LIBRARY_V3_REVISION_ID => check_standard_library_source_v3(snapshot),
@@ -755,7 +757,7 @@ fn check_standard_library_source_v5(
     snapshot: &VerifiedStandardLibrarySnapshot,
 ) -> Result<CheckedStandardLibrary, StandardLibraryCheckError> {
     let (families, checked_executable) = check_standard_library_source_v5_parts(
-        snapshot.source(),
+        snapshot.source().units(),
         snapshot.catalogue(),
         snapshot.origins(),
         snapshot.executables(),
@@ -769,13 +771,79 @@ fn check_standard_library_source_v5(
     })
 }
 
+/// Checks one retained V6 action standard source bundle.
+fn check_standard_library_source_v6(
+    snapshot: &VerifiedStandardLibrarySnapshot,
+) -> Result<CheckedStandardLibrary, StandardLibraryCheckError> {
+    let source_units = snapshot.source().units();
+    let [types_unit, invoke_unit, output_unit, ui_unit, json_unit, action_unit] = source_units else {
+        return Err(StandardLibraryCheckError::SourceUnitCount {
+            actual: source_units.len(),
+        });
+    };
+    if action_unit.id() != STD_ACTION_SOURCE_UNIT_ID
+        || action_unit.logical_path() != "std/action.orna"
+        || action_unit.ordinal() != 5
+    {
+        return Err(StandardLibraryCheckError::SourceMismatch);
+    }
+
+    let mut v5_origins = Vec::with_capacity(snapshot.origins().len());
+    let mut action_origins = Vec::new();
+    for origin in snapshot.origins() {
+        if origin.source().source_unit() == STD_ACTION_SOURCE_UNIT_ID {
+            action_origins.push(origin.clone());
+        } else {
+            v5_origins.push(origin.clone());
+        }
+    }
+    let (mut families, checked_executable) = check_standard_library_source_v5_parts(
+        &[
+            types_unit.clone(),
+            invoke_unit.clone(),
+            output_unit.clone(),
+            ui_unit.clone(),
+            json_unit.clone(),
+        ],
+        snapshot.catalogue(),
+        &v5_origins,
+        snapshot.executables(),
+    )?;
+    let bundle = SourceBundle::new([SourceUnit::new(
+        action_unit.logical_path(),
+        action_unit.content(),
+    )])
+    .map_err(|_| StandardLibraryCheckError::SourceMismatch)?;
+    let report = parse_bundle(&bundle);
+    if !report.diagnostics().is_empty() {
+        return Err(StandardLibraryCheckError::Diagnostics {
+            diagnostics: report.diagnostics().to_vec(),
+        });
+    }
+    let [parsed_action] = report.units() else {
+        return Err(StandardLibraryCheckError::SourceMismatch);
+    };
+    let action_families =
+        reconcile_standard_action_unit(action_unit, parsed_action, snapshot.catalogue(), &action_origins)?;
+    families.schemas.extend(action_families.schemas);
+    families.value_types.extend(action_families.value_types);
+    families.type_bindings.extend(action_families.type_bindings);
+
+    Ok(CheckedStandardLibrary {
+        verified_snapshot: snapshot.clone(),
+        schemas: families.schemas,
+        value_types: families.value_types,
+        type_bindings: families.type_bindings,
+        checked_executable: Some(checked_executable),
+    })
+}
+
 fn check_standard_library_source_v5_parts(
-    source: &StoredSourceRevision,
+    source_units: &[StoredSourceUnit],
     catalogue: &CatalogueSnapshot,
     origins: &[DefinitionOrigin],
     executables: &[StandardExecutable],
 ) -> Result<(StandardSourceFamilies, CheckedStandardExecutable), StandardLibraryCheckError> {
-    let source_units = source.units();
     let [types_unit, invoke_unit, output_unit, ui_unit, json_unit] = source_units else {
         return Err(StandardLibraryCheckError::SourceUnitCount {
             actual: source_units.len(),
@@ -943,55 +1011,6 @@ fn reconcile_standard_json_executable(
     Ok(())
 }
 
-/// Scopes the V3 catalogue to the declarations retained in `std/types.orna`:
-/// the standard schemas, value types, and type bindings only.
-///
-/// The `std.invoke`, `std.terminal`, and `std.io` schemas, the two opaque
-/// output value types, and their exports are declared in the other retained
-/// units and are reconciled by their own paths; the V1 type-only reconcile
-/// contract must not see them. Any other catalogue schema, function, object,
-/// enum, or record type fails closed.
-fn standard_v3_types_catalogue(
-    catalogue: &CatalogueSnapshot,
-) -> Result<CatalogueSnapshot, StandardLibraryCheckError> {
-    scope_standard_catalogue(
-        catalogue,
-        &[
-            STD_INVOKE_SCHEMA_ID,
-            STD_TERMINAL_SCHEMA_ID,
-            STD_IO_SCHEMA_ID,
-        ],
-        &[STD_TERMINAL_DOCUMENT_TYPE_ID, STD_IO_BYTE_STREAM_TYPE_ID],
-    )
-}
-
-/// Scopes the V4 catalogue to the declarations retained in `std/types.orna`:
-/// the standard schemas, value types, and type bindings only.
-///
-/// The `std.invoke`, `std.terminal`, `std.io`, and `std.ui` schemas, the
-/// three opaque output and ui value types, and their exports are declared in
-/// the other retained units and are reconciled by their own paths; the V1
-/// type-only reconcile contract must not see them. Any other catalogue
-/// schema, function, object, enum, or record type fails closed.
-fn standard_v4_types_catalogue(
-    catalogue: &CatalogueSnapshot,
-) -> Result<CatalogueSnapshot, StandardLibraryCheckError> {
-    scope_standard_catalogue(
-        catalogue,
-        &[
-            STD_INVOKE_SCHEMA_ID,
-            STD_TERMINAL_SCHEMA_ID,
-            STD_IO_SCHEMA_ID,
-            STD_UI_SCHEMA_ID,
-        ],
-        &[
-            STD_TERMINAL_DOCUMENT_TYPE_ID,
-            STD_IO_BYTE_STREAM_TYPE_ID,
-            STD_UI_TYPE_ID,
-        ],
-    )
-}
-
 /// Scopes one standard catalogue to the declarations retained in one source
 /// unit, dropping the excluded schemas and value types and every type binding
 /// that targets an excluded value type.
@@ -1041,8 +1060,58 @@ fn scope_standard_catalogue(
     )
     .map_err(|_| StandardLibraryCheckError::SourceMismatch)
 }
-/// Scopes the V5 catalogue to declarations retained in `std/types.orna`.
-/// The JSON schema and value type are reconciled in `std/json.orna`.
+
+/// Scopes the V3 catalogue to the declarations retained in `std/types.orna`:
+/// the standard schemas, value types, and type bindings only.
+///
+/// The `std.invoke`, `std.terminal`, and `std.io` schemas, the two opaque
+/// output value types, and their exports are declared in the other retained
+/// units and are reconciled by their own paths; the V1 type-only reconcile
+/// contract must not see them. Any other catalogue schema, function, object,
+/// enum, or record type fails closed.
+fn standard_v3_types_catalogue(
+    catalogue: &CatalogueSnapshot,
+) -> Result<CatalogueSnapshot, StandardLibraryCheckError> {
+    scope_standard_catalogue(
+        catalogue,
+        &[
+            STD_INVOKE_SCHEMA_ID,
+            STD_TERMINAL_SCHEMA_ID,
+            STD_IO_SCHEMA_ID,
+        ],
+        &[STD_TERMINAL_DOCUMENT_TYPE_ID, STD_IO_BYTE_STREAM_TYPE_ID],
+    )
+}
+
+/// Scopes the V4 catalogue to the declarations retained in `std/types.orna`:
+/// the standard schemas, value types, and type bindings only.
+///
+/// The `std.invoke`, `std.terminal`, `std.io`, and `std.ui` schemas, the
+/// three opaque output and ui value types, and their exports are declared in
+/// the other retained units and are reconciled by their own paths; the V1
+/// type-only reconcile contract must not see them. Any other catalogue
+/// schema, function, object, enum, or record type fails closed.
+fn standard_v4_types_catalogue(
+    catalogue: &CatalogueSnapshot,
+) -> Result<CatalogueSnapshot, StandardLibraryCheckError> {
+    scope_standard_catalogue(
+        catalogue,
+        &[
+            STD_INVOKE_SCHEMA_ID,
+            STD_TERMINAL_SCHEMA_ID,
+            STD_IO_SCHEMA_ID,
+            STD_UI_SCHEMA_ID,
+        ],
+        &[
+            STD_TERMINAL_DOCUMENT_TYPE_ID,
+            STD_IO_BYTE_STREAM_TYPE_ID,
+            STD_UI_TYPE_ID,
+        ],
+    )
+}
+
+/// Scopes the V5 and V6 catalogues to declarations retained in `std/types.orna`.
+/// The JSON and action schemas and value types are reconciled in their own units.
 fn standard_v5_types_catalogue(
     catalogue: &CatalogueSnapshot,
 ) -> Result<CatalogueSnapshot, StandardLibraryCheckError> {
@@ -1054,12 +1123,14 @@ fn standard_v5_types_catalogue(
             STD_IO_SCHEMA_ID,
             STD_UI_SCHEMA_ID,
             STD_JSON_SCHEMA_ID,
+            STD_ACTION_SCHEMA_ID,
         ],
         &[
             STD_TERMINAL_DOCUMENT_TYPE_ID,
             STD_IO_BYTE_STREAM_TYPE_ID,
             STD_UI_TYPE_ID,
             STD_JSON_VALUE_TYPE_ID,
+            STD_ACTION_TYPE_ID,
         ],
     )
 }
@@ -1506,6 +1577,131 @@ fn reconcile_standard_json_unit(
     }
 
     Ok(())
+}
+
+/// Reconciles the retained `std/action.orna` unit against the V6 catalogue.
+fn reconcile_standard_action_unit(
+    stored_unit: &StoredSourceUnit,
+    parsed_unit: &ParsedSourceUnit,
+    catalogue: &CatalogueSnapshot,
+    origins: &[DefinitionOrigin],
+) -> Result<StandardSourceFamilies, StandardLibraryCheckError> {
+    if parsed_unit.source_text() != stored_unit.content()
+        || parsed_unit.source_text() != parsed_unit.syntax_text()
+        || !parsed_unit.parsed().object_types().is_empty()
+        || !parsed_unit.parsed().enum_types().is_empty()
+        || !parsed_unit.parsed().primitive_value_types().is_empty()
+        || !parsed_unit.parsed().record_value_types().is_empty()
+        || !parsed_unit.parsed().field_renames().is_empty()
+        || !parsed_unit.parsed().server_functions().is_empty()
+        || !parsed_unit.parsed().client_functions().is_empty()
+    {
+        return Err(StandardLibraryCheckError::SourceMismatch);
+    }
+    let [action_schema_declaration] = parsed_unit.parsed().schemas() else {
+        return Err(StandardLibraryCheckError::SourceMismatch);
+    };
+    let [action_type_declaration] = parsed_unit.parsed().opaque_value_types() else {
+        return Err(StandardLibraryCheckError::SourceMismatch);
+    };
+    let [action_export] = parsed_unit.parsed().type_exports() else {
+        return Err(StandardLibraryCheckError::SourceMismatch);
+    };
+
+    let expected_schema_name =
+        QualifiedSemanticName::new(["std", "action"]).expect("the fixed action schema is valid");
+    let schema_name = unquoted_semantic_name(&action_schema_declaration.name)?;
+    if schema_name != expected_schema_name
+        || catalogue
+            .schema_by_id(STD_ACTION_SCHEMA_ID)
+            .ok_or(StandardLibraryCheckError::MissingSchema)?
+            .name()
+            != &schema_name
+    {
+        return Err(StandardLibraryCheckError::SourceMismatch);
+    }
+
+    let expected_type_name = QualifiedSemanticName::new(["std", "action", "action"])
+        .expect("the fixed action value type is valid");
+    let type_name = unquoted_semantic_name(&action_type_declaration.name)?;
+    let contract = decode_string_literal(&action_type_declaration.kernel_contract)
+        .ok_or(StandardLibraryCheckError::SourceMismatch)?;
+    let action_type = catalogue
+        .value_type_by_id(STD_ACTION_TYPE_ID)
+        .ok_or(StandardLibraryCheckError::SourceMismatch)?;
+    if type_name != expected_type_name
+        || action_type.name() != &type_name
+        || action_type.kind() != ValueTypeKind::Opaque
+        || action_type.mutability() != ValueTypeMutability::Immutable
+        || action_type.persistence() != ValueTypePersistence::Transient
+        || contract != STD_ACTION_CONTRACT
+        || action_type.representation_contract() != contract
+    {
+        return Err(StandardLibraryCheckError::SourceMismatch);
+    }
+
+    let expected_binding_name =
+        QualifiedSemanticName::new(["std", "action"]).expect("the fixed action export is valid");
+    let binding = catalogue
+        .type_binding_by_name(&TypeLookupName::qualified(expected_binding_name.clone()))
+        .ok_or(StandardLibraryCheckError::SourceMismatch)?;
+    let TypeExportTarget::Qualified { name: target_name } = &action_export.target else {
+        return Err(StandardLibraryCheckError::SourceMismatch);
+    };
+    if unquoted_semantic_name(&action_export.source_type)? != type_name
+        || unquoted_semantic_name(target_name)? != expected_binding_name
+        || !matches!(binding.kind(), TypeBindingKind::Qualified)
+        || binding.name() != &TypeLookupName::qualified(expected_binding_name)
+        || binding.target() != STD_ACTION_TYPE_ID
+    {
+        return Err(StandardLibraryCheckError::SourceMismatch);
+    }
+    let mut origins_by_identity = origin_map(origins)?;
+
+    let schema_origin = take_origin(
+        &mut origins_by_identity,
+        DefinitionIdentity::Schema(STD_ACTION_SCHEMA_ID),
+        stored_unit.id(),
+        &action_schema_declaration.span,
+    )?;
+    let value_type_origin = take_origin(
+        &mut origins_by_identity,
+        DefinitionIdentity::ValueType(STD_ACTION_TYPE_ID),
+        stored_unit.id(),
+        &action_type_declaration.span,
+    )?;
+    let binding_origin = take_origin(
+        &mut origins_by_identity,
+        DefinitionIdentity::TypeBinding(binding.id()),
+        stored_unit.id(),
+        &action_export.span,
+    )?;
+    if !origins_by_identity.is_empty() {
+        return Err(StandardLibraryCheckError::SourceMismatch);
+    }
+    Ok(StandardSourceFamilies {
+        schemas: vec![CheckedStandardSchema {
+            id: STD_ACTION_SCHEMA_ID,
+            name: schema_name,
+            origin: schema_origin,
+        }],
+        value_types: vec![CheckedStandardValueType {
+            id: STD_ACTION_TYPE_ID,
+            name: type_name,
+            kind: action_type.kind(),
+            mutability: action_type.mutability(),
+            persistence: action_type.persistence(),
+            representation_contract: action_type.representation_contract().to_owned(),
+            origin: value_type_origin,
+        }],
+        type_bindings: vec![CheckedStandardTypeBinding {
+            id: binding.id(),
+            kind: binding.kind(),
+            name: binding.name().clone(),
+            target: binding.target(),
+            origin: binding_origin,
+        }],
+    })
 }
 
 /// Splits the snapshot origins into the `std/types.orna` origins (schemas,
@@ -4552,7 +4748,10 @@ struct ClientActionTarget {
     return_type: ClientExpressionType,
 }
 
-fn action_result_type_is_durable(result_type: ClientExpressionType) -> bool {
+fn action_result_type_is_durable(
+    result_type: ClientExpressionType,
+    standard: Option<&CheckedStandardLibrary>,
+) -> bool {
     matches!(
         result_type.semantic_type,
         SemanticType::Scalar(
@@ -4561,9 +4760,22 @@ fn action_result_type_is_durable(result_type: ClientExpressionType) -> bool {
                 | StandardScalar::BigInt
                 | StandardScalar::Float
                 | StandardScalar::CharacterLargeObject
-                | StandardScalar::BinaryLargeObject
+                | StandardScalar::BinaryLargeObject,
         ) if result_type.standard_value_type.is_some()
     ) || matches!(result_type.semantic_type, SemanticType::Reference { .. })
+        || matches!(
+            result_type.semantic_type,
+            SemanticType::Named(CheckedTypeId::Existing(type_id))
+                if standard.is_some_and(|standard| {
+                    standard
+                        .verified_snapshot()
+                        .catalogue()
+                        .value_type_by_id(type_id)
+                        .is_some_and(|value| {
+                            value.persistence() == ValueTypePersistence::Persistable
+                        })
+                })
+        )
 }
 
 fn action_argument_type_is_orv3_encodable(expression_type: ClientExpressionType) -> bool {
@@ -4742,7 +4954,7 @@ fn client_action_targets(
             semantic_type: input.return_type,
             standard_value_type: input.standard_value_type,
         };
-        if !action_result_type_is_durable(return_type) {
+        if !action_result_type_is_durable(return_type, standard) {
             continue;
         }
         let Some(parameters) = action_target_parameters(&input.parameters) else {
@@ -4759,19 +4971,25 @@ fn client_action_targets(
         );
     }
     for input in server_inputs {
-        let ResolvedServerFunctionReturn::Single {
-            semantic_type,
-            standard_value_type,
-            ..
-        } = input.return_type
-        else {
-            continue;
+        let return_type = match input.return_type {
+            ResolvedServerFunctionReturn::Single {
+                semantic_type,
+                standard_value_type,
+                ..
+            } => ClientExpressionType {
+                semantic_type,
+                standard_value_type,
+            },
+            ResolvedServerFunctionReturn::Rows { ref columns, .. } if columns.len() == 1 => {
+                let column = &columns[0];
+                ClientExpressionType {
+                    semantic_type: column.semantic_type,
+                    standard_value_type: column.standard_value_type,
+                }
+            }
+            ResolvedServerFunctionReturn::Rows { .. } => continue,
         };
-        let return_type = ClientExpressionType {
-            semantic_type,
-            standard_value_type,
-        };
-        if !action_result_type_is_durable(return_type) {
+        if !action_result_type_is_durable(return_type, standard) {
             continue;
         }
         let Some(parameters) = action_target_parameters(&input.parameters) else {
@@ -4795,9 +5013,13 @@ fn client_action_targets(
             FunctionReturn::Single(resolved) => {
                 client_expression_type_from_core(*resolved, standard)
             }
+            FunctionReturn::Rows(columns) if columns.len() == 1 => columns.first().and_then(
+                |column| client_expression_type_from_core(column.resolved_type(), standard),
+            ),
             FunctionReturn::Rows(_) => None,
         };
-        let Some(return_type) = return_type.filter(|value| action_result_type_is_durable(*value))
+        let Some(return_type) =
+            return_type.filter(|value| action_result_type_is_durable(*value, standard))
         else {
             continue;
         };
@@ -6568,7 +6790,7 @@ fn check_client_functions(
                     diagnostics,
                 );
             }
-            let (body, body_type, body_location, references) =
+            let (body, body_type, body_location, mut references) =
                 if let Some((value, body_source)) = input.body.as_boolean_literal() {
                     if !input.capabilities.is_empty() {
                         diagnostics.push(diagnostic(
@@ -7086,6 +7308,7 @@ fn check_client_functions(
                     ));
                     return None;
                 };
+            references.extend(signature_references(&input.parameters, &[]));
             match &body {
                 CheckedClientFunctionBody::BooleanLiteral { .. } => {
                     record_standard_value_type_use(

@@ -1977,9 +1977,18 @@ pub const STANDARD_LIBRARY_V4_REVISION_ID: StandardLibraryRevisionId =
 /// The fixed ADR 0075 `orna.std/5` standard-library revision identity: `...05`.
 pub const STANDARD_LIBRARY_V5_REVISION_ID: StandardLibraryRevisionId =
     StandardLibraryRevisionId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x05]);
+/// The fixed ADR 0079 `orna.std/6` standard-library revision identity: `...06`.
+pub const STANDARD_LIBRARY_V6_REVISION_ID: StandardLibraryRevisionId =
+    StandardLibraryRevisionId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x06]);
 /// The fixed ADR 0062 `std/ui.orna` source-unit identity: `...05`.
 pub const STD_UI_SOURCE_UNIT_ID: SourceUnitId =
     SourceUnitId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x05]);
+/// The fixed ADR 0079 `std/action.orna` source-unit identity: `...07`.
+pub const STD_ACTION_SOURCE_UNIT_ID: SourceUnitId =
+    SourceUnitId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x07]);
+/// The fixed ADR 0079 `std.action` schema identity: `...09`.
+pub const STD_ACTION_SCHEMA_ID: SchemaId =
+    SchemaId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x09]);
 /// The fixed ADR 0075 `std/json.orna` source-unit identity: `...06`.
 pub const STD_JSON_SOURCE_UNIT_ID: SourceUnitId =
     SourceUnitId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x06]);
@@ -1993,9 +2002,9 @@ pub const STD_UI_TYPE_ID: TypeId =
     TypeId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x13]);
 /// The fixed ADR 0062 `std.ui.UI` kernel representation contract.
 pub const STD_UI_CONTRACT: &str = "orna.std.value.ui@1";
-/// The fixed ADR 0079 `std.action.Action` value-type identity: `...20`.
+/// The fixed ADR 0079 `std.action.Action` value-type identity: `reserved_id(20)`.
 pub const STD_ACTION_TYPE_ID: TypeId =
-    TypeId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x20]);
+    TypeId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x14]);
 /// The fixed ADR 0079 `std.action.Action` kernel representation contract.
 pub const STD_ACTION_CONTRACT: &str = "orna.std.value.action@1";
 /// The fixed ADR 0055 `std.invoke` schema identity: 15 zero bytes then `0x03`.
