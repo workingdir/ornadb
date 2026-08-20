@@ -6,11 +6,12 @@ use std::{
 };
 
 use orna_artifact::client_plan::{
-    ClientExpressionNode, OPAQUE_FORMAT_VERSION, OpaqueClientPlan, ProceduralClientPlan,
-    ResourceClientPlan,
+    ActionTargetDomain, ClientExpressionNode, OPAQUE_FORMAT_VERSION, OpaqueClientPlan,
+    ProceduralClientPlan, ResourceClientPlan,
 };
 use orna_client::{
-    ClientExecutionError,
+    ClientActionOutcome, ClientActionState, ClientExecutionError, ClientResourceStatus, ClientStateStore,
+    decode_action_payload, trigger_client_action,
     capability::{
         LocalCapabilityArgumentSource, LocalCapabilityDeclaration, LocalCapabilityGrant,
         LocalCapabilityGrantSet, LocalCapabilityName, LocalCapabilityScope,
@@ -68,13 +69,15 @@ use orna_postgres::{
 use orna_protocol::{
     CallFailure, Channel, ClientFrame, ConnectionError, Event, MAX_RESOURCE_WINDOW,
     ProtocolConnection, RawCall, ResourceArgument, ResourceCancel, ResourceCancellationCode,
-    ResourceClientFrame, ResourceKind, ResourceRequest, ResourceServerFrame, ResourceWindowUpdate, ServerAction, ServerFrame,
-    decode_active_server_frame, decode_constructed_server_frame, decode_invocation_event_batch,
-    decode_registered_server_frame, decode_server_frame, decode_resource_server_frame,
-    encode_resource_server_frame,
+    ResourceClientFrame, ResourceKind, ResourceRequest, ResourceServerFrame, ResourceWindowUpdate,
+    ServerAction, ServerFrame,
+    decode_active_server_frame, decode_constructed_server_frame,
+    decode_invocation_event_batch, decode_registered_server_frame, decode_resource_server_frame,
+    decode_server_frame,
     encode_active_client_frame, encode_active_server_frame, encode_client_frame,
     encode_constructed_client_frame, encode_constructed_value, encode_invocation_event_batch,
     encode_invoke_request, encode_registered_client_frame, encode_resource_client_frame,
+    encode_resource_server_frame,
 };
 use orna_server::{
     InstalledInvokeError, InstalledInvokeErrorKind, InstalledInvokeOutcome, InstalledInvokeRequest,
@@ -151,6 +154,17 @@ const RAW_EXPRESSION_CLIENT_FUNCTION_SOURCE: &str = "CREATE SCHEMA expr;\n\
     CREATE CLIENT FUNCTION expr.composed() RETURNS TEXT AS expr.literal() || ' world';\n\
     CREATE EXTERNAL CLIENT FUNCTION expr.external() RETURNS TEXT\n\
     RUNTIME CONTRACT 'expr.runtime@1';\n";
+const RAW_ACTION_SERVER_SOURCE: &str = "CREATE SCHEMA action_fixture;\n\
+    CREATE TYPE action_fixture.row AS OBJECT (value TEXT);\n\
+    CREATE SERVER FUNCTION action_fixture.read(p_value REF action_fixture.row)\n\
+    RETURNS ROWS (value TEXT) SECURITY INVOKER TRANSACTION READ ONLY VOLATILITY STABLE\n\
+    AS SELECT row.value FROM action_fixture.row row WHERE REF(row) = p_value;\n";
+const RAW_ACTION_CLIENT_SOURCE: &str = "CREATE CLIENT FUNCTION action_fixture.call(p_value REF action_fixture.row)\n\
+    RETURNS std.Action\n\
+    AS std.action.call(\n\
+      target => action_fixture.read,\n\
+      arguments => std.call.args(p_value => p_value)\n\
+    );\n";
 const RAW_EXTERNAL_CAPABILITY_SOURCE: &str = "CREATE SCHEMA cap;\n\
     CREATE EXTERNAL CLIENT FUNCTION cap.read() RETURNS TEXT\n\
     RUNTIME CONTRACT 'std.fs.read@1'\n\
@@ -2281,6 +2295,421 @@ async fn proves_expression_client_functions_through_installed_invoke() -> TestRe
                 && stdout.is_empty()
                 && stderr.is_empty(),
             "the external CLIENT contract did not fail closed through installed invoke",
+        )
+    })
+    .await
+}
+#[tokio::test]
+#[ignore = "requires the Compose PostgreSQL development service"]
+async fn proves_server_action_through_authenticated_installed_executor() -> TestResult<()> {
+    with_test_database(|database| async move {
+        let uid = nix::unistd::geteuid().as_raw();
+        let kernel = kernel(&database)?;
+        kernel.bootstrap().await?;
+        let empty = kernel.recover().await?;
+        let version_five = install_v5_standard(&kernel, &empty, &database).await?;
+        let upgrade_v6 = orna_standard::prepare_standard_upgrade_v5_to_v6(&version_five)
+            .map_err(|error| failure(format!("prepare V5-to-V6 standard upgrade failed: {error:?}")))?;
+        let active = kernel
+            .apply_standard_upgrade(&upgrade_v6)
+            .await
+            .map_err(|error| failure(format!("apply V5-to-V6 standard upgrade failed: {error:?}")))?;
+        let standard_source = active
+            .catalogue_hash_context()
+            .standard()
+            .cloned()
+            .ok_or_else(|| failure("action fixture has no checked standard source"))?;
+        let standard = check_standard_library_source(&standard_source)
+            .map_err(|error| failure(format!("installed standard source check failed: {error:?}")))?;
+        let (active, client, target, client_parameter, target_parameter) =
+            install_action_client_fixture(&kernel, &active, &standard).await?;
+        // Seed exactly the object referenced by the canonical action argument
+        // so the authenticated SERVER target emits one deterministic row.
+        let action_object = active
+            .catalogue()
+            .object_types()
+            .iter()
+            .find(|object| object.name().parts() == ["action_fixture", "row"])
+            .ok_or_else(|| failure("action fixture is missing its object type"))?;
+        let action_field = action_object
+            .fields()
+            .iter()
+            .find(|field| field.name() == "value")
+            .ok_or_else(|| failure("action fixture is missing its value field"))?;
+        let action_object_id = ObjectId::from_bytes([0x72; 16]);
+        let action_table = format!(
+            "t_{:032x}",
+            u128::from_be_bytes(action_object.id().to_bytes()),
+        );
+        let action_column = format!(
+            "f_{:032x}",
+            u128::from_be_bytes(action_field.id().to_bytes()),
+        );
+        let action_object_hex = format!(
+            "{:032x}",
+            u128::from_be_bytes(action_object_id.to_bytes()),
+        );
+        run_database_statement(
+            &database,
+            &format!(
+                "INSERT INTO _orna_data.{action_table} (_orna_object_id, {action_column}) \
+                 VALUES (decode('{action_object_hex}', 'hex'), 'installed-action')"
+            ),
+        )
+        .await?;
+        let mut functions = active
+            .catalogue()
+            .functions()
+            .iter()
+            .map(FunctionDefinition::id)
+            .collect::<Vec<_>>();
+        if let Some(standard) = active.catalogue_hash_context().standard() {
+            functions.extend(
+                standard
+                    .catalogue()
+                    .functions()
+                    .iter()
+                    .map(FunctionDefinition::id),
+            );
+        }
+        functions.sort_unstable();
+        let security = SecuritySnapshot::new_with_local_peer_credentials(
+            active.pair(),
+            functions,
+            vec![Principal::new(
+                RAW_CLIENT_USER,
+                PrincipalKind::User,
+                PrincipalStatus::Active,
+            )],
+            vec![],
+            vec![
+                ExecuteGrant::new(RAW_CLIENT_USER, client),
+                ExecuteGrant::new(RAW_CLIENT_USER, target),
+            ],
+            vec![LocalPeerCredential::new(uid, RAW_CLIENT_USER)],
+        )?;
+        let security = kernel.replace_security_snapshot(&security).await?;
+        let session = security.bind_authenticated_session(RAW_CLIENT_USER, vec![])?;
+        let authorisation = match security.authorise_execute(
+            &session,
+            InvocationTarget::new(client, active.pair()),
+        ) {
+            ExecuteDecision::Allowed(authorisation) => authorisation,
+            ExecuteDecision::Denied(denial) => {
+                return Err(failure(format!("installed action grant was denied: {denial:?}")))
+            }
+        };
+        let argument = FunctionArgument::new(
+            client_parameter,
+            RuntimeValue::Reference {
+                target: active
+                    .catalogue()
+                    .function_by_id(target)
+                    .and_then(|function| function.parameter_by_name("p_value"))
+                    .and_then(|parameter| parameter.resolved_type().reference_target())
+                    .ok_or_else(|| failure("action target parameter is not a reference"))?,
+                object: action_object_id,
+            },
+        )?;
+        let result = evaluate_client_function_with_arguments(
+            &active,
+            &authorisation,
+            std::slice::from_ref(&argument),
+        )?;
+        let RuntimeValue::Opaque(action) = result.value() else {
+            return Err(failure("action CLIENT function did not return an opaque action value"));
+        };
+        let descriptor = decode_action_payload(&active, action.canonical_payload())?;
+        require(
+            descriptor.domain() == ActionTargetDomain::Server
+                && descriptor.target() == target
+                && descriptor.target_revision() == active.pair()
+                && descriptor.arguments().len() == 1
+                && descriptor.arguments()[0].parameter() == target_parameter
+                && descriptor.arguments()[0].value() == argument.value(),
+            "action value lost its authenticated SERVER target or canonical argument",
+        )?;
+        let mut action_state = ClientActionState::default();
+        let mut state = ClientStateStore::default();
+        let mut executor =
+            orna_server::InstalledClientResourceExecutor::new(kernel.clone(), session, active.clone());
+        let outcome = trigger_client_action(
+            &active,
+            result.value(),
+            &authorisation,
+            result.context(),
+            &mut action_state,
+            &[],
+            &LocalCapabilityGrantSet::new(),
+            &mut state,
+            &mut executor,
+        )?;
+        require(
+            outcome == ClientActionOutcome::Completed
+                && matches!(action_state.status(), ClientResourceStatus::Idle),
+            "authenticated SERVER action did not complete through the installed executor",
+        )?;
+        let parent_invocation_id = result.context().parent_invocation_id().to_bytes().to_vec();
+        let target_bytes = target.to_bytes().to_vec();
+        let call_site_bytes = descriptor.call_site().to_bytes().to_vec();
+        let audit_session = database.open().await?;
+        let audit_operation = async {
+            let row = audit_session
+                .client()
+                .query_one(
+                    "SELECT parent_invocation_id, call_site_id, target_function_id, decision_outcome, terminal_outcome
+                     FROM _orna_kernel.resource_audit_events
+                     WHERE parent_invocation_id = $1 AND target_function_id = $2
+                     ORDER BY sequence DESC
+                     LIMIT 1",
+                    &[&parent_invocation_id, &target_bytes],
+                )
+                .await?;
+            let parent: Vec<u8> = row.try_get("parent_invocation_id")?;
+            let call_site: Vec<u8> = row.try_get("call_site_id")?;
+            let audited_target: Vec<u8> = row.try_get("target_function_id")?;
+            let decision: &str = row.try_get("decision_outcome")?;
+            let terminal: &str = row.try_get("terminal_outcome")?;
+            require(
+                parent == parent_invocation_id
+                    && call_site == call_site_bytes
+                    && audited_target == target_bytes
+                    && decision == "allowed"
+                    && terminal == "completed",
+                "SERVER action did not retain its authenticated resource audit evidence",
+            )
+        }
+        .await;
+        finish_session(
+            audit_operation,
+            audit_session.shutdown().await,
+            "installed action resource audit",
+        )
+    })
+    .await
+}
+
+#[tokio::test]
+#[ignore = "requires the Compose PostgreSQL development service"]
+async fn proves_server_action_denial_stays_inside_authenticated_sys_invoke() -> TestResult<()> {
+    with_test_database(|database| async move {
+        let uid = nix::unistd::geteuid().as_raw();
+        let kernel = kernel(&database)?;
+        kernel.bootstrap().await?;
+        let empty = kernel.recover().await?;
+        let version_five = install_v5_standard(&kernel, &empty, &database).await?;
+        let upgrade_v6 = orna_standard::prepare_standard_upgrade_v5_to_v6(&version_five)
+            .map_err(|error| failure(format!("prepare V5-to-V6 standard upgrade failed: {error:?}")))?;
+        let active = kernel
+            .apply_standard_upgrade(&upgrade_v6)
+            .await
+            .map_err(|error| failure(format!("apply V5-to-V6 standard upgrade failed: {error:?}")))?;
+        let standard_source = active
+            .catalogue_hash_context()
+            .standard()
+            .cloned()
+            .ok_or_else(|| failure("action denial fixture has no checked standard source"))?;
+        let standard = check_standard_library_source(&standard_source)
+            .map_err(|error| failure(format!("action denial standard source check failed: {error:?}")))?;
+        let (active, client, target, client_parameter, target_parameter) =
+            install_action_client_fixture(&kernel, &active, &standard).await?;
+        // Seed the referenced object so a target execution cannot be confused
+        // with a denied request that happens to return no rows.
+        let action_object = active
+            .catalogue()
+            .object_types()
+            .iter()
+            .find(|object| object.name().parts() == ["action_fixture", "row"])
+            .ok_or_else(|| failure("action denial fixture is missing its object type"))?;
+        let action_field = action_object
+            .fields()
+            .iter()
+            .find(|field| field.name() == "value")
+            .ok_or_else(|| failure("action denial fixture is missing its value field"))?;
+        let action_object_id = ObjectId::from_bytes([0x72; 16]);
+        let action_table = format!(
+            "t_{:032x}",
+            u128::from_be_bytes(action_object.id().to_bytes()),
+        );
+        let action_column = format!(
+            "f_{:032x}",
+            u128::from_be_bytes(action_field.id().to_bytes()),
+        );
+        let action_object_hex = format!(
+            "{:032x}",
+            u128::from_be_bytes(action_object_id.to_bytes()),
+        );
+        run_database_statement(
+            &database,
+            &format!(
+                "INSERT INTO _orna_data.{action_table} (_orna_object_id, {action_column}) \
+                 VALUES (decode('{action_object_hex}', 'hex'), 'denied-action')"
+            ),
+        )
+        .await?;
+        let mut functions = active
+            .catalogue()
+            .functions()
+            .iter()
+            .map(FunctionDefinition::id)
+            .collect::<Vec<_>>();
+        if let Some(standard) = active.catalogue_hash_context().standard() {
+            functions.extend(
+                standard
+                    .catalogue()
+                    .functions()
+                    .iter()
+                    .map(FunctionDefinition::id),
+            );
+        }
+        functions.sort_unstable();
+        let security = SecuritySnapshot::new_with_local_peer_credentials(
+            active.pair(),
+            functions,
+            vec![Principal::new(
+                RAW_CLIENT_USER,
+                PrincipalKind::User,
+                PrincipalStatus::Active,
+            )],
+            vec![],
+            vec![ExecuteGrant::new(RAW_CLIENT_USER, client)],
+            vec![LocalPeerCredential::new(uid, RAW_CLIENT_USER)],
+        )?;
+        let security = kernel.replace_security_snapshot(&security).await?;
+        let session = security.bind_authenticated_session(RAW_CLIENT_USER, vec![])?;
+        let authorisation = match security.authorise_execute(
+            &session,
+            InvocationTarget::new(client, active.pair()),
+        ) {
+            ExecuteDecision::Allowed(authorisation) => authorisation,
+            ExecuteDecision::Denied(denial) => {
+                return Err(failure(format!(
+                    "action denial client grant was denied: {denial:?}"
+                )))
+            }
+        };
+        let argument = FunctionArgument::new(
+            client_parameter,
+            RuntimeValue::Reference {
+                target: active
+                    .catalogue()
+                    .function_by_id(target)
+                    .and_then(|function| function.parameter_by_name("p_value"))
+                    .and_then(|parameter| parameter.resolved_type().reference_target())
+                    .ok_or_else(|| failure("action denial target parameter is not a reference"))?,
+                object: action_object_id,
+            },
+        )?;
+        let result = evaluate_client_function_with_arguments(
+            &active,
+            &authorisation,
+            std::slice::from_ref(&argument),
+        )?;
+        let RuntimeValue::Opaque(action) = result.value() else {
+            return Err(failure("action denial CLIENT function did not return an opaque action value"));
+        };
+        let descriptor = decode_action_payload(&active, action.canonical_payload())?;
+        require(
+            descriptor.domain() == ActionTargetDomain::Server
+                && descriptor.target() == target
+                && descriptor.target_revision() == active.pair()
+                && descriptor.arguments().len() == 1
+                && descriptor.arguments()[0].parameter() == target_parameter
+                && descriptor.arguments()[0].value() == argument.value(),
+            "action denial value lost its authenticated SERVER target or canonical argument",
+        )?;
+        let security_events_before = kernel.recover_security_audit_events().await?;
+        let invocation_rows_before = invocation_audit_rows(&database).await?;
+        let mut action_state = ClientActionState::default();
+        let mut state = ClientStateStore::default();
+        let mut executor =
+            orna_server::InstalledClientResourceExecutor::new(kernel.clone(), session, active.clone());
+        let outcome = trigger_client_action(
+            &active,
+            result.value(),
+            &authorisation,
+            result.context(),
+            &mut action_state,
+            &[],
+            &LocalCapabilityGrantSet::new(),
+            &mut state,
+            &mut executor,
+        )?;
+        require(
+            matches!(outcome, ClientActionOutcome::Failed { .. })
+                && matches!(action_state.status(), ClientResourceStatus::Idle),
+            "denied SERVER action did not fail closed through the installed executor",
+        )?;
+        let security_events_after = kernel.recover_security_audit_events().await?;
+        require(
+            security_events_after.len() == security_events_before.len() + 1
+                && security_events_after.last().is_some_and(|event| {
+                    let decision = event.decision();
+                    decision.kind() == SecurityAuditKind::Execute
+                        && decision.outcome() == SecurityAuditOutcome::Denied
+                        && decision.target() == Some(InvocationTarget::new(target, active.pair()))
+                        && decision.denial()
+                            == Some(SecurityAuditDenial::Execute(
+                                ExecuteDenial::MissingExecuteGrant,
+                            ))
+                        && decision.effective_principal().is_none()
+                        && decision.authorising_principal().is_none()
+                }),
+            "denied SERVER action did not append one redacted EXECUTE denial",
+        )?;
+        let invocation_rows_after = invocation_audit_rows(&database).await?;
+        require(
+            invocation_rows_after.len() == invocation_rows_before.len() + 1
+                && invocation_rows_after.last().is_some_and(|row| {
+                    row.outcome == "denied"
+                        && row.function == target.to_bytes().to_vec()
+                        && row.source == active.pair().source().to_bytes().to_vec()
+                        && row.catalogue == active.pair().catalogue().to_bytes().to_vec()
+                        && row.security_event.is_some()
+                }),
+            "denied SERVER action did not append its linked invocation audit",
+        )?;
+        let parent_invocation_id = result.context().parent_invocation_id().to_bytes().to_vec();
+        let audit_session = database.open().await?;
+        let audit_operation = async {
+            let row = audit_session
+                .client()
+                .query_one(
+                    "SELECT parent_invocation_id, target_function_id, source_revision_id,
+                            catalogue_revision_id, decision_outcome, terminal_outcome,
+                            item_count, byte_count
+                     FROM _orna_kernel.resource_audit_events
+                     WHERE parent_invocation_id = $1
+                     ORDER BY sequence DESC
+                     LIMIT 1",
+                    &[&parent_invocation_id],
+                )
+                .await?;
+            let parent: Vec<u8> = row.try_get("parent_invocation_id")?;
+            let audited_target: Option<Vec<u8>> = row.try_get("target_function_id")?;
+            let source_revision: Option<Vec<u8>> = row.try_get("source_revision_id")?;
+            let catalogue_revision: Option<Vec<u8>> = row.try_get("catalogue_revision_id")?;
+            let decision: &str = row.try_get("decision_outcome")?;
+            let terminal: &str = row.try_get("terminal_outcome")?;
+            let item_count: Option<i64> = row.try_get("item_count")?;
+            let byte_count: Option<i64> = row.try_get("byte_count")?;
+            require(
+                parent == parent_invocation_id
+                    && audited_target.is_none()
+                    && source_revision.is_none()
+                    && catalogue_revision.is_none()
+                    && decision == "denied"
+                    && terminal == "failed"
+                    && item_count.is_none()
+                    && byte_count.is_none(),
+                "denied SERVER action executed its target or retained target audit details",
+            )
+        }
+        .await;
+        finish_session(
+            audit_operation,
+            audit_session.shutdown().await,
+            "denied action resource audit",
         )
     })
     .await
@@ -9399,6 +9828,95 @@ async fn install_expression_client_fixture(
         .ok_or_else(|| failure("expression CLIENT fixture is missing expr.external"))?;
     Ok((active, literal, composed, external))
 }
+async fn install_action_client_fixture(
+    kernel: &PostgresKernel,
+    active: &orna_core::revision::ActiveDatabaseRevision,
+    standard: &CheckedStandardLibrary,
+) -> TestResult<(
+    orna_core::revision::ActiveDatabaseRevision,
+    FunctionId,
+    FunctionId,
+    ParameterId,
+    ParameterId,
+)> {
+    let append_source = |active: &orna_core::revision::ActiveDatabaseRevision, body: &str| -> TestResult<SourceBundle> {
+        if active.source().units().is_empty() {
+            return Ok(SourceBundle::new([SourceUnit::new("action_fixture.orna", body.to_owned())])?);
+        }
+        let last_ordinal = active
+            .source()
+            .units()
+            .len()
+            .checked_sub(1)
+            .ok_or_else(|| failure("action fixture has no retained source unit"))?;
+        Ok(SourceBundle::new(active.source().units().iter().enumerate().map(
+            |(ordinal, unit)| {
+                let content = if ordinal == last_ordinal {
+                    format!("{}\n{}", unit.content(), body)
+                } else {
+                    unit.content().to_owned()
+                };
+                SourceUnit::new(unit.logical_path(), content)
+            },
+        ))?)
+    };
+    let server_source = append_source(active, RAW_ACTION_SERVER_SOURCE)?;
+    let server_context = StandardApplicationCheckContext::try_new(active.catalogue(), standard)?;
+    let server_report = check_standard_application(&server_source, &server_context);
+    if !server_report.diagnostics().is_empty() {
+        return Err(failure(format!(
+            "SERVER action fixture did not compile: {:?}",
+            server_report.diagnostics()
+        )));
+    }
+    let active = kernel
+        .apply(&prepare_standard_application(
+            &server_report,
+            active.pair(),
+            active,
+        )?)
+        .await?;
+    let client_source = append_source(&active, RAW_ACTION_CLIENT_SOURCE)?;
+    let client_context = StandardApplicationCheckContext::try_new(active.catalogue(), standard)?;
+    let client_report = check_standard_application(&client_source, &client_context);
+    if !client_report.diagnostics().is_empty() {
+        return Err(failure(format!(
+            "CLIENT action fixture did not compile: {:?}",
+            client_report.diagnostics()
+        )));
+    }
+    let active = kernel
+        .apply(&prepare_standard_application(
+            &client_report,
+            active.pair(),
+            &active,
+        )?)
+        .await?;
+    let target_definition = active
+        .catalogue()
+        .functions()
+        .iter()
+        .find(|function| function.name().parts() == ["action_fixture", "read"])
+        .ok_or_else(|| failure("action fixture is missing its SERVER target"))?;
+    let target_parameter = target_definition
+        .parameter_by_name("p_value")
+        .ok_or_else(|| failure("action fixture SERVER target is missing p_value"))?
+        .id();
+    let client_definition = active
+        .catalogue()
+        .functions()
+        .iter()
+        .find(|function| function.name().parts() == ["action_fixture", "call"])
+        .ok_or_else(|| failure("action fixture is missing its CLIENT function"))?;
+    let client = client_definition.id();
+    let client_parameter = client_definition
+        .parameter_by_name("p_value")
+        .ok_or_else(|| failure("action fixture CLIENT function is missing p_value"))?
+        .id();
+    let target = target_definition.id();
+    Ok((active, client, target, client_parameter, target_parameter))
+}
+
 
 async fn install_external_capability_fixture(
     kernel: &PostgresKernel,
