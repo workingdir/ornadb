@@ -1494,6 +1494,7 @@ async fn handle_resource_frame<D: DispatchService>(
             .get(&cancel.stream_id)
             .is_some_and(|completion| resource_completion_is_terminal_for(completion, cancel.request_id))
     });
+    let mut cancellation_won = false;
     if let Some(cancel) = cancellation.filter(|_| !committed_completion) {
         let completed = drain_resource_completions(
             completion_receiver,
@@ -1507,6 +1508,33 @@ async fn handle_resource_frame<D: DispatchService>(
                 .is_some_and(|completion| {
                     resource_completion_is_terminal_for(completion, cancel.request_id)
                 });
+        if !committed_completion && !cancelled.contains_key(&cancel.stream_id) {
+            let Some(request) = requests.get(&cancel.stream_id) else {
+                return Err(LocalRawSocketError::ResourceConnection {
+                    source: ResourceConnectionError::UnknownStream {
+                        stream_id: cancel.stream_id,
+                    },
+                });
+            };
+            if request.request_id != cancel.request_id {
+                return Err(LocalRawSocketError::ResourceConnection {
+                    source: ResourceConnectionError::MismatchedRequest {
+                        stream_id: cancel.stream_id,
+                    },
+                });
+            }
+            let Some(task) = tasks.get(&cancel.stream_id) else {
+                return Err(LocalRawSocketError::ResourceConnection {
+                    source: ResourceConnectionError::UnknownStream {
+                        stream_id: cancel.stream_id,
+                    },
+                });
+            };
+            if !task.cancellation.request_cancel() {
+                return Ok(true);
+            }
+            cancellation_won = true;
+        }
     }
     let invalid_scalar_window_update = match &frame {
         ResourceClientFrame::WindowUpdate(update) => requests
@@ -1542,6 +1570,11 @@ async fn handle_resource_frame<D: DispatchService>(
             Err(source) => return Err(LocalRawSocketError::ResourceConnection { source }),
         }
     };
+    if let Some(cancel) = cancellation.filter(|_| cancellation_won)
+        && matches!(disposition, ResourceFrameDisposition::Applied)
+    {
+        cancelled.insert(cancel.stream_id, cancel);
+    }
     if matches!(disposition, ResourceFrameDisposition::DroppedLate) {
         return Ok(true);
     }
@@ -1584,28 +1617,6 @@ async fn handle_resource_frame<D: DispatchService>(
                     actions: resource_internal_failure(&request),
                 },
             );
-        }
-    }
-    if let Some(cancel) = cancellation
-        && !committed_completion
-        && matches!(disposition, ResourceFrameDisposition::Applied)
-    {
-        if !requests.contains_key(&cancel.stream_id) {
-            return Err(LocalRawSocketError::ResourceConnection {
-                source: ResourceConnectionError::UnknownStream {
-                    stream_id: cancel.stream_id,
-                },
-            });
-        }
-        let Some(task) = tasks.get(&cancel.stream_id) else {
-            return Err(LocalRawSocketError::ResourceConnection {
-                source: ResourceConnectionError::UnknownStream {
-                    stream_id: cancel.stream_id,
-                },
-            });
-        };
-        if task.cancellation.request_cancel() {
-            cancelled.insert(cancel.stream_id, cancel);
         }
     }
     Ok(true)
@@ -3044,6 +3055,117 @@ mod tests {
         assert!(pending.is_empty());
         assert!(!requests.contains_key(&request.stream_id));
     }
+    #[tokio::test]
+    async fn committing_resource_cancellation_does_not_terminalise_stream() {
+        let (version, revision) = constructed_test_version();
+        let request = resource_request(revision);
+        let (server, _client) = UnixStream::pair().unwrap();
+        let (_reader, mut writer) = server.into_split();
+        let (completion_sender, mut completion_receiver) =
+            mpsc::unbounded_channel::<(u64, ResourceDispatchCompletion)>();
+        let mut connection = ResourceProtocolConnection::new();
+        let mut pending = BTreeMap::new();
+        let mut cancelled = BTreeMap::new();
+        let mut tasks: BTreeMap<u64, ResourceTask> = BTreeMap::new();
+        let mut requests = BTreeMap::new();
+        let resources = LocalRawSocketResources::new();
+        let (_shutdown_sender, mut shutdown) = watch::channel(false);
+        let dispatcher = BlockingResourceDispatch {
+            started: Arc::new(Notify::new()),
+            cancelled: Arc::new(AtomicBool::new(false)),
+        };
+
+        handle_resource_frame(
+            ResourceClientFrame::Request(request.clone()),
+            PayloadReservation { _permit: None },
+            &dispatcher,
+            &test_session(),
+            &version,
+            &resources,
+            &mut connection,
+            &mut pending,
+            &mut cancelled,
+            &mut tasks,
+            &mut requests,
+            &completion_sender,
+            &mut completion_receiver,
+            &mut writer,
+            &mut shutdown,
+        )
+        .await
+        .unwrap();
+
+        let cancellation = tasks
+            .get(&request.stream_id)
+            .expect("resource task")
+            .cancellation
+            .clone();
+        assert!(cancellation.try_begin_commit());
+
+        handle_resource_frame(
+            ResourceClientFrame::Cancel(ResourceCancel {
+                stream_id: request.stream_id,
+                request_id: request.request_id,
+                reason: ResourceCancellationCode::ClientRequested,
+            }),
+            PayloadReservation { _permit: None },
+            &dispatcher,
+            &test_session(),
+            &version,
+            &resources,
+            &mut connection,
+            &mut pending,
+            &mut cancelled,
+            &mut tasks,
+            &mut requests,
+            &completion_sender,
+            &mut completion_receiver,
+            &mut writer,
+            &mut shutdown,
+        )
+        .await
+        .unwrap();
+
+        assert!(cancelled.is_empty());
+        tasks
+            .remove(&request.stream_id)
+            .expect("resource task")
+            .handle
+            .abort();
+        completion_sender
+            .send((
+                request.stream_id,
+                ResourceDispatchCompletion {
+                    actions: resource_actions(
+                        &version,
+                        &request,
+                        vec![RuntimeValue::Integer(7)],
+                    ),
+                },
+            ))
+            .unwrap();
+        assert!(
+            drain_resource_completions(
+                &mut completion_receiver,
+                &mut pending,
+                &mut cancelled,
+                &mut tasks,
+            )
+            .contains(&request.stream_id)
+        );
+        assert!(flush_resource_pending(
+            &version,
+            &mut connection,
+            &mut pending,
+            &mut requests,
+            &mut writer,
+            &mut shutdown,
+        )
+        .await
+        .unwrap());
+        assert!(pending.is_empty());
+    }
+
 
     #[tokio::test]
     async fn server_shutdown_cancels_active_resource_without_emitting_a_terminal_frame() {
