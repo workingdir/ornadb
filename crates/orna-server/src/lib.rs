@@ -28,8 +28,8 @@ pub use inspect::{
 };
 pub use invoke::{
     InstalledClientResourceExecutor, InstalledInvokeError, InstalledInvokeErrorKind,
-    InstalledInvokeOutcome, InstalledInvokeRequest, RuntimeFamily, run_installed_invoke,
-    run_invoke_with_kernel,
+    InstalledInvokeOutcome, InstalledInvokeRequest, RawResourceRequestAuthorizer, RuntimeFamily,
+    run_installed_invoke, run_invoke_with_kernel,
 };
 pub use local_auth::{LocalAuthenticationError, authenticate_local_stream};
 pub use raw_call::{
@@ -39,7 +39,7 @@ pub use raw_call::{
 pub use raw_client_dispatch::{RawClientDispatch, RawClientDispatchResult};
 pub use raw_socket::{
     LocalRawSocketError, LocalRawSocketResources, LocalRawSocketServer, LocalRawSocketServerError,
-    serve_local_raw_stream, start_local_raw_socket,
+    serve_local_raw_stream, serve_local_raw_stream_with_resource_authorizer, start_local_raw_socket,
 };
 pub use security_admin::{
     InstalledSecurityAdminError, InstalledSecurityAdminErrorKind, InstalledSecurityAdminOperation,
