@@ -389,6 +389,8 @@ impl FunctionReturnColumnDefinition {
 pub enum FunctionReturn {
     /// A function returns one resolved semantic value.
     Single(ResolvedType),
+    /// A server function returns zero or more resolved semantic values of one item type.
+    Stream(ResolvedType),
     /// A function returns zero or more records with this named ordered shape.
     Rows(Vec<FunctionReturnColumnDefinition>),
 }
@@ -1318,8 +1320,9 @@ impl CatalogueSnapshot {
         }
 
         Self::validate_parameters(function)?;
-        if let FunctionReturn::Rows(columns) = &function.return_type {
-            Self::validate_return_columns(function, columns)?;
+        match &function.return_type {
+            FunctionReturn::Rows(columns) => Self::validate_return_columns(function, columns)?,
+            FunctionReturn::Single(_) | FunctionReturn::Stream(_) => {}
         }
 
         Ok(())
@@ -3384,7 +3387,7 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_resolves_function_signatures_by_exact_name_and_stable_id() {
+    fn snapshot_resolves_function_signatures_and_accepts_stream_returns() {
         let function_id = FunctionId::from_bytes([9; 16]);
         let parameter_id = ParameterId::from_bytes([10; 16]);
         let function = FunctionDefinition::new(
@@ -3415,11 +3418,19 @@ mod tests {
             Some(FunctionTransaction::ReadOnly),
             FunctionVolatility::Stable,
         );
+        let stream = self::function(
+            13,
+            &["tasks", "live"],
+            FunctionDomain::Server,
+            vec![],
+            FunctionReturn::Stream(ResolvedType::scalar(StandardScalar::Integer)),
+            None,
+        );
         let catalogue = CatalogueSnapshot::new_with_functions(
             CatalogueRevisionId::from_bytes([7; 16]),
             vec![schema(1, &["tasks"])],
             vec![],
-            vec![function],
+            vec![function, stream],
         )
         .unwrap();
 
@@ -3459,6 +3470,11 @@ mod tests {
         assert_eq!(columns.len(), 2);
         assert_eq!(columns[0].name(), "title");
         assert_eq!(columns[0].ordinal(), 0);
+        let stream = catalogue.function_by_id(FunctionId::from_bytes([13; 16])).unwrap();
+        assert_eq!(
+            stream.return_type(),
+            &FunctionReturn::Stream(ResolvedType::scalar(StandardScalar::Integer))
+        );
         assert_eq!(
             columns[1].resolved_type(),
             ResolvedType::scalar(StandardScalar::Timestamp)

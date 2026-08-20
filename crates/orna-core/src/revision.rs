@@ -2267,7 +2267,7 @@ fn validate_resolved_type_slots(
                     )?;
                 }
             }
-            FunctionReturn::Single(resolved_type) => validate_resolved_type_slot(
+            FunctionReturn::Single(resolved_type) | FunctionReturn::Stream(resolved_type) => validate_resolved_type_slot(
                 context,
                 DefinitionIdentity::Function(function.id()),
                 *resolved_type,
@@ -3240,7 +3240,7 @@ fn definition_exists(
         DefinitionIdentity::FunctionReturnColumn { owner, ordinal } => catalogue
             .function_by_id(owner)
             .and_then(|function| match function.return_type() {
-                FunctionReturn::Single(_) => None,
+                FunctionReturn::Single(_) | FunctionReturn::Stream(_) => None,
                 FunctionReturn::Rows(columns) => columns.get(ordinal as usize),
             })
             .is_some(),
@@ -8797,6 +8797,21 @@ mod tests {
                 }
             )
         );
+
+        let stream_value = TypeId::from_bytes(id::<95>());
+        let catalogue = resolved_type_slots_catalogue(
+            ResolvedType::named(TypeId::from_bytes(id::<80>())),
+            ResolvedType::value(pinned_value),
+            FunctionReturn::Stream(ResolvedType::value(stream_value)),
+        );
+        assert_eq!(
+            validate_resolved_type_slots(&standard_context(), &catalogue,),
+            Err(RevisionInvariantError::ResolvedValueTypeNotInPinnedStandard {
+                identity: DefinitionIdentity::Function(FunctionId::from_bytes(id::<82>())),
+                value_type: stream_value,
+            })
+        );
+
 
         let rows_value = TypeId::from_bytes(id::<94>());
         let catalogue = resolved_type_slots_catalogue(
