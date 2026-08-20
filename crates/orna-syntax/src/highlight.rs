@@ -159,7 +159,8 @@ fn walk_node(
         | SyntaxKind::SetTypeSpecification
         | SyntaxKind::MapTypeSpecification
         | SyntaxKind::OptionTypeSpecification
-        | SyntaxKind::StreamTypeSpecification => {
+        | SyntaxKind::StreamTypeSpecification
+        | SyntaxKind::StreamReturnType => {
             walk_children_with_role(node, Some(NameRole::Type), tokens)
         }
         SyntaxKind::CapabilitySpecification => {
@@ -806,6 +807,14 @@ mod tests {
         assert_eq!(kind_at(opaque, "CONTRACT"), HighlightKind::Keyword);
         assert_eq!(kind_at(opaque, "TRANSIENT"), HighlightKind::Keyword);
         assert_eq!(kind_at(opaque, "'x'"), HighlightKind::StringLiteral);
+    }
+
+    #[test]
+    fn classifies_stream_return_element_type() {
+        let source = "CREATE SERVER FUNCTION tasks.events() RETURNS STREAM<tasks.event> AS SELECT REF(e) FROM tasks.event e;";
+        assert_eq!(kind_at(source, "STREAM"), HighlightKind::Keyword);
+        assert_eq!(kind_at(source, "tasks"), HighlightKind::NamespaceName);
+        assert_eq!(kind_at(source, "event"), HighlightKind::TypeName);
     }
 
     #[test]

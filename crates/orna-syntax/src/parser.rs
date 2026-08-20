@@ -80,6 +80,7 @@ pub(crate) enum SyntaxKind {
     ClientProceduralStatement,
     ClientProceduralLetStatement,
     ClientAssignmentStatement,
+    StreamReturnType,
 }
 
 impl From<SyntaxKind> for rowan::SyntaxKind {
@@ -153,6 +154,7 @@ impl Language for OrnaLanguage {
             54 => SyntaxKind::ClientProceduralStatement,
             55 => SyntaxKind::ClientProceduralLetStatement,
             56 => SyntaxKind::ClientAssignmentStatement,
+            57 => SyntaxKind::StreamReturnType,
             _ => panic!("unknown Orna syntax kind"),
         }
     }
@@ -1717,6 +1719,9 @@ impl<'source> Parser<'source> {
             self.error_current("ORNA0001", type_message);
             return None;
         }
+        if self.current().is_some_and(|token| token.is_word("STREAM")) {
+            return self.parse_stream_return_type(type_message);
+        }
         if !self.current().is_some_and(|token| token.is_word("ROWS")) {
             return self
                 .parse_type_specification_with_message(type_message)
@@ -1750,6 +1755,19 @@ impl<'source> Parser<'source> {
             });
         self.builder.finish_node();
         result
+    }
+
+    fn parse_stream_return_type(&mut self, type_message: &str) -> Option<FunctionReturnType> {
+        let (element, span) = self.parse_stream_type_parts(
+            type_message,
+            0,
+            32,
+            SyntaxKind::StreamReturnType,
+        )?;
+        Some(FunctionReturnType::Stream {
+            element: *element,
+            span,
+        })
     }
 
     fn parse_rows_column(&mut self, order: usize) -> Option<RowsColumnDeclaration> {
@@ -3029,6 +3047,45 @@ impl<'source> Parser<'source> {
         self.parse_postfix_options(specification, depth, MAXIMUM_DEPTH)
     }
 
+    fn parse_stream_type_parts(
+        &mut self,
+        named_type_message: &str,
+        depth: usize,
+        maximum_depth: usize,
+        syntax_kind: SyntaxKind,
+    ) -> Option<(Box<TypeSpecification>, SourceSpan)> {
+        let constructor = self.current().expect("STREAM constructor exists").clone();
+        self.builder.start_node(syntax_kind.into());
+        let start = constructor.range.start;
+        self.bump();
+        self.skip_trivia();
+        if self.take_symbol("<").is_none() {
+            self.error_current("ORNA0001", "expected '<' after type constructor");
+            self.builder.finish_node();
+            return None;
+        }
+        self.skip_trivia();
+
+        let Some(element) = self.parse_type_specification_at_depth(named_type_message, depth + 1)
+        else {
+            self.recover_type_constructor();
+            self.builder.finish_node();
+            return None;
+        };
+        self.skip_trivia();
+
+        let Some(end) = self.take_symbol(">").map(|token| token.range.end) else {
+            self.error_current("ORNA0001", "expected '>' to close type constructor");
+            self.recover_type_constructor();
+            self.builder.finish_node();
+            return None;
+        };
+        self.builder.finish_node();
+        let span = SourceSpan { start, end };
+        debug_assert!(depth + type_specification_depth(&element) + 1 <= maximum_depth);
+        Some((Box::new(element), span))
+    }
+
     fn parse_prefix_type_specification(
         &mut self,
         named_type_message: &str,
@@ -3036,6 +3093,15 @@ impl<'source> Parser<'source> {
         maximum_depth: usize,
     ) -> Option<TypeSpecification> {
         let constructor = self.current().expect("type constructor exists").clone();
+        if constructor.is_word("STREAM") {
+            let (element, span) = self.parse_stream_type_parts(
+                named_type_message,
+                depth,
+                maximum_depth,
+                SyntaxKind::StreamTypeSpecification,
+            )?;
+            return Some(TypeSpecification::Stream { element, span });
+        }
         let syntax_kind = if constructor.is_word("LIST") {
             SyntaxKind::ListTypeSpecification
         } else if constructor.is_word("SET") {
