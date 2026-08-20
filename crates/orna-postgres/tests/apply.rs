@@ -2577,7 +2577,7 @@ async fn require_standard_upgrade_storage(
             .iter()
             .filter_map(|function| match function.return_type() {
                 FunctionReturn::Rows(columns) => Some(columns),
-                FunctionReturn::Single(_) => None,
+                FunctionReturn::Single(_) | FunctionReturn::Stream(_) => None,
             })
             .flatten()
             .filter(|column| column.resolved_type().value_type().is_some())
@@ -2588,7 +2588,7 @@ async fn require_standard_upgrade_storage(
             .iter()
             .filter_map(|function| match function.return_type() {
                 FunctionReturn::Rows(columns) => Some(columns),
-                FunctionReturn::Single(_) => None,
+                FunctionReturn::Single(_) | FunctionReturn::Stream(_) => None,
             })
             .flatten()
             .filter(|column| column.resolved_type().reference_target().is_some())
@@ -2941,7 +2941,7 @@ impl CandidateSqlState {
             return_column_count: functions
                 .iter()
                 .map(|function| match function.return_type() {
-                    FunctionReturn::Single(_) => 0,
+                    FunctionReturn::Single(_) | FunctionReturn::Stream(_) => 0,
                     FunctionReturn::Rows(columns) => columns.len(),
                 })
                 .sum(),

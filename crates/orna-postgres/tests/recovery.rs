@@ -3942,6 +3942,7 @@ fn require_raw_v2_value_inventory(
                     }
                 }
             }
+            FunctionReturn::Stream(_) => {}
         }
     }
 
@@ -5664,6 +5665,7 @@ fn raw_v2_value_catalogue(
                         })
                         .collect::<TestResult<Vec<_>>>()?,
                 ),
+                FunctionReturn::Stream(resolved_type) => FunctionReturn::Stream(*resolved_type),
             };
             Ok(FunctionDefinition::new(
                 function.id(),
@@ -5749,6 +5751,7 @@ fn require_raw_v2_value_slots(
                     )?;
                 }
             }
+            FunctionReturn::Stream(_) => {}
         }
     }
     Ok(())
@@ -5849,6 +5852,7 @@ async fn upgrade_raw_v2_value_rows(
                         .await?;
                 }
             }
+            FunctionReturn::Stream(_) => {}
         }
     }
     Ok(())
@@ -7976,6 +7980,10 @@ async fn insert_function_record(
             ("single", Some(kind), scalar, target)
         }
         FunctionReturn::Rows(_) => ("rows", None, None, None),
+        FunctionReturn::Stream(resolved) => {
+            let (kind, scalar, target) = resolved_type_columns(*resolved)?;
+            ("stream", Some(kind), scalar, target)
+        }
     };
     client
         .execute(
