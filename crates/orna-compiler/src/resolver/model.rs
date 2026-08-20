@@ -1535,6 +1535,27 @@ impl CheckedServerFunctionReturnColumn {
     }
 }
 
+/// The checked return shape of one SERVER function.
+///
+/// `STREAM<T>` carries one flat element type without manufacturing a
+/// synthetic return column. Legacy `ROWS (...)` declarations retain their
+/// existing ordered column representation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum CheckedServerFunctionReturn {
+    /// Zero or more named return columns.
+    Rows(Vec<CheckedServerFunctionReturnColumn>),
+    /// Zero or more values of one resolved element type.
+    Stream {
+        /// The resolved stream element type.
+        semantic_type: SemanticType<CheckedTypeId>,
+        /// The standard value identity when the element uses one.
+        standard_value_type: Option<TypeId>,
+        /// The source location of the complete `STREAM<T>` declaration.
+        location: SourceLocation,
+    },
+}
+
+
 /// A checked definition target referenced by one declaration or query.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum CheckedDefinitionReferenceTarget {
@@ -1631,7 +1652,7 @@ pub struct CheckedServerFunction {
     pub(super) id: CheckedFunctionId,
     pub(super) name: QualifiedSemanticName,
     pub(super) parameters: Vec<CheckedServerFunctionParameter>,
-    pub(super) return_columns: Vec<CheckedServerFunctionReturnColumn>,
+    pub(super) return_type: CheckedServerFunctionReturn,
     pub(super) security: orna_core::catalogue::FunctionSecurity,
     pub(super) transaction: Option<orna_core::catalogue::FunctionTransaction>,
     pub(super) volatility: orna_core::catalogue::FunctionVolatility,
@@ -1658,7 +1679,15 @@ impl CheckedServerFunction {
 
     /// Returns checked `ROWS` return columns in declaration order.
     pub fn return_columns(&self) -> &[CheckedServerFunctionReturnColumn] {
-        &self.return_columns
+        match &self.return_type {
+            CheckedServerFunctionReturn::Rows(columns) => columns,
+            CheckedServerFunctionReturn::Stream { .. } => &[],
+        }
+    }
+
+    /// Returns the checked SERVER return shape.
+    pub(crate) fn return_type(&self) -> &CheckedServerFunctionReturn {
+        &self.return_type
     }
 
     /// Returns the function security context mode.
@@ -3639,7 +3668,10 @@ impl StandardApplicationCheckReport {
                     .inner
                     .server_functions
                     .first_mut()
-                    .and_then(|function| function.return_columns.first_mut())
+                    .and_then(|function| match &mut function.return_type {
+                        CheckedServerFunctionReturn::Rows(columns) => columns.first_mut(),
+                        CheckedServerFunctionReturn::Stream { .. } => None,
+                    })
                 else {
                     return false;
                 };
@@ -4350,7 +4382,7 @@ impl<'a> CheckedStandardApplicationServerFunction<'a> {
         &self,
     ) -> impl std::iter::ExactSizeIterator<Item = CheckedStandardApplicationReturnColumn<'_>> + '_
     {
-        self.function.return_columns.iter().map(move |column| {
+        self.function.return_columns().iter().map(move |column| {
             CheckedStandardApplicationReturnColumn {
                 bundle: self.bundle,
                 owner: self.function.id,
