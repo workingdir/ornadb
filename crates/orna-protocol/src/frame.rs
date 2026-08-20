@@ -5,9 +5,12 @@ use std::{collections::BTreeMap, error::Error, fmt};
 use orna_core::{
     CallSiteId, FunctionId, InvocationId, ParameterId, TypeId,
     catalogue::CatalogueSnapshot,
-    invocation::{InvokeEvent, InvokeRequest, invocation_carrier_type_id},
+    invocation::{InvokeEvent, InvokeRequest, InvocationEventKind, invocation_carrier_type_id},
     revision::{ActiveDatabaseRevision, RevisionPair},
-    system::{SYS_INVOKE_EVENT_TYPE_ID, SYS_INVOKE_REQUEST_TYPE_ID},
+    system::{
+        SYS_INVOKE_EVENT_TYPE_ID, SYS_INVOKE_FUNCTION_ID, SYS_INVOKE_PARAMETER_ID,
+        SYS_INVOKE_REQUEST_TYPE_ID,
+    },
     types::TypeDescriptor,
     value::{OpaqueCodecRegistry, RuntimeValue},
 };
@@ -313,6 +316,13 @@ pub enum ClientFrame {
         /// The canonical runtime value.
         value: RuntimeValue,
     },
+    /// Supplies a retained sealed sys.invoke Request in CALL_ARGUMENT.
+    CallInvokeRequest {
+        /// The call stream number.
+        stream: u64,
+        /// The complete private Request carrier envelope.
+        request: RetainedInvokeRequest,
+    },
     /// Declares that the call has no more arguments.
     CallArgumentsComplete {
         /// The call stream number.
@@ -602,6 +612,13 @@ pub enum ClientAction {
         /// The complete raw call without authentication context.
         call: RawCall,
     },
+    /// Authorise and dispatch one retained sealed  Request.
+    InvokeDispatch {
+        /// The connection-local call stream.
+        stream: u64,
+        /// The complete Request carrier retained until protected decoding.
+        request: RetainedInvokeRequest,
+    },
     /// Request cancellation of one dispatched call.
     Cancel {
         /// The connection-local call stream.
@@ -629,6 +646,18 @@ pub enum ServerAction {
         stream: u64,
         /// Events in send order. The machine assigns their sequence numbers.
         events: Vec<Event>,
+    },
+    /// Emits one already-sequenced sealed  Event batch.
+    InvokeEvents {
+        /// The connection-local call stream.
+        stream: u64,
+        /// The complete typed Event batch.
+        events: InvocationEventBatch,
+    },
+    /// Emits the required terminal cancellation Event for an accepted invoke call.
+    InvokeCancelled {
+        /// The connection-local call stream.
+        stream: u64,
     },
     /// Completes a running call successfully.
     Completed {
@@ -785,6 +814,10 @@ enum FrameVersion<'a> {
 }
 
 impl FrameVersion<'_> {
+    const fn is_constructed(self) -> bool {
+        matches!(self, Self::Constructed(_, _))
+    }
+
     const fn marker(self) -> &'static [u8; 4] {
         match self {
             Self::One => MARKER,
@@ -863,12 +896,15 @@ enum Phase {
         arguments: BTreeMap<ParameterId, RuntimeValue>,
         argument_bytes: usize,
     },
+    InvokeReceiving {
+        request: RetainedInvokeRequest,
+    },
     Dispatching,
     DispatchCancelling,
     Running {
         invocation: InvocationId,
     },
-    RunningCancelling,
+    RunningCancelling { invocation: InvocationId },
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -876,6 +912,10 @@ struct StreamState {
     phase: Phase,
     windows: [u64; 6],
     last_sequence: u64,
+    last_invocation_outer_sequence: u64,
+    last_invocation_event_sequence: Option<u64>,
+    is_invocation: bool,
+    invocation_terminal: bool,
 }
 
 impl StreamState {
@@ -888,6 +928,10 @@ impl StreamState {
             },
             windows: [0; 6],
             last_sequence: 0,
+            last_invocation_outer_sequence: 0,
+            last_invocation_event_sequence: None,
+            is_invocation: false,
+            invocation_terminal: false,
         }
     }
 }
@@ -1004,6 +1048,9 @@ impl ProtocolConnection {
                 parameter,
                 value,
             } => self.argument(version, stream, parameter, value),
+            ClientFrame::CallInvokeRequest { stream, request } => {
+                self.invoke_argument(version, stream, request)
+            }
             ClientFrame::CallArgumentsComplete { stream } => self.complete_arguments(stream),
             ClientFrame::WindowUpdate {
                 stream,
@@ -1100,6 +1147,8 @@ impl ProtocolConnection {
         match action {
             ServerAction::Accepted { stream, invocation } => self.accept(stream, invocation),
             ServerAction::Events { stream, events } => self.events(version, stream, events),
+            ServerAction::InvokeEvents { stream, events } => self.invoke_events(version, stream, events),
+            ServerAction::InvokeCancelled { stream } => self.invoke_cancelled(version, stream),
             ServerAction::Completed { stream } => self.complete(stream),
             ServerAction::Failed { stream, failure } => self.fail(stream, failure),
             ServerAction::Cancelled { stream } => self.cancelled(stream),
@@ -1162,6 +1211,9 @@ impl ProtocolConnection {
         else {
             return Err(ConnectionError::WrongState { stream });
         };
+        if matches!(&state.phase, Phase::Receiving { function, .. } if *function == SYS_INVOKE_FUNCTION_ID) {
+            return Err(ConnectionError::WrongState { stream });
+        }
         if arguments.contains_key(&parameter) {
             return Err(ConnectionError::DuplicateArgument { stream, parameter });
         }
@@ -1186,34 +1238,73 @@ impl ProtocolConnection {
         Ok(None)
     }
 
+    fn invoke_argument(
+        &mut self,
+        version: FrameVersion<'_>,
+        stream: u64,
+        request: RetainedInvokeRequest,
+    ) -> Result<Option<ClientAction>, ConnectionError> {
+        if !version.is_constructed() {
+            return Err(ConnectionError::InvalidFrame {
+                source: FrameCodecError::InvocationCarrierNotAccepted {
+                    carrier: SYS_INVOKE_REQUEST_TYPE_ID,
+                },
+            });
+        }
+        let state = self
+            .streams
+            .get(&stream)
+            .ok_or(ConnectionError::UnknownStream { stream })?;
+        if !matches!(state.phase, Phase::Receiving { function, .. } if function == SYS_INVOKE_FUNCTION_ID) {
+            return Err(ConnectionError::WrongState { stream });
+        }
+        self.streams
+            .get_mut(&stream)
+            .expect("live stream checked")
+            .phase = Phase::InvokeReceiving { request };
+        self.streams
+            .get_mut(&stream)
+            .expect("live stream checked")
+            .is_invocation = true;
+        Ok(None)
+    }
+
     fn complete_arguments(&mut self, stream: u64) -> Result<Option<ClientAction>, ConnectionError> {
         let state = self
             .streams
             .get(&stream)
             .ok_or(ConnectionError::UnknownStream { stream })?;
-        let Phase::Receiving {
-            function,
-            arguments,
-            ..
-        } = &state.phase
-        else {
-            return Err(ConnectionError::WrongState { stream });
-        };
-        let call = RawCall {
-            function: *function,
-            arguments: arguments
-                .iter()
-                .map(|(parameter, value)| CallArgument {
-                    parameter: *parameter,
-                    value: value.clone(),
-                })
-                .collect(),
-        };
-        self.streams
-            .get_mut(&stream)
-            .expect("live stream checked")
-            .phase = Phase::Dispatching;
-        Ok(Some(ClientAction::Dispatch { stream, call }))
+        match &state.phase {
+            Phase::InvokeReceiving { request } => {
+                let request = request.clone();
+                self.streams
+                    .get_mut(&stream)
+                    .expect("live stream checked")
+                    .phase = Phase::Dispatching;
+                Ok(Some(ClientAction::InvokeDispatch { stream, request }))
+            }
+            Phase::Receiving { function, arguments, .. } => {
+                if *function == SYS_INVOKE_FUNCTION_ID {
+                    return Err(ConnectionError::WrongState { stream });
+                }
+                let call = RawCall {
+                    function: *function,
+                    arguments: arguments
+                        .iter()
+                        .map(|(parameter, value)| CallArgument {
+                            parameter: *parameter,
+                            value: value.clone(),
+                        })
+                        .collect(),
+                };
+                self.streams
+                    .get_mut(&stream)
+                    .expect("live stream checked")
+                    .phase = Phase::Dispatching;
+                Ok(Some(ClientAction::Dispatch { stream, call }))
+            }
+            _ => Err(ConnectionError::WrongState { stream }),
+        }
     }
 
     fn update_window(
@@ -1231,6 +1322,9 @@ impl ProtocolConnection {
             .streams
             .get(&stream)
             .ok_or(ConnectionError::UnknownStream { stream })?;
+        if state.is_invocation && channel != Channel::ResultValues {
+            return Err(ConnectionError::WrongState { stream });
+        }
         let index = channel_index(channel);
         let next = state.windows[index]
             .checked_add(credit)
@@ -1249,7 +1343,7 @@ impl ProtocolConnection {
             .get(&stream)
             .ok_or(ConnectionError::UnknownStream { stream })?;
         match state.phase {
-            Phase::Receiving { .. } => {
+            Phase::Receiving { .. } | Phase::InvokeReceiving { .. } => {
                 self.streams.remove(&stream);
                 Ok(Some(ClientAction::Send(ServerFrame::CallCancelled {
                     stream,
@@ -1269,13 +1363,13 @@ impl ProtocolConnection {
                 self.streams
                     .get_mut(&stream)
                     .expect("live stream checked")
-                    .phase = Phase::RunningCancelling;
+                    .phase = Phase::RunningCancelling { invocation };
                 Ok(Some(ClientAction::Cancel {
                     stream,
                     invocation: Some(invocation),
                 }))
             }
-            Phase::DispatchCancelling | Phase::RunningCancelling => {
+            Phase::DispatchCancelling | Phase::RunningCancelling { .. } => {
                 Err(ConnectionError::WrongState { stream })
             }
         }
@@ -1312,9 +1406,20 @@ impl ProtocolConnection {
             .ok_or(ConnectionError::UnknownStream { stream })?;
         if !matches!(
             state.phase,
-            Phase::Running { .. } | Phase::RunningCancelling
+            Phase::Running { .. } | Phase::RunningCancelling { .. }
         ) {
             return Err(ConnectionError::WrongState { stream });
+        }
+        if state.is_invocation {
+            return Err(ConnectionError::WrongState { stream });
+        }
+        if let Some(carrier) = events.iter().find_map(|event| match event {
+            Event::Value(value) => invocation_carrier_type_id(value),
+            Event::Bytes(_) | Event::Failure(_) => None,
+        }) {
+            return Err(ConnectionError::InvalidFrame {
+                source: FrameCodecError::InvocationCarrierNotAccepted { carrier },
+            });
         }
         let Some(first) = events.first() else {
             return Err(ConnectionError::InvalidFrame {
@@ -1377,6 +1482,195 @@ impl ProtocolConnection {
         Ok(frame)
     }
 
+    fn invoke_events(
+        &mut self,
+        version: FrameVersion<'_>,
+        stream: u64,
+        batch: InvocationEventBatch,
+    ) -> Result<ServerFrame, ConnectionError> {
+        if !version.is_constructed() {
+            return Err(ConnectionError::InvalidFrame {
+                source: FrameCodecError::InvocationCarrierNotAccepted {
+                    carrier: SYS_INVOKE_EVENT_TYPE_ID,
+                },
+            });
+        }
+        let state = self
+            .streams
+            .get(&stream)
+            .ok_or(ConnectionError::UnknownStream { stream })?;
+        let (invocation, is_cancelling) = match state.phase {
+            Phase::Running { invocation } => (invocation, false),
+            Phase::RunningCancelling { invocation } => (invocation, true),
+            _ => return Err(ConnectionError::WrongState { stream }),
+        };
+        if !state.is_invocation || state.invocation_terminal {
+            return Err(ConnectionError::WrongState { stream });
+        }
+        validate_invocation_event_records(batch.records())
+            .map_err(|source| ConnectionError::InvalidFrame { source })?;
+        if !is_cancelling
+            && batch
+                .records()
+                .iter()
+                .any(|record| record.event().kind() == InvocationEventKind::InvocationCancelled)
+        {
+            return Err(ConnectionError::WrongState { stream });
+        }
+        let expected_outer = state
+            .last_invocation_outer_sequence
+            .checked_add(1)
+            .ok_or(ConnectionError::EventSequenceExhausted { stream })?;
+        let expected_inner = state
+            .last_invocation_event_sequence
+            .map(|value| value.checked_add(1).ok_or(ConnectionError::EventSequenceExhausted { stream }))
+            .transpose()?
+            .unwrap_or(0);
+        let records = batch.records();
+        if records[0].outer_sequence() != expected_outer
+            || records[0].event().sequence() != expected_inner
+            || (state.last_invocation_event_sequence.is_none()
+                && records[0].event().kind() != InvocationEventKind::InvocationStarted)
+        {
+            return Err(ConnectionError::InvalidFrame {
+                source: FrameCodecError::InvalidInvocationEventSequence,
+            });
+        }
+        if records
+            .iter()
+            .any(|record| record.event().invocation_id() != invocation)
+        {
+            return Err(ConnectionError::InvalidFrame {
+                source: FrameCodecError::MismatchedInvocationEvent,
+            });
+        }
+        let mut terminal = state.invocation_terminal;
+        for (index, record) in records.iter().enumerate() {
+            let kind = record.event().kind();
+            if index > 0 && kind == InvocationEventKind::InvocationStarted {
+                return Err(ConnectionError::InvalidFrame {
+                    source: FrameCodecError::InvalidInvocationEventSequence,
+                });
+            }
+            let is_terminal = matches!(
+                kind,
+                InvocationEventKind::InvocationCompleted
+                    | InvocationEventKind::InvocationFailed
+                    | InvocationEventKind::InvocationCancelled
+            );
+            if terminal || (is_terminal && index + 1 != records.len()) {
+                return Err(ConnectionError::InvalidFrame {
+                    source: FrameCodecError::InvalidInvocationEventSequence,
+                });
+            }
+            terminal |= is_terminal;
+        }
+        let payload = invocation_event_batch_payload(version, &batch)
+            .map_err(|source| ConnectionError::InvalidFrame { source })?;
+        let frame = ServerFrame::EventBatch {
+            stream,
+            channel: Channel::ResultValues,
+            events: records
+                .iter()
+                .map(|record| EventRecord {
+                    sequence: record.outer_sequence(),
+                    event: Event::Value(RuntimeValue::InvokeEvent(record.event().clone())),
+                })
+                .collect(),
+        };
+        let required = encode(version, EVENT_BATCH_TAG, stream, &payload)
+            .map_err(|source| ConnectionError::InvalidFrame { source })?
+            .len()
+            .checked_sub(HEADER_LENGTH)
+            .expect("encoded event frame includes its header") as u64;
+        let available = state.windows[channel_index(Channel::ResultValues)];
+        if available < required {
+            return Err(ConnectionError::InsufficientCredit {
+                stream,
+                channel: Channel::ResultValues,
+                available,
+                required,
+            });
+        }
+        let state = self.streams.get_mut(&stream).expect("live stream checked");
+        state.windows[channel_index(Channel::ResultValues)] -= required;
+        state.last_invocation_outer_sequence = records
+            .last()
+            .expect("sealed event batch is non-empty")
+            .outer_sequence();
+        state.last_sequence = state.last_invocation_outer_sequence;
+        state.last_invocation_event_sequence = records.last().map(|record| record.event().sequence());
+        state.invocation_terminal = terminal;
+        Ok(frame)
+    }
+
+    fn invoke_cancelled(
+        &mut self,
+        version: FrameVersion<'_>,
+        stream: u64,
+    ) -> Result<ServerFrame, ConnectionError> {
+        if !version.is_constructed() {
+            return Err(ConnectionError::InvalidFrame {
+                source: FrameCodecError::InvocationCarrierNotAccepted {
+                    carrier: SYS_INVOKE_EVENT_TYPE_ID,
+                },
+            });
+        }
+        let state = self
+            .streams
+            .get(&stream)
+            .ok_or(ConnectionError::UnknownStream { stream })?;
+        let invocation = match state.phase {
+            Phase::RunningCancelling { invocation } => invocation,
+            _ => return Err(ConnectionError::WrongState { stream }),
+        };
+        if !state.is_invocation || state.invocation_terminal {
+            return Err(ConnectionError::WrongState { stream });
+        }
+        let (outer, sequence, started) = match state.last_invocation_event_sequence {
+            Some(sequence) => (
+                state
+                    .last_invocation_outer_sequence
+                    .checked_add(1)
+                    .ok_or(ConnectionError::EventSequenceExhausted { stream })?,
+                sequence
+                    .checked_add(1)
+                    .ok_or(ConnectionError::EventSequenceExhausted { stream })?,
+                None,
+            ),
+            None => (2, 1, Some(InvokeEvent::new(
+                invocation,
+                0,
+                orna_core::invocation::InvocationEventBody::Started {
+                    visible_principal: None,
+                },
+            ).map_err(|_| ConnectionError::InvalidFrame {
+                source: FrameCodecError::InvalidInvocationEventSequence,
+            })?)),
+        };
+        let cancelled = InvokeEvent::new(
+            invocation,
+            sequence,
+            orna_core::invocation::InvocationEventBody::Cancelled { reason: None },
+        )
+        .map_err(|_| ConnectionError::InvalidFrame {
+            source: FrameCodecError::InvalidInvocationEventSequence,
+        })?;
+        let records = match started {
+            Some(started) => vec![
+                InvocationEventRecord::new(outer - 1, started),
+                InvocationEventRecord::new(outer, cancelled),
+            ],
+            None => vec![InvocationEventRecord::new(outer, cancelled)],
+        };
+        self.invoke_events(
+            version,
+            stream,
+            InvocationEventBatch::new(records)
+                .map_err(|source| ConnectionError::InvalidFrame { source })?,
+        )
+    }
+
     fn complete(&mut self, stream: u64) -> Result<ServerFrame, ConnectionError> {
         let state = self
             .streams
@@ -1384,8 +1678,11 @@ impl ProtocolConnection {
             .ok_or(ConnectionError::UnknownStream { stream })?;
         if !matches!(
             state.phase,
-            Phase::Running { .. } | Phase::RunningCancelling
+            Phase::Running { .. } | Phase::RunningCancelling { .. }
         ) {
+            return Err(ConnectionError::WrongState { stream });
+        }
+        if state.is_invocation && !state.invocation_terminal {
             return Err(ConnectionError::WrongState { stream });
         }
         self.streams.remove(&stream);
@@ -1402,8 +1699,13 @@ impl ProtocolConnection {
             Phase::Dispatching
                 | Phase::DispatchCancelling
                 | Phase::Running { .. }
-                | Phase::RunningCancelling
+                | Phase::RunningCancelling { .. }
         ) {
+            return Err(ConnectionError::WrongState { stream });
+        }
+        if state.is_invocation
+            && matches!(state.phase, Phase::Running { .. } | Phase::RunningCancelling { .. })
+        {
             return Err(ConnectionError::WrongState { stream });
         }
         self.streams.remove(&stream);
@@ -1417,8 +1719,11 @@ impl ProtocolConnection {
             .ok_or(ConnectionError::UnknownStream { stream })?;
         if !matches!(
             state.phase,
-            Phase::DispatchCancelling | Phase::RunningCancelling
+            Phase::DispatchCancelling | Phase::RunningCancelling { .. }
         ) {
+            return Err(ConnectionError::WrongState { stream });
+        }
+        if state.is_invocation && matches!(state.phase, Phase::RunningCancelling { .. }) {
             return Err(ConnectionError::WrongState { stream });
         }
         self.streams.remove(&stream);
@@ -2417,6 +2722,18 @@ pub fn encode_invocation_event_batch(
     Ok(payload)
 }
 
+fn invocation_event_batch_payload(
+    version: FrameVersion<'_>,
+    batch: &InvocationEventBatch,
+) -> Result<Vec<u8>, FrameCodecError> {
+    let FrameVersion::Constructed(active, registry) = version else {
+        return Err(FrameCodecError::InvocationCarrierNotAccepted {
+            carrier: SYS_INVOKE_EVENT_TYPE_ID,
+        });
+    };
+    encode_invocation_event_batch(active, registry, batch)
+}
+
 /// Decodes one closed `RESULT_VALUES` Event-batch payload for `sys.invoke`.
 ///
 /// This decoder fully validates and materialises every Event carrier. The
@@ -2497,6 +2814,41 @@ pub fn decode_invocation_event_batch(
     }
     InvocationEventBatch::new(records)
 }
+/// Decodes one complete sealed invocation Event frame on an ORF5 connection.
+///
+/// The ordinary server-frame decoder keeps invocation carriers closed. Callers
+/// must use this decoder only after the connection state has accepted a
+/// `sys.invoke` stream and selected the `RESULT_VALUES` Event position.
+///
+/// # Errors
+///
+/// Returns a [`FrameCodecError`] when the frame envelope or sealed Event batch
+/// is invalid.
+pub fn decode_constructed_invocation_event_frame(
+    active: &ActiveDatabaseRevision,
+    registry: &OpaqueCodecRegistry,
+    encoded: &[u8],
+) -> Result<ServerFrame, FrameCodecError> {
+    let (tag, stream, payload) = decode_envelope(FrameVersion::Constructed(active, registry), encoded)?;
+    if tag != EVENT_BATCH_TAG {
+        return Err(FrameCodecError::WrongDirection { tag });
+    }
+    require_stream(tag, stream, false)?;
+    let batch = decode_invocation_event_batch(active, registry, payload)?;
+    Ok(ServerFrame::EventBatch {
+        stream,
+        channel: Channel::ResultValues,
+        events: batch
+            .records()
+            .iter()
+            .map(|record| EventRecord {
+                sequence: record.outer_sequence(),
+                event: Event::Value(RuntimeValue::InvokeEvent(record.event().clone())),
+            })
+            .collect(),
+    })
+}
+
 
 /// Encodes one complete ORNA-RESOURCE/1 client frame.
 pub fn encode_resource_client_frame(
@@ -3360,6 +3712,18 @@ fn encode_client_frame_with_version(
             payload.extend_from_slice(&value);
             encode(version, CALL_ARGUMENT_TAG, *stream, &payload)
         }
+        ClientFrame::CallInvokeRequest { stream, request } => {
+            require_stream(CALL_ARGUMENT_TAG, *stream, false)?;
+            if !version.is_constructed() {
+                return Err(FrameCodecError::InvocationCarrierNotAccepted {
+                    carrier: SYS_INVOKE_REQUEST_TYPE_ID,
+                });
+            }
+            let mut payload = Vec::with_capacity(16 + request.encoded.len());
+            payload.extend_from_slice(&SYS_INVOKE_PARAMETER_ID.to_bytes());
+            payload.extend_from_slice(&request.encoded);
+            encode(version, CALL_ARGUMENT_TAG, *stream, &payload)
+        }
         ClientFrame::CallArgumentsComplete { stream } => {
             require_stream(CALL_ARGUMENTS_COMPLETE_TAG, *stream, false)?;
             encode(version, CALL_ARGUMENTS_COMPLETE_TAG, *stream, &[])
@@ -3478,6 +3842,12 @@ fn decode_client_frame_with_version(
                     .try_into()
                     .expect("argument prefix length checked"),
             );
+            if version.is_constructed() && parameter == SYS_INVOKE_PARAMETER_ID {
+                return Ok(ClientFrame::CallInvokeRequest {
+                    stream,
+                    request: decode_invoke_request(&payload[16..])?,
+                });
+            }
             let value = version
                 .decode_value(&payload[16..])
                 .map_err(|source| FrameCodecError::Value { source })?;
@@ -3604,6 +3974,26 @@ fn encode_server_frame_with_version(
             events,
         } => {
             require_stream(EVENT_BATCH_TAG, *stream, false)?;
+            if version.is_constructed()
+                && *channel == Channel::ResultValues
+                && !events.is_empty()
+                && events.iter().all(|record| {
+                    matches!(record.event, Event::Value(RuntimeValue::InvokeEvent(_)))
+                })
+            {
+                let records = events
+                    .iter()
+                    .map(|record| {
+                        let Event::Value(RuntimeValue::InvokeEvent(event)) = &record.event else {
+                            unreachable!("sealed event shape checked")
+                        };
+                        InvocationEventRecord::new(record.sequence, event.clone())
+                    })
+                    .collect();
+                let batch = InvocationEventBatch::new(records)?;
+                let payload = invocation_event_batch_payload(version, &batch)?;
+                return encode(version, EVENT_BATCH_TAG, *stream, &payload);
+            }
             let payload = encode_event_batch(version, *channel, events)?;
             encode(version, EVENT_BATCH_TAG, *stream, &payload)
         }
@@ -3680,8 +4070,7 @@ pub fn decode_registered_server_frame(
 /// # Errors
 ///
 /// Returns a [`FrameCodecError`] for an invalid version-5 envelope, payload,
-/// active value, registry-bound opaque value, constructed application value,
-/// or sealed invocation carrier in the ordinary result position.
+/// active value, registry-bound opaque value, or constructed application value.
 pub fn decode_constructed_server_frame(
     active: &ActiveDatabaseRevision,
     registry: &OpaqueCodecRegistry,
@@ -4314,6 +4703,438 @@ mod tests {
     }
 
     #[test]
+    fn special_invoke_request_uses_existing_argument_wire_and_state_contract() {
+        let active = empty_active_revision();
+        let registry = test_registry();
+        let request = encode_invoke_request(&active, &registry, &minimal_request(None)).unwrap();
+        let frame = ClientFrame::CallInvokeRequest {
+            stream: 1,
+            request: request.clone(),
+        };
+        let encoded = encode_constructed_client_frame(&active, &registry, &frame).unwrap();
+        let mut expected = b"ORF5\x02\0".to_vec();
+        expected.extend_from_slice(&1_u64.to_be_bytes());
+        expected.extend_from_slice(&(16_u32 + request.encoded_length() as u32).to_be_bytes());
+        expected.extend_from_slice(&SYS_INVOKE_PARAMETER_ID.to_bytes());
+        expected.extend_from_slice(&request.encoded);
+        assert_eq!(encoded, expected);
+        assert_eq!(decode_constructed_client_frame(&active, &registry, &encoded), Ok(frame.clone()));
+
+        let mut malformed = encoded.clone();
+        malformed[HEADER_LENGTH + 16] = 0;
+        assert!(matches!(
+            decode_constructed_client_frame(&active, &registry, &malformed),
+            Err(FrameCodecError::Value {
+                source: ValueCodecError::InvalidMarker,
+            })
+        ));
+
+        let mut wrong_parameter = encoded.clone();
+        wrong_parameter[HEADER_LENGTH..HEADER_LENGTH + 16].fill(0x44);
+        assert!(matches!(
+            decode_constructed_client_frame(&active, &registry, &wrong_parameter),
+            Err(FrameCodecError::InvocationCarrierNotAccepted {
+                carrier: SYS_INVOKE_REQUEST_TYPE_ID,
+            })
+        ));
+
+        let mut connection = ProtocolConnection::new();
+        connection
+            .receive_constructed(
+                &active,
+                &registry,
+                ClientFrame::CallRawStart {
+                    stream: 1,
+                    function: SYS_INVOKE_FUNCTION_ID,
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            connection.receive_constructed(&active, &registry, frame.clone()),
+            Ok(None)
+        );
+        assert_eq!(
+            connection.receive_constructed(
+                &active,
+                &registry,
+                ClientFrame::CallInvokeRequest {
+                    stream: 1,
+                    request: request.clone(),
+                },
+            ),
+            Err(ConnectionError::WrongState { stream: 1 })
+        );
+        assert!(matches!(
+            connection.receive_constructed(
+                &active,
+                &registry,
+                ClientFrame::CallArgumentsComplete { stream: 1 },
+            ),
+            Ok(Some(ClientAction::InvokeDispatch { .. }))
+        ));
+
+        let mut wrong_function = ProtocolConnection::new();
+        wrong_function
+            .receive_constructed(
+                &active,
+                &registry,
+                ClientFrame::CallRawStart {
+                    stream: 1,
+                    function: FunctionId::from_bytes([0x55; 16]),
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            wrong_function.receive_constructed(&active, &registry, frame),
+            Err(ConnectionError::WrongState { stream: 1 })
+        );
+    }
+
+    #[test]
+    fn sealed_event_batch_uses_event_tag_and_result_credit_lifecycle() {
+        let active = empty_active_revision();
+        let registry = test_registry();
+        let request = encode_invoke_request(&active, &registry, &minimal_request(None)).unwrap();
+        let invocation = InvocationId::from_bytes([0x71; 16]);
+        let started = InvokeEvent::new(
+            invocation,
+            0,
+            InvocationEventBody::Started {
+                visible_principal: None,
+            },
+        )
+        .unwrap();
+        let completed = InvokeEvent::new(
+            invocation,
+            1,
+            InvocationEventBody::Completed {
+                duration_nanoseconds: 11,
+            },
+        )
+        .unwrap();
+        let events = InvocationEventBatch::new(vec![
+            InvocationEventRecord::new(1, started),
+            InvocationEventRecord::new(2, completed),
+        ])
+        .unwrap();
+        let mut connection = ProtocolConnection::new();
+        connection
+            .receive_constructed(
+                &active,
+                &registry,
+                ClientFrame::CallRawStart {
+                    stream: 1,
+                    function: SYS_INVOKE_FUNCTION_ID,
+                },
+            )
+            .unwrap();
+        connection
+            .receive_constructed(
+                &active,
+                &registry,
+                ClientFrame::CallInvokeRequest {
+                    stream: 1,
+                    request,
+                },
+            )
+            .unwrap();
+        assert!(matches!(
+            connection
+                .receive_constructed(
+                    &active,
+                    &registry,
+                    ClientFrame::CallArgumentsComplete { stream: 1 },
+                )
+                .unwrap(),
+            Some(ClientAction::InvokeDispatch { .. })
+        ));
+        assert_eq!(
+            connection.apply_constructed(
+                &active,
+                &registry,
+                ServerAction::Accepted {
+                    stream: 1,
+                    invocation,
+                },
+            ),
+            Ok(ServerFrame::CallAccepted { stream: 1, invocation })
+        );
+        let mut cancellation_connection = connection.clone();
+        let mut queued_cancellation_connection = connection.clone();
+        queued_cancellation_connection
+            .receive_constructed(
+                &active,
+                &registry,
+                ClientFrame::WindowUpdate {
+                    stream: 1,
+                    channel: Channel::ResultValues,
+                    credit: MAX_CHANNEL_WINDOW,
+                },
+            )
+            .unwrap();
+        queued_cancellation_connection
+            .receive(ClientFrame::CallCancel { stream: 1 })
+            .unwrap();
+        let queued_cancelled = queued_cancellation_connection
+            .apply_constructed(
+                &active,
+                &registry,
+                ServerAction::InvokeCancelled { stream: 1 },
+            )
+            .unwrap();
+        assert!(matches!(
+            &queued_cancelled,
+            ServerFrame::EventBatch { events, .. }
+                if events.len() == 2
+                    && matches!(
+                        &events[0].event,
+                        Event::Value(RuntimeValue::InvokeEvent(event))
+                            if event.kind() == InvocationEventKind::InvocationStarted
+                                && event.sequence() == 0
+                    )
+                    && matches!(
+                        &events[1].event,
+                        Event::Value(RuntimeValue::InvokeEvent(event))
+                            if event.kind() == InvocationEventKind::InvocationCancelled
+                                && event.sequence() == 1
+                    )
+        ));
+        assert_eq!(
+            queued_cancellation_connection.apply(ServerAction::Completed { stream: 1 }),
+            Ok(ServerFrame::CallCompleted { stream: 1 })
+        );
+        assert!(matches!(
+            connection.apply_constructed(
+                &active,
+                &registry,
+                ServerAction::InvokeEvents {
+                    stream: 1,
+                    events: events.clone(),
+                },
+            ),
+            Err(ConnectionError::InsufficientCredit {
+                stream: 1,
+                channel: Channel::ResultValues,
+                available: 0,
+                required,
+            }) if required > 0
+        ));
+        assert_eq!(
+            connection.receive_constructed(
+                &active,
+                &registry,
+                ClientFrame::WindowUpdate {
+                    stream: 1,
+                    channel: Channel::ResultBytes,
+                    credit: 1,
+                },
+            ),
+            Err(ConnectionError::WrongState { stream: 1 })
+        );
+        connection
+            .receive_constructed(
+                &active,
+                &registry,
+                ClientFrame::WindowUpdate {
+                    stream: 1,
+                    channel: Channel::ResultValues,
+                    credit: MAX_CHANNEL_WINDOW,
+                },
+            )
+            .unwrap();
+        let frame = connection
+            .apply_constructed(
+                &active,
+                &registry,
+                ServerAction::InvokeEvents {
+                    stream: 1,
+                    events: events.clone(),
+                },
+            )
+            .unwrap();
+        let encoded = encode_constructed_server_frame(&active, &registry, &frame).unwrap();
+        assert_eq!(encoded[4], EVENT_BATCH_TAG);
+        assert_eq!(
+            decode_constructed_invocation_event_frame(&active, &registry, &encoded),
+            Ok(frame)
+        );
+
+        cancellation_connection
+            .receive_constructed(
+                &active,
+                &registry,
+                ClientFrame::WindowUpdate {
+                    stream: 1,
+                    channel: Channel::ResultValues,
+                    credit: MAX_CHANNEL_WINDOW,
+                },
+            )
+            .unwrap();
+        let started_only = InvocationEventBatch::new(vec![events.records()[0].clone()]).unwrap();
+        cancellation_connection
+            .apply_constructed(
+                &active,
+                &registry,
+                ServerAction::InvokeEvents {
+                    stream: 1,
+                    events: started_only,
+                },
+            )
+            .unwrap();
+        assert!(matches!(
+            cancellation_connection.receive(ClientFrame::CallCancel { stream: 1 }),
+            Ok(Some(ClientAction::Cancel {
+                stream: 1,
+                invocation: Some(_),
+            }))
+        ));
+        let cancelled = cancellation_connection
+            .apply_constructed(
+                &active,
+                &registry,
+                ServerAction::InvokeCancelled { stream: 1 },
+            )
+            .unwrap();
+        assert!(matches!(
+            &cancelled,
+            ServerFrame::EventBatch { events, .. }
+                if matches!(
+                    &events[0].event,
+                    Event::Value(RuntimeValue::InvokeEvent(event))
+                        if event.kind() == InvocationEventKind::InvocationCancelled
+                            && event.sequence() == 1
+                )
+        ));
+        assert_eq!(
+            cancellation_connection.apply(ServerAction::Completed { stream: 1 }),
+            Ok(ServerFrame::CallCompleted { stream: 1 })
+        );
+
+        assert_eq!(
+            connection.apply_constructed(
+                &active,
+                &registry,
+                ServerAction::Completed { stream: 1 },
+            ),
+            Ok(ServerFrame::CallCompleted { stream: 1 })
+        );
+    }
+
+    #[test]
+    fn later_sealed_cancellation_event_batch_uses_constructed_codec() {
+        let active = empty_active_revision();
+        let registry = test_registry();
+        let invocation = InvocationId::from_bytes([0x72; 16]);
+        let cancelled = InvokeEvent::new(
+            invocation,
+            1,
+            InvocationEventBody::Cancelled { reason: None },
+        )
+        .unwrap();
+        let frame = ServerFrame::EventBatch {
+            stream: 1,
+            channel: Channel::ResultValues,
+            events: vec![EventRecord {
+                sequence: 2,
+                event: Event::Value(RuntimeValue::InvokeEvent(cancelled)),
+            }],
+        };
+
+        let encoded = encode_constructed_server_frame(&active, &registry, &frame).unwrap();
+        assert_eq!(
+            decode_constructed_invocation_event_frame(&active, &registry, &encoded),
+            Ok(frame)
+        );
+    }
+
+    #[test]
+    fn invocation_cancelled_event_is_rejected_before_client_cancel() {
+        let active = empty_active_revision();
+        let registry = test_registry();
+        let request = encode_invoke_request(&active, &registry, &minimal_request(None)).unwrap();
+        let invocation = InvocationId::from_bytes([0x73; 16]);
+        let started = InvokeEvent::new(
+            invocation,
+            0,
+            InvocationEventBody::Started {
+                visible_principal: None,
+            },
+        )
+        .unwrap();
+        let cancelled = InvokeEvent::new(
+            invocation,
+            1,
+            InvocationEventBody::Cancelled { reason: None },
+        )
+        .unwrap();
+        let events = InvocationEventBatch::new(vec![
+            InvocationEventRecord::new(1, started),
+            InvocationEventRecord::new(2, cancelled),
+        ])
+        .unwrap();
+        let mut connection = ProtocolConnection::new();
+        connection
+            .receive_constructed(
+                &active,
+                &registry,
+                ClientFrame::CallRawStart {
+                    stream: 1,
+                    function: SYS_INVOKE_FUNCTION_ID,
+                },
+            )
+            .unwrap();
+        connection
+            .receive_constructed(
+                &active,
+                &registry,
+                ClientFrame::CallInvokeRequest { stream: 1, request },
+            )
+            .unwrap();
+        assert!(matches!(
+            connection
+                .receive_constructed(
+                    &active,
+                    &registry,
+                    ClientFrame::CallArgumentsComplete { stream: 1 },
+                )
+                .unwrap(),
+            Some(ClientAction::InvokeDispatch { .. })
+        ));
+        assert_eq!(
+            connection.apply_constructed(
+                &active,
+                &registry,
+                ServerAction::Accepted {
+                    stream: 1,
+                    invocation,
+                },
+            ),
+            Ok(ServerFrame::CallAccepted { stream: 1, invocation })
+        );
+        connection
+            .receive_constructed(
+                &active,
+                &registry,
+                ClientFrame::WindowUpdate {
+                    stream: 1,
+                    channel: Channel::ResultValues,
+                    credit: MAX_CHANNEL_WINDOW,
+                },
+            )
+            .unwrap();
+        let before = connection.clone();
+        assert_eq!(
+            connection.apply_constructed(
+                &active,
+                &registry,
+                ServerAction::InvokeEvents { stream: 1, events },
+            ),
+            Err(ConnectionError::WrongState { stream: 1 })
+        );
+        assert_eq!(connection, before);
+    }
+
+    #[test]
     fn invocation_event_batch_keeps_outer_and_inner_sequences_independent() {
         let active = empty_active_revision();
         let registry = test_registry();
@@ -4423,12 +5244,12 @@ mod tests {
                     channel: Channel::ResultValues,
                     events: vec![EventRecord {
                         sequence: 1,
-                        event: Event::Value(RuntimeValue::InvokeEvent(completed)),
+                        event: Event::Value(RuntimeValue::InvokeRequest(minimal_request(None))),
                     }],
                 },
             ),
             Err(FrameCodecError::InvocationCarrierNotAccepted {
-                carrier: SYS_INVOKE_EVENT_TYPE_ID,
+                carrier: SYS_INVOKE_REQUEST_TYPE_ID,
             })
         );
     }
