@@ -215,16 +215,15 @@ const RAW_STREAM_RESOURCE_SERVER_SOURCE: &str = "CREATE SCHEMA resource_fixture;
     TRANSACTION ATOMIC VOLATILITY VOLATILE\n\
     AS INSERT INTO resource_fixture.probe AS made (marker, sequence)\n\
     VALUES (p_marker, p_sequence) RETURNING REF(made);\n\
-    CREATE SERVER FUNCTION resource_fixture.resource(p_marker TEXT)
-    RETURNS ROWS (value TEXT) SECURITY INVOKER
-    TRANSACTION READ ONLY VOLATILITY STABLE
-    AS SELECT probe.marker FROM resource_fixture.probe probe
-    WHERE probe.marker = p_marker;
-    CREATE SERVER FUNCTION resource_fixture.all()
-    RETURNS ROWS (value TEXT) SECURITY INVOKER
-    TRANSACTION READ ONLY VOLATILITY STABLE
-    AS SELECT probe.marker FROM resource_fixture.probe probe ORDER BY probe.sequence;
-";
+    CREATE SERVER FUNCTION resource_fixture.resource(p_marker TEXT)\n\
+    RETURNS ROWS (value TEXT) SECURITY INVOKER\n\
+    TRANSACTION READ ONLY VOLATILITY STABLE\n\
+    AS SELECT probe.marker FROM resource_fixture.probe probe\n\
+    WHERE probe.marker = p_marker;\n\
+    CREATE SERVER FUNCTION resource_fixture.all()\n\
+    RETURNS ROWS (value TEXT) SECURITY INVOKER\n\
+    TRANSACTION READ ONLY VOLATILITY STABLE\n\
+    AS SELECT probe.marker FROM resource_fixture.probe probe ORDER BY probe.sequence;\n";
 const RAW_STREAM_RESOURCE_CLIENT_SOURCE: &str = "CREATE CLIENT FUNCTION resource_fixture.call(p_marker TEXT) RETURNS TEXT AS\n\
     AWAIT std.data.stream_resource(target => resource_fixture.resource,\n\
       arguments => std.call.args(p_marker => p_marker));\n";
@@ -257,13 +256,10 @@ const RAW_PROCEDURAL_RESOURCE_CLIENT_SOURCE: &str = "CREATE CLIENT FUNCTION proc
         result := result || '-assigned';\n\
         RETURN result;\n\
     END;\n";
-const RAW_SCALAR_RESOURCE_SERVER_SOURCE: &str = "CREATE SCHEMA scalar_fixture;\n\
-    CREATE SERVER FUNCTION scalar_fixture.resource()\n\
-    RETURNS TEXT SECURITY INVOKER TRANSACTION READ ONLY VOLATILITY STABLE\n\
-    AS SELECT 'scalar-marker';\n";
-const RAW_SCALAR_RESOURCE_CLIENT_SOURCE: &str = "CREATE CLIENT FUNCTION scalar_fixture.call() RETURNS TEXT AS\n\
-    AWAIT std.data.resource(target => scalar_fixture.resource,\n\
-      arguments => std.call.args());\n";
+const RAW_SCALAR_RESOURCE_CLIENT_SOURCE: &str = "CREATE SCHEMA scalar_fixture;\n\
+    CREATE CLIENT FUNCTION scalar_fixture.call() RETURNS INTEGER AS\n\
+    AWAIT std.data.resource(target => std.invoke.echo,\n\
+      arguments => std.call.args(p_value => 43));\n";
 const RAW_CLIENT_INT_INSERT_SOURCE: &str = "CREATE SCHEMA raw_int_insert;\n\
     CREATE TYPE raw_int_insert.int_probe AS OBJECT (\n\
       stored INT NOT NULL\n\
@@ -2039,13 +2035,21 @@ async fn proves_scalar_client_resource_pending_continues_through_installed_evalu
 
     with_test_database(|database| async move {
         let uid = nix::unistd::geteuid().as_raw();
-        let kernel = open_standard_database(kernel(&database)?)
+        let kernel = kernel(&database)?;
+        kernel
+            .bootstrap()
             .await
-            .map_err(|error| failure(format!("open standard database failed: {error:?}")))?;
-        let active = kernel
+            .map_err(|error| failure(format!("bootstrap failed: {error:?}")))?;
+        let empty = kernel
             .recover()
             .await
-            .map_err(|error| failure(format!("recover installed standard failed: {error:?}")))?;
+            .map_err(|error| failure(format!("recover empty database failed: {error:?}")))?;
+        let upgrade = orna_standard::prepare_standard_upgrade_v1_to_v2(&empty)
+            .map_err(|error| failure(format!("prepare V1-to-V2 upgrade failed: {error:?}")))?;
+        let active = kernel
+            .apply_standard_upgrade(&upgrade)
+            .await
+            .map_err(|error| failure(format!("apply V1-to-V2 upgrade failed: {error:?}")))?;
         let standard_source = active
             .catalogue_hash_context()
             .standard()
@@ -2055,15 +2059,20 @@ async fn proves_scalar_client_resource_pending_continues_through_installed_evalu
             .map_err(|error| failure(format!("installed standard source check failed: {error:?}")))?;
         let (active, client, target, _call_site) =
             install_scalar_resource_client_fixture(&kernel, &active, &standard).await?;
-        let functions = active
+        let mut function_targets = active
             .catalogue()
             .functions()
             .iter()
-            .map(FunctionDefinition::id)
+            .map(|function| SecurityFunctionTarget::application(function.id()))
             .collect::<Vec<_>>();
-        let security = SecuritySnapshot::new_with_local_peer_credentials(
+        function_targets.push(SecurityFunctionTarget::verified_standard(
+            target,
+            standard.verified_snapshot().revision(),
+            STD_INVOKE_ECHO_FUNCTION_REVISION_ID,
+        ));
+        let security = SecuritySnapshot::new_with_function_targets_and_local_peer_credentials(
             active.pair(),
-            functions,
+            function_targets,
             vec![Principal::new(
                 RAW_CLIENT_USER,
                 PrincipalKind::User,
@@ -2130,8 +2139,8 @@ async fn proves_scalar_client_resource_pending_continues_through_installed_evalu
         };
         require(
             values.len() == 1
-                && values[0].value() == &RuntimeValue::Text("scalar-marker".to_owned()),
-            "scalar pending resource completion was not typed TEXT",
+                && values[0].value() == &RuntimeValue::Integer(43),
+            "scalar pending resource completion was not typed INTEGER",
         )?;
         require(
             execute_count == 1 && poll_count > 0,
@@ -5999,7 +6008,28 @@ async fn installed_resource_socket_delivers_values_and_enforces_windows_and_gran
                             && frame.reason == ResourceCancellationCode::ClientRequested
                 ),
                 "active authenticated resource dispatch did not terminate as cancelled",
-            )
+            )?;
+
+            let replacement_request = ResourceRequest {
+                stream_id: 8,
+                request_id: InvocationId::from_bytes([0x81; 16]),
+                parent_invocation_id: InvocationId::from_bytes([0x82; 16]),
+                call_site_id: call_site,
+                target_function_id: target,
+                target_revision: active.pair(),
+                generation: 1,
+                resource_kind: ResourceKind::Stream,
+                arguments: vec![ResourceArgument { parameter, value: RuntimeValue::Text("resource-value".into()) }],
+                item_window: 1,
+                byte_window: MAX_RESOURCE_WINDOW,
+            };
+            send_resource_client_frame_to_socket(&mut client, &active, &registry, &ResourceClientFrame::Request(replacement_request.clone())).await?;
+            let replacement_accepted = read_resource_server_frame_from_socket(&mut client, &active, &registry).await?;
+            require(matches!(replacement_accepted, ResourceServerFrame::Accepted(frame) if frame.stream_id == replacement_request.stream_id), "resource executor was not reusable after cancellation")?;
+            let replacement_values = read_resource_server_frame_from_socket(&mut client, &active, &registry).await?;
+            require(matches!(replacement_values, ResourceServerFrame::Values(frame) if frame.stream_id == replacement_request.stream_id && frame.values == [RuntimeValue::Text("resource-value".into())]), "replacement request did not return its typed value")?;
+            let replacement_completed = read_resource_server_frame_from_socket(&mut client, &active, &registry).await?;
+            require(matches!(replacement_completed, ResourceServerFrame::Completed(frame) if frame.stream_id == replacement_request.stream_id && frame.total_items == 1), "replacement request did not complete after cancellation")
         }
         .await;
         let shutdown = client.shutdown().await.map_err(Into::into);
@@ -9814,24 +9844,8 @@ async fn install_scalar_resource_client_fixture(
             },
         ))?)
     };
-    let server_context = StandardApplicationCheckContext::try_new(active.catalogue(), standard)?;
-    let server_source = append_source(active, RAW_SCALAR_RESOURCE_SERVER_SOURCE)?;
-    let server_report = check_standard_application(&server_source, &server_context);
-    if !server_report.diagnostics().is_empty() {
-        return Err(failure(format!(
-            "scalar SERVER resource fixture did not compile: {:?}",
-            server_report.diagnostics(),
-        )));
-    }
-    let active = kernel
-        .apply(
-            &prepare_standard_application(&server_report, active.pair(), active)
-                .map_err(|error| failure(format!("scalar server prepare failed: {error:?}")))?,
-        )
-        .await
-        .map_err(|error| failure(format!("scalar server apply failed: {error:?}")))?;
     let client_context = StandardApplicationCheckContext::try_new(active.catalogue(), standard)?;
-    let client_source = append_source(&active, RAW_SCALAR_RESOURCE_CLIENT_SOURCE)?;
+    let client_source = append_source(active, RAW_SCALAR_RESOURCE_CLIENT_SOURCE)?;
     let client_report = check_standard_application(&client_source, &client_context);
     if !client_report.diagnostics().is_empty() {
         return Err(failure(format!(
@@ -9841,20 +9855,19 @@ async fn install_scalar_resource_client_fixture(
     }
     let active = kernel
         .apply(
-            &prepare_standard_application(&client_report, active.pair(), &active)
+            &prepare_standard_application(&client_report, active.pair(), active)
                 .map_err(|error| failure(format!("scalar client prepare failed: {error:?}")))?,
         )
         .await
         .map_err(|error| failure(format!("scalar client apply failed: {error:?}")))?;
-    let target = active
+    let target = standard
+        .verified_snapshot()
         .catalogue()
-        .functions()
-        .iter()
-        .find(|function| function.name().parts() == ["scalar_fixture", "resource"])
-        .ok_or_else(|| failure("scalar resource fixture is missing its SERVER target"))?;
+        .function_by_id(STD_INVOKE_ECHO_FUNCTION_ID)
+        .ok_or_else(|| failure("installed standard is missing std.invoke.echo"))?;
     let target_type = match target.return_type() {
         FunctionReturn::Single(resolved) => *resolved,
-        _ => return Err(failure("scalar resource target is not a single TEXT result")),
+        _ => return Err(failure("std.invoke.echo is not a single INTEGER result")),
     };
     let target = target.id();
     let client_definition = active
@@ -9865,7 +9878,7 @@ async fn install_scalar_resource_client_fixture(
         .ok_or_else(|| failure("scalar resource fixture is missing its CLIENT function"))?;
     require(
         client_definition.return_type() == &FunctionReturn::Single(target_type),
-        "scalar CLIENT resource fixture did not retain the checked TEXT result",
+        "scalar CLIENT resource fixture did not retain the checked INTEGER result",
     )?;
     let client = client_definition.id();
     let revision = active
@@ -9884,7 +9897,10 @@ async fn install_scalar_resource_client_fixture(
         operation.kind() == orna_artifact::client_plan::ResourceKind::Scalar
             && operation.target() == target
             && operation.target_revision() == active.pair()
-            && operation.arguments().is_empty(),
+            && operation.arguments().len() == 1
+            && operation.arguments()[0].0 == STD_INVOKE_ECHO_PARAMETER_ID
+            && operation.arguments()[0].1
+                == (ClientExpressionNode::Integer { value: 43 }),
         "scalar CLIENT resource plan did not retain canonical target metadata",
     )?;
     Ok((active, client, target, operation.call_site_id()))
@@ -10744,7 +10760,7 @@ async fn assert_resource_audit_rows(
             )
             .await?;
         require(
-            rows.len() == 6,
+            rows.len() == 7,
             "resource audit did not retain one terminal row for each request",
         )?;
         let expected = [
@@ -10753,6 +10769,7 @@ async fn assert_resource_audit_rows(
             ([0x55; 16], [0x56; 16], Some(all_target), "allowed", "completed", Some(2_i64)),
             ([0x57; 16], [0x58; 16], Some(target), "allowed", "completed", Some(1_i64)),
             ([0x61; 16], [0x62; 16], None, "denied", "cancelled", None),
+            ([0x81; 16], [0x82; 16], Some(target), "allowed", "completed", Some(1_i64)),
             ([0x71; 16], [0x72; 16], None, "denied", "failed", None),
         ];
         for (index, row) in rows.iter().enumerate() {

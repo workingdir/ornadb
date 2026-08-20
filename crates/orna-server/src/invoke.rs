@@ -460,11 +460,11 @@ impl ClientResourceExecutor for InstalledClientResourceExecutor {
         let (resource_kind, return_type) = match target_definition.map(FunctionDefinition::return_type) {
             Some(FunctionReturn::Single(return_type)) =>
                 (ProtocolResourceKind::Single, *return_type),
-            Some(FunctionReturn::Rows(columns)) if columns.len() == 1 => (
-                ProtocolResourceKind::Stream,
-                columns[0].resolved_type(),
-            ),
-            _ => return request.failed(SERVER_RESOURCE_SHAPE_CODE.to_owned()),
+            Some(FunctionReturn::Stream(return_type)) =>
+                (ProtocolResourceKind::Stream, *return_type),
+            Some(FunctionReturn::Rows(_)) | None => {
+                return request.failed(SERVER_RESOURCE_SHAPE_CODE.to_owned());
+            }
         };
         if return_type != request.expected_type() {
             return request.failed(SERVER_RESOURCE_SHAPE_CODE.to_owned());
@@ -2007,6 +2007,8 @@ fn render_scalar(scalar: StandardScalar) -> &'static str {
 fn render_return_type(return_type: &FunctionReturn) -> String {
     match return_type {
         FunctionReturn::Single(resolved) => render_resolved_type(*resolved),
+        FunctionReturn::Stream(resolved) =>
+            format!("STREAM<{}>", render_resolved_type(*resolved)),
         FunctionReturn::Rows(columns) => {
             let columns = columns
                 .iter()
@@ -2123,7 +2125,7 @@ mod tests {
             InvokeValue,
         },
         types::StandardScalar,
-        value::{RuntimeType, RuntimeValue},
+        value::RuntimeValue,
     };
     use orna_protocol::{InvocationEventBatch, InvocationEventRecord};
     use orna_standard::STD_UI_TYPE_ID;
@@ -2578,6 +2580,32 @@ mod tests {
             observer_context: None,
         })
         .expect("checked request")
+    }
+
+    #[test]
+    fn render_return_type_preserves_scalar_and_rows_and_names_stream_items() {
+        assert_eq!(
+            render_return_type(&FunctionReturn::Single(ResolvedType::Scalar(
+                StandardScalar::Integer,
+            ))),
+            "INTEGER",
+        );
+        assert_eq!(
+            render_return_type(&FunctionReturn::Stream(ResolvedType::Scalar(
+                StandardScalar::Integer,
+            ))),
+            "STREAM<INTEGER>",
+        );
+        assert_eq!(
+            render_return_type(&FunctionReturn::Rows(vec![
+                orna_core::catalogue::FunctionReturnColumnDefinition::new(
+                    "value",
+                    0,
+                    ResolvedType::Scalar(StandardScalar::Integer),
+                ),
+            ])),
+            "ROWS (value INTEGER)",
+        );
     }
 
     #[test]
