@@ -587,7 +587,18 @@ fn decode_function(
         "single" => {
             return Err(record.invariant("SINGLE functions must not have ROWS return columns"));
         }
-        _ => return Err(record.invariant("function return shape must be single or rows")),
+        "stream" if recovered_returns.is_empty() => {
+            FunctionReturn::Stream(decode_type_columns(
+                row,
+                &record,
+                LegacyResolvedTypeTupleMember::StreamReturn,
+                catalogue_hash_context,
+            )?)
+        }
+        "stream" => {
+            return Err(record.invariant("STREAM functions must not have ROWS return columns"));
+        }
+        _ => return Err(record.invariant("function return shape must be single, rows, or stream")),
     };
     let origin = decode_origin(row, &record, DefinitionIdentity::Function(id))?;
     member_origins.push(origin);
