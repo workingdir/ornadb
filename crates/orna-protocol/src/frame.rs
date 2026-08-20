@@ -1644,8 +1644,13 @@ impl ResourceProtocolConnection {
     }
 
     fn terminal_frame(&mut self, stream_id: u64, request_id: InvocationId) -> Result<ResourceFrameDisposition, ResourceConnectionError> {
-        if let Some(disposition) = self.check_terminal(stream_id, request_id)? { return Ok(disposition); }
-        let _ = self.state_for(stream_id, request_id)?;
+        if let Some(disposition) = self.check_terminal(stream_id, request_id)? {
+            return Ok(disposition);
+        }
+        let state = self.state_for(stream_id, request_id)?;
+        if matches!(state.resource_kind, ResourceKind::Single) && state.last_batch_sequence.is_some() {
+            return Err(ResourceConnectionError::WrongState { stream_id });
+        }
         self.finish(stream_id, request_id);
         Ok(ResourceFrameDisposition::Applied)
     }
@@ -3084,10 +3089,12 @@ fn require_resource_kind_windows(
 ) -> Result<(), FrameCodecError> {
     require_resource_window(item_window)?;
     require_resource_window(byte_window)?;
-    if matches!(kind, ResourceKind::Stream) && (item_window == 0 || byte_window == 0) {
-        return Err(FrameCodecError::ResourceWindowOverflow);
+    match kind {
+        ResourceKind::Single | ResourceKind::Stream if item_window == 0 || byte_window == 0 => {
+            Err(FrameCodecError::ResourceWindowOverflow)
+        }
+        ResourceKind::Single | ResourceKind::Stream => Ok(()),
     }
-    Ok(())
 }
 
 fn require_resource_window_addition(add_items: u64, add_bytes: u64) -> Result<(), FrameCodecError> {
@@ -6152,6 +6159,33 @@ mod tests {
             encode_resource_request(&active, &registry, &request),
             Err(FrameCodecError::ResourceWindowOverflow)
         ));
+
+        request.resource_kind = ResourceKind::Single;
+        request.item_window = 0;
+        request.byte_window = 1;
+        assert!(matches!(
+            encode_resource_request(&active, &registry, &request),
+            Err(FrameCodecError::ResourceWindowOverflow)
+        ));
+        let mut connection = ResourceProtocolConnection::new();
+        assert!(matches!(
+            connection.open(request.clone()),
+            Err(ResourceConnectionError::InvalidFrame {
+                source: FrameCodecError::ResourceWindowOverflow
+            })
+        ));
+        request.item_window = 1;
+        request.byte_window = 0;
+        assert!(matches!(
+            connection.open(request.clone()),
+            Err(ResourceConnectionError::InvalidFrame {
+                source: FrameCodecError::ResourceWindowOverflow
+            })
+        ));
+        assert!(matches!(
+            encode_resource_request(&active, &registry, &request),
+            Err(FrameCodecError::ResourceWindowOverflow)
+        ));
         request.item_window = 1;
         request.byte_window = 1;
         assert!(encode_resource_request(&active, &registry, &request).is_ok());
@@ -6439,6 +6473,68 @@ mod tests {
             }),
         );
         assert_eq!(connection.live_resources(), 1);
+    }
+
+    #[test]
+    fn resource_connection_rejects_scalar_terminal_after_values_but_completes() {
+        let mut request = resource_request_fixture();
+        request.item_window = 1;
+        request.byte_window = 1;
+        let request_id = request.request_id;
+        let mut connection = ResourceProtocolConnection::new();
+        assert_eq!(connection.open(request.clone()), Ok(ResourceFrameDisposition::Applied));
+        assert_eq!(
+            connection.apply(ResourceServerFrame::Accepted(ResourceAccepted {
+                stream_id: request.stream_id,
+                request_id,
+                nested_invocation_id: InvocationId::from_bytes([0x58; 16]),
+                target_revision: request.target_revision,
+                resource_kind: ResourceKind::Single,
+            })),
+            Ok(ResourceFrameDisposition::Applied),
+        );
+        assert_eq!(
+            connection.apply(ResourceServerFrame::Values(ResourceValues {
+                stream_id: request.stream_id,
+                request_id,
+                batch_sequence: 0,
+                item_count: 1,
+                byte_count: 1,
+                values: vec![RuntimeValue::Integer(7)],
+            })),
+            Ok(ResourceFrameDisposition::Applied),
+        );
+        assert_eq!(
+            connection.apply(ResourceServerFrame::Failed(ResourceFailed {
+                stream_id: request.stream_id,
+                request_id,
+                failure: CallFailure::InternalFailure,
+            })),
+            Err(ResourceConnectionError::WrongState {
+                stream_id: request.stream_id,
+            }),
+        );
+        assert_eq!(
+            connection.apply(ResourceServerFrame::Cancelled(ResourceCancelled {
+                stream_id: request.stream_id,
+                request_id,
+                reason: ResourceCancellationCode::ServerRequested,
+            })),
+            Err(ResourceConnectionError::WrongState {
+                stream_id: request.stream_id,
+            }),
+        );
+        assert_eq!(connection.live_resources(), 1);
+        assert_eq!(
+            connection.apply(ResourceServerFrame::Completed(ResourceCompleted {
+                stream_id: request.stream_id,
+                request_id,
+                final_batch_sequence: 0,
+                total_items: 1,
+            })),
+            Ok(ResourceFrameDisposition::Applied),
+        );
+        assert_eq!(connection.live_resources(), 0);
     }
 
     #[test]
