@@ -5,7 +5,7 @@ use orna_protocol::{
 };
 use sha2::{Digest, Sha256};
 use std::{
-    collections::{HashMap, hash_map::Entry},
+    collections::{HashMap, VecDeque, hash_map::Entry},
     error::Error,
     fmt,
     hash::{Hash, Hasher},
@@ -24,19 +24,20 @@ use orna_core::{
     CallSiteId, FunctionId, FunctionRevisionId, InvocationId, LocalId, ParameterId, PrincipalId, StateSlotId, TypeId,
     canonical_hash::{CanonicalHashError, catalogue_digest_with_context},
     catalogue::{
-        FunctionDomain, FunctionReturn, FunctionSecurity, FunctionVolatility, TypeDefinition,
+        FunctionDefinition, FunctionDomain, FunctionReturn, FunctionSecurity, FunctionVolatility, TypeDefinition,
         ValueTypeKind,
     },
     revision::{
         ActiveDatabaseRevision, DefinitionReferenceKind, DefinitionReferenceTarget,
         FunctionSemanticHashVersion, RevisionPair, Sha256Digest,
+        VerifiedStandardLibrarySnapshot,
     },
     security::{AuthorisedInvocation, InvocationTarget, TargetClass},
     state::{
         UserStateCell, UserStateChange, UserStateKeyWithoutPrincipal, UserStateWriteOutcome,
         UserStateWriteResult,
     },
-    types::{ResolvedType, StandardScalar},
+    types::{ResolvedType, StandardScalar, TypeDescriptor},
     value::{FunctionArgument, OpaqueValue, OpaqueValueError, RuntimeValue},
 };
 use orna_standard::{
@@ -424,6 +425,13 @@ pub enum ClientResourceError {
         /// The key carried by the completion.
         actual: ClientResourceKey,
     },
+    /// The completion belongs to a different request instance.
+    RequestIdMismatch {
+        /// The request identity currently owned by the resource.
+        expected: InvocationId,
+        /// The request identity carried by the completion.
+        actual: InvocationId,
+    },
     /// A failure code is empty or contains a forbidden NUL byte.
     InvalidFailureCode,
     /// The result does not match the declared resolved type.
@@ -488,6 +496,11 @@ impl fmt::Display for ClientResourceError {
                 "CLIENT resource completion uses key {:?}, expected {:?}",
                 actual, expected,
             ),
+            Self::RequestIdMismatch { expected, actual } => write!(
+                formatter,
+                "CLIENT resource completion uses request {:?}, expected {:?}",
+                actual, expected,
+            ),
             Self::InvalidFailureCode => {
                 formatter.write_str("CLIENT resource failure code must be non-empty and NUL-free")
             }
@@ -534,6 +547,7 @@ pub struct ClientResourceRequest {
     request_id: InvocationId,
     key: ClientResourceKey,
     generation: ClientResourceGeneration,
+    kind: ResourceKind,
     expected_type: ResolvedType,
     arguments: Vec<FunctionArgument>,
     invocation_context: Option<ClientResourceInvocationContext>,
@@ -544,6 +558,7 @@ impl ClientResourceRequest {
         active: &ActiveDatabaseRevision,
         key: ClientResourceKey,
         generation: ClientResourceGeneration,
+        kind: ResourceKind,
         expected_type: ResolvedType,
         arguments: Vec<FunctionArgument>,
         invocation_context: Option<ClientResourceInvocationContext>,
@@ -559,7 +574,7 @@ impl ClientResourceRequest {
                 expected: key.target(),
             });
         }
-        if !active_resource_result_type_matches(active, key.target(), expected_type) {
+        if !active_resource_result_type_matches(active, key.target(), kind, expected_type) {
             return Err(ClientResourceError::TypeMismatch);
         }
         let arguments = validate_resource_arguments(active, key.target(), &arguments)?;
@@ -574,6 +589,7 @@ impl ClientResourceRequest {
             request_id: InvocationId::new(),
             key,
             generation,
+            kind,
             expected_type,
             arguments,
             invocation_context,
@@ -600,7 +616,12 @@ impl ClientResourceRequest {
         self.key.target()
     }
 
-    /// Returns the expected result type.
+    /// Returns whether this request produces one scalar or streamed batches.
+    pub const fn kind(&self) -> ResourceKind {
+        self.kind
+    }
+
+    /// Returns the expected result item type.
     pub const fn expected_type(&self) -> ResolvedType {
         self.expected_type
     }
@@ -618,6 +639,7 @@ impl ClientResourceRequest {
     /// Creates a successful completion for this request.
     pub fn ready(self, value: RuntimeValue) -> ClientResourceCompletion {
         ClientResourceCompletion::Ready {
+            request_id: self.request_id,
             key: self.key,
             generation: self.generation,
             value,
@@ -626,6 +648,26 @@ impl ClientResourceRequest {
     /// Creates a non-terminal completion for this request.
     pub fn pending(self) -> ClientResourceCompletion {
         ClientResourceCompletion::Pending {
+            request_id: self.request_id,
+            key: self.key,
+            generation: self.generation,
+        }
+    }
+
+    /// Creates one non-terminal stream value batch for this request.
+    pub fn stream_values(self, values: Vec<RuntimeValue>) -> ClientResourceCompletion {
+        ClientResourceCompletion::StreamValues {
+            request_id: self.request_id,
+            key: self.key,
+            generation: self.generation,
+            values,
+        }
+    }
+
+    /// Creates the successful terminal completion for a stream request.
+    pub fn stream_completed(self) -> ClientResourceCompletion {
+        ClientResourceCompletion::StreamCompleted {
+            request_id: self.request_id,
             key: self.key,
             generation: self.generation,
         }
@@ -634,6 +676,7 @@ impl ClientResourceRequest {
     /// Creates a failed completion for this request.
     pub fn failed(self, code: String) -> ClientResourceCompletion {
         ClientResourceCompletion::Failed {
+            request_id: self.request_id,
             key: self.key,
             generation: self.generation,
             code,
@@ -642,6 +685,7 @@ impl ClientResourceRequest {
     /// Creates a cancelled completion for this request.
     pub fn cancelled(self) -> ClientResourceCompletion {
         ClientResourceCompletion::Cancelled {
+            request_id: self.request_id,
             key: self.key,
             generation: self.generation,
         }
@@ -654,6 +698,8 @@ impl ClientResourceRequest {
 pub enum ClientResourceCompletion {
     /// One typed value produced by the request.
     Ready {
+        /// The unique request identity that produced this completion.
+        request_id: InvocationId,
         /// The resource identity that created the request.
         key: ClientResourceKey,
         /// The request generation.
@@ -661,8 +707,30 @@ pub enum ClientResourceCompletion {
         /// The returned runtime value.
         value: RuntimeValue,
     },
+    /// One non-terminal batch produced by a stream request.
+    StreamValues {
+        /// The unique request identity that produced this completion.
+        request_id: InvocationId,
+        /// The resource identity that created the request.
+        key: ClientResourceKey,
+        /// The active request generation.
+        generation: ClientResourceGeneration,
+        /// The non-empty batch of typed stream items.
+        values: Vec<RuntimeValue>,
+    },
+    /// Successful terminal completion for a stream request.
+    StreamCompleted {
+        /// The unique request identity that produced this completion.
+        request_id: InvocationId,
+        /// The resource identity that created the request.
+        key: ClientResourceKey,
+        /// The active request generation.
+        generation: ClientResourceGeneration,
+    },
     /// The request remains active and will complete through a later call.
     Pending {
+        /// The unique request identity that produced this completion.
+        request_id: InvocationId,
         /// The resource identity that created the request.
         key: ClientResourceKey,
         /// The active request generation.
@@ -670,6 +738,8 @@ pub enum ClientResourceCompletion {
     },
     /// One structured failure produced by the request.
     Failed {
+        /// The unique request identity that produced this completion.
+        request_id: InvocationId,
         /// The resource identity that created the request.
         key: ClientResourceKey,
         /// The request generation.
@@ -679,6 +749,8 @@ pub enum ClientResourceCompletion {
     },
     /// One terminal cancellation produced by the request.
     Cancelled {
+        /// The unique request identity that produced this completion.
+        request_id: InvocationId,
         /// The resource identity that created the request.
         key: ClientResourceKey,
         /// The request generation.
@@ -691,10 +763,10 @@ pub enum ClientResourceCompletion {
 pub trait ClientResourceExecutor {
     /// Executes one request and returns its completion.
     fn execute(&mut self, request: ClientResourceRequest) -> ClientResourceCompletion;
-    /// Reports one terminal completion without blocking `execute`.
+    /// Reports one completion without blocking `execute`.
     ///
-    /// Transport-backed executors use this to report terminal completions
-    /// without blocking `execute`; immediate executors keep the default.
+    /// Transport-backed executors use this for stream value batches and
+    /// terminal completions; immediate executors keep the default.
     fn poll(&mut self) -> Option<ClientResourceCompletion> {
         None
     }
@@ -735,23 +807,45 @@ where
 #[derive(Clone, Debug, PartialEq)]
 pub struct ClientResource {
     key: ClientResourceKey,
+    kind: ResourceKind,
     expected_type: ResolvedType,
+    request_id: Option<InvocationId>,
     generation: ClientResourceGeneration,
     status: ClientResourceStatus,
     value: Option<RuntimeValue>,
     failure: Option<ClientResourceFailure>,
+    stream_batches: VecDeque<Vec<RuntimeValue>>,
+    stream_complete: bool,
 }
 
 impl ClientResource {
     /// Creates an idle resource with no published value.
     pub const fn new(key: ClientResourceKey, expected_type: ResolvedType) -> Self {
+        Self::new_with_kind(key, ResourceKind::Scalar, expected_type)
+    }
+
+    /// Creates an idle stream resource whose expected type is the item type.
+    pub const fn new_stream(key: ClientResourceKey, expected_type: ResolvedType) -> Self {
+        Self::new_with_kind(key, ResourceKind::Stream, expected_type)
+    }
+
+    /// Creates an idle resource with an explicit scalar or stream kind.
+    pub const fn new_with_kind(
+        key: ClientResourceKey,
+        kind: ResourceKind,
+        expected_type: ResolvedType,
+    ) -> Self {
         Self {
             key,
+            kind,
             expected_type,
+            request_id: None,
             generation: ClientResourceGeneration(0),
             status: ClientResourceStatus::Idle,
             value: None,
             failure: None,
+            stream_batches: VecDeque::new(),
+            stream_complete: false,
         }
     }
     /// Returns the complete cache identity.
@@ -759,14 +853,29 @@ impl ClientResource {
         self.key
     }
 
-    /// Returns the expected result type.
+    /// Returns whether this resource is scalar or streamed.
+    pub const fn kind(&self) -> ResourceKind {
+        self.kind
+    }
+
+    /// Returns the expected result item type.
     pub const fn expected_type(&self) -> ResolvedType {
         self.expected_type
+    }
+
+    /// Returns whether a stream has received its terminal completion.
+    pub const fn stream_complete(&self) -> bool {
+        self.stream_complete
     }
 
     /// Returns the current request generation.
     pub const fn generation(&self) -> ClientResourceGeneration {
         self.generation
+    }
+
+    /// Returns the identity of the currently active request, if any.
+    pub const fn request_id(&self) -> Option<InvocationId> {
+        self.request_id
     }
 
     /// Returns the current lifecycle state.
@@ -787,6 +896,7 @@ impl ClientResource {
     /// Starts a new request and invalidates every older completion.
     pub fn begin_loading(&mut self) -> Result<ClientResourceGeneration, ClientResourceError> {
         let generation = self.advance_generation()?;
+        self.request_id = Some(InvocationId::new());
         self.status = ClientResourceStatus::Loading;
         self.clear_result();
         Ok(generation)
@@ -801,7 +911,16 @@ impl ClientResource {
         active: &ActiveDatabaseRevision,
         arguments: Vec<FunctionArgument>,
     ) -> Result<ClientResourceRequest, ClientResourceError> {
-        self.begin_request_inner(active, None, arguments)
+        self.begin_request_inner(active, None, ResourceKind::Scalar, arguments)
+    }
+
+    /// Starts a stream request without an enclosing invocation context.
+    pub fn begin_stream_request(
+        &mut self,
+        active: &ActiveDatabaseRevision,
+        arguments: Vec<FunctionArgument>,
+    ) -> Result<ClientResourceRequest, ClientResourceError> {
+        self.begin_request_inner(active, None, ResourceKind::Stream, arguments)
     }
 
     /// Starts a request with its enclosing invocation and compiled call site.
@@ -811,25 +930,62 @@ impl ClientResource {
         invocation_context: ClientResourceInvocationContext,
         arguments: Vec<FunctionArgument>,
     ) -> Result<ClientResourceRequest, ClientResourceError> {
-        self.begin_request_inner(active, Some(invocation_context), arguments)
+        self.begin_request_with_context_and_kind(
+            active,
+            ResourceKind::Scalar,
+            invocation_context,
+            arguments,
+        )
+    }
+
+    /// Starts a request with its enclosing invocation and explicit kind.
+    pub fn begin_request_with_context_and_kind(
+        &mut self,
+        active: &ActiveDatabaseRevision,
+        kind: ResourceKind,
+        invocation_context: ClientResourceInvocationContext,
+        arguments: Vec<FunctionArgument>,
+    ) -> Result<ClientResourceRequest, ClientResourceError> {
+        self.begin_request_inner(active, Some(invocation_context), kind, arguments)
+    }
+
+    /// Starts a request with its enclosing invocation and stream kind.
+    pub fn begin_stream_request_with_context(
+        &mut self,
+        active: &ActiveDatabaseRevision,
+        invocation_context: ClientResourceInvocationContext,
+        arguments: Vec<FunctionArgument>,
+    ) -> Result<ClientResourceRequest, ClientResourceError> {
+        self.begin_request_with_context_and_kind(
+            active,
+            ResourceKind::Stream,
+            invocation_context,
+            arguments,
+        )
     }
 
     fn begin_request_inner(
         &mut self,
         active: &ActiveDatabaseRevision,
         invocation_context: Option<ClientResourceInvocationContext>,
+        kind: ResourceKind,
         arguments: Vec<FunctionArgument>,
     ) -> Result<ClientResourceRequest, ClientResourceError> {
+        if kind != self.kind {
+            return Err(ClientResourceError::TypeMismatch);
+        }
         let generation = self.next_generation()?;
         let request = ClientResourceRequest::new(
             active,
             self.key,
             generation,
+            kind,
             self.expected_type,
             arguments,
             invocation_context,
         )?;
         self.generation = generation;
+        self.request_id = Some(request.request_id());
         self.status = ClientResourceStatus::Loading;
         self.clear_result();
         Ok(request)
@@ -844,26 +1000,56 @@ impl ClientResource {
     ) -> Result<(), ClientResourceError> {
         match completion {
             ClientResourceCompletion::Ready {
+                request_id,
                 key,
                 generation,
                 value,
             } => {
+                self.require_generation(generation)?;
+                self.require_request_id(request_id)?;
                 self.require_key(key)?;
+                if self.kind != ResourceKind::Scalar {
+                    return Err(ClientResourceError::TypeMismatch);
+                }
                 self.publish_ready(active, generation, value)
             }
-            ClientResourceCompletion::Cancelled { key, generation } => {
+            ClientResourceCompletion::StreamValues {
+                request_id,
+                key,
+                generation,
+                values,
+            } => {
+                self.require_generation(generation)?;
+                self.require_request_id(request_id)?;
+                self.require_key(key)?;
+                self.append_stream_values(active, generation, values)
+            }
+            ClientResourceCompletion::StreamCompleted { request_id, key, generation } => {
+                self.require_generation(generation)?;
+                self.require_request_id(request_id)?;
+                self.require_key(key)?;
+                self.complete_stream(active, generation)
+            }
+            ClientResourceCompletion::Cancelled { request_id, key, generation } => {
+                self.require_generation(generation)?;
+                self.require_request_id(request_id)?;
                 self.require_key(key)?;
                 self.cancel(generation)
             }
-            ClientResourceCompletion::Pending { key, generation } => {
+            ClientResourceCompletion::Pending { request_id, key, generation } => {
+                self.require_generation(generation)?;
+                self.require_request_id(request_id)?;
                 self.require_key(key)?;
                 self.require_loading(generation)
             }
             ClientResourceCompletion::Failed {
+                request_id,
                 key,
                 generation,
                 code,
             } => {
+                self.require_generation(generation)?;
+                self.require_request_id(request_id)?;
                 self.require_key(key)?;
                 self.publish_failure(generation, code)
             }
@@ -877,6 +1063,9 @@ impl ClientResource {
         generation: ClientResourceGeneration,
         value: RuntimeValue,
     ) -> Result<(), ClientResourceError> {
+        if self.kind != ResourceKind::Scalar {
+            return Err(ClientResourceError::TypeMismatch);
+        }
         self.require_loading(generation)?;
         if active.pair() != self.key.target().revision() {
             return Err(ClientResourceError::RevisionMismatch {
@@ -889,7 +1078,7 @@ impl ClientResource {
                 expected: self.key.target(),
             });
         }
-        if !active_resource_result_type_matches(active, self.key.target(), self.expected_type) {
+        if !active_resource_result_type_matches(active, self.key.target(), self.kind, self.expected_type) {
             return Err(ClientResourceError::TypeMismatch);
         }
         if !runtime_value_matches(active, &value, self.expected_type) {
@@ -899,6 +1088,100 @@ impl ClientResource {
         self.value = Some(value);
         self.failure = None;
         Ok(())
+    }
+
+    fn append_stream_values(
+        &mut self,
+        active: &ActiveDatabaseRevision,
+        generation: ClientResourceGeneration,
+        values: Vec<RuntimeValue>,
+    ) -> Result<(), ClientResourceError> {
+        if self.kind != ResourceKind::Stream || values.is_empty() {
+            return Err(ClientResourceError::TypeMismatch);
+        }
+        self.require_loading(generation)?;
+        self.validate_stream_item_type(active)?;
+        if values
+            .iter()
+            .any(|value| !runtime_value_matches(active, value, self.expected_type))
+        {
+            return Err(ClientResourceError::TypeMismatch);
+        }
+        self.stream_batches.push_back(values);
+        Ok(())
+    }
+
+    fn complete_stream(
+        &mut self,
+        active: &ActiveDatabaseRevision,
+        generation: ClientResourceGeneration,
+    ) -> Result<(), ClientResourceError> {
+        if self.kind != ResourceKind::Stream {
+            return Err(ClientResourceError::TypeMismatch);
+        }
+        self.require_loading(generation)?;
+        self.validate_stream_item_type(active)?;
+        self.stream_complete = true;
+        self.status = ClientResourceStatus::Ready;
+        self.value = None;
+        self.failure = None;
+        Ok(())
+    }
+
+    fn validate_stream_item_type(
+        &self,
+        active: &ActiveDatabaseRevision,
+    ) -> Result<(), ClientResourceError> {
+        if active.pair() != self.key.target().revision() {
+            return Err(ClientResourceError::RevisionMismatch {
+                expected: self.key.target().revision(),
+                actual: active.pair(),
+            });
+        }
+        if !active_supports_invocation_target(active, self.key.target())
+            || !active_resource_result_type_matches(active, self.key.target(), self.kind, self.expected_type)
+        {
+            return Err(ClientResourceError::TypeMismatch);
+        }
+        Ok(())
+    }
+
+    /// Takes the next stream batch as canonical OPTION<LIST<T>>.
+    ///
+    /// `None` means the stream is still loading and has no batch available.
+    /// A terminal empty stream returns `Some(OPTION(None))`; batches are never
+    /// replayed after this method consumes them.
+    pub fn take_stream_value(
+        &mut self,
+        active: &ActiveDatabaseRevision,
+    ) -> Result<Option<RuntimeValue>, ClientResourceError> {
+        if self.kind != ResourceKind::Stream {
+            return Err(ClientResourceError::TypeMismatch);
+        }
+        self.validate_stream_item_type(active)?;
+        let Some(item_descriptor) = stream_item_descriptor(self.expected_type) else {
+            return Err(ClientResourceError::TypeMismatch);
+        };
+        let list_descriptor = TypeDescriptor::list(item_descriptor)
+            .map_err(|_| ClientResourceError::TypeMismatch)?;
+        let option_descriptor = TypeDescriptor::option(list_descriptor.clone())
+            .map_err(|_| ClientResourceError::TypeMismatch)?;
+        if let Some(values) = self.stream_batches.pop_front() {
+            let list = RuntimeValue::list(active, list_descriptor, values)
+                .map_err(|_| ClientResourceError::TypeMismatch)?;
+            let value = RuntimeValue::option(active, option_descriptor, Some(list))
+                .map_err(|_| ClientResourceError::TypeMismatch)?;
+            return Ok(Some(value));
+        }
+        if self.stream_complete {
+            let value = RuntimeValue::option(active, option_descriptor, None)
+                .map_err(|_| ClientResourceError::TypeMismatch)?;
+            return Ok(Some(value));
+        }
+        match self.status {
+            ClientResourceStatus::Loading => Ok(None),
+            status => Err(ClientResourceError::InvalidTransition { status }),
+        }
     }
 
     /// Records one structured failure for the current generation.
@@ -931,6 +1214,7 @@ impl ClientResource {
     /// Invalidates the current generation and returns to `IDLE`.
     pub fn invalidate(&mut self) -> Result<(), ClientResourceError> {
         self.advance_generation()?;
+        self.request_id = None;
         self.status = ClientResourceStatus::Idle;
         self.clear_result();
         Ok(())
@@ -939,6 +1223,8 @@ impl ClientResource {
     fn clear_result(&mut self) {
         self.value = None;
         self.failure = None;
+        self.stream_batches.clear();
+        self.stream_complete = false;
     }
 
     fn next_generation(&self) -> Result<ClientResourceGeneration, ClientResourceError> {
@@ -959,6 +1245,16 @@ impl ClientResource {
         Ok(self.generation)
     }
 
+    fn require_generation(&self, generation: ClientResourceGeneration) -> Result<(), ClientResourceError> {
+        if generation != self.generation {
+            return Err(ClientResourceError::StaleGeneration {
+                expected: self.generation,
+                actual: generation,
+            });
+        }
+        Ok(())
+    }
+
     fn require_key(&self, actual: ClientResourceKey) -> Result<(), ClientResourceError> {
         if actual != self.key {
             return Err(ClientResourceError::RequestKeyMismatch {
@@ -967,6 +1263,17 @@ impl ClientResource {
             });
         }
         Ok(())
+    }
+
+    fn require_request_id(&self, actual: InvocationId) -> Result<(), ClientResourceError> {
+        match self.request_id {
+            Some(expected) if expected == actual => Ok(()),
+            Some(expected) => Err(ClientResourceError::RequestIdMismatch { expected, actual }),
+            None => Err(ClientResourceError::RequestIdMismatch {
+                expected: InvocationId::from_bytes([0; 16]),
+                actual,
+            }),
+        }
     }
 
     fn require_loading(
@@ -987,6 +1294,30 @@ impl ClientResource {
         Ok(())
     }
 }
+fn stream_item_descriptor(expected: ResolvedType) -> Option<TypeDescriptor> {
+    match expected {
+        ResolvedType::Scalar(scalar) => Some(TypeDescriptor::named(match scalar {
+            StandardScalar::Boolean => orna_standard::BOOLEAN_TYPE_ID,
+            StandardScalar::Integer => orna_standard::INTEGER_TYPE_ID,
+            StandardScalar::BigInt => orna_standard::BIGINT_TYPE_ID,
+            StandardScalar::Float => orna_standard::FLOAT_TYPE_ID,
+            StandardScalar::Decimal => orna_standard::DECIMAL_TYPE_ID,
+            StandardScalar::CharacterLargeObject => orna_standard::CHARACTER_LARGE_OBJECT_TYPE_ID,
+            StandardScalar::BinaryLargeObject => orna_standard::BINARY_LARGE_OBJECT_TYPE_ID,
+            StandardScalar::Uuid => orna_standard::UUID_TYPE_ID,
+            StandardScalar::Date => orna_standard::DATE_TYPE_ID,
+            StandardScalar::Time => orna_standard::TIME_TYPE_ID,
+            StandardScalar::Timestamp => orna_standard::TIMESTAMP_TYPE_ID,
+            StandardScalar::Duration => orna_standard::DURATION_TYPE_ID,
+            StandardScalar::Void => orna_standard::VOID_TYPE_ID,
+        })),
+        ResolvedType::Named(type_id) | ResolvedType::Value(type_id) => {
+            Some(TypeDescriptor::named(type_id))
+        }
+        ResolvedType::Reference { target } => Some(TypeDescriptor::reference(target)),
+    }
+}
+
 fn canonical_resource_arguments(
     arguments: &[FunctionArgument],
 ) -> Result<Vec<FunctionArgument>, ClientResourceError> {
@@ -1002,14 +1333,107 @@ fn canonical_resource_arguments(
     Ok(arguments)
 }
 
+struct ResolvedResourceTarget<'a> {
+    target: InvocationTarget,
+    definition: &'a FunctionDefinition,
+}
+
+fn verified_standard_executable_revision(
+    standard: &VerifiedStandardLibrarySnapshot,
+    function: FunctionId,
+) -> Option<FunctionRevisionId> {
+    let mut revisions = standard
+        .executables()
+        .iter()
+        .filter(|executable| executable.function() == function)
+        .map(|executable| executable.revision().id());
+    let revision = revisions.next()?;
+    revisions.next().is_none().then_some(revision)
+}
+
+/// Resolves a resource target against the active application catalogue and its
+/// exact verified standard snapshot. A standard target must carry both the
+/// snapshot and executable revision pins; a raw class-less target is never
+/// upgraded implicitly by this path.
+fn resolve_resource_target<'a>(
+    active: &'a ActiveDatabaseRevision,
+    target: InvocationTarget,
+) -> Option<ResolvedResourceTarget<'a>> {
+    if target.revision() != active.pair() {
+        return None;
+    }
+    let application = active.catalogue().function_by_id(target.function());
+    let standard = active.catalogue_hash_context().standard();
+    let standard_definition =
+        standard.and_then(|snapshot| snapshot.catalogue().function_by_id(target.function()));
+    match target.class() {
+        None | Some(TargetClass::Application) => {
+            if target.standard_revision().is_some() || target.executable_revision().is_some() {
+                return None;
+            }
+            match (application, standard_definition) {
+                (Some(definition), None) => Some(ResolvedResourceTarget { target, definition }),
+                _ => None,
+            }
+        }
+        Some(TargetClass::VerifiedStandard) => {
+            let standard_revision = target.standard_revision()?;
+            let executable_revision = target.executable_revision()?;
+            let standard = standard?;
+            if application.is_some() || standard.revision() != standard_revision {
+                return None;
+            }
+            let definition = standard_definition?;
+            if verified_standard_executable_revision(standard, target.function())
+                != Some(executable_revision)
+            {
+                return None;
+            }
+            Some(ResolvedResourceTarget { target, definition })
+        }
+    }
+}
+
+/// Resolves artifact resource metadata to the canonical application or pinned
+/// verified-standard invocation target. The artifact stores the active pair;
+/// standard identity is admitted only when the function exists in the exact
+/// pinned snapshot and has one executable record.
+fn resolve_resource_operation_target<'a>(
+    active: &'a ActiveDatabaseRevision,
+    operation: &ResourceOperationNode,
+) -> Option<ResolvedResourceTarget<'a>> {
+    let raw_target = InvocationTarget::new(operation.target_function(), operation.target_revision());
+    let application = active.catalogue().function_by_id(raw_target.function());
+    let standard = active.catalogue_hash_context().standard();
+    let standard_definition =
+        standard.and_then(|snapshot| snapshot.catalogue().function_by_id(raw_target.function()));
+    match (application, standard_definition) {
+        (Some(_), None) => resolve_resource_target(active, raw_target),
+        (None, Some(_)) => {
+            let standard = standard?;
+            let executable_revision =
+                verified_standard_executable_revision(standard, raw_target.function())?;
+            let target = InvocationTarget::verified_standard(
+                raw_target.function(),
+                raw_target.revision(),
+                standard.revision(),
+                executable_revision,
+            );
+            resolve_resource_target(active, target)
+        }
+        _ => None,
+    }
+}
+
 fn validate_resource_arguments(
     active: &ActiveDatabaseRevision,
     target: InvocationTarget,
     arguments: &[FunctionArgument],
 ) -> Result<Vec<FunctionArgument>, ClientResourceError> {
-    let Some(definition) = active.catalogue().function_by_id(target.function()) else {
+    let Some(resolved) = resolve_resource_target(active, target) else {
         return Err(ClientResourceError::TargetMismatch { expected: target });
     };
+    let definition = resolved.definition;
     let arguments = canonical_resource_arguments(arguments)?;
     for argument in &arguments {
         let Some(parameter) = definition
@@ -1353,9 +1777,19 @@ impl ClientStateStore {
         key: ClientResourceKey,
         expected_type: ResolvedType,
     ) -> &mut ClientResource {
+        self.get_or_create_resource_with_kind(key, ResourceKind::Scalar, expected_type)
+    }
+
+    /// Returns or creates a resource with an explicit scalar/stream kind.
+    pub fn get_or_create_resource_with_kind(
+        &mut self,
+        key: ClientResourceKey,
+        kind: ResourceKind,
+        expected_type: ResolvedType,
+    ) -> &mut ClientResource {
         match self.resources.entry(key) {
             Entry::Occupied(entry) => entry.into_mut(),
-            Entry::Vacant(entry) => entry.insert(ClientResource::new(key, expected_type)),
+            Entry::Vacant(entry) => entry.insert(ClientResource::new_with_kind(key, kind, expected_type)),
         }
     }
 
@@ -2719,7 +3153,7 @@ fn evaluate_expression_plan(
         executor,
         local_environment,
     )?;
-    if runtime_value_matches(active, &value, expected) {
+    if runtime_expression_value_matches(active, expression, &value, expected, local_environment) {
         Ok(value)
     } else {
         Err(expression_error(
@@ -2856,7 +3290,7 @@ fn evaluate_procedural_plan(
         active, plan.return_expression(), context, arguments, declarations, grants, state, depth,
         principal, executor, local_environment,
     )?;
-    if runtime_value_matches(active, &value, expected) {
+    if runtime_expression_value_matches(active, plan.return_expression(), &value, expected, local_environment) {
         Ok(value)
     } else {
         Err(expression_error(context, ClientExpressionError::TypeMismatch))
@@ -3042,16 +3476,16 @@ fn evaluate_resource_error(
 fn active_resource_result_type_matches(
     active: &ActiveDatabaseRevision,
     target: InvocationTarget,
+    kind: ResourceKind,
     expected: ResolvedType,
 ) -> bool {
-    let Some(definition) = active.catalogue().function_by_id(target.function()) else {
+    let Some(resolved) = resolve_resource_target(active, target) else {
         return false;
     };
-    match definition.return_type() {
-        FunctionReturn::Single(resolved) => *resolved == expected,
-        FunctionReturn::Rows(columns) => columns
-            .first()
-            .is_some_and(|column| column.resolved_type() == expected),
+    match (kind, resolved.definition.return_type()) {
+        (ResourceKind::Scalar, FunctionReturn::Single(result)) => *result == expected,
+        (ResourceKind::Stream, FunctionReturn::Stream(item)) => *item == expected,
+        _ => false,
     }
 }
 
@@ -3092,37 +3526,26 @@ fn resource_operation_result_type(
     operation: &ResourceOperationNode,
     context: ClientExecutionContext,
 ) -> Result<ResolvedType, ClientExecutionError> {
-    let target = InvocationTarget::new(operation.target_function(), operation.target_revision());
+    let raw_target = InvocationTarget::new(operation.target_function(), operation.target_revision());
     let invalid = ||
         evaluate_resource_error(
             context,
             ClientResourceExecutionError::Invalid(ClientResourceError::TargetMismatch {
-                expected: target,
+                expected: raw_target,
             }),
         );
-    if target.revision() != active.pair()
-        || !active_supports_invocation_target(active, target)
-    {
-        return Err(invalid());
-    }
-    let Some(definition) = active.catalogue().function_by_id(operation.target_function()) else {
+    let Some(resolved) = resolve_resource_operation_target(active, operation) else {
         return Err(invalid());
     };
-    if definition.domain() != FunctionDomain::Server {
+    if resolved.definition.domain() != FunctionDomain::Server {
         return Err(invalid());
     }
-    let (expected_kind, expected) = match (operation.kind(), definition.return_type()) {
-        (ResourceKind::Scalar, FunctionReturn::Single(resolved)) => {
-            (ResourceKind::Scalar, *resolved)
+    let (expected_kind, expected) = match (operation.kind(), resolved.definition.return_type()) {
+        (ResourceKind::Scalar, FunctionReturn::Single(result)) => {
+            (ResourceKind::Scalar, *result)
         }
-        (ResourceKind::Stream, FunctionReturn::Rows(columns)) => {
-            let Some(column) = columns.first() else {
-                return Err(evaluate_resource_error(
-                    context,
-                    ClientResourceExecutionError::Invalid(ClientResourceError::TypeMismatch),
-                ));
-            };
-            (ResourceKind::Stream, column.resolved_type())
+        (ResourceKind::Stream, FunctionReturn::Stream(item)) => {
+            (ResourceKind::Stream, *item)
         }
         _ => {
             return Err(evaluate_resource_error(
@@ -3155,15 +3578,18 @@ fn evaluate_resource_expression(
     executor: &mut Option<&mut dyn ClientResourceExecutor>,
     local_environment: &mut ClientLocalEnvironment,
 ) -> Result<RuntimeValue, ClientExecutionError> {
-    let expected_type = resource_operation_result_type(active, operation, context)?;
-    let Some(target_definition) = active.catalogue().function_by_id(operation.target_function()) else {
+    let raw_target = InvocationTarget::new(operation.target_function(), operation.target_revision());
+    let Some(resolved_target) = resolve_resource_operation_target(active, operation) else {
         return Err(evaluate_resource_error(
             context,
             ClientResourceExecutionError::Invalid(ClientResourceError::TargetMismatch {
-                expected: InvocationTarget::new(operation.target_function(), operation.target_revision()),
+                expected: raw_target,
             }),
         ));
     };
+    let expected_type = resource_operation_result_type(active, operation, context)?;
+    let target = resolved_target.target;
+    let target_definition = resolved_target.definition;
     let mut evaluated = Vec::with_capacity(operation.arguments().len());
     for (parameter, expression) in operation.arguments() {
         if evaluated.iter().any(|candidate: &FunctionArgument| candidate.parameter() == *parameter) {
@@ -3213,11 +3639,7 @@ fn evaluate_resource_expression(
         })?;
         evaluated.push(argument);
     }
-    let evaluated = validate_resource_arguments(
-        active,
-        InvocationTarget::new(operation.target_function(), operation.target_revision()),
-        &evaluated,
-    )
+    let evaluated = validate_resource_arguments(active, target, &evaluated)
     .map_err(|source| {
         evaluate_resource_error(context, ClientResourceExecutionError::Invalid(source))
     })?;
@@ -3226,12 +3648,21 @@ fn evaluate_resource_expression(
     // The active catalogue hash is the deterministic invalidation identity in
     // this runtime seam; external data epochs belong to the host executor.
     let key = ClientResourceKey::new(
-        InvocationTarget::new(operation.target_function(), operation.target_revision()),
+        target,
         principal,
         digest,
         active.catalogue_hash(),
     );
-    let resource = state.get_or_create_resource(key, expected_type);
+    let resource = state.get_or_create_resource_with_kind(key, operation.kind(), expected_type);
+    if resource.kind() != operation.kind() {
+        return Err(evaluate_resource_error(
+            context,
+            ClientResourceExecutionError::Invalid(ClientResourceError::TypeMismatch),
+        ));
+    }
+    if resource.kind() == ResourceKind::Stream && resource.status() != ClientResourceStatus::Idle {
+        return read_stream_resource_value(active, resource, context);
+    }
     match resource.status() {
         ClientResourceStatus::Ready => {
             return resource.value().cloned().ok_or_else(|| {
@@ -3277,8 +3708,9 @@ fn evaluate_resource_expression(
         ));
     };
     let request = resource
-        .begin_request_with_context(
+        .begin_request_with_context_and_kind(
             active,
+            operation.kind(),
             ClientResourceInvocationContext::new(
                 context.parent_invocation_id(),
                 operation.call_site_id(),
@@ -3290,6 +3722,9 @@ fn evaluate_resource_expression(
     resource.apply_completion(active, completion).map_err(|source| {
         evaluate_resource_error(context, ClientResourceExecutionError::Invalid(source))
     })?;
+    if resource.kind() == ResourceKind::Stream {
+        return read_stream_resource_value(active, resource, context);
+    }
     match resource.status() {
         ClientResourceStatus::Ready => resource.value().cloned().ok_or_else(|| {
             evaluate_resource_error(
@@ -3321,6 +3756,84 @@ fn evaluate_resource_expression(
         status => Err(evaluate_resource_error(
             context,
             ClientResourceExecutionError::Invalid(ClientResourceError::InvalidTransition { status }),
+        )),
+    }
+}
+
+fn read_stream_resource_value(
+    active: &ActiveDatabaseRevision,
+    resource: &mut ClientResource,
+    context: ClientExecutionContext,
+) -> Result<RuntimeValue, ClientExecutionError> {
+    if resource.stream_batches.is_empty() {
+        match resource.status() {
+            ClientResourceStatus::Failed => {
+                let code = resource
+                    .failure()
+                    .map(|failure| failure.code().to_owned())
+                    .unwrap_or_else(|| "resource.failed".to_owned());
+                return Err(evaluate_resource_error(
+                    context,
+                    ClientResourceExecutionError::Failed(code),
+                ));
+            }
+            ClientResourceStatus::Cancelled => {
+                return Err(evaluate_resource_error(
+                    context,
+                    ClientResourceExecutionError::Cancelled,
+                ));
+            }
+            ClientResourceStatus::Idle => {
+                return Err(evaluate_resource_error(
+                    context,
+                    ClientResourceExecutionError::Invalid(
+                        ClientResourceError::InvalidTransition {
+                            status: ClientResourceStatus::Idle,
+                        },
+                    ),
+                ));
+            }
+            ClientResourceStatus::Loading | ClientResourceStatus::Ready => {}
+        }
+    }
+    if let Some(value) = resource.take_stream_value(active).map_err(|source| {
+        evaluate_resource_error(context, ClientResourceExecutionError::Invalid(source))
+    })? {
+        return Ok(value);
+    }
+    match resource.status() {
+        ClientResourceStatus::Loading => Err(evaluate_resource_error(
+            context,
+            ClientResourceExecutionError::Pending {
+                key: resource.key(),
+                generation: resource.generation(),
+            },
+        )),
+        ClientResourceStatus::Ready => Err(evaluate_resource_error(
+            context,
+            ClientResourceExecutionError::Invalid(ClientResourceError::InvalidTransition {
+                status: ClientResourceStatus::Ready,
+            }),
+        )),
+        ClientResourceStatus::Failed => {
+            let code = resource
+                .failure()
+                .map(|failure| failure.code().to_owned())
+                .unwrap_or_else(|| "resource.failed".to_owned());
+            Err(evaluate_resource_error(
+                context,
+                ClientResourceExecutionError::Failed(code),
+            ))
+        }
+        ClientResourceStatus::Cancelled => Err(evaluate_resource_error(
+            context,
+            ClientResourceExecutionError::Cancelled,
+        )),
+        ClientResourceStatus::Idle => Err(evaluate_resource_error(
+            context,
+            ClientResourceExecutionError::Invalid(ClientResourceError::InvalidTransition {
+                status: ClientResourceStatus::Idle,
+            }),
         )),
     }
 }
@@ -3495,7 +4008,7 @@ pub fn decode_action_payload(
 fn action_target_result_type(
     active: &ActiveDatabaseRevision,
     descriptor: &ClientActionDescriptor,
-) -> Result<ResolvedType, ClientActionError> {
+) -> Result<(ResourceKind, ResolvedType), ClientActionError> {
     if descriptor.target_revision != active.pair() {
         return Err(ClientActionError::RevisionMismatch);
     }
@@ -3509,15 +4022,15 @@ fn action_target_result_type(
     if definition.domain() != expected_domain {
         return Err(ClientActionError::TargetMismatch);
     }
-    let resolved = match definition.return_type() {
-        FunctionReturn::Single(resolved) => *resolved,
-        FunctionReturn::Rows(columns) if columns.len() == 1 => columns[0].resolved_type(),
+    let (kind, resolved) = match definition.return_type() {
+        FunctionReturn::Single(resolved) => (ResourceKind::Scalar, *resolved),
+        FunctionReturn::Stream(resolved) => (ResourceKind::Stream, *resolved),
         FunctionReturn::Rows(_) => return Err(ClientActionError::ResultTypeMismatch),
     };
     if !resource_type_matches_id(active, resolved, descriptor.result_type) {
         return Err(ClientActionError::ResultTypeMismatch);
     }
-    Ok(resolved)
+    Ok((kind, resolved))
 }
 
 fn validate_action_arguments(
@@ -3627,9 +4140,11 @@ pub fn complete_client_action(
 ) -> Result<ClientActionOutcome, ClientActionError> {
     let (completion_key, completion_generation) = match &completion {
         ClientResourceCompletion::Ready { key, generation, .. }
-        | ClientResourceCompletion::Pending { key, generation }
+        | ClientResourceCompletion::StreamValues { key, generation, .. }
+        | ClientResourceCompletion::StreamCompleted { key, generation, .. }
+        | ClientResourceCompletion::Pending { key, generation, .. }
         | ClientResourceCompletion::Failed { key, generation, .. }
-        | ClientResourceCompletion::Cancelled { key, generation } => (*key, *generation),
+        | ClientResourceCompletion::Cancelled { key, generation, .. } => (*key, *generation),
     };
     let Some(resource) = action_state.resource_mut() else {
         return if action_state.is_stale(completion_generation) {
@@ -3759,7 +4274,7 @@ pub fn trigger_client_action(
         return Err(ClientActionError::InvalidValue);
     }
     let descriptor = decode_action_payload(active, value.canonical_payload())?;
-    let expected = action_target_result_type(active, &descriptor)?;
+    let (kind, expected) = action_target_result_type(active, &descriptor)?;
     let values = validate_action_arguments(active, &descriptor)?;
     let target = InvocationTarget::new(descriptor.target, descriptor.target_revision);
     let digest = ClientResourceKey::canonical_arguments_digest(active, &values)
@@ -3782,13 +4297,14 @@ pub fn trigger_client_action(
                 }
                 action_state.clear();
             }
-            let mut resource = ClientResource::new(key, expected);
+            let mut resource = ClientResource::new_with_kind(key, kind, expected);
             // Preserve a monotonic generation across terminal clears so an old
             // completion can never be accepted by a later action.
             resource.generation = ClientResourceGeneration(action_state.tombstone.value());
             let request = resource
-                .begin_request_with_context(
+                .begin_request_with_context_and_kind(
                     active,
+                    kind,
                     ClientResourceInvocationContext::new(parent.parent_invocation_id(), descriptor.call_site),
                     values,
                 )
@@ -3813,13 +4329,14 @@ pub fn trigger_client_action(
                 }
                 action_state.clear();
             }
-            let mut resource = ClientResource::new(key, expected);
+            let mut resource = ClientResource::new_with_kind(key, kind, expected);
             // Preserve a monotonic generation across terminal clears so an old
             // completion can never be accepted by a later action.
             resource.generation = ClientResourceGeneration(action_state.tombstone.value());
             let request = resource
-                .begin_request_with_context(
+                .begin_request_with_context_and_kind(
                     active,
+                    kind,
                     ClientResourceInvocationContext::new(parent.parent_invocation_id(), descriptor.call_site),
                     values,
                 )
@@ -4014,6 +4531,45 @@ fn evaluate_field_path(
     Ok(current.clone())
 }
 
+fn runtime_expression_value_matches(
+    active: &ActiveDatabaseRevision,
+    expression: &ClientExpressionNode,
+    value: &RuntimeValue,
+    expected: ResolvedType,
+    local_environment: &ClientLocalEnvironment,
+) -> bool {
+    let is_stream_await = matches!(
+        expression,
+        ClientExpressionNode::Await { expression }
+            if procedural_resource_kind_for_runtime(expression, local_environment)
+                == Some(ResourceKind::Stream)
+    );
+    if is_stream_await {
+        runtime_stream_value_matches(value, expected)
+    } else {
+        runtime_value_matches(active, value, expected)
+    }
+}
+
+fn runtime_stream_value_matches(
+    value: &RuntimeValue,
+    expected_item: ResolvedType,
+) -> bool {
+    let Some(item_descriptor) = stream_item_descriptor(expected_item) else {
+        return false;
+    };
+    let Ok(list_descriptor) = TypeDescriptor::list(item_descriptor) else {
+        return false;
+    };
+    let Ok(option_descriptor) = TypeDescriptor::option(list_descriptor) else {
+        return false;
+    };
+    let RuntimeValue::Constructed(constructed) = value else {
+        return false;
+    };
+    constructed.descriptor() == &option_descriptor
+}
+
 fn runtime_value_matches(
     active: &ActiveDatabaseRevision,
     value: &RuntimeValue,
@@ -4107,33 +4663,7 @@ fn active_supports_invocation_target(
     active: &ActiveDatabaseRevision,
     target: InvocationTarget,
 ) -> bool {
-    let application_function = active.catalogue().function_by_id(target.function());
-    let standard_function = active
-        .catalogue_hash_context()
-        .standard()
-        .and_then(|standard| standard.catalogue().function_by_id(target.function()));
-    match target.class() {
-        None | Some(TargetClass::Application) => {
-            application_function.is_some() && standard_function.is_none()
-        }
-        Some(TargetClass::VerifiedStandard) => {
-            let (Some(standard_revision), Some(executable_revision)) =
-                (target.standard_revision(), target.executable_revision())
-            else {
-                return false;
-            };
-            let Some(standard) = active.catalogue_hash_context().standard() else {
-                return false;
-            };
-            application_function.is_none()
-                && standard.revision() == standard_revision
-                && standard_function.is_some()
-                && standard.executables().iter().any(|executable| {
-                    executable.function() == target.function()
-                        && executable.revision().id() == executable_revision
-                })
-        }
-    }
+    resolve_resource_target(active, target).is_some()
 }
 
 fn active_has_value_type(active: &ActiveDatabaseRevision, type_id: TypeId) -> bool {
@@ -4664,10 +5194,11 @@ fn invalid_function(
 mod tests {
     use super::{
         capability, complete_client_action, decode_action_payload, encode_action_payload,
-        trigger_client_action, ClientActionDescriptor, ClientActionError, ClientActionOutcome,
+        trigger_client_action, action_target_result_type, ClientActionDescriptor, ClientActionError, ClientActionOutcome,
         ClientActionState, ClientExecutionContext, ClientResource, ClientResourceCompletion,
         ClientResourceKey, ClientResourceRequest, ClientResourceStatus, ClientStateStore,
-        ClientResourceExecutor, DeterministicClientResourceExecutor, ACTION_FAILURE_CODE,
+        ClientResourceExecutor, DeterministicClientResourceExecutor, ResourceKind,
+        ACTION_FAILURE_CODE,
     };
     use orna_artifact::client_plan::ActionTargetDomain;
     use std::time::SystemTime;
@@ -4747,6 +5278,16 @@ mod tests {
 
         fn poll(&mut self) -> Option<ClientResourceCompletion> {
             self.pending.take().map(|request| request.ready(RuntimeValue::Boolean(true)))
+        }
+    }
+
+    struct StreamBatchTestExecutor {
+        value: bool,
+    }
+
+    impl ClientResourceExecutor for StreamBatchTestExecutor {
+        fn execute(&mut self, request: ClientResourceRequest) -> ClientResourceCompletion {
+            request.stream_values(vec![RuntimeValue::Boolean(self.value)])
         }
     }
 
@@ -4895,7 +5436,9 @@ mod tests {
         let mut resource =
             super::ClientResource::new(key, ResolvedType::Scalar(StandardScalar::Boolean));
         let generation = resource.begin_loading().unwrap();
+        let request_id = resource.request_id().unwrap();
         let completion = super::ClientResourceCompletion::Ready {
+            request_id,
             key: wrong_key,
             generation,
             value: RuntimeValue::Boolean(true),
@@ -4907,6 +5450,36 @@ mod tests {
             Err(super::ClientResourceError::RequestKeyMismatch {
                 expected: key,
                 actual: wrong_key,
+            })
+        );
+        assert_eq!(resource, before);
+    }
+
+    #[test]
+    fn client_resource_rejects_completion_with_mismatched_request_id() {
+        let (active, function, pair, _) = version_one_active(true);
+        let key = super::ClientResourceKey::new(
+            InvocationTarget::new(function, pair),
+            PrincipalId::from_bytes([0x7a; 16]),
+            super::ClientResourceKey::canonical_arguments_digest(&active, &[]).unwrap(),
+            Sha256Digest::from_bytes([0x22; 32]),
+        );
+        let mut resource =
+            super::ClientResource::new(key, ResolvedType::Scalar(StandardScalar::Boolean));
+        let request = resource.begin_request(&active, Vec::new()).unwrap();
+        let completion = super::ClientResourceCompletion::Ready {
+            request_id: InvocationId::from_bytes([0xff; 16]),
+            key,
+            generation: request.generation(),
+            value: RuntimeValue::Boolean(true),
+        };
+        let before = resource.clone();
+
+        assert_eq!(
+            resource.apply_completion(&active, completion),
+            Err(super::ClientResourceError::RequestIdMismatch {
+                expected: request.request_id(),
+                actual: InvocationId::from_bytes([0xff; 16]),
             })
         );
         assert_eq!(resource, before);
@@ -5093,6 +5666,7 @@ mod tests {
             super::ClientResource::new(key, ResolvedType::Scalar(StandardScalar::Boolean));
         let request = resource.begin_request(&active, Vec::new()).unwrap();
         let generation = request.generation();
+        let request_id = request.request_id();
 
         resource
             .apply_completion(&active, request.pending())
@@ -5105,6 +5679,7 @@ mod tests {
             .apply_completion(
                 &active,
                 super::ClientResourceCompletion::Ready {
+                    request_id,
                     key,
                     generation,
                     value: RuntimeValue::Boolean(true),
@@ -5129,10 +5704,11 @@ mod tests {
 
         let mut pending_resource = super::ClientResource::new(key, ResolvedType::Scalar(StandardScalar::Boolean));
         let pending_request = pending_resource.begin_request(&active, vec![]).unwrap();
+        let pending_request_id = pending_request.request_id();
         let expected_pending = pending_request.clone().pending();
         let mut polling = PollingTestExecutor::default();
         assert_eq!(polling.execute(pending_request), expected_pending);
-        assert_eq!(polling.poll(), Some(ClientResourceCompletion::Ready { key, generation: pending_resource.generation(), value: RuntimeValue::Boolean(true) }));
+        assert_eq!(polling.poll(), Some(ClientResourceCompletion::Ready { request_id: pending_request_id, key, generation: pending_resource.generation(), value: RuntimeValue::Boolean(true) }));
         assert_eq!(polling.poll(), None);
 
         let mut immediate_resource = super::ClientResource::new(key, ResolvedType::Scalar(StandardScalar::Boolean));
@@ -5169,6 +5745,298 @@ mod tests {
         assert_eq!(resource.status(), super::ClientResourceStatus::Cancelled);
         assert_eq!(resource.value(), None);
         assert_eq!(resource.failure(), None);
+    }
+
+
+    #[test]
+    fn client_stream_request_preserves_batch_order_and_returns_terminal_option() {
+    let (active, function, pair, _) = version_two_server_stream_active();
+    let key = super::ClientResourceKey::new(
+        InvocationTarget::new(function, pair),
+        PrincipalId::from_bytes([0x7a; 16]),
+        ClientResourceKey::canonical_arguments_digest(&active, &[]).unwrap(),
+        Sha256Digest::from_bytes([0x22; 32]),
+    );
+    let mut resource = ClientResource::new_stream(
+        key,
+        ResolvedType::Value(orna_standard::BOOLEAN_TYPE_ID),
+    );
+    let request = resource.begin_stream_request(&active, Vec::new()).unwrap();
+    assert_eq!(request.kind(), ResourceKind::Stream);
+
+    resource
+        .apply_completion(
+            &active,
+            request
+                .clone()
+                .stream_values(vec![RuntimeValue::Boolean(true), RuntimeValue::Boolean(false)]),
+        )
+        .unwrap();
+    resource
+        .apply_completion(
+            &active,
+            request
+                .clone()
+                .stream_values(vec![RuntimeValue::Boolean(false), RuntimeValue::Boolean(true)]),
+        )
+        .unwrap();
+    resource
+        .apply_completion(&active, request.stream_completed())
+        .unwrap();
+
+    let first = resource.take_stream_value(&active).unwrap().unwrap();
+    assert_boolean_stream_batch(first, &[true, false]);
+    let second = resource.take_stream_value(&active).unwrap().unwrap();
+    assert_boolean_stream_batch(second, &[false, true]);
+    let terminal = resource.take_stream_value(&active).unwrap().unwrap();
+    assert_boolean_stream_terminal(terminal);
+}
+
+#[test]
+fn client_stream_rejects_scalar_ready_completion() {
+    let (active, function, pair, _) = version_two_server_stream_active();
+    let key = super::ClientResourceKey::new(
+        InvocationTarget::new(function, pair),
+        PrincipalId::from_bytes([0x7a; 16]),
+        ClientResourceKey::canonical_arguments_digest(&active, &[]).unwrap(),
+        Sha256Digest::from_bytes([0x23; 32]),
+    );
+    let mut resource = ClientResource::new_stream(
+        key,
+        ResolvedType::Value(orna_standard::BOOLEAN_TYPE_ID),
+    );
+    let request = resource.begin_stream_request(&active, Vec::new()).unwrap();
+
+    assert_eq!(
+        resource.publish_ready(&active, request.generation(), RuntimeValue::Boolean(true)),
+        Err(super::ClientResourceError::TypeMismatch),
+    );
+    assert_eq!(resource.status(), super::ClientResourceStatus::Loading);
+    assert_eq!(resource.value(), None);
+    assert!(!resource.stream_complete());
+}
+
+#[test]
+fn client_stream_failure_drains_queued_batches_before_evaluator_reports_failure() {
+    let (active, function, pair, function_revision) = version_two_server_stream_active();
+    let key = super::ClientResourceKey::new(
+        InvocationTarget::new(function, pair),
+        PrincipalId::from_bytes([0x7a; 16]),
+        ClientResourceKey::canonical_arguments_digest(&active, &[]).unwrap(),
+        Sha256Digest::from_bytes([0x22; 32]),
+    );
+    let mut resource = ClientResource::new_stream(
+        key,
+        ResolvedType::Value(orna_standard::BOOLEAN_TYPE_ID),
+    );
+    let request = resource.begin_stream_request(&active, Vec::new()).unwrap();
+    resource
+        .apply_completion(
+            &active,
+            request
+                .clone()
+                .stream_values(vec![RuntimeValue::Boolean(true)]),
+        )
+        .unwrap();
+    resource
+        .apply_completion(
+            &active,
+            request
+                .clone()
+                .stream_values(vec![RuntimeValue::Boolean(false)]),
+        )
+        .unwrap();
+    resource
+        .apply_completion(&active, request.failed("stream.failed".to_owned()))
+        .unwrap();
+
+    let context = ClientExecutionContext {
+        pair,
+        function,
+        function_revision,
+        parent_invocation_id: InvocationId::from_bytes([0xf6; 16]),
+    };
+    let first = super::read_stream_resource_value(&active, &mut resource, context).unwrap();
+    assert_boolean_stream_batch(first, &[true]);
+    let second = super::read_stream_resource_value(&active, &mut resource, context).unwrap();
+    assert_boolean_stream_batch(second, &[false]);
+    assert!(matches!(
+        super::read_stream_resource_value(&active, &mut resource, context),
+        Err(super::ClientExecutionError::ResourceEvaluation {
+            source: super::ClientResourceExecutionError::Failed(code),
+            ..
+        }) if code == "stream.failed"
+    ));
+}
+
+#[test]
+fn client_stream_cancellation_clears_batches_and_rejects_stale_completions() {
+    let (active, function, pair, _) = version_two_server_stream_active();
+    let key = super::ClientResourceKey::new(
+        InvocationTarget::new(function, pair),
+        PrincipalId::from_bytes([0x7a; 16]),
+        ClientResourceKey::canonical_arguments_digest(&active, &[]).unwrap(),
+        Sha256Digest::from_bytes([0x22; 32]),
+    );
+    let mut resource = ClientResource::new_stream(
+        key,
+        ResolvedType::Value(orna_standard::BOOLEAN_TYPE_ID),
+    );
+    let first = resource.begin_stream_request(&active, Vec::new()).unwrap();
+    let second = resource.begin_stream_request(&active, Vec::new()).unwrap();
+    resource
+        .apply_completion(
+            &active,
+            second
+                .clone()
+                .stream_values(vec![RuntimeValue::Boolean(true)]),
+        )
+        .unwrap();
+    resource
+        .apply_completion(&active, second.clone().cancelled())
+        .unwrap();
+
+    assert_eq!(
+        resource.take_stream_value(&active),
+        Err(super::ClientResourceError::InvalidTransition {
+            status: super::ClientResourceStatus::Cancelled,
+        })
+    );
+    assert_eq!(resource.status(), super::ClientResourceStatus::Cancelled);
+    assert_eq!(resource.failure(), None);
+    assert!(matches!(
+        resource.apply_completion(
+            &active,
+            first.stream_values(vec![RuntimeValue::Boolean(false)]),
+        ),
+        Err(super::ClientResourceError::StaleGeneration { .. })
+    ));
+    assert_eq!(
+        resource.apply_completion(&active, second.stream_completed()),
+        Err(super::ClientResourceError::InvalidTransition {
+            status: super::ClientResourceStatus::Cancelled,
+        })
+    );
+}
+
+
+    fn assert_boolean_stream_batch(value: RuntimeValue, expected: &[bool]) {
+        let RuntimeValue::Constructed(option) = value else {
+            panic!("stream value must be a constructed OPTION");
+        };
+        let orna_core::value::ConstructedValueKind::Option(Some(list)) = option.kind() else {
+            panic!("stream value must contain a present LIST");
+        };
+        let RuntimeValue::Constructed(list) = list else {
+            panic!("stream OPTION must contain a constructed LIST");
+        };
+        let orna_core::value::ConstructedValueKind::List(values) = list.kind() else {
+            panic!("stream OPTION must contain a LIST");
+        };
+        let expected = expected
+            .iter()
+            .copied()
+            .map(RuntimeValue::Boolean)
+            .collect::<Vec<_>>();
+        assert_eq!(values, expected.as_slice());
+    }
+
+    fn assert_boolean_stream_terminal(value: RuntimeValue) {
+        let RuntimeValue::Constructed(option) = value else {
+            panic!("stream terminal must be a constructed OPTION");
+        };
+        assert_eq!(
+            option.kind(),
+            orna_core::value::ConstructedValueKind::Option(None)
+        );
+    }
+
+    #[test]
+    fn stream_await_expression_and_procedural_local_return_option_list_values() {
+        let (active, target, pair, target_revision) = version_two_server_stream_active();
+        let item_type = ResolvedType::Value(orna_standard::BOOLEAN_TYPE_ID);
+        let operation = orna_artifact::client_plan::ResourceOperationNode::new(
+            ResourceKind::Stream,
+            target,
+            pair,
+            CallSiteId::from_bytes([0x91; 16]),
+            Vec::new(),
+            orna_standard::BOOLEAN_TYPE_ID,
+        );
+        let expression = orna_artifact::client_plan::ClientExpressionNode::Await {
+            expression: Box::new(orna_artifact::client_plan::ClientExpressionNode::Resource {
+                operation: operation.clone(),
+            }),
+        };
+        let context = super::ClientExecutionContext {
+            pair,
+            function: target,
+            function_revision: target_revision,
+            parent_invocation_id: InvocationId::from_bytes([0x92; 16]),
+        };
+        let grants = capability::LocalCapabilityGrantSet::new();
+        let mut state = ClientStateStore::new();
+        let mut executor = StreamBatchTestExecutor { value: true };
+        let mut executor_slot: Option<&mut dyn ClientResourceExecutor> = Some(&mut executor);
+        let mut locals = std::collections::HashMap::new();
+        let value = super::evaluate_expression_plan(
+            &active,
+            &expression,
+            context,
+            item_type,
+            &[],
+            &[],
+            &grants,
+            &mut state,
+            0,
+            PrincipalId::from_bytes([0x93; 16]),
+            &mut executor_slot,
+            &mut locals,
+        )
+        .expect("stream AWAIT must be checked against its OPTION<LIST<T>> result");
+        assert_boolean_stream_batch(value, &[true]);
+
+        let local = LocalId::from_bytes([0x94; 16]);
+        let procedural = orna_artifact::client_plan::ProceduralClientPlan::new(
+            vec![orna_artifact::client_plan::ClientLocal::new(
+                local,
+                orna_standard::BOOLEAN_TYPE_ID,
+                orna_artifact::client_plan::ClientLocalKind::Resource(ResourceKind::Stream),
+            )],
+            vec![
+                orna_artifact::client_plan::ClientStatement::let_(
+                    local,
+                    orna_artifact::client_plan::ClientExpressionNode::Resource { operation: operation.clone() },
+                ),
+                orna_artifact::client_plan::ClientStatement::assignment(
+                    local,
+                    orna_artifact::client_plan::ClientExpressionNode::LocalRead { local },
+                ),
+            ],
+            orna_artifact::client_plan::ClientExpressionNode::Await {
+                expression: Box::new(orna_artifact::client_plan::ClientExpressionNode::LocalRead { local }),
+            },
+        );
+        let mut state = ClientStateStore::new();
+        let mut executor = StreamBatchTestExecutor { value: false };
+        let mut executor_slot: Option<&mut dyn ClientResourceExecutor> = Some(&mut executor);
+        let mut locals = std::collections::HashMap::new();
+        let value = super::evaluate_procedural_plan(
+            &active,
+            &procedural,
+            context,
+            item_type,
+            &[],
+            &[],
+            &grants,
+            &mut state,
+            0,
+            PrincipalId::from_bytes([0x93; 16]),
+            &mut executor_slot,
+            &mut locals,
+        )
+        .expect("procedural stream AWAIT must preserve the outer result shape");
+        assert_boolean_stream_batch(value, &[false]);
     }
 
     #[test]
@@ -5394,6 +6262,48 @@ mod tests {
             }),
         );
         assert_eq!(resource.status(), super::ClientResourceStatus::Loading);
+    }
+
+    #[test]
+    fn client_resource_resolves_compiled_verified_standard_server_target() {
+        let (active, _, pair, _) = version_two_client_call_active();
+        let argument = FunctionArgument::new(
+            orna_standard::STD_INVOKE_ECHO_PARAMETER_ID,
+            RuntimeValue::Integer(42),
+        )
+        .unwrap();
+        let standard = active
+            .catalogue_hash_context()
+            .standard()
+            .expect("version-two fixture pins the verified standard snapshot");
+        let target = InvocationTarget::verified_standard(
+            orna_standard::STD_INVOKE_ECHO_FUNCTION_ID,
+            pair,
+            standard.revision(),
+            orna_standard::STD_INVOKE_ECHO_FUNCTION_REVISION_ID,
+        );
+        let digest = ClientResourceKey::canonical_arguments_digest(
+            &active,
+            std::slice::from_ref(&argument),
+        )
+        .unwrap();
+        let key = ClientResourceKey::new(
+            target,
+            PrincipalId::from_bytes([0x7a; 16]),
+            digest,
+            active.catalogue_hash(),
+        );
+        let mut resource = ClientResource::new(
+            key,
+            ResolvedType::Scalar(StandardScalar::Integer),
+        );
+
+        let request = resource
+            .begin_request(&active, vec![argument])
+            .expect("the pinned standard resource target should validate");
+
+        assert_eq!(request.target(), target);
+        assert_eq!(request.expected_type(), ResolvedType::Scalar(StandardScalar::Integer));
     }
 
     #[test]
@@ -6222,6 +7132,7 @@ mod tests {
         assert_eq!(state.session(), &prior_session);
         assert_eq!(state.user(), &prior_user);
         let resource = state.resource(key).expect("pending resource remains in caller state");
+        let request_id = resource.request_id().expect("pending resource has request identity");
         assert_eq!(resource.key(), key);
         assert_eq!(resource.generation(), generation);
         assert_eq!(resource.status(), ClientResourceStatus::Loading);
@@ -6233,6 +7144,7 @@ mod tests {
             .apply_completion(
                 &active,
                 ClientResourceCompletion::Ready {
+                    request_id,
                     key,
                     generation,
                     value: RuntimeValue::Text("resumed".to_owned()),
@@ -8837,6 +9749,39 @@ mod tests {
         RevisionPair,
         FunctionRevisionId,
     ) {
+        version_two_server_active(FunctionReturn::Rows(vec![
+            FunctionReturnColumnDefinition::new(
+                "first",
+                0,
+                ResolvedType::value(orna_standard::BOOLEAN_TYPE_ID),
+            ),
+            FunctionReturnColumnDefinition::new(
+                "second",
+                1,
+                ResolvedType::value(orna_standard::BOOLEAN_TYPE_ID),
+            ),
+        ]))
+    }
+
+    fn version_two_server_stream_active() -> (
+        ActiveDatabaseRevision,
+        FunctionId,
+        RevisionPair,
+        FunctionRevisionId,
+    ) {
+        version_two_server_active(FunctionReturn::Stream(ResolvedType::value(
+            orna_standard::BOOLEAN_TYPE_ID,
+        )))
+    }
+
+    fn version_two_server_active(
+        return_type: FunctionReturn,
+    ) -> (
+        ActiveDatabaseRevision,
+        FunctionId,
+        RevisionPair,
+        FunctionRevisionId,
+    ) {
         let (initial, function_id, pair, function_revision_id) =
             version_two_active_with_artifact(
                 standard_v6(),
@@ -8852,18 +9797,7 @@ mod tests {
             prior_function.name().clone(),
             FunctionDomain::Server,
             Vec::new(),
-            FunctionReturn::Rows(vec![
-                FunctionReturnColumnDefinition::new(
-                    "first",
-                    0,
-                    ResolvedType::value(orna_standard::BOOLEAN_TYPE_ID),
-                ),
-                FunctionReturnColumnDefinition::new(
-                    "second",
-                    1,
-                    ResolvedType::value(orna_standard::BOOLEAN_TYPE_ID),
-                ),
-            ]),
+            return_type,
             function_revision_id,
             FunctionSecurity::Invoker,
             None,
@@ -8908,18 +9842,17 @@ mod tests {
         .unwrap()
         .with_semantic_hash_version(FunctionSemanticHashVersion::Version2);
         let mut origins = initial.origins().to_vec();
-        let FunctionReturn::Rows(columns) = function.return_type() else {
-            unreachable!("the multi-column fixture has a ROWS return");
-        };
-        origins.extend(columns.iter().map(|column| {
-            DefinitionOrigin::new(
-                DefinitionIdentity::FunctionReturnColumn {
-                    owner: function_id,
-                    ordinal: column.ordinal(),
-                },
-                prior_revision.declaration_origin(),
-            )
-        }));
+        if let FunctionReturn::Rows(columns) = function.return_type() {
+            origins.extend(columns.iter().map(|column| {
+                DefinitionOrigin::new(
+                    DefinitionIdentity::FunctionReturnColumn {
+                        owner: function_id,
+                        ordinal: column.ordinal(),
+                    },
+                    prior_revision.declaration_origin(),
+                )
+            }));
+        }
         let context = initial.catalogue_hash_context().clone();
         let catalogue_hash = catalogue_digest_with_context(
             &context,
@@ -9856,6 +10789,34 @@ mod tests {
     }
 
     #[test]
+    fn action_target_result_type_rejects_one_column_rows() {
+        let (active, function, pair, _) = version_one_active_with_shape(
+            FunctionDomain::Server,
+            Vec::new(),
+            FunctionReturn::Rows(vec![FunctionReturnColumnDefinition::new(
+                "value",
+                0,
+                ResolvedType::Named(TypeId::from_bytes([0x66; 16])),
+            )]),
+            FunctionSecurity::Invoker,
+            FunctionVolatility::Immutable,
+        );
+        let descriptor = ClientActionDescriptor::new(
+            ActionTargetDomain::Server,
+            function,
+            pair,
+            CallSiteId::from_bytes([0xfe; 16]),
+            Vec::new(),
+            TypeId::from_bytes([0x66; 16]),
+        );
+
+        assert_eq!(
+            action_target_result_type(&active, &descriptor),
+            Err(ClientActionError::ResultTypeMismatch)
+        );
+    }
+
+    #[test]
     fn action_payload_rejects_malformed_and_noncanonical_frames() {
         let (active, target, pair, _) = version_two_value_active(
             orna_standard::INTEGER_TYPE_ID,
@@ -10163,11 +11124,12 @@ mod tests {
         let mut resource = ClientResource::new(key, ResolvedType::Scalar(StandardScalar::Boolean));
         let request = resource.begin_request(&active, vec![]).unwrap();
         let generation = request.generation();
+        let request_id = request.request_id();
         let mut action_state = ClientActionState::default();
         action_state.set_resource(resource);
         assert_eq!(complete_client_action(&active, &mut action_state, request.pending()), Err(ClientActionError::Pending));
         assert_eq!(action_state.generation(), Some(generation));
-        let failed = ClientResourceCompletion::Failed { key, generation, code: "secret.internal.detail".to_owned() };
+        let failed = ClientResourceCompletion::Failed { request_id, key, generation, code: "secret.internal.detail".to_owned() };
         assert_eq!(complete_client_action(&active, &mut action_state, failed), Ok(ClientActionOutcome::Failed { code: ACTION_FAILURE_CODE.to_owned() }));
         assert_eq!(action_state.status(), ClientResourceStatus::Idle);
     }
@@ -10268,6 +11230,7 @@ mod tests {
                 &active,
                 &mut stale_state,
                 ClientResourceCompletion::Ready {
+                    request_id: request.request_id(),
                     key: wrong_key,
                     generation,
                     value: RuntimeValue::Boolean(true),
@@ -10277,21 +11240,25 @@ mod tests {
         );
         assert_eq!(stale_state.status(), ClientResourceStatus::Loading);
 
-        for completion in [
-            ClientResourceCompletion::Ready {
-                key,
-                generation,
-                value: RuntimeValue::Integer(1),
-            },
-            ClientResourceCompletion::Failed {
-                key,
-                generation,
-                code: String::new(),
-            },
-        ] {
+        for malformed_kind in [0_u8, 1_u8] {
             let mut resource = ClientResource::new(key, ResolvedType::Scalar(StandardScalar::Boolean));
             let request = resource.begin_request(&active, vec![]).unwrap();
             assert_eq!(request.generation(), generation);
+            let completion = if malformed_kind == 0 {
+                ClientResourceCompletion::Ready {
+                    request_id: request.request_id(),
+                    key,
+                    generation,
+                    value: RuntimeValue::Integer(1),
+                }
+            } else {
+                ClientResourceCompletion::Failed {
+                    request_id: request.request_id(),
+                    key,
+                    generation,
+                    code: String::new(),
+                }
+            };
             let mut action_state = ClientActionState::default();
             action_state.set_resource(resource);
             assert_eq!(
