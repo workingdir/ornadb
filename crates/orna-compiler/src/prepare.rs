@@ -3584,15 +3584,26 @@ fn signature_reference_sequence(
             ));
         }
     }
-    if let FunctionReturn::Rows(columns) = function.return_type() {
-        for column in columns {
-            if let ResolvedType::Reference { target } = column.resolved_type() {
+    match function.return_type() {
+        FunctionReturn::Rows(columns) => {
+            for column in columns {
+                if let ResolvedType::Reference { target } = column.resolved_type() {
+                    references.push((
+                        DefinitionReferenceKind::ObjectReference,
+                        DefinitionReferenceTarget::ObjectType(target),
+                    ));
+                }
+            }
+        }
+        FunctionReturn::Stream(element) => {
+            if let ResolvedType::Reference { target } = element {
                 references.push((
                     DefinitionReferenceKind::ObjectReference,
-                    DefinitionReferenceTarget::ObjectType(target),
+                    DefinitionReferenceTarget::ObjectType(*target),
                 ));
             }
         }
+        FunctionReturn::Single(_) => {}
     }
     references
 }
@@ -7900,6 +7911,30 @@ mod tests {
             MutationRecordFieldExpression, MutationRecordFieldExpressionKind, MutationValueType,
         },
     };
+
+    #[test]
+    fn stream_signature_reference_sequence_includes_reference_element() {
+        let target = TypeId::from_bytes([0xa1; 16]);
+        let function = FunctionDefinition::new(
+            FunctionId::from_bytes([0xa2; 16]),
+            QualifiedSemanticName::new(["app", "events"]).unwrap(),
+            FunctionDomain::Server,
+            Vec::new(),
+            FunctionReturn::Stream(ResolvedType::reference(target)),
+            FunctionRevisionId::from_bytes([0xa3; 16]),
+            FunctionSecurity::Invoker,
+            None,
+            FunctionVolatility::Stable,
+        );
+
+        assert_eq!(
+            signature_reference_sequence(&function),
+            vec![(
+                DefinitionReferenceKind::ObjectReference,
+                DefinitionReferenceTarget::ObjectType(target),
+            )],
+        );
+    }
 
     #[test]
     fn member_multiset_comparison_ignores_order_but_preserves_exact_multiplicity() {
