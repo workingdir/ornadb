@@ -1,4 +1,68 @@
-use std::time::SystemTime;
+use std::{
+    sync::{Arc, Mutex},
+    time::SystemTime,
+};
+
+const RESOURCE_CANCELLATION_RUNNING: u8 = 0;
+const RESOURCE_CANCELLATION_REQUESTED: u8 = 1;
+const RESOURCE_CANCELLATION_COMMIT_STARTED: u8 = 2;
+const RESOURCE_CANCELLATION_COMMITTED: u8 = 3;
+
+/// Coordinates cancellation with the terminal resource commit.
+///
+/// The state transition is the resource cancellation linearisation point:
+/// cancellation wins only while the request is still running. Once commit
+/// starts, the terminal result wins even if a later cancellation arrives.
+#[derive(Clone, Debug)]
+pub struct ResourceCancellation {
+    state: Arc<Mutex<u8>>,
+}
+
+impl ResourceCancellation {
+    /// Creates a cancellation state for one resource request.
+    pub fn new() -> Self {
+        Self {
+            state: Arc::new(Mutex::new(RESOURCE_CANCELLATION_RUNNING)),
+        }
+    }
+
+    /// Requests cancellation and returns whether this request won the race.
+    pub fn request_cancel(&self) -> bool {
+        let mut state = self
+            .state
+            .lock()
+            .expect("resource cancellation state is not poisoned");
+        if *state != RESOURCE_CANCELLATION_RUNNING {
+            return false;
+        }
+        *state = RESOURCE_CANCELLATION_REQUESTED;
+        true
+    }
+
+    /// Starts the terminal commit if cancellation has not won.
+    pub fn try_begin_commit(&self) -> bool {
+        let mut state = self
+            .state
+            .lock()
+            .expect("resource cancellation state is not poisoned");
+        if *state != RESOURCE_CANCELLATION_RUNNING {
+            return false;
+        }
+        *state = RESOURCE_CANCELLATION_COMMIT_STARTED;
+        true
+    }
+
+    /// Records that the terminal transaction commit completed.
+    pub fn commit_finished(&self) {
+        let mut state = self
+            .state
+            .lock()
+            .expect("resource cancellation state is not poisoned");
+        if *state == RESOURCE_CANCELLATION_COMMIT_STARTED {
+            *state = RESOURCE_CANCELLATION_COMMITTED;
+        }
+    }
+}
 
 use orna_client::{
     ClientExecutionError, ClientExecutionResult, ClientResourceExecutor, ClientStateStore,
@@ -6584,5 +6648,23 @@ mod tests {
         assert_eq!(failure.message(), "invocation target failed");
         assert!(failure.details().is_none());
         assert_eq!(failure.retryability(), InvocationRetryability::Unknown);
+    }
+    #[test]
+    fn resource_cancellation_wins_before_terminal_commit() {
+        let cancellation = ResourceCancellation::new();
+
+        assert!(cancellation.request_cancel());
+        assert!(!cancellation.try_begin_commit());
+        assert!(!cancellation.request_cancel());
+    }
+
+    #[test]
+    fn resource_terminal_commit_wins_over_late_cancellation() {
+        let cancellation = ResourceCancellation::new();
+
+        assert!(cancellation.try_begin_commit());
+        assert!(!cancellation.request_cancel());
+        cancellation.commit_finished();
+        assert!(!cancellation.try_begin_commit());
     }
 }
