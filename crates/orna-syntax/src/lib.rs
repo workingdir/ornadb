@@ -342,6 +342,13 @@ pub struct RowsColumnDeclaration {
 pub enum FunctionReturnType {
     /// One scalar or reference value.
     Single(TypeSpecification),
+    /// Zero or more values of one streamed element type.
+    Stream {
+        /// The streamed element type.
+        element: TypeSpecification,
+        /// The span from `STREAM` through the closing angle bracket.
+        span: SourceSpan,
+    },
     /// Zero or more records with the declared fields.
     Rows {
         /// The returned fields in source order.
@@ -2188,7 +2195,9 @@ mod tests {
                 assert_eq!(columns[1].order, 1);
                 assert_named_type(&columns[1].type_specification, "TEXT");
             }
-            FunctionReturnType::Single(_) => panic!("tasks.overdue must return rows"),
+            FunctionReturnType::Single(_) | FunctionReturnType::Stream { .. } => {
+                panic!("tasks.overdue must return rows")
+            }
         }
         assert_eq!(function.security, Some(FunctionSecurity::Invoker));
         assert_eq!(function.transaction, Some(FunctionTransaction::ReadOnly));
@@ -2378,7 +2387,9 @@ mod tests {
             FunctionReturnType::Single(type_specification) => {
                 assert_reference_type(type_specification, "tasks", "task", "");
             }
-            FunctionReturnType::Rows { .. } => panic!("tasks.reopen must return one reference"),
+            FunctionReturnType::Rows { .. } | FunctionReturnType::Stream { .. } => {
+                panic!("tasks.reopen must return one reference")
+            }
         }
         assert_eq!(
             parsed.server_functions()[0].security,
@@ -2538,7 +2549,9 @@ mod tests {
                     "BINARY LARGE OBJECT",
                 );
             }
-            FunctionReturnType::Rows { .. } => panic!("files.encode must return one value"),
+            FunctionReturnType::Rows { .. } | FunctionReturnType::Stream { .. } => {
+                panic!("files.encode must return one value")
+            }
         }
 
         let describe = &parsed.server_functions()[1];
@@ -2555,7 +2568,9 @@ mod tests {
                     "BINARY LARGE OBJECT",
                 );
             }
-            FunctionReturnType::Single(_) => panic!("files.describe must return rows"),
+            FunctionReturnType::Single(_) | FunctionReturnType::Stream { .. } => {
+                panic!("files.describe must return rows")
+            }
         }
     }
 
@@ -2728,6 +2743,40 @@ mod tests {
                 "{written_type}: {:?}",
                 parsed.diagnostics()
             );
+            assert_eq!(parsed.diagnostics()[0].message, expected, "{written_type}");
+        }
+    }
+
+    #[test]
+    fn parses_stream_return_type_losslessly_with_complete_span() {
+        let source = "CREATE SERVER FUNCTION tasks.events() RETURNS STREAM< /* kept */ REF tasks.event > AS SELECT REF(e) FROM tasks.event e;";
+        let parsed = parse(source);
+
+        assert!(parsed.diagnostics().is_empty());
+        assert_eq!(parsed.syntax().text(), source);
+        let FunctionReturnType::Stream { element, span } = &parsed.server_functions()[0].return_type else {
+            panic!("events must return a stream");
+        };
+        assert_eq!(&source[span.start..span.end], "STREAM< /* kept */ REF tasks.event >");
+        assert_reference_type(element, "tasks", "event", "");
+    }
+
+    #[test]
+    fn malformed_stream_return_types_keep_source_and_recover() {
+        for (written_type, expected) in [
+            ("STREAM", "expected '<' after type constructor"),
+            ("STREAM<>", "expected a field type"),
+            ("STREAM<TEXT", "expected '>' to close type constructor"),
+        ] {
+            let source = format!(
+                "CREATE SERVER FUNCTION tasks.bad() RETURNS {written_type} AS SELECT TRUE;CREATE SCHEMA recovered;"
+            );
+            let parsed = parse(&source);
+
+            assert_eq!(parsed.syntax().text(), source, "{written_type}");
+            assert!(parsed.server_functions().is_empty(), "{written_type}");
+            assert_eq!(parsed.schemas().len(), 1, "{written_type}");
+            assert_eq!(parsed.diagnostics().len(), 1, "{written_type}: {:?}", parsed.diagnostics());
             assert_eq!(parsed.diagnostics()[0].message, expected, "{written_type}");
         }
     }
