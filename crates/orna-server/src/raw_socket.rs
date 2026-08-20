@@ -62,7 +62,7 @@ const SERVER_ACTIVE_ACK: [u8; 12] = *b"ORNA\x81\x00\x00\x03\x00\x00\x00\x00";
 const SERVER_REGISTERED_ACK: [u8; 12] = *b"ORNA\x81\x00\x00\x04\x00\x00\x00\x00";
 const SERVER_CONSTRUCTED_ACK: [u8; 12] = *b"ORNA\x81\x00\x00\x05\x00\x00\x00\x00";
 const FRAME_HEADER_LENGTH: usize = 18;
-const RESOURCE_MARKER: &[u8; 4] = b"ORNA";
+const RESOURCE_MARKER: &[u8; 15] = b"ORNA-RESOURCE/1";
 const RESOURCE_HEADER_LENGTH: usize = 21;
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
 const FRAME_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
@@ -3975,6 +3975,38 @@ mod tests {
             Err(LocalRawSocketError::PayloadCapacity)
         ));
         drop(payload);
+    }
+
+    #[tokio::test]
+    async fn ordinary_versioned_raw_frame_uses_raw_decoder() {
+        let resources = LocalRawSocketResources::new();
+        let expected = ClientFrame::CallRawStart {
+            stream: 1,
+            function: FUNCTION,
+        };
+        let encoded = encode_client_frame(&expected).expect("raw frame encodes");
+        assert_eq!(&encoded[..4], b"ORF1");
+        let (mut server, mut client) = UnixStream::pair().expect("Unix stream pair");
+        client
+            .write_all(&encoded)
+            .await
+            .expect("raw frame writes");
+
+        let Some(IncomingFrame::Raw(RawIncomingFrame {
+            frame,
+            reservation,
+        })) = read_client_frame(
+            &mut server,
+            &resources,
+            Instant::now() + Duration::from_secs(1),
+        )
+        .await
+        .expect("raw frame reads")
+        else {
+            panic!("ordinary frame must use the raw decoder");
+        };
+        assert_eq!(frame, expected);
+        drop(reservation);
     }
 
     fn test_session() -> AuthenticatedSession {
