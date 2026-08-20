@@ -2,7 +2,10 @@
 
 use std::{collections::HashMap, error::Error, fmt, hash::Hash};
 
-use orna_artifact::{client_plan::{ActionTargetDomain, ResourceKind}, server_parameter_echo::ServerParameterEchoError};
+use orna_artifact::{
+    client_plan::{ActionTargetDomain, ResourceKind},
+    server_parameter_echo::ServerParameterEchoError,
+};
 use orna_core::{
     CallSiteId, CatalogueRevisionId, FieldId, FunctionId, FunctionRevisionId, ParameterId,
     SchemaId, SourceUnitId, StandardLibraryRevisionId, StateSlotId, TypeBindingId, TypeId,
@@ -1233,13 +1236,27 @@ pub(crate) struct CheckedActionOperation {
 }
 
 impl CheckedActionOperation {
-    pub(crate) const fn target_domain(&self) -> ActionTargetDomain { self.target_domain }
-    pub(crate) const fn target(&self) -> CheckedFunctionId { self.target }
-    pub(crate) const fn call_site(&self) -> CallSiteId { self.call_site }
-    pub(crate) fn arguments(&self) -> &[(CheckedParameterId, CheckedClientExpression)] { &self.arguments }
-    pub(crate) const fn result_type(&self) -> SemanticType<CheckedTypeId> { self.result_type }
-    pub(crate) const fn standard_result_type(&self) -> Option<TypeId> { self.standard_result_type }
-    pub(crate) fn location(&self) -> &SourceLocation { &self.location }
+    pub(crate) const fn target_domain(&self) -> ActionTargetDomain {
+        self.target_domain
+    }
+    pub(crate) const fn target(&self) -> CheckedFunctionId {
+        self.target
+    }
+    pub(crate) const fn call_site(&self) -> CallSiteId {
+        self.call_site
+    }
+    pub(crate) fn arguments(&self) -> &[(CheckedParameterId, CheckedClientExpression)] {
+        &self.arguments
+    }
+    pub(crate) const fn result_type(&self) -> SemanticType<CheckedTypeId> {
+        self.result_type
+    }
+    pub(crate) const fn standard_result_type(&self) -> Option<TypeId> {
+        self.standard_result_type
+    }
+    pub(crate) fn location(&self) -> &SourceLocation {
+        &self.location
+    }
 }
 
 /// The checked argument source of one CLIENT capability requirement.
