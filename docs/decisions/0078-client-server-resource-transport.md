@@ -26,6 +26,8 @@ stream_id: u64
 request_id: InvocationId
 parent_invocation_id: InvocationId
 call_site_id: CallSiteId
+state_profile: length-delimited UTF-8 text
+function_instance_key: length-delimited UTF-8 text
 target_function_id: FunctionId
 target_revision: RevisionPair
 generation: u64
@@ -38,8 +40,11 @@ byte_window: u64
 
 `stream_id` is connection-local. `request_id` identifies the nested invocation
 and is globally unique within the active invocation history. `parent_invocation_id`
-and `call_site_id` provide correlation and instance context. `generation` is the
-monotonic local resource generation.
+and `call_site_id` provide correlation and instance context. `state_profile` and
+`function_instance_key` carry the inherited root state context as canonical
+length-delimited UTF-8 text. Empty values select the default profile or
+instance. NUL bytes are invalid. `generation` is the monotonic local resource
+generation.
 
 The request does not contain a principal, role, `run_as` value, capability
 list, credential, retry policy, unchecked result type, or client-supplied
