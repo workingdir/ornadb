@@ -54,7 +54,7 @@ use tokio::{
     },
     sync::{OwnedSemaphorePermit, Semaphore, mpsc, watch},
     task::{JoinError, JoinHandle, JoinSet},
-    time::{Instant, timeout_at},
+    time::{Instant, timeout, timeout_at},
 };
 
 use crate::{RawClientDispatch, authenticate_local_stream};
@@ -77,7 +77,26 @@ const FRAME_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 const SHARED_PAYLOAD_BYTES: usize = 256 * 1024 * 1024;
 const KERNEL_OPERATION_LIMIT: usize = 64;
 const CONNECTION_LIMIT: usize = 64;
+// ResourceProtocolConnection admits at most CONNECTION_LIMIT live resources,
+// and the scheduler permits at most one completion in flight per live stream.
+const RESOURCE_COMPLETION_CHANNEL_CAPACITY: usize = CONNECTION_LIMIT;
+const RESOURCE_PRODUCER_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 const SOCKET_NAME: &str = "orna.sock";
+
+#[derive(Clone, Default)]
+struct ResourceReadState {
+    active: Arc<AtomicBool>,
+}
+
+impl ResourceReadState {
+    fn set_active(&self, active: bool) {
+        self.active.store(active, Ordering::SeqCst);
+    }
+
+    fn is_active(&self) -> bool {
+        self.active.load(Ordering::SeqCst)
+    }
+}
 
 #[derive(Clone)]
 enum RawProtocolVersion {
@@ -1262,7 +1281,7 @@ fn schedule_resource_pulls(
     connection: &ResourceProtocolConnection,
     pending: &mut BTreeMap<u64, ResourceDispatchCompletion>,
     tasks: &mut BTreeMap<u64, ResourceTask>,
-    sender: &mpsc::UnboundedSender<(u64, ResourceDispatchCompletion)>,
+    sender: &mpsc::Sender<(u64, ResourceDispatchCompletion)>,
 ) {
     let stream_ids: Vec<_> = pending.keys().copied().collect();
     for stream_id in stream_ids {
@@ -1316,7 +1335,7 @@ fn schedule_resource_pulls(
             } else {
                 completion
             };
-            let _ = sender.send((stream_id, completion));
+            let _ = sender.send((stream_id, completion)).await;
         });
         task.handle = handle;
         task.active = true;
@@ -1447,9 +1466,16 @@ async fn drive_versioned_authenticated_stream_until_shutdown<D: DispatchService>
 ) -> Result<(), LocalRawSocketError> {
     let (reader, mut writer) = stream.into_split();
     let (frame_sender, mut frame_receiver) = mpsc::channel(64);
-    let reader_task = spawn_frame_reader(reader, version.clone(), resources.clone(), frame_sender);
+    let resource_read_state = ResourceReadState::default();
+    let reader_task = spawn_frame_reader(
+        reader,
+        version.clone(),
+        resources.clone(),
+        resource_read_state.clone(),
+        frame_sender,
+    );
     let (resource_completion_sender, mut resource_completion_receiver) =
-        mpsc::unbounded_channel::<(u64, ResourceDispatchCompletion)>();
+        mpsc::channel::<(u64, ResourceDispatchCompletion)>(RESOURCE_COMPLETION_CHANNEL_CAPACITY);
     let mut connection = ProtocolConnection::new();
     let mut resource_connection = ResourceProtocolConnection::new();
     let mut retained_payload = BTreeMap::<u64, Vec<PayloadReservation>>::new();
@@ -1476,6 +1502,7 @@ async fn drive_versioned_authenticated_stream_until_shutdown<D: DispatchService>
             Ok(false) => break Ok(()),
             Err(error) => break Err(error),
         }
+        resource_read_state.set_active(resource_connection.live_resources() != 0);
         schedule_resource_pulls(
             &resource_connection,
             &mut resource_pending,
@@ -1580,6 +1607,7 @@ async fn drive_versioned_authenticated_stream_until_shutdown<D: DispatchService>
                         .await
                     }
                 };
+                resource_read_state.set_active(resource_connection.live_resources() != 0);
                 match result {
                     Ok(true) => {}
                     Ok(false) => break Ok(()),
@@ -1628,16 +1656,64 @@ async fn drive_versioned_authenticated_stream_until_shutdown<D: DispatchService>
     for task in resource_tasks.values() {
         task.cancellation.request_cancel();
     }
-    for (_, task) in std::mem::take(&mut resource_tasks) {
-        let _ = task.handle.await;
-    }
     resource_connection.shutdown();
+    // Late completions can outnumber currently live resources after client
+    // cancellation frees a stream slot. Drain them while the dispatch tasks
+    // join so a bounded completion channel cannot block shutdown.
+    let mut resource_shutdown = JoinSet::new();
+    for (_, task) in std::mem::take(&mut resource_tasks) {
+        resource_shutdown.spawn(async move {
+            let _ = task.handle.await;
+        });
+    }
+    while !resource_shutdown.is_empty() {
+        tokio::select! {
+            joined = resource_shutdown.join_next() => {
+                let _ = joined;
+            }
+            completion = resource_completion_receiver.recv() => {
+                let Some((stream_id, completion)) = completion else {
+                    continue;
+                };
+                if completion.producer.is_some() {
+                    if let Some(producer) = completion.producer.as_ref() {
+                        producer.cancel();
+                    }
+                    resource_pending.insert(stream_id, completion);
+                }
+            }
+        }
+    }
     drain_resource_completions(
         &mut resource_completion_receiver,
         &mut resource_pending,
         &mut resource_cancelled,
         &mut resource_tasks,
     );
+    // An accepted producer can be retained in a credit-starved pending
+    // completion after its dispatch task has already finished. Cancel it
+    // explicitly before dropping the connection so its transaction releases
+    // deterministically rather than relying on sender drop during unwind.
+    let mut producer_shutdown = JoinSet::new();
+    for completion in resource_pending.values_mut() {
+        if let Some(producer) = completion.producer.take() {
+            producer.cancel();
+            producer_shutdown.spawn(async move {
+                let _ = timeout(
+                    RESOURCE_PRODUCER_SHUTDOWN_TIMEOUT,
+                    producer.pull(ResourceCredit {
+                        item_count: 0,
+                        byte_count: 0,
+                    }),
+                )
+                .await;
+            });
+        }
+    }
+    while let Some(joined) = producer_shutdown.join_next().await {
+        let _ = joined;
+    }
+    resource_pending.clear();
     let mut drain_failure = None;
     while let Some(completion) = tasks.join_next().await {
         if let Err(source) = completion {
@@ -1651,7 +1727,7 @@ async fn drive_versioned_authenticated_stream_until_shutdown<D: DispatchService>
     }
 }
 fn drain_resource_completions(
-    completion_receiver: &mut mpsc::UnboundedReceiver<(u64, ResourceDispatchCompletion)>,
+    completion_receiver: &mut mpsc::Receiver<(u64, ResourceDispatchCompletion)>,
     pending: &mut BTreeMap<u64, ResourceDispatchCompletion>,
     cancelled: &mut BTreeMap<u64, orna_protocol::ResourceCancel>,
     tasks: &mut BTreeMap<u64, ResourceTask>,
@@ -1741,8 +1817,8 @@ async fn handle_resource_frame<D: DispatchService>(
     cancelled: &mut BTreeMap<u64, orna_protocol::ResourceCancel>,
     tasks: &mut BTreeMap<u64, ResourceTask>,
     requests: &mut BTreeMap<u64, ResourceRequest>,
-    completion_sender: &mpsc::UnboundedSender<(u64, ResourceDispatchCompletion)>,
-    completion_receiver: &mut mpsc::UnboundedReceiver<(u64, ResourceDispatchCompletion)>,
+    completion_sender: &mpsc::Sender<(u64, ResourceDispatchCompletion)>,
+    completion_receiver: &mut mpsc::Receiver<(u64, ResourceDispatchCompletion)>,
     _socket: &mut OwnedWriteHalf,
     _shutdown: &mut watch::Receiver<bool>,
 ) -> Result<bool, LocalRawSocketError> {
@@ -1891,7 +1967,7 @@ async fn handle_resource_frame<D: DispatchService>(
                 } else {
                     completion
                 };
-                let _ = sender.send((stream_id, completion));
+                let _ = sender.send((stream_id, completion)).await;
             });
             requests.insert(stream_id, request.clone());
             tasks.insert(
@@ -2137,15 +2213,17 @@ fn spawn_frame_reader(
     mut reader: OwnedReadHalf,
     version: RawProtocolVersion,
     resources: LocalRawSocketResources,
+    resource_read_state: ResourceReadState,
     sender: mpsc::Sender<Result<Option<IncomingFrame>, LocalRawSocketError>>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         loop {
-            let frame = read_versioned_client_frame(
+            let frame = read_versioned_client_frame_with_resource_state(
                 &mut reader,
                 &version,
                 &resources,
                 Instant::now() + FRAME_IDLE_TIMEOUT,
+                &resource_read_state,
             )
             .await;
             let terminal = !matches!(frame, Ok(Some(_)));
@@ -2156,6 +2234,43 @@ fn spawn_frame_reader(
     })
 }
 
+#[derive(Clone, Copy)]
+enum FrameReadMode<'a> {
+    #[cfg(test)]
+    Fixed(Instant),
+    ResourceAware {
+        deadline: Instant,
+        state: &'a ResourceReadState,
+    },
+}
+
+impl FrameReadMode<'_> {
+    fn deadline(self) -> Instant {
+        match self {
+            #[cfg(test)]
+            Self::Fixed(deadline) => deadline,
+            Self::ResourceAware { deadline, .. } => deadline,
+        }
+    }
+
+    fn resource_active(self) -> bool {
+        match self {
+            #[cfg(test)]
+            Self::Fixed(_) => false,
+            Self::ResourceAware { state, .. } => state.is_active(),
+        }
+    }
+}
+
+fn resource_idle_timeout_is_retryable(
+    resource_active: bool,
+    header_bytes: usize,
+    deadline: Instant,
+    now: Instant,
+) -> bool {
+    resource_active && header_bytes == 0 && now >= deadline
+}
+
 #[cfg(test)]
 async fn read_client_frame<R: AsyncRead + Unpin>(
     stream: &mut R,
@@ -2164,15 +2279,48 @@ async fn read_client_frame<R: AsyncRead + Unpin>(
 ) -> Result<Option<IncomingFrame>, LocalRawSocketError> {
     read_versioned_client_frame(stream, &RawProtocolVersion::One, resources, deadline).await
 }
+
+#[cfg(test)]
 async fn read_versioned_client_frame<R: AsyncRead + Unpin>(
     stream: &mut R,
     version: &RawProtocolVersion,
     resources: &LocalRawSocketResources,
     deadline: Instant,
 ) -> Result<Option<IncomingFrame>, LocalRawSocketError> {
+    read_versioned_client_frame_with_mode(
+        stream,
+        version,
+        resources,
+        FrameReadMode::Fixed(deadline),
+    )
+    .await
+}
+
+async fn read_versioned_client_frame_with_resource_state<R: AsyncRead + Unpin>(
+    stream: &mut R,
+    version: &RawProtocolVersion,
+    resources: &LocalRawSocketResources,
+    deadline: Instant,
+    state: &ResourceReadState,
+) -> Result<Option<IncomingFrame>, LocalRawSocketError> {
+    read_versioned_client_frame_with_mode(
+        stream,
+        version,
+        resources,
+        FrameReadMode::ResourceAware { deadline, state },
+    )
+    .await
+}
+
+async fn read_versioned_client_frame_with_mode<R: AsyncRead + Unpin>(
+    stream: &mut R,
+    version: &RawProtocolVersion,
+    resources: &LocalRawSocketResources,
+    mode: FrameReadMode<'_>,
+) -> Result<Option<IncomingFrame>, LocalRawSocketError> {
     let mut header = [0_u8; RESOURCE_HEADER_LENGTH];
-    let Some(()) =
-        read_header_before(stream, &mut header[..RESOURCE_MARKER.len()], deadline).await?
+    let Some(frame_deadline) =
+        read_header_before(stream, &mut header[..RESOURCE_MARKER.len()], mode).await?
     else {
         return Ok(None);
     };
@@ -2185,7 +2333,7 @@ async fn read_versioned_client_frame<R: AsyncRead + Unpin>(
     read_exact_before(
         stream,
         &mut header[RESOURCE_MARKER.len()..header_length],
-        deadline,
+        frame_deadline,
         LocalRawSocketError::FrameTimeout,
     )
     .await?;
@@ -2210,7 +2358,7 @@ async fn read_versioned_client_frame<R: AsyncRead + Unpin>(
     read_exact_before(
         stream,
         &mut encoded[header_length..],
-        deadline,
+        frame_deadline,
         LocalRawSocketError::FrameTimeout,
     )
     .await?;
@@ -2233,14 +2381,28 @@ async fn read_versioned_client_frame<R: AsyncRead + Unpin>(
 async fn read_header_before<R: AsyncRead + Unpin>(
     stream: &mut R,
     header: &mut [u8],
-    deadline: Instant,
-) -> Result<Option<()>, LocalRawSocketError> {
+    mode: FrameReadMode<'_>,
+) -> Result<Option<Instant>, LocalRawSocketError> {
     let mut filled = 0;
+    let mut deadline = mode.deadline();
     while filled < header.len() {
-        let read = timeout_at(deadline, stream.read(&mut header[filled..]))
-            .await
-            .map_err(|_| LocalRawSocketError::FrameTimeout)?
-            .map_err(|source| LocalRawSocketError::Io { source })?;
+        let read = match timeout_at(deadline, stream.read(&mut header[filled..])).await {
+            Ok(read) => read.map_err(|source| LocalRawSocketError::Io { source })?,
+            Err(_)
+                if resource_idle_timeout_is_retryable(
+                    mode.resource_active(),
+                    filled,
+                    deadline,
+                    Instant::now(),
+                ) => {
+                // A live resource may be waiting indefinitely for client credit.
+                // Once a frame has started, the fresh deadline below bounds the
+                // remainder and prevents an incomplete frame from pinning a task.
+                deadline = Instant::now() + FRAME_IDLE_TIMEOUT;
+                continue;
+            }
+            Err(_) => return Err(LocalRawSocketError::FrameTimeout),
+        };
         if read == 0 {
             if filled == 0 {
                 return Ok(None);
@@ -2252,9 +2414,12 @@ async fn read_header_before<R: AsyncRead + Unpin>(
                 ),
             });
         }
+        if filled == 0 && mode.resource_active() {
+            deadline = Instant::now() + FRAME_IDLE_TIMEOUT;
+        }
         filled += read;
     }
-    Ok(Some(()))
+    Ok(Some(deadline))
 }
 
 async fn read_exact_before<R: AsyncRead + Unpin>(
@@ -2951,6 +3116,74 @@ mod tests {
     }
 
     #[test]
+    fn resource_completion_channel_is_bounded_by_live_resource_limit() {
+        let (sender, mut receiver) =
+            mpsc::channel::<(u64, ResourceDispatchCompletion)>(
+                RESOURCE_COMPLETION_CHANNEL_CAPACITY,
+            );
+        assert_eq!(sender.max_capacity(), RESOURCE_COMPLETION_CHANNEL_CAPACITY);
+        for stream_id in 0..RESOURCE_COMPLETION_CHANNEL_CAPACITY as u64 {
+            sender
+                .try_send((
+                    stream_id,
+                    ResourceDispatchCompletion {
+                        actions: VecDeque::new(),
+                        producer: None,
+                        producer_waiting_bytes: None,
+                    },
+                ))
+                .expect("one completion fits per live resource");
+        }
+        assert_eq!(sender.capacity(), 0);
+        assert!(matches!(
+            sender.try_send((
+                RESOURCE_COMPLETION_CHANNEL_CAPACITY as u64,
+                ResourceDispatchCompletion {
+                    actions: VecDeque::new(),
+                    producer: None,
+                    producer_waiting_bytes: None,
+                },
+            )),
+            Err(mpsc::error::TrySendError::Full(_))
+        ));
+        for _ in 0..RESOURCE_COMPLETION_CHANNEL_CAPACITY {
+            receiver.try_recv().expect("bounded completions remain queued");
+        }
+    }
+
+    #[test]
+    fn credit_starved_resource_wait_retries_idle_only_before_frame_start() {
+        let now = Instant::now();
+        let expired = now - FRAME_IDLE_TIMEOUT;
+        let state = ResourceReadState::default();
+        assert!(!resource_idle_timeout_is_retryable(
+            state.is_active(),
+            0,
+            expired,
+            now,
+        ));
+        state.set_active(true);
+        assert!(resource_idle_timeout_is_retryable(
+            state.is_active(),
+            0,
+            expired,
+            now,
+        ));
+        assert!(!resource_idle_timeout_is_retryable(
+            state.is_active(),
+            1,
+            expired,
+            now,
+        ));
+        assert!(!resource_idle_timeout_is_retryable(
+            state.is_active(),
+            0,
+            now + FRAME_IDLE_TIMEOUT,
+            now,
+        ));
+    }
+
+    #[test]
     fn handshake_bytes_and_listener_budgets_are_exact() {
         assert_eq!(CLIENT_HELLO, *b"ORNA\x01\x00\x00\x01\x00\x00\x00\x00");
         assert_eq!(
@@ -3118,7 +3351,7 @@ mod tests {
         let (server, mut client) = UnixStream::pair().unwrap();
         let (_reader, mut writer) = server.into_split();
         let (completion_sender, mut completion_receiver) =
-            mpsc::unbounded_channel::<(u64, ResourceDispatchCompletion)>();
+            mpsc::channel::<(u64, ResourceDispatchCompletion)>(RESOURCE_COMPLETION_CHANNEL_CAPACITY);
         let mut connection = ResourceProtocolConnection::new();
         connection
             .receive(ResourceClientFrame::Request(request.clone()))
@@ -3593,7 +3826,7 @@ mod tests {
         let (server, _client) = UnixStream::pair().unwrap();
         let (_reader, mut writer) = server.into_split();
         let (completion_sender, mut completion_receiver) =
-            mpsc::unbounded_channel::<(u64, ResourceDispatchCompletion)>();
+            mpsc::channel::<(u64, ResourceDispatchCompletion)>(RESOURCE_COMPLETION_CHANNEL_CAPACITY);
         let mut connection = ResourceProtocolConnection::new();
         let mut pending = BTreeMap::new();
         let mut cancelled = BTreeMap::new();
@@ -3635,6 +3868,7 @@ mod tests {
                     producer_waiting_bytes: None,
                 },
             ))
+            .await
             .unwrap();
 
         handle_resource_frame(
@@ -3691,7 +3925,7 @@ mod tests {
         let (server, mut client) = UnixStream::pair().unwrap();
         let (_reader, mut writer) = server.into_split();
         let (completion_sender, mut completion_receiver) =
-            mpsc::unbounded_channel::<(u64, ResourceDispatchCompletion)>();
+            mpsc::channel::<(u64, ResourceDispatchCompletion)>(RESOURCE_COMPLETION_CHANNEL_CAPACITY);
         let mut connection = ResourceProtocolConnection::new();
         let mut pending = BTreeMap::new();
         let mut cancelled = BTreeMap::new();
@@ -3771,6 +4005,7 @@ mod tests {
                     producer_waiting_bytes: None,
                 },
             ))
+            .await
             .unwrap();
         assert!(
             drain_resource_completions(
