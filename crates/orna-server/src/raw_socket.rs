@@ -1538,9 +1538,15 @@ async fn handle_resource_frame<D: DispatchService>(
                     });
                 };
                 if !task.cancellation.request_cancel() {
-                    return Ok(true);
+                    // A commit that has started owns the terminal result; keep the
+                    // protocol stream live so its completion frames remain deliverable.
+                    committed_completion = !task.cancellation.is_requested();
+                    if !committed_completion {
+                        return Ok(true);
+                    }
+                } else {
+                    cancellation_won = true;
                 }
-                cancellation_won = true;
             }
         }
     }
@@ -3096,7 +3102,7 @@ mod tests {
     async fn committing_resource_cancellation_does_not_terminalise_stream() {
         let (version, revision) = constructed_test_version();
         let request = resource_request(revision);
-        let (server, _client) = UnixStream::pair().unwrap();
+        let (server, mut client) = UnixStream::pair().unwrap();
         let (_reader, mut writer) = server.into_split();
         let (completion_sender, mut completion_receiver) =
             mpsc::unbounded_channel::<(u64, ResourceDispatchCompletion)>();
@@ -3164,6 +3170,7 @@ mod tests {
         .unwrap();
 
         assert!(cancelled.is_empty());
+        assert_eq!(connection.live_resources(), 1);
         tasks
             .remove(&request.stream_id)
             .expect("resource task")
@@ -3201,6 +3208,29 @@ mod tests {
         .await
         .unwrap());
         assert!(pending.is_empty());
+        let (active, registry) = match &version {
+            RawProtocolVersion::Constructed(active, registry) => (active.as_ref(), registry.as_ref()),
+            _ => unreachable!("constructed test version"),
+        };
+        assert!(matches!(
+            timeout(Duration::from_secs(1), read_resource_server_frame(&mut client, active, registry)).await,
+            Ok(ResourceServerFrame::Accepted(frame))
+                if frame.stream_id == request.stream_id && frame.request_id == request.request_id
+        ));
+        assert!(matches!(
+            timeout(Duration::from_secs(1), read_resource_server_frame(&mut client, active, registry)).await,
+            Ok(ResourceServerFrame::Values(frame))
+                if frame.stream_id == request.stream_id
+                    && frame.request_id == request.request_id
+                    && frame.values == vec![RuntimeValue::Integer(7)]
+        ));
+        assert!(matches!(
+            timeout(Duration::from_secs(1), read_resource_server_frame(&mut client, active, registry)).await,
+            Ok(ResourceServerFrame::Completed(frame))
+                if frame.stream_id == request.stream_id
+                    && frame.request_id == request.request_id
+                    && frame.total_items == 1
+        ));
     }
 
 
