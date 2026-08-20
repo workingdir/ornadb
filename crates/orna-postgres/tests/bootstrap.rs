@@ -49,6 +49,7 @@ const EXPECTED_KERNEL_TABLES: &[&str] = &[
     "invocation_audit_events",
     "invocation_target_authorities",
     "resource_audit_events",
+    "resource_request_history",
     "schema_migrations",
     "security_audit_events",
     "security_execute_grants",
@@ -238,6 +239,11 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         "stream function returns",
         include_str!("../migrations/0033_stream_function_returns.sql"),
     ),
+    (
+        34,
+        "resource request identity history",
+        include_str!("../migrations/0034_resource_request_history.sql"),
+    ),
 ];
 const MIGRATION_DATA_STEP_SEPARATOR: &[u8] = b"\0orna.kernel.migration-step\0";
 const CANONICAL_HASH_V1_EMPTY_SEED_STEP: &[u8] = b"canonical-hash-v1-empty-seed/v1";
@@ -330,6 +336,7 @@ fn is_later_catalogue_relation(relation: &str) -> bool {
         || relation.starts_with("definition_references_record_")
         || relation.starts_with("invocation_")
         || relation.starts_with("resource_audit_")
+        || relation.starts_with("resource_request_")
         || relation.starts_with("inspect_")
         || relation.starts_with("standard_function_")
         || relation.starts_with("standard_catalogue_function")
@@ -883,8 +890,8 @@ async fn bootstrap_upgrades_the_registered_v20_empty_catalogue() -> TestResult<(
 
         let after = snapshot_upgrade_state(&database).await?;
         require(
-            after.migrations.len() == 33 && after.migrations[..20] == before.migrations[..],
-            format!("v21-v33 changed prior migration records: {:?}", after.migrations),
+            after.migrations.len() == 34 && after.migrations[..20] == before.migrations[..],
+            format!("v21-v34 changed prior migration records: {:?}", after.migrations),
         )?;
         require(
             after.migrations[20]
@@ -1005,7 +1012,7 @@ async fn bootstrap_upgrades_the_registered_v20_empty_catalogue() -> TestResult<(
         )?;
         require(
             after.active_pair == before.active_pair,
-            "v21-v33 changed the active revision pair",
+            "v21-v34 changed the active revision pair",
         )?;
 
         let recovered = kernel.recover().await?;
@@ -1675,8 +1682,8 @@ async fn bootstrap_upgrades_v5_write_reference_evidence_without_mutating_semanti
 
         let after = snapshot_upgrade_state(&database).await?;
         require(
-            after.migrations.len() == 33 && after.migrations[..5] == before.migrations[..],
-            format!("v6-v33 changed prior migration records: {:?}", after.migrations),
+            after.migrations.len() == 34 && after.migrations[..5] == before.migrations[..],
+            format!("v6-v34 changed prior migration records: {:?}", after.migrations),
         )?;
         require(
             after.migrations[5]
@@ -2016,7 +2023,7 @@ async fn bootstrap_upgrades_registered_v6_without_standard_rows() -> TestResult<
 
         let after = snapshot_upgrade_state(&database).await?;
         require(
-            after.migrations.len() == 33
+            after.migrations.len() == 34
                 && after.migrations[..6] == before.migrations[..]
                 && after.migrations[6]
                     == (
@@ -2295,7 +2302,7 @@ async fn bootstrap_upgrades_registered_v7_without_resolved_value_rows() -> TestR
         let after_surface = snapshot_catalogue_surface(&database).await?;
         let after_target_fks = snapshot_application_target_foreign_keys(&database).await?;
         require(
-            after.migrations.len() == 33
+            after.migrations.len() == 34
                 && after.migrations[..7] == before.migrations[..]
                 && after.migrations[7]
                     == (
@@ -2453,7 +2460,7 @@ async fn bootstrap_upgrades_registered_v7_without_resolved_value_rows() -> TestR
                         "stream function returns".to_owned(),
                         expected_migration_checksum(33, MIGRATIONS[32].2),
                     ),
-            format!("v7 upgrade produced unexpected migrations: {:?}", after.migrations),
+            format!("v7-v34 upgrade produced unexpected migrations: {:?}", after.migrations),
         )?;
         require(
             after.active_pair == before.active_pair
