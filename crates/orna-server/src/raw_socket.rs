@@ -1394,8 +1394,9 @@ fn drain_resource_completions(
     let mut completed = BTreeSet::new();
     while let Ok((stream_id, completion)) = completion_receiver.try_recv() {
         tasks.remove(&stream_id);
-        completed.insert(stream_id);
-        store_resource_completion(stream_id, completion, pending, cancelled);
+        if store_resource_completion(stream_id, completion, pending, cancelled) {
+            completed.insert(stream_id);
+        }
     }
     completed
 }
@@ -1405,16 +1406,30 @@ fn store_resource_completion(
     completion: ResourceDispatchCompletion,
     pending: &mut BTreeMap<u64, ResourceDispatchCompletion>,
     cancelled: &mut BTreeMap<u64, orna_protocol::ResourceCancel>,
-) {
-    if pending.contains_key(&stream_id) {
-        cancelled.remove(&stream_id);
-        return;
+) -> bool {
+    if let Some(cancel) = cancelled.remove(&stream_id) {
+        let pending_is_terminal = pending
+            .get(&stream_id)
+            .is_some_and(|completion| {
+                completion
+                    .actions
+                    .iter()
+                    .any(resource_action_is_terminal)
+            });
+        if !pending_is_terminal {
+            pending.insert(stream_id, cancelled_resource_completion(cancel));
+            return true;
+        }
     }
-    let completion = match cancelled.remove(&stream_id) {
-        Some(cancel) if completion.actions.is_empty() => cancelled_resource_completion(cancel),
-        _ => completion,
-    };
+    if pending.contains_key(&stream_id) {
+        return false;
+    }
+    let is_terminal = completion
+        .actions
+        .iter()
+        .any(resource_action_is_terminal);
     pending.insert(stream_id, completion);
+    is_terminal
 }
 
 fn cancelled_resource_completion(
@@ -1437,6 +1452,14 @@ fn resource_action_is_terminal(action: &ResourceServerFrame) -> bool {
             | ResourceServerFrame::Failed(_)
             | ResourceServerFrame::Cancelled(_)
     )
+}
+fn resource_completion_is_terminal_for(
+    completion: &ResourceDispatchCompletion,
+    request_id: orna_core::InvocationId,
+) -> bool {
+    completion.actions.iter().any(|action| {
+        resource_action_is_terminal(action) && resource_action_request_id(action) == request_id
+    })
 }
 
 
@@ -1469,8 +1492,7 @@ async fn handle_resource_frame<D: DispatchService>(
     let mut committed_completion = cancellation.is_some_and(|cancel| {
         pending
             .get(&cancel.stream_id)
-            .and_then(|completion| completion.actions.front())
-            .is_some_and(|action| resource_action_request_id(action) == cancel.request_id)
+            .is_some_and(|completion| resource_completion_is_terminal_for(completion, cancel.request_id))
     });
     if let Some(cancel) = cancellation.filter(|_| !committed_completion) {
         let completed = drain_resource_completions(
@@ -1482,8 +1504,9 @@ async fn handle_resource_frame<D: DispatchService>(
         committed_completion = completed.contains(&cancel.stream_id)
             || pending
                 .get(&cancel.stream_id)
-                .and_then(|completion| completion.actions.front())
-                .is_some_and(|action| resource_action_request_id(action) == cancel.request_id);
+                .is_some_and(|completion| {
+                    resource_completion_is_terminal_for(completion, cancel.request_id)
+                });
     }
     let invalid_scalar_window_update = match &frame {
         ResourceClientFrame::WindowUpdate(update) => requests
@@ -1534,8 +1557,16 @@ async fn handle_resource_frame<D: DispatchService>(
         ) {
             let stream_id = request.stream_id;
             let sender = completion_sender.clone();
+            let task_cancellation = cancellation.clone();
             let handle = tokio::spawn(async move {
                 let completion = future.await;
+                let completion = if task_cancellation.is_requested() {
+                    ResourceDispatchCompletion {
+                        actions: VecDeque::new(),
+                    }
+                } else {
+                    completion
+                };
                 let _ = sender.send((stream_id, completion));
             });
             requests.insert(stream_id, request.clone());
@@ -1573,8 +1604,9 @@ async fn handle_resource_frame<D: DispatchService>(
                 },
             });
         };
-        cancelled.insert(cancel.stream_id, cancel);
-        task.cancellation.request_cancel();
+        if task.cancellation.request_cancel() {
+            cancelled.insert(cancel.stream_id, cancel);
+        }
     }
     Ok(true)
 }
