@@ -9427,7 +9427,8 @@ mod tests {
             artifact_payload_digest, catalogue_digest_with_context, function_declaration_digest,
             function_semantic_digest_with_version, source_bundle_digest,
             source_revision_record_digest, source_unit_content_digest,
-            verify_standard_library_snapshot, verify_standard_library_v2_snapshot,
+            calculate_standard_library_digest, verify_standard_library_snapshot,
+            verify_standard_library_v2_snapshot,
         },
         catalogue::{
             CatalogueSnapshot, CatalogueSnapshotError, EnumTypeDefinition, FieldDefinition,
@@ -9473,7 +9474,8 @@ mod tests {
         STD_OUTPUT_SOURCE_UNIT_ID, STD_TERMINAL_DOCUMENT_TYPE_ID,
         STD_TERMINAL_PRESENT_TABLE_FUNCTION_ID, STD_TERMINAL_PRESENT_TABLE_FUNCTION_REVISION_ID,
         STD_TERMINAL_PRESENT_TABLE_PARAMETER_ID, STD_TERMINAL_SCHEMA_ID, STD_TYPES_SOURCE_UNIT_ID,
-        STD_UI_CONTRACT, STD_UI_SCHEMA_ID, STD_UI_SOURCE_UNIT_ID, STD_UI_TYPE_ID, SemanticType,
+        STD_ACTION_CONTRACT, STD_ACTION_TYPE_ID, STD_UI_CONTRACT, STD_UI_SCHEMA_ID,
+        STD_UI_SOURCE_UNIT_ID, STD_UI_TYPE_ID, SemanticType,
         StandardApplicationCheckContext, StandardApplicationContextError,
         StandardLibraryCheckError, StandardSourceFamilies, check, check_new_application,
         check_new_application_with_catalogue, check_standard_application,
@@ -11622,6 +11624,267 @@ mod tests {
             .unwrap(),
         )
         .unwrap()
+    }
+
+    fn verified_standard_library_with_action_for_test()
+    -> orna_core::revision::VerifiedStandardLibrarySnapshot {
+        const SOURCE: &str = "CREATE SCHEMA std;CREATE SCHEMA std.action;CREATE TYPE std.action.Action AS VALUE OPAQUE KERNEL CONTRACT 'orna.std.value.action@1' IMMUTABLE TRANSIENT;EXPORT TYPE std.action.Action AS std.Action;";
+        let parsed = parsed_standard_unit(SOURCE);
+        let source_unit_id = SourceUnitId::from_bytes([0x41; 16]);
+        let source_unit = StoredSourceUnit::new(
+            source_unit_id,
+            0,
+            "std/types.orna",
+            SOURCE,
+            source_unit_content_digest(SOURCE).unwrap(),
+        )
+        .unwrap();
+        let bundle_hash = source_bundle_digest(std::slice::from_ref(&source_unit)).unwrap();
+        let source = StoredSourceRevision::new(
+            SourceBundleId::from_bytes([0x42; 16]),
+            SourceRevisionId::from_bytes([0x43; 16]),
+            None,
+            vec![source_unit],
+            bundle_hash,
+            source_revision_record_digest(
+                SourceBundleId::from_bytes([0x42; 16]),
+                None,
+                bundle_hash,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let action = ValueTypeDefinition::opaque(
+            STD_ACTION_TYPE_ID,
+            QualifiedSemanticName::new(["std", "action", "action"]).unwrap(),
+            STD_ACTION_CONTRACT,
+        );
+        let binding = TypeBinding::qualified(
+            QualifiedSemanticName::new(["std", "action"]).unwrap(),
+            action.id(),
+        )
+        .unwrap();
+        let catalogue = CatalogueSnapshot::new_with_types(
+            CatalogueRevisionId::from_bytes([0x44; 16]),
+            vec![
+                SchemaDefinition::new(
+                    SchemaId::from_bytes([0x45; 16]),
+                    QualifiedSemanticName::new(["std"]).unwrap(),
+                ),
+                SchemaDefinition::new(
+                    SchemaId::from_bytes([0x46; 16]),
+                    QualifiedSemanticName::new(["std", "action"]).unwrap(),
+                ),
+            ],
+            vec![],
+            vec![action],
+            vec![binding.clone()],
+        )
+        .unwrap();
+        let action_origin = |identity, byte_start, byte_end| {
+            DefinitionOrigin::new(
+                identity,
+                SourceOrigin::new(source_unit_id, byte_start, byte_end).unwrap(),
+            )
+        };
+        let origins = vec![
+            action_origin(
+                DefinitionIdentity::Schema(SchemaId::from_bytes([0x45; 16])),
+                parsed.parsed().schemas()[0].span.start as u32,
+                parsed.parsed().schemas()[0].span.end as u32,
+            ),
+            action_origin(
+                DefinitionIdentity::Schema(SchemaId::from_bytes([0x46; 16])),
+                parsed.parsed().schemas()[1].span.start as u32,
+                parsed.parsed().schemas()[1].span.end as u32,
+            ),
+            action_origin(
+                DefinitionIdentity::ValueType(STD_ACTION_TYPE_ID),
+                parsed.parsed().opaque_value_types()[0].span.start as u32,
+                parsed.parsed().opaque_value_types()[0].span.end as u32,
+            ),
+            action_origin(
+                DefinitionIdentity::TypeBinding(binding.id()),
+                parsed.parsed().type_exports()[0].span.start as u32,
+                parsed.parsed().type_exports()[0].span.end as u32,
+            ),
+        ];
+        let snapshot = StandardLibrarySnapshot::new(
+            StandardLibraryRevisionId::from_bytes([0x47; 16]),
+            StandardLibraryDigestVersion::Version1,
+            source.clone(),
+            "orna.language/1",
+            catalogue.clone(),
+            origins.clone(),
+            Sha256Digest::from_bytes([0; 32]),
+        )
+        .unwrap();
+        let digest = calculate_standard_library_digest(&snapshot).unwrap();
+        verify_standard_library_snapshot(
+            StandardLibrarySnapshot::new(
+                snapshot.revision(),
+                snapshot.digest_version(),
+                source,
+                snapshot.language_version(),
+                catalogue,
+                origins,
+                digest,
+            )
+            .unwrap(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn accepts_client_action_call_with_canonical_target_and_argument_identities() {
+        let target_id = FunctionId::from_bytes([0x51; 16]);
+        let target_parameter_id = ParameterId::from_bytes([0x52; 16]);
+        let action_type = ResolvedType::Named(STD_ACTION_TYPE_ID);
+        let base = CatalogueSnapshot::new_with_functions(
+            CatalogueRevisionId::from_bytes([0x53; 16]),
+            vec![SchemaDefinition::new(
+                SchemaId::from_bytes([0x54; 16]),
+                QualifiedSemanticName::new(["tasks"]).unwrap(),
+            )],
+            Vec::new(),
+            vec![FunctionDefinition::new(
+                target_id,
+                QualifiedSemanticName::new(["tasks", "run"]).unwrap(),
+                FunctionDomain::Client,
+                vec![ParameterDefinition::new(
+                    target_parameter_id,
+                    "p_value",
+                    0,
+                    action_type,
+                    None,
+                )],
+                FunctionReturn::Single(action_type),
+                FunctionRevisionId::from_bytes([0x55; 16]),
+                FunctionSecurity::Invoker,
+                None,
+                FunctionVolatility::Immutable,
+            )],
+        )
+        .unwrap();
+        let standard = check_standard_library_source(
+            &verified_standard_library_with_action_for_test(),
+        )
+        .unwrap();
+        let context = StandardApplicationCheckContext::try_new(&base, &standard).unwrap();
+        let source = "CREATE SCHEMA ui; CREATE CLIENT FUNCTION ui.run(p_value std.Action) RETURNS std.Action AS std.action.call(target => tasks.run, arguments => std.call.args(p_value => p_value));";
+        let report = check_standard_application(&bundle([("action.orna", source)]), &context);
+        assert!(report.diagnostics().is_empty(), "{:?}", report.diagnostics());
+
+        let function = report
+            .preparation_view()
+            .unwrap()
+            .checked()
+            .client_functions()
+            .iter()
+            .find(|function| function.name().to_string() == "ui.run")
+            .unwrap();
+        let caller_parameter_id = function.parameters()[0].id();
+        let CheckedClientFunctionBody::Expression { expression } = function.body() else {
+            panic!("expected an expression CLIENT action body");
+        };
+        let super::CheckedClientExpression::Action { operation } = expression else {
+            panic!("expected std.action.call to lower to an action operation");
+        };
+        assert_eq!(
+            operation.target_domain(),
+            orna_artifact::client_plan::ActionTargetDomain::Client
+        );
+        assert_eq!(operation.target(), super::CheckedFunctionId::Existing(target_id));
+        assert_eq!(operation.arguments().len(), 1);
+        assert_eq!(operation.arguments()[0].0, super::CheckedParameterId::Existing(target_parameter_id));
+        assert!(matches!(
+            &operation.arguments()[0].1,
+            super::CheckedClientExpression::ParameterRead { parameter, .. }
+                if *parameter == caller_parameter_id
+        ));
+        assert_eq!(
+            operation.result_type(),
+            super::SemanticType::Named(super::CheckedTypeId::Existing(STD_ACTION_TYPE_ID))
+        );
+        assert_eq!(operation.standard_result_type(), None);
+    }
+
+    #[test]
+    fn rejects_unknown_and_malformed_action_call_targets_and_reserved_combinators() {
+        let target_id = FunctionId::from_bytes([0x61; 16]);
+        let target_parameter_id = ParameterId::from_bytes([0x62; 16]);
+        let action_type = ResolvedType::Named(STD_ACTION_TYPE_ID);
+        let base = CatalogueSnapshot::new_with_functions(
+            CatalogueRevisionId::from_bytes([0x63; 16]),
+            vec![SchemaDefinition::new(
+                SchemaId::from_bytes([0x64; 16]),
+                QualifiedSemanticName::new(["tasks"]).unwrap(),
+            )],
+            Vec::new(),
+            vec![FunctionDefinition::new(
+                target_id,
+                QualifiedSemanticName::new(["tasks", "run"]).unwrap(),
+                FunctionDomain::Client,
+                vec![ParameterDefinition::new(
+                    target_parameter_id,
+                    "p_value",
+                    0,
+                    action_type,
+                    None,
+                )],
+                FunctionReturn::Single(action_type),
+                FunctionRevisionId::from_bytes([0x65; 16]),
+                FunctionSecurity::Invoker,
+                None,
+                FunctionVolatility::Immutable,
+            )],
+        )
+        .unwrap();
+        let standard = check_standard_library_source(
+            &verified_standard_library_with_action_for_test(),
+        )
+        .unwrap();
+        let context = StandardApplicationCheckContext::try_new(&base, &standard).unwrap();
+        let cases = [
+            (
+                "std.action.call(target => missing.run, arguments => std.call.args(p_value => p_value))",
+                DiagnosticCode::UnknownQualifiedName,
+                "unknown std.action.call target missing.run",
+            ),
+            (
+                "std.action.call(target => TRUE, arguments => std.call.args(p_value => p_value))",
+                DiagnosticCode::TypeMismatch,
+                "std.action.call target must be a qualified function name",
+            ),
+            (
+                "std.action.call(target => tasks.run, arguments => TRUE)",
+                DiagnosticCode::TypeMismatch,
+                "std.action.call arguments must be a std.call.args value",
+            ),
+            (
+                "std.action.sequence()",
+                DiagnosticCode::UnknownQualifiedName,
+                "unknown CLIENT function std.action.sequence",
+            ),
+            (
+                "std.action.parallel()",
+                DiagnosticCode::UnknownQualifiedName,
+                "unknown CLIENT function std.action.parallel",
+            ),
+        ];
+        for (index, (expression, code, message)) in cases.into_iter().enumerate() {
+            let source = format!(
+                "CREATE SCHEMA ui; CREATE CLIENT FUNCTION ui.run(p_value std.Action) RETURNS std.Action AS {expression};"
+            );
+            let report = check_standard_application(
+                &SourceBundle::new([SourceUnit::new("action-reject.orna", source)]).unwrap(),
+                &context,
+            );
+            assert_eq!(report.diagnostics().len(), 1, "case {index}: {:?}", report.diagnostics());
+            assert_eq!(report.diagnostics()[0].code(), code, "case {index}");
+            assert_eq!(report.diagnostics()[0].message(), message, "case {index}");
+            assert!(report.checked_bundle().is_none(), "case {index}");
+        }
     }
 
     #[test]
