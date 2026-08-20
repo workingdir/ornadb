@@ -2331,7 +2331,6 @@ fn validate_resolved_type_slot(
 
 pub(crate) fn function_accepts_opaque_client_return(function: &FunctionDefinition) -> bool {
     function.domain() == FunctionDomain::Client
-        && function.parameters().is_empty()
         && matches!(
             function.return_type(),
             FunctionReturn::Single(ResolvedType::Value(_))
@@ -8824,7 +8823,7 @@ mod tests {
     }
 
     #[test]
-    fn version_two_rejects_a_pinned_opaque_value_in_every_catalogue_slot() {
+    fn version_two_rejects_a_pinned_opaque_value_in_non_function_catalogue_slots() {
         let opaque = TypeId::from_bytes(id::<72>());
         let named = ResolvedType::named(TypeId::from_bytes(id::<80>()));
         let cases = [
@@ -8849,14 +8848,6 @@ mod tests {
                     owner: FunctionId::from_bytes(id::<82>()),
                     parameter: ParameterId::from_bytes(id::<83>()),
                 },
-            ),
-            (
-                resolved_type_slots_catalogue(
-                    named,
-                    named,
-                    FunctionReturn::Single(ResolvedType::value(opaque)),
-                ),
-                DefinitionIdentity::Function(FunctionId::from_bytes(id::<82>())),
             ),
             (
                 resolved_type_slots_catalogue(
@@ -8906,14 +8897,19 @@ mod tests {
             ResolvedType::value(TypeId::from_bytes(id::<71>())),
             None,
         );
+        let parameterized = catalogue_with_opaque_client_return(
+            opaque,
+            FunctionDomain::Client,
+            vec![parameter],
+            FunctionSecurity::Invoker,
+            FunctionVolatility::Immutable,
+        );
+        assert_eq!(
+            validate_resolved_type_slots(&context, &parameterized),
+            Ok(())
+        );
+
         for catalogue in [
-            catalogue_with_opaque_client_return(
-                opaque,
-                FunctionDomain::Client,
-                vec![parameter],
-                FunctionSecurity::Invoker,
-                FunctionVolatility::Immutable,
-            ),
             catalogue_with_opaque_client_return(
                 opaque,
                 FunctionDomain::Server,
