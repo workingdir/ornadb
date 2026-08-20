@@ -59,7 +59,7 @@ pub use bootstrap::ActiveRevision;
 pub use orna_core::inspect::InspectSnapshotEpoch;
 pub use security::{
     AuthenticatedRawCallResult, AuthenticatedServerResourceResult, RecordArgumentPreflight,
-    SealedInvocationResult,
+    ResourceCancellation, SealedInvocationResult,
 };
 pub use server_execution::{ServerSelectContext, ServerSelectError, ServerSelectResult};
 pub use server_mutation_execution::{
