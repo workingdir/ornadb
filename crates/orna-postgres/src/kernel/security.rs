@@ -7,6 +7,7 @@ const RESOURCE_CANCELLATION_RUNNING: u8 = 0;
 const RESOURCE_CANCELLATION_REQUESTED: u8 = 1;
 const RESOURCE_CANCELLATION_COMMIT_STARTED: u8 = 2;
 const RESOURCE_CANCELLATION_COMMITTED: u8 = 3;
+const MAX_RESOURCE_CREDIT: u64 = 1024 * 1024 * 1024;
 
 /// Coordinates cancellation with the terminal resource commit.
 ///
@@ -155,6 +156,7 @@ use crate::{
         execute_standard_json_encode, execute_standard_parameter_echo,
         present_sealed_standard_output, raw_identity_selected_server_select_target_is_selected,
         raw_server_target_is_unavailable, raw_unique_text_selected_server_select_target_is_selected,
+        run_authenticated_server_resource_stream, run_authenticated_standard_resource_stream,
     },
     server_mutation_execution::{
         RawServerReferenceMutation, ServerInsertError, execute_authorised_raw_server_insert,
@@ -208,6 +210,176 @@ pub enum AuthenticatedServerResourceResult {
         /// The closed public failure class.
         failure: CallFailure,
     },
+}
+
+/// The local resource kind retained by an authenticated producer.
+///
+/// This deliberately does not expose the wire protocol's resource enum.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AuthenticatedServerResourceKind {
+    /// One scalar result item.
+    Single,
+    /// A bounded sequence of result items.
+    Stream,
+}
+
+/// The metadata established before a resource producer is accepted.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct AuthenticatedServerResourceAccepted {
+    pub stream_id: u64,
+    pub request_id: InvocationId,
+    pub nested_invocation_id: InvocationId,
+    pub target_revision: RevisionPair,
+    pub resource_kind: AuthenticatedServerResourceKind,
+}
+
+/// Checked item and byte credit for one producer pull.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ResourceCredit {
+    pub item_count: u64,
+    pub byte_count: u64,
+}
+
+impl ResourceCredit {
+    /// Creates non-zero bounded credit.
+    pub fn new(item_count: u64, byte_count: u64) -> Option<Self> {
+        (item_count != 0
+            && byte_count != 0
+            && item_count <= MAX_RESOURCE_CREDIT
+            && byte_count <= MAX_RESOURCE_CREDIT)
+            .then_some(Self { item_count, byte_count })
+    }
+}
+
+/// The producer result of one pull command.
+#[derive(Clone, Debug, PartialEq)]
+pub enum AuthenticatedServerResourceEvent {
+    /// One bounded batch of decoded values.
+    Values {
+        batch_sequence: u64,
+        item_count: u64,
+        byte_count: u64,
+        values: Vec<RuntimeValue>,
+    },
+    /// The transaction committed after all rows were consumed.
+    Completed {
+        final_batch_sequence: u64,
+        total_items: u64,
+        total_bytes: u64,
+    },
+    /// A redacted execution failure.
+    Failed { failure: CallFailure },
+    /// The transaction rolled back after cancellation won.
+    Cancelled,
+    /// The pulled row requires more byte credit and remains pending.
+    Waiting { required_bytes: u64 },
+}
+
+/// The result of starting an authenticated SERVER resource producer.
+#[derive(Debug)]
+pub enum AuthenticatedServerResourceStart {
+    /// Security and plan validation succeeded; the producer is live.
+    Accepted(AuthenticatedServerResourceProducer),
+    /// The request failed before acceptance and carries only its redacted class.
+    Failed {
+        stream_id: u64,
+        request_id: InvocationId,
+        failure: CallFailure,
+    },
+}
+
+/// A command-driven producer whose transaction and PostgreSQL row stream are
+/// owned by its task.
+pub struct AuthenticatedServerResourceProducer {
+    accepted: AuthenticatedServerResourceAccepted,
+    commands: tokio::sync::mpsc::Sender<ResourceProducerCommand>,
+    cancellation: ResourceCancellation,
+}
+
+impl AuthenticatedServerResourceProducer {
+    /// Returns the immutable acceptance metadata.
+    pub fn accepted(&self) -> AuthenticatedServerResourceAccepted {
+        self.accepted
+    }
+
+    /// Requests one bounded batch or terminal result.
+    pub async fn pull(
+        &self,
+        credit: ResourceCredit,
+    ) -> Result<AuthenticatedServerResourceEvent, PostgresKernelError> {
+        let (response, receiver) = tokio::sync::oneshot::channel();
+        self.commands
+            .send(ResourceProducerCommand::Pull(ResourceProducerPull { credit, response }))
+            .await
+            .map_err(|_| PostgresKernelError::DurableInvariant {
+                relation: "resource producer",
+                record: self.accepted.request_id.canonical(),
+                rule: "producer task terminated before pull response",
+            })?;
+        receiver.await.map_err(|_| PostgresKernelError::DurableInvariant {
+            relation: "resource producer",
+            record: self.accepted.request_id.canonical(),
+            rule: "producer task dropped pull response",
+        })?
+    }
+
+    /// Requests cancellation and reports whether this call won the race.
+    pub fn cancel(&self) -> bool {
+        self.cancellation.request_cancel()
+    }
+}
+
+impl std::fmt::Debug for AuthenticatedServerResourceProducer {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("AuthenticatedServerResourceProducer")
+            .field("accepted", &self.accepted)
+            .finish_non_exhaustive()
+    }
+}
+
+enum ResourceProducerReady {
+    Accepted(AuthenticatedServerResourceAccepted),
+    Failed {
+        stream_id: u64,
+        request_id: InvocationId,
+        failure: CallFailure,
+    },
+}
+
+/// Internal command sent to the task which owns the transaction.
+#[derive(Debug)]
+pub(crate) enum ResourceProducerCommand {
+    Pull(ResourceProducerPull),
+}
+
+#[derive(Debug)]
+pub(crate) struct ResourceProducerPull {
+    pub(crate) credit: ResourceCredit,
+    pub(crate) response: tokio::sync::oneshot::Sender<Result<AuthenticatedServerResourceEvent, PostgresKernelError>>,
+}
+
+/// The task exit used to finalize audit and transaction state.
+pub(crate) enum ResourceProducerExit {
+    Completed(ResourceProducerCompleted),
+    Cancelled(ResourceProducerCancelled),
+    Failed(ResourceProducerFailed),
+}
+
+pub(crate) struct ResourceProducerCompleted {
+    pub(crate) response: tokio::sync::oneshot::Sender<Result<AuthenticatedServerResourceEvent, PostgresKernelError>>,
+    pub(crate) final_batch_sequence: u64,
+    pub(crate) total_items: u64,
+    pub(crate) total_bytes: u64,
+}
+
+pub(crate) struct ResourceProducerCancelled {
+    pub(crate) response: Option<tokio::sync::oneshot::Sender<Result<AuthenticatedServerResourceEvent, PostgresKernelError>>>,
+}
+
+pub(crate) struct ResourceProducerFailed {
+    pub(crate) response: Option<tokio::sync::oneshot::Sender<Result<AuthenticatedServerResourceEvent, PostgresKernelError>>>,
+    pub(crate) error: PostgresKernelError,
 }
 
 /// The owned redacted result of one sealed `sys.invoke` dispatch.
@@ -760,6 +932,7 @@ impl PostgresKernel {
             let security = recover_security_snapshot_for_active(&transaction, &active).await?;
             let invocation = InvocationId::new();
             let mut audit_decision = SecurityAuditOutcome::Denied;
+            let mut completed_target = None;
             let failed = |failure| AuthenticatedServerResourceResult::Failed {
                 stream_id: request.stream_id,
                 request_id: request.request_id,
@@ -799,150 +972,133 @@ impl PostgresKernel {
                         failed(CallFailure::ExecuteDenied)
                     }
                     ExecuteDecision::Allowed(_) => {
-                        let target = InvocationTarget::new(request.target_function_id, active.pair());
-                        match security.authorise_execute(authenticated_session, target) {
-                    ExecuteDecision::Denied(reason) => {
-                        let event_id = append_security_audit_event(
-                            &transaction,
-                            SecurityAuditDecision::execute_denied(
-                                authenticated_session,
-                                target,
-                                reason,
-                            ),
-                        )
-                        .await?;
-                        append_linked_invocation_audit(&transaction, invocation, event_id).await?;
-                        failed(CallFailure::ExecuteDenied)
-                    }
-                    ExecuteDecision::Allowed(authorisation) => {
-                        audit_decision = SecurityAuditOutcome::Allowed;
-                        append_allowed_invocation_audit(
-                            &transaction,
-                            &security,
-                            authenticated_session,
-                            target,
-                            invocation,
-                        )
-                        .await?;
-                        let target_definition = active
-                            .catalogue()
-                            .function_by_id(request.target_function_id)
-                            .or_else(|| {
-                                active
-                                    .catalogue_hash_context()
-                                    .standard()
-                                    .and_then(|standard| {
-                                        standard
-                                            .catalogue()
-                                            .function_by_id(request.target_function_id)
-                                    })
-                            });
-                        match target_definition {
-                            None => failed(CallFailure::TargetUnavailable),
-                            Some(definition) if !resource_target_shape_is_supported(
-                                definition,
-                                request.resource_kind,
-                            ) => failed(CallFailure::TargetUnavailable),
-                            Some(definition) => match
-                                bind_authenticated_resource_arguments(
-                                    active.catalogue_hash_context(),
+                        match resolve_resource_target(&active, request.target_function_id) {
+                            None => {
+                                append_unresolved_invocation_audit(
+                                    &transaction,
+                                    authenticated_session,
+                                    invocation,
+                                )
+                                .await?;
+                                failed(CallFailure::TargetUnavailable)
+                            }
+                            Some(resolved_target) => {
+                                let target = resolved_target.target();
+                                match security.authorise_execute(authenticated_session, target) {
+                            ExecuteDecision::Denied(reason) => {
+                                let event_id = append_security_audit_event(
+                                    &transaction,
+                                    SecurityAuditDecision::execute_denied(
+                                        authenticated_session,
+                                        target,
+                                        reason,
+                                    ),
+                                )
+                                .await?;
+                                append_linked_invocation_audit(
+                                    &transaction,
+                                    invocation,
+                                    event_id,
+                                )
+                                .await?;
+                                failed(CallFailure::ExecuteDenied)
+                            }
+                            ExecuteDecision::Allowed(authorisation) => {
+                                audit_decision = SecurityAuditOutcome::Allowed;
+                                append_allowed_invocation_audit(
+                                    &transaction,
+                                    &security,
+                                    authenticated_session,
+                                    target,
+                                    invocation,
+                                )
+                                .await?;
+                                completed_target = Some(target);
+                                let definition = resolved_target.definition();
+                                if !resource_target_shape_is_supported(
                                     definition,
-                                    &request.arguments,
-                                )
-                            {
-                                None => failed(CallFailure::TargetUnavailable),
-                                Some(arguments) => {
-                                    let standard_target = active
-                                        .catalogue()
-                                        .function_by_id(request.target_function_id)
-                                        .is_none()
-                                        .then(|| {
-                                            active
-                                                .catalogue_hash_context()
-                                                .standard()
-                                                .and_then(|standard| {
-                                                    let definition = standard
-                                                        .catalogue()
-                                                        .function_by_id(request.target_function_id)?;
-                                                    let executable = standard
-                                                        .executables()
-                                                        .iter()
-                                                        .find(|executable| {
-                                                            executable.function()
-                                                                == request.target_function_id
-                                                        })?;
-                                                    Some((definition, executable))
-                                                })
-                                        })
-                                        .flatten();
-                                    if let Some((definition, executable)) = standard_target {
-                                        match execute_standard_parameter_echo(
-                                            definition,
-                                            executable.revision(),
-                                            &arguments,
-                                        ) {
-                                            Ok(value) => completed(vec![value]),
-                                            Err(_) => failed(CallFailure::TargetUnavailable),
-                                        }
-                                    } else {
-                                    let savepoint = transaction
-                                .savepoint("authenticated_server_resource_execution")
-                                .await
-                                .map_err(PostgresKernelError::Database)?;
-                            let execution =
-                                execute_authorised_server_select(
-                                    &savepoint,
-                                    &active,
-                                    &authorisation,
-                                    &arguments,
-                                )
-                                .await;
-                            match execution {
-                                Ok(server) => {
-                                    let values = resource_values_from_server_result(
-                                        request.resource_kind,
-                                        server,
-                                    );
-                                    match values {
-                                        Some(values) => {
-                                            savepoint
-                                                .commit()
-                                                .await
-                                                .map_err(PostgresKernelError::Database)?;
-                                            completed(values)
-                                        }
-                                        None => {
-                                            savepoint
-                                                .rollback()
-                                                .await
-                                                .map_err(PostgresKernelError::Database)?;
-                                            failed(CallFailure::TargetUnavailable)
+                                    request.resource_kind,
+                                ) {
+                                    failed(CallFailure::TargetUnavailable)
+                                } else {
+                                    match bind_authenticated_resource_arguments(
+                                        active.catalogue_hash_context(),
+                                        definition,
+                                        &request.arguments,
+                                    ) {
+                                        None => failed(CallFailure::TargetUnavailable),
+                                        Some(arguments) => {
+                                            if let Some(executable) = resolved_target.executable() {
+                                                match execute_standard_parameter_echo(
+                                                    definition,
+                                                    executable.revision(),
+                                                    &arguments,
+                                                ) {
+                                                    Ok(value) => completed(vec![value]),
+                                                    Err(_) => failed(CallFailure::TargetUnavailable),
+                                                }
+                                            } else {
+                                                let savepoint = transaction
+                                                    .savepoint(
+                                                        "authenticated_server_resource_execution",
+                                                    )
+                                                    .await
+                                                    .map_err(PostgresKernelError::Database)?;
+                                                let execution = execute_authorised_server_select(
+                                                    &savepoint,
+                                                    &active,
+                                                    &authorisation,
+                                                    &arguments,
+                                                )
+                                                .await;
+                                                match execution {
+                                                    Ok(server) => {
+                                                        let values =
+                                                            resource_values_from_server_result(
+                                                                request.resource_kind,
+                                                                server,
+                                                            );
+                                                        match values {
+                                                            Some(values) => {
+                                                                savepoint
+                                                                    .commit()
+                                                                    .await
+                                                                    .map_err(PostgresKernelError::Database)?;
+                                                                completed(values)
+                                                            }
+                                                            None => {
+                                                                savepoint
+                                                                    .rollback()
+                                                                    .await
+                                                                    .map_err(PostgresKernelError::Database)?;
+                                                                failed(CallFailure::TargetUnavailable)
+                                                            }
+                                                        }
+                                                    }
+                                                    Err(error) => {
+                                                        savepoint
+                                                            .rollback()
+                                                            .await
+                                                            .map_err(PostgresKernelError::Database)?;
+                                                        let failure = match error {
+                                                            PostgresKernelError::ServerSelect(source)
+                                                                if raw_server_target_is_unavailable(
+                                                                    &source,
+                                                                ) => CallFailure::TargetUnavailable,
+                                                            _ => CallFailure::InternalFailure,
+                                                        };
+                                                        failed(failure)
+                                                    }
+                                                }
+                                            }
                                         }
                                     }
                                 }
-                                Err(error) => {
-                                    savepoint
-                                        .rollback()
-                                        .await
-                                        .map_err(PostgresKernelError::Database)?;
-                                    let failure = match error {
-                                        PostgresKernelError::ServerSelect(source)
-                                            if raw_server_target_is_unavailable(&source) =>
-                                        {
-                                            CallFailure::TargetUnavailable
-                                        }
-                                        _ => CallFailure::InternalFailure,
-                                    };
-                                    failed(failure)
                                 }
-                                    }
-                                    }
-                                }
-                            },
+                            }
                         }
                     }
-                        }
-                    }
+                }
                 }
             };
             if !cancellation.try_begin_commit() {
@@ -955,7 +1111,12 @@ impl PostgresKernel {
             let (terminal, audit_target, item_count) = match &result {
                 AuthenticatedServerResourceResult::Completed { values, .. } => (
                     ResourceAuditTerminalOutcome::Completed,
-                    Some(InvocationTarget::new(request.target_function_id, active.pair())),
+                    Some(completed_target.ok_or_else(|| {
+                        sealed_target_invariant(
+                            &active,
+                            "completed resource target must retain its resolved invocation target",
+                        )
+                    })?),
                     Some(values.len() as u64),
                 ),
                 AuthenticatedServerResourceResult::Failed { .. } => {
@@ -992,6 +1153,53 @@ impl PostgresKernel {
                 Ok(None)
             }
             Err(error) => Err(error),
+        }
+    }
+
+    /// Starts one bounded authenticated SERVER resource producer.
+    ///
+    /// The returned handle contains only owned command channels and acceptance
+    /// metadata. The spawned task owns the RepeatableRead transaction and the
+    /// PostgreSQL query stream for its entire lifetime.
+    pub async fn start_authenticated_server_resource_producer(
+        &self,
+        authenticated_session: &AuthenticatedSession,
+        request: &ResourceRequest,
+        cancellation: &ResourceCancellation,
+    ) -> Result<AuthenticatedServerResourceStart, PostgresKernelError> {
+        let (commands, command_receiver) = tokio::sync::mpsc::channel(1);
+        let (ready_sender, ready_receiver) = tokio::sync::oneshot::channel();
+        let request_id = request.request_id;
+        let kernel = self.clone();
+        let session = authenticated_session.clone();
+        let request = request.clone();
+        let worker_cancellation = cancellation.clone();
+        tokio::spawn(async move {
+            let _ = run_authenticated_server_resource_producer_task(
+                kernel,
+                session,
+                request,
+                worker_cancellation,
+                command_receiver,
+                ready_sender,
+            )
+            .await;
+        });
+        match ready_receiver.await.map_err(|_| PostgresKernelError::DurableInvariant {
+            relation: "resource producer",
+            record: request_id.canonical(),
+            rule: "producer task terminated before acceptance",
+        })?? {
+            ResourceProducerReady::Accepted(accepted) => Ok(AuthenticatedServerResourceStart::Accepted(
+                AuthenticatedServerResourceProducer {
+                    accepted,
+                    commands,
+                    cancellation: cancellation.clone(),
+                },
+            )),
+            ResourceProducerReady::Failed { stream_id, request_id, failure } => {
+                Ok(AuthenticatedServerResourceStart::Failed { stream_id, request_id, failure })
+            }
         }
     }
 
@@ -2207,6 +2415,440 @@ impl PostgresKernel {
     }
 }
 
+
+async fn wait_for_resource_producer_pull_or_cancel(
+    commands: &mut tokio::sync::mpsc::Receiver<ResourceProducerCommand>,
+    cancellation: &ResourceCancellation,
+) -> Option<ResourceProducerPull> {
+    let cancelled = cancellation.cancelled();
+    let received = commands.recv();
+    futures_util::pin_mut!(cancelled, received);
+    match futures_util::future::select(cancelled, received).await {
+        futures_util::future::Either::Left(((), _received)) => None,
+        futures_util::future::Either::Right((Some(ResourceProducerCommand::Pull(pull)), _cancelled)) => {
+            Some(pull)
+        }
+        futures_util::future::Either::Right((None, _cancelled)) => None,
+    }
+}
+
+async fn commit_resource_audit(
+    transaction: Transaction<'_>,
+    authenticated_session: &AuthenticatedSession,
+    request: &ResourceRequest,
+    invocation: InvocationId,
+    decision: SecurityAuditOutcome,
+    terminal: ResourceAuditTerminalOutcome,
+    target: Option<InvocationTarget>,
+    item_count: Option<u64>,
+    byte_count: Option<u64>,
+) -> Result<(), PostgresKernelError> {
+    append_resource_audit_event(
+        &transaction,
+        authenticated_session,
+        request,
+        invocation,
+        decision,
+        terminal,
+        target,
+        item_count,
+        byte_count,
+    )
+    .await?;
+    transaction
+        .commit()
+        .await
+        .map_err(PostgresKernelError::Database)
+}
+
+async fn commit_accepted_resource_cancelled_audit(
+    transaction: Transaction<'_>,
+    authenticated_session: &AuthenticatedSession,
+    request: &ResourceRequest,
+    invocation: InvocationId,
+    target: Option<InvocationTarget>,
+) -> Result<(), PostgresKernelError> {
+    commit_resource_audit(
+        transaction,
+        authenticated_session,
+        request,
+        invocation,
+        SecurityAuditOutcome::Allowed,
+        ResourceAuditTerminalOutcome::Cancelled,
+        target,
+        None,
+        None,
+    )
+    .await
+}
+
+
+async fn run_authenticated_server_resource_producer_task(
+    kernel: PostgresKernel,
+    authenticated_session: AuthenticatedSession,
+    request: ResourceRequest,
+    cancellation: ResourceCancellation,
+    mut commands: tokio::sync::mpsc::Receiver<ResourceProducerCommand>,
+    ready_sender: tokio::sync::oneshot::Sender<
+        Result<ResourceProducerReady, PostgresKernelError>,
+    >,
+) -> Result<(), PostgresKernelError> {
+    let mut database_session = kernel.open().await?;
+    let transaction = database_session
+        .client
+        .build_transaction()
+        .isolation_level(IsolationLevel::RepeatableRead)
+        .start()
+        .await
+        .map_err(PostgresKernelError::Database)?;
+    require_current_migrations(&transaction).await?;
+    let active = configure_and_recover(&transaction).await?;
+    let security = recover_security_snapshot_for_active(&transaction, &active).await?;
+    let invocation = InvocationId::new();
+    let mut audit_decision = SecurityAuditOutcome::Denied;
+    let mut authorisation = None;
+    let mut bound_arguments = None;
+    let mut completed_target = None;
+    let mut standard_executable = None;
+    let mut failure = None;
+
+    if request.target_revision != active.pair() {
+        append_unresolved_invocation_audit(&transaction, &authenticated_session, invocation).await?;
+        failure = Some(CallFailure::TargetUnavailable);
+    } else {
+        let entry_target = InvocationTarget::new(SYS_INVOKE_FUNCTION_ID, active.pair());
+        match security.authorise_system_function(&authenticated_session, entry_target) {
+            ExecuteDecision::Denied(reason) => {
+                let event_id = append_security_audit_event(
+                    &transaction,
+                    SecurityAuditDecision::execute_denied(
+                        &authenticated_session,
+                        entry_target,
+                        reason,
+                    ),
+                )
+                .await?;
+                append_linked_invocation_audit(&transaction, invocation, event_id).await?;
+                failure = Some(CallFailure::ExecuteDenied);
+            }
+            ExecuteDecision::Allowed(_) => match resolve_resource_target(&active, request.target_function_id) {
+                None => {
+                    append_unresolved_invocation_audit(&transaction, &authenticated_session, invocation)
+                        .await?;
+                    failure = Some(CallFailure::TargetUnavailable);
+                }
+                Some(resolved_target) => {
+                    let target = resolved_target.target();
+                    match security.authorise_execute(&authenticated_session, target) {
+                        ExecuteDecision::Denied(reason) => {
+                            let event_id = append_security_audit_event(
+                                &transaction,
+                                SecurityAuditDecision::execute_denied(
+                                    &authenticated_session,
+                                    target,
+                                    reason,
+                                ),
+                            )
+                            .await?;
+                            append_linked_invocation_audit(&transaction, invocation, event_id).await?;
+                            failure = Some(CallFailure::ExecuteDenied);
+                        }
+                        ExecuteDecision::Allowed(allowed) => {
+                            audit_decision = SecurityAuditOutcome::Allowed;
+                            append_allowed_invocation_audit(
+                                &transaction,
+                                &security,
+                                &authenticated_session,
+                                target,
+                                invocation,
+                            )
+                            .await?;
+                            completed_target = Some(target);
+                            let definition = resolved_target.definition();
+                            if !resource_target_shape_is_supported(definition, request.resource_kind) {
+                                failure = Some(CallFailure::TargetUnavailable);
+                            } else {
+                                match bind_authenticated_resource_arguments(
+                                    active.catalogue_hash_context(),
+                                    definition,
+                                    &request.arguments,
+                                ) {
+                                    Some(arguments) => {
+                                        standard_executable = resolved_target.executable().cloned();
+                                        authorisation = Some(allowed);
+                                        bound_arguments = Some(arguments);
+                                    }
+                                    None => failure = Some(CallFailure::TargetUnavailable),
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+        }
+    }
+
+    if let Some(failure) = failure {
+        if !cancellation.try_begin_commit() {
+            let operation = async {
+                transaction
+                    .rollback()
+                    .await
+                    .map_err(PostgresKernelError::Database)?;
+                kernel
+                    .record_cancelled_resource_audit(&authenticated_session, &request)
+                    .await
+            }
+            .await;
+            let result = finish_authenticated_server_select_session(
+                operation,
+                database_session.shutdown().await,
+            );
+            match result {
+                Ok(()) => {
+                    let _ = ready_sender.send(Ok(ResourceProducerReady::Failed {
+                        stream_id: request.stream_id,
+                        request_id: request.request_id,
+                        failure,
+                    }));
+                }
+                Err(error) => {
+                    let _ = ready_sender.send(Err(error));
+                }
+            }
+            return Ok(());
+        }
+        let operation = async {
+            append_resource_audit_event(
+                &transaction,
+                &authenticated_session,
+                &request,
+                invocation,
+                audit_decision,
+                ResourceAuditTerminalOutcome::Failed,
+                None,
+                None,
+                None,
+            )
+            .await?;
+            transaction
+                .commit()
+                .await
+                .map_err(PostgresKernelError::Database)
+        }
+        .await;
+        if operation.is_ok() {
+            cancellation.commit_finished();
+        }
+        let result = finish_authenticated_server_select_session(
+            operation,
+            database_session.shutdown().await,
+        );
+        match result {
+            Ok(()) => {
+                let _ = ready_sender.send(Ok(ResourceProducerReady::Failed {
+                    stream_id: request.stream_id,
+                    request_id: request.request_id,
+                    failure,
+                }));
+            }
+            Err(error) => {
+                let _ = ready_sender.send(Err(error));
+            }
+        }
+        return Ok(());
+    }
+
+    let authorisation = authorisation.ok_or_else(|| sealed_target_invariant(
+        &active,
+        "accepted resource producer must retain authorisation evidence",
+    ))?;
+    let bound_arguments = bound_arguments.ok_or_else(|| sealed_target_invariant(
+        &active,
+        "accepted resource producer must retain bound arguments",
+    ))?;
+    let accepted = AuthenticatedServerResourceAccepted {
+        stream_id: request.stream_id,
+        request_id: request.request_id,
+        nested_invocation_id: invocation,
+        target_revision: active.pair(),
+        resource_kind: match request.resource_kind {
+            ProtocolResourceKind::Single => AuthenticatedServerResourceKind::Single,
+            ProtocolResourceKind::Stream => AuthenticatedServerResourceKind::Stream,
+        },
+    };
+    let _ = ready_sender.send(Ok(ResourceProducerReady::Accepted(accepted)));
+
+    let stream_result = if let Some(executable) = standard_executable.as_ref() {
+        run_authenticated_standard_resource_stream(
+            &active,
+            &authorisation,
+            executable,
+            &bound_arguments,
+            &mut commands,
+            &cancellation,
+        )
+        .await
+    } else {
+        run_authenticated_server_resource_stream(
+            &transaction,
+            &active,
+            &authorisation,
+            &bound_arguments,
+            &mut commands,
+            &cancellation,
+        )
+        .await
+    };
+    let stream_result = match stream_result {
+        Ok(result) => result,
+        Err(error) => match wait_for_resource_producer_pull_or_cancel(&mut commands, &cancellation).await {
+            Some(pull) => ResourceProducerExit::Failed(ResourceProducerFailed {
+                response: Some(pull.response),
+                error,
+            }),
+            None => ResourceProducerExit::Cancelled(ResourceProducerCancelled {
+                response: None,
+            }),
+        },
+    };
+    let mut terminal_error = None;
+    match stream_result {
+        ResourceProducerExit::Completed(ResourceProducerCompleted {
+            response,
+            final_batch_sequence,
+            total_items,
+            total_bytes,
+        }) => {
+            let commit_started = cancellation.try_begin_commit();
+            let operation = if commit_started {
+                commit_resource_audit(
+                    transaction,
+                    &authenticated_session,
+                    &request,
+                    invocation,
+                    SecurityAuditOutcome::Allowed,
+                    ResourceAuditTerminalOutcome::Completed,
+                    completed_target,
+                    Some(total_items),
+                    Some(total_bytes),
+                )
+                .await
+            } else {
+                commit_accepted_resource_cancelled_audit(
+                    transaction,
+                    &authenticated_session,
+                    &request,
+                    invocation,
+                    completed_target,
+                )
+                .await
+            };
+            if commit_started && operation.is_ok() {
+                cancellation.commit_finished();
+            }
+            match operation {
+                Ok(()) if commit_started => {
+                    let _ = response.send(Ok(AuthenticatedServerResourceEvent::Completed {
+                        final_batch_sequence,
+                        total_items,
+                        total_bytes,
+                    }));
+                }
+                Ok(()) => {
+                    let _ = response.send(Ok(AuthenticatedServerResourceEvent::Cancelled));
+                }
+                Err(error) => {
+                    let _ = response.send(Err(error));
+                }
+            }
+        }
+        ResourceProducerExit::Cancelled(ResourceProducerCancelled { response }) => {
+            let commit_started = cancellation.try_begin_commit();
+            let operation = commit_accepted_resource_cancelled_audit(
+                transaction,
+                &authenticated_session,
+                &request,
+                invocation,
+                completed_target,
+            )
+            .await;
+            if commit_started && operation.is_ok() {
+                cancellation.commit_finished();
+            }
+            if let Some(response) = response {
+                match operation {
+                    Ok(()) => {
+                        let _ = response.send(Ok(AuthenticatedServerResourceEvent::Cancelled));
+                    }
+                    Err(error) => {
+                        let _ = response.send(Err(error));
+                    }
+                }
+            } else if let Err(error) = operation {
+                terminal_error = Some(error);
+            }
+        }
+        ResourceProducerExit::Failed(ResourceProducerFailed { response, error }) => {
+            let failure = if standard_executable.is_some() {
+                CallFailure::TargetUnavailable
+            } else {
+                match &error {
+                    PostgresKernelError::ServerSelect(source)
+                        if raw_server_target_is_unavailable(source) => CallFailure::TargetUnavailable,
+                    _ => CallFailure::InternalFailure,
+                }
+            };
+            let commit_started = cancellation.try_begin_commit();
+            let operation = if commit_started {
+                commit_resource_audit(
+                    transaction,
+                    &authenticated_session,
+                    &request,
+                    invocation,
+                    SecurityAuditOutcome::Allowed,
+                    ResourceAuditTerminalOutcome::Failed,
+                    None,
+                    None,
+                    None,
+                )
+                .await
+            } else {
+                commit_accepted_resource_cancelled_audit(
+                    transaction,
+                    &authenticated_session,
+                    &request,
+                    invocation,
+                    completed_target,
+                )
+                .await
+            };
+            if commit_started && operation.is_ok() {
+                cancellation.commit_finished();
+            }
+            if let Some(response) = response {
+                match operation {
+                    Ok(()) if commit_started => {
+                        let _ = response.send(Ok(AuthenticatedServerResourceEvent::Failed { failure }));
+                    }
+                    Ok(()) => {
+                        let _ = response.send(Ok(AuthenticatedServerResourceEvent::Cancelled));
+                    }
+                    Err(error) => {
+                        let _ = response.send(Err(error));
+                    }
+                }
+            } else if let Err(error) = operation {
+                terminal_error = Some(error);
+            }
+        }
+    }
+    match (terminal_error, database_session.shutdown().await) {
+        (Some(error), _) => Err(error),
+        (None, shutdown) => shutdown,
+    }
+}
+
 fn resource_target_shape_is_supported(
     definition: &FunctionDefinition,
     kind: ProtocolResourceKind,
@@ -2216,7 +2858,7 @@ fn resource_target_shape_is_supported(
     }
     match (kind, definition.return_type()) {
         (ProtocolResourceKind::Single, FunctionReturn::Single(_)) => true,
-        (ProtocolResourceKind::Stream, FunctionReturn::Rows(columns)) => columns.len() == 1,
+        (ProtocolResourceKind::Stream, FunctionReturn::Stream(_)) => true,
         _ => false,
     }
 }
@@ -2395,7 +3037,7 @@ async fn execute_sealed_server_after_audit(
     };
     let kind = match definition.return_type() {
         FunctionReturn::Single(_) => ProtocolResourceKind::Single,
-        FunctionReturn::Rows(columns) if columns.len() == 1 => ProtocolResourceKind::Stream,
+        FunctionReturn::Stream(_) => ProtocolResourceKind::Stream,
         _ => {
             return finish_sealed_failure(
                 transaction,
@@ -3269,6 +3911,105 @@ pub(crate) fn is_admitted_security_identity(definition: SystemFunctionDefinition
                     _ => false,
                 }
         })
+}
+
+/// One canonical resource target resolved against the active application and
+/// verified-standard catalogues. Standard targets retain both immutable pins.
+enum ResolvedResourceTarget<'a> {
+    Application {
+        definition: &'a FunctionDefinition,
+        target: InvocationTarget,
+    },
+    VerifiedStandard {
+        definition: &'a FunctionDefinition,
+        executable: &'a StandardExecutable,
+        target: InvocationTarget,
+    },
+}
+
+impl<'a> ResolvedResourceTarget<'a> {
+    fn target(&self) -> InvocationTarget {
+        match self {
+            Self::Application { target, .. } | Self::VerifiedStandard { target, .. } => *target,
+        }
+    }
+
+    fn definition(&self) -> &'a FunctionDefinition {
+        match self {
+            Self::Application { definition, .. } | Self::VerifiedStandard { definition, .. } => {
+                definition
+            }
+        }
+    }
+
+    fn executable(&self) -> Option<&'a StandardExecutable> {
+        match self {
+            Self::Application { .. } => None,
+            Self::VerifiedStandard { executable, .. } => Some(executable),
+        }
+    }
+}
+
+/// Resolves one SERVER resource function to its closed security target.
+///
+/// A function present in both the active application and exact standard
+/// catalogues is ambiguous. A standard function must have exactly one
+/// executable whose immutable revision matches the catalogue definition;
+/// missing, duplicate, stale, or otherwise unpinned evidence resolves to no
+/// target and therefore cannot reach authorise_execute.
+fn resolve_resource_target<'a>(
+    active: &'a ActiveDatabaseRevision,
+    function: FunctionId,
+) -> Option<ResolvedResourceTarget<'a>> {
+    resolve_resource_target_in_catalogues(
+        active.pair(),
+        active.catalogue(),
+        active.catalogue_hash_context().standard(),
+        function,
+    )
+}
+
+fn resolve_resource_target_in_catalogues<'a>(
+    pair: RevisionPair,
+    application_catalogue: &'a orna_core::catalogue::CatalogueSnapshot,
+    standard: Option<&'a orna_core::revision::VerifiedStandardLibrarySnapshot>,
+    function: FunctionId,
+) -> Option<ResolvedResourceTarget<'a>> {
+    let application = application_catalogue.function_by_id(function);
+    let standard_definition =
+        standard.and_then(|snapshot| snapshot.catalogue().function_by_id(function));
+
+    match (application, standard_definition) {
+        (Some(_), Some(_)) | (None, None) => None,
+        (Some(definition), None) => Some(ResolvedResourceTarget::Application {
+            definition,
+            target: InvocationTarget::new(function, pair),
+        }),
+        (None, Some(definition)) => {
+            let snapshot = standard?;
+            let mut executables = snapshot
+                .executables()
+                .iter()
+                .filter(|executable| executable.function() == function);
+            let executable = executables.next()?;
+            if executables.next().is_some()
+                || executable.revision().function() != function
+                || executable.revision().id() != definition.current_revision()
+            {
+                return None;
+            }
+            Some(ResolvedResourceTarget::VerifiedStandard {
+                definition,
+                executable,
+                target: InvocationTarget::verified_standard(
+                    function,
+                    pair,
+                    snapshot.revision(),
+                    executable.revision().id(),
+                ),
+            })
+        }
+    }
 }
 
 /// Resolves one sealed request target in the pinned application and
@@ -5984,9 +6725,28 @@ mod tests {
             ProtocolResourceKind::Stream,
         ));
 
-        let rows = FunctionDefinition::new(
+        let stream = FunctionDefinition::new(
             RAW_CALL_FUNCTION,
             QualifiedSemanticName::new(["app", "stream"]).expect("function name"),
+            FunctionDomain::Server,
+            Vec::new(),
+            FunctionReturn::Stream(ResolvedType::scalar(StandardScalar::Integer)),
+            FunctionRevisionId::new(),
+            FunctionSecurity::Invoker,
+            Some(FunctionTransaction::ReadOnly),
+            FunctionVolatility::Stable,
+        );
+        assert!(resource_target_shape_is_supported(
+            &stream,
+            ProtocolResourceKind::Stream,
+        ));
+        assert!(!resource_target_shape_is_supported(
+            &stream,
+            ProtocolResourceKind::Single,
+        ));
+        let rows = FunctionDefinition::new(
+            RAW_CALL_FUNCTION,
+            QualifiedSemanticName::new(["app", "finite_rows"]).expect("function name"),
             FunctionDomain::Server,
             Vec::new(),
             FunctionReturn::Rows(vec![FunctionReturnColumnDefinition::new(
@@ -5999,14 +6759,11 @@ mod tests {
             Some(FunctionTransaction::ReadOnly),
             FunctionVolatility::Stable,
         );
-        assert!(resource_target_shape_is_supported(
+        assert!(!resource_target_shape_is_supported(
             &rows,
             ProtocolResourceKind::Stream,
         ));
-        assert!(!resource_target_shape_is_supported(
-            &rows,
-            ProtocolResourceKind::Single,
-        ));
+
         let multi_rows = FunctionDefinition::new(
             RAW_CALL_FUNCTION,
             QualifiedSemanticName::new(["app", "multi_stream"]).expect("function name"),
@@ -6917,6 +7674,156 @@ mod tests {
         assert!(failure.details().is_none());
         assert_eq!(failure.retryability(), InvocationRetryability::Unknown);
     }
+    #[test]
+    fn resource_targets_resolve_and_authorize_with_closed_class_pins() {
+        use orna_core::{
+            SchemaId,
+            catalogue::{
+                FunctionSecurity, FunctionTransaction, FunctionVolatility, SchemaDefinition,
+            },
+            security::{ExecuteGrant, Principal, PrincipalKind, PrincipalStatus},
+            types::{ResolvedType, StandardScalar},
+        };
+
+        let pair = RevisionPair::new(
+            SourceRevisionId::from_bytes([0xa1; 16]),
+            CatalogueRevisionId::from_bytes([0xa2; 16]),
+        );
+        let principal = PrincipalId::from_bytes([0xa3; 16]);
+        let application_function = FunctionId::from_bytes([0xa4; 16]);
+        let application_revision = FunctionRevisionId::from_bytes([0xa5; 16]);
+        let application = FunctionDefinition::new(
+            application_function,
+            QualifiedSemanticName::new(["app", "resource"]).expect("application name"),
+            FunctionDomain::Server,
+            Vec::new(),
+            FunctionReturn::Single(ResolvedType::scalar(StandardScalar::Integer)),
+            application_revision,
+            FunctionSecurity::Invoker,
+            Some(FunctionTransaction::ReadOnly),
+            FunctionVolatility::Stable,
+        );
+        let application_catalogue = CatalogueSnapshot::new_with_functions(
+            pair.catalogue(),
+            vec![SchemaDefinition::new(
+                SchemaId::from_bytes([0xa6; 16]),
+                QualifiedSemanticName::new(["app"]).expect("application schema"),
+            )],
+            Vec::new(),
+            vec![application],
+        )
+        .expect("application catalogue");
+        let application_target = resolve_resource_target_in_catalogues(
+            pair,
+            &application_catalogue,
+            None,
+            application_function,
+        )
+        .expect("application resource target");
+        assert_eq!(
+            application_target.target(),
+            InvocationTarget::new(application_function, pair)
+        );
+        let application_security = SecuritySnapshot::new_with_function_targets(
+            pair,
+            vec![SecurityFunctionTarget::application(application_function)],
+            vec![Principal::new(
+                principal,
+                PrincipalKind::User,
+                PrincipalStatus::Active,
+            )],
+            Vec::new(),
+            vec![ExecuteGrant::new(principal, application_function)],
+        )
+        .expect("application security snapshot");
+        let session = application_security
+            .bind_authenticated_session(principal, Vec::new())
+            .expect("application session");
+        assert!(matches!(
+            application_security.authorise_execute(&session, application_target.target()),
+            ExecuteDecision::Allowed(_)
+        ));
+
+        let standard = orna_standard::verify_standard_library_v2_snapshot(
+            orna_standard::retained_standard_library_v2_snapshot().expect("standard fixture"),
+        )
+        .expect("verified standard fixture");
+        let standard_function = STD_INVOKE_ECHO_FUNCTION_ID;
+        let standard_definition = standard
+            .catalogue()
+            .function_by_id(standard_function)
+            .expect("standard echo definition");
+        let standard_executable = standard
+            .executables()
+            .iter()
+            .find(|executable| executable.function() == standard_function)
+            .expect("standard echo executable");
+        assert_eq!(
+            standard_executable.revision().id(),
+            standard_definition.current_revision()
+        );
+        let empty_catalogue = CatalogueSnapshot::new_with_functions(
+            pair.catalogue(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        )
+        .expect("empty application catalogue");
+        let standard_target = resolve_resource_target_in_catalogues(
+            pair,
+            &empty_catalogue,
+            Some(&standard),
+            standard_function,
+        )
+        .expect("verified standard resource target");
+        let expected_standard_target = InvocationTarget::verified_standard(
+            standard_function,
+            pair,
+            standard.revision(),
+            standard_executable.revision().id(),
+        );
+        assert_eq!(standard_target.target(), expected_standard_target);
+        let standard_security = SecuritySnapshot::new_with_function_targets(
+            pair,
+            vec![SecurityFunctionTarget::verified_standard(
+                standard_function,
+                standard.revision(),
+                standard_executable.revision().id(),
+            )],
+            vec![Principal::new(
+                principal,
+                PrincipalKind::User,
+                PrincipalStatus::Active,
+            )],
+            Vec::new(),
+            vec![ExecuteGrant::new(principal, standard_function)],
+        )
+        .expect("standard security snapshot");
+        let session = standard_security
+            .bind_authenticated_session(principal, Vec::new())
+            .expect("standard session");
+        assert!(matches!(
+            standard_security.authorise_execute(&session, expected_standard_target),
+            ExecuteDecision::Allowed(_)
+        ));
+        assert_eq!(
+            standard_security.authorise_execute(
+                &session,
+                InvocationTarget::new(standard_function, pair),
+            ),
+            ExecuteDecision::Denied(ExecuteDenial::UnknownFunction)
+        );
+    }
+
+    #[test]
+    fn resource_credit_is_nonzero_and_bounded() {
+        assert!(ResourceCredit::new(1, 1).is_some());
+        assert!(ResourceCredit::new(0, 1).is_none());
+        assert!(ResourceCredit::new(1, 0).is_none());
+        assert!(ResourceCredit::new(MAX_RESOURCE_CREDIT + 1, 1).is_none());
+        assert!(ResourceCredit::new(1, MAX_RESOURCE_CREDIT + 1).is_none());
+    }
+
     #[test]
     fn resource_cancellation_wins_before_terminal_commit() {
         let cancellation = ResourceCancellation::new();

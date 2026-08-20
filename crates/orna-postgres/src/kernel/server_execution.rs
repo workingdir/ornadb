@@ -6,7 +6,7 @@
 use std::{collections::BTreeMap, error::Error, fmt, sync::OnceLock};
 
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
-use futures_util::TryStreamExt;
+use futures_util::{TryStreamExt, future::{Either, select}};
 use orna_artifact::server_csv_encode::{self, CsvEncodePlan, CsvEncodePlanError};
 use orna_artifact::server_json_encode::{self, JsonEncodePlan, JsonEncodePlanError};
 use orna_artifact::server_parameter_echo::{self, ServerParameterEcho, ServerParameterEchoError};
@@ -29,7 +29,7 @@ use orna_core::{
     presenter::{OutputResolutionError, PresenterEntry, PresenterRegistry},
     revision::{
         ActiveDatabaseRevision, CatalogueHashContext, DefinitionReferenceKind,
-        DefinitionReferenceTarget, ExecutableArtifact, ExecutableArtifactKind,
+        DefinitionReferenceTarget, ExecutableArtifact, ExecutableArtifactKind, StandardExecutable,
         FunctionRevisionRecord, RevisionPair, Sha256Digest, SourceOrigin,
     },
     security::{AuthorisedInvocation, InvocationTarget},
@@ -45,11 +45,17 @@ use orna_standard::{
     BYTE_STREAM_MAGIC, INTEGER_TYPE_ID, JSON_MAGIC, STD_IO_BYTE_STREAM_TYPE_ID,
     STD_TERMINAL_DOCUMENT_TYPE_ID, TERMINAL_DOCUMENT_MAGIC,
 };
+use tokio::sync::mpsc;
 use tokio_postgres::{
     Client, IsolationLevel, Row, Statement, Transaction,
     types::{ToSql, Type},
 };
 
+use super::security::{
+    AuthenticatedServerResourceEvent, ResourceCancellation, ResourceProducerCommand,
+    ResourceProducerCompleted, ResourceProducerCancelled, ResourceProducerFailed, ResourceProducerPull,
+    ResourceProducerExit,
+};
 use crate::{
     PostgresKernel, PostgresKernelError,
     server_runtime::{
@@ -1163,13 +1169,23 @@ async fn pause_after_recovery(test_barrier: Option<&SelectTestBarrier>) {
 #[cfg(not(feature = "test-hooks"))]
 async fn pause_after_recovery(_test_barrier: Option<&SelectTestBarrier>) {}
 
-async fn execute_active_transaction(
+struct PreparedServerExecution {
+    revision: FunctionRevisionId,
+    statement: Statement,
+    binds: Vec<SelectBindValue>,
+    columns: Vec<ResultColumn>,
+    guards: Vec<VariableGuard>,
+    variable_payload_limit: usize,
+    cardinality: ResultCardinality,
+}
+
+async fn prepare_active_transaction(
     transaction: &Transaction<'_>,
     active: &ActiveDatabaseRevision,
     function: &FunctionDefinition,
     context: ServerSelectContext,
     arguments: &[FunctionArgument],
-) -> Result<ServerSelectResult, PostgresKernelError> {
+) -> Result<PreparedServerExecution, PostgresKernelError> {
     let revision = active
         .function_revisions()
         .iter()
@@ -1202,13 +1218,15 @@ async fn execute_active_transaction(
         artifact.version(),
         artifact.payload(),
     )?;
-    // Resource dispatch admits scalar functions, while the canonical SELECT
-    // planner/result model is row-shaped. Adapt scalars to one internal value
-    // column so all existing validation, lowering, and canonical RuntimeValue
-    // decoding stay on the same path as ROWS execution.
-    let scalar_execution_function = scalar_execution_function(function);
-    let execution_function = scalar_execution_function.as_ref().unwrap_or(function);
-    let scalar_result = scalar_execution_function.is_some();
+    // Resource dispatch admits scalar and stream functions, while the
+    // canonical SELECT planner/result model is row-shaped. Adapt both to one
+    // internal value column so all existing validation, lowering, and
+    // canonical RuntimeValue decoding stay on the same path as ROWS
+    // execution. Only an original SINGLE retains exact-one cardinality.
+    let row_execution_function = row_execution_function(function);
+    let execution_function = row_execution_function.as_ref().unwrap_or(function);
+    let scalar_result = matches!(function.return_type(), FunctionReturn::Single(_));
+    let stream_result = matches!(function.return_type(), FunctionReturn::Stream(_));
     let (columns, lowered, cardinality) = match &decoded {
         DecodedServerPlan::V1(plan) => {
             validate_function_signature(execution_function)?;
@@ -1275,6 +1293,8 @@ async fn execute_active_transaction(
                 lowered,
                 if scalar_result {
                     ResultCardinality::ExactlyOne
+                } else if stream_result {
+                    ResultCardinality::BoundedMany
                 } else {
                     ResultCardinality::AtMostOne
                 },
@@ -1350,6 +1370,8 @@ async fn execute_active_transaction(
                 lowered,
                 if scalar_result {
                     ResultCardinality::ExactlyOne
+                } else if stream_result {
+                    ResultCardinality::BoundedMany
                 } else {
                     ResultCardinality::AtMostOne
                 },
@@ -1367,37 +1389,433 @@ async fn execute_active_transaction(
         &columns,
         &lowered.guards,
     )?;
+    Ok(PreparedServerExecution {
+        revision: revision.id(),
+        statement,
+        binds: lowered.binds,
+        columns,
+        guards: lowered.guards,
+        variable_payload_limit: lowered.variable_payload_limit,
+        cardinality,
+    })
+}
+
+async fn execute_active_transaction(
+    transaction: &Transaction<'_>,
+    active: &ActiveDatabaseRevision,
+    function: &FunctionDefinition,
+    context: ServerSelectContext,
+    arguments: &[FunctionArgument],
+) -> Result<ServerSelectResult, PostgresKernelError> {
+    let prepared = prepare_active_transaction(transaction, active, function, context, arguments).await?;
     let rows = stream_rows(
         transaction,
-        &statement,
-        &lowered.binds,
+        &prepared.statement,
+        &prepared.binds,
         ResultReadShape {
             active,
-            columns: &columns,
-            guards: &lowered.guards,
-            variable_payload_limit: lowered.variable_payload_limit,
-            cardinality,
+            columns: &prepared.columns,
+            guards: &prepared.guards,
+            variable_payload_limit: prepared.variable_payload_limit,
+            cardinality: prepared.cardinality,
         },
     )
     .await?;
     Ok(ServerSelectResult::new(
         context.pair(),
         context.function(),
-        revision.id(),
+        prepared.revision,
         rows,
     ))
 }
 
-/// Adapts one scalar SERVER signature to the internal one-column result model.
+/// Runs one authenticated SERVER resource query against one owned transaction.
+///
+/// Planning, statement preparation, the query stream, and every decoded row stay
+/// in this task. The command receiver is deliberately pull-driven: at most one
+/// row is decoded for one command, and a row that exceeds byte credit is retained
+/// as one bounded pending value rather than materialising the result set.
+pub(crate) async fn run_authenticated_server_resource_stream(
+    transaction: &Transaction<'_>,
+    active: &ActiveDatabaseRevision,
+    authorisation: &AuthorisedInvocation,
+    arguments: &[FunctionArgument],
+    commands: &mut mpsc::Receiver<ResourceProducerCommand>,
+    cancellation: &ResourceCancellation,
+) -> Result<ResourceProducerExit, PostgresKernelError> {
+    let target = authorisation.target();
+    if target.revision() != active.pair() {
+        return Err(server_error(ServerSelectError::AuthorisationMismatch {
+            authorised: Box::new(target),
+            active: active.pair(),
+        }));
+    }
+    let function = active
+        .catalogue()
+        .function_by_id(target.function())
+        .ok_or_else(|| {
+            server_error(ServerSelectError::FunctionNotActive {
+                pair: active.pair(),
+                function: target.function(),
+            })
+        })?;
+    let context = ServerSelectContext::new(active.pair(), target.function(), function.current_revision());
+    let prepared = prepare_active_transaction(transaction, active, function, context, arguments).await?;
+    let parameters = prepared
+        .binds
+        .iter()
+        .map(SelectBindValue::as_to_sql)
+        .collect::<Vec<_>>();
+    let stream = transaction
+        .query_raw(&prepared.statement, parameters)
+        .await
+        .map_err(PostgresKernelError::Database)?;
+    futures_util::pin_mut!(stream);
+
+    let mut rows_seen = 0usize;
+    let mut cells = 0usize;
+    let mut payload = initial_payload_len(&prepared.columns)?;
+    let mut pending: Option<(RuntimeValue, u64)> = None;
+    let mut batch_sequence = 0u64;
+    let mut final_batch_sequence = 0u64;
+    let mut total_items = 0u64;
+    let mut total_bytes = 0u64;
+
+    loop {
+        let cancelled = cancellation.cancelled();
+        let received = commands.recv();
+        futures_util::pin_mut!(cancelled, received);
+        let command = match select(cancelled, received).await {
+            Either::Left(((), _received)) => {
+                return Ok(ResourceProducerExit::Cancelled(ResourceProducerCancelled { response: None }));
+            }
+            Either::Right((command, _cancelled)) => command,
+        };
+        let Some(ResourceProducerCommand::Pull(ResourceProducerPull { credit, response })) = command else {
+            return Ok(ResourceProducerExit::Cancelled(ResourceProducerCancelled { response: None }));
+        };
+        if credit.item_count == 0 || credit.byte_count == 0 {
+            return Ok(ResourceProducerExit::Failed(ResourceProducerFailed {
+                response: Some(response),
+                error: server_error(ServerSelectError::Argument {
+                    parameter: None,
+                    rule: "resource pull credit must be non-zero",
+                }),
+            }));
+        }
+        if cancellation.is_requested() {
+            return Ok(ResourceProducerExit::Cancelled(ResourceProducerCancelled { response: Some(response) }));
+        }
+
+        let (value, byte_count) = if let Some(value) = pending.take() {
+            value
+        } else {
+            let cancelled = cancellation.cancelled();
+            let next_row = stream.try_next();
+            futures_util::pin_mut!(cancelled, next_row);
+            let row = match select(cancelled, next_row).await {
+                Either::Left(((), _next_row)) => {
+                    return Ok(ResourceProducerExit::Cancelled(ResourceProducerCancelled { response: Some(response) }));
+                }
+                Either::Right((row, _cancelled)) => match row {
+                    Ok(row) => row,
+                    Err(error) => return Ok(ResourceProducerExit::Failed(ResourceProducerFailed {
+                        response: Some(response),
+                        error: PostgresKernelError::Database(error),
+                    })),
+                },
+            };
+            let Some(row) = row else {
+                if let Err(error) = prepared.cardinality.finish(rows_seen) {
+                    return Ok(ResourceProducerExit::Failed(ResourceProducerFailed {
+                        response: Some(response),
+                        error,
+                    }));
+                }
+                return Ok(ResourceProducerExit::Completed(ResourceProducerCompleted {
+                    response,
+                    final_batch_sequence,
+                    total_items,
+                    total_bytes,
+                }));
+            };
+            if let Err(error) = prepared.cardinality.validate(rows_seen.saturating_add(1)) {
+                return Ok(ResourceProducerExit::Failed(ResourceProducerFailed {
+                    response: Some(response),
+                    error,
+                }));
+            }
+            if rows_seen == ROW_LIMIT {
+                return Ok(ResourceProducerExit::Failed(ResourceProducerFailed {
+                    response: Some(response),
+                    error: server_error(ServerSelectError::RowLimit { maximum: ROW_LIMIT }),
+                }));
+            }
+            cells = match cells.checked_add(prepared.columns.len()) {
+                Some(cells) => cells,
+                None => return Ok(ResourceProducerExit::Failed(ResourceProducerFailed {
+                    response: Some(response),
+                    error: server_error(ServerSelectError::CellLimit { maximum: CELL_LIMIT }),
+                })),
+            };
+            if cells > CELL_LIMIT {
+                return Ok(ResourceProducerExit::Failed(ResourceProducerFailed {
+                    response: Some(response),
+                    error: server_error(ServerSelectError::CellLimit { maximum: CELL_LIMIT }),
+                }));
+            }
+            let decoded = (|| -> Result<(RuntimeValue, u64), PostgresKernelError> {
+                let row_index = rows_seen;
+                for (guard_index, guard) in prepared.guards.iter().enumerate() {
+                    let accepted = row
+                        .try_get::<usize, bool>(prepared.columns.len() + guard_index)
+                        .map_err(|source| {
+                            server_error(ServerSelectError::RowDecode {
+                                row: row_index,
+                                column: prepared.columns.len() + guard_index,
+                                source,
+                            })
+                        })?;
+                    if !accepted {
+                        return Err(server_error(ServerSelectError::VariablePayload {
+                            row: row_index,
+                            column: guard.column,
+                            maximum: prepared.variable_payload_limit,
+                        }));
+                    }
+                }
+                let mut values = Vec::with_capacity(prepared.columns.len());
+                for (column_index, column) in prepared.columns.iter().enumerate() {
+                    let value = decode_value(active, &row, row_index, column_index, column)?;
+                    let value_payload = match &value {
+                        RuntimeValue::Record(_) => {
+                            canonical_record_payload_len(active, &value, row_index, column_index)?
+                        }
+                        _ => logical_payload_len(&value)?,
+                    };
+                    payload = add_payload(payload, value_payload)?;
+                    values.push(value);
+                }
+                rows_seen = rows_seen.saturating_add(1);
+                let [value] = values.try_into().map_err(|_| {
+                    server_error(ServerSelectError::PreparedResult {
+                        rule: "resource SERVER execution must produce exactly one value per row",
+                    })
+                })?;
+                let encoded = encode_active_value(active, &value).map_err(|source| {
+                    server_error(ServerSelectError::ValueCodec {
+                        row: row_index,
+                        column: 0,
+                        source,
+                    })
+                })?;
+                let byte_count = u64::try_from(encoded.len()).map_err(|_| {
+                    server_error(ServerSelectError::PayloadLimit { maximum: PAYLOAD_LIMIT })
+                })?;
+                Ok((value, byte_count))
+            })();
+            let (value, byte_count) = match decoded {
+                Ok(value) => value,
+                Err(error) => {
+                    return Ok(ResourceProducerExit::Failed(ResourceProducerFailed {
+                        response: Some(response),
+                        error,
+                    }));
+                }
+            };
+            (value, byte_count)
+        };
+        if byte_count > credit.byte_count {
+            pending = Some((value, byte_count));
+            if response
+                .send(Ok(AuthenticatedServerResourceEvent::Waiting {
+                    required_bytes: byte_count,
+                }))
+                .is_err()
+            {
+                return Ok(ResourceProducerExit::Cancelled(ResourceProducerCancelled { response: None }));
+            }
+            continue;
+        }
+        if cancellation.is_requested() {
+            return Ok(ResourceProducerExit::Cancelled(ResourceProducerCancelled { response: Some(response) }));
+        }
+        total_items = match total_items.checked_add(1) {
+            Some(total_items) => total_items,
+            None => return Ok(ResourceProducerExit::Failed(ResourceProducerFailed {
+                response: Some(response),
+                error: server_error(ServerSelectError::RowLimit { maximum: ROW_LIMIT }),
+            })),
+        };
+        total_bytes = match total_bytes.checked_add(byte_count) {
+            Some(total_bytes) => total_bytes,
+            None => return Ok(ResourceProducerExit::Failed(ResourceProducerFailed {
+                response: Some(response),
+                error: server_error(ServerSelectError::PayloadLimit { maximum: PAYLOAD_LIMIT }),
+            })),
+        };
+        let event = AuthenticatedServerResourceEvent::Values {
+            batch_sequence,
+            item_count: 1,
+            byte_count,
+            values: vec![value],
+        };
+        final_batch_sequence = batch_sequence;
+        batch_sequence = match batch_sequence.checked_add(1) {
+            Some(batch_sequence) => batch_sequence,
+            None => return Ok(ResourceProducerExit::Failed(ResourceProducerFailed {
+                response: Some(response),
+                error: server_error(ServerSelectError::RowLimit { maximum: ROW_LIMIT }),
+            })),
+        };
+        if response.send(Ok(event)).is_err() {
+            return Ok(ResourceProducerExit::Cancelled(ResourceProducerCancelled { response: None }));
+        }
+    }
+}
+
+/// Runs one verified-standard SERVER resource target through the same bounded
+/// pull protocol as an application target.
+///
+/// The standard executable is already pinned by the protected resource
+/// decision. Standard resource targets currently use the closed parameter-echo
+/// engine; no SQL preparation or PostgreSQL row stream is involved.
+pub(crate) async fn run_authenticated_standard_resource_stream(
+    active: &ActiveDatabaseRevision,
+    authorisation: &AuthorisedInvocation,
+    executable: &StandardExecutable,
+    arguments: &[FunctionArgument],
+    commands: &mut mpsc::Receiver<ResourceProducerCommand>,
+    cancellation: &ResourceCancellation,
+) -> Result<ResourceProducerExit, PostgresKernelError> {
+    let target = authorisation.target();
+    if target.revision() != active.pair() {
+        return Err(server_error(ServerSelectError::AuthorisationMismatch {
+            authorised: Box::new(target),
+            active: active.pair(),
+        }));
+    }
+    let standard = active
+        .catalogue_hash_context()
+        .standard()
+        .ok_or_else(|| server_error(ServerSelectError::FunctionNotActive {
+            pair: active.pair(),
+            function: target.function(),
+        }))?;
+    let function = standard
+        .catalogue()
+        .function_by_id(target.function())
+        .ok_or_else(|| server_error(ServerSelectError::FunctionNotActive {
+            pair: active.pair(),
+            function: target.function(),
+        }))?;
+    if executable.function() != target.function()
+        || executable.revision().function() != target.function()
+        || executable.revision().id() != function.current_revision()
+    {
+        return Err(server_error(ServerSelectError::FunctionNotActive {
+            pair: active.pair(),
+            function: target.function(),
+        }));
+    }
+    let value = execute_standard_parameter_echo(function, executable.revision(), arguments)?;
+    let encoded = encode_active_value(active, &value).map_err(|source| {
+        server_error(ServerSelectError::ValueCodec {
+            row: 0,
+            column: 0,
+            source,
+        })
+    })?;
+    let byte_count = u64::try_from(encoded.len()).map_err(|_| {
+        server_error(ServerSelectError::PayloadLimit {
+            maximum: PAYLOAD_LIMIT,
+        })
+    })?;
+    let mut emitted = false;
+
+    loop {
+        let cancelled = cancellation.cancelled();
+        let received = commands.recv();
+        futures_util::pin_mut!(cancelled, received);
+        let command = match select(cancelled, received).await {
+            Either::Left(((), _received)) => {
+                return Ok(ResourceProducerExit::Cancelled(ResourceProducerCancelled {
+                    response: None,
+                }));
+            }
+            Either::Right((command, _cancelled)) => command,
+        };
+        let Some(ResourceProducerCommand::Pull(ResourceProducerPull { credit, response })) = command else {
+            return Ok(ResourceProducerExit::Cancelled(ResourceProducerCancelled {
+                response: None,
+            }));
+        };
+        if credit.item_count == 0 || credit.byte_count == 0 {
+            return Ok(ResourceProducerExit::Failed(ResourceProducerFailed {
+                response: Some(response),
+                error: server_error(ServerSelectError::Argument {
+                    parameter: None,
+                    rule: "resource pull credit must be non-zero",
+                }),
+            }));
+        }
+        if cancellation.is_requested() {
+            return Ok(ResourceProducerExit::Cancelled(ResourceProducerCancelled {
+                response: Some(response),
+            }));
+        }
+        if !emitted {
+            if byte_count > credit.byte_count {
+                if response
+                    .send(Ok(AuthenticatedServerResourceEvent::Waiting {
+                        required_bytes: byte_count,
+                    }))
+                    .is_err()
+                {
+                    return Ok(ResourceProducerExit::Cancelled(ResourceProducerCancelled {
+                        response: None,
+                    }));
+                }
+                continue;
+            }
+            emitted = true;
+            if response
+                .send(Ok(AuthenticatedServerResourceEvent::Values {
+                    batch_sequence: 0,
+                    item_count: 1,
+                    byte_count,
+                    values: vec![value.clone()],
+                }))
+                .is_err()
+            {
+                return Ok(ResourceProducerExit::Cancelled(ResourceProducerCancelled {
+                    response: None,
+                }));
+            }
+            continue;
+        }
+        return Ok(ResourceProducerExit::Completed(ResourceProducerCompleted {
+            response,
+            final_batch_sequence: 0,
+            total_items: 1,
+            total_bytes: byte_count,
+        }));
+    }
+}
+
+
+/// Adapts one scalar or stream SERVER signature to the internal one-column
+/// result model.
 ///
 /// The SQL planner and decoder intentionally operate on ResultRows. A scalar
-/// resource therefore uses the same validated plan with a synthetic value
-/// column, while retaining the scalar's exact resolved type. This is an
+/// or stream resource therefore uses the same validated plan with a synthetic
+/// value column, while retaining the exact resolved item type. This is an
 /// execution-only view; the recovered catalogue definition is never replaced
 /// or persisted.
-fn scalar_execution_function(function: &FunctionDefinition) -> Option<FunctionDefinition> {
-    let FunctionReturn::Single(result_type) = function.return_type() else {
-        return None;
+fn row_execution_function(function: &FunctionDefinition) -> Option<FunctionDefinition> {
+    let result_type = match function.return_type() {
+        FunctionReturn::Single(result_type) | FunctionReturn::Stream(result_type) => result_type,
+        FunctionReturn::Rows(_) => return None,
     };
     Some(FunctionDefinition::new(
         function.id(),
@@ -5784,7 +6202,7 @@ mod tests {
     }
 
     #[test]
-    fn scalar_execution_adapts_single_result_and_preserves_canonical_value() {
+    fn row_execution_adapts_single_result_and_preserves_canonical_value() {
         let function = function(
             FunctionDomain::Server,
             Vec::new(),
@@ -5792,9 +6210,9 @@ mod tests {
             FunctionSecurity::Invoker,
             Some(FunctionTransaction::ReadOnly),
         );
-        let adapted = scalar_execution_function(&function).expect("scalar adapts");
+        let adapted = row_execution_function(&function).expect("single adapts");
         let FunctionReturn::Rows(columns) = adapted.return_type() else {
-            panic!("scalar execution view must be row-shaped");
+            panic!("single execution view must be row-shaped");
         };
         assert_eq!(columns.len(), 1);
         assert_eq!(columns[0].name(), "value");
@@ -5808,10 +6226,10 @@ mod tests {
                 ResolvedType::scalar(StandardScalar::Integer),
                 false,
             )
-            .expect("scalar result column is valid")],
+            .expect("single result column is valid")],
             [ResultRow::new([RuntimeValue::Integer(42)])],
         )
-        .expect("scalar result rows are valid");
+        .expect("single result rows are valid");
         let result = ServerSelectResult::new(
             RevisionPair::new(
                 SourceRevisionId::from_bytes([0x51; 16]),
@@ -5823,9 +6241,42 @@ mod tests {
         );
         assert_eq!(
             into_raw_server_values_for_context(&catalogue, &context, function.id(), result)
-                .expect("canonical scalar value conversion succeeds"),
+                .expect("canonical single value conversion succeeds"),
             vec![RuntimeValue::Integer(42)]
         );
+    }
+
+    #[test]
+    fn row_execution_adapts_stream_result_and_preserves_item_type() {
+        let function = function(
+            FunctionDomain::Server,
+            Vec::new(),
+            FunctionReturn::Stream(ResolvedType::scalar(StandardScalar::Boolean)),
+            FunctionSecurity::Invoker,
+            Some(FunctionTransaction::ReadOnly),
+        );
+        let adapted = row_execution_function(&function).expect("stream adapts");
+        let FunctionReturn::Rows(columns) = adapted.return_type() else {
+            panic!("stream execution view must be row-shaped");
+        };
+        assert_eq!(columns.len(), 1);
+        assert_eq!(columns[0].name(), "value");
+        assert_eq!(
+            columns[0].resolved_type(),
+            ResolvedType::scalar(StandardScalar::Boolean)
+        );
+    }
+
+    #[test]
+    fn row_execution_leaves_rows_result_unchanged() {
+        let function = function(
+            FunctionDomain::Server,
+            Vec::new(),
+            rows_return(),
+            FunctionSecurity::Invoker,
+            Some(FunctionTransaction::ReadOnly),
+        );
+        assert!(row_execution_function(&function).is_none());
     }
 
     #[test]
@@ -5839,7 +6290,7 @@ mod tests {
             FunctionSecurity::Invoker,
             Some(FunctionTransaction::ReadOnly),
         );
-        let adapted = scalar_execution_function(&function).expect("scalar adapts");
+        let adapted = row_execution_function(&function).expect("single adapts");
         let plan = ServerPlan {
             scan: Scan {
                 input: 0,
