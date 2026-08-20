@@ -100,7 +100,7 @@ use orna_client::{
     evaluate_client_function_with_grants_and_arguments as evaluate_authorised_client_function_with_arguments,
     evaluate_client_function_with_state_and_grants_and_arguments_and_executor_with_parent_invocation as evaluate_authorised_client_function_with_arguments_and_executor,
 };
-use orna_artifact::client_plan::{CAPABILITY_FORMAT_VERSION, CapabilityClientPlan};
+use orna_artifact::client_plan::{CAPABILITY_FORMAT_VERSION, CapabilityClientPlan, ResourceKind};
 use orna_core::{
     CatalogueRevisionId, FunctionId, FunctionRevisionId, InspectEpochId, InvocationAuditEventId,
     InvocationId, ObjectId, PrincipalId, SecurityAuditEventId, SourceRevisionId,
@@ -765,6 +765,14 @@ impl PostgresKernel {
                 request_id: request.request_id,
                 failure,
             };
+            let completed = |values| AuthenticatedServerResourceResult::Completed {
+                stream_id: request.stream_id,
+                request_id: request.request_id,
+                nested_invocation_id: invocation,
+                target_revision: active.pair(),
+                resource_kind: request.resource_kind,
+                values,
+            };
 
             let result = if request.target_revision != active.pair() {
                 append_unresolved_invocation_audit(
@@ -816,7 +824,20 @@ impl PostgresKernel {
                             invocation,
                         )
                         .await?;
-                        match active.catalogue().function_by_id(request.target_function_id) {
+                        let target_definition = active
+                            .catalogue()
+                            .function_by_id(request.target_function_id)
+                            .or_else(|| {
+                                active
+                                    .catalogue_hash_context()
+                                    .standard()
+                                    .and_then(|standard| {
+                                        standard
+                                            .catalogue()
+                                            .function_by_id(request.target_function_id)
+                                    })
+                            });
+                        match target_definition {
                             None => failed(CallFailure::TargetUnavailable),
                             Some(definition) if !resource_target_shape_is_supported(
                                 definition,
@@ -831,6 +852,39 @@ impl PostgresKernel {
                             {
                                 None => failed(CallFailure::TargetUnavailable),
                                 Some(arguments) => {
+                                    let standard_target = active
+                                        .catalogue()
+                                        .function_by_id(request.target_function_id)
+                                        .is_none()
+                                        .then(|| {
+                                            active
+                                                .catalogue_hash_context()
+                                                .standard()
+                                                .and_then(|standard| {
+                                                    let definition = standard
+                                                        .catalogue()
+                                                        .function_by_id(request.target_function_id)?;
+                                                    let executable = standard
+                                                        .executables()
+                                                        .iter()
+                                                        .find(|executable| {
+                                                            executable.function()
+                                                                == request.target_function_id
+                                                        })?;
+                                                    Some((definition, executable))
+                                                })
+                                        })
+                                        .flatten();
+                                    if let Some((definition, executable)) = standard_target {
+                                        match execute_standard_parameter_echo(
+                                            definition,
+                                            executable.revision(),
+                                            &arguments,
+                                        ) {
+                                            Ok(value) => completed(vec![value]),
+                                            Err(_) => failed(CallFailure::TargetUnavailable),
+                                        }
+                                    } else {
                                     let savepoint = transaction
                                 .savepoint("authenticated_server_resource_execution")
                                 .await
@@ -855,14 +909,7 @@ impl PostgresKernel {
                                                 .commit()
                                                 .await
                                                 .map_err(PostgresKernelError::Database)?;
-                                            AuthenticatedServerResourceResult::Completed {
-                                                stream_id: request.stream_id,
-                                                request_id: request.request_id,
-                                                nested_invocation_id: invocation,
-                                                target_revision: active.pair(),
-                                                resource_kind: request.resource_kind,
-                                                values,
-                                            }
+                                            completed(values)
                                         }
                                         None => {
                                             savepoint
@@ -888,6 +935,7 @@ impl PostgresKernel {
                                     };
                                     failed(failure)
                                 }
+                                    }
                                     }
                                 }
                             },
@@ -1161,9 +1209,11 @@ impl PostgresKernel {
                                                 };
                                                 let (completion_key, completion_generation) = match &completion {
                                                     ClientResourceCompletion::Ready { key, generation, .. }
-                                                    | ClientResourceCompletion::Pending { key, generation }
+                                                    | ClientResourceCompletion::StreamValues { key, generation, .. }
+                                                    | ClientResourceCompletion::StreamCompleted { key, generation, .. }
+                                                    | ClientResourceCompletion::Pending { key, generation, .. }
                                                     | ClientResourceCompletion::Failed { key, generation, .. }
-                                                    | ClientResourceCompletion::Cancelled { key, generation } => (*key, *generation),
+                                                    | ClientResourceCompletion::Cancelled { key, generation, .. } => (*key, *generation),
                                                 };
                                                 if completion_key != key || completion_generation != generation {
                                                     return Err(PostgresKernelError::ClientExecution(
@@ -1203,6 +1253,26 @@ impl PostgresKernel {
                                                         context,
                                                         source: ClientResourceExecutionError::Failed(
                                                             "resource.executor.invalid_state".to_owned(),
+                                                        ),
+                                                    },
+                                                ));
+                                            }
+                                            let impossible = match resource.kind() {
+                                                ResourceKind::Scalar => matches!(
+                                                    &completion,
+                                                    ClientResourceCompletion::StreamValues { .. }
+                                                        | ClientResourceCompletion::StreamCompleted { .. }
+                                                ),
+                                                ResourceKind::Stream => {
+                                                    matches!(&completion, ClientResourceCompletion::Ready { .. })
+                                                }
+                                            };
+                                            if impossible {
+                                                return Err(PostgresKernelError::ClientExecution(
+                                                    ClientExecutionError::ResourceEvaluation {
+                                                        context,
+                                                        source: ClientResourceExecutionError::Failed(
+                                                            "resource.executor.invalid_completion".to_owned(),
                                                         ),
                                                     },
                                                 ));
