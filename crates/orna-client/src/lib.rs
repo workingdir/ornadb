@@ -515,29 +515,48 @@ impl Error for ClientResourceError {}
 
 /// The invocation identity that a CLIENT resource request uses for server
 /// correlation.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ClientResourceInvocationContext {
     parent_invocation_id: InvocationId,
     call_site_id: CallSiteId,
+    state_profile: String,
+    function_instance_key: String,
 }
 
 impl ClientResourceInvocationContext {
     /// Creates one resource request invocation context.
-    pub const fn new(parent_invocation_id: InvocationId, call_site_id: CallSiteId) -> Self {
+    pub fn new(
+        parent_invocation_id: InvocationId,
+        call_site_id: CallSiteId,
+        state_profile: String,
+        function_instance_key: String,
+    ) -> Self {
         Self {
             parent_invocation_id,
             call_site_id,
+            state_profile,
+            function_instance_key,
         }
     }
 
     /// Returns the enclosing invocation identity.
-    pub const fn parent_invocation_id(self) -> InvocationId {
+    pub const fn parent_invocation_id(&self) -> InvocationId {
         self.parent_invocation_id
     }
 
     /// Returns the compiled resource call-site identity.
-    pub const fn call_site_id(self) -> CallSiteId {
+    pub const fn call_site_id(&self) -> CallSiteId {
         self.call_site_id
+    }
+
+    /// Returns the inherited root state profile.
+    pub fn state_profile(&self) -> &str {
+        &self.state_profile
+    }
+
+    /// Returns the inherited root function-instance key.
+    pub fn function_instance_key(&self) -> &str {
+        &self.function_instance_key
     }
 }
 
@@ -632,8 +651,8 @@ impl ClientResourceRequest {
     }
 
     /// Returns the invocation context when the evaluator supplied one.
-    pub const fn invocation_context(&self) -> Option<ClientResourceInvocationContext> {
-        self.invocation_context
+    pub fn invocation_context(&self) -> Option<ClientResourceInvocationContext> {
+        self.invocation_context.clone()
     }
 
     /// Creates a successful completion for this request.
@@ -776,6 +795,12 @@ pub trait ClientResourceExecutor {
     /// can override this method to send its protocol cancellation control.
     fn cancel(&mut self, request: ClientResourceRequest) -> ClientResourceCompletion {
         request.cancelled()
+    }
+    /// Cancels the active transport request, when one is pending.
+    ///
+    /// The default keeps immediate executors unchanged.
+    fn cancel_pending(&mut self) -> Option<ClientResourceCompletion> {
+        None
     }
 }
 
@@ -2669,6 +2694,28 @@ pub fn evaluate_client_function_with_state_and_grants_and_arguments(
     )
 }
 
+/// Evaluates one closed CLIENT function with invocation arguments, grants,
+/// and an explicit root state context, without an external resource executor.
+pub fn evaluate_client_function_in_state_context_with_grants_and_arguments(
+    active: &ActiveDatabaseRevision,
+    authorisation: &AuthorisedInvocation,
+    state_context: &ClientStateContext,
+    arguments: &[FunctionArgument],
+    declarations: &[capability::LocalCapabilityDeclaration],
+    grants: &capability::LocalCapabilityGrantSet,
+    state: &mut ClientStateStore,
+) -> Result<ClientExecutionResult, ClientExecutionError> {
+    evaluate_client_function_in_state_context(
+        active,
+        authorisation,
+        state_context,
+        arguments,
+        declarations,
+        grants,
+        state,
+    )
+}
+
 /// Evaluates one CLIENT function in an explicit root state context.
 ///
 /// Resource and `AWAIT` expressions fail closed because no external executor
@@ -2754,6 +2801,32 @@ pub fn evaluate_client_function_with_state_and_grants_and_arguments_and_executor
     )
 }
 
+/// Evaluates one CLIENT function with an explicit root state context, a
+/// caller-owned resource executor, and an enclosing root invocation identity.
+pub fn evaluate_client_function_in_state_context_with_grants_and_arguments_and_executor_with_parent_invocation(
+    active: &ActiveDatabaseRevision,
+    authorisation: &AuthorisedInvocation,
+    state_context: &ClientStateContext,
+    arguments: &[FunctionArgument],
+    declarations: &[capability::LocalCapabilityDeclaration],
+    grants: &capability::LocalCapabilityGrantSet,
+    state: &mut ClientStateStore,
+    parent_invocation_id: InvocationId,
+    executor: &mut dyn ClientResourceExecutor,
+) -> Result<ClientExecutionResult, ClientExecutionError> {
+    evaluate_client_function_in_state_context_with_executor(
+        active,
+        authorisation,
+        state_context,
+        arguments,
+        declarations,
+        grants,
+        state,
+        parent_invocation_id,
+        Some(executor),
+    )
+}
+
 /// Evaluates one CLIENT function with a caller-owned resource executor and an
 /// enclosing root invocation identity.
 pub fn evaluate_client_function_with_state_and_grants_and_arguments_and_executor_with_parent_invocation(
@@ -2767,7 +2840,7 @@ pub fn evaluate_client_function_with_state_and_grants_and_arguments_and_executor
     executor: &mut dyn ClientResourceExecutor,
 ) -> Result<ClientExecutionResult, ClientExecutionError> {
     let state_context = ClientStateContext::default_for(authorisation.target().function());
-    evaluate_client_function_in_state_context_with_executor(
+    evaluate_client_function_in_state_context_with_grants_and_arguments_and_executor_with_parent_invocation(
         active,
         authorisation,
         &state_context,
@@ -2776,7 +2849,7 @@ pub fn evaluate_client_function_with_state_and_grants_and_arguments_and_executor
         grants,
         state,
         parent_invocation_id,
-        Some(executor),
+        executor,
     )
 }
 
@@ -3882,6 +3955,8 @@ fn evaluate_resource_expression(
         digest,
         active.catalogue_hash(),
     );
+    let state_profile = state.context().state_profile().to_owned();
+    let function_instance_key = state.context().instance_key().to_owned();
     let resource = state.get_or_create_resource_with_kind(key, operation.kind(), expected_type);
     if resource.kind() != operation.kind() {
         return Err(evaluate_resource_error(
@@ -3943,6 +4018,8 @@ fn evaluate_resource_expression(
             ClientResourceInvocationContext::new(
                 context.parent_invocation_id(),
                 operation.call_site_id(),
+                state_profile,
+                function_instance_key,
             ),
             evaluated,
         )
@@ -4534,7 +4611,12 @@ pub fn trigger_client_action(
                 .begin_request_with_context_and_kind(
                     active,
                     kind,
-                    ClientResourceInvocationContext::new(parent.parent_invocation_id(), descriptor.call_site),
+                    ClientResourceInvocationContext::new(
+                        parent.parent_invocation_id(),
+                        descriptor.call_site,
+                        state.context().state_profile().to_owned(),
+                        state.context().instance_key().to_owned(),
+                    ),
                     values,
                 )
                 .map_err(ClientActionError::Arguments)?;
@@ -4566,7 +4648,12 @@ pub fn trigger_client_action(
                 .begin_request_with_context_and_kind(
                     active,
                     kind,
-                    ClientResourceInvocationContext::new(parent.parent_invocation_id(), descriptor.call_site),
+                    ClientResourceInvocationContext::new(
+                        parent.parent_invocation_id(),
+                        descriptor.call_site,
+                        state.context().state_profile().to_owned(),
+                        state.context().instance_key().to_owned(),
+                    ),
                     values,
                 )
                 .map_err(ClientActionError::Arguments)?;
@@ -6971,6 +7058,54 @@ fn client_stream_cancellation_clears_batches_and_rejects_stale_completions() {
     }
 
     #[test]
+    fn version_four_state_context_profiles_are_isolated() {
+        let (active, function, _) = version_four_text_state_plan();
+        let profile_a =
+            super::ClientStateContext::new(function, "profile-a".to_owned(), String::new())
+                .unwrap();
+        let profile_b =
+            super::ClientStateContext::new(function, "profile-b".to_owned(), String::new())
+                .unwrap();
+        let mut state = super::ClientStateStore::new();
+        let grants = super::capability::LocalCapabilityGrantSet::new();
+        let slot = StateSlotId::from_bytes([0x12; 16]);
+
+        super::evaluate_client_function_in_state_context_with_grants_and_arguments(
+            &active,
+            &authorise(active.pair(), function),
+            &profile_a,
+            &[],
+            &[],
+            &grants,
+            &mut state,
+        )
+        .unwrap();
+        let mut executor =
+            super::DeterministicClientResourceExecutor::new(|_: &super::ClientResourceRequest| {
+                Ok(RuntimeValue::Boolean(true))
+            });
+        super::evaluate_client_function_in_state_context_with_grants_and_arguments_and_executor_with_parent_invocation(
+            &active,
+            &authorise(active.pair(), function),
+            &profile_b,
+            &[],
+            &[],
+            &grants,
+            &mut state,
+            InvocationId::from_bytes([0x44; 16]),
+            &mut executor,
+        )
+        .unwrap();
+
+        let key_a = super::ClientStateKey::from_context(&profile_a, function, slot);
+        let key_b = super::ClientStateKey::from_context(&profile_b, function, slot);
+        assert_ne!(key_a, key_b);
+        assert!(state.session().contains_key(&key_a));
+        assert!(state.session().contains_key(&key_b));
+        assert_eq!(state.context(), &profile_b);
+    }
+
+    #[test]
     fn version_four_keeps_caller_state_input_over_the_plan_default() {
         let (active, function, _) = version_four_text_state_plan();
         let mut state = super::ClientStateStore::new();
@@ -7399,11 +7534,24 @@ fn client_stream_cancellation_clears_batches_and_rejects_stale_completions() {
         .unwrap();
         let grants = super::capability::LocalCapabilityGrantSet::from_grants([grant]).unwrap();
         let argument = FunctionArgument::new(parameter, RuntimeValue::Text("/tmp".to_owned())).unwrap();
+        let state_context = super::ClientStateContext::new(
+            function,
+            "profile-a".to_owned(),
+            "instance-a".to_owned(),
+        )
+        .unwrap();
+        let mut state = super::ClientStateStore::new();
+        state.set_context(state_context);
         let mut executor = super::DeterministicClientResourceExecutor::new(
             |request: &super::ClientResourceRequest| {
                 assert_eq!(
                     request.invocation_context(),
-                    Some(super::ClientResourceInvocationContext::new(parent_invocation_id, call_site_id)),
+                    Some(super::ClientResourceInvocationContext::new(
+                        parent_invocation_id,
+                        call_site_id,
+                        "profile-a".to_owned(),
+                        "instance-a".to_owned(),
+                    )),
                 );
                 assert_eq!(request.key().target(), InvocationTarget::new(target, pair));
                 assert_eq!(request.arguments().len(), 1);
@@ -7419,13 +7567,14 @@ fn client_stream_cancellation_clears_batches_and_rejects_stale_completions() {
             },
         );
 
-        let result = super::evaluate_client_function_with_state_and_grants_and_arguments_and_executor_with_parent_invocation(
+        let result = super::evaluate_client_function_in_state_context_with_grants_and_arguments_and_executor_with_parent_invocation(
             &active,
             &authorise(pair, function),
+            &state.context().clone(),
             &[argument],
             &[],
             &grants,
-            &mut super::ClientStateStore::new(),
+            &mut state,
             parent_invocation_id,
             &mut executor,
         )
