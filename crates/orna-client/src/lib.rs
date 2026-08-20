@@ -2319,7 +2319,7 @@ fn evaluate_client_function_in_state_context_with_executor(
     validate_active_catalogue(active, target.function())?;
     let mut staged = state.clone();
     staged.set_context(state_context.clone());
-    let result = evaluate_function(
+    let result = match evaluate_function(
         active,
         target.function(),
         arguments
@@ -2333,7 +2333,26 @@ fn evaluate_client_function_in_state_context_with_executor(
         authorisation.session_principal(),
         parent_invocation_id,
         &mut executor,
-    )?;
+    ) {
+        Ok(result) => result,
+        Err(error) => {
+            if let ClientExecutionError::ResourceEvaluation {
+                source: ClientResourceExecutionError::Pending { key, generation },
+                ..
+            } = &error
+            {
+                if let Some(resource) = staged.resources.get(key) {
+                    if resource.key() == *key
+                        && resource.generation() == *generation
+                        && resource.status() == ClientResourceStatus::Loading
+                    {
+                        state.resources.insert(*key, resource.clone());
+                    }
+                }
+            }
+            return Err(error);
+        }
+    };
     *state = staged;
     let (context, value) = result;
     Ok(ClientExecutionResult { context, value })
@@ -6062,6 +6081,118 @@ mod tests {
         .unwrap();
 
         assert_eq!(result.value(), &RuntimeValue::Text("executor-value".to_owned()));
+    }
+
+    #[test]
+    fn ordinary_resource_pending_persists_only_the_loading_resource() {
+        let (active, function, pair, _, parameter) = version_six_client_resource_action_active();
+        let principal = PrincipalId::from_bytes([0x7a; 16]);
+        let state_context = super::ClientStateContext::new(
+            FunctionId::from_bytes([0xa1; 16]),
+            "profile".to_owned(),
+            "instance".to_owned(),
+        )
+        .unwrap();
+        let local_key = super::ClientStateKey::from_context(
+            &state_context,
+            function,
+            StateSlotId::from_bytes([0xa2; 16]),
+        );
+        let session_key = super::ClientStateKey::from_context(
+            &state_context,
+            function,
+            StateSlotId::from_bytes([0xa3; 16]),
+        );
+        let user_key = UserStateKey::new(
+            principal,
+            state_context.root_function(),
+            state_context.state_profile().to_owned(),
+            function,
+            state_context.instance_key().to_owned(),
+            StateSlotId::from_bytes([0xa4; 16]),
+        )
+        .unwrap();
+        let mut state = ClientStateStore::new();
+        state.set_context(state_context.clone());
+        state.local_mut().insert(
+            local_key,
+            RuntimeValue::Text("local".to_owned()),
+        );
+        state.session_mut().insert(
+            session_key,
+            RuntimeValue::Text("session".to_owned()),
+        );
+        state
+            .load_user_state(&[UserStateCell::new(
+                user_key,
+                RuntimeValue::Text("user".to_owned()),
+                orna_standard::CHARACTER_LARGE_OBJECT_TYPE_ID,
+                1,
+                SystemTime::UNIX_EPOCH,
+            )])
+            .unwrap();
+        let prior_context = state.context().clone();
+        let prior_local = state.local().clone();
+        let prior_session = state.session().clone();
+        let prior_user = state.user().clone();
+        let grant = capability::LocalCapabilityGrant::new(
+            capability::LocalCapabilityName::StdFsRead,
+            capability::LocalCapabilityScope::path("/tmp/pending").unwrap(),
+        )
+        .unwrap();
+        let grants = capability::LocalCapabilityGrantSet::from_grants([grant]).unwrap();
+        let argument = FunctionArgument::new(
+            parameter,
+            RuntimeValue::Text("/tmp/pending".to_owned()),
+        )
+        .unwrap();
+        let mut executor = RecordingActionExecutor::new(None);
+
+        let error = super::evaluate_client_function_with_state_and_grants_and_arguments_and_executor_with_parent_invocation(
+            &active,
+            &authorise(pair, function),
+            &[argument],
+            &[],
+            &grants,
+            &mut state,
+            InvocationId::from_bytes([0x91; 16]),
+            &mut executor,
+        )
+        .unwrap_err();
+        let (key, generation) = match error {
+            super::ClientExecutionError::ResourceEvaluation {
+                source: super::ClientResourceExecutionError::Pending { key, generation },
+                ..
+            } => (key, generation),
+            other => panic!("expected Pending resource evaluation, got {other:?}"),
+        };
+
+        assert_eq!(state.context(), &prior_context);
+        assert_eq!(state.local(), &prior_local);
+        assert_eq!(state.session(), &prior_session);
+        assert_eq!(state.user(), &prior_user);
+        let resource = state.resource(key).expect("pending resource remains in caller state");
+        assert_eq!(resource.key(), key);
+        assert_eq!(resource.generation(), generation);
+        assert_eq!(resource.status(), ClientResourceStatus::Loading);
+        assert_eq!(resource.value(), None);
+        assert_eq!(resource.failure(), None);
+        state
+            .resource_mut(key)
+            .expect("pending resource remains mutable in caller state")
+            .apply_completion(
+                &active,
+                ClientResourceCompletion::Ready {
+                    key,
+                    generation,
+                    value: RuntimeValue::Text("resumed".to_owned()),
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            state.resource(key).map(ClientResource::status),
+            Some(ClientResourceStatus::Ready),
+        );
     }
 
 
