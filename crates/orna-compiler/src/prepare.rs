@@ -6903,10 +6903,9 @@ impl<'a> CandidateBuilder<'a> {
         target: CheckedFunctionId,
         function: FunctionId,
     ) -> Result<RevisionPair, PrepareError> {
-        // A target declared in this candidate is pinned to the candidate pair,
-        // including an existing function identity whose declaration is being
-        // replaced.  A target not submitted in the candidate remains pinned to
-        // the active database pair.
+        // Every supported target is installed with this candidate pair. The
+        // active and verified-standard catalogues below only establish that an
+        // unchanged target remains resolvable after application.
         if self
             .checked
             .server_functions()
@@ -6930,7 +6929,10 @@ impl<'a> CandidateBuilder<'a> {
                 .standard()
                 .is_some_and(|standard| standard.catalogue().function_by_id(function).is_some())
         {
-            return Ok(self.active.pair());
+            return Ok(RevisionPair::new(
+                self.source.revision.id(),
+                self.catalogue_revision,
+            ));
         }
         Err(existing_mismatch(DefinitionIdentity::Function(function)))
     }
