@@ -1159,7 +1159,7 @@ impl ClientResource {
             return Err(ClientResourceError::TypeMismatch);
         }
         self.validate_stream_item_type(active)?;
-        let Some(item_descriptor) = stream_item_descriptor(self.expected_type) else {
+        let Some(item_descriptor) = supported_stream_item_descriptor(active, self.expected_type) else {
             return Err(ClientResourceError::TypeMismatch);
         };
         let list_descriptor = TypeDescriptor::list(item_descriptor)
@@ -1296,25 +1296,66 @@ impl ClientResource {
 }
 fn stream_item_descriptor(expected: ResolvedType) -> Option<TypeDescriptor> {
     match expected {
-        ResolvedType::Scalar(scalar) => Some(TypeDescriptor::named(match scalar {
-            StandardScalar::Boolean => orna_standard::BOOLEAN_TYPE_ID,
-            StandardScalar::Integer => orna_standard::INTEGER_TYPE_ID,
-            StandardScalar::BigInt => orna_standard::BIGINT_TYPE_ID,
-            StandardScalar::Float => orna_standard::FLOAT_TYPE_ID,
-            StandardScalar::Decimal => orna_standard::DECIMAL_TYPE_ID,
-            StandardScalar::CharacterLargeObject => orna_standard::CHARACTER_LARGE_OBJECT_TYPE_ID,
-            StandardScalar::BinaryLargeObject => orna_standard::BINARY_LARGE_OBJECT_TYPE_ID,
-            StandardScalar::Uuid => orna_standard::UUID_TYPE_ID,
-            StandardScalar::Date => orna_standard::DATE_TYPE_ID,
-            StandardScalar::Time => orna_standard::TIME_TYPE_ID,
-            StandardScalar::Timestamp => orna_standard::TIMESTAMP_TYPE_ID,
-            StandardScalar::Duration => orna_standard::DURATION_TYPE_ID,
-            StandardScalar::Void => orna_standard::VOID_TYPE_ID,
-        })),
+        ResolvedType::Scalar(scalar) => {
+            let type_id = match scalar {
+                StandardScalar::Boolean => orna_standard::BOOLEAN_TYPE_ID,
+                StandardScalar::Integer => orna_standard::INTEGER_TYPE_ID,
+                StandardScalar::BigInt => orna_standard::BIGINT_TYPE_ID,
+                StandardScalar::Float => orna_standard::FLOAT_TYPE_ID,
+                StandardScalar::CharacterLargeObject => {
+                    orna_standard::CHARACTER_LARGE_OBJECT_TYPE_ID
+                }
+                StandardScalar::BinaryLargeObject => orna_standard::BINARY_LARGE_OBJECT_TYPE_ID,
+                StandardScalar::Decimal
+                | StandardScalar::Uuid
+                | StandardScalar::Date
+                | StandardScalar::Time
+                | StandardScalar::Timestamp
+                | StandardScalar::Duration
+                | StandardScalar::Void => return None,
+            };
+            Some(TypeDescriptor::named(type_id))
+        }
         ResolvedType::Named(type_id) | ResolvedType::Value(type_id) => {
             Some(TypeDescriptor::named(type_id))
         }
         ResolvedType::Reference { target } => Some(TypeDescriptor::reference(target)),
+    }
+}
+
+fn supported_stream_item_descriptor(
+    active: &ActiveDatabaseRevision,
+    expected: ResolvedType,
+) -> Option<TypeDescriptor> {
+    let descriptor = stream_item_descriptor(expected)?;
+    match expected {
+        ResolvedType::Scalar(_) => Some(descriptor),
+        ResolvedType::Named(type_id) => {
+            (active_has_enum_type(active, type_id) || active_has_record_type(active, type_id))
+                .then_some(descriptor)
+        }
+        ResolvedType::Value(type_id) => {
+            let definition = active
+                .catalogue_hash_context()
+                .standard()
+                .and_then(|standard| standard.catalogue().value_type_by_id(type_id))?;
+            if definition.kind() == ValueTypeKind::Opaque {
+                return None;
+            }
+            matches!(
+                definition.representation_contract(),
+                "orna.kernel.value.boolean@1"
+                    | "orna.kernel.value.integer@1"
+                    | "orna.kernel.value.bigint@1"
+                    | "orna.kernel.value.float@1"
+                    | "orna.kernel.value.character-large-object@1"
+                    | "orna.kernel.value.binary-large-object@1"
+            )
+            .then_some(descriptor)
+        }
+        ResolvedType::Reference { target } => {
+            active_has_object_type(active, target).then_some(descriptor)
+        }
     }
 }
 
@@ -3023,6 +3064,32 @@ fn evaluate_plan(
                 local_environment,
             )
         }
+        ClientReturnShape::StreamExpression(expected) => {
+            let plan = ExpressionClientPlan::decode(payload)
+                .map_err(|source| ClientExecutionError::InvalidArtifact { context, source })?;
+            evaluate_stream_expression_plan(
+                active,
+                plan.expression(),
+                context,
+                expected,
+                arguments,
+                declarations,
+                grants,
+                state,
+                depth,
+                principal,
+                executor,
+                local_environment,
+            )
+        }
+        ClientReturnShape::StreamState(expected) => {
+            let plan = StateClientPlan::decode(payload)
+                .map_err(|source| ClientExecutionError::InvalidArtifact { context, source })?;
+            evaluate_stream_state_plan(
+                active, &plan, context, expected, arguments, declarations, grants, state, depth,
+                principal, executor, local_environment,
+            )
+        }
         ClientReturnShape::State(expected) => {
             let plan = StateClientPlan::decode(payload)
                 .map_err(|source| ClientExecutionError::InvalidArtifact { context, source })?;
@@ -3041,6 +3108,14 @@ fn evaluate_plan(
                 local_environment,
             )
         }
+        ClientReturnShape::StreamProcedural(expected) => {
+            let plan = ProceduralClientPlan::decode(payload)
+                .map_err(|source| ClientExecutionError::InvalidArtifact { context, source })?;
+            evaluate_procedural_plan(
+                active, &plan, context, expected, true, arguments, declarations, grants, state,
+                depth, principal, executor, local_environment,
+            )
+        }
         ClientReturnShape::Procedural(expected) => {
             let plan = ProceduralClientPlan::decode(payload)
                 .map_err(|source| ClientExecutionError::InvalidArtifact { context, source })?;
@@ -3049,6 +3124,7 @@ fn evaluate_plan(
                 &plan,
                 context,
                 expected,
+                false,
                 arguments,
                 declarations,
                 grants,
@@ -3063,6 +3139,14 @@ fn evaluate_plan(
             let plan = ActionClientPlan::decode(payload)
                 .map_err(|source| ClientExecutionError::InvalidArtifact { context, source })?;
             evaluate_action_operation(active, plan.operation(), context, arguments, declarations, grants, state, depth, principal, executor, local_environment)
+        }
+        ClientReturnShape::StreamResource(expected) => {
+            let plan = ResourceClientPlan::decode(payload)
+                .map_err(|source| ClientExecutionError::InvalidArtifact { context, source })?;
+            evaluate_stream_resource_plan(
+                active, &plan, context, expected, arguments, declarations, grants, state, depth,
+                principal, executor, local_environment,
+            )
         }
         ClientReturnShape::Resource(expected) => {
             let plan = ResourceClientPlan::decode(payload)
@@ -3125,6 +3209,55 @@ fn evaluate_opaque_plan(
     Ok(RuntimeValue::Opaque(value))
 }
 
+/// Evaluates a stream expression only when it starts an actual stream await.
+fn evaluate_stream_expression_plan(
+    active: &ActiveDatabaseRevision,
+    expression: &ClientExpressionNode,
+    context: ClientExecutionContext,
+    expected: ResolvedType,
+    arguments: &[(ParameterId, RuntimeValue)],
+    declarations: &[capability::LocalCapabilityDeclaration],
+    grants: &capability::LocalCapabilityGrantSet,
+    state: &mut ClientStateStore,
+    depth: usize,
+    principal: PrincipalId,
+    executor: &mut Option<&mut dyn ClientResourceExecutor>,
+    local_environment: &mut ClientLocalEnvironment,
+) -> Result<RuntimeValue, ClientExecutionError> {
+    if matches!(expression, ClientExpressionNode::ExternalContract { .. }) {
+        return evaluate_expression(
+            active,
+            expression,
+            context,
+            arguments,
+            declarations,
+            grants,
+            state,
+            depth,
+            principal,
+            executor,
+            local_environment,
+        );
+    }
+    if !expression_returns_stream(active, expression, local_environment) {
+        return Err(expression_error(context, ClientExpressionError::TypeMismatch));
+    }
+    evaluate_expression_plan(
+        active,
+        expression,
+        context,
+        expected,
+        arguments,
+        declarations,
+        grants,
+        state,
+        depth,
+        principal,
+        executor,
+        local_environment,
+    )
+}
+
 /// Evaluates one decoded expression tree and type-checks its value.
 fn evaluate_expression_plan(
     active: &ActiveDatabaseRevision,
@@ -3161,6 +3294,30 @@ fn evaluate_expression_plan(
             ClientExpressionError::TypeMismatch,
         ))
     }
+}
+
+fn evaluate_stream_state_plan(
+    active: &ActiveDatabaseRevision,
+    plan: &StateClientPlan,
+    context: ClientExecutionContext,
+    expected: ResolvedType,
+    arguments: &[(ParameterId, RuntimeValue)],
+    declarations: &[capability::LocalCapabilityDeclaration],
+    grants: &capability::LocalCapabilityGrantSet,
+    state: &mut ClientStateStore,
+    depth: usize,
+    principal: PrincipalId,
+    executor: &mut Option<&mut dyn ClientResourceExecutor>,
+    local_environment: &mut ClientLocalEnvironment,
+) -> Result<RuntimeValue, ClientExecutionError> {
+    initialize_client_state(
+        active, plan, context, arguments, declarations, grants, state, depth, principal, executor,
+        local_environment,
+    )?;
+    evaluate_stream_expression_plan(
+        active, plan.expression(), context, expected, arguments, declarations, grants, state, depth,
+        principal, executor, local_environment,
+    )
 }
 
 /// Evaluates one decoded version-4 state plan after initialising its slots.
@@ -3207,6 +3364,26 @@ fn evaluate_state_plan(
     )
 }
 
+fn evaluate_stream_resource_plan(
+    active: &ActiveDatabaseRevision,
+    plan: &ResourceClientPlan,
+    context: ClientExecutionContext,
+    expected: ResolvedType,
+    arguments: &[(ParameterId, RuntimeValue)],
+    declarations: &[capability::LocalCapabilityDeclaration],
+    grants: &capability::LocalCapabilityGrantSet,
+    state: &mut ClientStateStore,
+    depth: usize,
+    principal: PrincipalId,
+    executor: &mut Option<&mut dyn ClientResourceExecutor>,
+    local_environment: &mut ClientLocalEnvironment,
+) -> Result<RuntimeValue, ClientExecutionError> {
+    evaluate_stream_expression_plan(
+        active, plan.expression(), context, expected, arguments, declarations, grants, state, depth,
+        principal, executor, local_environment,
+    )
+}
+
 fn evaluate_resource_plan(
     active: &ActiveDatabaseRevision,
     plan: &ResourceClientPlan,
@@ -3249,6 +3426,7 @@ fn evaluate_procedural_plan(
     plan: &ProceduralClientPlan,
     context: ClientExecutionContext,
     expected: ResolvedType,
+    stream_result: bool,
     arguments: &[(ParameterId, RuntimeValue)],
     declarations: &[capability::LocalCapabilityDeclaration],
     grants: &capability::LocalCapabilityGrantSet,
@@ -3290,7 +3468,19 @@ fn evaluate_procedural_plan(
         active, plan.return_expression(), context, arguments, declarations, grants, state, depth,
         principal, executor, local_environment,
     )?;
-    if runtime_expression_value_matches(active, plan.return_expression(), &value, expected, local_environment) {
+    let result_matches = if stream_result {
+        expression_returns_stream(active, plan.return_expression(), local_environment)
+            && runtime_stream_value_matches(active, &value, expected)
+    } else {
+        runtime_expression_value_matches(
+            active,
+            plan.return_expression(),
+            &value,
+            expected,
+            local_environment,
+        )
+    };
+    if result_matches {
         Ok(value)
     } else {
         Err(expression_error(context, ClientExpressionError::TypeMismatch))
@@ -3316,13 +3506,18 @@ fn evaluate_procedural_local(
             if procedural_resource_kind_for_runtime(expression, local_environment).is_some() {
                 return Err(expression_error(context, ClientExpressionError::TypeMismatch));
             }
-            let expected = resolve_state_slot_type(active, local.type_id())
+            let expected = resolve_client_local_type(active, local.type_id())
                 .ok_or_else(|| expression_error(context, ClientExpressionError::TypeMismatch))?;
+            let stream_await = expression_returns_stream(active, expression, local_environment);
             let value = evaluate_expression_plan(
                 active, expression, context, expected, arguments, declarations, grants, state, depth,
                 principal, executor, local_environment,
             )?;
-            Ok(ClientLocalBinding::Value(value))
+            if stream_await {
+                Ok(ClientLocalBinding::StreamValue(value))
+            } else {
+                Ok(ClientLocalBinding::Value(value))
+            }
         }
         ClientLocalKind::Resource(kind) => {
             let ClientExpressionNode::Resource { operation } = expression else {
@@ -3394,6 +3589,22 @@ fn evaluate_capability_plan(
             evaluate_opaque_plan(active, inner, context, expected)
         }
         InnerClientPlan::Expression(inner) => {
+            if let ClientReturnShape::StreamExpression(expected) = return_shape {
+                return evaluate_stream_expression_plan(
+                    active,
+                    inner.expression(),
+                    context,
+                    expected,
+                    arguments,
+                    &[],
+                    grants,
+                    state,
+                    depth,
+                    principal,
+                    executor,
+                    local_environment,
+                );
+            }
             let ClientReturnShape::Expression(expected) = return_shape else {
                 unreachable!("function shape was validated against the inner plan version");
             };
@@ -3413,6 +3624,12 @@ fn evaluate_capability_plan(
             )
         }
         InnerClientPlan::State(inner) => {
+            if let ClientReturnShape::StreamState(expected) = return_shape {
+                return evaluate_stream_state_plan(
+                    active, inner, context, expected, arguments, &[], grants, state, depth,
+                    principal, executor, local_environment,
+                );
+            }
             let ClientReturnShape::State(expected) = return_shape else {
                 unreachable!("function shape was validated against the inner plan version");
             };
@@ -3432,11 +3649,17 @@ fn evaluate_capability_plan(
             )
         }
         InnerClientPlan::Procedural(inner) => {
+            if let ClientReturnShape::StreamProcedural(expected) = return_shape {
+                return evaluate_procedural_plan(
+                    active, inner, context, expected, true, arguments, &[], grants, state, depth,
+                    principal, executor, local_environment,
+                );
+            }
             let ClientReturnShape::Procedural(expected) = return_shape else {
                 unreachable!("function shape was validated against the inner plan version");
             };
             evaluate_procedural_plan(
-                active, inner, context, expected, arguments, &[], grants, state, depth, principal,
+                active, inner, context, expected, false, arguments, &[], grants, state, depth, principal,
                 executor, local_environment,
             )
         }
@@ -3445,6 +3668,12 @@ fn evaluate_capability_plan(
             evaluate_action_operation(active, inner.operation(), context, arguments, &[], grants, state, depth, principal, executor, local_environment)
         }
         InnerClientPlan::Resource(inner) => {
+            if let ClientReturnShape::StreamResource(expected) = return_shape {
+                return evaluate_stream_resource_plan(
+                    active, inner, context, expected, arguments, &[], grants, state, depth,
+                    principal, executor, local_environment,
+                );
+            }
             let ClientReturnShape::Resource(expected) = return_shape else {
                 unreachable!("function shape was validated against the inner plan version");
             };
@@ -4431,7 +4660,9 @@ fn evaluate_expression(
             .map(|(_, value)| value.clone())
             .ok_or_else(|| expression_error(context, ClientExpressionError::ParameterNotBound)),
         ClientExpressionNode::LocalRead { local } => match local_environment.get(local) {
-            Some(ClientLocalBinding::Value(value)) => Ok(value.clone()),
+            Some(ClientLocalBinding::Value(value) | ClientLocalBinding::StreamValue(value)) => {
+                Ok(value.clone())
+            }
             Some(ClientLocalBinding::Resource(_)) => {
                 Err(expression_error(context, ClientExpressionError::TypeMismatch))
             }
@@ -4531,6 +4762,28 @@ fn evaluate_field_path(
     Ok(current.clone())
 }
 
+fn expression_returns_stream(
+    active: &ActiveDatabaseRevision,
+    expression: &ClientExpressionNode,
+    local_environment: &ClientLocalEnvironment,
+) -> bool {
+    match expression {
+        ClientExpressionNode::Await { expression } => {
+            procedural_resource_kind_for_runtime(expression, local_environment)
+                == Some(ResourceKind::Stream)
+        }
+        ClientExpressionNode::LocalRead { local } => matches!(
+            local_environment.get(local),
+            Some(ClientLocalBinding::StreamValue(_))
+        ),
+        ClientExpressionNode::Call { function, .. } => active
+            .catalogue()
+            .function_by_id(*function)
+            .is_some_and(|function| matches!(function.return_type(), FunctionReturn::Stream(_))),
+        _ => false,
+    }
+}
+
 fn runtime_expression_value_matches(
     active: &ActiveDatabaseRevision,
     expression: &ClientExpressionNode,
@@ -4538,24 +4791,19 @@ fn runtime_expression_value_matches(
     expected: ResolvedType,
     local_environment: &ClientLocalEnvironment,
 ) -> bool {
-    let is_stream_await = matches!(
-        expression,
-        ClientExpressionNode::Await { expression }
-            if procedural_resource_kind_for_runtime(expression, local_environment)
-                == Some(ResourceKind::Stream)
-    );
-    if is_stream_await {
-        runtime_stream_value_matches(value, expected)
+    if expression_returns_stream(active, expression, local_environment) {
+        runtime_stream_value_matches(active, value, expected)
     } else {
         runtime_value_matches(active, value, expected)
     }
 }
 
 fn runtime_stream_value_matches(
+    active: &ActiveDatabaseRevision,
     value: &RuntimeValue,
     expected_item: ResolvedType,
 ) -> bool {
-    let Some(item_descriptor) = stream_item_descriptor(expected_item) else {
+    let Some(item_descriptor) = supported_stream_item_descriptor(active, expected_item) else {
         return false;
     };
     let Ok(list_descriptor) = TypeDescriptor::list(item_descriptor) else {
@@ -4826,6 +5074,39 @@ fn initialize_client_state(
     Ok(())
 }
 
+/// Resolves one procedural CLIENT local identity to the runtime type used by
+/// expression evaluation. State slots use a narrower value-type contract.
+fn resolve_client_local_type(
+    active: &ActiveDatabaseRevision,
+    type_id: TypeId,
+) -> Option<ResolvedType> {
+    if let Some(resolved) = resolve_state_slot_type(active, type_id) {
+        return Some(resolved);
+    }
+    let scalar = if type_id == orna_standard::BIGINT_TYPE_ID {
+        Some(StandardScalar::BigInt)
+    } else if type_id == orna_standard::FLOAT_TYPE_ID {
+        Some(StandardScalar::Float)
+    } else if type_id == orna_standard::BINARY_LARGE_OBJECT_TYPE_ID {
+        Some(StandardScalar::BinaryLargeObject)
+    } else {
+        None
+    };
+    if let Some(scalar) = scalar {
+        return Some(ResolvedType::scalar(scalar));
+    }
+    if active_has_value_type(active, type_id) {
+        return Some(ResolvedType::value(type_id));
+    }
+    if active_has_enum_type(active, type_id) || active_has_record_type(active, type_id) {
+        return Some(ResolvedType::named(type_id));
+    }
+    if active_has_object_type(active, type_id) {
+        return Some(ResolvedType::reference(type_id));
+    }
+    None
+}
+
 /// Resolves one checked state slot type to the runtime type used to check
 /// defaults and construct null values.
 fn resolve_state_slot_type(
@@ -4891,6 +5172,7 @@ type ClientLocalEnvironment = HashMap<LocalId, ClientLocalBinding>;
 #[derive(Clone, Debug)]
 enum ClientLocalBinding {
     Value(RuntimeValue),
+    StreamValue(RuntimeValue),
     Resource(ResourceOperationNode),
 }
 
@@ -4900,9 +5182,13 @@ enum ClientReturnShape {
     StandardBoolean(TypeId),
     Opaque(TypeId),
     Expression(ResolvedType),
+    StreamExpression(ResolvedType),
     State(ResolvedType),
+    StreamState(ResolvedType),
     Resource(ResolvedType),
+    StreamResource(ResolvedType),
     Procedural(ResolvedType),
+    StreamProcedural(ResolvedType),
     Action(TypeId),
     OtherValue,
     Unsupported,
@@ -4917,6 +5203,7 @@ fn classify_client_return(
         artifact_version,
         EXPRESSION_FORMAT_VERSION | STATE_FORMAT_VERSION | RESOURCE_FORMAT_VERSION | PROCEDURAL_FORMAT_VERSION | orna_artifact::client_plan::ACTION_FORMAT_VERSION
     );
+    let stream_expression_eligible = artifact_version == EXPRESSION_FORMAT_VERSION;
     let expression_shape = |resolved_type: ResolvedType| {
         if artifact_version == STATE_FORMAT_VERSION {
             ClientReturnShape::State(resolved_type)
@@ -4928,13 +5215,28 @@ fn classify_client_return(
             ClientReturnShape::Expression(resolved_type)
         }
     };
-    let FunctionReturn::Single(resolved_type) = return_type else {
-        return ClientReturnShape::Unsupported;
+    let resolved_type = match return_type {
+        FunctionReturn::Single(resolved_type) => *resolved_type,
+        FunctionReturn::Stream(resolved_type) if stream_expression_eligible => {
+            return ClientReturnShape::StreamExpression(*resolved_type);
+        }
+        FunctionReturn::Stream(resolved_type) if artifact_version == STATE_FORMAT_VERSION => {
+            return ClientReturnShape::StreamState(*resolved_type);
+        }
+        FunctionReturn::Stream(resolved_type) if artifact_version == RESOURCE_FORMAT_VERSION => {
+            return ClientReturnShape::StreamResource(*resolved_type);
+        }
+        FunctionReturn::Stream(resolved_type) if artifact_version == PROCEDURAL_FORMAT_VERSION => {
+            return ClientReturnShape::StreamProcedural(*resolved_type);
+        }
+        FunctionReturn::Rows(_) | FunctionReturn::Stream(_) => {
+            return ClientReturnShape::Unsupported;
+        }
     };
     if let Some(scalar) = resolved_type.legacy_scalar() {
         return if scalar == StandardScalar::Boolean {
             if expression_eligible {
-                expression_shape(*resolved_type)
+                expression_shape(resolved_type)
             } else {
                 ClientReturnShape::LegacyBoolean
             }
@@ -4944,7 +5246,7 @@ fn classify_client_return(
                 StandardScalar::Integer | StandardScalar::CharacterLargeObject
             )
         {
-            expression_shape(*resolved_type)
+            expression_shape(resolved_type)
         } else {
             ClientReturnShape::Unsupported
         };
@@ -4965,14 +5267,14 @@ fn classify_client_return(
         };
         if definition.representation_contract() == "orna.kernel.value.boolean@1" {
             return if expression_eligible {
-                expression_shape(*resolved_type)
+                expression_shape(resolved_type)
             } else {
                 ClientReturnShape::StandardBoolean(type_id)
             };
         }
         if definition.kind() == ValueTypeKind::Opaque {
             return if expression_eligible {
-                expression_shape(*resolved_type)
+                expression_shape(resolved_type)
             } else {
                 ClientReturnShape::Opaque(type_id)
             };
@@ -4983,7 +5285,7 @@ fn classify_client_return(
                 "orna.kernel.value.integer@1" | "orna.kernel.value.character-large-object@1"
             )
         {
-            return expression_shape(*resolved_type);
+            return expression_shape(resolved_type);
         }
         return ClientReturnShape::OtherValue;
     }
@@ -5078,9 +5380,13 @@ fn validate_selected_references(
             if matches!(
                 return_shape,
                 ClientReturnShape::Expression(_)
+                | ClientReturnShape::StreamExpression(_)
                 | ClientReturnShape::State(_)
+                | ClientReturnShape::StreamState(_)
                 | ClientReturnShape::Resource(_)
+                | ClientReturnShape::StreamResource(_)
                 | ClientReturnShape::Procedural(_)
+                | ClientReturnShape::StreamProcedural(_)
                 | ClientReturnShape::Action(_)
             ) {
                 if selected
@@ -5121,9 +5427,13 @@ fn validate_selected_references(
                                     && definition.is_some_and(|value| value.kind() == ValueTypeKind::Opaque)
                             }
                             ClientReturnShape::Expression(_)
+                            | ClientReturnShape::StreamExpression(_)
                             | ClientReturnShape::State(_)
+                            | ClientReturnShape::StreamState(_)
                             | ClientReturnShape::Resource(_)
+                            | ClientReturnShape::StreamResource(_)
                             | ClientReturnShape::Procedural(_)
+                            | ClientReturnShape::StreamProcedural(_)
                             | ClientReturnShape::OtherValue
                             | ClientReturnShape::Unsupported => false,
                         }
@@ -5160,10 +5470,16 @@ fn validate_artifact(
     let expected_version = match return_shape {
         ClientReturnShape::LegacyBoolean | ClientReturnShape::StandardBoolean(_) => FORMAT_VERSION,
         ClientReturnShape::Opaque(_) => OPAQUE_FORMAT_VERSION,
-        ClientReturnShape::Expression(_) => EXPRESSION_FORMAT_VERSION,
-        ClientReturnShape::Procedural(_) => PROCEDURAL_FORMAT_VERSION,
-        ClientReturnShape::State(_) => STATE_FORMAT_VERSION,
-        ClientReturnShape::Resource(_) => RESOURCE_FORMAT_VERSION,
+        ClientReturnShape::Expression(_) | ClientReturnShape::StreamExpression(_) => {
+            EXPRESSION_FORMAT_VERSION
+        }
+        ClientReturnShape::Procedural(_) | ClientReturnShape::StreamProcedural(_) => {
+            PROCEDURAL_FORMAT_VERSION
+        }
+        ClientReturnShape::State(_) | ClientReturnShape::StreamState(_) => STATE_FORMAT_VERSION,
+        ClientReturnShape::Resource(_) | ClientReturnShape::StreamResource(_) => {
+            RESOURCE_FORMAT_VERSION
+        }
         ClientReturnShape::Action(_) => orna_artifact::client_plan::ACTION_FORMAT_VERSION,
         ClientReturnShape::OtherValue => unreachable!("definition references were validated"),
         ClientReturnShape::Unsupported => unreachable!("function shape was validated"),
@@ -5952,6 +6268,21 @@ fn client_stream_cancellation_clears_batches_and_rejects_stale_completions() {
     }
 
     #[test]
+    fn stream_descriptor_rejects_unsupported_scalar_items() {
+        for scalar in [
+            StandardScalar::Decimal,
+            StandardScalar::Uuid,
+            StandardScalar::Date,
+            StandardScalar::Time,
+            StandardScalar::Timestamp,
+            StandardScalar::Duration,
+            StandardScalar::Void,
+        ] {
+            assert!(super::stream_item_descriptor(ResolvedType::Scalar(scalar)).is_none());
+        }
+    }
+
+    #[test]
     fn stream_await_expression_and_procedural_local_return_option_list_values() {
         let (active, target, pair, target_revision) = version_two_server_stream_active();
         let item_type = ResolvedType::Value(orna_standard::BOOLEAN_TYPE_ID);
@@ -6026,6 +6357,7 @@ fn client_stream_cancellation_clears_batches_and_rejects_stale_completions() {
             &procedural,
             context,
             item_type,
+            false,
             &[],
             &[],
             &grants,
@@ -6037,6 +6369,65 @@ fn client_stream_cancellation_clears_batches_and_rejects_stale_completions() {
         )
         .expect("procedural stream AWAIT must preserve the outer result shape");
         assert_boolean_stream_batch(value, &[false]);
+
+        let value_local = LocalId::from_bytes([0x95; 16]);
+        let copy_local = LocalId::from_bytes([0x96; 16]);
+        let value_procedural = orna_artifact::client_plan::ProceduralClientPlan::new(
+            vec![
+                orna_artifact::client_plan::ClientLocal::new(
+                    value_local,
+                    orna_standard::BOOLEAN_TYPE_ID,
+                    orna_artifact::client_plan::ClientLocalKind::Value,
+                ),
+                orna_artifact::client_plan::ClientLocal::new(
+                    copy_local,
+                    orna_standard::BOOLEAN_TYPE_ID,
+                    orna_artifact::client_plan::ClientLocalKind::Value,
+                ),
+            ],
+            vec![
+                orna_artifact::client_plan::ClientStatement::let_(
+                    value_local,
+                    orna_artifact::client_plan::ClientExpressionNode::Await {
+                        expression: Box::new(
+                            orna_artifact::client_plan::ClientExpressionNode::Resource {
+                                operation: operation.clone(),
+                            },
+                        ),
+                    },
+                ),
+                orna_artifact::client_plan::ClientStatement::let_(
+                    copy_local,
+                    orna_artifact::client_plan::ClientExpressionNode::Boolean { value: false },
+                ),
+                orna_artifact::client_plan::ClientStatement::assignment(
+                    copy_local,
+                    orna_artifact::client_plan::ClientExpressionNode::LocalRead { local: value_local },
+                ),
+            ],
+            orna_artifact::client_plan::ClientExpressionNode::LocalRead { local: copy_local },
+        );
+        let mut state = ClientStateStore::new();
+        let mut executor = StreamBatchTestExecutor { value: true };
+        let mut executor_slot: Option<&mut dyn ClientResourceExecutor> = Some(&mut executor);
+        let mut locals = std::collections::HashMap::new();
+        let value = super::evaluate_procedural_plan(
+            &active,
+            &value_procedural,
+            context,
+            item_type,
+            false,
+            &[],
+            &[],
+            &grants,
+            &mut state,
+            0,
+            PrincipalId::from_bytes([0x93; 16]),
+            &mut executor_slot,
+            &mut locals,
+        )
+        .expect("a value local containing stream AWAIT must preserve its outer result shape");
+        assert_boolean_stream_batch(value, &[true]);
     }
 
     #[test]
@@ -8279,6 +8670,124 @@ fn client_stream_cancellation_clears_batches_and_rejects_stale_completions() {
     }
 
     #[test]
+    fn stream_expression_rejects_scalar_literal_plan() {
+        let payload = orna_artifact::client_plan::ExpressionClientPlan::new(
+            orna_artifact::client_plan::ClientExpressionNode::Boolean { value: true },
+        )
+        .encode()
+        .unwrap();
+        let (active, function, _, _) = version_two_client_stream_active_with_artifact(
+            standard_v6(),
+            orna_standard::BOOLEAN_TYPE_ID,
+            DefinitionReferenceTarget::ValueType(orna_standard::BOOLEAN_TYPE_ID),
+            DefinitionReferenceKind::NamedType,
+            orna_artifact::client_plan::EXPRESSION_FORMAT_VERSION,
+            payload,
+        );
+        let error = evaluate_client_function(&active, function).unwrap_err();
+        assert!(matches!(
+            error,
+            super::ClientExecutionError::ExpressionEvaluation {
+                source: super::ClientExpressionError::TypeMismatch,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn stream_artifact_versions_reject_scalar_roots() {
+        let scalar = orna_artifact::client_plan::ClientExpressionNode::Boolean { value: true };
+        for (artifact_version, payload) in [
+            (
+                orna_artifact::client_plan::STATE_FORMAT_VERSION,
+                orna_artifact::client_plan::StateClientPlan::new(
+                    scalar.clone(),
+                    vec![orna_artifact::client_plan::StateSlot::new(
+                        StateSlotId::from_bytes([0x21; 16]),
+                        orna_standard::BOOLEAN_TYPE_ID,
+                        orna_artifact::client_plan::StateScope::User,
+                        orna_artifact::client_plan::StateDefault::Unset,
+                    )],
+                )
+                    .encode()
+                    .expect("the state plan encodes"),
+            ),
+            (
+                orna_artifact::client_plan::RESOURCE_FORMAT_VERSION,
+                orna_artifact::client_plan::ResourceClientPlan::new(
+                    orna_artifact::client_plan::ClientExpressionNode::Await {
+                        expression: Box::new(orna_artifact::client_plan::ClientExpressionNode::Resource {
+                            operation: orna_artifact::client_plan::ResourceOperationNode::new(
+                                orna_artifact::client_plan::ResourceKind::Scalar,
+                                FunctionId::from_bytes([6; 16]),
+                                RevisionPair::new(
+                                    SourceRevisionId::from_bytes([1; 16]),
+                                    CatalogueRevisionId::from_bytes([2; 16]),
+                                ),
+                                CallSiteId::from_bytes([0xe1; 16]),
+                                Vec::new(),
+                                orna_standard::BOOLEAN_TYPE_ID,
+                            ),
+                        }),
+                    },
+                )
+                .encode()
+                .expect("the resource plan encodes"),
+            ),
+            (
+                orna_artifact::client_plan::PROCEDURAL_FORMAT_VERSION,
+                orna_artifact::client_plan::ProceduralClientPlan::new(
+                    Vec::new(),
+                    Vec::new(),
+                    scalar,
+                )
+                .encode()
+                .expect("the procedural plan encodes"),
+            ),
+        ] {
+            let (active, function, _, _) = version_two_client_stream_active_with_artifact(
+                standard_v6(),
+                orna_standard::BOOLEAN_TYPE_ID,
+                DefinitionReferenceTarget::ValueType(orna_standard::BOOLEAN_TYPE_ID),
+                DefinitionReferenceKind::NamedType,
+                artifact_version,
+                payload,
+            );
+            let error = evaluate_client_function(&active, function).unwrap_err();
+            assert!(matches!(
+                error,
+                super::ClientExecutionError::ExpressionEvaluation {
+                    source: super::ClientExpressionError::TypeMismatch,
+                    ..
+                }
+            ));
+        }
+    }
+
+    #[test]
+    fn prepared_client_stream_shape_reaches_runtime_contract_boundary() {
+        let prepared = prepared_client_source(
+            "CREATE SCHEMA app; \
+             CREATE EXTERNAL CLIENT FUNCTION app.events() \
+             RETURNS STREAM<BOOLEAN> RUNTIME CONTRACT 'app.events@1';",
+        );
+        let active = active_from_prepared_candidate(&prepared);
+        let definition = &active.catalogue().functions()[0];
+        assert!(matches!(
+            definition.return_type(),
+            FunctionReturn::Stream(ResolvedType::Value(type_id))
+                if *type_id == orna_standard::BOOLEAN_TYPE_ID
+        ));
+        let function = definition.id();
+        let error = evaluate_client_function(&active, function).unwrap_err();
+        assert!(matches!(
+            error,
+            super::ClientExecutionError::ExternalContract { identity, .. }
+                if identity == "app.events@1"
+        ));
+    }
+
+    #[test]
     fn compiler_emitted_v5_capability_gate_fails_closed_before_runtime() {
         let prepared = prepared_client_source(
             "CREATE SCHEMA app; \
@@ -9655,6 +10164,52 @@ fn client_stream_cancellation_clears_batches_and_rejects_stale_completions() {
         RevisionPair,
         FunctionRevisionId,
     ) {
+        version_two_active_with_function_return(
+            standard,
+            FunctionReturn::Single(ResolvedType::Value(return_type)),
+            reference_target,
+            reference_kind,
+            artifact_version,
+            payload,
+        )
+    }
+
+    fn version_two_client_stream_active_with_artifact(
+        standard: VerifiedStandardLibrarySnapshot,
+        item_type: TypeId,
+        reference_target: DefinitionReferenceTarget,
+        reference_kind: DefinitionReferenceKind,
+        artifact_version: u32,
+        payload: Vec<u8>,
+    ) -> (
+        ActiveDatabaseRevision,
+        FunctionId,
+        RevisionPair,
+        FunctionRevisionId,
+    ) {
+        version_two_active_with_function_return(
+            standard,
+            FunctionReturn::Stream(ResolvedType::Value(item_type)),
+            reference_target,
+            reference_kind,
+            artifact_version,
+            payload,
+        )
+    }
+
+    fn version_two_active_with_function_return(
+        standard: VerifiedStandardLibrarySnapshot,
+        function_return: FunctionReturn,
+        reference_target: DefinitionReferenceTarget,
+        reference_kind: DefinitionReferenceKind,
+        artifact_version: u32,
+        payload: Vec<u8>,
+    ) -> (
+        ActiveDatabaseRevision,
+        FunctionId,
+        RevisionPair,
+        FunctionRevisionId,
+    ) {
         let (version_one, function_id, pair, function_revision_id) = version_one_active(true);
         let prior_function = version_one.catalogue().function_by_id(function_id).unwrap();
         let function = FunctionDefinition::new(
@@ -9662,7 +10217,7 @@ fn client_stream_cancellation_clears_batches_and_rejects_stale_completions() {
             prior_function.name().clone(),
             FunctionDomain::Client,
             Vec::new(),
-            FunctionReturn::Single(ResolvedType::Value(return_type)),
+            function_return,
             function_revision_id,
             FunctionSecurity::Invoker,
             None,
