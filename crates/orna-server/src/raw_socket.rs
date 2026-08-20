@@ -14,36 +14,45 @@ use std::{
     path::{Path, PathBuf},
     pin::Pin,
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicBool, Ordering},
     },
     thread,
     time::Duration,
 };
 
+use orna_client::ClientStateStore;
 #[cfg(test)]
 use orna_core::value::RuntimeValue;
 use orna_core::{
-    catalogue::CatalogueSnapshot, revision::ActiveDatabaseRevision, security::AuthenticatedSession,
+    InvocationId,
+    catalogue::CatalogueSnapshot,
+    invocation::{
+        InvocationEventBody, InvocationFailure, InvocationFailurePhase, InvocationRetryability,
+        InvokeEvent,
+    },
+    revision::ActiveDatabaseRevision,
+    security::AuthenticatedSession,
     value::OpaqueCodecRegistry,
 };
 use orna_postgres::{
     AuthenticatedServerResourceAccepted, AuthenticatedServerResourceEvent,
     AuthenticatedServerResourceKind, AuthenticatedServerResourceProducer,
     AuthenticatedServerResourceStart, PostgresKernel, PostgresKernelError, ResourceCancellation,
-    ResourceCredit,
+    ResourceCredit, SealedInvocationContinuation, SealedInvocationExecution,
+    SealedInvocationPreflight, SealedInvocationResult,
 };
 #[cfg(test)]
 use orna_protocol::encode_constructed_value;
 use orna_protocol::{
-    CallFailure, ClientAction, ClientFrame, ConnectionError, FrameCodecError,
-    MAX_FRAME_PAYLOAD_LENGTH, ProtocolConnection, RawCall, ResourceClientFrame,
-    ResourceConnectionError, ResourceFrameDisposition, ResourceKind, ResourceProtocolConnection,
-    ResourceRequest, ResourceServerFrame, ServerAction, ServerFrame, decode_active_client_frame,
-    decode_catalogue_client_frame, decode_client_frame, decode_constructed_client_frame,
-    decode_registered_client_frame, decode_resource_client_frame, encode_active_server_frame,
-    encode_catalogue_server_frame, encode_constructed_server_frame, encode_registered_server_frame,
-    encode_resource_server_frame, encode_server_frame,
+    CallFailure, ClientAction, ClientFrame, ConnectionError, FrameCodecError, InvocationEventBatch,
+    InvocationEventRecord, MAX_FRAME_PAYLOAD_LENGTH, ProtocolConnection, RawCall,
+    ResourceClientFrame, ResourceConnectionError, ResourceFrameDisposition, ResourceKind,
+    ResourceProtocolConnection, ResourceRequest, ResourceServerFrame, ServerAction, ServerFrame,
+    decode_active_client_frame, decode_catalogue_client_frame, decode_client_frame,
+    decode_constructed_client_frame, decode_registered_client_frame, decode_resource_client_frame,
+    encode_active_server_frame, encode_catalogue_server_frame, encode_constructed_server_frame,
+    encode_registered_server_frame, encode_resource_server_frame, encode_server_frame,
 };
 use orna_standard::{RegisteredOpaqueCodecsError, registered_opaque_codecs};
 use tokio::{
@@ -52,12 +61,13 @@ use tokio::{
         UnixStream,
         unix::{OwnedReadHalf, OwnedWriteHalf},
     },
-    sync::{OwnedSemaphorePermit, Semaphore, mpsc, watch},
+    sync::{OwnedSemaphorePermit, Semaphore, mpsc, oneshot, watch},
     task::{JoinError, JoinHandle, JoinSet},
     time::{Instant, timeout, timeout_at},
 };
 
-use crate::{RawClientDispatch, authenticate_local_stream};
+use crate::invoke::{RawResourceRequestAuthorizer, SharedInvokeBroker};
+use crate::{InstalledClientResourceExecutor, RawClientDispatch, authenticate_local_stream};
 
 const CLIENT_HELLO: [u8; 12] = *b"ORNA\x01\x00\x00\x01\x00\x00\x00\x00";
 const CLIENT_CATALOGUE_HELLO: [u8; 12] = *b"ORNA\x01\x00\x00\x02\x00\x00\x00\x00";
@@ -81,7 +91,11 @@ const CONNECTION_LIMIT: usize = 64;
 // and the scheduler permits at most one completion in flight per live stream.
 const RESOURCE_COMPLETION_CHANNEL_CAPACITY: usize = CONNECTION_LIMIT;
 const RESOURCE_PRODUCER_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
+/// Gives cancelled dispatches a bounded cooperative drain window before
+/// started workers are joined to completion during connection shutdown.
+const DISPATCH_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 const SOCKET_NAME: &str = "orna.sock";
+const SEALED_CONNECTION_PROTOCOL_MAJOR: u16 = 5;
 
 #[derive(Clone, Default)]
 struct ResourceReadState {
@@ -309,6 +323,8 @@ impl Default for LocalRawSocketResources {
 pub enum LocalRawSocketError {
     /// The exact client hello was not completed before its deadline.
     HandshakeTimeout,
+    /// Local peer authentication did not finish before its deadline.
+    AuthenticationTimeout,
     /// The client hello did not select the exact supported protocol.
     InvalidHello,
     /// The client supplied no complete next frame before the idle deadline.
@@ -378,6 +394,7 @@ impl fmt::Display for LocalRawSocketError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(match self {
             Self::HandshakeTimeout => "local raw socket handshake timed out",
+            Self::AuthenticationTimeout => "local raw socket authentication timed out",
             Self::InvalidHello => "local raw socket handshake is invalid",
             Self::FrameTimeout => "local raw socket frame timed out",
             Self::PayloadCapacity => "local raw socket payload capacity is exhausted",
@@ -414,6 +431,7 @@ impl Error for LocalRawSocketError {
             Self::DispatchTask { source } => Some(source),
             Self::ConnectionTask { source } => Some(source),
             Self::HandshakeTimeout
+            | Self::AuthenticationTimeout
             | Self::InvalidHello
             | Self::FrameTimeout
             | Self::PayloadCapacity
@@ -780,12 +798,37 @@ pub async fn serve_local_raw_stream(
     stream: StandardUnixStream,
     resources: LocalRawSocketResources,
 ) -> Result<(), LocalRawSocketError> {
+    serve_local_raw_stream_with_broker(kernel, stream, resources, None).await
+}
+
+pub(crate) async fn serve_local_raw_stream_with_broker(
+    kernel: PostgresKernel,
+    stream: StandardUnixStream,
+    resources: LocalRawSocketResources,
+    broker: Option<SharedInvokeBroker>,
+) -> Result<(), LocalRawSocketError> {
     let (shutdown_guard, shutdown) = watch::channel(false);
     run_owned_connection_with_shutdown_guard(shutdown_guard, async move {
-        negotiate_and_drive(kernel, stream, resources, shutdown).await
+        negotiate_and_drive(kernel, stream, resources, shutdown, broker).await
     })
     .await
 }
+
+ /// Serves an installed resource socket with explicit request provenance.
+ ///
+ /// The public raw socket entry point fails closed because an unbound socket
+ /// has no trusted client evaluator. This hidden seam exists for integration
+ /// tests that register each request before they send protocol frames.
+ #[doc(hidden)]
+ pub async fn serve_local_raw_stream_with_resource_authorizer(
+     kernel: PostgresKernel,
+     stream: StandardUnixStream,
+     resources: LocalRawSocketResources,
+     authorizer: RawResourceRequestAuthorizer,
+ ) -> Result<(), LocalRawSocketError> {
+     serve_local_raw_stream_with_broker(kernel, stream, resources, Some(authorizer.broker())).await
+ }
+
 
 pub(super) async fn serve_local_raw_stream_until_shutdown(
     kernel: PostgresKernel,
@@ -802,7 +845,7 @@ pub(super) async fn serve_local_raw_stream_until_shutdown(
             wait_for_shutdown(&mut socket_shutdown).await;
             let _ = shutdown_stream.shutdown(Shutdown::Both);
         });
-        let result = negotiate_and_drive(kernel, stream, resources, shutdown).await;
+        let result = negotiate_and_drive(kernel, stream, resources, shutdown, None).await;
         shutdown_task.abort();
         let _ = shutdown_task.await;
         result
@@ -839,7 +882,7 @@ async fn wait_for_shutdown(shutdown: &mut watch::Receiver<bool>) {
             return;
         }
         if shutdown.changed().await.is_err() {
-            std::future::pending::<()>().await;
+            return;
         }
     }
 }
@@ -849,6 +892,7 @@ async fn negotiate_and_drive(
     stream: StandardUnixStream,
     resources: LocalRawSocketResources,
     mut shutdown: watch::Receiver<bool>,
+    broker: Option<SharedInvokeBroker>,
 ) -> Result<(), LocalRawSocketError> {
     let peer_stream = stream
         .try_clone()
@@ -875,9 +919,15 @@ async fn negotiate_and_drive(
     let requested = requested_protocol(&hello).ok_or(LocalRawSocketError::InvalidHello)?;
 
     let authentication_permit = resources.reserve_kernel_operation()?;
-    let session = authenticate_local_stream(&kernel, &peer_stream)
-        .await
-        .map_err(|source| LocalRawSocketError::Authentication { source })?;
+    let session = tokio::select! {
+        biased;
+        _ = wait_for_shutdown(&mut shutdown) => return Ok(()),
+        result = timeout(HANDSHAKE_TIMEOUT, authenticate_local_stream(&kernel, &peer_stream)) => {
+            result
+                .map_err(|_| LocalRawSocketError::AuthenticationTimeout)?
+                .map_err(|source| LocalRawSocketError::Authentication { source })?
+        }
+    };
     let version =
         match requested {
             RequestedProtocol::One => RawProtocolVersion::One,
@@ -918,7 +968,11 @@ async fn negotiate_and_drive(
     }
 
     drive_versioned_authenticated_stream_until_shutdown(
-        RawDispatchService { kernel },
+        RawDispatchService {
+            kernel,
+            invoke_cancellations: Arc::new(Mutex::new(BTreeMap::new())),
+            resource_broker: broker,
+        },
         session,
         version,
         stream,
@@ -977,13 +1031,125 @@ enum IncomingFrame {
 struct DispatchCompletion {
     actions: VecDeque<ServerAction>,
     cancellation: ServerAction,
+    cancellation_token: Option<ResourceCancellation>,
+    start_gate: Option<oneshot::Sender<()>>,
+    start_delivered: bool,
+    terminal_delivered: bool,
+    terminal_claimed: bool,
+    worker_completed: bool,
     _guards: Option<DispatchGuards>,
+}
+
+fn cancellation_actions(stream: u64, cancellation: ServerAction) -> VecDeque<ServerAction> {
+    match cancellation {
+        ServerAction::InvokeCancelled { .. } => VecDeque::from([
+            ServerAction::InvokeCancelled { stream },
+            ServerAction::Completed { stream },
+        ]),
+        cancellation => VecDeque::from([cancellation]),
+    }
+}
+
+fn queue_cancellation_actions(completion: &mut DispatchCompletion, stream: u64) {
+    let cancellation = cancellation_actions(stream, completion.cancellation.clone());
+    if completion.start_gate.is_some() && !completion.start_delivered {
+        completion.actions.truncate(1);
+        completion.actions.extend(cancellation);
+    } else {
+        completion.actions = cancellation;
+    }
+}
+
+fn dispatch_completion_has_claimed_terminal(completion: &DispatchCompletion) -> bool {
+    let mut terminal = false;
+    for action in &completion.actions {
+        match action {
+            ServerAction::Completed { .. } | ServerAction::Failed { .. } => terminal = true,
+            ServerAction::Cancelled { .. } | ServerAction::InvokeCancelled { .. } => return false,
+            ServerAction::Accepted { .. }
+            | ServerAction::Events { .. }
+            | ServerAction::InvokeEvents { .. } => {}
+        }
+    }
+    terminal
+}
+
+fn merge_dispatch_completion(
+    stream_id: u64,
+    mut completion: DispatchCompletion,
+    pending: &mut BTreeMap<u64, DispatchCompletion>,
+    cancelled: &mut BTreeSet<u64>,
+    cancelled_pending: &mut BTreeSet<u64>,
+) {
+    completion.worker_completed = true;
+    completion.terminal_claimed = dispatch_completion_has_claimed_terminal(&completion);
+    let cancellation_requested = completion
+        .cancellation_token
+        .as_ref()
+        .is_some_and(ResourceCancellation::is_requested)
+        && !completion.terminal_claimed;
+
+    // A cancellation queued while the worker was live owns the pending
+    // terminal frames unless the worker has already claimed a terminal result.
+    if cancelled_pending.remove(&stream_id) {
+        if let Some(existing) = pending.get_mut(&stream_id) {
+            existing.worker_completed = true;
+            if completion.terminal_claimed && !existing.terminal_delivered {
+                existing.terminal_claimed = true;
+                existing.actions = completion.actions;
+                existing.cancellation = completion.cancellation;
+                if existing._guards.is_none() {
+                    existing._guards = completion._guards;
+                }
+            }
+        }
+        return;
+    }
+
+    if let Some(existing) = pending.get_mut(&stream_id) {
+        // Never append a worker result after any terminal frame was delivered.
+        if existing.terminal_delivered {
+            return;
+        }
+        existing.worker_completed = true;
+        existing.terminal_claimed |= completion.terminal_claimed;
+        if cancellation_requested || cancelled.remove(&stream_id) {
+            queue_cancellation_actions(existing, stream_id);
+            return;
+        }
+        existing.actions.extend(completion.actions);
+        existing.cancellation = completion.cancellation;
+        if existing._guards.is_none() {
+            existing._guards = completion._guards;
+        }
+        return;
+    }
+
+    if cancellation_requested {
+        // A sealed invocation has a pending entry before its worker can run.
+        // If it is gone, its cancellation terminal has already been sent.
+        return;
+    }
+    if cancelled.remove(&stream_id) {
+        completion.actions = cancellation_actions(stream_id, completion.cancellation.clone());
+    }
+    pending.insert(stream_id, completion);
 }
 
 struct StartedDispatch {
     accepted: ServerAction,
+    started: Option<ServerAction>,
+    start_gate: Option<oneshot::Sender<()>>,
     future: DispatchFuture,
 }
+
+enum InvokePreflight {
+    Rejected(CallFailure),
+    Accepted(Option<SealedInvocationContinuation>),
+}
+
+type InvokePreflightFuture =
+    Pin<Box<dyn Future<Output = Result<InvokePreflight, PostgresKernelError>> + Send>>;
 
 struct ResourceDispatchCompletion {
     actions: VecDeque<ResourceServerFrame>,
@@ -1000,18 +1166,80 @@ struct ResourceTask {
     handle: JoinHandle<()>,
     cancellation: ResourceCancellation,
     active: bool,
+    _operation: OwnedSemaphorePermit,
+    _payload: Vec<PayloadReservation>,
 }
 
 type DispatchFuture = Pin<Box<dyn Future<Output = DispatchCompletion> + Send>>;
 type ResourceDispatchFuture = Pin<Box<dyn Future<Output = ResourceDispatchCompletion> + Send>>;
 
+fn redacted_invoke_failure(
+    invocation: InvocationId,
+    phase: InvocationFailurePhase,
+    code: &'static str,
+    message: &'static str,
+    retryability: InvocationRetryability,
+) -> InvocationEventBatch {
+    let failure = InvocationFailure::new(phase, code, message, None, retryability)
+        .expect("checked redacted invocation failure");
+    let failed = InvokeEvent::new(invocation, 1, InvocationEventBody::Failed(failure))
+        .expect("checked invocation failed event");
+    InvocationEventBatch::new(vec![InvocationEventRecord::new(2, failed)])
+        .expect("checked invocation failure batch")
+}
+
+fn without_started_event(events: InvocationEventBatch) -> InvocationEventBatch {
+    InvocationEventBatch::new(events.records().iter().skip(1).cloned().collect())
+        .expect("sealed invocation completion contains a terminal event")
+}
+
 #[derive(Clone)]
 struct RawDispatchService {
     kernel: PostgresKernel,
+    invoke_cancellations: Arc<Mutex<BTreeMap<u64, ResourceCancellation>>>,
+    resource_broker: Option<SharedInvokeBroker>,
 }
 
 trait DispatchService: Clone + Send + Sync + 'static {
     fn start(&self, session: AuthenticatedSession, stream: u64, call: RawCall) -> StartedDispatch;
+
+    fn preflight_invoke(
+        &self,
+        _session: AuthenticatedSession,
+        _request: orna_protocol::RetainedInvokeRequest,
+        _version: RawProtocolVersion,
+    ) -> InvokePreflightFuture {
+        Box::pin(async { Ok(InvokePreflight::Accepted(None)) })
+    }
+
+    fn start_invoke(
+        &self,
+        _session: AuthenticatedSession,
+        stream: u64,
+        _request: orna_protocol::RetainedInvokeRequest,
+        _version: &RawProtocolVersion,
+        _continuation: Option<SealedInvocationContinuation>,
+    ) -> StartedDispatch {
+        let invocation = InvocationId::new();
+        StartedDispatch {
+            accepted: ServerAction::Accepted { stream, invocation },
+            started: None,
+            start_gate: None,
+            future: Box::pin(async move {
+                DispatchCompletion {
+                    actions: VecDeque::from([ServerAction::Completed { stream }]),
+                    cancellation: ServerAction::InvokeCancelled { stream },
+                    cancellation_token: None,
+                    start_gate: None,
+                    start_delivered: false,
+                    terminal_delivered: false,
+                    terminal_claimed: false,
+                    worker_completed: false,
+                    _guards: None,
+                }
+            }),
+        }
+    }
 
     fn start_resource(
         &self,
@@ -1023,10 +1251,30 @@ trait DispatchService: Clone + Send + Sync + 'static {
         None
     }
 
+    /// Authorises a raw resource request before reserving dispatch capacity.
+    ///
+    /// Test and compatibility dispatchers do not carry durable resource
+    /// provenance, so they retain the existing permissive default. The real
+    /// raw dispatcher overrides this at the authenticated broker boundary.
+    fn authorize_resource_request(&self, _request: &ResourceRequest) -> bool {
+        true
+    }
+
     fn cancelled(&self, _stream: u64) {}
 }
 
 impl DispatchService for RawDispatchService {
+    fn cancelled(&self, stream: u64) {
+        if let Some(cancellation) = self
+            .invoke_cancellations
+            .lock()
+            .expect("invocation cancellation lock")
+            .get(&stream)
+        {
+            cancellation.request_cancel();
+        }
+    }
+
     fn start(&self, session: AuthenticatedSession, stream: u64, call: RawCall) -> StartedDispatch {
         let dispatch = RawClientDispatch::new(self.kernel.clone(), session, stream, call);
         let accepted = dispatch.accepted_action();
@@ -1039,10 +1287,246 @@ impl DispatchService for RawDispatchService {
             DispatchCompletion {
                 actions: result.into_actions().into(),
                 cancellation,
+                cancellation_token: None,
+                start_gate: None,
+                start_delivered: false,
+                terminal_delivered: false,
+                terminal_claimed: false,
+                worker_completed: false,
                 _guards: None,
             }
         });
-        StartedDispatch { accepted, future }
+        StartedDispatch {
+            accepted,
+            started: None,
+            start_gate: None,
+            future,
+        }
+    }
+
+    fn preflight_invoke(
+        &self,
+        session: AuthenticatedSession,
+        request: orna_protocol::RetainedInvokeRequest,
+        _version: RawProtocolVersion,
+    ) -> InvokePreflightFuture {
+        let kernel = self.kernel.clone();
+        Box::pin(async move {
+            match kernel
+                .validate_sealed_sys_invoke(&session, SEALED_CONNECTION_PROTOCOL_MAJOR, &request)
+                .await?
+            {
+                SealedInvocationPreflight::Rejected { failure } => {
+                    Ok(InvokePreflight::Rejected(failure))
+                }
+                SealedInvocationPreflight::Accepted(continuation) => {
+                    Ok(InvokePreflight::Accepted(Some(continuation)))
+                }
+            }
+        })
+    }
+
+    fn start_invoke(
+        &self,
+        _session: AuthenticatedSession,
+        stream: u64,
+        _request: orna_protocol::RetainedInvokeRequest,
+        _version: &RawProtocolVersion,
+        continuation: Option<SealedInvocationContinuation>,
+    ) -> StartedDispatch {
+        let continuation = continuation.expect("sealed invocation preflight continuation");
+        let invocation = continuation.invocation();
+        let dispatch_session = _session.clone();
+        let kernel = self.kernel.clone();
+        let started = ServerAction::InvokeEvents {
+            stream,
+            events: continuation.started_events().clone(),
+        };
+        let accepted = ServerAction::Accepted { stream, invocation };
+        let (start_gate, start_signal) = oneshot::channel();
+        let cancellation = ResourceCancellation::new();
+        self.invoke_cancellations
+            .lock()
+            .expect("invocation cancellation lock")
+            .insert(stream, cancellation.clone());
+        let cancellation_for_task = cancellation.clone();
+        let cancellations = self.invoke_cancellations.clone();
+        let resource_broker = self.resource_broker.clone();
+        let future = Box::pin(async move {
+            let mut operation = match continuation.prepare_sealed_sys_invoke_after_accept().await {
+                Ok(operation) => operation,
+                Err(source) => {
+                    report_private_dispatch_source(&source);
+                    cancellations
+                        .lock()
+                        .expect("invocation cancellation lock")
+                        .remove(&stream);
+                    return DispatchCompletion {
+                        actions: VecDeque::from([
+                            ServerAction::InvokeEvents {
+                                stream,
+                                events: redacted_invoke_failure(
+                                    invocation,
+                                    InvocationFailurePhase::Internal,
+                                    "INVOKE_INTERNAL_FAILURE",
+                                    "invocation could not complete",
+                                    InvocationRetryability::Unknown,
+                                ),
+                            },
+                            ServerAction::Completed { stream },
+                        ]),
+                        cancellation: ServerAction::InvokeCancelled { stream },
+                        cancellation_token: Some(cancellation_for_task.clone()),
+                        start_gate: None,
+                        start_delivered: false,
+                        terminal_delivered: false,
+                        terminal_claimed: false,
+                        worker_completed: false,
+                        _guards: None,
+                    };
+                }
+            };
+            let _ = tokio::select! {
+                biased;
+                _ = start_signal => {}
+                _ = cancellation_for_task.cancelled() => {}
+            };
+            let cancellation = cancellation_for_task.clone();
+            let worker_kernel = kernel.clone();
+            let worker_session = dispatch_session.clone();
+            let worker_active = operation.active_revision();
+            let execution = tokio::task::spawn_blocking(move || {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .map_err(|_| PostgresKernelError::DurableInvariant {
+                        relation: "_orna_kernel",
+                        record: "raw_socket".to_string(),
+                        rule: "sealed invocation worker runtime must start",
+                    })?;
+                runtime.block_on(async move {
+                    let mut state = ClientStateStore::new();
+                    let mut capability_audit_appended = false;
+                    let mut resource_executor = match resource_broker {
+                        Some(broker) => {
+                            InstalledClientResourceExecutor::new_with_broker(worker_active, broker, cancellation.clone())
+                        }
+                        None => InstalledClientResourceExecutor::new(
+                            worker_kernel,
+                            worker_session,
+                            worker_active,
+                        ),
+                    };
+                    operation
+                        .execute_after_started(
+                            Some(&mut resource_executor),
+                            &mut state,
+                            &mut capability_audit_appended,
+                            &cancellation,
+                        )
+                        .await
+                })
+            })
+            .await
+            .map_err(|_| PostgresKernelError::DurableInvariant {
+                relation: "_orna_kernel",
+                record: "raw_socket".to_string(),
+                rule: "sealed invocation worker must not panic",
+            })
+            .and_then(|result| result);
+            let actions = match execution {
+                Ok(SealedInvocationExecution::Result(SealedInvocationResult::Completed {
+                    events,
+                    ..
+                }))
+                | Ok(SealedInvocationExecution::Result(SealedInvocationResult::Failed {
+                    events,
+                    ..
+                })) => VecDeque::from([
+                    ServerAction::InvokeEvents {
+                        stream,
+                        events: without_started_event(events),
+                    },
+                    ServerAction::Completed { stream },
+                ]),
+                Ok(SealedInvocationExecution::Result(SealedInvocationResult::Denied {
+                    invocation,
+                })) => VecDeque::from([
+                    ServerAction::InvokeEvents {
+                        stream,
+                        events: redacted_invoke_failure(
+                            invocation,
+                            InvocationFailurePhase::Authorise,
+                            "INVOKE_DENIED",
+                            "invocation was not permitted",
+                            InvocationRetryability::No,
+                        ),
+                    },
+                    ServerAction::Completed { stream },
+                ]),
+                Ok(SealedInvocationExecution::Result(
+                    SealedInvocationResult::PresentationFailed { invocation },
+                )) => VecDeque::from([
+                    ServerAction::InvokeEvents {
+                        stream,
+                        events: redacted_invoke_failure(
+                            invocation,
+                            InvocationFailurePhase::Internal,
+                            "INVOKE_PRESENTATION_FAILURE",
+                            "invocation output could not be presented",
+                            InvocationRetryability::No,
+                        ),
+                    },
+                    ServerAction::Completed { stream },
+                ]),
+                Ok(SealedInvocationExecution::Cancelled { .. }) => {
+                    cancellation_actions(stream, ServerAction::InvokeCancelled { stream })
+                }
+                Err(source) => {
+                    report_private_dispatch_source(&source);
+                    VecDeque::from([
+                        ServerAction::InvokeEvents {
+                            stream,
+                            events: redacted_invoke_failure(
+                                invocation,
+                                InvocationFailurePhase::Internal,
+                                "INVOKE_INTERNAL_FAILURE",
+                                "invocation could not complete",
+                                InvocationRetryability::Unknown,
+                            ),
+                        },
+                        ServerAction::Completed { stream },
+                    ])
+                }
+            };
+            cancellations
+                .lock()
+                .expect("invocation cancellation lock")
+                .remove(&stream);
+            DispatchCompletion {
+                actions,
+                cancellation: ServerAction::InvokeCancelled { stream },
+                cancellation_token: Some(cancellation_for_task),
+                start_gate: None,
+                start_delivered: false,
+                terminal_delivered: false,
+                terminal_claimed: false,
+                worker_completed: false,
+                _guards: None,
+            }
+        });
+        StartedDispatch {
+            accepted,
+            started: Some(started),
+            start_gate: Some(start_gate),
+            future,
+        }
+    }
+
+    fn authorize_resource_request(&self, request: &ResourceRequest) -> bool {
+        self.resource_broker
+            .as_ref()
+            .is_some_and(|broker| broker.take_expected_resource_request(request))
     }
 
     fn start_resource(
@@ -1179,6 +1663,18 @@ fn resource_completion_actions(
     }
 }
 
+async fn shutdown_resource_producer(producer: AuthenticatedServerResourceProducer) {
+    producer.cancel();
+    let _ = timeout(
+        RESOURCE_PRODUCER_SHUTDOWN_TIMEOUT,
+        producer.pull(ResourceCredit {
+            item_count: 0,
+            byte_count: 0,
+        }),
+    )
+    .await;
+}
+
 fn resource_accepted_frame(accepted: AuthenticatedServerResourceAccepted) -> ResourceServerFrame {
     ResourceServerFrame::Accepted(orna_protocol::ResourceAccepted {
         stream_id: accepted.stream_id,
@@ -1197,13 +1693,13 @@ fn resource_event_completion(
     producer: AuthenticatedServerResourceProducer,
     event: Result<AuthenticatedServerResourceEvent, PostgresKernelError>,
 ) -> ResourceDispatchCompletion {
-    let failure = || ResourceDispatchCompletion {
+    let failure = |producer| ResourceDispatchCompletion {
         actions: VecDeque::from([ResourceServerFrame::Failed(orna_protocol::ResourceFailed {
             stream_id: accepted.stream_id,
             request_id: accepted.request_id,
             failure: CallFailure::InternalFailure,
         })]),
-        producer: None,
+        producer: Some(producer),
         producer_waiting_bytes: None,
     };
     match event {
@@ -1214,13 +1710,13 @@ fn resource_event_completion(
             values,
         }) => {
             let Ok(item_count) = u32::try_from(item_count) else {
-                return failure();
+                return failure(producer);
             };
             let Ok(byte_count) = u32::try_from(byte_count) else {
-                return failure();
+                return failure(producer);
             };
             if item_count == 0 || item_count as usize != values.len() {
-                return failure();
+                return failure(producer);
             }
             ResourceDispatchCompletion {
                 actions: VecDeque::from([ResourceServerFrame::Values(
@@ -1286,7 +1782,7 @@ fn resource_event_completion(
         }
         Err(error) => {
             report_private_dispatch_source(&error);
-            failure()
+            failure(producer)
         }
     }
 }
@@ -1339,16 +1835,21 @@ fn schedule_resource_pulls(
         let sender = sender.clone();
         let handle = tokio::spawn(async move {
             let event = producer.pull(credit).await;
-            let completion = resource_event_completion(accepted, producer, event);
-            let completion = if cancellation.is_requested() {
-                ResourceDispatchCompletion {
+            let mut completion = resource_event_completion(accepted, producer, event);
+            if cancellation.is_requested()
+                || completion.actions.iter().any(resource_action_is_terminal)
+            {
+                if let Some(producer) = completion.producer.take() {
+                    shutdown_resource_producer(producer).await;
+                }
+            }
+            if cancellation.is_requested() {
+                completion = ResourceDispatchCompletion {
                     actions: VecDeque::new(),
                     producer: None,
                     producer_waiting_bytes: None,
-                }
-            } else {
-                completion
-            };
+                };
+            }
             let _ = sender.send((stream_id, completion)).await;
         });
         task.handle = handle;
@@ -1426,7 +1927,7 @@ fn resource_internal_failure(request: &ResourceRequest) -> VecDeque<ResourceServ
 struct UnstartedDispatch {
     stream: u64,
     future: DispatchFuture,
-    guards: DispatchGuards,
+    guards: Option<DispatchGuards>,
     defer_once: bool,
 }
 
@@ -1494,6 +1995,7 @@ async fn drive_versioned_authenticated_stream_until_shutdown<D: DispatchService>
     let mut resource_connection = ResourceProtocolConnection::new();
     let mut retained_payload = BTreeMap::<u64, Vec<PayloadReservation>>::new();
     let mut cancelled = BTreeSet::<u64>::new();
+    let mut cancelled_pending = BTreeSet::<u64>::new();
     let mut pending = BTreeMap::<u64, DispatchCompletion>::new();
     let mut resource_cancelled = BTreeMap::<u64, orna_protocol::ResourceCancel>::new();
     let mut resource_pending = BTreeMap::<u64, ResourceDispatchCompletion>::new();
@@ -1507,6 +2009,7 @@ async fn drive_versioned_authenticated_stream_until_shutdown<D: DispatchService>
             &mut resource_connection,
             &mut resource_pending,
             &mut resource_requests,
+            &mut resource_tasks,
             &mut writer,
             &mut shutdown,
         )
@@ -1569,14 +2072,15 @@ async fn drive_versioned_authenticated_stream_until_shutdown<D: DispatchService>
             }
         } else {
             tokio::select! {
+                biased;
                 _ = wait_for_shutdown(&mut shutdown) => Next::Shutdown,
+                completion = tasks.join_next(), if !tasks.is_empty() => {
+                    Next::Completion(completion)
+                }
                 frame = frame_receiver.recv() => {
                     Next::Frame(frame.unwrap_or(Ok(None)))
                 }
                 resource = resource_completion_receiver.recv() => Next::ResourceCompletion(resource),
-                completion = tasks.join_next(), if !tasks.is_empty() => {
-                    Next::Completion(completion)
-                }
             }
         };
 
@@ -1593,6 +2097,7 @@ async fn drive_versioned_authenticated_stream_until_shutdown<D: DispatchService>
                             &mut connection,
                             &mut retained_payload,
                             &mut cancelled,
+                            &mut cancelled_pending,
                             &mut pending,
                             &mut unstarted,
                             &mut writer,
@@ -1621,7 +2126,6 @@ async fn drive_versioned_authenticated_stream_until_shutdown<D: DispatchService>
                         .await
                     }
                 };
-                resource_read_state.set_active(resource_connection.live_resources() != 0);
                 match result {
                     Ok(true) => {}
                     Ok(false) => break Ok(()),
@@ -1631,20 +2135,20 @@ async fn drive_versioned_authenticated_stream_until_shutdown<D: DispatchService>
             Next::Frame(Ok(None)) => break Ok(()),
             Next::Frame(Err(error)) => break Err(error),
             Next::Completion(Some(Ok((stream_id, completion)))) => {
-                let mut completion = completion;
-                if cancelled.remove(&stream_id) {
-                    completion.actions = VecDeque::from([completion.cancellation.clone()]);
-                }
-                pending.insert(stream_id, completion);
+                merge_dispatch_completion(
+                    stream_id,
+                    completion,
+                    &mut pending,
+                    &mut cancelled,
+                    &mut cancelled_pending,
+                );
             }
             Next::Completion(Some(Err(source))) => {
                 break Err(LocalRawSocketError::DispatchTask { source });
             }
             Next::Completion(None) => {}
             Next::ResourceCompletion(Some((stream_id, completion))) => {
-                if completion.producer.is_none() {
-                    resource_tasks.remove(&stream_id);
-                } else if let Some(task) = resource_tasks.get_mut(&stream_id) {
+                if let Some(task) = resource_tasks.get_mut(&stream_id) {
                     task.active = false;
                 }
                 store_resource_completion(
@@ -1664,6 +2168,20 @@ async fn drive_versioned_authenticated_stream_until_shutdown<D: DispatchService>
 
     reader_task.abort();
     let _ = reader_task.await;
+    // Close the socket before waiting for accepted dispatches. A started
+    // spawn_blocking worker cannot be aborted safely, so the connection must
+    // not remain open while its completion boundary is drained below.
+    let _ = writer.shutdown().await;
+    drop(writer);
+    // Disconnect is a cancellation boundary for every invocation that has not
+    // reached a terminal frame. This also wakes pending/unstarted dispatches;
+    // their futures check the token before entering kernel work.
+    for dispatch in &unstarted {
+        dispatcher.cancelled(dispatch.stream);
+    }
+    for stream_id in pending.keys().copied().collect::<Vec<_>>() {
+        dispatcher.cancelled(stream_id);
+    }
     while !unstarted.is_empty() {
         start_one_dispatch(&mut unstarted, &mut tasks);
     }
@@ -1675,28 +2193,61 @@ async fn drive_versioned_authenticated_stream_until_shutdown<D: DispatchService>
     // cancellation frees a stream slot. Drain them while the dispatch tasks
     // join so a bounded completion channel cannot block shutdown.
     let mut resource_shutdown = JoinSet::new();
+    let mut resource_abort_handles = Vec::with_capacity(resource_tasks.len());
+    let mut resource_guards = Vec::with_capacity(resource_tasks.len());
     for (_, task) in std::mem::take(&mut resource_tasks) {
+        let ResourceTask {
+            handle,
+            cancellation: _,
+            active: _,
+            _operation,
+            _payload,
+        } = task;
+        resource_guards.push((_operation, _payload));
+        resource_abort_handles.push(handle.abort_handle());
         resource_shutdown.spawn(async move {
-            let _ = task.handle.await;
+            let _ = handle.await;
         });
     }
-    while !resource_shutdown.is_empty() {
-        tokio::select! {
-            joined = resource_shutdown.join_next() => {
-                let _ = joined;
-            }
-            completion = resource_completion_receiver.recv() => {
-                let Some((stream_id, completion)) = completion else {
-                    continue;
-                };
-                if completion.producer.is_some() {
-                    if let Some(producer) = completion.producer.as_ref() {
-                        producer.cancel();
+    let resource_shutdown_completed = timeout(
+        RESOURCE_PRODUCER_SHUTDOWN_TIMEOUT,
+        async {
+            while !resource_shutdown.is_empty() {
+                tokio::select! {
+                    joined = resource_shutdown.join_next() => {
+                        let _ = joined;
                     }
-                    resource_pending.insert(stream_id, completion);
+                    completion = resource_completion_receiver.recv() => {
+                        let Some((stream_id, completion)) = completion else {
+                            continue;
+                        };
+                        if completion.producer.is_some() {
+                            if let Some(producer) = completion.producer.as_ref() {
+                                producer.cancel();
+                            }
+                            resource_pending.insert(stream_id, completion);
+                        }
+                    }
                 }
             }
+        },
+    )
+    .await
+    .is_ok();
+    if !resource_shutdown_completed {
+        for abort_handle in resource_abort_handles {
+            abort_handle.abort();
         }
+        resource_shutdown.abort_all();
+        let _ = timeout(
+            RESOURCE_PRODUCER_SHUTDOWN_TIMEOUT,
+            async {
+                while let Some(joined) = resource_shutdown.join_next().await {
+                    let _ = joined;
+                }
+            },
+        )
+        .await;
     }
     drain_resource_completions(
         &mut resource_completion_receiver,
@@ -1711,27 +2262,35 @@ async fn drive_versioned_authenticated_stream_until_shutdown<D: DispatchService>
     let mut producer_shutdown = JoinSet::new();
     for completion in resource_pending.values_mut() {
         if let Some(producer) = completion.producer.take() {
-            producer.cancel();
-            producer_shutdown.spawn(async move {
-                let _ = timeout(
-                    RESOURCE_PRODUCER_SHUTDOWN_TIMEOUT,
-                    producer.pull(ResourceCredit {
-                        item_count: 0,
-                        byte_count: 0,
-                    }),
-                )
-                .await;
-            });
+            producer_shutdown.spawn(shutdown_resource_producer(producer));
         }
     }
     while let Some(joined) = producer_shutdown.join_next().await {
         let _ = joined;
     }
     resource_pending.clear();
+    drop(resource_guards);
     let mut drain_failure = None;
-    while let Some(completion) = tasks.join_next().await {
-        if let Err(source) = completion {
-            drain_failure.get_or_insert(LocalRawSocketError::DispatchTask { source });
+    let dispatch_shutdown_completed = timeout(
+        DISPATCH_SHUTDOWN_TIMEOUT,
+        async {
+            while let Some(completion) = tasks.join_next().await {
+                if let Err(source) = completion {
+                    drain_failure.get_or_insert(LocalRawSocketError::DispatchTask { source });
+                }
+            }
+        },
+    )
+    .await
+    .is_ok();
+    if !dispatch_shutdown_completed {
+        // A started spawn_blocking worker cannot be aborted: aborting its
+        // dispatch task would detach the worker while it may still execute
+        // kernel work. Keep owning the JoinSet and drain it to completion.
+        while let Some(completion) = tasks.join_next().await {
+            if let Err(source) = completion {
+                drain_failure.get_or_insert(LocalRawSocketError::DispatchTask { source });
+            }
         }
     }
     match (result, drain_failure) {
@@ -1748,9 +2307,7 @@ fn drain_resource_completions(
 ) -> BTreeSet<u64> {
     let mut completed = BTreeSet::new();
     while let Ok((stream_id, completion)) = completion_receiver.try_recv() {
-        if completion.producer.is_none() {
-            tasks.remove(&stream_id);
-        } else if let Some(task) = tasks.get_mut(&stream_id) {
+        if let Some(task) = tasks.get_mut(&stream_id) {
             task.active = false;
         }
         if store_resource_completion(stream_id, completion, pending, cancelled) {
@@ -1762,19 +2319,24 @@ fn drain_resource_completions(
 
 fn store_resource_completion(
     stream_id: u64,
-    completion: ResourceDispatchCompletion,
+    mut completion: ResourceDispatchCompletion,
     pending: &mut BTreeMap<u64, ResourceDispatchCompletion>,
     cancelled: &mut BTreeMap<u64, orna_protocol::ResourceCancel>,
 ) -> bool {
+    let mut producer = completion.producer.take();
     if let Some(cancel) = cancelled.remove(&stream_id) {
         let pending_is_terminal = pending
             .get(&stream_id)
             .is_some_and(|completion| completion.actions.iter().any(resource_action_is_terminal));
         if !pending_is_terminal {
-            pending.insert(stream_id, cancelled_resource_completion(cancel));
+            pending.insert(
+                stream_id,
+                cancelled_resource_completion(cancel, producer.take()),
+            );
             return true;
         }
     }
+    completion.producer = producer;
     if pending.contains_key(&stream_id) {
         return false;
     }
@@ -1785,6 +2347,7 @@ fn store_resource_completion(
 
 fn cancelled_resource_completion(
     cancel: orna_protocol::ResourceCancel,
+    producer: Option<AuthenticatedServerResourceProducer>,
 ) -> ResourceDispatchCompletion {
     ResourceDispatchCompletion {
         actions: VecDeque::from([ResourceServerFrame::Cancelled(
@@ -1794,7 +2357,7 @@ fn cancelled_resource_completion(
                 reason: cancel.reason,
             },
         )]),
-        producer: None,
+        producer,
         producer_waiting_bytes: None,
     }
 }
@@ -1821,7 +2384,7 @@ fn resource_completion_is_committed_for(
 #[allow(clippy::too_many_arguments)]
 async fn handle_resource_frame<D: DispatchService>(
     frame: ResourceClientFrame,
-    _reservation: PayloadReservation,
+    reservation: PayloadReservation,
     dispatcher: &D,
     session: &AuthenticatedSession,
     version: &RawProtocolVersion,
@@ -1865,22 +2428,29 @@ async fn handle_resource_frame<D: DispatchService>(
                     });
                 }
                 if !tasks.get(&cancel.stream_id).is_some_and(|task| task.active) {
-                    if let Some(producer) = pending
-                        .get(&cancel.stream_id)
-                        .and_then(|completion| completion.producer.as_ref())
-                    {
-                        producer.cancel();
+                    let producer = pending
+                        .get_mut(&cancel.stream_id)
+                        .and_then(|completion| completion.producer.take());
+                    if let Some(producer) = producer {
+                        shutdown_resource_producer(producer).await;
                     }
                 }
                 if let Some(task) = tasks.get(&cancel.stream_id) {
                     if !task.active {
                         cancellation_won = true;
                     } else if !task.cancellation.request_cancel() {
-                        // A commit that has started owns the terminal result; keep the
-                        // protocol stream live so its completion frames remain deliverable.
-                        committed_completion = !task.cancellation.is_requested();
-                        if !committed_completion {
-                            return Ok(true);
+                        if task.cancellation.is_acceptance_cancellation_requested() {
+                            // Acceptance is still being committed. Preserve the
+                            // cancellation marker so the pre-accept failure is
+                            // surfaced as the protocol's terminal cancellation.
+                            cancellation_won = true;
+                        } else {
+                            // A terminal commit that has started owns its result;
+                            // keep the stream live so completion frames remain deliverable.
+                            committed_completion = !task.cancellation.is_requested();
+                            if !committed_completion {
+                                return Ok(true);
+                            }
                         }
                     } else {
                         cancellation_won = true;
@@ -1891,11 +2461,24 @@ async fn handle_resource_frame<D: DispatchService>(
                     // example, a value is blocked on credit), cancellation still wins.
                     cancellation_won = true;
                 } else {
-                    return Err(LocalRawSocketError::ResourceConnection {
-                        source: ResourceConnectionError::UnknownStream {
-                            stream_id: cancel.stream_id,
-                        },
-                    });
+                    // The local dispatch state can lag the protocol tombstone by one
+                    // frame after a terminal completion is flushed. Let the protocol
+                    // state classify that repeated control as late before rejecting
+                    // it as an unknown local stream. A live protocol stream remains
+                    // an error here because it has no corresponding dispatch state.
+                    match connection.receive(ResourceClientFrame::Cancel(cancel)) {
+                        Ok(ResourceFrameDisposition::DroppedLate) => return Ok(true),
+                        Ok(ResourceFrameDisposition::Applied) => {
+                            return Err(LocalRawSocketError::ResourceConnection {
+                                source: ResourceConnectionError::UnknownStream {
+                                    stream_id: cancel.stream_id,
+                                },
+                            });
+                        }
+                        Err(source) => {
+                            return Err(LocalRawSocketError::ResourceConnection { source });
+                        }
+                    }
                 }
             }
         }
@@ -1948,16 +2531,31 @@ async fn handle_resource_frame<D: DispatchService>(
             // cancellation response exactly once.
             cancelled.insert(cancel.stream_id, cancel);
         } else {
-            tasks.remove(&cancel.stream_id);
             // The completion was already drained before cancellation won, so
-            // there is no later producer event that needs a marker.
-            pending.insert(cancel.stream_id, cancelled_resource_completion(cancel));
+            // there is no later producer event that needs a marker. Keep the
+            // task guards until the terminal cancellation frame is flushed.
+            pending.insert(
+                cancel.stream_id,
+                cancelled_resource_completion(cancel, None),
+            );
         }
     }
     if matches!(disposition, ResourceFrameDisposition::DroppedLate) {
         return Ok(true);
     }
     if let Some(request) = request {
+        if !dispatcher.authorize_resource_request(&request) {
+            pending.insert(
+                request.stream_id,
+                ResourceDispatchCompletion {
+                    actions: resource_internal_failure(&request),
+                    producer: None,
+                    producer_waiting_bytes: None,
+                },
+            );
+            return Ok(true);
+        }
+        let operation = resources.reserve_kernel_operation()?;
         if let Some(StartedResourceDispatch {
             future,
             cancellation,
@@ -1971,16 +2569,17 @@ async fn handle_resource_frame<D: DispatchService>(
             let sender = completion_sender.clone();
             let task_cancellation = cancellation.clone();
             let handle = tokio::spawn(async move {
-                let completion = future.await;
-                let completion = if task_cancellation.is_requested() {
-                    ResourceDispatchCompletion {
+                let mut completion = future.await;
+                if task_cancellation.is_requested() {
+                    if let Some(producer) = completion.producer.take() {
+                        shutdown_resource_producer(producer).await;
+                    }
+                    completion = ResourceDispatchCompletion {
                         actions: VecDeque::new(),
                         producer: None,
                         producer_waiting_bytes: None,
-                    }
-                } else {
-                    completion
-                };
+                    };
+                }
                 let _ = sender.send((stream_id, completion)).await;
             });
             requests.insert(stream_id, request.clone());
@@ -1990,6 +2589,8 @@ async fn handle_resource_frame<D: DispatchService>(
                     handle,
                     cancellation,
                     active: true,
+                    _operation: operation,
+                    _payload: vec![reservation],
                 },
             );
         } else {
@@ -2010,6 +2611,7 @@ async fn flush_resource_pending(
     connection: &mut ResourceProtocolConnection,
     pending: &mut BTreeMap<u64, ResourceDispatchCompletion>,
     requests: &mut BTreeMap<u64, ResourceRequest>,
+    tasks: &mut BTreeMap<u64, ResourceTask>,
     stream: &mut OwnedWriteHalf,
     shutdown: &mut watch::Receiver<bool>,
 ) -> Result<bool, LocalRawSocketError> {
@@ -2024,8 +2626,11 @@ async fn flush_resource_pending(
                 let keep_producer = pending
                     .get(&stream_id)
                     .is_some_and(|completion| completion.producer.is_some());
-                if !keep_producer {
+                let keep_task = tasks.get(&stream_id).is_some_and(|task| task.active);
+                if !keep_producer && !keep_task {
                     pending.remove(&stream_id);
+                    requests.remove(&stream_id);
+                    tasks.remove(&stream_id);
                 }
                 break;
             };
@@ -2057,6 +2662,23 @@ async fn flush_resource_pending(
                         .pop_front();
                     if terminal {
                         requests.remove(&stream_id);
+                        let task_active = tasks.get_mut(&stream_id).map(|task| {
+                            if task.active {
+                                task.cancellation.request_cancel();
+                                true
+                            } else {
+                                false
+                            }
+                        });
+                        if task_active == Some(false) {
+                            tasks.remove(&stream_id);
+                        }
+                        let producer = pending
+                            .get_mut(&stream_id)
+                            .and_then(|completion| completion.producer.take());
+                        if let Some(producer) = producer {
+                            shutdown_resource_producer(producer).await;
+                        }
                     }
                     continue;
                 }
@@ -2076,6 +2698,23 @@ async fn flush_resource_pending(
                 .pop_front();
             if terminal {
                 requests.remove(&stream_id);
+                let task_active = tasks.get_mut(&stream_id).map(|task| {
+                    if task.active {
+                        task.cancellation.request_cancel();
+                        true
+                    } else {
+                        false
+                    }
+                });
+                if task_active == Some(false) {
+                    tasks.remove(&stream_id);
+                }
+                let producer = pending
+                    .get_mut(&stream_id)
+                    .and_then(|completion| completion.producer.take());
+                if let Some(producer) = producer {
+                    shutdown_resource_producer(producer).await;
+                }
             }
         }
     }
@@ -2107,6 +2746,7 @@ async fn handle_client_frame<D: DispatchService>(
     connection: &mut ProtocolConnection,
     retained_payload: &mut BTreeMap<u64, Vec<PayloadReservation>>,
     cancelled: &mut BTreeSet<u64>,
+    cancelled_pending: &mut BTreeSet<u64>,
 
     pending: &mut BTreeMap<u64, DispatchCompletion>,
     unstarted: &mut VecDeque<UnstartedDispatch>,
@@ -2116,7 +2756,9 @@ async fn handle_client_frame<D: DispatchService>(
     let stream_id = client_stream(&incoming.frame);
     let retains_payload = matches!(
         incoming.frame,
-        ClientFrame::CallRawStart { .. } | ClientFrame::CallArgument { .. }
+        ClientFrame::CallRawStart { .. }
+            | ClientFrame::CallArgument { .. }
+            | ClientFrame::CallInvokeRequest { .. }
     );
     let dispatch_permit = if matches!(incoming.frame, ClientFrame::CallArgumentsComplete { .. }) {
         Some(resources.reserve_kernel_operation()?)
@@ -2136,8 +2778,9 @@ async fn handle_client_frame<D: DispatchService>(
 
     match action {
         Some(ClientAction::Dispatch { stream, call }) => {
-            let StartedDispatch { accepted, future } =
-                dispatcher.start(session.clone(), stream, call);
+            let StartedDispatch {
+                accepted, future, ..
+            } = dispatcher.start(session.clone(), stream, call);
             let guards = DispatchGuards {
                 _operation: dispatch_permit.expect("dispatch action requires reserved permit"),
                 _payload: retained_payload.remove(&stream).unwrap_or_default(),
@@ -2145,7 +2788,67 @@ async fn handle_client_frame<D: DispatchService>(
             unstarted.push_back(UnstartedDispatch {
                 stream,
                 future,
-                guards,
+                guards: Some(guards),
+                defer_once: true,
+            });
+            let frame = version
+                .apply(connection, accepted)
+                .map_err(|source| LocalRawSocketError::Connection { source })?;
+            if !write_server_frame(version, socket, &frame, shutdown).await? {
+                return Ok(false);
+            }
+        }
+        Some(ClientAction::InvokeDispatch { stream, request }) => {
+            let preflight = match dispatcher
+                .preflight_invoke(session.clone(), request.clone(), version.clone())
+                .await
+            {
+                Ok(preflight) => preflight,
+                Err(source) => {
+                    report_private_dispatch_source(&source);
+                    InvokePreflight::Rejected(CallFailure::InternalFailure)
+                }
+            };
+            let continuation = match preflight {
+                InvokePreflight::Rejected(failure) => {
+                    drop(dispatch_permit);
+                    retained_payload.remove(&stream);
+                    let frame = version
+                        .apply(connection, ServerAction::Failed { stream, failure })
+                        .map_err(|source| LocalRawSocketError::Connection { source })?;
+                    return write_server_frame(version, socket, &frame, shutdown).await;
+                }
+                InvokePreflight::Accepted(continuation) => continuation,
+            };
+            let StartedDispatch {
+                accepted,
+                started,
+                start_gate,
+                future,
+            } = dispatcher.start_invoke(session.clone(), stream, request, version, continuation);
+            let guards = DispatchGuards {
+                _operation: dispatch_permit.expect("dispatch action requires reserved permit"),
+                _payload: retained_payload.remove(&stream).unwrap_or_default(),
+            };
+            let started = started.expect("sealed invocation start event");
+            pending.insert(
+                stream,
+                DispatchCompletion {
+                    actions: VecDeque::from([started]),
+                    cancellation: ServerAction::InvokeCancelled { stream },
+                    cancellation_token: None,
+                    start_gate,
+                    start_delivered: false,
+                    terminal_delivered: false,
+                    terminal_claimed: false,
+                    worker_completed: false,
+                    _guards: Some(guards),
+                },
+            );
+            unstarted.push_back(UnstartedDispatch {
+                stream,
+                future,
+                guards: None,
                 defer_once: true,
             });
             let frame = version
@@ -2156,11 +2859,16 @@ async fn handle_client_frame<D: DispatchService>(
             }
         }
         Some(ClientAction::Cancel { stream, .. }) => {
-            dispatcher.cancelled(stream);
             if let Some(completion) = pending.get_mut(&stream) {
-                completion.actions = VecDeque::from([completion.cancellation.clone()]);
-                cancelled.remove(&stream);
+                if !completion.terminal_delivered && !completion.terminal_claimed {
+                    dispatcher.cancelled(stream);
+                    queue_cancellation_actions(completion, stream);
+                    if !completion.worker_completed {
+                        cancelled_pending.insert(stream);
+                    }
+                }
             } else {
+                dispatcher.cancelled(stream);
                 cancelled.insert(stream);
             }
         }
@@ -2182,7 +2890,7 @@ fn start_one_dispatch(
     let dispatch = unstarted.pop_front().expect("unstarted dispatch exists");
     tasks.spawn(async move {
         let mut completion = dispatch.future.await;
-        completion._guards = Some(dispatch.guards);
+        completion._guards = dispatch.guards;
         (dispatch.stream, completion)
     });
 }
@@ -2202,9 +2910,22 @@ async fn flush_pending(
                 .and_then(|completion| completion.actions.front())
                 .cloned()
             else {
-                pending.remove(&stream_id);
+                let keep_waiting = pending.get(&stream_id).is_some_and(|completion| {
+                    completion.start_gate.is_some()
+                        || (!completion.terminal_delivered && completion.start_delivered)
+                });
+                if !keep_waiting {
+                    pending.remove(&stream_id);
+                }
                 break;
             };
+            let result_action = matches!(&action, ServerAction::Events { .. });
+            let terminal_action = matches!(
+                &action,
+                ServerAction::Completed { .. }
+                    | ServerAction::Failed { .. }
+                    | ServerAction::Cancelled { .. }
+            );
             let frame = match version.apply(connection, action) {
                 Ok(frame) => frame,
                 Err(ConnectionError::InsufficientCredit { .. }) => break,
@@ -2213,11 +2934,20 @@ async fn flush_pending(
             if !write_server_frame(version, stream, &frame, shutdown).await? {
                 return Ok(false);
             }
-            pending
+            let completion = pending
                 .get_mut(&stream_id)
-                .expect("pending completion exists")
-                .actions
-                .pop_front();
+                .expect("pending completion exists");
+            completion.actions.pop_front();
+            if result_action {
+                completion.terminal_claimed = false;
+            }
+            if let Some(gate) = completion.start_gate.take() {
+                completion.start_delivered = true;
+                let _ = gate.send(());
+            }
+            if terminal_action {
+                completion.terminal_delivered = true;
+            }
         }
     }
     Ok(true)
@@ -2489,6 +3219,7 @@ const fn client_stream(frame: &ClientFrame) -> u64 {
     match frame {
         ClientFrame::CallRawStart { stream, .. }
         | ClientFrame::CallArgument { stream, .. }
+        | ClientFrame::CallInvokeRequest { stream, .. }
         | ClientFrame::CallArgumentsComplete { stream }
         | ClientFrame::WindowUpdate { stream, .. }
         | ClientFrame::CallCancel { stream } => *stream,
@@ -2610,6 +3341,8 @@ mod tests {
             request_id: InvocationId::from_bytes([0x11; 16]),
             parent_invocation_id: InvocationId::from_bytes([0x12; 16]),
             call_site_id: orna_core::CallSiteId::from_bytes([0x13; 16]),
+            state_profile: String::new(),
+            function_instance_key: String::new(),
             target_function_id: FUNCTION,
             target_revision: revision,
             generation: 1,
@@ -2618,6 +3351,24 @@ mod tests {
             item_window: 1,
             byte_window: MAX_RESOURCE_WINDOW,
         }
+    }
+
+    #[test]
+    fn redacted_prepare_failure_contains_terminal_failure_event() {
+        let invocation = InvocationId::from_bytes([0x41; 16]);
+        let events = redacted_invoke_failure(
+            invocation,
+            InvocationFailurePhase::Internal,
+            "INVOKE_INTERNAL_FAILURE",
+            "invocation could not complete",
+            InvocationRetryability::Unknown,
+        );
+        assert_eq!(events.records().len(), 1);
+        assert_eq!(events.records()[0].event().invocation_id(), invocation);
+        assert!(matches!(
+            events.records()[0].event().body(),
+            InvocationEventBody::Failed(_)
+        ));
     }
 
     #[test]
@@ -3113,6 +3864,12 @@ mod tests {
                 DispatchCompletion {
                     actions: actions.iter().cloned().collect(),
                     cancellation: ServerAction::Cancelled { stream },
+                    cancellation_token: None,
+                    start_gate: None,
+                    start_delivered: false,
+                    terminal_delivered: false,
+                    terminal_claimed: false,
+                    worker_completed: false,
                     _guards: None,
                 }
             });
@@ -3121,6 +3878,8 @@ mod tests {
                     stream,
                     invocation: InvocationId::from_bytes([9; 16]),
                 },
+                started: None,
+                start_gate: None,
                 future,
             }
         }
@@ -3159,12 +3918,20 @@ mod tests {
                     stream,
                     invocation: InvocationId::from_bytes([9; 16]),
                 },
+                started: None,
+                start_gate: None,
                 future: Box::pin(async move {
                     polled.store(true, Ordering::SeqCst);
                     release.notified().await;
                     DispatchCompletion {
                         actions: VecDeque::from([ServerAction::Completed { stream }]),
                         cancellation: ServerAction::Cancelled { stream },
+                        cancellation_token: None,
+                        start_gate: None,
+                        start_delivered: false,
+                        terminal_delivered: false,
+                        terminal_claimed: false,
+                        worker_completed: false,
                         _guards: None,
                     }
                 }),
@@ -3333,6 +4100,117 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn repeated_cancel_after_terminal_completion_uses_protocol_tombstone() {
+        let (version, revision) = constructed_test_version();
+        let mut request = resource_request(revision);
+        request.resource_kind = ResourceKind::Stream;
+        let cancel = ResourceCancel {
+            stream_id: request.stream_id,
+            request_id: request.request_id,
+            reason: ResourceCancellationCode::ClientRequested,
+        };
+        let mut connection = ResourceProtocolConnection::new();
+        connection
+            .receive(ResourceClientFrame::Request(request.clone()))
+            .unwrap();
+        let (server, _client) = UnixStream::pair().unwrap();
+        let (_reader, mut writer) = server.into_split();
+        let (completion_sender, mut completion_receiver) =
+            mpsc::channel::<(u64, ResourceDispatchCompletion)>(RESOURCE_COMPLETION_CHANNEL_CAPACITY);
+        let resources = LocalRawSocketResources::new();
+        let (_shutdown_sender, mut shutdown) = watch::channel(false);
+        let mut pending = BTreeMap::from([(
+            request.stream_id,
+            ResourceDispatchCompletion {
+                actions: resource_actions(&version, &request, Vec::new()),
+                producer: None,
+                producer_waiting_bytes: None,
+            },
+        )]);
+        let mut cancelled = BTreeMap::new();
+        let mut tasks = BTreeMap::new();
+        let mut requests = BTreeMap::from([(request.stream_id, request.clone())]);
+        assert!(
+            flush_resource_pending(
+                &version,
+                &mut connection,
+                &mut pending,
+                &mut requests,
+                &mut tasks,
+                &mut writer,
+                &mut shutdown,
+            )
+            .await
+            .unwrap()
+        );
+        assert!(pending.is_empty());
+        // Keep the request entry to model the local bookkeeping window after
+        // the protocol has committed its terminal tombstone.
+        requests.insert(request.stream_id, request.clone());
+        let mut live_request = request.clone();
+        live_request.stream_id = 2;
+        live_request.request_id = InvocationId::from_bytes([0x22; 16]);
+        connection
+            .receive(ResourceClientFrame::Request(live_request))
+            .unwrap();
+
+        for _ in 0..2 {
+            handle_resource_frame(
+                ResourceClientFrame::Cancel(cancel),
+                PayloadReservation { _permit: None },
+                &ResourceDispatch,
+                &test_session(),
+                &version,
+                &resources,
+                &mut connection,
+                &mut pending,
+                &mut cancelled,
+                &mut tasks,
+                &mut requests,
+                &completion_sender,
+                &mut completion_receiver,
+                &mut writer,
+                &mut shutdown,
+            )
+            .await
+            .expect("late cancellation is idempotently dropped");
+        }
+        assert_eq!(connection.live_resources(), 1);
+
+        let unknown = ResourceCancel {
+            stream_id: request.stream_id + 2,
+            request_id: InvocationId::from_bytes([0x44; 16]),
+            reason: ResourceCancellationCode::ClientRequested,
+        };
+        let error = handle_resource_frame(
+            ResourceClientFrame::Cancel(unknown),
+            PayloadReservation { _permit: None },
+            &ResourceDispatch,
+            &test_session(),
+            &version,
+            &resources,
+            &mut connection,
+            &mut pending,
+            &mut cancelled,
+            &mut tasks,
+            &mut requests,
+            &completion_sender,
+            &mut completion_receiver,
+            &mut writer,
+            &mut shutdown,
+        )
+        .await
+        .expect_err("unknown resource cancellation must fail");
+        assert!(matches!(
+            error,
+            LocalRawSocketError::ResourceConnection {
+                source: ResourceConnectionError::UnknownStream { stream_id: 3 }
+            }
+        ));
+        assert_eq!(connection.live_resources(), 1);
+    }
+
+    #[tokio::test]
     async fn constructed_resource_request_delivers_a_scalar_result() {
         let (version, revision) = constructed_test_version();
         let (active, registry) = match &version {
@@ -3351,13 +4229,14 @@ mod tests {
         .unwrap();
         let resources = LocalRawSocketResources::new();
         let (server, mut client) = UnixStream::pair().unwrap();
+        let (_shutdown_sender, shutdown) = watch::channel(false);
         let server_task = tokio::spawn(drive_versioned_authenticated_stream_until_shutdown(
             ResourceDispatch,
             test_session(),
             version,
             server,
             resources,
-            watch::channel(false).1,
+            shutdown,
         ));
 
         client.write_all(&encoded).await.unwrap();
@@ -3465,6 +4344,7 @@ mod tests {
                 &mut connection,
                 &mut pending,
                 &mut requests,
+                &mut tasks,
                 &mut writer,
                 &mut shutdown,
             )
@@ -3509,13 +4389,14 @@ mod tests {
             started: Arc::clone(&started),
         };
         let (server, mut client) = UnixStream::pair().unwrap();
+        let (_shutdown_sender, shutdown) = watch::channel(false);
         let server_task = tokio::spawn(drive_versioned_authenticated_stream_until_shutdown(
             dispatcher,
             test_session(),
             version,
             server,
             LocalRawSocketResources::new(),
-            watch::channel(false).1,
+            shutdown,
         ));
 
         let scalar = resource_request(revision);
@@ -3650,13 +4531,14 @@ mod tests {
         )
         .unwrap();
         let (server, mut client) = UnixStream::pair().unwrap();
+        let (_shutdown_sender, shutdown) = watch::channel(false);
         let server_task = tokio::spawn(drive_versioned_authenticated_stream_until_shutdown(
             MultiValueResourceDispatch,
             test_session(),
             version,
             server,
             LocalRawSocketResources::new(),
-            watch::channel(false).1,
+            shutdown,
         ));
 
         client.write_all(&encoded).await.unwrap();
@@ -3732,13 +4614,14 @@ mod tests {
         )
         .unwrap();
         let (server, mut client) = UnixStream::pair().unwrap();
+        let (_shutdown_sender, shutdown) = watch::channel(false);
         let server_task = tokio::spawn(drive_versioned_authenticated_stream_until_shutdown(
             MultiValueResourceDispatch,
             test_session(),
             version,
             server,
             LocalRawSocketResources::new(),
-            watch::channel(false).1,
+            shutdown,
         ));
 
         client.write_all(&encoded).await.unwrap();
@@ -3829,6 +4712,7 @@ mod tests {
         let started = Arc::new(Notify::new());
         let cancelled = Arc::new(AtomicBool::new(false));
         let (server, mut client) = UnixStream::pair().unwrap();
+        let (_shutdown_sender, shutdown) = watch::channel(false);
         let server_task = tokio::spawn(drive_versioned_authenticated_stream_until_shutdown(
             BlockingResourceDispatch {
                 started: Arc::clone(&started),
@@ -3838,7 +4722,7 @@ mod tests {
             version,
             server,
             LocalRawSocketResources::new(),
-            watch::channel(false).1,
+            shutdown,
         ));
 
         client.write_all(&encoded).await.unwrap();
@@ -3870,6 +4754,16 @@ mod tests {
             .await
             .is_err(),
             "cancellation must emit exactly one terminal frame"
+        );
+        client.write_all(&cancel).await.unwrap();
+        assert!(
+            timeout(
+                Duration::from_millis(50),
+                read_resource_server_frame(&mut client, &active, &registry),
+            )
+            .await
+            .is_err(),
+            "repeated cancellation must remain idempotent"
         );
 
         client.shutdown().await.unwrap();
@@ -3966,6 +4860,7 @@ mod tests {
                 &mut connection,
                 &mut pending,
                 &mut requests,
+                &mut tasks,
                 &mut writer,
                 &mut shutdown,
             )
@@ -4079,6 +4974,7 @@ mod tests {
                 &mut connection,
                 &mut pending,
                 &mut requests,
+                &mut tasks,
                 &mut writer,
                 &mut shutdown,
             )
@@ -4169,13 +5065,14 @@ mod tests {
         ]);
         let resources = LocalRawSocketResources::new();
         let (server, mut client) = UnixStream::pair().expect("Unix stream pair");
+        let (_shutdown_sender, shutdown) = watch::channel(false);
         let server_task = tokio::spawn(drive_versioned_authenticated_stream_until_shutdown(
             dispatcher,
             test_session(),
             RawProtocolVersion::Catalogue(Arc::clone(&catalogue)),
             server,
             resources,
-            watch::channel(false).1,
+            shutdown,
         ));
 
         for frame in [
@@ -4400,6 +5297,121 @@ mod tests {
             .expect("connection drains after peer failure")
             .expect("connection task joins");
         assert!(polled.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn queued_terminal_completion_is_not_replaced_by_cancel() {
+        let dispatcher = TestDispatch::new(vec![ServerAction::Completed { stream: 1 }]);
+        let version = RawProtocolVersion::One;
+        let mut connection = ProtocolConnection::new();
+        assert!(
+            version
+                .receive(
+                    &mut connection,
+                    ClientFrame::CallRawStart {
+                        stream: 1,
+                        function: FUNCTION,
+                    },
+                )
+                .expect("raw call starts")
+                .is_none()
+        );
+        assert!(matches!(
+            version
+                .receive(
+                    &mut connection,
+                    ClientFrame::CallArgumentsComplete { stream: 1 },
+                )
+                .expect("raw call dispatches"),
+            Some(ClientAction::Dispatch { stream: 1, .. })
+        ));
+        version
+            .apply(
+                &mut connection,
+                ServerAction::Accepted {
+                    stream: 1,
+                    invocation: InvocationId::from_bytes([9; 16]),
+                },
+            )
+            .expect("accepted frame applies");
+
+        let (server, _client) = UnixStream::pair().expect("socket pair");
+        let (_reader, mut writer) = server.into_split();
+        let mut pending = BTreeMap::from([(
+            1,
+            DispatchCompletion {
+                actions: VecDeque::new(),
+                cancellation: ServerAction::Cancelled { stream: 1 },
+                cancellation_token: None,
+                start_gate: None,
+                start_delivered: true,
+                terminal_delivered: false,
+                terminal_claimed: false,
+                worker_completed: false,
+                _guards: None,
+            },
+        )]);
+        merge_dispatch_completion(
+            1,
+            DispatchCompletion {
+                actions: VecDeque::from([ServerAction::Completed { stream: 1 }]),
+                cancellation: ServerAction::Cancelled { stream: 1 },
+                cancellation_token: None,
+                start_gate: None,
+                start_delivered: true,
+                terminal_delivered: false,
+                terminal_claimed: false,
+                worker_completed: false,
+                _guards: None,
+            },
+            &mut pending,
+            &mut BTreeSet::new(),
+            &mut BTreeSet::new(),
+        );
+        assert!(pending.get(&1).expect("merged completion").terminal_claimed);
+        let mut retained_payload = BTreeMap::new();
+        let mut cancelled = BTreeSet::new();
+        let mut cancelled_pending = BTreeSet::new();
+        let mut unstarted = VecDeque::new();
+        let resources = LocalRawSocketResources::new();
+        let (_shutdown_sender, mut shutdown) = watch::channel(false);
+
+        assert!(
+            handle_client_frame(
+                RawIncomingFrame {
+                    frame: ClientFrame::CallCancel { stream: 1 },
+                    reservation: PayloadReservation { _permit: None },
+                },
+                &dispatcher,
+                &test_session(),
+                &version,
+                &resources,
+                &mut connection,
+                &mut retained_payload,
+                &mut cancelled,
+                &mut cancelled_pending,
+                &mut pending,
+                &mut unstarted,
+                &mut writer,
+                &mut shutdown,
+            )
+            .await
+            .expect("queued completion cancellation is accepted")
+        );
+        assert_eq!(
+            pending.get(&1).expect("pending completion remains").actions,
+            VecDeque::from([ServerAction::Completed { stream: 1 }]),
+        );
+        assert!(!dispatcher.cancelled.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn closed_shutdown_receiver_wakes_waiter() {
+        let (sender, mut shutdown) = watch::channel(false);
+        drop(sender);
+        timeout(Duration::from_millis(25), wait_for_shutdown(&mut shutdown))
+            .await
+            .expect("closed shutdown receiver resolves");
     }
 
     #[tokio::test]
