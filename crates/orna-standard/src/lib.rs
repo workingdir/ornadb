@@ -3235,7 +3235,7 @@ fn retained_standard_library_v2_snapshot_from_source(
 /// accepted `orna.std/3` snapshot additionally binds the two framed output
 /// codecs for `std.terminal.Document` and `std.io.ByteStream` (work ADR
 /// 0058); the accepted `orna.std/4` snapshot additionally binds the
-/// `ORNA-UI/1 ` length-prefixed-UTF-8 codec for `std.ui.UI` (work ADR 0062);
+/// `ORNA-UI/1 ` length-prefixed-canonical-JSON codec for `std.ui.UI` (work ADR 0062);
 /// the accepted V6 snapshot additionally binds the bounded raw-byte action
 /// codec (ADR 0079).
 pub fn registered_opaque_codecs(
@@ -3270,7 +3270,7 @@ pub fn registered_opaque_codecs(
             BYTE_STREAM_MAGIC,
         )
         .map_err(|source| RegisteredOpaqueCodecsError::Registry { source })?;
-        let ui = OpaqueCodecRegistration::length_prefixed_utf8(
+        let ui = OpaqueCodecRegistration::length_prefixed_canonical_json(
             STD_UI_TYPE_ID,
             semantic_name("std.ui.ui", ["std", "ui", "ui"])
                 .map_err(|source| RegisteredOpaqueCodecsError::Manifest { source })?,
@@ -3312,7 +3312,7 @@ pub fn registered_opaque_codecs(
             BYTE_STREAM_MAGIC,
         )
         .map_err(|source| RegisteredOpaqueCodecsError::Registry { source })?;
-        let ui = OpaqueCodecRegistration::length_prefixed_utf8(
+        let ui = OpaqueCodecRegistration::length_prefixed_canonical_json(
             STD_UI_TYPE_ID,
             semantic_name("std.ui.ui", ["std", "ui", "ui"])
                 .map_err(|source| RegisteredOpaqueCodecsError::Manifest { source })?,
@@ -3346,7 +3346,7 @@ pub fn registered_opaque_codecs(
             BYTE_STREAM_MAGIC,
         )
         .map_err(|source| RegisteredOpaqueCodecsError::Registry { source })?;
-        let ui = OpaqueCodecRegistration::length_prefixed_utf8(
+        let ui = OpaqueCodecRegistration::length_prefixed_canonical_json(
             STD_UI_TYPE_ID,
             semantic_name("std.ui.ui", ["std", "ui", "ui"])
                 .map_err(|source| RegisteredOpaqueCodecsError::Manifest { source })?,
@@ -7813,13 +7813,72 @@ EXPORT TYPE std.ui.UI AS std.UI;
         let registry = registered_opaque_codecs(&verified).expect("the V4 opaque codecs register");
         let active = empty_version_two_active_revision(&verified);
 
+        let body = br#"{"kind":"empty"}"#;
         let mut ui_payload = Vec::from(UI_MAGIC.as_bytes());
-        ui_payload.extend_from_slice(&5_u32.to_be_bytes());
-        ui_payload.extend_from_slice(b"hello");
+        ui_payload.extend_from_slice(&(body.len() as u32).to_be_bytes());
+        ui_payload.extend_from_slice(body);
         let ui = OpaqueValue::new(&active, &registry, STD_UI_TYPE_ID, &ui_payload)
             .expect("the ui payload constructs");
         assert_eq!(ui.opaque_type(), STD_UI_TYPE_ID);
         assert_eq!(ui.canonical_payload(), ui_payload);
+
+        let noncanonical_body = br#"{ "kind":"empty"}"#;
+        let mut noncanonical_payload = Vec::from(UI_MAGIC.as_bytes());
+        noncanonical_payload
+            .extend_from_slice(&(noncanonical_body.len() as u32).to_be_bytes());
+        noncanonical_payload.extend_from_slice(noncanonical_body);
+        assert_eq!(
+            OpaqueValue::new(
+                &active,
+                &registry,
+                STD_UI_TYPE_ID,
+                &noncanonical_payload,
+            ),
+            Err(OpaqueValueError::InvalidJsonBody {
+                opaque_type: STD_UI_TYPE_ID,
+            })
+        );
+
+        let malformed_body = br#"{"kind":}"#;
+        let mut malformed_payload = Vec::from(UI_MAGIC.as_bytes());
+        malformed_payload.extend_from_slice(&(malformed_body.len() as u32).to_be_bytes());
+        malformed_payload.extend_from_slice(malformed_body);
+        assert_eq!(
+            OpaqueValue::new(&active, &registry, STD_UI_TYPE_ID, &malformed_payload),
+            Err(OpaqueValueError::InvalidJsonBody {
+                opaque_type: STD_UI_TYPE_ID,
+            })
+        );
+
+        let mut wrong_length_payload = ui_payload.clone();
+        wrong_length_payload[UI_MAGIC.len()..UI_MAGIC.len() + 4]
+            .copy_from_slice(&((body.len() as u32) - 1).to_be_bytes());
+        assert_eq!(
+            OpaqueValue::new(
+                &active,
+                &registry,
+                STD_UI_TYPE_ID,
+                &wrong_length_payload,
+            ),
+            Err(OpaqueValueError::InvalidFrameLength {
+                opaque_type: STD_UI_TYPE_ID,
+            })
+        );
+
+        // The core codec validates canonical JSON only; UI schema-shape
+        // validation remains outside this registration's validator surface.
+        let invalid_shape_body = br#"{"kind":"not-a-ui-kind"}"#;
+        let mut invalid_shape_payload = Vec::from(UI_MAGIC.as_bytes());
+        invalid_shape_payload
+            .extend_from_slice(&(invalid_shape_body.len() as u32).to_be_bytes());
+        invalid_shape_payload.extend_from_slice(invalid_shape_body);
+        assert!(OpaqueValue::new(
+            &active,
+            &registry,
+            STD_UI_TYPE_ID,
+            &invalid_shape_payload,
+        )
+        .is_ok());
 
         // The V4 registry also binds the opaque-token, terminal-document, and
         // byte-stream codecs unchanged.
