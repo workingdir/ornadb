@@ -77,6 +77,7 @@ use orna_core::{
         QualifiedSemanticName, TypeBindingKind, TypeLookupName, ValueTypeKind, ValueTypeMutability,
         ValueTypePersistence,
     },
+    inspect::{INSPECT_RENDER_CARRIER_SIGNATURE, INSPECT_RENDER_CONTRACT},
     revision::{
         DefinitionIdentity, DefinitionOrigin, DefinitionReference, DefinitionReferenceKind,
         DefinitionReferenceTarget, EMPTY_APPLICATION_CATALOGUE_REVISION_ID, ExecutableArtifact,
@@ -4247,16 +4248,6 @@ fn resolve_client_function_inputs<'a>(
         let expression_body = declaration.body.as_expression().is_some()
             || declaration.body.as_external_contract().is_some()
             || declaration.body.as_state_block().is_some();
-        let inspector_shell_name = QualifiedSemanticName::new(["devtools", "inspector_shell"])
-            .expect("registered inspector helper name is valid");
-        if name == inspector_shell_name && declaration.body.as_external_contract().is_none() {
-            diagnostics.push(diagnostic(
-                DiagnosticCode::UnknownQualifiedName,
-                "devtools.inspector_shell is reserved for the registered external helper",
-                header.logical_path,
-                &declaration.span,
-            ));
-        }
         if !expression_body && !declaration.parameters.is_empty() {
             diagnostics.push(diagnostic(
                 DiagnosticCode::DomainIncompatible,
@@ -7261,15 +7252,12 @@ fn client_contract_identity(source: &SourceSlice) -> Option<String> {
     }
     Some(identity)
 }
-const DEVTOOLS_INSPECTOR_SHELL_CONTRACT: &str = "devtools.inspector_shell@1";
-
-fn is_inspector_shell_identity(identity: &str) -> bool {
-    identity == DEVTOOLS_INSPECTOR_SHELL_CONTRACT
-        || identity.starts_with("devtools.inspector_shell@")
+fn is_inspect_render_identity(identity: &str) -> bool {
+    identity == INSPECT_RENDER_CONTRACT || identity.starts_with("std.inspect.render@")
 }
 
 fn validate_registered_client_external_contract(
-    name: &QualifiedSemanticName,
+    _name: &QualifiedSemanticName,
     identity: &str,
     parameters: &[ResolvedServerFunctionParameter],
     return_type: ResolvedApplicationType,
@@ -7278,49 +7266,44 @@ fn validate_registered_client_external_contract(
     declaration_span: &SourceSpan,
     diagnostics: &mut Vec<CompilerDiagnostic>,
 ) -> bool {
-    let helper_name = QualifiedSemanticName::new(["devtools", "inspector_shell"])
-        .expect("registered inspector helper name is valid");
-    if name != &helper_name && !is_inspector_shell_identity(identity) {
+    if !is_inspect_render_identity(identity) {
         return true;
     }
-    if name != &helper_name || identity != DEVTOOLS_INSPECTOR_SHELL_CONTRACT {
+    if identity != INSPECT_RENDER_CONTRACT {
         diagnostics.push(diagnostic(
             DiagnosticCode::UnknownQualifiedName,
-            "unregistered CLIENT external helper devtools.inspector_shell",
+            format!("unregistered CLIENT external contract {identity}"),
             logical_path,
             declaration_span,
         ));
         return false;
     }
 
-    const EXPECTED: [(&str, TypeId); 9] = [
-        ("p_snapshot", orna_core::system::SYS_INSPECT_SNAPSHOT_TYPE_ID),
-        ("p_invocation_nodes", orna_core::system::SYS_INSPECT_INVOCATION_NODES_TYPE_ID),
-        ("p_calls", orna_core::system::SYS_INSPECT_CALLS_TYPE_ID),
-        ("p_resources", orna_core::system::SYS_INSPECT_RESOURCES_TYPE_ID),
-        ("p_state_cells", orna_core::system::SYS_INSPECT_STATE_CELLS_TYPE_ID),
-        ("p_ui_nodes", orna_core::system::SYS_INSPECT_UI_NODES_TYPE_ID),
-        ("p_presentation_candidates", orna_core::system::SYS_INSPECT_PRESENTATION_CANDIDATES_TYPE_ID),
-        ("p_runtime_bindings", orna_core::system::SYS_INSPECT_RUNTIME_BINDINGS_TYPE_ID),
-        ("p_security_decisions", orna_core::system::SYS_INSPECT_SECURITY_DECISIONS_TYPE_ID),
-    ];
-    if parameters.len() != EXPECTED.len() {
+    if parameters.len() != INSPECT_RENDER_CARRIER_SIGNATURE.len() {
         diagnostics.push(diagnostic(
             DiagnosticCode::TypeMismatch,
-            "devtools.inspector_shell@1 requires exactly nine ordered carrier parameters",
+            format!(
+                "{INSPECT_RENDER_CONTRACT} requires exactly nine ordered carrier parameters"
+            ),
             logical_path,
             declaration_span,
         ));
         return false;
     }
-    for (parameter, (expected_name, expected_id)) in parameters.iter().zip(EXPECTED) {
+    for (parameter, (expected_name, expected_id, _)) in parameters
+        .iter()
+        .zip(INSPECT_RENDER_CARRIER_SIGNATURE)
+    {
         if parameter.name != expected_name
             || parameter.semantic_type
                 != SemanticType::Named(CheckedTypeId::Existing(expected_id))
         {
             diagnostics.push(diagnostic(
                 DiagnosticCode::TypeMismatch,
-                format!("devtools.inspector_shell@1 parameter {} must be {}", expected_name, expected_name.trim_start_matches("p_")),
+                format!(
+                    "{INSPECT_RENDER_CONTRACT} parameter {expected_name} must be {}",
+                    expected_name.trim_start_matches("p_")
+                ),
                 logical_path,
                 &parameter.name_span,
             ));
@@ -7333,7 +7316,7 @@ fn validate_registered_client_external_contract(
     {
         diagnostics.push(diagnostic(
             DiagnosticCode::TypeMismatch,
-            "devtools.inspector_shell@1 must return std.ui.UI",
+            format!("{INSPECT_RENDER_CONTRACT} must return std.ui.UI"),
             logical_path,
             declaration_span,
         ));
@@ -11615,13 +11598,13 @@ mod tests {
     }
 
     #[test]
-    fn accepts_registered_inspector_shell_exact_signature() {
+    fn accepts_generic_inspect_render_contract_exact_signature() {
         let standard =
             check_standard_library_source(&verified_standard_v4_snapshot()).unwrap();
         let application = empty_catalogue();
         let context =
             StandardApplicationCheckContext::try_new(&application, &standard).unwrap();
-        let source = "CREATE SCHEMA devtools; CREATE EXTERNAL CLIENT FUNCTION devtools.inspector_shell(
+        let source = "CREATE SCHEMA app; CREATE EXTERNAL CLIENT FUNCTION app.inspector_renderer(
             p_snapshot sys.inspect.snapshot,
             p_invocation_nodes sys.inspect.invocation_nodes,
             p_calls sys.inspect.calls,
@@ -11631,11 +11614,11 @@ mod tests {
             p_presentation_candidates sys.inspect.presentation_candidates,
             p_runtime_bindings sys.inspect.runtime_bindings,
             p_security_decisions sys.inspect.security_decisions
-        ) RETURNS std.ui.UI RUNTIME CONTRACT 'devtools.inspector_shell@1';";
-        let report = check_standard_application(&bundle([("inspector-shell.orna", source)]), &context);
+        ) RETURNS std.ui.UI RUNTIME CONTRACT 'std.inspect.render@1';";
+        let report = check_standard_application(&bundle([("inspect-render.orna", source)]), &context);
         assert_eq!(report.diagnostics(), &[], "{:?}", report.diagnostics());
         let function = report.checked_bundle().unwrap().client_functions().next().unwrap();
-        assert_eq!(function.name().to_string(), "devtools.inspector_shell");
+        assert_eq!(function.name().to_string(), "app.inspector_renderer");
         assert_eq!(function.parameters().count(), 9);
     }
 
@@ -11646,8 +11629,8 @@ mod tests {
         let application = empty_catalogue();
         let context =
             StandardApplicationCheckContext::try_new(&application, &standard).unwrap();
-        let source = r#"CREATE SCHEMA devtools;
-            CREATE EXTERNAL CLIENT FUNCTION devtools.inspector_shell(
+        let source = r#"CREATE SCHEMA inspector_app; CREATE SCHEMA app;
+            CREATE EXTERNAL CLIENT FUNCTION app.inspector_renderer(
                 p_snapshot sys.inspect.snapshot,
                 p_invocation_nodes sys.inspect.invocation_nodes,
                 p_calls sys.inspect.calls,
@@ -11658,8 +11641,8 @@ mod tests {
                 p_runtime_bindings sys.inspect.runtime_bindings,
                 p_security_decisions sys.inspect.security_decisions
             ) RETURNS std.ui.UI
-            RUNTIME CONTRACT 'devtools.inspector_shell@1';
-            CREATE CLIENT FUNCTION devtools.inspector(p_target REF sys.inspect.invocation)
+            RUNTIME CONTRACT 'std.inspect.render@1';
+            CREATE CLIENT FUNCTION inspector_app.inspector(p_target REF sys.inspect.invocation)
             RETURNS std.ui.UI IS
             LET snapshot sys.inspect.snapshot := sys.inspect.snapshot(p_target => p_target);
             LET invocation_nodes sys.inspect.invocation_nodes :=
@@ -11677,7 +11660,7 @@ mod tests {
             LET security_decisions sys.inspect.security_decisions :=
                 sys.inspect.security_decisions(p_snapshot => snapshot);
             BEGIN
-                RETURN devtools.inspector_shell(
+                RETURN app.inspector_renderer(
                     p_snapshot => snapshot,
                     p_invocation_nodes => invocation_nodes,
                     p_calls => calls,
@@ -11695,7 +11678,7 @@ mod tests {
         let function = checked
             .client_functions()
             .iter()
-            .find(|function| function.name().to_string() == "devtools.inspector")
+            .find(|function| function.name().to_string() == "inspector_app.inspector")
             .expect("ordinary Inspector function");
         let CheckedClientFunctionBody::Procedural {
             locals,
@@ -11749,21 +11732,21 @@ mod tests {
     }
 
     #[test]
-    fn rejects_unregistered_or_malformed_inspector_shell_contracts() {
+    fn rejects_wrong_version_or_malformed_inspect_render_contracts() {
         let standard =
             check_standard_library_source(&verified_standard_v4_snapshot()).unwrap();
         let application = empty_catalogue();
         let context =
             StandardApplicationCheckContext::try_new(&application, &standard).unwrap();
         let cases = [
-            "CREATE SCHEMA devtools; CREATE EXTERNAL CLIENT FUNCTION devtools.inspector_shell(p_snapshot sys.inspect.snapshot, p_invocation_nodes sys.inspect.invocation_nodes, p_calls sys.inspect.calls, p_resources sys.inspect.resources, p_state_cells sys.inspect.state_cells, p_ui_nodes sys.inspect.ui_nodes, p_presentation_candidates sys.inspect.presentation_candidates, p_runtime_bindings sys.inspect.runtime_bindings) RETURNS std.ui.UI RUNTIME CONTRACT 'devtools.inspector_shell@1';",
-            "CREATE SCHEMA devtools; CREATE EXTERNAL CLIENT FUNCTION devtools.inspector_shell(p_snapshot sys.inspect.snapshot, p_invocation_nodes sys.inspect.invocation_nodes, p_calls sys.inspect.resources, p_resources sys.inspect.resources, p_state_cells sys.inspect.state_cells, p_ui_nodes sys.inspect.ui_nodes, p_presentation_candidates sys.inspect.presentation_candidates, p_runtime_bindings sys.inspect.runtime_bindings, p_security_decisions sys.inspect.security_decisions) RETURNS std.ui.UI RUNTIME CONTRACT 'devtools.inspector_shell@1';",
-            "CREATE SCHEMA devtools; CREATE EXTERNAL CLIENT FUNCTION devtools.inspector_shell(p_snapshot sys.inspect.snapshot, p_invocation_nodes sys.inspect.invocation_nodes, p_calls sys.inspect.calls, p_resources sys.inspect.resources, p_state_cells sys.inspect.state_cells, p_ui_nodes sys.inspect.ui_nodes, p_presentation_candidates sys.inspect.presentation_candidates, p_runtime_bindings sys.inspect.runtime_bindings, p_security_decisions sys.inspect.security_decisions) RETURNS BOOLEAN RUNTIME CONTRACT 'devtools.inspector_shell@1';",
-            "CREATE SCHEMA devtools; CREATE EXTERNAL CLIENT FUNCTION devtools.inspector_shell(p_snapshot sys.inspect.snapshot, p_invocation_nodes sys.inspect.invocation_nodes, p_calls sys.inspect.calls, p_resources sys.inspect.resources, p_state_cells sys.inspect.state_cells, p_ui_nodes sys.inspect.ui_nodes, p_presentation_candidates sys.inspect.presentation_candidates, p_runtime_bindings sys.inspect.runtime_bindings, p_security_decisions sys.inspect.security_decisions) RETURNS std.ui.UI RUNTIME CONTRACT 'devtools.inspector_shell@2';",
+            "CREATE SCHEMA app; CREATE EXTERNAL CLIENT FUNCTION app.inspector_renderer(p_snapshot sys.inspect.snapshot, p_invocation_nodes sys.inspect.invocation_nodes, p_calls sys.inspect.calls, p_resources sys.inspect.resources, p_state_cells sys.inspect.state_cells, p_ui_nodes sys.inspect.ui_nodes, p_presentation_candidates sys.inspect.presentation_candidates, p_runtime_bindings sys.inspect.runtime_bindings) RETURNS std.ui.UI RUNTIME CONTRACT 'std.inspect.render@1';",
+            "CREATE SCHEMA app; CREATE EXTERNAL CLIENT FUNCTION app.inspector_renderer(p_snapshot sys.inspect.snapshot, p_invocation_nodes sys.inspect.invocation_nodes, p_calls sys.inspect.resources, p_resources sys.inspect.resources, p_state_cells sys.inspect.state_cells, p_ui_nodes sys.inspect.ui_nodes, p_presentation_candidates sys.inspect.presentation_candidates, p_runtime_bindings sys.inspect.runtime_bindings, p_security_decisions sys.inspect.security_decisions) RETURNS std.ui.UI RUNTIME CONTRACT 'std.inspect.render@1';",
+            "CREATE SCHEMA app; CREATE EXTERNAL CLIENT FUNCTION app.inspector_renderer(p_snapshot sys.inspect.snapshot, p_invocation_nodes sys.inspect.invocation_nodes, p_calls sys.inspect.calls, p_resources sys.inspect.resources, p_state_cells sys.inspect.state_cells, p_ui_nodes sys.inspect.ui_nodes, p_presentation_candidates sys.inspect.presentation_candidates, p_runtime_bindings sys.inspect.runtime_bindings, p_security_decisions sys.inspect.security_decisions) RETURNS BOOLEAN RUNTIME CONTRACT 'std.inspect.render@1';",
+            "CREATE SCHEMA app; CREATE EXTERNAL CLIENT FUNCTION app.inspector_renderer(p_snapshot sys.inspect.snapshot, p_invocation_nodes sys.inspect.invocation_nodes, p_calls sys.inspect.calls, p_resources sys.inspect.resources, p_state_cells sys.inspect.state_cells, p_ui_nodes sys.inspect.ui_nodes, p_presentation_candidates sys.inspect.presentation_candidates, p_runtime_bindings sys.inspect.runtime_bindings, p_security_decisions sys.inspect.security_decisions) RETURNS std.ui.UI RUNTIME CONTRACT 'std.inspect.render@2';",
         ];
         for source in cases {
             let report =
-                check_standard_application(&bundle([("inspector-shell.orna", source)]), &context);
+                check_standard_application(&bundle([("inspect-render.orna", source)]), &context);
             assert!(
                 !report.diagnostics().is_empty(),
                 "source unexpectedly accepted: {source}"
