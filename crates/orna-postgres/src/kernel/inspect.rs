@@ -22,7 +22,7 @@ use orna_core::{
     SecurityAuditEventId, SourceRevisionId, StateSlotId, TypeId,
     inspect::{
         CallRow, InspectInvocationNodeKind, InspectInvocationPhase, InspectOutcomeKind,
-        InspectPrivilege, InspectResultSummary, InspectSecurityDecisionKind,
+        InspectClassifier, InspectPrivilege, InspectResultSummary, InspectSecurityDecisionKind,
         InspectSecurityDecisionOutcome, InspectSnapshotEpoch, InspectSnapshotOptions,
         InspectSnapshotSummary, InspectTraceEvent, InspectTracePayload, InvocationNodeRow,
         PresentationCandidateRow, ResourceRow, RuntimeBindingRow, SecurityDecisionRow,
@@ -298,10 +298,9 @@ impl PostgresKernel {
 
     /// Returns the `state_cells` projection over one epoch.
     ///
-    /// The projection reads the live `_orna_kernel.user_state_cells` rows
-    /// for the epoch owner and root target, decoding each typed value
-    /// through the verified standard registry. Values are redacted to `None`
-    /// unless the caller requested and was granted the `Values` classifier.
+    /// State-cell rows come from the immutable epoch payload. Capture options
+    /// decide whether typed values were retained, and a caller without the
+    /// `Values` classifier receives a further redacted projection.
     pub async fn inspect_state_cells(
         &self,
         authenticated_session: &AuthenticatedSession,
@@ -310,76 +309,22 @@ impl PostgresKernel {
         granted: &[InspectPrivilege],
     ) -> Result<Vec<StateCellRow>, PostgresKernelError> {
         require_inspect_privilege(authenticated_session, epoch, requested, granted)?;
-        let include_values = requested == InspectPrivilege::Values;
-        let mut database_session = self.open().await?;
-        let operation = async {
-            let transaction = database_session
-                .client
-                .build_transaction()
-                .isolation_level(IsolationLevel::RepeatableRead)
-                .read_only(true)
-                .start()
-                .await
-                .map_err(PostgresKernelError::Database)?;
-            require_current_migrations(&transaction).await?;
-            let active = configure_and_recover(&transaction).await?;
-            let registry = inspect_value_registry(&active)?;
-            let rows = transaction
-                .query(
-                    "SELECT principal_id, root_function_id, root_state_profile,
-                            function_id, function_instance_key, state_slot_id,
-                            value_bytes, value_type_id, revision, updated_at
-                     FROM _orna_kernel.user_state_cells
-                     WHERE principal_id = $1
-                       AND root_function_id = $2
-                     ORDER BY root_state_profile, function_id,
-                              function_instance_key, state_slot_id",
-                    &[
-                        &epoch.owner().to_bytes().to_vec(),
-                        &epoch.root_target().to_bytes().to_vec(),
-                    ],
-                )
-                .await
-                .map_err(PostgresKernelError::Database)?;
-            let mut cells = Vec::with_capacity(rows.len());
-            for row in &rows {
-                let key = decode_state_cell_key(row)?;
-                let value_bytes: Vec<u8> = inspect_column(
-                    "_orna_kernel.user_state_cells",
-                    row,
-                    "value_bytes",
-                    "value_bytes",
-                )?;
-                let value = decode_constructed_value(&active, &registry, &value_bytes)
-                    .map_err(PostgresKernelError::InspectValueCodec)?;
-                let value =
-                    InvokeValue::new(value).map_err(PostgresKernelError::InvocationCarrier)?;
-                let value_type = TypeId::from_bytes(inspect_id(
-                    "_orna_kernel.user_state_cells",
-                    row,
-                    "value_type_id",
-                    "value_type_id",
-                )?);
-                let revision = decode_revision(row)?;
-                let updated_at: SystemTime = inspect_column(
-                    "_orna_kernel.user_state_cells",
-                    row,
-                    "updated_at",
-                    "updated_at",
-                )?;
-                let value = if include_values { Some(value) } else { None };
-                cells.push(StateCellRow::new(
-                    key, value_type, revision, updated_at, value,
-                ));
-            }
-            transaction
-                .commit()
-                .await
-                .map_err(PostgresKernelError::Database)?;
-            Ok(cells)
+        if requested == InspectPrivilege::Values {
+            return Ok(epoch.state_cells().to_vec());
         }
-        .await;
-        finish_inspect_session(operation, database_session.shutdown().await)
+        Ok(epoch
+            .state_cells()
+            .iter()
+            .map(|row| {
+                StateCellRow::new(
+                    row.key().clone(),
+                    row.value_type(),
+                    row.revision(),
+                    row.updated_at(),
+                    None,
+                )
+            })
+            .collect())
     }
 
     /// Returns the `ui_nodes` projection over one epoch.
@@ -482,20 +427,32 @@ impl PostgresKernel {
 
     /// Streams the model-expressible trace events of one invocation.
     ///
-    /// Events are returned in contiguous sequence order with
-    /// `sequence > after_sequence`. Self-observation suppression is the
-    /// default: rows whose `observer_invocation_id` matches the inspecting
-    /// invocation are dropped unless `include_observer` is set. Durable
-    /// stream kinds the closed v1 model cannot express (for example the
-    /// `inspect_snapshot` marker) are retained in the relation but not
-    /// returned by this v1 model API.
+    /// The stream is gated by the same INSPECT ladder and classifier rules as
+    /// the epoch projections. Without the `Values` classifier, ValueBatch
+    /// events retain their sequence and count but carry no decoded schema or
+    /// values. Self-observation suppression is the default: when no observer
+    /// identity is supplied, the target invocation is used as the observer.
     pub async fn stream_inspect_trace(
         &self,
+        authenticated_session: &AuthenticatedSession,
+        epoch: &InspectSnapshotEpoch,
+        requested: InspectPrivilege,
+        granted: &[InspectPrivilege],
         invocation_id: InvocationId,
         after_sequence: u64,
         observer_invocation: Option<InvocationId>,
         include_observer: bool,
     ) -> Result<Vec<InspectTraceEvent>, PostgresKernelError> {
+        require_inspect_privilege(authenticated_session, epoch, requested, granted)?;
+        if epoch.invocation_id() != invocation_id {
+            return Err(PostgresKernelError::DurableInvariant {
+                relation: INSPECT_TRACE_RELATION,
+                record: invocation_id.canonical(),
+                rule: "trace invocation must match its authorised inspection epoch",
+            });
+        }
+        let include_values = requested.classifier() == Some(InspectClassifier::Values);
+        let observer = observer_invocation.unwrap_or(invocation_id);
         let after =
             i64::try_from(after_sequence).map_err(|_| PostgresKernelError::DurableInvariant {
                 relation: INSPECT_TRACE_RELATION,
@@ -546,19 +503,15 @@ impl PostgresKernel {
             let mut events = Vec::with_capacity(rows.len());
             for row in &rows {
                 let record = row_invocation_record(row)?;
-                if !include_observer
-                    && observer_invocation.is_some()
-                    && record.observer_invocation == observer_invocation
-                {
+                if !include_observer && record.observer_invocation == Some(observer) {
                     continue;
                 }
                 if !matches!(
                     record.kind.as_str(),
                     "started" | "value_batch" | "completed"
                 ) {
-                    // The closed v1 model carries the five lifecycle payloads
-                    // only; the richer durable kinds are retained for later
-                    // slices and never dropped from the relation.
+                    // The closed v1 model carries the lifecycle payloads only;
+                    // richer durable kinds remain retained for later slices.
                     continue;
                 }
                 let RuntimeValue::InvokeEvent(event) =
@@ -586,6 +539,23 @@ impl PostgresKernel {
                         rule: "trace kind must agree with its event payload kind",
                     });
                 };
+                let payload = if include_values {
+                    payload
+                } else {
+                    match payload {
+                        InspectTracePayload::ValueBatch { values, .. } => {
+                            let value_count = u64::try_from(values.len()).map_err(|_| {
+                                PostgresKernelError::DurableInvariant {
+                                    relation: INSPECT_TRACE_RELATION,
+                                    record: record.invocation.canonical(),
+                                    rule: "trace value count must fit BIGINT",
+                                }
+                            })?;
+                            InspectTracePayload::ValueBatchRedacted { value_count }
+                        }
+                        payload => payload,
+                    }
+                };
                 events.push(
                     InspectTraceEvent::new(
                         record.invocation,
@@ -595,7 +565,7 @@ impl PostgresKernel {
                         record.observer_invocation,
                         None,
                     )
-                    .map_err(PostgresKernelError::Inspect)?,
+                    .map_err(PostgresKernelError::Inspect)?
                 );
             }
             transaction
@@ -629,6 +599,9 @@ pub(crate) async fn capture_inspect_snapshot_in_transaction(
     client_offer: &InvocationClientOffer,
     observer_invocation: Option<InvocationId>,
 ) -> Result<InspectEpochId, PostgresKernelError> {
+    let state_cells =
+        capture_state_cells_in_transaction(transaction, active, registry, owner, root_target)
+            .await?;
     let epoch = build_inspect_epoch(
         active,
         invocation,
@@ -638,6 +611,7 @@ pub(crate) async fn capture_inspect_snapshot_in_transaction(
         outcome,
         events,
         client_offer,
+        state_cells,
     )?;
     let epoch_id = epoch.id();
     let record = epoch_id.canonical();
@@ -720,6 +694,37 @@ pub(crate) async fn capture_inspect_snapshot_in_transaction(
             })?;
     append_security_audit_event(transaction, audit).await?;
     Ok(epoch_id)
+}
+
+/// Captures the exact USER state-cell rows visible in the capture transaction.
+///
+/// The resulting rows are embedded in the canonical epoch payload; later
+/// projections must never consult mutable live state for an existing epoch.
+async fn capture_state_cells_in_transaction(
+    transaction: &Transaction<'_>,
+    active: &ActiveDatabaseRevision,
+    registry: &OpaqueCodecRegistry,
+    owner: PrincipalId,
+    root_target: FunctionId,
+) -> Result<Vec<StateCellRow>, PostgresKernelError> {
+    let rows = transaction
+        .query(
+            "SELECT principal_id, root_function_id, root_state_profile,
+                    function_id, function_instance_key, state_slot_id,
+                    value_bytes, value_type_id, revision, updated_at
+             FROM _orna_kernel.user_state_cells
+             WHERE principal_id = $1
+               AND root_function_id = $2
+             ORDER BY root_state_profile, function_id,
+                      function_instance_key, state_slot_id",
+            &[&owner.to_bytes().to_vec(), &root_target.to_bytes().to_vec()],
+        )
+        .await
+        .map_err(PostgresKernelError::Database)?;
+
+    rows.iter()
+        .map(|row| decode_state_cell_row(row, active, registry))
+        .collect()
 }
 
 /// Validates the inspection relations during normal recovery.
@@ -834,6 +839,7 @@ fn build_inspect_epoch(
     outcome: InspectOutcomeKind,
     events: &InvocationEventBatch,
     client_offer: &InvocationClientOffer,
+    state_cells: Vec<StateCellRow>,
 ) -> Result<InspectSnapshotEpoch, PostgresKernelError> {
     let mut value_count = 0_u64;
     let mut schema = None;
@@ -894,7 +900,7 @@ fn build_inspect_epoch(
         vec![node],
         vec![call],
         Vec::new(),
-        Vec::new(),
+        state_cells,
         Vec::new(),
         Vec::new(),
         runtime_bindings,
@@ -1235,6 +1241,43 @@ fn decode_security_decision_row(row: &Row) -> Result<SecurityDecisionRow, Postgr
         vec![event_id],
     )
     .map_err(PostgresKernelError::Inspect)
+}
+
+fn decode_state_cell_row(
+    row: &Row,
+    active: &ActiveDatabaseRevision,
+    registry: &OpaqueCodecRegistry,
+) -> Result<StateCellRow, PostgresKernelError> {
+    let key = decode_state_cell_key(row)?;
+    let value_bytes: Vec<u8> = inspect_column(
+        "_orna_kernel.user_state_cells",
+        row,
+        "selected row",
+        "value_bytes",
+    )?;
+    let value = decode_constructed_value(active, registry, &value_bytes)
+        .map_err(PostgresKernelError::InspectValueCodec)?;
+    let value = InvokeValue::new(value).map_err(PostgresKernelError::InvocationCarrier)?;
+    let value_type = TypeId::from_bytes(inspect_id(
+        "_orna_kernel.user_state_cells",
+        row,
+        "selected row",
+        "value_type_id",
+    )?);
+    let revision = decode_revision(row)?;
+    let updated_at: SystemTime = inspect_column(
+        "_orna_kernel.user_state_cells",
+        row,
+        "selected row",
+        "updated_at",
+    )?;
+    Ok(StateCellRow::new(
+        key,
+        value_type,
+        revision,
+        updated_at,
+        Some(value),
+    ))
 }
 
 fn decode_state_cell_key(row: &Row) -> Result<UserStateKeyWithoutPrincipal, PostgresKernelError> {
