@@ -3092,11 +3092,11 @@ fn render_terminal_table(
 ///
 /// The fixed layout is one header row of column names followed by one row
 /// per result row; every row ends with `\n` and the document ends with a
-/// trailing newline. Cells render with the same closed rules as the terminal
-/// table, then receive RFC-4180-style quoting: a cell containing a comma,
-/// double quote, CR, or LF is quoted and embedded quotes are doubled. Column
-/// names and cells cannot carry control characters; any rendered fragment
-/// containing one is rejected.
+/// trailing newline. Cells render with the same closed value rules as the
+/// terminal table, then receive RFC-4180-style quoting: a cell containing a
+/// comma, double quote, CR, or LF is quoted and embedded quotes are doubled.
+/// NUL and other forbidden control characters remain rejected, while CR and LF
+/// are valid CSV data.
 fn render_csv_document(
     active: &ActiveDatabaseRevision,
     rows: &ResultRows,
@@ -3107,7 +3107,7 @@ fn render_csv_document(
         if index > 0 {
             document.push(',');
         }
-        reject_control_characters(
+        reject_csv_control_characters(
             column.name(),
             "csv column names cannot contain control characters",
         )?;
@@ -3119,7 +3119,7 @@ fn render_csv_document(
             if index > 0 {
                 document.push(',');
             }
-            let cell = render_terminal_cell(active, value)?;
+            let cell = render_csv_cell(active, value)?;
             push_csv_field(&mut document, &cell);
         }
         document.push('\n');
@@ -3184,6 +3184,23 @@ fn render_terminal_cell(
     active: &ActiveDatabaseRevision,
     value: &RuntimeValue,
 ) -> Result<String, &'static str> {
+    render_cell(active, value, reject_control_characters)
+}
+
+/// Renders one CSV cell, allowing RFC-4180 CR/LF data while rejecting other
+/// forbidden control characters.
+fn render_csv_cell(
+    active: &ActiveDatabaseRevision,
+    value: &RuntimeValue,
+) -> Result<String, &'static str> {
+    render_cell(active, value, reject_csv_control_characters)
+}
+
+fn render_cell(
+    active: &ActiveDatabaseRevision,
+    value: &RuntimeValue,
+    validate: fn(&str, &'static str) -> Result<(), &'static str>,
+) -> Result<String, &'static str> {
     let cell = match value {
         RuntimeValue::Null(_) => "NULL".to_owned(),
         RuntimeValue::Boolean(value) => value.to_string(),
@@ -3194,7 +3211,7 @@ fn render_terminal_cell(
         RuntimeValue::Bytes(value) => BASE64_STANDARD.encode(value),
         RuntimeValue::Reference { object, .. } => object.canonical(),
         RuntimeValue::Enum(value) => value.label().to_owned(),
-        RuntimeValue::Record(value) => render_record_cell(active, value)?,
+        RuntimeValue::Record(value) => render_record_cell_with(active, value, validate)?,
         RuntimeValue::Opaque(_) => {
             return Err("terminal tables cannot render OPAQUE values");
         }
@@ -3208,7 +3225,7 @@ fn render_terminal_cell(
         }
         _ => return Err("terminal tables cannot render an unknown runtime value"),
     };
-    reject_control_characters(
+    validate(
         &cell,
         "terminal table cells cannot contain control characters",
     )?;
@@ -3220,9 +3237,10 @@ fn render_terminal_cell(
 /// Field names and the record type name come from the active catalogue;
 /// field values render with the same closed cell rules and are never null
 /// (the record constructor rejects null fields).
-fn render_record_cell(
+fn render_record_cell_with(
     active: &ActiveDatabaseRevision,
     record: &RecordValue,
+    validate: fn(&str, &'static str) -> Result<(), &'static str>,
 ) -> Result<String, &'static str> {
     let Some(definition) = active
         .catalogue()
@@ -3238,7 +3256,7 @@ fn render_record_cell(
         }
         cell.push_str(field.name());
         cell.push('=');
-        cell.push_str(&render_terminal_cell(active, value)?);
+        cell.push_str(&render_cell(active, value, validate)?);
     }
     cell.push('}');
     Ok(cell)
@@ -3247,6 +3265,19 @@ fn render_record_cell(
 /// Rejects any control character in one rendered table text fragment.
 fn reject_control_characters(text: &str, rule: &'static str) -> Result<(), &'static str> {
     if text.chars().any(char::is_control) {
+        Err(rule)
+    } else {
+        Ok(())
+    }
+}
+
+/// Rejects controls that cannot be represented as CSV data. CR and LF are
+/// explicitly allowed because RFC-4180 quoting preserves them inside fields.
+fn reject_csv_control_characters(text: &str, rule: &'static str) -> Result<(), &'static str> {
+    if text
+        .chars()
+        .any(|character| character.is_control() && !matches!(character, '\r' | '\n'))
+    {
         Err(rule)
     } else {
         Ok(())
@@ -10372,8 +10403,38 @@ mod tests {
             [ResultRow::new([RuntimeValue::Text("a\nb".to_owned())])],
         )
         .expect("the presenter rows are valid");
+        let carriage_and_newline = ResultRows::new(
+            [ResultColumn::new(
+                "value",
+                ResolvedType::scalar(StandardScalar::CharacterLargeObject),
+                false,
+            )
+            .expect("the value column is valid")],
+            [ResultRow::new([RuntimeValue::Text("a\r\nb".to_owned())])],
+        )
+        .expect("the presenter rows are valid");
+        assert_eq!(
+            render_csv_document(&active, &newline_text).expect("LF is valid CSV data"),
+            "value\n\"a\nb\"\n",
+        );
+        assert_eq!(
+            render_csv_document(&active, &carriage_and_newline)
+                .expect("CR/LF are valid CSV data"),
+            "value\n\"a\r\nb\"\n",
+        );
+
+        let nul_text = ResultRows::new(
+            [ResultColumn::new(
+                "value",
+                ResolvedType::scalar(StandardScalar::CharacterLargeObject),
+                false,
+            )
+            .expect("the value column is valid")],
+            [ResultRow::new([RuntimeValue::Text("a\0b".to_owned())])],
+        )
+        .expect("the presenter rows are valid");
         assert_presenter_rule(
-            render_csv_document(&active, &newline_text)
+            render_csv_document(&active, &nul_text)
                 .map(RuntimeValue::Text)
                 .map_err(|rule| server_error(ServerSelectError::Presenter { rule })),
             "terminal table cells cannot contain control characters",
