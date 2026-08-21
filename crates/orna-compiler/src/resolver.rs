@@ -6949,24 +6949,26 @@ fn check_client_expression(
     }
 }
 
-fn client_local_resource_kind(source: &SourceSlice) -> Option<ResourceKind> {
+fn client_local_resource_family(source: &SourceSlice) -> Option<ResourceKind> {
     let mut parser = ClientResourceTypeParser::new(&source.text);
     let outer = parser.parse_qualified_name()?;
-    let kind = if outer.len() == 3
-        && outer[0].eq_ignore_ascii_case("std")
-        && outer[1].eq_ignore_ascii_case("data")
-        && outer[2].eq_ignore_ascii_case("resource")
+    if outer.len() != 3
+        || !outer[0].eq_ignore_ascii_case("std")
+        || !outer[1].eq_ignore_ascii_case("data")
     {
-        ResourceKind::Scalar
-    } else if outer.len() == 3
-        && outer[0].eq_ignore_ascii_case("std")
-        && outer[1].eq_ignore_ascii_case("data")
-        && outer[2].eq_ignore_ascii_case("streamresource")
-    {
-        ResourceKind::Stream
-    } else {
         return None;
-    };
+    }
+    match outer[2].to_ascii_lowercase().as_str() {
+        "resource" => Some(ResourceKind::Scalar),
+        "streamresource" => Some(ResourceKind::Stream),
+        _ => None,
+    }
+}
+
+fn client_local_resource_kind(source: &SourceSlice) -> Option<ResourceKind> {
+    let kind = client_local_resource_family(source)?;
+    let mut parser = ClientResourceTypeParser::new(&source.text);
+    parser.parse_qualified_name()?;
     if !parser.consume(b'<') || !parser.parse_type() || !parser.consume(b'>') || !parser.is_end() {
         return None;
     }
@@ -7585,18 +7587,54 @@ fn check_client_functions(
         let diagnostics_before = diagnostics.len();
         validate_client_await_positions(&local.expression, false, input, diagnostics);
         if diagnostics.len() != diagnostics_before { return None; }
-        let (checked, expression_type, kind) = if let Some(kind) = client_local_resource_kind(&local.type_source) {
-            let (checked, expression_type) = check_resource_constructor(&local.expression, input, &targets, &action_targets, resource_targets, query_catalogue, base, server_names, standard, diagnostics, &mut references, &mut used_capabilities, &locals)?;
-            let actual_kind = match &checked {
-                CheckedClientExpression::Resource { operation } => operation.kind,
-                _ => unreachable!("resource constructor checker returns a resource"),
-            };
-            if actual_kind != kind {
-                diagnostics.push(diagnostic(DiagnosticCode::TypeMismatch, format!("CLIENT local {local_name} type does not match its resource constructor"), input.logical_path, &local.type_source.span));
-                return None;
-            }
-            (checked, expression_type, CheckedClientLocalKind::Resource(kind))
-        } else {
+        let direct_resource = matches!(
+            &local.expression,
+            ClientExpression::Call { callee, .. }
+                if resource_constructor_kind(&semantic_name(callee)).is_some()
+        );
+        let (checked, expression_type, kind) =
+            if client_local_resource_family(&local.type_source).is_some() || direct_resource {
+                let (checked, expression_type) = check_resource_constructor(
+                    &local.expression,
+                    input,
+                    &targets,
+                    &action_targets,
+                    resource_targets,
+                    query_catalogue,
+                    base,
+                    server_names,
+                    standard,
+                    diagnostics,
+                    &mut references,
+                    &mut used_capabilities,
+                    &locals,
+                )?;
+                let Some(kind) = client_local_resource_kind(&local.type_source) else {
+                    diagnostics.push(diagnostic(
+                        DiagnosticCode::TypeMismatch,
+                        format!(
+                            "CLIENT local {local_name} must declare std.data.Resource<T> or std.data.StreamResource<T>"
+                        ),
+                        input.logical_path,
+                        &local.type_source.span,
+                    ));
+                    return None;
+                };
+                let actual_kind = match &checked {
+                    CheckedClientExpression::Resource { operation } => operation.kind,
+                    _ => unreachable!("resource constructor checker returns a resource"),
+                };
+                if actual_kind != kind {
+                    diagnostics.push(diagnostic(
+                        DiagnosticCode::TypeMismatch,
+                        format!("CLIENT local {local_name} type does not match its resource constructor"),
+                        input.logical_path,
+                        &local.type_source.span,
+                    ));
+                    return None;
+                }
+                (checked, expression_type, CheckedClientLocalKind::Resource(kind))
+            } else {
             let (checked, expression_type) = check_client_expression(&local.expression, input, &targets, &action_targets, resource_targets, query_catalogue, base, server_names, standard, diagnostics, &mut references, &mut used_capabilities, &locals)?;
             if !client_expression_type_is_evaluable(expression_type, base, standard) {
                 diagnostics.push(diagnostic(DiagnosticCode::TypeMismatch, "this CLIENT local type is not supported by the local evaluator", input.logical_path, &local.span));
