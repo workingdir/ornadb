@@ -24,11 +24,13 @@ use orna_core::{
     source::{SourceBundle, SourceBundleError, SourceUnit},
 };
 use orna_postgres::{PostgresKernel, PostgresKernelError};
-use orna_standard::{
-    StandardLibraryError, retained_standard_library_snapshot, verify_standard_library_snapshot,
-};
+use orna_standard::StandardLibraryError;
 
-use crate::{EmbeddedHostError, inspect_ready_embedded_host};
+use crate::{
+    EmbeddedHostError,
+    inspect_ready_embedded_host,
+    source_apply::{select_accepted_standard, StandardSelectionError},
+};
 
 /// The closed result of one installed read-only source diff.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -300,9 +302,16 @@ async fn diff_source_bundle(
     bundle: SourceBundle,
 ) -> Result<InstalledSourceDiffOutcome, InstalledSourceDiffError> {
     let active = kernel.recover().await.map_err(map_recovery_error)?;
-    let accepted = retained_standard_library_snapshot()
-        .and_then(verify_standard_library_snapshot)
-        .map_err(|source| InstalledSourceDiffError::StandardLibrary { source })?;
+    let installed = active
+        .catalogue_hash_context()
+        .standard()
+        .ok_or(InstalledSourceDiffError::ActiveStandardMismatch)?;
+    let accepted = select_accepted_standard(installed).map_err(|error| match error {
+        StandardSelectionError::UnknownRevision => InstalledSourceDiffError::ActiveStandardMismatch,
+        StandardSelectionError::Verification(source) => {
+            InstalledSourceDiffError::StandardLibrary { source }
+        }
+    })?;
     require_accepted_active_standard(&active, &accepted)?;
     let standard = check_standard_library_source(&accepted)
         .map_err(|source| InstalledSourceDiffError::StandardSource { source })?;
