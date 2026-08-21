@@ -6921,6 +6921,7 @@ mod tests {
             ),
             Err(super::ClientExecutionError::ExternalContract { identity, .. })
                 if identity == "app.other@1"
+        ));
         let mut default_executor = super::DeterministicClientResourceExecutor::new(
             |_: &super::ClientResourceRequest| Ok::<_, String>(RuntimeValue::Boolean(false)),
         );
@@ -6940,7 +6941,6 @@ mod tests {
                 ),
             }),
         );
-        ));
         let mut absent: Option<&mut dyn super::ClientResourceExecutor> = None;
         assert!(matches!(
             super::evaluate_external_contract(
