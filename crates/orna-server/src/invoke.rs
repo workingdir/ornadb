@@ -421,6 +421,7 @@ struct BrokerResourceState {
     protocol: ResourceProtocolConnection,
     completion: Sender<Result<ResourceTransportOutcome, ResourceTransportFailure>>,
     accepted: bool,
+    accepted_nested_invocation_id: Option<orna_core::InvocationId>,
     scalar_value: Option<RuntimeValue>,
     cancellation_requested: bool,
     stream_values_seen: bool,
@@ -2152,13 +2153,37 @@ fn map_resource_transport_completion(
     outcome: Result<ResourceTransportOutcome, ResourceTransportFailure>,
 ) -> ClientResourceCompletion {
     match outcome {
-        Ok(ResourceTransportOutcome::Ready(value)) => request.ready(value),
+        Ok(ResourceTransportOutcome::Ready {
+            value,
+            nested_invocation_id,
+        }) => {
+            debug_assert!(valid_resource_invocation_id(nested_invocation_id));
+            request.ready(value)
+        }
         Ok(ResourceTransportOutcome::StreamValues(values)) => request.stream_values(values),
-        Ok(ResourceTransportOutcome::StreamCompleted) => request.stream_completed(),
-        Ok(ResourceTransportOutcome::Failed { failure }) => {
+        Ok(ResourceTransportOutcome::StreamCompleted {
+            nested_invocation_id,
+        }) => {
+            debug_assert!(valid_resource_invocation_id(nested_invocation_id));
+            request.stream_completed()
+        }
+        Ok(ResourceTransportOutcome::Failed {
+            failure,
+            nested_invocation_id,
+        }) => {
+            if let Some(nested_invocation_id) = nested_invocation_id {
+                debug_assert!(valid_resource_invocation_id(nested_invocation_id));
+            }
             request.failed(server_resource_failure_code(failure).to_owned())
         }
-        Ok(ResourceTransportOutcome::Cancelled) => request.cancelled(),
+        Ok(ResourceTransportOutcome::Cancelled {
+            nested_invocation_id,
+        }) => {
+            if let Some(nested_invocation_id) = nested_invocation_id {
+                debug_assert!(valid_resource_invocation_id(nested_invocation_id));
+            }
+            request.cancelled()
+        }
         Err(ResourceTransportFailure::Shape) => {
             request.failed(SERVER_RESOURCE_SHAPE_CODE.to_owned())
         }
@@ -2174,11 +2199,21 @@ fn map_resource_transport_completion(
 
 #[derive(Debug)]
 enum ResourceTransportOutcome {
-    Ready(RuntimeValue),
+    Ready {
+        value: RuntimeValue,
+        nested_invocation_id: orna_core::InvocationId,
+    },
     StreamValues(Vec<RuntimeValue>),
-    StreamCompleted,
-    Failed { failure: CallFailure },
-    Cancelled,
+    StreamCompleted {
+        nested_invocation_id: orna_core::InvocationId,
+    },
+    Failed {
+        failure: CallFailure,
+        nested_invocation_id: Option<orna_core::InvocationId>,
+    },
+    Cancelled {
+        nested_invocation_id: Option<orna_core::InvocationId>,
+    },
 }
 
 #[derive(Debug)]
@@ -2193,6 +2228,10 @@ struct ResourceTransportRun {
     stream: tokio::net::UnixStream,
     protocol: ResourceProtocolConnection,
     outcome: ResourceTransportOutcome,
+}
+
+fn valid_resource_invocation_id(invocation: orna_core::InvocationId) -> bool {
+    invocation.to_bytes().iter().any(|byte| *byte != 0)
 }
 
 enum ResourceFrameResult {
@@ -2501,6 +2540,7 @@ where
                     protocol,
                     completion,
                     accepted: false,
+                    accepted_nested_invocation_id: None,
                     scalar_value: None,
                     cancellation_requested: false,
                     stream_values_seen: false,
@@ -2788,10 +2828,12 @@ where
             if value.request_id != state.request.request_id
                 || value.target_revision != state.request.target_revision
                 || value.resource_kind != state.resource_kind
+                || !valid_resource_invocation_id(value.nested_invocation_id)
             {
                 return Err(ResourceTransportFailure::Shape);
             }
             state.accepted = true;
+            state.accepted_nested_invocation_id = Some(value.nested_invocation_id);
         }
         ResourceServerFrame::Values(value) => {
             if value.request_id != state.request.request_id
@@ -2877,9 +2919,18 @@ where
                         }
                         return Err(ResourceTransportFailure::Shape);
                     };
-                    ResourceTransportOutcome::Ready(value)
+                    ResourceTransportOutcome::Ready {
+                        value,
+                        nested_invocation_id: state
+                            .accepted_nested_invocation_id
+                            .ok_or(ResourceTransportFailure::Shape)?,
+                    }
                 }
-                ProtocolResourceKind::Stream => ResourceTransportOutcome::StreamCompleted,
+                ProtocolResourceKind::Stream => ResourceTransportOutcome::StreamCompleted {
+                    nested_invocation_id: state
+                        .accepted_nested_invocation_id
+                        .ok_or(ResourceTransportFailure::Shape)?,
+                },
             };
             state
                 .completion
@@ -2907,6 +2958,7 @@ where
                 .completion
                 .send(Ok(ResourceTransportOutcome::Failed {
                     failure: value.failure,
+                    nested_invocation_id: state.accepted_nested_invocation_id,
                 }))
                 .await
                 .map_err(|_| ResourceTransportFailure::Transport)?;
@@ -2918,7 +2970,9 @@ where
             }
             state
                 .completion
-                .send(Ok(ResourceTransportOutcome::Cancelled))
+                .send(Ok(ResourceTransportOutcome::Cancelled {
+                    nested_invocation_id: state.accepted_nested_invocation_id,
+                }))
                 .await
                 .map_err(|_| ResourceTransportFailure::Transport)?;
             return Ok(false);
@@ -3092,7 +3146,9 @@ async fn run_authenticated_resource_transport(
             Some(_control) => {
                 match resource_transport_cancellation_action(cancellation.request_cancel()) {
                     ResourceTransportCancellationAction::ReturnCancelled => {
-                        return Ok(ResourceTransportOutcome::Cancelled);
+                        return Ok(ResourceTransportOutcome::Cancelled {
+                            nested_invocation_id: None,
+                        });
                     }
                     ResourceTransportCancellationAction::ContinueCommitted => {
                         (&mut start)
@@ -3109,7 +3165,10 @@ async fn run_authenticated_resource_transport(
     let producer = match started {
         AuthenticatedServerResourceStart::Accepted(producer) => producer,
         AuthenticatedServerResourceStart::Failed { failure, .. } => {
-            return Ok(ResourceTransportOutcome::Failed { failure });
+            return Ok(ResourceTransportOutcome::Failed {
+                failure,
+                nested_invocation_id: None,
+            });
         }
     };
     let accepted = producer.accepted();
@@ -3121,17 +3180,21 @@ async fn run_authenticated_resource_transport(
         || accepted.request_id != request.request_id
         || accepted.target_revision != request.target_revision
         || accepted.resource_kind != accepted_kind
+        || !valid_resource_invocation_id(accepted.nested_invocation_id)
     {
         producer.cancel();
         return Err(ResourceTransportFailure::Shape);
     }
 
+    let accepted_nested_invocation_id = accepted.nested_invocation_id;
     if cancellation.is_requested() {
         // Cancellation can arrive after the acceptance commit check and before
         // the producer publishes its acceptance. Do not issue a pull to a
         // producer that is already terminating without a response.
         drop(producer);
-        return Ok(ResourceTransportOutcome::Cancelled);
+        return Ok(ResourceTransportOutcome::Cancelled {
+            nested_invocation_id: Some(accepted_nested_invocation_id),
+        });
     }
     let mut scalar_value = None;
     let mut next_batch_sequence = 0_u64;
@@ -3159,7 +3222,9 @@ async fn run_authenticated_resource_transport(
                 Some(_control) => {
                     match resource_transport_cancellation_action(producer.cancel()) {
                         ResourceTransportCancellationAction::ReturnCancelled => {
-                            return Ok(ResourceTransportOutcome::Cancelled);
+                            return Ok(ResourceTransportOutcome::Cancelled {
+                                nested_invocation_id: Some(accepted_nested_invocation_id),
+                            });
                         }
                         ResourceTransportCancellationAction::ContinueCommitted => {
                             (&mut pull)
@@ -3224,7 +3289,9 @@ async fn run_authenticated_resource_transport(
                                 Some(_control) => {
                                     match resource_transport_cancellation_action(producer.cancel()) {
                                         ResourceTransportCancellationAction::ReturnCancelled => {
-                                            return Ok(ResourceTransportOutcome::Cancelled);
+                                            return Ok(ResourceTransportOutcome::Cancelled {
+                                                nested_invocation_id: Some(accepted_nested_invocation_id),
+                                            });
                                         }
                                         ResourceTransportCancellationAction::ContinueCommitted => {
                                             (&mut send)
@@ -3262,9 +3329,14 @@ async fn run_authenticated_resource_transport(
                 }
                 return match resource_kind {
                     ProtocolResourceKind::Single => scalar_value
-                        .map(ResourceTransportOutcome::Ready)
+                        .map(|value| ResourceTransportOutcome::Ready {
+                            value,
+                            nested_invocation_id: accepted_nested_invocation_id,
+                        })
                         .ok_or(ResourceTransportFailure::Shape),
-                    ProtocolResourceKind::Stream => Ok(ResourceTransportOutcome::StreamCompleted),
+                    ProtocolResourceKind::Stream => Ok(ResourceTransportOutcome::StreamCompleted {
+                        nested_invocation_id: accepted_nested_invocation_id,
+                    }),
                 };
             }
             AuthenticatedServerResourceEvent::Failed { failure } => {
@@ -3272,10 +3344,15 @@ async fn run_authenticated_resource_transport(
                     producer.cancel();
                     return Err(ResourceTransportFailure::Shape);
                 }
-                return Ok(ResourceTransportOutcome::Failed { failure });
+                return Ok(ResourceTransportOutcome::Failed {
+                    failure,
+                    nested_invocation_id: Some(accepted_nested_invocation_id),
+                });
             }
             AuthenticatedServerResourceEvent::Cancelled => {
-                return Ok(ResourceTransportOutcome::Cancelled);
+                return Ok(ResourceTransportOutcome::Cancelled {
+                    nested_invocation_id: Some(accepted_nested_invocation_id),
+                });
             }
             AuthenticatedServerResourceEvent::Waiting { required_bytes } => {
                 if required_bytes == 0 || required_bytes > MAX_RESOURCE_WINDOW {
@@ -3342,6 +3419,7 @@ async fn run_resource_transport(
     }
 
     let mut accepted = false;
+    let mut accepted_nested_invocation_id = None;
     let mut scalar_value = None;
     let mut stream_values_seen = false;
     let mut cancellation_requested = false;
@@ -3384,14 +3462,16 @@ async fn run_resource_transport(
         if matches!(&frame, ResourceServerFrame::Failed(_)) && scalar_value.is_some() {
             return Err(ResourceTransportFailure::Shape);
         }
-        let is_accepted = match &frame {
+        let accepted_frame_nested_invocation_id = match &frame {
             ResourceServerFrame::Accepted(accepted) => {
-                if accepted.resource_kind != resource_kind {
+                if accepted.resource_kind != resource_kind
+                    || !valid_resource_invocation_id(accepted.nested_invocation_id)
+                {
                     return Err(ResourceTransportFailure::Shape);
                 }
-                true
+                Some(accepted.nested_invocation_id)
             }
-            _ => false,
+            _ => None,
         };
         let value_batch = match &frame {
             ResourceServerFrame::Values(values) => {
@@ -3457,8 +3537,9 @@ async fn run_resource_transport(
             ResourceFrameDispositionAction::Drop => continue,
             ResourceFrameDispositionAction::Apply | ResourceFrameDispositionAction::Drain => {}
         }
-        if is_accepted {
+        if let Some(nested_invocation_id) = accepted_frame_nested_invocation_id {
             accepted = true;
+            accepted_nested_invocation_id = Some(nested_invocation_id);
         }
         if let Some((values, item_count, byte_count)) = value_batch {
             match resource_kind {
@@ -3562,14 +3643,21 @@ async fn run_resource_transport(
                         return Ok(ResourceTransportRun {
                             stream,
                             protocol: connection,
-                            outcome: ResourceTransportOutcome::Ready(value),
+                            outcome: ResourceTransportOutcome::Ready {
+                                value,
+                                nested_invocation_id: accepted_nested_invocation_id
+                                    .ok_or(ResourceTransportFailure::Shape)?,
+                            },
                         });
                     }
                     ProtocolResourceKind::Stream => {
                         return Ok(ResourceTransportRun {
                             stream,
                             protocol: connection,
-                            outcome: ResourceTransportOutcome::StreamCompleted,
+                            outcome: ResourceTransportOutcome::StreamCompleted {
+                                nested_invocation_id: accepted_nested_invocation_id
+                                    .ok_or(ResourceTransportFailure::Shape)?,
+                            },
                         });
                     }
                 }
@@ -3581,14 +3669,19 @@ async fn run_resource_transport(
                 return Ok(ResourceTransportRun {
                     stream,
                     protocol: connection,
-                    outcome: ResourceTransportOutcome::Failed { failure },
+                    outcome: ResourceTransportOutcome::Failed {
+                        failure,
+                        nested_invocation_id: accepted_nested_invocation_id,
+                    },
                 });
             }
             ResourceFrameResult::Cancelled => {
                 return Ok(ResourceTransportRun {
                     stream,
                     protocol: connection,
-                    outcome: ResourceTransportOutcome::Cancelled,
+                    outcome: ResourceTransportOutcome::Cancelled {
+                        nested_invocation_id: accepted_nested_invocation_id,
+                    },
                 });
             }
         }
@@ -4584,7 +4677,7 @@ mod tests {
     };
     use orna_protocol::{
         InvocationEventBatch, InvocationEventRecord, ResourceAccepted, ResourceCompleted,
-        ResourceFailed, ResourceValues, decode_resource_client_frame, encode_resource_server_frame,
+        ResourceCancelled, ResourceFailed, ResourceValues, decode_resource_client_frame, encode_resource_server_frame,
     };
     use orna_standard::{
         STD_UI_TYPE_ID, retained_standard_library_snapshot, verify_standard_library_snapshot,
@@ -4674,14 +4767,18 @@ mod tests {
         >(BROKER_RESOURCE_COMPLETION_CAPACITY);
         for _ in 0..BROKER_RESOURCE_COMPLETION_CAPACITY {
             sender
-                .send(Ok(ResourceTransportOutcome::StreamCompleted))
+                .send(Ok(ResourceTransportOutcome::StreamCompleted {
+                    nested_invocation_id: InvocationId::from_bytes([0x40; 16]),
+                }))
                 .await
                 .expect("queue accepts its configured capacity");
         }
         assert!(
             tokio::time::timeout(
                 Duration::from_millis(10),
-                sender.send(Ok(ResourceTransportOutcome::StreamCompleted)),
+                sender.send(Ok(ResourceTransportOutcome::StreamCompleted {
+                    nested_invocation_id: InvocationId::from_bytes([0x40; 16]),
+                })),
             )
             .await
             .is_err()
@@ -4735,6 +4832,7 @@ mod tests {
                 protocol,
                 completion,
                 accepted: false,
+                accepted_nested_invocation_id: None,
                 scalar_value: None,
                 cancellation_requested: false,
                 stream_values_seen: false,
@@ -4770,9 +4868,10 @@ mod tests {
         assert_eq!(tombstones.len(), 1);
         assert!(matches!(
             completions.recv().await,
-            Some(Ok(ResourceTransportOutcome::Ready(RuntimeValue::Integer(
-                7
-            ))))
+            Some(Ok(ResourceTransportOutcome::Ready {
+                value: RuntimeValue::Integer(7),
+                nested_invocation_id,
+            })) if nested_invocation_id == InvocationId::from_bytes([0x40; 16])
         ));
 
         let late_bytes = encode_resource_server_frame(
@@ -4997,6 +5096,203 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn broker_rejects_zero_nested_invocation_identity() {
+        let (active, registry) = transport_test_context();
+        let request = transport_test_request(active.pair(), 1);
+        let mut protocol = ResourceProtocolConnection::new();
+        protocol.open(request.clone()).expect("resource request opens");
+        let (completion, _completions) = mpsc::channel(1);
+        let mut state = BrokerResourceState {
+            request: request.clone(),
+            expected_type: ResolvedType::Scalar(StandardScalar::Integer),
+            resource_kind: ProtocolResourceKind::Single,
+            protocol,
+            completion,
+            accepted: false,
+            accepted_nested_invocation_id: None,
+            scalar_value: None,
+            cancellation_requested: false,
+            stream_values_seen: false,
+        };
+        let (_reader, mut writer) = tokio::io::duplex(128);
+        let result = handle_shared_resource_frame(
+            &mut state,
+            ResourceServerFrame::Accepted(ResourceAccepted {
+                stream_id: request.stream_id,
+                request_id: request.request_id,
+                nested_invocation_id: InvocationId::from_bytes([0; 16]),
+                target_revision: request.target_revision,
+                resource_kind: request.resource_kind,
+            }),
+            &mut writer,
+            &active,
+            &registry,
+        )
+        .await;
+        assert!(matches!(result, Err(ResourceTransportFailure::Shape)));
+        assert!(!state.accepted);
+        assert_eq!(state.accepted_nested_invocation_id, None);
+    }
+
+    #[tokio::test]
+    async fn broker_retains_accepted_nested_invocation_identity() {
+        let (active, registry) = transport_test_context();
+        let request = transport_test_request(active.pair(), 1);
+        let nested_invocation_id = InvocationId::from_bytes([0x40; 16]);
+        let mut protocol = ResourceProtocolConnection::new();
+        protocol.open(request.clone()).expect("resource request opens");
+        let (completion, _completions) = mpsc::channel(1);
+        let mut state = BrokerResourceState {
+            request: request.clone(),
+            expected_type: ResolvedType::Scalar(StandardScalar::Integer),
+            resource_kind: ProtocolResourceKind::Single,
+            protocol,
+            completion,
+            accepted: false,
+            accepted_nested_invocation_id: None,
+            scalar_value: None,
+            cancellation_requested: false,
+            stream_values_seen: false,
+        };
+        let (_reader, mut writer) = tokio::io::duplex(128);
+        assert!(handle_shared_resource_frame(
+            &mut state,
+            ResourceServerFrame::Accepted(ResourceAccepted {
+                stream_id: request.stream_id,
+                request_id: request.request_id,
+                nested_invocation_id,
+                target_revision: request.target_revision,
+                resource_kind: request.resource_kind,
+            }),
+            &mut writer,
+            &active,
+            &registry,
+        )
+        .await
+        .expect("resource acceptance applies"));
+        assert!(state.accepted);
+        assert_eq!(state.accepted_nested_invocation_id, Some(nested_invocation_id));
+    }
+
+    #[tokio::test]
+    async fn broker_retains_accepted_nested_invocation_identity_for_stream_completion() {
+        let (active, registry) = transport_test_context();
+        let mut request = transport_test_request(active.pair(), 1);
+        request.resource_kind = ProtocolResourceKind::Stream;
+        let nested_invocation_id = InvocationId::from_bytes([0x41; 16]);
+        let mut protocol = ResourceProtocolConnection::new();
+        protocol.open(request.clone()).expect("resource request opens");
+        let (completion, mut completions) = mpsc::channel(1);
+        let mut state = BrokerResourceState {
+            request: request.clone(),
+            expected_type: ResolvedType::Scalar(StandardScalar::Integer),
+            resource_kind: ProtocolResourceKind::Stream,
+            protocol,
+            completion,
+            accepted: false,
+            accepted_nested_invocation_id: None,
+            scalar_value: None,
+            cancellation_requested: false,
+            stream_values_seen: false,
+        };
+        let (_reader, mut writer) = tokio::io::duplex(128);
+        handle_shared_resource_frame(
+            &mut state,
+            ResourceServerFrame::Accepted(ResourceAccepted {
+                stream_id: request.stream_id,
+                request_id: request.request_id,
+                nested_invocation_id,
+                target_revision: request.target_revision,
+                resource_kind: ProtocolResourceKind::Stream,
+            }),
+            &mut writer,
+            &active,
+            &registry,
+        )
+        .await
+        .expect("resource acceptance applies");
+        let keep = handle_shared_resource_frame(
+            &mut state,
+            ResourceServerFrame::Completed(ResourceCompleted {
+                stream_id: request.stream_id,
+                request_id: request.request_id,
+                final_batch_sequence: 0,
+                total_items: 0,
+            }),
+            &mut writer,
+            &active,
+            &registry,
+        )
+        .await
+        .expect("stream completion applies");
+        assert!(!keep);
+        assert!(matches!(
+            completions.recv().await,
+            Some(Ok(ResourceTransportOutcome::StreamCompleted {
+                nested_invocation_id: actual,
+            })) if actual == nested_invocation_id
+        ));
+    }
+
+    #[tokio::test]
+    async fn broker_retains_accepted_nested_invocation_identity_for_cancelled_resource() {
+        let (active, registry) = transport_test_context();
+        let request = transport_test_request(active.pair(), 1);
+        let nested_invocation_id = InvocationId::from_bytes([0x42; 16]);
+        let mut protocol = ResourceProtocolConnection::new();
+        protocol.open(request.clone()).expect("resource request opens");
+        let (completion, mut completions) = mpsc::channel(1);
+        let mut state = BrokerResourceState {
+            request: request.clone(),
+            expected_type: ResolvedType::Scalar(StandardScalar::Integer),
+            resource_kind: ProtocolResourceKind::Single,
+            protocol,
+            completion,
+            accepted: false,
+            accepted_nested_invocation_id: None,
+            scalar_value: None,
+            cancellation_requested: false,
+            stream_values_seen: false,
+        };
+        let (_reader, mut writer) = tokio::io::duplex(128);
+        handle_shared_resource_frame(
+            &mut state,
+            ResourceServerFrame::Accepted(ResourceAccepted {
+                stream_id: request.stream_id,
+                request_id: request.request_id,
+                nested_invocation_id,
+                target_revision: request.target_revision,
+                resource_kind: request.resource_kind,
+            }),
+            &mut writer,
+            &active,
+            &registry,
+        )
+        .await
+        .expect("resource acceptance applies");
+        let keep = handle_shared_resource_frame(
+            &mut state,
+            ResourceServerFrame::Cancelled(ResourceCancelled {
+                stream_id: request.stream_id,
+                request_id: request.request_id,
+                reason: ResourceCancellationCode::ParentInvocationCancelled,
+            }),
+            &mut writer,
+            &active,
+            &registry,
+        )
+        .await
+        .expect("resource cancellation applies");
+        assert!(!keep);
+        assert!(matches!(
+            completions.recv().await,
+            Some(Ok(ResourceTransportOutcome::Cancelled {
+                nested_invocation_id: Some(actual),
+            })) if actual == nested_invocation_id
+        ));
+    }
+
+    #[tokio::test]
     async fn broker_publishes_late_committed_failure_after_cancel() {
         let (active, registry) = transport_test_context();
         let request = transport_test_request(active.pair(), 1);
@@ -5030,6 +5326,7 @@ mod tests {
             protocol,
             completion,
             accepted: true,
+            accepted_nested_invocation_id: Some(InvocationId::from_bytes([0x40; 16])),
             scalar_value: None,
             cancellation_requested: true,
             stream_values_seen: false,
@@ -5049,12 +5346,14 @@ mod tests {
         .await
         .expect("late committed failure is valid");
         assert!(!keep);
-        assert!(matches!(
-            completions.recv().await,
-            Some(Ok(ResourceTransportOutcome::Failed {
-                failure: CallFailure::ExecuteDenied
-            }))
-        ));
+        let Some(Ok(ResourceTransportOutcome::Failed {
+            failure: CallFailure::ExecuteDenied,
+            nested_invocation_id: terminal_nested_invocation_id,
+        })) = completions.recv().await
+        else {
+            panic!("expected committed failure outcome");
+        };
+        assert_eq!(terminal_nested_invocation_id, Some(nested_invocation_id));
     }
 
     #[tokio::test]
@@ -5102,6 +5401,7 @@ mod tests {
             protocol,
             completion,
             accepted: true,
+            accepted_nested_invocation_id: Some(InvocationId::from_bytes([0x40; 16])),
             scalar_value: None,
             cancellation_requested: true,
             stream_values_seen: false,
@@ -5135,9 +5435,10 @@ mod tests {
         assert!(!keep);
         assert!(matches!(
             completions.recv().await,
-            Some(Ok(ResourceTransportOutcome::Ready(RuntimeValue::Integer(
-                7
-            ))))
+            Some(Ok(ResourceTransportOutcome::Ready {
+                value: RuntimeValue::Integer(7),
+                nested_invocation_id,
+            })) if nested_invocation_id == InvocationId::from_bytes([0x40; 16])
         ));
     }
 
@@ -5174,6 +5475,7 @@ mod tests {
             protocol,
             completion,
             accepted: true,
+            accepted_nested_invocation_id: Some(InvocationId::from_bytes([0x40; 16])),
             scalar_value: None,
             cancellation_requested: true,
             stream_values_seen: false,
@@ -5223,6 +5525,7 @@ mod tests {
             protocol,
             completion,
             accepted: false,
+            accepted_nested_invocation_id: None,
             scalar_value: None,
             cancellation_requested: true,
             stream_values_seen: false,
@@ -5245,7 +5548,97 @@ mod tests {
         assert!(matches!(
             completions.recv().await,
             Some(Ok(ResourceTransportOutcome::Failed {
-                failure: CallFailure::ExecuteDenied
+                failure: CallFailure::ExecuteDenied,
+                nested_invocation_id: None,
+            }))
+        ));
+    }
+
+    #[tokio::test]
+    async fn broker_rejects_zero_nested_invocation_identity_for_streams() {
+        let (active, registry) = transport_test_context();
+        let mut request = transport_test_request(active.pair(), 1);
+        request.resource_kind = ProtocolResourceKind::Stream;
+        let mut protocol = ResourceProtocolConnection::new();
+        protocol.open(request.clone()).expect("resource request opens");
+        let (completion, _completions) = mpsc::channel(1);
+        let mut state = BrokerResourceState {
+            request: request.clone(),
+            expected_type: ResolvedType::Scalar(StandardScalar::Integer),
+            resource_kind: ProtocolResourceKind::Stream,
+            protocol,
+            completion,
+            accepted: false,
+            accepted_nested_invocation_id: None,
+            scalar_value: None,
+            cancellation_requested: false,
+            stream_values_seen: false,
+        };
+        let (_reader, mut writer) = tokio::io::duplex(128);
+        let result = handle_shared_resource_frame(
+            &mut state,
+            ResourceServerFrame::Accepted(ResourceAccepted {
+                stream_id: request.stream_id,
+                request_id: request.request_id,
+                nested_invocation_id: InvocationId::from_bytes([0; 16]),
+                target_revision: request.target_revision,
+                resource_kind: ProtocolResourceKind::Stream,
+            }),
+            &mut writer,
+            &active,
+            &registry,
+        )
+        .await;
+        assert!(matches!(result, Err(ResourceTransportFailure::Shape)));
+        assert!(!state.accepted);
+        assert_eq!(state.accepted_nested_invocation_id, None);
+    }
+
+    #[tokio::test]
+    async fn broker_publishes_cancelled_without_nested_identity_before_acceptance() {
+        let (active, registry) = transport_test_context();
+        let request = transport_test_request(active.pair(), 1);
+        let mut protocol = ResourceProtocolConnection::new();
+        protocol.open(request.clone()).expect("resource request opens");
+        protocol
+            .receive(ResourceClientFrame::Cancel(ResourceCancel {
+                stream_id: request.stream_id,
+                request_id: request.request_id,
+                reason: ResourceCancellationCode::ParentInvocationCancelled,
+            }))
+            .expect("resource cancellation applies");
+        let (completion, mut completions) = mpsc::channel(1);
+        let mut state = BrokerResourceState {
+            request: request.clone(),
+            expected_type: ResolvedType::Scalar(StandardScalar::Integer),
+            resource_kind: ProtocolResourceKind::Single,
+            protocol,
+            completion,
+            accepted: false,
+            accepted_nested_invocation_id: None,
+            scalar_value: None,
+            cancellation_requested: true,
+            stream_values_seen: false,
+        };
+        let (_reader, mut writer) = tokio::io::duplex(128);
+        let keep = handle_shared_resource_frame(
+            &mut state,
+            ResourceServerFrame::Cancelled(ResourceCancelled {
+                stream_id: request.stream_id,
+                request_id: request.request_id,
+                reason: ResourceCancellationCode::ParentInvocationCancelled,
+            }),
+            &mut writer,
+            &active,
+            &registry,
+        )
+        .await
+        .expect("pre-accept cancellation closes the resource");
+        assert!(!keep);
+        assert!(matches!(
+            completions.recv().await,
+            Some(Ok(ResourceTransportOutcome::Cancelled {
+                nested_invocation_id: None,
             }))
         ));
     }
@@ -6334,6 +6727,65 @@ mod tests {
         requests
     }
 
+    #[derive(Clone, Copy)]
+    enum SocketTerminal {
+        Completed,
+        Failed(CallFailure),
+    }
+
+    fn serve_one_terminal_test_request(
+        mut stream: StandardUnixStream,
+        active: ActiveDatabaseRevision,
+        registry: orna_core::value::OpaqueCodecRegistry,
+        expected_kind: ProtocolResourceKind,
+        nested_invocation_id: InvocationId,
+        terminal: SocketTerminal,
+    ) {
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .expect("peer read timeout");
+        let mut hello = [0_u8; CONSTRUCTED_CLIENT_HELLO.len()];
+        stream.read_exact(&mut hello).expect("constructed hello");
+        assert_eq!(hello, CONSTRUCTED_CLIENT_HELLO);
+        stream
+            .write_all(&CONSTRUCTED_SERVER_ACK)
+            .expect("constructed acknowledgement");
+        let encoded = read_resource_test_frame(&mut stream);
+        let ResourceClientFrame::Request(request) =
+            decode_resource_client_frame(&active, &registry, &encoded)
+                .expect("client resource request")
+        else {
+            panic!("the client sent a non-request resource frame");
+        };
+        assert_eq!(request.resource_kind, expected_kind);
+        let accepted = ResourceServerFrame::Accepted(ResourceAccepted {
+            stream_id: request.stream_id,
+            request_id: request.request_id,
+            nested_invocation_id,
+            target_revision: request.target_revision,
+            resource_kind: expected_kind,
+        });
+        let encoded = encode_resource_server_frame(&active, &registry, &accepted)
+            .expect("encoded resource acceptance");
+        stream.write_all(&encoded).expect("resource acceptance");
+        let terminal = match terminal {
+            SocketTerminal::Completed => ResourceServerFrame::Completed(ResourceCompleted {
+                stream_id: request.stream_id,
+                request_id: request.request_id,
+                final_batch_sequence: 0,
+                total_items: 0,
+            }),
+            SocketTerminal::Failed(failure) => ResourceServerFrame::Failed(ResourceFailed {
+                stream_id: request.stream_id,
+                request_id: request.request_id,
+                failure,
+            }),
+        };
+        let encoded = encode_resource_server_frame(&active, &registry, &terminal)
+            .expect("encoded resource terminal");
+        stream.write_all(&encoded).expect("resource terminal");
+    }
+
     fn run_scalar_test_request(
         runtime: &tokio::runtime::Runtime,
         transport: &mut ResourceTransportSource,
@@ -6346,6 +6798,10 @@ mod tests {
             .expect("persistent transport connection");
         let (completion_sender, _completion_receiver) = mpsc::channel(1);
         let (_control_sender, controls) = mpsc::unbounded_channel();
+        let expected_nested_invocation_id = InvocationId::from_bytes([
+            0x30 + request.stream_id as u8;
+            16
+        ]);
         let run = runtime
             .block_on(run_resource_transport(
                 stream,
@@ -6363,9 +6819,171 @@ mod tests {
         let stream = run.stream.into_std().expect("restored resource stream");
         transport.restore_connection(stream, true, run.protocol);
         match run.outcome {
-            ResourceTransportOutcome::Ready(value) => value,
+            ResourceTransportOutcome::Ready {
+                value,
+                nested_invocation_id,
+            } => {
+                assert_eq!(nested_invocation_id, expected_nested_invocation_id);
+                value
+            }
             _ => panic!("unexpected non-ready scalar outcome"),
         }
+    }
+
+    #[test]
+    fn socket_transport_retains_nested_identity_for_stream_completion() {
+        let (active, registry) = transport_test_context();
+        let mut request = transport_test_request(active.pair(), 1);
+        request.resource_kind = ProtocolResourceKind::Stream;
+        let nested_invocation_id = InvocationId::from_bytes([0x51; 16]);
+        let (peer, client) = StandardUnixStream::pair().expect("resource socket pair");
+        let peer_thread = thread::spawn({
+            let peer_active = active.clone();
+            let peer_registry = registry.clone();
+            move || {
+                serve_one_terminal_test_request(
+                    peer,
+                    peer_active,
+                    peer_registry,
+                    ProtocolResourceKind::Stream,
+                    nested_invocation_id,
+                    SocketTerminal::Completed,
+                );
+            }
+        });
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime");
+        let (completion_sender, _completion_receiver) = mpsc::channel(1);
+        let (_control_sender, controls) = mpsc::unbounded_channel();
+        let result = runtime.block_on(run_resource_transport(
+            client,
+            false,
+            ResourceProtocolConnection::new(),
+            active,
+            registry,
+            request,
+            ResolvedType::Scalar(StandardScalar::Integer),
+            ProtocolResourceKind::Stream,
+            controls,
+            &completion_sender,
+        ));
+        let run = result.expect("stream transport run");
+        assert!(matches!(
+            run.outcome,
+            ResourceTransportOutcome::StreamCompleted {
+                nested_invocation_id: actual,
+            } if actual == nested_invocation_id
+        ));
+        peer_thread.join().expect("resource peer");
+    }
+
+    #[test]
+    fn socket_transport_retains_nested_identity_for_terminal_failure() {
+        let (active, registry) = transport_test_context();
+        let request = transport_test_request(active.pair(), 1);
+        let nested_invocation_id = InvocationId::from_bytes([0x52; 16]);
+        let (peer, client) = StandardUnixStream::pair().expect("resource socket pair");
+        let peer_thread = thread::spawn({
+            let peer_active = active.clone();
+            let peer_registry = registry.clone();
+            move || {
+                serve_one_terminal_test_request(
+                    peer,
+                    peer_active,
+                    peer_registry,
+                    ProtocolResourceKind::Single,
+                    nested_invocation_id,
+                    SocketTerminal::Failed(CallFailure::ExecuteDenied),
+                );
+            }
+        });
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime");
+        let (completion_sender, _completion_receiver) = mpsc::channel(1);
+        let (_control_sender, controls) = mpsc::unbounded_channel();
+        let result = runtime.block_on(run_resource_transport(
+            client,
+            false,
+            ResourceProtocolConnection::new(),
+            active,
+            registry,
+            request,
+            ResolvedType::Scalar(StandardScalar::Integer),
+            ProtocolResourceKind::Single,
+            controls,
+            &completion_sender,
+        ));
+        let run = result.expect("failed transport run");
+        assert!(matches!(
+            run.outcome,
+            ResourceTransportOutcome::Failed {
+                failure: CallFailure::ExecuteDenied,
+                nested_invocation_id: Some(actual),
+            } if actual == nested_invocation_id
+        ));
+        peer_thread.join().expect("resource peer");
+    }
+
+    #[test]
+    fn socket_transport_rejects_zero_nested_invocation_identity() {
+        let (active, registry) = transport_test_context();
+        let request = transport_test_request(active.pair(), 1);
+        let (peer, client) = StandardUnixStream::pair().expect("resource socket pair");
+        let peer_active = active.clone();
+        let peer_registry = registry.clone();
+        let peer_thread = thread::spawn(move || {
+            let mut peer = peer;
+            peer.set_read_timeout(Some(Duration::from_secs(5)))
+                .expect("peer read timeout");
+            let mut hello = [0_u8; CONSTRUCTED_CLIENT_HELLO.len()];
+            peer.read_exact(&mut hello).expect("constructed hello");
+            assert_eq!(hello, CONSTRUCTED_CLIENT_HELLO);
+            peer.write_all(&CONSTRUCTED_SERVER_ACK)
+                .expect("constructed acknowledgement");
+            let encoded = read_resource_test_frame(&mut peer);
+            let ResourceClientFrame::Request(request) =
+                decode_resource_client_frame(&peer_active, &peer_registry, &encoded)
+                    .expect("client resource request")
+            else {
+                panic!("the client sent a non-request resource frame");
+            };
+            let frame = ResourceServerFrame::Accepted(ResourceAccepted {
+                stream_id: request.stream_id,
+                request_id: request.request_id,
+                nested_invocation_id: InvocationId::from_bytes([0; 16]),
+                target_revision: request.target_revision,
+                resource_kind: request.resource_kind,
+            });
+            let encoded = encode_resource_server_frame(&peer_active, &peer_registry, &frame)
+                .expect("encoded resource response");
+            peer.write_all(&encoded).expect("resource response");
+        });
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime");
+        let (completion_sender, _completion_receiver) = mpsc::channel(1);
+        let (_control_sender, controls) = mpsc::unbounded_channel();
+        let (stream, handshake_complete, protocol) =
+            (client, false, ResourceProtocolConnection::new());
+        let result = runtime.block_on(run_resource_transport(
+            stream,
+            handshake_complete,
+            protocol,
+            active,
+            registry,
+            request,
+            ResolvedType::Scalar(StandardScalar::Integer),
+            ProtocolResourceKind::Single,
+            controls,
+            &completion_sender,
+        ));
+        assert!(matches!(result, Err(ResourceTransportFailure::Shape)));
+        peer_thread.join().expect("peer thread");
     }
 
     #[test]
