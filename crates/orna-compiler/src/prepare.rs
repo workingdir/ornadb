@@ -11,7 +11,8 @@ use orna_artifact::{
     client_plan::{
         ACTION_FORMAT_VERSION as CLIENT_PLAN_ACTION_VERSION, ActionClientPlan, ActionOperationNode,
         CAPABILITY_FORMAT_VERSION as CLIENT_PLAN_CAPABILITY_VERSION, CapabilityArgumentSource,
-        CapabilityClientPlan, CapabilityRequirement, ClientExpressionNode, ClientLocal,
+        CapabilityClientPlan, CapabilityRequirement, ClientExpressionNode, InspectOperationNode,
+        InspectProjection, ClientLocal,
         ClientLocalKind, ClientPlan, ClientStatement,
         EXPRESSION_FORMAT_VERSION as CLIENT_PLAN_EXPRESSION_VERSION, ExpressionClientPlan,
         FORMAT_IDENTITY as CLIENT_PLAN_FORMAT, FORMAT_VERSION as CLIENT_PLAN_VERSION,
@@ -86,7 +87,8 @@ use crate::{
     relational::{supports_server_select_distinct, supports_server_select_equality},
     resolver::{
         CheckedActionOperation, CheckedClientExpression, CheckedClientFunctionBody,
-        CheckedClientLocal, CheckedClientLocalKind, CheckedClientReturnShape,
+        CheckedClientLocal, CheckedClientLocalKind, CheckedClientReturnShape, CheckedInspectOperation,
+        CheckedInspectProjection,
         CheckedClientStateSlot, CheckedClientStatement,
         CheckedFieldRename, CheckedResourceOperation, CheckedStateDefault, CheckedStateScope,
         UNIQUE_FIELD_MESSAGE, durable_state_slot_id, supports_unique_text_or_required_reference,
@@ -1228,6 +1230,9 @@ impl CandidateResolvedType {
             return Ok(Self::LegacyScalar(scalar));
         }
         if let Some(type_id) = compatibility.named_type() {
+            if is_sealed_inspect_type_id(type_id) {
+                return Ok(Self::StandardOpaqueValue(type_id));
+            }
             return Ok(Self::Named(type_id));
         }
         if let Some(target) = compatibility.reference_target() {
@@ -1289,10 +1294,14 @@ fn candidate_from_mapped_evidence(
     {
         return Ok(CandidateResolvedType::Reference(target));
     }
-    if let CandidateResolvedType::Named(target) = candidate
+    if let CandidateResolvedType::Named(target) | CandidateResolvedType::StandardOpaqueValue(target) =
+        candidate
         && let MappedEvidenceTarget::Named(actual) = evidence
         && target == actual
     {
+        if is_sealed_inspect_type_id(target) {
+            return Ok(CandidateResolvedType::StandardOpaqueValue(target));
+        }
         return Ok(CandidateResolvedType::Named(target));
     }
     Err(invalid_checked_declaration_type_evidence())
@@ -1336,10 +1345,8 @@ impl CandidateLoweringMode {
     }
 
     fn lower_durable_standard_opaque_value(self, type_id: TypeId) -> ResolvedType {
-        match self {
-            Self::LegacyV1 | Self::StandardV1Match => ResolvedType::Named(type_id),
-            Self::StandardV2Plan | Self::StandardV2 => ResolvedType::Value(type_id),
-        }
+        let _ = self;
+        ResolvedType::Value(type_id)
     }
 
     fn lower_durable_standard_value(
@@ -3620,6 +3627,24 @@ fn validate_reference_sequence(
     }
 }
 
+fn is_sealed_inspect_type_id(id: TypeId) -> bool {
+    [
+        orna_core::system::SYS_INSPECT_INVOCATION_TYPE_ID,
+        orna_core::system::SYS_INSPECT_SNAPSHOT_TYPE_ID,
+        orna_core::system::SYS_INSPECT_SNAPSHOT_OPTIONS_TYPE_ID,
+        orna_core::system::SYS_INSPECT_TRACE_EVENT_TYPE_ID,
+        orna_core::system::SYS_INSPECT_INVOCATION_NODES_TYPE_ID,
+        orna_core::system::SYS_INSPECT_CALLS_TYPE_ID,
+        orna_core::system::SYS_INSPECT_RESOURCES_TYPE_ID,
+        orna_core::system::SYS_INSPECT_STATE_CELLS_TYPE_ID,
+        orna_core::system::SYS_INSPECT_UI_NODES_TYPE_ID,
+        orna_core::system::SYS_INSPECT_PRESENTATION_CANDIDATES_TYPE_ID,
+        orna_core::system::SYS_INSPECT_RUNTIME_BINDINGS_TYPE_ID,
+        orna_core::system::SYS_INSPECT_SECURITY_DECISIONS_TYPE_ID,
+    ]
+    .contains(&id)
+}
+
 fn resolved_type_from_semantic(semantic_type: SemanticType<TypeId>) -> ResolvedType {
     match semantic_type {
         SemanticType::Scalar(scalar) => ResolvedType::Scalar(scalar),
@@ -4275,6 +4300,20 @@ fn client_expression_locations<'a>(
             locations.push(operation.location());
             for (_, argument) in operation.arguments() {
                 client_expression_locations(argument, locations);
+            }
+        }
+        CheckedClientExpression::Inspect { operation } => {
+            locations.push(operation.location());
+            match operation {
+                CheckedInspectOperation::Snapshot { target, options, .. } => {
+                    client_expression_locations(target, locations);
+                    if let Some(options) = options {
+                        client_expression_locations(options, locations);
+                    }
+                }
+                CheckedInspectOperation::Projection { snapshot, .. } => {
+                    client_expression_locations(snapshot, locations);
+                }
             }
         }
         CheckedClientExpression::String { location, .. }
@@ -5006,6 +5045,13 @@ impl IdentityMap {
     }
 
     fn type_id(&self, id: CheckedTypeId) -> Result<TypeId, PrepareError> {
+        if let CheckedTypeId::Existing(type_id) = id
+            && is_sealed_inspect_type_id(type_id)
+        {
+            // Sealed Inspector carriers are fixed transient system identities,
+            // not application catalogue entries.
+            return Ok(type_id);
+        }
         copied(&self.types, id, "checked type has no durable identity")
     }
 
@@ -5664,6 +5710,13 @@ fn client_expression_contains_action(expression: &CheckedClientExpression) -> bo
             .arguments()
             .iter()
             .any(|(_, value)| client_expression_contains_action(value)),
+        CheckedClientExpression::Inspect { operation } => match operation {
+            CheckedInspectOperation::Snapshot { target, options, .. } => {
+                client_expression_contains_action(target)
+                    || options.as_deref().is_some_and(client_expression_contains_action)
+            }
+            CheckedInspectOperation::Projection { snapshot, .. } => client_expression_contains_action(snapshot),
+        },
         CheckedClientExpression::Call { arguments, .. } => arguments
             .iter()
             .any(|(_, value)| client_expression_contains_action(value)),
@@ -5684,6 +5737,13 @@ fn client_expression_contains_resource(expression: &CheckedClientExpression) -> 
         CheckedClientExpression::Await { .. }
         | CheckedClientExpression::Resource { .. }
         | CheckedClientExpression::Action { .. } => true,
+        CheckedClientExpression::Inspect { operation } => match operation {
+            CheckedInspectOperation::Snapshot { target, options, .. } => {
+                client_expression_contains_resource(target)
+                    || options.as_deref().is_some_and(client_expression_contains_resource)
+            }
+            CheckedInspectOperation::Projection { snapshot, .. } => client_expression_contains_resource(snapshot),
+        },
         CheckedClientExpression::Call { arguments, .. } => arguments
             .iter()
             .any(|(_, argument)| client_expression_contains_resource(argument)),
@@ -6559,7 +6619,7 @@ impl<'a> CandidateBuilder<'a> {
                                 reason: "checked CLIENT expression exceeds client-plan limits",
                             })?;
                     (
-                        CLIENT_PLAN_EXPRESSION_VERSION,
+                        plan.format_version(),
                         payload,
                         InnerClientPlan::Expression(plan),
                     )
@@ -6705,7 +6765,7 @@ impl<'a> CandidateBuilder<'a> {
                                     reason: "checked CLIENT expression exceeds client-plan limits",
                                 })?;
                         (
-                            CLIENT_PLAN_EXPRESSION_VERSION,
+                            plan.format_version(),
                             payload,
                             InnerClientPlan::Expression(plan),
                         )
@@ -6858,6 +6918,43 @@ impl<'a> CandidateBuilder<'a> {
             CheckedClientExpression::Action { operation } => ClientExpressionNode::Action {
                 operation: self.client_action_operation(operation)?,
             },
+            CheckedClientExpression::Inspect { operation } => {
+                let operation = match operation {
+                    CheckedInspectOperation::Snapshot { target, options, .. } => {
+                        if options.is_some() {
+                            return Err(PrepareError::InvalidCheckedBundle {
+                                reason: "checked Inspector snapshot options are unsupported in Inspector v1",
+                            });
+                        }
+                        InspectOperationNode::snapshot(
+                            self.client_expression_node_with_locals(target, local_ids)?,
+                        )
+                    }
+                    CheckedInspectOperation::Projection {
+                        projection,
+                        snapshot,
+                        ..
+                    } => {
+                        let projection = match projection {
+                            CheckedInspectProjection::InvocationNodes => InspectProjection::InvocationNodes,
+                            CheckedInspectProjection::Calls => InspectProjection::Calls,
+                            CheckedInspectProjection::Resources => InspectProjection::Resources,
+                            CheckedInspectProjection::StateCells => InspectProjection::StateCells,
+                            CheckedInspectProjection::UiNodes => InspectProjection::UiNodes,
+                            CheckedInspectProjection::PresentationCandidates => InspectProjection::PresentationCandidates,
+                            CheckedInspectProjection::RuntimeBindings => InspectProjection::RuntimeBindings,
+                            CheckedInspectProjection::SecurityDecisions => InspectProjection::SecurityDecisions,
+                        };
+                        InspectOperationNode::Projection {
+                            projection,
+                            snapshot: Box::new(
+                                self.client_expression_node_with_locals(snapshot, local_ids)?,
+                            ),
+                        }
+                    }
+                };
+                ClientExpressionNode::Inspect { operation }
+            }
             CheckedClientExpression::String { value, .. } => ClientExpressionNode::String {
                 value: value.clone(),
             },
@@ -7073,6 +7170,11 @@ impl<'a> CandidateBuilder<'a> {
         ))
     }
     fn client_named_type_id(&self, id: CheckedTypeId) -> Result<TypeId, PrepareError> {
+        if let CheckedTypeId::Existing(type_id) = id
+            && is_sealed_inspect_type_id(type_id)
+        {
+            return Ok(type_id);
+        }
         if let CheckedTypeId::Existing(type_id) = id
             && self
                 .mode
@@ -7396,10 +7498,11 @@ impl<'a> CandidateBuilder<'a> {
                 let CheckedTypeId::Existing(type_id) = target else {
                     return Err(invalid_checked_declaration_type_evidence());
                 };
-                if self
-                    .mode
-                    .durable_standard_catalogue()
-                    .is_some_and(|catalogue| catalogue.value_type_by_id(type_id).is_some())
+                if is_sealed_inspect_type_id(type_id)
+                    || self
+                        .mode
+                        .durable_standard_catalogue()
+                        .is_some_and(|catalogue| catalogue.value_type_by_id(type_id).is_some())
                 {
                     Ok(CandidateResolvedType::StandardOpaqueValue(type_id))
                 } else {
