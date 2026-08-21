@@ -32,6 +32,8 @@
 
 use std::{error::Error, fmt, sync::Arc, time::SystemTime};
 
+pub use crate::inspect_carrier::{InspectCarrierEnvelope, InspectCarrierError, InspectCarrierKind, InspectProjection};
+
 use crate::{
     CatalogueRevisionId, FunctionId, InspectEpochId, InvocationId, PrincipalId,
     SecurityAuditEventId, SourceRevisionId, TypeId, invocation::InvokeValue,
