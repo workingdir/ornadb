@@ -172,6 +172,7 @@ use orna_core::{
     revision::{
         ActiveDatabaseRevision, CatalogueHashContext, RevisionPair, StandardExecutable,
     },
+    state::UserStateCell,
     security::{
         AuthenticatedSession, AuthorisedInvocation, CATALOGUE_HEALTH_FUNCTION_ID,
         CATALOGUE_HEALTH_SERVICE_PRINCIPAL_ID, ExecuteDecision, ExecuteDenial, ExecuteGrant,
@@ -2152,6 +2153,7 @@ impl PostgresKernel {
         let mut invocation_audit_appended = pre_audited;
         let mut user_state_loaded = false;
         let mut user_state_revision = None;
+        let mut loaded_user_state_cells: Option<Vec<UserStateCell>> = None;
         let operation = async {
             loop {
             let transaction = database_session
@@ -2331,6 +2333,7 @@ impl PostgresKernel {
                                                 rule: "sealed CLIENT USER state load must populate the caller-owned store",
                                             }
                                         })?;
+                                        loaded_user_state_cells = Some(cells);
                                         user_state_loaded = true;
                                         user_state_revision = Some(active.pair());
                                     }
@@ -2703,6 +2706,7 @@ impl PostgresKernel {
                                 security_target.function(),
                                 &events,
                                 decoded.client_offer(),
+                                loaded_user_state_cells.as_deref(),
                             )
                             .await?;
                             SealedInvocationResult::Completed { invocation, events }
@@ -4692,6 +4696,7 @@ async fn execute_sealed_server_after_audit(
         security_target.function(),
         &events,
         decoded.client_offer(),
+        None,
     )
     .await
     .is_err()
@@ -5895,6 +5900,7 @@ async fn capture_sealed_invocation_snapshot(
     root_target: FunctionId,
     events: &InvocationEventBatch,
     client_offer: &InvocationClientOffer,
+    loaded_user_state_cells: Option<&[UserStateCell]>,
 ) -> Result<InspectEpochId, PostgresKernelError> {
     crate::inspect::capture_inspect_snapshot_in_transaction(
         transaction,
@@ -5911,6 +5917,7 @@ async fn capture_sealed_invocation_snapshot(
         events,
         client_offer,
         None,
+        loaded_user_state_cells,
     )
     .await
 }

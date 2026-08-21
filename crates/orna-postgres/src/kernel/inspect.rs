@@ -35,7 +35,7 @@ use orna_core::{
         AuthenticatedSession, InspectDecision, InspectEpochScope, SecurityAuditDecision,
         authorise_inspect,
     },
-    state::{UserStateKeyWithoutPrincipal, is_sealed_inspect_runtime_value},
+    state::{UserStateCell, UserStateKeyWithoutPrincipal, is_sealed_inspect_runtime_value},
     types::TypeDescriptor,
     value::{OpaqueCodecRegistry, RuntimeValue},
 };
@@ -147,6 +147,7 @@ impl PostgresKernel {
                 events,
                 client_offer,
                 observer_invocation,
+                None,
             )
             .await?;
             transaction
@@ -692,6 +693,7 @@ pub(crate) async fn capture_inspect_snapshot_in_transaction(
     events: &InvocationEventBatch,
     client_offer: &InvocationClientOffer,
     observer_invocation: Option<InvocationId>,
+    loaded_user_state_cells: Option<&[UserStateCell]>,
 ) -> Result<InspectEpochId, PostgresKernelError> {
     // Capture the protected decision evidence before writing the immutable
     // epoch. The linked EXECUTE row admits the invocation and the INSPECT
@@ -715,9 +717,13 @@ pub(crate) async fn capture_inspect_snapshot_in_transaction(
     let security_decisions =
         capture_security_decisions_in_transaction(transaction, invocation, inspect_audit_id)
             .await?;
-    let state_cells =
-        capture_state_cells_in_transaction(transaction, active, registry, owner, root_target)
-            .await?;
+    let state_cells = match loaded_user_state_cells {
+        Some(cells) => state_cell_rows_from_loaded_user_state(cells)?,
+        None => {
+            capture_state_cells_in_transaction(transaction, active, registry, owner, root_target)
+                .await?
+        }
+    };
     let epoch = build_inspect_epoch(
         active,
         invocation,
@@ -798,6 +804,37 @@ pub(crate) async fn capture_inspect_snapshot_in_transaction(
     .await?;
 
     Ok(epoch_id)
+}
+
+/// Converts the exact USER cells loaded for a sealed CLIENT evaluation into
+/// immutable Inspector rows. Resource retries run after the load transaction
+/// commits, so their capture must not consult mutable USER state again.
+fn state_cell_rows_from_loaded_user_state(
+    cells: &[UserStateCell],
+) -> Result<Vec<StateCellRow>, PostgresKernelError> {
+    cells
+        .iter()
+        .map(|cell| {
+            if is_sealed_inspect_type_id(cell.value_type())
+                || is_sealed_inspect_runtime_value(cell.value())
+            {
+                return Err(PostgresKernelError::DurableInvariant {
+                    relation: "_orna_kernel.user_state_cells",
+                    record: cell.key().to_string(),
+                    rule: "USER state cannot expose sealed Inspector values",
+                });
+            }
+            let value = InvokeValue::new(cell.value().clone())
+                .map_err(PostgresKernelError::InvocationCarrier)?;
+            Ok(StateCellRow::new(
+                cell.key().without_principal(),
+                cell.value_type(),
+                cell.revision(),
+                cell.updated_at(),
+                Some(value),
+            ))
+        })
+        .collect()
 }
 
 /// Captures the exact USER state-cell rows visible in the capture transaction.
