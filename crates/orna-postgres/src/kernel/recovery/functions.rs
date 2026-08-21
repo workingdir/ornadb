@@ -30,7 +30,7 @@ use tokio_postgres::{Row, Transaction};
 use orna_core::types::StandardScalar;
 
 use crate::{
-    PostgresKernelError,
+    PostgresKernelError, is_sealed_inspect_type_id,
     decode::{
         DurableRecord, digest_bytes, exact_enum, identity_bytes, optional_identity_bytes,
         u32_from_i64, u64_from_i64,
@@ -1767,6 +1767,7 @@ fn decode_reference(
     .map(TypeId::from_bytes);
     let target_kind: String =
         record.column(row, "target_kind", "reference target kind must decode")?;
+    let target_type = TypeId::from_bytes(target_bytes);
     let target = match (
         target_kind.as_str(),
         owner_type,
@@ -1806,10 +1807,16 @@ fn decode_reference(
         ("expression", None, None, None, None, None, None, None) => {
             DefinitionReferenceTarget::Expression(ExpressionId::from_bytes(target_bytes))
         }
-        ("value_type", None, None, Some(revision), None, None, None, None)
-            if Some(revision) == expected_standard_library_revision =>
+        ("value_type", None, None, None, None, None, None, None)
+            if is_sealed_inspect_type_id(target_type) =>
         {
-            DefinitionReferenceTarget::ValueType(TypeId::from_bytes(target_bytes))
+            DefinitionReferenceTarget::ValueType(target_type)
+        }
+        ("value_type", None, None, Some(revision), None, None, None, None)
+            if !is_sealed_inspect_type_id(target_type)
+                && Some(revision) == expected_standard_library_revision =>
+        {
+            DefinitionReferenceTarget::ValueType(target_type)
         }
         ("enum_type", None, None, None, Some(revision), None, None, None)
             if revision == catalogue =>

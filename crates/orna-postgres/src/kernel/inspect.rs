@@ -254,6 +254,64 @@ impl PostgresKernel {
         finish_inspect_session(operation, database_session.shutdown().await)
     }
 
+    /// Returns whether a target invocation is the observer root or one of
+    /// its server-recorded descendants.
+    ///
+    /// Parent links come from the protected resource audit relation. The
+    /// caller supplies only the current execution anchor; it cannot provide
+    /// lineage or authority as data.
+    pub async fn inspect_target_is_recursive(
+        &self,
+        observer_root: InvocationId,
+        target: InvocationId,
+    ) -> Result<bool, PostgresKernelError> {
+        if observer_root == target {
+            return Ok(true);
+        }
+        let mut database_session = self.open().await?;
+        let operation = async {
+            let transaction = database_session
+                .client
+                .build_transaction()
+                .isolation_level(IsolationLevel::RepeatableRead)
+                .read_only(true)
+                .start()
+                .await
+                .map_err(PostgresKernelError::Database)?;
+            require_current_migrations(&transaction).await?;
+            let row = transaction
+                .query_one(
+                    "WITH RECURSIVE descendants(invocation_id) AS (
+                         SELECT nested_invocation_id
+                         FROM _orna_kernel.resource_audit_events
+                         WHERE parent_invocation_id = $1
+                         UNION
+                         SELECT resource.nested_invocation_id
+                         FROM _orna_kernel.resource_audit_events AS resource
+                         JOIN descendants
+                           ON descendants.invocation_id = resource.parent_invocation_id
+                     )
+                     SELECT EXISTS(
+                         SELECT 1 FROM descendants WHERE invocation_id = $2
+                     )",
+                    &[
+                        &observer_root.to_bytes().to_vec(),
+                        &target.to_bytes().to_vec(),
+                    ],
+                )
+                .await
+                .map_err(PostgresKernelError::Database)?;
+            let recursive: bool = row.try_get(0).map_err(PostgresKernelError::Database)?;
+            transaction
+                .commit()
+                .await
+                .map_err(PostgresKernelError::Database)?;
+            Ok(recursive)
+        }
+        .await;
+        finish_inspect_session(operation, database_session.shutdown().await)
+    }
+
     /// Returns the `invocation_nodes` projection over one epoch.
     ///
     /// The projection is gated by the INSPECT privilege ladder; a denied
@@ -371,10 +429,6 @@ impl PostgresKernel {
     }
 
     /// Returns the `security_decisions` projection over one epoch.
-    ///
-    /// The projection joins the linked protected `EXECUTE` evidence: the
-    /// invocation audit row's `security_audit_event_id` resolves to the
-    /// exact decision that admitted the captured invocation.
     pub async fn inspect_security_decisions(
         &self,
         authenticated_session: &AuthenticatedSession,
@@ -383,46 +437,7 @@ impl PostgresKernel {
         granted: &[InspectPrivilege],
     ) -> Result<Vec<SecurityDecisionRow>, PostgresKernelError> {
         require_inspect_privilege(authenticated_session, epoch, requested, granted)?;
-        let mut database_session = self.open().await?;
-        let operation = async {
-            let transaction = database_session
-                .client
-                .build_transaction()
-                .isolation_level(IsolationLevel::RepeatableRead)
-                .read_only(true)
-                .start()
-                .await
-                .map_err(PostgresKernelError::Database)?;
-            require_current_migrations(&transaction).await?;
-            let rows = transaction
-                .query(
-                    "SELECT security.event_id, security.event_kind,
-                            security.outcome, security.denial_reason,
-                            security.session_principal_id,
-                            security.effective_principal_id,
-                            security.authorising_principal_id,
-                            security.function_id
-                     FROM _orna_kernel.invocation_audit_events AS invocation
-                     JOIN _orna_kernel.security_audit_events AS security
-                       ON security.event_id = invocation.security_audit_event_id
-                     WHERE invocation.invocation_id = $1
-                     ORDER BY security.sequence",
-                    &[&epoch.invocation_id().to_bytes().to_vec()],
-                )
-                .await
-                .map_err(PostgresKernelError::Database)?;
-            let mut decisions = Vec::with_capacity(rows.len());
-            for row in &rows {
-                decisions.push(decode_security_decision_row(row)?);
-            }
-            transaction
-                .commit()
-                .await
-                .map_err(PostgresKernelError::Database)?;
-            Ok(decisions)
-        }
-        .await;
-        finish_inspect_session(operation, database_session.shutdown().await)
+        Ok(epoch.security_decisions().to_vec())
     }
 
     /// Streams the model-expressible trace events of one invocation.
@@ -599,6 +614,31 @@ pub(crate) async fn capture_inspect_snapshot_in_transaction(
     client_offer: &InvocationClientOffer,
     observer_invocation: Option<InvocationId>,
 ) -> Result<InspectEpochId, PostgresKernelError> {
+    // Capture the protected decision evidence before writing the immutable
+    // epoch. The linked EXECUTE row admits the invocation and the INSPECT
+    // row records this capture; both are copied into the epoch payload so a
+    // later projection never has to consult mutable audit history.
+    let inspect_decision = InspectDecision::Allowed {
+        epoch_scope: InspectEpochScope::Own,
+        requested: InspectPrivilege::OwnInvocation,
+    };
+    let inspect_audit = SecurityAuditDecision::inspect_allowed(
+        authenticated_session,
+        inspect_decision,
+        Some(owner),
+    )
+    .map_err(|_| PostgresKernelError::DurableInvariant {
+        relation: "_orna_kernel.security_audit_events",
+        record: invocation.canonical(),
+        rule: "the capture decision must be an allowed INSPECT decision",
+    })?;
+    let inspect_audit_id = append_security_audit_event(transaction, inspect_audit).await?;
+    let security_decisions = capture_security_decisions_in_transaction(
+        transaction,
+        invocation,
+        inspect_audit_id,
+    )
+    .await?;
     let state_cells =
         capture_state_cells_in_transaction(transaction, active, registry, owner, root_target)
             .await?;
@@ -612,9 +652,9 @@ pub(crate) async fn capture_inspect_snapshot_in_transaction(
         events,
         client_offer,
         state_cells,
+        security_decisions,
     )?;
     let epoch_id = epoch.id();
-    let record = epoch_id.canonical();
     let recorded_at = epoch.recorded_at();
 
     let payload = encode_epoch_payload(active, registry, &epoch)?;
@@ -681,18 +721,6 @@ pub(crate) async fn capture_inspect_snapshot_in_transaction(
     )
     .await?;
 
-    let decision = InspectDecision::Allowed {
-        epoch_scope: InspectEpochScope::Own,
-        requested: InspectPrivilege::OwnInvocation,
-    };
-    let audit =
-        SecurityAuditDecision::inspect_allowed(authenticated_session, decision, Some(owner))
-            .map_err(|_| PostgresKernelError::DurableInvariant {
-                relation: "_orna_kernel.security_audit_events",
-                record: record.clone(),
-                rule: "the capture decision must be an allowed INSPECT decision",
-            })?;
-    append_security_audit_event(transaction, audit).await?;
     Ok(epoch_id)
 }
 
@@ -725,6 +753,49 @@ async fn capture_state_cells_in_transaction(
     rows.iter()
         .map(|row| decode_state_cell_row(row, active, registry))
         .collect()
+}
+
+/// Copies the protected EXECUTE evidence linked to an invocation and the
+/// protected INSPECT decision for this capture into the immutable epoch.
+///
+/// The query is deliberately performed in the capture transaction. The
+/// returned rows are then encoded into summary_bytes; projections never
+/// re-read either audit relation for an existing epoch.
+async fn capture_security_decisions_in_transaction(
+    transaction: &Transaction<'_>,
+    invocation: InvocationId,
+    inspect_audit_id: SecurityAuditEventId,
+) -> Result<Vec<SecurityDecisionRow>, PostgresKernelError> {
+    let rows = transaction
+        .query(
+            "SELECT security.event_id, security.event_kind,
+                    security.outcome, security.denial_reason,
+                    security.session_principal_id,
+                    security.effective_principal_id,
+                    security.authorising_principal_id,
+                    security.function_id
+             FROM _orna_kernel.security_audit_events AS security
+             LEFT JOIN _orna_kernel.invocation_audit_events AS invocation_audit
+               ON invocation_audit.security_audit_event_id = security.event_id
+             WHERE invocation_audit.invocation_id = $1
+                OR security.event_id = $2
+             ORDER BY security.sequence",
+            &[
+                &invocation.to_bytes().to_vec(),
+                &inspect_audit_id.to_bytes().to_vec(),
+            ],
+        )
+        .await
+        .map_err(PostgresKernelError::Database)?;
+
+    if rows.is_empty() {
+        return Err(PostgresKernelError::DurableInvariant {
+            relation: "_orna_kernel.security_audit_events",
+            record: invocation.canonical(),
+            rule: "captured invocation must retain linked EXECUTE and INSPECT evidence",
+        });
+    }
+    rows.iter().map(decode_security_decision_row).collect()
 }
 
 /// Validates the inspection relations during normal recovery.
@@ -840,6 +911,7 @@ fn build_inspect_epoch(
     events: &InvocationEventBatch,
     client_offer: &InvocationClientOffer,
     state_cells: Vec<StateCellRow>,
+    security_decisions: Vec<SecurityDecisionRow>,
 ) -> Result<InspectSnapshotEpoch, PostgresKernelError> {
     let mut value_count = 0_u64;
     let mut schema = None;
@@ -904,7 +976,7 @@ fn build_inspect_epoch(
         Vec::new(),
         Vec::new(),
         runtime_bindings,
-        Vec::new(),
+        security_decisions,
     )
     .map_err(PostgresKernelError::Inspect)
 }
@@ -1161,7 +1233,7 @@ fn decode_security_decision_row(row: &Row) -> Result<SecurityDecisionRow, Postgr
         _ => {
             return Err(PostgresKernelError::DurableInvariant {
                 relation: "_orna_kernel.security_audit_events",
-                record: record.clone(),
+                record,
                 rule: "security decision kind is outside the closed set",
             });
         }
@@ -1169,7 +1241,7 @@ fn decode_security_decision_row(row: &Row) -> Result<SecurityDecisionRow, Postgr
     let outcome: String = inspect_column(
         "_orna_kernel.security_audit_events",
         row,
-        &record,
+        &event_id.canonical(),
         "outcome",
     )?;
     let outcome = match outcome.as_str() {
@@ -1178,7 +1250,7 @@ fn decode_security_decision_row(row: &Row) -> Result<SecurityDecisionRow, Postgr
         _ => {
             return Err(PostgresKernelError::DurableInvariant {
                 relation: "_orna_kernel.security_audit_events",
-                record: record.clone(),
+                record: event_id.canonical(),
                 rule: "security decision outcome must be allowed or denied",
             });
         }
@@ -1188,21 +1260,21 @@ fn decode_security_decision_row(row: &Row) -> Result<SecurityDecisionRow, Postgr
         inspect_optional_id(
             "_orna_kernel.security_audit_events",
             row,
-            &record,
+            &event_id.canonical(),
             "session_principal_id",
         )?
         .map(PrincipalId::from_bytes),
         inspect_optional_id(
             "_orna_kernel.security_audit_events",
             row,
-            &record,
+            &event_id.canonical(),
             "effective_principal_id",
         )?
         .map(PrincipalId::from_bytes),
         inspect_optional_id(
             "_orna_kernel.security_audit_events",
             row,
-            &record,
+            &event_id.canonical(),
             "authorising_principal_id",
         )?
         .map(PrincipalId::from_bytes),
@@ -1217,14 +1289,14 @@ fn decode_security_decision_row(row: &Row) -> Result<SecurityDecisionRow, Postgr
     let target = inspect_optional_id(
         "_orna_kernel.security_audit_events",
         row,
-        &record,
+        &event_id.canonical(),
         "function_id",
     )?
     .map(FunctionId::from_bytes);
     let denial_reason: Option<String> = inspect_column(
         "_orna_kernel.security_audit_events",
         row,
-        &record,
+        &event_id.canonical(),
         "denial_reason",
     )?;
     let denial_reason = if outcome == InspectSecurityDecisionOutcome::Denied {
