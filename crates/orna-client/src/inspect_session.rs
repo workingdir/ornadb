@@ -171,13 +171,40 @@ impl ClientInspectLifecycleSession {
     /// Replaces the current epoch with a newer binding.
     ///
     /// A successful replacement invalidates the currently pending request.
-    /// Rejected stale/future/revision/principal replacements leave the session
-    /// untouched.
+    /// Rejected stale, principal/revision-changing, or enclosing-execution
+    /// replacements leave the session untouched; a refresh may carry a new
+    /// server snapshot identity.
     pub fn replace_epoch(
         &mut self,
         binding: InspectEpochBinding,
     ) -> Result<(), ClientInspectError> {
-        let replaces_epoch = binding.generation() > self.lifecycle.binding().generation();
+        validate_lifecycle_state(&self.lifecycle).map_err(ClientInspectError::from)?;
+        let current = self.lifecycle.binding();
+        let replaces_epoch = binding.generation() > current.generation();
+        if replaces_epoch {
+            // A refresh may capture a new server snapshot identity, but the
+            // active session cannot change its principal, revision, enclosing
+            // client execution, target, observer lineage, or projection set.
+            if binding.principal() != current.principal() {
+                return Err(InspectLifecycleError::PrincipalMismatch.into());
+            }
+            if binding.revision() != current.revision() {
+                return Err(InspectLifecycleError::RevisionMismatch {
+                    expected: current.revision(),
+                    actual: binding.revision(),
+                }
+                .into());
+            }
+            if binding.client_epoch_id() != current.client_epoch_id()
+                || binding.target_invocation_id() != current.target_invocation_id()
+                || binding.observer_root_invocation_id() != current.observer_root_invocation_id()
+                || binding.observer_parent_invocation_id()
+                    != current.observer_parent_invocation_id()
+                || binding.projection_versions() != current.projection_versions()
+            {
+                return Err(InspectLifecycleError::EpochMismatch.into());
+            }
+        }
         self.lifecycle
             .replace_epoch(binding)
             .map_err(ClientInspectError::from)?;
@@ -552,6 +579,98 @@ mod tests {
         );
 
         assert_eq!(session.pending_request_id, Some(operation.request_id()));
+    }
+
+    #[test]
+    fn higher_generation_replacement_preserves_authority_and_refreshes_identity() {
+        let current = binding(1);
+        let mut session = ClientInspectLifecycleSession::new(current);
+        let operation = session
+            .begin_request(request(), current)
+            .expect("matching Inspector request is admitted");
+
+        let principal = InspectEpochBinding::new(
+            current.client_epoch_id(),
+            current.server_epoch_id(),
+            current.target_invocation_id(),
+            principal_id(8),
+            current.revision(),
+            current.observer_root_invocation_id(),
+            current.observer_parent_invocation_id(),
+            current.projection_versions(),
+            2,
+        );
+        assert_eq!(
+            session.replace_epoch(principal),
+            Err(ClientInspectError::Failed(
+                "inspect.epoch_mismatch".to_owned()
+            ))
+        );
+        assert_eq!(session.binding(), current);
+        assert_eq!(session.pending_request_id, Some(operation.request_id()));
+
+        let revision = InspectEpochBinding::new(
+            current.client_epoch_id(),
+            current.server_epoch_id(),
+            current.target_invocation_id(),
+            current.principal(),
+            revision_pair(9),
+            current.observer_root_invocation_id(),
+            current.observer_parent_invocation_id(),
+            current.projection_versions(),
+            2,
+        );
+        assert_eq!(
+            session.replace_epoch(revision),
+            Err(ClientInspectError::Failed(
+                "inspect.epoch_mismatch".to_owned()
+            ))
+        );
+        assert_eq!(session.binding(), current);
+        assert_eq!(session.pending_request_id, Some(operation.request_id()));
+
+        let foreign_execution = InspectEpochBinding::new(
+            invocation_id(9),
+            current.server_epoch_id(),
+            current.target_invocation_id(),
+            current.principal(),
+            current.revision(),
+            current.observer_root_invocation_id(),
+            current.observer_parent_invocation_id(),
+            current.projection_versions(),
+            2,
+        );
+        assert_eq!(
+            session.replace_epoch(foreign_execution),
+            Err(ClientInspectError::Failed(
+                "inspect.epoch_mismatch".to_owned()
+            ))
+        );
+        assert_eq!(session.binding(), current);
+        assert_eq!(session.pending_request_id, Some(operation.request_id()));
+
+        let replacement = binding(2);
+        assert_eq!(session.replace_epoch(replacement), Ok(()));
+        assert_eq!(session.binding(), replacement);
+        assert_eq!(session.pending_request_id, None);
+        assert_eq!(
+            session.publish_completion(operation.ready(RuntimeValue::Boolean(true))),
+            Err(ClientInspectError::Failed("inspect.stale_epoch".to_owned()))
+        );
+
+        let refreshed = InspectEpochBinding::new(
+            replacement.client_epoch_id(),
+            replacement.server_epoch_id() + 1,
+            replacement.target_invocation_id(),
+            replacement.principal(),
+            replacement.revision(),
+            replacement.observer_root_invocation_id(),
+            replacement.observer_parent_invocation_id(),
+            replacement.projection_versions(),
+            3,
+        );
+        assert_eq!(session.replace_epoch(refreshed), Ok(()));
+        assert_eq!(session.binding(), refreshed);
     }
 
     #[test]
