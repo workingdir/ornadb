@@ -33,7 +33,11 @@
 
 use std::{error::Error, fmt, time::SystemTime};
 
-use crate::{FunctionId, PrincipalId, StateSlotId, TypeId, value::RuntimeValue};
+use crate::{
+    FunctionId, PrincipalId, StateSlotId, TypeId,
+    types::{ResolvedType, TypeDescriptor, TypeDescriptorKind},
+    value::{ConstructedValueKind, RuntimeType, RuntimeValue},
+};
 
 /// Rejects one TEXT key component that cannot round-trip through the durable
 /// relation. An empty component is legal: it is the default profile or the
@@ -42,6 +46,149 @@ fn validate_state_text(component: &str, what: &str) -> Result<(), UserStateError
     if component.contains('\0') {
         return Err(UserStateError::InvalidKey {
             reason: format!("{what} must not contain a NUL byte"),
+        });
+    }
+    Ok(())
+}
+
+/// Returns whether a type identity is one of the transient sealed Inspector
+/// carriers. The identities are the existing sealed system registry entries;
+/// USER state must never turn any of them into durable value type identity.
+fn is_sealed_inspect_type_id(type_id: TypeId) -> bool {
+    matches!(
+        type_id,
+        crate::system::SYS_INSPECT_INVOCATION_TYPE_ID
+            | crate::system::SYS_INSPECT_SNAPSHOT_TYPE_ID
+            | crate::system::SYS_INSPECT_SNAPSHOT_OPTIONS_TYPE_ID
+            | crate::system::SYS_INSPECT_TRACE_EVENT_TYPE_ID
+            | crate::system::SYS_INSPECT_INVOCATION_NODES_TYPE_ID
+            | crate::system::SYS_INSPECT_CALLS_TYPE_ID
+            | crate::system::SYS_INSPECT_RESOURCES_TYPE_ID
+            | crate::system::SYS_INSPECT_STATE_CELLS_TYPE_ID
+            | crate::system::SYS_INSPECT_UI_NODES_TYPE_ID
+            | crate::system::SYS_INSPECT_PRESENTATION_CANDIDATES_TYPE_ID
+            | crate::system::SYS_INSPECT_RUNTIME_BINDINGS_TYPE_ID
+            | crate::system::SYS_INSPECT_SECURITY_DECISIONS_TYPE_ID
+    )
+}
+
+fn descriptor_contains_sealed_inspect_type(descriptor: &TypeDescriptor) -> bool {
+    match descriptor.kind() {
+        TypeDescriptorKind::Named(type_id) | TypeDescriptorKind::Reference(type_id) => {
+            is_sealed_inspect_type_id(type_id)
+        }
+        TypeDescriptorKind::List(child)
+        | TypeDescriptorKind::Set(child)
+        | TypeDescriptorKind::Option(child)
+        | TypeDescriptorKind::Stream(child) => descriptor_contains_sealed_inspect_type(child),
+        TypeDescriptorKind::Map { key, value } => {
+            descriptor_contains_sealed_inspect_type(key)
+                || descriptor_contains_sealed_inspect_type(value)
+        }
+    }
+}
+
+/// Returns whether a runtime value contains a sealed Inspector identity.
+///
+/// USER state stores typed runtime values, so checking only the separately
+/// supplied metadata type is insufficient. The check walks nested records and
+/// constructed values before a change is accepted or a recovered cell is
+/// exposed to the client.
+pub fn is_sealed_inspect_runtime_value(value: &RuntimeValue) -> bool {
+    let type_is_sealed = match value.runtime_type() {
+        RuntimeType::Flat(ResolvedType::Named(type_id))
+        | RuntimeType::Flat(ResolvedType::Reference { target: type_id })
+        | RuntimeType::Flat(ResolvedType::Value(type_id)) => is_sealed_inspect_type_id(type_id),
+        RuntimeType::Flat(ResolvedType::Scalar(_)) => false,
+        RuntimeType::Constructed(descriptor) => {
+            descriptor_contains_sealed_inspect_type(descriptor)
+        }
+    };
+    if type_is_sealed {
+        return true;
+    }
+
+    match value {
+        RuntimeValue::Record(record) => record
+            .fields()
+            .iter()
+            .any(is_sealed_inspect_runtime_value),
+        RuntimeValue::Constructed(constructed) => match constructed.kind() {
+            ConstructedValueKind::Option(value) => {
+                value.is_some_and(is_sealed_inspect_runtime_value)
+            }
+            ConstructedValueKind::List(values) | ConstructedValueKind::Set(values) => values
+                .iter()
+                .any(is_sealed_inspect_runtime_value),
+            ConstructedValueKind::Map(entries) => entries.iter().any(|(key, value)| {
+                is_sealed_inspect_runtime_value(key) || is_sealed_inspect_runtime_value(value)
+            }),
+        },
+        RuntimeValue::InvokeValue(invoke_value) => {
+            is_sealed_inspect_runtime_value(invoke_value.value())
+        }
+        RuntimeValue::InvokeRequest(request) => {
+            request
+                .arguments()
+                .iter()
+                .any(|argument| is_sealed_inspect_runtime_value(argument.value().value()))
+                || request
+                    .caller_context()
+                    .preference_policy()
+                    .is_some_and(|value| is_sealed_inspect_runtime_value(value.value()))
+                || request
+                    .client_offer()
+                    .limits()
+                    .is_some_and(|value| is_sealed_inspect_runtime_value(value.value()))
+                || request
+                    .client_offer()
+                    .preferences()
+                    .is_some_and(|value| is_sealed_inspect_runtime_value(value.value()))
+                || request.client_offer().sink_offers().iter().any(|offer| {
+                    offer
+                        .limits()
+                        .is_some_and(|value| is_sealed_inspect_runtime_value(value.value()))
+                })
+                || request.client_offer().runtime_offers().iter().any(|offer| {
+                    offer
+                        .limits()
+                        .is_some_and(|value| is_sealed_inspect_runtime_value(value.value()))
+                })
+                || request
+                    .observer_context()
+                    .is_some_and(|value| is_sealed_inspect_runtime_value(value.value()))
+        }
+        RuntimeValue::InvokeEvent(event) => match event.body() {
+            crate::invocation::InvocationEventBody::ValueBatch { schema, values } => {
+                schema
+                    .as_ref()
+                    .is_some_and(|value| is_sealed_inspect_runtime_value(value.value()))
+                    || values
+                        .iter()
+                        .any(|value| is_sealed_inspect_runtime_value(value.value()))
+            }
+            crate::invocation::InvocationEventBody::Failed(failure) => failure
+                .details()
+                .is_some_and(|value| is_sealed_inspect_runtime_value(value.value())),
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+fn reject_sealed_inspect_value(value: &RuntimeValue) -> Result<(), UserStateError> {
+    if is_sealed_inspect_runtime_value(value) {
+        return Err(UserStateError::InvalidChange {
+            reason: "sealed Inspector values cannot be persisted in USER state".to_owned(),
+        });
+    }
+    Ok(())
+}
+
+fn reject_sealed_inspect_type_id(type_id: TypeId) -> Result<(), UserStateError> {
+    if is_sealed_inspect_type_id(type_id) {
+        return Err(UserStateError::InvalidChange {
+            reason: format!("sealed Inspector type {type_id} cannot be persisted in USER state"),
         });
     }
     Ok(())
@@ -336,6 +483,8 @@ impl UserStateChange {
     ) -> Result<Self, UserStateError> {
         validate_state_text(&state_profile, "state profile")?;
         validate_state_text(&instance_key, "instance key")?;
+        reject_sealed_inspect_type_id(value_type)?;
+        reject_sealed_inspect_value(&value)?;
         Ok(Self {
             root_function,
             state_profile,
@@ -582,6 +731,8 @@ pub fn apply_change(
 ) -> Result<UserStateWriteResult, UserStateError> {
     let key = change.key_without_principal();
     let Some(cell) = cell else {
+        reject_sealed_inspect_type_id(change.value_type())?;
+        reject_sealed_inspect_value(change.value())?;
         let outcome = match change.expected_revision() {
             None | Some(0) => UserStateWriteOutcome::Written { revision: 1 },
             Some(expected) => {
@@ -609,6 +760,10 @@ pub fn apply_change(
             ),
         });
     }
+    reject_sealed_inspect_type_id(change.value_type())?;
+    reject_sealed_inspect_value(change.value())?;
+    reject_sealed_inspect_type_id(cell.value_type())?;
+    reject_sealed_inspect_value(cell.value())?;
     if change.value_type() != cell.value_type() {
         return Err(UserStateError::TypeIncompatible {
             key: Box::new(key),
@@ -651,13 +806,19 @@ pub fn apply_change(
 /// This is the load-time ORNA0901 check: a cell whose type no longer matches
 /// the slot's declared type fails closed instead of returning a stale value.
 pub fn cell_type_matches(cell: &UserStateCell, declared_type: TypeId) -> bool {
-    cell.value_type() == declared_type
+    !is_sealed_inspect_type_id(cell.value_type())
+        && !is_sealed_inspect_runtime_value(cell.value())
+        && cell.value_type() == declared_type
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
+    use crate::invocation::{
+        InvocationArgument, InvocationCallerContext, InvocationCallerKind, InvocationClientOffer,
+        InvocationEventBody, InvocationParameterSelector, InvocationTarget, InvocationTracePolicy,
+        InvokeEvent, InvokeRequest, InvokeRequestInput, InvokeValue,
+    };
     const PRINCIPAL_A: u8 = 0x11;
     const PRINCIPAL_B: u8 = 0x22;
     const ROOT: u8 = 0x33;
@@ -665,7 +826,6 @@ mod tests {
     const SLOT: u8 = 0x55;
     const TYPE_INT: u8 = 0x66;
     const TYPE_TEXT: u8 = 0x77;
-
     fn principal_id(byte: u8) -> PrincipalId {
         PrincipalId::from_bytes([byte; 16])
     }
@@ -877,6 +1037,183 @@ mod tests {
             nul_instance,
             Err(UserStateError::InvalidKey { .. })
         ));
+    }
+
+    #[test]
+    fn change_construction_rejects_every_sealed_inspector_type() {
+        let sealed_types = [
+            crate::system::SYS_INSPECT_INVOCATION_TYPE_ID,
+            crate::system::SYS_INSPECT_SNAPSHOT_TYPE_ID,
+            crate::system::SYS_INSPECT_SNAPSHOT_OPTIONS_TYPE_ID,
+            crate::system::SYS_INSPECT_TRACE_EVENT_TYPE_ID,
+            crate::system::SYS_INSPECT_INVOCATION_NODES_TYPE_ID,
+            crate::system::SYS_INSPECT_CALLS_TYPE_ID,
+            crate::system::SYS_INSPECT_RESOURCES_TYPE_ID,
+            crate::system::SYS_INSPECT_STATE_CELLS_TYPE_ID,
+            crate::system::SYS_INSPECT_UI_NODES_TYPE_ID,
+            crate::system::SYS_INSPECT_PRESENTATION_CANDIDATES_TYPE_ID,
+            crate::system::SYS_INSPECT_RUNTIME_BINDINGS_TYPE_ID,
+            crate::system::SYS_INSPECT_SECURITY_DECISIONS_TYPE_ID,
+        ];
+
+        for sealed_type in sealed_types {
+            let error = UserStateChange::new(
+                function_id(ROOT),
+                String::new(),
+                function_id(FUNCTION),
+                String::new(),
+                state_slot_id(SLOT),
+                None,
+                RuntimeValue::Integer(1),
+                sealed_type,
+            )
+            .expect_err("sealed Inspector identities are transient and not USER-persistable");
+            assert!(matches!(error, UserStateError::InvalidChange { .. }));
+            assert_eq!(error.code(), None);
+        }
+
+        UserStateChange::new(
+            function_id(ROOT),
+            String::new(),
+            function_id(FUNCTION),
+            String::new(),
+            state_slot_id(SLOT),
+            None,
+            RuntimeValue::Integer(1),
+            type_id(TYPE_INT),
+        )
+        .expect("ordinary scalar USER state remains persistable");
+    }
+
+    #[test]
+    fn change_rejects_a_sealed_inspector_runtime_value_with_ordinary_metadata() {
+        let error = UserStateChange::new(
+            function_id(ROOT),
+            String::new(),
+            function_id(FUNCTION),
+            String::new(),
+            state_slot_id(SLOT),
+            None,
+            RuntimeValue::Reference {
+                target: crate::system::SYS_INSPECT_INVOCATION_TYPE_ID,
+                object: crate::ObjectId::from_bytes([0x91; 16]),
+            },
+            type_id(TYPE_INT),
+        )
+        .expect_err("sealed Inspector runtime identities cannot hide behind ordinary metadata");
+        assert!(matches!(error, UserStateError::InvalidChange { .. }));
+    }
+
+
+    #[test]
+    fn change_rejects_a_sealed_inspector_reference_nested_in_an_invoke_request_argument() {
+        let argument = InvocationArgument::new(
+            InvocationParameterSelector::name("payload").expect("a valid parameter selector"),
+            InvokeValue::new(RuntimeValue::Reference {
+                target: crate::system::SYS_INSPECT_INVOCATION_TYPE_ID,
+                object: crate::ObjectId::from_bytes([0x92; 16]),
+            })
+            .expect("a valid invocation argument value"),
+        );
+        let request = InvokeRequest::new(InvokeRequestInput {
+            target: InvocationTarget::function_id(function_id(FUNCTION)),
+            arguments: vec![argument],
+            caller_context: InvocationCallerContext::new(
+                InvocationCallerKind::CliPipe,
+                false,
+                false,
+                None,
+                None,
+                "en-GB",
+                "Europe/London",
+                None,
+            )
+            .expect("a valid caller context"),
+            client_offer: InvocationClientOffer::new(
+                5,
+                "en-GB",
+                "Europe/London",
+                [],
+                [],
+                1_024,
+                0,
+                None,
+                None,
+            )
+            .expect("a valid client offer"),
+            output_requirement: None,
+            state_profile: None,
+            trace_policy: InvocationTracePolicy::Off,
+            idempotency_key: None,
+            parent_invocation_id: None,
+            observer_context: None,
+        })
+        .expect("a valid invocation request");
+
+        let error = UserStateChange::new(
+            function_id(ROOT),
+            String::new(),
+            function_id(FUNCTION),
+            String::new(),
+            state_slot_id(SLOT),
+            None,
+            RuntimeValue::InvokeRequest(request),
+            type_id(TYPE_INT),
+        )
+        .expect_err("sealed Inspector values cannot hide in request arguments");
+        assert!(matches!(error, UserStateError::InvalidChange { .. }));
+    }
+
+    #[test]
+    fn change_rejects_a_sealed_inspector_reference_nested_in_an_invoke_event_value_batch() {
+        let body = InvocationEventBody::value_batch(
+            None,
+            [
+                InvokeValue::new(RuntimeValue::Reference {
+                    target: crate::system::SYS_INSPECT_INVOCATION_TYPE_ID,
+                    object: crate::ObjectId::from_bytes([0x93; 16]),
+                })
+                .expect("a valid event value"),
+            ],
+        )
+        .expect("a non-empty value batch");
+        let event = InvokeEvent::new(crate::InvocationId::from_bytes([0x94; 16]), 0, body)
+            .expect("a valid invocation event");
+
+        let error = UserStateChange::new(
+            function_id(ROOT),
+            String::new(),
+            function_id(FUNCTION),
+            String::new(),
+            state_slot_id(SLOT),
+            None,
+            RuntimeValue::InvokeEvent(event),
+            type_id(TYPE_INT),
+        )
+        .expect_err("sealed Inspector values cannot hide in event value batches");
+        assert!(matches!(error, UserStateError::InvalidChange { .. }));
+    }
+
+    #[test]
+    fn forged_sealed_inspector_cell_fails_closed_before_write() {
+        let forged = cell(
+            PRINCIPAL_A,
+            ROOT,
+            "",
+            FUNCTION,
+            "",
+            SLOT,
+            crate::system::SYS_INSPECT_SNAPSHOT_TYPE_ID,
+            1,
+        );
+        let error = apply_change(
+            Some(&forged),
+            &default_change(Some(1), RuntimeValue::Integer(2)),
+            principal_id(PRINCIPAL_A),
+        )
+        .expect_err("a forged persisted Inspector carrier identity must fail closed");
+        assert!(matches!(error, UserStateError::InvalidChange { .. }));
+        assert_eq!(error.code(), None);
     }
 
     #[test]
