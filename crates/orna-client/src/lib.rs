@@ -15841,7 +15841,19 @@ pub mod runtime_conformance {
         nodes: &HashMap<NodeHandle, NodeState>,
     ) {
         let state = nodes.get(&node).expect("node state should exist");
-        output.extend_from_slice(b"{\"kind\":\"node\",\"contract\":{\"id\":");
+        output.extend_from_slice(b"{\"actions\":{");
+        for (index, (event_name, action)) in state.actions.iter().enumerate() {
+            if index != 0 {
+                output.push(b',');
+            }
+            append_json_string(output, event_name);
+            output.extend_from_slice(b":{\"action_id\":");
+            append_json_string(output, &action.action.to_string());
+            output.extend_from_slice(b",\"input_type\":");
+            append_json_string(output, &action.input_type);
+            output.extend_from_slice(b",\"debug_kind\":null}");
+        }
+        output.extend_from_slice(b"},\"call_site_id\":null,\"contract\":{\"id\":");
         append_json_string(output, &state.contract_name);
         output.extend_from_slice(b",\"name\":");
         append_json_string(output, &state.contract_name);
@@ -15850,9 +15862,9 @@ pub mod runtime_conformance {
             output,
             &format!("{}.{}", state.contract_major, state.contract_minor),
         );
-        output.extend_from_slice(b"},\"call_site_id\":null,\"function_instance_id\":null,\"key\":");
+        output.extend_from_slice(b"},\"function_instance_id\":null,\"key\":");
         append_json_value(output, &state.explicit_key);
-        output.extend_from_slice(b",\"properties\":{");
+        output.extend_from_slice(b",\"kind\":\"node\",\"properties\":{");
         for (index, (property, value)) in state.properties.iter().enumerate() {
             if index != 0 {
                 output.push(b',');
@@ -15876,18 +15888,6 @@ pub mod runtime_conformance {
             }
             output.push(b']');
         }
-        output.extend_from_slice(b"},\"actions\":{");
-        for (index, (event_name, action)) in state.actions.iter().enumerate() {
-            if index != 0 {
-                output.push(b',');
-            }
-            append_json_string(output, event_name);
-            output.extend_from_slice(b":{\"action_id\":");
-            append_json_string(output, &action.action.to_string());
-            output.extend_from_slice(b",\"input_type\":");
-            append_json_string(output, &action.input_type);
-            output.extend_from_slice(b",\"debug_kind\":null}");
-        }
         output.extend_from_slice(b"}}");
     }
 
@@ -15900,14 +15900,14 @@ pub mod runtime_conformance {
             [] => body.extend_from_slice(b"{\"kind\":\"empty\"}"),
             [root] => append_node_json(&mut body, *root, nodes),
             roots => {
-                body.extend_from_slice(b"{\"kind\":\"fragment\",\"children\":[");
+                body.extend_from_slice(b"{\"children\":[");
                 for (index, root) in roots.iter().enumerate() {
                     if index != 0 {
                         body.push(b',');
                     }
                     append_node_json(&mut body, *root, nodes);
                 }
-                body.extend_from_slice(b"]}");
+                body.extend_from_slice(b"],\"kind\":\"fragment\"}");
             }
         }
         let length = u32::try_from(body.len())
@@ -16069,8 +16069,10 @@ pub mod runtime_conformance {
                 .expect("frame length is four bytes"),
         );
         declared_length == body_length
-            && serde_json::from_slice::<serde_json::Value>(&frame[14..])
-                .is_ok_and(|value| valid_ui_value(&value))
+            && serde_json::from_slice::<serde_json::Value>(&frame[14..]).is_ok_and(|value| {
+                valid_ui_value(&value)
+                    && serde_json::to_vec(&value).is_ok_and(|canonical| canonical == frame[14..])
+            })
     }
 
     struct SurfaceState {
@@ -19306,7 +19308,7 @@ pub mod runtime_conformance {
         assert!(valid_canonical_frame(&frame));
         assert_eq!(
             frame_body(&frame),
-            br#"{"kind":"node","contract":{"id":"std.ui.UI","name":"std.ui.UI","version":"1.0"},"call_site_id":null,"function_instance_id":null,"key":{"type":"std.json.Value","value":""},"properties":{"\b\f":{"type":"std.json.Value","value":""}},"slots":{},"actions":{}}"#
+            br#"{"actions":{},"call_site_id":null,"contract":{"id":"std.ui.UI","name":"std.ui.UI","version":"1.0"},"function_instance_id":null,"key":{"type":"std.json.Value","value":""},"kind":"node","properties":{"\b\f":{"type":"std.json.Value","value":""}},"slots":{}}"#
         );
     }
 
@@ -19343,10 +19345,26 @@ pub mod runtime_conformance {
             "headless fixture must reject invalid UI frames"
         );
 
+        let frame_for = |body: &[u8]| {
+            let mut frame = Vec::from(b"ORNA-UI/1 ".as_slice());
+            frame.extend_from_slice(&(body.len() as u32).to_be_bytes());
+            frame.extend_from_slice(body);
+            frame
+        };
         let body = br#"{"kind":"empty"}"#;
-        let mut payload = Vec::from(b"ORNA-UI/1 ".as_slice());
-        payload.extend_from_slice(&(body.len() as u32).to_be_bytes());
-        payload.extend_from_slice(body);
+        let payload = frame_for(body);
+        assert!(
+            session
+                .apply_ui_payload(&frame_for(br#"{ "kind": "empty" }"#))
+                .is_err(),
+            "headless fixture must reject non-canonical JSON whitespace"
+        );
+        assert!(
+            session
+                .apply_ui_payload(&frame_for(br#"{"kind":"fragment","children":[]}"#))
+                .is_err(),
+            "headless fixture must reject non-canonical JSON object key order"
+        );
         let captured = session
             .apply_ui_payload(&payload)
             .expect("headless fixture should accept a canonical UI frame");
