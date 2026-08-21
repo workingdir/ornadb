@@ -51,10 +51,10 @@ use orna_core::{
 use orna_postgres::{PostgresKernel, SealedInvocationResult};
 use orna_protocol::{encode_constructed_value, encode_invoke_request};
 use orna_server::{
-    InstalledInspectError, InstalledInspectOutcome, InstalledInspectProjection,
-    InstalledInspectRequest, InstalledUserStateChange, InstalledUserStateError,
-    InstalledUserStateOperation, InstalledUserStateOutcome, InstalledUserStateRequest,
-    run_inspect_with_kernel, run_user_state_with_kernel,
+    InstalledInspectError, InstalledInspectErrorKind, InstalledInspectOutcome,
+    InstalledInspectProjection, InstalledInspectRequest, InstalledUserStateChange,
+    InstalledUserStateError, InstalledUserStateOperation, InstalledUserStateOutcome,
+    InstalledUserStateRequest, run_inspect_with_kernel, run_user_state_with_kernel,
 };
 use orna_standard::{INTEGER_TYPE_ID, registered_opaque_codecs};
 use postgres_test_support::{TestDatabase, TestResult, failure, with_test_database};
@@ -597,6 +597,112 @@ async fn proves_installed_inspect_end_to_end() -> TestResult<()> {
         require(
             override_text.contains(&format!("\"invocation\":\"{}\"", invocation.canonical())),
             "the epoch override must resolve the same invocation: {override_text}",
+        )?;
+
+        Ok(())
+    })
+    .await
+}
+
+/// An explicit epoch override is bound to the requested invocation: selecting
+/// invocation B's owned epoch while requesting invocation A must fail closed
+/// with the stable `inspect.epoch_mismatch` code.
+#[tokio::test]
+#[ignore = "requires the Compose PostgreSQL development service"]
+async fn rejects_an_owned_epoch_for_a_different_requested_invocation() -> TestResult<()> {
+    with_test_database(|database| async move {
+        install_standard(&database).await?;
+        let db_kernel = kernel(&database);
+        let uid = nix::unistd::geteuid().as_raw();
+        let active = db_kernel.recover().await?;
+        let pair = active.pair();
+        let standard = active
+            .catalogue_hash_context()
+            .standard()
+            .ok_or_else(|| failure("the standard snapshot is pinned by the V1-to-V2 upgrade"))?;
+        let standard_revision = standard.revision();
+        let registry = registered_opaque_codecs(standard)?;
+
+        let security = SecuritySnapshot::new_with_function_targets_and_local_peer_credentials(
+            pair,
+            vec![SecurityFunctionTarget::verified_standard(
+                STD_INVOKE_ECHO_FUNCTION_ID,
+                standard_revision,
+                STD_INVOKE_ECHO_FUNCTION_REVISION_ID,
+            )],
+            vec![Principal::new(
+                INSPECT_PRINCIPAL,
+                PrincipalKind::User,
+                PrincipalStatus::Active,
+            )],
+            vec![],
+            vec![ExecuteGrant::new(
+                INSPECT_PRINCIPAL,
+                STD_INVOKE_ECHO_FUNCTION_ID,
+            )],
+            vec![LocalPeerCredential::new(uid, INSPECT_PRINCIPAL)],
+        )?;
+        db_kernel.replace_security_snapshot(&security).await?;
+        let session = security.bind_authenticated_session(INSPECT_PRINCIPAL, vec![])?;
+
+        let request_a = sealed_echo_request(41)?;
+        let retained_a = encode_invoke_request(&active, &registry, &request_a)?;
+        let result_a = db_kernel
+            .dispatch_sealed_sys_invoke(&session, CONNECTION_PROTOCOL_MAJOR, &retained_a)
+            .await?;
+        let invocation_a = require_echo_completion(&result_a, 41)?;
+
+        let request_b = sealed_echo_request(42)?;
+        let retained_b = encode_invoke_request(&active, &registry, &request_b)?;
+        let result_b = db_kernel
+            .dispatch_sealed_sys_invoke(&session, CONNECTION_PROTOCOL_MAJOR, &retained_b)
+            .await?;
+        let invocation_b = require_echo_completion(&result_b, 42)?;
+
+        let epoch_b = db_kernel
+            .find_latest_inspect_epoch(&session, invocation_b)
+            .await?
+            .ok_or_else(|| failure("invocation B did not resolve its captured epoch"))?;
+        let loaded_b = db_kernel
+            .load_inspect_snapshot(epoch_b)
+            .await?
+            .ok_or_else(|| failure("invocation B's epoch did not load"))?;
+        require(
+            loaded_b.invocation_id() == invocation_b,
+            "the selected owned epoch did not belong to invocation B",
+        )?;
+
+        let (outcome, stdout) = inspect_run(
+            &database,
+            InstalledInspectRequest::new(
+                invocation_a,
+                Some(epoch_b),
+                None,
+                false,
+                0,
+                false,
+                false,
+                false,
+                false,
+                None,
+            ),
+        )
+        .await?;
+        let error = outcome.expect_err("an epoch owned by invocation B must not inspect A");
+        require(
+            stdout.is_empty(),
+            "a rejected epoch target must not render inspect output",
+        )?;
+        require(
+            error.kind() == InstalledInspectErrorKind::Kernel
+                && error.code() == Some("inspect.epoch_mismatch")
+                && error.message() == "inspection epoch target does not match requested invocation",
+            format!(
+                "the mismatched epoch target returned the wrong stable error: kind={:?}, code={:?}, message={}",
+                error.kind(),
+                error.code(),
+                error.message()
+            ),
         )?;
 
         Ok(())
