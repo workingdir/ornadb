@@ -1416,7 +1416,13 @@ impl DispatchService for RawDispatchService {
                     let mut capability_audit_appended = false;
                     let mut resource_executor = match resource_broker {
                         Some(broker) => {
-                            InstalledClientResourceExecutor::new_with_broker(worker_active, broker, cancellation.clone())
+                            InstalledClientResourceExecutor::new_with_broker(
+                                worker_kernel,
+                                worker_session,
+                                worker_active,
+                                broker,
+                                cancellation.clone(),
+                            )
                         }
                         None => InstalledClientResourceExecutor::new(
                             worker_kernel,
