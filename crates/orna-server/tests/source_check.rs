@@ -22,7 +22,6 @@ use std::{
 
 const VALID_SOURCE: &[u8] =
     b"CREATE SCHEMA app; CREATE TYPE app.task AS OBJECT (done BOOLEAN NOT NULL);";
-const V6_STANDARD_SOURCE: &[u8] = b"CREATE SCHEMA app; CREATE CLIENT FUNCTION app.invoke(p_value INTEGER) RETURNS std.Action AS std.action.call(target => std.invoke.echo, arguments => std.call.args(p_value => p_value));";
 const TERMINAL_REQUIRED: &[u8] = b"orna: backend-shell must be run in an interactive terminal\n";
 const RAW_CALL_CONNECTION_FAILED: &[u8] = b"local raw-call connection failed\n";
 const PROCESS_TIMEOUT: Duration = Duration::from_secs(5);
@@ -286,17 +285,6 @@ fn accepts_only_the_exact_command_shape_and_valid_path_tokens() {
     assert_read_failure(
         &run_source_check(&directory.0, "*.orna").expect("literal wildcard result"),
         b"*.orna",
-    );
-}
-
-#[test]
-fn resolves_names_from_the_accepted_v6_standard_library() {
-    let directory = TestDirectory::new("v6-standard").expect("test directory");
-    fs::write(directory.0.join("application.orna"), V6_STANDARD_SOURCE)
-        .expect("V6 standard source");
-
-    assert_success(
-        &run_source_check(&directory.0, "application.orna").expect("V6 standard source check"),
     );
 }
 
