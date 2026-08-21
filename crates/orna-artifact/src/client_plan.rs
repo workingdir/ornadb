@@ -1,4 +1,4 @@
-//! Canonical `orna.client-plan` artefact formats, versions 1 through 8.
+//! Canonical `orna.client-plan` artefact formats, versions 1 through 9.
 //!
 //! The first CLIENT function slice has one operation: return a non-null
 //! BOOLEAN constant. The complete encoding is:
@@ -99,8 +99,9 @@
 //! final return expression node
 //! ```
 //!
-//! Procedural expressions additionally admit `LocalRead` nodes and the v6
-//! resource/`AWAIT` nodes; versions 1-6 reject `LocalRead` as an unknown node.
+//! Procedural expressions additionally admit `LocalRead` nodes, the v6
+//! resource/`AWAIT` nodes, and sealed Inspector nodes; versions 1-6 reject
+//! `LocalRead` and Inspector nodes as unknown nodes.
 //!
 //! Version 8 carries one checked CLIENT action operation. Its descriptor is:
 //!
@@ -120,6 +121,15 @@
 //! Action arguments are encoded with the closed expression node set. Action
 //! nodes cannot nest inside action arguments, and arguments are ordered by
 //! ascending `ParameterId`.
+//!
+//! Version 9 carries an expression tree containing one or more sealed Inspector
+//! nodes. Its header uses operation tag 9; the Inspector node tag is 13. The
+//! node payload is operation tag 1 plus a target expression and an options
+//! marker (0 for the structural-only default) for `Snapshot`, or operation
+//! tag 2 plus projection tag 1..=8 and a snapshot expression for `Projection`.
+//! Typed options markers are rejected because Inspector v1 has no canonical
+//! snapshot-options payload decoder. Version 3 remains the format for trees
+//! without Inspector nodes, and rejects the sealed node tag.
 //!
 //! The version 1-4 formats contain no source text, source locations, Orna
 //! names, or backend values.
@@ -169,6 +179,8 @@ pub const RESOURCE_FORMAT_VERSION: u32 = 6;
 pub const PROCEDURAL_FORMAT_VERSION: u32 = 7;
 /// The client-plan version that carries one checked CLIENT action operation.
 pub const ACTION_FORMAT_VERSION: u32 = 8;
+/// The client-plan version that carries closed Inspector expression nodes.
+pub const INSPECT_FORMAT_VERSION: u32 = 9;
 /// The maximum number of resource operation nodes in one resource plan.
 pub const MAX_RESOURCE_OPERATIONS: usize = 64;
 /// The maximum number of arguments in one resource operation.
@@ -194,6 +206,7 @@ const RETURN_CAPABILITY_OPERATION: u8 = 5;
 const RETURN_RESOURCE_OPERATION: u8 = 6;
 const RETURN_PROCEDURAL_OPERATION: u8 = 7;
 const RETURN_ACTION_OPERATION: u8 = 8;
+const RETURN_INSPECT_OPERATION: u8 = 9;
 const CAPABILITY_ARGUMENT_TEXT: u8 = 1;
 const CAPABILITY_ARGUMENT_PARAMETER: u8 = 2;
 const RESOURCE_KIND_SCALAR: u8 = 1;
@@ -215,6 +228,9 @@ const NODE_CONCAT: u8 = 7;
 const NODE_EXTERNAL_CONTRACT: u8 = 8;
 const NODE_LOCAL_READ: u8 = 11;
 const NODE_ACTION: u8 = 12;
+const NODE_INSPECT: u8 = 13;
+const INSPECT_OPERATION_SNAPSHOT: u8 = 1;
+const INSPECT_OPERATION_PROJECTION: u8 = 2;
 
 const PROCEDURAL_STATEMENT_LET: u8 = 1;
 const PROCEDURAL_STATEMENT_ASSIGNMENT: u8 = 2;
@@ -367,6 +383,115 @@ impl ClientPlan {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ExpressionClientPlan {
     expression: ClientExpressionNode,
+    contains_inspect: bool,
+}
+
+/// One of the eight bounded Inspector projections.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum InspectProjection {
+    InvocationNodes,
+    Calls,
+    Resources,
+    StateCells,
+    UiNodes,
+    PresentationCandidates,
+    RuntimeBindings,
+    SecurityDecisions,
+}
+
+impl InspectProjection {
+    const fn tag(self) -> u8 {
+        match self {
+            Self::InvocationNodes => 1,
+            Self::Calls => 2,
+            Self::Resources => 3,
+            Self::StateCells => 4,
+            Self::UiNodes => 5,
+            Self::PresentationCandidates => 6,
+            Self::RuntimeBindings => 7,
+            Self::SecurityDecisions => 8,
+        }
+    }
+
+    fn from_tag(tag: u8) -> Result<Self, ClientPlanError> {
+        match tag {
+            1 => Ok(Self::InvocationNodes),
+            2 => Ok(Self::Calls),
+            3 => Ok(Self::Resources),
+            4 => Ok(Self::StateCells),
+            5 => Ok(Self::UiNodes),
+            6 => Ok(Self::PresentationCandidates),
+            7 => Ok(Self::RuntimeBindings),
+            8 => Ok(Self::SecurityDecisions),
+            tag => Err(ClientPlanError::InvalidInspectProjection(tag)),
+        }
+    }
+}
+
+/// One sealed Inspector expression operation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum InspectOperationNode {
+    Snapshot {
+        target: Box<ClientExpressionNode>,
+        /// The explicit structural-only snapshot default. Typed options are
+        /// rejected by the Inspector v1 compiler and artifact codec.
+        options: Option<Box<ClientExpressionNode>>,
+    },
+    Projection {
+        projection: InspectProjection,
+        snapshot: Box<ClientExpressionNode>,
+    },
+}
+
+impl InspectOperationNode {
+    pub fn snapshot(target: ClientExpressionNode) -> Self {
+        Self::Snapshot {
+            target: Box::new(target),
+            options: None,
+        }
+    }
+
+    pub fn projection(projection: InspectProjection, snapshot: ClientExpressionNode) -> Self {
+        Self::Projection { projection, snapshot: Box::new(snapshot) }
+    }
+
+    pub const fn target(&self) -> Option<&ClientExpressionNode> {
+        match self {
+            Self::Snapshot { target, .. } => Some(target),
+            Self::Projection { .. } => None,
+        }
+    }
+
+    /// Returns the snapshot-options expression when present. Inspector v1
+    /// plans use the structural-only default and therefore return None.
+    pub fn options(&self) -> Option<&ClientExpressionNode> {
+        match self {
+            Self::Snapshot { options, .. } => match options {
+                Some(options) => Some(options.as_ref()),
+                None => None,
+            },
+            Self::Projection { .. } => None,
+        }
+    }
+
+    /// Alias for the options accessor with an explicit carrier name.
+    pub fn snapshot_options(&self) -> Option<&ClientExpressionNode> {
+        self.options()
+    }
+
+    pub const fn projection_kind(&self) -> Option<InspectProjection> {
+        match self {
+            Self::Snapshot { .. } => None,
+            Self::Projection { projection, .. } => Some(*projection),
+        }
+    }
+
+    pub const fn snapshot_expression(&self) -> Option<&ClientExpressionNode> {
+        match self {
+            Self::Snapshot { .. } => None,
+            Self::Projection { snapshot, .. } => Some(snapshot),
+        }
+    }
 }
 
 /// One closed CLIENT expression-tree node (work ADR 0068).
@@ -381,6 +506,11 @@ pub enum ClientExpressionNode {
     Resource {
         /// The target, revision, call-site, arguments, and result type.
         operation: ResourceOperationNode,
+    },
+    /// A checked sealed Inspector operation value.
+    Inspect {
+        /// The snapshot or projection operation.
+        operation: InspectOperationNode,
     },
     /// A checked CLIENT action operation value.
     Action {
@@ -443,7 +573,11 @@ pub enum ClientExpressionNode {
 impl ExpressionClientPlan {
     /// Creates a checked plan from one closed expression tree.
     pub fn new(expression: ClientExpressionNode) -> Self {
-        Self { expression }
+        let contains_inspect = expression_contains_inspect(&expression);
+        Self {
+            expression,
+            contains_inspect,
+        }
     }
 }
 
@@ -627,6 +761,7 @@ impl ProceduralClientPlan {
                         &mut count,
                         true,
                         true,
+                        true,
                         &mut resource_count,
                     )?;
                 }
@@ -640,6 +775,7 @@ impl ProceduralClientPlan {
                         &mut count,
                         true,
                         true,
+                        true,
                         &mut resource_count,
                     )?;
                 }
@@ -650,6 +786,7 @@ impl ProceduralClientPlan {
             &mut writer,
             0,
             &mut count,
+            true,
             true,
             true,
             &mut resource_count,
@@ -726,6 +863,7 @@ impl ProceduralClientPlan {
                 &mut count,
                 true,
                 true,
+                true,
                 &mut resource_count,
             )?;
             let statement = match statement_kind {
@@ -739,6 +877,7 @@ impl ProceduralClientPlan {
             &mut reader,
             0,
             &mut count,
+            true,
             true,
             true,
             &mut resource_count,
@@ -1019,6 +1158,7 @@ impl ResourceClientPlan {
             &mut expression_count,
             true,
             false,
+            false,
             &mut resource_count,
         )?;
         if resource_count == 0 {
@@ -1062,6 +1202,7 @@ impl ResourceClientPlan {
             &mut expression_count,
             true,
             false,
+            false,
             &mut resource_count,
         )?;
         reader.require_finished()?;
@@ -1080,18 +1221,33 @@ impl ExpressionClientPlan {
 
     /// Returns the canonical artefact version for this plan.
     pub const fn format_version(&self) -> u32 {
-        EXPRESSION_FORMAT_VERSION
+        if self.contains_inspect {
+            INSPECT_FORMAT_VERSION
+        } else {
+            EXPRESSION_FORMAT_VERSION
+        }
     }
 
-    /// Encodes this plan into its exact version-3 bytes.
+    /// Encodes this plan into its exact version-3 or version-9 bytes.
     pub fn encode(&self) -> Result<Vec<u8>, ClientPlanError> {
+        let version = self.format_version();
         let mut bytes = Vec::new();
         bytes.extend_from_slice(&MAGIC);
-        bytes.extend_from_slice(&EXPRESSION_FORMAT_VERSION.to_be_bytes());
-        bytes.push(RETURN_EXPRESSION_OPERATION);
+        bytes.extend_from_slice(&version.to_be_bytes());
+        bytes.push(if version == INSPECT_FORMAT_VERSION {
+            RETURN_INSPECT_OPERATION
+        } else {
+            RETURN_EXPRESSION_OPERATION
+        });
         let mut writer = NodeWriter::new();
         let mut count = 0;
-        encode_expression_node(&self.expression, &mut writer, 0, &mut count)?;
+        encode_expression_node_with_inspect(
+            &self.expression,
+            &mut writer,
+            0,
+            &mut count,
+            version == INSPECT_FORMAT_VERSION,
+        )?;
         bytes.extend_from_slice(&writer.finish());
         if bytes.len() > MAX_ARTIFACT_BYTES {
             return Err(ClientPlanError::ArtifactSizeLimit {
@@ -1102,7 +1258,7 @@ impl ExpressionClientPlan {
         Ok(bytes)
     }
 
-    /// Decodes exactly one canonical version-3 expression client-plan.
+    /// Decodes exactly one canonical version-3 or version-9 expression client-plan.
     pub fn decode(bytes: &[u8]) -> Result<Self, ClientPlanError> {
         if bytes.len() > MAX_ARTIFACT_BYTES {
             return Err(ClientPlanError::ArtifactSizeLimit {
@@ -1115,16 +1271,29 @@ impl ExpressionClientPlan {
             return Err(ClientPlanError::InvalidMagic);
         }
         let version = reader.u32()?;
-        if version != EXPRESSION_FORMAT_VERSION {
+        if version != EXPRESSION_FORMAT_VERSION && version != INSPECT_FORMAT_VERSION {
             return Err(ClientPlanError::UnsupportedVersion(version));
         }
         let operation = reader.u8()?;
-        if operation != RETURN_EXPRESSION_OPERATION {
+        let expected_operation = if version == INSPECT_FORMAT_VERSION {
+            RETURN_INSPECT_OPERATION
+        } else {
+            RETURN_EXPRESSION_OPERATION
+        };
+        if operation != expected_operation {
             return Err(ClientPlanError::InvalidOperation(operation));
         }
         let mut count = 0usize;
-        let expression = decode_expression_node(&mut reader, 0, &mut count)?;
+        let expression = decode_expression_node_with_inspect(
+            &mut reader,
+            0,
+            &mut count,
+            version == INSPECT_FORMAT_VERSION,
+        )?;
         reader.require_finished()?;
+        if version == INSPECT_FORMAT_VERSION && !expression_contains_inspect(&expression) {
+            return Err(ClientPlanError::InvalidInspectPlan);
+        }
         Ok(Self::new(expression))
     }
 }
@@ -1400,8 +1569,8 @@ impl CapabilityRequirement {
 
 /// The inner plan carried by one version-5 capability envelope.
 ///
-/// The envelope holds a complete decoded version 1-4, version-6, version-7, or
-/// version-8 client plan so the runtime can evaluate it directly after the capability gate
+/// The envelope holds a complete decoded version 1-4, version-6, version-7,
+/// version-8, or version-9 client plan so the runtime can evaluate it directly after the capability gate
 /// admits it.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum InnerClientPlan {
@@ -1450,7 +1619,7 @@ impl InnerClientPlan {
 }
 
 /// A checked version-5 CLIENT plan that carries one version 1-4, version-6,
-/// version-7, or version-8 inner plan and the owning function's ordered, closed capability
+/// version-7, version-8, or version-9 inner plan and the owning function's ordered, closed capability
 /// requirements (work ADR 0060).
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CapabilityClientPlan {
@@ -1597,7 +1766,7 @@ impl CapabilityClientPlan {
             OPAQUE_FORMAT_VERSION => {
                 InnerClientPlan::Opaque(OpaqueClientPlan::decode(inner_payload)?)
             }
-            EXPRESSION_FORMAT_VERSION => {
+            EXPRESSION_FORMAT_VERSION | INSPECT_FORMAT_VERSION => {
                 InnerClientPlan::Expression(ExpressionClientPlan::decode(inner_payload)?)
             }
             STATE_FORMAT_VERSION => InnerClientPlan::State(StateClientPlan::decode(inner_payload)?),
@@ -1688,6 +1857,20 @@ impl NodeWriter {
     }
 }
 
+fn expression_contains_inspect(node: &ClientExpressionNode) -> bool {
+    match node {
+        ClientExpressionNode::Inspect { operation } => match operation {
+            InspectOperationNode::Snapshot { .. } | InspectOperationNode::Projection { .. } => true,
+        },
+        ClientExpressionNode::Await { expression } => expression_contains_inspect(expression),
+        ClientExpressionNode::Resource { operation } => operation.arguments().iter().any(|(_, value)| expression_contains_inspect(value)),
+        ClientExpressionNode::Action { operation } => operation.arguments().iter().any(|(_, value)| expression_contains_inspect(value)),
+        ClientExpressionNode::Call { arguments, .. } => arguments.iter().any(|(_, value)| expression_contains_inspect(value)),
+        ClientExpressionNode::Concat { left, right } => expression_contains_inspect(left) || expression_contains_inspect(right),
+        ClientExpressionNode::String { .. } | ClientExpressionNode::Integer { .. } | ClientExpressionNode::Boolean { .. } | ClientExpressionNode::ParameterRead { .. } | ClientExpressionNode::LocalRead { .. } | ClientExpressionNode::FieldPath { .. } | ClientExpressionNode::ExternalContract { .. } => false,
+    }
+}
+
 /// Encodes one expression node recursively.
 fn encode_expression_node(
     node: &ClientExpressionNode,
@@ -1697,13 +1880,20 @@ fn encode_expression_node(
 ) -> Result<(), ClientPlanError> {
     let mut resource_count = 0;
     encode_expression_node_with_resources(
-        node,
-        writer,
-        depth,
-        count,
-        false,
-        false,
-        &mut resource_count,
+        node, writer, depth, count, false, false, false, &mut resource_count,
+    )
+}
+
+fn encode_expression_node_with_inspect(
+    node: &ClientExpressionNode,
+    writer: &mut NodeWriter,
+    depth: usize,
+    count: &mut usize,
+    allow_inspect: bool,
+) -> Result<(), ClientPlanError> {
+    let mut resource_count = 0;
+    encode_expression_node_with_resources(
+        node, writer, depth, count, false, false, allow_inspect, &mut resource_count,
     )
 }
 
@@ -1714,6 +1904,7 @@ fn encode_expression_node_with_resources(
     count: &mut usize,
     allow_resources: bool,
     allow_local: bool,
+    allow_inspect: bool,
     resource_count: &mut usize,
 ) -> Result<(), ClientPlanError> {
     if depth > MAX_EXPRESSION_DEPTH {
@@ -1736,6 +1927,7 @@ fn encode_expression_node_with_resources(
                 count,
                 allow_resources,
                 allow_local,
+                allow_inspect,
                 resource_count,
             )?;
         }
@@ -1754,6 +1946,29 @@ fn encode_expression_node_with_resources(
         }
         ClientExpressionNode::Action { .. } => {
             return Err(ClientPlanError::InvalidExpressionNode(NODE_ACTION));
+        }
+        ClientExpressionNode::Inspect { operation } => {
+            if !allow_inspect {
+                return Err(ClientPlanError::InvalidExpressionNode(NODE_INSPECT));
+            }
+            writer.push(NODE_INSPECT);
+            match operation {
+                InspectOperationNode::Snapshot { target, options } => {
+                    writer.push(INSPECT_OPERATION_SNAPSHOT);
+                    encode_expression_node_with_resources(
+                        target, writer, depth + 1, count, allow_resources, allow_local, allow_inspect, resource_count,
+                    )?;
+                    match options {
+                        None => writer.push(0),
+                        Some(_) => return Err(ClientPlanError::UnsupportedInspectOptions),
+                    }
+                }
+                InspectOperationNode::Projection { projection, snapshot } => {
+                    writer.push(INSPECT_OPERATION_PROJECTION);
+                    writer.push(projection.tag());
+                    encode_expression_node_with_resources(snapshot, writer, depth + 1, count, allow_resources, allow_local, allow_inspect, resource_count)?;
+                }
+            }
         }
         ClientExpressionNode::Call {
             function,
@@ -1781,6 +1996,7 @@ fn encode_expression_node_with_resources(
                     count,
                     allow_resources,
                     allow_local,
+                    allow_inspect,
                     resource_count,
                 )?;
             }
@@ -1840,6 +2056,7 @@ fn encode_expression_node_with_resources(
                 count,
                 allow_resources,
                 allow_local,
+                allow_inspect,
                 resource_count,
             )?;
             encode_expression_node_with_resources(
@@ -1849,6 +2066,7 @@ fn encode_expression_node_with_resources(
                 count,
                 allow_resources,
                 allow_local,
+                allow_inspect,
                 resource_count,
             )?;
         }
@@ -1903,6 +2121,7 @@ fn encode_resource_operation(
             count,
             true,
             allow_local,
+            false,
             resource_count,
         )?;
     }
@@ -2210,6 +2429,17 @@ fn validate_procedural_expression(
         ClientExpressionNode::Action { .. } => {
             return Err(ClientPlanError::InvalidExpressionNode(NODE_ACTION));
         }
+        ClientExpressionNode::Inspect { operation } => match operation {
+            InspectOperationNode::Snapshot { target, options } => {
+                if options.is_some() {
+                    return Err(ClientPlanError::UnsupportedInspectOptions);
+                }
+                validate_procedural_expression(target, locals, false, false, true)?;
+            }
+            InspectOperationNode::Projection { snapshot, .. } => {
+                validate_procedural_expression(snapshot, locals, false, false, true)?;
+            }
+        },
     }
     Ok(())
 }
@@ -2261,6 +2491,9 @@ fn validate_resource_await_placement(
         ClientExpressionNode::Action { .. } => {
             return Err(ClientPlanError::InvalidExpressionNode(NODE_ACTION));
         }
+        ClientExpressionNode::Inspect { .. } => {
+            return Err(ClientPlanError::InvalidExpressionNode(NODE_INSPECT));
+        }
     }
     Ok(())
 }
@@ -2271,8 +2504,17 @@ fn decode_expression_node(
     depth: usize,
     count: &mut usize,
 ) -> Result<ClientExpressionNode, ClientPlanError> {
+    decode_expression_node_with_inspect(reader, depth, count, false)
+}
+
+fn decode_expression_node_with_inspect(
+    reader: &mut Reader<'_>,
+    depth: usize,
+    count: &mut usize,
+    allow_inspect: bool,
+) -> Result<ClientExpressionNode, ClientPlanError> {
     let mut resource_count = 0;
-    decode_expression_node_with_resources(reader, depth, count, false, false, &mut resource_count)
+    decode_expression_node_with_resources(reader, depth, count, false, false, allow_inspect, &mut resource_count)
 }
 
 fn decode_expression_node_with_resources(
@@ -2281,6 +2523,7 @@ fn decode_expression_node_with_resources(
     count: &mut usize,
     allow_resources: bool,
     allow_local: bool,
+    allow_inspect: bool,
     resource_count: &mut usize,
 ) -> Result<ClientExpressionNode, ClientPlanError> {
     if depth > MAX_EXPRESSION_DEPTH {
@@ -2303,6 +2546,7 @@ fn decode_expression_node_with_resources(
                     count,
                     allow_resources,
                     allow_local,
+                    allow_inspect,
                     resource_count,
                 )?),
             })
@@ -2321,6 +2565,30 @@ fn decode_expression_node_with_resources(
                 )?,
             })
         }
+        NODE_INSPECT => {
+            if !allow_inspect {
+                return Err(ClientPlanError::InvalidExpressionNode(NODE_INSPECT));
+            }
+            let operation = match reader.u8()? {
+                INSPECT_OPERATION_SNAPSHOT => InspectOperationNode::Snapshot {
+                    target: Box::new(decode_expression_node_with_resources(reader, depth + 1, count, allow_resources, allow_local, allow_inspect, resource_count)?),
+                    options: match reader.u8()? {
+                        0 => None,
+                        1 => return Err(ClientPlanError::UnsupportedInspectOptions),
+                        tag => return Err(ClientPlanError::InvalidInspectOperation(tag)),
+                    },
+                },
+                INSPECT_OPERATION_PROJECTION => {
+                    let projection = InspectProjection::from_tag(reader.u8()?)?;
+                    InspectOperationNode::Projection {
+                        projection,
+                        snapshot: Box::new(decode_expression_node_with_resources(reader, depth + 1, count, allow_resources, allow_local, allow_inspect, resource_count)?),
+                    }
+                }
+                tag => return Err(ClientPlanError::InvalidInspectOperation(tag)),
+            };
+            Ok(ClientExpressionNode::Inspect { operation })
+        }
         NODE_CALL => {
             let function = FunctionId::from_bytes(reader.array()?);
             let length = reader.u32()? as usize;
@@ -2338,6 +2606,7 @@ fn decode_expression_node_with_resources(
                     count,
                     allow_resources,
                     allow_local,
+                    allow_inspect,
                     resource_count,
                 )?;
                 arguments.push((parameter, value));
@@ -2403,6 +2672,7 @@ fn decode_expression_node_with_resources(
                 count,
                 allow_resources,
                 allow_local,
+                allow_inspect,
                 resource_count,
             )?;
             let right = decode_expression_node_with_resources(
@@ -2411,6 +2681,7 @@ fn decode_expression_node_with_resources(
                 count,
                 allow_resources,
                 allow_local,
+                allow_inspect,
                 resource_count,
             )?;
             Ok(ClientExpressionNode::Concat {
@@ -2482,6 +2753,7 @@ fn decode_resource_operation(
             count,
             true,
             allow_local,
+            false,
             resource_count,
         )?;
         arguments.push((parameter, value));
@@ -2515,6 +2787,14 @@ pub enum ClientPlanError {
     },
     /// A version-3 expression node uses an unknown tag.
     InvalidExpressionNode(u8),
+    /// An Inspector operation uses an unknown operation tag.
+    InvalidInspectOperation(u8),
+    /// Inspector snapshot options are outside the structural-only v1 contract.
+    UnsupportedInspectOptions,
+    /// An Inspector projection uses an unknown projection tag.
+    InvalidInspectProjection(u8),
+    /// Version nine must contain at least one Inspector node.
+    InvalidInspectPlan,
     /// A version-3 expression tree exceeds the depth cap.
     ExpressionDepthExceeded,
     /// A version-3 expression tree exceeds the node-count cap.
@@ -2683,6 +2963,16 @@ impl fmt::Display for ClientPlanError {
             Self::InvalidExpressionNode(tag) => {
                 write!(formatter, "invalid client-plan expression node tag {tag}")
             }
+            Self::InvalidInspectOperation(tag) => {
+                write!(formatter, "invalid client-plan Inspector operation tag {tag}")
+            }
+            Self::UnsupportedInspectOptions => {
+                formatter.write_str("typed client-plan Inspector snapshot options are unsupported in v1")
+            }
+            Self::InvalidInspectProjection(tag) => {
+                write!(formatter, "invalid client-plan Inspector projection tag {tag}")
+            }
+            Self::InvalidInspectPlan => formatter.write_str("version-nine client plan contains no Inspector node"),
             Self::ExpressionDepthExceeded => {
                 formatter.write_str("client-plan expression tree exceeds the depth cap")
             }
@@ -3498,6 +3788,150 @@ mod tests {
                 StateDefault::Unset,
             )],
         )
+    }
+
+    #[test]
+    fn inspect_plan_round_trips_all_projections_and_uses_version_nine() {
+        let projections = [
+            InspectProjection::InvocationNodes,
+            InspectProjection::Calls,
+            InspectProjection::Resources,
+            InspectProjection::StateCells,
+            InspectProjection::UiNodes,
+            InspectProjection::PresentationCandidates,
+            InspectProjection::RuntimeBindings,
+            InspectProjection::SecurityDecisions,
+        ];
+        for projection in projections {
+            let plan = ExpressionClientPlan::new(ClientExpressionNode::Inspect {
+                operation: InspectOperationNode::Projection {
+                    projection,
+                    snapshot: Box::new(ClientExpressionNode::Inspect {
+                        operation: InspectOperationNode::Snapshot {
+                            target: Box::new(ClientExpressionNode::ParameterRead {
+                                parameter: ParameterId::from_bytes([0x31; 16]),
+                            }),
+                            options: None,
+                        },
+                    }),
+                },
+            });
+            assert_eq!(plan.format_version(), INSPECT_FORMAT_VERSION);
+            let bytes = plan.encode().expect("inspect plan encodes");
+            assert_eq!(&bytes[..8], &MAGIC);
+            assert_eq!(&bytes[8..12], &INSPECT_FORMAT_VERSION.to_be_bytes());
+            assert_eq!(bytes[12], RETURN_INSPECT_OPERATION);
+            assert_eq!(bytes[13], NODE_INSPECT);
+            assert_eq!(bytes[14], INSPECT_OPERATION_PROJECTION);
+            assert_eq!(ExpressionClientPlan::decode(&bytes), Ok(plan));
+        }
+    }
+
+    #[test]
+    fn inspect_plan_round_trips_structural_default_options() {
+        let plan = ExpressionClientPlan::new(ClientExpressionNode::Inspect {
+            operation: InspectOperationNode::snapshot(ClientExpressionNode::ParameterRead {
+                parameter: ParameterId::from_bytes([0x32; 16]),
+            }),
+        });
+        assert_eq!(ExpressionClientPlan::decode(&plan.encode().unwrap()), Ok(plan));
+    }
+
+    #[test]
+    fn inspect_plan_rejects_unknown_projection_operation_trailing_and_old_version() {
+        let plan = ExpressionClientPlan::new(ClientExpressionNode::Inspect {
+            operation: InspectOperationNode::Projection {
+                projection: InspectProjection::Calls,
+                snapshot: Box::new(ClientExpressionNode::Boolean { value: true }),
+            },
+        });
+        let encoded = plan.encode().expect("inspect plan encodes");
+
+        let mut unknown_projection = encoded.clone();
+        unknown_projection[15] = 0;
+        assert_eq!(
+            ExpressionClientPlan::decode(&unknown_projection),
+            Err(ClientPlanError::InvalidInspectProjection(0))
+        );
+        unknown_projection[15] = 9;
+        assert_eq!(
+            ExpressionClientPlan::decode(&unknown_projection),
+            Err(ClientPlanError::InvalidInspectProjection(9))
+        );
+
+        let mut unknown_operation = encoded.clone();
+        unknown_operation[14] = 3;
+        assert_eq!(
+            ExpressionClientPlan::decode(&unknown_operation),
+            Err(ClientPlanError::InvalidInspectOperation(3))
+        );
+
+        let mut trailing = encoded.clone();
+        trailing.push(0);
+        assert_eq!(
+            ExpressionClientPlan::decode(&trailing),
+            Err(ClientPlanError::TrailingBytes)
+        );
+        assert_eq!(
+            ExpressionClientPlan::decode(&encoded),
+            Ok(plan.clone())
+        );
+        assert_eq!(
+            ClientPlan::decode(&encoded),
+            Err(ClientPlanError::UnsupportedVersion(INSPECT_FORMAT_VERSION))
+        );
+
+        let mut old_version = encoded;
+        old_version[8..12].copy_from_slice(&EXPRESSION_FORMAT_VERSION.to_be_bytes());
+        old_version[12] = RETURN_EXPRESSION_OPERATION;
+        assert_eq!(
+            ExpressionClientPlan::decode(&old_version),
+            Err(ClientPlanError::InvalidExpressionNode(NODE_INSPECT))
+        );
+    }
+
+    #[test]
+    fn inspect_version_nine_requires_an_inspect_node_and_rejects_truncation() {
+        let ordinary = ExpressionClientPlan::new(ClientExpressionNode::Boolean { value: true });
+        let mut noncanonical = ordinary.encode().expect("ordinary plan encodes");
+        noncanonical[8..12].copy_from_slice(&INSPECT_FORMAT_VERSION.to_be_bytes());
+        noncanonical[12] = RETURN_INSPECT_OPERATION;
+        assert_eq!(
+            ExpressionClientPlan::decode(&noncanonical),
+            Err(ClientPlanError::InvalidInspectPlan)
+        );
+
+        let inspect = ExpressionClientPlan::new(ClientExpressionNode::Inspect {
+            operation: InspectOperationNode::Snapshot {
+                target: Box::new(ClientExpressionNode::Boolean { value: false }),
+                options: None,
+            },
+        });
+        let encoded = inspect.encode().expect("inspect plan encodes");
+        for length in 0..encoded.len() {
+            assert_eq!(
+                ExpressionClientPlan::decode(&encoded[..length]),
+                Err(ClientPlanError::Truncated),
+                "prefix length {length} must be truncated"
+            );
+        }
+    }
+
+    #[test]
+    fn inspect_nodes_use_recursive_depth_limits() {
+        let mut node = ClientExpressionNode::Boolean { value: true };
+        for _ in 0..=MAX_EXPRESSION_DEPTH {
+            node = ClientExpressionNode::Inspect {
+                operation: InspectOperationNode::Snapshot {
+                    target: Box::new(node),
+                    options: None,
+                },
+            };
+        }
+        assert_eq!(
+            ExpressionClientPlan::new(node).encode(),
+            Err(ClientPlanError::ExpressionDepthExceeded)
+        );
     }
 
     #[test]
@@ -4748,6 +5182,31 @@ mod tests {
             &InnerClientPlan::Procedural(plan)
         );
     }
+    #[test]
+    fn procedural_plan_round_trips_inspector_operations() {
+        let local = LocalId::from_bytes([0x76; 16]);
+        let parameter = ParameterId::from_bytes([0x77; 16]);
+        let snapshot = ClientExpressionNode::Inspect {
+            operation: InspectOperationNode::snapshot(ClientExpressionNode::ParameterRead { parameter }),
+        };
+        let plan = ProceduralClientPlan::new(
+            vec![ClientLocal::new(
+                local,
+                TypeId::from_bytes([0x78; 16]),
+                ClientLocalKind::Value,
+            )],
+            vec![ClientStatement::let_(local, snapshot)],
+            ClientExpressionNode::Inspect {
+                operation: InspectOperationNode::projection(
+                    InspectProjection::UiNodes,
+                    ClientExpressionNode::LocalRead { local },
+                ),
+            },
+        );
+        let encoded = plan.encode().expect("procedural Inspector plan encodes");
+        assert_eq!(ProceduralClientPlan::decode(&encoded), Ok(plan));
+    }
+
 
     #[test]
     fn procedural_plan_rejects_unknown_locals_and_legacy_local_reads() {
