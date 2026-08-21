@@ -5,14 +5,14 @@ use std::{
     time::Duration,
 };
 
+#[cfg(feature = "test-hooks")]
+use orna_artifact::client_plan::ActionTargetDomain;
 use orna_artifact::client_plan::{
-    ActionTargetDomain, ClientExpressionNode, OPAQUE_FORMAT_VERSION, OpaqueClientPlan,
-    ProceduralClientPlan, ResourceClientPlan,
+    ClientExpressionNode, OPAQUE_FORMAT_VERSION, OpaqueClientPlan, ProceduralClientPlan,
+    ResourceClientPlan,
 };
 use orna_client::{
-    ClientActionError, ClientActionOutcome, ClientActionState, ClientExecutionError,
-    ClientResourceCompletion, ClientResourceExecutor, ClientResourceStatus, ClientStateStore,
-    complete_client_action, decode_action_payload, trigger_client_action,
+    ClientExecutionError, ClientResourceCompletion, ClientResourceExecutor,
     capability::{
         LocalCapabilityArgumentSource, LocalCapabilityDeclaration, LocalCapabilityGrant,
         LocalCapabilityGrantSet, LocalCapabilityName, LocalCapabilityScope,
@@ -20,6 +20,11 @@ use orna_client::{
     ClientResourceRequest, evaluate_client_function,
     evaluate_client_function_with_arguments,
     evaluate_client_function_with_arguments_and_executor, evaluate_client_function_with_grants,
+};
+#[cfg(feature = "test-hooks")]
+use orna_client::{
+    ClientActionError, ClientActionOutcome, ClientActionState, ClientResourceStatus,
+    ClientStateStore, complete_client_action, decode_action_payload, trigger_client_action,
 };
 use orna_compiler::{
     CheckedStandardLibrary, STD_INVOKE_ECHO_FUNCTION_ID, STD_INVOKE_ECHO_FUNCTION_REVISION_ID,
@@ -60,8 +65,10 @@ use orna_core::{
     source::{SourceBundle, SourceUnit},
     system::SYS_INVOKE_FUNCTION_ID,
     types::{ResolvedType, TypeDescriptor},
-    value::{EnumValue, FunctionArgument, OpaqueCodecRegistry, OpaqueValue, RecordValue, RuntimeValue},
+    value::{EnumValue, FunctionArgument, OpaqueValue, RecordValue, RuntimeValue},
 };
+#[cfg(feature = "test-hooks")]
+use orna_core::value::OpaqueCodecRegistry;
 use orna_postgres::{
     AuthenticatedRawCallResult, AuthenticatedServerResourceResult, PostgresKernel,
     ResourceCancellation,
@@ -69,24 +76,29 @@ use orna_postgres::{
     ServerUpdateError,
 };
 use orna_protocol::{
-    CallFailure, Channel, ClientFrame, ConnectionError, Event, MAX_RESOURCE_WINDOW,
-    ProtocolConnection, RawCall, ResourceArgument, ResourceCancel, ResourceCancellationCode,
-    ResourceClientFrame, ResourceKind, ResourceRequest, ResourceServerFrame, ResourceWindowUpdate,
-    ServerAction, ServerFrame,
-    decode_active_server_frame, decode_constructed_server_frame,
-    decode_invocation_event_batch, decode_registered_server_frame, decode_resource_server_frame,
-    decode_server_frame,
-    encode_active_client_frame, encode_active_server_frame, encode_client_frame,
-    encode_constructed_client_frame, encode_constructed_value, encode_invocation_event_batch,
-    encode_invoke_request, encode_registered_client_frame, encode_resource_client_frame,
+    CallFailure, Channel, ClientFrame, ConnectionError, Event, MAX_RESOURCE_WINDOW, ProtocolConnection,
+    RawCall, ResourceArgument, ResourceKind, ResourceRequest, ServerAction, ServerFrame,
+    decode_active_server_frame, decode_constructed_server_frame, decode_invocation_event_batch,
+    decode_registered_server_frame, decode_server_frame, encode_active_client_frame,
+    encode_active_server_frame, encode_client_frame, encode_constructed_client_frame,
+    encode_constructed_value, encode_invocation_event_batch, encode_invoke_request,
+    encode_registered_client_frame,
+};
+#[cfg(feature = "test-hooks")]
+use orna_protocol::{
+    ResourceCancel, ResourceCancellationCode, ResourceClientFrame, ResourceServerFrame,
+    ResourceWindowUpdate, decode_resource_server_frame, encode_resource_client_frame,
     encode_resource_server_frame,
 };
 use orna_server::{
-    InstalledClientResourceExecutor, InstalledInvokeError, InstalledInvokeErrorKind,
-    InstalledInvokeOutcome, InstalledInvokeRequest,
+    InstalledInvokeError, InstalledInvokeErrorKind, InstalledInvokeOutcome, InstalledInvokeRequest,
     LocalAuthenticationError, LocalRawSocketError, LocalRawSocketResources,
-    OpenStandardDatabaseError, RawClientDispatch, RawResourceRequestAuthorizer,
-    open_standard_database, run_invoke_with_kernel, serve_local_raw_stream,
+    OpenStandardDatabaseError, RawClientDispatch, open_standard_database, run_invoke_with_kernel,
+    serve_local_raw_stream,
+};
+#[cfg(feature = "test-hooks")]
+use orna_server::{
+    InstalledClientResourceExecutor, RawResourceRequestAuthorizer,
     serve_local_raw_stream_with_resource_authorizer,
 };
 use orna_standard::{
@@ -112,27 +124,37 @@ mod postgres_test_support;
 use postgres_test_support::{TestDatabase, TestResult, failure, with_test_database};
 
 const RAW_CLIENT_SCHEMA_SOURCE: &str = "CREATE SCHEMA app;\n";
+#[cfg(feature = "test-hooks")]
 struct RecordingInstalledResourceExecutor {
     inner: InstalledClientResourceExecutor,
     execute_count: usize,
     poll_count: usize,
 }
 
+#[cfg(feature = "test-hooks")]
 impl RecordingInstalledResourceExecutor {
     fn new(
         kernel: PostgresKernel,
         session: AuthenticatedSession,
         active: ActiveDatabaseRevision,
         stream: StandardUnixStream,
+        authorizer: RawResourceRequestAuthorizer,
     ) -> Self {
         Self {
-            inner: InstalledClientResourceExecutor::new_with_stream(kernel, session, active, stream),
+            inner: InstalledClientResourceExecutor::new_with_stream_and_resource_authorizer(
+                kernel,
+                session,
+                active,
+                stream,
+                authorizer,
+            ),
             execute_count: 0,
             poll_count: 0,
         }
     }
 }
 
+#[cfg(feature = "test-hooks")]
 impl ClientResourceExecutor for RecordingInstalledResourceExecutor {
     fn execute(&mut self, request: ClientResourceRequest) -> ClientResourceCompletion {
         self.execute_count += 1;
@@ -214,7 +236,9 @@ const RAW_EXPRESSION_CLIENT_FUNCTION_SOURCE: &str = "CREATE SCHEMA expr;\n\
     CREATE CLIENT FUNCTION expr.composed() RETURNS TEXT AS expr.literal() || ' world';\n\
     CREATE EXTERNAL CLIENT FUNCTION expr.external() RETURNS TEXT\n\
     RUNTIME CONTRACT 'expr.runtime@1';\n";
+#[cfg(feature = "test-hooks")]
 const RAW_ACTION_SERVER_SOURCE: &str = "CREATE SCHEMA action_fixture;\n";
+#[cfg(feature = "test-hooks")]
 const RAW_ACTION_CLIENT_SOURCE: &str = "CREATE CLIENT FUNCTION action_fixture.call(p_value INTEGER)\n\
     RETURNS std.Action\n\
     AS std.action.call(\n\
@@ -2043,6 +2067,7 @@ async fn proves_installed_orna_invoke_end_to_end_against_postgres() -> TestResul
     .await
 }
 
+#[cfg(feature = "test-hooks")]
 #[tokio::test]
 #[ignore = "requires the Compose PostgreSQL development service"]
 async fn proves_scalar_client_resource_pending_continues_through_installed_evaluator() -> TestResult<()> {
@@ -2111,16 +2136,19 @@ async fn proves_scalar_client_resource_pending_continues_through_installed_evalu
         let retained = encode_invoke_request(&active, &registry, &request)?;
         let (server, client_stream) = StandardUnixStream::pair()?;
         client_stream.set_nonblocking(true)?;
-        let connection = tokio::spawn(serve_local_raw_stream(
+        let authorizer = RawResourceRequestAuthorizer::new();
+        let connection = tokio::spawn(serve_local_raw_stream_with_resource_authorizer(
             kernel.clone(),
             server,
             LocalRawSocketResources::new(),
+            authorizer.clone(),
         ));
         let mut executor = RecordingInstalledResourceExecutor::new(
             kernel.clone(),
             session.clone(),
             active.clone(),
             client_stream,
+            authorizer,
         );
         let dispatch = kernel
             .dispatch_sealed_sys_invoke_with_resource_executor(
@@ -2492,6 +2520,7 @@ async fn proves_expression_client_functions_through_installed_invoke() -> TestRe
     })
     .await
 }
+#[cfg(feature = "test-hooks")]
 #[tokio::test]
 #[ignore = "requires the Compose PostgreSQL development service"]
 async fn proves_server_action_resource_trigger_through_authenticated_executor() -> TestResult<()> {
@@ -2528,11 +2557,19 @@ async fn proves_server_action_resource_trigger_through_authenticated_executor() 
             .iter()
             .map(|function| SecurityFunctionTarget::application(function.id()))
             .collect::<Vec<_>>();
-        function_targets.push(SecurityFunctionTarget::verified_standard(
-            target,
-            standard.verified_snapshot().revision(),
-            STD_INVOKE_ECHO_FUNCTION_REVISION_ID,
-        ));
+        function_targets.extend(
+            standard
+                .verified_snapshot()
+                .executables()
+                .iter()
+                .map(|executable| {
+                    SecurityFunctionTarget::verified_standard(
+                        executable.function(),
+                        standard.verified_snapshot().revision(),
+                        executable.revision().id(),
+                    )
+                }),
+        );
         let security = SecuritySnapshot::new_with_function_targets_and_local_peer_credentials(
             active.pair(),
             function_targets,
@@ -2585,17 +2622,20 @@ async fn proves_server_action_resource_trigger_through_authenticated_executor() 
         let mut state = ClientStateStore::default();
         let (server, client_stream) = StandardUnixStream::pair()?;
         client_stream.set_nonblocking(true)?;
-        let connection = tokio::spawn(serve_local_raw_stream(
+        let authorizer = RawResourceRequestAuthorizer::new();
+        let connection = tokio::spawn(serve_local_raw_stream_with_resource_authorizer(
             kernel.clone(),
             server,
             LocalRawSocketResources::new(),
+            authorizer.clone(),
         ));
         let mut executor =
-            orna_server::InstalledClientResourceExecutor::new_with_stream(
+            orna_server::InstalledClientResourceExecutor::new_with_stream_and_resource_authorizer(
                 kernel.clone(),
                 session,
                 active.clone(),
                 client_stream,
+                authorizer,
             );
         let action_result = trigger_client_action(
             &active,
@@ -2667,7 +2707,7 @@ async fn proves_server_action_resource_trigger_through_authenticated_executor() 
                     && decision == "allowed"
                     && terminal == "completed"
                     && item_count == Some(1)
-                    && byte_count.is_none(),
+                    && byte_count.is_some(),
                 "SERVER action did not retain its authenticated redacted resource audit evidence",
             )
         }
@@ -2681,6 +2721,7 @@ async fn proves_server_action_resource_trigger_through_authenticated_executor() 
     .await
 }
 
+#[cfg(feature = "test-hooks")]
 #[tokio::test]
 #[ignore = "requires the Compose PostgreSQL development service"]
 async fn proves_server_action_denial_stays_inside_authenticated_resource_trigger() -> TestResult<()> {
@@ -2711,11 +2752,19 @@ async fn proves_server_action_denial_stays_inside_authenticated_resource_trigger
             .iter()
             .map(|function| SecurityFunctionTarget::application(function.id()))
             .collect::<Vec<_>>();
-        function_targets.push(SecurityFunctionTarget::verified_standard(
-            target,
-            standard.verified_snapshot().revision(),
-            STD_INVOKE_ECHO_FUNCTION_REVISION_ID,
-        ));
+        function_targets.extend(
+            standard
+                .verified_snapshot()
+                .executables()
+                .iter()
+                .map(|executable| {
+                    SecurityFunctionTarget::verified_standard(
+                        executable.function(),
+                        standard.verified_snapshot().revision(),
+                        executable.revision().id(),
+                    )
+                }),
+        );
         let security = SecuritySnapshot::new_with_function_targets_and_local_peer_credentials(
             active.pair(),
             function_targets,
@@ -2769,17 +2818,20 @@ async fn proves_server_action_denial_stays_inside_authenticated_resource_trigger
         let mut state = ClientStateStore::default();
         let (server, client_stream) = StandardUnixStream::pair()?;
         client_stream.set_nonblocking(true)?;
-        let connection = tokio::spawn(serve_local_raw_stream(
+        let authorizer = RawResourceRequestAuthorizer::new();
+        let connection = tokio::spawn(serve_local_raw_stream_with_resource_authorizer(
             kernel.clone(),
             server,
             LocalRawSocketResources::new(),
+            authorizer.clone(),
         ));
         let mut executor =
-            orna_server::InstalledClientResourceExecutor::new_with_stream(
+            orna_server::InstalledClientResourceExecutor::new_with_stream_and_resource_authorizer(
                 kernel.clone(),
                 session,
                 active.clone(),
                 client_stream,
+                authorizer,
             );
         let action_result = trigger_client_action(
             &active,
@@ -2813,8 +2865,19 @@ async fn proves_server_action_denial_stays_inside_authenticated_resource_trigger
             "denied SERVER action did not fail closed through the installed executor",
         )?;
         let security_events_after = kernel.recover_security_audit_events().await?;
+        let appended_security_events = security_events_after
+            .get(security_events_before.len()..)
+            .unwrap_or_default();
         require(
-            security_events_after.len() == security_events_before.len() + 1
+            appended_security_events
+                .iter()
+                .filter(|event| {
+                    let decision = event.decision();
+                    decision.kind() == SecurityAuditKind::Execute
+                        && decision.outcome() == SecurityAuditOutcome::Denied
+                })
+                .count()
+                == 1
                 && security_events_after.last().is_some_and(|event| {
                     let decision = event.decision();
                     decision.kind() == SecurityAuditKind::Execute
@@ -2827,8 +2890,8 @@ async fn proves_server_action_denial_stays_inside_authenticated_resource_trigger
                         && decision.effective_principal().is_none()
                         && decision.authorising_principal().is_none()
                 }),
-            "denied SERVER action did not append one redacted EXECUTE denial",
-        )?;
+                "denied SERVER action did not append one redacted EXECUTE denial",
+            )?;
         let invocation_rows_after = invocation_audit_rows(&database).await?;
         require(
             invocation_rows_after.len() == invocation_rows_before.len() + 1
@@ -2867,14 +2930,14 @@ async fn proves_server_action_denial_stays_inside_authenticated_resource_trigger
             let byte_count: Option<i64> = row.try_get("byte_count")?;
             require(
                 parent == parent_invocation_id
-                    && audited_target.is_none()
-                    && source_revision.is_none()
-                    && catalogue_revision.is_none()
+                    && audited_target == Some(target.to_bytes().to_vec())
+                    && source_revision == Some(active.pair().source().to_bytes().to_vec())
+                    && catalogue_revision == Some(active.pair().catalogue().to_bytes().to_vec())
                     && decision == "denied"
                     && terminal == "failed"
                     && item_count.is_none()
                     && byte_count.is_none(),
-                "denied SERVER action executed its target or retained target audit details",
+                "denied SERVER action did not retain its authenticated target identity",
             )
         }
         .await;
@@ -3397,6 +3460,7 @@ async fn installed_invoke_run(
     Ok((outcome, stdout, stderr))
 }
 
+#[cfg(feature = "test-hooks")]
 async fn finish_pending_client_action(
     active: &ActiveDatabaseRevision,
     action_state: &mut ClientActionState,
@@ -5505,9 +5569,10 @@ async fn authenticated_resource_worker_failure_is_compensated_once() -> TestResu
             matches!(
                 worker_failure,
                 Err(PostgresKernelError::Database(source))
-                    if source
-                        .as_db_error()
-                        .is_some_and(|database| database.code() == &SqlState::UNDEFINED_COLUMN)
+                    if source.as_db_error().is_some_and(|database| {
+                        database.code() == &SqlState::UNDEFINED_COLUMN
+                            && database.message().contains("no_such_resource_producer_column")
+                    })
             ),
             "forced producer failure did not preserve the injected undefined-column SQLSTATE",
         )?;
@@ -5520,6 +5585,7 @@ async fn authenticated_resource_worker_failure_is_compensated_once() -> TestResu
                 .query(
                     "SELECT resource.nested_invocation_id,
                             resource.parent_invocation_id,
+                            resource.call_site_id,
                             resource.target_function_id,
                             resource.source_revision_id,
                             resource.catalogue_revision_id,
@@ -5528,7 +5594,16 @@ async fn authenticated_resource_worker_failure_is_compensated_once() -> TestResu
                             resource.terminal_outcome,
                             resource.item_count,
                             resource.byte_count,
-                            invocation.outcome AS invocation_outcome
+                            invocation.outcome AS invocation_outcome,
+                            invocation.session_principal_id AS invocation_session_principal_id,
+                            invocation.effective_principal_id AS invocation_effective_principal_id,
+                            invocation.authorising_principal_id AS invocation_authorising_principal_id,
+                            invocation.function_id AS invocation_function_id,
+                            invocation.source_revision_id AS invocation_source_revision_id,
+                            invocation.catalogue_revision_id AS invocation_catalogue_revision_id,
+                            invocation.security_audit_event_id AS invocation_security_audit_event_id,
+                            row_to_json(resource)::text AS resource_json,
+                            row_to_json(invocation)::text AS invocation_json
                      FROM _orna_kernel.resource_audit_events AS resource
                      JOIN _orna_kernel.invocation_audit_events AS invocation
                        ON invocation.invocation_id = resource.nested_invocation_id
@@ -5540,6 +5615,7 @@ async fn authenticated_resource_worker_failure_is_compensated_once() -> TestResu
             let row = &rows[0];
             let nested_invocation_id: Vec<u8> = row.try_get("nested_invocation_id")?;
             let parent_invocation_id: Vec<u8> = row.try_get("parent_invocation_id")?;
+            let call_site_id: Vec<u8> = row.try_get("call_site_id")?;
             let target_function_id: Option<Vec<u8>> = row.try_get("target_function_id")?;
             let source_revision_id: Option<Vec<u8>> = row.try_get("source_revision_id")?;
             let catalogue_revision_id: Option<Vec<u8>> = row.try_get("catalogue_revision_id")?;
@@ -5549,11 +5625,28 @@ async fn authenticated_resource_worker_failure_is_compensated_once() -> TestResu
             let item_count: Option<i64> = row.try_get("item_count")?;
             let byte_count: Option<i64> = row.try_get("byte_count")?;
             let invocation_outcome: String = row.try_get("invocation_outcome")?;
+            let invocation_session_principal_id: Vec<u8> =
+                row.try_get("invocation_session_principal_id")?;
+            let invocation_effective_principal_id: Option<Vec<u8>> =
+                row.try_get("invocation_effective_principal_id")?;
+            let invocation_authorising_principal_id: Option<Vec<u8>> =
+                row.try_get("invocation_authorising_principal_id")?;
+            let invocation_function_id: Option<Vec<u8>> = row.try_get("invocation_function_id")?;
+            let invocation_source_revision_id: Option<Vec<u8>> =
+                row.try_get("invocation_source_revision_id")?;
+            let invocation_catalogue_revision_id: Option<Vec<u8>> =
+                row.try_get("invocation_catalogue_revision_id")?;
+            let invocation_security_audit_event_id: Option<Vec<u8>> =
+                row.try_get("invocation_security_audit_event_id")?;
+            let resource_json: String = row.try_get("resource_json")?;
+            let invocation_json: String = row.try_get("invocation_json")?;
             require(
                 nested_invocation_id.len() == 16
                     && nested_invocation_id.iter().any(|byte| *byte != 0)
                     && nested_invocation_id != request.request_id.to_bytes().to_vec()
+                    && parent_invocation_id != nested_invocation_id
                     && parent_invocation_id == request.parent_invocation_id.to_bytes().to_vec()
+                    && call_site_id == request.call_site_id.to_bytes().to_vec()
                     && target_function_id.is_none()
                     && source_revision_id.is_none()
                     && catalogue_revision_id.is_none()
@@ -5562,7 +5655,16 @@ async fn authenticated_resource_worker_failure_is_compensated_once() -> TestResu
                     && terminal_outcome == "failed"
                     && item_count.is_none()
                     && byte_count.is_none()
-                    && invocation_outcome == "denied",
+                    && invocation_outcome == "denied"
+                    && invocation_session_principal_id == RAW_CLIENT_USER.to_bytes().to_vec()
+                    && invocation_effective_principal_id.is_none()
+                    && invocation_authorising_principal_id.is_none()
+                    && invocation_function_id.is_none()
+                    && invocation_source_revision_id.is_none()
+                    && invocation_catalogue_revision_id.is_none()
+                    && invocation_security_audit_event_id.is_none()
+                    && !resource_json.contains(RESOURCE_INPUT)
+                    && !invocation_json.contains(RESOURCE_INPUT),
                 "worker compensation exposed target or retained non-redacted audit state",
             )?;
             Ok::<(), Box<dyn Error + Send + Sync>>(())
@@ -5573,6 +5675,245 @@ async fn authenticated_resource_worker_failure_is_compensated_once() -> TestResu
             audit_session.shutdown().await,
             "worker compensation audit",
         )?;
+        let mut post_request = request.clone();
+        post_request.stream_id += 1;
+        post_request.request_id = InvocationId::from_bytes([0xb1; 16]);
+        let post_start = kernel
+            .start_authenticated_server_resource_producer_with_forced_post_acceptance_failure(
+                &session,
+                &post_request,
+                &ResourceCancellation::new(),
+            )
+            .await?;
+        match post_start {
+            orna_postgres::AuthenticatedServerResourceStart::Accepted(producer) => drop(producer),
+            orna_postgres::AuthenticatedServerResourceStart::Failed { .. } => {
+                return Err(failure("forced post-acceptance failure did not publish acceptance"));
+            }
+        }
+        let post_request_bytes = post_request.request_id.to_bytes().to_vec();
+        let post_audit_session = database.open().await?;
+        let post_audit_operation = async {
+            let row = timeout(Duration::from_secs(5), async {
+                loop {
+                    if let Some(row) = post_audit_session
+                        .client()
+                        .query_opt(
+                            "SELECT resource.nested_invocation_id,
+                                    resource.parent_invocation_id,
+                                    resource.call_site_id,
+                                    resource.target_function_id,
+                                    resource.source_revision_id,
+                                    resource.catalogue_revision_id,
+                                    resource.decision_outcome,
+                                    resource.terminal_outcome,
+                                    invocation.outcome AS invocation_outcome,
+                                    invocation.function_id AS invocation_function_id,
+                                    invocation.source_revision_id AS invocation_source_revision_id,
+                                    invocation.catalogue_revision_id AS invocation_catalogue_revision_id,
+                                    row_to_json(resource)::text AS resource_json,
+                                    row_to_json(invocation)::text AS invocation_json
+                             FROM _orna_kernel.resource_audit_events AS resource
+                             JOIN _orna_kernel.invocation_audit_events AS invocation
+                               ON invocation.invocation_id = resource.nested_invocation_id
+                             WHERE resource.request_id = $1",
+                            &[&post_request_bytes],
+                        )
+                        .await?
+                    {
+                        return Ok::<_, tokio_postgres::Error>(row);
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .map_err(|_| failure("post-acceptance worker failure did not leave an audit row"))??;
+            let nested_invocation_id: Vec<u8> = row.try_get("nested_invocation_id")?;
+            let parent_invocation_id: Vec<u8> = row.try_get("parent_invocation_id")?;
+            let call_site_id: Vec<u8> = row.try_get("call_site_id")?;
+            let target_function_id: Option<Vec<u8>> = row.try_get("target_function_id")?;
+            let source_revision_id: Option<Vec<u8>> = row.try_get("source_revision_id")?;
+            let catalogue_revision_id: Option<Vec<u8>> = row.try_get("catalogue_revision_id")?;
+            let decision_outcome: String = row.try_get("decision_outcome")?;
+            let terminal_outcome: String = row.try_get("terminal_outcome")?;
+            let invocation_outcome: String = row.try_get("invocation_outcome")?;
+            let invocation_function_id: Option<Vec<u8>> = row.try_get("invocation_function_id")?;
+            let invocation_source_revision_id: Option<Vec<u8>> =
+                row.try_get("invocation_source_revision_id")?;
+            let invocation_catalogue_revision_id: Option<Vec<u8>> =
+                row.try_get("invocation_catalogue_revision_id")?;
+            let resource_json: String = row.try_get("resource_json")?;
+            let invocation_json: String = row.try_get("invocation_json")?;
+            require(
+                nested_invocation_id.len() == 16
+                    && nested_invocation_id != post_request.request_id.to_bytes().to_vec()
+                    && parent_invocation_id == post_request.parent_invocation_id.to_bytes().to_vec()
+                    && call_site_id == post_request.call_site_id.to_bytes().to_vec()
+                    && target_function_id == Some(target.to_bytes().to_vec())
+                    && source_revision_id == Some(post_request.target_revision.source().to_bytes().to_vec())
+                    && catalogue_revision_id
+                        == Some(post_request.target_revision.catalogue().to_bytes().to_vec())
+                    && decision_outcome == "allowed"
+                    && terminal_outcome == "failed"
+                    && invocation_outcome == "allowed"
+                    && invocation_function_id == Some(target.to_bytes().to_vec())
+                    && invocation_source_revision_id
+                        == Some(post_request.target_revision.source().to_bytes().to_vec())
+                    && invocation_catalogue_revision_id
+                        == Some(post_request.target_revision.catalogue().to_bytes().to_vec())
+                    && !resource_json.contains(RESOURCE_INPUT)
+                    && !invocation_json.contains(RESOURCE_INPUT),
+                "post-acceptance worker failure did not preserve bounded allowed identity evidence",
+            )?;
+            Ok::<(), Box<dyn Error + Send + Sync>>(())
+        }
+        .await;
+        finish_session(
+            post_audit_operation,
+            post_audit_session.shutdown().await,
+            "post-acceptance worker compensation audit",
+        )?;
+        let mut post_audit_request = request.clone();
+        post_audit_request.stream_id += 2;
+        post_audit_request.request_id = InvocationId::from_bytes([0xc1; 16]);
+        let post_audit_result = kernel
+            .start_authenticated_server_resource_producer_with_forced_post_acceptance_audit_failure(
+                &session,
+                &post_audit_request,
+                &ResourceCancellation::new(),
+            )
+            .await?;
+        match post_audit_result {
+            orna_postgres::AuthenticatedServerResourceStart::Failed {
+                stream_id,
+                request_id,
+                failure,
+            } => require(
+                stream_id == post_audit_request.stream_id
+                    && request_id == post_audit_request.request_id
+                    && failure == CallFailure::InternalFailure,
+                "post-acceptance audit failure did not return its redacted failure",
+            )?,
+            orna_postgres::AuthenticatedServerResourceStart::Accepted(_) => {
+                return Err(failure("post-acceptance audit failure was accepted"));
+            }
+        }
+        assert_resource_compensation_audit_row(
+            &database,
+            &post_audit_request,
+            Some(target),
+            "allowed",
+            "failed",
+            "allowed",
+            RESOURCE_INPUT,
+        )
+        .await?;
+
+        let mut post_cancel_request = request.clone();
+        post_cancel_request.stream_id += 3;
+        post_cancel_request.request_id = InvocationId::from_bytes([0xc2; 16]);
+        let post_cancel = ResourceCancellation::new();
+        let post_cancel_result = kernel
+            .start_authenticated_server_resource_producer_with_forced_post_acceptance_cancelled_audit_failure(
+                &session,
+                &post_cancel_request,
+                &post_cancel,
+            )
+            .await?;
+        match post_cancel_result {
+            orna_postgres::AuthenticatedServerResourceStart::Failed {
+                stream_id,
+                request_id,
+                failure,
+            } => require(
+                stream_id == post_cancel_request.stream_id
+                    && request_id == post_cancel_request.request_id
+                    && failure == CallFailure::InternalFailure,
+                "cancelled post-acceptance audit failure did not return its redacted failure",
+            )?,
+            orna_postgres::AuthenticatedServerResourceStart::Accepted(_) => {
+                return Err(failure("cancelled post-acceptance audit failure was accepted"));
+            }
+        }
+        require(
+            post_cancel.is_requested() && !post_cancel.try_begin_commit(),
+            "cancelled post-acceptance audit compensation consumed the cancellation winner",
+        )?;
+        assert_resource_compensation_audit_row(
+            &database,
+            &post_cancel_request,
+            Some(target),
+            "allowed",
+            "cancelled",
+            "allowed",
+            RESOURCE_INPUT,
+        )
+        .await?;
+        let mut cancelled_exit_request = request.clone();
+        cancelled_exit_request.stream_id += 4;
+        cancelled_exit_request.request_id = InvocationId::from_bytes([0xc4; 16]);
+        let cancelled_exit = ResourceCancellation::new();
+        let cancelled_exit_result = kernel
+            .start_authenticated_server_resource_producer_with_forced_post_acceptance_cancelled_exit_audit_failure(
+                &session,
+                &cancelled_exit_request,
+                &cancelled_exit,
+            )
+            .await?;
+        match cancelled_exit_result {
+            orna_postgres::AuthenticatedServerResourceStart::Accepted(producer) => drop(producer),
+            orna_postgres::AuthenticatedServerResourceStart::Failed { .. } => {
+                return Err(failure("cancelled producer exit audit did not publish acceptance"));
+            }
+        }
+        require(
+            cancelled_exit.is_requested() && !cancelled_exit.try_begin_commit(),
+            "cancelled producer exit compensation consumed the cancellation winner",
+        )?;
+        assert_resource_compensation_audit_row(
+            &database,
+            &cancelled_exit_request,
+            Some(target),
+            "allowed",
+            "cancelled",
+            "allowed",
+            RESOURCE_INPUT,
+        )
+        .await?;
+
+        let mut finalizer_cancel_request = request.clone();
+        finalizer_cancel_request.stream_id += 5;
+        finalizer_cancel_request.request_id = InvocationId::from_bytes([0xc3; 16]);
+        let finalizer_cancel = ResourceCancellation::new();
+        require(
+            finalizer_cancel.request_cancel(),
+            "pre-finalizer cancellation did not win the cancellation race",
+        )?;
+        let finalizer_cancel_result = kernel
+            .start_authenticated_server_resource_producer_with_forced_pre_acceptance_failure(
+                &session,
+                &finalizer_cancel_request,
+                &finalizer_cancel,
+            )
+            .await;
+        require(
+            finalizer_cancel_result.is_err(),
+            "pre-finalizer cancellation unexpectedly returned a public failure value",
+        )?;
+        require(
+            finalizer_cancel.is_requested() && !finalizer_cancel.try_begin_commit(),
+            "finalizer cancellation compensation consumed the cancellation winner",
+        )?;
+        assert_resource_compensation_audit_row(
+            &database,
+            &finalizer_cancel_request,
+            None,
+            "denied",
+            "cancelled",
+            "denied",
+            RESOURCE_INPUT,
+        )
+        .await?;
 
         let duplicate = kernel
             .start_authenticated_server_resource_producer_with_forced_pre_acceptance_failure(
@@ -5601,12 +5942,28 @@ async fn authenticated_resource_worker_failure_is_compensated_once() -> TestResu
             let row = count_session
                 .client()
                 .query_one(
-                    "SELECT count(*) FROM _orna_kernel.resource_audit_events WHERE request_id = $1",
+                    "SELECT
+                         (SELECT count(*)
+                            FROM _orna_kernel.resource_audit_events
+                           WHERE request_id = $1) AS resource_count,
+                         (SELECT count(*)
+                            FROM _orna_kernel.resource_audit_events AS resource
+                            JOIN _orna_kernel.invocation_audit_events AS invocation
+                              ON invocation.invocation_id = resource.nested_invocation_id
+                           WHERE resource.request_id = $1) AS invocation_count,
+                         (SELECT count(*)
+                            FROM _orna_kernel.resource_request_history
+                           WHERE request_id = $1) AS history_count",
                     &[&request_bytes],
                 )
                 .await?;
-            let count: i64 = row.try_get(0)?;
-            require(count == 1, "duplicate resource request inserted a second terminal audit row")
+            let resource_count: i64 = row.try_get("resource_count")?;
+            let invocation_count: i64 = row.try_get("invocation_count")?;
+            let history_count: i64 = row.try_get("history_count")?;
+            require(
+                resource_count == 1 && invocation_count == 1 && history_count == 1,
+                "duplicate resource request inserted extra resource, invocation, or history rows",
+            )
         }
         .await;
         finish_session(
@@ -5617,6 +5974,123 @@ async fn authenticated_resource_worker_failure_is_compensated_once() -> TestResu
         require_no_database_sessions(&database).await
     })
     .await
+}
+
+async fn assert_resource_compensation_audit_row(
+    database: &TestDatabase,
+    request: &ResourceRequest,
+    expected_target: Option<FunctionId>,
+    expected_decision: &str,
+    expected_terminal: &str,
+    expected_invocation_outcome: &str,
+    raw_marker: &str,
+) -> TestResult<()> {
+    let request_bytes = request.request_id.to_bytes().to_vec();
+    let audit_session = database.open().await?;
+    let audit_operation = async {
+        let row = timeout(Duration::from_secs(5), async {
+            loop {
+                if let Some(row) = audit_session
+                    .client()
+                    .query_opt(
+                        "SELECT resource.nested_invocation_id,
+                                resource.parent_invocation_id,
+                                resource.call_site_id,
+                                resource.target_function_id,
+                                resource.source_revision_id,
+                                resource.catalogue_revision_id,
+                                resource.session_principal_id,
+                                resource.decision_outcome,
+                                resource.terminal_outcome,
+                                invocation.outcome AS invocation_outcome,
+                                invocation.session_principal_id AS invocation_session_principal_id,
+                                invocation.effective_principal_id AS invocation_effective_principal_id,
+                                invocation.authorising_principal_id AS invocation_authorising_principal_id,
+                                invocation.function_id AS invocation_function_id,
+                                invocation.source_revision_id AS invocation_source_revision_id,
+                                invocation.catalogue_revision_id AS invocation_catalogue_revision_id,
+                                invocation.security_audit_event_id AS invocation_security_audit_event_id,
+                                row_to_json(resource)::text AS resource_json,
+                                row_to_json(invocation)::text AS invocation_json
+                         FROM _orna_kernel.resource_audit_events AS resource
+                         JOIN _orna_kernel.invocation_audit_events AS invocation
+                           ON invocation.invocation_id = resource.nested_invocation_id
+                         WHERE resource.request_id = $1",
+                        &[&request_bytes],
+                    )
+                    .await?
+                {
+                    return Ok::<_, tokio_postgres::Error>(row);
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .map_err(|_| failure("resource compensation did not leave its audit row"))??;
+        let nested_invocation_id: Vec<u8> = row.try_get("nested_invocation_id")?;
+        let parent_invocation_id: Vec<u8> = row.try_get("parent_invocation_id")?;
+        let call_site_id: Vec<u8> = row.try_get("call_site_id")?;
+        let target_function_id: Option<Vec<u8>> = row.try_get("target_function_id")?;
+        let source_revision_id: Option<Vec<u8>> = row.try_get("source_revision_id")?;
+        let catalogue_revision_id: Option<Vec<u8>> = row.try_get("catalogue_revision_id")?;
+        let session_principal_id: Vec<u8> = row.try_get("session_principal_id")?;
+        let decision_outcome: String = row.try_get("decision_outcome")?;
+        let terminal_outcome: String = row.try_get("terminal_outcome")?;
+        let invocation_outcome: String = row.try_get("invocation_outcome")?;
+        let invocation_session_principal_id: Vec<u8> =
+            row.try_get("invocation_session_principal_id")?;
+        let invocation_effective_principal_id: Option<Vec<u8>> =
+            row.try_get("invocation_effective_principal_id")?;
+        let invocation_authorising_principal_id: Option<Vec<u8>> =
+            row.try_get("invocation_authorising_principal_id")?;
+        let invocation_function_id: Option<Vec<u8>> = row.try_get("invocation_function_id")?;
+        let invocation_source_revision_id: Option<Vec<u8>> =
+            row.try_get("invocation_source_revision_id")?;
+        let invocation_catalogue_revision_id: Option<Vec<u8>> =
+            row.try_get("invocation_catalogue_revision_id")?;
+        let invocation_security_audit_event_id: Option<Vec<u8>> =
+            row.try_get("invocation_security_audit_event_id")?;
+        let resource_json: String = row.try_get("resource_json")?;
+        let invocation_json: String = row.try_get("invocation_json")?;
+        let target_bytes = expected_target.map(|target| target.to_bytes().to_vec());
+        let source_bytes = expected_target.map(|_| request.target_revision.source().to_bytes().to_vec());
+        let catalogue_bytes =
+            expected_target.map(|_| request.target_revision.catalogue().to_bytes().to_vec());
+        let principal_bytes = RAW_CLIENT_USER.to_bytes().to_vec();
+        require(
+            nested_invocation_id.len() == 16
+                && nested_invocation_id != request.request_id.to_bytes().to_vec()
+                && parent_invocation_id != nested_invocation_id
+                && parent_invocation_id == request.parent_invocation_id.to_bytes().to_vec()
+                && call_site_id == request.call_site_id.to_bytes().to_vec()
+                && target_function_id == target_bytes
+                && source_revision_id == source_bytes
+                && catalogue_revision_id == catalogue_bytes
+                && session_principal_id == principal_bytes
+                && decision_outcome == expected_decision
+                && terminal_outcome == expected_terminal
+                && invocation_outcome == expected_invocation_outcome
+                && invocation_session_principal_id == principal_bytes
+                && invocation_effective_principal_id
+                    == expected_target.map(|_| RAW_CLIENT_USER.to_bytes().to_vec())
+                && invocation_authorising_principal_id
+                    == expected_target.map(|_| RAW_CLIENT_USER.to_bytes().to_vec())
+                && invocation_function_id == target_bytes
+                && invocation_source_revision_id == source_bytes
+                && invocation_catalogue_revision_id == catalogue_bytes
+                && invocation_security_audit_event_id.is_some() == expected_target.is_some()
+                && !resource_json.contains(raw_marker)
+                && !invocation_json.contains(raw_marker),
+            "resource compensation changed bounded identity, audit, or redaction evidence",
+        )?;
+        Ok::<(), Box<dyn Error + Send + Sync>>(())
+    }
+    .await;
+    finish_session(
+        audit_operation,
+        audit_session.shutdown().await,
+        "resource compensation audit",
+    )
 }
 
 #[tokio::test]
@@ -5743,9 +6217,11 @@ async fn direct_scalar_resource_holds_active_revision_lock_through_execution() -
                     .query_one(
                         "SELECT EXISTS (
                              SELECT 1
-                             FROM pg_locks
-                             WHERE relation = '_orna_kernel.active_revision'::regclass
-                               AND NOT granted
+                             FROM pg_stat_activity AS waiting
+                            WHERE waiting.pid <> pg_backend_pid()
+                              AND waiting.wait_event_type = 'Lock'
+                              AND waiting.query LIKE '%_orna_kernel.active_revision%'
+                              AND cardinality(pg_blocking_pids(waiting.pid)) > 0
                          )",
                         &[],
                     )
@@ -5816,6 +6292,7 @@ async fn direct_scalar_resource_holds_active_revision_lock_through_execution() -
     .await
 }
 
+#[cfg(feature = "test-hooks")]
 #[tokio::test]
 #[ignore = "requires the Compose PostgreSQL development service"]
 async fn installed_resource_socket_delivers_values_and_enforces_windows_and_grants() -> TestResult<()> {
@@ -10081,8 +10558,10 @@ async fn require_invalid_local_raw_hello(
         "invalid protocol-5 hello did not close at the public handshake boundary",
     )
 }
+#[cfg(feature = "test-hooks")]
 const RESOURCE_WIRE_HEADER_LENGTH: usize = 21;
 
+#[cfg(feature = "test-hooks")]
 async fn read_resource_server_frame_with_encoded(
     stream: &mut UnixStream,
     active: &ActiveDatabaseRevision,
@@ -10100,6 +10579,7 @@ async fn read_resource_server_frame_with_encoded(
     Ok((encoded, frame))
 }
 
+#[cfg(feature = "test-hooks")]
 async fn read_resource_server_frame_from_socket(
     stream: &mut UnixStream,
     active: &ActiveDatabaseRevision,
@@ -10110,6 +10590,7 @@ async fn read_resource_server_frame_from_socket(
         .1)
 }
 
+#[cfg(feature = "test-hooks")]
 async fn send_resource_client_frame_to_socket(
     stream: &mut UnixStream,
     active: &ActiveDatabaseRevision,
@@ -10122,6 +10603,7 @@ async fn send_resource_client_frame_to_socket(
 }
 
 
+#[cfg(feature = "test-hooks")]
 fn exact_resource_value_bytes(
     active: &ActiveDatabaseRevision,
     registry: &OpaqueCodecRegistry,
@@ -10608,6 +11090,7 @@ async fn install_expression_client_fixture(
         .ok_or_else(|| failure("expression CLIENT fixture is missing expr.external"))?;
     Ok((active, literal, composed, external))
 }
+#[cfg(feature = "test-hooks")]
 async fn install_action_client_fixture(
     kernel: &PostgresKernel,
     active: &orna_core::revision::ActiveDatabaseRevision,
@@ -11145,6 +11628,7 @@ async fn security_audit_count(database: &TestDatabase) -> TestResult<i64> {
     finish_session(operation, session.shutdown().await, "security audit count")
 }
 
+#[cfg(feature = "test-hooks")]
 async fn assert_resource_audit_rows(
     database: &TestDatabase,
     active: &ActiveDatabaseRevision,
@@ -11258,6 +11742,7 @@ async fn require_no_database_sessions(database: &TestDatabase) -> TestResult<()>
 }
 
 /// Builds one complete checked `sys.invoke` Request for a no-argument scalar CLIENT fixture.
+#[cfg(feature = "test-hooks")]
 fn sealed_scalar_resource_request(client: FunctionId) -> TestResult<InvokeRequest> {
     Ok(InvokeRequest::new(InvokeRequestInput {
         target: InvocationRequestTarget::function_id(client),
