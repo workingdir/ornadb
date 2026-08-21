@@ -5471,7 +5471,7 @@ fn decode_inspect_snapshot_target_row(
     row: &[u8],
     epoch_id: u64,
 ) -> Result<InvocationId, ClientInspectError> {
-    if row.len() < 84 || row[0] != INSPECT_SNAPSHOT_ROW_TAG || row[1..9] != [0; 8] {
+    if row.len() < 68 || row[0] != INSPECT_SNAPSHOT_ROW_TAG || row[1..9] != [0; 8] {
         return Err(inspect_carrier_error("inspect.malformed_carrier"));
     }
     if u64::from_be_bytes(row[17..25].try_into().expect("snapshot epoch width")) != epoch_id {
@@ -5481,7 +5481,7 @@ fn decode_inspect_snapshot_target_row(
     if target.to_bytes() == [0; 16] {
         return Err(inspect_carrier_error("inspect.invalid_target"));
     }
-    let mut offset = 73;
+    let mut offset = 57;
     let outcome = *row.get(offset).ok_or_else(|| inspect_carrier_error("inspect.malformed_carrier"))?;
     if !(1..=4).contains(&outcome) {
         return Err(inspect_carrier_error("inspect.malformed_carrier"));
@@ -7104,13 +7104,12 @@ mod tests {
     }
 
     #[test]
-    fn inspect_snapshot_row_binding_rejects_epoch_mismatch_and_preserves_target() {
+    fn inspect_snapshot_row_binding_rejects_epoch_mismatch_and_trailing_bytes() {
         let target = super::InvocationId::from_bytes([0x17; 16]);
         let mut row = vec![1, 0, 0, 0, 0, 0, 0, 0, 0];
         row.extend_from_slice(&[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 7]);
         row.extend_from_slice(&target.to_bytes());
         row.extend_from_slice(&[0x18; 16]);
-        row.extend_from_slice(&[0x19; 16]);
         row.push(1);
         row.extend_from_slice(&0_u64.to_be_bytes());
         row.push(0);
@@ -7119,6 +7118,11 @@ mod tests {
         assert_eq!(
             super::decode_inspect_snapshot_target_row(&row, 8),
             Err(super::ClientInspectError::Failed("inspect.epoch_mismatch".to_owned()))
+        );
+        row.extend_from_slice(&[0x19; 16]);
+        assert_eq!(
+            super::decode_inspect_snapshot_target_row(&row, 7),
+            Err(super::ClientInspectError::Failed("inspect.malformed_carrier".to_owned()))
         );
     }
 
