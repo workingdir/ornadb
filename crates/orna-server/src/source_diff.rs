@@ -387,8 +387,8 @@ fn render_change(
         SemanticChange::ObjectTypeDropped { name, .. } => {
             let _ = write!(line, "- object type {name}");
         }
-        SemanticChange::ObjectTypeRenamed { from, to, .. } => {
-            let _ = write!(line, "~ object type {from} -> {to}");
+        SemanticChange::ObjectTypeRenamed { id, from, to } => {
+            let _ = write!(line, "~ object type {from} -> {to} [{}]", id.canonical());
         }
         SemanticChange::FieldAdded {
             owner, name, id, ..
@@ -409,13 +409,13 @@ fn render_change(
             let _ = write!(line, "- field {owner}.{name} [{id:?}]");
         }
         SemanticChange::FieldRenamed {
-            owner, from, to, ..
+            owner, id, from, to,
         } => {
             let owner = candidate
                 .object_type_by_id(*owner)
                 .map(|definition| qualified(definition.name()))
                 .unwrap_or_else(|| owner.canonical());
-            let _ = write!(line, "~ field {owner}.{from} -> {owner}.{to}");
+            let _ = write!(line, "~ field {owner}.{from} -> {owner}.{to} [{}]", id.canonical());
         }
         SemanticChange::EnumTypeAdded { name, .. } => {
             let _ = write!(line, "+ enum type {name}");
@@ -432,8 +432,8 @@ fn render_change(
         SemanticChange::FunctionDropped { name, .. } => {
             let _ = write!(line, "- function {name}");
         }
-        SemanticChange::FunctionRenamed { from, to, .. } => {
-            let _ = write!(line, "~ function {from} -> {to}");
+        SemanticChange::FunctionRenamed { id, from, to } => {
+            let _ = write!(line, "~ function {from} -> {to} [{}]", id.canonical());
         }
         SemanticChange::ParameterAdded {
             owner, name, id, ..
@@ -454,13 +454,13 @@ fn render_change(
             let _ = write!(line, "- parameter {owner}.{name} [{id:?}]");
         }
         SemanticChange::ParameterRenamed {
-            owner, from, to, ..
+            owner, id, from, to,
         } => {
             let owner = candidate
                 .function_by_id(*owner)
                 .map(|definition| qualified(definition.name()))
                 .unwrap_or_else(|| owner.canonical());
-            let _ = write!(line, "~ parameter {owner}.{from} -> {owner}.{to}");
+            let _ = write!(line, "~ parameter {owner}.{from} -> {owner}.{to} [{}]", id.canonical());
         }
         SemanticChange::FieldTypeChanged {
             owner, name, id, ..
