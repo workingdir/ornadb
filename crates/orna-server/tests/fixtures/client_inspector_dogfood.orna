@@ -1,6 +1,6 @@
-CREATE SCHEMA devtools;
+CREATE SCHEMA inspector_app;
 
-CREATE EXTERNAL CLIENT FUNCTION devtools.inspector_shell(
+CREATE EXTERNAL CLIENT FUNCTION inspector_app.inspector_renderer(
     p_snapshot sys.inspect.snapshot,
     p_invocation_nodes sys.inspect.invocation_nodes,
     p_calls sys.inspect.calls,
@@ -11,9 +11,9 @@ CREATE EXTERNAL CLIENT FUNCTION devtools.inspector_shell(
     p_runtime_bindings sys.inspect.runtime_bindings,
     p_security_decisions sys.inspect.security_decisions
 ) RETURNS std.ui.UI
-RUNTIME CONTRACT 'devtools.inspector_shell@1';
+RUNTIME CONTRACT 'std.inspect.render@1';
 
-CREATE CLIENT FUNCTION devtools.inspector(p_target REF sys.inspect.invocation)
+CREATE CLIENT FUNCTION inspector_app.inspector(p_target REF sys.inspect.invocation)
 RETURNS std.ui.UI IS
 LET snapshot sys.inspect.snapshot := sys.inspect.snapshot(p_target => p_target);
 LET invocation_nodes sys.inspect.invocation_nodes :=
@@ -31,7 +31,7 @@ LET runtime_bindings sys.inspect.runtime_bindings :=
 LET security_decisions sys.inspect.security_decisions :=
     sys.inspect.security_decisions(p_snapshot => snapshot);
 BEGIN
-    RETURN devtools.inspector_shell(
+    RETURN inspector_app.inspector_renderer(
         p_snapshot => snapshot,
         p_invocation_nodes => invocation_nodes,
         p_calls => calls,

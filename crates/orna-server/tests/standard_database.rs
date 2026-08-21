@@ -12490,21 +12490,21 @@ async fn proves_ordinary_client_inspector_through_installed_evaluator() -> TestR
             .apply(&prepare_standard_application(&report, active.pair(), &active)?)
             .await
             .map_err(|error| failure(format!("ordinary Inspector source install failed: {error:?}")))?;
-        let inspector_shell = active
+        let inspector_renderer = active
             .catalogue()
             .functions()
             .iter()
-            .find(|function| function.name().parts() == ["devtools", "inspector_shell"])
-            .ok_or_else(|| failure("installed Inspector shell function is missing"))?;
+            .find(|function| function.name().parts() == ["inspector_app", "inspector_renderer"])
+            .ok_or_else(|| failure("installed Inspector renderer function is missing"))?;
         require(
             matches!(
-                inspector_shell.return_type(),
+                inspector_renderer.return_type(),
                 FunctionReturn::Single(ResolvedType::Value(type_id))
                     if *type_id == orna_standard::STD_UI_TYPE_ID
             ),
-            "installed Inspector shell return type did not retain the sealed UI value identity",
+            "installed Inspector renderer return type did not retain the sealed UI value identity",
         )?;
-        let expected_shell_parameters = [
+        let expected_renderer_parameters = [
             ("p_snapshot", SYS_INSPECT_SNAPSHOT_TYPE_ID),
             ("p_invocation_nodes", SYS_INSPECT_INVOCATION_NODES_TYPE_ID),
             ("p_calls", SYS_INSPECT_CALLS_TYPE_ID),
@@ -12519,23 +12519,23 @@ async fn proves_ordinary_client_inspector_through_installed_evaluator() -> TestR
             ("p_security_decisions", SYS_INSPECT_SECURITY_DECISIONS_TYPE_ID),
         ];
         require(
-            inspector_shell.parameters().len() == expected_shell_parameters.len()
-                && inspector_shell
+            inspector_renderer.parameters().len() == expected_renderer_parameters.len()
+                && inspector_renderer
                     .parameters()
                     .iter()
-                    .zip(expected_shell_parameters)
+                    .zip(expected_renderer_parameters)
                     .all(|(parameter, (name, type_id))| {
                         parameter.name() == name
                             && parameter.resolved_type() == ResolvedType::Value(type_id)
                     }),
-            "installed Inspector shell parameters did not retain sealed value identities",
+            "installed Inspector renderer parameters did not retain sealed value identities",
         )?;
 
         let inspector = active
             .catalogue()
             .functions()
             .iter()
-            .find(|function| function.name().parts() == ["devtools", "inspector"])
+            .find(|function| function.name().parts() == ["inspector_app", "inspector"])
             .ok_or_else(|| failure("installed ordinary Inspector function is missing"))?;
         let inspector_parameter = inspector
             .parameter_by_name("p_target")
@@ -12739,7 +12739,7 @@ async fn proves_ordinary_client_inspector_through_installed_evaluator() -> TestR
                                     if value.opaque_type() == expected_kind.type_id()
                             )
                     }),
-            "ordinary Inspector did not deliver the complete ordered nine-carrier set to the helper",
+            "ordinary Inspector did not deliver the complete ordered nine-carrier set to the renderer",
         )?;
         let mut shared_server_epoch = None;
         let mut observed_row_counts = Vec::with_capacity(expected_carrier_kinds.len());
