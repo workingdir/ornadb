@@ -32,12 +32,25 @@ use std::{
     time::Duration,
 };
 
-use orna_client::{ClientExternalContractRequest, ClientInspectOperation, ClientInspectRequest, ClientResourceCompletion, ClientResourceExecutor, ClientResourceRequest};
-use orna_core::inspect::{CallRow, InspectInvocationNodeKind, InspectInvocationPhase, InspectOutcomeKind, InspectPrivilege, InspectResourceKind, InspectResourceStatus, InspectResultSummary, InspectSecurityDecisionKind, InspectSecurityDecisionOutcome, InvocationNodeRow, PresentationCandidateRow, ResourceRow, RuntimeBindingRow, SecurityDecisionRow, StateCellRow, UiNodeRow};
-use orna_core::inspect_carrier::{InspectCarrierEnvelope, InspectCarrierKind, InspectCarrierProvenance};
+use orna_client::{
+    ClientExternalContractRequest, ClientInspectOperation, ClientInspectRequest,
+    ClientResourceCompletion, ClientResourceExecutor, ClientResourceRequest,
+};
+use orna_core::inspect::{
+    CallRow, InspectInvocationNodeKind, InspectInvocationPhase, InspectOutcomeKind,
+    InspectPrivilege, InspectResourceKind, InspectResourceStatus, InspectResultSummary,
+    InspectSecurityDecisionKind, InspectSecurityDecisionOutcome, InvocationNodeRow,
+    PresentationCandidateRow, ResourceRow, RuntimeBindingRow, SecurityDecisionRow, StateCellRow,
+    UiNodeRow,
+};
+use orna_core::inspect_carrier::{
+    InspectCarrierEnvelope, InspectCarrierKind, InspectCarrierProvenance,
+};
 use orna_core::{
     FunctionRevisionId, InspectEpochId, InvocationId, TypeId,
-    catalogue::{FunctionDefinition, FunctionDomain, FunctionReturn, QualifiedSemanticName, ValueTypeKind},
+    catalogue::{
+        FunctionDefinition, FunctionDomain, FunctionReturn, QualifiedSemanticName, ValueTypeKind,
+    },
     invocation::InvocationCarrierConstructionError,
     invocation::{
         InvocationArgument, InvocationCallerContext, InvocationCallerKind, InvocationClientOffer,
@@ -49,13 +62,21 @@ use orna_core::{
     invocation_binding::{CliArgumentInput, bind_cli_arguments},
     revision::{ActiveDatabaseRevision, VerifiedStandardLibrarySnapshot},
     security::AuthenticatedSession,
-    system::{SYS_INSPECT_CALLS_TYPE_ID, SYS_INSPECT_INVOCATION_NODES_TYPE_ID, SYS_INSPECT_INVOCATION_TYPE_ID, SYS_INSPECT_PRESENTATION_CANDIDATES_TYPE_ID, SYS_INSPECT_RESOURCES_TYPE_ID, SYS_INSPECT_RUNTIME_BINDINGS_TYPE_ID, SYS_INSPECT_SECURITY_DECISIONS_TYPE_ID, SYS_INSPECT_SNAPSHOT_TYPE_ID, SYS_INSPECT_STATE_CELLS_TYPE_ID, SYS_INSPECT_UI_NODES_TYPE_ID, SYS_INVOKE_FUNCTION_ID},
+    system::{
+        SYS_INSPECT_CALLS_TYPE_ID, SYS_INSPECT_INVOCATION_NODES_TYPE_ID,
+        SYS_INSPECT_INVOCATION_TYPE_ID, SYS_INSPECT_PRESENTATION_CANDIDATES_TYPE_ID,
+        SYS_INSPECT_RESOURCES_TYPE_ID, SYS_INSPECT_RUNTIME_BINDINGS_TYPE_ID,
+        SYS_INSPECT_SECURITY_DECISIONS_TYPE_ID, SYS_INSPECT_SNAPSHOT_TYPE_ID,
+        SYS_INSPECT_STATE_CELLS_TYPE_ID, SYS_INSPECT_UI_NODES_TYPE_ID, SYS_INVOKE_FUNCTION_ID,
+    },
     types::{ResolvedType, StandardScalar, TypeDescriptor, TypeDescriptorKind},
-    value::{ConstructedValueKind, OpaqueCodecRegistry, OpaqueValue, OpaqueValueError, RuntimeValue},
+    value::{
+        ConstructedValueKind, OpaqueCodecRegistry, OpaqueValue, OpaqueValueError, RuntimeValue,
+    },
 };
 use orna_postgres::{
-    AuthenticatedServerResourceEvent, AuthenticatedServerResourceStart, PostgresKernel, PostgresKernelError,
-    ResourceCancellation, ResourceCredit, SealedInvocationResult,
+    AuthenticatedServerResourceEvent, AuthenticatedServerResourceStart, PostgresKernel,
+    PostgresKernelError, ResourceCancellation, ResourceCredit, SealedInvocationResult,
 };
 use orna_protocol::{
     CallFailure, Channel, ClientFrame, Event, InvocationEventRecord, MAX_CHANNEL_WINDOW,
@@ -64,9 +85,8 @@ use orna_protocol::{
     ResourceKind as ProtocolResourceKind, ResourceProtocolConnection, ResourceRequest,
     ResourceServerFrame, ResourceWindowUpdate, ServerFrame,
     decode_constructed_invocation_event_frame, decode_constructed_server_frame,
-    decode_constructed_value,
-    decode_resource_server_frame, encode_constructed_client_frame, encode_constructed_value,
-    encode_invoke_request, encode_resource_client_frame,
+    decode_constructed_value, decode_resource_server_frame, encode_constructed_client_frame,
+    encode_constructed_value, encode_invoke_request, encode_resource_client_frame,
 };
 use orna_standard::{
     BINARY_LARGE_OBJECT_TYPE_ID, STD_IO_BYTE_STREAM_TYPE_ID, STD_TERMINAL_DOCUMENT_TYPE_ID,
@@ -320,7 +340,6 @@ struct AuthenticatedResourceTransport {
     transport: PersistentResourceTransport,
 }
 
-
 enum ResourceTransportSource {
     Authenticated(AuthenticatedResourceTransport),
     Injected(InjectedResourceTransport),
@@ -373,7 +392,6 @@ impl Default for RawResourceRequestAuthorizer {
     }
 }
 
-
 enum BrokerCommand {
     StartRoot {
         request: orna_protocol::RetainedInvokeRequest,
@@ -414,8 +432,7 @@ struct BrokerResourceState {
 }
 
 type BrokerResourceTombstones = BTreeMap<u64, orna_core::InvocationId>;
-type BrokerResourceExpectations =
-    std::sync::Arc<std::sync::Mutex<BTreeMap<u64, ResourceRequest>>>;
+type BrokerResourceExpectations = std::sync::Arc<std::sync::Mutex<BTreeMap<u64, ResourceRequest>>>;
 
 const BROKER_RESOURCE_EXPECTATION_LOCK: &str = "broker resource expectation lock";
 
@@ -432,10 +449,7 @@ impl SharedInvokeBroker {
         true
     }
 
-    pub(crate) fn take_expected_resource_request(
-        &self,
-        request: &ResourceRequest,
-    ) -> bool {
+    pub(crate) fn take_expected_resource_request(&self, request: &ResourceRequest) -> bool {
         let mut expectations = self
             .resource_expectations
             .lock()
@@ -464,7 +478,6 @@ impl SharedInvokeBroker {
             .clear();
     }
 }
-
 
 enum InjectedResourceTransport {
     /// A compatibility stream used by focused transport tests.
@@ -704,11 +717,14 @@ impl InstalledClientResourceExecutor {
             if let Some(pending) = self.broker_pending.as_mut()
                 && !pending.cancel_requested
             {
-                let _ = pending.control.commands.send(BrokerCommand::CancelResource {
-                    stream_id: pending.stream_id,
-                    request_id: pending.request.request_id(),
-                    reason: ResourceCancellationCode::ParentInvocationCancelled,
-                });
+                let _ = pending
+                    .control
+                    .commands
+                    .send(BrokerCommand::CancelResource {
+                        stream_id: pending.stream_id,
+                        request_id: pending.request.request_id(),
+                        reason: ResourceCancellationCode::ParentInvocationCancelled,
+                    });
                 pending.cancel_requested = true;
             }
         }
@@ -738,19 +754,63 @@ impl InstalledClientResourceExecutor {
 
 const DEVTOOLS_INSPECTOR_SHELL_CONTRACT: &str = "devtools.inspector_shell@1";
 const INSPECT_SNAPSHOT_ROW_TAG: u8 = 1;
+/// Typed marker used in a classified row field when its classifier is absent.
+///
+/// Length-delimited text fields use this value in place of their u32 byte
+/// length; optional fields use it in place of their presence byte. The value
+/// is outside the ordinary field domain and therefore cannot be mistaken for
+/// a caller-provided classified value.
+const INSPECT_REDACTED_FIELD_TAG: u8 = 2;
+const INSPECT_REDACTED_TEXT_LENGTH: u32 = u32::MAX;
 
 const INSPECTOR_CARRIER_SIGNATURE: [(&str, TypeId, InspectCarrierKind); 9] = [
-    ("p_snapshot", SYS_INSPECT_SNAPSHOT_TYPE_ID, InspectCarrierKind::Snapshot),
-    ("p_invocation_nodes", SYS_INSPECT_INVOCATION_NODES_TYPE_ID, InspectCarrierKind::InvocationNodes),
-    ("p_calls", SYS_INSPECT_CALLS_TYPE_ID, InspectCarrierKind::Calls),
-    ("p_resources", SYS_INSPECT_RESOURCES_TYPE_ID, InspectCarrierKind::Resources),
-    ("p_state_cells", SYS_INSPECT_STATE_CELLS_TYPE_ID, InspectCarrierKind::StateCells),
-    ("p_ui_nodes", SYS_INSPECT_UI_NODES_TYPE_ID, InspectCarrierKind::UiNodes),
-    ("p_presentation_candidates", SYS_INSPECT_PRESENTATION_CANDIDATES_TYPE_ID, InspectCarrierKind::PresentationCandidates),
-    ("p_runtime_bindings", SYS_INSPECT_RUNTIME_BINDINGS_TYPE_ID, InspectCarrierKind::RuntimeBindings),
-    ("p_security_decisions", SYS_INSPECT_SECURITY_DECISIONS_TYPE_ID, InspectCarrierKind::SecurityDecisions),
+    (
+        "p_snapshot",
+        SYS_INSPECT_SNAPSHOT_TYPE_ID,
+        InspectCarrierKind::Snapshot,
+    ),
+    (
+        "p_invocation_nodes",
+        SYS_INSPECT_INVOCATION_NODES_TYPE_ID,
+        InspectCarrierKind::InvocationNodes,
+    ),
+    (
+        "p_calls",
+        SYS_INSPECT_CALLS_TYPE_ID,
+        InspectCarrierKind::Calls,
+    ),
+    (
+        "p_resources",
+        SYS_INSPECT_RESOURCES_TYPE_ID,
+        InspectCarrierKind::Resources,
+    ),
+    (
+        "p_state_cells",
+        SYS_INSPECT_STATE_CELLS_TYPE_ID,
+        InspectCarrierKind::StateCells,
+    ),
+    (
+        "p_ui_nodes",
+        SYS_INSPECT_UI_NODES_TYPE_ID,
+        InspectCarrierKind::UiNodes,
+    ),
+    (
+        "p_presentation_candidates",
+        SYS_INSPECT_PRESENTATION_CANDIDATES_TYPE_ID,
+        InspectCarrierKind::PresentationCandidates,
+    ),
+    (
+        "p_runtime_bindings",
+        SYS_INSPECT_RUNTIME_BINDINGS_TYPE_ID,
+        InspectCarrierKind::RuntimeBindings,
+    ),
+    (
+        "p_security_decisions",
+        SYS_INSPECT_SECURITY_DECISIONS_TYPE_ID,
+        InspectCarrierKind::SecurityDecisions,
+    ),
 ];
-/// Evaluates the registered Inspector external contract without selecting a
+/// Evaluates the installed Inspector shell contract without selecting a
 /// graphical runtime or reading mutable state.
 fn run_installed_external_contract(
     active: &ActiveDatabaseRevision,
@@ -785,17 +845,19 @@ fn run_installed_external_contract(
         return Err("inspect.malformed_carrier".to_owned());
     }
 
-
     let standard = active
         .catalogue_hash_context()
         .standard()
         .ok_or_else(|| "inspect.runtime_unavailable".to_owned())?;
-    let registry = registered_opaque_codecs(standard)
-        .map_err(|_| "inspect.runtime_unavailable".to_owned())?;
+    let registry =
+        registered_opaque_codecs(standard).map_err(|_| "inspect.runtime_unavailable".to_owned())?;
     let mut epoch_id = None;
+    let mut target_invocation_id = None;
     let mut row_counts = Vec::with_capacity(arguments.len());
-    for (index, ((parameter_id, value), (expected_name, expected_type, expected_kind))) in
-        arguments.iter().zip(INSPECTOR_CARRIER_SIGNATURE).enumerate()
+    for (index, ((parameter_id, value), (expected_name, expected_type, expected_kind))) in arguments
+        .iter()
+        .zip(INSPECTOR_CARRIER_SIGNATURE)
+        .enumerate()
     {
         let parameter = &definition.parameters()[index];
         if parameter.id() != *parameter_id
@@ -810,12 +872,9 @@ fn run_installed_external_contract(
         if value.opaque_type() != expected_type {
             return Err("inspect.unknown_carrier".to_owned());
         }
-        let value = OpaqueValue::new_inspect_carrier(
-            active,
-            expected_type,
-            value.canonical_payload(),
-        )
-        .map_err(map_inspect_carrier_error)?;
+        let value =
+            OpaqueValue::new_inspect_carrier(active, expected_type, value.canonical_payload())
+                .map_err(map_inspect_carrier_error)?;
         let envelope = InspectCarrierEnvelope::decode(value.canonical_payload())
             .map_err(|_| "inspect.malformed_carrier".to_owned())?;
         if envelope.carrier_kind() != expected_kind {
@@ -826,6 +885,7 @@ fn run_installed_external_contract(
         {
             return Err("inspect.epoch_mismatch".to_owned());
         }
+        let mut carrier_target = None;
         if expected_kind == InspectCarrierKind::Snapshot {
             if envelope.rows().len() != 1 {
                 return Err("inspect.malformed_carrier".to_owned());
@@ -834,12 +894,29 @@ fn run_installed_external_contract(
                 .rows()
                 .first()
                 .ok_or_else(|| "inspect.malformed_carrier".to_owned())?;
-            let _ = decode_snapshot_row_epoch(
-                active,
-                &registry,
-                snapshot_row,
-                envelope.epoch_id(),
-            )?;
+            carrier_target = Some(
+                decode_snapshot_row_epoch(active, &registry, snapshot_row, envelope.epoch_id())?.1,
+            );
+        } else {
+            for row in envelope.rows() {
+                let target = decode_enriched_inspect_row_target(
+                    active,
+                    &registry,
+                    row,
+                    expected_kind,
+                    envelope.epoch_id(),
+                )?;
+                if carrier_target.is_some_and(|known| known != target) {
+                    return Err("inspect.epoch_mismatch".to_owned());
+                }
+                carrier_target = Some(target);
+            }
+        }
+        if let Some(carrier_target) = carrier_target {
+            if target_invocation_id.is_some_and(|known| known != carrier_target) {
+                return Err("inspect.epoch_mismatch".to_owned());
+            }
+            target_invocation_id = Some(carrier_target);
         }
         match epoch_id {
             Some(expected_epoch) if expected_epoch != envelope.epoch_id() => {
@@ -897,7 +974,6 @@ fn run_installed_external_contract(
         .map_err(|_| "inspect.projection_failed".to_owned())
 }
 
-
 fn map_inspect_carrier_error(error: OpaqueValueError) -> String {
     match error {
         OpaqueValueError::UnregisteredType { .. } => "inspect.unknown_carrier".to_owned(),
@@ -908,16 +984,22 @@ fn map_inspect_carrier_error(error: OpaqueValueError) -> String {
     }
 }
 
-
-async fn run_installed_inspect(kernel: PostgresKernel, session: AuthenticatedSession, active: ActiveDatabaseRevision, request: ClientInspectRequest) -> Result<RuntimeValue, String> {
+async fn run_installed_inspect(
+    kernel: PostgresKernel,
+    session: AuthenticatedSession,
+    active: ActiveDatabaseRevision,
+    request: ClientInspectRequest,
+) -> Result<RuntimeValue, String> {
     let context = request.context();
-    if context.pair() != active.pair() { return Err("inspect.epoch_mismatch".to_owned()); }
+    if context.pair() != active.pair() {
+        return Err("inspect.epoch_mismatch".to_owned());
+    }
     let standard = active
         .catalogue_hash_context()
         .standard()
         .ok_or_else(|| "inspect.runtime_unavailable".to_owned())?;
-    let registry = registered_opaque_codecs(standard)
-        .map_err(|_| "inspect.runtime_unavailable".to_owned())?;
+    let registry =
+        registered_opaque_codecs(standard).map_err(|_| "inspect.runtime_unavailable".to_owned())?;
     match request.operation() {
         ClientInspectOperation::Snapshot { target } => {
             // The installed v1 provider has no closed decoder for the opaque
@@ -927,12 +1009,7 @@ async fn run_installed_inspect(kernel: PostgresKernel, session: AuthenticatedSes
             if request.snapshot_options().is_some() {
                 return Err("inspect.invalid_options".to_owned());
             }
-            let invocation = match target {
-                RuntimeValue::Reference { target, object } if *target == SYS_INSPECT_INVOCATION_TYPE_ID => {
-                    InvocationId::from_bytes(object.to_bytes())
-                }
-                _ => return Err("inspect.invalid_target".to_owned()),
-            };
+            let invocation = inspect_snapshot_request_target(target)?;
             if request
                 .target_invocation_id()
                 .is_some_and(|target| target != invocation)
@@ -977,9 +1054,16 @@ async fn run_installed_inspect(kernel: PostgresKernel, session: AuthenticatedSes
             make_opaque(&active, SYS_INSPECT_SNAPSHOT_TYPE_ID, payload)
         }
         ClientInspectOperation::Projection { snapshot, .. } => {
-            let tag = request.operation().projection_carrier_tag().ok_or_else(|| "inspect.malformed_carrier".to_owned())?;
+            let tag = request
+                .operation()
+                .projection_carrier_tag()
+                .ok_or_else(|| "inspect.malformed_carrier".to_owned())?;
             let snapshot = match snapshot {
-                RuntimeValue::Opaque(value) if value.opaque_type() == SYS_INSPECT_SNAPSHOT_TYPE_ID => value,
+                RuntimeValue::Opaque(value)
+                    if value.opaque_type() == SYS_INSPECT_SNAPSHOT_TYPE_ID =>
+                {
+                    value
+                }
                 RuntimeValue::Opaque(_) => return Err("inspect.unknown_carrier".to_owned()),
                 _ => return Err("inspect.malformed_carrier".to_owned()),
             };
@@ -1000,24 +1084,28 @@ async fn run_installed_inspect(kernel: PostgresKernel, session: AuthenticatedSes
                 .rows()
                 .first()
                 .ok_or_else(|| "inspect.malformed_carrier".to_owned())?;
-            let (epoch_id, target_invocation) = decode_snapshot_row_epoch(
-                &active,
-                &registry,
-                snapshot_row,
-                envelope.epoch_id(),
-            )?;
-            if request
-                .target_invocation_id()
-                .is_some_and(|target| target != target_invocation)
-            {
-                return Err("inspect.epoch_mismatch".to_owned());
-            }
+            let (epoch_id, target_invocation) =
+                decode_snapshot_row_epoch(&active, &registry, snapshot_row, envelope.epoch_id())?;
+            let Some(_) = kernel
+                .find_inspect_epoch(&session, epoch_id)
+                .await
+                .map_err(inspect_kernel_error_code)?
+            else {
+                return Err("inspect.stale_epoch".to_owned());
+            };
+            require_inspect_target_provenance(request.target_invocation_id(), target_invocation)?;
             let recursive_from_root = kernel
-                .inspect_target_is_recursive(request.observer_root_invocation_id(), target_invocation)
+                .inspect_target_is_recursive(
+                    request.observer_root_invocation_id(),
+                    target_invocation,
+                )
                 .await
                 .map_err(inspect_kernel_error_code)?;
             let recursive_from_parent = kernel
-                .inspect_target_is_recursive(request.observer_parent_invocation_id(), target_invocation)
+                .inspect_target_is_recursive(
+                    request.observer_parent_invocation_id(),
+                    target_invocation,
+                )
                 .await
                 .map_err(inspect_kernel_error_code)?;
             if recursive_from_root || recursive_from_parent {
@@ -1033,22 +1121,70 @@ async fn run_installed_inspect(kernel: PostgresKernel, session: AuthenticatedSes
             validate_epoch(&epoch, target_invocation, active.pair())?;
             let privilege = InspectPrivilege::OwnInvocation;
             let granted = [InspectPrivilege::OwnInvocation];
-            // The installed v1 request carries the structural OwnInvocation
-            // grant. The epoch rows are immutable and already redacted according
-            // to capture options; classifier options themselves remain rejected
-            // above when supplied without a closed decoder.
+            let values_granted = inspect_classifier_granted(&granted, InspectPrivilege::Values);
+            let security_details_granted =
+                inspect_classifier_granted(&granted, InspectPrivilege::SecurityDetails);
+            let runtime_internals_granted =
+                inspect_classifier_granted(&granted, InspectPrivilege::RuntimeInternals);
+            let source_granted = inspect_classifier_granted(&granted, InspectPrivilege::Source);
+            // The installed v1 request carries only the structural
+            // OwnInvocation grant. The epoch rows are immutable, but the
+            // carrier boundary still enforces each classifier independently:
+            // a future armed path may pass the matching protected grant, while
+            // this ordinary path emits typed redaction markers.
             let rows = match tag {
-                2 => encode_invocation_nodes(&kernel.inspect_invocation_nodes(&session, &epoch, privilege, &granted).map_err(inspect_kernel_error_code)?) ,
-                3 => encode_calls(&kernel.inspect_calls(&session, &epoch, privilege, &granted).map_err(inspect_kernel_error_code)?) ,
-                4 => encode_resources(&kernel.inspect_resources(&session, &epoch, privilege, &granted).map_err(inspect_kernel_error_code)?) ,
-                5 => encode_state_cells(&kernel.inspect_state_cells(&session, &epoch, privilege, &granted).await.map_err(inspect_kernel_error_code)?) ,
-                6 => encode_ui_nodes(&kernel.inspect_ui_nodes(&session, &epoch, privilege, &granted).map_err(inspect_kernel_error_code)?) ,
-                7 => encode_presentation_candidates(&kernel.inspect_presentation_candidates(&session, &epoch, privilege, &granted).map_err(inspect_kernel_error_code)?) ,
-                8 => encode_runtime_bindings(&kernel.inspect_runtime_bindings(&session, &epoch, privilege, &granted).map_err(inspect_kernel_error_code)?) ,
-                9 => encode_security_decisions(&kernel.inspect_security_decisions(&session, &epoch, privilege, &granted).await.map_err(inspect_kernel_error_code)?) ,
+                2 => encode_invocation_nodes(
+                    &kernel
+                        .inspect_invocation_nodes(&session, &epoch, privilege, &granted)
+                        .map_err(inspect_kernel_error_code)?,
+                ),
+                3 => encode_calls(
+                    &kernel
+                        .inspect_calls(&session, &epoch, privilege, &granted)
+                        .map_err(inspect_kernel_error_code)?,
+                    values_granted,
+                ),
+                4 => encode_resources(
+                    &kernel
+                        .inspect_resources(&session, &epoch, privilege, &granted)
+                        .map_err(inspect_kernel_error_code)?,
+                ),
+                5 => encode_state_cells(
+                    &kernel
+                        .inspect_state_cells(&session, &epoch, privilege, &granted)
+                        .await
+                        .map_err(inspect_kernel_error_code)?,
+                ),
+                6 => encode_ui_nodes(
+                    &kernel
+                        .inspect_ui_nodes(&session, &epoch, privilege, &granted)
+                        .map_err(inspect_kernel_error_code)?,
+                    source_granted,
+                    runtime_internals_granted,
+                ),
+                7 => encode_presentation_candidates(
+                    &kernel
+                        .inspect_presentation_candidates(&session, &epoch, privilege, &granted)
+                        .map_err(inspect_kernel_error_code)?,
+                    runtime_internals_granted,
+                ),
+                8 => encode_runtime_bindings(
+                    &kernel
+                        .inspect_runtime_bindings(&session, &epoch, privilege, &granted)
+                        .map_err(inspect_kernel_error_code)?,
+                    runtime_internals_granted,
+                ),
+                9 => encode_security_decisions(
+                    &kernel
+                        .inspect_security_decisions(&session, &epoch, privilege, &granted)
+                        .await
+                        .map_err(inspect_kernel_error_code)?,
+                    security_details_granted,
+                ),
                 _ => return Err("inspect.malformed_carrier".to_owned()),
             }?;
-            let kind = InspectCarrierKind::from_tag(tag).ok_or_else(|| "inspect.malformed_carrier".to_owned())?;
+            let kind = InspectCarrierKind::from_tag(tag)
+                .ok_or_else(|| "inspect.malformed_carrier".to_owned())?;
             let payload = make_inspect_carrier(
                 &active,
                 &registry,
@@ -1063,6 +1199,27 @@ async fn run_installed_inspect(kernel: PostgresKernel, session: AuthenticatedSes
     }
 }
 
+fn inspect_snapshot_request_target(target: &RuntimeValue) -> Result<InvocationId, String> {
+    let RuntimeValue::Reference { target, object } = target else {
+        return Err("inspect.invalid_target".to_owned());
+    };
+    let object_bytes = object.to_bytes();
+    if *target != SYS_INSPECT_INVOCATION_TYPE_ID || object_bytes == [0; 16] {
+        return Err("inspect.invalid_target".to_owned());
+    }
+    Ok(InvocationId::from_bytes(object_bytes))
+}
+
+fn require_inspect_target_provenance(
+    request_target: Option<InvocationId>,
+    decoded_target: InvocationId,
+) -> Result<(), String> {
+    if request_target.is_some_and(|target| target != decoded_target) {
+        return Err("inspect.epoch_mismatch".to_owned());
+    }
+    Ok(())
+}
+
 fn inspect_kernel_error_code(error: PostgresKernelError) -> String {
     match error {
         PostgresKernelError::InspectDenied { .. } => "inspect.denied".to_owned(),
@@ -1070,13 +1227,31 @@ fn inspect_kernel_error_code(error: PostgresKernelError) -> String {
     }
 }
 
-fn validate_epoch(epoch: &orna_core::inspect::InspectSnapshotEpoch, invocation: InvocationId, pair: orna_core::revision::RevisionPair) -> Result<(), String> {
-    if epoch.invocation_id() != invocation { return Err("inspect.epoch_mismatch".to_owned()); }
-    if epoch.source_revision_id() != pair.source() || epoch.catalogue_revision_id() != pair.catalogue() { return Err("inspect.epoch_mismatch".to_owned()); }
+fn validate_epoch(
+    epoch: &orna_core::inspect::InspectSnapshotEpoch,
+    invocation: InvocationId,
+    pair: orna_core::revision::RevisionPair,
+) -> Result<(), String> {
+    if epoch.invocation_id() != invocation {
+        return Err("inspect.epoch_mismatch".to_owned());
+    }
+    if epoch.source_revision_id() != pair.source()
+        || epoch.catalogue_revision_id() != pair.catalogue()
+    {
+        return Err("inspect.epoch_mismatch".to_owned());
+    }
     Ok(())
 }
 
-fn make_opaque(active: &ActiveDatabaseRevision, opaque_type: TypeId, payload: Vec<u8>) -> Result<RuntimeValue, String> { OpaqueValue::new_inspect_carrier(active, opaque_type, payload).map(RuntimeValue::Opaque).map_err(|_| "inspect.projection_failed".to_owned()) }
+fn make_opaque(
+    active: &ActiveDatabaseRevision,
+    opaque_type: TypeId,
+    payload: Vec<u8>,
+) -> Result<RuntimeValue, String> {
+    OpaqueValue::new_inspect_carrier(active, opaque_type, payload)
+        .map(RuntimeValue::Opaque)
+        .map_err(|_| "inspect.projection_failed".to_owned())
+}
 
 fn make_inspect_carrier(
     active: &ActiveDatabaseRevision,
@@ -1149,14 +1324,15 @@ fn enrich_inspect_row(
     if row.len() < 9 {
         return row;
     }
-    let mut enriched = Vec::with_capacity(row.len() + 98);
+    let mut enriched = Vec::with_capacity(row.len() + 82);
     enriched.extend_from_slice(&row[..9]);
     // Fixed common prefix: epoch identity, target invocation, root target,
-    // owner, pinned revisions, own-invocation scope, and classifier evidence.
+    // pinned revisions, own-invocation scope, and classifier evidence. The
+    // owner principal is deliberately not copied: the scope fact is enough
+    // for this CLIENT carrier and the principal is security-classified.
     enriched.extend_from_slice(&epoch.id().to_bytes());
     enriched.extend_from_slice(&epoch.invocation_id().to_bytes());
     enriched.extend_from_slice(&epoch.root_target().to_bytes());
-    enriched.extend_from_slice(&epoch.owner().to_bytes());
     enriched.extend_from_slice(&epoch.source_revision_id().to_bytes());
     enriched.extend_from_slice(&epoch.catalogue_revision_id().to_bytes());
     enriched.push(1);
@@ -1174,12 +1350,129 @@ fn inspect_classification_tag(kind: InspectCarrierKind, privilege: InspectPrivil
     }
 }
 
-fn id(bytes: &mut Vec<u8>, value: &[u8]) { bytes.extend_from_slice(value); }
-fn text(bytes: &mut Vec<u8>, value: &str) -> Result<(), String> { if value.len() > 65_536 { return Err("inspect.projection_failed".to_owned()); } bytes.extend_from_slice(&(value.len() as u32).to_be_bytes()); bytes.extend_from_slice(value.as_bytes()); Ok(()) }
+fn inspect_classifier_granted(granted: &[InspectPrivilege], classifier: InspectPrivilege) -> bool {
+    debug_assert!(classifier.is_classifier());
+    granted.contains(&classifier)
+}
+
+fn encode_classified_text(bytes: &mut Vec<u8>, value: &str, granted: bool) -> Result<(), String> {
+    if !granted {
+        bytes.extend_from_slice(&INSPECT_REDACTED_TEXT_LENGTH.to_be_bytes());
+        return Ok(());
+    }
+    text(bytes, value)
+}
+
+fn encode_classified_optional_text(
+    bytes: &mut Vec<u8>,
+    value: Option<&str>,
+    granted: bool,
+) -> Result<(), String> {
+    if !granted {
+        bytes.push(INSPECT_REDACTED_FIELD_TAG);
+        return Ok(());
+    }
+    match value {
+        Some(value) => {
+            bytes.push(1);
+            text(bytes, value)?;
+        }
+        None => bytes.push(0),
+    }
+    Ok(())
+}
+
+fn id(bytes: &mut Vec<u8>, value: &[u8]) {
+    bytes.extend_from_slice(value);
+}
+fn text(bytes: &mut Vec<u8>, value: &str) -> Result<(), String> {
+    if value.len() > 65_536 {
+        return Err("inspect.projection_failed".to_owned());
+    }
+    bytes.extend_from_slice(&(value.len() as u32).to_be_bytes());
+    bytes.extend_from_slice(value.as_bytes());
+    Ok(())
+}
 
 fn encode_snapshot_row(epoch: &orna_core::inspect::InspectSnapshotEpoch) -> Vec<u8> {
-    let mut bytes = row(INSPECT_SNAPSHOT_ROW_TAG, 0); id(&mut bytes, &epoch.id().to_bytes()); id(&mut bytes, &epoch.invocation_id().to_bytes()); id(&mut bytes, &epoch.owner().to_bytes()); id(&mut bytes, &epoch.root_target().to_bytes()); bytes.push(match epoch.outcome() { InspectOutcomeKind::Allowed => 1, InspectOutcomeKind::Denied => 2, InspectOutcomeKind::Failed => 3, InspectOutcomeKind::Cancelled => 4 }); let summary = epoch.summary(); bytes.extend_from_slice(&summary.event_count().to_be_bytes()); match summary.result() { InspectResultSummary::NoValues => bytes.push(0), InspectResultSummary::ValueBatch { value_count } => { bytes.push(1); bytes.extend_from_slice(&value_count.to_be_bytes()); } } match summary.duration_nanoseconds() { Some(value) => { bytes.push(1); bytes.extend_from_slice(&value.to_be_bytes()); }, None => bytes.push(0) } bytes
+    let mut bytes = row(INSPECT_SNAPSHOT_ROW_TAG, 0);
+    id(&mut bytes, &epoch.id().to_bytes());
+    id(&mut bytes, &epoch.invocation_id().to_bytes());
+    id(&mut bytes, &epoch.root_target().to_bytes());
+    bytes.push(match epoch.outcome() {
+        InspectOutcomeKind::Allowed => 1,
+        InspectOutcomeKind::Denied => 2,
+        InspectOutcomeKind::Failed => 3,
+        InspectOutcomeKind::Cancelled => 4,
+    });
+    let summary = epoch.summary();
+    bytes.extend_from_slice(&summary.event_count().to_be_bytes());
+    match summary.result() {
+        InspectResultSummary::NoValues => bytes.push(0),
+        InspectResultSummary::ValueBatch { value_count } => {
+            bytes.push(1);
+            bytes.extend_from_slice(&value_count.to_be_bytes());
+        }
+    }
+    match summary.duration_nanoseconds() {
+        Some(value) => {
+            bytes.push(1);
+            bytes.extend_from_slice(&value.to_be_bytes());
+        }
+        None => bytes.push(0),
+    }
+    bytes
 }
+fn decode_enriched_inspect_row_target(
+    active: &ActiveDatabaseRevision,
+    registry: &OpaqueCodecRegistry,
+    row: &[u8],
+    expected_kind: InspectCarrierKind,
+    epoch_id: u64,
+) -> Result<InvocationId, String> {
+    let value = decode_constructed_value(active, registry, row)
+        .map_err(|_| "inspect.malformed_carrier".to_owned())?;
+    let RuntimeValue::Constructed(constructed) = value else {
+        return Err("inspect.malformed_carrier".to_owned());
+    };
+    let TypeDescriptorKind::List(child) = constructed.descriptor().kind() else {
+        return Err("inspect.malformed_carrier".to_owned());
+    };
+    if child.kind() != TypeDescriptorKind::Named(BINARY_LARGE_OBJECT_TYPE_ID) {
+        return Err("inspect.malformed_carrier".to_owned());
+    }
+    let ConstructedValueKind::List(values) = constructed.kind() else {
+        return Err("inspect.malformed_carrier".to_owned());
+    };
+    let [RuntimeValue::Bytes(payload)] = values else {
+        return Err("inspect.malformed_carrier".to_owned());
+    };
+    if payload.len() < 91 || payload[0] != expected_kind.tag() {
+        return Err("inspect.malformed_carrier".to_owned());
+    }
+    let epoch = InspectEpochId::from_bytes(
+        payload[9..25]
+            .try_into()
+            .map_err(|_| "inspect.malformed_carrier".to_owned())?,
+    );
+    if u64::from_be_bytes(epoch.to_bytes()[8..].try_into().expect("epoch id")) != epoch_id {
+        return Err("inspect.epoch_mismatch".to_owned());
+    }
+    if payload[57..73] != active.pair().source().to_bytes()
+        || payload[73..89] != active.pair().catalogue().to_bytes()
+    {
+        return Err("inspect.epoch_mismatch".to_owned());
+    }
+    if payload[89] != 1 || payload[90] > 4 {
+        return Err("inspect.malformed_carrier".to_owned());
+    }
+    Ok(InvocationId::from_bytes(
+        payload[25..41]
+            .try_into()
+            .map_err(|_| "inspect.malformed_carrier".to_owned())?,
+    ))
+}
+
 fn decode_snapshot_row_epoch(
     active: &ActiveDatabaseRevision,
     registry: &OpaqueCodecRegistry,
@@ -1206,8 +1499,11 @@ fn decode_snapshot_row_epoch(
     decode_snapshot_row_payload(payload, epoch_id)
 }
 
-fn decode_snapshot_row_payload(row: &[u8], epoch_id: u64) -> Result<(InspectEpochId, InvocationId), String> {
-    if row.len() < 84 || row[0] != INSPECT_SNAPSHOT_ROW_TAG || row[1..9] != [0; 8] {
+fn decode_snapshot_row_payload(
+    row: &[u8],
+    epoch_id: u64,
+) -> Result<(InspectEpochId, InvocationId), String> {
+    if row.len() < 68 || row[0] != INSPECT_SNAPSHOT_ROW_TAG || row[1..9] != [0; 8] {
         return Err("inspect.malformed_carrier".to_owned());
     }
     let bytes: [u8; 16] = row[9..25]
@@ -1225,28 +1521,186 @@ fn decode_snapshot_row_payload(row: &[u8], epoch_id: u64) -> Result<(InspectEpoc
     if invocation.to_bytes() == [0; 16] {
         return Err("inspect.invalid_target".to_owned());
     }
-    let mut offset = 25 + 16 + 16 + 16;
-    let outcome = *row.get(offset).ok_or_else(|| "inspect.malformed_carrier".to_owned())?;
-    if !(1..=4).contains(&outcome) { return Err("inspect.malformed_carrier".to_owned()); }
+    let mut offset = 25 + 16 + 16;
+    let outcome = *row
+        .get(offset)
+        .ok_or_else(|| "inspect.malformed_carrier".to_owned())?;
+    if !(1..=4).contains(&outcome) {
+        return Err("inspect.malformed_carrier".to_owned());
+    }
     offset += 1 + 8;
-    let result = *row.get(offset).ok_or_else(|| "inspect.malformed_carrier".to_owned())?;
+    let result = *row
+        .get(offset)
+        .ok_or_else(|| "inspect.malformed_carrier".to_owned())?;
     offset += 1;
-    if result == 1 { offset += 8; } else if result != 0 { return Err("inspect.malformed_carrier".to_owned()); }
-    let duration = *row.get(offset).ok_or_else(|| "inspect.malformed_carrier".to_owned())?;
+    if result == 1 {
+        offset += 8;
+    } else if result != 0 {
+        return Err("inspect.malformed_carrier".to_owned());
+    }
+    let duration = *row
+        .get(offset)
+        .ok_or_else(|| "inspect.malformed_carrier".to_owned())?;
     offset += 1;
-    if duration == 1 { offset += 8; } else if duration != 0 { return Err("inspect.malformed_carrier".to_owned()); }
-    if offset != row.len() { return Err("inspect.malformed_carrier".to_owned()); }
+    if duration == 1 {
+        offset += 8;
+    } else if duration != 0 {
+        return Err("inspect.malformed_carrier".to_owned());
+    }
+    if offset != row.len() {
+        return Err("inspect.malformed_carrier".to_owned());
+    }
     Ok((id, invocation))
 }
 
-fn encode_invocation_nodes(rows: &[InvocationNodeRow]) -> Result<Vec<Vec<u8>>, String> { rows.iter().enumerate().map(|(index, value)| { let mut bytes = row(2,index); id(&mut bytes,&value.id().to_bytes()); match value.parent_id() { Some(parent) => { bytes.push(1); id(&mut bytes,&parent.to_bytes()); }, None => bytes.push(0) }; bytes.push(match value.kind() { InspectInvocationNodeKind::Root=>1, InspectInvocationNodeKind::Nested=>2 }); bytes.push(match value.phase() { InspectInvocationPhase::Started=>1, InspectInvocationPhase::Executing=>2, InspectInvocationPhase::Completed=>3, InspectInvocationPhase::Failed=>4, InspectInvocationPhase::Cancelled=>5 }); id(&mut bytes,&value.target().to_bytes()); bytes.extend_from_slice(&value.sequence().to_be_bytes()); Ok(bytes) }).collect() }
-fn encode_calls(rows: &[CallRow]) -> Result<Vec<Vec<u8>>, String> { rows.iter().enumerate().map(|(index,value)| { let mut bytes=row(3,index); id(&mut bytes,&value.invocation_id().to_bytes()); bytes.push(u8::from(value.schema().is_some())); bytes.extend_from_slice(&value.value_count().to_be_bytes()); bytes.extend_from_slice(&value.duration_nanoseconds().to_be_bytes()); Ok(bytes) }).collect() }
-fn encode_resources(rows: &[ResourceRow]) -> Result<Vec<Vec<u8>>, String> { rows.iter().enumerate().map(|(index,value)| { let mut bytes=row(4,index); bytes.push(match value.kind() { InspectResourceKind::State=>1, InspectResourceKind::Catalog=>2, InspectResourceKind::Standard=>3, InspectResourceKind::Runtime=>4 }); bytes.push(match value.status() { InspectResourceStatus::Active=>1, InspectResourceStatus::Invalidated=>2, InspectResourceStatus::Released=>3 }); Ok(bytes) }).collect() }
-fn encode_state_cells(rows: &[StateCellRow]) -> Result<Vec<Vec<u8>>, String> { rows.iter().enumerate().map(|(index,value)| { let key=value.key(); let mut bytes=row(5,index); id(&mut bytes,&key.root_function().to_bytes()); text(&mut bytes,key.state_profile())?; id(&mut bytes,&key.function().to_bytes()); text(&mut bytes,key.instance_key())?; id(&mut bytes,&key.state_slot().to_bytes()); id(&mut bytes,&value.value_type().to_bytes()); bytes.extend_from_slice(&value.revision().to_be_bytes()); bytes.push(u8::from(value.value().is_some())); Ok(bytes) }).collect() }
-fn encode_ui_nodes(rows: &[UiNodeRow]) -> Result<Vec<Vec<u8>>, String> { rows.iter().enumerate().map(|(index,value)| { let mut bytes=row(6,index); id(&mut bytes,&value.function().to_bytes()); text(&mut bytes,value.call_site())?; text(&mut bytes,value.runtime_contract())?; Ok(bytes) }).collect() }
-fn encode_presentation_candidates(rows: &[PresentationCandidateRow]) -> Result<Vec<Vec<u8>>, String> { rows.iter().enumerate().map(|(index,value)| { let mut bytes=row(7,index); text(&mut bytes,value.presenter())?; bytes.push(u8::from(value.accepted())); text(&mut bytes,value.reason())?; bytes.push(u8::from(value.selected_sink().is_some())); match value.runtime() { Some(runtime) => { bytes.push(1); text(&mut bytes,runtime)?; }, None => bytes.push(0) }; Ok(bytes) }).collect() }
-fn encode_runtime_bindings(rows: &[RuntimeBindingRow]) -> Result<Vec<Vec<u8>>, String> { rows.iter().enumerate().map(|(index,value)| { let mut bytes=row(8,index); text(&mut bytes,value.runtime_name())?; text(&mut bytes,value.version())?; bytes.push(u8::from(value.trusted())); bytes.extend_from_slice(&value.preference_rank().to_be_bytes()); bytes.extend_from_slice(&(value.consumed_descriptors().len() as u32).to_be_bytes()); bytes.extend_from_slice(&(value.contracts().len() as u32).to_be_bytes()); Ok(bytes) }).collect() }
-fn encode_security_decisions(rows: &[SecurityDecisionRow]) -> Result<Vec<Vec<u8>>, String> {
+fn encode_invocation_nodes(rows: &[InvocationNodeRow]) -> Result<Vec<Vec<u8>>, String> {
+    rows.iter()
+        .enumerate()
+        .map(|(index, value)| {
+            let mut bytes = row(2, index);
+            id(&mut bytes, &value.id().to_bytes());
+            match value.parent_id() {
+                Some(parent) => {
+                    bytes.push(1);
+                    id(&mut bytes, &parent.to_bytes());
+                }
+                None => bytes.push(0),
+            };
+            bytes.push(match value.kind() {
+                InspectInvocationNodeKind::Root => 1,
+                InspectInvocationNodeKind::Nested => 2,
+            });
+            bytes.push(match value.phase() {
+                InspectInvocationPhase::Started => 1,
+                InspectInvocationPhase::Executing => 2,
+                InspectInvocationPhase::Completed => 3,
+                InspectInvocationPhase::Failed => 4,
+                InspectInvocationPhase::Cancelled => 5,
+            });
+            id(&mut bytes, &value.target().to_bytes());
+            bytes.extend_from_slice(&value.sequence().to_be_bytes());
+            Ok(bytes)
+        })
+        .collect()
+}
+fn encode_calls(rows: &[CallRow], values_granted: bool) -> Result<Vec<Vec<u8>>, String> {
+    rows.iter()
+        .enumerate()
+        .map(|(index, value)| {
+            let mut bytes = row(3, index);
+            id(&mut bytes, &value.invocation_id().to_bytes());
+            bytes.push(u8::from(values_granted && value.schema().is_some()));
+            bytes.extend_from_slice(&value.value_count().to_be_bytes());
+            bytes.extend_from_slice(&value.duration_nanoseconds().to_be_bytes());
+            Ok(bytes)
+        })
+        .collect()
+}
+fn encode_resources(rows: &[ResourceRow]) -> Result<Vec<Vec<u8>>, String> {
+    rows.iter()
+        .enumerate()
+        .map(|(index, value)| {
+            let mut bytes = row(4, index);
+            bytes.push(match value.kind() {
+                InspectResourceKind::State => 1,
+                InspectResourceKind::Catalog => 2,
+                InspectResourceKind::Standard => 3,
+                InspectResourceKind::Runtime => 4,
+            });
+            bytes.push(match value.status() {
+                InspectResourceStatus::Active => 1,
+                InspectResourceStatus::Invalidated => 2,
+                InspectResourceStatus::Released => 3,
+            });
+            Ok(bytes)
+        })
+        .collect()
+}
+fn encode_state_cells(rows: &[StateCellRow]) -> Result<Vec<Vec<u8>>, String> {
+    rows.iter()
+        .enumerate()
+        .map(|(index, value)| {
+            let key = value.key();
+            let mut bytes = row(5, index);
+            id(&mut bytes, &key.root_function().to_bytes());
+            text(&mut bytes, key.state_profile())?;
+            id(&mut bytes, &key.function().to_bytes());
+            text(&mut bytes, key.instance_key())?;
+            id(&mut bytes, &key.state_slot().to_bytes());
+            id(&mut bytes, &value.value_type().to_bytes());
+            bytes.extend_from_slice(&value.revision().to_be_bytes());
+            bytes.push(u8::from(value.value().is_some()));
+            Ok(bytes)
+        })
+        .collect()
+}
+fn encode_ui_nodes(
+    rows: &[UiNodeRow],
+    source_granted: bool,
+    runtime_internals_granted: bool,
+) -> Result<Vec<Vec<u8>>, String> {
+    rows.iter()
+        .enumerate()
+        .map(|(index, value)| {
+            let mut bytes = row(6, index);
+            id(&mut bytes, &value.function().to_bytes());
+            encode_classified_text(&mut bytes, value.call_site(), source_granted)?;
+            encode_classified_text(
+                &mut bytes,
+                value.runtime_contract(),
+                runtime_internals_granted,
+            )?;
+            Ok(bytes)
+        })
+        .collect()
+}
+fn encode_presentation_candidates(
+    rows: &[PresentationCandidateRow],
+    runtime_internals_granted: bool,
+) -> Result<Vec<Vec<u8>>, String> {
+    rows.iter()
+        .enumerate()
+        .map(|(index, value)| {
+            let mut bytes = row(7, index);
+            encode_classified_text(&mut bytes, value.presenter(), runtime_internals_granted)?;
+            bytes.push(u8::from(value.accepted()));
+            encode_classified_text(&mut bytes, value.reason(), runtime_internals_granted)?;
+            bytes.push(u8::from(value.selected_sink().is_some()));
+            encode_classified_optional_text(
+                &mut bytes,
+                value.runtime(),
+                runtime_internals_granted,
+            )?;
+            Ok(bytes)
+        })
+        .collect()
+}
+fn encode_runtime_bindings(
+    rows: &[RuntimeBindingRow],
+    runtime_internals_granted: bool,
+) -> Result<Vec<Vec<u8>>, String> {
+    rows.iter()
+        .enumerate()
+        .map(|(index, value)| {
+            let mut bytes = row(8, index);
+            if !runtime_internals_granted {
+                bytes.push(INSPECT_REDACTED_FIELD_TAG);
+                return Ok(bytes);
+            }
+            text(&mut bytes, value.runtime_name())?;
+            text(&mut bytes, value.version())?;
+            bytes.push(u8::from(value.trusted()));
+            bytes.extend_from_slice(&value.preference_rank().to_be_bytes());
+            bytes.extend_from_slice(&(value.consumed_descriptors().len() as u32).to_be_bytes());
+            bytes.extend_from_slice(&(value.contracts().len() as u32).to_be_bytes());
+            Ok(bytes)
+        })
+        .collect()
+}
+fn encode_security_decisions(
+    rows: &[SecurityDecisionRow],
+    security_details_granted: bool,
+) -> Result<Vec<Vec<u8>>, String> {
     rows.iter()
         .enumerate()
         .map(|(index, value)| {
@@ -1267,6 +1721,10 @@ fn encode_security_decisions(rows: &[SecurityDecisionRow]) -> Result<Vec<Vec<u8>
                     text(&mut bytes, &target.canonical())?;
                 }
                 None => bytes.push(0),
+            }
+            if !security_details_granted {
+                bytes.push(INSPECT_REDACTED_FIELD_TAG);
+                return Ok(bytes);
             }
             match value.denial_reason() {
                 Some(reason) => {
@@ -1290,7 +1748,9 @@ fn encode_security_decisions(rows: &[SecurityDecisionRow]) -> Result<Vec<Vec<u8>
 
 impl ClientResourceExecutor for InstalledClientResourceExecutor {
     fn inspect(&mut self, request: ClientInspectRequest) -> Result<RuntimeValue, String> {
-        let (Some(kernel), Some(session)) = (self.inspect_kernel.clone(), self.inspect_session.clone()) else {
+        let (Some(kernel), Some(session)) =
+            (self.inspect_kernel.clone(), self.inspect_session.clone())
+        else {
             return Err("inspect.runtime_unavailable".to_owned());
         };
         if self.cancellation.is_requested() {
@@ -1305,7 +1765,8 @@ impl ClientResourceExecutor for InstalledClientResourceExecutor {
                     .enable_all()
                     .build()
                     .map_err(|_| "inspect.runtime_unavailable".to_owned())?;
-                let result = runtime.block_on(run_installed_inspect(kernel, session, active, request));
+                let result =
+                    runtime.block_on(run_installed_inspect(kernel, session, active, request));
                 if cancellation.is_requested() {
                     Err("inspect.cancelled".to_owned())
                 } else {
@@ -1326,7 +1787,6 @@ impl ClientResourceExecutor for InstalledClientResourceExecutor {
     ) -> Result<RuntimeValue, String> {
         run_installed_external_contract(&self.active, &request)
     }
-
 
     fn execute(&mut self, request: ClientResourceRequest) -> ClientResourceCompletion {
         if self.pending.is_some() || self.broker_pending.is_some() {
@@ -1452,8 +1912,8 @@ impl ClientResourceExecutor for InstalledClientResourceExecutor {
                         .build()
                         .map_err(|_| ResourceTransportFailure::Transport)?;
                     match &worker_transport {
-                        ResourceTransportSource::Authenticated(transport) => runtime
-                            .block_on(run_authenticated_resource_transport(
+                        ResourceTransportSource::Authenticated(transport) => {
+                            runtime.block_on(run_authenticated_resource_transport(
                                 transport.kernel.clone(),
                                 transport.session.clone(),
                                 active,
@@ -1463,7 +1923,8 @@ impl ClientResourceExecutor for InstalledClientResourceExecutor {
                                 resource_kind,
                                 control_receiver,
                                 &sender,
-                            )),
+                            ))
+                        }
                         _ => {
                             let (stream, handshake_complete, protocol) = worker_transport
                                 .take_connection()
@@ -1766,7 +2227,6 @@ impl SharedInvokeBroker {
             receiver,
         )
     }
-
 
     async fn activate(
         &self,
@@ -2326,7 +2786,10 @@ where
     // reached this broker. Drain late non-terminals, but publish this terminal
     // before removing the broker state.
     let late_terminal = state.cancellation_requested
-        && matches!(disposition, orna_protocol::ResourceFrameDisposition::DroppedLate)
+        && matches!(
+            disposition,
+            orna_protocol::ResourceFrameDisposition::DroppedLate
+        )
         && matches!(
             &frame,
             ResourceServerFrame::Completed(_)
@@ -2633,7 +3096,8 @@ async fn run_authenticated_resource_transport(
     completion_sender: &Sender<Result<ResourceTransportOutcome, ResourceTransportFailure>>,
 ) -> Result<ResourceTransportOutcome, ResourceTransportFailure> {
     let cancellation = ResourceCancellation::new();
-    let start = kernel.start_authenticated_server_resource_producer(&session, &request, &cancellation);
+    let start =
+        kernel.start_authenticated_server_resource_producer(&session, &request, &cancellation);
     tokio::pin!(start);
     let started = tokio::select! {
         biased;
@@ -2663,9 +3127,7 @@ async fn run_authenticated_resource_transport(
     };
     let accepted = producer.accepted();
     let accepted_kind = match resource_kind {
-        ProtocolResourceKind::Single => {
-            orna_postgres::AuthenticatedServerResourceKind::Single
-        }
+        ProtocolResourceKind::Single => orna_postgres::AuthenticatedServerResourceKind::Single,
         ProtocolResourceKind::Stream => orna_postgres::AuthenticatedServerResourceKind::Stream,
     };
     if accepted.stream_id != request.stream_id
@@ -2693,16 +3155,15 @@ async fn run_authenticated_resource_transport(
         // A scalar value is followed by a zero-credit terminal probe. The
         // producer accepts that probe only after the row has been delivered;
         // ResourceCredit::new intentionally rejects zero credit for requests.
-        let credit = if matches!(resource_kind, ProtocolResourceKind::Single)
-            && scalar_value.is_some()
-        {
-            ResourceCredit {
-                item_count: 0,
-                byte_count: 0,
-            }
-        } else {
-            ResourceCredit::new(1, byte_credit).ok_or(ResourceTransportFailure::Shape)?
-        };
+        let credit =
+            if matches!(resource_kind, ProtocolResourceKind::Single) && scalar_value.is_some() {
+                ResourceCredit {
+                    item_count: 0,
+                    byte_count: 0,
+                }
+            } else {
+                ResourceCredit::new(1, byte_credit).ok_or(ResourceTransportFailure::Shape)?
+            };
         let pull = producer.pull(credit);
         tokio::pin!(pull);
         let event = tokio::select! {
@@ -2816,7 +3277,7 @@ async fn run_authenticated_resource_transport(
                     ProtocolResourceKind::Single => scalar_value
                         .map(ResourceTransportOutcome::Ready)
                         .ok_or(ResourceTransportFailure::Shape),
-                    ProtocolResourceKind::Stream => Ok(ResourceTransportOutcome::StreamCompleted)
+                    ProtocolResourceKind::Stream => Ok(ResourceTransportOutcome::StreamCompleted),
                 };
             }
             AuthenticatedServerResourceEvent::Failed { failure } => {
@@ -4115,13 +4576,14 @@ fn map_host_error(error: EmbeddedHostError) -> InstalledInvokeError {
 mod tests {
     use super::*;
     use orna_core::{
-        CatalogueRevisionId, FunctionId, InvocationId, ParameterId, SourceBundleId,
-        SourceRevisionId,
+        CatalogueRevisionId, FunctionId, InvocationId, ParameterId, PrincipalId,
+        SecurityAuditEventId, SourceBundleId, SourceRevisionId,
         canonical_hash::{catalogue_digest, source_bundle_digest, source_revision_record_digest},
         catalogue::{
             CatalogueSnapshot, FunctionDomain, FunctionReturn, FunctionSecurity,
             FunctionVolatility, ParameterDefinition,
         },
+        inspect::{InspectSnapshotEpoch, InspectSnapshotOptions, InspectSnapshotSummary},
         invocation::{
             InvocationFailure, InvocationFailurePhase, InvocationRetryability, InvokeEvent,
             InvokeValue,
@@ -4134,8 +4596,8 @@ mod tests {
         value::RuntimeValue,
     };
     use orna_protocol::{
-        InvocationEventBatch, InvocationEventRecord, ResourceAccepted, ResourceCompleted, ResourceFailed,
-        ResourceValues, decode_resource_client_frame, encode_resource_server_frame,
+        InvocationEventBatch, InvocationEventRecord, ResourceAccepted, ResourceCompleted,
+        ResourceFailed, ResourceValues, decode_resource_client_frame, encode_resource_server_frame,
     };
     use orna_standard::{
         STD_UI_TYPE_ID, retained_standard_library_snapshot, verify_standard_library_snapshot,
@@ -4195,11 +4657,19 @@ mod tests {
         let (sender, mut receiver) = mpsc::channel(1);
         let reader = tokio::spawn(read_shared_broker_frames(server, sender));
         let frame = [0_u8; 18];
-        client.write_all(&frame[..5]).await.expect("partial frame write");
-        assert!(tokio::time::timeout(Duration::from_millis(10), receiver.recv())
+        client
+            .write_all(&frame[..5])
             .await
-            .is_err());
-        client.write_all(&frame[5..]).await.expect("frame remainder write");
+            .expect("partial frame write");
+        assert!(
+            tokio::time::timeout(Duration::from_millis(10), receiver.recv())
+                .await
+                .is_err()
+        );
+        client
+            .write_all(&frame[5..])
+            .await
+            .expect("frame remainder write");
         let decoded = tokio::time::timeout(Duration::from_secs(1), receiver.recv())
             .await
             .expect("frame arrives")
@@ -4212,21 +4682,23 @@ mod tests {
 
     #[tokio::test]
     async fn broker_stream_completion_queue_is_finite() {
-        let (sender, mut receiver) = mpsc::channel::<Result<ResourceTransportOutcome, ResourceTransportFailure>>(
-            BROKER_RESOURCE_COMPLETION_CAPACITY,
-        );
+        let (sender, mut receiver) = mpsc::channel::<
+            Result<ResourceTransportOutcome, ResourceTransportFailure>,
+        >(BROKER_RESOURCE_COMPLETION_CAPACITY);
         for _ in 0..BROKER_RESOURCE_COMPLETION_CAPACITY {
             sender
                 .send(Ok(ResourceTransportOutcome::StreamCompleted))
                 .await
                 .expect("queue accepts its configured capacity");
         }
-        assert!(tokio::time::timeout(
-            Duration::from_millis(10),
-            sender.send(Ok(ResourceTransportOutcome::StreamCompleted)),
-        )
-        .await
-        .is_err());
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(10),
+                sender.send(Ok(ResourceTransportOutcome::StreamCompleted)),
+            )
+            .await
+            .is_err()
+        );
         let _ = receiver.recv().await;
     }
 
@@ -4261,7 +4733,9 @@ mod tests {
         };
         let protocol = {
             let mut protocol = ResourceProtocolConnection::new();
-            protocol.open(request.clone()).expect("resource request opens");
+            protocol
+                .open(request.clone())
+                .expect("resource request opens");
             protocol
         };
         let (completion, mut completions) = mpsc::channel(2);
@@ -4291,7 +4765,10 @@ mod tests {
             let bytes = encode_resource_server_frame(&active, &registry, &frame)
                 .expect("encoded resource response");
             handle_shared_broker_frame(
-                BrokerWireFrame { resource: true, bytes },
+                BrokerWireFrame {
+                    resource: true,
+                    bytes,
+                },
                 &mut writer,
                 &active,
                 &registry,
@@ -4306,7 +4783,9 @@ mod tests {
         assert_eq!(tombstones.len(), 1);
         assert!(matches!(
             completions.recv().await,
-            Some(Ok(ResourceTransportOutcome::Ready(RuntimeValue::Integer(7))))
+            Some(Ok(ResourceTransportOutcome::Ready(RuntimeValue::Integer(
+                7
+            ))))
         ));
 
         let late_bytes = encode_resource_server_frame(
@@ -4543,13 +5022,11 @@ mod tests {
             resource_kind: request.resource_kind,
         };
         let mut protocol = ResourceProtocolConnection::new();
-        protocol.open(request.clone()).expect("resource request opens");
         protocol
-            .apply_constructed(
-                &active,
-                &registry,
-                ResourceServerFrame::Accepted(accepted),
-            )
+            .open(request.clone())
+            .expect("resource request opens");
+        protocol
+            .apply_constructed(&active, &registry, ResourceServerFrame::Accepted(accepted))
             .expect("resource acceptance applies");
         protocol
             .receive(ResourceClientFrame::Cancel(ResourceCancel {
@@ -4617,7 +5094,9 @@ mod tests {
             values: vec![value],
         };
         let mut protocol = ResourceProtocolConnection::new();
-        protocol.open(request.clone()).expect("resource request opens");
+        protocol
+            .open(request.clone())
+            .expect("resource request opens");
         protocol
             .apply_constructed(&active, &registry, ResourceServerFrame::Accepted(accepted))
             .expect("resource acceptance applies");
@@ -4669,7 +5148,9 @@ mod tests {
         assert!(!keep);
         assert!(matches!(
             completions.recv().await,
-            Some(Ok(ResourceTransportOutcome::Ready(RuntimeValue::Integer(7))))
+            Some(Ok(ResourceTransportOutcome::Ready(RuntimeValue::Integer(
+                7
+            ))))
         ));
     }
 
@@ -4685,7 +5166,9 @@ mod tests {
             resource_kind: request.resource_kind,
         };
         let mut protocol = ResourceProtocolConnection::new();
-        protocol.open(request.clone()).expect("resource request opens");
+        protocol
+            .open(request.clone())
+            .expect("resource request opens");
         protocol
             .apply_constructed(&active, &registry, ResourceServerFrame::Accepted(accepted))
             .expect("resource acceptance applies");
@@ -4735,7 +5218,9 @@ mod tests {
         let (active, registry) = transport_test_context();
         let request = transport_test_request(active.pair(), 1);
         let mut protocol = ResourceProtocolConnection::new();
-        protocol.open(request.clone()).expect("resource request opens");
+        protocol
+            .open(request.clone())
+            .expect("resource request opens");
         protocol
             .receive(ResourceClientFrame::Cancel(ResourceCancel {
                 stream_id: request.stream_id,
@@ -5371,6 +5856,45 @@ mod tests {
     }
 
     #[test]
+    fn inspector_snapshot_target_rejects_zero_object_bytes() {
+        let target = RuntimeValue::Reference {
+            target: SYS_INSPECT_INVOCATION_TYPE_ID,
+            object: orna_core::ObjectId::from_bytes([0; 16]),
+        };
+        assert_eq!(
+            inspect_snapshot_request_target(&target),
+            Err("inspect.invalid_target".to_owned()),
+        );
+    }
+
+    #[test]
+    fn inspector_projection_accepts_derived_or_matching_target_provenance() {
+        let target = InvocationId::from_bytes([0x11; 16]);
+        assert_eq!(require_inspect_target_provenance(None, target), Ok(()));
+        assert_eq!(
+            require_inspect_target_provenance(Some(InvocationId::from_bytes([0x22; 16])), target,),
+            Err("inspect.epoch_mismatch".to_owned()),
+        );
+        assert_eq!(
+            require_inspect_target_provenance(Some(target), target),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn inspector_calls_schema_requires_values_classifier() {
+        let invocation = InvocationId::from_bytes([0x31; 16]);
+        let schema = InvokeValue::new(RuntimeValue::Boolean(true)).expect("schema value");
+        let call = CallRow::new(invocation, Some(schema), 1, 42).expect("call row");
+
+        let redacted = encode_calls(std::slice::from_ref(&call), false).expect("redacted calls");
+        let visible = encode_calls(std::slice::from_ref(&call), true).expect("visible calls");
+
+        assert_eq!(redacted[0][25], 0);
+        assert_eq!(visible[0][25], 1);
+    }
+
+    #[test]
     fn inspector_signature_covers_all_projection_carriers() {
         assert_eq!(INSPECTOR_CARRIER_SIGNATURE.len(), 9);
         for (tag, expected) in [
@@ -5387,11 +5911,17 @@ mod tests {
             assert_eq!(InspectCarrierKind::from_tag(tag), Some(expected));
         }
         assert_eq!(
-            inspect_classification_tag(InspectCarrierKind::RuntimeBindings, InspectPrivilege::OwnInvocation),
+            inspect_classification_tag(
+                InspectCarrierKind::RuntimeBindings,
+                InspectPrivilege::OwnInvocation
+            ),
             0,
         );
         assert_eq!(
-            inspect_classification_tag(InspectCarrierKind::SecurityDecisions, InspectPrivilege::OwnInvocation),
+            inspect_classification_tag(
+                InspectCarrierKind::SecurityDecisions,
+                InspectPrivilege::OwnInvocation
+            ),
             0,
         );
     }
@@ -5416,6 +5946,191 @@ mod tests {
             panic!("Inspector row must carry exactly one identity payload");
         };
         assert_eq!(payload, &identity);
+    }
+
+    #[test]
+    fn unarmed_security_and_runtime_carriers_redact_classified_bytes() {
+        let (active, registry) = inspect_test_context();
+        let target = InvocationId::from_bytes([0x32; 16]);
+        let principal = PrincipalId::from_bytes([0xa1; 16]);
+        let audit_reference = SecurityAuditEventId::from_bytes([0xa3; 16]);
+        let denial_reason = "denial-reason-secret";
+        let security = SecurityDecisionRow::new(
+            InspectSecurityDecisionKind::Inspect,
+            InspectSecurityDecisionOutcome::Denied,
+            vec![principal],
+            Some(FunctionId::from_bytes([0xa4; 16])),
+            Some(denial_reason.to_owned()),
+            vec![audit_reference],
+        )
+        .expect("security fixture must validate");
+        let runtime = RuntimeBindingRow::new(
+            "runtime-secret".to_owned(),
+            "platform-secret".to_owned(),
+            Vec::new(),
+            vec![(
+                "runtime-contract-secret".to_owned(),
+                "9".to_owned(),
+                vec!["platform-detail-secret".to_owned()],
+            )],
+            true,
+            1,
+        )
+        .expect("runtime fixture must validate");
+        let ui = UiNodeRow::new(
+            FunctionId::from_bytes([0xa5; 16]),
+            "call-site-secret".to_owned(),
+            "ui-runtime-contract-secret".to_owned(),
+        )
+        .expect("UI fixture must validate");
+        let presentation = PresentationCandidateRow::new(
+            "presenter-secret".to_owned(),
+            true,
+            "platform-reason-secret".to_owned(),
+            None,
+            Some("presentation-runtime-secret".to_owned()),
+        )
+        .expect("presentation fixture must validate");
+        let epoch = InspectSnapshotEpoch::new(
+            InspectEpochId::from_bytes([0x31; 16]),
+            target,
+            active.pair().source(),
+            active.pair().catalogue(),
+            PrincipalId::from_bytes([0x33; 16]),
+            std::time::SystemTime::UNIX_EPOCH,
+            FunctionId::from_bytes([0x34; 16]),
+            InspectOutcomeKind::Denied,
+            InspectSnapshotSummary::new(1, InspectResultSummary::NoValues, None)
+                .expect("summary must validate"),
+            &InspectSnapshotOptions::structural(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            vec![security.clone()],
+        )
+        .expect("epoch must validate");
+
+        let unarmed = [InspectPrivilege::OwnInvocation];
+        let security_payload = make_inspect_carrier(
+            &active,
+            &registry,
+            InspectCarrierKind::SecurityDecisions,
+            &epoch,
+            target,
+            encode_security_decisions(std::slice::from_ref(&security), false)
+                .expect("unarmed security rows encode"),
+            0,
+        )
+        .expect("unarmed security carrier encodes");
+        let runtime_payload = make_inspect_carrier(
+            &active,
+            &registry,
+            InspectCarrierKind::RuntimeBindings,
+            &epoch,
+            target,
+            encode_runtime_bindings(std::slice::from_ref(&runtime), false)
+                .expect("unarmed runtime rows encode"),
+            0,
+        )
+        .expect("unarmed runtime carrier encodes");
+        let ui_payload = make_inspect_carrier(
+            &active,
+            &registry,
+            InspectCarrierKind::UiNodes,
+            &epoch,
+            target,
+            encode_ui_nodes(std::slice::from_ref(&ui), false, false)
+                .expect("unarmed UI rows encode"),
+            0,
+        )
+        .expect("unarmed UI carrier encodes");
+        let presentation_payload = make_inspect_carrier(
+            &active,
+            &registry,
+            InspectCarrierKind::PresentationCandidates,
+            &epoch,
+            target,
+            encode_presentation_candidates(std::slice::from_ref(&presentation), false)
+                .expect("unarmed presentation rows encode"),
+            0,
+        )
+        .expect("unarmed presentation carrier encodes");
+        for (payload, kind) in [
+            (&security_payload, InspectCarrierKind::SecurityDecisions),
+            (&runtime_payload, InspectCarrierKind::RuntimeBindings),
+            (&ui_payload, InspectCarrierKind::UiNodes),
+            (
+                &presentation_payload,
+                InspectCarrierKind::PresentationCandidates,
+            ),
+        ] {
+            let carrier = InspectCarrierEnvelope::decode(payload).expect("carrier decodes");
+            assert_eq!(carrier.carrier_kind(), kind);
+            orna_core::inspect_carrier::validate_inspect_rows(carrier.rows())
+                .expect("carrier rows remain valid");
+            assert_eq!(carrier.rows().len(), 1);
+        }
+        let contains = |payload: &[u8], bytes: &[u8]| {
+            payload.windows(bytes.len()).any(|window| window == bytes)
+        };
+        let contains_row =
+            |rows: &[Vec<u8>], bytes: &[u8]| rows.iter().any(|row| contains(row, bytes));
+        assert!(!contains(&security_payload, &principal.to_bytes()));
+        assert!(!contains(&security_payload, denial_reason.as_bytes()));
+        assert!(!contains(&security_payload, &audit_reference.to_bytes()));
+        assert!(!contains(&security_payload, &[0x33; 16]));
+        for secret in [
+            b"runtime-secret".as_slice(),
+            b"platform-secret".as_slice(),
+            b"runtime-contract-secret".as_slice(),
+            b"platform-detail-secret".as_slice(),
+        ] {
+            assert!(!contains(&runtime_payload, secret));
+        }
+        for (payload, secret) in [
+            (&ui_payload, b"call-site-secret".as_slice()),
+            (&ui_payload, b"ui-runtime-contract-secret".as_slice()),
+            (&presentation_payload, b"presenter-secret".as_slice()),
+            (&presentation_payload, b"platform-reason-secret".as_slice()),
+            (
+                &presentation_payload,
+                b"presentation-runtime-secret".as_slice(),
+            ),
+        ] {
+            assert!(!contains(payload, secret));
+        }
+
+        assert!(contains_row(
+            &encode_security_decisions(std::slice::from_ref(&security), true)
+                .expect("armed security rows encode"),
+            denial_reason.as_bytes(),
+        ));
+        assert!(contains_row(
+            &encode_runtime_bindings(std::slice::from_ref(&runtime), true)
+                .expect("armed runtime rows encode"),
+            b"runtime-secret",
+        ));
+        assert!(contains_row(
+            &encode_ui_nodes(std::slice::from_ref(&ui), true, true).expect("armed UI rows encode"),
+            b"ui-runtime-contract-secret",
+        ));
+        assert!(contains_row(
+            &encode_presentation_candidates(std::slice::from_ref(&presentation), true)
+                .expect("armed presentation rows encode"),
+            b"presentation-runtime-secret",
+        ));
+        assert!(!inspect_classifier_granted(
+            &unarmed,
+            InspectPrivilege::SecurityDetails
+        ));
+        assert!(!inspect_classifier_granted(
+            &unarmed,
+            InspectPrivilege::RuntimeInternals
+        ));
     }
 
     fn transport_test_context() -> (
