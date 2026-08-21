@@ -407,6 +407,7 @@ mod tests {
             function: FunctionId::from_bytes([8; 16]),
             function_revision: FunctionRevisionId::from_bytes([9; 16]),
             parent_invocation_id: invocation_id(1),
+            observer_lineage: None,
         }
     }
 
