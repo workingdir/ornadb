@@ -74,6 +74,28 @@ impl UserStateInstanceRequest {
     }
 }
 
+fn requested_state_instances(
+    instances: &[UserStateInstanceRequest],
+) -> BTreeSet<(FunctionId, String)> {
+    instances
+        .iter()
+        .map(|request| (request.function(), request.instance_key().to_owned()))
+        .collect()
+}
+
+fn state_instance_is_requested(
+    instances: &[UserStateInstanceRequest],
+    requested_instances: &BTreeSet<(FunctionId, String)>,
+    function: FunctionId,
+    instance_key: &str,
+) -> bool {
+    if instances.is_empty() {
+        instance_key.is_empty()
+    } else {
+        requested_instances.contains(&(function, instance_key.to_owned()))
+    }
+}
+
 /// Loads authenticated USER state cells from an already-pinned snapshot.
 ///
 /// The caller owns the transaction's active revision and codec registry. This
@@ -91,10 +113,7 @@ pub(crate) async fn load_user_state_in_transaction(
     expected_types: &BTreeMap<(FunctionId, StateSlotId), TypeId>,
 ) -> Result<Vec<UserStateCell>, PostgresKernelError> {
     validate_state_profile(state_profile)?;
-    let requested_instances = instances
-        .iter()
-        .map(|request| (request.function(), request.instance_key().to_owned()))
-        .collect::<BTreeSet<_>>();
+    let requested_instances = requested_state_instances(instances);
     let principal = authenticated_session.principal();
     for ((function, state_slot), expected_type) in expected_types {
         let declared_type = active_user_state_slot_type(active, *function, *state_slot)?;
@@ -132,9 +151,12 @@ pub(crate) async fn load_user_state_in_transaction(
             .map(FunctionId::from_bytes)?;
         let instance_key: String =
             state_column(row, "function_instance_key", "USER state instance identity")?;
-        if !requested_instances.is_empty()
-            && !requested_instances.contains(&(function, instance_key.clone()))
-        {
+        if !state_instance_is_requested(
+            instances,
+            &requested_instances,
+            function,
+            &instance_key,
+        ) {
             continue;
         }
         let cell = decode_state_cell(row, active, registry)?;
@@ -158,8 +180,7 @@ impl PostgresKernel {
     /// Loads the authenticated principal's USER state cells.
     ///
     /// `instances` is an optional `(function, instance_key)` filter. An empty
-    /// filter returns every cell for the root function and profile; CLIENT
-    /// slot declarations can add narrower default-instance semantics later.
+    /// filter selects the default instance for each USER state slot.
     /// Because state-slot declarations are deferred, `expected_types` supplies
     /// the load-time declared type by `(function, state_slot)` and a mismatch
     /// fails closed with ORNA0901.
@@ -236,8 +257,8 @@ impl PostgresKernel {
 
     /// Writes authenticated USER state changes with optimistic revisions.
     ///
-    /// Revision conflicts are per-change `Conflict` results, so non-conflicting
-    /// writes commit together in one transaction. ORNA0901/0903, codec errors,
+    /// Revision conflicts return an aligned all-`Conflict` result batch and
+    /// persist no changes. ORNA0901/0903, codec errors,
     /// invalid batches, and database failures abort the whole transaction.
     /// Every change in one batch must identify the same root function so the
     /// protected audit event can record one unambiguous root.
@@ -359,20 +380,22 @@ fn plan_user_state_changes(
 ) -> Result<(Vec<UserStateWriteResult>, Vec<PendingStateWrite>), PostgresKernelError> {
     let mut results = Vec::with_capacity(changes.len());
     let mut pending = Vec::new();
+    let mut staged_cells = HashMap::<UserStateKey, UserStateCell>::new();
+    let mut has_conflict = false;
     for change in changes {
         let key = change.key_without_principal().with_principal(principal);
-        let current = current_cells
-            .get(&key)
-            .expect("write planner receives every requested key")
-            .clone();
-        let current_revision = current.as_ref().map_or(0, UserStateCell::revision);
-        let result = match apply_change(current.as_ref(), change, principal) {
+        let current = if let Some(staged) = staged_cells.get(&key) {
+            Some(staged)
+        } else {
+            current_cells
+                .get(&key)
+                .expect("write planner receives every requested key")
+                .as_ref()
+        };
+        let result = match apply_change(current, change, principal) {
             Ok(result) => result,
             Err(error) if error.code() == Some("ORNA0902") => {
-                results.push(UserStateWriteResult::new(
-                    change.key_without_principal(),
-                    UserStateWriteOutcome::Conflict { current_revision },
-                ));
+                has_conflict = true;
                 continue;
             }
             Err(error) => return Err(PostgresKernelError::UserState(error)),
@@ -380,6 +403,7 @@ fn plan_user_state_changes(
         let UserStateWriteOutcome::Written { revision } = result.outcome() else {
             unreachable!("apply_change only returns Written outcomes")
         };
+        let existing = current.is_some();
         let updated = UserStateCell::new(
             key.clone(),
             change.value().clone(),
@@ -387,15 +411,36 @@ fn plan_user_state_changes(
             revision,
             SystemTime::now(),
         );
-        current_cells.insert(key.clone(), Some(updated));
+        staged_cells.insert(key.clone(), updated);
         pending.push(PendingStateWrite {
             key,
             value: change.value().clone(),
             value_type: change.value_type(),
             revision,
-            existing: current.is_some(),
+            existing,
         });
         results.push(result);
+    }
+    if has_conflict {
+        let conflicts = changes
+            .iter()
+            .map(|change| {
+                let key = change.key_without_principal().with_principal(principal);
+                let current_revision = current_cells
+                    .get(&key)
+                    .expect("write planner receives every requested key")
+                    .as_ref()
+                    .map_or(0, UserStateCell::revision);
+                UserStateWriteResult::new(
+                    change.key_without_principal(),
+                    UserStateWriteOutcome::Conflict { current_revision },
+                )
+            })
+            .collect();
+        return Ok((conflicts, Vec::new()));
+    }
+    for (key, cell) in staged_cells {
+        current_cells.insert(key, Some(cell));
     }
     Ok((results, pending))
 }
@@ -839,11 +884,19 @@ mod tests {
     const TEXT: TypeId = TypeId::from_bytes([0x35; 16]);
 
     fn change(expected_revision: Option<u64>, value: i64) -> UserStateChange {
+        change_for_instance(String::new(), expected_revision, value)
+    }
+
+    fn change_for_instance(
+        instance_key: String,
+        expected_revision: Option<u64>,
+        value: i64,
+    ) -> UserStateChange {
         UserStateChange::new(
             ROOT,
             String::new(),
             FUNCTION,
-            String::new(),
+            instance_key,
             SLOT,
             expected_revision,
             RuntimeValue::BigInt(value),
@@ -853,13 +906,22 @@ mod tests {
     }
 
     fn cell(principal: PrincipalId, revision: u64, value: i64) -> UserStateCell {
+        cell_for_instance(principal, String::new(), revision, value)
+    }
+
+    fn cell_for_instance(
+        principal: PrincipalId,
+        instance_key: String,
+        revision: u64,
+        value: i64,
+    ) -> UserStateCell {
         UserStateCell::new(
             UserStateKey::new(
                 principal,
                 ROOT,
                 String::new(),
                 FUNCTION,
-                String::new(),
+                instance_key,
                 SLOT,
             )
             .expect("test key is valid"),
@@ -1102,28 +1164,63 @@ mod tests {
         assert!(UserStateInstanceRequest::new(FUNCTION, String::new()).is_ok());
         assert!(UserStateInstanceRequest::new(FUNCTION, "bad\0key".to_owned()).is_err());
     }
+
     #[test]
-    fn batch_conflict_is_returned_in_input_order_and_success_continues() {
-        let current = cell(PRINCIPAL, 3, 1);
-        let first = change(Some(2), 2);
-        let second = change(Some(3), 3);
-        let key = first.key_without_principal().with_principal(PRINCIPAL);
-        let mut current_cells = HashMap::from([(key, Some(current))]);
+    fn empty_instance_request_selects_only_the_default_persisted_instance() {
+        let requests = requested_state_instances(&[]);
+        let default_cell = cell(PRINCIPAL, 1, 1);
+        let named_cell = cell_for_instance(PRINCIPAL, "named".to_owned(), 1, 2);
+
+        assert!(state_instance_is_requested(
+            &[], &requests, default_cell.key().function(), default_cell.key().instance_key()
+        ));
+        assert!(!state_instance_is_requested(
+            &[], &requests, named_cell.key().function(), named_cell.key().instance_key()
+        ));
+    }
+
+    #[test]
+    fn explicit_instance_request_still_selects_the_named_persisted_instance() {
+        let explicit = UserStateInstanceRequest::new(FUNCTION, "named".to_owned())
+            .expect("explicit instance request is valid");
+        let requests = requested_state_instances(std::slice::from_ref(&explicit));
+        let named_cell = cell_for_instance(PRINCIPAL, "named".to_owned(), 1, 2);
+
+        assert!(state_instance_is_requested(
+            std::slice::from_ref(&explicit),
+            &requests,
+            named_cell.key().function(),
+            named_cell.key().instance_key(),
+        ));
+    }
+
+    #[test]
+    fn mixed_batch_conflict_returns_all_conflicts_without_staging_writes() {
+        let default_cell = cell(PRINCIPAL, 3, 1);
+        let named_cell = cell_for_instance(PRINCIPAL, "named".to_owned(), 3, 2);
+        let first = change(Some(3), 10);
+        let second = change_for_instance("named".to_owned(), Some(2), 20);
+        let default_key = first.key_without_principal().with_principal(PRINCIPAL);
+        let named_key = second.key_without_principal().with_principal(PRINCIPAL);
+        let original_default = default_cell.clone();
+        let original_named = named_cell.clone();
+        let mut current_cells = HashMap::from([
+            (default_key.clone(), Some(default_cell)),
+            (named_key.clone(), Some(named_cell)),
+        ]);
         let (results, pending) =
             plan_user_state_changes(&[first, second], PRINCIPAL, &mut current_cells)
-                .expect("a conflict does not abort the batch");
+                .expect("conflicts are returned as closed results");
+
+        assert_eq!(pending.len(), 0);
         assert_eq!(results.len(), 2);
-        assert_eq!(
-            results[0].outcome(),
-            UserStateWriteOutcome::Conflict {
+        assert!(results.iter().all(|result| {
+            result.outcome() == UserStateWriteOutcome::Conflict {
                 current_revision: 3
             }
-        );
-        assert_eq!(
-            results[1].outcome(),
-            UserStateWriteOutcome::Written { revision: 4 }
-        );
-        assert_eq!(pending.len(), 1);
+        }));
+        assert_eq!(current_cells.get(&default_key), Some(&Some(original_default)));
+        assert_eq!(current_cells.get(&named_key), Some(&Some(original_named)));
     }
 
     #[test]
