@@ -59,10 +59,15 @@ use orna_standard::{
 
 pub mod capability;
 pub mod inspect_lifecycle;
+pub mod inspect_session;
 
 pub use inspect_lifecycle::{
     ClientInspectLifecycle, ClientInspectLifecycleState, InspectEpochBinding, InspectFreezeToken,
     InspectLifecycleError, InspectProjectionVersions,
+};
+pub use inspect_session::{
+    ClientInspectLifecycleCompletion, ClientInspectLifecycleRequest,
+    ClientInspectLifecycleSession,
 };
 
 /// The active revision, function revision, and root invocation selected for
@@ -5215,7 +5220,7 @@ const INSPECT_PUBLIC_ERROR_CODES: &[&str] = &[
     INSPECT_PROJECTION_FAILED,
 ];
 
-fn stable_inspect_provider_error(error: &str) -> String {
+pub(crate) fn stable_inspect_provider_error(error: &str) -> String {
     // The server seam historically used `inspect.revision_mismatch`; ADR 0080
     // exposes the equivalent provenance failure as `inspect.epoch_mismatch`.
     // Keep this translation at the client boundary so provider details never
