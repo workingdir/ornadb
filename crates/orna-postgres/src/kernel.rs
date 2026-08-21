@@ -27,6 +27,14 @@ use orna_standard::StandardUpgradeIdentity;
 use tokio::task::{JoinError, JoinHandle};
 use tokio_postgres::{Client, Config, NoTls};
 
+/// Returns whether `type_id` is one of the exact transient Inspector carrier
+/// identities. The `f7` security-principal identity is deliberately excluded.
+pub(crate) fn is_sealed_inspect_type_id(type_id: orna_core::TypeId) -> bool {
+    let bytes = type_id.to_bytes();
+    bytes[..15].iter().all(|byte| *byte == 0)
+        && matches!(bytes[15], 0xf3..=0xf6 | 0xf8..=0xff)
+}
+
 #[path = "kernel/apply.rs"]
 pub(crate) mod apply;
 #[path = "kernel/bootstrap.rs"]
