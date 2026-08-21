@@ -1745,6 +1745,7 @@ enum ResourcePhase { Requested, Live }
 #[derive(Clone, Debug, PartialEq)]
 struct ResourceState {
     request_id: InvocationId,
+    nested_invocation_id: Option<InvocationId>,
     target_revision: RevisionPair,
     resource_kind: ResourceKind,
     phase: ResourcePhase,
@@ -1800,6 +1801,18 @@ impl ResourceProtocolConnection {
         })
     }
 
+    /// Returns the server-generated nested invocation identity after acceptance.
+    ///
+    /// Before the acceptance handshake completes, the resource has no lineage
+    /// identity and this returns `Ok(None)`.
+    pub fn resource_nested_invocation_id(
+        &self,
+        stream_id: u64,
+        request_id: InvocationId,
+    ) -> Result<Option<InvocationId>, ResourceConnectionError> {
+        Ok(self.state_for(stream_id, request_id)?.nested_invocation_id)
+    }
+
     pub fn receive(&mut self, frame: ResourceClientFrame) -> Result<ResourceFrameDisposition, ResourceConnectionError> {
         match frame {
             ResourceClientFrame::Request(request) => self.open(request),
@@ -1841,6 +1854,7 @@ impl ResourceProtocolConnection {
         self.request_ids.insert(request.request_id);
         self.streams.insert(request.stream_id, ResourceState {
             request_id: request.request_id,
+            nested_invocation_id: None,
             target_revision: request.target_revision,
             resource_kind: request.resource_kind,
             phase: ResourcePhase::Requested,
@@ -1947,6 +1961,7 @@ impl ResourceProtocolConnection {
         }
         let state = self.streams.get_mut(&frame.stream_id).expect("resource state checked");
         state.accepted = true;
+        state.nested_invocation_id = Some(frame.nested_invocation_id);
         if matches!(state.phase, ResourcePhase::Requested) { state.phase = ResourcePhase::Live; }
         Ok(ResourceFrameDisposition::Applied)
     }
@@ -7561,6 +7576,10 @@ mod tests {
         let request_id = request.request_id;
         let mut connection = ResourceProtocolConnection::new();
         assert_eq!(connection.open(request.clone()), Ok(ResourceFrameDisposition::Applied));
+        assert_eq!(
+            connection.resource_nested_invocation_id(request.stream_id, request_id),
+            Ok(None),
+        );
 
         assert_eq!(
             connection.apply(ResourceServerFrame::Accepted(ResourceAccepted {
@@ -7593,16 +7612,27 @@ mod tests {
         );
         assert_eq!(connection.live_resources(), 1);
 
+        let accepted = ResourceAccepted {
+            stream_id: request.stream_id,
+            request_id,
+            nested_invocation_id: InvocationId::from_bytes([0x62; 16]),
+            target_revision: request.target_revision,
+            resource_kind: request.resource_kind,
+        };
+        let decoded = decode_resource_accepted(&encode_resource_accepted(&accepted).unwrap()).unwrap();
+        assert_eq!(connection.apply(ResourceServerFrame::Accepted(decoded)), Ok(ResourceFrameDisposition::Applied));
+        assert_eq!(connection.resource_nested_invocation_id(request.stream_id, request_id), Ok(Some(InvocationId::from_bytes([0x62; 16]))));
         assert_eq!(
             connection.apply(ResourceServerFrame::Accepted(ResourceAccepted {
                 stream_id: request.stream_id,
                 request_id,
-                nested_invocation_id: InvocationId::from_bytes([0x62; 16]),
+                nested_invocation_id: InvocationId::from_bytes([0x63; 16]),
                 target_revision: request.target_revision,
                 resource_kind: request.resource_kind,
             })),
-            Ok(ResourceFrameDisposition::Applied),
+            Err(ResourceConnectionError::WrongState { stream_id: request.stream_id }),
         );
+        assert_eq!(connection.resource_nested_invocation_id(request.stream_id, request_id), Ok(Some(InvocationId::from_bytes([0x62; 16]))));
         assert_eq!(connection.live_resources(), 1);
     }
 
@@ -7894,6 +7924,10 @@ mod tests {
         );
         assert_eq!(connection.apply(ResourceServerFrame::Values(values)), Ok(ResourceFrameDisposition::DroppedLate));
         assert_eq!(connection.live_resources(), 0);
+        assert_eq!(
+            connection.resource_nested_invocation_id(1, request_id),
+            Err(ResourceConnectionError::UnknownStream { stream_id: 1 }),
+        );
     }
 
     #[test]
