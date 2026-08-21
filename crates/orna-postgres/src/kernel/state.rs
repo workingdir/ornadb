@@ -74,6 +74,86 @@ impl UserStateInstanceRequest {
     }
 }
 
+/// Loads authenticated USER state cells from an already-pinned snapshot.
+///
+/// The caller owns the transaction's active revision and codec registry. This
+/// keeps sealed invocation loading on the same repeatable-read snapshot as
+/// target authorisation and evaluation, rather than opening a second kernel
+/// session that could observe a different active revision.
+pub(crate) async fn load_user_state_in_transaction(
+    transaction: &Transaction<'_>,
+    authenticated_session: &AuthenticatedSession,
+    active: &ActiveDatabaseRevision,
+    registry: &OpaqueCodecRegistry,
+    root_function: FunctionId,
+    state_profile: &str,
+    instances: &[UserStateInstanceRequest],
+    expected_types: &BTreeMap<(FunctionId, StateSlotId), TypeId>,
+) -> Result<Vec<UserStateCell>, PostgresKernelError> {
+    validate_state_profile(state_profile)?;
+    let requested_instances = instances
+        .iter()
+        .map(|request| (request.function(), request.instance_key().to_owned()))
+        .collect::<BTreeSet<_>>();
+    let principal = authenticated_session.principal();
+    for ((function, state_slot), expected_type) in expected_types {
+        let declared_type = active_user_state_slot_type(active, *function, *state_slot)?;
+        let key = UserStateKeyWithoutPrincipal::new(
+            root_function,
+            state_profile.to_owned(),
+            *function,
+            String::new(),
+            *state_slot,
+        )
+        .map_err(PostgresKernelError::UserState)?;
+        require_declared_user_state_type(key, *expected_type, declared_type)?;
+    }
+    let rows = transaction
+        .query(
+            "SELECT principal_id, root_function_id, root_state_profile,
+                    function_id, function_instance_key, state_slot_id,
+                    value_bytes, value_type_id, revision, updated_at
+             FROM _orna_kernel.user_state_cells
+             WHERE principal_id = $1
+               AND root_function_id = $2
+               AND root_state_profile = $3
+             ORDER BY function_id, function_instance_key, state_slot_id",
+            &[
+                &principal.to_bytes().to_vec(),
+                &root_function.to_bytes().to_vec(),
+                &state_profile,
+            ],
+        )
+        .await
+        .map_err(PostgresKernelError::Database)?;
+    let mut cells = Vec::with_capacity(rows.len());
+    for row in &rows {
+        let function = state_id(row, "function_id", "USER state function identity")
+            .map(FunctionId::from_bytes)?;
+        let instance_key: String =
+            state_column(row, "function_instance_key", "USER state instance identity")?;
+        if !requested_instances.is_empty()
+            && !requested_instances.contains(&(function, instance_key.clone()))
+        {
+            continue;
+        }
+        let cell = decode_state_cell(row, active, registry)?;
+        let declared_type = active_user_state_slot_type(
+            active,
+            cell.key().function(),
+            cell.key().state_slot(),
+        )?;
+        require_declared_user_state_type(
+            cell.key().without_principal(),
+            declared_type,
+            cell.value_type(),
+        )?;
+        require_expected_type(&cell, expected_types)?;
+        cells.push(cell);
+    }
+    Ok(cells)
+}
+
 impl PostgresKernel {
     /// Loads the authenticated principal's USER state cells.
     ///
@@ -92,11 +172,6 @@ impl PostgresKernel {
         expected_types: &BTreeMap<(FunctionId, StateSlotId), TypeId>,
     ) -> Result<Vec<UserStateCell>, PostgresKernelError> {
         validate_state_profile(state_profile)?;
-        let requested_instances = instances
-            .iter()
-            .map(|request| (request.function(), request.instance_key().to_owned()))
-            .collect::<BTreeSet<_>>();
-        let principal = authenticated_session.principal();
         let mut database_session = self.open().await?;
         let operation = async {
             let transaction = database_session
@@ -111,61 +186,17 @@ impl PostgresKernel {
             let active = configure_and_recover(&transaction).await?;
             let _security = recover_security_snapshot_for_active(&transaction, &active).await?;
             let registry = state_value_registry(&active)?;
-            for ((function, state_slot), expected_type) in expected_types {
-                let declared_type = active_user_state_slot_type(&active, *function, *state_slot)?;
-                let key = UserStateKeyWithoutPrincipal::new(
-                    root_function,
-                    state_profile.to_owned(),
-                    *function,
-                    String::new(),
-                    *state_slot,
-                )
-                .map_err(PostgresKernelError::UserState)?;
-                require_declared_user_state_type(key, *expected_type, declared_type)?;
-            }
-            let rows = transaction
-                .query(
-                    "SELECT principal_id, root_function_id, root_state_profile,
-                            function_id, function_instance_key, state_slot_id,
-                            value_bytes, value_type_id, revision, updated_at
-                     FROM _orna_kernel.user_state_cells
-                     WHERE principal_id = $1
-                       AND root_function_id = $2
-                       AND root_state_profile = $3
-                     ORDER BY function_id, function_instance_key, state_slot_id",
-                    &[
-                        &principal.to_bytes().to_vec(),
-                        &root_function.to_bytes().to_vec(),
-                        &state_profile,
-                    ],
-                )
-                .await
-                .map_err(PostgresKernelError::Database)?;
-            let mut cells = Vec::with_capacity(rows.len());
-            for row in &rows {
-                let function = state_id(row, "function_id", "USER state function identity")
-                    .map(FunctionId::from_bytes)?;
-                let instance_key: String =
-                    state_column(row, "function_instance_key", "USER state instance identity")?;
-                if !requested_instances.is_empty()
-                    && !requested_instances.contains(&(function, instance_key.clone()))
-                {
-                    continue;
-                }
-                let cell = decode_state_cell(row, &active, &registry)?;
-                let declared_type = active_user_state_slot_type(
-                    &active,
-                    cell.key().function(),
-                    cell.key().state_slot(),
-                )?;
-                require_declared_user_state_type(
-                    cell.key().without_principal(),
-                    declared_type,
-                    cell.value_type(),
-                )?;
-                require_expected_type(&cell, expected_types)?;
-                cells.push(cell);
-            }
+            let cells = load_user_state_in_transaction(
+                &transaction,
+                authenticated_session,
+                &active,
+                &registry,
+                root_function,
+                state_profile,
+                instances,
+                expected_types,
+            )
+            .await?;
             transaction
                 .commit()
                 .await
