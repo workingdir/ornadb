@@ -73,8 +73,8 @@ pub struct InstalledInspectRequest {
     /// Requests the `RuntimeInternals` classifier for the
     /// `runtime_bindings` projection.
     pub include_runtime: bool,
-    /// The inspecting invocation, enabling self-observation suppression when
-    /// it matches a trace row's observer. The installed CLI never sets this.
+    /// The observing invocation used for self-observation suppression. When
+    /// absent, the target invocation is used by the trace provider.
     pub observer: Option<InvocationId>,
 }
 
@@ -424,10 +424,17 @@ async fn execute_inspect(
     }
 
     if request.trace {
-        // Self-observation suppression is the default: rows observed by the
-        // inspecting invocation are dropped unless explicitly included.
+        // Trace uses the same structural and classifier privileges as the
+        // projections. The target invocation is the default observer identity
+        // so self-observer rows are suppressed unless explicitly included.
+        let granted = granted_privileges(request);
+        let requested = trace_privilege(request);
         let events = kernel
             .stream_inspect_trace(
+                &session,
+                &epoch,
+                requested,
+                &granted,
                 request.invocation,
                 request.after_sequence,
                 request.observer,
@@ -494,6 +501,18 @@ fn requested_privilege(
             InspectPrivilege::RuntimeInternals
         }
         _ => InspectPrivilege::OwnInvocation,
+    }
+}
+
+/// Selects the requested privilege for the trace stream.
+///
+/// Trace is structural by default; `--include-values` arms the orthogonal
+/// Values classifier and permits decoded ValueBatch payloads.
+fn trace_privilege(request: &InstalledInspectRequest) -> InspectPrivilege {
+    if request.include_values {
+        InspectPrivilege::Values
+    } else {
+        InspectPrivilege::OwnInvocation
     }
 }
 
@@ -696,8 +715,9 @@ fn security_decision_record(row: &SecurityDecisionRow) -> serde_json::Value {
 
 /// Renders one trace event as its closed JSON record.
 ///
-/// The event kind is derived from the payload, and the payload carries the
-/// event's own closed fields: typed values render as canonical ORV5 hex.
+/// The event kind is derived from the payload; typed values render as
+/// canonical ORV5 hex only when the Values classifier was granted, otherwise
+/// ValueBatch payloads render their structural count with `redacted: true`.
 fn trace_record(
     event: &InspectTraceEvent,
     hex: &dyn Fn(&InvokeValue) -> Result<String, InstalledInspectError>,
@@ -717,6 +737,10 @@ fn trace_record(
                 values_hex.push(hex(value)?);
             }
             payload.insert("values_hex".to_owned(), serde_json::json!(values_hex));
+        }
+        InspectTracePayload::ValueBatchRedacted { value_count } => {
+            payload.insert("value_count".to_owned(), serde_json::json!(value_count));
+            payload.insert("redacted".to_owned(), serde_json::json!(true));
         }
         InspectTracePayload::Completed {
             duration_nanoseconds,
@@ -1087,6 +1111,8 @@ mod tests {
             requested_privilege(&InstalledInspectProjection::StateCells, &values),
             InspectPrivilege::Values
         );
+        assert_eq!(trace_privilege(&values), InspectPrivilege::Values);
+
         let security = InstalledInspectRequest::new(
             invocation(0x01),
             None,
@@ -1103,6 +1129,7 @@ mod tests {
             requested_privilege(&InstalledInspectProjection::SecurityDecisions, &security),
             InspectPrivilege::SecurityDetails
         );
+
         let runtime = InstalledInspectRequest::new(
             invocation(0x01),
             None,
@@ -1132,6 +1159,7 @@ mod tests {
             false,
             None,
         );
+        assert_eq!(trace_privilege(&bare), InspectPrivilege::OwnInvocation);
         for projection in [
             InstalledInspectProjection::InvocationNodes,
             InstalledInspectProjection::Calls,
@@ -1416,6 +1444,33 @@ mod tests {
                 },
             })
         );
+
+        let redacted = InspectTraceEvent::new(
+            invocation(0x21),
+            1,
+            InspectTracePayload::ValueBatchRedacted { value_count: 1 },
+            SystemTime::UNIX_EPOCH,
+            None,
+            None,
+        )
+        .expect("redacted fixture event must validate");
+        assert_eq!(
+            trace_record(&redacted, &stub_hex()).expect("record must render"),
+            serde_json::json!({
+                "trace": true,
+                "invocation": invocation(0x21).canonical(),
+                "sequence": 1,
+                "kind": "value_batch",
+                "recorded_at": 0,
+                "observer_invocation": null,
+                "purpose": null,
+                "payload": {
+                    "value_count": 1,
+                    "redacted": true,
+                },
+            })
+        );
+
 
         let completed = InspectTraceEvent::new(
             invocation(0x21),

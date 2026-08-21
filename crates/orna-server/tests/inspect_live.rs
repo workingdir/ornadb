@@ -406,11 +406,46 @@ async fn proves_installed_inspect_end_to_end() -> TestResult<()> {
                     .map(|record| record["sequence"].as_u64().unwrap_or(u64::MAX))
                     .collect::<Vec<_>>()
                     == [0, 1, 2]
-                && trace[1]["payload"]["value_count"] == 1,
+                && trace[1]["payload"]["value_count"] == 1
+                && trace[1]["payload"]["redacted"] == true
+                && trace[1]["payload"].get("values_hex").is_none(),
             format!(
                 "the trace did not stream started(0), value_batch(1), completed(2): {trace_text}"
             ),
         )?;
+
+        let trace_exact_41 = integer_hex(&database, ECHO_VALUE).await?;
+        let (outcome, stdout) = inspect_run(
+            &database,
+            InstalledInspectRequest::new(
+                invocation,
+                None,
+                None,
+                true,
+                0,
+                true,
+                false,
+                false,
+                false,
+                None,
+            ),
+        )
+        .await?;
+        require(
+            outcome == Ok(InstalledInspectOutcome::Completed),
+            "the value-armed trace must complete",
+        )?;
+        let armed_trace_text = String::from_utf8(stdout)
+            .map_err(|_| failure("the value-armed trace stdout was not UTF-8 text"))?;
+        let armed_trace = record_lines(&armed_trace_text).map_err(|message| failure(&message))?;
+        require(
+            armed_trace.len() == 3
+                && armed_trace[1]["payload"]["values_hex"]
+                    == serde_json::json!([trace_exact_41])
+                && armed_trace[1]["payload"].get("redacted").is_none(),
+            "the value-armed trace must render the exact typed value: {armed_trace_text}",
+        )?;
+
 
         let (outcome, stdout) = inspect_run(
             &database,
