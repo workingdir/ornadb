@@ -5495,11 +5495,11 @@ async fn append_unresolved_invocation_audit(
     Ok(())
 }
 
-/// Acquires the exclusive active-revision lock used by ordinary invocations.
+/// Acquires the exclusive active-revision lock for transaction-bound execution.
 ///
-/// Deployment paths use the same lock before they replace the active pointer,
-/// so the caller keeps its revision and security snapshot stable while the
-/// execution transaction is open.
+/// Active-pointer writers use the same lock before replacement, so the caller
+/// keeps its revision and security snapshot stable while the transaction is
+/// open.
 pub(crate) async fn lock_active_revision(
     transaction: &Transaction<'_>,
     expected: RevisionPair,
@@ -5520,9 +5520,9 @@ pub(crate) async fn lock_active_revision(
 /// Acquires a shared active-revision lock for one accepted resource producer.
 ///
 /// Multiple resource producers can validate the same pinned revision together.
-/// Deployment still uses `FOR UPDATE`, which conflicts with this lock and waits
-/// until every producer releases its terminal transaction.
-pub(crate) async fn lock_active_revision_for_resource(
+/// Active-pointer writers acquire `FOR UPDATE`, which conflicts with this lock
+/// and waits until every producer releases its terminal transaction.
+async fn lock_active_revision_for_resource(
     transaction: &Transaction<'_>,
     expected: RevisionPair,
 ) -> Result<(), PostgresKernelError> {
