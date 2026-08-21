@@ -38,6 +38,7 @@ use orna_client::{
 };
 use orna_core::inspect::{
     CallRow, InspectInvocationNodeKind, InspectInvocationPhase, InspectOutcomeKind,
+    INSPECT_RENDER_CARRIER_SIGNATURE, INSPECT_RENDER_CONTRACT,
     InspectPrivilege, InspectResourceKind, InspectResourceStatus, InspectResultSummary,
     InspectSecurityDecisionKind, InspectSecurityDecisionOutcome, InvocationNodeRow,
     PresentationCandidateRow, ResourceRow, RuntimeBindingRow, SecurityDecisionRow, StateCellRow,
@@ -62,13 +63,7 @@ use orna_core::{
     invocation_binding::{CliArgumentInput, bind_cli_arguments},
     revision::{ActiveDatabaseRevision, VerifiedStandardLibrarySnapshot},
     security::AuthenticatedSession,
-    system::{
-        SYS_INSPECT_CALLS_TYPE_ID, SYS_INSPECT_INVOCATION_NODES_TYPE_ID,
-        SYS_INSPECT_INVOCATION_TYPE_ID, SYS_INSPECT_PRESENTATION_CANDIDATES_TYPE_ID,
-        SYS_INSPECT_RESOURCES_TYPE_ID, SYS_INSPECT_RUNTIME_BINDINGS_TYPE_ID,
-        SYS_INSPECT_SECURITY_DECISIONS_TYPE_ID, SYS_INSPECT_SNAPSHOT_TYPE_ID,
-        SYS_INSPECT_STATE_CELLS_TYPE_ID, SYS_INSPECT_UI_NODES_TYPE_ID, SYS_INVOKE_FUNCTION_ID,
-    },
+    system::{SYS_INSPECT_INVOCATION_TYPE_ID, SYS_INSPECT_SNAPSHOT_TYPE_ID, SYS_INVOKE_FUNCTION_ID},
     types::{ResolvedType, StandardScalar, TypeDescriptor, TypeDescriptorKind},
     value::{
         ConstructedValueKind, OpaqueCodecRegistry, OpaqueValue, OpaqueValueError, RuntimeValue,
@@ -752,71 +747,23 @@ impl InstalledClientResourceExecutor {
     }
 }
 
-const DEVTOOLS_INSPECTOR_SHELL_CONTRACT: &str = "devtools.inspector_shell@1";
 const INSPECT_SNAPSHOT_ROW_TAG: u8 = 1;
 /// Typed marker used in a classified row field when its classifier is absent.
 ///
 /// Length-delimited text fields use this value in place of their u32 byte
-/// length; optional fields use it in place of their presence byte. The value
+/// length; optional fields use it in place of its presence byte. The value
 /// is outside the ordinary field domain and therefore cannot be mistaken for
 /// a caller-provided classified value.
 const INSPECT_REDACTED_FIELD_TAG: u8 = 2;
 const INSPECT_REDACTED_TEXT_LENGTH: u32 = u32::MAX;
 
-const INSPECTOR_CARRIER_SIGNATURE: [(&str, TypeId, InspectCarrierKind); 9] = [
-    (
-        "p_snapshot",
-        SYS_INSPECT_SNAPSHOT_TYPE_ID,
-        InspectCarrierKind::Snapshot,
-    ),
-    (
-        "p_invocation_nodes",
-        SYS_INSPECT_INVOCATION_NODES_TYPE_ID,
-        InspectCarrierKind::InvocationNodes,
-    ),
-    (
-        "p_calls",
-        SYS_INSPECT_CALLS_TYPE_ID,
-        InspectCarrierKind::Calls,
-    ),
-    (
-        "p_resources",
-        SYS_INSPECT_RESOURCES_TYPE_ID,
-        InspectCarrierKind::Resources,
-    ),
-    (
-        "p_state_cells",
-        SYS_INSPECT_STATE_CELLS_TYPE_ID,
-        InspectCarrierKind::StateCells,
-    ),
-    (
-        "p_ui_nodes",
-        SYS_INSPECT_UI_NODES_TYPE_ID,
-        InspectCarrierKind::UiNodes,
-    ),
-    (
-        "p_presentation_candidates",
-        SYS_INSPECT_PRESENTATION_CANDIDATES_TYPE_ID,
-        InspectCarrierKind::PresentationCandidates,
-    ),
-    (
-        "p_runtime_bindings",
-        SYS_INSPECT_RUNTIME_BINDINGS_TYPE_ID,
-        InspectCarrierKind::RuntimeBindings,
-    ),
-    (
-        "p_security_decisions",
-        SYS_INSPECT_SECURITY_DECISIONS_TYPE_ID,
-        InspectCarrierKind::SecurityDecisions,
-    ),
-];
-/// Evaluates the installed Inspector shell contract without selecting a
+/// Evaluates the installed standard Inspector render contract without selecting a
 /// graphical runtime or reading mutable state.
 fn run_installed_external_contract(
     active: &ActiveDatabaseRevision,
     request: &ClientExternalContractRequest,
 ) -> Result<RuntimeValue, String> {
-    if request.identity() != DEVTOOLS_INSPECTOR_SHELL_CONTRACT {
+    if request.identity() != INSPECT_RENDER_CONTRACT {
         return Err("inspect.runtime_unavailable".to_owned());
     }
     if request.context().pair() != active.pair() {
@@ -830,7 +777,6 @@ fn run_installed_external_contract(
     };
     if request.context().function_revision() != definition.current_revision()
         || definition.domain() != FunctionDomain::Client
-        || definition.name().to_string() != "devtools.inspector_shell"
         || !matches!(
             definition.return_type(),
             FunctionReturn::Single(ResolvedType::Value(type_id)) if *type_id == STD_UI_TYPE_ID
@@ -839,8 +785,8 @@ fn run_installed_external_contract(
         return Err("inspect.malformed_carrier".to_owned());
     }
     let arguments = request.arguments();
-    if arguments.len() != INSPECTOR_CARRIER_SIGNATURE.len()
-        || definition.parameters().len() != INSPECTOR_CARRIER_SIGNATURE.len()
+    if arguments.len() != INSPECT_RENDER_CARRIER_SIGNATURE.len()
+        || definition.parameters().len() != INSPECT_RENDER_CARRIER_SIGNATURE.len()
     {
         return Err("inspect.malformed_carrier".to_owned());
     }
@@ -856,7 +802,7 @@ fn run_installed_external_contract(
     let mut row_counts = Vec::with_capacity(arguments.len());
     for (index, ((parameter_id, value), (expected_name, expected_type, expected_kind))) in arguments
         .iter()
-        .zip(INSPECTOR_CARRIER_SIGNATURE)
+        .zip(INSPECT_RENDER_CARRIER_SIGNATURE)
         .enumerate()
     {
         let parameter = &definition.parameters()[index];
@@ -6011,8 +5957,9 @@ mod tests {
     }
 
     #[test]
-    fn inspector_signature_covers_all_projection_carriers() {
-        assert_eq!(INSPECTOR_CARRIER_SIGNATURE.len(), 9);
+    fn inspect_render_signature_covers_all_projection_carriers() {
+        assert_eq!(INSPECT_RENDER_CONTRACT, "std.inspect.render@1");
+        assert_eq!(INSPECT_RENDER_CARRIER_SIGNATURE.len(), 9);
         for (tag, expected) in [
             (1, InspectCarrierKind::Snapshot),
             (2, InspectCarrierKind::InvocationNodes),
