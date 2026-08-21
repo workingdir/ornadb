@@ -88,9 +88,10 @@ separate release action.
 - [x] Add CLIENT action values and `std.action.call`, including checked plans
   and trigger lifecycle proof (work ADR 0079).
 - [x] Deliver the headless ordinary CLIENT Inspector v1 accepted by work ADR
-  0080. The production graphical runtime/UI sink, populated resource/UI
-  projections beyond the accepted headless scope, and reflective gateways
-  remain proposal-only.
+  0080 and the generic standard render contract `std.inspect.render@1` accepted
+  by work ADR 0081. The production graphical runtime/UI sink, populated
+  resource/UI projections beyond the accepted headless scope, and reflective
+  gateways remain proposal-only.
 - [ ] Implement reflective JSON-RPC and MCP gateway programs after the
   canonical Exposure and Service value contracts become accepted executable
   specifications.
