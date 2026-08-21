@@ -20,12 +20,17 @@ mod postgres_test_support;
 
 use std::collections::BTreeMap;
 
+use orna_artifact::client_plan::{StateClientPlan, StateScope};
 use orna_client::{
     ClientStateContext, ClientStateKey, ClientStateStore, ClientUserStateError,
+};
+use orna_compiler::{
+    StandardApplicationCheckContext, check_standard_application, prepare_standard_application,
 };
 use orna_core::{
     FunctionId, PrincipalId, StateSlotId, TypeId,
     security::{LocalPeerCredential, Principal, PrincipalKind, PrincipalStatus, SecuritySnapshot},
+    source::{SourceBundle, SourceUnit},
     state::{UserStateChange, UserStateWriteOutcome},
     value::RuntimeValue,
 };
@@ -50,9 +55,12 @@ fn require(condition: bool, message: impl Into<String>) -> TestResult<()> {
 
 const PRINCIPAL_A: PrincipalId = PrincipalId::from_bytes([0xaa; 16]);
 const PRINCIPAL_B: PrincipalId = PrincipalId::from_bytes([0xbb; 16]);
-const ROOT_FUNCTION: FunctionId = FunctionId::from_bytes([0x10; 16]);
-const SLOT_FUNCTION: FunctionId = FunctionId::from_bytes([0x11; 16]);
-const SLOT: StateSlotId = StateSlotId::from_bytes([0x12; 16]);
+const RAW_USER_STATE_SOURCE: &str = "CREATE SCHEMA user_state_fixture;\n\
+    CREATE CLIENT FUNCTION user_state_fixture.state() RETURNS BOOLEAN IS\n\
+      STATE value INTEGER SCOPE USER DEFAULT 0;\n\
+    BEGIN\n\
+      RETURN TRUE;\n\
+    END;\n";
 
 fn kernel(database: &TestDatabase) -> PostgresKernel {
     database.connection_string().parse().expect("kernel URL")
@@ -90,13 +98,59 @@ fn loaded_value_hex(record: &str) -> Result<String, String> {
         .ok_or_else(|| "record has no value_hex field".to_owned())
 }
 
-async fn install_standard(database: &TestDatabase) -> TestResult<()> {
+async fn install_standard(database: &TestDatabase) -> TestResult<(FunctionId, StateSlotId)> {
     let kernel = kernel(database);
     kernel.bootstrap().await?;
     let empty = kernel.recover().await?;
     let upgrade = orna_standard::prepare_standard_upgrade_v1_to_v2(&empty)?;
     kernel.apply_standard_upgrade(&upgrade).await?;
-    Ok(())
+
+    let active = kernel.recover().await?;
+    let context = StandardApplicationCheckContext::try_new(
+        active.catalogue(),
+        upgrade.checked_standard_library(),
+    )?;
+    let source = SourceBundle::new([SourceUnit::new(
+        "user-state.orna",
+        RAW_USER_STATE_SOURCE,
+    )])?;
+    let report = check_standard_application(&source, &context);
+    require(
+        report.diagnostics().is_empty(),
+        format!(
+            "USER state fixture did not compile: {:?}",
+            report.diagnostics()
+        ),
+    )?;
+    let active = kernel
+        .apply(&prepare_standard_application(
+            &report,
+            active.pair(),
+            &active,
+        )?)
+        .await?;
+    let function = active
+        .catalogue()
+        .functions()
+        .iter()
+        .find(|function| function.name().parts() == ["user_state_fixture", "state"])
+        .ok_or_else(|| failure("USER state fixture is missing its CLIENT function"))?
+        .id();
+    let revision = active
+        .function_revisions()
+        .iter()
+        .find(|revision| revision.function() == function)
+        .ok_or_else(|| failure("USER state fixture is missing its CLIENT revision"))?;
+    let plan = StateClientPlan::decode(revision.artifact().payload()).map_err(|error| {
+        failure(format!("USER state fixture plan did not decode: {error}"))
+    })?;
+    let slot = plan
+        .slots()
+        .iter()
+        .find(|slot| slot.scope() == StateScope::User)
+        .ok_or_else(|| failure("USER state fixture is missing its USER state slot"))?
+        .state_slot_id();
+    Ok((function, slot))
 }
 
 async fn map_peer(database: &TestDatabase, principal: PrincipalId) -> TestResult<()> {
@@ -182,9 +236,11 @@ async fn write_cell(
 async fn load_cells(
     database: &TestDatabase,
     root: FunctionId,
+    function: FunctionId,
     profile: &str,
 ) -> TestResult<(InstalledUserStateOutcome, Vec<u8>)> {
-    let (outcome, stdout) = load_cells_with_types(database, root, profile, Vec::new()).await?;
+    let (outcome, stdout) =
+        load_cells_with_types(database, root, function, profile, Vec::new()).await?;
     let outcome = match outcome {
         Ok(outcome) => outcome,
         Err(error) => {
@@ -197,6 +253,7 @@ async fn load_cells(
 async fn load_cells_with_types(
     database: &TestDatabase,
     root: FunctionId,
+    function: FunctionId,
     profile: &str,
     expected_types: Vec<InstalledUserStateExpectedType>,
 ) -> TestResult<(
@@ -207,7 +264,7 @@ async fn load_cells_with_types(
         root_function: root,
         state_profile: profile.to_owned(),
         instances: vec![InstalledUserStateInstance {
-            function: SLOT_FUNCTION,
+            function,
             instance_key: String::new(),
         }],
         expected_types,
@@ -220,17 +277,17 @@ async fn load_cells_with_types(
 #[ignore = "requires the Compose PostgreSQL development service"]
 async fn proves_user_state_end_to_end() -> TestResult<()> {
     with_test_database(|database| async move {
-        install_standard(&database).await?;
+        let (state_function, state_slot) = install_standard(&database).await?;
 
         // Principal A creates a cell under the default profile.
         map_peer(&database, PRINCIPAL_A).await?;
         let (create, _) = write_cell(
             &database,
-            ROOT_FUNCTION,
-            SLOT_FUNCTION,
+            state_function,
+            state_function,
             "",
             "",
-            SLOT,
+            state_slot,
             None,
             41,
         )
@@ -241,7 +298,7 @@ async fn proves_user_state_end_to_end() -> TestResult<()> {
         )?;
 
         // Load it back: one record carrying the exact value and revision 1.
-        let (load, load_stdout) = load_cells(&database, ROOT_FUNCTION, "").await?;
+        let (load, load_stdout) = load_cells(&database, state_function, state_function, "").await?;
         require(
             load == InstalledUserStateOutcome::Completed,
             "the principal A load must complete",
@@ -262,11 +319,11 @@ async fn proves_user_state_end_to_end() -> TestResult<()> {
         // A matching expected revision increments to 2.
         let (write_two, _) = write_cell(
             &database,
-            ROOT_FUNCTION,
-            SLOT_FUNCTION,
+            state_function,
+            state_function,
             "",
             "",
-            SLOT,
+            state_slot,
             Some(1),
             42,
         )
@@ -275,7 +332,7 @@ async fn proves_user_state_end_to_end() -> TestResult<()> {
             write_two == Ok(InstalledUserStateOutcome::Completed),
             "the matching-revision write must complete",
         )?;
-        let (load_two, load_two_stdout) = load_cells(&database, ROOT_FUNCTION, "").await?;
+        let (load_two, load_two_stdout) = load_cells(&database, state_function, state_function, "").await?;
         require(
             load_two == InstalledUserStateOutcome::Completed,
             "the second load must complete",
@@ -297,11 +354,11 @@ async fn proves_user_state_end_to_end() -> TestResult<()> {
         // request still completes and renders the ORNA0902 conflict record.
         let (stale, stale_stdout) = write_cell(
             &database,
-            ROOT_FUNCTION,
-            SLOT_FUNCTION,
+            state_function,
+            state_function,
             "",
             "",
-            SLOT,
+            state_slot,
             Some(1),
             99,
         )
@@ -320,7 +377,7 @@ async fn proves_user_state_end_to_end() -> TestResult<()> {
 
         // The conflict applied nothing: the cell still carries exact 42 at 2.
         let (after_conflict, after_conflict_stdout) =
-            load_cells(&database, ROOT_FUNCTION, "").await?;
+            load_cells(&database, state_function, state_function, "").await?;
         require(
             after_conflict == InstalledUserStateOutcome::Completed,
             "the post-conflict load must complete",
@@ -341,11 +398,12 @@ async fn proves_user_state_end_to_end() -> TestResult<()> {
         // A load-time type mismatch fails closed with ORNA0901.
         let (type_mismatch, _) = load_cells_with_types(
             &database,
-            ROOT_FUNCTION,
+            state_function,
+            state_function,
             "",
             vec![InstalledUserStateExpectedType {
-                function: SLOT_FUNCTION,
-                state_slot: SLOT,
+                function: state_function,
+                state_slot: state_slot,
                 value_type: TypeId::from_bytes([0x99; 16]),
             }],
         )
@@ -362,7 +420,7 @@ async fn proves_user_state_end_to_end() -> TestResult<()> {
 
         // Remap the local peer to principal B; its load sees no cells.
         map_peer(&database, PRINCIPAL_B).await?;
-        let (isolation, isolation_stdout) = load_cells(&database, ROOT_FUNCTION, "").await?;
+        let (isolation, isolation_stdout) = load_cells(&database, state_function, state_function, "").await?;
         require(
             isolation == InstalledUserStateOutcome::Completed,
             "the isolated load must complete",
@@ -374,7 +432,7 @@ async fn proves_user_state_end_to_end() -> TestResult<()> {
 
         // A fresh kernel reopen preserves the cells for principal A.
         map_peer(&database, PRINCIPAL_A).await?;
-        let (reopen, reopen_stdout) = load_cells(&database, ROOT_FUNCTION, "").await?;
+        let (reopen, reopen_stdout) = load_cells(&database, state_function, state_function, "").await?;
         require(
             reopen == InstalledUserStateOutcome::Completed,
             "the reopen load must complete",
@@ -406,7 +464,7 @@ async fn proves_user_state_end_to_end() -> TestResult<()> {
 #[ignore = "requires the Compose PostgreSQL development service"]
 async fn proves_authenticated_client_state_adapter_lifecycle() -> TestResult<()> {
     with_test_database(|database| async move {
-        install_standard(&database).await?;
+        let (state_function, state_slot) = install_standard(&database).await?;
         map_peer(&database, PRINCIPAL_A).await?;
 
         let kernel = kernel(&database);
@@ -414,18 +472,18 @@ async fn proves_authenticated_client_state_adapter_lifecycle() -> TestResult<()>
             .authenticate_local_peer(nix::unistd::geteuid().as_raw())
             .await?;
         let context = ClientStateContext::new(
-            ROOT_FUNCTION,
+            state_function,
             "adapter-profile".to_owned(),
             String::new(),
         )
         .map_err(|error| failure(error.to_string()))?;
-        let expected_types = BTreeMap::from([((SLOT_FUNCTION, SLOT), INTEGER_TYPE_ID)]);
+        let expected_types = BTreeMap::from([((state_function, state_slot), INTEGER_TYPE_ID)]);
         let initial_change = UserStateChange::new(
-            ROOT_FUNCTION,
+            state_function,
             "adapter-profile".to_owned(),
-            SLOT_FUNCTION,
+            state_function,
             String::new(),
-            SLOT,
+            state_slot,
             None,
             RuntimeValue::Integer(7),
             INTEGER_TYPE_ID,
@@ -447,7 +505,7 @@ async fn proves_authenticated_client_state_adapter_lifecycle() -> TestResult<()>
             .load(&context, &[], &expected_types, &mut state)
             .await
             .map_err(|error| failure(error.to_string()))?;
-        let key = ClientStateKey::from_context(&context, SLOT_FUNCTION, SLOT);
+        let key = ClientStateKey::from_context(&context, state_function, state_slot);
         require(
             state.user().get(&key).is_some_and(|value| {
                 value.value() == &RuntimeValue::Integer(7)
@@ -489,11 +547,11 @@ async fn proves_authenticated_client_state_adapter_lifecycle() -> TestResult<()>
 
         reloaded.set_user_state(key.clone(), RuntimeValue::Integer(9), INTEGER_TYPE_ID)?;
         let external_change = UserStateChange::new(
-            ROOT_FUNCTION,
+            state_function,
             "adapter-profile".to_owned(),
-            SLOT_FUNCTION,
+            state_function,
             String::new(),
-            SLOT,
+            state_slot,
             Some(2),
             RuntimeValue::Integer(10),
             INTEGER_TYPE_ID,
