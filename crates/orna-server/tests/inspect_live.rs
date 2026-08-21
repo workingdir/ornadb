@@ -31,8 +31,11 @@ mod support;
 #[path = "../../orna-postgres/tests/support/mod.rs"]
 mod postgres_test_support;
 
+use orna_artifact::client_plan::{StateClientPlan, StateScope};
 use orna_compiler::{
-    STD_INVOKE_ECHO_FUNCTION_ID, STD_INVOKE_ECHO_FUNCTION_REVISION_ID, STD_INVOKE_ECHO_PARAMETER_ID,
+    STD_INVOKE_ECHO_FUNCTION_ID, STD_INVOKE_ECHO_FUNCTION_REVISION_ID,
+    STD_INVOKE_ECHO_PARAMETER_ID, StandardApplicationCheckContext, check_standard_application,
+    prepare_standard_application,
 };
 use orna_core::{
     FunctionId, InvocationId, PrincipalId, StateSlotId,
@@ -46,6 +49,7 @@ use orna_core::{
         ExecuteGrant, LocalPeerCredential, Principal, PrincipalKind, PrincipalStatus,
         SecurityFunctionTarget, SecuritySnapshot,
     },
+    source::{SourceBundle, SourceUnit},
     value::RuntimeValue,
 };
 use orna_postgres::{PostgresKernel, SealedInvocationResult};
@@ -62,8 +66,12 @@ use postgres_test_support::{TestDatabase, TestResult, failure, with_test_databas
 const ECHO_VALUE: i32 = 41;
 const CONNECTION_PROTOCOL_MAJOR: u16 = 5;
 const INSPECT_PRINCIPAL: PrincipalId = PrincipalId::from_bytes([0x5a; 16]);
-const SLOT_FUNCTION: FunctionId = FunctionId::from_bytes([0x5b; 16]);
-const SLOT: StateSlotId = StateSlotId::from_bytes([0x5c; 16]);
+const RAW_INSPECT_STATE_SOURCE: &str = "CREATE SCHEMA inspect_fixture;\n\
+    CREATE CLIENT FUNCTION inspect_fixture.state() RETURNS BOOLEAN IS\n\
+      STATE value INTEGER SCOPE USER DEFAULT 0;\n\
+    BEGIN\n\
+      RETURN TRUE;\n\
+    END;\n";
 
 /// Asserts one live condition, failing the whole test with a typed error.
 fn require(condition: bool, message: impl Into<String>) -> TestResult<()> {
@@ -95,19 +103,76 @@ async fn integer_hex(database: &TestDatabase, value: i32) -> TestResult<String> 
     Ok(hex)
 }
 
-async fn install_standard(database: &TestDatabase) -> TestResult<()> {
+async fn install_standard(database: &TestDatabase) -> TestResult<orna_standard::StandardUpgrade> {
     let kernel = kernel(database);
     kernel.bootstrap().await?;
     let empty = kernel.recover().await?;
     let upgrade = orna_standard::prepare_standard_upgrade_v1_to_v2(&empty)?;
     kernel.apply_standard_upgrade(&upgrade).await?;
-    Ok(())
+    Ok(upgrade)
+}
+
+async fn install_state_client_fixture(
+    database: &TestDatabase,
+    standard_upgrade: &orna_standard::StandardUpgrade,
+) -> TestResult<(FunctionId, StateSlotId)> {
+    let kernel = kernel(database);
+    let active = kernel.recover().await?;
+    let context = StandardApplicationCheckContext::try_new(
+        active.catalogue(),
+        standard_upgrade.checked_standard_library(),
+    )?;
+    let source = SourceBundle::new([SourceUnit::new(
+        "inspect-state.orna",
+        RAW_INSPECT_STATE_SOURCE,
+    )])?;
+    let report = check_standard_application(&source, &context);
+    require(
+        report.diagnostics().is_empty(),
+        format!(
+            "Inspector state fixture did not compile: {:?}",
+            report.diagnostics()
+        ),
+    )?;
+    let active = kernel
+        .apply(&prepare_standard_application(
+            &report,
+            active.pair(),
+            &active,
+        )?)
+        .await?;
+    let function = active
+        .catalogue()
+        .functions()
+        .iter()
+        .find(|function| function.name().parts() == ["inspect_fixture", "state"])
+        .ok_or_else(|| failure("Inspector state fixture is missing its CLIENT function"))?
+        .id();
+    let revision = active
+        .function_revisions()
+        .iter()
+        .find(|revision| revision.function() == function)
+        .ok_or_else(|| failure("Inspector state fixture is missing its CLIENT revision"))?;
+    let plan = StateClientPlan::decode(revision.artifact().payload()).map_err(|error| {
+        failure(format!(
+            "Inspector state fixture plan did not decode: {error}"
+        ))
+    })?;
+    let slot = plan
+        .slots()
+        .iter()
+        .find(|slot| slot.scope() == StateScope::User)
+        .ok_or_else(|| failure("Inspector state fixture is missing its USER state slot"))?
+        .state_slot_id();
+    Ok((function, slot))
 }
 
 /// Writes one integer USER state cell under the echo root function, so the
 /// `state_cells` projection of the captured epoch has a live row to read.
 async fn write_cell(
     database: &TestDatabase,
+    state_function: FunctionId,
+    state_slot: StateSlotId,
     value: i32,
 ) -> TestResult<Result<InstalledUserStateOutcome, InstalledUserStateError>> {
     let active = kernel(database).recover().await?;
@@ -121,9 +186,9 @@ async fn write_cell(
         root_function: STD_INVOKE_ECHO_FUNCTION_ID,
         state_profile: String::new(),
         change: InstalledUserStateChange {
-            function: SLOT_FUNCTION,
+            function: state_function,
             instance_key: String::new(),
-            state_slot: SLOT,
+            state_slot,
             expected_revision: None,
             value_type: INTEGER_TYPE_ID,
             value_bytes,
@@ -238,7 +303,9 @@ fn require_echo_completion(
 #[ignore = "requires the Compose PostgreSQL development service"]
 async fn proves_installed_inspect_end_to_end() -> TestResult<()> {
     with_test_database(|database| async move {
-        install_standard(&database).await?;
+        let standard_upgrade = install_standard(&database).await?;
+        let (state_function, state_slot) =
+            install_state_client_fixture(&database, &standard_upgrade).await?;
         let db_kernel = kernel(&database);
         let uid = nix::unistd::geteuid().as_raw();
         let active = db_kernel.recover().await?;
@@ -255,11 +322,14 @@ async fn proves_installed_inspect_end_to_end() -> TestResult<()> {
         // the sealed dispatch, exactly like the installed product.
         let security = SecuritySnapshot::new_with_function_targets_and_local_peer_credentials(
             pair,
-            vec![SecurityFunctionTarget::verified_standard(
-                STD_INVOKE_ECHO_FUNCTION_ID,
-                standard_revision,
-                STD_INVOKE_ECHO_FUNCTION_REVISION_ID,
-            )],
+            vec![
+                SecurityFunctionTarget::verified_standard(
+                    STD_INVOKE_ECHO_FUNCTION_ID,
+                    standard_revision,
+                    STD_INVOKE_ECHO_FUNCTION_REVISION_ID,
+                ),
+                SecurityFunctionTarget::application(state_function),
+            ],
             vec![Principal::new(
                 INSPECT_PRINCIPAL,
                 PrincipalKind::User,
@@ -275,7 +345,7 @@ async fn proves_installed_inspect_end_to_end() -> TestResult<()> {
         db_kernel.replace_security_snapshot(&security).await?;
 
         // One cell under the echo root for the state_cells redaction proof.
-        let write = write_cell(&database, ECHO_VALUE).await?;
+        let write = write_cell(&database, state_function, state_slot, ECHO_VALUE).await?;
         require(
             write == Ok(InstalledUserStateOutcome::Completed),
             "the state-cell write must complete",
@@ -616,7 +686,7 @@ async fn proves_installed_inspect_end_to_end() -> TestResult<()> {
 #[ignore = "requires the Compose PostgreSQL development service"]
 async fn rejects_an_owned_epoch_for_a_different_requested_invocation() -> TestResult<()> {
     with_test_database(|database| async move {
-        install_standard(&database).await?;
+        let _standard_upgrade = install_standard(&database).await?;
         let db_kernel = kernel(&database);
         let uid = nix::unistd::geteuid().as_raw();
         let active = db_kernel.recover().await?;
