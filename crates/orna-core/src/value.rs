@@ -8,6 +8,7 @@ use std::{cmp::Ordering, error::Error, fmt};
 
 use crate::{
     FieldId, ObjectId, ParameterId, TypeId,
+    inspect_carrier::InspectCarrierEnvelope,
     catalogue::{
         CatalogueSnapshot, QualifiedSemanticName, ValueTypeKind, ValueTypeMutability,
         ValueTypePersistence,
@@ -15,6 +16,21 @@ use crate::{
     revision::{
         ActiveDatabaseRevision, RecordValueFieldDescriptorClass, VerifiedStandardLibrarySnapshot,
         classify_record_value_field_descriptor,
+    },
+    system::{
+        SYS_INSPECT_CALLS_REPRESENTATION_CONTRACT, SYS_INSPECT_CALLS_TYPE_ID,
+        SYS_INSPECT_CALLS_TYPE_NAME, SYS_INSPECT_INVOCATION_NODES_REPRESENTATION_CONTRACT,
+        SYS_INSPECT_INVOCATION_NODES_TYPE_ID, SYS_INSPECT_INVOCATION_NODES_TYPE_NAME,
+        SYS_INSPECT_PRESENTATION_CANDIDATES_REPRESENTATION_CONTRACT,
+        SYS_INSPECT_PRESENTATION_CANDIDATES_TYPE_ID, SYS_INSPECT_PRESENTATION_CANDIDATES_TYPE_NAME,
+        SYS_INSPECT_RESOURCES_REPRESENTATION_CONTRACT, SYS_INSPECT_RESOURCES_TYPE_ID,
+        SYS_INSPECT_RESOURCES_TYPE_NAME, SYS_INSPECT_RUNTIME_BINDINGS_REPRESENTATION_CONTRACT,
+        SYS_INSPECT_RUNTIME_BINDINGS_TYPE_ID, SYS_INSPECT_RUNTIME_BINDINGS_TYPE_NAME,
+        SYS_INSPECT_SECURITY_DECISIONS_REPRESENTATION_CONTRACT, SYS_INSPECT_SECURITY_DECISIONS_TYPE_ID,
+        SYS_INSPECT_SECURITY_DECISIONS_TYPE_NAME, SYS_INSPECT_SNAPSHOT_TYPE_ID,
+        SYS_INSPECT_STATE_CELLS_REPRESENTATION_CONTRACT, SYS_INSPECT_STATE_CELLS_TYPE_ID,
+        SYS_INSPECT_STATE_CELLS_TYPE_NAME, SYS_INSPECT_UI_NODES_REPRESENTATION_CONTRACT,
+        SYS_INSPECT_UI_NODES_TYPE_ID, SYS_INSPECT_UI_NODES_TYPE_NAME,
     },
     types::{ResolvedType, StandardScalar, TypeDescriptor, TypeDescriptorKind},
 };
@@ -26,6 +42,104 @@ const MAX_OPAQUE_CODEC_MAGIC_LENGTH: usize = 64;
 
 /// The largest accepted number of runtime-value nodes.
 pub const MAX_RUNTIME_VALUE_NODES: usize = 65_536;
+
+/// One immutable checked-in contract for a sealed `sys.inspect` carrier.
+///
+/// These registrations are deliberately separate from `OpaqueCodecRegistry`.
+/// Inspector carriers are sealed system values and do not belong to an
+/// application or verified standard-library catalogue.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct InspectCarrierCodecRegistration {
+    opaque_type: TypeId,
+    semantic_name: &'static str,
+    representation_contract: &'static str,
+}
+
+impl InspectCarrierCodecRegistration {
+    const fn new(
+        opaque_type: TypeId,
+        semantic_name: &'static str,
+        representation_contract: &'static str,
+    ) -> Self {
+        Self {
+            opaque_type,
+            semantic_name,
+            representation_contract,
+        }
+    }
+
+    /// Returns the sealed carrier type identity.
+    pub const fn opaque_type(self) -> TypeId {
+        self.opaque_type
+    }
+
+    /// Returns the sealed carrier semantic name.
+    pub const fn semantic_name(self) -> &'static str {
+        self.semantic_name
+    }
+
+    /// Returns the immutable carrier representation contract.
+    pub const fn representation_contract(self) -> &'static str {
+        self.representation_contract
+    }
+}
+
+/// The complete deterministic registration set for the eight sealed Inspector
+/// projection result carriers. No caller may extend this set. The snapshot
+/// carrier has a separate sealed construction path because it has no
+/// projection tag.
+pub const INSPECT_CARRIER_CODEC_REGISTRATIONS: &[InspectCarrierCodecRegistration] = &[
+    InspectCarrierCodecRegistration::new(
+        SYS_INSPECT_INVOCATION_NODES_TYPE_ID,
+        SYS_INSPECT_INVOCATION_NODES_TYPE_NAME,
+        SYS_INSPECT_INVOCATION_NODES_REPRESENTATION_CONTRACT,
+    ),
+    InspectCarrierCodecRegistration::new(
+        SYS_INSPECT_CALLS_TYPE_ID,
+        SYS_INSPECT_CALLS_TYPE_NAME,
+        SYS_INSPECT_CALLS_REPRESENTATION_CONTRACT,
+    ),
+    InspectCarrierCodecRegistration::new(
+        SYS_INSPECT_RESOURCES_TYPE_ID,
+        SYS_INSPECT_RESOURCES_TYPE_NAME,
+        SYS_INSPECT_RESOURCES_REPRESENTATION_CONTRACT,
+    ),
+    InspectCarrierCodecRegistration::new(
+        SYS_INSPECT_STATE_CELLS_TYPE_ID,
+        SYS_INSPECT_STATE_CELLS_TYPE_NAME,
+        SYS_INSPECT_STATE_CELLS_REPRESENTATION_CONTRACT,
+    ),
+    InspectCarrierCodecRegistration::new(
+        SYS_INSPECT_UI_NODES_TYPE_ID,
+        SYS_INSPECT_UI_NODES_TYPE_NAME,
+        SYS_INSPECT_UI_NODES_REPRESENTATION_CONTRACT,
+    ),
+    InspectCarrierCodecRegistration::new(
+        SYS_INSPECT_PRESENTATION_CANDIDATES_TYPE_ID,
+        SYS_INSPECT_PRESENTATION_CANDIDATES_TYPE_NAME,
+        SYS_INSPECT_PRESENTATION_CANDIDATES_REPRESENTATION_CONTRACT,
+    ),
+    InspectCarrierCodecRegistration::new(
+        SYS_INSPECT_RUNTIME_BINDINGS_TYPE_ID,
+        SYS_INSPECT_RUNTIME_BINDINGS_TYPE_NAME,
+        SYS_INSPECT_RUNTIME_BINDINGS_REPRESENTATION_CONTRACT,
+    ),
+    InspectCarrierCodecRegistration::new(
+        SYS_INSPECT_SECURITY_DECISIONS_TYPE_ID,
+        SYS_INSPECT_SECURITY_DECISIONS_TYPE_NAME,
+        SYS_INSPECT_SECURITY_DECISIONS_REPRESENTATION_CONTRACT,
+    ),
+];
+
+/// Returns the fixed registration for one sealed Inspector carrier type.
+pub fn inspect_carrier_codec_by_type_id(
+    opaque_type: TypeId,
+) -> Option<InspectCarrierCodecRegistration> {
+    INSPECT_CARRIER_CODEC_REGISTRATIONS
+        .iter()
+        .copied()
+        .find(|registration| registration.opaque_type == opaque_type)
+}
 
 /// A borrowed exact type view of one runtime value.
 ///
@@ -1577,6 +1691,44 @@ impl OpaqueValue {
         registry.construct(active, opaque_type, payload.as_ref())
     }
 
+    /// Validates and constructs one sealed `sys.inspect` projection carrier.
+    ///
+    /// Inspector carriers intentionally bypass [`OpaqueCodecRegistry`]: their
+    /// identities and contracts are sealed system facts, not definitions in
+    /// the active application or verified standard-library catalogue. The
+    /// canonical envelope still carries the active source/catalogue provenance
+    /// and is decoded before the opaque value is retained.
+    pub fn new_inspect_carrier(
+        active: &ActiveDatabaseRevision,
+        opaque_type: TypeId,
+        payload: impl AsRef<[u8]>,
+    ) -> Result<Self, OpaqueValueError> {
+        if opaque_type != SYS_INSPECT_SNAPSHOT_TYPE_ID
+            && inspect_carrier_codec_by_type_id(opaque_type).is_none()
+        {
+            return Err(OpaqueValueError::UnregisteredType { opaque_type });
+        }
+
+        let payload = payload.as_ref();
+        let envelope = InspectCarrierEnvelope::decode(payload).map_err(|_| {
+            OpaqueValueError::InvalidInspectCarrierEnvelope { opaque_type }
+        })?;
+        if envelope.carrier_kind().type_id() != opaque_type {
+            return Err(OpaqueValueError::InspectCarrierTypeMismatch { opaque_type });
+        }
+        let pair = active.pair();
+        if envelope.source_revision_id() != pair.source()
+            || envelope.catalogue_revision_id() != pair.catalogue()
+        {
+            return Err(OpaqueValueError::InspectCarrierRevisionMismatch { opaque_type });
+        }
+
+        Ok(Self {
+            opaque_type,
+            canonical_payload: payload.to_vec(),
+        })
+    }
+
     /// Returns the nominal opaque value-type identity.
     pub const fn opaque_type(&self) -> TypeId {
         self.opaque_type
@@ -1714,6 +1866,21 @@ pub enum OpaqueValueError {
         /// The inactive opaque type identity.
         opaque_type: TypeId,
     },
+    /// The sealed Inspector carrier envelope is malformed or non-canonical.
+    InvalidInspectCarrierEnvelope {
+        /// The carrier type whose envelope was rejected.
+        opaque_type: TypeId,
+    },
+    /// The envelope projection does not match the requested sealed carrier.
+    InspectCarrierTypeMismatch {
+        /// The carrier type whose projection was rejected.
+        opaque_type: TypeId,
+    },
+    /// The envelope is pinned to a different active source/catalogue pair.
+    InspectCarrierRevisionMismatch {
+        /// The carrier type whose provenance was rejected.
+        opaque_type: TypeId,
+    },
     /// The complete opaque payload has the wrong exact length.
     WrongPayloadLength {
         /// The opaque type whose payload was rejected.
@@ -1764,6 +1931,15 @@ impl fmt::Display for OpaqueValueError {
             }
             Self::InactiveRegistration { .. } => {
                 formatter.write_str("opaque codec registration is not active")
+            }
+            Self::InvalidInspectCarrierEnvelope { .. } => {
+                formatter.write_str("inspect carrier envelope is invalid")
+            }
+            Self::InspectCarrierTypeMismatch { .. } => {
+                formatter.write_str("inspect carrier envelope type does not match")
+            }
+            Self::InspectCarrierRevisionMismatch { .. } => {
+                formatter.write_str("inspect carrier envelope revision does not match")
             }
             Self::WrongPayloadLength { .. } => {
                 formatter.write_str("opaque value payload has the wrong length")
@@ -7631,4 +7807,113 @@ mod tests {
             })
         );
     }
+
+    fn inspect_carrier_payload(
+        active: &ActiveDatabaseRevision,
+        tag: u8,
+        rows: &[&[u8]],
+    ) -> Vec<u8> {
+        let mut payload = b"ORNA-INSPECT/1 ".to_vec();
+        payload.extend_from_slice(&1_u16.to_be_bytes());
+        payload.push(tag);
+        payload.extend_from_slice(&7_u64.to_be_bytes());
+        payload.extend_from_slice(&active.pair().source().to_bytes());
+        payload.extend_from_slice(&active.pair().catalogue().to_bytes());
+        payload.extend_from_slice(&u32::try_from(rows.len()).unwrap().to_be_bytes());
+        for row in rows {
+            payload.extend_from_slice(&u32::try_from(row.len()).unwrap().to_be_bytes());
+            payload.extend_from_slice(row);
+        }
+        payload
+    }
+
+    fn inspect_orv5_integer_row(value: i32) -> Vec<u8> {
+        let mut row = b"ORV5".to_vec();
+        row.push(0x03);
+        row.extend_from_slice(&[0; 16]);
+        row.extend_from_slice(&4_u32.to_be_bytes());
+        row.extend_from_slice(&value.to_be_bytes());
+        row
+    }
+
+    #[test]
+    fn inspect_opaque_constructor_accepts_all_eight_projection_carriers() {
+        let active = active_record_revision();
+        let carriers = [
+            (2_u8, SYS_INSPECT_INVOCATION_NODES_TYPE_ID),
+            (3, SYS_INSPECT_CALLS_TYPE_ID),
+            (4, SYS_INSPECT_RESOURCES_TYPE_ID),
+            (5, SYS_INSPECT_STATE_CELLS_TYPE_ID),
+            (6, SYS_INSPECT_UI_NODES_TYPE_ID),
+            (7, SYS_INSPECT_PRESENTATION_CANDIDATES_TYPE_ID),
+            (8, SYS_INSPECT_RUNTIME_BINDINGS_TYPE_ID),
+            (9, SYS_INSPECT_SECURITY_DECISIONS_TYPE_ID),
+        ];
+
+        for (tag, opaque_type) in carriers {
+            let row = inspect_orv5_integer_row(1);
+            let payload = inspect_carrier_payload(&active, tag, &[row.as_slice()]);
+            let value = OpaqueValue::new_inspect_carrier(&active, opaque_type, &payload)
+                .expect("the fixed projection carrier must construct");
+            assert_eq!(value.opaque_type(), opaque_type);
+            assert_eq!(value.canonical_payload(), payload);
+        }
+    }
+
+    #[test]
+    fn inspect_opaque_constructor_accepts_snapshot_and_rejects_other_reserved_types() {
+        let active = active_record_revision();
+        let row = inspect_orv5_integer_row(1);
+        let payload = inspect_carrier_payload(&active, 1, &[row.as_slice()]);
+        let snapshot = OpaqueValue::new_inspect_carrier(&active, SYS_INSPECT_SNAPSHOT_TYPE_ID, &payload)
+            .expect("the fixed snapshot carrier must construct");
+        assert_eq!(snapshot.opaque_type(), SYS_INSPECT_SNAPSHOT_TYPE_ID);
+
+        for opaque_type in [
+            crate::system::SYS_INSPECT_INVOCATION_TYPE_ID,
+            crate::system::SYS_INSPECT_SNAPSHOT_OPTIONS_TYPE_ID,
+            crate::system::SYS_INSPECT_TRACE_EVENT_TYPE_ID,
+        ] {
+            assert_eq!(
+                OpaqueValue::new_inspect_carrier(&active, opaque_type, &payload),
+                Err(OpaqueValueError::UnregisteredType { opaque_type })
+            );
+        }
+    }
+
+    #[test]
+    fn inspect_opaque_constructor_rejects_malformed_trailing_and_mismatched_payloads() {
+        let active = active_record_revision();
+        let opaque_type = SYS_INSPECT_INVOCATION_NODES_TYPE_ID;
+        let row = inspect_orv5_integer_row(1);
+        let payload = inspect_carrier_payload(&active, 2, &[row.as_slice()]);
+
+        let mut trailing = payload.clone();
+        trailing.push(0);
+        assert_eq!(
+            OpaqueValue::new_inspect_carrier(&active, opaque_type, trailing),
+            Err(OpaqueValueError::InvalidInspectCarrierEnvelope { opaque_type })
+        );
+        assert_eq!(
+            OpaqueValue::new_inspect_carrier(&active, opaque_type, &payload[..payload.len() - 1]),
+            Err(OpaqueValueError::InvalidInspectCarrierEnvelope { opaque_type })
+        );
+
+        let mut wrong_revision = payload.clone();
+        let source_offset = b"ORNA-INSPECT/1 ".len() + 2 + 1 + 8;
+        wrong_revision[source_offset] ^= 1;
+        assert_eq!(
+            OpaqueValue::new_inspect_carrier(&active, opaque_type, wrong_revision),
+            Err(OpaqueValueError::InspectCarrierRevisionMismatch { opaque_type })
+        );
+
+        let unknown_type = TypeId::from_bytes([0xaa; 16]);
+        assert_eq!(
+            OpaqueValue::new_inspect_carrier(&active, unknown_type, payload),
+            Err(OpaqueValueError::UnregisteredType {
+                opaque_type: unknown_type,
+            })
+        );
+    }
+
 }
