@@ -1166,6 +1166,10 @@ struct ResourceTask {
     handle: JoinHandle<()>,
     cancellation: ResourceCancellation,
     active: bool,
+    guards: Option<ResourceTaskGuards>,
+}
+
+struct ResourceTaskGuards {
     _operation: OwnedSemaphorePermit,
     _payload: Vec<PayloadReservation>,
 }
@@ -1675,6 +1679,24 @@ async fn shutdown_resource_producer(producer: AuthenticatedServerResourceProduce
     .await;
 }
 
+fn schedule_shutdown_task<F>(shutdown_tasks: &mut JoinSet<()>, shutdown: F)
+where
+    F: Future<Output = ()> + Send + 'static,
+{
+    shutdown_tasks.spawn(shutdown);
+}
+
+fn schedule_resource_producer_shutdown(
+    producer: AuthenticatedServerResourceProducer,
+    shutdown_tasks: &mut JoinSet<()>,
+    guards: Option<ResourceTaskGuards>,
+) {
+    schedule_shutdown_task(shutdown_tasks, async move {
+        shutdown_resource_producer(producer).await;
+        drop(guards);
+    });
+}
+
 fn resource_accepted_frame(accepted: AuthenticatedServerResourceAccepted) -> ResourceServerFrame {
     ResourceServerFrame::Accepted(orna_protocol::ResourceAccepted {
         stream_id: accepted.stream_id,
@@ -2002,6 +2024,9 @@ async fn drive_versioned_authenticated_stream_until_shutdown<D: DispatchService>
     let mut resource_tasks = BTreeMap::<u64, ResourceTask>::new();
     let mut resource_requests = BTreeMap::<u64, ResourceRequest>::new();
     let mut tasks = JoinSet::<(u64, DispatchCompletion)>::new();
+    // Cancellation owns producer shutdown work on this connection set; the event
+    // loop never awaits it inline.
+    let mut producer_shutdown = JoinSet::<()>::new();
     let mut unstarted = VecDeque::<UnstartedDispatch>::new();
     let result = loop {
         match flush_resource_pending(
@@ -2117,6 +2142,7 @@ async fn drive_versioned_authenticated_stream_until_shutdown<D: DispatchService>
                             &mut resource_pending,
                             &mut resource_cancelled,
                             &mut resource_tasks,
+                            &mut producer_shutdown,
                             &mut resource_requests,
                             &resource_completion_sender,
                             &mut resource_completion_receiver,
@@ -2200,10 +2226,11 @@ async fn drive_versioned_authenticated_stream_until_shutdown<D: DispatchService>
             handle,
             cancellation: _,
             active: _,
-            _operation,
-            _payload,
+            guards,
         } = task;
-        resource_guards.push((_operation, _payload));
+        if let Some(guards) = guards {
+            resource_guards.push(guards);
+        }
         resource_abort_handles.push(handle.abort_handle());
         resource_shutdown.spawn(async move {
             let _ = handle.await;
@@ -2259,14 +2286,34 @@ async fn drive_versioned_authenticated_stream_until_shutdown<D: DispatchService>
     // completion after its dispatch task has already finished. Cancel it
     // explicitly before dropping the connection so its transaction releases
     // deterministically rather than relying on sender drop during unwind.
-    let mut producer_shutdown = JoinSet::new();
     for completion in resource_pending.values_mut() {
         if let Some(producer) = completion.producer.take() {
-            producer_shutdown.spawn(shutdown_resource_producer(producer));
+            schedule_resource_producer_shutdown(producer, &mut producer_shutdown, None);
         }
     }
-    while let Some(joined) = producer_shutdown.join_next().await {
-        let _ = joined;
+    // Every scheduled cleanup is joined before the connection returns; timeout
+    // then aborts and drains it.
+    let producer_shutdown_completed = timeout(
+        RESOURCE_PRODUCER_SHUTDOWN_TIMEOUT,
+        async {
+            while let Some(joined) = producer_shutdown.join_next().await {
+                let _ = joined;
+            }
+        },
+    )
+    .await
+    .is_ok();
+    if !producer_shutdown_completed {
+        producer_shutdown.abort_all();
+        let _ = timeout(
+            RESOURCE_PRODUCER_SHUTDOWN_TIMEOUT,
+            async {
+                while let Some(joined) = producer_shutdown.join_next().await {
+                    let _ = joined;
+                }
+            },
+        )
+        .await;
     }
     resource_pending.clear();
     drop(resource_guards);
@@ -2393,6 +2440,7 @@ async fn handle_resource_frame<D: DispatchService>(
     pending: &mut BTreeMap<u64, ResourceDispatchCompletion>,
     cancelled: &mut BTreeMap<u64, orna_protocol::ResourceCancel>,
     tasks: &mut BTreeMap<u64, ResourceTask>,
+    producer_shutdown: &mut JoinSet<()>,
     requests: &mut BTreeMap<u64, ResourceRequest>,
     completion_sender: &mpsc::Sender<(u64, ResourceDispatchCompletion)>,
     completion_receiver: &mut mpsc::Receiver<(u64, ResourceDispatchCompletion)>,
@@ -2432,7 +2480,10 @@ async fn handle_resource_frame<D: DispatchService>(
                         .get_mut(&cancel.stream_id)
                         .and_then(|completion| completion.producer.take());
                     if let Some(producer) = producer {
-                        shutdown_resource_producer(producer).await;
+                        let guards = tasks
+                            .get_mut(&cancel.stream_id)
+                            .and_then(|task| task.guards.take());
+                        schedule_resource_producer_shutdown(producer, producer_shutdown, guards);
                     }
                 }
                 if let Some(task) = tasks.get(&cancel.stream_id) {
@@ -2589,8 +2640,10 @@ async fn handle_resource_frame<D: DispatchService>(
                     handle,
                     cancellation,
                     active: true,
-                    _operation: operation,
-                    _payload: vec![reservation],
+                    guards: Some(ResourceTaskGuards {
+                        _operation: operation,
+                        _payload: vec![reservation],
+                    }),
                 },
             );
         } else {
@@ -3266,7 +3319,7 @@ mod tests {
         registered_opaque_codecs, retained_standard_library_snapshot,
         verify_standard_library_snapshot,
     };
-    use tokio::sync::Notify;
+    use tokio::sync::{Notify, oneshot};
     use tokio::time::timeout;
 
     use super::*;
@@ -3939,6 +3992,41 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn scheduled_shutdown_task_returns_without_awaiting_cleanup() {
+        let mut shutdown_tasks = JoinSet::new();
+        let (started_sender, started_receiver) = oneshot::channel();
+        let (release_sender, release_receiver) = oneshot::channel();
+        schedule_shutdown_task(&mut shutdown_tasks, async move {
+            started_sender
+                .send(())
+                .expect("scheduling test receiver remains live");
+            release_receiver
+                .await
+                .expect("scheduling test release remains live");
+        });
+
+        timeout(Duration::from_millis(50), started_receiver)
+            .await
+            .expect("scheduled cleanup starts promptly")
+            .expect("scheduled cleanup start signal");
+        assert!(
+            timeout(Duration::from_millis(10), shutdown_tasks.join_next())
+                .await
+                .is_err(),
+            "cancellation scheduling must not await cleanup inline"
+        );
+
+        release_sender
+            .send(())
+            .expect("scheduled cleanup release remains live");
+        timeout(Duration::from_millis(50), shutdown_tasks.join_next())
+            .await
+            .expect("scheduled cleanup joins")
+            .expect("scheduled cleanup task result")
+            .expect("scheduled cleanup completes successfully");
+    }
+
     #[test]
     fn resource_completion_channel_is_bounded_by_live_resource_limit() {
         let (sender, mut receiver) =
@@ -4129,6 +4217,7 @@ mod tests {
         )]);
         let mut cancelled = BTreeMap::new();
         let mut tasks = BTreeMap::new();
+        let mut producer_shutdown = JoinSet::new();
         let mut requests = BTreeMap::from([(request.stream_id, request.clone())]);
         assert!(
             flush_resource_pending(
@@ -4166,6 +4255,7 @@ mod tests {
                 &mut pending,
                 &mut cancelled,
                 &mut tasks,
+                &mut producer_shutdown,
                 &mut requests,
                 &completion_sender,
                 &mut completion_receiver,
@@ -4193,6 +4283,7 @@ mod tests {
             &mut pending,
             &mut cancelled,
             &mut tasks,
+            &mut producer_shutdown,
             &mut requests,
             &completion_sender,
             &mut completion_receiver,
@@ -4302,6 +4393,7 @@ mod tests {
         )]);
         let mut cancelled = BTreeMap::new();
         let mut tasks = BTreeMap::new();
+        let mut producer_shutdown = JoinSet::new();
         let mut requests = BTreeMap::from([(request.stream_id, request.clone())]);
         let resources = LocalRawSocketResources::new();
         let (_shutdown_sender, mut shutdown) = watch::channel(false);
@@ -4322,6 +4414,7 @@ mod tests {
             &mut pending,
             &mut cancelled,
             &mut tasks,
+            &mut producer_shutdown,
             &mut requests,
             &completion_sender,
             &mut completion_receiver,
@@ -4782,6 +4875,7 @@ mod tests {
         let mut pending = BTreeMap::new();
         let mut cancelled = BTreeMap::new();
         let mut tasks: BTreeMap<u64, ResourceTask> = BTreeMap::new();
+        let mut producer_shutdown = JoinSet::new();
         let mut requests = BTreeMap::new();
         let resources = LocalRawSocketResources::new();
         let (_shutdown_sender, mut shutdown) = watch::channel(false);
@@ -4802,6 +4896,7 @@ mod tests {
             &mut pending,
             &mut cancelled,
             &mut tasks,
+            &mut producer_shutdown,
             &mut requests,
             &completion_sender,
             &mut completion_receiver,
@@ -4837,6 +4932,7 @@ mod tests {
             &mut pending,
             &mut cancelled,
             &mut tasks,
+            &mut producer_shutdown,
             &mut requests,
             &completion_sender,
             &mut completion_receiver,
@@ -4882,6 +4978,7 @@ mod tests {
         let mut pending = BTreeMap::new();
         let mut cancelled = BTreeMap::new();
         let mut tasks: BTreeMap<u64, ResourceTask> = BTreeMap::new();
+        let mut producer_shutdown = JoinSet::new();
         let mut requests = BTreeMap::new();
         let resources = LocalRawSocketResources::new();
         let (_shutdown_sender, mut shutdown) = watch::channel(false);
@@ -4901,6 +4998,7 @@ mod tests {
             &mut pending,
             &mut cancelled,
             &mut tasks,
+            &mut producer_shutdown,
             &mut requests,
             &completion_sender,
             &mut completion_receiver,
@@ -4932,6 +5030,7 @@ mod tests {
             &mut pending,
             &mut cancelled,
             &mut tasks,
+            &mut producer_shutdown,
             &mut requests,
             &completion_sender,
             &mut completion_receiver,
