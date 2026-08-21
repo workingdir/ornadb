@@ -390,31 +390,52 @@ fn render_change(
         SemanticChange::ObjectTypeRenamed { id, from, to } => {
             let _ = write!(line, "~ object type {from} -> {to} [{}]", id.canonical());
         }
+        SemanticChange::ValueTypeAdded { name, .. } => {
+            let _ = write!(line, "+ value type {name}");
+        }
+        SemanticChange::ValueTypeDropped { name, .. } => {
+            let _ = write!(line, "- value type {name}");
+        }
+        SemanticChange::ValueTypeRenamed { id, from, to } => {
+            let _ = write!(line, "~ value type {from} -> {to} [{}]", id.canonical());
+        }
+        SemanticChange::ValueTypeKindChanged { name, .. } => {
+            let _ = write!(line, "! value type {name} kind");
+        }
+        SemanticChange::ValueTypeMutabilityChanged { name, .. } => {
+            let _ = write!(line, "! value type {name} mutability");
+        }
+        SemanticChange::ValueTypePersistenceChanged { name, .. } => {
+            let _ = write!(line, "! value type {name} persistence");
+        }
+        SemanticChange::ValueTypeRepresentationChanged { name, .. } => {
+            let _ = write!(line, "! value type {name} representation");
+        }
+        SemanticChange::RecordValueTypeAdded { name, .. } => {
+            let _ = write!(line, "+ record value type {name}");
+        }
+        SemanticChange::RecordValueTypeDropped { name, .. } => {
+            let _ = write!(line, "- record value type {name}");
+        }
+        SemanticChange::RecordValueTypeRenamed { id, from, to } => {
+            let _ = write!(line, "~ record value type {from} -> {to} [{}]", id.canonical());
+        }
         SemanticChange::FieldAdded {
             owner, name, id, ..
         } => {
-            let owner = candidate
-                .object_type_by_id(*owner)
-                .map(|definition| qualified(definition.name()))
-                .unwrap_or_else(|| owner.canonical());
+            let owner = field_owner_name(candidate, *owner);
             let _ = write!(line, "+ field {owner}.{name} [{id:?}]");
         }
         SemanticChange::FieldDropped {
             owner, name, id, ..
         } => {
-            let owner = candidate
-                .object_type_by_id(*owner)
-                .map(|definition| qualified(definition.name()))
-                .unwrap_or_else(|| owner.canonical());
+            let owner = field_owner_name(candidate, *owner);
             let _ = write!(line, "- field {owner}.{name} [{id:?}]");
         }
         SemanticChange::FieldRenamed {
             owner, id, from, to,
         } => {
-            let owner = candidate
-                .object_type_by_id(*owner)
-                .map(|definition| qualified(definition.name()))
-                .unwrap_or_else(|| owner.canonical());
+            let owner = field_owner_name(candidate, *owner);
             let _ = write!(line, "~ field {owner}.{from} -> {owner}.{to} [{}]", id.canonical());
         }
         SemanticChange::EnumTypeAdded { name, .. } => {
@@ -465,37 +486,31 @@ fn render_change(
         SemanticChange::FieldTypeChanged {
             owner, name, id, ..
         } => {
-            let owner = candidate
-                .object_type_by_id(*owner)
-                .map(|definition| qualified(definition.name()))
-                .unwrap_or_else(|| owner.canonical());
+            let owner = field_owner_name(candidate, *owner);
             let _ = write!(line, "! field {owner}.{name} type [{id:?}]");
+        }
+        SemanticChange::FieldOrdinalChanged {
+            owner, name, id, ..
+        } => {
+            let owner = field_owner_name(candidate, *owner);
+            let _ = write!(line, "! field {owner}.{name} ordinal [{id:?}]");
         }
         SemanticChange::FieldNullabilityChanged {
             owner, name, id, ..
         } => {
-            let owner = candidate
-                .object_type_by_id(*owner)
-                .map(|definition| qualified(definition.name()))
-                .unwrap_or_else(|| owner.canonical());
+            let owner = field_owner_name(candidate, *owner);
             let _ = write!(line, "! field {owner}.{name} nullability [{id:?}]");
         }
         SemanticChange::FieldUniquenessChanged {
             owner, name, id, ..
         } => {
-            let owner = candidate
-                .object_type_by_id(*owner)
-                .map(|definition| qualified(definition.name()))
-                .unwrap_or_else(|| owner.canonical());
+            let owner = field_owner_name(candidate, *owner);
             let _ = write!(line, "! field {owner}.{name} uniqueness [{id:?}]");
         }
         SemanticChange::FieldConstraintChanged {
             owner, name, id, ..
         } => {
-            let owner = candidate
-                .object_type_by_id(*owner)
-                .map(|definition| qualified(definition.name()))
-                .unwrap_or_else(|| owner.canonical());
+            let owner = field_owner_name(candidate, *owner);
             let _ = write!(line, "! field {owner}.{name} default/on-delete [{id:?}]");
         }
         SemanticChange::EnumLabelsChanged { name, .. } => {
@@ -530,6 +545,21 @@ fn render_change(
         }
     }
     line
+}
+
+fn field_owner_name(
+    candidate: &orna_core::catalogue::CatalogueSnapshot,
+    owner: orna_core::TypeId,
+) -> String {
+    candidate
+        .object_type_by_id(owner)
+        .map(|definition| qualified(definition.name()))
+        .or_else(|| {
+            candidate
+                .record_value_type_by_id(owner)
+                .map(|definition| qualified(definition.name()))
+        })
+        .unwrap_or_else(|| owner.canonical())
 }
 
 fn qualified(name: &orna_core::catalogue::QualifiedSemanticName) -> String {
@@ -656,5 +686,153 @@ fn map_recovery_error(source: PostgresKernelError) -> InstalledSourceDiffError {
         | PostgresKernelError::Database(_)
         | PostgresKernelError::DriverTask(_)) => InstalledSourceDiffError::Attach { source },
         source => InstalledSourceDiffError::Recovery { source },
+    }
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::render_change;
+    use orna_core::{
+        CatalogueRevisionId, FieldId, SchemaId, TypeId,
+        catalogue::{
+            CatalogueSnapshot, EnumTypeDefinition, QualifiedSemanticName,
+            RecordValueFieldDefinition, RecordValueTypeDefinition, SchemaDefinition,
+        },
+        types::TypeDescriptor,
+        catalogue_diff::SemanticChange,
+    };
+
+    fn candidate_with_record(record_id: TypeId) -> CatalogueSnapshot {
+        let enum_id = TypeId::from_bytes([6; 16]);
+        let field = RecordValueFieldDefinition::try_new_descriptor(
+            FieldId::from_bytes([7; 16]),
+            "longitude",
+            0,
+            TypeDescriptor::named(enum_id),
+        )
+        .unwrap();
+        CatalogueSnapshot::new_with_record_value_types(
+            CatalogueRevisionId::from_bytes([1; 16]),
+            vec![SchemaDefinition::new(
+                SchemaId::from_bytes([2; 16]),
+                QualifiedSemanticName::new(["app"]).unwrap(),
+            )],
+            Vec::new(),
+            Vec::new(),
+            vec![EnumTypeDefinition::new(
+                enum_id,
+                QualifiedSemanticName::new(["app", "axis"]).unwrap(),
+                ["horizontal", "vertical"],
+            )],
+            vec![RecordValueTypeDefinition::new(
+                record_id,
+                QualifiedSemanticName::new(["app", "point"]).unwrap(),
+                vec![field],
+            )],
+            Vec::new(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn renders_value_record_and_record_field_changes_explicitly() {
+        let value_id = TypeId::from_bytes([3; 16]);
+        let record_id = TypeId::from_bytes([4; 16]);
+        let field_id = FieldId::from_bytes([5; 16]);
+        let candidate = candidate_with_record(record_id);
+        let changes = [
+            SemanticChange::ValueTypeAdded {
+                id: value_id,
+                name: "app.money".to_owned(),
+            },
+            SemanticChange::ValueTypeDropped {
+                id: value_id,
+                name: "app.money".to_owned(),
+            },
+            SemanticChange::ValueTypeRenamed {
+                id: value_id,
+                from: "app.money".to_owned(),
+                to: "app.currency".to_owned(),
+            },
+            SemanticChange::ValueTypeKindChanged {
+                id: value_id,
+                name: "app.money".to_owned(),
+            },
+            SemanticChange::ValueTypeMutabilityChanged {
+                id: value_id,
+                name: "app.money".to_owned(),
+            },
+            SemanticChange::ValueTypePersistenceChanged {
+                id: value_id,
+                name: "app.money".to_owned(),
+            },
+            SemanticChange::ValueTypeRepresentationChanged {
+                id: value_id,
+                name: "app.money".to_owned(),
+            },
+            SemanticChange::RecordValueTypeAdded {
+                id: record_id,
+                name: "app.point".to_owned(),
+            },
+            SemanticChange::RecordValueTypeDropped {
+                id: record_id,
+                name: "app.point".to_owned(),
+            },
+            SemanticChange::RecordValueTypeRenamed {
+                id: record_id,
+                from: "app.point".to_owned(),
+                to: "app.coordinate".to_owned(),
+            },
+            SemanticChange::FieldAdded {
+                owner: record_id,
+                id: field_id,
+                name: "longitude".to_owned(),
+            },
+            SemanticChange::FieldDropped {
+                owner: record_id,
+                id: field_id,
+                name: "longitude".to_owned(),
+            },
+            SemanticChange::FieldRenamed {
+                owner: record_id,
+                id: field_id,
+                from: "longitude".to_owned(),
+                to: "east".to_owned(),
+            },
+            SemanticChange::FieldTypeChanged {
+                owner: record_id,
+                id: field_id,
+                name: "longitude".to_owned(),
+            },
+            SemanticChange::FieldOrdinalChanged {
+                owner: record_id,
+                id: field_id,
+                name: "longitude".to_owned(),
+            },
+        ];
+
+        let rendered: Vec<_> = changes
+            .iter()
+            .map(|change| render_change(change, &candidate))
+            .collect();
+        assert!(rendered
+            .iter()
+            .all(|line| !line.contains("unsupported change")), "{rendered:?}");
+        assert_eq!(rendered[0], "+ value type app.money");
+        assert_eq!(rendered[1], "- value type app.money");
+        assert!(rendered[2].starts_with("~ value type app.money -> app.currency ["));
+        assert_eq!(rendered[3], "! value type app.money kind");
+        assert_eq!(rendered[4], "! value type app.money mutability");
+        assert_eq!(rendered[5], "! value type app.money persistence");
+        assert_eq!(rendered[6], "! value type app.money representation");
+        assert_eq!(rendered[7], "+ record value type app.point");
+        assert_eq!(rendered[8], "- record value type app.point");
+        assert!(rendered[9].starts_with("~ record value type app.point -> app.coordinate ["));
+        assert!(rendered[10].starts_with("+ field app.point.longitude ["));
+        assert!(rendered[11].starts_with("- field app.point.longitude ["));
+        assert!(rendered[12].starts_with("~ field app.point.longitude -> app.point.east ["));
+        assert!(rendered[13].starts_with("! field app.point.longitude type ["));
+        assert!(rendered[14].starts_with("! field app.point.longitude ordinal ["));
     }
 }
