@@ -7253,7 +7253,9 @@ fn client_contract_identity(source: &SourceSlice) -> Option<String> {
     Some(identity)
 }
 fn is_inspect_render_identity(identity: &str) -> bool {
-    identity == INSPECT_RENDER_CONTRACT || identity.starts_with("std.inspect.render@")
+    identity == "devtools.inspector_shell@1"
+        || identity == INSPECT_RENDER_CONTRACT
+        || identity.starts_with("std.inspect.render@")
 }
 
 fn validate_registered_client_external_contract(
@@ -11620,6 +11622,37 @@ mod tests {
         let function = report.checked_bundle().unwrap().client_functions().next().unwrap();
         assert_eq!(function.name().to_string(), "app.inspector_renderer");
         assert_eq!(function.parameters().count(), 9);
+    }
+
+    #[test]
+    fn rejects_historical_inspector_shell_contract_before_provider_dispatch() {
+        let standard =
+            check_standard_library_source(&verified_standard_v4_snapshot()).unwrap();
+        let application = empty_catalogue();
+        let context =
+            StandardApplicationCheckContext::try_new(&application, &standard).unwrap();
+        let source = "CREATE SCHEMA app; CREATE EXTERNAL CLIENT FUNCTION app.inspector_renderer(
+            p_snapshot sys.inspect.snapshot,
+            p_invocation_nodes sys.inspect.invocation_nodes,
+            p_calls sys.inspect.calls,
+            p_resources sys.inspect.resources,
+            p_state_cells sys.inspect.state_cells,
+            p_ui_nodes sys.inspect.ui_nodes,
+            p_presentation_candidates sys.inspect.presentation_candidates,
+            p_runtime_bindings sys.inspect.runtime_bindings,
+            p_security_decisions sys.inspect.security_decisions
+        ) RETURNS std.ui.UI RUNTIME CONTRACT 'devtools.inspector_shell@1';";
+        let report = check_standard_application(&bundle([("inspect-render.orna", source)]), &context);
+        assert_eq!(report.diagnostics().len(), 1);
+        assert_eq!(
+            report.diagnostics()[0].code(),
+            DiagnosticCode::UnknownQualifiedName
+        );
+        assert_eq!(
+            report.diagnostics()[0].message(),
+            "unregistered CLIENT external contract devtools.inspector_shell@1"
+        );
+        assert!(report.checked_bundle().is_none());
     }
 
     #[test]
