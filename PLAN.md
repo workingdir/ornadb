@@ -5,29 +5,33 @@
 This plan covers the remaining roadmap surfaces after the accepted `orna.std/5`
 JSON value slice and the CLIENT resource and USER state slices.
 
-The plan is deliberately dormant until the canonical specification accepts the
-missing executable contracts. The current specification marks the graphical
-runtime ABI, UI event boundary, resource inspection projection, and reflective
-gateway details as `CURRENT PROPOSAL` or `OPEN`. The repository must not treat
+The plan tracks implementation hardening and integration after the accepted
+headless ordinary CLIENT Inspector v1 in work ADR 0080. The current
+specification still marks the graphical runtime ABI, UI event boundary,
+populated resource/UI projections beyond that accepted scope, and reflective
+gateway details as `CURRENT PROPOSAL` or `OPEN`; the repository must not treat
 those drafts as implementation contracts.
 
 Current accepted implementation evidence:
 
-- `TODO.md:54-80` records the completed CLIENT, TTY, Inspector-core, source,
-  security, presenter, state, resource, identity, transport, and JSON slices.
+- `TODO.md:54-89` records the completed CLIENT, TTY, Inspector-core, source,
+  security, presenter, state, resource, identity, transport, and JSON slices;
+  `TODO.md:90-93` records the delivered headless ordinary CLIENT Inspector v1.
 - `docs/decisions/0062-std-ui-value-type.md` accepts the transient `std.ui.UI`
   value only. It defers the graphical runtime ABI and UI sink.
 - `docs/decisions/0063-automatic-runtime-selection.md` accepts the TTY offer and
   deterministic selection only. Non-TTY runtimes remain later work.
 - `docs/decisions/0064-sys-inspect-core.md` accepts server-side snapshots and
-  the `orna inspect` CLI. UI nodes and resource projections remain empty by
-  contract.
+  the `orna inspect` CLI. Work ADR 0080 now accepts the headless ordinary CLIENT
+  Inspector v1; populated resource/UI projections beyond that scope remain
+  deferred.
 - `docs/decisions/0068-client-expression-bodies.md` accepts closed CLIENT
   expressions but defers CLIENT-to-SERVER async calls and graphical contracts.
 - `docs/decisions/0071-client-resource-lifecycle.md` and
   `docs/decisions/0074-client-resource-executor-seam.md` accept resource
-  identity, lifecycle, and completion validation, not source syntax or
-  Inspector projection.
+  identity, lifecycle, and completion validation. Work ADR 0080 accepts the
+  headless ordinary CLIENT Inspector v1; broader populated projections remain
+  deferred.
 - `docs/decisions/0075-std-json-value.md` accepts the append-only V5 JSON value
   snapshot.
 
@@ -147,8 +151,9 @@ The next contract order is:
 2. Accept the CLIENT-to-SERVER asynchronous resource contract, including
    syntax, versioned request/completion frames, principal derivation,
    capability checks, cancellation, backpressure, shutdown, and audit events.
-3. Accept the ordinary CLIENT Inspector projection after the runtime and
-   resource contracts define its epoch and redaction inputs.
+3. Harden and integrate the accepted headless ordinary CLIENT Inspector v1
+   after the runtime and resource contracts define its epoch and redaction
+   inputs.
 4. Accept the reflective gateway contract separately, then implement its
    disabled/enabled exposure proof through sealed `sys.invoke`.
 
@@ -295,31 +300,32 @@ standard source units, `crates/orna-protocol`, `crates/orna-core`,
 
 ### 0.4 Inspector contract
 
-After 0.1 and 0.2 are accepted, define the ordinary CLIENT Inspector described
-by `../spec/docs/30-inspector.md`, `../spec/docs/31-self-inspection.md`, and
-`../spec/api/inspect.md`.
+Work ADR 0080 accepts the headless ordinary CLIENT Inspector v1 described by
+`../spec/docs/30-inspector.md`, `../spec/docs/31-self-inspection.md`, and
+`../spec/api/inspect.md`. This stream now covers implementation hardening and
+integration, not acceptance of a proposal-level Inspector contract.
 
-The contract must settle:
+Implementation hardening and integration must preserve:
 
-- the exact `devtools.inspector` CLIENT signature and return value;
+- the accepted `devtools.inspector` CLIENT signature and return value;
 - snapshot epoch, freeze, resume, and observer-context semantics;
 - recursion and observer suppression for self-inspection;
-- immutable projections for CLIENT instances, resources, UI nodes, runtime
-  bindings, invocation, presentation, and security plans;
+- immutable projection-carrier identity and revision evidence;
 - privilege and redaction rules for arguments, values, source, and audit data;
 - the relationship between server snapshot epochs and client runtime epochs.
 
-**Deliverables:** accepted Inspector ADR, checked CLIENT function, versioned
-snapshot/projection schema, and installed self-inspection proof.
+**Deliverables:** focused hardening changes, checked CLIENT function,
+versioned snapshot/projection schema, and installed self-inspection proof.
 
-**Acceptance:** an Inspector root can inspect another invocation without
-executing it, can inspect itself without an observer loop, can freeze and
-resume an epoch, and cannot read a projection outside its privilege ladder.
-Resource and UI rows must contain immutable identity and revision evidence.
+**Acceptance:** the headless Inspector root continues to inspect another
+invocation without executing it, inspect itself without an observer loop,
+freeze and resume an epoch, and reject projections outside its privilege
+ladder. These checks do not accept a graphical runtime/UI sink, populated
+resource/UI projections beyond the accepted headless scope, or reflective
+gateways.
 
-**Likely files:** `spec/docs/30-inspector.md`, `spec/docs/31-self-inspection.md`,
-`spec/api/inspect.md`, `crates/orna-core/src/inspect.rs`,
-`crates/orna-client`, `crates/orna-compiler`, `crates/orna-artifact`,
+**Likely files:** `crates/orna-core/src/inspect.rs`, `crates/orna-client`,
+`crates/orna-compiler`, `crates/orna-artifact`,
 `crates/orna-server/src/inspect.rs`, and focused live tests.
 
 ## Phase 1: Implement the accepted runtime and invocation foundations
@@ -339,18 +345,22 @@ files. Run focused tests after every step, then run `cargo test --workspace
 
 ## Phase 2: Implement the ordinary CLIENT Inspector
 
-1. Add the parser and checked model for the exact Inspector function surface.
-2. Emit a versioned Inspector client plan with stable projection identities.
-3. Evaluate snapshot reads through the client runtime without executing the
+ADR 0080 accepts and current HEAD delivers the headless ordinary CLIENT
+Inspector v1. Remaining work is implementation hardening and integration:
+
+1. Harden the checked Inspector function and versioned client plan against the
+   accepted signature and stable projection identities.
+2. Verify snapshot reads through the client runtime without executing the
    observed target.
-4. Add UI node and runtime binding projections only through the accepted UI
-   runtime contract.
-5. Add recursion suppression, privilege checks, redaction, epoch freeze/resume,
-   and an installed self-inspection proof.
+3. Preserve recursion suppression, privilege checks, redaction, epoch
+   freeze/resume, and the installed self-inspection proof.
+4. Keep graphical runtime/UI sink integration, populated resource/UI
+   projections beyond the accepted headless scope, and reflective gateways
+   outside this phase until their contracts are accepted.
 
 The proof must cover the Inspector observing a normal function, observing
-itself, a denied projection, a stale epoch, and a resource/UI projection with
-redacted values.
+itself, a denied projection, a stale epoch, and a bounded resource/UI carrier
+case with redacted values within the accepted headless scope.
 
 ## Phase 3: Implement Studio and the first production UI runtime
 

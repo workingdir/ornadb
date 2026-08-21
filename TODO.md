@@ -87,9 +87,10 @@ separate release action.
   cancellation, terminal ordering, and bounded scheduling (work ADR 0078).
 - [x] Add CLIENT action values and `std.action.call`, including checked plans
   and trigger lifecycle proof (work ADR 0079).
-- [ ] Implement the ordinary CLIENT Inspector; the production graphical
-  runtime/UI sink contract remains proposal-only, and an accepted executable
-  Inspector contract is still required.
+- [x] Deliver the headless ordinary CLIENT Inspector v1 accepted by work ADR
+  0080. The production graphical runtime/UI sink, populated resource/UI
+  projections beyond the accepted headless scope, and reflective gateways
+  remain proposal-only.
 - [ ] Implement reflective JSON-RPC and MCP gateway programs after the
   canonical Exposure and Service value contracts become accepted executable
   specifications.
