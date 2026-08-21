@@ -872,6 +872,14 @@ pub enum InspectTracePayload {
         /// The non-empty captured values.
         values: Vec<InvokeValue>,
     },
+    /// One non-empty batch whose typed schema and values were redacted.
+    ///
+    /// The count is structural metadata and remains visible without the
+    /// `Values` classifier; no decoded value or schema crosses that boundary.
+    ValueBatchRedacted {
+        /// The number of captured values in the batch.
+        value_count: u64,
+    },
     /// The invocation completed with the stated duration.
     Completed {
         /// The recorded execution duration in nanoseconds.
@@ -925,6 +933,9 @@ impl InspectTraceEvent {
             InspectTracePayload::ValueBatch { values, .. } if values.is_empty() => {
                 return Err(InspectError::EmptyValueBatch);
             }
+            InspectTracePayload::ValueBatchRedacted { value_count: 0 } => {
+                return Err(InspectError::EmptyValueBatch);
+            }
             InspectTracePayload::Failed { code } if code.is_empty() => {
                 return Err(InspectError::EmptyFailureCode);
             }
@@ -962,7 +973,8 @@ impl InspectTraceEvent {
     pub const fn kind(&self) -> InspectTraceEventKind {
         match &self.payload {
             InspectTracePayload::Started => InspectTraceEventKind::InvocationStarted,
-            InspectTracePayload::ValueBatch { .. } => InspectTraceEventKind::ValueBatch,
+            InspectTracePayload::ValueBatch { .. }
+            | InspectTracePayload::ValueBatchRedacted { .. } => InspectTraceEventKind::ValueBatch,
             InspectTracePayload::Completed { .. } => InspectTraceEventKind::InvocationCompleted,
             InspectTracePayload::Failed { .. } => InspectTraceEventKind::InvocationFailed,
             InspectTracePayload::Cancelled { .. } => InspectTraceEventKind::InvocationCancelled,
@@ -2025,6 +2037,14 @@ mod tests {
         assert_eq!(
             trace_event(
                 2,
+                InspectTracePayload::ValueBatchRedacted { value_count: 1 },
+            )
+            .kind(),
+            InspectTraceEventKind::ValueBatch
+        );
+        assert_eq!(
+            trace_event(
+                2,
                 InspectTracePayload::Completed {
                     duration_nanoseconds: 42
                 }
@@ -2049,7 +2069,7 @@ mod tests {
     }
 
     #[test]
-    fn trace_event_rejects_an_empty_value_batch() {
+    fn trace_event_rejects_empty_value_batches() {
         let error = InspectTraceEvent::new(
             invocation_id(INVOCATION),
             0,
@@ -2062,6 +2082,17 @@ mod tests {
             None,
         )
         .expect_err("a value batch must be non-empty");
+        assert_eq!(error, InspectError::EmptyValueBatch);
+
+        let error = InspectTraceEvent::new(
+            invocation_id(INVOCATION),
+            0,
+            InspectTracePayload::ValueBatchRedacted { value_count: 0 },
+            SystemTime::UNIX_EPOCH,
+            None,
+            None,
+        )
+        .expect_err("a redacted value batch must retain a non-zero count");
         assert_eq!(error, InspectError::EmptyValueBatch);
     }
 
