@@ -404,6 +404,11 @@ enum BrokerCommand {
         request_id: orna_core::InvocationId,
         reason: ResourceCancellationCode,
     },
+    AbandonResource {
+        stream_id: u64,
+        request_id: orna_core::InvocationId,
+        reason: ResourceCancellationCode,
+    },
     Shutdown,
 }
 
@@ -501,6 +506,98 @@ struct PendingBrokerResource {
 struct DetachedResourceTransport {
     control: UnboundedSender<ResourceTransportControl>,
     worker: thread::JoinHandle<()>,
+    waiter: Option<thread::JoinHandle<()>>,
+    transport_return: std::sync::Arc<std::sync::Mutex<Option<ResourceTransportSource>>>,
+}
+
+struct DetachedBrokerResource {
+    control: SharedInvokeBroker,
+    stream_id: u64,
+    request_id: orna_core::InvocationId,
+    waiter: Option<thread::JoinHandle<()>>,
+}
+
+enum CancellationWaitOutcome {
+    Terminal(Result<ResourceTransportOutcome, ResourceTransportFailure>),
+    TimedOut,
+}
+
+struct CancellationWaiter {
+    completion: std::sync::mpsc::Receiver<CancellationWaitOutcome>,
+    thread: thread::JoinHandle<()>,
+}
+
+impl CancellationWaiter {
+    fn start(
+        receiver: Receiver<Result<ResourceTransportOutcome, ResourceTransportFailure>>,
+    ) -> Result<Self, Receiver<Result<ResourceTransportOutcome, ResourceTransportFailure>>> {
+        let (sender, completion) = std::sync::mpsc::sync_channel(1);
+        let receiver_slot = std::sync::Arc::new(std::sync::Mutex::new(Some(receiver)));
+        let thread_receiver_slot = std::sync::Arc::clone(&receiver_slot);
+        let thread = match thread::Builder::new()
+            .name("orna-resource-cancel-waiter".to_owned())
+            .spawn(move || {
+                let mut receiver = thread_receiver_slot
+                    .lock()
+                    .expect("resource cancellation receiver lock")
+                    .take()
+                    .expect("resource cancellation receiver");
+                let outcome = match tokio::runtime::Builder::new_current_thread()
+                    .enable_time()
+                    .build()
+                {
+                    Ok(runtime) => runtime.block_on(async move {
+                        let receive_terminal = async move {
+                            loop {
+                                match receiver.recv().await {
+                                    Some(Ok(ResourceTransportOutcome::StreamValues(_))) => {}
+                                    Some(result) => break CancellationWaitOutcome::Terminal(result),
+                                    None => {
+                                        break CancellationWaitOutcome::Terminal(Err(
+                                            ResourceTransportFailure::Transport,
+                                        ))
+                                    }
+                                }
+                            }
+                        };
+                        tokio::time::timeout(RESOURCE_FRAME_TIMEOUT, receive_terminal)
+                            .await
+                            .unwrap_or(CancellationWaitOutcome::TimedOut)
+                    }),
+                    Err(_) => CancellationWaitOutcome::Terminal(Err(
+                        ResourceTransportFailure::Transport,
+                    )),
+                };
+                let _ = sender.send(outcome);
+            }) {
+            Ok(thread) => thread,
+            Err(_) => {
+                return Err(receiver_slot
+                    .lock()
+                    .expect("resource cancellation receiver lock")
+                    .take()
+                    .expect("resource cancellation receiver"));
+            }
+        };
+        Ok(Self { completion, thread })
+    }
+
+    fn wait(self) -> (
+        Option<CancellationWaitOutcome>,
+        Option<thread::JoinHandle<()>>,
+    ) {
+        let Self {
+            completion,
+            thread,
+        } = self;
+        match completion.recv_timeout(RESOURCE_FRAME_TIMEOUT + Duration::from_secs(1)) {
+            Ok(outcome) => {
+                let _ = thread.join();
+                (Some(outcome), None)
+            }
+            Err(_) => (None, Some(thread)),
+        }
+    }
 }
 
 enum ResourceTransportControl {
@@ -601,6 +698,7 @@ pub struct InstalledClientResourceExecutor {
     pending: Option<PendingResourceTransport>,
     broker_pending: Option<PendingBrokerResource>,
     detached: Vec<DetachedResourceTransport>,
+    detached_broker: Option<DetachedBrokerResource>,
     cancellation: ResourceCancellation,
 }
 
@@ -628,6 +726,7 @@ impl InstalledClientResourceExecutor {
             )),
             pending: None,
             detached: Vec::new(),
+            detached_broker: None,
             cancellation: ResourceCancellation::new(),
         }
     }
@@ -657,6 +756,7 @@ impl InstalledClientResourceExecutor {
             )),
             pending: None,
             detached: Vec::new(),
+            detached_broker: None,
             cancellation: ResourceCancellation::new(),
         }
     }
@@ -699,6 +799,7 @@ impl InstalledClientResourceExecutor {
             pending: None,
             broker_pending: None,
             detached: Vec::new(),
+            detached_broker: None,
             cancellation,
         }
     }
@@ -727,27 +828,92 @@ impl InstalledClientResourceExecutor {
                 pending.cancel_requested = true;
             }
         }
-        let pending = self.broker_pending.as_mut()?;
-        let result = match pending.receiver.try_recv() {
-            Ok(result) => result,
-            Err(TryRecvError::Empty) => return None,
-            Err(TryRecvError::Disconnected) => Err(ResourceTransportFailure::Transport),
-        };
-        let stream_values = matches!(&result, Ok(ResourceTransportOutcome::StreamValues(_)));
-        if stream_values && pending.cancel_requested {
-            return self.poll_broker();
+        // Cancellation may leave an arbitrary number of queued stream batches;
+        // drain them iteratively so a slow broker cannot grow the call stack.
+        loop {
+            let (result, cancel_requested, request) = {
+                let pending = self.broker_pending.as_mut()?;
+                let result = match pending.receiver.try_recv() {
+                    Ok(result) => result,
+                    Err(TryRecvError::Empty) => return None,
+                    Err(TryRecvError::Disconnected) => {
+                        Err(ResourceTransportFailure::Transport)
+                    }
+                };
+                (result, pending.cancel_requested, pending.request.clone())
+            };
+            let stream_values = matches!(&result, Ok(ResourceTransportOutcome::StreamValues(_)));
+            if stream_values && cancel_requested {
+                continue;
+            }
+            if stream_values {
+                return Some(map_resource_transport_completion(request, result));
+            }
+            let pending = self
+                .broker_pending
+                .take()
+                .expect("broker pending checked above");
+            return Some(map_resource_transport_completion(pending.request, result));
         }
-        if stream_values {
-            return Some(map_resource_transport_completion(
-                pending.request.clone(),
-                result,
-            ));
+    }
+
+    fn reap_detached(&mut self) {
+        let detached = std::mem::take(&mut self.detached);
+        for mut resource in detached {
+            let waiter_finished = resource
+                .waiter
+                .as_ref()
+                .map(|waiter| waiter.is_finished())
+                .unwrap_or(true);
+            if waiter_finished && resource.worker.is_finished() {
+                if let Some(waiter) = resource.waiter.take() {
+                    let _ = waiter.join();
+                }
+                let _ = resource.worker.join();
+                if self.transport.is_none() {
+                    self.transport = resource
+                        .transport_return
+                        .lock()
+                        .expect("resource transport return lock")
+                        .take();
+                }
+            } else {
+                self.detached.push(resource);
+            }
         }
-        let pending = self
-            .broker_pending
-            .take()
-            .expect("broker pending checked above");
-        Some(map_resource_transport_completion(pending.request, result))
+        if let Some(mut resource) = self.detached_broker.take() {
+            let waiter_finished = resource
+                .waiter
+                .as_ref()
+                .map(|waiter| waiter.is_finished())
+                .unwrap_or(true);
+            if waiter_finished {
+                if let Some(waiter) = resource.waiter.take() {
+                    let _ = waiter.join();
+                }
+                let _ = resource.control.commands.send(BrokerCommand::AbandonResource {
+                    stream_id: resource.stream_id,
+                    request_id: resource.request_id,
+                    reason: ResourceCancellationCode::RuntimeShutdown,
+                });
+            } else {
+                self.detached_broker = Some(resource);
+            }
+        }
+    }
+
+    /// Starts a cancellation waiter without dropping the transport receiver
+    /// when the synchronous caller reaches its bounded wait.
+    fn wait_for_cancelled_transport(
+        receiver: Receiver<Result<ResourceTransportOutcome, ResourceTransportFailure>>,
+    ) -> Result<
+        (
+            Option<CancellationWaitOutcome>,
+            Option<thread::JoinHandle<()>>,
+        ),
+        Receiver<Result<ResourceTransportOutcome, ResourceTransportFailure>>,
+    > {
+        Ok(CancellationWaiter::start(receiver)?.wait())
     }
 }
 
@@ -1772,7 +1938,12 @@ impl ClientResourceExecutor for InstalledClientResourceExecutor {
     }
 
     fn execute(&mut self, request: ClientResourceRequest) -> ClientResourceCompletion {
-        if self.pending.is_some() || self.broker_pending.is_some() {
+        self.reap_detached();
+        if self.pending.is_some()
+            || self.broker_pending.is_some()
+            || !self.detached.is_empty()
+            || self.detached_broker.is_some()
+        {
             return request.failed(SERVER_RESOURCE_INTERNAL_CODE.to_owned());
         }
         let Some(next_stream_id) = self.next_stream_id.checked_add(1) else {
@@ -2039,36 +2210,70 @@ impl ClientResourceExecutor for InstalledClientResourceExecutor {
                 self.broker_pending = Some(pending);
                 return request.failed(SERVER_RESOURCE_INTERNAL_CODE.to_owned());
             }
-            if pending.cancel_requested {
-                self.broker_pending = Some(pending);
-                return request.pending();
-            }
-            match pending.receiver.try_recv() {
-                Ok(Ok(ResourceTransportOutcome::StreamValues(_))) => {}
-                Ok(result @ Ok(_)) | Ok(result @ Err(_)) => {
-                    self.discard_raw_resource_request(pending.stream_id);
-                    return map_resource_transport_completion(pending.request, result);
+            if !pending.cancel_requested {
+                match pending.receiver.try_recv() {
+                    Ok(Ok(ResourceTransportOutcome::StreamValues(_))) => {}
+                    Ok(result @ Ok(_)) | Ok(result @ Err(_)) => {
+                        self.discard_raw_resource_request(pending.stream_id);
+                        return map_resource_transport_completion(pending.request, result);
+                    }
+                    Err(TryRecvError::Disconnected) => {
+                        self.discard_raw_resource_request(pending.stream_id);
+                        return map_resource_transport_completion(
+                            pending.request,
+                            Err(ResourceTransportFailure::Transport),
+                        );
+                    }
+                    Err(TryRecvError::Empty) => {}
                 }
-                Err(TryRecvError::Disconnected) => {
-                    self.discard_raw_resource_request(pending.stream_id);
-                    return map_resource_transport_completion(
-                        pending.request,
-                        Err(ResourceTransportFailure::Transport),
-                    );
-                }
-                Err(TryRecvError::Empty) => {}
-            }
-            let _ = pending
-                .control
-                .commands
-                .send(BrokerCommand::CancelResource {
+                let _ = pending.control.commands.send(BrokerCommand::CancelResource {
                     stream_id: pending.stream_id,
                     request_id: pending.request.request_id(),
                     reason: ResourceCancellationCode::ClientRequested,
                 });
-            pending.cancel_requested = true;
-            self.broker_pending = Some(pending);
-            return request.pending();
+                pending.cancel_requested = true;
+            }
+            let waiter = match Self::wait_for_cancelled_transport(pending.receiver) {
+                Ok(waiter) => waiter,
+                Err(receiver) => {
+                    pending.receiver = receiver;
+                    self.broker_pending = Some(pending);
+                    return request.failed(SERVER_RESOURCE_INTERNAL_CODE.to_owned());
+                }
+            };
+            let (outcome, waiter_thread) = waiter;
+            self.discard_raw_resource_request(pending.stream_id);
+            return match outcome {
+                Some(CancellationWaitOutcome::Terminal(result)) => {
+                    let _ = pending.control.commands.send(BrokerCommand::AbandonResource {
+                        stream_id: pending.stream_id,
+                        request_id: pending.request.request_id(),
+                        reason: ResourceCancellationCode::RuntimeShutdown,
+                    });
+                    map_resource_transport_completion(pending.request, result)
+                }
+                Some(CancellationWaitOutcome::TimedOut) => {
+                    let _ = pending.control.commands.send(BrokerCommand::AbandonResource {
+                        stream_id: pending.stream_id,
+                        request_id: pending.request.request_id(),
+                        reason: ResourceCancellationCode::RuntimeShutdown,
+                    });
+                    pending
+                        .request
+                        .failed(SERVER_RESOURCE_INTERNAL_CODE.to_owned())
+                }
+                None => {
+                    self.detached_broker = Some(DetachedBrokerResource {
+                        control: pending.control,
+                        stream_id: pending.stream_id,
+                        request_id: pending.request.request_id(),
+                        waiter: waiter_thread,
+                    });
+                    pending
+                        .request
+                        .failed(SERVER_RESOURCE_INTERNAL_CODE.to_owned())
+                }
+            };
         }
         let Some(mut pending) = self.pending.take() else {
             return request.failed(SERVER_RESOURCE_INTERNAL_CODE.to_owned());
@@ -2080,45 +2285,68 @@ impl ClientResourceExecutor for InstalledClientResourceExecutor {
             self.pending = Some(pending);
             return request.failed(SERVER_RESOURCE_INTERNAL_CODE.to_owned());
         }
-        if pending.cancel_requested {
-            self.pending = Some(pending);
-            return request.pending();
-        }
-        loop {
-            match pending.receiver.try_recv() {
-                Ok(Ok(ResourceTransportOutcome::StreamValues(_))) => {}
-                Ok(result @ Ok(_)) | Ok(result @ Err(_)) => {
-                    self.discard_raw_resource_request(pending.stream_id);
-                    let _ = pending.worker.join();
-                    self.transport = pending
-                        .transport_return
-                        .lock()
-                        .expect("resource transport return lock")
-                        .take();
-                    return map_resource_transport_completion(pending.request, result);
-                }
-                Err(TryRecvError::Empty) => break,
-                Err(TryRecvError::Disconnected) => {
-                    self.discard_raw_resource_request(pending.stream_id);
-                    let _ = pending.worker.join();
-                    self.transport = pending
-                        .transport_return
-                        .lock()
-                        .expect("resource transport return lock")
-                        .take();
-                    return map_resource_transport_completion(
-                        pending.request,
-                        Err(ResourceTransportFailure::Transport),
-                    );
+        if !pending.cancel_requested {
+            loop {
+                match pending.receiver.try_recv() {
+                    Ok(Ok(ResourceTransportOutcome::StreamValues(_))) => {}
+                    Ok(result @ Ok(_)) | Ok(result @ Err(_)) => {
+                        self.discard_raw_resource_request(pending.stream_id);
+                        let _ = pending.worker.join();
+                        self.transport = pending
+                            .transport_return
+                            .lock()
+                            .expect("resource transport return lock")
+                            .take();
+                        return map_resource_transport_completion(pending.request, result);
+                    }
+                    Err(TryRecvError::Empty) => break,
+                    Err(TryRecvError::Disconnected) => {
+                        self.discard_raw_resource_request(pending.stream_id);
+                        let _ = pending.worker.join();
+                        self.transport = pending
+                            .transport_return
+                            .lock()
+                            .expect("resource transport return lock")
+                            .take();
+                        return map_resource_transport_completion(
+                            pending.request,
+                            Err(ResourceTransportFailure::Transport),
+                        );
+                    }
                 }
             }
+            let _ = pending.control.send(ResourceTransportControl::Cancel(
+                ResourceCancellationCode::ClientRequested,
+            ));
+            pending.cancel_requested = true;
         }
-        pending.cancel_requested = true;
-        let _ = pending.control.send(ResourceTransportControl::Cancel(
-            ResourceCancellationCode::ClientRequested,
-        ));
-        self.pending = Some(pending);
-        request.pending()
+        let waiter = match Self::wait_for_cancelled_transport(pending.receiver) {
+            Ok(waiter) => waiter,
+            Err(receiver) => {
+                pending.receiver = receiver;
+                self.pending = Some(pending);
+                return request.failed(SERVER_RESOURCE_INTERNAL_CODE.to_owned());
+            }
+        };
+        let (outcome, waiter_thread) = waiter;
+        self.discard_raw_resource_request(pending.stream_id);
+        match outcome {
+            Some(CancellationWaitOutcome::Terminal(result)) => {
+                map_resource_transport_completion(pending.request, result)
+            }
+            Some(CancellationWaitOutcome::TimedOut) | None => {
+                let _ = pending.control.send(ResourceTransportControl::Shutdown);
+                self.detached.push(DetachedResourceTransport {
+                    control: pending.control,
+                    worker: pending.worker,
+                    waiter: waiter_thread,
+                    transport_return: pending.transport_return,
+                });
+                pending
+                    .request
+                    .failed(SERVER_RESOURCE_INTERNAL_CODE.to_owned())
+            }
+        }
     }
 }
 impl Drop for InstalledClientResourceExecutor {
@@ -2133,16 +2361,32 @@ impl Drop for InstalledClientResourceExecutor {
                     request_id: pending.request.request_id(),
                     reason: ResourceCancellationCode::RuntimeShutdown,
                 });
+            let _ = pending
+                .control
+                .commands
+                .send(BrokerCommand::AbandonResource {
+                    stream_id: pending.stream_id,
+                    request_id: pending.request.request_id(),
+                    reason: ResourceCancellationCode::RuntimeShutdown,
+                });
         }
         if let Some(pending) = self.pending.take() {
             self.discard_raw_resource_request(pending.stream_id);
-            drop(pending.receiver);
             let _ = pending.control.send(ResourceTransportControl::Shutdown);
-            let _ = pending.worker.join();
+            drop(pending.receiver);
         }
         for detached in self.detached.drain(..) {
             let _ = detached.control.send(ResourceTransportControl::Shutdown);
-            let _ = detached.worker.join();
+        }
+        if let Some(detached) = self.detached_broker.take() {
+            let _ = detached
+                .control
+                .commands
+                .send(BrokerCommand::AbandonResource {
+                    stream_id: detached.stream_id,
+                    request_id: detached.request_id,
+                    reason: ResourceCancellationCode::RuntimeShutdown,
+                });
         }
     }
 }
@@ -2424,6 +2668,7 @@ async fn run_shared_invoke_broker(
                     &mut root,
                     &mut resources,
                     &mut resource_high_water_mark,
+                    &mut resource_tombstones,
                 )
                 .await
                 .is_err()
@@ -2473,6 +2718,7 @@ async fn handle_shared_broker_command<W>(
     root: &mut Option<BrokerRootState>,
     resources: &mut BTreeMap<u64, BrokerResourceState>,
     resource_high_water_mark: &mut Option<u64>,
+    resource_tombstones: &mut BrokerResourceTombstones,
 ) -> Result<(), ResourceTransportFailure>
 where
     W: AsyncWrite + Unpin,
@@ -2570,6 +2816,35 @@ where
                 .map_err(|_| ResourceTransportFailure::Shape)?;
             write_shared_broker_frame(stream, &encoded).await?;
         }
+        BrokerCommand::AbandonResource {
+            stream_id,
+            request_id,
+            reason,
+        } => {
+            let Some(mut state) = resources.remove(&stream_id) else {
+                return Ok(());
+            };
+            if state.request.request_id != request_id {
+                return Err(ResourceTransportFailure::Shape);
+            }
+            if !state.cancellation_requested {
+                let cancel = ResourceClientFrame::Cancel(ResourceCancel {
+                    stream_id,
+                    request_id,
+                    reason,
+                });
+                state
+                    .protocol
+                    .receive(cancel.clone())
+                    .map_err(|_| ResourceTransportFailure::Shape)?;
+                state.cancellation_requested = true;
+                let encoded = encode_resource_client_frame(active, registry, &cancel)
+                    .map_err(|_| ResourceTransportFailure::Shape)?;
+                write_shared_broker_frame(stream, &encoded).await?;
+            }
+            remember_broker_resource_terminal(resource_tombstones, stream_id, request_id);
+        }
+
         BrokerCommand::Shutdown => {
             if root.is_some() {
                 let cancel = ClientFrame::CallCancel { stream: 1 };
@@ -2779,6 +3054,38 @@ fn reconstruct_shared_root_result(
     }
 }
 
+async fn send_shared_resource_completion<W>(
+    state: &mut BrokerResourceState,
+    outcome: Result<ResourceTransportOutcome, ResourceTransportFailure>,
+    stream: &mut W,
+    active: &ActiveDatabaseRevision,
+    registry: &OpaqueCodecRegistry,
+) -> Result<bool, ResourceTransportFailure>
+where
+    W: AsyncWrite + Unpin,
+{
+    if state.completion.send(outcome).await.is_ok() {
+        return Ok(true);
+    }
+    if state.cancellation_requested {
+        return Ok(false);
+    }
+    let cancel = ResourceClientFrame::Cancel(ResourceCancel {
+        stream_id: state.request.stream_id,
+        request_id: state.request.request_id,
+        reason: ResourceCancellationCode::RuntimeShutdown,
+    });
+    state
+        .protocol
+        .receive(cancel.clone())
+        .map_err(|_| ResourceTransportFailure::Shape)?;
+    state.cancellation_requested = true;
+    let encoded = encode_resource_client_frame(active, registry, &cancel)
+        .map_err(|_| ResourceTransportFailure::Shape)?;
+    write_shared_broker_frame(stream, &encoded).await?;
+    Ok(true)
+}
+
 async fn handle_shared_resource_frame<W>(
     state: &mut BrokerResourceState,
     frame: ResourceServerFrame,
@@ -2873,11 +3180,20 @@ where
                 }
                 ProtocolResourceKind::Stream => {
                     state.stream_values_seen = true;
-                    state
-                        .completion
-                        .send(Ok(ResourceTransportOutcome::StreamValues(value.values)))
-                        .await
-                        .map_err(|_| ResourceTransportFailure::Transport)?;
+                    if !send_shared_resource_completion(
+                        state,
+                        Ok(ResourceTransportOutcome::StreamValues(value.values)),
+                        stream,
+                        active,
+                        registry,
+                    )
+                    .await?
+                    {
+                        return Ok(false);
+                    }
+                    if state.cancellation_requested {
+                        return Ok(true);
+                    }
                     let update = ResourceWindowUpdate {
                         stream_id: value.stream_id,
                         request_id: value.request_id,
@@ -2904,11 +3220,14 @@ where
             }
             if !state.accepted {
                 if late_terminal {
-                    state
-                        .completion
-                        .send(Err(ResourceTransportFailure::Shape))
-                        .await
-                        .map_err(|_| ResourceTransportFailure::Transport)?;
+                    let _ = send_shared_resource_completion(
+                        state,
+                        Err(ResourceTransportFailure::Shape),
+                        stream,
+                        active,
+                        registry,
+                    )
+                    .await?;
                     return Ok(false);
                 }
                 return Err(ResourceTransportFailure::Shape);
@@ -2917,11 +3236,14 @@ where
                 ProtocolResourceKind::Single => {
                     let Some(value) = state.scalar_value.take() else {
                         if late_terminal {
-                            state
-                                .completion
-                                .send(Err(ResourceTransportFailure::Shape))
-                                .await
-                                .map_err(|_| ResourceTransportFailure::Transport)?;
+                            let _ = send_shared_resource_completion(
+                                state,
+                                Err(ResourceTransportFailure::Shape),
+                                stream,
+                                active,
+                                registry,
+                            )
+                            .await?;
                             return Ok(false);
                         }
                         return Err(ResourceTransportFailure::Shape);
@@ -2939,11 +3261,14 @@ where
                         .ok_or(ResourceTransportFailure::Shape)?,
                 },
             };
-            state
-                .completion
-                .send(Ok(outcome))
-                .await
-                .map_err(|_| ResourceTransportFailure::Transport)?;
+            let _ = send_shared_resource_completion(
+                state,
+                Ok(outcome),
+                stream,
+                active,
+                registry,
+            )
+            .await?;
             return Ok(false);
         }
         ResourceServerFrame::Failed(value) => {
@@ -2952,36 +3277,45 @@ where
             }
             if state.scalar_value.is_some() {
                 if late_terminal {
-                    state
-                        .completion
-                        .send(Err(ResourceTransportFailure::Shape))
-                        .await
-                        .map_err(|_| ResourceTransportFailure::Transport)?;
+                    let _ = send_shared_resource_completion(
+                        state,
+                        Err(ResourceTransportFailure::Shape),
+                        stream,
+                        active,
+                        registry,
+                    )
+                    .await?;
                     return Ok(false);
                 }
                 return Err(ResourceTransportFailure::Shape);
             }
-            state
-                .completion
-                .send(Ok(ResourceTransportOutcome::Failed {
+            let _ = send_shared_resource_completion(
+                state,
+                Ok(ResourceTransportOutcome::Failed {
                     failure: value.failure,
                     nested_invocation_id: state.accepted_nested_invocation_id,
-                }))
-                .await
-                .map_err(|_| ResourceTransportFailure::Transport)?;
+                }),
+                stream,
+                active,
+                registry,
+            )
+            .await?;
             return Ok(false);
         }
         ResourceServerFrame::Cancelled(value) => {
             if value.request_id != state.request.request_id {
                 return Err(ResourceTransportFailure::Shape);
             }
-            state
-                .completion
-                .send(Ok(ResourceTransportOutcome::Cancelled {
+            let _ = send_shared_resource_completion(
+                state,
+                Ok(ResourceTransportOutcome::Cancelled {
                     nested_invocation_id: state.accepted_nested_invocation_id,
-                }))
-                .await
-                .map_err(|_| ResourceTransportFailure::Transport)?;
+                }),
+                stream,
+                active,
+                registry,
+            )
+            .await?;
             return Ok(false);
         }
     }
@@ -3158,8 +3492,9 @@ async fn run_authenticated_resource_transport(
                         });
                     }
                     ResourceTransportCancellationAction::ContinueCommitted => {
-                        (&mut start)
+                        tokio::time::timeout(RESOURCE_FRAME_TIMEOUT, &mut start)
                             .await
+                            .map_err(|_| ResourceTransportFailure::Transport)?
                             .map_err(|_| ResourceTransportFailure::Transport)?
                     }
                 }
@@ -3234,8 +3569,9 @@ async fn run_authenticated_resource_transport(
                             });
                         }
                         ResourceTransportCancellationAction::ContinueCommitted => {
-                            (&mut pull)
+                            tokio::time::timeout(RESOURCE_FRAME_TIMEOUT, &mut pull)
                                 .await
+                                .map_err(|_| ResourceTransportFailure::Transport)?
                                 .map_err(|_| ResourceTransportFailure::Transport)?
                         }
                     }
@@ -3301,8 +3637,9 @@ async fn run_authenticated_resource_transport(
                                             });
                                         }
                                         ResourceTransportCancellationAction::ContinueCommitted => {
-                                            (&mut send)
+                                            tokio::time::timeout(RESOURCE_FRAME_TIMEOUT, &mut send)
                                                 .await
+                                                .map_err(|_| ResourceTransportFailure::Transport)?
                                                 .map(|_| ())
                                                 .map_err(|_| ResourceTransportFailure::Transport)
                                         }
@@ -5736,6 +6073,33 @@ mod tests {
                 nested_invocation_id: None,
             }))
         ));
+    }
+
+    #[test]
+    fn cancellation_waiter_suppresses_stream_values_before_terminal() {
+        let (sender, receiver) = mpsc::channel(2);
+        let producer = thread::spawn(move || {
+            sender
+                .blocking_send(Ok(ResourceTransportOutcome::StreamValues(vec![RuntimeValue::Integer(1)])))
+                .expect("stream batch reaches cancellation waiter");
+            sender
+                .blocking_send(Ok(ResourceTransportOutcome::Cancelled {
+                    nested_invocation_id: None,
+                }))
+                .expect("terminal cancellation reaches cancellation waiter");
+        });
+        let (result, waiter) = InstalledClientResourceExecutor::wait_for_cancelled_transport(receiver)
+            .expect("cancellation waiter returns a terminal result");
+        assert!(waiter.is_none());
+        assert!(matches!(
+            result,
+            Some(CancellationWaitOutcome::Terminal(Ok(
+                ResourceTransportOutcome::Cancelled {
+                    nested_invocation_id: None,
+                },
+            )))
+        ));
+        producer.join().expect("cancellation producer");
     }
 
     #[test]
