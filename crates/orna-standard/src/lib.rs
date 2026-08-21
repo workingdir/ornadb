@@ -39,6 +39,7 @@ use orna_core::{
 use orna_syntax::{NamePart, PrimitiveValueTypePersistence, QualifiedName, TypeExportTarget};
 
 pub use orna_compiler::StandardUpgradeIdentity;
+pub use orna_core::inspect::INSPECT_RENDER_CONTRACT;
 
 pub use orna_compiler::{
     STD_INTEGER_TYPE_ID, STD_INVOKE_ECHO_FUNCTION_ID, STD_INVOKE_ECHO_FUNCTION_REVISION_ID,
