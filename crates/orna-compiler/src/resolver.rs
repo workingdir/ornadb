@@ -5152,56 +5152,68 @@ fn client_action_targets(
             },
         );
     }
-    for function in base.functions() {
-        if targets.contains_key(function.name()) {
+    let standard_functions = standard.map(|standard| {
+        standard
+            .verified_snapshot()
+            .catalogue()
+            .functions()
+    });
+    // Keep application precedence so a target name resolves to one catalogue identity.
+    for functions in [Some(base.functions()), standard_functions] {
+        let Some(functions) = functions else {
             continue;
-        }
-        let return_type = match function.return_type() {
-            FunctionReturn::Single(resolved) => {
-                client_expression_type_from_core(*resolved, standard)
+        };
+        for function in functions {
+            if targets.contains_key(function.name()) {
+                continue;
             }
-            // Action execution rejects ROWS and STREAM results (ADR 0079),
-            // including one-column ROWS that could otherwise look scalar.
-            FunctionReturn::Rows(_) | FunctionReturn::Stream(_) => None,
-        };
-        let Some(return_type) = return_type
-            .map(|value| client_action_result_type(value, standard))
-            .filter(|value| action_result_type_is_durable(*value, standard))
-        else {
-            continue;
-        };
-        let Some(parameters) = function
-            .parameters()
-            .iter()
-            .map(|parameter| {
-                client_expression_type_from_core(parameter.resolved_type(), standard).map(
-                    |expression_type| ClientExpressionParameter {
-                        id: CheckedParameterId::Existing(parameter.id()),
-                        name: parameter.name().to_owned(),
-                        expression_type,
+            let return_type = match function.return_type() {
+                FunctionReturn::Single(resolved) => {
+                    client_expression_type_from_core(*resolved, standard)
+                }
+                // Action execution rejects ROWS and STREAM results (ADR 0079),
+                // including one-column ROWS that could otherwise look scalar.
+                FunctionReturn::Rows(_) | FunctionReturn::Stream(_) => None,
+            };
+            let Some(return_type) = return_type
+                .map(|value| client_action_result_type(value, standard))
+                .filter(|value| action_result_type_is_durable(*value, standard))
+            else {
+                continue;
+            };
+            let Some(parameters) = function
+                .parameters()
+                .iter()
+                .map(|parameter| {
+                    client_expression_type_from_core(parameter.resolved_type(), standard).map(
+                        |expression_type| ClientExpressionParameter {
+                            id: CheckedParameterId::Existing(parameter.id()),
+                            name: parameter.name().to_owned(),
+                            expression_type,
+                        },
+                    )
+                })
+                .collect::<Option<Vec<_>>>()
+            else {
+                continue;
+            };
+            targets.insert(
+                function.name().clone(),
+                ClientActionTarget {
+                    domain: match function.domain() {
+                        FunctionDomain::Client => {
+                            orna_artifact::client_plan::ActionTargetDomain::Client
+                        }
+                        FunctionDomain::Server => {
+                            orna_artifact::client_plan::ActionTargetDomain::Server
+                        }
                     },
-                )
-            })
-            .collect::<Option<Vec<_>>>()
-        else {
-            continue;
-        };
-        targets.insert(
-            function.name().clone(),
-            ClientActionTarget {
-            domain: match function.domain() {
-                    FunctionDomain::Client => {
-                        orna_artifact::client_plan::ActionTargetDomain::Client
-                    }
-                    FunctionDomain::Server => {
-                        orna_artifact::client_plan::ActionTargetDomain::Server
-                    }
-            },
-                id: CheckedFunctionId::Existing(function.id()),
-                parameters,
-                return_type,
-            },
-        );
+                    id: CheckedFunctionId::Existing(function.id()),
+                    parameters,
+                    return_type,
+                },
+            );
+        }
     }
     targets
 }

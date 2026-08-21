@@ -6955,6 +6955,11 @@ impl<'a> CandidateBuilder<'a> {
                 .iter()
                 .any(|candidate| candidate.id() == target)
             || self.active.catalogue().function_by_id(function).is_some()
+            || self
+                .active
+                .catalogue_hash_context()
+                .standard()
+                .is_some_and(|standard| standard.catalogue().function_by_id(function).is_some())
         {
             return Ok(RevisionPair::new(
                 self.source.revision.id(),
