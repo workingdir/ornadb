@@ -2372,7 +2372,7 @@ impl ClientStateStore {
 #[non_exhaustive]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ClientUserStateError {
-    /// A load contained the same logical cell more than once.
+    /// A USER state batch contained the same logical cell more than once.
     DuplicateKey(ClientStateKey),
     /// A transport result did not align with the submitted change batch.
     WriteBatchLength { expected: usize, actual: usize },
@@ -2408,7 +2408,7 @@ impl fmt::Display for ClientUserStateError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::DuplicateKey(key) => {
-                write!(formatter, "USER state load contains duplicate key {key:?}")
+                write!(formatter, "USER state batch contains duplicate key {key:?}")
             }
             Self::WriteBatchLength { expected, actual } => write!(
                 formatter,
@@ -2533,6 +2533,7 @@ impl ClientStateStore {
                 actual: results.len(),
             });
         }
+        let mut seen_keys = HashMap::with_capacity(changes.len());
         for (change, result) in changes.iter().zip(results) {
             let expected_key = ClientStateKey::from_user_change(change);
             let actual_key = ClientStateKey::from_user_key(result.key());
@@ -2541,6 +2542,9 @@ impl ClientStateStore {
                     expected: expected_key,
                     actual: actual_key,
                 });
+            }
+            if seen_keys.insert(expected_key.clone(), ()).is_some() {
+                return Err(ClientUserStateError::DuplicateKey(expected_key));
             }
             let Some(local) = self.user.get(&expected_key) else {
                 return Err(ClientUserStateError::UnknownKey(expected_key));
@@ -2553,11 +2557,13 @@ impl ClientStateStore {
                 return Err(ClientUserStateError::ValueMismatch(expected_key));
             }
         }
+        let mut staged_writes = Vec::with_capacity(changes.len());
+        let mut first_conflict = None;
         for (change, result) in changes.iter().zip(results) {
             let key = ClientStateKey::from_user_change(change);
             let local = self
                 .user
-                .get_mut(&key)
+                .get(&key)
                 .expect("USER state key was validated above");
             match result.outcome() {
                 UserStateWriteOutcome::Written { revision } => {
@@ -2566,17 +2572,29 @@ impl ClientStateStore {
                     if !valid {
                         return Err(ClientUserStateError::InvalidRevision(key));
                     }
-                    local.revision = Some(revision);
-                    local.dirty = false;
+                    staged_writes.push((key, revision));
                 }
                 UserStateWriteOutcome::Conflict { current_revision } => {
-                    return Err(ClientUserStateError::Conflict {
-                        key,
-                        expected: change.expected_revision(),
-                        current: current_revision,
-                    });
+                    if first_conflict.is_none() {
+                        first_conflict = Some(ClientUserStateError::Conflict {
+                            key,
+                            expected: change.expected_revision(),
+                            current: current_revision,
+                        });
+                    }
                 }
             }
+        }
+        for (key, revision) in staged_writes {
+            let local = self
+                .user
+                .get_mut(&key)
+                .expect("USER state key was validated above");
+            local.revision = Some(revision);
+            local.dirty = false;
+        }
+        if let Some(error) = first_conflict {
+            return Err(error);
         }
         Ok(())
     }
@@ -8942,6 +8960,149 @@ fn client_stream_cancellation_clears_batches_and_rejects_stale_completions() {
         assert_eq!(stored.revision(), Some(8));
         assert!(!stored.is_dirty());
         assert!(state.pending_user_state_changes().unwrap().is_empty());
+    }
+
+    #[test]
+    fn client_user_state_write_results_leave_all_cells_unchanged_when_a_later_revision_is_invalid() {
+        let root_function = FunctionId::from_bytes([0x41; 16]);
+        let function = FunctionId::from_bytes([0x42; 16]);
+        let value_type = orna_standard::CHARACTER_LARGE_OBJECT_TYPE_ID;
+        let context = super::ClientStateContext::new(
+            root_function,
+            "profile".to_owned(),
+            "root-instance".to_owned(),
+        )
+        .unwrap();
+        let first_slot = StateSlotId::from_bytes([0x43; 16]);
+        let second_slot = StateSlotId::from_bytes([0x44; 16]);
+        let principal = PrincipalId::from_bytes([0x45; 16]);
+        let first_key = UserStateKey::new(
+            principal,
+            root_function,
+            "profile".to_owned(),
+            function,
+            "root-instance".to_owned(),
+            first_slot,
+        )
+        .unwrap();
+        let second_key = UserStateKey::new(
+            principal,
+            root_function,
+            "profile".to_owned(),
+            function,
+            "root-instance".to_owned(),
+            second_slot,
+        )
+        .unwrap();
+        let first_client_key = super::ClientStateKey::from_context(&context, function, first_slot);
+        let second_client_key = super::ClientStateKey::from_context(&context, function, second_slot);
+        let mut state = super::ClientStateStore::new();
+        state.set_context(context);
+        state
+            .load_user_state(&[
+                UserStateCell::new(
+                    first_key,
+                    RuntimeValue::Text("first-loaded".to_owned()),
+                    value_type,
+                    7,
+                    SystemTime::UNIX_EPOCH,
+                ),
+                UserStateCell::new(
+                    second_key,
+                    RuntimeValue::Text("second-loaded".to_owned()),
+                    value_type,
+                    11,
+                    SystemTime::UNIX_EPOCH,
+                ),
+            ])
+            .unwrap();
+        state
+            .set_user_state(
+                first_client_key.clone(),
+                RuntimeValue::Text("first-changed".to_owned()),
+                value_type,
+            )
+            .unwrap();
+        state
+            .set_user_state(
+                second_client_key.clone(),
+                RuntimeValue::Text("second-changed".to_owned()),
+                value_type,
+            )
+            .unwrap();
+        let changes = state.pending_user_state_changes().unwrap();
+        assert_eq!(changes.len(), 2);
+        let before = state.user().clone();
+        let results = vec![
+            UserStateWriteResult::new(
+                changes[0].key_without_principal(),
+                UserStateWriteOutcome::Written { revision: 12 },
+            ),
+            UserStateWriteResult::new(
+                changes[1].key_without_principal(),
+                UserStateWriteOutcome::Written { revision: 0 },
+            ),
+        ];
+
+        let error = state
+            .apply_user_state_write_results(&changes, &results)
+            .unwrap_err();
+
+        assert!(matches!(error, super::ClientUserStateError::InvalidRevision(_)));
+        assert_eq!(state.user(), &before);
+
+        let mixed_results = vec![
+            UserStateWriteResult::new(
+                changes[0].key_without_principal(),
+                UserStateWriteOutcome::Written { revision: 12 },
+            ),
+            UserStateWriteResult::new(
+                changes[1].key_without_principal(),
+                UserStateWriteOutcome::Conflict {
+                    current_revision: 15,
+                },
+            ),
+        ];
+        let mixed_error = state
+            .apply_user_state_write_results(&changes, &mixed_results)
+            .unwrap_err();
+
+        assert!(matches!(
+            mixed_error,
+            super::ClientUserStateError::Conflict {
+                key,
+                expected: Some(11),
+                current: 15,
+            } if key == second_client_key
+        ));
+        let first_after_mixed = state.user().get(&first_client_key).unwrap();
+        assert_eq!(first_after_mixed.revision(), Some(12));
+        assert!(!first_after_mixed.is_dirty());
+        let second_after_mixed = state.user().get(&second_client_key).unwrap();
+        assert_eq!(second_after_mixed.revision(), Some(11));
+        assert!(second_after_mixed.is_dirty());
+        let after_mixed = state.user().clone();
+
+        let duplicate_changes = vec![changes[1].clone(), changes[1].clone()];
+        let duplicate_results = vec![
+            UserStateWriteResult::new(
+                duplicate_changes[0].key_without_principal(),
+                UserStateWriteOutcome::Written { revision: 16 },
+            ),
+            UserStateWriteResult::new(
+                duplicate_changes[1].key_without_principal(),
+                UserStateWriteOutcome::Written { revision: 17 },
+            ),
+        ];
+        let duplicate_error = state
+            .apply_user_state_write_results(&duplicate_changes, &duplicate_results)
+            .unwrap_err();
+
+        assert!(matches!(
+            duplicate_error,
+            super::ClientUserStateError::DuplicateKey(key) if key == super::ClientStateKey::from_user_change(&changes[1])
+        ));
+        assert_eq!(state.user(), &after_mixed);
     }
 
     #[test]
