@@ -931,7 +931,7 @@ mod tests {
             validated_migration_registry()
                 .expect("registry is valid")
                 .len(),
-            34
+            35
         );
         assert_eq!(MIGRATIONS[0].version, 1);
         assert_eq!(MIGRATIONS[1].version, 2);
@@ -967,7 +967,9 @@ mod tests {
         assert_eq!(MIGRATIONS[31].version, 32);
         assert_eq!(MIGRATIONS[32].version, 33);
         assert_eq!(MIGRATIONS[33].version, 34);
+        assert_eq!(MIGRATIONS[34].version, 35);
         assert_eq!(MIGRATIONS[33].name, "resource request identity history");
+        assert_eq!(MIGRATIONS[34].name, "resource audit target authorities");
         assert_eq!(MIGRATIONS[5].name, "definition reference write evidence");
         assert_eq!(MIGRATIONS[6].name, "standard catalogue type storage");
         assert_eq!(MIGRATIONS[7].name, "resolved value type storage");
