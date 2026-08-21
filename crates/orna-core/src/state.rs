@@ -91,9 +91,9 @@ fn descriptor_contains_sealed_inspect_type(descriptor: &TypeDescriptor) -> bool 
 /// Returns whether a runtime value contains a sealed Inspector identity.
 ///
 /// USER state stores typed runtime values, so checking only the separately
-/// supplied metadata type is insufficient. The check walks nested records and
-/// constructed values before a change is accepted or a recovered cell is
-/// exposed to the client.
+/// supplied metadata type is insufficient. The check walks nested records,
+/// constructed values, and descriptor-bearing invocation offer metadata before a
+/// change is accepted or a recovered cell is exposed to the client.
 pub fn is_sealed_inspect_runtime_value(value: &RuntimeValue) -> bool {
     let type_is_sealed = match value.runtime_type() {
         RuntimeType::Flat(ResolvedType::Named(type_id))
@@ -145,14 +145,19 @@ pub fn is_sealed_inspect_runtime_value(value: &RuntimeValue) -> bool {
                     .preferences()
                     .is_some_and(|value| is_sealed_inspect_runtime_value(value.value()))
                 || request.client_offer().sink_offers().iter().any(|offer| {
-                    offer
-                        .limits()
-                        .is_some_and(|value| is_sealed_inspect_runtime_value(value.value()))
+                    descriptor_contains_sealed_inspect_type(offer.descriptor())
+                        || offer
+                            .limits()
+                            .is_some_and(|value| is_sealed_inspect_runtime_value(value.value()))
                 })
                 || request.client_offer().runtime_offers().iter().any(|offer| {
                     offer
-                        .limits()
-                        .is_some_and(|value| is_sealed_inspect_runtime_value(value.value()))
+                        .consumed_descriptors()
+                        .iter()
+                        .any(descriptor_contains_sealed_inspect_type)
+                        || offer
+                            .limits()
+                            .is_some_and(|value| is_sealed_inspect_runtime_value(value.value()))
                 })
                 || request
                     .observer_context()
@@ -816,8 +821,9 @@ mod tests {
     use super::*;
     use crate::invocation::{
         InvocationArgument, InvocationCallerContext, InvocationCallerKind, InvocationClientOffer,
-        InvocationEventBody, InvocationParameterSelector, InvocationTarget, InvocationTracePolicy,
-        InvokeEvent, InvokeRequest, InvokeRequestInput, InvokeValue,
+        InvocationEventBody, InvocationParameterSelector, InvocationRuntimeOffer,
+        InvocationSinkOffer, InvocationTarget, InvocationTracePolicy, InvokeEvent, InvokeRequest,
+        InvokeRequestInput, InvokeValue,
     };
     const PRINCIPAL_A: u8 = 0x11;
     const PRINCIPAL_B: u8 = 0x22;
@@ -957,6 +963,68 @@ mod tests {
             type_id(TYPE_INT),
             revision,
         )
+    }
+
+    fn invoke_request_with_offers(
+        sink_offers: Vec<InvocationSinkOffer>,
+        runtime_offers: Vec<InvocationRuntimeOffer>,
+    ) -> RuntimeValue {
+        RuntimeValue::InvokeRequest(
+            InvokeRequest::new(InvokeRequestInput {
+                target: InvocationTarget::function_id(function_id(FUNCTION)),
+                arguments: vec![],
+                caller_context: InvocationCallerContext::new(
+                    InvocationCallerKind::CliPipe,
+                    false,
+                    false,
+                    None,
+                    None,
+                    "en-GB",
+                    "Europe/London",
+                    None,
+                )
+                .expect("a valid caller context"),
+                client_offer: InvocationClientOffer::new(
+                    5,
+                    "en-GB",
+                    "Europe/London",
+                    sink_offers,
+                    runtime_offers,
+                    1_024,
+                    0,
+                    None,
+                    None,
+                )
+                .expect("a valid client offer"),
+                output_requirement: None,
+                state_profile: None,
+                trace_policy: InvocationTracePolicy::Off,
+                idempotency_key: None,
+                parent_invocation_id: None,
+                observer_context: None,
+            })
+            .expect("a valid invocation request"),
+        )
+    }
+
+    fn assert_rejected_sealed_offer_value(value: RuntimeValue, message: &str) {
+        let error = UserStateChange::new(
+            function_id(ROOT),
+            String::new(),
+            function_id(FUNCTION),
+            String::new(),
+            state_slot_id(SLOT),
+            None,
+            value,
+            type_id(TYPE_INT),
+        )
+        .expect_err(message);
+        assert_eq!(
+            error,
+            UserStateError::InvalidChange {
+                reason: "sealed Inspector values cannot be persisted in USER state".to_owned(),
+            }
+        );
     }
 
     #[test]
@@ -1162,6 +1230,102 @@ mod tests {
         )
         .expect_err("sealed Inspector values cannot hide in request arguments");
         assert!(matches!(error, UserStateError::InvalidChange { .. }));
+    }
+
+    #[test]
+    fn change_rejects_a_sealed_inspector_descriptor_nested_in_a_sink_offer() {
+        let descriptor = TypeDescriptor::option(
+            TypeDescriptor::list(TypeDescriptor::named(
+                crate::system::SYS_INSPECT_INVOCATION_TYPE_ID,
+            ))
+            .expect("a valid list descriptor"),
+        )
+        .expect("a valid option descriptor");
+        let sink_offer = InvocationSinkOffer::new(
+            descriptor,
+            ["application/octet-stream"],
+            false,
+            0,
+            None,
+        )
+        .expect("a valid sink offer");
+
+        assert_rejected_sealed_offer_value(
+            invoke_request_with_offers(vec![sink_offer], vec![]),
+            "sealed Inspector descriptors cannot hide in sink offers",
+        );
+    }
+
+    #[test]
+    fn change_rejects_a_sealed_inspector_descriptor_nested_in_a_runtime_offer() {
+        let descriptor = TypeDescriptor::map(
+            TypeDescriptor::named(type_id(TYPE_INT)),
+            TypeDescriptor::option(TypeDescriptor::reference(
+                crate::system::SYS_INSPECT_SNAPSHOT_TYPE_ID,
+            ))
+            .expect("a valid option descriptor"),
+        )
+        .expect("a valid map descriptor");
+        let runtime_offer = InvocationRuntimeOffer::new(
+            "runtime",
+            "1",
+            [descriptor],
+            [],
+            0,
+            false,
+            None,
+        )
+        .expect("a valid runtime offer");
+
+        assert_rejected_sealed_offer_value(
+            invoke_request_with_offers(vec![], vec![runtime_offer]),
+            "sealed Inspector descriptors cannot hide in runtime offers",
+        );
+    }
+
+    #[test]
+    fn change_accepts_ordinary_descriptors_in_sink_and_runtime_offers() {
+        let sink_descriptor = TypeDescriptor::list(
+            TypeDescriptor::option(TypeDescriptor::named(type_id(TYPE_INT)))
+                .expect("a valid option descriptor"),
+        )
+        .expect("a valid list descriptor");
+        let sink_offer = InvocationSinkOffer::new(
+            sink_descriptor,
+            ["application/octet-stream"],
+            false,
+            0,
+            None,
+        )
+        .expect("a valid sink offer");
+        let runtime_descriptor = TypeDescriptor::map(
+            TypeDescriptor::named(type_id(TYPE_TEXT)),
+            TypeDescriptor::option(TypeDescriptor::reference(type_id(TYPE_INT)))
+                .expect("a valid option descriptor"),
+        )
+        .expect("a valid map descriptor");
+        let runtime_offer = InvocationRuntimeOffer::new(
+            "runtime",
+            "1",
+            [runtime_descriptor],
+            [],
+            0,
+            false,
+            None,
+        )
+        .expect("a valid runtime offer");
+
+        UserStateChange::new(
+            function_id(ROOT),
+            String::new(),
+            function_id(FUNCTION),
+            String::new(),
+            state_slot_id(SLOT),
+            None,
+            invoke_request_with_offers(vec![sink_offer], vec![runtime_offer]),
+            type_id(TYPE_INT),
+        )
+        .expect("ordinary invocation descriptors remain USER-persistable");
     }
 
     #[test]
