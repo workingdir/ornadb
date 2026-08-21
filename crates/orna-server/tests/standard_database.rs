@@ -5703,7 +5703,8 @@ async fn installed_resource_socket_delivers_values_and_enforces_windows_and_gran
                     Duration::from_secs(5),
                     read_resource_server_frame_from_socket(&mut client, &active, &registry),
                 )
-                .await??;
+                .await
+                .map_err(|_| failure("item barrier acceptance timed out"))??;
             require(
                 matches!(
                     item_barrier_accepted,
