@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeMap,
     sync::{Arc, Mutex},
     time::SystemTime,
 };
@@ -206,6 +207,7 @@ use crate::{
     PostgresKernel, PostgresKernelError, RawServerTargetError,
     bootstrap::require_current_migrations,
     recovery::{load_verified_standard_library, recover_active_revision},
+    state::load_user_state_in_transaction,
     server_execution::{
         SealedPresentationError, ServerSelectError, ServerSelectResult,
         execute_authorised_raw_server_select, execute_authorised_server_select,
@@ -2148,6 +2150,8 @@ impl PostgresKernel {
     ) -> Result<SealedInvocationResult, PostgresKernelError> {
         let mut database_session = self.open().await?;
         let mut invocation_audit_appended = pre_audited;
+        let mut user_state_loaded = false;
+        let mut user_state_revision = None;
         let operation = async {
             loop {
             let transaction = database_session
@@ -2289,6 +2293,47 @@ impl PostgresKernel {
                                             "sealed invocation state profile must be canonical",
                                         )
                                     })?;
+                                    if user_state_loaded {
+                                        if user_state_revision != Some(active.pair()) {
+                                            return Err(PostgresKernelError::DurableInvariant {
+                                                relation: "_orna_kernel.active_revision",
+                                                record: invocation.canonical(),
+                                                rule: "sealed CLIENT USER state must retain its pinned active revision",
+                                            });
+                                        }
+                                    } else {
+                                        let cells = load_user_state_in_transaction(
+                                            &transaction,
+                                            authenticated_session,
+                                            &active,
+                                            &registry,
+                                            state_context.root_function(),
+                                            state_context.state_profile(),
+                                            &[],
+                                            &BTreeMap::new(),
+                                        )
+                                        .await?;
+                                        append_security_audit_event(
+                                            &transaction,
+                                            SecurityAuditDecision::user_state_allowed(
+                                                authenticated_session,
+                                                UserStateAuditOperation::Load,
+                                                state_context.root_function(),
+                                                cells.len() as u64,
+                                            ),
+                                        )
+                                        .await?;
+                                        state.set_context(state_context.clone());
+                                        state.load_user_state(&cells).map_err(|_| {
+                                            PostgresKernelError::DurableInvariant {
+                                                relation: "CLIENT state store",
+                                                record: format!("{:?}", definition.id()),
+                                                rule: "sealed CLIENT USER state load must populate the caller-owned store",
+                                            }
+                                        })?;
+                                        user_state_loaded = true;
+                                        user_state_revision = Some(active.pair());
+                                    }
                                     let execution = if let Some(executor) =
                                         resource_executor.as_deref_mut()
                                     {
