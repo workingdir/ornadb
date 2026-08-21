@@ -1468,7 +1468,21 @@ fn resolve_resource_operation_target<'a>(
     active: &'a ActiveDatabaseRevision,
     operation: &ResourceOperationNode,
 ) -> Option<ResolvedResourceTarget<'a>> {
-    let raw_target = InvocationTarget::new(operation.target_function(), operation.target_revision());
+    resolve_unclassified_target(
+        active,
+        InvocationTarget::new(operation.target_function(), operation.target_revision()),
+    )
+}
+
+/// Resolves an action's unclassified target to the application function or to
+/// the exact verified-standard executable selected by the active catalogue
+/// hash context. A raw target is intentionally never upgraded unless the
+/// active catalogue proves that the identity belongs only to the standard
+/// snapshot.
+fn resolve_unclassified_target<'a>(
+    active: &'a ActiveDatabaseRevision,
+    raw_target: InvocationTarget,
+) -> Option<ResolvedResourceTarget<'a>> {
     let application = active.catalogue().function_by_id(raw_target.function());
     let standard = active.catalogue_hash_context().standard();
     let standard_definition =
@@ -1489,6 +1503,29 @@ fn resolve_resource_operation_target<'a>(
         }
         _ => None,
     }
+}
+
+fn resolve_action_target<'a>(
+    active: &'a ActiveDatabaseRevision,
+    descriptor: &ClientActionDescriptor,
+) -> Result<ResolvedResourceTarget<'a>, ClientActionError> {
+    if descriptor.target_revision != active.pair() {
+        return Err(ClientActionError::RevisionMismatch);
+    }
+    let Some(resolved) = resolve_unclassified_target(
+        active,
+        InvocationTarget::new(descriptor.target, descriptor.target_revision),
+    ) else {
+        return Err(ClientActionError::TargetMismatch);
+    };
+    let expected_domain = match descriptor.domain {
+        ActionTargetDomain::Client => FunctionDomain::Client,
+        ActionTargetDomain::Server => FunctionDomain::Server,
+    };
+    if resolved.definition.domain() != expected_domain {
+        return Err(ClientActionError::TargetMismatch);
+    }
+    Ok(resolved)
 }
 
 fn validate_resource_arguments(
@@ -4315,20 +4352,8 @@ fn action_target_result_type(
     active: &ActiveDatabaseRevision,
     descriptor: &ClientActionDescriptor,
 ) -> Result<(ResourceKind, ResolvedType), ClientActionError> {
-    if descriptor.target_revision != active.pair() {
-        return Err(ClientActionError::RevisionMismatch);
-    }
-    let Some(definition) = active.catalogue().function_by_id(descriptor.target) else {
-        return Err(ClientActionError::TargetMismatch);
-    };
-    let expected_domain = match descriptor.domain {
-        ActionTargetDomain::Client => FunctionDomain::Client,
-        ActionTargetDomain::Server => FunctionDomain::Server,
-    };
-    if definition.domain() != expected_domain {
-        return Err(ClientActionError::TargetMismatch);
-    }
-    let (kind, resolved) = match definition.return_type() {
+    let resolved_target = resolve_action_target(active, descriptor)?;
+    let (kind, resolved) = match resolved_target.definition.return_type() {
         FunctionReturn::Single(resolved) => (ResourceKind::Scalar, *resolved),
         FunctionReturn::Stream(resolved) => (ResourceKind::Stream, *resolved),
         FunctionReturn::Rows(_) => return Err(ClientActionError::ResultTypeMismatch),
@@ -4343,9 +4368,8 @@ fn validate_action_arguments(
     active: &ActiveDatabaseRevision,
     descriptor: &ClientActionDescriptor,
 ) -> Result<Vec<FunctionArgument>, ClientActionError> {
-    let Some(definition) = active.catalogue().function_by_id(descriptor.target) else {
-        return Err(ClientActionError::TargetMismatch);
-    };
+    let resolved_target = resolve_action_target(active, descriptor)?;
+    let definition = resolved_target.definition;
     if descriptor.arguments.len() != definition.parameters().len() {
         return Err(ClientActionError::Arguments(
             ClientResourceError::TypeMismatch,
@@ -4582,7 +4606,7 @@ pub fn trigger_client_action(
     let descriptor = decode_action_payload(active, value.canonical_payload())?;
     let (kind, expected) = action_target_result_type(active, &descriptor)?;
     let values = validate_action_arguments(active, &descriptor)?;
-    let target = InvocationTarget::new(descriptor.target, descriptor.target_revision);
+    let target = resolve_action_target(active, &descriptor)?.target;
     let digest = ClientResourceKey::canonical_arguments_digest(active, &values)
         .map_err(ClientActionError::Arguments)?;
     if !client_action_target_is_provenance_safe(active, *parent, descriptor.target) {
@@ -12042,6 +12066,79 @@ fn client_stream_cancellation_clears_batches_and_rejects_stale_completions() {
             }
             assert!(state.resource(request.key()).is_none());
         }
+    }
+
+    #[test]
+    fn action_trigger_executes_a_verified_standard_server_target() {
+        let (active, parent_function, _pair, parent_revision) = version_two_active_with_artifact(
+            standard_v6(),
+            orna_standard::BOOLEAN_TYPE_ID,
+            DefinitionReferenceTarget::Function(orna_standard::STD_INVOKE_ECHO_FUNCTION_ID),
+            DefinitionReferenceKind::FunctionCall,
+            orna_artifact::client_plan::EXPRESSION_FORMAT_VERSION,
+            orna_artifact::client_plan::ExpressionClientPlan::new(
+                orna_artifact::client_plan::ClientExpressionNode::Boolean { value: true },
+            )
+            .encode()
+            .unwrap(),
+        );
+        let pair = active.pair();
+        let standard = active
+            .catalogue_hash_context()
+            .standard()
+            .expect("standard action fixture has a pinned snapshot");
+        let argument = FunctionArgument::new(
+            orna_standard::STD_INVOKE_ECHO_PARAMETER_ID,
+            RuntimeValue::Integer(42),
+        )
+        .unwrap();
+        let action = action_value(
+            &active,
+            ActionTargetDomain::Server,
+            orna_standard::STD_INVOKE_ECHO_FUNCTION_ID,
+            pair,
+            CallSiteId::from_bytes([0xf6; 16]),
+            vec![argument.clone()],
+            orna_standard::INTEGER_TYPE_ID,
+        );
+        let auth = authorise(pair, parent_function);
+        let parent = ClientExecutionContext {
+            pair,
+            function: parent_function,
+            function_revision: parent_revision,
+            parent_invocation_id: InvocationId::from_bytes([0xf7; 16]),
+        };
+        let mut state = ClientStateStore::default();
+        let mut action_state = ClientActionState::default();
+        let mut executor = RecordingActionExecutor::new(Some(RuntimeValue::Integer(42)));
+
+        assert_eq!(
+            trigger_client_action(
+                &active,
+                &action,
+                &auth,
+                &parent,
+                &mut action_state,
+                &[],
+                &capability::LocalCapabilityGrantSet::default(),
+                &mut state,
+                &mut executor,
+            ),
+            Ok(ClientActionOutcome::Completed),
+        );
+        let request = executor.executed.first().expect("action was dispatched");
+        assert_eq!(
+            request.target(),
+            InvocationTarget::verified_standard(
+                orna_standard::STD_INVOKE_ECHO_FUNCTION_ID,
+                pair,
+                standard.revision(),
+                orna_standard::STD_INVOKE_ECHO_FUNCTION_REVISION_ID,
+            )
+        );
+        assert_eq!(request.arguments(), &[argument]);
+        assert_eq!(request.expected_type(), ResolvedType::Scalar(StandardScalar::Integer));
+        assert_eq!(action_state.status(), ClientResourceStatus::Idle);
     }
 
     #[test]
