@@ -161,3 +161,5 @@ source-of-truth or authority rules.
   [CLIENT-to-SERVER Resource Transport and Scheduling](0078-client-server-resource-transport.md)
 * **work ADR 0079:**
   [CLIENT Action Values and `std.action.call`](0079-client-action-values.md)
+* **work ADR 0080:**
+  [Headless Ordinary CLIENT Inspector v1](0080-client-inspector.md)
