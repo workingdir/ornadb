@@ -6,7 +6,8 @@ This plan covers the remaining roadmap surfaces after the accepted `orna.std/5`
 JSON value slice and the CLIENT resource and USER state slices.
 
 The plan tracks implementation hardening and integration after the accepted
-headless ordinary CLIENT Inspector v1 in work ADR 0080. The current
+headless ordinary CLIENT Inspector v1 in work ADR 0080 and the generic standard
+render contract `std.inspect.render@1` accepted by work ADR 0081. The current
 specification still marks the graphical runtime ABI, UI event boundary,
 populated resource/UI projections beyond that accepted scope, and reflective
 gateway details as `CURRENT PROPOSAL` or `OPEN`; the repository must not treat
@@ -16,22 +17,23 @@ Current accepted implementation evidence:
 
 - `TODO.md:54-89` records the completed CLIENT, TTY, Inspector-core, source,
   security, presenter, state, resource, identity, transport, and JSON slices;
-  `TODO.md:90-93` records the delivered headless ordinary CLIENT Inspector v1.
+  `TODO.md:90-94` records the delivered headless ordinary CLIENT Inspector v1
+  and the accepted generic standard render contract `std.inspect.render@1`.
 - `docs/decisions/0062-std-ui-value-type.md` accepts the transient `std.ui.UI`
   value only. It defers the graphical runtime ABI and UI sink.
 - `docs/decisions/0063-automatic-runtime-selection.md` accepts the TTY offer and
   deterministic selection only. Non-TTY runtimes remain later work.
 - `docs/decisions/0064-sys-inspect-core.md` accepts server-side snapshots and
-  the `orna inspect` CLI. Work ADR 0080 now accepts the headless ordinary CLIENT
-  Inspector v1; populated resource/UI projections beyond that scope remain
-  deferred.
+  the `orna inspect` CLI. Work ADRs 0080 and 0081 accept the headless ordinary
+  CLIENT Inspector v1 and generic standard render contract `std.inspect.render@1`;
+  populated resource/UI projections beyond that scope remain deferred.
 - `docs/decisions/0068-client-expression-bodies.md` accepts closed CLIENT
   expressions but defers CLIENT-to-SERVER async calls and graphical contracts.
 - `docs/decisions/0071-client-resource-lifecycle.md` and
   `docs/decisions/0074-client-resource-executor-seam.md` accept resource
-  identity, lifecycle, and completion validation. Work ADR 0080 accepts the
-  headless ordinary CLIENT Inspector v1; broader populated projections remain
-  deferred.
+  identity, lifecycle, and completion validation. Work ADRs 0080 and 0081 accept
+  the headless ordinary CLIENT Inspector v1 and generic standard render contract;
+  broader populated projections remain deferred.
 - `docs/decisions/0075-std-json-value.md` accepts the append-only V5 JSON value
   snapshot.
 
@@ -62,8 +64,8 @@ This work has three separate goals:
 3. **Runnable dogfood applications.** Add small source programs that use the
    accepted language and standard library through the same parse, check,
    install, and invoke path as user programs. Proposal-only resources,
-   graphical runtimes, Inspector projections, and reflective gateways stay
-   out of these fixtures until their contracts become executable.
+   graphical runtimes, populated Inspector resource/UI projections, and reflective
+   gateways stay out of these fixtures until their contracts become executable.
 
 - use the existing accepted CLIENT expression and state syntax as the first
   source base, then extend it only when the corresponding contract is accepted;
@@ -83,7 +85,8 @@ The accepted implementation audit found no missing executable slice in the
 current locked scope. The canonical status locks the function, invocation,
 identity, USER state, Inspector, and reflective-gateway directions
 (`../spec/docs/02-status-decisions.md:5-29`), but the executable details for
-non-TTY runtimes, resource inspection, and gateways remain proposal-level in
+non-TTY runtimes, populated Inspector resource/UI projections, and gateways
+remain proposal-level in
 the canonical gap plan (`../spec/docs/49-gap-research-and-contract-plan.md:14-19,39-43`).
 
 The accepted closed slices have focused proof in the repository, including:
@@ -300,14 +303,17 @@ standard source units, `crates/orna-protocol`, `crates/orna-core`,
 
 ### 0.4 Inspector contract
 
-Work ADR 0080 accepts the headless ordinary CLIENT Inspector v1 described by
+Work ADRs 0080 and 0081 accept the headless ordinary CLIENT Inspector v1 and
+its generic standard render contract `std.inspect.render@1`, described by
 `../spec/docs/30-inspector.md`, `../spec/docs/31-self-inspection.md`, and
 `../spec/api/inspect.md`. This stream now covers implementation hardening and
 integration, not acceptance of a proposal-level Inspector contract.
 
 Implementation hardening and integration must preserve:
 
-- the accepted `devtools.inspector` CLIENT signature and return value;
+- the accepted ordinary CLIENT Inspector signature and return value, with
+  rendering identified by `std.inspect.render@1` rather than an application
+  function name;
 - snapshot epoch, freeze, resume, and observer-context semantics;
 - recursion and observer suppression for self-inspection;
 - immutable projection-carrier identity and revision evidence;
@@ -345,11 +351,12 @@ files. Run focused tests after every step, then run `cargo test --workspace
 
 ## Phase 2: Implement the ordinary CLIENT Inspector
 
-ADR 0080 accepts and current HEAD delivers the headless ordinary CLIENT
-Inspector v1. Remaining work is implementation hardening and integration:
+ADRs 0080 and 0081 accept and current HEAD delivers the headless ordinary
+CLIENT Inspector v1 and generic standard render contract `std.inspect.render@1`.
+Remaining work is implementation hardening and integration:
 
 1. Harden the checked Inspector function and versioned client plan against the
-   accepted signature and stable projection identities.
+   accepted signature, generic render contract, and stable projection identities.
 2. Verify snapshot reads through the client runtime without executing the
    observed target.
 3. Preserve recursion suppression, privilege checks, redaction, epoch
