@@ -6128,7 +6128,10 @@ fn resolve_client_local_type(
     if let Some(resolved) = resolve_state_slot_type(active, type_id) {
         return Some(resolved);
     }
-    if is_sealed_inspect_type(type_id) {
+    if type_id == SYS_INSPECT_INVOCATION_TYPE_ID {
+        return Some(ResolvedType::reference(type_id));
+    }
+    if is_inspect_carrier_type(type_id) {
         return Some(ResolvedType::value(type_id));
     }
     let scalar = if type_id == orna_standard::BIGINT_TYPE_ID {
@@ -6910,6 +6913,21 @@ mod tests {
             },
             expected,
         ));
+    }
+
+    #[test]
+    fn inspector_procedural_local_types_preserve_reference_and_carrier_shapes() {
+        let (active, _, _, _) = version_one_active(true);
+        assert_eq!(
+            super::resolve_client_local_type(&active, super::SYS_INSPECT_INVOCATION_TYPE_ID),
+            Some(ResolvedType::Reference {
+                target: super::SYS_INSPECT_INVOCATION_TYPE_ID,
+            }),
+        );
+        assert_eq!(
+            super::resolve_client_local_type(&active, super::SYS_INSPECT_SNAPSHOT_TYPE_ID),
+            Some(ResolvedType::Value(super::SYS_INSPECT_SNAPSHOT_TYPE_ID)),
+        );
     }
 
     #[test]
