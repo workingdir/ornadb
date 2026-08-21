@@ -17732,12 +17732,17 @@ mod runtime_conformance {
             }
             let record = self
                 .requests
-                .remove(&request)
+                .get(&request)
+                .copied()
                 .expect("request checked above");
-            self.cancelled_requests.insert(request, record);
             let failure = status(StatusCode::Cancelled, b"request cancelled");
             let result =
                 unsafe { (self.client.fail_model_request)(self.client.context, request, failure) };
+            if result.code != StatusCode::Ok {
+                return result;
+            }
+            self.requests.remove(&request);
+            self.cancelled_requests.insert(request, record);
             if let Some(surface) = self.surfaces.get_mut(&record.surface) {
                 surface.owned_handles.remove(&request);
                 surface.owned_handles.remove(&record._model);
@@ -19574,6 +19579,22 @@ mod runtime_conformance {
                 .filter(|event| event.kind == EventKind::SurfaceClosed)
                 .count(),
             1
+        );
+    }
+
+    #[test]
+    fn failed_direct_cancellation_preserves_request_until_callback_succeeds() {
+        let session = FixtureSession::new();
+        let surface = session.create_surface(b"Failed direct cancellation");
+        let (_, request) = session.start_model_request(surface);
+        session.fail_next_model_callback();
+
+        assert_eq!(session.cancel_request(request), StatusCode::Failed);
+        assert_eq!(session.cancel_request(request), StatusCode::Ok);
+        assert_eq!(session.apply_model_rows(request), StatusCode::Cancelled);
+        assert_eq!(
+            session.callback_log().failures,
+            vec![(request, StatusCode::Cancelled)]
         );
     }
 
