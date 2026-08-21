@@ -7293,7 +7293,16 @@ async fn proves_inspect_capture_and_projections_after_sealed_echo() -> TestResul
         // including the Started marker at sequence 0; a positive value
         // returns only rows strictly after it.
         let stream = kernel
-            .stream_inspect_trace(invocation, 0, None, false)
+            .stream_inspect_trace(
+                &session,
+                &loaded,
+                InspectPrivilege::Values,
+                &[InspectPrivilege::OwnInvocation, InspectPrivilege::Values],
+                invocation,
+                0,
+                None,
+                false,
+            )
             .await?;
         require(
             stream.len() == 3
@@ -7314,7 +7323,16 @@ async fn proves_inspect_capture_and_projections_after_sealed_echo() -> TestResul
             "the trace stream did not return the model lifecycle events",
         )?;
         let resumed = kernel
-            .stream_inspect_trace(invocation, 1, None, false)
+            .stream_inspect_trace(
+                &session,
+                &loaded,
+                InspectPrivilege::Values,
+                &[InspectPrivilege::OwnInvocation, InspectPrivilege::Values],
+                invocation,
+                1,
+                None,
+                false,
+            )
             .await?;
         require(
             resumed.len() == 1 && resumed[0].sequence() == 2,
@@ -7361,14 +7379,32 @@ async fn proves_inspect_capture_and_projections_after_sealed_echo() -> TestResul
             )));
         }
         let suppressed = kernel
-            .stream_inspect_trace(invocation, 1, Some(observer), false)
+            .stream_inspect_trace(
+                &session,
+                &loaded,
+                InspectPrivilege::Values,
+                &[InspectPrivilege::OwnInvocation, InspectPrivilege::Values],
+                invocation,
+                1,
+                Some(observer),
+                false,
+            )
             .await?;
         require(
             suppressed.len() == 1 && suppressed[0].sequence() == 2,
             "self-observation suppression did not drop the observer row",
         )?;
         let included = kernel
-            .stream_inspect_trace(invocation, 1, Some(observer), true)
+            .stream_inspect_trace(
+                &session,
+                &loaded,
+                InspectPrivilege::Values,
+                &[InspectPrivilege::OwnInvocation, InspectPrivilege::Values],
+                invocation,
+                1,
+                Some(observer),
+                true,
+            )
             .await?;
         require(
             included.len() == 2
@@ -7377,6 +7413,49 @@ async fn proves_inspect_capture_and_projections_after_sealed_echo() -> TestResul
                 && included[1].observer_invocation() == Some(observer),
             "include-observer mode did not return the observer row",
         )?;
+
+        let redacted = kernel
+            .stream_inspect_trace(
+                &session,
+                &loaded,
+                InspectPrivilege::OwnInvocation,
+                &[InspectPrivilege::OwnInvocation],
+                invocation,
+                0,
+                None,
+                false,
+            )
+            .await?;
+        require(
+            redacted.len() == 3
+                && matches!(
+                    redacted[1].payload(),
+                    InspectTracePayload::ValueBatchRedacted { value_count: 1 }
+                ),
+            "the unarmed trace must retain a redacted ValueBatch without decoded values",
+        )?;
+        let denied = kernel
+            .stream_inspect_trace(
+                &session,
+                &loaded,
+                InspectPrivilege::OwnInvocation,
+                &[],
+                invocation,
+                0,
+                None,
+                false,
+            )
+            .await;
+        require(
+            matches!(
+                denied,
+                Err(PostgresKernelError::InspectDenied {
+                    reason: orna_core::security::InspectDenial::MissingPrivilege
+                })
+            ),
+            "a trace request without a granted privilege did not fail closed",
+        )?;
+
 
         // The live state_cells projection returns the stored cell; the typed
         // value is redacted unless the Values classifier was requested and
