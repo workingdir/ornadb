@@ -19,12 +19,15 @@ use orna_client::{
     },
     ClientResourceRequest, evaluate_client_function,
     evaluate_client_function_with_arguments,
-    evaluate_client_function_with_arguments_and_executor, evaluate_client_function_with_grants,
+    evaluate_client_function_with_arguments_and_executor,
+    evaluate_client_function_with_grants,
 };
 #[cfg(feature = "test-hooks")]
 use orna_client::{
-    ClientActionError, ClientActionOutcome, ClientActionState, ClientResourceStatus,
-    ClientStateStore, complete_client_action, decode_action_payload, trigger_client_action,
+    evaluate_client_function_with_state_and_grants_and_arguments_and_executor_with_parent_invocation,
+    ClientActionError, ClientActionOutcome, ClientActionState, ClientExternalContractRequest,
+    ClientInspectRequest, ClientResourceStatus, ClientStateStore, complete_client_action,
+    decode_action_payload, trigger_client_action,
 };
 use orna_compiler::{
     CheckedStandardLibrary, STD_INVOKE_ECHO_FUNCTION_ID, STD_INVOKE_ECHO_FUNCTION_REVISION_ID,
@@ -42,6 +45,7 @@ use orna_core::{
         CatalogueSnapshot, FunctionDefinition, FunctionDomain, FunctionReturn, FunctionSecurity,
         FunctionVolatility, QualifiedSemanticName,
     },
+    inspect_carrier::{InspectCarrierEnvelope, InspectCarrierKind},
     invocation::{
         InvocationArgument, InvocationCallerContext, InvocationCallerKind, InvocationClientOffer,
         InvocationEventBody, InvocationEventKind, InvocationParameterSelector,
@@ -134,7 +138,9 @@ const RAW_CLIENT_SCHEMA_SOURCE: &str = "CREATE SCHEMA app;\n";
 struct RecordingInstalledResourceExecutor {
     inner: InstalledClientResourceExecutor,
     execute_count: usize,
+    inspect_count: usize,
     poll_count: usize,
+    completed_values: Vec<(ResolvedType, RuntimeValue)>,
 }
 
 #[cfg(feature = "test-hooks")]
@@ -155,7 +161,9 @@ impl RecordingInstalledResourceExecutor {
                 authorizer,
             ),
             execute_count: 0,
+            inspect_count: 0,
             poll_count: 0,
+            completed_values: Vec::new(),
         }
     }
 }
@@ -164,7 +172,12 @@ impl RecordingInstalledResourceExecutor {
 impl ClientResourceExecutor for RecordingInstalledResourceExecutor {
     fn execute(&mut self, request: ClientResourceRequest) -> ClientResourceCompletion {
         self.execute_count += 1;
-        self.inner.execute(request)
+        let expected_type = request.expected_type();
+        let completion = self.inner.execute(request);
+        if let ClientResourceCompletion::Ready { value, .. } = &completion {
+            self.completed_values.push((expected_type, value.clone()));
+        }
+        completion
     }
 
     fn poll(&mut self) -> Option<ClientResourceCompletion> {
@@ -174,6 +187,35 @@ impl ClientResourceExecutor for RecordingInstalledResourceExecutor {
 
     fn cancel(&mut self, request: ClientResourceRequest) -> ClientResourceCompletion {
         self.inner.cancel(request)
+    }
+
+    fn inspect(&mut self, request: ClientInspectRequest) -> Result<RuntimeValue, String> {
+        self.inspect_count += 1;
+        let expected_type = match request.operation().projection_carrier_tag() {
+            None => orna_core::system::SYS_INSPECT_SNAPSHOT_TYPE_ID,
+            Some(2) => SYS_INSPECT_INVOCATION_NODES_TYPE_ID,
+            Some(3) => SYS_INSPECT_CALLS_TYPE_ID,
+            Some(4) => SYS_INSPECT_RESOURCES_TYPE_ID,
+            Some(5) => SYS_INSPECT_STATE_CELLS_TYPE_ID,
+            Some(6) => SYS_INSPECT_UI_NODES_TYPE_ID,
+            Some(7) => SYS_INSPECT_PRESENTATION_CANDIDATES_TYPE_ID,
+            Some(8) => SYS_INSPECT_RUNTIME_BINDINGS_TYPE_ID,
+            Some(9) => SYS_INSPECT_SECURITY_DECISIONS_TYPE_ID,
+            Some(_) => return Err("unexpected Inspector carrier tag".to_owned()),
+        };
+        let result = self.inner.inspect(request);
+        if let Ok(value) = &result {
+            self.completed_values
+                .push((ResolvedType::Value(expected_type), value.clone()));
+        }
+        result
+    }
+
+    fn external_contract(
+        &mut self,
+        request: ClientExternalContractRequest,
+    ) -> Result<RuntimeValue, String> {
+        self.inner.external_contract(request)
     }
 }
 struct DeterministicStreamResourceExecutor;
@@ -12404,49 +12446,8 @@ async fn proves_installed_server_function_dogfood_source_through_orna_invoke() -
 }
 
 
-const RAW_ORDINARY_INSPECTOR_SOURCE: &str = "CREATE SCHEMA devtools;\n\
-    CREATE EXTERNAL CLIENT FUNCTION devtools.inspector_shell(\n\
-        p_snapshot sys.inspect.snapshot,\n\
-        p_invocation_nodes sys.inspect.invocation_nodes,\n\
-        p_calls sys.inspect.calls,\n\
-        p_resources sys.inspect.resources,\n\
-        p_state_cells sys.inspect.state_cells,\n\
-        p_ui_nodes sys.inspect.ui_nodes,\n\
-        p_presentation_candidates sys.inspect.presentation_candidates,\n\
-        p_runtime_bindings sys.inspect.runtime_bindings,\n\
-        p_security_decisions sys.inspect.security_decisions\n\
-    ) RETURNS std.ui.UI\n\
-    RUNTIME CONTRACT 'devtools.inspector_shell@1';\n\
-    CREATE CLIENT FUNCTION devtools.inspector(p_target REF sys.inspect.invocation)\n\
-    RETURNS std.ui.UI IS\n\
-    LET snapshot sys.inspect.snapshot := sys.inspect.snapshot(p_target => p_target);\n\
-    LET invocation_nodes sys.inspect.invocation_nodes :=\n\
-        sys.inspect.invocation_nodes(p_snapshot => snapshot);\n\
-    LET calls sys.inspect.calls := sys.inspect.calls(p_snapshot => snapshot);\n\
-    LET resources sys.inspect.resources :=\n\
-        sys.inspect.resources(p_snapshot => snapshot);\n\
-    LET state_cells sys.inspect.state_cells :=\n\
-        sys.inspect.state_cells(p_snapshot => snapshot);\n\
-    LET ui_nodes sys.inspect.ui_nodes := sys.inspect.ui_nodes(p_snapshot => snapshot);\n\
-    LET presentation_candidates sys.inspect.presentation_candidates :=\n\
-        sys.inspect.presentation_candidates(p_snapshot => snapshot);\n\
-    LET runtime_bindings sys.inspect.runtime_bindings :=\n\
-        sys.inspect.runtime_bindings(p_snapshot => snapshot);\n\
-    LET security_decisions sys.inspect.security_decisions :=\n\
-        sys.inspect.security_decisions(p_snapshot => snapshot);\n\
-    BEGIN\n\
-        RETURN devtools.inspector_shell(\n\
-            p_snapshot => snapshot,\n\
-            p_invocation_nodes => invocation_nodes,\n\
-            p_calls => calls,\n\
-            p_resources => resources,\n\
-            p_state_cells => state_cells,\n\
-            p_ui_nodes => ui_nodes,\n\
-            p_presentation_candidates => presentation_candidates,\n\
-            p_runtime_bindings => runtime_bindings,\n\
-            p_security_decisions => security_decisions\n\
-        );\n\
-    END;\n";
+const RAW_ORDINARY_INSPECTOR_SOURCE: &str =
+    include_str!("fixtures/client_inspector_dogfood.orna");
 
 #[cfg(feature = "test-hooks")]
 #[tokio::test]
@@ -12605,15 +12606,29 @@ async fn proves_ordinary_client_inspector_through_installed_evaluator() -> TestR
                 return Err(failure(format!("ordinary Inspector grant was denied: {denial:?}")))
             }
         };
-        let mut executor = InstalledClientResourceExecutor::new(
-            kernel.clone(),
-            session,
-            active.clone(),
-        );
-        let result = evaluate_client_function_with_arguments_and_executor(
+        let mut executor = RecordingInstalledResourceExecutor {
+            inner: InstalledClientResourceExecutor::new(
+                kernel.clone(),
+                session.clone(),
+                active.clone(),
+            ),
+            execute_count: 0,
+            inspect_count: 0,
+            poll_count: 0,
+            completed_values: Vec::new(),
+        };
+        // Reuse one enclosing invocation identity so the two runs exercise the same client epoch.
+        let deterministic_parent = InvocationId::from_bytes([0x58; 16]);
+        let grants = LocalCapabilityGrantSet::new();
+        let mut state = ClientStateStore::new();
+        let result = evaluate_client_function_with_state_and_grants_and_arguments_and_executor_with_parent_invocation(
             &active,
             &authorisation,
             std::slice::from_ref(&target_argument),
+            &[],
+            &grants,
+            &mut state,
+            deterministic_parent,
             &mut executor,
         )?;
         let RuntimeValue::Opaque(ui) = result.value() else {
@@ -12624,7 +12639,7 @@ async fn proves_ordinary_client_inspector_through_installed_evaluator() -> TestR
                 && !matches!(result.value(), RuntimeValue::Boolean(_)),
             "ordinary Inspector returned a Boolean or arbitrary opaque value",
         )?;
-        let payload = ui.canonical_payload();
+        let payload = ui.canonical_payload().to_vec();
         let magic = orna_standard::UI_MAGIC.as_bytes();
         require(
             payload.len() >= magic.len() + 4 && payload.starts_with(magic),
@@ -12647,6 +12662,191 @@ async fn proves_ordinary_client_inspector_through_installed_evaluator() -> TestR
         require(
             json.is_object(),
             "ordinary Inspector UI body was not a canonical JSON object",
+        )?;
+        require(
+            json.get("kind").and_then(serde_json::Value::as_str) == Some("node"),
+            "ordinary Inspector UI kind was not the canonical node shape",
+        )?;
+        let contract = json
+            .get("contract")
+            .and_then(serde_json::Value::as_object)
+            .ok_or_else(|| failure("ordinary Inspector UI contract was missing"))?;
+        require(
+            contract.len() == 3
+                && contract.get("id").and_then(serde_json::Value::as_str)
+                    == Some("std.ui.window")
+                && contract.get("name").and_then(serde_json::Value::as_str)
+                    == Some("std.ui.window")
+                && contract.get("version").and_then(serde_json::Value::as_str) == Some("1.0"),
+            "ordinary Inspector UI contract id, name, or version drifted from ORNA-UI/1",
+        )?;
+        require(
+            json.get("call_site_id") == Some(&serde_json::Value::Null)
+                && json.get("function_instance_id") == Some(&serde_json::Value::Null),
+            "ordinary Inspector UI call-site identity shape was not canonical",
+        )?;
+        let key = json
+            .get("key")
+            .and_then(serde_json::Value::as_object)
+            .ok_or_else(|| failure("ordinary Inspector UI key was missing"))?;
+        require(
+            key.len() == 2
+                && key.get("type").and_then(serde_json::Value::as_str)
+                    == Some("std.types.text")
+                && key
+                    .get("value")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|value| value.starts_with("inspector-")),
+            "ordinary Inspector UI key did not retain the canonical text shape",
+        )?;
+        require(
+            json.get("slots")
+                .and_then(serde_json::Value::as_object)
+                .is_some_and(|object| object.is_empty()),
+            "ordinary Inspector UI slots were not the canonical empty object",
+        )?;
+        require(
+            json.get("actions")
+                .and_then(serde_json::Value::as_object)
+                .is_some_and(|object| object.is_empty()),
+            "ordinary Inspector UI actions were not the canonical empty object",
+        )?;
+
+        let expected_carrier_kinds = [
+            InspectCarrierKind::Snapshot,
+            InspectCarrierKind::InvocationNodes,
+            InspectCarrierKind::Calls,
+            InspectCarrierKind::Resources,
+            InspectCarrierKind::StateCells,
+            InspectCarrierKind::UiNodes,
+            InspectCarrierKind::PresentationCandidates,
+            InspectCarrierKind::RuntimeBindings,
+            InspectCarrierKind::SecurityDecisions,
+        ];
+        let expected_row_counts = [1usize, 1, 1, 0, 0, 0, 0, 0, 2];
+        require(
+            executor.inspect_count == expected_carrier_kinds.len()
+                && executor.completed_values.len() == expected_carrier_kinds.len()
+                && executor
+                    .completed_values
+                    .iter()
+                    .zip(expected_carrier_kinds.iter())
+                    .all(|((expected_type, value), expected_kind)| {
+                        *expected_type == ResolvedType::Value(expected_kind.type_id())
+                            && matches!(
+                                value,
+                                RuntimeValue::Opaque(value)
+                                    if value.opaque_type() == expected_kind.type_id()
+                            )
+                    }),
+            "ordinary Inspector did not deliver the complete ordered nine-carrier set to the helper",
+        )?;
+        let mut shared_server_epoch = None;
+        let mut observed_row_counts = Vec::with_capacity(expected_carrier_kinds.len());
+        for (((expected_type, value), expected_kind), expected_rows) in executor
+            .completed_values
+            .iter()
+            .zip(expected_carrier_kinds.iter())
+            .zip(expected_row_counts)
+        {
+            require(
+                *expected_type == ResolvedType::Value(expected_kind.type_id()),
+                "ordinary Inspector carrier result type drifted from its sealed identity",
+            )?;
+            let RuntimeValue::Opaque(value) = value else {
+                return Err(failure("ordinary Inspector carrier result was not opaque"));
+            };
+            let envelope = InspectCarrierEnvelope::decode(value.canonical_payload())
+                .map_err(|error| failure(format!("ordinary Inspector carrier envelope was invalid: {error}")))?;
+            require(
+                envelope.carrier_kind() == *expected_kind
+                    && envelope.source_revision_id() == active.pair().source()
+                    && envelope.catalogue_revision_id() == active.pair().catalogue()
+                    && envelope.rows().len() == expected_rows,
+                "ordinary Inspector carrier lost its kind, active revisions, or fixture row count",
+            )?;
+            if let Some(expected_epoch) = shared_server_epoch {
+                require(
+                    envelope.server_epoch_id() == expected_epoch,
+                    "ordinary Inspector carriers did not share one server epoch",
+                )?;
+            } else {
+                shared_server_epoch = Some(envelope.server_epoch_id());
+            }
+            observed_row_counts.push(envelope.rows().len());
+        }
+        let shared_server_epoch =
+            shared_server_epoch.ok_or_else(|| failure("ordinary Inspector produced no server epoch"))?;
+        require(
+            observed_row_counts == expected_row_counts,
+            "ordinary Inspector carrier row counts were not deterministic for the echo fixture",
+        )?;
+        let properties = json
+            .get("properties")
+            .and_then(serde_json::Value::as_object)
+            .ok_or_else(|| failure("ordinary Inspector UI properties were missing"))?;
+        let ui_server_epoch = properties
+            .get("server_epoch")
+            .and_then(|property| property.get("value"))
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| failure("ordinary Inspector UI server_epoch property was missing"))?;
+        require(
+            ui_server_epoch == shared_server_epoch.to_string(),
+            "ordinary Inspector UI server_epoch did not match the shared carrier epoch",
+        )?;
+        let ui_carrier_rows = properties
+            .get("carrier_rows")
+            .and_then(|property| property.get("value"))
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| failure("ordinary Inspector UI carrier_rows property was missing"))?;
+        require(
+            ui_carrier_rows == "1,1,1,0,0,0,0,0,2",
+            "ordinary Inspector UI carrier_rows did not match the echo fixture",
+        )?;
+
+        let first_carriers = executor.completed_values.clone();
+        let mut second_executor = RecordingInstalledResourceExecutor {
+            inner: InstalledClientResourceExecutor::new(kernel.clone(), session, active.clone()),
+            execute_count: 0,
+            inspect_count: 0,
+            poll_count: 0,
+            completed_values: Vec::new(),
+        };
+        let mut second_state = ClientStateStore::new();
+        let second_result = evaluate_client_function_with_state_and_grants_and_arguments_and_executor_with_parent_invocation(
+            &active,
+            &authorisation,
+            std::slice::from_ref(&target_argument),
+            &[],
+            &grants,
+            &mut second_state,
+            deterministic_parent,
+            &mut second_executor,
+        )?;
+        let RuntimeValue::Opaque(second_ui) = second_result.value() else {
+            return Err(failure("ordinary Inspector repeat did not return an opaque std.ui.UI value"));
+        };
+        require(
+            second_ui.opaque_type() == orna_standard::STD_UI_TYPE_ID
+                && second_ui.canonical_payload() == payload.as_slice(),
+            "ordinary Inspector ORNA-UI/1 payload bytes were not deterministic for the same carrier set",
+        )?;
+        require(
+            first_carriers.len() == second_executor.completed_values.len()
+                && first_carriers
+                    .iter()
+                    .zip(second_executor.completed_values.iter())
+                    .all(|((first_type, first_value), (second_type, second_value))| {
+                        first_type == second_type
+                            && match (first_value, second_value) {
+                                (RuntimeValue::Opaque(first), RuntimeValue::Opaque(second)) => {
+                                    first.opaque_type() == second.opaque_type()
+                                        && first.canonical_payload() == second.canonical_payload()
+                                }
+                                _ => false,
+                            }
+                    }),
+            "ordinary Inspector repeat did not evaluate the same ordered carrier bytes",
         )?;
 
         let unavailable = evaluate_client_function_with_arguments(

@@ -1,0 +1,45 @@
+CREATE SCHEMA devtools;
+
+CREATE EXTERNAL CLIENT FUNCTION devtools.inspector_shell(
+    p_snapshot sys.inspect.snapshot,
+    p_invocation_nodes sys.inspect.invocation_nodes,
+    p_calls sys.inspect.calls,
+    p_resources sys.inspect.resources,
+    p_state_cells sys.inspect.state_cells,
+    p_ui_nodes sys.inspect.ui_nodes,
+    p_presentation_candidates sys.inspect.presentation_candidates,
+    p_runtime_bindings sys.inspect.runtime_bindings,
+    p_security_decisions sys.inspect.security_decisions
+) RETURNS std.ui.UI
+RUNTIME CONTRACT 'devtools.inspector_shell@1';
+
+CREATE CLIENT FUNCTION devtools.inspector(p_target REF sys.inspect.invocation)
+RETURNS std.ui.UI IS
+LET snapshot sys.inspect.snapshot := sys.inspect.snapshot(p_target => p_target);
+LET invocation_nodes sys.inspect.invocation_nodes :=
+    sys.inspect.invocation_nodes(p_snapshot => snapshot);
+LET calls sys.inspect.calls := sys.inspect.calls(p_snapshot => snapshot);
+LET resources sys.inspect.resources :=
+    sys.inspect.resources(p_snapshot => snapshot);
+LET state_cells sys.inspect.state_cells :=
+    sys.inspect.state_cells(p_snapshot => snapshot);
+LET ui_nodes sys.inspect.ui_nodes := sys.inspect.ui_nodes(p_snapshot => snapshot);
+LET presentation_candidates sys.inspect.presentation_candidates :=
+    sys.inspect.presentation_candidates(p_snapshot => snapshot);
+LET runtime_bindings sys.inspect.runtime_bindings :=
+    sys.inspect.runtime_bindings(p_snapshot => snapshot);
+LET security_decisions sys.inspect.security_decisions :=
+    sys.inspect.security_decisions(p_snapshot => snapshot);
+BEGIN
+    RETURN devtools.inspector_shell(
+        p_snapshot => snapshot,
+        p_invocation_nodes => invocation_nodes,
+        p_calls => calls,
+        p_resources => resources,
+        p_state_cells => state_cells,
+        p_ui_nodes => ui_nodes,
+        p_presentation_candidates => presentation_candidates,
+        p_runtime_bindings => runtime_bindings,
+        p_security_decisions => security_decisions
+    );
+END;
