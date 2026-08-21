@@ -310,10 +310,24 @@ async fn execute_inspect(
         .map_err(map_kernel_error)?;
 
     // The invocation resolves to one immutable epoch: the exact override, or
-    // the latest epoch captured for the invocation. A completed protected
-    // invocation normally resolves; a missing epoch fails closed.
+    // the latest epoch captured for the invocation. Both paths apply the
+    // authenticated ownership gate before loading or rendering the snapshot.
+    // A completed protected invocation normally resolves; a missing epoch
+    // fails closed.
     let epoch_id = match request.epoch {
-        Some(epoch) => epoch,
+        Some(epoch) => {
+            let Some(epoch) = kernel
+                .find_inspect_epoch(&session, epoch)
+                .await
+                .map_err(map_kernel_error)?
+            else {
+                return Err(InstalledInspectError::new(
+                    InstalledInspectErrorKind::Kernel,
+                    format!("inspection epoch {} does not exist", epoch.canonical()),
+                ));
+            };
+            epoch
+        }
         None => {
             let Some(epoch) = kernel
                 .find_latest_inspect_epoch(&session, request.invocation)
@@ -341,6 +355,13 @@ async fn execute_inspect(
             format!("inspection epoch {} does not exist", epoch_id.canonical()),
         ));
     };
+    if epoch.invocation_id() != request.invocation {
+        return Err(InstalledInspectError::with_code(
+            InstalledInspectErrorKind::Kernel,
+            "inspection epoch target does not match requested invocation".to_owned(),
+            "inspect.epoch_mismatch",
+        ));
+    }
 
     // Typed values render as canonical ORV5 hex through the pinned standard
     // registry, mirroring the `orna state` render path.
@@ -1470,7 +1491,6 @@ mod tests {
                 },
             })
         );
-
 
         let completed = InspectTraceEvent::new(
             invocation(0x21),
