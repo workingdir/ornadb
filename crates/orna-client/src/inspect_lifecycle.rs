@@ -208,6 +208,7 @@ mod tests {
         let wrong_token = InspectFreezeToken::issue(binding(1));
 
         assert_ne!(token, wrong_token);
+        assert_eq!(lifecycle.freeze(), Err(InspectLifecycleError::TokenMismatch));
         assert_eq!(
             lifecycle.resume(wrong_token),
             Err(InspectLifecycleError::TokenMismatch)
