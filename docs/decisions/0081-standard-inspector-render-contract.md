@@ -52,7 +52,27 @@ p_runtime_bindings
 p_security_decisions
 ```
 
-The compiler validates the registered contract and this exact signature: nine
+For example, an application may declare:
+
+```sql
+CREATE EXTERNAL CLIENT FUNCTION app.inspect_renderer(
+    p_snapshot                sys.inspect.snapshot,
+    p_invocation_nodes        sys.inspect.invocation_nodes,
+    p_calls                   sys.inspect.calls,
+    p_resources               sys.inspect.resources,
+    p_state_cells             sys.inspect.state_cells,
+    p_ui_nodes                sys.inspect.ui_nodes,
+    p_presentation_candidates sys.inspect.presentation_candidates,
+    p_runtime_bindings        sys.inspect.runtime_bindings,
+    p_security_decisions      sys.inspect.security_decisions
+) RETURNS std.ui.UI
+RUNTIME CONTRACT 'std.inspect.render@1';
+```
+
+The `app.inspect_renderer` name is illustrative; only the contract and signature
+are stable.
+
+The compiler validates by contract identity and exact signature: nine
 parameters, this order, the corresponding sealed `sys.inspect.*` carrier types,
 and the `std.ui.UI` return type. It does not recognize a helper because its
 function name is `devtools.inspector_shell` or any other particular name.
@@ -63,6 +83,8 @@ and produces the immutable semantic UI value. It does not execute the
 inspected UI, create server work, read process or filesystem state, or emit a
 native toolkit operation.
 
+At execution, an external contract identity or version without a provider fails
+closed as unavailable rather than falling back by function name.
 
 ### Migration of historical installed revisions
 
