@@ -12,7 +12,7 @@ use orna_artifact::client_plan::{
     ResourceClientPlan,
 };
 use orna_client::{
-    ClientExecutionError, ClientResourceCompletion, ClientResourceExecutor,
+    ClientExecutionError, ClientInspectError, ClientResourceCompletion, ClientResourceExecutor,
     capability::{
         LocalCapabilityArgumentSource, LocalCapabilityDeclaration, LocalCapabilityGrant,
         LocalCapabilityGrantSet, LocalCapabilityName, LocalCapabilityScope,
@@ -12855,7 +12855,13 @@ async fn proves_ordinary_client_inspector_through_installed_evaluator() -> TestR
             std::slice::from_ref(&target_argument),
         );
         require(
-            matches!(unavailable, Err(ClientExecutionError::Inspect { .. })),
+            matches!(
+                unavailable,
+                Err(ClientExecutionError::Inspect {
+                    source: ClientInspectError::Failed(code),
+                    ..
+                }) if code == "inspect.runtime_unavailable"
+            ),
             "ordinary Inspector without an executor did not fail closed",
         )
     })
