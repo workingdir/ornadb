@@ -12,7 +12,7 @@ use orna_artifact::client_plan::{
     ResourceClientPlan,
 };
 use orna_client::{
-    ClientExecutionError, ClientInspectError, ClientResourceCompletion, ClientResourceExecutor,
+    ClientExecutionError, ClientResourceCompletion, ClientResourceExecutor,
     capability::{
         LocalCapabilityArgumentSource, LocalCapabilityDeclaration, LocalCapabilityGrant,
         LocalCapabilityGrantSet, LocalCapabilityName, LocalCapabilityScope,
@@ -23,12 +23,16 @@ use orna_client::{
     evaluate_client_function_with_grants,
 };
 #[cfg(feature = "test-hooks")]
+use orna_client::ClientInspectError;
+#[cfg(feature = "test-hooks")]
 use orna_client::{
     evaluate_client_function_with_state_and_grants_and_arguments_and_executor_with_parent_invocation,
     ClientActionError, ClientActionOutcome, ClientActionState, ClientExternalContractRequest,
     ClientInspectRequest, ClientResourceStatus, ClientStateStore, complete_client_action,
     decode_action_payload, trigger_client_action,
 };
+#[cfg(feature = "test-hooks")]
+use orna_client::runtime_conformance::HeadlessFixtureSession;
 use orna_compiler::{
     CheckedStandardLibrary, STD_INVOKE_ECHO_FUNCTION_ID, STD_INVOKE_ECHO_FUNCTION_REVISION_ID,
     STD_INVOKE_ECHO_PARAMETER_ID, StandardApplicationCheckContext, check,
@@ -45,7 +49,6 @@ use orna_core::{
         CatalogueSnapshot, FunctionDefinition, FunctionDomain, FunctionReturn, FunctionSecurity,
         FunctionVolatility, QualifiedSemanticName,
     },
-    inspect_carrier::{InspectCarrierEnvelope, InspectCarrierKind},
     invocation::{
         InvocationArgument, InvocationCallerContext, InvocationCallerKind, InvocationClientOffer,
         InvocationEventBody, InvocationEventKind, InvocationParameterSelector,
@@ -67,15 +70,18 @@ use orna_core::{
         SecurityAuditOutcome, SecurityFunctionTarget, SecuritySnapshot,
     },
     source::{SourceBundle, SourceUnit},
-    system::{
-        SYS_INSPECT_CALLS_TYPE_ID, SYS_INSPECT_INVOCATION_NODES_TYPE_ID,
-        SYS_INSPECT_PRESENTATION_CANDIDATES_TYPE_ID, SYS_INSPECT_RESOURCES_TYPE_ID,
-        SYS_INSPECT_RUNTIME_BINDINGS_TYPE_ID, SYS_INSPECT_SECURITY_DECISIONS_TYPE_ID,
-        SYS_INSPECT_SNAPSHOT_TYPE_ID, SYS_INSPECT_STATE_CELLS_TYPE_ID, SYS_INSPECT_UI_NODES_TYPE_ID,
-        SYS_INVOKE_FUNCTION_ID,
-    },
+    system::SYS_INVOKE_FUNCTION_ID,
     types::{ResolvedType, TypeDescriptor},
     value::{EnumValue, FunctionArgument, OpaqueValue, RecordValue, RuntimeValue},
+};
+#[cfg(feature = "test-hooks")]
+use orna_core::inspect_carrier::{InspectCarrierEnvelope, InspectCarrierKind};
+#[cfg(feature = "test-hooks")]
+use orna_core::system::{
+    SYS_INSPECT_CALLS_TYPE_ID, SYS_INSPECT_INVOCATION_NODES_TYPE_ID,
+    SYS_INSPECT_PRESENTATION_CANDIDATES_TYPE_ID, SYS_INSPECT_RESOURCES_TYPE_ID,
+    SYS_INSPECT_RUNTIME_BINDINGS_TYPE_ID, SYS_INSPECT_SECURITY_DECISIONS_TYPE_ID,
+    SYS_INSPECT_SNAPSHOT_TYPE_ID, SYS_INSPECT_STATE_CELLS_TYPE_ID, SYS_INSPECT_UI_NODES_TYPE_ID,
 };
 #[cfg(feature = "test-hooks")]
 use orna_core::value::OpaqueCodecRegistry;
@@ -10736,6 +10742,7 @@ async fn install_raw_client_fixture(
     Ok((active, standard_upgrade, client, server))
 }
 
+#[cfg(feature = "test-hooks")]
 async fn install_raw_client_fixture_v4(
     kernel: &PostgresKernel,
 ) -> TestResult<(
@@ -12446,6 +12453,7 @@ async fn proves_installed_server_function_dogfood_source_through_orna_invoke() -
 }
 
 
+#[cfg(feature = "test-hooks")]
 const RAW_ORDINARY_INSPECTOR_SOURCE: &str =
     include_str!("fixtures/client_inspector_dogfood.orna");
 
@@ -12455,6 +12463,7 @@ const RAW_ORDINARY_INSPECTOR_SOURCE: &str =
 async fn proves_ordinary_client_inspector_through_installed_evaluator() -> TestResult<()> {
     const CONNECTION_PROTOCOL_MAJOR: u16 = 5;
     const MAX_UI_BODY_BYTES: usize = 64 * 1024;
+    const MAX_CAPTURE_BODY_BYTES: usize = (2 * MAX_UI_BODY_BYTES) + (8 * 1024);
 
     with_test_database(|database| async move {
         let uid = nix::unistd::geteuid().as_raw();
@@ -12849,6 +12858,76 @@ async fn proves_ordinary_client_inspector_through_installed_evaluator() -> TestR
             "ordinary Inspector repeat did not evaluate the same ordered carrier bytes",
         )?;
 
+        let fixture = HeadlessFixtureSession::new();
+        let surface = fixture
+            .create_surface()
+            .map_err(|error| failure(format!("headless Inspector fixture surface creation failed: {error}")))?;
+        let semantic_capture = fixture
+            .apply_ui_payload(&payload)
+            .map_err(|error| {
+                failure(format!("headless Inspector fixture rejected UI payload: {error}"))
+            })?;
+        let capture_magic = orna_standard::UI_MAGIC.as_bytes();
+        require(
+            semantic_capture.len() >= capture_magic.len() + 4
+                && semantic_capture.starts_with(capture_magic),
+            "headless Inspector fixture returned a non-canonical UI frame",
+        )?;
+        let capture_body_length = u32::from_be_bytes(
+            semantic_capture[capture_magic.len()..capture_magic.len() + 4]
+                .try_into()
+                .map_err(|_| failure("headless Inspector capture length prefix was truncated"))?,
+        ) as usize;
+        require(
+            capture_body_length <= MAX_CAPTURE_BODY_BYTES
+                && semantic_capture.len() == capture_magic.len() + 4 + capture_body_length,
+            "headless Inspector fixture returned an invalid UI frame length",
+        )?;
+        let capture_json: serde_json::Value =
+            serde_json::from_slice(&semantic_capture[capture_magic.len() + 4..])
+                .map_err(|error| failure(format!("headless Inspector capture was not JSON: {error}")))?;
+        let payload_hex = payload
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        require(
+            capture_json
+                .get("properties")
+                .and_then(|properties| properties.get("payload"))
+                .and_then(|property| property.get("type"))
+                .and_then(serde_json::Value::as_str)
+                == Some("std.ui.UI")
+                && capture_json
+                    .get("properties")
+                    .and_then(|properties| properties.get("payload"))
+                    .and_then(|property| property.get("value"))
+                    .and_then(serde_json::Value::as_str)
+                    == Some(payload_hex.as_str()),
+            "headless Inspector fixture did not retain the exact canonical UI payload",
+        )?;
+        let repeated_semantic_capture = fixture
+            .apply_ui_payload(&payload)
+            .map_err(|error| {
+                failure(format!("headless Inspector fixture repeat failed: {error}"))
+            })?;
+        require(
+            semantic_capture == repeated_semantic_capture,
+            "headless Inspector fixture semantic capture was not deterministic",
+        )?;
+        fixture.destroy_surface(surface).map_err(|error| {
+            failure(format!("headless Inspector fixture surface destroy failed: {error}"))
+        })?;
+        fixture.shutdown().map_err(|error| {
+            failure(format!("headless Inspector fixture shutdown failed: {error}"))
+        })?;
+        require(
+            fixture.is_terminal(),
+            "headless Inspector fixture did not reach terminal shutdown",
+        )?;
+        require(
+            fixture.last_callback_is_terminal(),
+            "headless Inspector fixture did not record terminal callback evidence",
+        )?;
         let unavailable = evaluate_client_function_with_arguments(
             &active,
             &authorisation,
