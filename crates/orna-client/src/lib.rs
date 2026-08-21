@@ -37,6 +37,7 @@ use orna_core::{
         FunctionDefinition, FunctionDomain, FunctionReturn, FunctionSecurity, FunctionVolatility, TypeDefinition,
         ValueTypeKind,
     },
+    inspect::{INSPECT_RENDER_CARRIER_SIGNATURE, INSPECT_RENDER_CONTRACT},
     revision::{
         ActiveDatabaseRevision, DefinitionReferenceKind, DefinitionReferenceTarget,
         FunctionSemanticHashVersion, RevisionPair, Sha256Digest,
@@ -249,6 +250,7 @@ pub enum ClientActionOutcome {
 }
 
 const ACTION_FAILURE_CODE: &str = "action.failed";
+const EXTERNAL_CONTRACT_RUNTIME_UNAVAILABLE: &str = "external_contract.runtime_unavailable";
 // Keep action framing within the shared opaque codec payload ceiling.
 const MAX_ACTION_PAYLOAD_LENGTH: usize = 16 * 1024 * 1024;
 
@@ -1181,7 +1183,7 @@ pub trait ClientResourceExecutor {
         &mut self,
         _request: ClientExternalContractRequest,
     ) -> Result<RuntimeValue, String> {
-        Err("inspect.runtime_unavailable".to_owned())
+        Err(EXTERNAL_CONTRACT_RUNTIME_UNAVAILABLE.to_owned())
     }
 }
 
@@ -1246,7 +1248,7 @@ where
     ) -> Result<RuntimeValue, String> {
         match self.external_contract.as_mut() {
             Some(provider) => provider(&request),
-            None => Err("inspect.runtime_unavailable".to_owned()),
+            None => Err(EXTERNAL_CONTRACT_RUNTIME_UNAVAILABLE.to_owned()),
         }
     }
 }
@@ -5231,7 +5233,6 @@ fn stable_inspect_provider_error(error: &str) -> String {
         INSPECT_PROJECTION_FAILED.to_owned()
     }
 }
-const DEVTOOLS_INSPECTOR_SHELL_CONTRACT: &str = "devtools.inspector_shell@1";
 
 fn evaluate_external_contract(
     identity: &str,
@@ -5240,17 +5241,16 @@ fn evaluate_external_contract(
     arguments: &[(ParameterId, RuntimeValue)],
     executor: &mut Option<&mut dyn ClientResourceExecutor>,
 ) -> Result<RuntimeValue, ClientExecutionError> {
-    if identity != DEVTOOLS_INSPECTOR_SHELL_CONTRACT {
+    let Some(executor) = executor.as_deref_mut() else {
+        if identity == INSPECT_RENDER_CONTRACT {
+            return Err(ClientExecutionError::Inspect {
+                context,
+                source: ClientInspectError::Failed("inspect.runtime_unavailable".to_owned()),
+            });
+        }
         return Err(ClientExecutionError::ExternalContract {
             context,
             identity: identity.to_owned(),
-        });
-    }
-
-    let Some(executor) = executor.as_deref_mut() else {
-        return Err(ClientExecutionError::Inspect {
-            context,
-            source: ClientInspectError::Failed("inspect.runtime_unavailable".to_owned()),
         });
     };
     let request = ClientExternalContractRequest::with_lineage(
@@ -5259,27 +5259,27 @@ fn evaluate_external_contract(
         arguments.to_vec(),
         lineage,
     );
-    executor
-        .external_contract(request)
-        .map_err(|code| ClientExecutionError::Inspect {
-            context,
-            source: ClientInspectError::Failed(stable_inspect_provider_error(&code)),
-        })
+    executor.external_contract(request).map_err(|code| {
+        if identity == INSPECT_RENDER_CONTRACT {
+            ClientExecutionError::Inspect {
+                context,
+                source: ClientInspectError::Failed(if code == EXTERNAL_CONTRACT_RUNTIME_UNAVAILABLE {
+                    "inspect.runtime_unavailable".to_owned()
+                } else {
+                    stable_inspect_provider_error(&code)
+                }),
+            }
+        } else {
+            ClientExecutionError::ExternalContract {
+                context,
+                identity: identity.to_owned(),
+            }
+        }
+    })
 }
 
-const INSPECTOR_SHELL_SIGNATURE: [(&str, TypeId); 9] = [
-    ("p_snapshot", SYS_INSPECT_SNAPSHOT_TYPE_ID),
-    ("p_invocation_nodes", SYS_INSPECT_INVOCATION_NODES_TYPE_ID),
-    ("p_calls", SYS_INSPECT_CALLS_TYPE_ID),
-    ("p_resources", SYS_INSPECT_RESOURCES_TYPE_ID),
-    ("p_state_cells", SYS_INSPECT_STATE_CELLS_TYPE_ID),
-    ("p_ui_nodes", SYS_INSPECT_UI_NODES_TYPE_ID),
-    ("p_presentation_candidates", SYS_INSPECT_PRESENTATION_CANDIDATES_TYPE_ID),
-    ("p_runtime_bindings", SYS_INSPECT_RUNTIME_BINDINGS_TYPE_ID),
-    ("p_security_decisions", SYS_INSPECT_SECURITY_DECISIONS_TYPE_ID),
-];
 
-fn inspector_shell_contract_error(
+fn inspect_render_contract_error(
     context: ClientExecutionContext,
 ) -> ClientExecutionError {
     ClientExecutionError::Inspect {
@@ -5288,14 +5288,14 @@ fn inspector_shell_contract_error(
     }
 }
 
-fn inspector_shell_artifact_is_external(
+fn inspect_render_artifact_is_external(
     revision: &orna_core::revision::FunctionRevisionRecord,
 ) -> bool {
     fn is_external(expression: &ClientExpressionNode) -> bool {
         matches!(
             expression,
             ClientExpressionNode::ExternalContract { identity }
-                if identity == DEVTOOLS_INSPECTOR_SHELL_CONTRACT
+                if identity == INSPECT_RENDER_CONTRACT
         )
     }
 
@@ -5314,38 +5314,37 @@ fn inspector_shell_artifact_is_external(
     }
 }
 
-fn validate_inspector_shell_contract(
+fn validate_inspect_render_contract(
     active: &ActiveDatabaseRevision,
     context: ClientExecutionContext,
     identity: &str,
     arguments: &[(ParameterId, RuntimeValue)],
 ) -> Result<(), ClientExecutionError> {
-    if identity != DEVTOOLS_INSPECTOR_SHELL_CONTRACT || context.pair() != active.pair() {
-        return Err(inspector_shell_contract_error(context));
+    if identity != INSPECT_RENDER_CONTRACT || context.pair() != active.pair() {
+        return Err(inspect_render_contract_error(context));
     }
     let Some(definition) = active.catalogue().function_by_id(context.function()) else {
-        return Err(inspector_shell_contract_error(context));
+        return Err(inspect_render_contract_error(context));
     };
     let Some(revision) = active.function_revisions().iter().find(|revision| {
         revision.function() == context.function() && revision.id() == context.function_revision()
     }) else {
-        return Err(inspector_shell_contract_error(context));
+        return Err(inspect_render_contract_error(context));
     };
     if definition.domain() != FunctionDomain::Client
-        || definition.name().to_string() != "devtools.inspector_shell"
         || definition.current_revision() != context.function_revision()
         || !matches!(
             definition.return_type(),
             FunctionReturn::Single(ResolvedType::Value(type_id)) if *type_id == STD_UI_TYPE_ID
         )
-        || definition.parameters().len() != INSPECTOR_SHELL_SIGNATURE.len()
-        || arguments.len() != INSPECTOR_SHELL_SIGNATURE.len()
-        || !inspector_shell_artifact_is_external(revision)
+        || definition.parameters().len() != INSPECT_RENDER_CARRIER_SIGNATURE.len()
+        || arguments.len() != INSPECT_RENDER_CARRIER_SIGNATURE.len()
+        || !inspect_render_artifact_is_external(revision)
     {
-        return Err(inspector_shell_contract_error(context));
+        return Err(inspect_render_contract_error(context));
     }
-    for (index, ((parameter_id, value), (expected_name, expected_type))) in
-        arguments.iter().zip(INSPECTOR_SHELL_SIGNATURE).enumerate()
+    for (index, ((parameter_id, value), (expected_name, expected_type, _))) in
+        arguments.iter().zip(INSPECT_RENDER_CARRIER_SIGNATURE).enumerate()
     {
         let parameter = &definition.parameters()[index];
         if parameter.id() != *parameter_id
@@ -5353,20 +5352,20 @@ fn validate_inspector_shell_contract(
             || parameter.resolved_type() != ResolvedType::Value(expected_type)
             || !runtime_value_matches(active, value, ResolvedType::Value(expected_type))
         {
-            return Err(inspector_shell_contract_error(context));
+            return Err(inspect_render_contract_error(context));
         }
     }
     let Some((_, snapshot)) = arguments.first() else {
-        return Err(inspector_shell_contract_error(context));
+        return Err(inspect_render_contract_error(context));
     };
     let snapshot = decode_inspect_carrier(active, snapshot, SYS_INSPECT_SNAPSHOT_TYPE_ID)
-        .map_err(|_| inspector_shell_contract_error(context))?;
+        .map_err(|_| inspect_render_contract_error(context))?;
     inspect_snapshot_target_from_envelope(active, &snapshot)
-        .map_err(|_| inspector_shell_contract_error(context))?;
+        .map_err(|_| inspect_render_contract_error(context))?;
     Ok(())
 }
 
-fn inspector_shell_ui_value_matches(
+fn inspect_render_ui_value_matches(
     active: &ActiveDatabaseRevision,
     value: &RuntimeValue,
 ) -> bool {
@@ -5826,10 +5825,10 @@ fn evaluate_expression(
             Ok(value)
         }
         ClientExpressionNode::ExternalContract { identity } => {
-            if identity == DEVTOOLS_INSPECTOR_SHELL_CONTRACT {
-                validate_inspector_shell_contract(active, context, identity, arguments)?;
+            if identity == INSPECT_RENDER_CONTRACT {
+                validate_inspect_render_contract(active, context, identity, arguments)?;
                 let value = evaluate_external_contract(identity, context, lineage, arguments, executor)?;
-                if !inspector_shell_ui_value_matches(active, &value) {
+                if !inspect_render_ui_value_matches(active, &value) {
                     return Err(ClientExecutionError::Inspect {
                         context,
                         source: ClientInspectError::TypeMismatch,
@@ -6838,7 +6837,7 @@ mod tests {
         );
     }
     #[test]
-    fn inspector_shell_external_contract_dispatches_typed_arguments() {
+    fn inspect_render_external_contract_dispatches_typed_arguments() {
         let context = super::ClientExecutionContext {
             pair: RevisionPair::new(
                 SourceRevisionId::from_bytes([0x71; 16]),
@@ -6853,7 +6852,7 @@ mod tests {
             |_: &super::ClientResourceRequest| Ok::<_, String>(RuntimeValue::Boolean(false)),
         )
         .with_external_contract(move |request| {
-            assert_eq!(request.identity(), "devtools.inspector_shell@1");
+            assert_eq!(request.identity(), super::INSPECT_RENDER_CONTRACT);
             assert_eq!(request.context(), context);
             assert_eq!(
                 request.arguments(),
@@ -6864,7 +6863,7 @@ mod tests {
         let mut optional: Option<&mut dyn super::ClientResourceExecutor> = Some(&mut executor);
         assert_eq!(
             super::evaluate_external_contract(
-                "devtools.inspector_shell@1",
+                super::INSPECT_RENDER_CONTRACT,
                 context,
             super::ObserverLineage::compatibility(context),
             &[(parameter, RuntimeValue::Boolean(true))],
@@ -6875,8 +6874,9 @@ mod tests {
         );
     }
 
+
     #[test]
-    fn generic_external_contracts_and_absent_inspector_provider_fail_closed() {
+    fn generic_external_contracts_forward_and_fail_closed_without_executor() {
         let context = super::ClientExecutionContext {
             pair: RevisionPair::new(
                 SourceRevisionId::from_bytes([0x81; 16]),
@@ -6889,9 +6889,14 @@ mod tests {
         let parameter = ParameterId::from_bytes([0x86; 16]);
         let mut executor = super::DeterministicClientResourceExecutor::new(
             |_: &super::ClientResourceRequest| Ok::<_, String>(RuntimeValue::Boolean(false)),
-        );
+        )
+        .with_external_contract(move |request| {
+            assert_eq!(request.identity(), "app.other@1");
+            assert_eq!(request.arguments(), &[(parameter, RuntimeValue::Boolean(true))]);
+            Ok(RuntimeValue::Boolean(false))
+        });
         let mut optional: Option<&mut dyn super::ClientResourceExecutor> = Some(&mut executor);
-        assert!(matches!(
+        assert_eq!(
             super::evaluate_external_contract(
                 "app.other@1",
                 context,
@@ -6899,16 +6904,62 @@ mod tests {
             &[(parameter, RuntimeValue::Boolean(true))],
                 &mut optional,
             ),
+            Ok(RuntimeValue::Boolean(false)),
+        );
+        let mut failing = super::DeterministicClientResourceExecutor::new(
+            |_: &super::ClientResourceRequest| Ok::<_, String>(RuntimeValue::Boolean(false)),
+        )
+        .with_external_contract(|_| Err("inspect.denied".to_owned()));
+        let mut failing_slot: Option<&mut dyn super::ClientResourceExecutor> = Some(&mut failing);
+        assert!(matches!(
+            super::evaluate_external_contract(
+                "app.other@1",
+                context,
+            super::ObserverLineage::compatibility(context),
+            &[],
+                &mut failing_slot,
+            ),
+            Err(super::ClientExecutionError::ExternalContract { identity, .. })
+                if identity == "app.other@1"
+        let mut default_executor = super::DeterministicClientResourceExecutor::new(
+            |_: &super::ClientResourceRequest| Ok::<_, String>(RuntimeValue::Boolean(false)),
+        );
+        let mut default_slot: Option<&mut dyn super::ClientResourceExecutor> = Some(&mut default_executor);
+        assert_eq!(
+            super::evaluate_external_contract(
+                super::INSPECT_RENDER_CONTRACT,
+                context,
+            super::ObserverLineage::compatibility(context),
+            &[],
+                &mut default_slot,
+            ),
+            Err(super::ClientExecutionError::Inspect {
+                context,
+                source: super::ClientInspectError::Failed(
+                    "inspect.runtime_unavailable".to_owned(),
+                ),
+            }),
+        );
+        ));
+        let mut absent: Option<&mut dyn super::ClientResourceExecutor> = None;
+        assert!(matches!(
+            super::evaluate_external_contract(
+                "app.other@1",
+                context,
+            super::ObserverLineage::compatibility(context),
+            &[],
+                &mut absent,
+            ),
             Err(super::ClientExecutionError::ExternalContract { identity, .. })
                 if identity == "app.other@1"
         ));
         assert_eq!(
             super::evaluate_external_contract(
-                "devtools.inspector_shell@1",
+                super::INSPECT_RENDER_CONTRACT,
                 context,
             super::ObserverLineage::compatibility(context),
             &[],
-                &mut optional,
+                &mut absent,
             ),
             Err(super::ClientExecutionError::Inspect {
                 context,
@@ -6918,9 +6969,8 @@ mod tests {
             }),
         );
     }
-
     #[test]
-    fn inspector_provider_errors_are_whitelisted_and_redacted() {
+    fn inspect_render_provider_errors_are_whitelisted_and_redacted() {
         assert_eq!(
             super::stable_inspect_provider_error("inspect.denied"),
             "inspect.denied"
@@ -6944,7 +6994,7 @@ mod tests {
     }
 
     #[test]
-    fn inspector_request_provenance_rejects_observer_target() {
+    fn inspect_request_provenance_rejects_observer_target() {
         let context = super::ClientExecutionContext {
             pair: super::RevisionPair::new(
                 orna_core::SourceRevisionId::from_bytes([0x01; 16]),
@@ -7019,7 +7069,7 @@ mod tests {
         });
         let mut executor_slot: Option<&mut dyn super::ClientResourceExecutor> = Some(&mut executor);
         let value = super::evaluate_external_contract(
-            "devtools.inspector_shell@1",
+            super::INSPECT_RENDER_CONTRACT,
             context,
             child,
             &[],
@@ -7030,7 +7080,7 @@ mod tests {
     }
 
     #[test]
-    fn inspector_snapshot_validation_rejects_empty_carrier_rows() {
+    fn inspect_snapshot_validation_rejects_empty_carrier_rows() {
         let (active, _, pair, _) = version_one_active(true);
         let envelope = super::InspectCarrierEnvelope::new(
             super::InspectCarrierKind::Snapshot,
@@ -7049,7 +7099,7 @@ mod tests {
     }
 
     #[test]
-    fn inspector_snapshot_row_binding_rejects_epoch_mismatch_and_preserves_target() {
+    fn inspect_snapshot_row_binding_rejects_epoch_mismatch_and_preserves_target() {
         let target = super::InvocationId::from_bytes([0x17; 16]);
         let mut row = vec![1, 0, 0, 0, 0, 0, 0, 0, 0];
         row.extend_from_slice(&[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 7]);
@@ -7068,7 +7118,7 @@ mod tests {
     }
 
     #[test]
-    fn inspector_shell_wrong_contract_identity_fails_closed_before_provider() {
+    fn inspect_render_wrong_contract_identity_fails_closed_before_provider() {
         let context = super::ClientExecutionContext {
             pair: super::RevisionPair::new(
                 orna_core::SourceRevisionId::from_bytes([0x21; 16]),
@@ -7080,7 +7130,7 @@ mod tests {
         };
         let (active, _, _, _) = version_one_active(true);
         assert!(matches!(
-            super::validate_inspector_shell_contract(&active, context, "devtools.inspector_shell@2", &[]),
+            super::validate_inspect_render_contract(&active, context, "std.inspect.render@2", &[]),
             Err(super::ClientExecutionError::Inspect {
                 source: super::ClientInspectError::Failed(code), ..
             }) if code == "inspect.malformed_carrier"
@@ -7088,9 +7138,9 @@ mod tests {
     }
 
     #[test]
-    fn inspector_shell_wrong_ui_type_fails_closed() {
+    fn inspect_render_wrong_ui_type_fails_closed() {
         let (active, _, _, _) = version_one_active(true);
-        assert!(!super::inspector_shell_ui_value_matches(
+        assert!(!super::inspect_render_ui_value_matches(
             &active,
             &super::RuntimeValue::Boolean(false),
         ));
