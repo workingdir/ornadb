@@ -235,6 +235,12 @@ const MIGRATIONS: &[Migration] = &[
         sql: include_str!("../../migrations/0035_resource_audit_target_authority.sql"),
         data_step: None,
     },
+    Migration {
+        version: 36,
+        name: "sealed Inspector value types",
+        sql: include_str!("../../migrations/0036_sealed_inspect_value_types.sql"),
+        data_step: None,
+    },
 ];
 const MIGRATION_DATA_STEP_SEPARATOR: &[u8] = b"\0orna.kernel.migration-step\0";
 const CANONICAL_HASH_V1_EMPTY_SEED_STEP: &[u8] = b"canonical-hash-v1-empty-seed/v1";
@@ -931,7 +937,7 @@ mod tests {
             validated_migration_registry()
                 .expect("registry is valid")
                 .len(),
-            35
+            36
         );
         assert_eq!(MIGRATIONS[0].version, 1);
         assert_eq!(MIGRATIONS[1].version, 2);
@@ -968,8 +974,10 @@ mod tests {
         assert_eq!(MIGRATIONS[32].version, 33);
         assert_eq!(MIGRATIONS[33].version, 34);
         assert_eq!(MIGRATIONS[34].version, 35);
+        assert_eq!(MIGRATIONS[35].version, 36);
         assert_eq!(MIGRATIONS[33].name, "resource request identity history");
         assert_eq!(MIGRATIONS[34].name, "resource audit target authorities");
+        assert_eq!(MIGRATIONS[35].name, "sealed Inspector value types");
         assert_eq!(MIGRATIONS[5].name, "definition reference write evidence");
         assert_eq!(MIGRATIONS[6].name, "standard catalogue type storage");
         assert_eq!(MIGRATIONS[7].name, "resolved value type storage");
@@ -1029,6 +1037,48 @@ mod tests {
         assert!(MIGRATIONS[29].data_step.is_none());
         assert!(MIGRATIONS[30].data_step.is_none());
         assert!(MIGRATIONS[31].data_step.is_none());
+        assert!(MIGRATIONS[32].data_step.is_none());
+        assert!(MIGRATIONS[33].data_step.is_none());
+        assert!(MIGRATIONS[34].data_step.is_none());
+        assert!(MIGRATIONS[35].data_step.is_none());
+    }
+
+    #[test]
+    fn sealed_inspect_value_migration_preserves_strict_ref_targets() {
+        let migration = &MIGRATIONS[35];
+
+        assert_eq!(migration.version, 36);
+        assert_eq!(migration.name, "sealed Inspector value types");
+        assert!(migration.sql.contains(
+            "DROP CONSTRAINT catalogue_function_parameters_catalogue_revision_id_target_fkey"
+        ));
+        assert!(migration.sql.contains(
+            "DROP CONSTRAINT catalogue_functions_catalogue_revision_id_return_target_ty_fkey"
+        ));
+        assert!(migration.sql.contains(
+            "CREATE CONSTRAINT TRIGGER catalogue_function_parameters_catalogue_revision_id_target_fkey"
+        ));
+        assert!(migration.sql.contains(
+            "CREATE CONSTRAINT TRIGGER catalogue_functions_catalogue_revision_id_return_target_ty_fkey"
+        ));
+        assert!(migration.sql.contains(
+            "CREATE CONSTRAINT TRIGGER catalogue_object_types_function_target_fkey"
+        ));
+        assert!(migration
+            .sql
+            .contains("current_type_kind NOT IN ('named', 'reference')"));
+        assert!(migration.sql.contains(
+            "current_type_kind = 'reference'\n       AND current_target_type_id = decode('000000000000000000000000000000f3', 'hex')"
+        ));
+        assert!(migration.sql.contains(
+            "current_return_type_kind IS DISTINCT FROM 'named'\n          AND current_return_type_kind IS DISTINCT FROM 'reference'"
+        ));
+        assert!(migration.sql.contains(
+            "current_return_type_kind = 'reference'\n       AND current_return_target_type_id = decode('000000000000000000000000000000f3', 'hex')"
+        ));
+        assert!(migration.sql.contains("FOR KEY SHARE"));
+        assert!(migration.sql.contains("DEFERRABLE INITIALLY DEFERRED"));
+        assert!(migration.sql.contains("USING ERRCODE = 'foreign_key_violation'"));
     }
 
     #[test]
