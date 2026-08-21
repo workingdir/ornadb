@@ -13,8 +13,11 @@
 //! database; callers recover the two snapshots and render the report.
 
 use crate::{
+    catalogue::{
+        CatalogueSnapshot, FieldDefinition, FunctionDefinition, ObjectTypeDefinition,
+        ParameterDefinition,
+    },
     FieldId, FunctionId, ParameterId, SchemaId, TypeId,
-    catalogue::{CatalogueSnapshot, FieldDefinition, FunctionDefinition, ObjectTypeDefinition},
 };
 
 /// What happened to one durable definition between two catalogues.
@@ -216,7 +219,8 @@ impl CatalogueSemanticDiff {
 /// the same definition; a different resolved name is a rename, and dependent
 /// references survive because they resolve by identity. Nested definitions
 /// (object fields, function parameters) are compared under their retained
-/// owner identity only; a renamed or dropped owner carries no nested changes.
+/// owner identity whether or not the owner name changed; a dropped owner
+/// carries no nested changes.
 pub fn catalogue_diff(
     base: &CatalogueSnapshot,
     candidate: &CatalogueSnapshot,
@@ -270,11 +274,14 @@ fn diff_object_types(
             Some(found) if found.name() == definition.name() => {
                 diff_fields(found, definition, definition.id(), diff);
             }
-            Some(found) => diff.push(SemanticChange::ObjectTypeRenamed {
-                id: definition.id(),
-                from: qualified(found.name()),
-                to: qualified(definition.name()),
-            }),
+            Some(found) => {
+                diff.push(SemanticChange::ObjectTypeRenamed {
+                    id: definition.id(),
+                    from: qualified(found.name()),
+                    to: qualified(definition.name()),
+                });
+                diff_fields(found, definition, definition.id(), diff);
+            }
             None => diff.push(SemanticChange::ObjectTypeAdded {
                 id: definition.id(),
                 name: qualified(definition.name()),
@@ -302,12 +309,15 @@ fn diff_fields(
             Some(found) if found.name() == field.name() => {
                 diff_field_payload(found, field, owner, diff);
             }
-            Some(found) => diff.push(SemanticChange::FieldRenamed {
-                owner,
-                id: field.id(),
-                from: found.name().to_owned(),
-                to: field.name().to_owned(),
-            }),
+            Some(found) => {
+                diff.push(SemanticChange::FieldRenamed {
+                    owner,
+                    id: field.id(),
+                    from: found.name().to_owned(),
+                    to: field.name().to_owned(),
+                });
+                diff_field_payload(found, field, owner, diff);
+            }
             None => diff.push(SemanticChange::FieldAdded {
                 owner,
                 id: field.id(),
@@ -409,11 +419,15 @@ fn diff_functions(
                 diff_parameters(found, definition, definition.id(), diff);
                 diff_function_payload(found, definition, definition.id(), diff);
             }
-            Some(found) => diff.push(SemanticChange::FunctionRenamed {
-                id: definition.id(),
-                from: qualified(found.name()),
-                to: qualified(definition.name()),
-            }),
+            Some(found) => {
+                diff.push(SemanticChange::FunctionRenamed {
+                    id: definition.id(),
+                    from: qualified(found.name()),
+                    to: qualified(definition.name()),
+                });
+                diff_parameters(found, definition, definition.id(), diff);
+                diff_function_payload(found, definition, definition.id(), diff);
+            }
             None => diff.push(SemanticChange::FunctionAdded {
                 id: definition.id(),
                 name: qualified(definition.name()),
@@ -475,20 +489,17 @@ fn diff_parameters(
     for parameter in candidate.parameters() {
         match base.parameter_by_id(parameter.id()) {
             Some(found) if found.name() == parameter.name() => {
-                if found.resolved_type() != parameter.resolved_type() {
-                    diff.push(SemanticChange::ParameterTypeChanged {
-                        owner,
-                        id: parameter.id(),
-                        name: parameter.name().to_owned(),
-                    });
-                }
+                diff_parameter_payload(found, parameter, owner, diff);
             }
-            Some(found) => diff.push(SemanticChange::ParameterRenamed {
-                owner,
-                id: parameter.id(),
-                from: found.name().to_owned(),
-                to: parameter.name().to_owned(),
-            }),
+            Some(found) => {
+                diff.push(SemanticChange::ParameterRenamed {
+                    owner,
+                    id: parameter.id(),
+                    from: found.name().to_owned(),
+                    to: parameter.name().to_owned(),
+                });
+                diff_parameter_payload(found, parameter, owner, diff);
+            }
             None => diff.push(SemanticChange::ParameterAdded {
                 owner,
                 id: parameter.id(),
@@ -507,6 +518,21 @@ fn diff_parameters(
     }
 }
 
+fn diff_parameter_payload(
+    base: &ParameterDefinition,
+    candidate: &ParameterDefinition,
+    owner: FunctionId,
+    diff: &mut CatalogueSemanticDiff,
+) {
+    if base.resolved_type() != candidate.resolved_type() {
+        diff.push(SemanticChange::ParameterTypeChanged {
+            owner,
+            id: candidate.id(),
+            name: candidate.name().to_owned(),
+        });
+    }
+}
+
 fn qualified(name: &crate::catalogue::QualifiedSemanticName) -> String {
     name.parts().join(".")
 }
@@ -520,8 +546,8 @@ mod tests {
         SchemaDefinition,
     };
     use crate::{
-        CatalogueRevisionId, FunctionRevisionId,
         types::{ResolvedType, StandardScalar},
+        CatalogueRevisionId, FunctionRevisionId,
     };
 
     fn name(parts: &[&str]) -> QualifiedSemanticName {
@@ -642,15 +668,11 @@ mod tests {
         );
         let candidate = full_snapshot(
             vec![schema(1, &["app"])],
-            // Same TypeId; the renamed owner carries no nested field change.
-            vec![object(2, &["app", "gadget"], vec![field(3, "label", 0)])],
+            // Same TypeId; the renamed owner retains its nested field.
+            vec![object(2, &["app", "gadget"], vec![field(3, "name", 0)])],
             vec![],
-            // Same FunctionId; renamed function carries no parameter delta.
-            vec![function(
-                5,
-                &["app", "load"],
-                vec![parameter(6, "p_query", 0)],
-            )],
+            // Same FunctionId; renamed function retains its parameter.
+            vec![function(5, &["app", "load"], vec![parameter(6, "p_q", 0)])],
         );
         let diff = catalogue_diff(&base, &candidate);
         assert_eq!(
@@ -665,6 +687,80 @@ mod tests {
                     id: FunctionId::from_bytes([5; 16]),
                     from: "app.read".to_owned(),
                     to: "app.load".to_owned(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn renamed_object_type_reports_nested_field_changes() {
+        let base = full_snapshot(
+            vec![schema(1, &["app"])],
+            vec![object(2, &["app", "widget"], vec![field(3, "name", 0)])],
+            vec![],
+            vec![],
+        );
+        let candidate = full_snapshot(
+            vec![schema(1, &["app"])],
+            vec![object(2, &["app", "gadget"], vec![field(3, "label", 0)])],
+            vec![],
+            vec![],
+        );
+
+        let diff = catalogue_diff(&base, &candidate);
+
+        assert_eq!(
+            diff.changes(),
+            &[
+                SemanticChange::ObjectTypeRenamed {
+                    id: TypeId::from_bytes([2; 16]),
+                    from: "app.widget".to_owned(),
+                    to: "app.gadget".to_owned(),
+                },
+                SemanticChange::FieldRenamed {
+                    owner: TypeId::from_bytes([2; 16]),
+                    id: FieldId::from_bytes([3; 16]),
+                    from: "name".to_owned(),
+                    to: "label".to_owned(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn renamed_function_reports_nested_parameter_changes() {
+        let base = full_snapshot(
+            vec![schema(1, &["app"])],
+            vec![],
+            vec![],
+            vec![function(5, &["app", "read"], vec![parameter(6, "p_q", 0)])],
+        );
+        let candidate = full_snapshot(
+            vec![schema(1, &["app"])],
+            vec![],
+            vec![],
+            vec![function(
+                5,
+                &["app", "load"],
+                vec![parameter(6, "p_query", 0)],
+            )],
+        );
+
+        let diff = catalogue_diff(&base, &candidate);
+
+        assert_eq!(
+            diff.changes(),
+            &[
+                SemanticChange::FunctionRenamed {
+                    id: FunctionId::from_bytes([5; 16]),
+                    from: "app.read".to_owned(),
+                    to: "app.load".to_owned(),
+                },
+                SemanticChange::ParameterRenamed {
+                    owner: FunctionId::from_bytes([5; 16]),
+                    id: ParameterId::from_bytes([6; 16]),
+                    from: "p_q".to_owned(),
+                    to: "p_query".to_owned(),
                 },
             ]
         );
@@ -705,6 +801,104 @@ mod tests {
                     id: ParameterId::from_bytes([6; 16]),
                     from: "p_q".to_owned(),
                     to: "p_query".to_owned(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn renamed_field_reports_payload_changes() {
+        let base = full_snapshot(
+            vec![schema(1, &["app"])],
+            vec![object(2, &["app", "widget"], vec![field(3, "name", 0)])],
+            vec![],
+            vec![],
+        );
+        let candidate = full_snapshot(
+            vec![schema(1, &["app"])],
+            vec![object(
+                2,
+                &["app", "widget"],
+                vec![FieldDefinition::new(
+                    FieldId::from_bytes([3; 16]),
+                    "label",
+                    0,
+                    ResolvedType::scalar(StandardScalar::Integer),
+                    false,
+                    false,
+                    None,
+                    None,
+                )],
+            )],
+            vec![],
+            vec![],
+        );
+
+        let diff = catalogue_diff(&base, &candidate);
+
+        assert_eq!(
+            diff.changes(),
+            &[
+                SemanticChange::FieldRenamed {
+                    owner: TypeId::from_bytes([2; 16]),
+                    id: FieldId::from_bytes([3; 16]),
+                    from: "name".to_owned(),
+                    to: "label".to_owned(),
+                },
+                SemanticChange::FieldTypeChanged {
+                    owner: TypeId::from_bytes([2; 16]),
+                    id: FieldId::from_bytes([3; 16]),
+                    name: "label".to_owned(),
+                },
+                SemanticChange::FieldNullabilityChanged {
+                    owner: TypeId::from_bytes([2; 16]),
+                    id: FieldId::from_bytes([3; 16]),
+                    name: "label".to_owned(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn renamed_parameter_reports_type_changes() {
+        let base = full_snapshot(
+            vec![schema(1, &["app"])],
+            vec![],
+            vec![],
+            vec![function(5, &["app", "read"], vec![parameter(6, "p_q", 0)])],
+        );
+        let candidate = full_snapshot(
+            vec![schema(1, &["app"])],
+            vec![],
+            vec![],
+            vec![function(
+                5,
+                &["app", "read"],
+                vec![ParameterDefinition::new(
+                    ParameterId::from_bytes([6; 16]),
+                    "p_query",
+                    0,
+                    ResolvedType::scalar(StandardScalar::CharacterLargeObject),
+                    None,
+                )],
+            )],
+        );
+
+        let diff = catalogue_diff(&base, &candidate);
+
+        assert_eq!(
+            diff.changes(),
+            &[
+                SemanticChange::ParameterRenamed {
+                    owner: FunctionId::from_bytes([5; 16]),
+                    id: ParameterId::from_bytes([6; 16]),
+                    from: "p_q".to_owned(),
+                    to: "p_query".to_owned(),
+                },
+                SemanticChange::ParameterTypeChanged {
+                    owner: FunctionId::from_bytes([5; 16]),
+                    id: ParameterId::from_bytes([6; 16]),
+                    name: "p_query".to_owned(),
                 },
             ]
         );
