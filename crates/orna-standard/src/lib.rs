@@ -31,7 +31,10 @@ use orna_core::{
         StoredSourceRevision, StoredSourceUnit, VerifiedStandardLibrarySnapshot,
     },
     types::{ResolvedType, StandardScalar},
-    value::{OpaqueCodecRegistration, OpaqueCodecRegistry, OpaqueCodecRegistryError},
+    value::{
+        InspectCarrierCodecRegistration, INSPECT_CARRIER_CODEC_REGISTRATIONS,
+        OpaqueCodecRegistration, OpaqueCodecRegistry, OpaqueCodecRegistryError,
+    },
 };
 use orna_syntax::{NamePart, PrimitiveValueTypePersistence, QualifiedName, TypeExportTarget};
 
@@ -3383,6 +3386,24 @@ pub fn registered_opaque_codecs(
         .map_err(|source| RegisteredOpaqueCodecsError::Registry { source })
 }
 
+/// Returns the deterministic checked-in contracts for the eight sealed
+/// `sys.inspect` projection carriers. The snapshot uses a separate sealed
+/// construction path because it has no projection tag.
+///
+/// These system carriers are intentionally not added to a standard snapshot's
+/// [`OpaqueCodecRegistry`]. They are recognised through their sealed TypeIds
+/// and contracts, independently of application catalogue definitions.
+pub fn registered_inspect_carrier_codecs() -> &'static [InspectCarrierCodecRegistration] {
+    INSPECT_CARRIER_CODEC_REGISTRATIONS
+}
+
+/// Returns whether a TypeId is one of the fixed sealed Inspector carriers.
+pub fn is_registered_inspect_carrier_type(opaque_type: TypeId) -> bool {
+    registered_inspect_carrier_codecs()
+        .iter()
+        .any(|registration| registration.opaque_type() == opaque_type)
+}
+
 /// Returns whether one verified snapshot is exactly the accepted version-one
 /// or version-two standard library (ADR 0055).
 ///
@@ -4030,8 +4051,19 @@ mod tests {
         ValueTypeMutability, ValueTypePersistence,
     };
     use orna_core::revision::DefinitionIdentity;
+    use orna_core::system::{
+        SYS_INSPECT_CALLS_REPRESENTATION_CONTRACT, SYS_INSPECT_CALLS_TYPE_ID,
+        SYS_INSPECT_INVOCATION_NODES_REPRESENTATION_CONTRACT, SYS_INSPECT_INVOCATION_NODES_TYPE_ID,
+        SYS_INSPECT_PRESENTATION_CANDIDATES_REPRESENTATION_CONTRACT,
+        SYS_INSPECT_PRESENTATION_CANDIDATES_TYPE_ID, SYS_INSPECT_RESOURCES_REPRESENTATION_CONTRACT,
+        SYS_INSPECT_RESOURCES_TYPE_ID, SYS_INSPECT_RUNTIME_BINDINGS_REPRESENTATION_CONTRACT,
+        SYS_INSPECT_RUNTIME_BINDINGS_TYPE_ID, SYS_INSPECT_SECURITY_DECISIONS_REPRESENTATION_CONTRACT,
+        SYS_INSPECT_SECURITY_DECISIONS_TYPE_ID, SYS_INSPECT_STATE_CELLS_REPRESENTATION_CONTRACT,
+        SYS_INSPECT_STATE_CELLS_TYPE_ID, SYS_INSPECT_UI_NODES_REPRESENTATION_CONTRACT,
+        SYS_INSPECT_UI_NODES_TYPE_ID,
+    };
     use orna_core::{
-        CatalogueRevisionId, SourceBundleId, SourceRevisionId, SourceUnitId,
+        CatalogueRevisionId, SourceBundleId, SourceRevisionId, SourceUnitId, TypeId,
         canonical_hash::{
             artifact_payload_digest, catalogue_digest, catalogue_digest_with_context,
             function_semantic_digest_with_version, source_bundle_digest,
@@ -4075,13 +4107,16 @@ mod tests {
         StandardUpgradeError, TERMINAL_DOCUMENT_MAGIC, TIME_TYPE_ID, TIMESTAMP_TYPE_ID, UI_MAGIC,
         UUID_TYPE_ID, VOID_TYPE_ID, build_type_bindings, prepare_standard_upgrade,
         prepare_standard_upgrade_v1_to_v2, prepare_standard_upgrade_v2_to_v3,
-        prepare_standard_upgrade_v4_to_v5, prepare_standard_upgrade_with, registered_opaque_codecs,
+        prepare_standard_upgrade_v4_to_v5, prepare_standard_upgrade_with,
+        is_registered_inspect_carrier_type, registered_inspect_carrier_codecs,
+        registered_opaque_codecs,
         retained_standard_library_snapshot, retained_standard_library_snapshot_from_source,
         retained_standard_library_v2_snapshot, retained_standard_library_v2_snapshot_from_source,
         retained_standard_library_v3_snapshot, retained_standard_library_v4_snapshot,
         retained_standard_library_v5_snapshot,
         standard_library_manifest, standard_library_v2_manifest, standard_library_v3_manifest,
-        standard_library_v4_manifest, standard_library_v5_manifest, verify_standard_library_snapshot,
+        standard_library_v4_manifest, standard_library_v5_manifest,
+        verify_standard_library_snapshot,
         verify_standard_library_v2_snapshot, verify_standard_library_v3_snapshot,
         verify_standard_library_v4_snapshot, verify_standard_library_v5_snapshot,
     };
@@ -8274,5 +8309,40 @@ EXPORT TYPE std.ui.UI AS std.UI;
         assert_eq!(v6.action_source_logical_path(), super::STD_ACTION_SOURCE_LOGICAL_PATH);
     }
 
+
+
+    #[test]
+    fn inspect_carrier_registry_is_fixed_and_deterministic() {
+        let expected = [
+            (
+                SYS_INSPECT_INVOCATION_NODES_TYPE_ID,
+                SYS_INSPECT_INVOCATION_NODES_REPRESENTATION_CONTRACT,
+            ),
+            (SYS_INSPECT_CALLS_TYPE_ID, SYS_INSPECT_CALLS_REPRESENTATION_CONTRACT),
+            (SYS_INSPECT_RESOURCES_TYPE_ID, SYS_INSPECT_RESOURCES_REPRESENTATION_CONTRACT),
+            (SYS_INSPECT_STATE_CELLS_TYPE_ID, SYS_INSPECT_STATE_CELLS_REPRESENTATION_CONTRACT),
+            (SYS_INSPECT_UI_NODES_TYPE_ID, SYS_INSPECT_UI_NODES_REPRESENTATION_CONTRACT),
+            (
+                SYS_INSPECT_PRESENTATION_CANDIDATES_TYPE_ID,
+                SYS_INSPECT_PRESENTATION_CANDIDATES_REPRESENTATION_CONTRACT,
+            ),
+            (
+                SYS_INSPECT_RUNTIME_BINDINGS_TYPE_ID,
+                SYS_INSPECT_RUNTIME_BINDINGS_REPRESENTATION_CONTRACT,
+            ),
+            (
+                SYS_INSPECT_SECURITY_DECISIONS_TYPE_ID,
+                SYS_INSPECT_SECURITY_DECISIONS_REPRESENTATION_CONTRACT,
+            ),
+        ];
+        let registrations = registered_inspect_carrier_codecs();
+        assert_eq!(registrations.len(), expected.len());
+        for (registration, (opaque_type, contract)) in registrations.iter().zip(expected) {
+            assert_eq!(registration.opaque_type(), opaque_type);
+            assert_eq!(registration.representation_contract(), contract);
+            assert!(is_registered_inspect_carrier_type(opaque_type));
+        }
+        assert!(!is_registered_inspect_carrier_type(TypeId::from_bytes([0xaa; 16])));
+    }
 
 }
