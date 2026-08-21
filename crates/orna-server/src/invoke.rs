@@ -2832,6 +2832,14 @@ where
             {
                 return Err(ResourceTransportFailure::Shape);
             }
+            if state.cancellation_requested
+                && matches!(
+                    disposition,
+                    orna_protocol::ResourceFrameDisposition::DroppedLate
+                )
+            {
+                return Ok(true);
+            }
             state.accepted = true;
             state.accepted_nested_invocation_id = Some(value.nested_invocation_id);
         }
@@ -5289,6 +5297,94 @@ mod tests {
             Some(Ok(ResourceTransportOutcome::Cancelled {
                 nested_invocation_id: Some(actual),
             })) if actual == nested_invocation_id
+        ));
+    }
+
+    #[tokio::test]
+    async fn broker_drops_late_acceptance_after_cancel_before_values_and_completion() {
+        let (active, registry) = transport_test_context();
+        let request = transport_test_request(active.pair(), 1);
+        let nested_invocation_id = InvocationId::from_bytes([0x40; 16]);
+        let accepted = ResourceAccepted {
+            stream_id: request.stream_id,
+            request_id: request.request_id,
+            nested_invocation_id,
+            target_revision: request.target_revision,
+            resource_kind: request.resource_kind,
+        };
+        let value = RuntimeValue::Integer(7);
+        let byte_count = encode_constructed_value(&active, &registry, &value)
+            .expect("encoded resource value")
+            .len() as u32;
+        let mut protocol = ResourceProtocolConnection::new();
+        protocol.open(request.clone()).expect("resource request opens");
+        protocol
+            .receive(ResourceClientFrame::Cancel(ResourceCancel {
+                stream_id: request.stream_id,
+                request_id: request.request_id,
+                reason: ResourceCancellationCode::ParentInvocationCancelled,
+            }))
+            .expect("resource cancellation applies");
+        let (completion, mut completions) = mpsc::channel(2);
+        let mut state = BrokerResourceState {
+            request: request.clone(),
+            expected_type: ResolvedType::Scalar(StandardScalar::Integer),
+            resource_kind: ProtocolResourceKind::Single,
+            protocol,
+            completion,
+            accepted: false,
+            accepted_nested_invocation_id: None,
+            scalar_value: None,
+            cancellation_requested: true,
+            stream_values_seen: false,
+        };
+        let (_reader, mut writer) = tokio::io::duplex(128);
+        assert!(handle_shared_resource_frame(
+            &mut state,
+            ResourceServerFrame::Accepted(accepted),
+            &mut writer,
+            &active,
+            &registry,
+        )
+        .await
+        .expect("late acceptance is drained"));
+        assert!(!state.accepted);
+        assert_eq!(state.accepted_nested_invocation_id, None);
+
+        assert!(handle_shared_resource_frame(
+            &mut state,
+            ResourceServerFrame::Values(ResourceValues {
+                stream_id: request.stream_id,
+                request_id: request.request_id,
+                batch_sequence: 0,
+                item_count: 1,
+                byte_count,
+                values: vec![value],
+            }),
+            &mut writer,
+            &active,
+            &registry,
+        )
+        .await
+        .expect("late values are drained"));
+        let keep = handle_shared_resource_frame(
+            &mut state,
+            ResourceServerFrame::Completed(ResourceCompleted {
+                stream_id: request.stream_id,
+                request_id: request.request_id,
+                final_batch_sequence: 0,
+                total_items: 1,
+            }),
+            &mut writer,
+            &active,
+            &registry,
+        )
+        .await
+        .expect("late completion closes the resource");
+        assert!(!keep);
+        assert!(matches!(
+            completions.recv().await,
+            Some(Err(ResourceTransportFailure::Shape))
         ));
     }
 
