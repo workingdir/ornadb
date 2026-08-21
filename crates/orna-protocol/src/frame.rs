@@ -1959,6 +1959,8 @@ impl ResourceProtocolConnection {
         if !matches!(state.phase, ResourcePhase::Requested) {
             return Err(ResourceConnectionError::WrongState { stream_id: frame.stream_id });
         }
+        require_resource_invocation_id(frame.nested_invocation_id)
+            .map_err(|source| ResourceConnectionError::InvalidFrame { source })?;
         let state = self.streams.get_mut(&frame.stream_id).expect("resource state checked");
         state.accepted = true;
         state.nested_invocation_id = Some(frame.nested_invocation_id);
@@ -3061,6 +3063,7 @@ pub fn decode_resource_request(
 /// Encodes one server acceptance frame.
 pub fn encode_resource_accepted(frame: &ResourceAccepted) -> Result<Vec<u8>, FrameCodecError> {
     require_resource_stream(frame.stream_id)?;
+    require_resource_invocation_id(frame.nested_invocation_id)?;
     let mut payload = Vec::with_capacity(8 + 16 + 16 + 32 + 1);
     payload.extend_from_slice(&frame.stream_id.to_be_bytes());
     payload.extend_from_slice(&frame.request_id.to_bytes());
@@ -3146,6 +3149,7 @@ pub fn decode_resource_accepted(encoded: &[u8]) -> Result<ResourceAccepted, Fram
     require_resource_stream(stream_id)?;
     let request_id = resource_id(payload, &mut cursor, InvocationId::from_bytes)?;
     let nested_invocation_id = resource_id(payload, &mut cursor, InvocationId::from_bytes)?;
+    require_resource_invocation_id(nested_invocation_id)?;
     let target_revision = parse_revision_pair(payload, &mut cursor)?;
     let resource_kind = resource_kind_from_wire(resource_u8(payload, &mut cursor)?)?;
     require_resource_end(payload, cursor)?;
@@ -3506,6 +3510,14 @@ fn resource_cancellation_from_wire(value: u8) -> Result<ResourceCancellationCode
 fn require_resource_stream(stream_id: u64) -> Result<(), FrameCodecError> {
     if stream_id == 0 {
         Err(FrameCodecError::InvalidResourceStream { stream_id })
+    } else {
+        Ok(())
+    }
+}
+
+fn require_resource_invocation_id(id: InvocationId) -> Result<(), FrameCodecError> {
+    if id.to_bytes() == [0; 16] {
+        Err(FrameCodecError::ResourceMalformedPayload)
     } else {
         Ok(())
     }
@@ -7477,6 +7489,43 @@ mod tests {
             ));
         }
     }
+    #[test]
+    fn resource_acceptance_rejects_zero_nested_identity_at_decode_and_apply() {
+        let request = resource_request_fixture();
+        let request_id = request.request_id;
+        let accepted = ResourceAccepted {
+            stream_id: request.stream_id,
+            request_id,
+            nested_invocation_id: InvocationId::from_bytes([0x44; 16]),
+            target_revision: request.target_revision,
+            resource_kind: request.resource_kind,
+        };
+        let mut encoded = encode_resource_accepted(&accepted).unwrap();
+        let nested_start = RESOURCE_HEADER_LENGTH + 8 + 16;
+        encoded[nested_start..nested_start + 16].fill(0);
+        assert_eq!(
+            decode_resource_accepted(&encoded),
+            Err(FrameCodecError::ResourceMalformedPayload)
+        );
+
+        let mut connection = ResourceProtocolConnection::new();
+        connection.open(request.clone()).unwrap();
+        assert_eq!(
+            connection.apply(ResourceServerFrame::Accepted(ResourceAccepted {
+                nested_invocation_id: InvocationId::from_bytes([0; 16]),
+                ..accepted
+            })),
+            Err(ResourceConnectionError::InvalidFrame {
+                source: FrameCodecError::ResourceMalformedPayload,
+            })
+        );
+        assert_eq!(
+            connection.resource_nested_invocation_id(request.stream_id, request_id),
+            Ok(None)
+        );
+        assert_eq!(connection.live_resources(), 1);
+    }
+
     #[test]
     fn constructed_resource_application_rejects_forged_byte_count_before_credit() {
         let active = empty_active_revision();
