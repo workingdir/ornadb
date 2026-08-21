@@ -20,7 +20,15 @@ use orna_core::{
 };
 use orna_postgres::{PostgresKernel, PostgresKernelError};
 use orna_standard::{
-    StandardLibraryError, retained_standard_library_snapshot, verify_standard_library_snapshot,
+    retained_standard_library_snapshot, retained_standard_library_v2_snapshot,
+    retained_standard_library_v3_snapshot, retained_standard_library_v4_snapshot,
+    retained_standard_library_v5_snapshot, retained_standard_library_v6_snapshot,
+    verify_standard_library_snapshot, verify_standard_library_v2_snapshot,
+    verify_standard_library_v3_snapshot, verify_standard_library_v4_snapshot,
+    verify_standard_library_v5_snapshot, verify_standard_library_v6_snapshot,
+    StandardLibraryError, STANDARD_LIBRARY_REVISION_ID, STANDARD_LIBRARY_V2_REVISION_ID,
+    STANDARD_LIBRARY_V3_REVISION_ID, STANDARD_LIBRARY_V4_REVISION_ID, STANDARD_LIBRARY_V5_REVISION_ID,
+    STANDARD_LIBRARY_V6_REVISION_ID,
 };
 use serde::Serialize;
 
@@ -307,9 +315,11 @@ async fn apply_source_bundle(
     bundle: SourceBundle,
 ) -> Result<InstalledSourceApplyOutcome, InstalledSourceApplyError> {
     let active = kernel.recover().await.map_err(map_recovery_error)?;
-    let accepted = retained_standard_library_snapshot()
-        .and_then(verify_standard_library_snapshot)
-        .map_err(|source| InstalledSourceApplyError::StandardLibrary { source })?;
+    let installed = active
+        .catalogue_hash_context()
+        .standard()
+        .ok_or(InstalledSourceApplyError::ActiveStandardMismatch)?;
+    let accepted = select_accepted_standard(installed)?;
     require_accepted_active_standard(&active, &accepted)?;
     let standard = check_standard_library_source(&accepted)
         .map_err(|source| InstalledSourceApplyError::StandardSource { source })?;
@@ -422,6 +432,31 @@ fn map_apply_error(source: PostgresKernelError) -> InstalledSourceApplyError {
         ) => InstalledSourceApplyError::RecoveryMismatch,
         source => InstalledSourceApplyError::Apply { source },
     }
+}
+
+fn select_accepted_standard(
+    installed: &VerifiedStandardLibrarySnapshot,
+) -> Result<VerifiedStandardLibrarySnapshot, InstalledSourceApplyError> {
+    let accepted =
+        match installed.revision() {
+            STANDARD_LIBRARY_REVISION_ID => {
+                retained_standard_library_snapshot().and_then(verify_standard_library_snapshot)
+            }
+            STANDARD_LIBRARY_V2_REVISION_ID => retained_standard_library_v2_snapshot()
+                .and_then(verify_standard_library_v2_snapshot),
+            STANDARD_LIBRARY_V3_REVISION_ID => retained_standard_library_v3_snapshot()
+                .and_then(verify_standard_library_v3_snapshot),
+            STANDARD_LIBRARY_V4_REVISION_ID => retained_standard_library_v4_snapshot()
+                .and_then(verify_standard_library_v4_snapshot),
+            STANDARD_LIBRARY_V5_REVISION_ID => retained_standard_library_v5_snapshot()
+                .and_then(verify_standard_library_v5_snapshot),
+            STANDARD_LIBRARY_V6_REVISION_ID => retained_standard_library_v6_snapshot()
+                .and_then(verify_standard_library_v6_snapshot),
+            _ => return Err(InstalledSourceApplyError::ActiveStandardMismatch),
+        }
+        .map_err(|source| InstalledSourceApplyError::StandardLibrary { source })?;
+
+    Ok(accepted)
 }
 
 fn require_accepted_active_standard(
@@ -629,6 +664,49 @@ mod tests {
             ],
         )
         .expect("catalogue must validate")
+    }
+
+    fn assert_selected_standard_matches(installed: &VerifiedStandardLibrarySnapshot) {
+        let selected = select_accepted_standard(installed).expect("accepted standard snapshot");
+        assert_eq!(selected.revision(), installed.revision());
+        assert_eq!(
+            selected.catalogue().revision(),
+            installed.catalogue().revision()
+        );
+        assert_eq!(selected.source().bundle(), installed.source().bundle());
+        assert_eq!(selected.source().id(), installed.source().id());
+        assert_eq!(
+            selected.source().bundle_hash(),
+            installed.source().bundle_hash()
+        );
+        assert_eq!(
+            selected.source().revision_hash(),
+            installed.source().revision_hash()
+        );
+        assert_eq!(selected.digest(), installed.digest());
+    }
+
+    #[test]
+    fn selects_the_accepted_v1_snapshot_for_a_v1_active_standard() {
+        let installed = verify_standard_library_snapshot(
+            retained_standard_library_snapshot().expect("retained V1 standard"),
+        )
+        .expect("verified V1 standard");
+        assert_selected_standard_matches(&installed);
+    }
+
+    #[test]
+    fn selects_the_accepted_v6_snapshot_for_a_v6_active_standard() {
+        let installed = verify_standard_library_v6_snapshot(
+            retained_standard_library_v6_snapshot().expect("retained V6 standard"),
+        )
+        .expect("verified V6 standard");
+        assert_selected_standard_matches(&installed);
+        let name = QualifiedSemanticName::new(["std", "invoke", "echo"]).expect("V6 name");
+        assert!(
+            installed.catalogue().function_by_name(&name).is_some(),
+            "V6 active standard must expose std.invoke.echo"
+        );
     }
 
     fn split_document(bytes: &[u8]) -> (&[u8], &[u8]) {
