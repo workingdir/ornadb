@@ -160,8 +160,8 @@ impl PostgresKernel {
                 )?;
                 require_declared_user_state_type(
                     cell.key().without_principal(),
-                    cell.value_type(),
                     declared_type,
+                    cell.value_type(),
                 )?;
                 require_expected_type(&cell, expected_types)?;
                 cells.push(cell);
@@ -558,17 +558,17 @@ fn require_expected_type(
 
 fn require_declared_user_state_type(
     key: UserStateKeyWithoutPrincipal,
-    value_type: TypeId,
-    declared_type: TypeId,
+    expected_type: TypeId,
+    current_type: TypeId,
 ) -> Result<(), PostgresKernelError> {
-    if value_type == declared_type {
+    if expected_type == current_type {
         return Ok(());
     }
     Err(PostgresKernelError::UserState(
         UserStateError::TypeIncompatible {
             key: Box::new(key),
-            expected: value_type,
-            current: declared_type,
+            expected: expected_type,
+            current: current_type,
         },
     ))
 }
@@ -898,11 +898,41 @@ mod tests {
         let plan = state_plan(StateScope::User, INTEGER);
         let error = validate_user_state_slot_declaration(FUNCTION, FUNCTION, SLOT, TEXT, &plan)
             .expect_err("USER state type must match the active declaration");
-        assert!(matches!(
-            error,
-            PostgresKernelError::UserState(UserStateError::TypeIncompatible { .. })
-        ));
-        assert!(error.to_string().contains("ORNA0901"));
+        let message = error.to_string();
+        match error {
+            PostgresKernelError::UserState(UserStateError::TypeIncompatible {
+                expected,
+                current,
+                ..
+            }) => {
+                assert_eq!(expected, TEXT);
+                assert_eq!(current, INTEGER);
+            }
+            other => panic!("expected ORNA0901 type mismatch, got {other:?}"),
+        }
+        assert!(message.contains("ORNA0901"));
+    }
+
+    #[test]
+    fn load_declared_type_is_expected_and_persisted_type_is_current() {
+        let key =
+            UserStateKeyWithoutPrincipal::new(ROOT, String::new(), FUNCTION, String::new(), SLOT)
+                .expect("test key is valid");
+        let error = require_declared_user_state_type(key, INTEGER, TEXT)
+            .expect_err("declared and persisted USER state types must agree");
+        let message = error.to_string();
+        match error {
+            PostgresKernelError::UserState(UserStateError::TypeIncompatible {
+                expected,
+                current,
+                ..
+            }) => {
+                assert_eq!(expected, INTEGER);
+                assert_eq!(current, TEXT);
+            }
+            other => panic!("expected ORNA0901 type mismatch, got {other:?}"),
+        }
+        assert!(message.contains("ORNA0901"));
     }
 
     #[test]
