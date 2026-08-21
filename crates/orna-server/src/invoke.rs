@@ -336,11 +336,13 @@ pub(crate) struct SharedInvokeBroker {
 /// drives a sealed invocation. Direct protocol tests must register the
 /// exact resource requests that the client evaluator would have produced.
 #[doc(hidden)]
+#[cfg(feature = "test-hooks")]
 #[derive(Clone)]
 pub struct RawResourceRequestAuthorizer {
     broker: SharedInvokeBroker,
 }
 
+#[cfg(feature = "test-hooks")]
 impl RawResourceRequestAuthorizer {
     /// Creates an empty resource request authoriser.
     #[doc(hidden)]
@@ -360,6 +362,7 @@ impl RawResourceRequestAuthorizer {
     }
 }
 
+#[cfg(feature = "test-hooks")]
 impl Default for RawResourceRequestAuthorizer {
     fn default() -> Self {
         Self::new()
@@ -466,6 +469,7 @@ enum InjectedResourceTransport {
 
 struct PendingResourceTransport {
     request: ClientResourceRequest,
+    stream_id: u64,
     receiver: Receiver<Result<ResourceTransportOutcome, ResourceTransportFailure>>,
     control: UnboundedSender<ResourceTransportControl>,
     transport_return: std::sync::Arc<std::sync::Mutex<Option<ResourceTransportSource>>>,
@@ -577,6 +581,7 @@ pub struct InstalledClientResourceExecutor {
     active: ActiveDatabaseRevision,
     next_stream_id: u64,
     broker: Option<SharedInvokeBroker>,
+    raw_resource_authorizer: Option<SharedInvokeBroker>,
     transport: Option<ResourceTransportSource>,
     pending: Option<PendingResourceTransport>,
     broker_pending: Option<PendingBrokerResource>,
@@ -595,6 +600,7 @@ impl InstalledClientResourceExecutor {
             active,
             next_stream_id: 1,
             broker: None,
+            raw_resource_authorizer: None,
             broker_pending: None,
             transport: Some(ResourceTransportSource::Authenticated(
                 AuthenticatedResourceTransport {
@@ -620,6 +626,7 @@ impl InstalledClientResourceExecutor {
             active,
             next_stream_id: 1,
             broker: None,
+            raw_resource_authorizer: None,
             broker_pending: None,
             transport: Some(ResourceTransportSource::Injected(
                 InjectedResourceTransport::Stream(PersistentResourceTransport {
@@ -635,6 +642,25 @@ impl InstalledClientResourceExecutor {
         }
     }
 
+    /// Creates an injected transport executor with an explicit test broker.
+    ///
+    /// The broker registers each generated protocol request immediately
+    /// before the injected stream sends it. This preserves exact request
+    /// provenance while allowing tests to use fresh request identifiers.
+    #[doc(hidden)]
+    #[cfg(feature = "test-hooks")]
+    pub fn new_with_stream_and_resource_authorizer(
+        kernel: PostgresKernel,
+        session: AuthenticatedSession,
+        active: ActiveDatabaseRevision,
+        stream: StandardUnixStream,
+        authorizer: RawResourceRequestAuthorizer,
+    ) -> Self {
+        let mut executor = Self::new_with_stream(kernel, session, active, stream);
+        executor.raw_resource_authorizer = Some(authorizer.broker());
+        executor
+    }
+
     #[doc(hidden)]
     pub(crate) fn new_with_broker(
         active: ActiveDatabaseRevision,
@@ -645,6 +671,7 @@ impl InstalledClientResourceExecutor {
             active,
             next_stream_id: 1,
             broker: Some(broker),
+            raw_resource_authorizer: None,
             transport: None,
             pending: None,
             broker_pending: None,
@@ -686,6 +713,12 @@ impl InstalledClientResourceExecutor {
             .take()
             .expect("broker pending checked above");
         Some(map_resource_transport_completion(pending.request, result))
+    }
+
+    fn discard_raw_resource_request(&self, stream_id: u64) {
+        if let Some(authorizer) = self.raw_resource_authorizer.as_ref() {
+            authorizer.discard_expected_resource_request(stream_id);
+        }
     }
 }
 
@@ -750,10 +783,12 @@ impl ClientResourceExecutor for InstalledClientResourceExecutor {
             item_window: 1,
             byte_window: MAX_RESOURCE_WINDOW,
         };
+        if let Some(authorizer) = self.raw_resource_authorizer.as_ref()
+            && !authorizer.register_expected_resource_request(&protocol_request)
+        {
+            return request.failed(SERVER_RESOURCE_INTERNAL_CODE.to_owned());
+        }
         if let Some(broker) = self.broker.clone() {
-            if !broker.register_expected_resource_request(&protocol_request) {
-                return request.failed(SERVER_RESOURCE_INTERNAL_CODE.to_owned());
-            }
             let (completion, receiver) = mpsc::channel(BROKER_RESOURCE_COMPLETION_CAPACITY);
             if broker
                 .commands
@@ -765,7 +800,6 @@ impl ClientResourceExecutor for InstalledClientResourceExecutor {
                 })
                 .is_err()
             {
-                broker.discard_expected_resource_request(stream_id);
                 return request.failed(SERVER_RESOURCE_INTERNAL_CODE.to_owned());
             }
             let pending = ClientResourceCompletion::Pending {
@@ -783,6 +817,7 @@ impl ClientResourceExecutor for InstalledClientResourceExecutor {
             return pending;
         }
         let Some(worker_transport) = self.transport.take() else {
+            self.discard_raw_resource_request(stream_id);
             return request.failed(SERVER_RESOURCE_INTERNAL_CODE.to_owned());
         };
         let (sender, receiver) = mpsc::channel(1);
@@ -858,11 +893,17 @@ impl ClientResourceExecutor for InstalledClientResourceExecutor {
                 let _ = sender.blocking_send(outcome);
             });
         let Ok(worker) = worker else {
+            if let Some(authorizer) = self.raw_resource_authorizer.as_ref() {
+                authorizer.discard_expected_resource_request(stream_id);
+            }
             self.transport = Some(worker_transport);
             return request.failed(SERVER_RESOURCE_INTERNAL_CODE.to_owned());
         };
         if let Err(error) = worker_transport_sender.send(worker_transport) {
             let _ = worker.join();
+            if let Some(authorizer) = self.raw_resource_authorizer.as_ref() {
+                authorizer.discard_expected_resource_request(stream_id);
+            }
             self.transport = Some(error.0);
             return request.failed(SERVER_RESOURCE_INTERNAL_CODE.to_owned());
         }
@@ -873,6 +914,7 @@ impl ClientResourceExecutor for InstalledClientResourceExecutor {
         };
         self.pending = Some(PendingResourceTransport {
             request,
+            stream_id,
             receiver,
             control,
             transport_return,
@@ -917,6 +959,7 @@ impl ClientResourceExecutor for InstalledClientResourceExecutor {
                 .pending
                 .take()
                 .expect("pending resource transport was checked above");
+            self.discard_raw_resource_request(pending.stream_id);
             let _ = pending.worker.join();
             self.transport = pending
                 .transport_return
@@ -997,6 +1040,7 @@ impl ClientResourceExecutor for InstalledClientResourceExecutor {
             match pending.receiver.try_recv() {
                 Ok(Ok(ResourceTransportOutcome::StreamValues(_))) => {}
                 Ok(result @ Ok(_)) | Ok(result @ Err(_)) => {
+                    self.discard_raw_resource_request(pending.stream_id);
                     let _ = pending.worker.join();
                     self.transport = pending
                         .transport_return
@@ -1007,6 +1051,7 @@ impl ClientResourceExecutor for InstalledClientResourceExecutor {
                 }
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => {
+                    self.discard_raw_resource_request(pending.stream_id);
                     let _ = pending.worker.join();
                     self.transport = pending
                         .transport_return
@@ -1031,6 +1076,7 @@ impl ClientResourceExecutor for InstalledClientResourceExecutor {
 impl Drop for InstalledClientResourceExecutor {
     fn drop(&mut self) {
         if let Some(pending) = self.broker_pending.take() {
+            self.discard_raw_resource_request(pending.stream_id);
             let _ = pending
                 .control
                 .commands
@@ -1041,6 +1087,7 @@ impl Drop for InstalledClientResourceExecutor {
                 });
         }
         if let Some(pending) = self.pending.take() {
+            self.discard_raw_resource_request(pending.stream_id);
             drop(pending.receiver);
             let _ = pending.control.send(ResourceTransportControl::Shutdown);
             let _ = pending.worker.join();
