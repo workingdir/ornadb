@@ -7011,7 +7011,7 @@ mod tests {
         });
         let mut executor_slot: Option<&mut dyn super::ClientResourceExecutor> = Some(&mut executor);
         let value = super::evaluate_external_contract(
-            "devtools.inspector_shell",
+            "devtools.inspector_shell@1",
             context,
             child,
             &[],
