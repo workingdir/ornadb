@@ -14790,7 +14790,7 @@ pub mod runtime_conformance {
         let Some(name) = (unsafe { text(contract.name) }) else {
             return Err(LoadError::Descriptor("contract name"));
         };
-        if name.is_empty() {
+        if name != SINK_NAME {
             return Err(LoadError::Descriptor("contract name"));
         }
         if contract.major != 1 || contract.minor != 0 {
@@ -15849,9 +15849,9 @@ pub mod runtime_conformance {
             append_json_string(output, event_name);
             output.extend_from_slice(b":{\"action_id\":");
             append_json_string(output, &action.action.to_string());
-            output.extend_from_slice(b",\"input_type\":");
+            output.extend_from_slice(b",\"debug_kind\":null,\"input_type\":");
             append_json_string(output, &action.input_type);
-            output.extend_from_slice(b",\"debug_kind\":null}");
+            output.push(b'}');
         }
         output.extend_from_slice(b"},\"call_site_id\":null,\"contract\":{\"id\":");
         append_json_string(output, &state.contract_name);
@@ -18704,6 +18704,23 @@ pub mod runtime_conformance {
     }
 
     #[test]
+    fn rejects_descriptor_with_wrong_contract_name() {
+        static WRONG_NAME: ContractVersion = ContractVersion {
+            name: view(b"std.ui.Other"),
+            major: 1,
+            minor: 0,
+            features: ptr::null(),
+            feature_count: 0,
+        };
+        let mut descriptor = DESCRIPTOR;
+        descriptor.contracts = &WRONG_NAME;
+        assert_eq!(
+            validate_descriptor(&descriptor),
+            Err(LoadError::Descriptor("contract name"))
+        );
+    }
+
+    #[test]
     fn rejects_duplicate_contracts_versions_unknown_features_and_bad_counts() {
         static DUPLICATES: [ContractVersion; 2] = [CONTRACT, CONTRACT];
         static BAD_VERSION: ContractVersion = ContractVersion {
@@ -18875,7 +18892,7 @@ pub mod runtime_conformance {
         let captured = session.capture(surface);
         assert_eq!(
             frame_body(&captured),
-            b"{\"kind\":\"node\",\"contract\":{\"id\":\"std.ui.UI\",\"name\":\"std.ui.UI\",\"version\":\"1.0\"},\"call_site_id\":null,\"function_instance_id\":null,\"key\":{\"type\":\"std.json.Value\",\"value\":\"6669727374\"},\"properties\":{},\"slots\":{},\"actions\":{}}",
+            b"{\"actions\":{},\"call_site_id\":null,\"contract\":{\"id\":\"std.ui.UI\",\"name\":\"std.ui.UI\",\"version\":\"1.0\"},\"function_instance_id\":null,\"key\":{\"type\":\"std.json.Value\",\"value\":\"6669727374\"},\"kind\":\"node\",\"properties\":{},\"slots\":{}}",
         );
         assert!(captured.windows(4).any(|window| window == b"slot"));
         assert!(!captured.windows(4).any(|window| window == b"xxxx"));
