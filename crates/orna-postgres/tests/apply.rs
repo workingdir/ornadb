@@ -18,8 +18,8 @@ use orna_compiler::{
     STD_INVOKE_SOURCE_UNIT_ID, STD_TYPES_SOURCE_UNIT_ID,
 };
 use orna_core::{
-    CatalogueRevisionId, FieldId, FunctionId, InvocationId, ObjectId, PrincipalId, SourceBundleId,
-    SourceRevisionId, SourceUnitId, StandardLibraryRevisionId, StateSlotId, TypeId,
+    CatalogueRevisionId, FieldId, FunctionId, InspectEpochId, InvocationId, ObjectId, PrincipalId,
+    SourceBundleId, SourceRevisionId, SourceUnitId, StandardLibraryRevisionId, StateSlotId, TypeId,
     canonical_hash::{
         catalogue_digest_with_context, source_bundle_digest, source_revision_record_digest,
         source_unit_content_digest, verify_standard_library_snapshot,
@@ -7026,13 +7026,9 @@ async fn proves_sealed_security_identity_invocation_and_audit() -> TestResult<()
                 SYS_SECURITY_EFFECTIVE_PRINCIPAL_FUNCTION_ID,
                 "effective_principal",
             ),
-            (
-                SYS_SECURITY_ACTIVE_ROLES_FUNCTION_ID,
-                "active_roles",
-            ),
+            (SYS_SECURITY_ACTIVE_ROLES_FUNCTION_ID, "active_roles"),
         ] {
-            let authority =
-                standard_authority_row(&database, pair.catalogue(), function).await?;
+            let authority = standard_authority_row(&database, pair.catalogue(), function).await?;
             require(
                 authority.as_ref().is_some_and(|row| {
                     row.target_class == "system"
@@ -7455,7 +7451,6 @@ async fn proves_inspect_capture_and_projections_after_sealed_echo() -> TestResul
             ),
             "a trace request without a granted privilege did not fail closed",
         )?;
-
 
         // The live state_cells projection returns the stored cell; the typed
         // value is redacted unless the Values classifier was requested and
@@ -7911,6 +7906,22 @@ async fn proves_find_latest_inspect_epoch_resolves_the_dispatch_epoch() -> TestR
             "find_latest_inspect_epoch resolved the wrong epoch",
         )?;
 
+        // An explicit epoch uses the same authenticated ownership gate as the
+        // latest lookup, then can be loaded by the already-authorised caller.
+        let exact = kernel.find_inspect_epoch(&session, epoch_id).await?;
+        require(
+            exact == Some(epoch_id),
+            "the owning principal must resolve its explicit inspect epoch",
+        )?;
+
+        let unknown_epoch = kernel
+            .find_inspect_epoch(&session, InspectEpochId::from_bytes([0xef; 16]))
+            .await?;
+        require(
+            unknown_epoch.is_none(),
+            "an unknown explicit inspect epoch must resolve as None",
+        )?;
+
         // An invocation with no captured epoch resolves as `None`.
         let absent = kernel
             .find_latest_inspect_epoch(&session, InvocationId::from_bytes([0xee; 16]))
@@ -7935,6 +7946,17 @@ async fn proves_find_latest_inspect_epoch_resolves_the_dispatch_epoch() -> TestR
                 })
             ),
             "a foreign principal must fail closed on the ladder",
+        )?;
+
+        let exact_denial = kernel.find_inspect_epoch(&foreign_session, epoch_id).await;
+        require(
+            matches!(
+                exact_denial,
+                Err(PostgresKernelError::InspectDenied {
+                    reason: orna_core::security::InspectDenial::MissingPrivilege
+                })
+            ),
+            "a foreign principal must fail closed for an explicit epoch",
         )?;
 
         Ok(())
