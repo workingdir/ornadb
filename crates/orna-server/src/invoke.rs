@@ -51,7 +51,7 @@ use orna_core::{
     security::AuthenticatedSession,
     system::{SYS_INSPECT_CALLS_TYPE_ID, SYS_INSPECT_INVOCATION_NODES_TYPE_ID, SYS_INSPECT_INVOCATION_TYPE_ID, SYS_INSPECT_PRESENTATION_CANDIDATES_TYPE_ID, SYS_INSPECT_RESOURCES_TYPE_ID, SYS_INSPECT_RUNTIME_BINDINGS_TYPE_ID, SYS_INSPECT_SECURITY_DECISIONS_TYPE_ID, SYS_INSPECT_SNAPSHOT_TYPE_ID, SYS_INSPECT_STATE_CELLS_TYPE_ID, SYS_INSPECT_UI_NODES_TYPE_ID, SYS_INVOKE_FUNCTION_ID},
     types::{ResolvedType, StandardScalar, TypeDescriptor, TypeDescriptorKind},
-    value::{ConstructedValueKind, OpaqueCodecRegistry, OpaqueValue, RuntimeValue},
+    value::{ConstructedValueKind, OpaqueCodecRegistry, OpaqueValue, OpaqueValueError, RuntimeValue},
 };
 use orna_postgres::{
     AuthenticatedServerResourceEvent, AuthenticatedServerResourceStart, PostgresKernel, PostgresKernelError,
@@ -786,6 +786,12 @@ fn run_installed_external_contract(
     }
 
 
+    let standard = active
+        .catalogue_hash_context()
+        .standard()
+        .ok_or_else(|| "inspect.runtime_unavailable".to_owned())?;
+    let registry = registered_opaque_codecs(standard)
+        .map_err(|_| "inspect.runtime_unavailable".to_owned())?;
     let mut epoch_id = None;
     let mut row_counts = Vec::with_capacity(arguments.len());
     for (index, ((parameter_id, value), (expected_name, expected_type, expected_kind))) in
@@ -804,6 +810,12 @@ fn run_installed_external_contract(
         if value.opaque_type() != expected_type {
             return Err("inspect.unknown_carrier".to_owned());
         }
+        let value = OpaqueValue::new_inspect_carrier(
+            active,
+            expected_type,
+            value.canonical_payload(),
+        )
+        .map_err(map_inspect_carrier_error)?;
         let envelope = InspectCarrierEnvelope::decode(value.canonical_payload())
             .map_err(|_| "inspect.malformed_carrier".to_owned())?;
         if envelope.carrier_kind() != expected_kind {
@@ -813,6 +825,21 @@ fn run_installed_external_contract(
             || envelope.catalogue_revision_id() != active.pair().catalogue()
         {
             return Err("inspect.epoch_mismatch".to_owned());
+        }
+        if expected_kind == InspectCarrierKind::Snapshot {
+            if envelope.rows().len() != 1 {
+                return Err("inspect.malformed_carrier".to_owned());
+            }
+            let snapshot_row = envelope
+                .rows()
+                .first()
+                .ok_or_else(|| "inspect.malformed_carrier".to_owned())?;
+            let _ = decode_snapshot_row_epoch(
+                active,
+                &registry,
+                snapshot_row,
+                envelope.epoch_id(),
+            )?;
         }
         match epoch_id {
             Some(expected_epoch) if expected_epoch != envelope.epoch_id() => {
@@ -865,15 +892,20 @@ fn run_installed_external_contract(
     let mut payload = b"ORNA-UI/1 ".to_vec();
     payload.extend_from_slice(&body_length.to_be_bytes());
     payload.extend_from_slice(&body);
-    let standard = active
-        .catalogue_hash_context()
-        .standard()
-        .ok_or_else(|| "inspect.runtime_unavailable".to_owned())?;
-    let registry = registered_opaque_codecs(standard)
-        .map_err(|_| "inspect.runtime_unavailable".to_owned())?;
     OpaqueValue::new(active, &registry, STD_UI_TYPE_ID, payload)
         .map(RuntimeValue::Opaque)
         .map_err(|_| "inspect.projection_failed".to_owned())
+}
+
+
+fn map_inspect_carrier_error(error: OpaqueValueError) -> String {
+    match error {
+        OpaqueValueError::UnregisteredType { .. } => "inspect.unknown_carrier".to_owned(),
+        OpaqueValueError::InspectCarrierRevisionMismatch { .. } => {
+            "inspect.epoch_mismatch".to_owned()
+        }
+        _ => "inspect.malformed_carrier".to_owned(),
+    }
 }
 
 
@@ -1190,6 +1222,9 @@ fn decode_snapshot_row_payload(row: &[u8], epoch_id: u64) -> Result<(InspectEpoc
             .try_into()
             .map_err(|_| "inspect.malformed_carrier".to_owned())?,
     );
+    if invocation.to_bytes() == [0; 16] {
+        return Err("inspect.invalid_target".to_owned());
+    }
     let mut offset = 25 + 16 + 16 + 16;
     let outcome = *row.get(offset).ok_or_else(|| "inspect.malformed_carrier".to_owned())?;
     if !(1..=4).contains(&outcome) { return Err("inspect.malformed_carrier".to_owned()); }
