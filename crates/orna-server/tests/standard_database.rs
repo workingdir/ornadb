@@ -63,7 +63,13 @@ use orna_core::{
         SecurityAuditOutcome, SecurityFunctionTarget, SecuritySnapshot,
     },
     source::{SourceBundle, SourceUnit},
-    system::SYS_INVOKE_FUNCTION_ID,
+    system::{
+        SYS_INSPECT_CALLS_TYPE_ID, SYS_INSPECT_INVOCATION_NODES_TYPE_ID,
+        SYS_INSPECT_PRESENTATION_CANDIDATES_TYPE_ID, SYS_INSPECT_RESOURCES_TYPE_ID,
+        SYS_INSPECT_RUNTIME_BINDINGS_TYPE_ID, SYS_INSPECT_SECURITY_DECISIONS_TYPE_ID,
+        SYS_INSPECT_SNAPSHOT_TYPE_ID, SYS_INSPECT_STATE_CELLS_TYPE_ID, SYS_INSPECT_UI_NODES_TYPE_ID,
+        SYS_INVOKE_FUNCTION_ID,
+    },
     types::{ResolvedType, TypeDescriptor},
     value::{EnumValue, FunctionArgument, OpaqueValue, RecordValue, RuntimeValue},
 };
@@ -10687,6 +10693,65 @@ async fn install_raw_client_fixture(
         .id();
     Ok((active, standard_upgrade, client, server))
 }
+
+async fn install_raw_client_fixture_v4(
+    kernel: &PostgresKernel,
+) -> TestResult<(
+    orna_core::revision::ActiveDatabaseRevision,
+    orna_standard::StandardUpgrade,
+    FunctionId,
+    FunctionId,
+)> {
+    kernel.bootstrap().await?;
+    let empty = kernel.recover().await?;
+    let schema = SourceBundle::new([SourceUnit::new("schema.orna", RAW_CLIENT_SCHEMA_SOURCE)])?;
+    let report = check(&schema, empty.catalogue());
+    require(
+        report.diagnostics().is_empty(),
+        "raw V4 CLIENT fixture schema did not compile",
+    )?;
+    let version_one = kernel
+        .apply(&prepare(&report, empty.pair(), &empty)?)
+        .await?;
+    let standard_upgrade_v2 = orna_standard::prepare_standard_upgrade_v1_to_v2(&version_one)?;
+    let version_two = kernel.apply_standard_upgrade(&standard_upgrade_v2).await?;
+    let standard_upgrade_v3 = orna_standard::prepare_standard_upgrade_v2_to_v3(&version_two)?;
+    let version_three = kernel.apply_standard_upgrade(&standard_upgrade_v3).await?;
+    let standard_upgrade_v4 = orna_standard::prepare_standard_upgrade_v3_to_v4(&version_three)?;
+    let version_four = kernel.apply_standard_upgrade(&standard_upgrade_v4).await?;
+    let context = StandardApplicationCheckContext::try_new(
+        version_four.catalogue(),
+        standard_upgrade_v4.checked_standard_library(),
+    )?;
+    let source = SourceBundle::new([SourceUnit::new("main.orna", RAW_CLIENT_FUNCTION_SOURCE)])?;
+    let report = check_standard_application(&source, &context);
+    require(
+        report.diagnostics().is_empty(),
+        "raw V4 CLIENT fixture functions did not compile",
+    )?;
+    let active = kernel
+        .apply(&prepare_standard_application(
+            &report,
+            version_four.pair(),
+            &version_four,
+        )?)
+        .await?;
+    let client = active
+        .catalogue()
+        .functions()
+        .iter()
+        .find(|function| function.name().parts() == ["app", "enabled"])
+        .ok_or_else(|| failure("raw V4 CLIENT fixture is missing its CLIENT function"))?
+        .id();
+    let server = active
+        .catalogue()
+        .functions()
+        .iter()
+        .find(|function| function.name().parts() == ["app", "read"])
+        .ok_or_else(|| failure("raw V4 CLIENT fixture is missing its SERVER function"))?
+        .id();
+    Ok((active, standard_upgrade_v4, client, server))
+}
 async fn install_scalar_resource_client_fixture(
     kernel: &PostgresKernel,
     active: &orna_core::revision::ActiveDatabaseRevision,
@@ -12334,6 +12399,265 @@ async fn proves_installed_server_function_dogfood_source_through_orna_invoke() -
         )?;
 
         require_no_database_sessions(&database).await
+    })
+    .await
+}
+
+
+const RAW_ORDINARY_INSPECTOR_SOURCE: &str = "CREATE SCHEMA devtools;\n\
+    CREATE EXTERNAL CLIENT FUNCTION devtools.inspector_shell(\n\
+        p_snapshot sys.inspect.snapshot,\n\
+        p_invocation_nodes sys.inspect.invocation_nodes,\n\
+        p_calls sys.inspect.calls,\n\
+        p_resources sys.inspect.resources,\n\
+        p_state_cells sys.inspect.state_cells,\n\
+        p_ui_nodes sys.inspect.ui_nodes,\n\
+        p_presentation_candidates sys.inspect.presentation_candidates,\n\
+        p_runtime_bindings sys.inspect.runtime_bindings,\n\
+        p_security_decisions sys.inspect.security_decisions\n\
+    ) RETURNS std.ui.UI\n\
+    RUNTIME CONTRACT 'devtools.inspector_shell@1';\n\
+    CREATE CLIENT FUNCTION devtools.inspector(p_target REF sys.inspect.invocation)\n\
+    RETURNS std.ui.UI IS\n\
+    LET snapshot sys.inspect.snapshot := sys.inspect.snapshot(p_target => p_target);\n\
+    LET invocation_nodes sys.inspect.invocation_nodes :=\n\
+        sys.inspect.invocation_nodes(p_snapshot => snapshot);\n\
+    LET calls sys.inspect.calls := sys.inspect.calls(p_snapshot => snapshot);\n\
+    LET resources sys.inspect.resources :=\n\
+        sys.inspect.resources(p_snapshot => snapshot);\n\
+    LET state_cells sys.inspect.state_cells :=\n\
+        sys.inspect.state_cells(p_snapshot => snapshot);\n\
+    LET ui_nodes sys.inspect.ui_nodes := sys.inspect.ui_nodes(p_snapshot => snapshot);\n\
+    LET presentation_candidates sys.inspect.presentation_candidates :=\n\
+        sys.inspect.presentation_candidates(p_snapshot => snapshot);\n\
+    LET runtime_bindings sys.inspect.runtime_bindings :=\n\
+        sys.inspect.runtime_bindings(p_snapshot => snapshot);\n\
+    LET security_decisions sys.inspect.security_decisions :=\n\
+        sys.inspect.security_decisions(p_snapshot => snapshot);\n\
+    BEGIN\n\
+        RETURN devtools.inspector_shell(\n\
+            p_snapshot => snapshot,\n\
+            p_invocation_nodes => invocation_nodes,\n\
+            p_calls => calls,\n\
+            p_resources => resources,\n\
+            p_state_cells => state_cells,\n\
+            p_ui_nodes => ui_nodes,\n\
+            p_presentation_candidates => presentation_candidates,\n\
+            p_runtime_bindings => runtime_bindings,\n\
+            p_security_decisions => security_decisions\n\
+        );\n\
+    END;\n";
+
+#[cfg(feature = "test-hooks")]
+#[tokio::test]
+#[ignore = "requires the Compose PostgreSQL development service"]
+async fn proves_ordinary_client_inspector_through_installed_evaluator() -> TestResult<()> {
+    const CONNECTION_PROTOCOL_MAJOR: u16 = 5;
+    const MAX_UI_BODY_BYTES: usize = 64 * 1024;
+
+    with_test_database(|database| async move {
+        let uid = nix::unistd::geteuid().as_raw();
+        let kernel = kernel(&database)?;
+        let (mut active, standard_upgrade, _fixture_client, _fixture_server) =
+            install_raw_client_fixture_v4(&kernel).await?;
+        let standard = standard_upgrade.checked_standard_library();
+        let last_ordinal = active
+            .source()
+            .units()
+            .len()
+            .checked_sub(1)
+            .ok_or_else(|| failure("ordinary Inspector fixture has no retained source unit"))?;
+        let source = SourceBundle::new(active.source().units().iter().enumerate().map(
+            |(ordinal, unit)| {
+                let content = if ordinal == last_ordinal {
+                    format!("{}\n{}", unit.content(), RAW_ORDINARY_INSPECTOR_SOURCE)
+                } else {
+                    unit.content().to_owned()
+                };
+                SourceUnit::new(unit.logical_path(), content)
+            },
+        ))?;
+        let context = StandardApplicationCheckContext::try_new(active.catalogue(), &standard)?;
+        let report = check_standard_application(&source, &context);
+        if !report.diagnostics().is_empty() {
+            return Err(failure(format!(
+                "ordinary Inspector source did not compile: {:?}",
+                report.diagnostics()
+            )));
+        }
+        active = kernel
+            .apply(&prepare_standard_application(&report, active.pair(), &active)?)
+            .await
+            .map_err(|error| failure(format!("ordinary Inspector source install failed: {error:?}")))?;
+        let inspector_shell = active
+            .catalogue()
+            .functions()
+            .iter()
+            .find(|function| function.name().parts() == ["devtools", "inspector_shell"])
+            .ok_or_else(|| failure("installed Inspector shell function is missing"))?;
+        require(
+            matches!(
+                inspector_shell.return_type(),
+                FunctionReturn::Single(ResolvedType::Value(type_id))
+                    if *type_id == orna_standard::STD_UI_TYPE_ID
+            ),
+            "installed Inspector shell return type did not retain the sealed UI value identity",
+        )?;
+        let expected_shell_parameters = [
+            ("p_snapshot", SYS_INSPECT_SNAPSHOT_TYPE_ID),
+            ("p_invocation_nodes", SYS_INSPECT_INVOCATION_NODES_TYPE_ID),
+            ("p_calls", SYS_INSPECT_CALLS_TYPE_ID),
+            ("p_resources", SYS_INSPECT_RESOURCES_TYPE_ID),
+            ("p_state_cells", SYS_INSPECT_STATE_CELLS_TYPE_ID),
+            ("p_ui_nodes", SYS_INSPECT_UI_NODES_TYPE_ID),
+            (
+                "p_presentation_candidates",
+                SYS_INSPECT_PRESENTATION_CANDIDATES_TYPE_ID,
+            ),
+            ("p_runtime_bindings", SYS_INSPECT_RUNTIME_BINDINGS_TYPE_ID),
+            ("p_security_decisions", SYS_INSPECT_SECURITY_DECISIONS_TYPE_ID),
+        ];
+        require(
+            inspector_shell.parameters().len() == expected_shell_parameters.len()
+                && inspector_shell
+                    .parameters()
+                    .iter()
+                    .zip(expected_shell_parameters)
+                    .all(|(parameter, (name, type_id))| {
+                        parameter.name() == name
+                            && parameter.resolved_type() == ResolvedType::Value(type_id)
+                    }),
+            "installed Inspector shell parameters did not retain sealed value identities",
+        )?;
+
+        let inspector = active
+            .catalogue()
+            .functions()
+            .iter()
+            .find(|function| function.name().parts() == ["devtools", "inspector"])
+            .ok_or_else(|| failure("installed ordinary Inspector function is missing"))?;
+        let inspector_parameter = inspector
+            .parameter_by_name("p_target")
+            .ok_or_else(|| failure("ordinary Inspector is missing p_target"))?
+            .id();
+        let inspector = inspector.id();
+        let target = active
+            .catalogue_hash_context()
+            .standard()
+            .and_then(|standard| standard.catalogue().function_by_id(STD_INVOKE_ECHO_FUNCTION_ID))
+            .ok_or_else(|| failure("installed standard is missing std.invoke.echo"))?;
+        let registry = registered_opaque_codecs(
+            active
+                .catalogue_hash_context()
+                .standard()
+                .ok_or_else(|| failure("ordinary Inspector has no standard context"))?,
+        )?;
+        let security = SecuritySnapshot::new_with_function_targets_and_local_peer_credentials(
+            active.pair(),
+            active
+                .catalogue()
+                .functions()
+                .iter()
+                .map(|function| SecurityFunctionTarget::application(function.id()))
+                .chain(std::iter::once(SecurityFunctionTarget::verified_standard(
+                    target.id(),
+                    standard.verified_snapshot().revision(),
+                    target.current_revision(),
+                )))
+                .collect(),
+            vec![Principal::new(
+                RAW_CLIENT_USER,
+                PrincipalKind::User,
+                PrincipalStatus::Active,
+            )],
+            vec![],
+            vec![
+                ExecuteGrant::new(RAW_CLIENT_USER, inspector),
+                ExecuteGrant::new(RAW_CLIENT_USER, target.id()),
+            ],
+            vec![LocalPeerCredential::new(uid, RAW_CLIENT_USER)],
+        )?;
+        let security = kernel.replace_security_snapshot(&security).await?;
+        let session = security.bind_authenticated_session(RAW_CLIENT_USER, vec![])?;
+        let target_request = sealed_echo_request(
+            InvocationRequestTarget::function_id(target.id()),
+            InvocationParameterSelector::parameter_id(STD_INVOKE_ECHO_PARAMETER_ID),
+            41,
+        )?;
+        let retained = encode_invoke_request(&active, &registry, &target_request)?;
+        let target_result = kernel
+            .dispatch_sealed_sys_invoke(&session, CONNECTION_PROTOCOL_MAJOR, &retained)
+            .await?;
+        let target_invocation = require_echo_completion(&target_result, 41)?;
+        let target_argument = FunctionArgument::new(
+            inspector_parameter,
+            RuntimeValue::Reference {
+                target: orna_core::system::SYS_INSPECT_INVOCATION_TYPE_ID,
+                object: ObjectId::from_bytes(target_invocation.to_bytes()),
+            },
+        )?;
+        let authorisation = match security.authorise_execute(
+            &session,
+            InvocationTarget::new(inspector, active.pair()),
+        ) {
+            ExecuteDecision::Allowed(authorisation) => authorisation,
+            ExecuteDecision::Denied(denial) => {
+                return Err(failure(format!("ordinary Inspector grant was denied: {denial:?}")))
+            }
+        };
+        let mut executor = InstalledClientResourceExecutor::new(
+            kernel.clone(),
+            session,
+            active.clone(),
+        );
+        let result = evaluate_client_function_with_arguments_and_executor(
+            &active,
+            &authorisation,
+            std::slice::from_ref(&target_argument),
+            &mut executor,
+        )?;
+        let RuntimeValue::Opaque(ui) = result.value() else {
+            return Err(failure("ordinary Inspector did not return an opaque std.ui.UI value"));
+        };
+        require(
+            ui.opaque_type() == orna_standard::STD_UI_TYPE_ID
+                && !matches!(result.value(), RuntimeValue::Boolean(_)),
+            "ordinary Inspector returned a Boolean or arbitrary opaque value",
+        )?;
+        let payload = ui.canonical_payload();
+        let magic = orna_standard::UI_MAGIC.as_bytes();
+        require(
+            payload.len() >= magic.len() + 4 && payload.starts_with(magic),
+            "ordinary Inspector UI payload did not start with canonical ORNA-UI/1 framing",
+        )?;
+        let length_start = magic.len();
+        let body_length = u32::from_be_bytes(
+            payload[length_start..length_start + 4]
+                .try_into()
+                .map_err(|_| failure("ordinary Inspector UI length prefix was truncated"))?,
+        ) as usize;
+        require(
+            body_length <= MAX_UI_BODY_BYTES
+                && payload.len() == length_start + 4 + body_length,
+            "ordinary Inspector UI payload length was not bounded and exact",
+        )?;
+        let body = &payload[length_start + 4..];
+        let json: serde_json::Value = serde_json::from_slice(body)
+            .map_err(|error| failure(format!("ordinary Inspector UI body was not JSON: {error}")))?;
+        require(
+            json.is_object(),
+            "ordinary Inspector UI body was not a canonical JSON object",
+        )?;
+
+        let unavailable = evaluate_client_function_with_arguments(
+            &active,
+            &authorisation,
+            std::slice::from_ref(&target_argument),
+        );
+        require(
+            matches!(unavailable, Err(ClientExecutionError::Inspect { .. })),
+            "ordinary Inspector without an executor did not fail closed",
+        )
     })
     .await
 }
