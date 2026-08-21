@@ -443,6 +443,19 @@ struct ResourceProducerLifecycle {
     invocation: Option<InvocationId>,
     target: Option<InvocationTarget>,
     acceptance_committed: bool,
+    failure: Option<CallFailure>,
+    cancelled: bool,
+    terminal_commit_started: bool,
+    acceptance_commit_attempted: bool,
+}
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ResourceProducerFailureStage {
+    None,
+    PreAcceptance,
+    PostAcceptance,
+    PostAcceptanceAudit,
+    PostAcceptanceAuditCancellation,
+    PostAcceptanceCancelledExitAudit,
 }
 
 /// The owned redacted result of one sealed `sys.invoke` dispatch.
@@ -1887,7 +1900,7 @@ impl PostgresKernel {
             authenticated_session,
             request,
             cancellation,
-            false,
+            ResourceProducerFailureStage::None,
         )
         .await
     }
@@ -1904,7 +1917,75 @@ impl PostgresKernel {
             authenticated_session,
             request,
             cancellation,
-            true,
+            ResourceProducerFailureStage::PreAcceptance,
+        )
+        .await
+    }
+
+    #[cfg(feature = "test-hooks")]
+    #[doc(hidden)]
+    pub async fn start_authenticated_server_resource_producer_with_forced_post_acceptance_failure(
+        &self,
+        authenticated_session: &AuthenticatedSession,
+        request: &ResourceRequest,
+        cancellation: &ResourceCancellation,
+    ) -> Result<AuthenticatedServerResourceStart, PostgresKernelError> {
+        self.start_authenticated_server_resource_producer_with_failure_hook(
+            authenticated_session,
+            request,
+            cancellation,
+            ResourceProducerFailureStage::PostAcceptance,
+        )
+        .await
+    }
+
+    #[cfg(feature = "test-hooks")]
+    #[doc(hidden)]
+    pub async fn start_authenticated_server_resource_producer_with_forced_post_acceptance_audit_failure(
+        &self,
+        authenticated_session: &AuthenticatedSession,
+        request: &ResourceRequest,
+        cancellation: &ResourceCancellation,
+    ) -> Result<AuthenticatedServerResourceStart, PostgresKernelError> {
+        self.start_authenticated_server_resource_producer_with_failure_hook(
+            authenticated_session,
+            request,
+            cancellation,
+            ResourceProducerFailureStage::PostAcceptanceAudit,
+        )
+        .await
+    }
+
+    #[cfg(feature = "test-hooks")]
+    #[doc(hidden)]
+    pub async fn start_authenticated_server_resource_producer_with_forced_post_acceptance_cancelled_audit_failure(
+        &self,
+        authenticated_session: &AuthenticatedSession,
+        request: &ResourceRequest,
+        cancellation: &ResourceCancellation,
+    ) -> Result<AuthenticatedServerResourceStart, PostgresKernelError> {
+        self.start_authenticated_server_resource_producer_with_failure_hook(
+            authenticated_session,
+            request,
+            cancellation,
+            ResourceProducerFailureStage::PostAcceptanceAuditCancellation,
+        )
+        .await
+    }
+
+    #[cfg(feature = "test-hooks")]
+    #[doc(hidden)]
+    pub async fn start_authenticated_server_resource_producer_with_forced_post_acceptance_cancelled_exit_audit_failure(
+        &self,
+        authenticated_session: &AuthenticatedSession,
+        request: &ResourceRequest,
+        cancellation: &ResourceCancellation,
+    ) -> Result<AuthenticatedServerResourceStart, PostgresKernelError> {
+        self.start_authenticated_server_resource_producer_with_failure_hook(
+            authenticated_session,
+            request,
+            cancellation,
+            ResourceProducerFailureStage::PostAcceptanceCancelledExitAudit,
         )
         .await
     }
@@ -1914,7 +1995,7 @@ impl PostgresKernel {
         authenticated_session: &AuthenticatedSession,
         request: &ResourceRequest,
         cancellation: &ResourceCancellation,
-        force_pre_acceptance_failure: bool,
+        failure_stage: ResourceProducerFailureStage,
     ) -> Result<AuthenticatedServerResourceStart, PostgresKernelError> {
         validate_resource_state_context(request)?;
         if !self.reserve_resource_request_id(request.request_id).await? {
@@ -1937,7 +2018,7 @@ impl PostgresKernel {
                 session,
                 request,
                 worker_cancellation,
-                force_pre_acceptance_failure,
+                failure_stage,
                 command_receiver,
                 ready_sender,
             )
@@ -3371,6 +3452,7 @@ async fn commit_post_acceptance_resource_error_audit(
     cancellation: &ResourceCancellation,
     invocation: InvocationId,
     target: Option<InvocationTarget>,
+    lifecycle: &mut ResourceProducerLifecycle,
 ) -> Result<(), PostgresKernelError> {
     let mut session = kernel.open().await?;
     let operation = async {
@@ -3383,10 +3465,14 @@ async fn commit_post_acceptance_resource_error_audit(
             .map_err(PostgresKernelError::Database)?;
         require_current_migrations(&transaction).await?;
         let commit_started = cancellation.try_begin_commit();
-        let terminal = if commit_started {
-            ResourceAuditTerminalOutcome::Failed
-        } else {
+        if commit_started {
+            lifecycle.terminal_commit_started = true;
+        }
+        let cancellation_won = !commit_started && cancellation.is_requested();
+        let terminal = if cancellation_won {
             ResourceAuditTerminalOutcome::Cancelled
+        } else {
+            ResourceAuditTerminalOutcome::Failed
         };
         append_resource_audit_event(
             &transaction,
@@ -3404,7 +3490,7 @@ async fn commit_post_acceptance_resource_error_audit(
             .commit()
             .await
             .map_err(PostgresKernelError::Database)?;
-        if commit_started {
+        if !cancellation_won {
             cancellation.commit_finished();
         }
         Ok(())
@@ -3425,22 +3511,11 @@ fn send_resource_producer_ready(
 }
 
 fn finish_resource_producer_failure(
-    ready_sender: &mut Option<
-        tokio::sync::oneshot::Sender<Result<ResourceProducerReady, PostgresKernelError>>,
-    >,
-    stream_id: u64,
-    request_id: InvocationId,
+    lifecycle: &mut ResourceProducerLifecycle,
     result: Result<(), PostgresKernelError>,
 ) -> Result<(), PostgresKernelError> {
     if result.is_ok() {
-        send_resource_producer_ready(
-            ready_sender,
-            Ok(ResourceProducerReady::Failed {
-                stream_id,
-                request_id,
-                failure: CallFailure::InternalFailure,
-            }),
-        );
+        lifecycle.failure = Some(CallFailure::InternalFailure);
     }
     result
 }
@@ -3501,10 +3576,80 @@ async fn finalize_reserved_resource_request(
                 .commit()
                 .await
                 .map_err(PostgresKernelError::Database)?;
+            cancellation.commit_finished();
             return Ok(());
         }
 
-        let invocation = if lifecycle.acceptance_committed {
+        let acceptance_committed = if lifecycle.acceptance_committed {
+            true
+        } else if lifecycle.acceptance_commit_attempted {
+            let invocation = lifecycle.invocation.ok_or_else(|| {
+                PostgresKernelError::DurableInvariant {
+                    relation: "resource producer",
+                    record: request.request_id.canonical(),
+                    rule: "attempted acceptance commit must retain its invocation identity",
+                }
+            })?;
+            let target = lifecycle.target.ok_or_else(|| {
+                PostgresKernelError::DurableInvariant {
+                    relation: "resource producer",
+                    record: request.request_id.canonical(),
+                    rule: "attempted acceptance commit must retain its target identity",
+                }
+            })?;
+            let invocation_id = invocation.to_bytes().to_vec();
+            let row = transaction
+                .query_opt(
+                    "SELECT outcome,
+                            session_principal_id,
+                            function_id,
+                            source_revision_id,
+                            catalogue_revision_id,
+                            security_audit_event_id
+                     FROM _orna_kernel.invocation_audit_events
+                     WHERE invocation_id = $1",
+                    &[&invocation_id],
+                )
+                .await
+                .map_err(PostgresKernelError::Database)?;
+            match row {
+                None => false,
+                Some(row) => {
+                    let outcome: String =
+                        row.try_get("outcome").map_err(PostgresKernelError::Database)?;
+                    let session_principal_id: Vec<u8> =
+                        row.try_get("session_principal_id").map_err(PostgresKernelError::Database)?;
+                    let function_id: Option<Vec<u8>> =
+                        row.try_get("function_id").map_err(PostgresKernelError::Database)?;
+                    let source_revision_id: Option<Vec<u8>> =
+                        row.try_get("source_revision_id").map_err(PostgresKernelError::Database)?;
+                    let catalogue_revision_id: Option<Vec<u8>> =
+                        row.try_get("catalogue_revision_id").map_err(PostgresKernelError::Database)?;
+                    let security_audit_event_id: Option<Vec<u8>> =
+                        row.try_get("security_audit_event_id").map_err(PostgresKernelError::Database)?;
+                    let accepted_identity_matches = outcome == "allowed"
+                        && session_principal_id
+                            == authenticated_session.principal().to_bytes().to_vec()
+                        && function_id == Some(target.function().to_bytes().to_vec())
+                        && source_revision_id
+                            == Some(target.revision().source().to_bytes().to_vec())
+                        && catalogue_revision_id
+                            == Some(target.revision().catalogue().to_bytes().to_vec())
+                        && security_audit_event_id.is_some();
+                    if !accepted_identity_matches {
+                        return Err(PostgresKernelError::DurableInvariant {
+                            relation: "_orna_kernel.invocation_audit_events",
+                            record: invocation.canonical(),
+                            rule: "attempted acceptance commit retained invalid allowed evidence",
+                        });
+                    }
+                    true
+                }
+            }
+        } else {
+            false
+        };
+        let invocation = if acceptance_committed {
             lifecycle.invocation.ok_or_else(|| PostgresKernelError::DurableInvariant {
                 relation: "resource producer",
                 record: request.request_id.canonical(),
@@ -3513,8 +3658,13 @@ async fn finalize_reserved_resource_request(
         } else {
             lifecycle.invocation.unwrap_or_else(InvocationId::new)
         };
-        let (decision, target) = if lifecycle.acceptance_committed {
-            (SecurityAuditOutcome::Allowed, lifecycle.target)
+        let (decision, target) = if acceptance_committed {
+            let target = lifecycle.target.ok_or_else(|| PostgresKernelError::DurableInvariant {
+                relation: "resource producer",
+                record: request.request_id.canonical(),
+                rule: "accepted resource producer must retain its target identity",
+            })?;
+            (SecurityAuditOutcome::Allowed, Some(target))
         } else {
             append_unresolved_invocation_audit(
                 &transaction,
@@ -3524,11 +3674,15 @@ async fn finalize_reserved_resource_request(
             .await?;
             (SecurityAuditOutcome::Denied, None)
         };
-        let commit_started = cancellation.try_begin_commit();
-        let terminal = if commit_started {
-            ResourceAuditTerminalOutcome::Failed
-        } else {
+        let finalizer_commit_started = cancellation.try_begin_commit();
+        let terminal_commit_started =
+            finalizer_commit_started || lifecycle.terminal_commit_started;
+        let cancellation_won =
+            lifecycle.cancelled || (!terminal_commit_started && cancellation.is_requested());
+        let terminal = if cancellation_won {
             ResourceAuditTerminalOutcome::Cancelled
+        } else {
+            ResourceAuditTerminalOutcome::Failed
         };
         append_resource_audit_event(
             &transaction,
@@ -3546,7 +3700,7 @@ async fn finalize_reserved_resource_request(
             .commit()
             .await
             .map_err(PostgresKernelError::Database);
-        if result.is_ok() && commit_started {
+        if result.is_ok() && terminal_commit_started {
             cancellation.commit_finished();
         }
         result
@@ -3560,7 +3714,7 @@ async fn run_authenticated_server_resource_producer_task(
     authenticated_session: AuthenticatedSession,
     request: ResourceRequest,
     cancellation: ResourceCancellation,
-    force_pre_acceptance_failure: bool,
+    failure_stage: ResourceProducerFailureStage,
     commands: tokio::sync::mpsc::Receiver<ResourceProducerCommand>,
     ready_sender: tokio::sync::oneshot::Sender<
         Result<ResourceProducerReady, PostgresKernelError>,
@@ -3575,7 +3729,7 @@ async fn run_authenticated_server_resource_producer_task(
             authenticated_session.clone(),
             request.clone(),
             cancellation.clone(),
-            force_pre_acceptance_failure,
+            failure_stage,
             &mut database_session,
             commands,
             &mut ready_sender,
@@ -3610,17 +3764,27 @@ async fn run_authenticated_server_resource_producer_task(
                 Err(error)
             }
         }
-        Ok(()) => {
-            send_resource_producer_ready(
-                &mut ready_sender,
-                Ok(ResourceProducerReady::Failed {
-                    stream_id: request.stream_id,
-                    request_id: request.request_id,
-                    failure: CallFailure::InternalFailure,
-                }),
-            );
-            finalizer
-        }
+        Ok(()) => match finalizer {
+            Ok(()) => {
+                send_resource_producer_ready(
+                    &mut ready_sender,
+                    Ok(ResourceProducerReady::Failed {
+                        stream_id: request.stream_id,
+                        request_id: request.request_id,
+                        failure: lifecycle.failure.unwrap_or(CallFailure::InternalFailure),
+                    }),
+                );
+                Ok(())
+            }
+            Err(error) => {
+                if ready_sender.is_some() {
+                    send_resource_producer_ready(&mut ready_sender, Err(error));
+                    Ok(())
+                } else {
+                    Err(error)
+                }
+            }
+        },
     }
 }
 
@@ -3629,7 +3793,7 @@ async fn run_authenticated_server_resource_producer_task_body(
     authenticated_session: AuthenticatedSession,
     request: ResourceRequest,
     cancellation: ResourceCancellation,
-    force_pre_acceptance_failure: bool,
+    failure_stage: ResourceProducerFailureStage,
     database_session: &mut PostgresSession,
     mut commands: tokio::sync::mpsc::Receiver<ResourceProducerCommand>,
     ready_sender: &mut Option<
@@ -3649,7 +3813,7 @@ async fn run_authenticated_server_resource_producer_task_body(
     let security = recover_security_snapshot_for_active(&transaction, &active).await?;
     let invocation = InvocationId::new();
     lifecycle.invocation = Some(invocation);
-    if force_pre_acceptance_failure {
+    if failure_stage == ResourceProducerFailureStage::PreAcceptance {
         transaction
             .query_one("SELECT no_such_resource_producer_column", &[])
             .await
@@ -3751,8 +3915,11 @@ async fn run_authenticated_server_resource_producer_task_body(
     }
 
     if let Some(failure) = failure {
-        if !cancellation.try_begin_commit() {
-            let operation = async {
+        lifecycle.failure = Some(failure);
+        let commit_started = cancellation.try_begin_commit();
+        if !commit_started {
+            lifecycle.cancelled = true;
+            return async {
                 transaction
                     .rollback()
                     .await
@@ -3762,21 +3929,8 @@ async fn run_authenticated_server_resource_producer_task_body(
                     .await
             }
             .await;
-            let result = operation;
-            match result {
-                Ok(()) => {
-                    send_resource_producer_ready(ready_sender, Ok(ResourceProducerReady::Failed {
-                        stream_id: request.stream_id,
-                        request_id: request.request_id,
-                        failure,
-                    }));
-                }
-                Err(error) => {
-                    return Err(error);
-                }
-            }
-            return Ok(());
         }
+        lifecycle.terminal_commit_started = true;
         let operation = async {
             append_resource_audit_event(
                 &transaction,
@@ -3799,20 +3953,7 @@ async fn run_authenticated_server_resource_producer_task_body(
         if operation.is_ok() {
             cancellation.commit_finished();
         }
-        let result = operation;
-        match result {
-            Ok(()) => {
-                send_resource_producer_ready(ready_sender, Ok(ResourceProducerReady::Failed {
-                    stream_id: request.stream_id,
-                    request_id: request.request_id,
-                    failure,
-                }));
-            }
-            Err(error) => {
-                return Err(error);
-            }
-        }
-        return Ok(());
+        return operation;
     }
 
     let authorisation = authorisation.ok_or_else(|| sealed_target_invariant(
@@ -3828,7 +3969,8 @@ async fn run_authenticated_server_resource_producer_task_body(
     // cancellation that already won before this boundary must not expose an
     // accepted stream without its durable audit row.
     if !cancellation.try_begin_acceptance_commit() {
-        let operation = async {
+        lifecycle.failure = Some(CallFailure::InternalFailure);
+        return async {
             transaction
                 .rollback()
                 .await
@@ -3838,30 +3980,36 @@ async fn run_authenticated_server_resource_producer_task_body(
                 .await
         }
         .await;
-        let result = operation;
-        match result {
-            Ok(()) => {
-                send_resource_producer_ready(ready_sender, Ok(ResourceProducerReady::Failed {
-                    stream_id: request.stream_id,
-                    request_id: request.request_id,
-                    failure: CallFailure::InternalFailure,
-                }));
-            }
-            Err(error) => {
-                return Err(error);
-            }
-        }
-        return Ok(());
     }
-    let operation = transaction
-        .commit()
-        .await
-        .map_err(PostgresKernelError::Database);
+    lifecycle.acceptance_commit_attempted = true;
+    let operation = async {
+        let request_id = request.request_id.to_bytes().to_vec();
+        let reservation = transaction
+            .query_opt(
+                "SELECT request_id
+                 FROM _orna_kernel.resource_request_history
+                 WHERE request_id = $1
+                 FOR UPDATE",
+                &[&request_id],
+            )
+            .await
+            .map_err(PostgresKernelError::Database)?;
+        if reservation.is_none() {
+            return Err(PostgresKernelError::DurableInvariant {
+                relation: "_orna_kernel.resource_request_history",
+                record: request.request_id.canonical(),
+                rule: "accepted resource producer must retain its reservation",
+            });
+        }
+        transaction
+            .commit()
+            .await
+            .map_err(PostgresKernelError::Database)
+    }
+    .await;
+    cancellation.acceptance_commit_finished();
     if operation.is_ok() {
         lifecycle.acceptance_committed = true;
-        cancellation.acceptance_commit_finished();
-    } else {
-        cancellation.acceptance_commit_finished();
     }
     if let Err(error) = operation {
         return Err(error);
@@ -3890,9 +4038,10 @@ async fn run_authenticated_server_resource_producer_task_body(
             &cancellation,
             invocation,
             completed_target,
+            lifecycle,
         )
         .await;
-        return finish_resource_producer_failure(ready_sender, request.stream_id, request.request_id, operation);
+        return finish_resource_producer_failure(lifecycle, operation);
     }
     let transaction = transaction.ok_or_else(|| {
         sealed_target_invariant(
@@ -3909,9 +4058,13 @@ async fn run_authenticated_server_resource_producer_task_body(
             &cancellation,
             invocation,
             completed_target,
+            lifecycle,
         )
         .await;
-        return finish_resource_producer_failure(ready_sender, request.stream_id, request.request_id, operation);
+        return finish_resource_producer_failure(lifecycle, operation);
+    }
+    if failure_stage == ResourceProducerFailureStage::PostAcceptanceAuditCancellation {
+        cancellation.request_cancel();
     }
     let execution_validation = async {
         lock_active_revision_for_resource(&transaction, active.pair()).await?;
@@ -3927,6 +4080,16 @@ async fn run_authenticated_server_resource_producer_task_body(
         if !security_snapshots_match(&execution_security, &security) {
             return Err(PostgresKernelError::SecurityFunctionSetMismatch);
         }
+        if matches!(
+            failure_stage,
+            ResourceProducerFailureStage::PostAcceptanceAudit
+                | ResourceProducerFailureStage::PostAcceptanceAuditCancellation
+        ) {
+            transaction
+                .query_one("SELECT no_such_post_acceptance_audit_column", &[])
+                .await
+                .map_err(PostgresKernelError::Database)?;
+        }
         Ok::<(), PostgresKernelError>(())
     }
     .await;
@@ -3939,12 +4102,14 @@ async fn run_authenticated_server_resource_producer_task_body(
             &cancellation,
             invocation,
             completed_target,
+            lifecycle,
         )
         .await;
-        return finish_resource_producer_failure(ready_sender, request.stream_id, request.request_id, operation);
+        return finish_resource_producer_failure(lifecycle, operation);
     }
 
     if cancellation.is_requested() {
+        lifecycle.cancelled = true;
         let operation = commit_accepted_resource_cancelled_audit(
             transaction,
             &authenticated_session,
@@ -3953,7 +4118,7 @@ async fn run_authenticated_server_resource_producer_task_body(
             completed_target,
         )
         .await;
-        return finish_resource_producer_failure(ready_sender, request.stream_id, request.request_id, operation);
+        return finish_resource_producer_failure(lifecycle, operation);
     }
 
     let accepted = AuthenticatedServerResourceAccepted {
@@ -3967,6 +4132,15 @@ async fn run_authenticated_server_resource_producer_task_body(
         },
     };
     send_resource_producer_ready(ready_sender, Ok(ResourceProducerReady::Accepted(accepted)));
+    if failure_stage == ResourceProducerFailureStage::PostAcceptance {
+        transaction
+            .query_one("SELECT no_such_post_acceptance_resource_producer_column", &[])
+            .await
+            .map_err(PostgresKernelError::Database)?;
+    }
+    if failure_stage == ResourceProducerFailureStage::PostAcceptanceCancelledExitAudit {
+        cancellation.request_cancel();
+    }
 
     let stream_result = if let Some(executable) = standard_executable.as_ref() {
         run_authenticated_standard_resource_stream(
@@ -4010,6 +4184,11 @@ async fn run_authenticated_server_resource_producer_task_body(
             total_bytes,
         }) => {
             let commit_started = cancellation.try_begin_commit();
+            if commit_started {
+                lifecycle.terminal_commit_started = true;
+            } else {
+                lifecycle.cancelled = true;
+            }
             let operation = if commit_started {
                 commit_resource_audit(
                     transaction,
@@ -4054,6 +4233,16 @@ async fn run_authenticated_server_resource_producer_task_body(
         }
         ResourceProducerExit::Cancelled(ResourceProducerCancelled { response }) => {
             let commit_started = cancellation.try_begin_commit();
+            lifecycle.cancelled = true;
+            if commit_started {
+                lifecycle.terminal_commit_started = true;
+            }
+            if failure_stage == ResourceProducerFailureStage::PostAcceptanceCancelledExitAudit {
+                transaction
+                    .query_one("SELECT no_such_post_acceptance_cancelled_exit_audit_column", &[])
+                    .await
+                    .map_err(PostgresKernelError::Database)?;
+            }
             let operation = commit_accepted_resource_cancelled_audit(
                 transaction,
                 &authenticated_session,
@@ -4089,6 +4278,11 @@ async fn run_authenticated_server_resource_producer_task_body(
                 }
             };
             let commit_started = cancellation.try_begin_commit();
+            if commit_started {
+                lifecycle.terminal_commit_started = true;
+            } else {
+                lifecycle.cancelled = true;
+            }
             let operation = if commit_started {
                 commit_resource_audit(
                     transaction,
