@@ -57,6 +57,12 @@ use orna_standard::{
 };
 
 pub mod capability;
+pub mod inspect_lifecycle;
+
+pub use inspect_lifecycle::{
+    ClientInspectLifecycle, ClientInspectLifecycleState, InspectEpochBinding, InspectFreezeToken,
+    InspectLifecycleError, InspectProjectionVersions,
+};
 
 /// The active revision, function revision, and root invocation selected for
 /// one CLIENT execution.
