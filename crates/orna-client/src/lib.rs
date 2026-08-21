@@ -78,40 +78,77 @@ pub struct ClientExecutionContext {
     function: FunctionId,
     function_revision: FunctionRevisionId,
     parent_invocation_id: InvocationId,
+    observer_lineage: Option<ObserverLineage>,
 }
 
 /// Internal observer provenance for one active CLIENT invocation.
 ///
-/// The public execution context intentionally keeps its existing shape. The
-/// evaluator carries the complete observer chain separately so nested calls
-/// can expose their fresh current invocation without losing the root or the
-/// caller's current invocation.
+/// The public accessors retain their existing API. A private compatibility
+/// carrier preserves the bounded observer chain across returned contexts.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct ObserverLineage {
     root: InvocationId,
     parent: InvocationId,
     current: InvocationId,
+    ancestors: [InvocationId; orna_artifact::client_plan::MAX_EXPRESSION_DEPTH + 1],
+    ancestor_len: usize,
 }
 
 impl ObserverLineage {
-    const fn top_level(invocation: InvocationId) -> Self {
+    fn top_level(invocation: InvocationId) -> Self {
+        let mut ancestors = [
+            InvocationId::from_bytes([0; 16]);
+            orna_artifact::client_plan::MAX_EXPRESSION_DEPTH + 1
+        ];
+        ancestors[0] = invocation;
         Self {
             root: invocation,
             parent: invocation,
             current: invocation,
+            ancestors,
+            ancestor_len: 1,
         }
     }
 
-    fn nested(self) -> Self {
-        Self {
-            root: self.root,
-            parent: self.current,
-            current: InvocationId::new(),
+    fn nested(mut self) -> Self {
+        let current = InvocationId::new();
+        self.parent = self.current;
+        self.current = current;
+        if self.ancestor_len < self.ancestors.len() {
+            self.ancestors[self.ancestor_len] = current;
+            self.ancestor_len += 1;
         }
+        self
     }
 
-    const fn compatibility(context: ClientExecutionContext) -> Self {
-        Self::top_level(context.parent_invocation_id())
+    fn with_current(mut self, current: InvocationId) -> Self {
+        self.parent = self.current;
+        self.current = current;
+        if self.ancestor_len < self.ancestors.len() {
+            self.ancestors[self.ancestor_len] = current;
+            self.ancestor_len += 1;
+        }
+        self
+    }
+
+    #[cfg(test)]
+    fn with_parent_and_current(mut self, parent: InvocationId, current: InvocationId) -> Self {
+        self.parent = parent;
+        self.current = current;
+        self.ancestors[1] = parent;
+        self.ancestors[2] = current;
+        self.ancestor_len = 3;
+        self
+    }
+
+    fn contains(&self, target: InvocationId) -> bool {
+        self.ancestors[..self.ancestor_len].contains(&target) || target == self.current
+    }
+
+    fn compatibility(context: ClientExecutionContext) -> Self {
+        context
+            .observer_lineage
+            .unwrap_or_else(|| Self::top_level(context.parent_invocation_id()))
     }
 }
 
@@ -157,11 +194,29 @@ impl ClientExecutionContext {
         self.parent_invocation_id
     }
 
+    /// Returns the observer lineage carried by this execution context.
+    /// Contexts built by older callers have no embedded lineage and retain
+    /// the single-anchor compatibility behaviour.
+    fn observer_lineage(&self) -> ObserverLineage {
+        self.observer_lineage
+            .unwrap_or_else(|| ObserverLineage::top_level(self.parent_invocation_id))
+    }
+
     /// Returns the trusted observer root invocation anchor used by Inspector.
-    pub const fn observer_root_invocation_id(&self) -> InvocationId { self.parent_invocation_id }
+    pub const fn observer_root_invocation_id(&self) -> InvocationId {
+        match self.observer_lineage {
+            Some(lineage) => lineage.root,
+            None => self.parent_invocation_id,
+        }
+    }
 
     /// Returns the trusted observer parent invocation anchor used by Inspector.
-    pub const fn observer_parent_invocation_id(&self) -> InvocationId { self.parent_invocation_id }
+    pub const fn observer_parent_invocation_id(&self) -> InvocationId {
+        match self.observer_lineage {
+            Some(lineage) => lineage.current,
+            None => self.parent_invocation_id,
+        }
+    }
 
     /// Returns the distinct client-side Inspector epoch anchor.
     pub const fn client_epoch_id(&self) -> ClientEpochId {
@@ -950,6 +1005,8 @@ pub struct ClientInspectRequest {
     client_epoch_id: ClientEpochId,
     observer_root_invocation_id: InvocationId,
     observer_parent_invocation_id: InvocationId,
+    observer_lineage: [InvocationId; orna_artifact::client_plan::MAX_EXPRESSION_DEPTH + 1],
+    observer_lineage_len: usize,
     target_invocation_id: Option<InvocationId>,
     snapshot_options: Option<RuntimeValue>,
 }
@@ -1001,6 +1058,8 @@ impl ClientInspectRequest {
             client_epoch_id: context.client_epoch_id(),
             observer_root_invocation_id: lineage.root,
             observer_parent_invocation_id: lineage.current,
+            observer_lineage: lineage.ancestors,
+            observer_lineage_len: lineage.ancestor_len,
             target_invocation_id,
             snapshot_options,
         }
@@ -1034,6 +1093,11 @@ impl ClientInspectRequest {
     /// Returns the trusted observer parent invocation identity.
     pub const fn observer_parent_invocation_id(&self) -> InvocationId {
         self.observer_parent_invocation_id
+    }
+
+    /// Returns all bounded observer anchors from root through current.
+    pub fn observer_lineage(&self) -> &[InvocationId] {
+        &self.observer_lineage[..self.observer_lineage_len]
     }
 
     /// Returns the fixed observer purpose for this sealed request.
@@ -3570,6 +3634,7 @@ fn evaluate_function(
         function,
         function_revision: revision.id(),
         parent_invocation_id: lineage.parent,
+        observer_lineage: Some(lineage),
     };
     // A version-5 capability envelope is decoded before function-shape
     // validation (work ADR 0060). Its inner plan version classifies the
@@ -5174,6 +5239,23 @@ pub fn cancel_client_action_with_executor(
     complete_client_action(active, action_state, completion)
 }
 
+pub fn trigger_client_action(
+    active: &ActiveDatabaseRevision,
+    action: &RuntimeValue,
+    authorisation: &AuthorisedInvocation,
+    parent: &ClientExecutionContext,
+    action_state: &mut ClientActionState,
+    declarations: &[capability::LocalCapabilityDeclaration],
+    grants: &capability::LocalCapabilityGrantSet,
+    state: &mut ClientStateStore,
+    executor: &mut dyn ClientResourceExecutor,
+) -> Result<ClientActionOutcome, ClientActionError> {
+    trigger_client_action_with_lineage(
+        active, action, authorisation, parent, action_state, declarations, grants, state,
+        parent.observer_lineage(), executor,
+    )
+}
+
 fn client_action_target_is_provenance_safe(
     active: &ActiveDatabaseRevision,
     parent: ClientExecutionContext,
@@ -5219,7 +5301,7 @@ impl ClientResourceExecutor for ClientActionNestedExecutor<'_> {
     }
 }
 
-pub fn trigger_client_action(
+fn trigger_client_action_with_lineage(
     active: &ActiveDatabaseRevision,
     action: &RuntimeValue,
     authorisation: &AuthorisedInvocation,
@@ -5228,6 +5310,7 @@ pub fn trigger_client_action(
     declarations: &[capability::LocalCapabilityDeclaration],
     grants: &capability::LocalCapabilityGrantSet,
     state: &mut ClientStateStore,
+    lineage: ObserverLineage,
     executor: &mut dyn ClientResourceExecutor,
 ) -> Result<ClientActionOutcome, ClientActionError> {
     if parent.pair() != active.pair()
@@ -5277,7 +5360,7 @@ pub fn trigger_client_action(
                     active,
                     kind,
                     ClientResourceInvocationContext::new(
-                        parent.parent_invocation_id(),
+                        lineage.current,
                         descriptor.call_site,
                         state.context().state_profile().to_owned(),
                         state.context().instance_key().to_owned(),
@@ -5314,7 +5397,7 @@ pub fn trigger_client_action(
                     active,
                     kind,
                     ClientResourceInvocationContext::new(
-                        parent.parent_invocation_id(),
+                        lineage.current,
                         descriptor.call_site,
                         state.context().state_profile().to_owned(),
                         state.context().instance_key().to_owned(),
@@ -5342,11 +5425,7 @@ pub fn trigger_client_action(
                 &mut staged,
                 0,
                 authorisation.session_principal(),
-                ObserverLineage {
-                    root: parent.parent_invocation_id(),
-                    parent: parent.parent_invocation_id(),
-                    current: request.request_id(),
-                },
+                lineage.with_current(request.request_id()),
                 &mut nested,
             );
             let completion = match result {
@@ -5616,7 +5695,7 @@ fn inspect_target_is_observer(
 }
 
 fn inspect_target_is_observer_with_lineage(lineage: ObserverLineage, target: InvocationId) -> bool {
-    target == lineage.root || target == lineage.parent || target == lineage.current
+    lineage.contains(target)
 }
 
 fn inspect_invocation_target(value: &RuntimeValue) -> Option<InvocationId> {
@@ -6992,6 +7071,7 @@ mod tests {
             function: FunctionId::from_bytes([0x33; 16]),
             function_revision: FunctionRevisionId::from_bytes([0x44; 16]),
             parent_invocation_id: InvocationId::from_bytes([0x55; 16]),
+            observer_lineage: None,
         };
         let operation = super::ClientInspectOperation::Snapshot {
             target: RuntimeValue::Boolean(true),
@@ -7015,6 +7095,7 @@ mod tests {
             function: FunctionId::from_bytes([0x73; 16]),
             function_revision: FunctionRevisionId::from_bytes([0x74; 16]),
             parent_invocation_id: InvocationId::from_bytes([0x75; 16]),
+            observer_lineage: None,
         };
         let parameter = ParameterId::from_bytes([0x76; 16]);
         let mut executor = super::DeterministicClientResourceExecutor::new(
@@ -7054,6 +7135,7 @@ mod tests {
             function: FunctionId::from_bytes([0x83; 16]),
             function_revision: FunctionRevisionId::from_bytes([0x84; 16]),
             parent_invocation_id: InvocationId::from_bytes([0x85; 16]),
+            observer_lineage: None,
         };
         let parameter = ParameterId::from_bytes([0x86; 16]);
         let mut executor = super::DeterministicClientResourceExecutor::new(
@@ -7172,6 +7254,7 @@ mod tests {
             function: super::FunctionId::from_bytes([0x03; 16]),
             function_revision: super::FunctionRevisionId::from_bytes([0x04; 16]),
             parent_invocation_id: super::InvocationId::from_bytes([0x05; 16]),
+            observer_lineage: None,
         };
         assert!(super::inspect_target_is_observer(
             context,
@@ -7210,6 +7293,14 @@ mod tests {
         assert_eq!(child.parent, nested.current);
         assert_ne!(child.current, nested.current);
 
+        let grandchild = child.nested();
+        assert_eq!(grandchild.root, root);
+        assert_eq!(grandchild.parent, child.current);
+        assert!(grandchild.contains(root));
+        assert!(grandchild.contains(nested.current));
+        assert!(grandchild.contains(child.current));
+        assert!(grandchild.contains(grandchild.current));
+
         let context = super::ClientExecutionContext {
             pair: super::RevisionPair::new(
                 orna_core::SourceRevisionId::from_bytes([0x32; 16]),
@@ -7218,15 +7309,30 @@ mod tests {
             function: super::FunctionId::from_bytes([0x34; 16]),
             function_revision: super::FunctionRevisionId::from_bytes([0x35; 16]),
             parent_invocation_id: nested.current,
+            observer_lineage: Some(nested),
         };
+        assert_eq!(context.observer_root_invocation_id(), root);
+        assert_eq!(context.observer_parent_invocation_id(), nested.current);
         let operation = super::ClientInspectOperation::Snapshot {
             target: super::RuntimeValue::Boolean(true),
         };
+        let compatibility_request = super::ClientInspectRequest::new(context, operation.clone());
+        assert_eq!(compatibility_request.observer_root_invocation_id(), root);
+        assert_eq!(compatibility_request.observer_parent_invocation_id(), nested.current);
+        assert_eq!(compatibility_request.observer_lineage(), &[root, nested.current]);
+        let external_request = super::ClientExternalContractRequest::new(
+            context,
+            "app.test@1",
+            Vec::new(),
+        );
+        assert_eq!(external_request.observer_root_invocation_id(), root);
+        assert_eq!(external_request.observer_parent_invocation_id(), nested.current);
         let request = super::ClientInspectRequest::with_provenance(
             context, operation, None, None, nested,
         );
         assert_eq!(request.observer_root_invocation_id(), root);
         assert_eq!(request.observer_parent_invocation_id(), nested.current);
+        assert_eq!(request.observer_lineage(), &[root, nested.current]);
 
         let mut executor = super::DeterministicClientResourceExecutor::new(
             |_: &super::ClientResourceRequest| Ok::<_, String>(RuntimeValue::Boolean(false)),
@@ -7300,6 +7406,7 @@ mod tests {
             function: super::FunctionId::from_bytes([0x23; 16]),
             function_revision: super::FunctionRevisionId::from_bytes([0x24; 16]),
             parent_invocation_id: super::InvocationId::from_bytes([0x25; 16]),
+            observer_lineage: None,
         };
         let (active, _, _, _) = version_one_active(true);
         assert!(matches!(
@@ -7429,6 +7536,7 @@ mod tests {
             function: FunctionId::from_bytes([0xa3; 16]),
             function_revision: FunctionRevisionId::from_bytes([0xa4; 16]),
             parent_invocation_id: InvocationId::from_bytes([0xa5; 16]),
+            observer_lineage: None,
         };
         let request = super::ClientInspectRequest::new(
             context,
@@ -7456,6 +7564,7 @@ mod tests {
             function: FunctionId::from_bytes([0x63; 16]),
             function_revision: FunctionRevisionId::from_bytes([0x64; 16]),
             parent_invocation_id: InvocationId::from_bytes([0x65; 16]),
+            observer_lineage: None,
         };
         let operation = super::ClientInspectOperation::Projection {
             projection: InspectProjection::Calls,
@@ -7484,11 +7593,8 @@ mod tests {
         let root = InvocationId::from_bytes([0x91; 16]);
         let parent = InvocationId::from_bytes([0x92; 16]);
         let current = InvocationId::from_bytes([0x93; 16]);
-        let explicit_lineage = super::ObserverLineage {
-            root,
-            parent,
-            current,
-        };
+        let explicit_lineage = super::ObserverLineage::top_level(root)
+            .with_parent_and_current(parent, current);
         let top_level = super::ObserverLineage::top_level(root);
         let nested = top_level.nested();
         let child = nested.nested();
@@ -7505,6 +7611,7 @@ mod tests {
                 function,
                 function_revision,
                 parent_invocation_id: lineage.parent,
+                observer_lineage: None,
             };
             let parameter = ParameterId::from_bytes([0x94; 16]);
             let expression = orna_artifact::client_plan::ClientExpressionNode::Inspect {
@@ -8119,6 +8226,7 @@ fn client_stream_failure_drains_queued_batches_before_evaluator_reports_failure(
         function,
         function_revision,
         parent_invocation_id: InvocationId::from_bytes([0xf6; 16]),
+        observer_lineage: None,
     };
     let first = super::read_stream_resource_value(&active, &mut resource, context).unwrap();
     assert_boolean_stream_batch(first, &[true]);
@@ -8252,6 +8360,7 @@ fn client_stream_cancellation_clears_batches_and_rejects_stale_completions() {
             function: target,
             function_revision: target_revision,
             parent_invocation_id: InvocationId::from_bytes([0x92; 16]),
+            observer_lineage: None,
         };
         let grants = capability::LocalCapabilityGrantSet::new();
         let mut state = ClientStateStore::new();
@@ -11633,6 +11742,7 @@ fn client_stream_cancellation_clears_batches_and_rejects_stale_completions() {
             function,
             function_revision,
             parent_invocation_id: orna_core::InvocationId::from_bytes([0; 16]),
+            observer_lineage: None,
         };
         let rules = [
             (
@@ -13484,6 +13594,7 @@ fn client_stream_cancellation_clears_batches_and_rejects_stale_completions() {
             function: parent_function,
             function_revision: parent_revision,
             parent_invocation_id: InvocationId::from_bytes([0xf6; 16]),
+            observer_lineage: None,
         };
         let argument = FunctionArgument::new(
             parameter,
@@ -13558,6 +13669,7 @@ fn client_stream_cancellation_clears_batches_and_rejects_stale_completions() {
             function: parent_function,
             function_revision: parent_revision,
             parent_invocation_id: InvocationId::from_bytes([0xfa; 16]),
+            observer_lineage: None,
         };
         let argument = FunctionArgument::new(
             parameter,
@@ -13599,6 +13711,7 @@ fn client_stream_cancellation_clears_batches_and_rejects_stale_completions() {
             function: multi_column_function,
             function_revision: multi_column_revision,
             parent_invocation_id: InvocationId::from_bytes([0xfc; 16]),
+            observer_lineage: None,
         };
         let multi_column_action = action_value(
             &multi_column_active,
@@ -13798,12 +13911,20 @@ fn client_stream_cancellation_clears_batches_and_rejects_stale_completions() {
             version_six_client_resource_action_active();
         let target = FunctionId::from_bytes([0xd1; 16]);
         let auth = authorise(pair, parent_function);
+        let observer_root = InvocationId::from_bytes([0xfb; 16]);
+        let observer_parent = InvocationId::from_bytes([0xfa; 16]);
+        let observer_current = InvocationId::from_bytes([0xf9; 16]);
+        let observer_lineage = super::ObserverLineage::top_level(observer_root)
+            .with_parent_and_current(observer_parent, observer_current);
         let parent = ClientExecutionContext {
             pair,
             function: parent_function,
             function_revision: parent_revision,
             parent_invocation_id: InvocationId::from_bytes([0xfe; 16]),
+            observer_lineage: Some(observer_lineage),
         };
+        assert_eq!(parent.observer_root_invocation_id(), observer_root);
+        assert_eq!(parent.observer_parent_invocation_id(), observer_current);
         let argument = FunctionArgument::new(
             ParameterId::from_bytes([0xd3; 16]),
             RuntimeValue::Text("/tmp/action".to_owned()),
@@ -13837,6 +13958,13 @@ fn client_stream_cancellation_clears_batches_and_rejects_stale_completions() {
             Err(ClientActionError::Pending),
         );
         let first_request = executor.executed[0].clone();
+        assert_eq!(
+            first_request
+                .invocation_context()
+                .expect("server action carries observer provenance")
+                .parent_invocation_id(),
+            observer_current
+        );
         assert_eq!(action_state.status(), ClientResourceStatus::Loading);
 
         // The one-active-action contract rejects a repeated trigger while loading.
@@ -13871,6 +13999,7 @@ fn client_stream_cancellation_clears_batches_and_rejects_stale_completions() {
             function: parent_function,
             function_revision: parent_revision,
             parent_invocation_id: InvocationId::from_bytes([0x01; 16]),
+            observer_lineage: None,
         };
         let argument = FunctionArgument::new(
             ParameterId::from_bytes([0xd3; 16]),
@@ -14021,6 +14150,7 @@ fn client_stream_cancellation_clears_batches_and_rejects_stale_completions() {
             function,
             function_revision: revision,
             parent_invocation_id: InvocationId::from_bytes([0xf1; 16]),
+            observer_lineage: None,
         };
         let mut state = ClientStateStore::default();
         let mut action_state = ClientActionState::default();
@@ -14121,6 +14251,7 @@ fn client_stream_cancellation_clears_batches_and_rejects_stale_completions() {
             function,
             function_revision: revision,
             parent_invocation_id: enclosing_parent,
+            observer_lineage: None,
         };
         let argument = FunctionArgument::new(
             parameter,
@@ -14219,6 +14350,7 @@ fn client_stream_cancellation_clears_batches_and_rejects_stale_completions() {
             function: parent_function,
             function_revision: parent_revision,
             parent_invocation_id: InvocationId::from_bytes([0xf7; 16]),
+            observer_lineage: None,
         };
         let mut state = ClientStateStore::default();
         let mut action_state = ClientActionState::default();
@@ -14262,6 +14394,7 @@ fn client_stream_cancellation_clears_batches_and_rejects_stale_completions() {
             function: target,
             function_revision: revision,
             parent_invocation_id: InvocationId::from_bytes([0xf3; 16]),
+            observer_lineage: None,
         };
         let descriptor = ClientActionDescriptor::new(
             ActionTargetDomain::Client,
@@ -14375,6 +14508,7 @@ fn client_stream_cancellation_clears_batches_and_rejects_stale_completions() {
             function: target,
             function_revision: revision,
             parent_invocation_id: InvocationId::from_bytes([0xf2; 16]),
+            observer_lineage: None,
         };
         let mut state = ClientStateStore::default();
         let mut action_state = ClientActionState::default();
