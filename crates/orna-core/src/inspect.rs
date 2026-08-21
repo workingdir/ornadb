@@ -40,6 +40,30 @@ use crate::{
     state::UserStateKeyWithoutPrincipal, types::TypeDescriptor,
 };
 
+/// The stable identity of the generic standard Inspector render contract.
+///
+/// The contract is intentionally independent of any particular application
+/// function name. Consumers validate that name separately while sharing this
+/// identity and its sealed carrier signature.
+pub const INSPECT_RENDER_CONTRACT: &str = "std.inspect.render@1";
+
+/// The ordered sealed carrier parameters accepted by INSPECT_RENDER_CONTRACT.
+///
+/// Each tuple contains the parameter name, its sealed carrier TypeId, and
+/// the corresponding InspectCarrierKind. The order is part of the stable
+/// contract and must not be changed without a new contract version.
+pub const INSPECT_RENDER_CARRIER_SIGNATURE: [(&str, TypeId, InspectCarrierKind); 9] = [
+    ("p_snapshot", crate::system::SYS_INSPECT_SNAPSHOT_TYPE_ID, InspectCarrierKind::Snapshot),
+    ("p_invocation_nodes", crate::system::SYS_INSPECT_INVOCATION_NODES_TYPE_ID, InspectCarrierKind::InvocationNodes),
+    ("p_calls", crate::system::SYS_INSPECT_CALLS_TYPE_ID, InspectCarrierKind::Calls),
+    ("p_resources", crate::system::SYS_INSPECT_RESOURCES_TYPE_ID, InspectCarrierKind::Resources),
+    ("p_state_cells", crate::system::SYS_INSPECT_STATE_CELLS_TYPE_ID, InspectCarrierKind::StateCells),
+    ("p_ui_nodes", crate::system::SYS_INSPECT_UI_NODES_TYPE_ID, InspectCarrierKind::UiNodes),
+    ("p_presentation_candidates", crate::system::SYS_INSPECT_PRESENTATION_CANDIDATES_TYPE_ID, InspectCarrierKind::PresentationCandidates),
+    ("p_runtime_bindings", crate::system::SYS_INSPECT_RUNTIME_BINDINGS_TYPE_ID, InspectCarrierKind::RuntimeBindings),
+    ("p_security_decisions", crate::system::SYS_INSPECT_SECURITY_DECISIONS_TYPE_ID, InspectCarrierKind::SecurityDecisions),
+];
+
 /// The closed INSPECT privilege set (spec `api/inspect.md`).
 ///
 /// The first three privileges form the invocation-scope ladder:
@@ -1533,6 +1557,32 @@ mod tests {
             None,
         )
         .expect("a valid test trace event")
+    }
+
+    #[test]
+    fn inspect_render_contract_signature_is_stable_and_type_aligned() {
+        assert_eq!(INSPECT_RENDER_CONTRACT, "std.inspect.render@1");
+        assert_eq!(INSPECT_RENDER_CARRIER_SIGNATURE.len(), 9);
+
+        let expected_names = [
+            "p_snapshot",
+            "p_invocation_nodes",
+            "p_calls",
+            "p_resources",
+            "p_state_cells",
+            "p_ui_nodes",
+            "p_presentation_candidates",
+            "p_runtime_bindings",
+            "p_security_decisions",
+        ];
+        assert_eq!(
+            INSPECT_RENDER_CARRIER_SIGNATURE.map(|(name, _, _)| name),
+            expected_names,
+        );
+
+        for (_, type_id, kind) in INSPECT_RENDER_CARRIER_SIGNATURE {
+            assert_eq!(type_id, kind.type_id());
+        }
     }
 
     #[test]
