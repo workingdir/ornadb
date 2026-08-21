@@ -32,7 +32,7 @@ use orna_core::{
         SYS_INSPECT_RUNTIME_BINDINGS_TYPE_ID, SYS_INSPECT_SECURITY_DECISIONS_TYPE_ID,
         SYS_INSPECT_SNAPSHOT_TYPE_ID, SYS_INSPECT_SNAPSHOT_OPTIONS_TYPE_ID, SYS_INSPECT_INVOCATION_TYPE_ID,
     },
-    canonical_hash::{CanonicalHashError, catalogue_digest_with_context},
+    canonical_hash::{CanonicalHashError, artifact_payload_digest, catalogue_digest_with_context},
     catalogue::{
         FunctionDefinition, FunctionDomain, FunctionReturn, FunctionSecurity, FunctionVolatility, TypeDefinition,
         ValueTypeKind,
@@ -40,7 +40,7 @@ use orna_core::{
     inspect::{INSPECT_RENDER_CARRIER_SIGNATURE, INSPECT_RENDER_CONTRACT},
     revision::{
         ActiveDatabaseRevision, DefinitionReferenceKind, DefinitionReferenceTarget,
-        FunctionSemanticHashVersion, RevisionPair, Sha256Digest,
+        ExecutableArtifactKind, FunctionSemanticHashVersion, RevisionPair, Sha256Digest,
         VerifiedStandardLibrarySnapshot,
     },
     inspect_carrier::{InspectCarrierEnvelope, InspectCarrierKind},
@@ -3636,6 +3636,7 @@ fn evaluate_function(
         parent_invocation_id: lineage.parent,
         observer_lineage: Some(lineage),
     };
+    validate_artifact_identity(revision.artifact(), context)?;
     // A version-5 capability envelope is decoded before function-shape
     // validation (work ADR 0060). Its inner plan version classifies the
     // function, and its stored requirements gate evaluation; the caller's
@@ -6941,6 +6942,31 @@ fn validate_artifact(
         ));
     }
     Ok(())
+}
+
+/// Validates the saved CLIENT artefact identity and exact payload digest before
+/// any plan decoder or evaluation side effect. Integrity failures deliberately
+/// use the existing redacted invalid-artifact contract.
+fn validate_artifact_identity(
+    artifact: &orna_core::revision::ExecutableArtifact,
+    context: ClientExecutionContext,
+) -> Result<(), ClientExecutionError> {
+    if artifact.kind() != ExecutableArtifactKind::Client {
+        return Err(invalid_artifact(context));
+    }
+    let digest = artifact_payload_digest(artifact.payload())
+        .map_err(|_| invalid_artifact(context))?;
+    if digest != artifact.content_hash() {
+        return Err(invalid_artifact(context));
+    }
+    Ok(())
+}
+
+fn invalid_artifact(context: ClientExecutionContext) -> ClientExecutionError {
+    ClientExecutionError::InvalidArtifact {
+        context,
+        source: ClientPlanError::InvalidMagic,
+    }
 }
 
 fn invalid_function(
@@ -10645,6 +10671,67 @@ fn client_stream_cancellation_clears_batches_and_rejects_stale_completions() {
             "function artifact payload hash differs from exact payload"
         );
         assert!(std::error::Error::source(source).is_some());
+    }
+
+    #[test]
+    fn client_evaluator_rejects_mismatched_payload_hash_before_resource_execution() {
+        let (active, function, pair, _) = version_one_active(true);
+        let untrusted = active_with_mismatched_function_artifact_payload_hash(&active);
+        let mut state = ClientStateStore::new();
+        let mut executor = RecordingActionExecutor::new(Some(RuntimeValue::Boolean(true)));
+        let mut executor_slot: Option<&mut dyn ClientResourceExecutor> = Some(&mut executor);
+
+        let error = super::evaluate_function(
+            &untrusted,
+            function,
+            Vec::new(),
+            &[],
+            &capability::LocalCapabilityGrantSet::default(),
+            &mut state,
+            0,
+            PrincipalId::from_bytes([0x7a; 16]),
+            super::ObserverLineage::top_level(InvocationId::from_bytes([0xa1; 16])),
+            &mut executor_slot,
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            error,
+            super::ClientExecutionError::InvalidArtifact { context, .. }
+                if context.pair() == pair && context.function() == function
+        ));
+        assert!(executor.executed.is_empty());
+        assert!(executor.cancelled.is_empty());
+    }
+
+    #[test]
+    fn client_artifact_guard_rejects_server_kind_with_client_payload() {
+        let (_active, function, pair, function_revision) = version_one_active(true);
+        let payload = orna_artifact::client_plan::ClientPlan::return_boolean(true).encode();
+        let artifact = ExecutableArtifact::new(
+            ExecutableArtifactKind::Server,
+            "orna.client-plan",
+            orna_artifact::client_plan::FORMAT_VERSION,
+            payload.clone(),
+            artifact_payload_digest(&payload).unwrap(),
+        )
+        .unwrap();
+        let context = super::ClientExecutionContext {
+            pair,
+            function,
+            function_revision,
+            parent_invocation_id: InvocationId::from_bytes([0xa2; 16]),
+            observer_lineage: None,
+        };
+
+        let error = super::validate_artifact_identity(&artifact, context).unwrap_err();
+
+        assert!(matches!(
+            error,
+            super::ClientExecutionError::InvalidArtifact { context: actual, .. }
+                if actual == context
+        ));
+        assert_eq!(error.to_string(), "the saved CLIENT function cannot be evaluated");
     }
 
     #[test]
