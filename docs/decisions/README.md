@@ -163,3 +163,5 @@ source-of-truth or authority rules.
   [CLIENT Action Values and `std.action.call`](0079-client-action-values.md)
 * **work ADR 0080:**
   [Headless Ordinary CLIENT Inspector v1](0080-client-inspector.md)
+* **work ADR 0081:**
+  [Generic Standard Inspector Render Contract](0081-standard-inspector-render-contract.md)
