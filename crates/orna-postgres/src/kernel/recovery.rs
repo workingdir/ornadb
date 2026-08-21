@@ -29,12 +29,13 @@ use orna_core::{
         StandardLibraryDigestVersion, StandardLibrarySnapshot, StoredSourceRevision,
         StoredSourceUnit, VerifiedStandardLibrarySnapshot,
     },
+    system::SYS_INSPECT_INVOCATION_TYPE_ID,
     types::{ResolvedType, StandardScalar, TypeDescriptor},
 };
 use tokio_postgres::{Client, IsolationLevel, Row, Transaction};
 
 use crate::{
-    PostgresKernel, PostgresKernelError,
+    PostgresKernel, PostgresKernelError, is_sealed_inspect_type_id,
     bootstrap::require_current_migrations,
     decode::{
         DurableRecord, digest_bytes, exact_enum, identity_bytes, optional_identity_bytes,
@@ -3450,9 +3451,7 @@ pub(super) fn decode_resolved_type_tuple(
     }
 
     if tuple.kind.as_deref() == Some("value") {
-        let (Some(value_type), Some(standard_library_revision)) =
-            (tuple.value_type, tuple.standard_library_revision)
-        else {
+        let Some(value_type) = tuple.value_type else {
             return Err(record.invariant(member.value_tuple_rule()));
         };
         if tuple.scalar.is_some()
@@ -3462,6 +3461,25 @@ pub(super) fn decode_resolved_type_tuple(
         {
             return Err(record.invariant(member.value_tuple_rule()));
         }
+        if is_sealed_inspect_type_id(value_type) {
+            if !matches!(
+                member,
+                LegacyResolvedTypeTupleMember::Parameter
+                    | LegacyResolvedTypeTupleMember::SingleReturn
+                    | LegacyResolvedTypeTupleMember::StreamReturn
+            ) {
+                return Err(record.invariant(member.value_tuple_rule()));
+            }
+            if tuple.standard_library_revision.is_some() {
+                return Err(record.invariant(
+                    "sealed Inspector value types must not retain a standard library revision",
+                ));
+            }
+            return Ok(ResolvedType::value(value_type));
+        }
+        let Some(standard_library_revision) = tuple.standard_library_revision else {
+            return Err(record.invariant(member.value_tuple_rule()));
+        };
         if standard_library_revision != standard.revision() {
             return Err(record.invariant(
                 "resolved value type standard library revision must equal the selected catalogue pin",
@@ -4370,6 +4388,9 @@ fn validate_function_type(
         return Ok(());
     }
     if let Some(target) = resolved_type.reference_target() {
+        if target == SYS_INSPECT_INVOCATION_TYPE_ID {
+            return Ok(());
+        }
         if catalogue.object_type_by_id(target).is_none() {
             return Err(record
                 .invariant("every reference function type target must be an active object type"));
@@ -4426,6 +4447,7 @@ mod tests {
     use orna_core::{
         CatalogueRevisionId, FieldId, SchemaId, SourceBundleId, SourceRevisionId, SourceUnitId,
         StandardLibraryRevisionId, TypeId,
+        system::SYS_INSPECT_INVOCATION_TYPE_ID,
         canonical_hash::{
             catalogue_digest, source_bundle_digest, source_revision_record_digest,
             source_unit_content_digest,
@@ -4688,6 +4710,14 @@ mod tests {
         assert!(
             validate_function_type(&catalogue, ResolvedType::reference(enum_type), &record)
                 .is_err()
+        );
+        assert!(
+            validate_function_type(
+                &catalogue,
+                ResolvedType::reference(SYS_INSPECT_INVOCATION_TYPE_ID),
+                &record,
+            )
+            .is_ok()
         );
     }
 
