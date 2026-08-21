@@ -3386,9 +3386,8 @@ pub fn registered_opaque_codecs(
         .map_err(|source| RegisteredOpaqueCodecsError::Registry { source })
 }
 
-/// Returns the deterministic checked-in contracts for the eight sealed
-/// `sys.inspect` projection carriers. The snapshot uses a separate sealed
-/// construction path because it has no projection tag.
+/// Returns the deterministic checked-in contracts for the nine sealed
+/// `sys.inspect` snapshot and projection carriers.
 ///
 /// These system carriers are intentionally not added to a standard snapshot's
 /// [`OpaqueCodecRegistry`]. They are recognised through their sealed TypeIds
@@ -4052,6 +4051,7 @@ mod tests {
     };
     use orna_core::revision::DefinitionIdentity;
     use orna_core::system::{
+        SYS_INSPECT_SNAPSHOT_REPRESENTATION_CONTRACT, SYS_INSPECT_SNAPSHOT_TYPE_ID,
         SYS_INSPECT_CALLS_REPRESENTATION_CONTRACT, SYS_INSPECT_CALLS_TYPE_ID,
         SYS_INSPECT_INVOCATION_NODES_REPRESENTATION_CONTRACT, SYS_INSPECT_INVOCATION_NODES_TYPE_ID,
         SYS_INSPECT_PRESENTATION_CANDIDATES_REPRESENTATION_CONTRACT,
@@ -8314,6 +8314,7 @@ EXPORT TYPE std.ui.UI AS std.UI;
     #[test]
     fn inspect_carrier_registry_is_fixed_and_deterministic() {
         let expected = [
+            (SYS_INSPECT_SNAPSHOT_TYPE_ID, SYS_INSPECT_SNAPSHOT_REPRESENTATION_CONTRACT),
             (
                 SYS_INSPECT_INVOCATION_NODES_TYPE_ID,
                 SYS_INSPECT_INVOCATION_NODES_REPRESENTATION_CONTRACT,

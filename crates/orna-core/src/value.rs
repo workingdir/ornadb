@@ -27,7 +27,8 @@ use crate::{
         SYS_INSPECT_RESOURCES_TYPE_NAME, SYS_INSPECT_RUNTIME_BINDINGS_REPRESENTATION_CONTRACT,
         SYS_INSPECT_RUNTIME_BINDINGS_TYPE_ID, SYS_INSPECT_RUNTIME_BINDINGS_TYPE_NAME,
         SYS_INSPECT_SECURITY_DECISIONS_REPRESENTATION_CONTRACT, SYS_INSPECT_SECURITY_DECISIONS_TYPE_ID,
-        SYS_INSPECT_SECURITY_DECISIONS_TYPE_NAME, SYS_INSPECT_SNAPSHOT_TYPE_ID,
+        SYS_INSPECT_SECURITY_DECISIONS_TYPE_NAME, SYS_INSPECT_SNAPSHOT_REPRESENTATION_CONTRACT,
+        SYS_INSPECT_SNAPSHOT_TYPE_ID, SYS_INSPECT_SNAPSHOT_TYPE_NAME,
         SYS_INSPECT_STATE_CELLS_REPRESENTATION_CONTRACT, SYS_INSPECT_STATE_CELLS_TYPE_ID,
         SYS_INSPECT_STATE_CELLS_TYPE_NAME, SYS_INSPECT_UI_NODES_REPRESENTATION_CONTRACT,
         SYS_INSPECT_UI_NODES_TYPE_ID, SYS_INSPECT_UI_NODES_TYPE_NAME,
@@ -84,11 +85,14 @@ impl InspectCarrierCodecRegistration {
     }
 }
 
-/// The complete deterministic registration set for the eight sealed Inspector
-/// projection result carriers. No caller may extend this set. The snapshot
-/// carrier has a separate sealed construction path because it has no
-/// projection tag.
+/// The complete deterministic registration set for the nine sealed Inspector
+/// snapshot and projection result carriers. No caller may extend this set.
 pub const INSPECT_CARRIER_CODEC_REGISTRATIONS: &[InspectCarrierCodecRegistration] = &[
+    InspectCarrierCodecRegistration::new(
+        SYS_INSPECT_SNAPSHOT_TYPE_ID,
+        SYS_INSPECT_SNAPSHOT_TYPE_NAME,
+        SYS_INSPECT_SNAPSHOT_REPRESENTATION_CONTRACT,
+    ),
     InspectCarrierCodecRegistration::new(
         SYS_INSPECT_INVOCATION_NODES_TYPE_ID,
         SYS_INSPECT_INVOCATION_NODES_TYPE_NAME,
@@ -1691,7 +1695,7 @@ impl OpaqueValue {
         registry.construct(active, opaque_type, payload.as_ref())
     }
 
-    /// Validates and constructs one sealed `sys.inspect` projection carrier.
+    /// Validates and constructs one sealed `sys.inspect` snapshot or projection carrier.
     ///
     /// Inspector carriers intentionally bypass [`OpaqueCodecRegistry`]: their
     /// identities and contracts are sealed system facts, not definitions in
@@ -1703,9 +1707,7 @@ impl OpaqueValue {
         opaque_type: TypeId,
         payload: impl AsRef<[u8]>,
     ) -> Result<Self, OpaqueValueError> {
-        if opaque_type != SYS_INSPECT_SNAPSHOT_TYPE_ID
-            && inspect_carrier_codec_by_type_id(opaque_type).is_none()
-        {
+        if inspect_carrier_codec_by_type_id(opaque_type).is_none() {
             return Err(OpaqueValueError::UnregisteredType { opaque_type });
         }
 
@@ -7837,9 +7839,10 @@ mod tests {
     }
 
     #[test]
-    fn inspect_opaque_constructor_accepts_all_eight_projection_carriers() {
+    fn inspect_opaque_constructor_accepts_all_nine_registered_carriers() {
         let active = active_record_revision();
         let carriers = [
+            (1_u8, SYS_INSPECT_SNAPSHOT_TYPE_ID),
             (2_u8, SYS_INSPECT_INVOCATION_NODES_TYPE_ID),
             (3, SYS_INSPECT_CALLS_TYPE_ID),
             (4, SYS_INSPECT_RESOURCES_TYPE_ID),
@@ -7854,7 +7857,7 @@ mod tests {
             let row = inspect_orv5_integer_row(1);
             let payload = inspect_carrier_payload(&active, tag, &[row.as_slice()]);
             let value = OpaqueValue::new_inspect_carrier(&active, opaque_type, &payload)
-                .expect("the fixed projection carrier must construct");
+                .expect("the fixed Inspector carrier must construct");
             assert_eq!(value.opaque_type(), opaque_type);
             assert_eq!(value.canonical_payload(), payload);
         }
