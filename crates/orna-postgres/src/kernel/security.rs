@@ -350,17 +350,13 @@ pub enum AuthenticatedServerResourceStart {
 /// A command-driven producer whose transaction and PostgreSQL row stream are
 /// owned by its task.
 ///
-/// The producer owns the task's abort permission as well as its command
-/// channel. Normal pulls and cancellation remain cooperative so the task can
-/// preserve its terminal audit/transaction ordering. Dropping an abandoned
-/// producer requests cancellation and aborts the worker as the final
-/// ownership boundary, so a stalled RepeatableRead transaction cannot outlive
-/// the producer indefinitely.
+/// Dropping an abandoned producer requests cancellation. The worker remains
+/// responsible for terminal audit and transaction ordering, including when the
+/// caller drops the producer before it receives a terminal event.
 pub struct AuthenticatedServerResourceProducer {
     accepted: AuthenticatedServerResourceAccepted,
     commands: tokio::sync::mpsc::Sender<ResourceProducerCommand>,
     cancellation: ResourceCancellation,
-    abort_handle: tokio::task::AbortHandle,
 }
 
 impl AuthenticatedServerResourceProducer {
@@ -399,7 +395,6 @@ impl AuthenticatedServerResourceProducer {
 impl Drop for AuthenticatedServerResourceProducer {
     fn drop(&mut self) {
         self.cancellation.request_cancel();
-        self.abort_handle.abort();
     }
 }
 
@@ -421,32 +416,31 @@ enum ResourceProducerReady {
     },
 }
 
-/// Owns the worker abort permission while startup waits for acceptance.
-///
-/// A resource dispatch may be cancelled while the worker is still validating
-/// the request, before an [`AuthenticatedServerResourceProducer`] exists. The
-/// guard closes that pre-acceptance ownership gap when the start future is
-/// dropped.
-struct ResourceProducerTaskGuard {
-    abort_handle: Option<tokio::task::AbortHandle>,
+/// Requests cancellation if startup is dropped before the worker publishes
+/// acceptance or a pre-acceptance failure. The worker must not be aborted here:
+/// it owns the reserved request finalizer.
+struct ResourceProducerStartGuard {
+    cancellation: ResourceCancellation,
+    armed: bool,
 }
 
-impl ResourceProducerTaskGuard {
-    fn new(abort_handle: tokio::task::AbortHandle) -> Self {
-        Self { abort_handle: Some(abort_handle) }
+impl ResourceProducerStartGuard {
+    fn new(cancellation: ResourceCancellation) -> Self {
+        Self {
+            cancellation,
+            armed: true,
+        }
     }
 
-    fn release(&mut self) -> tokio::task::AbortHandle {
-        self.abort_handle
-            .take()
-            .expect("resource producer task guard must release once")
+    fn disarm(&mut self) {
+        self.armed = false;
     }
 }
 
-impl Drop for ResourceProducerTaskGuard {
+impl Drop for ResourceProducerStartGuard {
     fn drop(&mut self) {
-        if let Some(abort_handle) = self.abort_handle.take() {
-            abort_handle.abort();
+        if self.armed {
+            self.cancellation.request_cancel();
         }
     }
 }
@@ -2060,7 +2054,7 @@ impl PostgresKernel {
         let session = authenticated_session.clone();
         let request = request.clone();
         let worker_cancellation = cancellation.clone();
-        let worker = tokio::spawn(async move {
+        tokio::spawn(async move {
             let _ = run_authenticated_server_resource_producer_task(
                 kernel,
                 session,
@@ -2072,23 +2066,29 @@ impl PostgresKernel {
             )
             .await;
         });
-        let mut task_guard = ResourceProducerTaskGuard::new(worker.abort_handle());
-        drop(worker);
+        let mut start_guard = ResourceProducerStartGuard::new(cancellation.clone());
         match ready_receiver.await.map_err(|_| PostgresKernelError::DurableInvariant {
             relation: "resource producer",
             record: request_id.canonical(),
             rule: "producer task terminated before acceptance",
         })?? {
-            ResourceProducerReady::Accepted(accepted) => Ok(AuthenticatedServerResourceStart::Accepted(
-                AuthenticatedServerResourceProducer {
-                    accepted,
-                    commands,
-                    cancellation: cancellation.clone(),
-                    abort_handle: task_guard.release(),
-                },
-            )),
+            ResourceProducerReady::Accepted(accepted) => {
+                start_guard.disarm();
+                Ok(AuthenticatedServerResourceStart::Accepted(
+                    AuthenticatedServerResourceProducer {
+                        accepted,
+                        commands,
+                        cancellation: cancellation.clone(),
+                    },
+                ))
+            }
             ResourceProducerReady::Failed { stream_id, request_id, failure } => {
-                Ok(AuthenticatedServerResourceStart::Failed { stream_id, request_id, failure })
+                start_guard.disarm();
+                Ok(AuthenticatedServerResourceStart::Failed {
+                    stream_id,
+                    request_id,
+                    failure,
+                })
             }
         }
     }
@@ -9508,9 +9508,8 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn dropping_resource_producer_aborts_owned_task() {
-        let worker = tokio::spawn(std::future::pending::<()>());
+    #[test]
+    fn dropping_resource_producer_requests_cancellation() {
         let cancellation = ResourceCancellation::new();
         let (commands, _receiver) = tokio::sync::mpsc::channel(1);
         let producer = AuthenticatedServerResourceProducer {
@@ -9526,27 +9525,21 @@ mod tests {
             },
             commands,
             cancellation: cancellation.clone(),
-            abort_handle: worker.abort_handle(),
         };
 
         drop(producer);
 
-        let error = worker.await.expect_err("dropping the producer must abort its worker");
-        assert!(error.is_cancelled());
         assert!(cancellation.is_requested());
     }
 
-    #[tokio::test]
-    async fn dropping_resource_producer_start_guard_aborts_pre_acceptance_worker() {
-        let worker = tokio::spawn(std::future::pending::<()>());
+    #[test]
+    fn dropping_resource_producer_start_guard_requests_cancellation() {
+        let cancellation = ResourceCancellation::new();
         {
-            let _guard = ResourceProducerTaskGuard::new(worker.abort_handle());
+            let _guard = ResourceProducerStartGuard::new(cancellation.clone());
         }
 
-        let error = worker
-            .await
-            .expect_err("dropping the start guard must abort its worker");
-        assert!(error.is_cancelled());
+        assert!(cancellation.is_requested());
     }
 
     #[test]
