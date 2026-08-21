@@ -402,6 +402,17 @@ impl ClientResourceKey {
     pub const fn invalidation_token(self) -> Sha256Digest {
         self.invalidation_token
     }
+
+    /// Matches the logical operation slot while ignoring the revision pair
+    /// and invalidation token that make a complete key replacement.
+    fn replacement_slot_matches(self, other: Self) -> bool {
+        self.target.function() == other.target.function()
+            && self.target.class() == other.target.class()
+            && self.target.standard_revision() == other.target.standard_revision()
+            && self.target.executable_revision() == other.target.executable_revision()
+            && self.principal == other.principal
+            && self.arguments_digest == other.arguments_digest
+    }
 }
 
 impl Hash for ClientResourceKey {
@@ -1259,6 +1270,22 @@ where
 }
 
 
+/// Request metadata retained by the runtime solely for executor cancellation.
+///
+/// The request payload can contain sensitive argument values, so the wrapper
+/// deliberately redacts it from the parent resource's derived `Debug` output.
+#[derive(Clone, PartialEq)]
+struct ActiveClientResourceRequest(ClientResourceRequest);
+
+impl fmt::Debug for ActiveClientResourceRequest {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_tuple("ActiveClientResourceRequest")
+            .field(&self.0.request_id())
+            .finish()
+    }
+}
+
 /// One typed CLIENT resource lifecycle owned by the local evaluator.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ClientResource {
@@ -1266,6 +1293,10 @@ pub struct ClientResource {
     kind: ResourceKind,
     expected_type: ResolvedType,
     request_id: Option<InvocationId>,
+    /// A runtime-owned copy of the request metadata needed to ask the
+    /// executor to cancel its owned request. The executor still owns the
+    /// submitted request; this copy is only the cancellation descriptor.
+    active_request: Option<ActiveClientResourceRequest>,
     generation: ClientResourceGeneration,
     status: ClientResourceStatus,
     value: Option<RuntimeValue>,
@@ -1296,6 +1327,7 @@ impl ClientResource {
             kind,
             expected_type,
             request_id: None,
+            active_request: None,
             generation: ClientResourceGeneration(0),
             status: ClientResourceStatus::Idle,
             value: None,
@@ -1353,6 +1385,7 @@ impl ClientResource {
     pub fn begin_loading(&mut self) -> Result<ClientResourceGeneration, ClientResourceError> {
         let generation = self.advance_generation()?;
         self.request_id = Some(InvocationId::new());
+        self.active_request = None;
         self.status = ClientResourceStatus::Loading;
         self.clear_result();
         Ok(generation)
@@ -1442,6 +1475,7 @@ impl ClientResource {
         )?;
         self.generation = generation;
         self.request_id = Some(request.request_id());
+        self.active_request = Some(ActiveClientResourceRequest(request.clone()));
         self.status = ClientResourceStatus::Loading;
         self.clear_result();
         Ok(request)
@@ -1541,6 +1575,7 @@ impl ClientResource {
             return Err(ClientResourceError::TypeMismatch);
         }
         self.status = ClientResourceStatus::Ready;
+        self.active_request = None;
         self.value = Some(value);
         self.failure = None;
         Ok(())
@@ -1579,6 +1614,7 @@ impl ClientResource {
         self.validate_stream_item_type(active)?;
         self.stream_complete = true;
         self.status = ClientResourceStatus::Ready;
+        self.active_request = None;
         self.value = None;
         self.failure = None;
         Ok(())
@@ -1651,6 +1687,7 @@ impl ClientResource {
         }
         self.require_loading(generation)?;
         self.status = ClientResourceStatus::Failed;
+        self.active_request = None;
         self.value = None;
         self.failure = Some(ClientResourceFailure { code });
         Ok(())
@@ -1663,6 +1700,7 @@ impl ClientResource {
     ) -> Result<(), ClientResourceError> {
         self.require_loading(generation)?;
         self.status = ClientResourceStatus::Cancelled;
+        self.active_request = None;
         self.clear_result();
         Ok(())
     }
@@ -1671,9 +1709,26 @@ impl ClientResource {
     pub fn invalidate(&mut self) -> Result<(), ClientResourceError> {
         self.advance_generation()?;
         self.request_id = None;
+        self.active_request = None;
         self.status = ClientResourceStatus::Idle;
         self.clear_result();
         Ok(())
+    }
+
+    /// Asks the owning executor to cancel the active request before local
+    /// invalidation makes its generation stale.
+    ///
+    /// The returned executor completion is intentionally discarded: the
+    /// invalidation itself is the local linearisation point, so every
+    /// completion for the old generation must be rejected as stale.
+    pub fn invalidate_with_executor(
+        &mut self,
+        executor: &mut dyn ClientResourceExecutor,
+    ) -> Result<(), ClientResourceError> {
+        if let Some(request) = self.active_request() {
+            let _ = executor.cancel(request);
+        }
+        self.invalidate()
     }
 
     fn clear_result(&mut self) {
@@ -1681,6 +1736,12 @@ impl ClientResource {
         self.failure = None;
         self.stream_batches.clear();
         self.stream_complete = false;
+    }
+
+    fn active_request(&self) -> Option<ClientResourceRequest> {
+        self.active_request
+            .as_ref()
+            .map(|request| request.0.clone())
     }
 
     fn next_generation(&self) -> Result<ClientResourceGeneration, ClientResourceError> {
@@ -2330,7 +2391,10 @@ impl ClientStateStore {
     /// Invalidates one cached resource without removing its identity.
     ///
     /// The generation advances and any published value or failure is cleared.
-    /// An absent key is already invalidated and returns `false`.
+    /// An absent key is already invalidated and returns `false`. This direct
+    /// entrypoint intentionally does not touch an executor; use
+    /// [`Self::invalidate_resource_with_executor`] when the runtime owns an
+    /// active request for this resource.
     pub fn invalidate_resource(
         &mut self,
         key: ClientResourceKey,
@@ -2340,6 +2404,72 @@ impl ClientStateStore {
         };
         resource.invalidate()?;
         Ok(true)
+    }
+
+    /// Invalidates one cached resource and asks the owning executor to cancel
+    /// its active request before the local generation changes.
+    ///
+    /// The executor owns the submitted request. The resource retains only a
+    /// cancellation descriptor, and any completion returned by the hook is
+    /// deliberately discarded because the invalidation makes that generation
+    /// stale. This keeps cancellation in the owning runtime rather than in
+    /// stale-completion handling.
+    pub fn invalidate_resource_with_executor(
+        &mut self,
+        key: ClientResourceKey,
+        executor: &mut dyn ClientResourceExecutor,
+    ) -> Result<bool, ClientResourceError> {
+        let Some(resource) = self.resources.get_mut(&key) else {
+            return Ok(false);
+        };
+        resource.invalidate_with_executor(executor)?;
+        Ok(true)
+    }
+
+    /// Returns or creates a resource while cancelling active resources whose
+    /// complete key is being replaced by a new invalidation identity.
+    ///
+    /// The ordinary [`Self::get_or_create_resource_with_kind`] method remains
+    /// independent-key and executor-free for compatibility. Evaluator code
+    /// uses this ownership-aware path so a dependency change cannot leave the
+    /// previous executor-owned request running.
+    pub fn get_or_create_resource_with_kind_and_executor(
+        &mut self,
+        key: ClientResourceKey,
+        kind: ResourceKind,
+        expected_type: ResolvedType,
+        executor: &mut dyn ClientResourceExecutor,
+    ) -> Result<&mut ClientResource, ClientResourceError> {
+        let replacements: Vec<_> = self
+            .resources
+            .iter()
+            .filter_map(|(candidate_key, candidate)| {
+                (*candidate_key != key
+                    && candidate_key.replacement_slot_matches(key)
+                    && candidate.status() == ClientResourceStatus::Loading)
+                    .then_some(*candidate_key)
+            })
+            .collect();
+        for replacement in replacements {
+            self.invalidate_resource_with_executor(replacement, executor)?;
+        }
+        Ok(self.get_or_create_resource_with_kind(key, kind, expected_type))
+    }
+
+    /// Returns or creates a scalar resource through the executor-aware key
+    /// replacement path.
+    pub fn get_or_create_resource_with_executor(
+        &mut self,
+        key: ClientResourceKey,
+        expected_type: ResolvedType,
+        executor: &mut dyn ClientResourceExecutor,
+    ) -> Result<&mut ClientResource, ClientResourceError> {
+        self.get_or_create_resource_with_kind_and_executor(
+            key,
+            ResourceKind::Scalar,
+            expected_type,
+            executor,
+        )
     }
 
     /// Returns the `LOCAL` slot values of one mounted function instance.
@@ -4485,7 +4615,23 @@ fn evaluate_resource_expression(
     );
     let state_profile = state.context().state_profile().to_owned();
     let function_instance_key = state.context().instance_key().to_owned();
-    let resource = state.get_or_create_resource_with_kind(key, operation.kind(), expected_type);
+    // A changed complete key is a dependency replacement. Let the owning
+    // runtime cancel any matching active generation before this lookup makes
+    // the new key visible.
+    let resource = if let Some(executor) = executor.as_deref_mut() {
+        state
+            .get_or_create_resource_with_kind_and_executor(
+                key,
+                operation.kind(),
+                expected_type,
+                executor,
+            )
+            .map_err(|source| {
+                evaluate_resource_error(context, ClientResourceExecutionError::Invalid(source))
+            })?
+    } else {
+        state.get_or_create_resource_with_kind(key, operation.kind(), expected_type)
+    };
     if resource.kind() != operation.kind() {
         return Err(evaluate_resource_error(
             context,
@@ -8626,6 +8772,135 @@ fn client_stream_cancellation_clears_batches_and_rejects_stale_completions() {
             Sha256Digest::from_bytes([0xc2; 32]),
             )),
             Ok(false)
+        );
+    }
+
+    #[test]
+    fn resource_invalidation_cancels_owned_request_and_rejects_late_completion() {
+        let (active, _, pair, _) = version_two_client_call_active();
+        let standard = active
+            .catalogue_hash_context()
+            .standard()
+            .expect("version-two fixture pins the verified standard snapshot");
+        let target = InvocationTarget::verified_standard(
+            orna_standard::STD_INVOKE_ECHO_FUNCTION_ID,
+            pair,
+            standard.revision(),
+            orna_standard::STD_INVOKE_ECHO_FUNCTION_REVISION_ID,
+        );
+        let argument = FunctionArgument::new(
+            orna_standard::STD_INVOKE_ECHO_PARAMETER_ID,
+            RuntimeValue::Integer(42),
+        )
+        .unwrap();
+        let digest = ClientResourceKey::canonical_arguments_digest(
+            &active,
+            std::slice::from_ref(&argument),
+        )
+        .unwrap();
+        let key = ClientResourceKey::new(
+            target,
+            PrincipalId::from_bytes([0x7a; 16]),
+            digest,
+            Sha256Digest::from_bytes([0xc2; 32]),
+        );
+        let mut state = ClientStateStore::new();
+        let request = state
+            .get_or_create_resource(key, ResolvedType::Scalar(StandardScalar::Integer))
+            .begin_request(&active, vec![argument])
+            .unwrap();
+        let late_completion = request.clone().ready(RuntimeValue::Integer(42));
+        let mut executor = RecordingActionExecutor::new(None);
+
+        assert_eq!(
+            state.invalidate_resource_with_executor(key, &mut executor),
+            Ok(true),
+        );
+        assert_eq!(executor.cancelled, vec![request.clone()]);
+        assert_eq!(
+            state
+                .resource(key)
+                .expect("invalidated resource remains cached")
+                .status(),
+            super::ClientResourceStatus::Idle,
+        );
+        assert_eq!(
+            state
+                .resource_mut(key)
+                .expect("invalidated resource remains cached")
+                .apply_completion(&active, late_completion),
+            Err(super::ClientResourceError::StaleGeneration {
+                expected: super::ClientResourceGeneration(2),
+                actual: request.generation(),
+            }),
+        );
+    }
+
+    #[test]
+    fn replacing_complete_resource_key_cancels_previous_generation() {
+        let (active, _, pair, _) = version_two_client_call_active();
+        let standard = active
+            .catalogue_hash_context()
+            .standard()
+            .expect("version-two fixture pins the verified standard snapshot");
+        let target = InvocationTarget::verified_standard(
+            orna_standard::STD_INVOKE_ECHO_FUNCTION_ID,
+            pair,
+            standard.revision(),
+            orna_standard::STD_INVOKE_ECHO_FUNCTION_REVISION_ID,
+        );
+        let argument = FunctionArgument::new(
+            orna_standard::STD_INVOKE_ECHO_PARAMETER_ID,
+            RuntimeValue::Integer(42),
+        )
+        .unwrap();
+        let digest = ClientResourceKey::canonical_arguments_digest(
+            &active,
+            std::slice::from_ref(&argument),
+        )
+        .unwrap();
+        let key_a = ClientResourceKey::new(
+            target,
+            PrincipalId::from_bytes([0x7a; 16]),
+            digest,
+            Sha256Digest::from_bytes([0xd2; 32]),
+        );
+        let key_b = ClientResourceKey::new(
+            target,
+            PrincipalId::from_bytes([0x7a; 16]),
+            digest,
+            Sha256Digest::from_bytes([0xd3; 32]),
+        );
+        let mut state = ClientStateStore::new();
+        let request = state
+            .get_or_create_resource(key_a, ResolvedType::Scalar(StandardScalar::Integer))
+            .begin_request(&active, vec![argument])
+            .unwrap();
+        let mut executor = RecordingActionExecutor::new(None);
+
+        state
+            .get_or_create_resource_with_executor(
+                key_b,
+                ResolvedType::Scalar(StandardScalar::Integer),
+                &mut executor,
+            )
+            .unwrap();
+
+        assert_eq!(executor.cancelled, vec![request.clone()]);
+        assert_eq!(
+            state.resource(key_a).map(super::ClientResource::status),
+            Some(super::ClientResourceStatus::Idle),
+        );
+        assert!(matches!(
+            state
+                .resource_mut(key_a)
+                .expect("replaced resource remains cached")
+                .apply_completion(&active, request.ready(RuntimeValue::Integer(42))),
+            Err(super::ClientResourceError::StaleGeneration { .. }),
+        ));
+        assert_eq!(
+            state.resource(key_b).map(super::ClientResource::status),
+            Some(super::ClientResourceStatus::Idle),
         );
     }
 
