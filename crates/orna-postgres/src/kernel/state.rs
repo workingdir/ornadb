@@ -18,16 +18,17 @@ use orna_core::{
     state::{
         UserStateCell, UserStateChange, UserStateError, UserStateKey, UserStateKeyWithoutPrincipal,
         UserStateWriteOutcome, UserStateWriteResult, apply_change, cell_type_matches,
+        is_sealed_inspect_runtime_value,
     },
     value::OpaqueCodecRegistry,
 };
 use orna_protocol::{decode_constructed_value, encode_constructed_value};
 use orna_standard::registered_opaque_codecs;
 use tokio_postgres::{IsolationLevel, Row, Transaction, types::FromSqlOwned};
-
 use crate::{
     PostgresKernel, PostgresKernelError,
     bootstrap::require_current_migrations,
+    is_sealed_inspect_type_id,
     security::{append_security_audit_event, recover_security_snapshot_for_active},
     server_runtime::configure_and_recover,
 };
@@ -375,6 +376,7 @@ async fn persist_state_write(
     let function = write.key.function().to_bytes().to_vec();
     let instance_key = write.key.instance_key();
     let state_slot = write.key.state_slot().to_bytes().to_vec();
+    reject_sealed_inspect_state_type(write.value_type, write.key.to_string())?;
     let value_type = write.value_type.to_bytes().to_vec();
     let revision =
         i64::try_from(write.revision).map_err(|_| PostgresKernelError::DurableInvariant {
@@ -450,10 +452,18 @@ fn decode_state_cell(
     let instance_key: String =
         state_column(row, "function_instance_key", "USER state instance key")?;
     let state_slot = StateSlotId::from_bytes(state_id(row, "state_slot_id", "USER state slot")?);
-    let value_bytes: Vec<u8> = state_column(row, "value_bytes", "USER state typed value")?;
+    let value_type = TypeId::from_bytes(state_id(row, "value_type_id", "USER state value type")?);
+    reject_sealed_inspect_state_type(value_type, "selected row")?;
+    let value_bytes: Vec<u8> = state_column(row, "value_bytes", "USER state value")?;
     let value = decode_constructed_value(active, registry, &value_bytes)
         .map_err(PostgresKernelError::UserStateValueCodec)?;
-    let value_type = TypeId::from_bytes(state_id(row, "value_type_id", "USER state value type")?);
+    if is_sealed_inspect_runtime_value(&value) {
+        return Err(PostgresKernelError::DurableInvariant {
+            relation: STATE_RELATION,
+            record: "selected row".to_owned(),
+            rule: "USER state cannot expose sealed Inspector values",
+        });
+    }
     let revision: i64 = state_column(row, "revision", "USER state revision")?;
     let revision = u64::try_from(revision).map_err(|_| PostgresKernelError::DurableInvariant {
         relation: STATE_RELATION,
@@ -508,6 +518,20 @@ fn require_expected_type(
         Err(error) => Err(PostgresKernelError::UserState(error)),
         Ok(_) => unreachable!("a mismatched expected type must fail closed"),
     }
+}
+
+fn reject_sealed_inspect_state_type(
+    value_type: TypeId,
+    record: impl Into<String>,
+) -> Result<(), PostgresKernelError> {
+    if is_sealed_inspect_type_id(value_type) {
+        return Err(PostgresKernelError::DurableInvariant {
+            relation: STATE_RELATION,
+            record: record.into(),
+            rule: "USER state cannot persist sealed Inspector carrier type identities",
+        });
+    }
+    Ok(())
 }
 
 fn state_value_registry(
@@ -694,6 +718,62 @@ mod tests {
         let error = apply_change(Some(&current), &change(Some(1), 2), PRINCIPAL)
             .expect_err("cross-principal cell must fail closed");
         assert_eq!(error.code(), Some("ORNA0903"));
+    }
+
+    #[test]
+    fn sealed_inspector_state_types_are_rejected_but_scalars_are_allowed() {
+        let sealed_types = [
+            orna_core::system::SYS_INSPECT_INVOCATION_TYPE_ID,
+            orna_core::system::SYS_INSPECT_SNAPSHOT_TYPE_ID,
+            orna_core::system::SYS_INSPECT_SNAPSHOT_OPTIONS_TYPE_ID,
+            orna_core::system::SYS_INSPECT_TRACE_EVENT_TYPE_ID,
+            orna_core::system::SYS_INSPECT_INVOCATION_NODES_TYPE_ID,
+            orna_core::system::SYS_INSPECT_CALLS_TYPE_ID,
+            orna_core::system::SYS_INSPECT_RESOURCES_TYPE_ID,
+            orna_core::system::SYS_INSPECT_STATE_CELLS_TYPE_ID,
+            orna_core::system::SYS_INSPECT_UI_NODES_TYPE_ID,
+            orna_core::system::SYS_INSPECT_PRESENTATION_CANDIDATES_TYPE_ID,
+            orna_core::system::SYS_INSPECT_RUNTIME_BINDINGS_TYPE_ID,
+            orna_core::system::SYS_INSPECT_SECURITY_DECISIONS_TYPE_ID,
+        ];
+        for sealed_type in sealed_types {
+            let error = reject_sealed_inspect_state_type(sealed_type, "forged row")
+                .expect_err("sealed Inspector identities must fail closed");
+            assert!(matches!(
+                error,
+                PostgresKernelError::DurableInvariant {
+                    relation: STATE_RELATION,
+                    ..
+                }
+            ));
+        }
+        reject_sealed_inspect_state_type(INTEGER, "ordinary scalar")
+            .expect("ordinary scalar USER state remains persistable");
+    }
+
+    #[test]
+    fn forged_sealed_inspector_cell_aborts_the_write_plan() {
+        let current = UserStateCell::new(
+            UserStateKey::new(
+                PRINCIPAL,
+                ROOT,
+                String::new(),
+                FUNCTION,
+                String::new(),
+                SLOT,
+            )
+            .expect("test key is valid"),
+            RuntimeValue::BigInt(1),
+            orna_core::system::SYS_INSPECT_SNAPSHOT_TYPE_ID,
+            1,
+            SystemTime::UNIX_EPOCH,
+        );
+        let change = change(Some(1), 2);
+        let key = change.key_without_principal().with_principal(PRINCIPAL);
+        let mut current_cells = HashMap::from([(key, Some(current))]);
+        let error = plan_user_state_changes(&[change], PRINCIPAL, &mut current_cells)
+            .expect_err("a forged persisted Inspector identity must fail closed");
+        assert!(matches!(error, PostgresKernelError::UserState(_)));
     }
 
     #[test]
