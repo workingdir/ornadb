@@ -1,7 +1,8 @@
 //! Local evaluation for closed CLIENT functions.
 
 use orna_protocol::{
-    ClientFrame, decode_active_value, encode_active_client_frame, encode_active_value,
+    ClientFrame, decode_active_value, decode_constructed_value, encode_active_client_frame,
+    encode_active_value,
 };
 use sha2::{Digest, Sha256};
 use std::{
@@ -14,6 +15,7 @@ use std::{
 use orna_artifact::client_plan::{
     CAPABILITY_FORMAT_VERSION, CapabilityArgumentSource, CapabilityClientPlan,
     ClientExpressionNode, ClientLocal, ClientLocalKind, ClientPlan, ClientPlanError, EXPRESSION_FORMAT_VERSION,
+    InspectOperationNode, InspectProjection,
     ExpressionClientPlan, FORMAT_IDENTITY, FORMAT_VERSION, InnerClientPlan,
     LANGUAGE_VERSION_IDENTITY, OPAQUE_FORMAT_VERSION, OpaqueClientPlan, RESOURCE_FORMAT_VERSION, PROCEDURAL_FORMAT_VERSION,
     ActionClientPlan, ActionTargetDomain, ProceduralClientPlan, ResourceClientPlan, ResourceKind,
@@ -21,7 +23,15 @@ use orna_artifact::client_plan::{
     StateDefault, StateScope,
 };
 use orna_core::{
-    CallSiteId, FunctionId, FunctionRevisionId, InvocationId, LocalId, ParameterId, PrincipalId, StateSlotId, TypeId,
+    CallSiteId, FunctionId, FunctionRevisionId, InvocationId, LocalId, ParameterId, PrincipalId, StateSlotId,
+    TypeId,
+    system::{
+        SYS_INSPECT_INVOCATION_NODES_TYPE_ID, SYS_INSPECT_CALLS_TYPE_ID,
+        SYS_INSPECT_RESOURCES_TYPE_ID, SYS_INSPECT_STATE_CELLS_TYPE_ID,
+        SYS_INSPECT_UI_NODES_TYPE_ID, SYS_INSPECT_PRESENTATION_CANDIDATES_TYPE_ID,
+        SYS_INSPECT_RUNTIME_BINDINGS_TYPE_ID, SYS_INSPECT_SECURITY_DECISIONS_TYPE_ID,
+        SYS_INSPECT_SNAPSHOT_TYPE_ID, SYS_INSPECT_SNAPSHOT_OPTIONS_TYPE_ID, SYS_INSPECT_INVOCATION_TYPE_ID,
+    },
     canonical_hash::{CanonicalHashError, catalogue_digest_with_context},
     catalogue::{
         FunctionDefinition, FunctionDomain, FunctionReturn, FunctionSecurity, FunctionVolatility, TypeDefinition,
@@ -32,17 +42,18 @@ use orna_core::{
         FunctionSemanticHashVersion, RevisionPair, Sha256Digest,
         VerifiedStandardLibrarySnapshot,
     },
+    inspect_carrier::{InspectCarrierEnvelope, InspectCarrierKind},
     security::{AuthorisedInvocation, InvocationTarget, TargetClass},
     state::{
         UserStateCell, UserStateChange, UserStateKeyWithoutPrincipal, UserStateWriteOutcome,
         UserStateWriteResult,
     },
-    types::{ResolvedType, StandardScalar, TypeDescriptor},
-    value::{FunctionArgument, OpaqueValue, OpaqueValueError, RuntimeValue},
+    types::{ResolvedType, StandardScalar, TypeDescriptor, TypeDescriptorKind},
+    value::{ConstructedValueKind, FunctionArgument, OpaqueValue, OpaqueValueError, RuntimeValue},
 };
 use orna_standard::{
-    ACTION_MAGIC, RegisteredOpaqueCodecsError, STD_ACTION_TYPE_ID,
-    registered_opaque_codecs,
+    ACTION_MAGIC, BINARY_LARGE_OBJECT_TYPE_ID, RegisteredOpaqueCodecsError, STD_ACTION_TYPE_ID,
+    STD_UI_TYPE_ID, registered_opaque_codecs,
 };
 
 pub mod capability;
@@ -55,6 +66,27 @@ pub struct ClientExecutionContext {
     function: FunctionId,
     function_revision: FunctionRevisionId,
     parent_invocation_id: InvocationId,
+}
+
+/// The client-side anchor for one Inspector execution.
+///
+/// Inspector carriers retain the server epoch in their stable ORNA-INSPECT
+/// envelope. The client epoch is deliberately a different identity: it is
+/// derived from the enclosing invocation and is carried on the typed provider
+/// request rather than being added to the wire envelope.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct ClientEpochId(InvocationId);
+
+impl ClientEpochId {
+    /// Binds one client epoch to its enclosing invocation identity.
+    pub const fn from_parent_invocation(parent: InvocationId) -> Self {
+        Self(parent)
+    }
+
+    /// Returns the enclosing invocation used as the client epoch anchor.
+    pub const fn invocation_id(self) -> InvocationId {
+        self.0
+    }
 }
 
 impl ClientExecutionContext {
@@ -76,6 +108,17 @@ impl ClientExecutionContext {
     /// Returns the root invocation identity used by resource requests.
     pub const fn parent_invocation_id(&self) -> InvocationId {
         self.parent_invocation_id
+    }
+
+    /// Returns the trusted observer root invocation anchor used by Inspector.
+    pub const fn observer_root_invocation_id(&self) -> InvocationId { self.parent_invocation_id }
+
+    /// Returns the trusted observer parent invocation anchor used by Inspector.
+    pub const fn observer_parent_invocation_id(&self) -> InvocationId { self.parent_invocation_id }
+
+    /// Returns the distinct client-side Inspector epoch anchor.
+    pub const fn client_epoch_id(&self) -> ClientEpochId {
+        ClientEpochId::from_parent_invocation(self.parent_invocation_id)
     }
 }
 
@@ -778,6 +821,253 @@ pub enum ClientResourceCompletion {
 
 }
 
+/// One sealed Inspector operation evaluated by the local CLIENT runtime.
+///
+/// The operation carries only already-evaluated, typed arguments. It never
+/// carries caller-supplied authority; the provider receives the enclosing
+/// [`ClientExecutionContext`] separately through [`ClientInspectRequest`].
+#[derive(Clone, Debug, PartialEq)]
+pub enum ClientInspectOperation {
+    /// Capture one immutable structural snapshot of an invocation target.
+    Snapshot { target: RuntimeValue },
+    /// Materialise one bounded projection from a snapshot.
+    Projection {
+        projection: InspectProjection,
+        snapshot: RuntimeValue,
+    },
+}
+
+impl ClientInspectOperation {
+    /// Returns the invocation target for a snapshot operation.
+    pub fn target(&self) -> Option<&RuntimeValue> {
+        match self {
+            Self::Snapshot { target } => Some(target),
+            Self::Projection { .. } => None,
+        }
+    }
+
+    /// Returns the sealed carrier tag for a projection operation (2 through 9).
+    ///
+    /// The carrier tags are distinct from client-plan projection tags and let
+    /// server adapters remain independent of the artifact crate.
+    pub const fn projection_carrier_tag(&self) -> Option<u8> {
+        match self {
+            Self::Snapshot { .. } => None,
+            Self::Projection { projection, .. } => Some(match projection {
+                InspectProjection::InvocationNodes => 2,
+                InspectProjection::Calls => 3,
+                InspectProjection::Resources => 4,
+                InspectProjection::StateCells => 5,
+                InspectProjection::UiNodes => 6,
+                InspectProjection::PresentationCandidates => 7,
+                InspectProjection::RuntimeBindings => 8,
+                InspectProjection::SecurityDecisions => 9,
+            }),
+        }
+    }
+
+    /// Returns the projection selector for a projection operation.
+    pub const fn projection(&self) -> Option<InspectProjection> {
+        match self {
+            Self::Snapshot { .. } => None,
+            Self::Projection { projection, .. } => Some(*projection),
+        }
+    }
+
+    /// Returns the snapshot argument for a projection operation.
+    pub fn snapshot(&self) -> Option<&RuntimeValue> {
+        match self {
+            Self::Snapshot { .. } => None,
+            Self::Projection { snapshot, .. } => Some(snapshot),
+        }
+    }
+}
+
+/// One typed request submitted to the installed CLIENT Inspector provider.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ClientInspectRequest {
+    operation: ClientInspectOperation,
+    context: ClientExecutionContext,
+    client_epoch_id: ClientEpochId,
+    observer_root_invocation_id: InvocationId,
+    observer_parent_invocation_id: InvocationId,
+    target_invocation_id: Option<InvocationId>,
+    snapshot_options: Option<RuntimeValue>,
+}
+
+impl ClientInspectRequest {
+    /// Creates a request bound to one CLIENT execution context.
+    pub fn new(context: ClientExecutionContext, operation: ClientInspectOperation) -> Self {
+        let target_invocation_id = operation.target().and_then(inspect_invocation_target);
+        Self::with_provenance(context, operation, target_invocation_id, None)
+    }
+
+    /// Creates a request with a target identity recovered from canonical snapshot evidence.
+    fn with_target_invocation(
+        context: ClientExecutionContext,
+        operation: ClientInspectOperation,
+        target_invocation_id: InvocationId,
+    ) -> Self {
+        Self::with_provenance(context, operation, Some(target_invocation_id), None)
+    }
+
+    /// Creates a request carrying the checked snapshot-options value.
+    fn with_target_invocation_and_options(
+        context: ClientExecutionContext,
+        operation: ClientInspectOperation,
+        target_invocation_id: InvocationId,
+        snapshot_options: RuntimeValue,
+    ) -> Self {
+        Self::with_provenance(
+            context,
+            operation,
+            Some(target_invocation_id),
+            Some(snapshot_options),
+        )
+    }
+
+    fn with_provenance(
+        context: ClientExecutionContext,
+        operation: ClientInspectOperation,
+        target_invocation_id: Option<InvocationId>,
+        snapshot_options: Option<RuntimeValue>,
+    ) -> Self {
+        Self {
+            operation,
+            context,
+            client_epoch_id: context.client_epoch_id(),
+            observer_root_invocation_id: context.observer_root_invocation_id(),
+            observer_parent_invocation_id: context.observer_parent_invocation_id(),
+            target_invocation_id,
+            snapshot_options,
+        }
+    }
+
+    /// Returns the typed sealed operation.
+    pub const fn operation(&self) -> &ClientInspectOperation {
+        &self.operation
+    }
+
+    /// Returns the enclosing execution context and revision evidence.
+    pub const fn context(&self) -> ClientExecutionContext {
+        self.context
+    }
+
+    /// Returns the active revision pair pinned by this request.
+    pub const fn pair(&self) -> RevisionPair {
+        self.context.pair()
+    }
+
+    /// Returns the observer's parent invocation identity.
+    pub const fn parent_invocation_id(&self) -> InvocationId {
+        self.context.parent_invocation_id()
+    }
+
+    /// Returns the trusted observer root invocation identity.
+    pub const fn observer_root_invocation_id(&self) -> InvocationId {
+        self.observer_root_invocation_id
+    }
+
+    /// Returns the trusted observer parent invocation identity.
+    pub const fn observer_parent_invocation_id(&self) -> InvocationId {
+        self.observer_parent_invocation_id
+    }
+
+    /// Returns the fixed observer purpose for this sealed request.
+    pub const fn observer_purpose(&self) -> &'static str {
+        "inspect"
+    }
+
+    /// Returns the target invocation identity when canonical evidence supplied it.
+    pub const fn target_invocation_id(&self) -> Option<InvocationId> {
+        self.target_invocation_id
+    }
+
+    /// Returns the checked snapshot-options value for a snapshot request.
+    pub fn snapshot_options(&self) -> Option<&RuntimeValue> {
+        self.snapshot_options.as_ref()
+    }
+
+    /// Returns the client-side epoch anchor for this request.
+    pub const fn client_epoch_id(&self) -> ClientEpochId {
+        self.client_epoch_id
+    }
+}
+
+/// One typed request submitted to an installed CLIENT runtime contract.
+///
+/// The request carries already-evaluated argument values and the enclosing
+/// execution context. It does not carry caller-supplied authority.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ClientExternalContractRequest {
+    identity: String,
+    arguments: Vec<(ParameterId, RuntimeValue)>,
+    context: ClientExecutionContext,
+}
+
+impl ClientExternalContractRequest {
+    /// Creates a request for one exact runtime contract identity.
+    pub fn new(
+        context: ClientExecutionContext,
+        identity: impl Into<String>,
+        arguments: Vec<(ParameterId, RuntimeValue)>,
+    ) -> Self {
+        Self {
+            identity: identity.into(),
+            arguments,
+            context,
+        }
+    }
+
+    /// Returns the exact runtime contract identity.
+    pub fn identity(&self) -> &str {
+        &self.identity
+    }
+
+    /// Returns the evaluated arguments with their declared parameter identities.
+    pub fn arguments(&self) -> &[(ParameterId, RuntimeValue)] {
+        &self.arguments
+    }
+
+    /// Returns the enclosing CLIENT execution context.
+    pub const fn context(&self) -> ClientExecutionContext {
+        self.context
+    }
+}
+
+/// A sealed Inspector operation failed during local CLIENT evaluation.
+#[non_exhaustive]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ClientInspectError {
+    /// The provider is not installed or returned the stable unavailable code.
+    Failed(String),
+    /// The operation attempted to use an invocation value of the wrong type.
+    InvalidTarget,
+    /// The operation attempted to project a value that is not a snapshot carrier.
+    InvalidSnapshot,
+    /// The provider returned a value outside the operation's sealed result type.
+    TypeMismatch,
+    /// Nested Inspector operations exceeded the closed expression depth bound.
+    RecursionLimit,
+    /// The request context did not match the active revision.
+    RevisionMismatch { expected: RevisionPair, actual: RevisionPair },
+}
+
+impl fmt::Display for ClientInspectError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Failed(code) => write!(formatter, "CLIENT Inspector failed: {code}"),
+            Self::InvalidTarget => formatter.write_str("CLIENT Inspector target is invalid"),
+            Self::InvalidSnapshot => formatter.write_str("CLIENT Inspector snapshot is invalid"),
+            Self::TypeMismatch => formatter.write_str("CLIENT Inspector provider returned the wrong type"),
+            Self::RecursionLimit => formatter.write_str("CLIENT Inspector recursion limit was exceeded"),
+            Self::RevisionMismatch { .. } => formatter.write_str("CLIENT Inspector request revision does not match the active revision"),
+        }
+    }
+}
+
+impl Error for ClientInspectError {}
+
 /// A runtime adapter that evaluates one resource request.
 pub trait ClientResourceExecutor {
     /// Executes one request and returns its completion.
@@ -802,17 +1092,60 @@ pub trait ClientResourceExecutor {
     fn cancel_pending(&mut self) -> Option<ClientResourceCompletion> {
         None
     }
+    /// Evaluates one typed Inspector operation.
+    ///
+    /// The default is deliberately fail-closed. Hosts that do not install the
+    /// headless Inspector provider therefore expose the stable public failure
+    /// code rather than selecting another runtime or generic resource path.
+    fn inspect(&mut self, _request: ClientInspectRequest) -> Result<RuntimeValue, String> {
+        Err("inspect.runtime_unavailable".to_owned())
+    }
+    /// Evaluates one typed external CLIENT runtime contract.
+    ///
+    /// Hosts that do not install the exact contract fail closed. Generic
+    /// external contracts remain unavailable unless a host opts in explicitly.
+    fn external_contract(
+        &mut self,
+        _request: ClientExternalContractRequest,
+    ) -> Result<RuntimeValue, String> {
+        Err("inspect.runtime_unavailable".to_owned())
+    }
 }
 
 /// A deterministic immediate executor for host glue and focused tests.
 pub struct DeterministicClientResourceExecutor<F> {
     evaluate: F,
+    inspect: Option<Box<dyn FnMut(&ClientInspectRequest) -> Result<RuntimeValue, String>>>,
+    external_contract:
+        Option<Box<dyn FnMut(&ClientExternalContractRequest) -> Result<RuntimeValue, String>>>,
 }
 
 impl<F> DeterministicClientResourceExecutor<F> {
     /// Creates an immediate executor around one evaluation closure.
     pub const fn new(evaluate: F) -> Self {
-        Self { evaluate }
+        Self {
+            evaluate,
+            inspect: None,
+            external_contract: None,
+        }
+    }
+
+    /// Installs a deterministic Inspector provider for focused tests and host glue.
+    pub fn with_inspect<I>(mut self, inspect: I) -> Self
+    where
+        I: FnMut(&ClientInspectRequest) -> Result<RuntimeValue, String> + 'static,
+    {
+        self.inspect = Some(Box::new(inspect));
+        self
+    }
+
+    /// Installs a deterministic external contract provider for focused tests and host glue.
+    pub fn with_external_contract<I>(mut self, external_contract: I) -> Self
+    where
+        I: FnMut(&ClientExternalContractRequest) -> Result<RuntimeValue, String> + 'static,
+    {
+        self.external_contract = Some(Box::new(external_contract));
+        self
     }
 }
 
@@ -826,7 +1159,25 @@ where
             Err(code) => request.failed(code),
         }
     }
+
+    fn inspect(&mut self, request: ClientInspectRequest) -> Result<RuntimeValue, String> {
+        match self.inspect.as_mut() {
+            Some(provider) => provider(&request),
+            None => Err("inspect.runtime_unavailable".to_owned()),
+        }
+    }
+
+    fn external_contract(
+        &mut self,
+        request: ClientExternalContractRequest,
+    ) -> Result<RuntimeValue, String> {
+        match self.external_contract.as_mut() {
+            Some(provider) => provider(&request),
+            None => Err("inspect.runtime_unavailable".to_owned()),
+        }
+    }
 }
+
 
 /// One typed CLIENT resource lifecycle owned by the local evaluator.
 #[derive(Clone, Debug, PartialEq)]
@@ -2495,6 +2846,13 @@ pub enum ClientExecutionError {
         /// The closed resource failure.
         source: ClientResourceExecutionError,
     },
+    /// A version-nine Inspector expression could not produce a checked value.
+    Inspect {
+        /// The resolved execution context.
+        context: ClientExecutionContext,
+        /// The closed Inspector failure.
+        source: ClientInspectError,
+    },
 }
 impl ClientExecutionError {
     /// Returns the active revision pair associated with this error.
@@ -2509,7 +2867,8 @@ impl ClientExecutionError {
             | Self::ExpressionEvaluation { context, .. }
             | Self::ExternalContract { context, .. }
             | Self::StateEvaluation { context, .. }
-            | Self::ResourceEvaluation { context, .. } => context.pair(),
+            | Self::ResourceEvaluation { context, .. }
+            | Self::Inspect { context, .. } => context.pair(),
         }
     }
 
@@ -2526,7 +2885,8 @@ impl ClientExecutionError {
             | Self::ExpressionEvaluation { context, .. }
             | Self::ExternalContract { context, .. }
             | Self::StateEvaluation { context, .. }
-            | Self::ResourceEvaluation { context, .. } => context.function(),
+            | Self::ResourceEvaluation { context, .. }
+            | Self::Inspect { context, .. } => context.function(),
         }
     }
 
@@ -2543,7 +2903,8 @@ impl ClientExecutionError {
             | Self::ExpressionEvaluation { context, .. }
             | Self::ExternalContract { context, .. }
             | Self::StateEvaluation { context, .. }
-            | Self::ResourceEvaluation { context, .. } => Some(context),
+            | Self::ResourceEvaluation { context, .. }
+            | Self::Inspect { context, .. } => Some(context),
         }
     }
 }
@@ -2575,6 +2936,7 @@ impl fmt::Display for ClientExecutionError {
             ),
             Self::StateEvaluation { source, .. } => source.fmt(formatter),
             Self::ResourceEvaluation { source, .. } => source.fmt(formatter),
+            Self::Inspect { source, .. } => source.fmt(formatter),
         }
     }
 }
@@ -2586,6 +2948,7 @@ impl Error for ClientExecutionError {
             Self::InvalidOpaqueValue { source, .. } => Some(source),
             Self::StateEvaluation { source, .. } => Some(source),
             Self::ResourceEvaluation { source, .. } => source.source(),
+            Self::Inspect { source, .. } => Some(source),
             Self::AuthorisationMismatch { .. }
             | Self::FunctionNotFound { .. }
             | Self::InvalidFunction { .. }
@@ -3156,7 +3519,7 @@ fn evaluate_plan(
                 .map_err(|source| ClientExecutionError::InvalidArtifact { context, source })?;
             evaluate_opaque_plan(active, &plan, context, expected)
         }
-        ClientReturnShape::Expression(expected) => {
+        ClientReturnShape::Expression(expected) | ClientReturnShape::Inspect(expected) => {
             let plan = ExpressionClientPlan::decode(payload)
                 .map_err(|source| ClientExecutionError::InvalidArtifact { context, source })?;
             evaluate_expression_plan(
@@ -3652,6 +4015,7 @@ fn procedural_resource_kind_for_runtime(
 ) -> Option<ResourceKind> {
     match expression {
         ClientExpressionNode::Resource { operation } => Some(operation.kind()),
+        ClientExpressionNode::Inspect { .. } => None,
         ClientExpressionNode::LocalRead { local } => match local_environment.get(local) {
             Some(ClientLocalBinding::Resource(operation)) => Some(operation.kind()),
             _ => None,
@@ -3715,7 +4079,7 @@ fn evaluate_capability_plan(
                     local_environment,
                 );
             }
-            let ClientReturnShape::Expression(expected) = return_shape else {
+            let (ClientReturnShape::Expression(expected) | ClientReturnShape::Inspect(expected)) = return_shape else {
                 unreachable!("function shape was validated against the inner plan version");
             };
             evaluate_expression_plan(
@@ -4721,6 +5085,500 @@ pub fn trigger_client_action(
     }
 }
 
+const INSPECT_PROJECTION_FAILED: &str = "inspect.projection_failed";
+
+const INSPECT_PUBLIC_ERROR_CODES: &[&str] = &[
+    "inspect.invalid_target",
+    "inspect.unknown_carrier",
+    "inspect.malformed_carrier",
+    "inspect.limit",
+    "inspect.denied",
+    "inspect.epoch_mismatch",
+    "inspect.stale_epoch",
+    "inspect.future_epoch",
+    "inspect.recursion",
+    "inspect.cancelled",
+    "inspect.closed",
+    "inspect.runtime_unavailable",
+    INSPECT_PROJECTION_FAILED,
+];
+
+fn stable_inspect_provider_error(error: &str) -> String {
+    // The server seam historically used `inspect.revision_mismatch`; ADR 0080
+    // exposes the equivalent provenance failure as `inspect.epoch_mismatch`.
+    // Keep this translation at the client boundary so provider details never
+    // become part of the public error surface.
+    let normalized = match error {
+        "inspect.revision_mismatch" => "inspect.epoch_mismatch",
+        "inspect.invalid_snapshot" => "inspect.malformed_carrier",
+        "inspect.invalid_projection" => "inspect.malformed_carrier",
+        "inspect.epoch_unavailable" => "inspect.stale_epoch",
+        _ => error,
+    };
+    if INSPECT_PUBLIC_ERROR_CODES.contains(&normalized) {
+        normalized.to_owned()
+    } else {
+        INSPECT_PROJECTION_FAILED.to_owned()
+    }
+}
+const DEVTOOLS_INSPECTOR_SHELL_CONTRACT: &str = "devtools.inspector_shell@1";
+
+fn evaluate_external_contract(
+    identity: &str,
+    context: ClientExecutionContext,
+    arguments: &[(ParameterId, RuntimeValue)],
+    executor: &mut Option<&mut dyn ClientResourceExecutor>,
+) -> Result<RuntimeValue, ClientExecutionError> {
+    if identity != DEVTOOLS_INSPECTOR_SHELL_CONTRACT {
+        return Err(ClientExecutionError::ExternalContract {
+            context,
+            identity: identity.to_owned(),
+        });
+    }
+
+    let Some(executor) = executor.as_deref_mut() else {
+        return Err(ClientExecutionError::Inspect {
+            context,
+            source: ClientInspectError::Failed("inspect.runtime_unavailable".to_owned()),
+        });
+    };
+    let request = ClientExternalContractRequest::new(
+        context,
+        identity,
+        arguments.to_vec(),
+    );
+    executor
+        .external_contract(request)
+        .map_err(|code| ClientExecutionError::Inspect {
+            context,
+            source: ClientInspectError::Failed(stable_inspect_provider_error(&code)),
+        })
+}
+
+const INSPECTOR_SHELL_SIGNATURE: [(&str, TypeId); 9] = [
+    ("p_snapshot", SYS_INSPECT_SNAPSHOT_TYPE_ID),
+    ("p_invocation_nodes", SYS_INSPECT_INVOCATION_NODES_TYPE_ID),
+    ("p_calls", SYS_INSPECT_CALLS_TYPE_ID),
+    ("p_resources", SYS_INSPECT_RESOURCES_TYPE_ID),
+    ("p_state_cells", SYS_INSPECT_STATE_CELLS_TYPE_ID),
+    ("p_ui_nodes", SYS_INSPECT_UI_NODES_TYPE_ID),
+    ("p_presentation_candidates", SYS_INSPECT_PRESENTATION_CANDIDATES_TYPE_ID),
+    ("p_runtime_bindings", SYS_INSPECT_RUNTIME_BINDINGS_TYPE_ID),
+    ("p_security_decisions", SYS_INSPECT_SECURITY_DECISIONS_TYPE_ID),
+];
+
+fn inspector_shell_contract_error(
+    context: ClientExecutionContext,
+) -> ClientExecutionError {
+    ClientExecutionError::Inspect {
+        context,
+        source: inspect_carrier_error("inspect.malformed_carrier"),
+    }
+}
+
+fn inspector_shell_artifact_is_external(
+    revision: &orna_core::revision::FunctionRevisionRecord,
+) -> bool {
+    fn is_external(expression: &ClientExpressionNode) -> bool {
+        matches!(
+            expression,
+            ClientExpressionNode::ExternalContract { identity }
+                if identity == DEVTOOLS_INSPECTOR_SHELL_CONTRACT
+        )
+    }
+
+    match revision.artifact().version() {
+        EXPRESSION_FORMAT_VERSION => ExpressionClientPlan::decode(revision.artifact().payload())
+            .ok()
+            .is_some_and(|plan| is_external(plan.expression())),
+        CAPABILITY_FORMAT_VERSION => CapabilityClientPlan::decode(revision.artifact().payload())
+            .ok()
+            .and_then(|plan| match plan.inner_plan() {
+                InnerClientPlan::Expression(expression) => Some(is_external(expression.expression())),
+                _ => None,
+            })
+            .unwrap_or(false),
+        _ => false,
+    }
+}
+
+fn validate_inspector_shell_contract(
+    active: &ActiveDatabaseRevision,
+    context: ClientExecutionContext,
+    identity: &str,
+    arguments: &[(ParameterId, RuntimeValue)],
+) -> Result<(), ClientExecutionError> {
+    if identity != DEVTOOLS_INSPECTOR_SHELL_CONTRACT || context.pair() != active.pair() {
+        return Err(inspector_shell_contract_error(context));
+    }
+    let Some(definition) = active.catalogue().function_by_id(context.function()) else {
+        return Err(inspector_shell_contract_error(context));
+    };
+    let Some(revision) = active.function_revisions().iter().find(|revision| {
+        revision.function() == context.function() && revision.id() == context.function_revision()
+    }) else {
+        return Err(inspector_shell_contract_error(context));
+    };
+    if definition.domain() != FunctionDomain::Client
+        || definition.name().to_string() != "devtools.inspector_shell"
+        || definition.current_revision() != context.function_revision()
+        || !matches!(
+            definition.return_type(),
+            FunctionReturn::Single(ResolvedType::Value(type_id)) if *type_id == STD_UI_TYPE_ID
+        )
+        || definition.parameters().len() != INSPECTOR_SHELL_SIGNATURE.len()
+        || arguments.len() != INSPECTOR_SHELL_SIGNATURE.len()
+        || !inspector_shell_artifact_is_external(revision)
+    {
+        return Err(inspector_shell_contract_error(context));
+    }
+    for (index, ((parameter_id, value), (expected_name, expected_type))) in
+        arguments.iter().zip(INSPECTOR_SHELL_SIGNATURE).enumerate()
+    {
+        let parameter = &definition.parameters()[index];
+        if parameter.id() != *parameter_id
+            || parameter.name() != expected_name
+            || parameter.resolved_type() != ResolvedType::Value(expected_type)
+            || !runtime_value_matches(active, value, ResolvedType::Value(expected_type))
+        {
+            return Err(inspector_shell_contract_error(context));
+        }
+    }
+    Ok(())
+}
+
+fn inspector_shell_ui_value_matches(
+    active: &ActiveDatabaseRevision,
+    value: &RuntimeValue,
+) -> bool {
+    let RuntimeValue::Opaque(opaque) = value else {
+        return false;
+    };
+    if opaque.opaque_type() != STD_UI_TYPE_ID {
+        return false;
+    }
+    let Some(standard) = active.catalogue_hash_context().standard() else {
+        return false;
+    };
+    let Ok(registry) = registered_opaque_codecs(standard) else {
+        return false;
+    };
+    OpaqueValue::new(active, &registry, STD_UI_TYPE_ID, opaque.canonical_payload()).is_ok()
+}
+
+fn inspect_carrier_error(code: &'static str) -> ClientInspectError {
+    ClientInspectError::Failed(code.to_owned())
+}
+
+
+fn decode_inspect_carrier_payload(
+    active: &ActiveDatabaseRevision,
+    payload: &[u8],
+    expected: TypeId,
+) -> Result<InspectCarrierEnvelope, ClientInspectError> {
+    let Some(kind) = InspectCarrierKind::from_type_id(expected) else {
+        return Err(inspect_carrier_error("inspect.unknown_carrier"));
+    };
+    let envelope = InspectCarrierEnvelope::decode(payload)
+        .map_err(|_| inspect_carrier_error("inspect.malformed_carrier"))?;
+    if envelope.carrier_kind() != kind {
+        return Err(inspect_carrier_error("inspect.malformed_carrier"));
+    }
+    let pair = active.pair();
+    if envelope.source_revision_id() != pair.source()
+        || envelope.catalogue_revision_id() != pair.catalogue()
+    {
+        return Err(inspect_carrier_error("inspect.epoch_mismatch"));
+    }
+    Ok(envelope)
+}
+
+fn decode_inspect_carrier(
+    active: &ActiveDatabaseRevision,
+    value: &RuntimeValue,
+    expected: TypeId,
+) -> Result<InspectCarrierEnvelope, ClientInspectError> {
+    let RuntimeValue::Opaque(opaque) = value else {
+        return Err(inspect_carrier_error("inspect.malformed_carrier"));
+    };
+    if opaque.opaque_type() != expected {
+        return Err(inspect_carrier_error("inspect.malformed_carrier"));
+    }
+    decode_inspect_carrier_payload(active, opaque.canonical_payload(), expected)
+}
+
+fn inspect_projection_result_type(projection: InspectProjection) -> TypeId {
+    match projection {
+        InspectProjection::InvocationNodes => SYS_INSPECT_INVOCATION_NODES_TYPE_ID,
+        InspectProjection::Calls => SYS_INSPECT_CALLS_TYPE_ID,
+        InspectProjection::Resources => SYS_INSPECT_RESOURCES_TYPE_ID,
+        InspectProjection::StateCells => SYS_INSPECT_STATE_CELLS_TYPE_ID,
+        InspectProjection::UiNodes => SYS_INSPECT_UI_NODES_TYPE_ID,
+        InspectProjection::PresentationCandidates => SYS_INSPECT_PRESENTATION_CANDIDATES_TYPE_ID,
+        InspectProjection::RuntimeBindings => SYS_INSPECT_RUNTIME_BINDINGS_TYPE_ID,
+        InspectProjection::SecurityDecisions => SYS_INSPECT_SECURITY_DECISIONS_TYPE_ID,
+    }
+}
+
+fn inspect_target_is_observer(
+    context: ClientExecutionContext,
+    target: InvocationId,
+) -> bool {
+    target == context.observer_root_invocation_id()
+        || target == context.observer_parent_invocation_id()
+}
+
+fn inspect_invocation_target(value: &RuntimeValue) -> Option<InvocationId> {
+    let RuntimeValue::Reference { target, object } = value else {
+        return None;
+    };
+    if *target != SYS_INSPECT_INVOCATION_TYPE_ID || object.to_bytes() == [0; 16] {
+        return None;
+    }
+    Some(InvocationId::from_bytes(object.to_bytes()))
+}
+
+const INSPECT_SNAPSHOT_ROW_TAG: u8 = 1;
+
+fn decode_inspect_snapshot_target_row(
+    row: &[u8],
+    epoch_id: u64,
+) -> Result<InvocationId, ClientInspectError> {
+    if row.len() < 84 || row[0] != INSPECT_SNAPSHOT_ROW_TAG || row[1..9] != [0; 8] {
+        return Err(inspect_carrier_error("inspect.malformed_carrier"));
+    }
+    if u64::from_be_bytes(row[17..25].try_into().expect("snapshot epoch width")) != epoch_id {
+        return Err(inspect_carrier_error("inspect.epoch_mismatch"));
+    }
+    let target = InvocationId::from_bytes(row[25..41].try_into().expect("snapshot target width"));
+    if target.to_bytes() == [0; 16] {
+        return Err(inspect_carrier_error("inspect.invalid_target"));
+    }
+    let mut offset = 73;
+    let outcome = *row.get(offset).ok_or_else(|| inspect_carrier_error("inspect.malformed_carrier"))?;
+    if !(1..=4).contains(&outcome) {
+        return Err(inspect_carrier_error("inspect.malformed_carrier"));
+    }
+    offset += 1 + 8;
+    let result = *row.get(offset).ok_or_else(|| inspect_carrier_error("inspect.malformed_carrier"))?;
+    offset += 1;
+    match result {
+        0 => {}
+        1 => offset += 8,
+        _ => return Err(inspect_carrier_error("inspect.malformed_carrier")),
+    }
+    let duration = *row.get(offset).ok_or_else(|| inspect_carrier_error("inspect.malformed_carrier"))?;
+    offset += 1;
+    match duration {
+        0 => {}
+        1 => offset += 8,
+        _ => return Err(inspect_carrier_error("inspect.malformed_carrier")),
+    }
+    if offset != row.len() {
+        return Err(inspect_carrier_error("inspect.malformed_carrier"));
+    }
+    Ok(target)
+}
+
+fn inspect_snapshot_target_from_envelope(
+    active: &ActiveDatabaseRevision,
+    envelope: &InspectCarrierEnvelope,
+) -> Result<InvocationId, ClientInspectError> {
+    if envelope.carrier_kind() != InspectCarrierKind::Snapshot || envelope.rows().len() != 1 {
+        return Err(inspect_carrier_error("inspect.malformed_carrier"));
+    }
+    let Some(standard) = active.catalogue_hash_context().standard() else {
+        return Err(inspect_carrier_error("inspect.projection_failed"));
+    };
+    let registry = registered_opaque_codecs(standard)
+        .map_err(|_| inspect_carrier_error("inspect.projection_failed"))?;
+    let row = decode_constructed_value(active, &registry, &envelope.rows()[0])
+        .map_err(|_| inspect_carrier_error("inspect.malformed_carrier"))?;
+    let RuntimeValue::Constructed(constructed) = row else {
+        return Err(inspect_carrier_error("inspect.malformed_carrier"));
+    };
+    let TypeDescriptorKind::List(child) = constructed.descriptor().kind() else {
+        return Err(inspect_carrier_error("inspect.malformed_carrier"));
+    };
+    if child.kind() != TypeDescriptorKind::Named(BINARY_LARGE_OBJECT_TYPE_ID) {
+        return Err(inspect_carrier_error("inspect.malformed_carrier"));
+    }
+    let ConstructedValueKind::List(values) = constructed.kind() else {
+        return Err(inspect_carrier_error("inspect.malformed_carrier"));
+    };
+    let [RuntimeValue::Bytes(payload)] = values else {
+        return Err(inspect_carrier_error("inspect.malformed_carrier"));
+    };
+    decode_inspect_snapshot_target_row(payload, envelope.epoch_id())
+}
+
+fn inspect_carrier_value_matches(
+    active: &ActiveDatabaseRevision,
+    value: &RuntimeValue,
+    expected: TypeId,
+) -> bool {
+    decode_inspect_carrier(active, value, expected).is_ok()
+}
+
+fn evaluate_inspect_expression(
+    active: &ActiveDatabaseRevision,
+    operation: &InspectOperationNode,
+    context: ClientExecutionContext,
+    arguments: &[(ParameterId, RuntimeValue)],
+    declarations: &[capability::LocalCapabilityDeclaration],
+    grants: &capability::LocalCapabilityGrantSet,
+    state: &mut ClientStateStore,
+    depth: usize,
+    principal: PrincipalId,
+    executor: &mut Option<&mut dyn ClientResourceExecutor>,
+    local_environment: &mut ClientLocalEnvironment,
+) -> Result<RuntimeValue, ClientExecutionError> {
+    if context.pair() != active.pair() {
+        return Err(ClientExecutionError::Inspect {
+            context,
+            source: ClientInspectError::RevisionMismatch {
+                expected: active.pair(),
+                actual: context.pair(),
+            },
+        });
+    }
+    if depth > orna_artifact::client_plan::MAX_EXPRESSION_DEPTH {
+        return Err(ClientExecutionError::Inspect {
+            context,
+            source: ClientInspectError::RecursionLimit,
+        });
+    }
+    let mut snapshot_epoch_id = None;
+    let target_invocation_id;
+    let mut snapshot_options = None;
+    let operation = match operation {
+        InspectOperationNode::Snapshot { target, options } => {
+            let target = evaluate_expression(
+                active, target, context, arguments, declarations, grants, state, depth + 1,
+                principal, executor, local_environment,
+            )?;
+            let Some(invocation) = inspect_invocation_target(&target) else {
+                return Err(ClientExecutionError::Inspect {
+                    context,
+                    source: ClientInspectError::InvalidTarget,
+                });
+            };
+            if inspect_target_is_observer(context, invocation)
+            {
+                return Err(ClientExecutionError::Inspect {
+                    context,
+                    source: inspect_carrier_error("inspect.recursion"),
+                });
+            }
+            if let Some(options) = options {
+                let options = evaluate_expression(
+                    active, options, context, arguments, declarations, grants, state, depth + 1,
+                    principal, executor, local_environment,
+                )?;
+                if !runtime_value_matches(
+                    active,
+                    &options,
+                    ResolvedType::Named(SYS_INSPECT_SNAPSHOT_OPTIONS_TYPE_ID),
+                ) {
+                    return Err(ClientExecutionError::Inspect {
+                        context,
+                        source: ClientInspectError::InvalidSnapshot,
+                    });
+                }
+                snapshot_options = Some(options);
+            }
+            target_invocation_id = Some(invocation);
+            ClientInspectOperation::Snapshot { target }
+        }
+        InspectOperationNode::Projection { projection, snapshot } => {
+            let snapshot = evaluate_expression(
+                active, snapshot, context, arguments, declarations, grants, state, depth + 1,
+                principal, executor, local_environment,
+            )?;
+            let snapshot_envelope = match decode_inspect_carrier(
+                active,
+                &snapshot,
+                SYS_INSPECT_SNAPSHOT_TYPE_ID,
+            ) {
+                Ok(envelope) => envelope,
+                Err(source) => {
+                    return Err(ClientExecutionError::Inspect { context, source });
+                }
+            };
+            let invocation = inspect_snapshot_target_from_envelope(active, &snapshot_envelope)
+                .map_err(|source| ClientExecutionError::Inspect { context, source })?;
+            if inspect_target_is_observer(context, invocation) {
+                return Err(ClientExecutionError::Inspect {
+                    context,
+                    source: inspect_carrier_error("inspect.recursion"),
+                });
+            }
+            target_invocation_id = Some(invocation);
+            snapshot_epoch_id = Some(snapshot_envelope.epoch_id());
+            ClientInspectOperation::Projection {
+                projection: *projection,
+                snapshot,
+            }
+        }
+    };
+    let Some(executor) = executor.as_deref_mut() else {
+        return Err(ClientExecutionError::Inspect {
+            context,
+            source: ClientInspectError::Failed("inspect.runtime_unavailable".to_owned()),
+        });
+    };
+    let request = match (target_invocation_id, snapshot_options) {
+        (Some(target), Some(options)) => ClientInspectRequest::with_target_invocation_and_options(
+            context,
+            operation.clone(),
+            target,
+            options,
+        ),
+        (Some(target), None) => ClientInspectRequest::with_target_invocation(
+            context,
+            operation.clone(),
+            target,
+        ),
+        (None, None) => ClientInspectRequest::new(context, operation.clone()),
+        (None, Some(_)) => unreachable!("snapshot options require a target"),
+    };
+    let value = executor.inspect(request).map_err(|code| ClientExecutionError::Inspect {
+        context,
+        source: ClientInspectError::Failed(stable_inspect_provider_error(&code)),
+    })?;
+    let expected = match operation {
+        ClientInspectOperation::Snapshot { .. } => SYS_INSPECT_SNAPSHOT_TYPE_ID,
+        ClientInspectOperation::Projection { projection, .. } => {
+            inspect_projection_result_type(projection)
+        }
+    };
+    let envelope = match decode_inspect_carrier(active, &value, expected) {
+        Ok(envelope) => envelope,
+        Err(source) => {
+            return Err(ClientExecutionError::Inspect { context, source });
+        }
+    };
+    if snapshot_epoch_id.is_some_and(|epoch_id| epoch_id != envelope.epoch_id()) {
+        return Err(ClientExecutionError::Inspect {
+            context,
+            source: inspect_carrier_error("inspect.epoch_mismatch"),
+        });
+    }
+    if let Some(expected_target) = target_invocation_id {
+        if matches!(operation, ClientInspectOperation::Snapshot { .. }) {
+            let actual_target = inspect_snapshot_target_from_envelope(active, &envelope)
+                .map_err(|source| ClientExecutionError::Inspect { context, source })?;
+            if actual_target != expected_target {
+                return Err(ClientExecutionError::Inspect {
+                    context,
+                    source: inspect_carrier_error("inspect.epoch_mismatch"),
+                });
+            }
+        }
+    }
+    Ok(value)
+}
+
 fn evaluate_expression(
     active: &ActiveDatabaseRevision,
     expression: &ClientExpressionNode,
@@ -4757,6 +5615,10 @@ fn evaluate_expression(
             executor, local_environment,
         ),
         ClientExpressionNode::Action { operation } => evaluate_action_operation(
+            active, operation, context, arguments, declarations, grants, state, depth, principal,
+            executor, local_environment,
+        ),
+        ClientExpressionNode::Inspect { operation } => evaluate_inspect_expression(
             active, operation, context, arguments, declarations, grants, state, depth, principal,
             executor, local_environment,
         ),
@@ -4802,7 +5664,7 @@ fn evaluate_expression(
             Ok(RuntimeValue::Text(format!("{left}{right}")))
         }
         ClientExpressionNode::Call { function, arguments: bound } => {
-            if depth >= orna_artifact::client_plan::MAX_EXPRESSION_DEPTH {
+            if depth > orna_artifact::client_plan::MAX_EXPRESSION_DEPTH {
                 return Err(expression_error(context, ClientExpressionError::RecursionLimit));
             }
             let mut evaluated = Vec::with_capacity(bound.len());
@@ -4831,9 +5693,21 @@ fn evaluate_expression(
             Ok(value)
         }
         ClientExpressionNode::ExternalContract { identity } => {
-            Err(ClientExecutionError::ExternalContract { context, identity: identity.clone() })
+            if identity == DEVTOOLS_INSPECTOR_SHELL_CONTRACT {
+                validate_inspector_shell_contract(active, context, identity, arguments)?;
+                let value = evaluate_external_contract(identity, context, arguments, executor)?;
+                if !inspector_shell_ui_value_matches(active, &value) {
+                    return Err(ClientExecutionError::Inspect {
+                        context,
+                        source: ClientInspectError::TypeMismatch,
+                    });
+                }
+                Ok(value)
+            } else {
+                evaluate_external_contract(identity, context, arguments, executor)
+            }
         }
-    }
+}
 }
 
 fn evaluate_field_path(
@@ -4891,6 +5765,7 @@ fn expression_returns_stream(
             .catalogue()
             .function_by_id(*function)
             .is_some_and(|function| matches!(function.return_type(), FunctionReturn::Stream(_))),
+        ClientExpressionNode::Inspect { .. } => false,
         _ => false,
     }
 }
@@ -4929,6 +5804,38 @@ fn runtime_stream_value_matches(
     constructed.descriptor() == &option_descriptor
 }
 
+fn is_sealed_inspect_type(type_id: TypeId) -> bool {
+    matches!(
+        type_id,
+        SYS_INSPECT_INVOCATION_TYPE_ID
+            | SYS_INSPECT_SNAPSHOT_TYPE_ID
+            | SYS_INSPECT_SNAPSHOT_OPTIONS_TYPE_ID
+            | SYS_INSPECT_INVOCATION_NODES_TYPE_ID
+            | SYS_INSPECT_CALLS_TYPE_ID
+            | SYS_INSPECT_RESOURCES_TYPE_ID
+            | SYS_INSPECT_STATE_CELLS_TYPE_ID
+            | SYS_INSPECT_UI_NODES_TYPE_ID
+            | SYS_INSPECT_PRESENTATION_CANDIDATES_TYPE_ID
+            | SYS_INSPECT_RUNTIME_BINDINGS_TYPE_ID
+            | SYS_INSPECT_SECURITY_DECISIONS_TYPE_ID
+    )
+}
+
+fn is_inspect_carrier_type(type_id: TypeId) -> bool {
+    matches!(
+        type_id,
+        SYS_INSPECT_SNAPSHOT_TYPE_ID
+            | SYS_INSPECT_INVOCATION_NODES_TYPE_ID
+            | SYS_INSPECT_CALLS_TYPE_ID
+            | SYS_INSPECT_RESOURCES_TYPE_ID
+            | SYS_INSPECT_STATE_CELLS_TYPE_ID
+            | SYS_INSPECT_UI_NODES_TYPE_ID
+            | SYS_INSPECT_PRESENTATION_CANDIDATES_TYPE_ID
+            | SYS_INSPECT_RUNTIME_BINDINGS_TYPE_ID
+            | SYS_INSPECT_SECURITY_DECISIONS_TYPE_ID
+    )
+}
+
 fn runtime_value_matches(
     active: &ActiveDatabaseRevision,
     value: &RuntimeValue,
@@ -4949,6 +5856,15 @@ fn runtime_value_matches(
     match expected {
         ResolvedType::Scalar(scalar) => scalar_matches(scalar),
         ResolvedType::Value(type_id) => {
+            if is_inspect_carrier_type(type_id) {
+                return inspect_carrier_value_matches(active, value, type_id);
+            }
+            if type_id == SYS_INSPECT_INVOCATION_TYPE_ID {
+                return false;
+            }
+            if type_id == STD_UI_TYPE_ID {
+                return matches!(value, RuntimeValue::Opaque(opaque) if opaque.opaque_type() == type_id);
+            }
             let Some(definition) = active
                 .catalogue_hash_context()
                 .standard()
@@ -4973,7 +5889,17 @@ fn runtime_value_matches(
                 _ => false,
             }
         }
-        ResolvedType::Named(type_id) => match value {
+        ResolvedType::Named(type_id) => {
+            if type_id == SYS_INSPECT_SNAPSHOT_OPTIONS_TYPE_ID {
+                // V1 has no registered options codec. Never admit an opaque
+                // payload merely because its type id is sealed; supplied
+                // options therefore fail closed instead of being discarded.
+                return false;
+            }
+            if is_inspect_carrier_type(type_id) {
+                return inspect_carrier_value_matches(active, value, type_id);
+            }
+            match value {
             RuntimeValue::Record(record) => {
                 record.record_type() == type_id && active_has_record_type(active, type_id)
             }
@@ -4982,8 +5908,12 @@ fn runtime_value_matches(
                     && active_enum_label_is_valid(active, type_id, enum_value.label())
             }
             _ => false,
-        },
+            }
+        }
         ResolvedType::Reference { target } => {
+            if target == SYS_INSPECT_INVOCATION_TYPE_ID {
+                return inspect_invocation_target(value).is_some();
+            }
             matches!(value, RuntimeValue::Reference { target: actual, .. } if *actual == target)
                 && active_has_object_type(active, target)
         }
@@ -4993,9 +5923,13 @@ fn runtime_value_matches(
 fn active_type_is_known(active: &ActiveDatabaseRevision, resolved: ResolvedType) -> bool {
     match resolved {
         ResolvedType::Scalar(_) => true,
-        ResolvedType::Value(type_id) => active_has_value_type(active, type_id),
+        ResolvedType::Value(type_id) => {
+            is_sealed_inspect_type(type_id) || active_has_value_type(active, type_id)
+        }
         ResolvedType::Named(type_id) => {
-            active_has_record_type(active, type_id) || active_has_enum_type(active, type_id)
+            is_inspect_carrier_type(type_id)
+                || active_has_record_type(active, type_id)
+                || active_has_enum_type(active, type_id)
         }
         ResolvedType::Reference { target } => active_has_object_type(active, target),
     }
@@ -5194,6 +6128,9 @@ fn resolve_client_local_type(
     if let Some(resolved) = resolve_state_slot_type(active, type_id) {
         return Some(resolved);
     }
+    if is_sealed_inspect_type(type_id) {
+        return Some(ResolvedType::value(type_id));
+    }
     let scalar = if type_id == orna_standard::BIGINT_TYPE_ID {
         Some(StandardScalar::BigInt)
     } else if type_id == orna_standard::FLOAT_TYPE_ID {
@@ -5301,6 +6238,7 @@ enum ClientReturnShape {
     Procedural(ResolvedType),
     StreamProcedural(ResolvedType),
     Action(TypeId),
+    Inspect(ResolvedType),
     OtherValue,
     Unsupported,
 }
@@ -5312,7 +6250,7 @@ fn classify_client_return(
 ) -> ClientReturnShape {
     let expression_eligible = matches!(
         artifact_version,
-        EXPRESSION_FORMAT_VERSION | STATE_FORMAT_VERSION | RESOURCE_FORMAT_VERSION | PROCEDURAL_FORMAT_VERSION | orna_artifact::client_plan::ACTION_FORMAT_VERSION
+        EXPRESSION_FORMAT_VERSION | STATE_FORMAT_VERSION | RESOURCE_FORMAT_VERSION | PROCEDURAL_FORMAT_VERSION | orna_artifact::client_plan::ACTION_FORMAT_VERSION | orna_artifact::client_plan::INSPECT_FORMAT_VERSION
     );
     let stream_expression_eligible = artifact_version == EXPRESSION_FORMAT_VERSION;
     let expression_shape = |resolved_type: ResolvedType| {
@@ -5322,6 +6260,8 @@ fn classify_client_return(
             ClientReturnShape::Resource(resolved_type)
         } else if artifact_version == PROCEDURAL_FORMAT_VERSION {
             ClientReturnShape::Procedural(resolved_type)
+        } else if artifact_version == orna_artifact::client_plan::INSPECT_FORMAT_VERSION {
+            ClientReturnShape::Inspect(resolved_type)
         } else {
             ClientReturnShape::Expression(resolved_type)
         }
@@ -5368,6 +6308,11 @@ fn classify_client_return(
     if let Some(type_id) = resolved_type.value_type() {
         if artifact_version == orna_artifact::client_plan::ACTION_FORMAT_VERSION && type_id == STD_ACTION_TYPE_ID {
             return ClientReturnShape::Action(type_id);
+        }
+        if artifact_version == orna_artifact::client_plan::INSPECT_FORMAT_VERSION
+            && is_sealed_inspect_type(type_id)
+        {
+            return expression_shape(resolved_type);
         }
         let Some(definition) = active
             .catalogue_hash_context()
@@ -5417,7 +6362,7 @@ fn validate_function_shape(
     }
     if !matches!(
         artifact_version,
-        EXPRESSION_FORMAT_VERSION | STATE_FORMAT_VERSION | RESOURCE_FORMAT_VERSION | PROCEDURAL_FORMAT_VERSION | orna_artifact::client_plan::ACTION_FORMAT_VERSION
+        EXPRESSION_FORMAT_VERSION | STATE_FORMAT_VERSION | RESOURCE_FORMAT_VERSION | PROCEDURAL_FORMAT_VERSION | orna_artifact::client_plan::ACTION_FORMAT_VERSION | orna_artifact::client_plan::INSPECT_FORMAT_VERSION
     ) && !definition.parameters().is_empty()
     {
         return Err(invalid_function(context, ClientExecutionRule::Parameters));
@@ -5499,6 +6444,7 @@ fn validate_selected_references(
                 | ClientReturnShape::Procedural(_)
                 | ClientReturnShape::StreamProcedural(_)
                 | ClientReturnShape::Action(_)
+                | ClientReturnShape::Inspect(_)
             ) {
                 if selected
                     .iter()
@@ -5545,6 +6491,7 @@ fn validate_selected_references(
                             | ClientReturnShape::StreamResource(_)
                             | ClientReturnShape::Procedural(_)
                             | ClientReturnShape::StreamProcedural(_)
+                            | ClientReturnShape::Inspect(_)
                             | ClientReturnShape::OtherValue
                             | ClientReturnShape::Unsupported => false,
                         }
@@ -5592,6 +6539,7 @@ fn validate_artifact(
             RESOURCE_FORMAT_VERSION
         }
         ClientReturnShape::Action(_) => orna_artifact::client_plan::ACTION_FORMAT_VERSION,
+        ClientReturnShape::Inspect(_) => orna_artifact::client_plan::INSPECT_FORMAT_VERSION,
         ClientReturnShape::OtherValue => unreachable!("definition references were validated"),
         ClientReturnShape::Unsupported => unreachable!("function shape was validated"),
     };
@@ -5627,7 +6575,7 @@ mod tests {
         ClientResourceExecutor, DeterministicClientResourceExecutor, ResourceKind,
         ACTION_FAILURE_CODE,
     };
-    use orna_artifact::client_plan::ActionTargetDomain;
+    use orna_artifact::client_plan::{ActionTargetDomain, InspectProjection};
     use std::time::SystemTime;
 
     use orna_core::{
@@ -5726,6 +6674,354 @@ mod tests {
         fn cancel(&mut self, request: ClientResourceRequest) -> ClientResourceCompletion {
             request.cancelled()
         }
+    }
+
+    #[test]
+    fn inspect_executor_default_is_fail_closed() {
+        let context = super::ClientExecutionContext {
+            pair: RevisionPair::new(
+                SourceRevisionId::from_bytes([0x11; 16]),
+                CatalogueRevisionId::from_bytes([0x22; 16]),
+            ),
+            function: FunctionId::from_bytes([0x33; 16]),
+            function_revision: FunctionRevisionId::from_bytes([0x44; 16]),
+            parent_invocation_id: InvocationId::from_bytes([0x55; 16]),
+        };
+        let operation = super::ClientInspectOperation::Snapshot {
+            target: RuntimeValue::Boolean(true),
+        };
+        let request = super::ClientInspectRequest::new(context, operation);
+        let mut executor = super::DeterministicClientResourceExecutor::new(|_: &super::ClientResourceRequest| {
+            Ok::<_, String>(RuntimeValue::Boolean(false))
+        });
+        assert_eq!(
+            executor.inspect(request),
+            Err("inspect.runtime_unavailable".to_owned())
+        );
+    }
+    #[test]
+    fn inspector_shell_external_contract_dispatches_typed_arguments() {
+        let context = super::ClientExecutionContext {
+            pair: RevisionPair::new(
+                SourceRevisionId::from_bytes([0x71; 16]),
+                CatalogueRevisionId::from_bytes([0x72; 16]),
+            ),
+            function: FunctionId::from_bytes([0x73; 16]),
+            function_revision: FunctionRevisionId::from_bytes([0x74; 16]),
+            parent_invocation_id: InvocationId::from_bytes([0x75; 16]),
+        };
+        let parameter = ParameterId::from_bytes([0x76; 16]);
+        let mut executor = super::DeterministicClientResourceExecutor::new(
+            |_: &super::ClientResourceRequest| Ok::<_, String>(RuntimeValue::Boolean(false)),
+        )
+        .with_external_contract(move |request| {
+            assert_eq!(request.identity(), "devtools.inspector_shell@1");
+            assert_eq!(request.context(), context);
+            assert_eq!(
+                request.arguments(),
+                &[(parameter, RuntimeValue::Boolean(true))],
+            );
+            Ok(RuntimeValue::Text("ui".to_owned()))
+        });
+        let mut optional: Option<&mut dyn super::ClientResourceExecutor> = Some(&mut executor);
+        assert_eq!(
+            super::evaluate_external_contract(
+                "devtools.inspector_shell@1",
+                context,
+                &[(parameter, RuntimeValue::Boolean(true))],
+                &mut optional,
+            )
+            .unwrap(),
+            RuntimeValue::Text("ui".to_owned()),
+        );
+    }
+
+    #[test]
+    fn generic_external_contracts_and_absent_inspector_provider_fail_closed() {
+        let context = super::ClientExecutionContext {
+            pair: RevisionPair::new(
+                SourceRevisionId::from_bytes([0x81; 16]),
+                CatalogueRevisionId::from_bytes([0x82; 16]),
+            ),
+            function: FunctionId::from_bytes([0x83; 16]),
+            function_revision: FunctionRevisionId::from_bytes([0x84; 16]),
+            parent_invocation_id: InvocationId::from_bytes([0x85; 16]),
+        };
+        let parameter = ParameterId::from_bytes([0x86; 16]);
+        let mut executor = super::DeterministicClientResourceExecutor::new(
+            |_: &super::ClientResourceRequest| Ok::<_, String>(RuntimeValue::Boolean(false)),
+        );
+        let mut optional: Option<&mut dyn super::ClientResourceExecutor> = Some(&mut executor);
+        assert!(matches!(
+            super::evaluate_external_contract(
+                "app.other@1",
+                context,
+                &[(parameter, RuntimeValue::Boolean(true))],
+                &mut optional,
+            ),
+            Err(super::ClientExecutionError::ExternalContract { identity, .. })
+                if identity == "app.other@1"
+        ));
+        assert_eq!(
+            super::evaluate_external_contract(
+                "devtools.inspector_shell@1",
+                context,
+                &[],
+                &mut optional,
+            ),
+            Err(super::ClientExecutionError::Inspect {
+                context,
+                source: super::ClientInspectError::Failed(
+                    "inspect.runtime_unavailable".to_owned(),
+                ),
+            }),
+        );
+    }
+
+    #[test]
+    fn inspector_provider_errors_are_whitelisted_and_redacted() {
+        assert_eq!(
+            super::stable_inspect_provider_error("inspect.denied"),
+            "inspect.denied"
+        );
+        assert_eq!(
+            super::stable_inspect_provider_error("inspect.revision_mismatch"),
+            "inspect.epoch_mismatch"
+        );
+        assert_eq!(
+            super::stable_inspect_provider_error("inspect.epoch_unavailable"),
+            "inspect.stale_epoch"
+        );
+        assert_eq!(
+            super::stable_inspect_provider_error("secret provider detail"),
+            "inspect.projection_failed"
+        );
+        assert_eq!(
+            super::stable_inspect_provider_error("inspect.projection_failed\0secret"),
+            "inspect.projection_failed"
+        );
+    }
+
+    #[test]
+    fn inspector_request_provenance_rejects_observer_target() {
+        let context = super::ClientExecutionContext {
+            pair: super::RevisionPair::new(
+                orna_core::SourceRevisionId::from_bytes([0x01; 16]),
+                orna_core::CatalogueRevisionId::from_bytes([0x02; 16]),
+            ),
+            function: super::FunctionId::from_bytes([0x03; 16]),
+            function_revision: super::FunctionRevisionId::from_bytes([0x04; 16]),
+            parent_invocation_id: super::InvocationId::from_bytes([0x05; 16]),
+        };
+        assert!(super::inspect_target_is_observer(
+            context,
+            context.observer_root_invocation_id(),
+        ));
+        let request = super::ClientInspectRequest::new(
+            context,
+            super::ClientInspectOperation::Snapshot {
+                target: super::RuntimeValue::Reference {
+                    target: super::SYS_INSPECT_INVOCATION_TYPE_ID,
+                    object: orna_core::ObjectId::from_bytes([0x06; 16]),
+                },
+            },
+        );
+        assert_eq!(request.observer_root_invocation_id(), context.parent_invocation_id());
+        assert_eq!(request.observer_parent_invocation_id(), context.parent_invocation_id());
+        assert_eq!(request.observer_purpose(), "inspect");
+        assert_eq!(request.target_invocation_id(), Some(super::InvocationId::from_bytes([0x06; 16])));
+    }
+
+    #[test]
+    fn inspector_snapshot_row_binding_rejects_epoch_mismatch_and_preserves_target() {
+        let target = super::InvocationId::from_bytes([0x17; 16]);
+        let mut row = vec![1, 0, 0, 0, 0, 0, 0, 0, 0];
+        row.extend_from_slice(&[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 7]);
+        row.extend_from_slice(&target.to_bytes());
+        row.extend_from_slice(&[0x18; 16]);
+        row.extend_from_slice(&[0x19; 16]);
+        row.push(1);
+        row.extend_from_slice(&0_u64.to_be_bytes());
+        row.push(0);
+        row.push(0);
+        assert_eq!(super::decode_inspect_snapshot_target_row(&row, 7), Ok(target));
+        assert_eq!(
+            super::decode_inspect_snapshot_target_row(&row, 8),
+            Err(super::ClientInspectError::Failed("inspect.epoch_mismatch".to_owned()))
+        );
+    }
+
+    #[test]
+    fn inspector_shell_wrong_contract_identity_fails_closed_before_provider() {
+        let context = super::ClientExecutionContext {
+            pair: super::RevisionPair::new(
+                orna_core::SourceRevisionId::from_bytes([0x21; 16]),
+                orna_core::CatalogueRevisionId::from_bytes([0x22; 16]),
+            ),
+            function: super::FunctionId::from_bytes([0x23; 16]),
+            function_revision: super::FunctionRevisionId::from_bytes([0x24; 16]),
+            parent_invocation_id: super::InvocationId::from_bytes([0x25; 16]),
+        };
+        let (active, _, _, _) = version_one_active(true);
+        assert!(matches!(
+            super::validate_inspector_shell_contract(&active, context, "devtools.inspector_shell@2", &[]),
+            Err(super::ClientExecutionError::Inspect {
+                source: super::ClientInspectError::Failed(code), ..
+            }) if code == "inspect.malformed_carrier"
+        ));
+    }
+
+    #[test]
+    fn inspector_shell_wrong_ui_type_fails_closed() {
+        let (active, _, _, _) = version_one_active(true);
+        assert!(!super::inspector_shell_ui_value_matches(
+            &active,
+            &super::RuntimeValue::Boolean(false),
+        ));
+    }
+
+    #[test]
+    fn inspector_invocation_references_require_sealed_type_and_nonzero_object() {
+        let (active, _, _, _) = version_one_active(true);
+        let expected = ResolvedType::Reference {
+            target: super::SYS_INSPECT_INVOCATION_TYPE_ID,
+        };
+        assert!(super::runtime_value_matches(
+            &active,
+            &RuntimeValue::Reference {
+                target: super::SYS_INSPECT_INVOCATION_TYPE_ID,
+                object: orna_core::ObjectId::from_bytes([0x11; 16]),
+            },
+            expected,
+        ));
+        assert!(!super::runtime_value_matches(
+            &active,
+            &RuntimeValue::Reference {
+                target: super::SYS_INSPECT_INVOCATION_TYPE_ID,
+                object: orna_core::ObjectId::from_bytes([0; 16]),
+            },
+            expected,
+        ));
+        assert!(!super::runtime_value_matches(
+            &active,
+            &RuntimeValue::Reference {
+                target: TypeId::from_bytes([0x12; 16]),
+                object: orna_core::ObjectId::from_bytes([0x11; 16]),
+            },
+            expected,
+        ));
+    }
+
+    #[test]
+    fn inspector_carriers_reject_malformed_and_stale_revision_envelopes() {
+        let (active, _, pair, _) = version_one_active(true);
+        let payload = super::InspectCarrierEnvelope::new(
+            super::InspectCarrierKind::Snapshot,
+            7,
+            pair.source(),
+            pair.catalogue(),
+            vec![],
+        )
+        .unwrap()
+        .encode()
+        .unwrap();
+        let value = RuntimeValue::Opaque(
+            OpaqueValue::new_inspect_carrier(
+                &active,
+                super::SYS_INSPECT_SNAPSHOT_TYPE_ID,
+                payload.clone(),
+            )
+            .unwrap(),
+        );
+        assert!(super::runtime_value_matches(
+            &active,
+            &value,
+            ResolvedType::Named(super::SYS_INSPECT_SNAPSHOT_TYPE_ID),
+        ));
+        assert!(!super::runtime_value_matches(
+            &active,
+            &RuntimeValue::Bytes(vec![0; 4]),
+            ResolvedType::Named(super::SYS_INSPECT_SNAPSHOT_TYPE_ID),
+        ));
+
+        let stale_payload = super::InspectCarrierEnvelope::new(
+            super::InspectCarrierKind::Snapshot,
+            7,
+            SourceRevisionId::from_bytes([0x91; 16]),
+            pair.catalogue(),
+            vec![],
+        )
+        .unwrap()
+        .encode()
+        .unwrap();
+        assert_eq!(
+            super::decode_inspect_carrier_payload(
+                &active,
+                &stale_payload,
+                super::SYS_INSPECT_SNAPSHOT_TYPE_ID,
+            )
+            .unwrap_err(),
+            super::ClientInspectError::Failed("inspect.epoch_mismatch".to_owned())
+        );
+    }
+
+    #[test]
+    fn inspector_request_exposes_distinct_client_epoch_anchor() {
+        let context = super::ClientExecutionContext {
+            pair: RevisionPair::new(
+                SourceRevisionId::from_bytes([0xa1; 16]),
+                CatalogueRevisionId::from_bytes([0xa2; 16]),
+            ),
+            function: FunctionId::from_bytes([0xa3; 16]),
+            function_revision: FunctionRevisionId::from_bytes([0xa4; 16]),
+            parent_invocation_id: InvocationId::from_bytes([0xa5; 16]),
+        };
+        let request = super::ClientInspectRequest::new(
+            context,
+            super::ClientInspectOperation::Snapshot {
+                target: RuntimeValue::Reference {
+                    target: super::SYS_INSPECT_INVOCATION_TYPE_ID,
+                    object: orna_core::ObjectId::from_bytes([0xa6; 16]),
+                },
+            },
+        );
+        assert_eq!(request.client_epoch_id(), context.client_epoch_id());
+        assert_eq!(
+            request.client_epoch_id().invocation_id(),
+            context.parent_invocation_id()
+        );
+    }
+
+    #[test]
+    fn inspect_executor_forwards_typed_request_to_provider() {
+        let context = super::ClientExecutionContext {
+            pair: RevisionPair::new(
+                SourceRevisionId::from_bytes([0x61; 16]),
+                CatalogueRevisionId::from_bytes([0x62; 16]),
+            ),
+            function: FunctionId::from_bytes([0x63; 16]),
+            function_revision: FunctionRevisionId::from_bytes([0x64; 16]),
+            parent_invocation_id: InvocationId::from_bytes([0x65; 16]),
+        };
+        let operation = super::ClientInspectOperation::Projection {
+            projection: InspectProjection::Calls,
+            snapshot: RuntimeValue::Boolean(true),
+        };
+        let request = super::ClientInspectRequest::new(context, operation);
+        let mut executor = super::DeterministicClientResourceExecutor::new(|_: &super::ClientResourceRequest| {
+            Ok::<_, String>(RuntimeValue::Boolean(false))
+        })
+        .with_inspect(move |request| {
+            assert_eq!(request.context(), context);
+            assert_eq!(request.operation().projection(), Some(InspectProjection::Calls));
+            assert_eq!(request.operation().projection_carrier_tag(), Some(3));
+            assert!(matches!(request.operation().snapshot(), Some(RuntimeValue::Boolean(true))));
+            Ok(RuntimeValue::Boolean(false))
+        });
+        assert_eq!(
+            executor.inspect(request),
+            Ok(RuntimeValue::Boolean(false))
+        );
     }
 
     fn authorise(pair: RevisionPair, function: FunctionId) -> AuthorisedInvocation {
