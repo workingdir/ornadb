@@ -990,10 +990,7 @@ async fn run_installed_inspect(
     active: ActiveDatabaseRevision,
     request: ClientInspectRequest,
 ) -> Result<RuntimeValue, String> {
-    let context = request.context();
-    if context.pair() != active.pair() {
-        return Err("inspect.epoch_mismatch".to_owned());
-    }
+    validate_inspect_request_context(&request, &active)?;
     let standard = active
         .catalogue_hash_context()
         .standard()
@@ -1010,12 +1007,7 @@ async fn run_installed_inspect(
                 return Err("inspect.invalid_options".to_owned());
             }
             let invocation = inspect_snapshot_request_target(target)?;
-            if request
-                .target_invocation_id()
-                .is_some_and(|target| target != invocation)
-            {
-                return Err("inspect.epoch_mismatch".to_owned());
-            }
+            require_inspect_target_provenance(request.target_invocation_id(), invocation)?;
             let recursive_from_root = kernel
                 .inspect_target_is_recursive(request.observer_root_invocation_id(), invocation)
                 .await
@@ -1086,6 +1078,13 @@ async fn run_installed_inspect(
                 .ok_or_else(|| "inspect.malformed_carrier".to_owned())?;
             let (epoch_id, target_invocation) =
                 decode_snapshot_row_epoch(&active, &registry, snapshot_row, envelope.epoch_id())?;
+            validate_inspect_projection_binding(
+                request.target_invocation_id(),
+                &envelope,
+                epoch_id,
+                target_invocation,
+                active.pair(),
+            )?;
             let Some(_) = kernel
                 .find_inspect_epoch(&session, epoch_id)
                 .await
@@ -1093,7 +1092,6 @@ async fn run_installed_inspect(
             else {
                 return Err("inspect.stale_epoch".to_owned());
             };
-            require_inspect_target_provenance(request.target_invocation_id(), target_invocation)?;
             let recursive_from_root = kernel
                 .inspect_target_is_recursive(
                     request.observer_root_invocation_id(),
@@ -1210,11 +1208,54 @@ fn inspect_snapshot_request_target(target: &RuntimeValue) -> Result<InvocationId
     Ok(InvocationId::from_bytes(object_bytes))
 }
 
+fn validate_inspect_request_context(
+    request: &ClientInspectRequest,
+    active: &ActiveDatabaseRevision,
+) -> Result<(), String> {
+    if request.context().pair() != active.pair() {
+        return Err("inspect.epoch_mismatch".to_owned());
+    }
+    Ok(())
+}
+
 fn require_inspect_target_provenance(
     request_target: Option<InvocationId>,
     decoded_target: InvocationId,
 ) -> Result<(), String> {
-    if request_target.is_some_and(|target| target != decoded_target) {
+    let Some(request_target) = request_target else {
+        return Err("inspect.malformed_carrier".to_owned());
+    };
+    if request_target != decoded_target {
+        return Err("inspect.epoch_mismatch".to_owned());
+    }
+    Ok(())
+}
+
+fn validate_inspect_projection_binding(
+    request_target: Option<InvocationId>,
+    envelope: &InspectCarrierEnvelope,
+    decoded_epoch: InspectEpochId,
+    decoded_target: InvocationId,
+    pair: orna_core::revision::RevisionPair,
+) -> Result<(), String> {
+    require_inspect_target_provenance(request_target, decoded_target)?;
+    if envelope
+        .target_invocation_id()
+        .is_some_and(|target| target != decoded_target)
+    {
+        return Err("inspect.epoch_mismatch".to_owned());
+    }
+    let decoded_epoch_id = u64::from_be_bytes(
+        decoded_epoch.to_bytes()[8..]
+            .try_into()
+            .expect("inspect epoch identity width"),
+    );
+    if envelope.epoch_id() != decoded_epoch_id {
+        return Err("inspect.epoch_mismatch".to_owned());
+    }
+    if envelope.source_revision_id() != pair.source()
+        || envelope.catalogue_revision_id() != pair.catalogue()
+    {
         return Err("inspect.epoch_mismatch".to_owned());
     }
     Ok(())
@@ -5868,9 +5909,12 @@ mod tests {
     }
 
     #[test]
-    fn inspector_projection_accepts_derived_or_matching_target_provenance() {
+    fn inspector_projection_requires_target_provenance() {
         let target = InvocationId::from_bytes([0x11; 16]);
-        assert_eq!(require_inspect_target_provenance(None, target), Ok(()));
+        assert_eq!(
+            require_inspect_target_provenance(None, target),
+            Err("inspect.malformed_carrier".to_owned()),
+        );
         assert_eq!(
             require_inspect_target_provenance(Some(InvocationId::from_bytes([0x22; 16])), target,),
             Err("inspect.epoch_mismatch".to_owned()),
@@ -5878,6 +5922,78 @@ mod tests {
         assert_eq!(
             require_inspect_target_provenance(Some(target), target),
             Ok(())
+        );
+    }
+
+    #[test]
+    fn inspector_projection_binding_rejects_target_epoch_and_revision_mismatches() {
+        let target = InvocationId::from_bytes([0x11; 16]);
+        let other_target = InvocationId::from_bytes([0x22; 16]);
+        let mut epoch_bytes = [0; 16];
+        epoch_bytes[15] = 0x33;
+        let epoch = InspectEpochId::from_bytes(epoch_bytes);
+        let pair = RevisionPair::new(
+            SourceRevisionId::from_bytes([0x44; 16]),
+            CatalogueRevisionId::from_bytes([0x55; 16]),
+        );
+        let envelope = InspectCarrierEnvelope::new_with_target(
+            InspectCarrierKind::Snapshot,
+            target,
+            InspectCarrierProvenance::trusted_for_target(
+                0x33,
+                target,
+                pair.source(),
+                pair.catalogue(),
+            ),
+            Vec::new(),
+        )
+        .expect("snapshot envelope");
+        assert_eq!(
+            validate_inspect_projection_binding(
+                Some(target),
+                &envelope,
+                epoch,
+                target,
+                pair,
+            ),
+            Ok(())
+        );
+        assert_eq!(
+            validate_inspect_projection_binding(
+                Some(other_target),
+                &envelope,
+                epoch,
+                target,
+                pair,
+            ),
+            Err("inspect.epoch_mismatch".to_owned()),
+        );
+        let mut wrong_epoch_bytes = [0; 16];
+        wrong_epoch_bytes[15] = 0x34;
+        let wrong_epoch = InspectEpochId::from_bytes(wrong_epoch_bytes);
+        assert_eq!(
+            validate_inspect_projection_binding(
+                Some(target),
+                &envelope,
+                wrong_epoch,
+                target,
+                pair,
+            ),
+            Err("inspect.epoch_mismatch".to_owned()),
+        );
+        let wrong_pair = RevisionPair::new(
+            SourceRevisionId::from_bytes([0x66; 16]),
+            pair.catalogue(),
+        );
+        assert_eq!(
+            validate_inspect_projection_binding(
+                Some(target),
+                &envelope,
+                epoch,
+                target,
+                wrong_pair,
+            ),
+            Err("inspect.epoch_mismatch".to_owned()),
         );
     }
 
