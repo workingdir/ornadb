@@ -42,6 +42,7 @@ pub use model::{
 };
 pub(crate) use model::{
     CheckedActionOperation, CheckedClientExpression, CheckedClientFunctionBody, CheckedClientLocal,
+    CheckedInspectOperation, CheckedInspectProjection,
     CheckedClientReturnShape,
     CheckedClientLocalKind, CheckedClientStateSlot, CheckedClientStatement, CheckedFieldRename,
     CheckedResourceOperation, CheckedServerFunctionBody, CheckedServerFunctionReturn,
@@ -4246,6 +4247,16 @@ fn resolve_client_function_inputs<'a>(
         let expression_body = declaration.body.as_expression().is_some()
             || declaration.body.as_external_contract().is_some()
             || declaration.body.as_state_block().is_some();
+        let inspector_shell_name = QualifiedSemanticName::new(["devtools", "inspector_shell"])
+            .expect("registered inspector helper name is valid");
+        if name == inspector_shell_name && declaration.body.as_external_contract().is_none() {
+            diagnostics.push(diagnostic(
+                DiagnosticCode::UnknownQualifiedName,
+                "devtools.inspector_shell is reserved for the registered external helper",
+                header.logical_path,
+                &declaration.span,
+            ));
+        }
         if !expression_body && !declaration.parameters.is_empty() {
             diagnostics.push(diagnostic(
                 DiagnosticCode::DomainIncompatible,
@@ -4897,6 +4908,17 @@ fn client_expression_contains_await_or_resource(
             .arguments()
             .iter()
             .any(|(_, argument)| client_expression_contains_await_or_resource(argument, locals)),
+        CheckedClientExpression::Inspect { operation } => match operation {
+            CheckedInspectOperation::Snapshot { target, options, .. } => {
+                client_expression_contains_await_or_resource(target, locals)
+                    || options.as_deref().is_some_and(|options| {
+                        client_expression_contains_await_or_resource(options, locals)
+                    })
+            }
+            CheckedInspectOperation::Projection { snapshot, .. } => {
+                client_expression_contains_await_or_resource(snapshot, locals)
+            }
+        },
         CheckedClientExpression::Concat { left, right, .. } => {
             client_expression_contains_await_or_resource(left, locals)
                 || client_expression_contains_await_or_resource(right, locals)
@@ -5434,6 +5456,8 @@ fn client_expression_type_is_evaluable(
                 | StandardScalar::Integer
                 | StandardScalar::CharacterLargeObject
         ),
+        SemanticType::Named(CheckedTypeId::Existing(type_id))
+            if is_sealed_inspect_type_id(type_id) || type_id == STD_UI_TYPE_ID => true,
         SemanticType::Named(CheckedTypeId::Existing(type_id)) => standard
             .and_then(|standard| {
                 standard
@@ -6147,6 +6171,281 @@ fn check_action_constructor(
 }
 
 #[allow(clippy::too_many_arguments)]
+fn check_inspect_call(
+    expression: &ClientExpression,
+    input: &ResolvedClientFunctionInput<'_>,
+    targets: &HashMap<QualifiedSemanticName, ClientExpressionTarget>,
+    action_targets: &HashMap<QualifiedSemanticName, ClientActionTarget>,
+    resource_targets: &HashMap<QualifiedSemanticName, ClientResourceTarget>,
+    query_catalogue: &ResolutionCatalogue<CheckedTypeId, CheckedFieldId>,
+    base: &CatalogueSnapshot,
+    server_names: &[QualifiedSemanticName],
+    standard: Option<&CheckedStandardLibrary>,
+    diagnostics: &mut Vec<CompilerDiagnostic>,
+    references: &mut Vec<CheckedDefinitionReference>,
+    used_capabilities: &mut HashSet<QualifiedSemanticName>,
+    locals: &ClientLocalEnvironment,
+) -> Option<Option<(CheckedClientExpression, ClientExpressionType)>> {
+    let ClientExpression::Call {
+        callee,
+        arguments,
+        span,
+    } = expression
+    else {
+        return None;
+    };
+    let name = semantic_name(callee);
+    let system = orna_core::system::system_function_by_name(&name)?;
+    let Some(signature) = system.inspect_signature() else {
+        return Some(None);
+    };
+
+    let projection = match system.id() {
+        orna_core::system::SYS_INSPECT_SNAPSHOT_FUNCTION_ID => None,
+        orna_core::system::SYS_INSPECT_INVOCATION_NODES_FUNCTION_ID => {
+            Some(CheckedInspectProjection::InvocationNodes)
+        }
+        orna_core::system::SYS_INSPECT_CALLS_FUNCTION_ID => Some(CheckedInspectProjection::Calls),
+        orna_core::system::SYS_INSPECT_RESOURCES_FUNCTION_ID => {
+            Some(CheckedInspectProjection::Resources)
+        }
+        orna_core::system::SYS_INSPECT_STATE_CELLS_FUNCTION_ID => {
+            Some(CheckedInspectProjection::StateCells)
+        }
+        orna_core::system::SYS_INSPECT_UI_NODES_FUNCTION_ID => {
+            Some(CheckedInspectProjection::UiNodes)
+        }
+        orna_core::system::SYS_INSPECT_PRESENTATION_CANDIDATES_FUNCTION_ID => {
+            Some(CheckedInspectProjection::PresentationCandidates)
+        }
+        orna_core::system::SYS_INSPECT_RUNTIME_BINDINGS_FUNCTION_ID => {
+            Some(CheckedInspectProjection::RuntimeBindings)
+        }
+        orna_core::system::SYS_INSPECT_SECURITY_DECISIONS_FUNCTION_ID => {
+            Some(CheckedInspectProjection::SecurityDecisions)
+        }
+        _ => {
+            diagnostics.push(diagnostic(
+                DiagnosticCode::UnknownQualifiedName,
+                format!("sealed INSPECT function {name} is not an expression operation"),
+                input.logical_path,
+                span,
+            ));
+            return Some(None);
+        }
+    };
+
+    let (target_argument, options_argument) = if projection.is_none() {
+        if arguments.is_empty() || arguments.len() > 2 {
+            diagnostics.push(diagnostic(
+                DiagnosticCode::TypeMismatch,
+                "sys.inspect.snapshot requires target and optionally p_options",
+                input.logical_path,
+                span,
+            ));
+            return Some(None);
+        }
+        let mut bound = [false; 2];
+        let mut target_argument = None;
+        let mut options_argument = None;
+        for (position, argument) in arguments.iter().enumerate() {
+            let index = match argument.name.as_ref().map(semantic_part) {
+                Some(argument_name) if argument_name == "p_target" => 0,
+                Some(argument_name) if argument_name == "p_options" => 1,
+                Some(_) => {
+                    diagnostics.push(diagnostic(
+                        DiagnosticCode::UnknownQualifiedName,
+                        format!("{name} accepts only named arguments p_target and p_options"),
+                        input.logical_path,
+                        &argument.span,
+                    ));
+                    return Some(None);
+                }
+                None => position,
+            };
+            if bound[index] {
+                diagnostics.push(diagnostic(
+                    DiagnosticCode::DuplicateDefinition,
+                    format!("duplicate argument for sys.inspect.snapshot parameter {}", if index == 0 { "p_target" } else { "p_options" }),
+                    input.logical_path,
+                    &argument.span,
+                ));
+                return Some(None);
+            }
+            bound[index] = true;
+            if index == 0 {
+                target_argument = Some(argument);
+            } else {
+                options_argument = Some(argument);
+            }
+        }
+        let Some(target_argument) = target_argument else {
+            diagnostics.push(diagnostic(
+                DiagnosticCode::TypeMismatch,
+                "sys.inspect.snapshot requires p_target",
+                input.logical_path,
+                span,
+            ));
+            return Some(None);
+        };
+        (target_argument, options_argument)
+    } else {
+        if arguments.len() != 1 {
+            diagnostics.push(diagnostic(
+                DiagnosticCode::TypeMismatch,
+                "sys.inspect projection requires exactly one snapshot argument",
+                input.logical_path,
+                span,
+            ));
+            return Some(None);
+        }
+        let argument = &arguments[0];
+        if let Some(argument_name) = &argument.name
+            && semantic_part(argument_name) != "p_snapshot"
+        {
+            diagnostics.push(diagnostic(
+                DiagnosticCode::UnknownQualifiedName,
+                format!("{name} accepts only named argument p_snapshot"),
+                input.logical_path,
+                &argument.span,
+            ));
+            return Some(None);
+        }
+        (argument, None)
+    };
+
+    let (checked, expression_type) = check_client_expression(
+        &target_argument.value,
+        input,
+        targets,
+        action_targets,
+        resource_targets,
+        query_catalogue,
+        base,
+        server_names,
+        standard,
+        diagnostics,
+        references,
+        used_capabilities,
+        locals,
+    )?;
+    let expected_type = if projection.is_none() {
+        SemanticType::reference(CheckedTypeId::Existing(
+            orna_core::system::SYS_INSPECT_INVOCATION_TYPE_ID,
+        ))
+    } else {
+        SemanticType::Named(CheckedTypeId::Existing(
+            orna_core::system::SYS_INSPECT_SNAPSHOT_TYPE_ID,
+        ))
+    };
+    if expression_type.semantic_type != expected_type
+        || expression_type.result_shape != ClientExpressionResultShape::Value
+    {
+        diagnostics.push(diagnostic(
+            DiagnosticCode::TypeMismatch,
+            if projection.is_none() {
+                "sys.inspect.snapshot target must be REF sys.inspect.invocation"
+            } else {
+                "sys.inspect projection argument must be sys.inspect.snapshot"
+            },
+            input.logical_path,
+            target_argument.value.span(),
+        ));
+        return Some(None);
+    }
+
+    if let Some(options_argument) = options_argument {
+        diagnostics.push(diagnostic(
+            DiagnosticCode::TypeMismatch,
+            "sys.inspect.snapshot options are not supported in Inspector v1",
+            input.logical_path,
+            options_argument.value.span(),
+        ));
+        return Some(None);
+    }
+    let checked_options = None;
+
+    // The registry signature remains authoritative for the sealed operation.
+    let valid_signature = if projection.is_none() {
+        signature.parameter_count() == 2
+            && signature.parameter_type(0)
+                == Some(orna_core::system::SYS_INSPECT_INVOCATION_TYPE_ID)
+            && signature.parameter_type(1)
+                == Some(orna_core::system::SYS_INSPECT_SNAPSHOT_OPTIONS_TYPE_ID)
+            && signature.result_type() == Some(orna_core::system::SYS_INSPECT_SNAPSHOT_TYPE_ID)
+    } else {
+        signature.parameter_count() == 1
+            && signature.parameter_type(0)
+                == Some(orna_core::system::SYS_INSPECT_SNAPSHOT_TYPE_ID)
+            && signature.result_type().is_some()
+    };
+    if !valid_signature {
+        diagnostics.push(diagnostic(
+            DiagnosticCode::TypeMismatch,
+            format!("sealed INSPECT function {name} has an invalid registry signature"),
+            input.logical_path,
+            span,
+        ));
+        return Some(None);
+    }
+
+    let (operation, result_type) = if let Some(projection) = projection {
+        let result_type = match projection {
+            CheckedInspectProjection::InvocationNodes => {
+                orna_core::system::SYS_INSPECT_INVOCATION_NODES_TYPE_ID
+            }
+            CheckedInspectProjection::Calls => orna_core::system::SYS_INSPECT_CALLS_TYPE_ID,
+            CheckedInspectProjection::Resources => orna_core::system::SYS_INSPECT_RESOURCES_TYPE_ID,
+            CheckedInspectProjection::StateCells => orna_core::system::SYS_INSPECT_STATE_CELLS_TYPE_ID,
+            CheckedInspectProjection::UiNodes => orna_core::system::SYS_INSPECT_UI_NODES_TYPE_ID,
+            CheckedInspectProjection::PresentationCandidates => {
+                orna_core::system::SYS_INSPECT_PRESENTATION_CANDIDATES_TYPE_ID
+            }
+            CheckedInspectProjection::RuntimeBindings => {
+                orna_core::system::SYS_INSPECT_RUNTIME_BINDINGS_TYPE_ID
+            }
+            CheckedInspectProjection::SecurityDecisions => {
+                orna_core::system::SYS_INSPECT_SECURITY_DECISIONS_TYPE_ID
+            }
+        };
+        if signature.result_type() != Some(result_type) {
+            diagnostics.push(diagnostic(
+                DiagnosticCode::TypeMismatch,
+                format!("sealed INSPECT function {name} has the wrong result carrier"),
+                input.logical_path,
+                span,
+            ));
+            return Some(None);
+        }
+        (
+            CheckedInspectOperation::Projection {
+                projection,
+                snapshot: Box::new(checked),
+                location: location(input.logical_path, span),
+            },
+            result_type,
+        )
+    } else {
+        (
+            CheckedInspectOperation::Snapshot {
+                target: Box::new(checked),
+                options: checked_options,
+                location: location(input.logical_path, span),
+            },
+            orna_core::system::SYS_INSPECT_SNAPSHOT_TYPE_ID,
+        )
+    };
+    Some(Some((
+        CheckedClientExpression::Inspect { operation },
+        ClientExpressionType {
+            semantic_type: SemanticType::Named(CheckedTypeId::Existing(result_type)),
+            standard_value_type: None,
+            result_shape: ClientExpressionResultShape::Value,
+        },
+    )))
+}
+
+#[allow(clippy::too_many_arguments)]
 fn check_client_expression(
     expression: &ClientExpression,
     input: &ResolvedClientFunctionInput<'_>,
@@ -6455,6 +6754,23 @@ fn check_client_expression(
             span,
         } => {
             let name = semantic_name(callee);
+            if let Some(inspect) = check_inspect_call(
+                expression,
+                input,
+                targets,
+                action_targets,
+                resource_targets,
+                query_catalogue,
+                base,
+                server_names,
+                standard,
+                diagnostics,
+                references,
+                used_capabilities,
+                locals,
+            ) {
+                return inspect;
+            }
             if name
                 == QualifiedSemanticName::new(["std", "action", "call"])
                     .expect("std.action.call is valid")
@@ -6943,6 +7259,87 @@ fn client_contract_identity(source: &SourceSlice) -> Option<String> {
     }
     Some(identity)
 }
+const DEVTOOLS_INSPECTOR_SHELL_CONTRACT: &str = "devtools.inspector_shell@1";
+
+fn is_inspector_shell_identity(identity: &str) -> bool {
+    identity == DEVTOOLS_INSPECTOR_SHELL_CONTRACT
+        || identity.starts_with("devtools.inspector_shell@")
+}
+
+fn validate_registered_client_external_contract(
+    name: &QualifiedSemanticName,
+    identity: &str,
+    parameters: &[ResolvedServerFunctionParameter],
+    return_type: ResolvedApplicationType,
+    result_shape: ClientExpressionResultShape,
+    logical_path: &str,
+    declaration_span: &SourceSpan,
+    diagnostics: &mut Vec<CompilerDiagnostic>,
+) -> bool {
+    let helper_name = QualifiedSemanticName::new(["devtools", "inspector_shell"])
+        .expect("registered inspector helper name is valid");
+    if name != &helper_name && !is_inspector_shell_identity(identity) {
+        return true;
+    }
+    if name != &helper_name || identity != DEVTOOLS_INSPECTOR_SHELL_CONTRACT {
+        diagnostics.push(diagnostic(
+            DiagnosticCode::UnknownQualifiedName,
+            "unregistered CLIENT external helper devtools.inspector_shell",
+            logical_path,
+            declaration_span,
+        ));
+        return false;
+    }
+
+    const EXPECTED: [(&str, TypeId); 9] = [
+        ("p_snapshot", orna_core::system::SYS_INSPECT_SNAPSHOT_TYPE_ID),
+        ("p_invocation_nodes", orna_core::system::SYS_INSPECT_INVOCATION_NODES_TYPE_ID),
+        ("p_calls", orna_core::system::SYS_INSPECT_CALLS_TYPE_ID),
+        ("p_resources", orna_core::system::SYS_INSPECT_RESOURCES_TYPE_ID),
+        ("p_state_cells", orna_core::system::SYS_INSPECT_STATE_CELLS_TYPE_ID),
+        ("p_ui_nodes", orna_core::system::SYS_INSPECT_UI_NODES_TYPE_ID),
+        ("p_presentation_candidates", orna_core::system::SYS_INSPECT_PRESENTATION_CANDIDATES_TYPE_ID),
+        ("p_runtime_bindings", orna_core::system::SYS_INSPECT_RUNTIME_BINDINGS_TYPE_ID),
+        ("p_security_decisions", orna_core::system::SYS_INSPECT_SECURITY_DECISIONS_TYPE_ID),
+    ];
+    if parameters.len() != EXPECTED.len() {
+        diagnostics.push(diagnostic(
+            DiagnosticCode::TypeMismatch,
+            "devtools.inspector_shell@1 requires exactly nine ordered carrier parameters",
+            logical_path,
+            declaration_span,
+        ));
+        return false;
+    }
+    for (parameter, (expected_name, expected_id)) in parameters.iter().zip(EXPECTED) {
+        if parameter.name != expected_name
+            || parameter.semantic_type
+                != SemanticType::Named(CheckedTypeId::Existing(expected_id))
+        {
+            diagnostics.push(diagnostic(
+                DiagnosticCode::TypeMismatch,
+                format!("devtools.inspector_shell@1 parameter {} must be {}", expected_name, expected_name.trim_start_matches("p_")),
+                logical_path,
+                &parameter.name_span,
+            ));
+            return false;
+        }
+    }
+    if result_shape != ClientExpressionResultShape::Value
+        || return_type.semantic_type
+            != SemanticType::Named(CheckedTypeId::Existing(STD_UI_TYPE_ID))
+    {
+        diagnostics.push(diagnostic(
+            DiagnosticCode::TypeMismatch,
+            "devtools.inspector_shell@1 must return std.ui.UI",
+            logical_path,
+            declaration_span,
+        ));
+        return false;
+    }
+    true
+}
+
 fn checked_state_slot_id(function: CheckedFunctionId, name: &str) -> CheckedStateSlotId {
     let mut payload = function.to_string().into_bytes();
     payload.push(0);
@@ -7185,25 +7582,41 @@ fn check_client_functions(
             diagnostics.push(diagnostic(DiagnosticCode::DuplicateDefinition, format!("duplicate CLIENT local definition {local_name} in {}", input.name), input.logical_path, &local.name.span));
             return None;
         }
-        let Some(kind) = client_local_resource_kind(&local.type_source) else {
-            diagnostics.push(diagnostic(DiagnosticCode::TypeMismatch, format!("CLIENT local {local_name} must declare std.data.Resource<T> or std.data.StreamResource<T>"), input.logical_path, &local.type_source.span));
-            return None;
-        };
         let diagnostics_before = diagnostics.len();
         validate_client_await_positions(&local.expression, false, input, diagnostics);
         if diagnostics.len() != diagnostics_before { return None; }
-        let (checked, expression_type) = check_resource_constructor(&local.expression, input, &targets, &action_targets, resource_targets, query_catalogue, base, server_names, standard, diagnostics, &mut references, &mut used_capabilities, &locals)?;
-        let actual_kind = match &checked {
-            CheckedClientExpression::Resource { operation } => operation.kind,
-            _ => unreachable!("resource constructor checker returns a resource"),
+        let (checked, expression_type, kind) = if let Some(kind) = client_local_resource_kind(&local.type_source) {
+            let (checked, expression_type) = check_resource_constructor(&local.expression, input, &targets, &action_targets, resource_targets, query_catalogue, base, server_names, standard, diagnostics, &mut references, &mut used_capabilities, &locals)?;
+            let actual_kind = match &checked {
+                CheckedClientExpression::Resource { operation } => operation.kind,
+                _ => unreachable!("resource constructor checker returns a resource"),
+            };
+            if actual_kind != kind {
+                diagnostics.push(diagnostic(DiagnosticCode::TypeMismatch, format!("CLIENT local {local_name} type does not match its resource constructor"), input.logical_path, &local.type_source.span));
+                return None;
+            }
+            (checked, expression_type, CheckedClientLocalKind::Resource(kind))
+        } else {
+            let (checked, expression_type) = check_client_expression(&local.expression, input, &targets, &action_targets, resource_targets, query_catalogue, base, server_names, standard, diagnostics, &mut references, &mut used_capabilities, &locals)?;
+            if !client_expression_type_is_evaluable(expression_type, base, standard) {
+                diagnostics.push(diagnostic(DiagnosticCode::TypeMismatch, "this CLIENT local type is not supported by the local evaluator", input.logical_path, &local.span));
+                return None;
+            }
+            let Some(specification) = client_type_specification_from_source(&local.type_source) else {
+                diagnostics.push(diagnostic(DiagnosticCode::TypeMismatch, format!("unsupported CLIENT local type for {local_name}"), input.logical_path, &local.type_source.span));
+                return None;
+            };
+            let resolved = resolve_application_type_with_named_standard(&specification, submitted_ids, input.logical_path, diagnostics, standard, true)?;
+            let expected = ClientExpressionType { semantic_type: resolved.semantic_type, standard_value_type: resolved.standard_value_type, result_shape: ClientExpressionResultShape::Value };
+            if !client_expression_types_compatible(expression_type, expected) {
+                diagnostics.push(diagnostic(DiagnosticCode::TypeMismatch, format!("CLIENT local {local_name} initializer does not match its declared type"), input.logical_path, &local.span));
+                return None;
+            }
+            (checked, expression_type, CheckedClientLocalKind::Value)
         };
-        if actual_kind != kind {
-            diagnostics.push(diagnostic(DiagnosticCode::TypeMismatch, format!("CLIENT local {local_name} type does not match its resource constructor"), input.logical_path, &local.type_source.span));
-            return None;
-        }
         let ordinal = next_ordinal; next_ordinal += 1;
-        checked_locals.push(CheckedClientLocal { ordinal, name: local_name.clone(), semantic_type: expression_type.semantic_type, standard_value_type: expression_type.standard_value_type, kind: CheckedClientLocalKind::Resource(kind), location: location(input.logical_path, &local.span) });
-        locals.insert(local_name, ClientLocalBinding { checked: checked.clone(), expression_type, ordinal: Some(ordinal), kind: CheckedClientLocalKind::Resource(kind) });
+        checked_locals.push(CheckedClientLocal { ordinal, name: local_name.clone(), semantic_type: expression_type.semantic_type, standard_value_type: expression_type.standard_value_type, kind, location: location(input.logical_path, &local.span) });
+        locals.insert(local_name, ClientLocalBinding { checked: checked.clone(), expression_type, ordinal: Some(ordinal), kind });
         statements.push(CheckedClientStatement::Let { local: ordinal, expression: checked });
     }
 
@@ -7339,6 +7752,21 @@ fn check_client_functions(
                             standard,
                             true,
                         )?;
+                        if matches!(state.scope, StateScope::Session | StateScope::User)
+                            && matches!(
+                                resolved.semantic_type,
+                                SemanticType::Named(CheckedTypeId::Existing(type_id))
+                                    if is_sealed_inspect_type_id(type_id)
+                            )
+                        {
+                            diagnostics.push(diagnostic(
+                                DiagnosticCode::DomainIncompatible,
+                                "sealed sys.inspect carriers are transient and cannot be stored in SESSION or USER state",
+                                input.logical_path,
+                                state.type_specification.span(),
+                            ));
+                            return None;
+                        }
                         let state_type = ClientExpressionType {
                             semantic_type: resolved.semantic_type,
                             standard_value_type: resolved.standard_value_type,
@@ -7576,6 +8004,21 @@ fn check_client_functions(
                     ));
                         return None;
                     };
+                    if !validate_registered_client_external_contract(
+                        &input.name,
+                        &identity,
+                        &input.parameters,
+                        ResolvedApplicationType {
+                            semantic_type: input.return_type,
+                            standard_value_type: input.standard_value_type,
+                        },
+                        input.result_shape,
+                        input.logical_path,
+                        &input.declaration_span,
+                        diagnostics,
+                    ) {
+                        return None;
+                    }
                     (
                         CheckedClientFunctionBody::ExternalContract {
                             identity,
@@ -9428,6 +9871,42 @@ enum SubmittedType {
     RecordValue(CheckedTypeId),
 }
 
+fn sealed_inspect_type_id(name: &QualifiedSemanticName) -> Option<TypeId> {
+    match name.to_string().as_str() {
+        orna_core::system::SYS_INSPECT_INVOCATION_TYPE_NAME => Some(orna_core::system::SYS_INSPECT_INVOCATION_TYPE_ID),
+        orna_core::system::SYS_INSPECT_SNAPSHOT_TYPE_NAME => Some(orna_core::system::SYS_INSPECT_SNAPSHOT_TYPE_ID),
+        orna_core::system::SYS_INSPECT_SNAPSHOT_OPTIONS_TYPE_NAME => Some(orna_core::system::SYS_INSPECT_SNAPSHOT_OPTIONS_TYPE_ID),
+        orna_core::system::SYS_INSPECT_TRACE_EVENT_TYPE_NAME => Some(orna_core::system::SYS_INSPECT_TRACE_EVENT_TYPE_ID),
+        orna_core::system::SYS_INSPECT_INVOCATION_NODES_TYPE_NAME => Some(orna_core::system::SYS_INSPECT_INVOCATION_NODES_TYPE_ID),
+        orna_core::system::SYS_INSPECT_CALLS_TYPE_NAME => Some(orna_core::system::SYS_INSPECT_CALLS_TYPE_ID),
+        orna_core::system::SYS_INSPECT_RESOURCES_TYPE_NAME => Some(orna_core::system::SYS_INSPECT_RESOURCES_TYPE_ID),
+        orna_core::system::SYS_INSPECT_STATE_CELLS_TYPE_NAME => Some(orna_core::system::SYS_INSPECT_STATE_CELLS_TYPE_ID),
+        orna_core::system::SYS_INSPECT_UI_NODES_TYPE_NAME => Some(orna_core::system::SYS_INSPECT_UI_NODES_TYPE_ID),
+        orna_core::system::SYS_INSPECT_PRESENTATION_CANDIDATES_TYPE_NAME => Some(orna_core::system::SYS_INSPECT_PRESENTATION_CANDIDATES_TYPE_ID),
+        orna_core::system::SYS_INSPECT_RUNTIME_BINDINGS_TYPE_NAME => Some(orna_core::system::SYS_INSPECT_RUNTIME_BINDINGS_TYPE_ID),
+        orna_core::system::SYS_INSPECT_SECURITY_DECISIONS_TYPE_NAME => Some(orna_core::system::SYS_INSPECT_SECURITY_DECISIONS_TYPE_ID),
+        _ => None,
+    }
+}
+
+fn is_sealed_inspect_type_id(id: TypeId) -> bool {
+    [
+        orna_core::system::SYS_INSPECT_INVOCATION_TYPE_ID,
+        orna_core::system::SYS_INSPECT_SNAPSHOT_TYPE_ID,
+        orna_core::system::SYS_INSPECT_SNAPSHOT_OPTIONS_TYPE_ID,
+        orna_core::system::SYS_INSPECT_TRACE_EVENT_TYPE_ID,
+        orna_core::system::SYS_INSPECT_INVOCATION_NODES_TYPE_ID,
+        orna_core::system::SYS_INSPECT_CALLS_TYPE_ID,
+        orna_core::system::SYS_INSPECT_RESOURCES_TYPE_ID,
+        orna_core::system::SYS_INSPECT_STATE_CELLS_TYPE_ID,
+        orna_core::system::SYS_INSPECT_UI_NODES_TYPE_ID,
+        orna_core::system::SYS_INSPECT_PRESENTATION_CANDIDATES_TYPE_ID,
+        orna_core::system::SYS_INSPECT_RUNTIME_BINDINGS_TYPE_ID,
+        orna_core::system::SYS_INSPECT_SECURITY_DECISIONS_TYPE_ID,
+    ]
+    .contains(&id)
+}
+
 fn resolve_application_type(
     specification: &TypeSpecification,
     submitted_ids: &HashMap<QualifiedSemanticName, SubmittedType>,
@@ -9455,6 +9934,14 @@ fn resolve_application_type_with_named_standard(
 ) -> Option<ResolvedApplicationType> {
     match specification {
         TypeSpecification::Named(name) => {
+            if allow_standard_named
+                && let Some(type_id) = sealed_inspect_type_id(&semantic_name(name))
+            {
+                return Some(ResolvedApplicationType {
+                    semantic_type: SemanticType::Named(CheckedTypeId::Existing(type_id)),
+                    standard_value_type: None,
+                });
+            }
             let value_type = standard.map_or_else(
                 || resolve_closed_scalar(name).map(|scalar| (None, scalar)),
                 |standard| {
@@ -9544,6 +10031,26 @@ fn resolve_application_type_with_named_standard(
                 ));
                 return None;
             };
+            let target_name = semantic_name(target);
+            if allow_standard_named
+                && let Some(type_id) = sealed_inspect_type_id(&target_name)
+            {
+                if type_id == orna_core::system::SYS_INSPECT_INVOCATION_TYPE_ID {
+                    return Some(ResolvedApplicationType {
+                        semantic_type: SemanticType::Reference {
+                            target: CheckedTypeId::Existing(type_id),
+                        },
+                        standard_value_type: None,
+                    });
+                }
+                diagnostics.push(diagnostic(
+                    DiagnosticCode::InvalidReferenceTarget,
+                    format!("REF target {target_name} is a sealed INSPECT carrier"),
+                    logical_path,
+                    &target.span,
+                ));
+                return None;
+            }
             let scalar_target = standard.map_or_else(
                 || resolve_closed_scalar(target).is_some(),
                 |standard| standard_value_by_name(target, standard).is_some(),
@@ -10402,7 +10909,7 @@ fn diagnostic(
 
 #[cfg(test)]
 mod tests {
-    use super::CheckedClientFunctionBody;
+    use super::{CheckedClientExpression, CheckedClientFunctionBody};
     use std::{cell::Cell, error::Error};
 
     use orna_artifact::server_mutation_plan::{
@@ -11001,6 +11508,230 @@ mod tests {
                 .map(|(path, source)| SourceUnit::new(path, source)),
         )
         .unwrap()
+    }
+
+    #[test]
+    fn accepts_the_ordinary_inspector_signature_and_nested_projection_calls() {
+        let source = "CREATE SCHEMA devtools; CREATE CLIENT FUNCTION devtools.inspect(p_target REF sys.inspect.invocation) RETURNS sys.inspect.snapshot IS BEGIN RETURN sys.inspect.snapshot(p_target => p_target); END; CREATE CLIENT FUNCTION devtools.project(p_target REF sys.inspect.invocation) RETURNS sys.inspect.calls IS BEGIN RETURN sys.inspect.calls(p_snapshot => sys.inspect.snapshot(p_target => p_target)); END;";
+        let report = check(&bundle([("inspector.orna", source)]), &empty_catalogue());
+        assert!(report.diagnostics().is_empty(), "{:?}", report.diagnostics());
+        let checked = report.checked_bundle().unwrap();
+        let clients = checked.client_functions();
+        assert_eq!(clients.len(), 2);
+        assert!(matches!(
+            clients[0].body(),
+            CheckedClientFunctionBody::Expression {
+                expression: CheckedClientExpression::Inspect {
+                    operation: super::CheckedInspectOperation::Snapshot { .. }
+                }
+            }
+        ));
+        assert!(matches!(
+            clients[1].body(),
+            CheckedClientFunctionBody::Expression {
+                expression: CheckedClientExpression::Inspect {
+                    operation: super::CheckedInspectOperation::Projection {
+                        projection: super::CheckedInspectProjection::Calls,
+                        ..
+                    }
+                }
+            }
+        ));
+    }
+
+    #[test]
+    fn accepts_ordinary_inspector_structural_default_without_options() {
+        let source = "CREATE SCHEMA devtools; CREATE CLIENT FUNCTION devtools.inspect(p_target REF sys.inspect.invocation) RETURNS sys.inspect.snapshot IS BEGIN RETURN sys.inspect.snapshot(p_target => p_target); END;";
+        let report = check(&bundle([("inspector.orna", source)]), &empty_catalogue());
+        assert!(report.diagnostics().is_empty(), "{:?}", report.diagnostics());
+        let checked = report.checked_bundle().unwrap();
+        let CheckedClientFunctionBody::Expression { expression } = checked.client_functions()[0].body() else {
+            panic!("ordinary Inspector body was not an expression");
+        };
+        let CheckedClientExpression::Inspect { operation } = expression else {
+            panic!("ordinary Inspector body was not an inspect operation");
+        };
+        assert!(matches!(operation, super::CheckedInspectOperation::Snapshot { options: None, .. }));
+    }
+
+    #[test]
+    fn rejects_inspector_wrong_carrier_types_and_server_calls() {
+        let cases = [
+            "CREATE SCHEMA devtools; CREATE CLIENT FUNCTION devtools.bad(p_target REF sys.inspect.invocation, p_options sys.inspect.snapshot_options) RETURNS sys.inspect.snapshot IS BEGIN RETURN sys.inspect.snapshot(p_target => p_target, p_options => p_options); END;",
+            "CREATE SCHEMA devtools; CREATE CLIENT FUNCTION devtools.bad(p_target REF sys.inspect.invocation, p_options sys.inspect.snapshot_options) RETURNS sys.inspect.resources IS BEGIN RETURN sys.inspect.calls(p_snapshot => sys.inspect.snapshot(p_target => p_target, p_options => p_options)); END;",
+            "CREATE SCHEMA devtools; CREATE SERVER FUNCTION devtools.server() RETURNS ROWS (value TEXT) AS SELECT 'x'; CREATE CLIENT FUNCTION devtools.bad() RETURNS sys.inspect.snapshot IS BEGIN RETURN devtools.server(); END;",
+        ];
+        for source in cases {
+            let report = check(&bundle([("inspector.orna", source)]), &empty_catalogue());
+            assert!(!report.diagnostics().is_empty(), "source unexpectedly accepted: {source}");
+            assert_no_checked_bundle(&report);
+        }
+
+        let supplied_options = "CREATE SCHEMA devtools; CREATE CLIENT FUNCTION devtools.bad(p_target REF sys.inspect.invocation, p_options sys.inspect.snapshot_options) RETURNS sys.inspect.snapshot IS BEGIN RETURN sys.inspect.snapshot(p_target => p_target, p_options => p_options); END;";
+        let report = check(&bundle([("inspector.orna", supplied_options)]), &empty_catalogue());
+        assert_eq!(
+            report.diagnostics().iter().map(|diagnostic| diagnostic.message()).collect::<Vec<_>>(),
+            vec!["sys.inspect.snapshot options are not supported in Inspector v1"],
+        );
+        assert_no_checked_bundle(&report);
+    }
+
+    #[test]
+    fn accepts_registered_inspector_shell_exact_signature() {
+        let standard =
+            check_standard_library_source(&verified_standard_v4_snapshot()).unwrap();
+        let application = empty_catalogue();
+        let context =
+            StandardApplicationCheckContext::try_new(&application, &standard).unwrap();
+        let source = "CREATE SCHEMA devtools; CREATE EXTERNAL CLIENT FUNCTION devtools.inspector_shell(
+            p_snapshot sys.inspect.snapshot,
+            p_invocation_nodes sys.inspect.invocation_nodes,
+            p_calls sys.inspect.calls,
+            p_resources sys.inspect.resources,
+            p_state_cells sys.inspect.state_cells,
+            p_ui_nodes sys.inspect.ui_nodes,
+            p_presentation_candidates sys.inspect.presentation_candidates,
+            p_runtime_bindings sys.inspect.runtime_bindings,
+            p_security_decisions sys.inspect.security_decisions
+        ) RETURNS std.ui.UI RUNTIME CONTRACT 'devtools.inspector_shell@1';";
+        let report = check_standard_application(&bundle([("inspector-shell.orna", source)]), &context);
+        assert_eq!(report.diagnostics(), &[], "{:?}", report.diagnostics());
+        let function = report.checked_bundle().unwrap().client_functions().next().unwrap();
+        assert_eq!(function.name().to_string(), "devtools.inspector_shell");
+        assert_eq!(function.parameters().count(), 9);
+    }
+
+    #[test]
+    fn accepts_procedural_inspector_with_pre_begin_value_locals() {
+        let standard =
+            check_standard_library_source(&verified_standard_v4_snapshot()).unwrap();
+        let application = empty_catalogue();
+        let context =
+            StandardApplicationCheckContext::try_new(&application, &standard).unwrap();
+        let source = r#"CREATE SCHEMA devtools;
+            CREATE EXTERNAL CLIENT FUNCTION devtools.inspector_shell(
+                p_snapshot sys.inspect.snapshot,
+                p_invocation_nodes sys.inspect.invocation_nodes,
+                p_calls sys.inspect.calls,
+                p_resources sys.inspect.resources,
+                p_state_cells sys.inspect.state_cells,
+                p_ui_nodes sys.inspect.ui_nodes,
+                p_presentation_candidates sys.inspect.presentation_candidates,
+                p_runtime_bindings sys.inspect.runtime_bindings,
+                p_security_decisions sys.inspect.security_decisions
+            ) RETURNS std.ui.UI
+            RUNTIME CONTRACT 'devtools.inspector_shell@1';
+            CREATE CLIENT FUNCTION devtools.inspector(p_target REF sys.inspect.invocation)
+            RETURNS std.ui.UI IS
+            LET snapshot sys.inspect.snapshot := sys.inspect.snapshot(p_target => p_target);
+            LET invocation_nodes sys.inspect.invocation_nodes :=
+                sys.inspect.invocation_nodes(p_snapshot => snapshot);
+            LET calls sys.inspect.calls := sys.inspect.calls(p_snapshot => snapshot);
+            LET resources sys.inspect.resources :=
+                sys.inspect.resources(p_snapshot => snapshot);
+            LET state_cells sys.inspect.state_cells :=
+                sys.inspect.state_cells(p_snapshot => snapshot);
+            LET ui_nodes sys.inspect.ui_nodes := sys.inspect.ui_nodes(p_snapshot => snapshot);
+            LET presentation_candidates sys.inspect.presentation_candidates :=
+                sys.inspect.presentation_candidates(p_snapshot => snapshot);
+            LET runtime_bindings sys.inspect.runtime_bindings :=
+                sys.inspect.runtime_bindings(p_snapshot => snapshot);
+            LET security_decisions sys.inspect.security_decisions :=
+                sys.inspect.security_decisions(p_snapshot => snapshot);
+            BEGIN
+                RETURN devtools.inspector_shell(
+                    p_snapshot => snapshot,
+                    p_invocation_nodes => invocation_nodes,
+                    p_calls => calls,
+                    p_resources => resources,
+                    p_state_cells => state_cells,
+                    p_ui_nodes => ui_nodes,
+                    p_presentation_candidates => presentation_candidates,
+                    p_runtime_bindings => runtime_bindings,
+                    p_security_decisions => security_decisions
+                );
+            END;"#;
+        let report = check_standard_application(&bundle([("inspector.orna", source)]), &context);
+        assert_eq!(report.diagnostics(), &[], "{:?}", report.diagnostics());
+        let checked = report.preparation_view().unwrap().checked();
+        let function = checked
+            .client_functions()
+            .iter()
+            .find(|function| function.name().to_string() == "devtools.inspector")
+            .expect("ordinary Inspector function");
+        let CheckedClientFunctionBody::Procedural {
+            locals,
+            statements,
+            return_expression,
+        } = function.body()
+        else {
+            panic!("expected checked procedural Inspector body");
+        };
+        assert_eq!(locals.len(), 9);
+        assert_eq!(statements.len(), 9);
+        assert_eq!(
+            locals.iter().map(|local| local.ordinal()).collect::<Vec<_>>(),
+            (0..9).collect::<Vec<_>>()
+        );
+        assert!(locals
+            .iter()
+            .all(|local| local.kind() == super::CheckedClientLocalKind::Value));
+        assert_eq!(
+            statements
+                .iter()
+                .map(|statement| statement.local())
+                .collect::<Vec<_>>(),
+            (0..9).collect::<Vec<_>>()
+        );
+        assert!(matches!(
+            statements[0].expression(),
+            CheckedClientExpression::Inspect {
+                operation: super::CheckedInspectOperation::Snapshot { target, .. }
+            } if matches!(target.as_ref(), CheckedClientExpression::ParameterRead { .. })
+        ));
+        for statement in &statements[1..] {
+            assert!(matches!(
+                statement.expression(),
+                CheckedClientExpression::Inspect {
+                    operation: super::CheckedInspectOperation::Projection { snapshot, .. }
+                } if matches!(snapshot.as_ref(), CheckedClientExpression::LocalRead { local: 0, .. })
+            ));
+        }
+        let CheckedClientExpression::Call { arguments, .. } = return_expression else {
+            panic!("expected Inspector shell call");
+        };
+        assert_eq!(arguments.len(), 9);
+        for (ordinal, (_, expression)) in arguments.iter().enumerate() {
+            assert!(matches!(
+                expression,
+                CheckedClientExpression::LocalRead { local, .. }
+                    if *local == ordinal as u32
+            ));
+        }
+    }
+
+    #[test]
+    fn rejects_unregistered_or_malformed_inspector_shell_contracts() {
+        let standard =
+            check_standard_library_source(&verified_standard_v4_snapshot()).unwrap();
+        let application = empty_catalogue();
+        let context =
+            StandardApplicationCheckContext::try_new(&application, &standard).unwrap();
+        let cases = [
+            "CREATE SCHEMA devtools; CREATE EXTERNAL CLIENT FUNCTION devtools.inspector_shell(p_snapshot sys.inspect.snapshot, p_invocation_nodes sys.inspect.invocation_nodes, p_calls sys.inspect.calls, p_resources sys.inspect.resources, p_state_cells sys.inspect.state_cells, p_ui_nodes sys.inspect.ui_nodes, p_presentation_candidates sys.inspect.presentation_candidates, p_runtime_bindings sys.inspect.runtime_bindings) RETURNS std.ui.UI RUNTIME CONTRACT 'devtools.inspector_shell@1';",
+            "CREATE SCHEMA devtools; CREATE EXTERNAL CLIENT FUNCTION devtools.inspector_shell(p_snapshot sys.inspect.snapshot, p_invocation_nodes sys.inspect.invocation_nodes, p_calls sys.inspect.resources, p_resources sys.inspect.resources, p_state_cells sys.inspect.state_cells, p_ui_nodes sys.inspect.ui_nodes, p_presentation_candidates sys.inspect.presentation_candidates, p_runtime_bindings sys.inspect.runtime_bindings, p_security_decisions sys.inspect.security_decisions) RETURNS std.ui.UI RUNTIME CONTRACT 'devtools.inspector_shell@1';",
+            "CREATE SCHEMA devtools; CREATE EXTERNAL CLIENT FUNCTION devtools.inspector_shell(p_snapshot sys.inspect.snapshot, p_invocation_nodes sys.inspect.invocation_nodes, p_calls sys.inspect.calls, p_resources sys.inspect.resources, p_state_cells sys.inspect.state_cells, p_ui_nodes sys.inspect.ui_nodes, p_presentation_candidates sys.inspect.presentation_candidates, p_runtime_bindings sys.inspect.runtime_bindings, p_security_decisions sys.inspect.security_decisions) RETURNS BOOLEAN RUNTIME CONTRACT 'devtools.inspector_shell@1';",
+            "CREATE SCHEMA devtools; CREATE EXTERNAL CLIENT FUNCTION devtools.inspector_shell(p_snapshot sys.inspect.snapshot, p_invocation_nodes sys.inspect.invocation_nodes, p_calls sys.inspect.calls, p_resources sys.inspect.resources, p_state_cells sys.inspect.state_cells, p_ui_nodes sys.inspect.ui_nodes, p_presentation_candidates sys.inspect.presentation_candidates, p_runtime_bindings sys.inspect.runtime_bindings, p_security_decisions sys.inspect.security_decisions) RETURNS std.ui.UI RUNTIME CONTRACT 'devtools.inspector_shell@2';",
+        ];
+        for source in cases {
+            let report =
+                check_standard_application(&bundle([("inspector-shell.orna", source)]), &context);
+            assert!(
+                !report.diagnostics().is_empty(),
+                "source unexpectedly accepted: {source}"
+            );
+            assert!(report.checked_bundle().is_none());
+        }
     }
 
     #[test]
@@ -19068,6 +19799,18 @@ mod tests {
         ));
         assert!(matches!(states[1].default(), CheckedStateDefault::Null));
         assert!(matches!(states[2].default(), CheckedStateDefault::Unset));
+
+        let sealed_session = "CREATE SCHEMA examples; CREATE CLIENT FUNCTION examples.state() RETURNS BOOLEAN IS STATE snapshot sys.inspect.snapshot SCOPE SESSION; BEGIN RETURN TRUE; END;";
+        let report = check(&bundle([("client.orna", sealed_session)]), &empty_catalogue());
+        assert_eq!(report.diagnostics().len(), 1);
+        assert_eq!(report.diagnostics()[0].code(), DiagnosticCode::DomainIncompatible);
+        assert!(report.diagnostics()[0].message().contains("sealed sys.inspect carriers are transient"));
+
+        let sealed_user = "CREATE SCHEMA examples; CREATE CLIENT FUNCTION examples.state() RETURNS BOOLEAN IS STATE snapshot_options sys.inspect.snapshot_options SCOPE USER; BEGIN RETURN TRUE; END;";
+        let report = check(&bundle([("client.orna", sealed_user)]), &empty_catalogue());
+        assert_eq!(report.diagnostics().len(), 1);
+        assert_eq!(report.diagnostics()[0].code(), DiagnosticCode::DomainIncompatible);
+        assert!(report.diagnostics()[0].message().contains("sealed sys.inspect carriers are transient"));
 
         let duplicate = "CREATE SCHEMA examples; CREATE CLIENT FUNCTION examples.state() RETURNS TEXT IS \
             STATE value TEXT; STATE value INTEGER; BEGIN RETURN 'ready'; END;";
