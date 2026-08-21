@@ -718,6 +718,28 @@ mod tests {
         );
     }
 
+    #[test]
+    fn selects_the_accepted_v2_through_v5_snapshots() {
+        let snapshots = [
+            retained_standard_library_v2_snapshot()
+                .and_then(verify_standard_library_v2_snapshot)
+                .expect("verified V2 standard"),
+            retained_standard_library_v3_snapshot()
+                .and_then(verify_standard_library_v3_snapshot)
+                .expect("verified V3 standard"),
+            retained_standard_library_v4_snapshot()
+                .and_then(verify_standard_library_v4_snapshot)
+                .expect("verified V4 standard"),
+            retained_standard_library_v5_snapshot()
+                .and_then(verify_standard_library_v5_snapshot)
+                .expect("verified V5 standard"),
+        ];
+
+        for installed in &snapshots {
+            assert_selected_standard_matches(installed);
+        }
+    }
+
     fn split_document(bytes: &[u8]) -> (&[u8], &[u8]) {
         let marker = b"\"functions\":[";
         let start = bytes
