@@ -1121,6 +1121,11 @@ pub(crate) enum CheckedClientExpression {
         /// The resolved action operation metadata and bound arguments.
         operation: CheckedActionOperation,
     },
+    /// A sealed `sys.inspect` operation over an immutable inspection carrier.
+    Inspect {
+        /// The checked sealed operation and its nested target expression.
+        operation: CheckedInspectOperation,
+    },
     /// A text literal value.
     String {
         /// The unescaped text value.
@@ -1174,6 +1179,48 @@ pub(crate) enum CheckedClientExpression {
         /// The source location of the complete expression.
         location: SourceLocation,
     },
+}
+
+/// One fixed materialized projection exposed by the sealed Inspector surface.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum CheckedInspectProjection {
+    InvocationNodes,
+    Calls,
+    Resources,
+    StateCells,
+    UiNodes,
+    PresentationCandidates,
+    RuntimeBindings,
+    SecurityDecisions,
+}
+
+/// A checked sealed `sys.inspect` operation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum CheckedInspectOperation {
+    /// Captures one target invocation using structural defaults.
+    Snapshot {
+        target: Box<CheckedClientExpression>,
+        /// The checked `sys.inspect.snapshot_options` argument. None is the
+        /// explicit structural-only default accepted by the one-argument
+        /// snapshot spelling.
+        options: Option<Box<CheckedClientExpression>>,
+        location: SourceLocation,
+    },
+    /// Materializes one fixed projection from an existing snapshot.
+    Projection {
+        projection: CheckedInspectProjection,
+        snapshot: Box<CheckedClientExpression>,
+        location: SourceLocation,
+    },
+}
+
+impl CheckedInspectOperation {
+    /// Returns the source location of the complete sealed operation.
+    pub(crate) fn location(&self) -> &SourceLocation {
+        match self {
+            Self::Snapshot { location, .. } | Self::Projection { location, .. } => location,
+        }
+    }
 }
 
 /// One checked CLIENT-to-SERVER resource operation.
