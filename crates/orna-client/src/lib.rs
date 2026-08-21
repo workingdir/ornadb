@@ -4508,6 +4508,8 @@ fn evaluate_resource_expression(
             ClientResourceExecutionError::ExecutorUnavailable,
         ));
     };
+    // CLIENT helper requests remain nested under the active local invocation.
+    // The fresh current identity preserves audit correlation across nested calls.
     let request = resource
         .begin_request_with_context_and_kind(
             active,
@@ -6706,7 +6708,7 @@ mod tests {
         ACTION_FAILURE_CODE,
     };
     use orna_artifact::client_plan::{ActionTargetDomain, InspectProjection};
-    use std::time::SystemTime;
+    use std::{cell::Cell, rc::Rc, time::SystemTime};
 
     use orna_core::{
         CallSiteId, CatalogueRevisionId, FunctionId, FunctionRevisionId, InvocationId, LocalId, ParameterId, PrincipalId, SchemaId,
@@ -7245,6 +7247,93 @@ mod tests {
             executor.inspect(request),
             Ok(RuntimeValue::Boolean(false))
         );
+    }
+
+    #[test]
+    fn inspect_expression_rejects_observer_lineage_targets_before_provider() {
+        let (active, function, pair, function_revision) = version_one_active(true);
+        let root = InvocationId::from_bytes([0x91; 16]);
+        let parent = InvocationId::from_bytes([0x92; 16]);
+        let current = InvocationId::from_bytes([0x93; 16]);
+        let explicit_lineage = super::ObserverLineage {
+            root,
+            parent,
+            current,
+        };
+        let top_level = super::ObserverLineage::top_level(root);
+        let nested = top_level.nested();
+        let child = nested.nested();
+        let cases = [
+            ("root", explicit_lineage, root),
+            ("parent", explicit_lineage, parent),
+            ("current", explicit_lineage, current),
+            ("recorded nested descendant", child, nested.current),
+        ];
+
+        for (label, lineage, target) in cases {
+            let context = super::ClientExecutionContext {
+                pair,
+                function,
+                function_revision,
+                parent_invocation_id: lineage.parent,
+            };
+            let parameter = ParameterId::from_bytes([0x94; 16]);
+            let expression = orna_artifact::client_plan::ClientExpressionNode::Inspect {
+                operation: orna_artifact::client_plan::InspectOperationNode::snapshot(
+                    orna_artifact::client_plan::ClientExpressionNode::ParameterRead { parameter },
+                ),
+            };
+            let arguments = [(
+                parameter,
+                RuntimeValue::Reference {
+                    target: super::SYS_INSPECT_INVOCATION_TYPE_ID,
+                    object: orna_core::ObjectId::from_bytes(target.to_bytes()),
+                },
+            )];
+            let grants = capability::LocalCapabilityGrantSet::new();
+            let mut state = ClientStateStore::new();
+            let provider_calls = Rc::new(Cell::new(0));
+            let provider_calls_for_executor = Rc::clone(&provider_calls);
+            let mut executor = super::DeterministicClientResourceExecutor::new(
+                |_: &super::ClientResourceRequest| Ok::<_, String>(RuntimeValue::Boolean(false)),
+            )
+            .with_inspect(move |_| {
+                provider_calls_for_executor.set(provider_calls_for_executor.get() + 1);
+                Ok(RuntimeValue::Boolean(false))
+            });
+            let mut executor_slot: Option<&mut dyn ClientResourceExecutor> = Some(&mut executor);
+            let mut locals = std::collections::HashMap::new();
+
+            let result = super::evaluate_expression_plan(
+                &active,
+                &expression,
+                context,
+                lineage,
+                ResolvedType::Value(super::SYS_INSPECT_SNAPSHOT_TYPE_ID),
+                &arguments,
+                &[],
+                &grants,
+                &mut state,
+                0,
+                PrincipalId::from_bytes([0x95; 16]),
+                &mut executor_slot,
+                &mut locals,
+            );
+
+            assert_eq!(
+                result,
+                Err(super::ClientExecutionError::Inspect {
+                    context,
+                    source: super::ClientInspectError::Failed("inspect.recursion".to_owned()),
+                }),
+                "{label} target must be rejected by the expression evaluator",
+            );
+            assert_eq!(
+                provider_calls.get(),
+                0,
+                "{label} target must not invoke the Inspector provider",
+            );
+        }
     }
 
     fn authorise(pair: RevisionPair, function: FunctionId) -> AuthorisedInvocation {
