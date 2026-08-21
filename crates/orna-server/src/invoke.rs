@@ -703,6 +703,9 @@ impl InstalledClientResourceExecutor {
         }
     }
     fn discard_raw_resource_request(&self, stream_id: u64) {
+        if let Some(broker) = self.broker.as_ref() {
+            broker.discard_expected_resource_request(stream_id);
+        }
         if let Some(authorizer) = self.raw_resource_authorizer.as_ref() {
             authorizer.discard_expected_resource_request(stream_id);
         }
@@ -1836,7 +1839,11 @@ impl ClientResourceExecutor for InstalledClientResourceExecutor {
             item_window: 1,
             byte_window: MAX_RESOURCE_WINDOW,
         };
-        if let Some(authorizer) = self.raw_resource_authorizer.as_ref()
+        if let Some(broker) = self.broker.as_ref()
+            && !broker.register_expected_resource_request(&protocol_request)
+        {
+            return request.failed(SERVER_RESOURCE_INTERNAL_CODE.to_owned());
+        } else if let Some(authorizer) = self.raw_resource_authorizer.as_ref()
             && !authorizer.register_expected_resource_request(&protocol_request)
         {
             return request.failed(SERVER_RESOURCE_INTERNAL_CODE.to_owned());
