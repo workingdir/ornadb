@@ -5,7 +5,7 @@
 
 use std::{error::Error, fmt};
 
-use crate::{CatalogueRevisionId, SourceRevisionId, TypeId};
+use crate::{CatalogueRevisionId, InvocationId, SourceRevisionId, TypeId};
 
 pub const INSPECT_CARRIER_MAGIC: &[u8; 15] = b"ORNA-INSPECT/1 ";
 pub const INSPECT_CARRIER_VERSION: u16 = 1;
@@ -163,9 +163,18 @@ impl InspectCarrierKind {
 }
 
 /// Provenance copied from trusted kernel/server facts.
+///
+/// `server_epoch_id` is the epoch encoded by ORNA-INSPECT/1. The distinct
+/// client execution epoch is intentionally not part of this core envelope;
+/// the client binds it externally while validating the decoded carrier.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct InspectCarrierProvenance {
-    epoch_id: u64,
+    /// The server-side snapshot epoch represented by the carrier.
+    server_epoch_id: u64,
+    /// The invocation captured by the server epoch, when the carrier was
+    /// constructed from target-bound facts. Legacy constructors leave this
+    /// absent because ORNA-INSPECT/1 does not encode it.
+    target_invocation_id: Option<InvocationId>,
     source_revision_id: SourceRevisionId,
     catalogue_revision_id: CatalogueRevisionId,
 }
@@ -173,12 +182,28 @@ pub struct InspectCarrierProvenance {
 impl InspectCarrierProvenance {
     /// Explicitly marks the supplied facts as trusted kernel/server evidence.
     pub const fn trusted(
-        epoch_id: u64,
+        server_epoch_id: u64,
         source_revision_id: SourceRevisionId,
         catalogue_revision_id: CatalogueRevisionId,
     ) -> Self {
         Self {
-            epoch_id,
+            server_epoch_id,
+            target_invocation_id: None,
+            source_revision_id,
+            catalogue_revision_id,
+        }
+    }
+
+    /// Explicitly marks target-bound server facts as trusted evidence.
+    pub const fn trusted_for_target(
+        server_epoch_id: u64,
+        target_invocation_id: InvocationId,
+        source_revision_id: SourceRevisionId,
+        catalogue_revision_id: CatalogueRevisionId,
+    ) -> Self {
+        Self {
+            server_epoch_id,
+            target_invocation_id: Some(target_invocation_id),
             source_revision_id,
             catalogue_revision_id,
         }
@@ -187,15 +212,47 @@ impl InspectCarrierProvenance {
     /// Copies provenance from an immutable captured epoch.
     pub fn from_snapshot_epoch(epoch: &crate::inspect::InspectSnapshotEpoch) -> Self {
         let bytes = epoch.id().to_bytes();
-        Self::trusted(
+        Self::trusted_for_target(
             u64::from_be_bytes(bytes[8..].try_into().expect("epoch identity width")),
+            epoch.invocation_id(),
             epoch.source_revision_id(),
             epoch.catalogue_revision_id(),
         )
     }
 
+    /// Returns the server-side epoch identity.
+    pub const fn server_epoch_id(self) -> u64 {
+        self.server_epoch_id
+    }
+
+    /// Returns the target invocation when this provenance is target-bound.
+    pub const fn target_invocation_id(self) -> Option<InvocationId> {
+        self.target_invocation_id
+    }
+
+    /// Binds trusted legacy provenance to a target, rejecting a conflicting
+    /// target already present in the provenance.
+    pub fn bind_target(
+        self,
+        target_invocation_id: InvocationId,
+    ) -> Result<Self, InspectCarrierError> {
+        if let Some(expected) = self.target_invocation_id
+            && expected != target_invocation_id
+        {
+            return Err(InspectCarrierError::TargetInvocationMismatch {
+                expected,
+                actual: target_invocation_id,
+            });
+        }
+        Ok(Self {
+            target_invocation_id: Some(target_invocation_id),
+            ..self
+        })
+    }
+
+    /// Compatibility alias for the pre-target-bound carrier API.
     pub const fn epoch_id(self) -> u64 {
-        self.epoch_id
+        self.server_epoch_id()
     }
     pub const fn source_revision_id(self) -> SourceRevisionId {
         self.source_revision_id
@@ -214,8 +271,8 @@ pub struct InspectCarrierEnvelope {
 
 impl InspectCarrierEnvelope {
     /// Constructs a carrier from trusted kernel/server provenance facts.
-    /// Prefer [`Self::from_snapshot_epoch`] or [`Self::new_with_provenance`]
-    /// when the provenance source should be visible at the call site.
+    /// Prefer [`Self::from_snapshot_epoch`] or [`Self::new_with_target`]
+    /// when the target invocation is available at the call site.
     pub fn new<K: Into<InspectCarrierKind>>(
         kind: K,
         epoch_id: u64,
@@ -251,6 +308,18 @@ impl InspectCarrierEnvelope {
         Ok(value)
     }
 
+    /// Constructs a carrier after binding trusted provenance to its target
+    /// invocation. The target is retained in memory; ORNA-INSPECT/1 does not
+    /// have a target field, so a wire decode cannot recover this binding.
+    pub fn new_with_target<K: Into<InspectCarrierKind>>(
+        kind: K,
+        target_invocation_id: InvocationId,
+        provenance: InspectCarrierProvenance,
+        rows: Vec<Vec<u8>>,
+    ) -> Result<Self, InspectCarrierError> {
+        Self::new_with_provenance(kind, provenance.bind_target(target_invocation_id)?, rows)
+    }
+
     pub fn from_snapshot_epoch<K: Into<InspectCarrierKind>>(
         kind: K,
         epoch: &crate::inspect::InspectSnapshotEpoch,
@@ -273,7 +342,13 @@ impl InspectCarrierEnvelope {
         self.kind.projection()
     }
     pub const fn epoch_id(&self) -> u64 {
-        self.provenance.epoch_id()
+        self.server_epoch_id()
+    }
+    pub const fn server_epoch_id(&self) -> u64 {
+        self.provenance.server_epoch_id()
+    }
+    pub const fn target_invocation_id(&self) -> Option<InvocationId> {
+        self.provenance.target_invocation_id()
     }
     pub const fn source_revision_id(&self) -> SourceRevisionId {
         self.provenance.source_revision_id()
@@ -776,6 +851,10 @@ pub enum InspectCarrierError {
     NonCanonicalRowOrder,
     InvalidRow(InspectRowError),
     EnvelopeTooLarge { actual: usize, maximum: usize },
+    TargetInvocationMismatch {
+        expected: InvocationId,
+        actual: InvocationId,
+    },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -859,6 +938,10 @@ impl fmt::Display for InspectCarrierError {
             Self::EnvelopeTooLarge { actual, maximum } => write!(
                 formatter,
                 "inspect carrier envelope length {actual} exceeds maximum {maximum}"
+            ),
+            Self::TargetInvocationMismatch { expected, actual } => write!(
+                formatter,
+                "inspect carrier target invocation {actual} does not match provenance target {expected}"
             ),
         }
     }
@@ -1067,5 +1150,52 @@ mod tests {
         )
         .expect("trusted provenance");
         assert_eq!(carrier.provenance(), provenance);
+        assert_eq!(carrier.server_epoch_id(), 9);
+        assert_eq!(carrier.target_invocation_id(), None);
+    }
+
+    #[test]
+    fn target_bound_provenance_round_trips_in_memory_and_rejects_mismatch() {
+        let target = InvocationId::from_bytes([0x33; 16]);
+        let other_target = InvocationId::from_bytes([0x44; 16]);
+        let provenance = InspectCarrierProvenance::trusted_for_target(
+            9,
+            target,
+            source(),
+            catalogue(),
+        );
+        let carrier = InspectCarrierEnvelope::new_with_target(
+            InspectCarrierKind::Snapshot,
+            target,
+            provenance,
+            vec![],
+        )
+        .expect("matching target provenance");
+        assert_eq!(carrier.provenance(), provenance);
+        assert_eq!(carrier.target_invocation_id(), Some(target));
+        assert_eq!(carrier.server_epoch_id(), 9);
+
+        assert_eq!(
+            InspectCarrierEnvelope::new_with_target(
+                InspectCarrierKind::Snapshot,
+                other_target,
+                provenance,
+                vec![],
+            ),
+            Err(InspectCarrierError::TargetInvocationMismatch {
+                expected: target,
+                actual: other_target,
+            })
+        );
+
+        // The @1 wire envelope intentionally has no target/client-epoch
+        // fields. Decoding preserves server epoch and revision evidence but
+        // cannot claim a target binding that was not encoded.
+        let decoded = InspectCarrierEnvelope::decode(&carrier.encode().expect("encode"))
+            .expect("decode");
+        assert_eq!(decoded.server_epoch_id(), carrier.server_epoch_id());
+        assert_eq!(decoded.source_revision_id(), carrier.source_revision_id());
+        assert_eq!(decoded.catalogue_revision_id(), carrier.catalogue_revision_id());
+        assert_eq!(decoded.target_invocation_id(), None);
     }
 }
