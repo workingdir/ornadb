@@ -7,6 +7,7 @@ pub mod canonical_hash;
 pub mod catalogue;
 pub mod catalogue_diff;
 pub mod inspect;
+pub mod inspect_carrier;
 pub mod invocation;
 pub mod invocation_binding;
 pub mod physical;
