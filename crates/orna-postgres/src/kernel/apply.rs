@@ -36,7 +36,7 @@ use orna_core::system::{
 use tokio_postgres::{Client, IsolationLevel, Transaction};
 
 use crate::{
-    PostgresKernel, PostgresKernelError,
+    PostgresKernel, PostgresKernelError, is_sealed_inspect_type_id,
     decode::{DurableRecord, identity_bytes},
     physical::{establish_trusted_search_path, install_physical_plan},
     recovery::recover_active_revision,
@@ -1293,11 +1293,11 @@ fn validate_postgres_encodings(
         let _ = function_transaction(function.transaction())?;
         let _ = function_volatility(function.volatility());
         for parameter in function.parameters() {
-            let _ = encoder.type_columns(parameter.resolved_type(), false)?;
+            let _ = encoder.function_type_columns(function.domain(), parameter.resolved_type(), false)?;
         }
         match function.return_type() {
             FunctionReturn::Single(resolved) => {
-                let _ = encoder.type_columns(*resolved, true)?;
+                let _ = encoder.function_type_columns(function.domain(), *resolved, true)?;
             }
             FunctionReturn::Rows(columns) => {
                 for column in columns {
@@ -1305,7 +1305,7 @@ fn validate_postgres_encodings(
                 }
             }
             FunctionReturn::Stream(resolved) => {
-                let _ = encoder.type_columns(*resolved, false)?;
+                let _ = encoder.function_type_columns(function.domain(), *resolved, false)?;
             }
         }
     }
@@ -2438,7 +2438,7 @@ async fn persist_functions(
                     standard_library_revision,
                     enum_type,
                     record_type,
-                } = encoder.type_columns(*value, true)?;
+                } = encoder.function_type_columns(function.domain(), *value, true)?;
                 (
                     "single",
                     Some(kind),
@@ -2460,7 +2460,7 @@ async fn persist_functions(
                     standard_library_revision,
                     enum_type,
                     record_type,
-                } = encoder.type_columns(*value, false)?;
+                } = encoder.function_type_columns(function.domain(), *value, false)?;
                 (
                     "stream",
                     Some(kind),
@@ -2517,7 +2517,7 @@ async fn persist_functions(
                 standard_library_revision,
                 enum_type,
                 record_type,
-            } = encoder.type_columns(parameter.resolved_type(), false)?;
+            } = encoder.function_type_columns(function.domain(), parameter.resolved_type(), false)?;
             let origin = origin(
                 candidate.origins(),
                 DefinitionIdentity::Parameter {
@@ -3127,15 +3127,19 @@ impl<'a> CandidateEncoder<'a> {
             });
         }
         if let Some(value_type) = value.value_type() {
-            let standard_library_revision = self.standard_library_revision().ok_or_else(|| {
-                invariant("resolved value types require version-two PostgreSQL encoding")
-            })?;
+            let standard_library_revision = if is_sealed_inspect_type_id(value_type) {
+                None
+            } else {
+                Some(self.standard_library_revision().ok_or_else(|| {
+                    invariant("resolved value types require version-two PostgreSQL encoding")
+                })?)
+            };
             return Ok(TypeColumns {
                 kind: "value",
                 scalar: None,
                 target: None,
                 value_type: Some(value_type),
-                standard_library_revision: Some(standard_library_revision),
+                standard_library_revision,
                 enum_type: None,
                 record_type: None,
             });
@@ -3143,6 +3147,34 @@ impl<'a> CandidateEncoder<'a> {
         Err(invariant(
             "resolved type must expose one supported PostgreSQL type shape",
         ))
+    }
+
+    fn client_type_columns(
+        &self,
+        value: ResolvedType,
+        allow_void: bool,
+    ) -> Result<TypeColumns, PostgresKernelError> {
+        let mut columns = self.type_columns(value, allow_void)?;
+        if columns
+            .value_type
+            .is_some_and(is_sealed_inspect_type_id)
+        {
+            columns.standard_library_revision = None;
+        }
+        Ok(columns)
+    }
+
+    fn function_type_columns(
+        &self,
+        domain: FunctionDomain,
+        value: ResolvedType,
+        allow_void: bool,
+    ) -> Result<TypeColumns, PostgresKernelError> {
+        if domain == FunctionDomain::Client {
+            self.client_type_columns(value, allow_void)
+        } else {
+            self.type_columns(value, allow_void)
+        }
     }
 
     fn reference_target(
@@ -3185,6 +3217,19 @@ impl<'a> CandidateEncoder<'a> {
                     None,
                     None,
                     Some(bytes(self.catalogue.revision())),
+                    None,
+                    None,
+                ));
+            }
+            if is_sealed_inspect_type_id(id) {
+                return Ok((
+                    "value_type",
+                    bytes(id),
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
                     None,
                     None,
                 ));
