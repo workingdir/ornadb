@@ -319,7 +319,12 @@ async fn apply_source_bundle(
         .catalogue_hash_context()
         .standard()
         .ok_or(InstalledSourceApplyError::ActiveStandardMismatch)?;
-    let accepted = select_accepted_standard(installed)?;
+    let accepted = select_accepted_standard(installed).map_err(|error| match error {
+        StandardSelectionError::UnknownRevision => InstalledSourceApplyError::ActiveStandardMismatch,
+        StandardSelectionError::Verification(source) => {
+            InstalledSourceApplyError::StandardLibrary { source }
+        }
+    })?;
     require_accepted_active_standard(&active, &accepted)?;
     let standard = check_standard_library_source(&accepted)
         .map_err(|source| InstalledSourceApplyError::StandardSource { source })?;
@@ -434,29 +439,33 @@ fn map_apply_error(source: PostgresKernelError) -> InstalledSourceApplyError {
     }
 }
 
-fn select_accepted_standard(
-    installed: &VerifiedStandardLibrarySnapshot,
-) -> Result<VerifiedStandardLibrarySnapshot, InstalledSourceApplyError> {
-    let accepted =
-        match installed.revision() {
-            STANDARD_LIBRARY_REVISION_ID => {
-                retained_standard_library_snapshot().and_then(verify_standard_library_snapshot)
-            }
-            STANDARD_LIBRARY_V2_REVISION_ID => retained_standard_library_v2_snapshot()
-                .and_then(verify_standard_library_v2_snapshot),
-            STANDARD_LIBRARY_V3_REVISION_ID => retained_standard_library_v3_snapshot()
-                .and_then(verify_standard_library_v3_snapshot),
-            STANDARD_LIBRARY_V4_REVISION_ID => retained_standard_library_v4_snapshot()
-                .and_then(verify_standard_library_v4_snapshot),
-            STANDARD_LIBRARY_V5_REVISION_ID => retained_standard_library_v5_snapshot()
-                .and_then(verify_standard_library_v5_snapshot),
-            STANDARD_LIBRARY_V6_REVISION_ID => retained_standard_library_v6_snapshot()
-                .and_then(verify_standard_library_v6_snapshot),
-            _ => return Err(InstalledSourceApplyError::ActiveStandardMismatch),
-        }
-        .map_err(|source| InstalledSourceApplyError::StandardLibrary { source })?;
+#[derive(Debug)]
+pub(super) enum StandardSelectionError {
+    UnknownRevision,
+    Verification(StandardLibraryError),
+}
 
-    Ok(accepted)
+pub(super) fn select_accepted_standard(
+    installed: &VerifiedStandardLibrarySnapshot,
+) -> Result<VerifiedStandardLibrarySnapshot, StandardSelectionError> {
+    let accepted = match installed.revision() {
+        STANDARD_LIBRARY_REVISION_ID => {
+            retained_standard_library_snapshot().and_then(verify_standard_library_snapshot)
+        }
+        STANDARD_LIBRARY_V2_REVISION_ID => retained_standard_library_v2_snapshot()
+            .and_then(verify_standard_library_v2_snapshot),
+        STANDARD_LIBRARY_V3_REVISION_ID => retained_standard_library_v3_snapshot()
+            .and_then(verify_standard_library_v3_snapshot),
+        STANDARD_LIBRARY_V4_REVISION_ID => retained_standard_library_v4_snapshot()
+            .and_then(verify_standard_library_v4_snapshot),
+        STANDARD_LIBRARY_V5_REVISION_ID => retained_standard_library_v5_snapshot()
+            .and_then(verify_standard_library_v5_snapshot),
+        STANDARD_LIBRARY_V6_REVISION_ID => retained_standard_library_v6_snapshot()
+            .and_then(verify_standard_library_v6_snapshot),
+        _ => return Err(StandardSelectionError::UnknownRevision),
+    };
+
+    accepted.map_err(StandardSelectionError::Verification)
 }
 
 fn require_accepted_active_standard(
