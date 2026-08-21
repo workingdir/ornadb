@@ -46,7 +46,7 @@ kernel-resource-audit-proof:
     docker compose up --detach --wait postgres
     export ORNA_TEST_POSTGRES_ADMIN_URL='host=127.0.0.1 port=55432 user=ornadb_dev password=ornadb_dev_password'
     export ORNA_TEST_POSTGRES_URL='host=127.0.0.1 port=55432 user=ornadb_dev password=ornadb_dev_password dbname=ornadb_dev'
-    cargo test --package orna-server --test standard_database installed_resource_socket_delivers_values_and_enforces_windows_and_grants -- --ignored --exact --test-threads=1
+    cargo test --package orna-server --features test-hooks --test standard_database installed_resource_socket_delivers_values_and_enforces_windows_and_grants -- --ignored --exact --test-threads=1
 
 # Run every ignored PostgreSQL integration test against an isolated database.
 kernel-test:
@@ -69,6 +69,6 @@ kernel-test:
         test_name=${test_path##*/}
         postgres_tests+=(--test "${test_name%.rs}")
     done
-    cargo test --package orna-server "${server_tests[@]}" -- --ignored --test-threads=1
+    cargo test --package orna-server --features test-hooks "${server_tests[@]}" -- --ignored --test-threads=1
     cargo test --package orna-postgres --features test-hooks --lib -- --ignored --test-threads=1
     cargo test --package orna-postgres --features test-hooks "${postgres_tests[@]}" -- --ignored --test-threads=1
