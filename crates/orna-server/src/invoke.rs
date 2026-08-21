@@ -32,10 +32,12 @@ use std::{
     time::Duration,
 };
 
-use orna_client::{ClientResourceCompletion, ClientResourceExecutor, ClientResourceRequest};
+use orna_client::{ClientExternalContractRequest, ClientInspectOperation, ClientInspectRequest, ClientResourceCompletion, ClientResourceExecutor, ClientResourceRequest};
+use orna_core::inspect::{CallRow, InspectInvocationNodeKind, InspectInvocationPhase, InspectOutcomeKind, InspectPrivilege, InspectResourceKind, InspectResourceStatus, InspectResultSummary, InspectSecurityDecisionKind, InspectSecurityDecisionOutcome, InvocationNodeRow, PresentationCandidateRow, ResourceRow, RuntimeBindingRow, SecurityDecisionRow, StateCellRow, UiNodeRow};
+use orna_core::inspect_carrier::{InspectCarrierEnvelope, InspectCarrierKind, InspectCarrierProvenance};
 use orna_core::{
-    FunctionRevisionId, TypeId,
-    catalogue::{FunctionDefinition, FunctionReturn, QualifiedSemanticName, ValueTypeKind},
+    FunctionRevisionId, InspectEpochId, InvocationId, TypeId,
+    catalogue::{FunctionDefinition, FunctionDomain, FunctionReturn, QualifiedSemanticName, ValueTypeKind},
     invocation::InvocationCarrierConstructionError,
     invocation::{
         InvocationArgument, InvocationCallerContext, InvocationCallerKind, InvocationClientOffer,
@@ -47,12 +49,12 @@ use orna_core::{
     invocation_binding::{CliArgumentInput, bind_cli_arguments},
     revision::{ActiveDatabaseRevision, VerifiedStandardLibrarySnapshot},
     security::AuthenticatedSession,
-    system::SYS_INVOKE_FUNCTION_ID,
-    types::{ResolvedType, StandardScalar, TypeDescriptor},
-    value::{OpaqueCodecRegistry, RuntimeValue},
+    system::{SYS_INSPECT_CALLS_TYPE_ID, SYS_INSPECT_INVOCATION_NODES_TYPE_ID, SYS_INSPECT_INVOCATION_TYPE_ID, SYS_INSPECT_PRESENTATION_CANDIDATES_TYPE_ID, SYS_INSPECT_RESOURCES_TYPE_ID, SYS_INSPECT_RUNTIME_BINDINGS_TYPE_ID, SYS_INSPECT_SECURITY_DECISIONS_TYPE_ID, SYS_INSPECT_SNAPSHOT_TYPE_ID, SYS_INSPECT_STATE_CELLS_TYPE_ID, SYS_INSPECT_UI_NODES_TYPE_ID, SYS_INVOKE_FUNCTION_ID},
+    types::{ResolvedType, StandardScalar, TypeDescriptor, TypeDescriptorKind},
+    value::{ConstructedValueKind, OpaqueCodecRegistry, OpaqueValue, RuntimeValue},
 };
 use orna_postgres::{
-    AuthenticatedServerResourceEvent, AuthenticatedServerResourceStart, PostgresKernel,
+    AuthenticatedServerResourceEvent, AuthenticatedServerResourceStart, PostgresKernel, PostgresKernelError,
     ResourceCancellation, ResourceCredit, SealedInvocationResult,
 };
 use orna_protocol::{
@@ -62,11 +64,13 @@ use orna_protocol::{
     ResourceKind as ProtocolResourceKind, ResourceProtocolConnection, ResourceRequest,
     ResourceServerFrame, ResourceWindowUpdate, ServerFrame,
     decode_constructed_invocation_event_frame, decode_constructed_server_frame,
+    decode_constructed_value,
     decode_resource_server_frame, encode_constructed_client_frame, encode_constructed_value,
     encode_invoke_request, encode_resource_client_frame,
 };
 use orna_standard::{
-    STD_IO_BYTE_STREAM_TYPE_ID, STD_TERMINAL_DOCUMENT_TYPE_ID, registered_opaque_codecs,
+    BINARY_LARGE_OBJECT_TYPE_ID, STD_IO_BYTE_STREAM_TYPE_ID, STD_TERMINAL_DOCUMENT_TYPE_ID,
+    STD_UI_TYPE_ID, registered_opaque_codecs,
 };
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::mpsc::error::TryRecvError;
@@ -579,6 +583,8 @@ impl Drop for PersistentResourceTransport {
 /// the server decision.
 pub struct InstalledClientResourceExecutor {
     active: ActiveDatabaseRevision,
+    inspect_kernel: Option<PostgresKernel>,
+    inspect_session: Option<AuthenticatedSession>,
     next_stream_id: u64,
     broker: Option<SharedInvokeBroker>,
     raw_resource_authorizer: Option<SharedInvokeBroker>,
@@ -598,6 +604,8 @@ impl InstalledClientResourceExecutor {
     ) -> Self {
         Self {
             active,
+            inspect_kernel: Some(kernel.clone()),
+            inspect_session: Some(session.clone()),
             next_stream_id: 1,
             broker: None,
             raw_resource_authorizer: None,
@@ -624,6 +632,8 @@ impl InstalledClientResourceExecutor {
     ) -> Self {
         Self {
             active,
+            inspect_kernel: None,
+            inspect_session: None,
             next_stream_id: 1,
             broker: None,
             raw_resource_authorizer: None,
@@ -647,8 +657,8 @@ impl InstalledClientResourceExecutor {
     /// The broker registers each generated protocol request immediately
     /// before the injected stream sends it. This preserves exact request
     /// provenance while allowing tests to use fresh request identifiers.
-    #[doc(hidden)]
     #[cfg(feature = "test-hooks")]
+    #[doc(hidden)]
     pub fn new_with_stream_and_resource_authorizer(
         kernel: PostgresKernel,
         session: AuthenticatedSession,
@@ -663,12 +673,16 @@ impl InstalledClientResourceExecutor {
 
     #[doc(hidden)]
     pub(crate) fn new_with_broker(
+        kernel: PostgresKernel,
+        session: AuthenticatedSession,
         active: ActiveDatabaseRevision,
         broker: SharedInvokeBroker,
         cancellation: ResourceCancellation,
     ) -> Self {
         Self {
             active,
+            inspect_kernel: Some(kernel),
+            inspect_session: Some(session),
             next_stream_id: 1,
             broker: Some(broker),
             raw_resource_authorizer: None,
@@ -679,6 +693,12 @@ impl InstalledClientResourceExecutor {
             cancellation,
         }
     }
+    fn discard_raw_resource_request(&self, stream_id: u64) {
+        if let Some(authorizer) = self.raw_resource_authorizer.as_ref() {
+            authorizer.discard_expected_resource_request(stream_id);
+        }
+    }
+
     fn poll_broker(&mut self) -> Option<ClientResourceCompletion> {
         if self.cancellation.is_requested() {
             if let Some(pending) = self.broker_pending.as_mut()
@@ -714,15 +734,565 @@ impl InstalledClientResourceExecutor {
             .expect("broker pending checked above");
         Some(map_resource_transport_completion(pending.request, result))
     }
+}
 
-    fn discard_raw_resource_request(&self, stream_id: u64) {
-        if let Some(authorizer) = self.raw_resource_authorizer.as_ref() {
-            authorizer.discard_expected_resource_request(stream_id);
+const DEVTOOLS_INSPECTOR_SHELL_CONTRACT: &str = "devtools.inspector_shell@1";
+const INSPECT_SNAPSHOT_ROW_TAG: u8 = 1;
+
+const INSPECTOR_CARRIER_SIGNATURE: [(&str, TypeId, InspectCarrierKind); 9] = [
+    ("p_snapshot", SYS_INSPECT_SNAPSHOT_TYPE_ID, InspectCarrierKind::Snapshot),
+    ("p_invocation_nodes", SYS_INSPECT_INVOCATION_NODES_TYPE_ID, InspectCarrierKind::InvocationNodes),
+    ("p_calls", SYS_INSPECT_CALLS_TYPE_ID, InspectCarrierKind::Calls),
+    ("p_resources", SYS_INSPECT_RESOURCES_TYPE_ID, InspectCarrierKind::Resources),
+    ("p_state_cells", SYS_INSPECT_STATE_CELLS_TYPE_ID, InspectCarrierKind::StateCells),
+    ("p_ui_nodes", SYS_INSPECT_UI_NODES_TYPE_ID, InspectCarrierKind::UiNodes),
+    ("p_presentation_candidates", SYS_INSPECT_PRESENTATION_CANDIDATES_TYPE_ID, InspectCarrierKind::PresentationCandidates),
+    ("p_runtime_bindings", SYS_INSPECT_RUNTIME_BINDINGS_TYPE_ID, InspectCarrierKind::RuntimeBindings),
+    ("p_security_decisions", SYS_INSPECT_SECURITY_DECISIONS_TYPE_ID, InspectCarrierKind::SecurityDecisions),
+];
+/// Evaluates the registered Inspector external contract without selecting a
+/// graphical runtime or reading mutable state.
+fn run_installed_external_contract(
+    active: &ActiveDatabaseRevision,
+    request: &ClientExternalContractRequest,
+) -> Result<RuntimeValue, String> {
+    if request.identity() != DEVTOOLS_INSPECTOR_SHELL_CONTRACT {
+        return Err("inspect.runtime_unavailable".to_owned());
+    }
+    if request.context().pair() != active.pair() {
+        return Err("inspect.epoch_mismatch".to_owned());
+    }
+    let Some(definition) = active
+        .catalogue()
+        .function_by_id(request.context().function())
+    else {
+        return Err("inspect.malformed_carrier".to_owned());
+    };
+    if request.context().function_revision() != definition.current_revision()
+        || definition.domain() != FunctionDomain::Client
+        || definition.name().to_string() != "devtools.inspector_shell"
+        || !matches!(
+            definition.return_type(),
+            FunctionReturn::Single(ResolvedType::Value(type_id)) if *type_id == STD_UI_TYPE_ID
+        )
+    {
+        return Err("inspect.malformed_carrier".to_owned());
+    }
+    let arguments = request.arguments();
+    if arguments.len() != INSPECTOR_CARRIER_SIGNATURE.len()
+        || definition.parameters().len() != INSPECTOR_CARRIER_SIGNATURE.len()
+    {
+        return Err("inspect.malformed_carrier".to_owned());
+    }
+
+
+    let mut epoch_id = None;
+    let mut row_counts = Vec::with_capacity(arguments.len());
+    for (index, ((parameter_id, value), (expected_name, expected_type, expected_kind))) in
+        arguments.iter().zip(INSPECTOR_CARRIER_SIGNATURE).enumerate()
+    {
+        let parameter = &definition.parameters()[index];
+        if parameter.id() != *parameter_id
+            || parameter.name() != expected_name
+            || parameter.resolved_type() != ResolvedType::Value(expected_type)
+        {
+            return Err("inspect.malformed_carrier".to_owned());
+        }
+        let RuntimeValue::Opaque(value) = value else {
+            return Err("inspect.malformed_carrier".to_owned());
+        };
+        if value.opaque_type() != expected_type {
+            return Err("inspect.unknown_carrier".to_owned());
+        }
+        let envelope = InspectCarrierEnvelope::decode(value.canonical_payload())
+            .map_err(|_| "inspect.malformed_carrier".to_owned())?;
+        if envelope.carrier_kind() != expected_kind {
+            return Err("inspect.malformed_carrier".to_owned());
+        }
+        if envelope.source_revision_id() != active.pair().source()
+            || envelope.catalogue_revision_id() != active.pair().catalogue()
+        {
+            return Err("inspect.epoch_mismatch".to_owned());
+        }
+        match epoch_id {
+            Some(expected_epoch) if expected_epoch != envelope.epoch_id() => {
+                return Err("inspect.epoch_mismatch".to_owned());
+            }
+            None => epoch_id = Some(envelope.epoch_id()),
+            _ => {}
+        }
+        row_counts.push(envelope.rows().len());
+    }
+
+    let epoch_id = epoch_id.ok_or_else(|| "inspect.malformed_carrier".to_owned())?;
+    let client_epoch_id = request.context().client_epoch_id().invocation_id();
+    let body = serde_json::to_vec(&serde_json::json!({
+        "kind": "node",
+        "contract": {
+            "id": "std.ui.window",
+            "name": "std.ui.window",
+            "version": "1.0",
+        },
+        "call_site_id": null,
+        "function_instance_id": null,
+        "key": {
+            "type": "std.types.text",
+            "value": format!("inspector-{client_epoch_id}-{epoch_id}"),
+        },
+        "properties": {
+            "client_epoch": {
+                "type": "std.types.text",
+                "value": client_epoch_id.to_string(),
+            },
+            "server_epoch": {
+                "type": "std.types.text",
+                "value": epoch_id.to_string(),
+            },
+            "carrier_rows": {
+                "type": "std.types.text",
+                "value": row_counts
+                    .iter()
+                    .map(usize::to_string)
+                    .collect::<Vec<_>>()
+                    .join(","),
+            },
+        },
+        "slots": {},
+        "actions": {},
+    }))
+    .map_err(|_| "inspect.projection_failed".to_owned())?;
+    let body_length = u32::try_from(body.len()).map_err(|_| "inspect.limit".to_owned())?;
+    let mut payload = b"ORNA-UI/1 ".to_vec();
+    payload.extend_from_slice(&body_length.to_be_bytes());
+    payload.extend_from_slice(&body);
+    let standard = active
+        .catalogue_hash_context()
+        .standard()
+        .ok_or_else(|| "inspect.runtime_unavailable".to_owned())?;
+    let registry = registered_opaque_codecs(standard)
+        .map_err(|_| "inspect.runtime_unavailable".to_owned())?;
+    OpaqueValue::new(active, &registry, STD_UI_TYPE_ID, payload)
+        .map(RuntimeValue::Opaque)
+        .map_err(|_| "inspect.projection_failed".to_owned())
+}
+
+
+async fn run_installed_inspect(kernel: PostgresKernel, session: AuthenticatedSession, active: ActiveDatabaseRevision, request: ClientInspectRequest) -> Result<RuntimeValue, String> {
+    let context = request.context();
+    if context.pair() != active.pair() { return Err("inspect.epoch_mismatch".to_owned()); }
+    let standard = active
+        .catalogue_hash_context()
+        .standard()
+        .ok_or_else(|| "inspect.runtime_unavailable".to_owned())?;
+    let registry = registered_opaque_codecs(standard)
+        .map_err(|_| "inspect.runtime_unavailable".to_owned())?;
+    match request.operation() {
+        ClientInspectOperation::Snapshot { target } => {
+            // The installed v1 provider has no closed decoder for the opaque
+            // snapshot-options carrier. Omitted options are the structural
+            // default; reject supplied options rather than silently discarding
+            // classifier bits.
+            if request.snapshot_options().is_some() {
+                return Err("inspect.invalid_options".to_owned());
+            }
+            let invocation = match target {
+                RuntimeValue::Reference { target, object } if *target == SYS_INSPECT_INVOCATION_TYPE_ID => {
+                    InvocationId::from_bytes(object.to_bytes())
+                }
+                _ => return Err("inspect.invalid_target".to_owned()),
+            };
+            if request
+                .target_invocation_id()
+                .is_some_and(|target| target != invocation)
+            {
+                return Err("inspect.epoch_mismatch".to_owned());
+            }
+            let recursive_from_root = kernel
+                .inspect_target_is_recursive(request.observer_root_invocation_id(), invocation)
+                .await
+                .map_err(inspect_kernel_error_code)?;
+            let recursive_from_parent = kernel
+                .inspect_target_is_recursive(request.observer_parent_invocation_id(), invocation)
+                .await
+                .map_err(inspect_kernel_error_code)?;
+            if recursive_from_root || recursive_from_parent {
+                return Err("inspect.recursion".to_owned());
+            }
+            let Some(epoch_id) = kernel
+                .find_latest_inspect_epoch(&session, invocation)
+                .await
+                .map_err(inspect_kernel_error_code)?
+            else {
+                return Err("inspect.stale_epoch".to_owned());
+            };
+            let Some(epoch) = kernel
+                .load_inspect_snapshot(epoch_id)
+                .await
+                .map_err(inspect_kernel_error_code)?
+            else {
+                return Err("inspect.stale_epoch".to_owned());
+            };
+            validate_epoch(&epoch, invocation, active.pair())?;
+            let payload = make_inspect_carrier(
+                &active,
+                &registry,
+                InspectCarrierKind::Snapshot,
+                &epoch,
+                invocation,
+                vec![encode_snapshot_row(&epoch)],
+                0,
+            )?;
+            make_opaque(&active, SYS_INSPECT_SNAPSHOT_TYPE_ID, payload)
+        }
+        ClientInspectOperation::Projection { snapshot, .. } => {
+            let tag = request.operation().projection_carrier_tag().ok_or_else(|| "inspect.malformed_carrier".to_owned())?;
+            let snapshot = match snapshot {
+                RuntimeValue::Opaque(value) if value.opaque_type() == SYS_INSPECT_SNAPSHOT_TYPE_ID => value,
+                RuntimeValue::Opaque(_) => return Err("inspect.unknown_carrier".to_owned()),
+                _ => return Err("inspect.malformed_carrier".to_owned()),
+            };
+            let envelope = InspectCarrierEnvelope::decode(snapshot.canonical_payload())
+                .map_err(|_| "inspect.malformed_carrier".to_owned())?;
+            if envelope.carrier_kind() != InspectCarrierKind::Snapshot {
+                return Err("inspect.malformed_carrier".to_owned());
+            }
+            if envelope.source_revision_id() != active.pair().source()
+                || envelope.catalogue_revision_id() != active.pair().catalogue()
+            {
+                return Err("inspect.epoch_mismatch".to_owned());
+            }
+            if envelope.rows().len() != 1 {
+                return Err("inspect.malformed_carrier".to_owned());
+            }
+            let snapshot_row = envelope
+                .rows()
+                .first()
+                .ok_or_else(|| "inspect.malformed_carrier".to_owned())?;
+            let (epoch_id, target_invocation) = decode_snapshot_row_epoch(
+                &active,
+                &registry,
+                snapshot_row,
+                envelope.epoch_id(),
+            )?;
+            if request
+                .target_invocation_id()
+                .is_some_and(|target| target != target_invocation)
+            {
+                return Err("inspect.epoch_mismatch".to_owned());
+            }
+            let recursive_from_root = kernel
+                .inspect_target_is_recursive(request.observer_root_invocation_id(), target_invocation)
+                .await
+                .map_err(inspect_kernel_error_code)?;
+            let recursive_from_parent = kernel
+                .inspect_target_is_recursive(request.observer_parent_invocation_id(), target_invocation)
+                .await
+                .map_err(inspect_kernel_error_code)?;
+            if recursive_from_root || recursive_from_parent {
+                return Err("inspect.recursion".to_owned());
+            }
+            let Some(epoch) = kernel
+                .load_inspect_snapshot(epoch_id)
+                .await
+                .map_err(inspect_kernel_error_code)?
+            else {
+                return Err("inspect.stale_epoch".to_owned());
+            };
+            validate_epoch(&epoch, target_invocation, active.pair())?;
+            let privilege = InspectPrivilege::OwnInvocation;
+            let granted = [InspectPrivilege::OwnInvocation];
+            // The installed v1 request carries the structural OwnInvocation
+            // grant. The epoch rows are immutable and already redacted according
+            // to capture options; classifier options themselves remain rejected
+            // above when supplied without a closed decoder.
+            let rows = match tag {
+                2 => encode_invocation_nodes(&kernel.inspect_invocation_nodes(&session, &epoch, privilege, &granted).map_err(inspect_kernel_error_code)?) ,
+                3 => encode_calls(&kernel.inspect_calls(&session, &epoch, privilege, &granted).map_err(inspect_kernel_error_code)?) ,
+                4 => encode_resources(&kernel.inspect_resources(&session, &epoch, privilege, &granted).map_err(inspect_kernel_error_code)?) ,
+                5 => encode_state_cells(&kernel.inspect_state_cells(&session, &epoch, privilege, &granted).await.map_err(inspect_kernel_error_code)?) ,
+                6 => encode_ui_nodes(&kernel.inspect_ui_nodes(&session, &epoch, privilege, &granted).map_err(inspect_kernel_error_code)?) ,
+                7 => encode_presentation_candidates(&kernel.inspect_presentation_candidates(&session, &epoch, privilege, &granted).map_err(inspect_kernel_error_code)?) ,
+                8 => encode_runtime_bindings(&kernel.inspect_runtime_bindings(&session, &epoch, privilege, &granted).map_err(inspect_kernel_error_code)?) ,
+                9 => encode_security_decisions(&kernel.inspect_security_decisions(&session, &epoch, privilege, &granted).await.map_err(inspect_kernel_error_code)?) ,
+                _ => return Err("inspect.malformed_carrier".to_owned()),
+            }?;
+            let kind = InspectCarrierKind::from_tag(tag).ok_or_else(|| "inspect.malformed_carrier".to_owned())?;
+            let payload = make_inspect_carrier(
+                &active,
+                &registry,
+                kind,
+                &epoch,
+                target_invocation,
+                rows,
+                inspect_classification_tag(kind, privilege),
+            )?;
+            make_opaque(&active, kind.type_id(), payload)
         }
     }
 }
 
+fn inspect_kernel_error_code(error: PostgresKernelError) -> String {
+    match error {
+        PostgresKernelError::InspectDenied { .. } => "inspect.denied".to_owned(),
+        _ => "inspect.projection_failed".to_owned(),
+    }
+}
+
+fn validate_epoch(epoch: &orna_core::inspect::InspectSnapshotEpoch, invocation: InvocationId, pair: orna_core::revision::RevisionPair) -> Result<(), String> {
+    if epoch.invocation_id() != invocation { return Err("inspect.epoch_mismatch".to_owned()); }
+    if epoch.source_revision_id() != pair.source() || epoch.catalogue_revision_id() != pair.catalogue() { return Err("inspect.epoch_mismatch".to_owned()); }
+    Ok(())
+}
+
+fn make_opaque(active: &ActiveDatabaseRevision, opaque_type: TypeId, payload: Vec<u8>) -> Result<RuntimeValue, String> { OpaqueValue::new_inspect_carrier(active, opaque_type, payload).map(RuntimeValue::Opaque).map_err(|_| "inspect.projection_failed".to_owned()) }
+
+fn make_inspect_carrier(
+    active: &ActiveDatabaseRevision,
+    registry: &OpaqueCodecRegistry,
+    kind: InspectCarrierKind,
+    epoch: &orna_core::inspect::InspectSnapshotEpoch,
+    target_invocation: InvocationId,
+    rows: Vec<Vec<u8>>,
+    classification: u8,
+) -> Result<Vec<u8>, String> {
+    let epoch_id = u64::from_be_bytes(epoch.id().to_bytes()[8..].try_into().expect("epoch id"));
+    let mut encoded_rows = rows
+        .into_iter()
+        .map(|row| {
+            let row = if kind == InspectCarrierKind::Snapshot {
+                row
+            } else {
+                enrich_inspect_row(epoch, row, classification)
+            };
+            encode_inspect_row(active, registry, row)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    encoded_rows.sort_unstable();
+    InspectCarrierEnvelope::new_with_target(
+        kind,
+        target_invocation,
+        InspectCarrierProvenance::trusted(
+            epoch_id,
+            epoch.source_revision_id(),
+            epoch.catalogue_revision_id(),
+        ),
+        encoded_rows,
+    )
+    .and_then(|envelope| envelope.encode())
+    .map_err(|_| "inspect.projection_failed".to_owned())
+}
+
+/// Wraps one accepted Inspector identity payload in the canonical ORV5
+/// constructed-value codec. The list descriptor and byte child are fixed so
+/// every projection has one deterministic row representation while the
+/// existing row payload remains intact inside the ORV5 value.
+fn encode_inspect_row(
+    active: &ActiveDatabaseRevision,
+    registry: &OpaqueCodecRegistry,
+    row: Vec<u8>,
+) -> Result<Vec<u8>, String> {
+    let descriptor = TypeDescriptor::list(TypeDescriptor::named(BINARY_LARGE_OBJECT_TYPE_ID))
+        .map_err(|_| "inspect.projection_failed".to_owned())?;
+    let value = RuntimeValue::list(active, descriptor, vec![RuntimeValue::Bytes(row)])
+        .map_err(|_| "inspect.projection_failed".to_owned())?;
+    encode_constructed_value(active, registry, &value)
+        .map_err(|_| "inspect.projection_failed".to_owned())
+}
+
+fn row(tag: u8, index: usize) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(128);
+    bytes.push(tag);
+    bytes.extend_from_slice(&(index as u64).to_be_bytes());
+    bytes
+}
+
+/// Adds the canonical common row evidence required by ADR 0080. The
+/// projection-specific encoders retain their complete row fields after this
+/// fixed header; all identities use their full sixteen-byte form.
+fn enrich_inspect_row(
+    epoch: &orna_core::inspect::InspectSnapshotEpoch,
+    row: Vec<u8>,
+    classification: u8,
+) -> Vec<u8> {
+    if row.len() < 9 {
+        return row;
+    }
+    let mut enriched = Vec::with_capacity(row.len() + 98);
+    enriched.extend_from_slice(&row[..9]);
+    // Fixed common prefix: epoch identity, target invocation, root target,
+    // owner, pinned revisions, own-invocation scope, and classifier evidence.
+    enriched.extend_from_slice(&epoch.id().to_bytes());
+    enriched.extend_from_slice(&epoch.invocation_id().to_bytes());
+    enriched.extend_from_slice(&epoch.root_target().to_bytes());
+    enriched.extend_from_slice(&epoch.owner().to_bytes());
+    enriched.extend_from_slice(&epoch.source_revision_id().to_bytes());
+    enriched.extend_from_slice(&epoch.catalogue_revision_id().to_bytes());
+    enriched.push(1);
+    enriched.push(classification);
+    enriched.extend_from_slice(&row[9..]);
+    enriched
+}
+
+fn inspect_classification_tag(kind: InspectCarrierKind, privilege: InspectPrivilege) -> u8 {
+    match (kind, privilege) {
+        (InspectCarrierKind::StateCells, InspectPrivilege::Values) => 1,
+        (InspectCarrierKind::SecurityDecisions, InspectPrivilege::SecurityDetails) => 3,
+        (InspectCarrierKind::RuntimeBindings, InspectPrivilege::RuntimeInternals) => 4,
+        _ => 0,
+    }
+}
+
+fn id(bytes: &mut Vec<u8>, value: &[u8]) { bytes.extend_from_slice(value); }
+fn text(bytes: &mut Vec<u8>, value: &str) -> Result<(), String> { if value.len() > 65_536 { return Err("inspect.projection_failed".to_owned()); } bytes.extend_from_slice(&(value.len() as u32).to_be_bytes()); bytes.extend_from_slice(value.as_bytes()); Ok(()) }
+
+fn encode_snapshot_row(epoch: &orna_core::inspect::InspectSnapshotEpoch) -> Vec<u8> {
+    let mut bytes = row(INSPECT_SNAPSHOT_ROW_TAG, 0); id(&mut bytes, &epoch.id().to_bytes()); id(&mut bytes, &epoch.invocation_id().to_bytes()); id(&mut bytes, &epoch.owner().to_bytes()); id(&mut bytes, &epoch.root_target().to_bytes()); bytes.push(match epoch.outcome() { InspectOutcomeKind::Allowed => 1, InspectOutcomeKind::Denied => 2, InspectOutcomeKind::Failed => 3, InspectOutcomeKind::Cancelled => 4 }); let summary = epoch.summary(); bytes.extend_from_slice(&summary.event_count().to_be_bytes()); match summary.result() { InspectResultSummary::NoValues => bytes.push(0), InspectResultSummary::ValueBatch { value_count } => { bytes.push(1); bytes.extend_from_slice(&value_count.to_be_bytes()); } } match summary.duration_nanoseconds() { Some(value) => { bytes.push(1); bytes.extend_from_slice(&value.to_be_bytes()); }, None => bytes.push(0) } bytes
+}
+fn decode_snapshot_row_epoch(
+    active: &ActiveDatabaseRevision,
+    registry: &OpaqueCodecRegistry,
+    row: &[u8],
+    epoch_id: u64,
+) -> Result<(InspectEpochId, InvocationId), String> {
+    let value = decode_constructed_value(active, registry, row)
+        .map_err(|_| "inspect.malformed_carrier".to_owned())?;
+    let RuntimeValue::Constructed(constructed) = value else {
+        return Err("inspect.malformed_carrier".to_owned());
+    };
+    let TypeDescriptorKind::List(child) = constructed.descriptor().kind() else {
+        return Err("inspect.malformed_carrier".to_owned());
+    };
+    if child.kind() != TypeDescriptorKind::Named(BINARY_LARGE_OBJECT_TYPE_ID) {
+        return Err("inspect.malformed_carrier".to_owned());
+    }
+    let ConstructedValueKind::List(values) = constructed.kind() else {
+        return Err("inspect.malformed_carrier".to_owned());
+    };
+    let [RuntimeValue::Bytes(payload)] = values else {
+        return Err("inspect.malformed_carrier".to_owned());
+    };
+    decode_snapshot_row_payload(payload, epoch_id)
+}
+
+fn decode_snapshot_row_payload(row: &[u8], epoch_id: u64) -> Result<(InspectEpochId, InvocationId), String> {
+    if row.len() < 84 || row[0] != INSPECT_SNAPSHOT_ROW_TAG || row[1..9] != [0; 8] {
+        return Err("inspect.malformed_carrier".to_owned());
+    }
+    let bytes: [u8; 16] = row[9..25]
+        .try_into()
+        .map_err(|_| "inspect.malformed_carrier".to_owned())?;
+    let id = InspectEpochId::from_bytes(bytes);
+    if u64::from_be_bytes(id.to_bytes()[8..].try_into().expect("epoch id")) != epoch_id {
+        return Err("inspect.epoch_mismatch".to_owned());
+    }
+    let invocation = InvocationId::from_bytes(
+        row[25..41]
+            .try_into()
+            .map_err(|_| "inspect.malformed_carrier".to_owned())?,
+    );
+    let mut offset = 25 + 16 + 16 + 16;
+    let outcome = *row.get(offset).ok_or_else(|| "inspect.malformed_carrier".to_owned())?;
+    if !(1..=4).contains(&outcome) { return Err("inspect.malformed_carrier".to_owned()); }
+    offset += 1 + 8;
+    let result = *row.get(offset).ok_or_else(|| "inspect.malformed_carrier".to_owned())?;
+    offset += 1;
+    if result == 1 { offset += 8; } else if result != 0 { return Err("inspect.malformed_carrier".to_owned()); }
+    let duration = *row.get(offset).ok_or_else(|| "inspect.malformed_carrier".to_owned())?;
+    offset += 1;
+    if duration == 1 { offset += 8; } else if duration != 0 { return Err("inspect.malformed_carrier".to_owned()); }
+    if offset != row.len() { return Err("inspect.malformed_carrier".to_owned()); }
+    Ok((id, invocation))
+}
+
+fn encode_invocation_nodes(rows: &[InvocationNodeRow]) -> Result<Vec<Vec<u8>>, String> { rows.iter().enumerate().map(|(index, value)| { let mut bytes = row(2,index); id(&mut bytes,&value.id().to_bytes()); match value.parent_id() { Some(parent) => { bytes.push(1); id(&mut bytes,&parent.to_bytes()); }, None => bytes.push(0) }; bytes.push(match value.kind() { InspectInvocationNodeKind::Root=>1, InspectInvocationNodeKind::Nested=>2 }); bytes.push(match value.phase() { InspectInvocationPhase::Started=>1, InspectInvocationPhase::Executing=>2, InspectInvocationPhase::Completed=>3, InspectInvocationPhase::Failed=>4, InspectInvocationPhase::Cancelled=>5 }); id(&mut bytes,&value.target().to_bytes()); bytes.extend_from_slice(&value.sequence().to_be_bytes()); Ok(bytes) }).collect() }
+fn encode_calls(rows: &[CallRow]) -> Result<Vec<Vec<u8>>, String> { rows.iter().enumerate().map(|(index,value)| { let mut bytes=row(3,index); id(&mut bytes,&value.invocation_id().to_bytes()); bytes.push(u8::from(value.schema().is_some())); bytes.extend_from_slice(&value.value_count().to_be_bytes()); bytes.extend_from_slice(&value.duration_nanoseconds().to_be_bytes()); Ok(bytes) }).collect() }
+fn encode_resources(rows: &[ResourceRow]) -> Result<Vec<Vec<u8>>, String> { rows.iter().enumerate().map(|(index,value)| { let mut bytes=row(4,index); bytes.push(match value.kind() { InspectResourceKind::State=>1, InspectResourceKind::Catalog=>2, InspectResourceKind::Standard=>3, InspectResourceKind::Runtime=>4 }); bytes.push(match value.status() { InspectResourceStatus::Active=>1, InspectResourceStatus::Invalidated=>2, InspectResourceStatus::Released=>3 }); Ok(bytes) }).collect() }
+fn encode_state_cells(rows: &[StateCellRow]) -> Result<Vec<Vec<u8>>, String> { rows.iter().enumerate().map(|(index,value)| { let key=value.key(); let mut bytes=row(5,index); id(&mut bytes,&key.root_function().to_bytes()); text(&mut bytes,key.state_profile())?; id(&mut bytes,&key.function().to_bytes()); text(&mut bytes,key.instance_key())?; id(&mut bytes,&key.state_slot().to_bytes()); id(&mut bytes,&value.value_type().to_bytes()); bytes.extend_from_slice(&value.revision().to_be_bytes()); bytes.push(u8::from(value.value().is_some())); Ok(bytes) }).collect() }
+fn encode_ui_nodes(rows: &[UiNodeRow]) -> Result<Vec<Vec<u8>>, String> { rows.iter().enumerate().map(|(index,value)| { let mut bytes=row(6,index); id(&mut bytes,&value.function().to_bytes()); text(&mut bytes,value.call_site())?; text(&mut bytes,value.runtime_contract())?; Ok(bytes) }).collect() }
+fn encode_presentation_candidates(rows: &[PresentationCandidateRow]) -> Result<Vec<Vec<u8>>, String> { rows.iter().enumerate().map(|(index,value)| { let mut bytes=row(7,index); text(&mut bytes,value.presenter())?; bytes.push(u8::from(value.accepted())); text(&mut bytes,value.reason())?; bytes.push(u8::from(value.selected_sink().is_some())); match value.runtime() { Some(runtime) => { bytes.push(1); text(&mut bytes,runtime)?; }, None => bytes.push(0) }; Ok(bytes) }).collect() }
+fn encode_runtime_bindings(rows: &[RuntimeBindingRow]) -> Result<Vec<Vec<u8>>, String> { rows.iter().enumerate().map(|(index,value)| { let mut bytes=row(8,index); text(&mut bytes,value.runtime_name())?; text(&mut bytes,value.version())?; bytes.push(u8::from(value.trusted())); bytes.extend_from_slice(&value.preference_rank().to_be_bytes()); bytes.extend_from_slice(&(value.consumed_descriptors().len() as u32).to_be_bytes()); bytes.extend_from_slice(&(value.contracts().len() as u32).to_be_bytes()); Ok(bytes) }).collect() }
+fn encode_security_decisions(rows: &[SecurityDecisionRow]) -> Result<Vec<Vec<u8>>, String> {
+    rows.iter()
+        .enumerate()
+        .map(|(index, value)| {
+            let mut bytes = row(9, index);
+            bytes.push(match value.kind() {
+                InspectSecurityDecisionKind::Execute => 1,
+                InspectSecurityDecisionKind::Capability => 2,
+                InspectSecurityDecisionKind::UserState => 3,
+                InspectSecurityDecisionKind::Inspect => 4,
+            });
+            bytes.push(match value.outcome() {
+                InspectSecurityDecisionOutcome::Allowed => 1,
+                InspectSecurityDecisionOutcome::Denied => 2,
+            });
+            match value.target() {
+                Some(target) => {
+                    bytes.push(1);
+                    text(&mut bytes, &target.canonical())?;
+                }
+                None => bytes.push(0),
+            }
+            match value.denial_reason() {
+                Some(reason) => {
+                    bytes.push(1);
+                    text(&mut bytes, reason)?;
+                }
+                None => bytes.push(0),
+            }
+            bytes.extend_from_slice(&(value.principals().len() as u32).to_be_bytes());
+            for principal in value.principals() {
+                text(&mut bytes, &principal.canonical())?;
+            }
+            bytes.extend_from_slice(&(value.audit_refs().len() as u32).to_be_bytes());
+            for event in value.audit_refs() {
+                text(&mut bytes, &event.canonical())?;
+            }
+            Ok(bytes)
+        })
+        .collect()
+}
+
 impl ClientResourceExecutor for InstalledClientResourceExecutor {
+    fn inspect(&mut self, request: ClientInspectRequest) -> Result<RuntimeValue, String> {
+        let (Some(kernel), Some(session)) = (self.inspect_kernel.clone(), self.inspect_session.clone()) else {
+            return Err("inspect.runtime_unavailable".to_owned());
+        };
+        if self.cancellation.is_requested() {
+            return Err("inspect.cancelled".to_owned());
+        }
+        let active = self.active.clone();
+        let cancellation = self.cancellation.clone();
+        let result = thread::Builder::new()
+            .name("orna-inspect".to_owned())
+            .spawn(move || {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .map_err(|_| "inspect.runtime_unavailable".to_owned())?;
+                let result = runtime.block_on(run_installed_inspect(kernel, session, active, request));
+                if cancellation.is_requested() {
+                    Err("inspect.cancelled".to_owned())
+                } else {
+                    result
+                }
+            })
+            .map_err(|_| "inspect.runtime_unavailable".to_owned())?
+            .join()
+            .map_err(|_| "inspect.runtime_unavailable".to_owned())?;
+        if self.cancellation.is_requested() {
+            return Err("inspect.cancelled".to_owned());
+        }
+        result
+    }
+    fn external_contract(
+        &mut self,
+        request: ClientExternalContractRequest,
+    ) -> Result<RuntimeValue, String> {
+        run_installed_external_contract(&self.active, &request)
+    }
+
+
     fn execute(&mut self, request: ClientResourceRequest) -> ClientResourceCompletion {
         if self.pending.is_some() || self.broker_pending.is_some() {
             return request.failed(SERVER_RESOURCE_INTERNAL_CODE.to_owned());
@@ -800,6 +1370,7 @@ impl ClientResourceExecutor for InstalledClientResourceExecutor {
                 })
                 .is_err()
             {
+                self.discard_raw_resource_request(stream_id);
                 return request.failed(SERVER_RESOURCE_INTERNAL_CODE.to_owned());
             }
             let pending = ClientResourceCompletion::Pending {
@@ -893,17 +1464,13 @@ impl ClientResourceExecutor for InstalledClientResourceExecutor {
                 let _ = sender.blocking_send(outcome);
             });
         let Ok(worker) = worker else {
-            if let Some(authorizer) = self.raw_resource_authorizer.as_ref() {
-                authorizer.discard_expected_resource_request(stream_id);
-            }
+            self.discard_raw_resource_request(stream_id);
             self.transport = Some(worker_transport);
             return request.failed(SERVER_RESOURCE_INTERNAL_CODE.to_owned());
         };
         if let Err(error) = worker_transport_sender.send(worker_transport) {
             let _ = worker.join();
-            if let Some(authorizer) = self.raw_resource_authorizer.as_ref() {
-                authorizer.discard_expected_resource_request(stream_id);
-            }
+            self.discard_raw_resource_request(stream_id);
             self.transport = Some(error.0);
             return request.failed(SERVER_RESOURCE_INTERNAL_CODE.to_owned());
         }
@@ -975,10 +1542,6 @@ impl ClientResourceExecutor for InstalledClientResourceExecutor {
             return self.poll_broker();
         }
         if self.pending.is_some() {
-            // The direct transport has its own cancellation state because it
-            // is not connected to the invocation's broker cancellation token.
-            // Request it here, then let `poll` send the protocol cancel once.
-            let _ = self.cancellation.request_cancel();
             return self.poll();
         }
         None
@@ -1000,9 +1563,11 @@ impl ClientResourceExecutor for InstalledClientResourceExecutor {
             match pending.receiver.try_recv() {
                 Ok(Ok(ResourceTransportOutcome::StreamValues(_))) => {}
                 Ok(result @ Ok(_)) | Ok(result @ Err(_)) => {
+                    self.discard_raw_resource_request(pending.stream_id);
                     return map_resource_transport_completion(pending.request, result);
                 }
                 Err(TryRecvError::Disconnected) => {
+                    self.discard_raw_resource_request(pending.stream_id);
                     return map_resource_transport_completion(
                         pending.request,
                         Err(ResourceTransportFailure::Transport),
@@ -1693,24 +2258,6 @@ fn reconstruct_shared_root_result(
     }
 }
 
-/// Publishes a terminal resource result without turning an allowed
-/// cancellation race into a shared broker failure.
-///
-/// A cancelled resource may outlive the evaluator that owns its completion
-/// receiver. In that case a committed terminal frame is still a local stream
-/// completion, not a transport failure for the root invocation. A live
-/// resource with a closed receiver remains a genuine broker transport error.
-async fn send_shared_resource_terminal(
-    state: &BrokerResourceState,
-    outcome: Result<ResourceTransportOutcome, ResourceTransportFailure>,
-) -> Result<(), ResourceTransportFailure> {
-    match state.completion.send(outcome).await {
-        Ok(()) => Ok(()),
-        Err(_) if state.cancellation_requested => Ok(()),
-        Err(_) => Err(ResourceTransportFailure::Transport),
-    }
-}
-
 async fn handle_shared_resource_frame<W>(
     state: &mut BrokerResourceState,
     frame: ResourceServerFrame,
@@ -1742,7 +2289,7 @@ where
     // A terminal frame marked DroppedLate can still be the committed server
     // result: cancellation closed the client-side protocol before that result
     // reached this broker. Drain late non-terminals, but publish this terminal
-    // when its receiver is still live before removing the broker state.
+    // before removing the broker state.
     let late_terminal = state.cancellation_requested
         && matches!(disposition, orna_protocol::ResourceFrameDisposition::DroppedLate)
         && matches!(
@@ -1823,11 +2370,11 @@ where
             }
             if !state.accepted {
                 if late_terminal {
-                    send_shared_resource_terminal(
-                        state,
-                        Err(ResourceTransportFailure::Shape),
-                    )
-                    .await?;
+                    state
+                        .completion
+                        .send(Err(ResourceTransportFailure::Shape))
+                        .await
+                        .map_err(|_| ResourceTransportFailure::Transport)?;
                     return Ok(false);
                 }
                 return Err(ResourceTransportFailure::Shape);
@@ -1836,11 +2383,11 @@ where
                 ProtocolResourceKind::Single => {
                     let Some(value) = state.scalar_value.take() else {
                         if late_terminal {
-                            send_shared_resource_terminal(
-                                state,
-                                Err(ResourceTransportFailure::Shape),
-                            )
-                            .await?;
+                            state
+                                .completion
+                                .send(Err(ResourceTransportFailure::Shape))
+                                .await
+                                .map_err(|_| ResourceTransportFailure::Transport)?;
                             return Ok(false);
                         }
                         return Err(ResourceTransportFailure::Shape);
@@ -1849,7 +2396,11 @@ where
                 }
                 ProtocolResourceKind::Stream => ResourceTransportOutcome::StreamCompleted,
             };
-            send_shared_resource_terminal(state, Ok(outcome)).await?;
+            state
+                .completion
+                .send(Ok(outcome))
+                .await
+                .map_err(|_| ResourceTransportFailure::Transport)?;
             return Ok(false);
         }
         ResourceServerFrame::Failed(value) => {
@@ -1858,33 +2409,33 @@ where
             }
             if state.scalar_value.is_some() {
                 if late_terminal {
-                    send_shared_resource_terminal(
-                        state,
-                        Err(ResourceTransportFailure::Shape),
-                    )
-                    .await?;
+                    state
+                        .completion
+                        .send(Err(ResourceTransportFailure::Shape))
+                        .await
+                        .map_err(|_| ResourceTransportFailure::Transport)?;
                     return Ok(false);
                 }
                 return Err(ResourceTransportFailure::Shape);
             }
-            send_shared_resource_terminal(
-                state,
-                Ok(ResourceTransportOutcome::Failed {
+            state
+                .completion
+                .send(Ok(ResourceTransportOutcome::Failed {
                     failure: value.failure,
-                }),
-            )
-            .await?;
+                }))
+                .await
+                .map_err(|_| ResourceTransportFailure::Transport)?;
             return Ok(false);
         }
         ResourceServerFrame::Cancelled(value) => {
             if value.request_id != state.request.request_id {
                 return Err(ResourceTransportFailure::Shape);
             }
-            send_shared_resource_terminal(
-                state,
-                Ok(ResourceTransportOutcome::Cancelled),
-            )
-            .await?;
+            state
+                .completion
+                .send(Ok(ResourceTransportOutcome::Cancelled))
+                .await
+                .map_err(|_| ResourceTransportFailure::Transport)?;
             return Ok(false);
         }
     }
@@ -3540,7 +4091,10 @@ mod tests {
             InvocationFailure, InvocationFailurePhase, InvocationRetryability, InvokeEvent,
             InvokeValue,
         },
-        revision::{RevisionPair, StoredSourceRevision},
+        revision::{
+            ActiveDatabaseRevisionInput, ActiveRevisionContent, CatalogueHashContext, RevisionPair,
+            StoredSourceRevision,
+        },
         types::StandardScalar,
         value::RuntimeValue,
     };
@@ -4189,51 +4743,6 @@ mod tests {
         ));
     }
 
-    #[tokio::test]
-    async fn cancelled_resource_terminal_ignores_closed_completion_receiver() {
-        let (active, _) = transport_test_context();
-        let request = transport_test_request(active.pair(), 1);
-        let (completion, receiver) = mpsc::channel(1);
-        drop(receiver);
-        let state = BrokerResourceState {
-            request,
-            expected_type: ResolvedType::Scalar(StandardScalar::Integer),
-            resource_kind: ProtocolResourceKind::Single,
-            protocol: ResourceProtocolConnection::new(),
-            completion,
-            accepted: true,
-            scalar_value: None,
-            cancellation_requested: true,
-            stream_values_seen: false,
-        };
-        send_shared_resource_terminal(&state, Ok(ResourceTransportOutcome::Cancelled))
-            .await
-            .expect("cancelled receiver closure is local completion");
-    }
-
-    #[tokio::test]
-    async fn live_resource_terminal_rejects_closed_completion_receiver() {
-        let (active, _) = transport_test_context();
-        let request = transport_test_request(active.pair(), 1);
-        let (completion, receiver) = mpsc::channel(1);
-        drop(receiver);
-        let state = BrokerResourceState {
-            request,
-            expected_type: ResolvedType::Scalar(StandardScalar::Integer),
-            resource_kind: ProtocolResourceKind::Single,
-            protocol: ResourceProtocolConnection::new(),
-            completion,
-            accepted: true,
-            scalar_value: None,
-            cancellation_requested: false,
-            stream_values_seen: false,
-        };
-        assert!(matches!(
-            send_shared_resource_terminal(&state, Ok(ResourceTransportOutcome::Cancelled)).await,
-            Err(ResourceTransportFailure::Transport)
-        ));
-    }
-
     #[test]
     fn cancellation_disposition_preserves_committed_terminals_and_drops_late_frames() {
         use orna_protocol::ResourceFrameDisposition::{Applied, DroppedLate};
@@ -4781,6 +5290,99 @@ mod tests {
         .expect_err("an unknown parameter is rejected");
         assert_eq!(unknown.to_string(), "unknown parameter `p_other`");
     }
+    fn inspect_test_context() -> (
+        ActiveDatabaseRevision,
+        orna_core::value::OpaqueCodecRegistry,
+    ) {
+        let source_bundle = SourceBundleId::from_bytes([0x91; 16]);
+        let source_revision = SourceRevisionId::from_bytes([0x92; 16]);
+        let bundle_hash = source_bundle_digest(&[]).expect("source bundle digest");
+        let source = StoredSourceRevision::new(
+            source_bundle,
+            source_revision,
+            None,
+            Vec::new(),
+            bundle_hash,
+            source_revision_record_digest(source_bundle, None, bundle_hash)
+                .expect("source revision digest"),
+        )
+        .expect("stored source revision");
+        let catalogue = CatalogueSnapshot::new(
+            CatalogueRevisionId::from_bytes([0x93; 16]),
+            Vec::new(),
+            Vec::new(),
+        )
+        .expect("empty catalogue");
+        let standard = verify_standard_library_snapshot(
+            retained_standard_library_snapshot().expect("retained standard snapshot"),
+        )
+        .expect("verified standard snapshot");
+        let catalogue_hash =
+            catalogue_digest(&catalogue, &[], &[], &[], &[]).expect("catalogue digest");
+        let pair = RevisionPair::new(source.id(), catalogue.revision());
+        let active = ActiveDatabaseRevision::new_with_catalogue_hash_context(
+            ActiveDatabaseRevisionInput::new(
+                pair,
+                source,
+                catalogue,
+                catalogue_hash,
+                ActiveRevisionContent::new(Vec::new(), Vec::new(), Vec::new(), Vec::new()),
+            ),
+            CatalogueHashContext::version_two(standard.clone()),
+        )
+        .expect("active revision");
+        let registry = registered_opaque_codecs(&standard).expect("standard codecs");
+        (active, registry)
+    }
+
+    #[test]
+    fn inspector_signature_covers_all_projection_carriers() {
+        assert_eq!(INSPECTOR_CARRIER_SIGNATURE.len(), 9);
+        for (tag, expected) in [
+            (1, InspectCarrierKind::Snapshot),
+            (2, InspectCarrierKind::InvocationNodes),
+            (3, InspectCarrierKind::Calls),
+            (4, InspectCarrierKind::Resources),
+            (5, InspectCarrierKind::StateCells),
+            (6, InspectCarrierKind::UiNodes),
+            (7, InspectCarrierKind::PresentationCandidates),
+            (8, InspectCarrierKind::RuntimeBindings),
+            (9, InspectCarrierKind::SecurityDecisions),
+        ] {
+            assert_eq!(InspectCarrierKind::from_tag(tag), Some(expected));
+        }
+        assert_eq!(
+            inspect_classification_tag(InspectCarrierKind::RuntimeBindings, InspectPrivilege::OwnInvocation),
+            0,
+        );
+        assert_eq!(
+            inspect_classification_tag(InspectCarrierKind::SecurityDecisions, InspectPrivilege::OwnInvocation),
+            0,
+        );
+    }
+
+    #[test]
+    fn inspect_rows_use_canonical_orv5_and_preserve_identity_payload() {
+        let (active, registry) = inspect_test_context();
+        let identity = vec![1, 0, 0, 0, 0, 0, 0, 0, 7, 0xaa, 0xbb];
+        let encoded = encode_inspect_row(&active, &registry, identity.clone())
+            .expect("Inspector row encodes");
+        orna_core::inspect_carrier::validate_inspect_rows(std::slice::from_ref(&encoded))
+            .expect("Inspector row is canonical ORV5");
+        let decoded =
+            decode_constructed_value(&active, &registry, &encoded).expect("Inspector row decodes");
+        let RuntimeValue::Constructed(constructed) = decoded else {
+            panic!("Inspector row must use the constructed representation");
+        };
+        let ConstructedValueKind::List(values) = constructed.kind() else {
+            panic!("Inspector row must use a deterministic list representation");
+        };
+        let [RuntimeValue::Bytes(payload)] = values else {
+            panic!("Inspector row must carry exactly one identity payload");
+        };
+        assert_eq!(payload, &identity);
+    }
+
     fn transport_test_context() -> (
         ActiveDatabaseRevision,
         orna_core::value::OpaqueCodecRegistry,
