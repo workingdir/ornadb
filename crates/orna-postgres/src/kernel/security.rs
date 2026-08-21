@@ -3619,7 +3619,7 @@ async fn run_authenticated_server_resource_producer_task(
         return Ok(());
     }
     let execution_validation = async {
-        lock_active_revision(&transaction, active.pair()).await?;
+        lock_active_revision_for_resource(&transaction, active.pair()).await?;
         let execution_active = configure_and_recover(&transaction).await?;
         if execution_active.pair() != active.pair() {
             return Err(PostgresKernelError::SecurityRevisionMismatch {
@@ -5495,6 +5495,11 @@ async fn append_unresolved_invocation_audit(
     Ok(())
 }
 
+/// Acquires the exclusive active-revision lock used by ordinary invocations.
+///
+/// Deployment paths use the same lock before they replace the active pointer,
+/// so the caller keeps its revision and security snapshot stable while the
+/// execution transaction is open.
 pub(crate) async fn lock_active_revision(
     transaction: &Transaction<'_>,
     expected: RevisionPair,
@@ -5509,14 +5514,43 @@ pub(crate) async fn lock_active_revision(
         )
         .await
         .map_err(PostgresKernelError::Database)?;
+    validate_locked_active_revision(&row, expected)
+}
+
+/// Acquires a shared active-revision lock for one accepted resource producer.
+///
+/// Multiple resource producers can validate the same pinned revision together.
+/// Deployment still uses `FOR UPDATE`, which conflicts with this lock and waits
+/// until every producer releases its terminal transaction.
+pub(crate) async fn lock_active_revision_for_resource(
+    transaction: &Transaction<'_>,
+    expected: RevisionPair,
+) -> Result<(), PostgresKernelError> {
+    let row = transaction
+        .query_one(
+            "SELECT source_revision_id, catalogue_revision_id
+             FROM _orna_kernel.active_revision
+             WHERE singleton = true
+             FOR KEY SHARE",
+            &[],
+        )
+        .await
+        .map_err(PostgresKernelError::Database)?;
+    validate_locked_active_revision(&row, expected)
+}
+
+fn validate_locked_active_revision(
+    row: &Row,
+    expected: RevisionPair,
+) -> Result<(), PostgresKernelError> {
     let active = RevisionPair::new(
         orna_core::SourceRevisionId::from_bytes(exact_id(
-            &row,
+            row,
             "source_revision_id",
             "active source revision is not exactly 16 bytes",
         )?),
         orna_core::CatalogueRevisionId::from_bytes(exact_id(
-            &row,
+            row,
             "catalogue_revision_id",
             "active catalogue revision is not exactly 16 bytes",
         )?),
