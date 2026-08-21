@@ -7050,12 +7050,14 @@ mod tests {
             let frame = ResourceServerFrame::Accepted(ResourceAccepted {
                 stream_id: request.stream_id,
                 request_id: request.request_id,
-                nested_invocation_id: InvocationId::from_bytes([0; 16]),
+                nested_invocation_id: InvocationId::from_bytes([0x44; 16]),
                 target_revision: request.target_revision,
                 resource_kind: request.resource_kind,
             });
-            let encoded = encode_resource_server_frame(&peer_active, &peer_registry, &frame)
+            let mut encoded = encode_resource_server_frame(&peer_active, &peer_registry, &frame)
                 .expect("encoded resource response");
+            let nested_start = RESOURCE_HEADER_LENGTH + 8 + 16;
+            encoded[nested_start..nested_start + 16].fill(0);
             peer.write_all(&encoded).expect("resource response");
         });
         let runtime = tokio::runtime::Builder::new_current_thread()
