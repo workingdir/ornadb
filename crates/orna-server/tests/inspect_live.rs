@@ -328,7 +328,7 @@ async fn proves_installed_inspect_end_to_end() -> TestResult<()> {
                 && summary["outcome"] == "allowed"
                 && summary["result"] == "value_batch"
                 && summary["value_count"] == 1,
-            "the bare inspect command did not render the exact epoch summary: {summary_text}",
+            format!("the bare inspect command did not render the exact epoch summary: {summary_text}"),
         )?;
         let epoch = summary["epoch"]
             .as_str()
@@ -366,7 +366,7 @@ async fn proves_installed_inspect_end_to_end() -> TestResult<()> {
                     "\"target\":\"{}\"",
                     STD_INVOKE_ECHO_FUNCTION_ID.canonical()
                 )),
-            "the invocation_nodes projection did not render the root node: {node_text}",
+            format!("the invocation_nodes projection did not render the root node: {node_text}"),
         )?;
 
         // The trace streams the three model events in contiguous order and
@@ -443,7 +443,7 @@ async fn proves_installed_inspect_end_to_end() -> TestResult<()> {
                 && armed_trace[1]["payload"]["values_hex"]
                     == serde_json::json!([trace_exact_41])
                 && armed_trace[1]["payload"].get("redacted").is_none(),
-            "the value-armed trace must render the exact typed value: {armed_trace_text}",
+            format!("the value-armed trace must render the exact typed value: {armed_trace_text}"),
         )?;
 
 
@@ -474,7 +474,7 @@ async fn proves_installed_inspect_end_to_end() -> TestResult<()> {
             resumed.len() == 1
                 && resumed[0]["sequence"] == 2
                 && resumed[0]["kind"] == "completed",
-            "the resumed trace must stream only sequence 2: {resumed_text}",
+            format!("the resumed trace must stream only sequence 2: {resumed_text}"),
         )?;
 
         // state_cells renders redacted unless the Values classifier is armed.
@@ -503,7 +503,7 @@ async fn proves_installed_inspect_end_to_end() -> TestResult<()> {
         require(
             redacted_text.contains("\"projection\":\"state_cells\"")
                 && redacted_text.contains("\"value_hex\":null"),
-            "the unarmed state_cells projection must redact the value: {redacted_text}",
+            format!("the unarmed state_cells projection must redact the value: {redacted_text}"),
         )?;
 
         let (outcome, stdout) = inspect_run(
@@ -531,7 +531,7 @@ async fn proves_installed_inspect_end_to_end() -> TestResult<()> {
         let exact_41 = integer_hex(&database, ECHO_VALUE).await?;
         require(
             armed_text.contains(&format!("\"value_hex\":\"{exact_41}\"")),
-            "the armed state_cells projection must render the exact value: {armed_text}",
+            format!("the armed state_cells projection must render the exact value: {armed_text}"),
         )?;
 
         // security_decisions returns the linked EXECUTE decision.
@@ -560,12 +560,17 @@ async fn proves_installed_inspect_end_to_end() -> TestResult<()> {
         let decisions =
             record_lines(&decisions_text).map_err(|message| failure(&message))?;
         require(
-            decisions.len() == 1
+            decisions.len() == 2
                 && decisions[0]["kind"] == "execute"
                 && decisions[0]["outcome"] == "allowed"
                 && decisions[0]["target"]
-                    == serde_json::json!(STD_INVOKE_ECHO_FUNCTION_ID.canonical()),
-            "the security_decisions projection did not return the linked EXECUTE decision: {decisions_text}",
+                    == serde_json::json!(STD_INVOKE_ECHO_FUNCTION_ID.canonical())
+                && decisions[1]["kind"] == "inspect"
+                && decisions[1]["outcome"] == "allowed"
+                && decisions[1]["target"].is_null(),
+            format!(
+                "the security_decisions projection did not return the linked EXECUTE and INSPECT decisions: {decisions_text}"
+            ),
         )?;
 
         // The exact epoch override resolves the same epoch by identity.
@@ -596,7 +601,7 @@ async fn proves_installed_inspect_end_to_end() -> TestResult<()> {
             .map_err(|_| failure("the override projection stdout was not UTF-8 text"))?;
         require(
             override_text.contains(&format!("\"invocation\":\"{}\"", invocation.canonical())),
-            "the epoch override must resolve the same invocation: {override_text}",
+            format!("the epoch override must resolve the same invocation: {override_text}"),
         )?;
 
         Ok(())
