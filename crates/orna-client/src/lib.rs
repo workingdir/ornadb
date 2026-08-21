@@ -13986,7 +13986,7 @@ fn client_stream_cancellation_clears_batches_and_rejects_stale_completions() {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-hooks"))]
 mod runtime_abi {
     use std::ffi::{c_char, c_void};
 
@@ -14564,8 +14564,8 @@ mod runtime_abi {
     };
 }
 
-#[cfg(test)]
-mod runtime_conformance {
+#[cfg(any(test, feature = "test-hooks"))]
+pub mod runtime_conformance {
     use super::runtime_abi::*;
     use std::{
         collections::{BTreeMap, HashMap, HashSet, VecDeque},
@@ -14635,6 +14635,17 @@ mod runtime_conformance {
             let handle = NEXT_HANDLE.fetch_add(1, Ordering::SeqCst);
             assert_ne!(handle, 0, "handle allocation exhausted");
             if reservations.insert(handle) {
+                return handle;
+            }
+        }
+    }
+
+    #[cfg(feature = "test-hooks")]
+    fn next_unreserved_alias_handle() -> Handle {
+        loop {
+            let handle = NEXT_HANDLE.fetch_add(1, Ordering::SeqCst);
+            assert_ne!(handle, 0, "handle allocation exhausted");
+            if !is_reserved_handle(handle) {
                 return handle;
             }
         }
@@ -18155,6 +18166,31 @@ mod runtime_conformance {
             }
         }
 
+        #[cfg(feature = "test-hooks")]
+        fn create_surface_result(
+            &self,
+            title: &'static [u8],
+        ) -> Result<SurfaceHandle, StatusCode> {
+            let options = SurfaceCreateOptions {
+                surface_kind: view(b"window"),
+                title: view(title),
+                state_profile: view(b"local"),
+                opaque_runtime_restore_state: BytesView {
+                    data: ptr::null(),
+                    len: 0,
+                },
+            };
+            let mut surface = 0;
+            let result = unsafe {
+                (FIXTURE_API.create_surface)(self.runtime, &options, &mut surface)
+            };
+            if result.code == StatusCode::Ok {
+                Ok(surface)
+            } else {
+                Err(result.code)
+            }
+        }
+
         fn create_surface(&self, title: &'static [u8]) -> SurfaceHandle {
             let options = SurfaceCreateOptions {
                 surface_kind: view(b"window"),
@@ -18203,6 +18239,37 @@ mod runtime_conformance {
                 (output.release)(output.owner, output.data, output.len);
             }
             bytes
+        }
+
+        #[cfg(feature = "test-hooks")]
+        fn capture_result(&self, surface: SurfaceHandle) -> Result<Vec<u8>, StatusCode> {
+            let mut output = OwnedBytes {
+                data: ptr::null_mut(),
+                len: 0,
+                owner: ptr::null_mut(),
+                release: release_owned,
+            };
+            let result = unsafe {
+                (FIXTURE_API.capture_semantic_state)(self.runtime, surface, &mut output)
+            };
+            if result.code != StatusCode::Ok {
+                return Err(result.code);
+            }
+            let bytes = if output.len == 0 {
+                if !output.data.is_null() {
+                    return Err(StatusCode::Internal);
+                }
+                Vec::new()
+            } else {
+                if output.data.is_null() {
+                    return Err(StatusCode::Internal);
+                }
+                unsafe { slice::from_raw_parts(output.data, output.len).to_vec() }
+            };
+            unsafe {
+                (output.release)(output.owner, output.data, output.len);
+            }
+            Ok(bytes)
         }
 
         fn destroy_surface(&self, surface: SurfaceHandle) -> StatusCode {
@@ -18339,6 +18406,126 @@ mod runtime_conformance {
             let context = (&mut *self.client) as *mut ClientContext as *mut c_void;
             unregister_context(context);
         }
+    }
+
+    #[cfg(feature = "test-hooks")]
+    struct HeadlessFixtureState {
+        surface: Option<SurfaceHandle>,
+        node: Option<NodeHandle>,
+        revision: u64,
+    }
+
+    #[cfg(feature = "test-hooks")]
+    pub struct HeadlessFixtureSession {
+        fixture: FixtureSession,
+        state: Mutex<HeadlessFixtureState>,
+    }
+
+    #[cfg(feature = "test-hooks")]
+    impl HeadlessFixtureSession {
+        pub fn new() -> Self {
+            Self {
+                fixture: FixtureSession::new(),
+                state: Mutex::new(HeadlessFixtureState {
+                    surface: None,
+                    node: None,
+                    revision: 0,
+                }),
+            }
+        }
+
+        pub fn create_surface(&self) -> Result<u64, String> {
+            let surface = self
+                .fixture
+                .create_surface_result(b"Headless fixture")
+                .map_err(status_error)?;
+            let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+            state.surface = Some(surface);
+            state.node = None;
+            state.revision = 0;
+            Ok(surface)
+        }
+
+        pub fn apply_ui_payload(&self, payload: &[u8]) -> Result<Vec<u8>, String> {
+            if !valid_canonical_frame(payload) {
+                return Err(status_error(StatusCode::InvalidArgument));
+            }
+            let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+            let Some(surface) = state.surface else {
+                return Err(status_error(StatusCode::NotFound));
+            };
+            let revision = state
+                .revision
+                .checked_add(1)
+                .ok_or_else(|| status_error(StatusCode::InvalidArgument))?;
+            let had_node = state.node.is_some();
+            let node = state.node.unwrap_or_else(next_unreserved_alias_handle);
+            let mut operations = [mount(node, 0, view(b"root")), set_property(node, view(b"payload"))];
+            operations[1].as_.set_property.value = ValueRef {
+                handle: 0,
+                type_name: view(b"std.ui.UI"),
+                canonical_encoding: BytesView {
+                    data: if payload.is_empty() {
+                        ptr::null()
+                    } else {
+                        payload.as_ptr()
+                    },
+                    len: payload.len(),
+                },
+            };
+            let first_operation = if had_node { 1 } else { 0 };
+            let batch = batch(revision, &operations[first_operation..]);
+            let result = self.fixture.apply(surface, &batch);
+            if result != StatusCode::Ok {
+                return Err(status_error(result));
+            }
+            state.node = Some(node);
+            state.revision = revision;
+            self.fixture
+                .capture_result(surface)
+                .map_err(status_error)
+        }
+
+        pub fn destroy_surface(&self, surface: u64) -> Result<(), String> {
+            let result = self.fixture.destroy_surface(surface);
+            if result != StatusCode::Ok {
+                return Err(status_error(result));
+            }
+            let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+            if state.surface == Some(surface) {
+                state.surface = None;
+                state.node = None;
+                state.revision = 0;
+            }
+            Ok(())
+        }
+
+        pub fn shutdown(&self) -> Result<(), String> {
+            let result = self.fixture.shutdown();
+            if result == StatusCode::Ok {
+                Ok(())
+            } else {
+                Err(status_error(result))
+            }
+        }
+
+        pub fn is_terminal(&self) -> bool {
+            let guard = global().lock().unwrap_or_else(|error| error.into_inner());
+            guard.runtime.as_ref().is_some_and(|runtime| runtime.terminal)
+        }
+
+        pub fn last_callback_is_terminal(&self) -> bool {
+            self.fixture
+                .callback_log()
+                .sequence
+                .last()
+                .is_some_and(|record| record.terminal)
+        }
+    }
+
+    #[cfg(feature = "test-hooks")]
+    fn status_error(code: StatusCode) -> String {
+        String::from_utf8_lossy(status_message(code)).into_owned()
     }
 
     #[derive(Clone, Debug, Eq, PartialEq)]
@@ -19142,6 +19329,52 @@ mod runtime_conformance {
             b"ORNA-UI/1 \0\0\0\x0f{\"kind\":\"node\"}"
         ));
     }
+    #[cfg(feature = "test-hooks")]
+    #[test]
+    fn headless_fixture_validates_and_retains_canonical_ui_payload() {
+        let session = HeadlessFixtureSession::new();
+        let surface = session
+            .create_surface()
+            .expect("headless fixture surface should be created");
+        assert!(
+            session
+                .apply_ui_payload(b"not an ORNA-UI frame")
+                .is_err(),
+            "headless fixture must reject invalid UI frames"
+        );
+
+        let body = br#"{"kind":"empty"}"#;
+        let mut payload = Vec::from(b"ORNA-UI/1 ".as_slice());
+        payload.extend_from_slice(&(body.len() as u32).to_be_bytes());
+        payload.extend_from_slice(body);
+        let captured = session
+            .apply_ui_payload(&payload)
+            .expect("headless fixture should accept a canonical UI frame");
+        assert!(valid_canonical_frame(&captured));
+        let captured_body: serde_json::Value =
+            serde_json::from_slice(frame_body(&captured)).expect("capture body should be JSON");
+        let encoded_payload = payload
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        assert_eq!(
+            captured_body["properties"]["payload"]["type"],
+            serde_json::Value::String("std.ui.UI".to_owned())
+        );
+        assert_eq!(
+            captured_body["properties"]["payload"]["value"],
+            serde_json::Value::String(encoded_payload)
+        );
+        session
+            .destroy_surface(surface)
+            .expect("headless fixture surface should be destroyed");
+        session
+            .shutdown()
+            .expect("headless fixture should shut down");
+        assert!(session.is_terminal());
+        assert!(session.last_callback_is_terminal());
+    }
+
 
     #[test]
     fn capture_rejects_a_corrupted_canonical_frame() {
