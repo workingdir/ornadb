@@ -1035,6 +1035,15 @@ async fn run_installed_inspect(
                 target_invocation,
                 active.pair(),
             )?;
+            for anchor in request.observer_lineage() {
+                if kernel
+                    .inspect_target_is_recursive(*anchor, target_invocation)
+                    .await
+                    .map_err(inspect_kernel_error_code)?
+                {
+                    return Err("inspect.recursion".to_owned());
+                }
+            }
             let Some(_) = kernel
                 .find_inspect_epoch(&session, epoch_id)
                 .await
@@ -1042,23 +1051,6 @@ async fn run_installed_inspect(
             else {
                 return Err("inspect.stale_epoch".to_owned());
             };
-            let recursive_from_root = kernel
-                .inspect_target_is_recursive(
-                    request.observer_root_invocation_id(),
-                    target_invocation,
-                )
-                .await
-                .map_err(inspect_kernel_error_code)?;
-            let recursive_from_parent = kernel
-                .inspect_target_is_recursive(
-                    request.observer_parent_invocation_id(),
-                    target_invocation,
-                )
-                .await
-                .map_err(inspect_kernel_error_code)?;
-            if recursive_from_root || recursive_from_parent {
-                return Err("inspect.recursion".to_owned());
-            }
             let Some(epoch) = kernel
                 .load_inspect_snapshot(epoch_id)
                 .await
