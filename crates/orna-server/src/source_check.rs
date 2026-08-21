@@ -6,9 +6,7 @@ use orna_compiler::{
     NewApplicationCheckError, check_new_application, check_standard_library_source,
 };
 use orna_core::source::{SourceBundle, SourceUnit};
-use orna_standard::{
-    retained_standard_library_v6_snapshot, verify_standard_library_v6_snapshot,
-};
+use orna_standard::{retained_standard_library_snapshot, verify_standard_library_snapshot};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum SourceCheckResult {
@@ -37,12 +35,11 @@ pub(super) fn run(path: &str, output: &mut impl Write) -> SourceCheckResult {
         Ok(bundle) if bundle.len() == 1 => bundle,
         _ => return SourceCheckResult::Usage,
     };
-    let snapshot = match retained_standard_library_v6_snapshot()
-        .and_then(verify_standard_library_v6_snapshot)
-    {
-        Ok(snapshot) => snapshot,
-        Err(_) => return write_standard_failure(output),
-    };
+    let snapshot =
+        match retained_standard_library_snapshot().and_then(verify_standard_library_snapshot) {
+            Ok(snapshot) => snapshot,
+            Err(_) => return write_standard_failure(output),
+        };
     let standard = match check_standard_library_source(&snapshot) {
         Ok(standard) => standard,
         Err(_) => return write_standard_failure(output),
