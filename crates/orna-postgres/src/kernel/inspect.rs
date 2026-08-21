@@ -21,20 +21,21 @@ use orna_core::{
     CatalogueRevisionId, FunctionId, InspectEpochId, InvocationId, PrincipalId,
     SecurityAuditEventId, SourceRevisionId, StateSlotId, TypeId,
     inspect::{
-        CallRow, InspectInvocationNodeKind, InspectInvocationPhase, InspectOutcomeKind,
-        InspectClassifier, InspectPrivilege, InspectResultSummary, InspectSecurityDecisionKind,
+        CallRow, InspectClassifier, InspectInvocationNodeKind, InspectInvocationPhase,
+        InspectOutcomeKind, InspectPrivilege, InspectResultSummary, InspectSecurityDecisionKind,
         InspectSecurityDecisionOutcome, InspectSnapshotEpoch, InspectSnapshotOptions,
         InspectSnapshotSummary, InspectTraceEvent, InspectTracePayload, InvocationNodeRow,
         PresentationCandidateRow, ResourceRow, RuntimeBindingRow, SecurityDecisionRow,
         StateCellRow, UiNodeRow,
     },
+    inspect_carrier::MAX_INSPECT_CARRIER_ROWS,
     invocation::{InvocationClientOffer, InvocationEventBody, InvokeValue},
     revision::ActiveDatabaseRevision,
     security::{
         AuthenticatedSession, InspectDecision, InspectEpochScope, SecurityAuditDecision,
         authorise_inspect,
     },
-    state::UserStateKeyWithoutPrincipal,
+    state::{UserStateKeyWithoutPrincipal, is_sealed_inspect_runtime_value},
     types::TypeDescriptor,
     value::{OpaqueCodecRegistry, RuntimeValue},
 };
@@ -44,7 +45,8 @@ use tokio_postgres::{IsolationLevel, Row, Transaction, types::FromSqlOwned};
 
 use crate::{
     PostgresKernel, PostgresKernelError, bootstrap::require_current_migrations,
-    security::append_security_audit_event, server_runtime::configure_and_recover,
+    is_sealed_inspect_type_id, security::append_security_audit_event,
+    server_runtime::configure_and_recover,
 };
 
 const INSPECT_SNAPSHOT_RELATION: &str = "_orna_kernel.inspect_snapshots";
@@ -65,6 +67,38 @@ const INSPECT_TRACE_KINDS: &[&str] = &[
 /// The closed envelope magic and version of the canonical epoch payload.
 const INSPECT_EPOCH_MAGIC: &[u8; 4] = b"INEP";
 const INSPECT_EPOCH_VERSION: u8 = 1;
+
+const PAYLOAD_ID_BYTES: usize = 16;
+const PAYLOAD_U64_BYTES: usize = 8;
+
+// Each persisted collection is bounded by the existing inspect carrier row
+// limit. The per-item lower bounds below are only used to prove that a
+// declared count can fit in the bytes left in the payload before allocating.
+const MAX_PERSISTED_COLLECTION_ITEMS: usize = MAX_INSPECT_CARRIER_ROWS;
+const INVOCATION_NODE_MIN_BYTES: usize =
+    PAYLOAD_ID_BYTES + 1 + 1 + 1 + PAYLOAD_ID_BYTES + PAYLOAD_U64_BYTES;
+const CALL_ROW_MIN_BYTES: usize = PAYLOAD_ID_BYTES + 1 + PAYLOAD_U64_BYTES + PAYLOAD_U64_BYTES;
+const RESOURCE_ROW_MIN_BYTES: usize = 2;
+const STATE_CELL_ROW_MIN_BYTES: usize = PAYLOAD_ID_BYTES
+    + PAYLOAD_U64_BYTES
+    + PAYLOAD_ID_BYTES
+    + PAYLOAD_U64_BYTES
+    + PAYLOAD_ID_BYTES
+    + PAYLOAD_ID_BYTES
+    + PAYLOAD_U64_BYTES
+    + PAYLOAD_U64_BYTES
+    + 4
+    + 1;
+const UI_NODE_ROW_MIN_BYTES: usize = PAYLOAD_ID_BYTES + PAYLOAD_U64_BYTES + PAYLOAD_U64_BYTES;
+const PRESENTATION_CANDIDATE_ROW_MIN_BYTES: usize =
+    PAYLOAD_U64_BYTES + 1 + PAYLOAD_U64_BYTES + 1 + 1;
+const RUNTIME_BINDING_ROW_MIN_BYTES: usize =
+    PAYLOAD_U64_BYTES + PAYLOAD_U64_BYTES + PAYLOAD_U64_BYTES + PAYLOAD_U64_BYTES + 1 + 4;
+const SECURITY_DECISION_ROW_MIN_BYTES: usize =
+    1 + 1 + PAYLOAD_U64_BYTES + 1 + 1 + PAYLOAD_U64_BYTES;
+const TYPE_DESCRIPTOR_MIN_BYTES: usize = 1 + PAYLOAD_ID_BYTES;
+const RUNTIME_CONTRACT_MIN_BYTES: usize = PAYLOAD_U64_BYTES + PAYLOAD_U64_BYTES + PAYLOAD_U64_BYTES;
+const RUNTIME_FEATURE_MIN_BYTES: usize = PAYLOAD_U64_BYTES;
 
 impl PostgresKernel {
     /// Captures one immutable inspection epoch and its trace rows.
@@ -177,6 +211,61 @@ impl PostgresKernel {
         finish_inspect_session(operation, database_session.shutdown().await)
     }
 
+    /// Resolves one exact inspection epoch after applying the authenticated
+    /// ownership/scope gate used by [`Self::find_latest_inspect_epoch`].
+    ///
+    /// A missing epoch returns `None`. An epoch owned by another principal
+    /// fails closed with the stable INSPECT denial instead of revealing that
+    /// the epoch exists.
+    pub async fn find_inspect_epoch(
+        &self,
+        authenticated_session: &AuthenticatedSession,
+        epoch_id: InspectEpochId,
+    ) -> Result<Option<InspectEpochId>, PostgresKernelError> {
+        let mut database_session = self.open().await?;
+        let operation = async {
+            let transaction = database_session
+                .client
+                .build_transaction()
+                .isolation_level(IsolationLevel::RepeatableRead)
+                .read_only(true)
+                .start()
+                .await
+                .map_err(PostgresKernelError::Database)?;
+            require_current_migrations(&transaction).await?;
+            let row = transaction
+                .query_opt(
+                    "SELECT owner_principal_id
+                     FROM _orna_kernel.inspect_snapshots
+                     WHERE epoch_id = $1",
+                    &[&epoch_id.to_bytes().to_vec()],
+                )
+                .await
+                .map_err(PostgresKernelError::Database)?;
+            let Some(row) = row else {
+                transaction
+                    .commit()
+                    .await
+                    .map_err(PostgresKernelError::Database)?;
+                return Ok(None);
+            };
+            let owner = PrincipalId::from_bytes(inspect_id(
+                INSPECT_SNAPSHOT_RELATION,
+                &row,
+                epoch_id.canonical().as_str(),
+                "owner_principal_id",
+            )?);
+            require_inspect_epoch_access(authenticated_session, owner)?;
+            transaction
+                .commit()
+                .await
+                .map_err(PostgresKernelError::Database)?;
+            Ok(Some(epoch_id))
+        }
+        .await;
+        finish_inspect_session(operation, database_session.shutdown().await)
+    }
+
     /// Resolves the most recent inspection epoch captured for one invocation.
     ///
     /// The lookup returns the latest epoch for the invocation (the most
@@ -233,17 +322,7 @@ impl PostgresKernel {
                 invocation.canonical().as_str(),
                 "owner_principal_id",
             )?);
-            match authorise_inspect(
-                authenticated_session.principal(),
-                InspectPrivilege::OwnInvocation,
-                Some(owner),
-                &[InspectPrivilege::OwnInvocation],
-            ) {
-                InspectDecision::Allowed { .. } => {}
-                InspectDecision::Denied(reason) => {
-                    return Err(PostgresKernelError::InspectDenied { reason });
-                }
-            }
+            require_inspect_epoch_access(authenticated_session, owner)?;
             transaction
                 .commit()
                 .await
@@ -580,7 +659,7 @@ impl PostgresKernel {
                         record.observer_invocation,
                         None,
                     )
-                    .map_err(PostgresKernelError::Inspect)?
+                    .map_err(PostgresKernelError::Inspect)?,
                 );
             }
             transaction
@@ -633,12 +712,9 @@ pub(crate) async fn capture_inspect_snapshot_in_transaction(
         rule: "the capture decision must be an allowed INSPECT decision",
     })?;
     let inspect_audit_id = append_security_audit_event(transaction, inspect_audit).await?;
-    let security_decisions = capture_security_decisions_in_transaction(
-        transaction,
-        invocation,
-        inspect_audit_id,
-    )
-    .await?;
+    let security_decisions =
+        capture_security_decisions_in_transaction(transaction, invocation, inspect_audit_id)
+            .await?;
     let state_cells =
         capture_state_cells_in_transaction(transaction, active, registry, owner, root_target)
             .await?;
@@ -1329,13 +1405,20 @@ fn decode_state_cell_row(
     )?;
     let value = decode_constructed_value(active, registry, &value_bytes)
         .map_err(PostgresKernelError::InspectValueCodec)?;
-    let value = InvokeValue::new(value).map_err(PostgresKernelError::InvocationCarrier)?;
     let value_type = TypeId::from_bytes(inspect_id(
         "_orna_kernel.user_state_cells",
         row,
         "selected row",
         "value_type_id",
     )?);
+    if is_sealed_inspect_type_id(value_type) || is_sealed_inspect_runtime_value(&value) {
+        return Err(PostgresKernelError::DurableInvariant {
+            relation: "_orna_kernel.user_state_cells",
+            record: "selected row".to_owned(),
+            rule: "USER state cannot expose sealed Inspector values",
+        });
+    }
+    let value = InvokeValue::new(value).map_err(PostgresKernelError::InvocationCarrier)?;
     let revision = decode_revision(row)?;
     let updated_at: SystemTime = inspect_column(
         "_orna_kernel.user_state_cells",
@@ -1410,6 +1493,23 @@ fn decode_revision(row: &Row) -> Result<u64, PostgresKernelError> {
         });
     }
     Ok(revision)
+}
+
+/// Applies the structural INSPECT ownership/scope gate used while resolving
+/// both latest and exact epochs.
+fn require_inspect_epoch_access(
+    authenticated_session: &AuthenticatedSession,
+    owner: PrincipalId,
+) -> Result<(), PostgresKernelError> {
+    match authorise_inspect(
+        authenticated_session.principal(),
+        InspectPrivilege::OwnInvocation,
+        Some(owner),
+        &[InspectPrivilege::OwnInvocation],
+    ) {
+        InspectDecision::Allowed { .. } => Ok(()),
+        InspectDecision::Denied(reason) => Err(PostgresKernelError::InspectDenied { reason }),
+    }
 }
 
 /// Decides whether one session principal may apply one INSPECT privilege to
@@ -1781,6 +1881,20 @@ impl<'a> PayloadReader<'a> {
         Ok(value)
     }
 
+    fn take_count(
+        &mut self,
+        rule: &'static str,
+        minimum_item_bytes: usize,
+        maximum: usize,
+    ) -> Result<usize, PostgresKernelError> {
+        debug_assert!(minimum_item_bytes > 0);
+        let count = usize::try_from(self.take_u64(rule)?).map_err(|_| self.invalid(rule))?;
+        if count > maximum || count > self.remaining() / minimum_item_bytes {
+            return Err(self.invalid(rule));
+        }
+        Ok(count)
+    }
+
     fn take_flag(&mut self, rule: &'static str) -> Result<bool, PostgresKernelError> {
         Ok(self.take_u8(rule)? != 0)
     }
@@ -1927,10 +2041,12 @@ fn push_invocation_nodes(writer: &mut PayloadWriter, rows: &[InvocationNodeRow])
 fn take_invocation_nodes(
     reader: &mut PayloadReader<'_>,
 ) -> Result<Vec<InvocationNodeRow>, PostgresKernelError> {
-    let count = reader.take_u64("invocation node count")?;
-    let mut rows = Vec::with_capacity(
-        usize::try_from(count).map_err(|_| reader.invalid("invocation node count is too large"))?,
-    );
+    let count = reader.take_count(
+        "invocation node count",
+        INVOCATION_NODE_MIN_BYTES,
+        MAX_PERSISTED_COLLECTION_ITEMS,
+    )?;
+    let mut rows = Vec::with_capacity(count);
     for _ in 0..count {
         let id = InvocationId::from_bytes(reader.take_id("invocation node identity")?);
         let parent_id = reader
@@ -1980,10 +2096,12 @@ fn take_calls(
     active: &ActiveDatabaseRevision,
     registry: &OpaqueCodecRegistry,
 ) -> Result<Vec<CallRow>, PostgresKernelError> {
-    let count = reader.take_u64("call row count")?;
-    let mut rows = Vec::with_capacity(
-        usize::try_from(count).map_err(|_| reader.invalid("call row count is too large"))?,
-    );
+    let count = reader.take_count(
+        "call row count",
+        CALL_ROW_MIN_BYTES,
+        MAX_PERSISTED_COLLECTION_ITEMS,
+    )?;
+    let mut rows = Vec::with_capacity(count);
     for _ in 0..count {
         let invocation_id = InvocationId::from_bytes(reader.take_id("call invocation identity")?);
         let schema = take_optional_invoke_value(reader, active, registry)?;
@@ -2016,10 +2134,12 @@ fn push_resources(writer: &mut PayloadWriter, rows: &[ResourceRow]) {
 
 fn take_resources(reader: &mut PayloadReader<'_>) -> Result<Vec<ResourceRow>, PostgresKernelError> {
     use orna_core::inspect::{InspectResourceKind, InspectResourceStatus};
-    let count = reader.take_u64("resource row count")?;
-    let mut rows = Vec::with_capacity(
-        usize::try_from(count).map_err(|_| reader.invalid("resource row count is too large"))?,
-    );
+    let count = reader.take_count(
+        "resource row count",
+        RESOURCE_ROW_MIN_BYTES,
+        MAX_PERSISTED_COLLECTION_ITEMS,
+    )?;
+    let mut rows = Vec::with_capacity(count);
     for _ in 0..count {
         let kind = match reader.take_u8("resource kind")? {
             0 => InspectResourceKind::State,
@@ -2065,10 +2185,12 @@ fn take_state_cells(
     active: &ActiveDatabaseRevision,
     registry: &OpaqueCodecRegistry,
 ) -> Result<Vec<StateCellRow>, PostgresKernelError> {
-    let count = reader.take_u64("state cell row count")?;
-    let mut rows = Vec::with_capacity(
-        usize::try_from(count).map_err(|_| reader.invalid("state cell row count is too large"))?,
-    );
+    let count = reader.take_count(
+        "state cell row count",
+        STATE_CELL_ROW_MIN_BYTES,
+        MAX_PERSISTED_COLLECTION_ITEMS,
+    )?;
+    let mut rows = Vec::with_capacity(count);
     for _ in 0..count {
         let root_function =
             FunctionId::from_bytes(reader.take_id("state cell root function identity")?);
@@ -2105,10 +2227,12 @@ fn push_ui_nodes(writer: &mut PayloadWriter, rows: &[UiNodeRow]) {
 }
 
 fn take_ui_nodes(reader: &mut PayloadReader<'_>) -> Result<Vec<UiNodeRow>, PostgresKernelError> {
-    let count = reader.take_u64("UI node row count")?;
-    let mut rows = Vec::with_capacity(
-        usize::try_from(count).map_err(|_| reader.invalid("UI node row count is too large"))?,
-    );
+    let count = reader.take_count(
+        "UI node row count",
+        UI_NODE_ROW_MIN_BYTES,
+        MAX_PERSISTED_COLLECTION_ITEMS,
+    )?;
+    let mut rows = Vec::with_capacity(count);
     for _ in 0..count {
         let function = FunctionId::from_bytes(reader.take_id("UI node function identity")?);
         let call_site = reader.take_str("UI node call site")?;
@@ -2141,11 +2265,12 @@ fn push_presentation_candidates(writer: &mut PayloadWriter, rows: &[Presentation
 fn take_presentation_candidates(
     reader: &mut PayloadReader<'_>,
 ) -> Result<Vec<PresentationCandidateRow>, PostgresKernelError> {
-    let count = reader.take_u64("presentation candidate row count")?;
-    let mut rows = Vec::with_capacity(
-        usize::try_from(count)
-            .map_err(|_| reader.invalid("presentation candidate row count is too large"))?,
-    );
+    let count = reader.take_count(
+        "presentation candidate row count",
+        PRESENTATION_CANDIDATE_ROW_MIN_BYTES,
+        MAX_PERSISTED_COLLECTION_ITEMS,
+    )?;
+    let mut rows = Vec::with_capacity(count);
     for _ in 0..count {
         let presenter = reader.take_str("presentation candidate presenter")?;
         let accepted = reader.take_flag("presentation candidate acceptance")?;
@@ -2194,35 +2319,39 @@ fn push_runtime_bindings(writer: &mut PayloadWriter, rows: &[RuntimeBindingRow])
 fn take_runtime_bindings(
     reader: &mut PayloadReader<'_>,
 ) -> Result<Vec<RuntimeBindingRow>, PostgresKernelError> {
-    let count = reader.take_u64("runtime binding row count")?;
-    let mut rows = Vec::with_capacity(
-        usize::try_from(count)
-            .map_err(|_| reader.invalid("runtime binding row count is too large"))?,
-    );
+    let count = reader.take_count(
+        "runtime binding row count",
+        RUNTIME_BINDING_ROW_MIN_BYTES,
+        MAX_PERSISTED_COLLECTION_ITEMS,
+    )?;
+    let mut rows = Vec::with_capacity(count);
     for _ in 0..count {
         let runtime_name = reader.take_str("runtime binding name")?;
         let version = reader.take_str("runtime binding version")?;
-        let descriptor_count = reader.take_u64("runtime binding descriptor count")?;
-        let mut consumed_descriptors = Vec::with_capacity(
-            usize::try_from(descriptor_count)
-                .map_err(|_| reader.invalid("runtime binding descriptor count is too large"))?,
-        );
+        let descriptor_count = reader.take_count(
+            "runtime binding descriptor count",
+            TYPE_DESCRIPTOR_MIN_BYTES,
+            MAX_PERSISTED_COLLECTION_ITEMS,
+        )?;
+        let mut consumed_descriptors = Vec::with_capacity(descriptor_count);
         for _ in 0..descriptor_count {
             consumed_descriptors.push(take_descriptor(reader)?);
         }
-        let contract_count = reader.take_u64("runtime binding contract count")?;
-        let mut contracts = Vec::with_capacity(
-            usize::try_from(contract_count)
-                .map_err(|_| reader.invalid("runtime binding contract count is too large"))?,
-        );
+        let contract_count = reader.take_count(
+            "runtime binding contract count",
+            RUNTIME_CONTRACT_MIN_BYTES,
+            MAX_PERSISTED_COLLECTION_ITEMS,
+        )?;
+        let mut contracts = Vec::with_capacity(contract_count);
         for _ in 0..contract_count {
             let name = reader.take_str("runtime binding contract name")?;
             let version = reader.take_str("runtime binding contract version")?;
-            let feature_count = reader.take_u64("runtime binding contract feature count")?;
-            let mut features =
-                Vec::with_capacity(usize::try_from(feature_count).map_err(|_| {
-                    reader.invalid("runtime binding contract feature count is too large")
-                })?);
+            let feature_count = reader.take_count(
+                "runtime binding contract feature count",
+                RUNTIME_FEATURE_MIN_BYTES,
+                MAX_PERSISTED_COLLECTION_ITEMS,
+            )?;
+            let mut features = Vec::with_capacity(feature_count);
             for _ in 0..feature_count {
                 features.push(reader.take_str("runtime binding contract feature")?);
             }
@@ -2277,11 +2406,12 @@ fn push_security_decisions(writer: &mut PayloadWriter, rows: &[SecurityDecisionR
 fn take_security_decisions(
     reader: &mut PayloadReader<'_>,
 ) -> Result<Vec<SecurityDecisionRow>, PostgresKernelError> {
-    let count = reader.take_u64("security decision row count")?;
-    let mut rows = Vec::with_capacity(
-        usize::try_from(count)
-            .map_err(|_| reader.invalid("security decision row count is too large"))?,
-    );
+    let count = reader.take_count(
+        "security decision row count",
+        SECURITY_DECISION_ROW_MIN_BYTES,
+        MAX_PERSISTED_COLLECTION_ITEMS,
+    )?;
+    let mut rows = Vec::with_capacity(count);
     for _ in 0..count {
         let kind = match reader.take_u8("security decision kind")? {
             0 => InspectSecurityDecisionKind::Execute,
@@ -2295,11 +2425,12 @@ fn take_security_decisions(
             1 => InspectSecurityDecisionOutcome::Denied,
             _ => return Err(reader.invalid("security decision outcome is outside the closed set")),
         };
-        let principal_count = reader.take_u64("security decision principal count")?;
-        let mut principals = Vec::with_capacity(
-            usize::try_from(principal_count)
-                .map_err(|_| reader.invalid("security decision principal count is too large"))?,
-        );
+        let principal_count = reader.take_count(
+            "security decision principal count",
+            PAYLOAD_ID_BYTES,
+            MAX_PERSISTED_COLLECTION_ITEMS,
+        )?;
+        let mut principals = Vec::with_capacity(principal_count);
         for _ in 0..principal_count {
             principals.push(PrincipalId::from_bytes(
                 reader.take_id("security decision principal identity")?,
@@ -2313,11 +2444,12 @@ fn take_security_decisions(
         } else {
             None
         };
-        let reference_count = reader.take_u64("security decision audit reference count")?;
-        let mut audit_refs =
-            Vec::with_capacity(usize::try_from(reference_count).map_err(|_| {
-                reader.invalid("security decision audit reference count is too large")
-            })?);
+        let reference_count = reader.take_count(
+            "security decision audit reference count",
+            PAYLOAD_ID_BYTES,
+            MAX_PERSISTED_COLLECTION_ITEMS,
+        )?;
+        let mut audit_refs = Vec::with_capacity(reference_count);
         for _ in 0..reference_count {
             audit_refs.push(SecurityAuditEventId::from_bytes(
                 reader.take_id("security decision audit reference identity")?,
@@ -2330,7 +2462,6 @@ fn take_security_decisions(
     }
     Ok(rows)
 }
-
 fn push_optional_invoke_value(
     writer: &mut PayloadWriter,
     active: &ActiveDatabaseRevision,
@@ -2422,5 +2553,57 @@ fn take_descriptor(reader: &mut PayloadReader<'_>) -> Result<TypeDescriptor, Pos
         6 => TypeDescriptor::stream(take_descriptor(reader)?)
             .map_err(|_| reader.invalid("type descriptor is not canonical")),
         _ => Err(reader.invalid("type descriptor tag is outside the closed set")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn persisted_count_near_u64_max_fails_before_allocation() {
+        let payload = u64::MAX.to_be_bytes();
+        let mut reader = PayloadReader::new(&payload, "malformed count");
+        assert!(matches!(
+            reader.take_count("row count is too large", 1, MAX_PERSISTED_COLLECTION_ITEMS),
+            Err(PostgresKernelError::DurableInvariant {
+                rule: "row count is too large",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn persisted_count_must_fit_remaining_payload_bytes() {
+        let mut payload = 2_u64.to_be_bytes().to_vec();
+        payload.extend_from_slice(&[0; 4]);
+        let mut reader = PayloadReader::new(&payload, "bounded count");
+        assert_eq!(
+            reader
+                .take_count("row count", 2, MAX_PERSISTED_COLLECTION_ITEMS)
+                .expect("two items fit in four bytes"),
+            2
+        );
+
+        let mut payload = 2_u64.to_be_bytes().to_vec();
+        payload.push(0);
+        let mut reader = PayloadReader::new(&payload, "truncated count");
+        assert!(
+            reader
+                .take_count("row count", 2, MAX_PERSISTED_COLLECTION_ITEMS)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn persisted_empty_count_is_valid_without_remaining_items() {
+        let payload = 0_u64.to_be_bytes();
+        let mut reader = PayloadReader::new(&payload, "empty collection");
+        assert_eq!(
+            reader
+                .take_count("row count", 16, MAX_PERSISTED_COLLECTION_ITEMS)
+                .expect("empty collection has no item bytes"),
+            0
+        );
     }
 }
