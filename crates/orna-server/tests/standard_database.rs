@@ -5431,6 +5431,203 @@ async fn authenticated_stream_resource_dispatches_allowed_and_denied_with_redact
 
 #[tokio::test]
 #[ignore = "requires the Compose PostgreSQL development service"]
+async fn direct_scalar_resource_holds_active_revision_lock_through_execution() -> TestResult<()> {
+    with_test_database(|database| async move {
+        let uid = nix::unistd::geteuid().as_raw();
+        let kernel = kernel(&database)?;
+        kernel.bootstrap().await?;
+        let empty = kernel.recover().await?;
+        let upgrade = orna_standard::prepare_standard_upgrade_v1_to_v2(&empty)?;
+        let active = kernel.apply_standard_upgrade(&upgrade).await?;
+        let standard_source = active
+            .catalogue_hash_context()
+            .standard()
+            .cloned()
+            .ok_or_else(|| failure("scalar resource lock proof has no checked standard source"))?;
+        let standard = check_standard_library_source(&standard_source)?;
+        let (active, _client, target, call_site) =
+            install_scalar_resource_client_fixture(&kernel, &active, &standard).await?;
+        let mut function_targets = active
+            .catalogue()
+            .functions()
+            .iter()
+            .map(|function| SecurityFunctionTarget::application(function.id()))
+            .collect::<Vec<_>>();
+        function_targets.push(SecurityFunctionTarget::verified_standard(
+            target,
+            standard.verified_snapshot().revision(),
+            STD_INVOKE_ECHO_FUNCTION_REVISION_ID,
+        ));
+        let principal = Principal::new(
+            RAW_CLIENT_USER,
+            PrincipalKind::User,
+            PrincipalStatus::Active,
+        );
+        let security = SecuritySnapshot::new_with_function_targets_and_local_peer_credentials(
+            active.pair(),
+            function_targets,
+            vec![principal],
+            vec![],
+            vec![ExecuteGrant::new(RAW_CLIENT_USER, target)],
+            vec![LocalPeerCredential::new(uid, RAW_CLIENT_USER)],
+        )?;
+        kernel.replace_security_snapshot(&security).await?;
+        let session = kernel.authenticate_local_peer(uid).await?;
+        let request = ResourceRequest {
+            stream_id: 91,
+            request_id: InvocationId::from_bytes([0x91; 16]),
+            parent_invocation_id: InvocationId::from_bytes([0x92; 16]),
+            call_site_id: call_site,
+            state_profile: String::new(),
+            function_instance_key: String::new(),
+            target_function_id: target,
+            target_revision: active.pair(),
+            generation: 1,
+            resource_kind: ResourceKind::Single,
+            arguments: vec![ResourceArgument {
+                parameter: STD_INVOKE_ECHO_PARAMETER_ID,
+                value: RuntimeValue::Integer(43),
+            }],
+            item_window: 1,
+            byte_window: MAX_RESOURCE_WINDOW,
+        };
+
+        let last_ordinal = active
+            .source()
+            .units()
+            .len()
+            .checked_sub(1)
+            .ok_or_else(|| failure("scalar resource lock proof has no source unit"))?;
+        let changed_source = SourceBundle::new(active.source().units().iter().enumerate().map(
+            |(ordinal, unit)| {
+                let content = if ordinal == last_ordinal {
+                    format!("{}\n-- direct scalar resource lock interleave", unit.content())
+                } else {
+                    unit.content().to_owned()
+                };
+                SourceUnit::new(unit.logical_path(), content)
+            },
+        ))?;
+        let changed_report = check_standard_application(
+            &changed_source,
+            &StandardApplicationCheckContext::try_new(active.catalogue(), &standard)?,
+        );
+        require(
+            changed_report.diagnostics().is_empty(),
+            "direct scalar lock interleave source-only apply did not compile",
+        )?;
+        let changed = prepare_standard_application(&changed_report, active.pair(), &active)?;
+        let changed_pair = changed.candidate_pair();
+
+        let reached = Arc::new(Barrier::new(2));
+        let resume = Arc::new(Barrier::new(2));
+        let dispatch_kernel = kernel.clone();
+        let dispatch_session = session.clone();
+        let dispatch_request = request.clone();
+        let dispatch_reached = reached.clone();
+        let dispatch_resume = resume.clone();
+        let dispatch = tokio::spawn(async move {
+            dispatch_kernel
+                .dispatch_authenticated_server_resource_with_test_barrier(
+                    &dispatch_session,
+                    &dispatch_request,
+                    dispatch_reached,
+                    dispatch_resume,
+                )
+                .await
+        });
+        timeout(Duration::from_secs(5), reached.wait())
+            .await
+            .map_err(|_| failure("direct scalar resource dispatch did not reach validation barrier"))?;
+
+        let waiter = database.open().await?;
+        let apply_kernel = kernel.clone();
+        let mut apply = tokio::spawn(async move { apply_kernel.apply(&changed).await });
+        let apply_waiting = timeout(Duration::from_secs(5), async {
+            loop {
+                if apply.is_finished() {
+                    return Ok::<bool, tokio_postgres::Error>(false);
+                }
+                let waiting = waiter
+                    .client()
+                    .query_one(
+                        "SELECT EXISTS (
+                             SELECT 1
+                             FROM pg_locks
+                             WHERE relation = '_orna_kernel.active_revision'::regclass
+                               AND NOT granted
+                         )",
+                        &[],
+                    )
+                    .await?
+                    .get::<_, bool>(0);
+                if waiting {
+                    return Ok(true);
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .map_err(|_| failure("apply did not reach the active-revision lock wait"))??;
+
+        resume.wait().await;
+        let dispatched = timeout(Duration::from_secs(5), dispatch)
+            .await
+            .map_err(|_| failure("direct scalar resource dispatch did not resume"))?;
+        let dispatched = dispatched.map_err(|error| {
+            failure(format!("direct scalar resource task failed: {error}"))
+        })?;
+        let dispatched = dispatched?;
+        let applied = timeout(Duration::from_secs(5), &mut apply)
+            .await
+            .map_err(|_| failure("source-only apply did not resume after resource completion"))?;
+        let applied = applied
+            .map_err(|error| failure(format!("source-only apply task failed: {error}")))?;
+        let applied = applied?;
+        waiter.shutdown().await?;
+
+        require(
+            apply_waiting,
+            "source-only apply committed while direct scalar resource execution was paused",
+        )?;
+        require(
+            applied.pair() == changed_pair,
+            "source-only apply did not commit its replacement active revision",
+        )?;
+        match dispatched {
+            AuthenticatedServerResourceResult::Completed {
+                target_revision,
+                resource_kind,
+                values,
+                ..
+            } => {
+                require(
+                    target_revision == active.pair()
+                        && resource_kind == ResourceKind::Single
+                        && values == [RuntimeValue::Integer(43)],
+                    "direct scalar resource did not execute against its locked active revision",
+                )?;
+            }
+            AuthenticatedServerResourceResult::Failed {
+                failure: call_failure,
+                ..
+            } => {
+                return Err(failure(format!(
+                    "direct scalar resource unexpectedly failed: {call_failure:?}"
+                )));
+            }
+        }
+        require(
+            applied.pair() != active.pair(),
+            "source-only apply did not advance the active revision pair",
+        )?;
+        require_no_database_sessions(&database).await
+    })
+    .await
+}
+
+#[tokio::test]
+#[ignore = "requires the Compose PostgreSQL development service"]
 async fn installed_resource_socket_delivers_values_and_enforces_windows_and_grants() -> TestResult<()> {
     with_test_database(|database| async move {
         let kernel = open_standard_database(kernel(&database)?)

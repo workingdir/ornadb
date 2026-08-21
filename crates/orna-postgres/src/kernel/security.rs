@@ -1551,6 +1551,54 @@ impl PostgresKernel {
         request: &ResourceRequest,
         cancellation: &ResourceCancellation,
     ) -> Result<Option<AuthenticatedServerResourceResult>, PostgresKernelError> {
+        self.dispatch_authenticated_server_resource_with_cancellation_and_test_barrier(
+            authenticated_session,
+            request,
+            cancellation,
+            None,
+        )
+        .await
+    }
+
+    /// Pauses direct resource dispatch after its active-revision validation.
+    ///
+    /// This hook is absent from production builds and exists only to make the
+    /// active-pointer interleave deterministic in the integration harness.
+    #[cfg(feature = "test-hooks")]
+    #[doc(hidden)]
+    pub async fn dispatch_authenticated_server_resource_with_test_barrier(
+        &self,
+        authenticated_session: &AuthenticatedSession,
+        request: &ResourceRequest,
+        reached: std::sync::Arc<tokio::sync::Barrier>,
+        resume: std::sync::Arc<tokio::sync::Barrier>,
+    ) -> Result<AuthenticatedServerResourceResult, PostgresKernelError> {
+        let cancellation = ResourceCancellation::new();
+        match self
+            .dispatch_authenticated_server_resource_with_cancellation_and_test_barrier(
+                authenticated_session,
+                request,
+                &cancellation,
+                Some(AuthenticatedResourceTestBarrier { reached, resume }),
+            )
+            .await?
+        {
+            Some(result) => Ok(result),
+            None => Err(PostgresKernelError::DurableInvariant {
+                relation: "resource cancellation",
+                record: request.request_id.canonical(),
+                rule: "uncancellable resource dispatch returned no terminal result",
+            }),
+        }
+    }
+
+    async fn dispatch_authenticated_server_resource_with_cancellation_and_test_barrier(
+        &self,
+        authenticated_session: &AuthenticatedSession,
+        request: &ResourceRequest,
+        cancellation: &ResourceCancellation,
+        test_barrier: Option<AuthenticatedResourceTestBarrier>,
+    ) -> Result<Option<AuthenticatedServerResourceResult>, PostgresKernelError> {
         validate_resource_state_context(request)?;
         if !self.reserve_resource_request_id(request.request_id).await? {
             return Ok(Some(AuthenticatedServerResourceResult::Failed {
@@ -1571,6 +1619,22 @@ impl PostgresKernel {
             require_current_migrations(&transaction).await?;
             let active = configure_and_recover(&transaction).await?;
             let security = recover_security_snapshot_for_active(&transaction, &active).await?;
+            lock_active_revision_for_resource(&transaction, active.pair()).await?;
+            let execution_active = configure_and_recover(&transaction).await?;
+            if execution_active.pair() != active.pair() {
+                return Err(PostgresKernelError::SecurityRevisionMismatch {
+                    expected: active.pair(),
+                    active: execution_active.pair(),
+                });
+            }
+            let execution_security =
+                recover_security_snapshot_for_active(&transaction, &execution_active).await?;
+            if !security_snapshots_match(&execution_security, &security) {
+                return Err(PostgresKernelError::SecurityFunctionSetMismatch);
+            }
+            let active = execution_active;
+            let security = execution_security;
+            pause_after_authenticated_resource_validation(test_barrier.as_ref()).await;
             let invocation = InvocationId::new();
             let mut audit_decision = SecurityAuditOutcome::Denied;
             let mut completed_target = None;
@@ -4474,6 +4538,31 @@ struct AuthenticatedSelectTestBarrier;
 #[cfg(not(feature = "test-hooks"))]
 async fn pause_after_authenticated_select_recovery(
     _test_barrier: Option<&AuthenticatedSelectTestBarrier>,
+) {
+}
+
+#[cfg(feature = "test-hooks")]
+struct AuthenticatedResourceTestBarrier {
+    reached: std::sync::Arc<tokio::sync::Barrier>,
+    resume: std::sync::Arc<tokio::sync::Barrier>,
+}
+
+#[cfg(feature = "test-hooks")]
+async fn pause_after_authenticated_resource_validation(
+    test_barrier: Option<&AuthenticatedResourceTestBarrier>,
+) {
+    if let Some(test_barrier) = test_barrier {
+        test_barrier.reached.wait().await;
+        test_barrier.resume.wait().await;
+    }
+}
+
+#[cfg(not(feature = "test-hooks"))]
+struct AuthenticatedResourceTestBarrier;
+
+#[cfg(not(feature = "test-hooks"))]
+async fn pause_after_authenticated_resource_validation(
+    _test_barrier: Option<&AuthenticatedResourceTestBarrier>,
 ) {
 }
 
