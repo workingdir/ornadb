@@ -68,6 +68,41 @@ pub struct ClientExecutionContext {
     parent_invocation_id: InvocationId,
 }
 
+/// Internal observer provenance for one active CLIENT invocation.
+///
+/// The public execution context intentionally keeps its existing shape. The
+/// evaluator carries the complete observer chain separately so nested calls
+/// can expose their fresh current invocation without losing the root or the
+/// caller's current invocation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ObserverLineage {
+    root: InvocationId,
+    parent: InvocationId,
+    current: InvocationId,
+}
+
+impl ObserverLineage {
+    const fn top_level(invocation: InvocationId) -> Self {
+        Self {
+            root: invocation,
+            parent: invocation,
+            current: invocation,
+        }
+    }
+
+    fn nested(self) -> Self {
+        Self {
+            root: self.root,
+            parent: self.current,
+            current: InvocationId::new(),
+        }
+    }
+
+    const fn compatibility(context: ClientExecutionContext) -> Self {
+        Self::top_level(context.parent_invocation_id())
+    }
+}
+
 /// The client-side anchor for one Inspector execution.
 ///
 /// Inspector carriers retain the server epoch in their stable ORNA-INSPECT
@@ -899,7 +934,7 @@ impl ClientInspectRequest {
     /// Creates a request bound to one CLIENT execution context.
     pub fn new(context: ClientExecutionContext, operation: ClientInspectOperation) -> Self {
         let target_invocation_id = operation.target().and_then(inspect_invocation_target);
-        Self::with_provenance(context, operation, target_invocation_id, None)
+        Self::with_provenance(context, operation, target_invocation_id, None, ObserverLineage::compatibility(context))
     }
 
     /// Creates a request with a target identity recovered from canonical snapshot evidence.
@@ -907,8 +942,9 @@ impl ClientInspectRequest {
         context: ClientExecutionContext,
         operation: ClientInspectOperation,
         target_invocation_id: InvocationId,
+        lineage: ObserverLineage,
     ) -> Self {
-        Self::with_provenance(context, operation, Some(target_invocation_id), None)
+        Self::with_provenance(context, operation, Some(target_invocation_id), None, lineage)
     }
 
     /// Creates a request carrying the checked snapshot-options value.
@@ -917,12 +953,14 @@ impl ClientInspectRequest {
         operation: ClientInspectOperation,
         target_invocation_id: InvocationId,
         snapshot_options: RuntimeValue,
+        lineage: ObserverLineage,
     ) -> Self {
         Self::with_provenance(
             context,
             operation,
             Some(target_invocation_id),
             Some(snapshot_options),
+            lineage,
         )
     }
 
@@ -931,13 +969,14 @@ impl ClientInspectRequest {
         operation: ClientInspectOperation,
         target_invocation_id: Option<InvocationId>,
         snapshot_options: Option<RuntimeValue>,
+        lineage: ObserverLineage,
     ) -> Self {
         Self {
             operation,
             context,
             client_epoch_id: context.client_epoch_id(),
-            observer_root_invocation_id: context.observer_root_invocation_id(),
-            observer_parent_invocation_id: context.observer_parent_invocation_id(),
+            observer_root_invocation_id: lineage.root,
+            observer_parent_invocation_id: lineage.current,
             target_invocation_id,
             snapshot_options,
         }
@@ -1003,6 +1042,8 @@ pub struct ClientExternalContractRequest {
     identity: String,
     arguments: Vec<(ParameterId, RuntimeValue)>,
     context: ClientExecutionContext,
+    observer_root_invocation_id: InvocationId,
+    observer_parent_invocation_id: InvocationId,
 }
 
 impl ClientExternalContractRequest {
@@ -1012,10 +1053,26 @@ impl ClientExternalContractRequest {
         identity: impl Into<String>,
         arguments: Vec<(ParameterId, RuntimeValue)>,
     ) -> Self {
+        Self::with_lineage(
+            context,
+            identity,
+            arguments,
+            ObserverLineage::compatibility(context),
+        )
+    }
+
+    fn with_lineage(
+        context: ClientExecutionContext,
+        identity: impl Into<String>,
+        arguments: Vec<(ParameterId, RuntimeValue)>,
+        lineage: ObserverLineage,
+    ) -> Self {
         Self {
             identity: identity.into(),
             arguments,
             context,
+            observer_root_invocation_id: lineage.root,
+            observer_parent_invocation_id: lineage.current,
         }
     }
 
@@ -1032,6 +1089,16 @@ impl ClientExternalContractRequest {
     /// Returns the enclosing CLIENT execution context.
     pub const fn context(&self) -> ClientExecutionContext {
         self.context
+    }
+
+    /// Returns the trusted observer root invocation identity.
+    pub const fn observer_root_invocation_id(&self) -> InvocationId {
+        self.observer_root_invocation_id
+    }
+
+    /// Returns the trusted observer parent invocation identity.
+    pub const fn observer_parent_invocation_id(&self) -> InvocationId {
+        self.observer_parent_invocation_id
     }
 }
 
@@ -3286,7 +3353,7 @@ fn evaluate_client_function_in_state_context_with_executor(
         &mut staged,
         0,
         authorisation.session_principal(),
-        parent_invocation_id,
+        ObserverLineage::top_level(parent_invocation_id),
         &mut executor,
     ) {
         Ok(result) => result,
@@ -3322,7 +3389,7 @@ fn evaluate_function(
     state: &mut ClientStateStore,
     depth: usize,
     principal: PrincipalId,
-    parent_invocation_id: InvocationId,
+    lineage: ObserverLineage,
     executor: &mut Option<&mut dyn ClientResourceExecutor>,
 ) -> Result<(ClientExecutionContext, RuntimeValue), ClientExecutionError> {
     let pair = active.pair();
@@ -3341,7 +3408,7 @@ fn evaluate_function(
         pair,
         function,
         function_revision: revision.id(),
-        parent_invocation_id,
+        parent_invocation_id: lineage.parent,
     };
     // A version-5 capability envelope is decoded before function-shape
     // validation (work ADR 0060). Its inner plan version classifies the
@@ -3443,6 +3510,7 @@ fn evaluate_function(
             active,
             plan,
             context,
+            lineage,
             return_shape,
             &arguments,
             grants,
@@ -3456,6 +3524,7 @@ fn evaluate_function(
             active,
             revision.artifact().payload(),
             context,
+            lineage,
             return_shape,
             &arguments,
             declarations,
@@ -3498,6 +3567,7 @@ fn evaluate_plan(
     active: &ActiveDatabaseRevision,
     payload: &[u8],
     context: ClientExecutionContext,
+    lineage: ObserverLineage,
     return_shape: ClientReturnShape,
     arguments: &[(ParameterId, RuntimeValue)],
     declarations: &[capability::LocalCapabilityDeclaration],
@@ -3526,6 +3596,7 @@ fn evaluate_plan(
                 active,
                 plan.expression(),
                 context,
+                lineage,
                 expected,
                 arguments,
                 declarations,
@@ -3544,6 +3615,7 @@ fn evaluate_plan(
                 active,
                 plan.expression(),
                 context,
+                lineage,
                 expected,
                 arguments,
                 declarations,
@@ -3559,7 +3631,7 @@ fn evaluate_plan(
             let plan = StateClientPlan::decode(payload)
                 .map_err(|source| ClientExecutionError::InvalidArtifact { context, source })?;
             evaluate_stream_state_plan(
-                active, &plan, context, expected, arguments, declarations, grants, state, depth,
+                active, &plan, context, lineage, expected, arguments, declarations, grants, state, depth,
                 principal, executor, local_environment,
             )
         }
@@ -3570,6 +3642,7 @@ fn evaluate_plan(
                 active,
                 &plan,
                 context,
+                lineage,
                 expected,
                 arguments,
                 declarations,
@@ -3585,7 +3658,7 @@ fn evaluate_plan(
             let plan = ProceduralClientPlan::decode(payload)
                 .map_err(|source| ClientExecutionError::InvalidArtifact { context, source })?;
             evaluate_procedural_plan(
-                active, &plan, context, expected, true, arguments, declarations, grants, state,
+                active, &plan, context, lineage, expected, true, arguments, declarations, grants, state,
                 depth, principal, executor, local_environment,
             )
         }
@@ -3596,6 +3669,7 @@ fn evaluate_plan(
                 active,
                 &plan,
                 context,
+                lineage,
                 expected,
                 false,
                 arguments,
@@ -3611,13 +3685,13 @@ fn evaluate_plan(
         ClientReturnShape::Action(_expected) => {
             let plan = ActionClientPlan::decode(payload)
                 .map_err(|source| ClientExecutionError::InvalidArtifact { context, source })?;
-            evaluate_action_operation(active, plan.operation(), context, arguments, declarations, grants, state, depth, principal, executor, local_environment)
+            evaluate_action_operation(active, plan.operation(), context, lineage, arguments, declarations, grants, state, depth, principal, executor, local_environment)
         }
         ClientReturnShape::StreamResource(expected) => {
             let plan = ResourceClientPlan::decode(payload)
                 .map_err(|source| ClientExecutionError::InvalidArtifact { context, source })?;
             evaluate_stream_resource_plan(
-                active, &plan, context, expected, arguments, declarations, grants, state, depth,
+                active, &plan, context, lineage, expected, arguments, declarations, grants, state, depth,
                 principal, executor, local_environment,
             )
         }
@@ -3628,6 +3702,7 @@ fn evaluate_plan(
                 active,
                 &plan,
                 context,
+                lineage,
                 expected,
                 arguments,
                 declarations,
@@ -3687,6 +3762,7 @@ fn evaluate_stream_expression_plan(
     active: &ActiveDatabaseRevision,
     expression: &ClientExpressionNode,
     context: ClientExecutionContext,
+    lineage: ObserverLineage,
     expected: ResolvedType,
     arguments: &[(ParameterId, RuntimeValue)],
     declarations: &[capability::LocalCapabilityDeclaration],
@@ -3702,6 +3778,7 @@ fn evaluate_stream_expression_plan(
             active,
             expression,
             context,
+            lineage,
             arguments,
             declarations,
             grants,
@@ -3719,6 +3796,7 @@ fn evaluate_stream_expression_plan(
         active,
         expression,
         context,
+        lineage,
         expected,
         arguments,
         declarations,
@@ -3736,6 +3814,7 @@ fn evaluate_expression_plan(
     active: &ActiveDatabaseRevision,
     expression: &ClientExpressionNode,
     context: ClientExecutionContext,
+    lineage: ObserverLineage,
     expected: ResolvedType,
     arguments: &[(ParameterId, RuntimeValue)],
     declarations: &[capability::LocalCapabilityDeclaration],
@@ -3750,6 +3829,7 @@ fn evaluate_expression_plan(
         active,
         expression,
         context,
+        lineage,
         arguments,
         declarations,
         grants,
@@ -3773,6 +3853,7 @@ fn evaluate_stream_state_plan(
     active: &ActiveDatabaseRevision,
     plan: &StateClientPlan,
     context: ClientExecutionContext,
+    lineage: ObserverLineage,
     expected: ResolvedType,
     arguments: &[(ParameterId, RuntimeValue)],
     declarations: &[capability::LocalCapabilityDeclaration],
@@ -3784,11 +3865,11 @@ fn evaluate_stream_state_plan(
     local_environment: &mut ClientLocalEnvironment,
 ) -> Result<RuntimeValue, ClientExecutionError> {
     initialize_client_state(
-        active, plan, context, arguments, declarations, grants, state, depth, principal, executor,
+        active, plan, context, lineage, arguments, declarations, grants, state, depth, principal, executor,
         local_environment,
     )?;
     evaluate_stream_expression_plan(
-        active, plan.expression(), context, expected, arguments, declarations, grants, state, depth,
+        active, plan.expression(), context, lineage, expected, arguments, declarations, grants, state, depth,
         principal, executor, local_environment,
     )
 }
@@ -3798,6 +3879,7 @@ fn evaluate_state_plan(
     active: &ActiveDatabaseRevision,
     plan: &StateClientPlan,
     context: ClientExecutionContext,
+    lineage: ObserverLineage,
     expected: ResolvedType,
     arguments: &[(ParameterId, RuntimeValue)],
     declarations: &[capability::LocalCapabilityDeclaration],
@@ -3812,6 +3894,7 @@ fn evaluate_state_plan(
         active,
         plan,
         context,
+        lineage,
         arguments,
         declarations,
         grants,
@@ -3825,6 +3908,7 @@ fn evaluate_state_plan(
         active,
         plan.expression(),
         context,
+        lineage,
         expected,
         arguments,
         declarations,
@@ -3841,6 +3925,7 @@ fn evaluate_stream_resource_plan(
     active: &ActiveDatabaseRevision,
     plan: &ResourceClientPlan,
     context: ClientExecutionContext,
+    lineage: ObserverLineage,
     expected: ResolvedType,
     arguments: &[(ParameterId, RuntimeValue)],
     declarations: &[capability::LocalCapabilityDeclaration],
@@ -3852,7 +3937,7 @@ fn evaluate_stream_resource_plan(
     local_environment: &mut ClientLocalEnvironment,
 ) -> Result<RuntimeValue, ClientExecutionError> {
     evaluate_stream_expression_plan(
-        active, plan.expression(), context, expected, arguments, declarations, grants, state, depth,
+        active, plan.expression(), context, lineage, expected, arguments, declarations, grants, state, depth,
         principal, executor, local_environment,
     )
 }
@@ -3861,6 +3946,7 @@ fn evaluate_resource_plan(
     active: &ActiveDatabaseRevision,
     plan: &ResourceClientPlan,
     context: ClientExecutionContext,
+    lineage: ObserverLineage,
     expected: ResolvedType,
     arguments: &[(ParameterId, RuntimeValue)],
     declarations: &[capability::LocalCapabilityDeclaration],
@@ -3875,6 +3961,7 @@ fn evaluate_resource_plan(
         active,
         plan.expression(),
         context,
+        lineage,
         expected,
         arguments,
         declarations,
@@ -3898,6 +3985,7 @@ fn evaluate_procedural_plan(
     active: &ActiveDatabaseRevision,
     plan: &ProceduralClientPlan,
     context: ClientExecutionContext,
+    lineage: ObserverLineage,
     expected: ResolvedType,
     stream_result: bool,
     arguments: &[(ParameterId, RuntimeValue)],
@@ -3920,7 +4008,7 @@ fn evaluate_procedural_plan(
                     return Err(expression_error(context, ClientExpressionError::InvalidCall));
                 }
                 let binding = evaluate_procedural_local(
-                    active, local, expression, context, arguments, declarations, grants, state,
+                    active, local, expression, context, lineage, arguments, declarations, grants, state,
                     depth, principal, executor, local_environment,
                 )?;
                 local_environment.insert(local_id, binding);
@@ -3930,7 +4018,7 @@ fn evaluate_procedural_plan(
                     return Err(expression_error(context, ClientExpressionError::ParameterNotBound));
                 }
                 let binding = evaluate_procedural_local(
-                    active, local, expression, context, arguments, declarations, grants, state,
+                    active, local, expression, context, lineage, arguments, declarations, grants, state,
                     depth, principal, executor, local_environment,
                 )?;
                 local_environment.insert(local_id, binding);
@@ -3938,7 +4026,7 @@ fn evaluate_procedural_plan(
         }
     }
     let value = evaluate_expression(
-        active, plan.return_expression(), context, arguments, declarations, grants, state, depth,
+        active, plan.return_expression(), context, lineage, arguments, declarations, grants, state, depth,
         principal, executor, local_environment,
     )?;
     let result_matches = if stream_result {
@@ -3965,6 +4053,7 @@ fn evaluate_procedural_local(
     local: &ClientLocal,
     expression: &ClientExpressionNode,
     context: ClientExecutionContext,
+    lineage: ObserverLineage,
     arguments: &[(ParameterId, RuntimeValue)],
     declarations: &[capability::LocalCapabilityDeclaration],
     grants: &capability::LocalCapabilityGrantSet,
@@ -3983,7 +4072,7 @@ fn evaluate_procedural_local(
                 .ok_or_else(|| expression_error(context, ClientExpressionError::TypeMismatch))?;
             let stream_await = expression_returns_stream(active, expression, local_environment);
             let value = evaluate_expression_plan(
-                active, expression, context, expected, arguments, declarations, grants, state, depth,
+                active, expression, context, lineage, expected, arguments, declarations, grants, state, depth,
                 principal, executor, local_environment,
             )?;
             if stream_await {
@@ -4045,6 +4134,7 @@ fn evaluate_capability_plan(
     active: &ActiveDatabaseRevision,
     plan: &CapabilityClientPlan,
     context: ClientExecutionContext,
+    lineage: ObserverLineage,
     return_shape: ClientReturnShape,
     arguments: &[(ParameterId, RuntimeValue)],
     grants: &capability::LocalCapabilityGrantSet,
@@ -4068,6 +4158,7 @@ fn evaluate_capability_plan(
                     active,
                     inner.expression(),
                     context,
+                    lineage,
                     expected,
                     arguments,
                     &[],
@@ -4086,6 +4177,7 @@ fn evaluate_capability_plan(
                 active,
                 inner.expression(),
                 context,
+                lineage,
                 expected,
                 arguments,
                 &[],
@@ -4100,7 +4192,7 @@ fn evaluate_capability_plan(
         InnerClientPlan::State(inner) => {
             if let ClientReturnShape::StreamState(expected) = return_shape {
                 return evaluate_stream_state_plan(
-                    active, inner, context, expected, arguments, &[], grants, state, depth,
+                    active, inner, context, lineage, expected, arguments, &[], grants, state, depth,
                     principal, executor, local_environment,
                 );
             }
@@ -4111,6 +4203,7 @@ fn evaluate_capability_plan(
                 active,
                 inner,
                 context,
+                lineage,
                 expected,
                 arguments,
                 &[],
@@ -4125,7 +4218,7 @@ fn evaluate_capability_plan(
         InnerClientPlan::Procedural(inner) => {
             if let ClientReturnShape::StreamProcedural(expected) = return_shape {
                 return evaluate_procedural_plan(
-                    active, inner, context, expected, true, arguments, &[], grants, state, depth,
+                    active, inner, context, lineage, expected, true, arguments, &[], grants, state, depth,
                     principal, executor, local_environment,
                 );
             }
@@ -4133,18 +4226,18 @@ fn evaluate_capability_plan(
                 unreachable!("function shape was validated against the inner plan version");
             };
             evaluate_procedural_plan(
-                active, inner, context, expected, false, arguments, &[], grants, state, depth, principal,
+                active, inner, context, lineage, expected, false, arguments, &[], grants, state, depth, principal,
                 executor, local_environment,
             )
         }
         InnerClientPlan::Action(inner) => {
             let ClientReturnShape::Action(_expected) = return_shape else { unreachable!("function shape was validated against the inner plan version"); };
-            evaluate_action_operation(active, inner.operation(), context, arguments, &[], grants, state, depth, principal, executor, local_environment)
+            evaluate_action_operation(active, inner.operation(), context, lineage, arguments, &[], grants, state, depth, principal, executor, local_environment)
         }
         InnerClientPlan::Resource(inner) => {
             if let ClientReturnShape::StreamResource(expected) = return_shape {
                 return evaluate_stream_resource_plan(
-                    active, inner, context, expected, arguments, &[], grants, state, depth,
+                    active, inner, context, lineage, expected, arguments, &[], grants, state, depth,
                     principal, executor, local_environment,
                 );
             }
@@ -4155,6 +4248,7 @@ fn evaluate_capability_plan(
                 active,
                 inner,
                 context,
+                lineage,
                 expected,
                 arguments,
                 &[],
@@ -4272,6 +4366,7 @@ fn evaluate_resource_expression(
     active: &ActiveDatabaseRevision,
     operation: &ResourceOperationNode,
     context: ClientExecutionContext,
+    lineage: ObserverLineage,
     arguments: &[(ParameterId, RuntimeValue)],
     declarations: &[capability::LocalCapabilityDeclaration],
     grants: &capability::LocalCapabilityGrantSet,
@@ -4307,6 +4402,7 @@ fn evaluate_resource_expression(
             active,
             expression,
             context,
+            lineage,
             arguments,
             declarations,
             grants,
@@ -4417,7 +4513,7 @@ fn evaluate_resource_expression(
             active,
             operation.kind(),
             ClientResourceInvocationContext::new(
-                context.parent_invocation_id(),
+                lineage.current,
                 operation.call_site_id(),
                 state_profile,
                 function_instance_key,
@@ -4773,6 +4869,7 @@ fn evaluate_action_operation(
     active: &ActiveDatabaseRevision,
     operation: &orna_artifact::client_plan::ActionOperationNode,
     context: ClientExecutionContext,
+    lineage: ObserverLineage,
     arguments: &[(ParameterId, RuntimeValue)],
     declarations: &[capability::LocalCapabilityDeclaration],
     grants: &capability::LocalCapabilityGrantSet,
@@ -4788,6 +4885,7 @@ fn evaluate_action_operation(
             active,
             expression,
             context,
+            lineage,
             arguments,
             declarations,
             grants,
@@ -5065,7 +5163,11 @@ pub fn trigger_client_action(
                 &mut staged,
                 0,
                 authorisation.session_principal(),
-                request.request_id(),
+                ObserverLineage {
+                    root: parent.parent_invocation_id(),
+                    parent: parent.parent_invocation_id(),
+                    current: request.request_id(),
+                },
                 &mut nested,
             );
             let completion = match result {
@@ -5126,6 +5228,7 @@ const DEVTOOLS_INSPECTOR_SHELL_CONTRACT: &str = "devtools.inspector_shell@1";
 fn evaluate_external_contract(
     identity: &str,
     context: ClientExecutionContext,
+    lineage: ObserverLineage,
     arguments: &[(ParameterId, RuntimeValue)],
     executor: &mut Option<&mut dyn ClientResourceExecutor>,
 ) -> Result<RuntimeValue, ClientExecutionError> {
@@ -5142,10 +5245,11 @@ fn evaluate_external_contract(
             source: ClientInspectError::Failed("inspect.runtime_unavailable".to_owned()),
         });
     };
-    let request = ClientExternalContractRequest::new(
+    let request = ClientExternalContractRequest::with_lineage(
         context,
         identity,
         arguments.to_vec(),
+        lineage,
     );
     executor
         .external_contract(request)
@@ -5244,6 +5348,13 @@ fn validate_inspector_shell_contract(
             return Err(inspector_shell_contract_error(context));
         }
     }
+    let Some((_, snapshot)) = arguments.first() else {
+        return Err(inspector_shell_contract_error(context));
+    };
+    let snapshot = decode_inspect_carrier(active, snapshot, SYS_INSPECT_SNAPSHOT_TYPE_ID)
+        .map_err(|_| inspector_shell_contract_error(context))?;
+    inspect_snapshot_target_from_envelope(active, &snapshot)
+        .map_err(|_| inspector_shell_contract_error(context))?;
     Ok(())
 }
 
@@ -5320,12 +5431,16 @@ fn inspect_projection_result_type(projection: InspectProjection) -> TypeId {
     }
 }
 
+#[cfg(test)]
 fn inspect_target_is_observer(
     context: ClientExecutionContext,
     target: InvocationId,
 ) -> bool {
-    target == context.observer_root_invocation_id()
-        || target == context.observer_parent_invocation_id()
+    inspect_target_is_observer_with_lineage(ObserverLineage::compatibility(context), target)
+}
+
+fn inspect_target_is_observer_with_lineage(lineage: ObserverLineage, target: InvocationId) -> bool {
+    target == lineage.root || target == lineage.parent || target == lineage.current
 }
 
 fn inspect_invocation_target(value: &RuntimeValue) -> Option<InvocationId> {
@@ -5424,6 +5539,7 @@ fn evaluate_inspect_expression(
     active: &ActiveDatabaseRevision,
     operation: &InspectOperationNode,
     context: ClientExecutionContext,
+    lineage: ObserverLineage,
     arguments: &[(ParameterId, RuntimeValue)],
     declarations: &[capability::LocalCapabilityDeclaration],
     grants: &capability::LocalCapabilityGrantSet,
@@ -5454,7 +5570,7 @@ fn evaluate_inspect_expression(
     let operation = match operation {
         InspectOperationNode::Snapshot { target, options } => {
             let target = evaluate_expression(
-                active, target, context, arguments, declarations, grants, state, depth + 1,
+                active, target, context, lineage, arguments, declarations, grants, state, depth + 1,
                 principal, executor, local_environment,
             )?;
             let Some(invocation) = inspect_invocation_target(&target) else {
@@ -5463,7 +5579,7 @@ fn evaluate_inspect_expression(
                     source: ClientInspectError::InvalidTarget,
                 });
             };
-            if inspect_target_is_observer(context, invocation)
+            if inspect_target_is_observer_with_lineage(lineage, invocation)
             {
                 return Err(ClientExecutionError::Inspect {
                     context,
@@ -5472,7 +5588,7 @@ fn evaluate_inspect_expression(
             }
             if let Some(options) = options {
                 let options = evaluate_expression(
-                    active, options, context, arguments, declarations, grants, state, depth + 1,
+                    active, options, context, lineage, arguments, declarations, grants, state, depth + 1,
                     principal, executor, local_environment,
                 )?;
                 if !runtime_value_matches(
@@ -5492,7 +5608,7 @@ fn evaluate_inspect_expression(
         }
         InspectOperationNode::Projection { projection, snapshot } => {
             let snapshot = evaluate_expression(
-                active, snapshot, context, arguments, declarations, grants, state, depth + 1,
+                active, snapshot, context, lineage, arguments, declarations, grants, state, depth + 1,
                 principal, executor, local_environment,
             )?;
             let snapshot_envelope = match decode_inspect_carrier(
@@ -5507,7 +5623,7 @@ fn evaluate_inspect_expression(
             };
             let invocation = inspect_snapshot_target_from_envelope(active, &snapshot_envelope)
                 .map_err(|source| ClientExecutionError::Inspect { context, source })?;
-            if inspect_target_is_observer(context, invocation) {
+            if inspect_target_is_observer_with_lineage(lineage, invocation) {
                 return Err(ClientExecutionError::Inspect {
                     context,
                     source: inspect_carrier_error("inspect.recursion"),
@@ -5533,13 +5649,21 @@ fn evaluate_inspect_expression(
             operation.clone(),
             target,
             options,
+            lineage,
         ),
         (Some(target), None) => ClientInspectRequest::with_target_invocation(
             context,
             operation.clone(),
             target,
+            lineage,
         ),
-        (None, None) => ClientInspectRequest::new(context, operation.clone()),
+        (None, None) => ClientInspectRequest::with_provenance(
+            context,
+            operation.clone(),
+            None,
+            None,
+            lineage,
+        ),
         (None, Some(_)) => unreachable!("snapshot options require a target"),
     };
     let value = executor.inspect(request).map_err(|code| ClientExecutionError::Inspect {
@@ -5583,6 +5707,7 @@ fn evaluate_expression(
     active: &ActiveDatabaseRevision,
     expression: &ClientExpressionNode,
     context: ClientExecutionContext,
+    lineage: ObserverLineage,
     arguments: &[(ParameterId, RuntimeValue)],
     declarations: &[capability::LocalCapabilityDeclaration],
     grants: &capability::LocalCapabilityGrantSet,
@@ -5595,7 +5720,7 @@ fn evaluate_expression(
     match expression {
         ClientExpressionNode::Await { expression } => match expression.as_ref() {
             ClientExpressionNode::Resource { operation } => evaluate_resource_expression(
-                active, operation, context, arguments, declarations, grants, state, depth, principal,
+                active, operation, context, lineage, arguments, declarations, grants, state, depth, principal,
                 executor, local_environment,
             ),
             ClientExpressionNode::LocalRead { local } => {
@@ -5604,22 +5729,22 @@ fn evaluate_expression(
                 };
                 let operation = operation.clone();
                 evaluate_resource_expression(
-                    active, &operation, context, arguments, declarations, grants, state, depth, principal,
+                    active, &operation, context, lineage, arguments, declarations, grants, state, depth, principal,
                     executor, local_environment,
                 )
             }
             _ => Err(expression_error(context, ClientExpressionError::InvalidCall)),
         },
         ClientExpressionNode::Resource { operation } => evaluate_resource_expression(
-            active, operation, context, arguments, declarations, grants, state, depth, principal,
+            active, operation, context, lineage, arguments, declarations, grants, state, depth, principal,
             executor, local_environment,
         ),
         ClientExpressionNode::Action { operation } => evaluate_action_operation(
-            active, operation, context, arguments, declarations, grants, state, depth, principal,
+            active, operation, context, lineage, arguments, declarations, grants, state, depth, principal,
             executor, local_environment,
         ),
         ClientExpressionNode::Inspect { operation } => evaluate_inspect_expression(
-            active, operation, context, arguments, declarations, grants, state, depth, principal,
+            active, operation, context, lineage, arguments, declarations, grants, state, depth, principal,
             executor, local_environment,
         ),
         ClientExpressionNode::String { value } => Ok(RuntimeValue::Text(value.clone())),
@@ -5651,11 +5776,11 @@ fn evaluate_expression(
         }
         ClientExpressionNode::Concat { left, right } => {
             let left = evaluate_expression(
-                active, left, context, arguments, declarations, grants, state, depth, principal,
+                active, left, context, lineage, arguments, declarations, grants, state, depth, principal,
                 executor, local_environment,
             )?;
             let right = evaluate_expression(
-                active, right, context, arguments, declarations, grants, state, depth, principal,
+                active, right, context, lineage, arguments, declarations, grants, state, depth, principal,
                 executor, local_environment,
             )?;
             let (RuntimeValue::Text(left), RuntimeValue::Text(right)) = (left, right) else {
@@ -5673,7 +5798,7 @@ fn evaluate_expression(
                     return Err(expression_error(context, ClientExpressionError::InvalidCall));
                 }
                 let value = evaluate_expression(
-                    active, expression, context, arguments, declarations, grants, state, depth, principal,
+                    active, expression, context, lineage, arguments, declarations, grants, state, depth, principal,
                     executor, local_environment,
                 )?;
                 evaluated.push((*parameter, value));
@@ -5687,7 +5812,7 @@ fn evaluate_expression(
                 state,
                 depth + 1,
                 principal,
-                context.parent_invocation_id(),
+                lineage.nested(),
                 executor,
             )?;
             Ok(value)
@@ -5695,7 +5820,7 @@ fn evaluate_expression(
         ClientExpressionNode::ExternalContract { identity } => {
             if identity == DEVTOOLS_INSPECTOR_SHELL_CONTRACT {
                 validate_inspector_shell_contract(active, context, identity, arguments)?;
-                let value = evaluate_external_contract(identity, context, arguments, executor)?;
+                let value = evaluate_external_contract(identity, context, lineage, arguments, executor)?;
                 if !inspector_shell_ui_value_matches(active, &value) {
                     return Err(ClientExecutionError::Inspect {
                         context,
@@ -5704,7 +5829,7 @@ fn evaluate_expression(
                 }
                 Ok(value)
             } else {
-                evaluate_external_contract(identity, context, arguments, executor)
+                evaluate_external_contract(identity, context, lineage, arguments, executor)
             }
         }
 }
@@ -6028,6 +6153,7 @@ fn initialize_client_state(
     active: &ActiveDatabaseRevision,
     plan: &StateClientPlan,
     context: ClientExecutionContext,
+    lineage: ObserverLineage,
     arguments: &[(ParameterId, RuntimeValue)],
     declarations: &[capability::LocalCapabilityDeclaration],
     grants: &capability::LocalCapabilityGrantSet,
@@ -6078,6 +6204,7 @@ fn initialize_client_state(
                     active,
                     node,
                     context,
+                    lineage,
                     arguments,
                     declarations,
                     grants,
@@ -6731,7 +6858,8 @@ mod tests {
             super::evaluate_external_contract(
                 "devtools.inspector_shell@1",
                 context,
-                &[(parameter, RuntimeValue::Boolean(true))],
+            super::ObserverLineage::compatibility(context),
+            &[(parameter, RuntimeValue::Boolean(true))],
                 &mut optional,
             )
             .unwrap(),
@@ -6759,7 +6887,8 @@ mod tests {
             super::evaluate_external_contract(
                 "app.other@1",
                 context,
-                &[(parameter, RuntimeValue::Boolean(true))],
+            super::ObserverLineage::compatibility(context),
+            &[(parameter, RuntimeValue::Boolean(true))],
                 &mut optional,
             ),
             Err(super::ClientExecutionError::ExternalContract { identity, .. })
@@ -6769,7 +6898,8 @@ mod tests {
             super::evaluate_external_contract(
                 "devtools.inspector_shell@1",
                 context,
-                &[],
+            super::ObserverLineage::compatibility(context),
+            &[],
                 &mut optional,
             ),
             Err(super::ClientExecutionError::Inspect {
@@ -6833,6 +6963,81 @@ mod tests {
         assert_eq!(request.observer_parent_invocation_id(), context.parent_invocation_id());
         assert_eq!(request.observer_purpose(), "inspect");
         assert_eq!(request.target_invocation_id(), Some(super::InvocationId::from_bytes([0x06; 16])));
+    }
+
+    #[test]
+    fn nested_observer_lineage_propagates_root_parent_and_current() {
+        let root = super::InvocationId::from_bytes([0x31; 16]);
+        let top = super::ObserverLineage::top_level(root);
+        assert_eq!(top.root, root);
+        assert_eq!(top.parent, root);
+        assert_eq!(top.current, root);
+
+        let nested = top.nested();
+        assert_eq!(nested.root, root);
+        assert_eq!(nested.parent, root);
+        assert_ne!(nested.current, root);
+
+        let child = nested.nested();
+        assert_eq!(child.root, root);
+        assert_eq!(child.parent, nested.current);
+        assert_ne!(child.current, nested.current);
+
+        let context = super::ClientExecutionContext {
+            pair: super::RevisionPair::new(
+                orna_core::SourceRevisionId::from_bytes([0x32; 16]),
+                orna_core::CatalogueRevisionId::from_bytes([0x33; 16]),
+            ),
+            function: super::FunctionId::from_bytes([0x34; 16]),
+            function_revision: super::FunctionRevisionId::from_bytes([0x35; 16]),
+            parent_invocation_id: nested.current,
+        };
+        let operation = super::ClientInspectOperation::Snapshot {
+            target: super::RuntimeValue::Boolean(true),
+        };
+        let request = super::ClientInspectRequest::with_provenance(
+            context, operation, None, None, nested,
+        );
+        assert_eq!(request.observer_root_invocation_id(), root);
+        assert_eq!(request.observer_parent_invocation_id(), nested.current);
+
+        let mut executor = super::DeterministicClientResourceExecutor::new(
+            |_: &super::ClientResourceRequest| Ok::<_, String>(RuntimeValue::Boolean(false)),
+        )
+        .with_external_contract(move |request| {
+            assert_eq!(request.observer_root_invocation_id(), root);
+            assert_eq!(request.observer_parent_invocation_id(), child.current);
+            Ok(RuntimeValue::Text("ui".to_owned()))
+        });
+        let mut executor_slot: Option<&mut dyn super::ClientResourceExecutor> = Some(&mut executor);
+        let value = super::evaluate_external_contract(
+            "devtools.inspector_shell",
+            context,
+            child,
+            &[],
+            &mut executor_slot,
+        )
+        .unwrap();
+        assert_eq!(value, RuntimeValue::Text("ui".to_owned()));
+    }
+
+    #[test]
+    fn inspector_snapshot_validation_rejects_empty_carrier_rows() {
+        let (active, _, pair, _) = version_one_active(true);
+        let envelope = super::InspectCarrierEnvelope::new(
+            super::InspectCarrierKind::Snapshot,
+            7,
+            pair.source(),
+            pair.catalogue(),
+            Vec::new(),
+        )
+        .unwrap();
+        assert_eq!(
+            super::inspect_snapshot_target_from_envelope(&active, &envelope),
+            Err(super::ClientInspectError::Failed(
+                "inspect.malformed_carrier".to_owned(),
+            )),
+        );
     }
 
     #[test]
@@ -7739,6 +7944,7 @@ fn client_stream_cancellation_clears_batches_and_rejects_stale_completions() {
             &active,
             &expression,
             context,
+            super::ObserverLineage::compatibility(context),
             item_type,
             &[],
             &[],
@@ -7781,6 +7987,7 @@ fn client_stream_cancellation_clears_batches_and_rejects_stale_completions() {
             &active,
             &procedural,
             context,
+            super::ObserverLineage::compatibility(context),
             item_type,
             false,
             &[],
@@ -7840,6 +8047,7 @@ fn client_stream_cancellation_clears_batches_and_rejects_stale_completions() {
             &active,
             &value_procedural,
             context,
+            super::ObserverLineage::compatibility(context),
             item_type,
             false,
             &[],
