@@ -298,6 +298,14 @@ const RAW_ACTION_CLIENT_SOURCE: &str = "CREATE CLIENT FUNCTION action_fixture.ca
     AS std.action.call(\n\
       target => std.invoke.echo,\n\
       arguments => std.call.args(p_value => p_value)\n\
+    );\n\
+    CREATE CLIENT FUNCTION action_fixture.local(p_value INTEGER)\n\
+    RETURNS INTEGER AS p_value;\n\
+    CREATE CLIENT FUNCTION action_fixture.call_local(p_value INTEGER)\n\
+    RETURNS std.Action\n\
+    AS std.action.call(\n\
+      target => action_fixture.local,\n\
+      arguments => std.call.args(p_value => p_value)\n\
     );\n";
 const RAW_EXTERNAL_CAPABILITY_SOURCE: &str = "CREATE SCHEMA cap;\n\
     CREATE EXTERNAL CLIENT FUNCTION cap.read() RETURNS TEXT\n\
@@ -2603,8 +2611,17 @@ async fn proves_server_action_resource_trigger_through_authenticated_executor() 
             .ok_or_else(|| failure("action fixture has no checked standard source"))?;
         let standard = check_standard_library_source(&standard_source)
             .map_err(|error| failure(format!("installed standard source check failed: {error:?}")))?;
-        let (active, client, target, client_parameter, target_parameter) =
-            install_action_client_fixture(&kernel, &active, &standard).await?;
+        let (
+            active,
+            client,
+            target,
+            client_parameter,
+            target_parameter,
+            local_client,
+            local_target,
+            local_client_parameter,
+            local_target_parameter,
+        ) = install_action_client_fixture(&kernel, &active, &standard).await?;
         let mut function_targets = active
             .catalogue()
             .functions()
@@ -2636,6 +2653,8 @@ async fn proves_server_action_resource_trigger_through_authenticated_executor() 
             vec![
                 ExecuteGrant::new(RAW_CLIENT_USER, client),
                 ExecuteGrant::new(RAW_CLIENT_USER, target),
+                ExecuteGrant::new(RAW_CLIENT_USER, local_client),
+                ExecuteGrant::new(RAW_CLIENT_USER, local_target),
             ],
             vec![LocalPeerCredential::new(uid, RAW_CLIENT_USER)],
         )?;
@@ -2659,6 +2678,26 @@ async fn proves_server_action_resource_trigger_through_authenticated_executor() 
             &authorisation,
             std::slice::from_ref(&argument),
         )?;
+        let local_authorisation = match security.authorise_execute(
+            &session,
+            InvocationTarget::new(local_client, active.pair()),
+        ) {
+            ExecuteDecision::Allowed(authorisation) => authorisation,
+            ExecuteDecision::Denied(denial) => {
+                return Err(failure(format!(
+                    "installed local action grant was denied: {denial:?}"
+                )))
+            }
+        };
+        let local_argument = FunctionArgument::new(
+            local_client_parameter,
+            RuntimeValue::Integer(43),
+        )?;
+        let local_result = evaluate_client_function_with_arguments(
+            &active,
+            &local_authorisation,
+            std::slice::from_ref(&local_argument),
+        )?;
         let RuntimeValue::Opaque(action) = result.value() else {
             return Err(failure("action CLIENT function did not return an opaque action value"));
         };
@@ -2671,6 +2710,21 @@ async fn proves_server_action_resource_trigger_through_authenticated_executor() 
                 && descriptor.arguments()[0].parameter() == target_parameter
                 && descriptor.arguments()[0].value() == argument.value(),
             "action value lost its authenticated SERVER target or canonical argument",
+        )?;
+        let RuntimeValue::Opaque(local_action) = local_result.value() else {
+            return Err(failure(
+                "local action CLIENT function did not return an opaque action value",
+            ));
+        };
+        let local_descriptor = decode_action_payload(&active, local_action.canonical_payload())?;
+        require(
+            local_descriptor.domain() == ActionTargetDomain::Client
+                && local_descriptor.target() == local_target
+                && local_descriptor.target_revision() == active.pair()
+                && local_descriptor.arguments().len() == 1
+                && local_descriptor.arguments()[0].parameter() == local_target_parameter
+                && local_descriptor.arguments()[0].value() == local_argument.value(),
+            "local action value lost its authenticated CLIENT target or canonical argument",
         )?;
         let mut action_state = ClientActionState::default();
         let mut state = ClientStateStore::default();
@@ -2719,6 +2773,25 @@ async fn proves_server_action_resource_trigger_through_authenticated_executor() 
             outcome == ClientActionOutcome::Completed
                 && matches!(action_state.status(), ClientResourceStatus::Idle),
             "authenticated SERVER action did not complete through the installed executor",
+        )?;
+        let mut local_action_state = ClientActionState::default();
+        let mut local_state = ClientStateStore::default();
+        let mut local_executor = DeterministicStreamResourceExecutor;
+        let local_action_result = trigger_client_action(
+            &active,
+            local_result.value(),
+            &local_authorisation,
+            local_result.context(),
+            &mut local_action_state,
+            &[],
+            &LocalCapabilityGrantSet::new(),
+            &mut local_state,
+            &mut local_executor,
+        );
+        require(
+            local_action_result == Ok(ClientActionOutcome::Completed)
+                && matches!(local_action_state.status(), ClientResourceStatus::Idle),
+            "local CLIENT action did not complete through the installed executor",
         )?;
         let parent_invocation_id = result.context().parent_invocation_id().to_bytes().to_vec();
         let target_bytes = target.to_bytes().to_vec();
@@ -2798,7 +2871,7 @@ async fn proves_server_action_denial_stays_inside_authenticated_resource_trigger
             .ok_or_else(|| failure("action denial fixture has no checked standard source"))?;
         let standard = check_standard_library_source(&standard_source)
             .map_err(|error| failure(format!("action denial standard source check failed: {error:?}")))?;
-        let (active, client, target, client_parameter, target_parameter) =
+        let (active, client, target, client_parameter, target_parameter, _, _, _, _) =
             install_action_client_fixture(&kernel, &active, &standard).await?;
         let mut function_targets = active
             .catalogue()
@@ -11215,6 +11288,10 @@ async fn install_action_client_fixture(
     FunctionId,
     ParameterId,
     ParameterId,
+    FunctionId,
+    FunctionId,
+    ParameterId,
+    ParameterId,
 )> {
     let append_source = |active: &orna_core::revision::ActiveDatabaseRevision, body: &str| -> TestResult<SourceBundle> {
         if active.source().units().is_empty() {
@@ -11290,7 +11367,39 @@ async fn install_action_client_fixture(
         .ok_or_else(|| failure("action fixture CLIENT function is missing p_value"))?
         .id();
     let target = target_definition.id();
-    Ok((active, client, target, client_parameter, target_parameter))
+    let local_target_definition = active
+        .catalogue()
+        .functions()
+        .iter()
+        .find(|function| function.name().parts() == ["action_fixture", "local"])
+        .ok_or_else(|| failure("action fixture is missing its local CLIENT target"))?;
+    let local_target = local_target_definition.id();
+    let local_target_parameter = local_target_definition
+        .parameter_by_name("p_value")
+        .ok_or_else(|| failure("action fixture local CLIENT target is missing p_value"))?
+        .id();
+    let local_client_definition = active
+        .catalogue()
+        .functions()
+        .iter()
+        .find(|function| function.name().parts() == ["action_fixture", "call_local"])
+        .ok_or_else(|| failure("action fixture is missing its local action CLIENT function"))?;
+    let local_client = local_client_definition.id();
+    let local_client_parameter = local_client_definition
+        .parameter_by_name("p_value")
+        .ok_or_else(|| failure("action fixture local action CLIENT function is missing p_value"))?
+        .id();
+    Ok((
+        active,
+        client,
+        target,
+        client_parameter,
+        target_parameter,
+        local_client,
+        local_target,
+        local_client_parameter,
+        local_target_parameter,
+    ))
 }
 
 
