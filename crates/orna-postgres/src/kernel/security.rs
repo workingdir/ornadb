@@ -200,6 +200,8 @@ use orna_standard::{
 };
 use tokio_postgres::{IsolationLevel, Row, Transaction, types::FromSqlOwned};
 
+use super::PostgresSession;
+
 use crate::{
     PostgresKernel, PostgresKernelError, RawServerTargetError,
     bootstrap::require_current_migrations,
@@ -434,6 +436,13 @@ pub(crate) struct ResourceProducerCancelled {
 pub(crate) struct ResourceProducerFailed {
     pub(crate) response: Option<tokio::sync::oneshot::Sender<Result<AuthenticatedServerResourceEvent, PostgresKernelError>>>,
     pub(crate) error: PostgresKernelError,
+}
+
+#[derive(Default)]
+struct ResourceProducerLifecycle {
+    invocation: Option<InvocationId>,
+    target: Option<InvocationTarget>,
+    acceptance_committed: bool,
 }
 
 /// The owned redacted result of one sealed `sys.invoke` dispatch.
@@ -1874,6 +1883,39 @@ impl PostgresKernel {
         request: &ResourceRequest,
         cancellation: &ResourceCancellation,
     ) -> Result<AuthenticatedServerResourceStart, PostgresKernelError> {
+        self.start_authenticated_server_resource_producer_with_failure_hook(
+            authenticated_session,
+            request,
+            cancellation,
+            false,
+        )
+        .await
+    }
+
+    #[cfg(feature = "test-hooks")]
+    #[doc(hidden)]
+    pub async fn start_authenticated_server_resource_producer_with_forced_pre_acceptance_failure(
+        &self,
+        authenticated_session: &AuthenticatedSession,
+        request: &ResourceRequest,
+        cancellation: &ResourceCancellation,
+    ) -> Result<AuthenticatedServerResourceStart, PostgresKernelError> {
+        self.start_authenticated_server_resource_producer_with_failure_hook(
+            authenticated_session,
+            request,
+            cancellation,
+            true,
+        )
+        .await
+    }
+
+    async fn start_authenticated_server_resource_producer_with_failure_hook(
+        &self,
+        authenticated_session: &AuthenticatedSession,
+        request: &ResourceRequest,
+        cancellation: &ResourceCancellation,
+        force_pre_acceptance_failure: bool,
+    ) -> Result<AuthenticatedServerResourceStart, PostgresKernelError> {
         validate_resource_state_context(request)?;
         if !self.reserve_resource_request_id(request.request_id).await? {
             return Ok(AuthenticatedServerResourceStart::Failed {
@@ -1895,6 +1937,7 @@ impl PostgresKernel {
                 session,
                 request,
                 worker_cancellation,
+                force_pre_acceptance_failure,
                 command_receiver,
                 ready_sender,
             )
@@ -3370,17 +3413,230 @@ async fn commit_post_acceptance_resource_error_audit(
     finish_authenticated_server_select_session(operation, session.shutdown().await)
 }
 
+fn send_resource_producer_ready(
+    ready_sender: &mut Option<
+        tokio::sync::oneshot::Sender<Result<ResourceProducerReady, PostgresKernelError>>,
+    >,
+    result: Result<ResourceProducerReady, PostgresKernelError>,
+) {
+    if let Some(sender) = ready_sender.take() {
+        let _ = sender.send(result);
+    }
+}
+
+fn finish_resource_producer_failure(
+    ready_sender: &mut Option<
+        tokio::sync::oneshot::Sender<Result<ResourceProducerReady, PostgresKernelError>>,
+    >,
+    stream_id: u64,
+    request_id: InvocationId,
+    result: Result<(), PostgresKernelError>,
+) -> Result<(), PostgresKernelError> {
+    if result.is_ok() {
+        send_resource_producer_ready(
+            ready_sender,
+            Ok(ResourceProducerReady::Failed {
+                stream_id,
+                request_id,
+                failure: CallFailure::InternalFailure,
+            }),
+        );
+    }
+    result
+}
+
+/// Repairs the durable evidence for a reserved resource request after the
+/// worker transaction and session have been closed.
+///
+/// The reservation row is the per-request mutex. A normal terminal path has
+/// already inserted the resource row, so the repair is a no-op in that case.
+/// Otherwise this appends only closed invocation/resource identities and never
+/// crosses request arguments, result values, credentials, or authority data.
+async fn finalize_reserved_resource_request(
+    kernel: &PostgresKernel,
+    authenticated_session: &AuthenticatedSession,
+    request: &ResourceRequest,
+    cancellation: &ResourceCancellation,
+    lifecycle: &ResourceProducerLifecycle,
+) -> Result<(), PostgresKernelError> {
+    let mut database_session = kernel.open().await?;
+    let operation = async {
+        let transaction = database_session
+            .client
+            .build_transaction()
+            .isolation_level(IsolationLevel::ReadCommitted)
+            .start()
+            .await
+            .map_err(PostgresKernelError::Database)?;
+        require_current_migrations(&transaction).await?;
+        let request_id = request.request_id.to_bytes().to_vec();
+        let reserved = transaction
+            .query_opt(
+                "SELECT request_id
+                 FROM _orna_kernel.resource_request_history
+                 WHERE request_id = $1
+                 FOR UPDATE",
+                &[&request_id],
+            )
+            .await
+            .map_err(PostgresKernelError::Database)?;
+        if reserved.is_none() {
+            transaction
+                .commit()
+                .await
+                .map_err(PostgresKernelError::Database)?;
+            return Ok(());
+        }
+        let terminal = transaction
+            .query_opt(
+                "SELECT 1
+                 FROM _orna_kernel.resource_audit_events
+                 WHERE request_id = $1",
+                &[&request_id],
+            )
+            .await
+            .map_err(PostgresKernelError::Database)?;
+        if terminal.is_some() {
+            transaction
+                .commit()
+                .await
+                .map_err(PostgresKernelError::Database)?;
+            return Ok(());
+        }
+
+        let invocation = if lifecycle.acceptance_committed {
+            lifecycle.invocation.ok_or_else(|| PostgresKernelError::DurableInvariant {
+                relation: "resource producer",
+                record: request.request_id.canonical(),
+                rule: "accepted resource producer must retain its invocation identity",
+            })?
+        } else {
+            lifecycle.invocation.unwrap_or_else(InvocationId::new)
+        };
+        let (decision, target) = if lifecycle.acceptance_committed {
+            (SecurityAuditOutcome::Allowed, lifecycle.target)
+        } else {
+            append_unresolved_invocation_audit(
+                &transaction,
+                authenticated_session,
+                invocation,
+            )
+            .await?;
+            (SecurityAuditOutcome::Denied, None)
+        };
+        let commit_started = cancellation.try_begin_commit();
+        let terminal = if commit_started {
+            ResourceAuditTerminalOutcome::Failed
+        } else {
+            ResourceAuditTerminalOutcome::Cancelled
+        };
+        append_resource_audit_event(
+            &transaction,
+            authenticated_session,
+            request,
+            invocation,
+            decision,
+            terminal,
+            target,
+            None,
+            None,
+        )
+        .await?;
+        let result = transaction
+            .commit()
+            .await
+            .map_err(PostgresKernelError::Database);
+        if result.is_ok() && commit_started {
+            cancellation.commit_finished();
+        }
+        result
+    }
+    .await;
+    finish_authenticated_server_select_session(operation, database_session.shutdown().await)
+}
+
 async fn run_authenticated_server_resource_producer_task(
     kernel: PostgresKernel,
     authenticated_session: AuthenticatedSession,
     request: ResourceRequest,
     cancellation: ResourceCancellation,
-    mut commands: tokio::sync::mpsc::Receiver<ResourceProducerCommand>,
+    force_pre_acceptance_failure: bool,
+    commands: tokio::sync::mpsc::Receiver<ResourceProducerCommand>,
     ready_sender: tokio::sync::oneshot::Sender<
         Result<ResourceProducerReady, PostgresKernelError>,
     >,
 ) -> Result<(), PostgresKernelError> {
-    let mut database_session = kernel.open().await?;
+    let mut lifecycle = ResourceProducerLifecycle::default();
+    let mut ready_sender = Some(ready_sender);
+    let worker_result = async {
+        let mut database_session = kernel.open().await?;
+        let operation = run_authenticated_server_resource_producer_task_body(
+            kernel.clone(),
+            authenticated_session.clone(),
+            request.clone(),
+            cancellation.clone(),
+            force_pre_acceptance_failure,
+            &mut database_session,
+            commands,
+            &mut ready_sender,
+            &mut lifecycle,
+        )
+        .await;
+        let shutdown = database_session.shutdown().await;
+        finish_authenticated_server_select_session(operation, shutdown)
+    }
+    .await;
+    let finalizer = finalize_reserved_resource_request(
+        &kernel,
+        &authenticated_session,
+        &request,
+        &cancellation,
+        &lifecycle,
+    )
+    .await;
+    match worker_result {
+        Err(error) => {
+            if let Err(finalizer_error) = finalizer {
+                if ready_sender.is_some() {
+                    send_resource_producer_ready(&mut ready_sender, Err(finalizer_error));
+                    return Ok(());
+                }
+                return Err(finalizer_error);
+            }
+            if ready_sender.is_some() {
+                send_resource_producer_ready(&mut ready_sender, Err(error));
+                Ok(())
+            } else {
+                Err(error)
+            }
+        }
+        Ok(()) => {
+            send_resource_producer_ready(
+                &mut ready_sender,
+                Ok(ResourceProducerReady::Failed {
+                    stream_id: request.stream_id,
+                    request_id: request.request_id,
+                    failure: CallFailure::InternalFailure,
+                }),
+            );
+            finalizer
+        }
+    }
+}
+
+async fn run_authenticated_server_resource_producer_task_body(
+    kernel: PostgresKernel,
+    authenticated_session: AuthenticatedSession,
+    request: ResourceRequest,
+    cancellation: ResourceCancellation,
+    force_pre_acceptance_failure: bool,
+    database_session: &mut PostgresSession,
+    mut commands: tokio::sync::mpsc::Receiver<ResourceProducerCommand>,
+    ready_sender: &mut Option<
+        tokio::sync::oneshot::Sender<Result<ResourceProducerReady, PostgresKernelError>>,
+    >,
+    lifecycle: &mut ResourceProducerLifecycle,
+) -> Result<(), PostgresKernelError> {
     let transaction = database_session
         .client
         .build_transaction()
@@ -3392,6 +3648,13 @@ async fn run_authenticated_server_resource_producer_task(
     let active = configure_and_recover(&transaction).await?;
     let security = recover_security_snapshot_for_active(&transaction, &active).await?;
     let invocation = InvocationId::new();
+    lifecycle.invocation = Some(invocation);
+    if force_pre_acceptance_failure {
+        transaction
+            .query_one("SELECT no_such_resource_producer_column", &[])
+            .await
+            .map_err(PostgresKernelError::Database)?;
+    }
     let mut audit_decision = SecurityAuditOutcome::Denied;
     let mut authorisation = None;
     let mut bound_arguments = None;
@@ -3432,6 +3695,7 @@ async fn run_authenticated_server_resource_producer_task(
                     Some(resolved_target) => {
                         let target = resolved_target.target();
                         completed_target = Some(target);
+                        lifecycle.target = Some(target);
                         match security.authorise_execute(&authenticated_session, target) {
                             ExecuteDecision::Denied(reason) => {
                                 let event_id = append_security_audit_event(
@@ -3498,20 +3762,17 @@ async fn run_authenticated_server_resource_producer_task(
                     .await
             }
             .await;
-            let result = finish_authenticated_server_select_session(
-                operation,
-                database_session.shutdown().await,
-            );
+            let result = operation;
             match result {
                 Ok(()) => {
-                    let _ = ready_sender.send(Ok(ResourceProducerReady::Failed {
+                    send_resource_producer_ready(ready_sender, Ok(ResourceProducerReady::Failed {
                         stream_id: request.stream_id,
                         request_id: request.request_id,
                         failure,
                     }));
                 }
                 Err(error) => {
-                    let _ = ready_sender.send(Err(error));
+                    return Err(error);
                 }
             }
             return Ok(());
@@ -3538,20 +3799,17 @@ async fn run_authenticated_server_resource_producer_task(
         if operation.is_ok() {
             cancellation.commit_finished();
         }
-        let result = finish_authenticated_server_select_session(
-            operation,
-            database_session.shutdown().await,
-        );
+        let result = operation;
         match result {
             Ok(()) => {
-                let _ = ready_sender.send(Ok(ResourceProducerReady::Failed {
+                send_resource_producer_ready(ready_sender, Ok(ResourceProducerReady::Failed {
                     stream_id: request.stream_id,
                     request_id: request.request_id,
                     failure,
                 }));
             }
             Err(error) => {
-                let _ = ready_sender.send(Err(error));
+                return Err(error);
             }
         }
         return Ok(());
@@ -3580,20 +3838,17 @@ async fn run_authenticated_server_resource_producer_task(
                 .await
         }
         .await;
-        let result = finish_authenticated_server_select_session(
-            operation,
-            database_session.shutdown().await,
-        );
+        let result = operation;
         match result {
             Ok(()) => {
-                let _ = ready_sender.send(Ok(ResourceProducerReady::Failed {
+                send_resource_producer_ready(ready_sender, Ok(ResourceProducerReady::Failed {
                     stream_id: request.stream_id,
                     request_id: request.request_id,
                     failure: CallFailure::InternalFailure,
                 }));
             }
             Err(error) => {
-                let _ = ready_sender.send(Err(error));
+                return Err(error);
             }
         }
         return Ok(());
@@ -3603,19 +3858,13 @@ async fn run_authenticated_server_resource_producer_task(
         .await
         .map_err(PostgresKernelError::Database);
     if operation.is_ok() {
+        lifecycle.acceptance_committed = true;
+        cancellation.acceptance_commit_finished();
+    } else {
         cancellation.acceptance_commit_finished();
     }
     if let Err(error) = operation {
-        let result = finish_authenticated_server_select_session(
-            Err(error),
-            database_session.shutdown().await,
-        );
-        let _ = ready_sender.send(result.map(|()| ResourceProducerReady::Failed {
-            stream_id: request.stream_id,
-            request_id: request.request_id,
-            failure: CallFailure::InternalFailure,
-        }));
-        return Ok(());
+        return Err(error);
     }
     let mut transaction_error = None;
     let transaction = match database_session
@@ -3643,16 +3892,7 @@ async fn run_authenticated_server_resource_producer_task(
             completed_target,
         )
         .await;
-        let result = finish_authenticated_server_select_session(
-            operation,
-            database_session.shutdown().await,
-        );
-        let _ = ready_sender.send(result.map(|()| ResourceProducerReady::Failed {
-            stream_id: request.stream_id,
-            request_id: request.request_id,
-            failure: CallFailure::InternalFailure,
-        }));
-        return Ok(());
+        return finish_resource_producer_failure(ready_sender, request.stream_id, request.request_id, operation);
     }
     let transaction = transaction.ok_or_else(|| {
         sealed_target_invariant(
@@ -3671,16 +3911,7 @@ async fn run_authenticated_server_resource_producer_task(
             completed_target,
         )
         .await;
-        let result = finish_authenticated_server_select_session(
-            operation,
-            database_session.shutdown().await,
-        );
-        let _ = ready_sender.send(result.map(|()| ResourceProducerReady::Failed {
-            stream_id: request.stream_id,
-            request_id: request.request_id,
-            failure: CallFailure::InternalFailure,
-        }));
-        return Ok(());
+        return finish_resource_producer_failure(ready_sender, request.stream_id, request.request_id, operation);
     }
     let execution_validation = async {
         lock_active_revision_for_resource(&transaction, active.pair()).await?;
@@ -3710,16 +3941,7 @@ async fn run_authenticated_server_resource_producer_task(
             completed_target,
         )
         .await;
-        let result = finish_authenticated_server_select_session(
-            operation,
-            database_session.shutdown().await,
-        );
-        let _ = ready_sender.send(result.map(|()| ResourceProducerReady::Failed {
-            stream_id: request.stream_id,
-            request_id: request.request_id,
-            failure: CallFailure::InternalFailure,
-        }));
-        return Ok(());
+        return finish_resource_producer_failure(ready_sender, request.stream_id, request.request_id, operation);
     }
 
     if cancellation.is_requested() {
@@ -3731,16 +3953,7 @@ async fn run_authenticated_server_resource_producer_task(
             completed_target,
         )
         .await;
-        let result = finish_authenticated_server_select_session(
-            operation,
-            database_session.shutdown().await,
-        );
-        let _ = ready_sender.send(result.map(|()| ResourceProducerReady::Failed {
-            stream_id: request.stream_id,
-            request_id: request.request_id,
-            failure: CallFailure::InternalFailure,
-        }));
-        return Ok(());
+        return finish_resource_producer_failure(ready_sender, request.stream_id, request.request_id, operation);
     }
 
     let accepted = AuthenticatedServerResourceAccepted {
@@ -3753,7 +3966,7 @@ async fn run_authenticated_server_resource_producer_task(
             ProtocolResourceKind::Stream => AuthenticatedServerResourceKind::Stream,
         },
     };
-    let _ = ready_sender.send(Ok(ResourceProducerReady::Accepted(accepted)));
+    send_resource_producer_ready(ready_sender, Ok(ResourceProducerReady::Accepted(accepted)));
 
     let stream_result = if let Some(executable) = standard_executable.as_ref() {
         run_authenticated_standard_resource_stream(
@@ -3919,9 +4132,9 @@ async fn run_authenticated_server_resource_producer_task(
             }
         }
     }
-    match (terminal_error, database_session.shutdown().await) {
-        (Some(error), _) => Err(error),
-        (None, shutdown) => shutdown,
+    match terminal_error {
+        Some(error) => Err(error),
+        None => Ok(()),
     }
 }
 

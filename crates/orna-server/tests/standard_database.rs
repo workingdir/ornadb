@@ -64,6 +64,7 @@ use orna_core::{
 };
 use orna_postgres::{
     AuthenticatedRawCallResult, AuthenticatedServerResourceResult, PostgresKernel,
+    ResourceCancellation,
     PostgresKernelError, SealedInvocationResult, ServerInsertError, ServerMutationError,
     ServerUpdateError,
 };
@@ -104,6 +105,7 @@ use tokio::{
     time::{sleep, timeout},
 };
 
+use tokio_postgres::error::SqlState;
 #[path = "../../orna-postgres/tests/support/mod.rs"]
 mod postgres_test_support;
 
@@ -5423,6 +5425,194 @@ async fn authenticated_stream_resource_dispatches_allowed_and_denied_with_redact
             !audit_text.contains(&format!("Integer({RESOURCE_VALUE})"))
                 && !audit_text.contains(&nested.canonical()),
             "resource audit evidence retained raw argument or result detail",
+        )?;
+        require_no_database_sessions(&database).await
+    })
+    .await
+}
+
+#[tokio::test]
+#[ignore = "requires the Compose PostgreSQL development service"]
+async fn authenticated_resource_worker_failure_is_compensated_once() -> TestResult<()> {
+    const RESOURCE_INPUT: &str = "resource-worker-input";
+    with_test_database(|database| async move {
+        let kernel = kernel(&database)?;
+        let (
+            active,
+            standard_upgrade,
+            _client_function,
+            _server_function,
+        ) = install_raw_client_fixture(&kernel).await?;
+        let (active, _resource_client, target, parameter, call_site) =
+            install_stream_resource_client_fixture(
+                &kernel,
+                &active,
+                standard_upgrade.checked_standard_library(),
+            )
+            .await
+            .map_err(|error| failure(format!("install stream resource fixture failed: {error:?}")))?;
+        let request = ResourceRequest {
+            stream_id: 201,
+            request_id: InvocationId::from_bytes([0xa1; 16]),
+            parent_invocation_id: InvocationId::from_bytes([0xa2; 16]),
+            call_site_id: call_site,
+            state_profile: String::new(),
+            function_instance_key: String::new(),
+            target_function_id: target,
+            target_revision: active.pair(),
+            generation: 1,
+            resource_kind: ResourceKind::Stream,
+            arguments: vec![ResourceArgument {
+                parameter,
+                value: RuntimeValue::Text(RESOURCE_INPUT.into()),
+            }],
+            item_window: 1,
+            byte_window: 1024,
+        };
+        let principal = Principal::new(
+            RAW_CLIENT_USER,
+            PrincipalKind::User,
+            PrincipalStatus::Active,
+        );
+        let functions = active
+            .catalogue()
+            .functions()
+            .iter()
+            .map(|function| function.id())
+            .collect::<Vec<_>>();
+        let security = SecuritySnapshot::new_with_function_targets(
+            active.pair(),
+            functions
+                .iter()
+                .copied()
+                .map(SecurityFunctionTarget::application)
+                .collect(),
+            vec![principal],
+            vec![],
+            vec![ExecuteGrant::new(RAW_CLIENT_USER, target)],
+        )?;
+        let active = kernel.replace_security_snapshot(&security).await?;
+        let session = active.bind_authenticated_session(RAW_CLIENT_USER, vec![])?;
+        let cancellation = ResourceCancellation::new();
+        let worker_failure = kernel
+            .start_authenticated_server_resource_producer_with_forced_pre_acceptance_failure(
+                &session,
+                &request,
+                &cancellation,
+            )
+            .await;
+        require(
+            matches!(
+                worker_failure,
+                Err(PostgresKernelError::Database(source))
+                    if source
+                        .as_db_error()
+                        .is_some_and(|database| database.code() == &SqlState::UNDEFINED_COLUMN)
+            ),
+            "forced producer failure did not preserve the injected undefined-column SQLSTATE",
+        )?;
+
+        let request_bytes = request.request_id.to_bytes().to_vec();
+        let audit_session = database.open().await?;
+        let audit_operation = async {
+            let rows = audit_session
+                .client()
+                .query(
+                    "SELECT resource.nested_invocation_id,
+                            resource.parent_invocation_id,
+                            resource.target_function_id,
+                            resource.source_revision_id,
+                            resource.catalogue_revision_id,
+                            resource.session_principal_id,
+                            resource.decision_outcome,
+                            resource.terminal_outcome,
+                            resource.item_count,
+                            resource.byte_count,
+                            invocation.outcome AS invocation_outcome
+                     FROM _orna_kernel.resource_audit_events AS resource
+                     JOIN _orna_kernel.invocation_audit_events AS invocation
+                       ON invocation.invocation_id = resource.nested_invocation_id
+                     WHERE resource.request_id = $1",
+                    &[&request_bytes],
+                )
+                .await?;
+            require(rows.len() == 1, "worker failure did not leave exactly one resource audit row")?;
+            let row = &rows[0];
+            let nested_invocation_id: Vec<u8> = row.try_get("nested_invocation_id")?;
+            let parent_invocation_id: Vec<u8> = row.try_get("parent_invocation_id")?;
+            let target_function_id: Option<Vec<u8>> = row.try_get("target_function_id")?;
+            let source_revision_id: Option<Vec<u8>> = row.try_get("source_revision_id")?;
+            let catalogue_revision_id: Option<Vec<u8>> = row.try_get("catalogue_revision_id")?;
+            let session_principal_id: Vec<u8> = row.try_get("session_principal_id")?;
+            let decision_outcome: String = row.try_get("decision_outcome")?;
+            let terminal_outcome: String = row.try_get("terminal_outcome")?;
+            let item_count: Option<i64> = row.try_get("item_count")?;
+            let byte_count: Option<i64> = row.try_get("byte_count")?;
+            let invocation_outcome: String = row.try_get("invocation_outcome")?;
+            require(
+                nested_invocation_id.len() == 16
+                    && nested_invocation_id.iter().any(|byte| *byte != 0)
+                    && nested_invocation_id != request.request_id.to_bytes().to_vec()
+                    && parent_invocation_id == request.parent_invocation_id.to_bytes().to_vec()
+                    && target_function_id.is_none()
+                    && source_revision_id.is_none()
+                    && catalogue_revision_id.is_none()
+                    && session_principal_id == RAW_CLIENT_USER.to_bytes().to_vec()
+                    && decision_outcome == "denied"
+                    && terminal_outcome == "failed"
+                    && item_count.is_none()
+                    && byte_count.is_none()
+                    && invocation_outcome == "denied",
+                "worker compensation exposed target or retained non-redacted audit state",
+            )?;
+            Ok::<(), Box<dyn Error + Send + Sync>>(())
+        }
+        .await;
+        finish_session(
+            audit_operation,
+            audit_session.shutdown().await,
+            "worker compensation audit",
+        )?;
+
+        let duplicate = kernel
+            .start_authenticated_server_resource_producer_with_forced_pre_acceptance_failure(
+                &session,
+                &request,
+                &ResourceCancellation::new(),
+            )
+            .await?;
+        match duplicate {
+            orna_postgres::AuthenticatedServerResourceStart::Failed {
+                stream_id,
+                request_id,
+                failure,
+            } => require(
+                stream_id == request.stream_id
+                    && request_id == request.request_id
+                    && failure == CallFailure::InternalFailure,
+                "reusing a compensated resource request did not return its redacted duplicate failure",
+            )?,
+            orna_postgres::AuthenticatedServerResourceStart::Accepted(_) => {
+                return Err(failure("duplicate resource request was accepted"));
+            }
+        }
+        let count_session = database.open().await?;
+        let count_operation = async {
+            let row = count_session
+                .client()
+                .query_one(
+                    "SELECT count(*) FROM _orna_kernel.resource_audit_events WHERE request_id = $1",
+                    &[&request_bytes],
+                )
+                .await?;
+            let count: i64 = row.try_get(0)?;
+            require(count == 1, "duplicate resource request inserted a second terminal audit row")
+        }
+        .await;
+        finish_session(
+            count_operation,
+            count_session.shutdown().await,
+            "worker compensation duplicate count",
         )?;
         require_no_database_sessions(&database).await
     })
