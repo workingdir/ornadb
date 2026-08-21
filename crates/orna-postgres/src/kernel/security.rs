@@ -5833,11 +5833,11 @@ async fn finish_sealed_failure(
 /// invocation in the caller's protected transaction.
 ///
 /// ADR 0064 wires capture into the sealed dispatch: after the protected
-/// decision and at execution, the produced Event batch becomes the durable
-/// trace rows and one immutable snapshot epoch. v1 captures every completed
-/// invocation with structural-only options; the request's observer context
-/// is carried on the wire but never set by any v1 caller, so the observer
-/// invocation is not threaded yet. Denied, bind-failed, and
+/// decision and before/at execution, the produced Event batch becomes the
+/// durable trace rows and one immutable snapshot epoch. v1 retains typed
+/// state values in the protected epoch so a later `INSPECT VALUES` projection
+/// can reveal them without reading mutable USER state; the projection still
+/// redacts them unless the classifier is granted. Denied, bind-failed, and
 /// presentation-failed invocations produce no Event batch and therefore no
 /// epoch.
 #[allow(clippy::too_many_arguments)]
@@ -5857,7 +5857,9 @@ async fn capture_sealed_invocation_snapshot(
         registry,
         authenticated_session,
         invocation,
-        InspectSnapshotOptions::structural(),
+        // Retain typed values in the immutable epoch. The installed
+        // projection applies the independent `Values` classifier.
+        InspectSnapshotOptions::new(true, false, false, false),
         authenticated_session.principal(),
         root_target,
         InspectOutcomeKind::Allowed,
