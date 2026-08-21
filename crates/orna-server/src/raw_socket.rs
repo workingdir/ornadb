@@ -66,7 +66,9 @@ use tokio::{
     time::{Instant, timeout, timeout_at},
 };
 
-use crate::invoke::{RawResourceRequestAuthorizer, SharedInvokeBroker};
+#[cfg(feature = "test-hooks")]
+use crate::invoke::RawResourceRequestAuthorizer;
+use crate::invoke::SharedInvokeBroker;
 use crate::{InstalledClientResourceExecutor, RawClientDispatch, authenticate_local_stream};
 
 const CLIENT_HELLO: [u8; 12] = *b"ORNA\x01\x00\x00\x01\x00\x00\x00\x00";
@@ -820,6 +822,7 @@ pub(crate) async fn serve_local_raw_stream_with_broker(
  /// has no trusted client evaluator. This hidden seam exists for integration
  /// tests that register each request before they send protocol frames.
  #[doc(hidden)]
+ #[cfg(feature = "test-hooks")]
  pub async fn serve_local_raw_stream_with_resource_authorizer(
      kernel: PostgresKernel,
      stream: StandardUnixStream,

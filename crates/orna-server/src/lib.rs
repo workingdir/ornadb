@@ -28,9 +28,11 @@ pub use inspect::{
 };
 pub use invoke::{
     InstalledClientResourceExecutor, InstalledInvokeError, InstalledInvokeErrorKind,
-    InstalledInvokeOutcome, InstalledInvokeRequest, RawResourceRequestAuthorizer, RuntimeFamily,
-    run_installed_invoke, run_invoke_with_kernel,
+    InstalledInvokeOutcome, InstalledInvokeRequest, RuntimeFamily, run_installed_invoke,
+    run_invoke_with_kernel,
 };
+#[cfg(feature = "test-hooks")]
+pub use invoke::RawResourceRequestAuthorizer;
 pub use local_auth::{LocalAuthenticationError, authenticate_local_stream};
 pub use raw_call::{
     LocalRawCallError, LocalRawCallOutcome, run_local_raw_call, run_local_raw_call_with_argument,
@@ -39,8 +41,10 @@ pub use raw_call::{
 pub use raw_client_dispatch::{RawClientDispatch, RawClientDispatchResult};
 pub use raw_socket::{
     LocalRawSocketError, LocalRawSocketResources, LocalRawSocketServer, LocalRawSocketServerError,
-    serve_local_raw_stream, serve_local_raw_stream_with_resource_authorizer, start_local_raw_socket,
+    serve_local_raw_stream, start_local_raw_socket,
 };
+#[cfg(feature = "test-hooks")]
+pub use raw_socket::serve_local_raw_stream_with_resource_authorizer;
 pub use security_admin::{
     InstalledSecurityAdminError, InstalledSecurityAdminErrorKind, InstalledSecurityAdminOperation,
     InstalledSecurityAdminOutcome, InstalledSecurityAdminRequest, parse_privilege_class,
