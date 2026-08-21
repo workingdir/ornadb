@@ -11,9 +11,21 @@ use std::{
     time::SystemTime,
 };
 
+use crate::{
+    PostgresKernel, PostgresKernelError,
+    bootstrap::require_current_migrations,
+    is_sealed_inspect_type_id,
+    security::{append_security_audit_event, recover_security_snapshot_for_active},
+    server_runtime::configure_and_recover,
+};
+use orna_artifact::client_plan::{
+    CAPABILITY_FORMAT_VERSION, CapabilityClientPlan, FORMAT_IDENTITY as CLIENT_PLAN_FORMAT,
+    InnerClientPlan, STATE_FORMAT_VERSION, StateClientPlan, StateScope,
+};
 use orna_core::{
     FunctionId, PrincipalId, StateSlotId, TypeId,
-    revision::ActiveDatabaseRevision,
+    catalogue::FunctionDomain,
+    revision::{ActiveDatabaseRevision, ExecutableArtifactKind, FunctionRevisionRecord},
     security::{AuthenticatedSession, SecurityAuditDecision, UserStateAuditOperation},
     state::{
         UserStateCell, UserStateChange, UserStateError, UserStateKey, UserStateKeyWithoutPrincipal,
@@ -25,13 +37,6 @@ use orna_core::{
 use orna_protocol::{decode_constructed_value, encode_constructed_value};
 use orna_standard::registered_opaque_codecs;
 use tokio_postgres::{IsolationLevel, Row, Transaction, types::FromSqlOwned};
-use crate::{
-    PostgresKernel, PostgresKernelError,
-    bootstrap::require_current_migrations,
-    is_sealed_inspect_type_id,
-    security::{append_security_audit_event, recover_security_snapshot_for_active},
-    server_runtime::configure_and_recover,
-};
 const STATE_RELATION: &str = "_orna_kernel.user_state_cells";
 
 /// One function instance selected by a USER state load.
@@ -106,6 +111,18 @@ impl PostgresKernel {
             let active = configure_and_recover(&transaction).await?;
             let _security = recover_security_snapshot_for_active(&transaction, &active).await?;
             let registry = state_value_registry(&active)?;
+            for ((function, state_slot), expected_type) in expected_types {
+                let declared_type = active_user_state_slot_type(&active, *function, *state_slot)?;
+                let key = UserStateKeyWithoutPrincipal::new(
+                    root_function,
+                    state_profile.to_owned(),
+                    *function,
+                    String::new(),
+                    *state_slot,
+                )
+                .map_err(PostgresKernelError::UserState)?;
+                require_declared_user_state_type(key, *expected_type, declared_type)?;
+            }
             let rows = transaction
                 .query(
                     "SELECT principal_id, root_function_id, root_state_profile,
@@ -136,6 +153,16 @@ impl PostgresKernel {
                     continue;
                 }
                 let cell = decode_state_cell(row, &active, &registry)?;
+                let declared_type = active_user_state_slot_type(
+                    &active,
+                    cell.key().function(),
+                    cell.key().state_slot(),
+                )?;
+                require_declared_user_state_type(
+                    cell.key().without_principal(),
+                    cell.value_type(),
+                    declared_type,
+                )?;
                 require_expected_type(&cell, expected_types)?;
                 cells.push(cell);
             }
@@ -221,6 +248,15 @@ impl PostgresKernel {
             let active = configure_and_recover(&transaction).await?;
             let _security = recover_security_snapshot_for_active(&transaction, &active).await?;
             let registry = state_value_registry(&active)?;
+            for change in changes {
+                let declared_type =
+                    active_user_state_slot_type(&active, change.function(), change.state_slot())?;
+                require_declared_user_state_type(
+                    change.key_without_principal(),
+                    change.value_type(),
+                    declared_type,
+                )?;
+            }
             let mut current_cells = HashMap::<UserStateKey, Option<UserStateCell>>::new();
             let mut fetched_keys = HashSet::new();
             for change in changes {
@@ -520,6 +556,157 @@ fn require_expected_type(
     }
 }
 
+fn require_declared_user_state_type(
+    key: UserStateKeyWithoutPrincipal,
+    value_type: TypeId,
+    declared_type: TypeId,
+) -> Result<(), PostgresKernelError> {
+    if value_type == declared_type {
+        return Ok(());
+    }
+    Err(PostgresKernelError::UserState(
+        UserStateError::TypeIncompatible {
+            key: Box::new(key),
+            expected: value_type,
+            current: declared_type,
+        },
+    ))
+}
+
+fn active_user_state_slot_type(
+    active: &ActiveDatabaseRevision,
+    function: FunctionId,
+    state_slot: StateSlotId,
+) -> Result<TypeId, PostgresKernelError> {
+    let definition = active.catalogue().function_by_id(function).ok_or_else(|| {
+        PostgresKernelError::DurableInvariant {
+            relation: STATE_RELATION,
+            record: format!("{function:?}"),
+            rule: "USER state slot must identify an active CLIENT function",
+        }
+    })?;
+    if definition.domain() != FunctionDomain::Client {
+        return Err(PostgresKernelError::DurableInvariant {
+            relation: STATE_RELATION,
+            record: format!("{function:?}"),
+            rule: "USER state slot owner must be a CLIENT function",
+        });
+    }
+    let revision = active
+        .function_revisions()
+        .iter()
+        .find(|revision| {
+            revision.function() == function && revision.id() == definition.current_revision()
+        })
+        .ok_or_else(|| PostgresKernelError::DurableInvariant {
+            relation: STATE_RELATION,
+            record: format!("{function:?}"),
+            rule: "USER state slot owner must have its active CLIENT function revision",
+        })?;
+    let plan = decode_active_client_state_plan(revision)?;
+    declared_user_state_slot(revision.function(), function, state_slot, &plan)
+}
+
+fn decode_active_client_state_plan(
+    revision: &FunctionRevisionRecord,
+) -> Result<StateClientPlan, PostgresKernelError> {
+    let artifact = revision.artifact();
+    if artifact.kind() != ExecutableArtifactKind::Client || artifact.format() != CLIENT_PLAN_FORMAT
+    {
+        return Err(PostgresKernelError::DurableInvariant {
+            relation: STATE_RELATION,
+            record: format!("{:?}", revision.function()),
+            rule: "active CLIENT USER state owner must carry an orna.client-plan artifact",
+        });
+    }
+    match artifact.version() {
+        STATE_FORMAT_VERSION => StateClientPlan::decode(artifact.payload()).map_err(|_| {
+            PostgresKernelError::DurableInvariant {
+                relation: STATE_RELATION,
+                record: format!("{:?}", revision.function()),
+                rule: "active CLIENT USER state plan must decode as a version-four state plan",
+            }
+        }),
+        CAPABILITY_FORMAT_VERSION => {
+            let plan = CapabilityClientPlan::decode(artifact.payload()).map_err(|_| {
+                PostgresKernelError::DurableInvariant {
+                    relation: STATE_RELATION,
+                    record: format!("{:?}", revision.function()),
+                    rule: "active CLIENT capability state plan must decode canonically",
+                }
+            })?;
+            match plan.inner_plan() {
+                InnerClientPlan::State(state) => Ok(state.clone()),
+                _ => Err(PostgresKernelError::DurableInvariant {
+                    relation: STATE_RELATION,
+                    record: format!("{:?}", revision.function()),
+                    rule: "active CLIENT USER state owner must carry a state plan",
+                }),
+            }
+        }
+        _ => Err(PostgresKernelError::DurableInvariant {
+            relation: STATE_RELATION,
+            record: format!("{:?}", revision.function()),
+            rule: "active CLIENT USER state owner must carry a supported state plan",
+        }),
+    }
+}
+
+fn declared_user_state_slot(
+    owner_function: FunctionId,
+    function: FunctionId,
+    state_slot: StateSlotId,
+    plan: &StateClientPlan,
+) -> Result<TypeId, PostgresKernelError> {
+    let record = format!("owner={owner_function:?}, function={function:?}, slot={state_slot:?}");
+    if owner_function != function {
+        return Err(PostgresKernelError::DurableInvariant {
+            relation: STATE_RELATION,
+            record,
+            rule: "USER state slot must be presented with its owning CLIENT function",
+        });
+    }
+    let Some(slot) = plan
+        .slots()
+        .iter()
+        .find(|slot| slot.state_slot_id() == state_slot)
+    else {
+        return Err(PostgresKernelError::DurableInvariant {
+            relation: STATE_RELATION,
+            record,
+            rule: "USER state slot must be declared by its owning CLIENT function",
+        });
+    };
+    if slot.scope() != StateScope::User {
+        return Err(PostgresKernelError::DurableInvariant {
+            relation: STATE_RELATION,
+            record,
+            rule: "USER state service cannot access LOCAL or SESSION CLIENT state slots",
+        });
+    }
+    Ok(slot.type_id())
+}
+
+#[cfg(test)]
+fn validate_user_state_slot_declaration(
+    owner_function: FunctionId,
+    function: FunctionId,
+    state_slot: StateSlotId,
+    value_type: TypeId,
+    plan: &StateClientPlan,
+) -> Result<(), PostgresKernelError> {
+    let declared_type = declared_user_state_slot(owner_function, function, state_slot, plan)?;
+    let key = UserStateKeyWithoutPrincipal::new(
+        owner_function,
+        String::new(),
+        function,
+        String::new(),
+        state_slot,
+    )
+    .map_err(PostgresKernelError::UserState)?;
+    require_declared_user_state_type(key, value_type, declared_type)
+}
+
 fn reject_sealed_inspect_state_type(
     value_type: TypeId,
     record: impl Into<String>,
@@ -607,14 +794,18 @@ fn finish_state_session<T>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use orna_artifact::client_plan::{ClientExpressionNode, StateDefault, StateSlot};
     use orna_core::{PrincipalId, TypeId, value::RuntimeValue};
 
     const PRINCIPAL: orna_core::PrincipalId = PrincipalId::from_bytes([0x11; 16]);
     const OTHER_PRINCIPAL: orna_core::PrincipalId = PrincipalId::from_bytes([0x22; 16]);
     const ROOT: FunctionId = FunctionId::from_bytes([0x31; 16]);
     const FUNCTION: FunctionId = FunctionId::from_bytes([0x32; 16]);
+    const OTHER_FUNCTION: FunctionId = FunctionId::from_bytes([0x36; 16]);
     const SLOT: StateSlotId = StateSlotId::from_bytes([0x33; 16]);
+    const OTHER_SLOT: StateSlotId = StateSlotId::from_bytes([0x37; 16]);
     const INTEGER: TypeId = TypeId::from_bytes([0x34; 16]);
+    const TEXT: TypeId = TypeId::from_bytes([0x35; 16]);
 
     fn change(expected_revision: Option<u64>, value: i64) -> UserStateChange {
         UserStateChange::new(
@@ -646,6 +837,72 @@ mod tests {
             revision,
             SystemTime::UNIX_EPOCH,
         )
+    }
+
+    fn state_plan(scope: StateScope, value_type: TypeId) -> StateClientPlan {
+        StateClientPlan::new(
+            ClientExpressionNode::Boolean { value: true },
+            vec![StateSlot::new(SLOT, value_type, scope, StateDefault::Unset)],
+        )
+    }
+
+    #[test]
+    fn undeclared_user_slot_is_rejected() {
+        let plan = state_plan(StateScope::User, INTEGER);
+        let error =
+            validate_user_state_slot_declaration(FUNCTION, FUNCTION, OTHER_SLOT, INTEGER, &plan)
+                .expect_err("unknown USER state slot must fail closed");
+        assert!(matches!(
+            error,
+            PostgresKernelError::DurableInvariant {
+                rule: "USER state slot must be declared by its owning CLIENT function",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn user_slot_presented_with_wrong_owner_is_rejected() {
+        let plan = state_plan(StateScope::User, INTEGER);
+        let error =
+            validate_user_state_slot_declaration(FUNCTION, OTHER_FUNCTION, SLOT, INTEGER, &plan)
+                .expect_err("USER state slot must use its owning function");
+        assert!(matches!(
+            error,
+            PostgresKernelError::DurableInvariant {
+                rule: "USER state slot must be presented with its owning CLIENT function",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn local_and_session_slots_are_rejected_by_user_service() {
+        for scope in [StateScope::Local, StateScope::Session] {
+            let plan = state_plan(scope, INTEGER);
+            let error =
+                validate_user_state_slot_declaration(FUNCTION, FUNCTION, SLOT, INTEGER, &plan)
+                    .expect_err("non-USER state scope must fail closed");
+            assert!(matches!(
+                error,
+                PostgresKernelError::DurableInvariant {
+                    rule: "USER state service cannot access LOCAL or SESSION CLIENT state slots",
+                    ..
+                }
+            ));
+        }
+    }
+
+    #[test]
+    fn user_slot_type_mismatch_is_rejected_against_active_plan() {
+        let plan = state_plan(StateScope::User, INTEGER);
+        let error = validate_user_state_slot_declaration(FUNCTION, FUNCTION, SLOT, TEXT, &plan)
+            .expect_err("USER state type must match the active declaration");
+        assert!(matches!(
+            error,
+            PostgresKernelError::UserState(UserStateError::TypeIncompatible { .. })
+        ));
+        assert!(error.to_string().contains("ORNA0901"));
     }
 
     #[test]
