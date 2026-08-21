@@ -2306,6 +2306,9 @@ fn validate_resolved_type_slot(
                 );
             }
             CatalogueHashContext::Version2 { standard } => {
+                if is_sealed_inspect_type_id(value_type) {
+                    return Ok(());
+                }
                 let Some(value_type_definition) = standard.catalogue().value_type_by_id(value_type)
                 else {
                     return Err(
@@ -3248,12 +3251,38 @@ fn definition_exists(
     }
 }
 
+fn is_sealed_inspect_type_id(type_id: TypeId) -> bool {
+    matches!(
+        type_id,
+        crate::system::SYS_INSPECT_INVOCATION_TYPE_ID
+            | crate::system::SYS_INSPECT_SNAPSHOT_TYPE_ID
+            | crate::system::SYS_INSPECT_SNAPSHOT_OPTIONS_TYPE_ID
+            | crate::system::SYS_INSPECT_TRACE_EVENT_TYPE_ID
+            | crate::system::SYS_INSPECT_INVOCATION_NODES_TYPE_ID
+            | crate::system::SYS_INSPECT_CALLS_TYPE_ID
+            | crate::system::SYS_INSPECT_RESOURCES_TYPE_ID
+            | crate::system::SYS_INSPECT_STATE_CELLS_TYPE_ID
+            | crate::system::SYS_INSPECT_UI_NODES_TYPE_ID
+            | crate::system::SYS_INSPECT_PRESENTATION_CANDIDATES_TYPE_ID
+            | crate::system::SYS_INSPECT_RUNTIME_BINDINGS_TYPE_ID
+            | crate::system::SYS_INSPECT_SECURITY_DECISIONS_TYPE_ID
+    )
+}
+
 fn reference_target_exists(
     catalogue: &CatalogueSnapshot,
     standard: Option<&CatalogueSnapshot>,
     expression_ids: &HashSet<ExpressionId>,
     target: DefinitionReferenceTarget,
 ) -> bool {
+    if matches!(
+        target,
+        DefinitionReferenceTarget::ValueType(type_id)
+            | DefinitionReferenceTarget::ObjectType(type_id)
+            if is_sealed_inspect_type_id(type_id)
+    ) {
+        return true;
+    }
     if let DefinitionReferenceTarget::Field { owner, field } = target {
         return catalogue
             .object_type_by_id(owner)
