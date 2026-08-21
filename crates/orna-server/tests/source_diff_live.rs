@@ -138,6 +138,14 @@ async fn proves_installed_source_diff_end_to_end() -> TestResult<()> {
 
         let before = kernel(&database).recover().await?;
         let before_pair = before.pair();
+        let field_identity = before
+            .catalogue()
+            .object_types()
+            .iter()
+            .find(|object| object.name().to_string() == "app.widget")
+            .and_then(|object| object.fields().iter().find(|field| field.name() == "name"))
+            .map(|field| field.id().canonical().to_owned())
+            .ok_or_else(|| failure("the installed base is missing app.widget.name"))?;
 
         // The candidate renames the object field through the identity
         // preserving ALTER form, adds one function, and drops one; the
@@ -149,8 +157,12 @@ async fn proves_installed_source_diff_end_to_end() -> TestResult<()> {
         )?;
         let text =
             String::from_utf8(stdout).map_err(|_| failure("the diff stdout was not UTF-8 text"))?;
+        let expected_rename = format!(
+            "~ field app.widget.name -> app.widget.label [{}]",
+            field_identity
+        );
         require(
-            text.contains("~ field app.widget.name -> app.widget.label")
+            text.contains(&expected_rename)
                 && text.contains("+ function app.fresh")
                 && text.contains("- function app.gone"),
             "the diff report did not render the field rename, add, and drop: {text}",
