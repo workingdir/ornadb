@@ -276,6 +276,95 @@ pub const SYS_INSPECT_TRACE_EVENT_TYPE_NAME: &str = "sys.inspect.trace_event";
 /// The immutable representation contract of the sealed inspect-trace-event carrier.
 pub const SYS_INSPECT_TRACE_EVENT_REPRESENTATION_CONTRACT: &str = "orna.sys.inspect.trace_event@1";
 
+// `BIGINT` is the retained standard scalar identity (...0x03). Keeping this
+// local avoids a dependency from `orna-core` back to `orna-standard`.
+const SYS_INSPECT_TRACE_AFTER_SEQUENCE_TYPE_ID: TypeId =
+    TypeId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x03]);
+
+/// The stable identity of the sealed `sys.inspect.invocation_nodes` result carrier.
+pub const SYS_INSPECT_INVOCATION_NODES_TYPE_ID: TypeId =
+    TypeId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xf8]);
+
+/// The exact semantic name of the sealed invocation-nodes result carrier.
+pub const SYS_INSPECT_INVOCATION_NODES_TYPE_NAME: &str = "sys.inspect.invocation_nodes";
+
+/// The immutable representation contract of the sealed invocation-nodes result carrier.
+pub const SYS_INSPECT_INVOCATION_NODES_REPRESENTATION_CONTRACT: &str =
+    "orna.sys.inspect.invocation_nodes@1";
+
+/// The stable identity of the sealed `sys.inspect.calls` result carrier.
+pub const SYS_INSPECT_CALLS_TYPE_ID: TypeId =
+    TypeId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xf9]);
+
+/// The exact semantic name of the sealed calls result carrier.
+pub const SYS_INSPECT_CALLS_TYPE_NAME: &str = "sys.inspect.calls";
+
+/// The immutable representation contract of the sealed calls result carrier.
+pub const SYS_INSPECT_CALLS_REPRESENTATION_CONTRACT: &str = "orna.sys.inspect.calls@1";
+
+/// The stable identity of the sealed `sys.inspect.resources` result carrier.
+pub const SYS_INSPECT_RESOURCES_TYPE_ID: TypeId =
+    TypeId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xfa]);
+
+/// The exact semantic name of the sealed resources result carrier.
+pub const SYS_INSPECT_RESOURCES_TYPE_NAME: &str = "sys.inspect.resources";
+
+/// The immutable representation contract of the sealed resources result carrier.
+pub const SYS_INSPECT_RESOURCES_REPRESENTATION_CONTRACT: &str = "orna.sys.inspect.resources@1";
+
+/// The stable identity of the sealed `sys.inspect.state_cells` result carrier.
+pub const SYS_INSPECT_STATE_CELLS_TYPE_ID: TypeId =
+    TypeId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xfb]);
+
+/// The exact semantic name of the sealed state-cells result carrier.
+pub const SYS_INSPECT_STATE_CELLS_TYPE_NAME: &str = "sys.inspect.state_cells";
+
+/// The immutable representation contract of the sealed state-cells result carrier.
+pub const SYS_INSPECT_STATE_CELLS_REPRESENTATION_CONTRACT: &str = "orna.sys.inspect.state_cells@1";
+
+/// The stable identity of the sealed `sys.inspect.ui_nodes` result carrier.
+pub const SYS_INSPECT_UI_NODES_TYPE_ID: TypeId =
+    TypeId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xfc]);
+
+/// The exact semantic name of the sealed UI-nodes result carrier.
+pub const SYS_INSPECT_UI_NODES_TYPE_NAME: &str = "sys.inspect.ui_nodes";
+
+/// The immutable representation contract of the sealed UI-nodes result carrier.
+pub const SYS_INSPECT_UI_NODES_REPRESENTATION_CONTRACT: &str = "orna.sys.inspect.ui_nodes@1";
+
+/// The stable identity of the sealed `sys.inspect.presentation_candidates` result carrier.
+pub const SYS_INSPECT_PRESENTATION_CANDIDATES_TYPE_ID: TypeId =
+    TypeId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xfd]);
+
+/// The exact semantic name of the sealed presentation-candidates result carrier.
+pub const SYS_INSPECT_PRESENTATION_CANDIDATES_TYPE_NAME: &str =
+    "sys.inspect.presentation_candidates";
+
+/// The immutable representation contract of the sealed presentation-candidates result carrier.
+pub const SYS_INSPECT_PRESENTATION_CANDIDATES_REPRESENTATION_CONTRACT: &str =
+    "orna.sys.inspect.presentation_candidates@1";
+
+/// The stable identity of the sealed `sys.inspect.runtime_bindings` result carrier.
+pub const SYS_INSPECT_RUNTIME_BINDINGS_TYPE_ID: TypeId =
+    TypeId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xfe]);
+
+/// The exact semantic name of the sealed runtime-bindings result carrier.
+pub const SYS_INSPECT_RUNTIME_BINDINGS_TYPE_NAME: &str = "sys.inspect.runtime_bindings";
+
+/// The immutable representation contract of the sealed runtime-bindings result carrier.
+pub const SYS_INSPECT_RUNTIME_BINDINGS_REPRESENTATION_CONTRACT: &str =
+    "orna.sys.inspect.runtime_bindings@1";
+
+/// The stable identity of the sealed `sys.inspect.security_decisions` result carrier.
+pub const SYS_INSPECT_SECURITY_DECISIONS_TYPE_ID: TypeId =
+    TypeId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff]);
+
+/// The exact semantic name of the sealed security-decisions result carrier.
+pub const SYS_INSPECT_SECURITY_DECISIONS_TYPE_NAME: &str = "sys.inspect.security_decisions";
+
+/// The immutable representation contract of the sealed security-decisions result carrier.
+pub const SYS_INSPECT_SECURITY_DECISIONS_REPRESENTATION_CONTRACT: &str =
+    "orna.sys.inspect.security_decisions@1";
 /// The stable identity of the sealed `sys.security.principal` carrier.
 pub const SYS_SECURITY_PRINCIPAL_TYPE_ID: TypeId =
     TypeId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xf7]);
@@ -547,21 +636,29 @@ const SYS_INVOKE_SIGNATURE: SystemInvocationSignature = SystemInvocationSignatur
 
 /// The immutable sealed signature shape of one `sys.inspect` entry.
 ///
-/// The ten entries use three closed shapes: snapshot capture (two sealed
-/// parameters and no result stream), the eight projections (one sealed
-/// snapshot parameter and no result stream), and the trace stream (two
-/// sealed parameters and one sealed stream item type). A caller can obtain a
-/// signature only from the sealed system-function registry.
+/// Snapshot capture and the eight materialized projections expose their exact
+/// sealed parameter and result carrier identities. The trace entry retains its
+/// existing count and stream-item metadata and also identifies its BIGINT
+/// sequence parameter without introducing a result carrier.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct SystemInspectSignature {
     parameter_count: u8,
+    parameter_types: &'static [TypeId],
+    result_type: Option<TypeId>,
     stream_item_type: Option<TypeId>,
 }
 
 impl SystemInspectSignature {
-    const fn new(parameter_count: u8, stream_item_type: Option<TypeId>) -> Self {
+    const fn new(
+        parameter_count: u8,
+        parameter_types: &'static [TypeId],
+        result_type: Option<TypeId>,
+        stream_item_type: Option<TypeId>,
+    ) -> Self {
         Self {
             parameter_count,
+            parameter_types,
+            result_type,
             stream_item_type,
         }
     }
@@ -571,17 +668,79 @@ impl SystemInspectSignature {
         self.parameter_count
     }
 
+    /// Returns the exact typed sealed parameter identities in declaration order.
+    pub const fn parameter_types(self) -> &'static [TypeId] {
+        self.parameter_types
+    }
+
+    /// Returns one typed sealed parameter identity by declaration index.
+    pub const fn parameter_type(self, index: usize) -> Option<TypeId> {
+        if index < self.parameter_types.len() {
+            Some(self.parameter_types[index])
+        } else {
+            None
+        }
+    }
+
+    /// Returns the materialized sealed result carrier identity, when present.
+    pub const fn result_type(self) -> Option<TypeId> {
+        self.result_type
+    }
+
     /// Returns the sealed stream item type when the entry returns a stream.
     pub const fn stream_item_type(self) -> Option<TypeId> {
         self.stream_item_type
     }
 }
 
-const SYS_INSPECT_SNAPSHOT_SIGNATURE: SystemInspectSignature = SystemInspectSignature::new(2, None);
-const SYS_INSPECT_PROJECTION_SIGNATURE: SystemInspectSignature =
-    SystemInspectSignature::new(1, None);
-const SYS_INSPECT_TRACE_SIGNATURE: SystemInspectSignature =
-    SystemInspectSignature::new(2, Some(SYS_INSPECT_TRACE_EVENT_TYPE_ID));
+const SYS_INSPECT_SNAPSHOT_PARAMETER_TYPES: &[TypeId] = &[
+    SYS_INSPECT_INVOCATION_TYPE_ID,
+    SYS_INSPECT_SNAPSHOT_OPTIONS_TYPE_ID,
+];
+const SYS_INSPECT_PROJECTION_PARAMETER_TYPES: &[TypeId] = &[SYS_INSPECT_SNAPSHOT_TYPE_ID];
+const SYS_INSPECT_TRACE_PARAMETER_TYPES: &[TypeId] = &[
+    SYS_INSPECT_INVOCATION_TYPE_ID,
+    SYS_INSPECT_TRACE_AFTER_SEQUENCE_TYPE_ID,
+];
+
+const SYS_INSPECT_SNAPSHOT_SIGNATURE: SystemInspectSignature = SystemInspectSignature::new(
+    2,
+    SYS_INSPECT_SNAPSHOT_PARAMETER_TYPES,
+    Some(SYS_INSPECT_SNAPSHOT_TYPE_ID),
+    None,
+);
+const fn sys_inspect_projection_signature(result_type: TypeId) -> SystemInspectSignature {
+    SystemInspectSignature::new(
+        1,
+        SYS_INSPECT_PROJECTION_PARAMETER_TYPES,
+        Some(result_type),
+        None,
+    )
+}
+
+const SYS_INSPECT_INVOCATION_NODES_SIGNATURE: SystemInspectSignature =
+    sys_inspect_projection_signature(SYS_INSPECT_INVOCATION_NODES_TYPE_ID);
+const SYS_INSPECT_CALLS_SIGNATURE: SystemInspectSignature =
+    sys_inspect_projection_signature(SYS_INSPECT_CALLS_TYPE_ID);
+const SYS_INSPECT_RESOURCES_SIGNATURE: SystemInspectSignature =
+    sys_inspect_projection_signature(SYS_INSPECT_RESOURCES_TYPE_ID);
+const SYS_INSPECT_STATE_CELLS_SIGNATURE: SystemInspectSignature =
+    sys_inspect_projection_signature(SYS_INSPECT_STATE_CELLS_TYPE_ID);
+const SYS_INSPECT_UI_NODES_SIGNATURE: SystemInspectSignature =
+    sys_inspect_projection_signature(SYS_INSPECT_UI_NODES_TYPE_ID);
+const SYS_INSPECT_PRESENTATION_CANDIDATES_SIGNATURE: SystemInspectSignature =
+    sys_inspect_projection_signature(SYS_INSPECT_PRESENTATION_CANDIDATES_TYPE_ID);
+const SYS_INSPECT_RUNTIME_BINDINGS_SIGNATURE: SystemInspectSignature =
+    sys_inspect_projection_signature(SYS_INSPECT_RUNTIME_BINDINGS_TYPE_ID);
+const SYS_INSPECT_SECURITY_DECISIONS_SIGNATURE: SystemInspectSignature =
+    sys_inspect_projection_signature(SYS_INSPECT_SECURITY_DECISIONS_TYPE_ID);
+
+const SYS_INSPECT_TRACE_SIGNATURE: SystemInspectSignature = SystemInspectSignature::new(
+    2,
+    SYS_INSPECT_TRACE_PARAMETER_TYPES,
+    None,
+    Some(SYS_INSPECT_TRACE_EVENT_TYPE_ID),
+);
 
 /// The immutable sealed signature shape of one `sys.security` entry.
 ///
@@ -827,7 +986,7 @@ pub const SYSTEM_FUNCTIONS: &[SystemFunctionDefinition] = &[
         SYS_INSPECT_INVOCATION_NODES_FUNCTION_ID,
         SYS_INSPECT_INVOCATION_NODES_FUNCTION_NAME_PARTS,
         None,
-        Some(SYS_INSPECT_PROJECTION_SIGNATURE),
+        Some(SYS_INSPECT_INVOCATION_NODES_SIGNATURE),
         None,
         None,
     ),
@@ -836,7 +995,7 @@ pub const SYSTEM_FUNCTIONS: &[SystemFunctionDefinition] = &[
         SYS_INSPECT_CALLS_FUNCTION_ID,
         SYS_INSPECT_CALLS_FUNCTION_NAME_PARTS,
         None,
-        Some(SYS_INSPECT_PROJECTION_SIGNATURE),
+        Some(SYS_INSPECT_CALLS_SIGNATURE),
         None,
         None,
     ),
@@ -845,7 +1004,7 @@ pub const SYSTEM_FUNCTIONS: &[SystemFunctionDefinition] = &[
         SYS_INSPECT_RESOURCES_FUNCTION_ID,
         SYS_INSPECT_RESOURCES_FUNCTION_NAME_PARTS,
         None,
-        Some(SYS_INSPECT_PROJECTION_SIGNATURE),
+        Some(SYS_INSPECT_RESOURCES_SIGNATURE),
         None,
         None,
     ),
@@ -854,7 +1013,7 @@ pub const SYSTEM_FUNCTIONS: &[SystemFunctionDefinition] = &[
         SYS_INSPECT_STATE_CELLS_FUNCTION_ID,
         SYS_INSPECT_STATE_CELLS_FUNCTION_NAME_PARTS,
         None,
-        Some(SYS_INSPECT_PROJECTION_SIGNATURE),
+        Some(SYS_INSPECT_STATE_CELLS_SIGNATURE),
         None,
         None,
     ),
@@ -863,7 +1022,7 @@ pub const SYSTEM_FUNCTIONS: &[SystemFunctionDefinition] = &[
         SYS_INSPECT_UI_NODES_FUNCTION_ID,
         SYS_INSPECT_UI_NODES_FUNCTION_NAME_PARTS,
         None,
-        Some(SYS_INSPECT_PROJECTION_SIGNATURE),
+        Some(SYS_INSPECT_UI_NODES_SIGNATURE),
         None,
         None,
     ),
@@ -872,7 +1031,7 @@ pub const SYSTEM_FUNCTIONS: &[SystemFunctionDefinition] = &[
         SYS_INSPECT_PRESENTATION_CANDIDATES_FUNCTION_ID,
         SYS_INSPECT_PRESENTATION_CANDIDATES_FUNCTION_NAME_PARTS,
         None,
-        Some(SYS_INSPECT_PROJECTION_SIGNATURE),
+        Some(SYS_INSPECT_PRESENTATION_CANDIDATES_SIGNATURE),
         None,
         None,
     ),
@@ -881,7 +1040,7 @@ pub const SYSTEM_FUNCTIONS: &[SystemFunctionDefinition] = &[
         SYS_INSPECT_RUNTIME_BINDINGS_FUNCTION_ID,
         SYS_INSPECT_RUNTIME_BINDINGS_FUNCTION_NAME_PARTS,
         None,
-        Some(SYS_INSPECT_PROJECTION_SIGNATURE),
+        Some(SYS_INSPECT_RUNTIME_BINDINGS_SIGNATURE),
         None,
         None,
     ),
@@ -890,7 +1049,7 @@ pub const SYSTEM_FUNCTIONS: &[SystemFunctionDefinition] = &[
         SYS_INSPECT_SECURITY_DECISIONS_FUNCTION_ID,
         SYS_INSPECT_SECURITY_DECISIONS_FUNCTION_NAME_PARTS,
         None,
-        Some(SYS_INSPECT_PROJECTION_SIGNATURE),
+        Some(SYS_INSPECT_SECURITY_DECISIONS_SIGNATURE),
         None,
         None,
     ),
@@ -1328,31 +1487,75 @@ mod tests {
     }
 
     #[test]
-    fn inspect_entries_expose_the_closed_signature_shapes() {
+    fn inspect_entries_expose_typed_parameter_and_result_identities() {
         let snapshot = system_function_by_id(SYS_INSPECT_SNAPSHOT_FUNCTION_ID)
             .expect("the snapshot identity must resolve");
         let signature = snapshot
             .inspect_signature()
             .expect("sys.inspect.snapshot must expose its sealed signature");
         assert_eq!(signature.parameter_count(), 2);
+        assert_eq!(
+            signature.parameter_types(),
+            &[
+                SYS_INSPECT_INVOCATION_TYPE_ID,
+                SYS_INSPECT_SNAPSHOT_OPTIONS_TYPE_ID
+            ]
+        );
+        assert_eq!(
+            signature.parameter_type(0),
+            Some(SYS_INSPECT_INVOCATION_TYPE_ID)
+        );
+        assert_eq!(
+            signature.parameter_type(1),
+            Some(SYS_INSPECT_SNAPSHOT_OPTIONS_TYPE_ID)
+        );
+        assert_eq!(signature.parameter_type(2), None);
+        assert_eq!(signature.result_type(), Some(SYS_INSPECT_SNAPSHOT_TYPE_ID));
         assert_eq!(signature.stream_item_type(), None);
         assert!(snapshot.invocation_signature().is_none());
 
-        for id in [
-            SYS_INSPECT_INVOCATION_NODES_FUNCTION_ID,
-            SYS_INSPECT_CALLS_FUNCTION_ID,
-            SYS_INSPECT_RESOURCES_FUNCTION_ID,
-            SYS_INSPECT_STATE_CELLS_FUNCTION_ID,
-            SYS_INSPECT_UI_NODES_FUNCTION_ID,
-            SYS_INSPECT_PRESENTATION_CANDIDATES_FUNCTION_ID,
-            SYS_INSPECT_RUNTIME_BINDINGS_FUNCTION_ID,
-            SYS_INSPECT_SECURITY_DECISIONS_FUNCTION_ID,
+        for (id, result_type) in [
+            (
+                SYS_INSPECT_INVOCATION_NODES_FUNCTION_ID,
+                SYS_INSPECT_INVOCATION_NODES_TYPE_ID,
+            ),
+            (SYS_INSPECT_CALLS_FUNCTION_ID, SYS_INSPECT_CALLS_TYPE_ID),
+            (
+                SYS_INSPECT_RESOURCES_FUNCTION_ID,
+                SYS_INSPECT_RESOURCES_TYPE_ID,
+            ),
+            (
+                SYS_INSPECT_STATE_CELLS_FUNCTION_ID,
+                SYS_INSPECT_STATE_CELLS_TYPE_ID,
+            ),
+            (
+                SYS_INSPECT_UI_NODES_FUNCTION_ID,
+                SYS_INSPECT_UI_NODES_TYPE_ID,
+            ),
+            (
+                SYS_INSPECT_PRESENTATION_CANDIDATES_FUNCTION_ID,
+                SYS_INSPECT_PRESENTATION_CANDIDATES_TYPE_ID,
+            ),
+            (
+                SYS_INSPECT_RUNTIME_BINDINGS_FUNCTION_ID,
+                SYS_INSPECT_RUNTIME_BINDINGS_TYPE_ID,
+            ),
+            (
+                SYS_INSPECT_SECURITY_DECISIONS_FUNCTION_ID,
+                SYS_INSPECT_SECURITY_DECISIONS_TYPE_ID,
+            ),
         ] {
             let projection = system_function_by_id(id).expect("a projection identity must resolve");
             let signature = projection
                 .inspect_signature()
                 .expect("a projection must expose its sealed signature");
             assert_eq!(signature.parameter_count(), 1);
+            assert_eq!(signature.parameter_types(), &[SYS_INSPECT_SNAPSHOT_TYPE_ID]);
+            assert_eq!(
+                signature.parameter_type(0),
+                Some(SYS_INSPECT_SNAPSHOT_TYPE_ID)
+            );
+            assert_eq!(signature.result_type(), Some(result_type));
             assert_eq!(signature.stream_item_type(), None);
             assert!(projection.invocation_signature().is_none());
         }
@@ -1363,6 +1566,14 @@ mod tests {
             .inspect_signature()
             .expect("sys.inspect.trace must expose its sealed signature");
         assert_eq!(signature.parameter_count(), 2);
+        assert_eq!(
+            signature.parameter_types(),
+            &[
+                SYS_INSPECT_INVOCATION_TYPE_ID,
+                SYS_INSPECT_TRACE_AFTER_SEQUENCE_TYPE_ID,
+            ]
+        );
+        assert_eq!(signature.result_type(), None);
         assert_eq!(
             signature.stream_item_type(),
             Some(SYS_INSPECT_TRACE_EVENT_TYPE_ID)
@@ -1799,6 +2010,83 @@ mod tests {
                 .any(|carrier| ids.contains(&carrier.id())),
             "inspect carriers must not collide with the invocation carriers"
         );
+    }
+
+    #[test]
+    fn inspect_projection_carrier_identities_are_fixed_and_collision_free() {
+        let carriers = [
+            (
+                SYS_INSPECT_INVOCATION_NODES_TYPE_ID,
+                SYS_INSPECT_INVOCATION_NODES_TYPE_NAME,
+                SYS_INSPECT_INVOCATION_NODES_REPRESENTATION_CONTRACT,
+                0xf8,
+            ),
+            (
+                SYS_INSPECT_CALLS_TYPE_ID,
+                SYS_INSPECT_CALLS_TYPE_NAME,
+                SYS_INSPECT_CALLS_REPRESENTATION_CONTRACT,
+                0xf9,
+            ),
+            (
+                SYS_INSPECT_RESOURCES_TYPE_ID,
+                SYS_INSPECT_RESOURCES_TYPE_NAME,
+                SYS_INSPECT_RESOURCES_REPRESENTATION_CONTRACT,
+                0xfa,
+            ),
+            (
+                SYS_INSPECT_STATE_CELLS_TYPE_ID,
+                SYS_INSPECT_STATE_CELLS_TYPE_NAME,
+                SYS_INSPECT_STATE_CELLS_REPRESENTATION_CONTRACT,
+                0xfb,
+            ),
+            (
+                SYS_INSPECT_UI_NODES_TYPE_ID,
+                SYS_INSPECT_UI_NODES_TYPE_NAME,
+                SYS_INSPECT_UI_NODES_REPRESENTATION_CONTRACT,
+                0xfc,
+            ),
+            (
+                SYS_INSPECT_PRESENTATION_CANDIDATES_TYPE_ID,
+                SYS_INSPECT_PRESENTATION_CANDIDATES_TYPE_NAME,
+                SYS_INSPECT_PRESENTATION_CANDIDATES_REPRESENTATION_CONTRACT,
+                0xfd,
+            ),
+            (
+                SYS_INSPECT_RUNTIME_BINDINGS_TYPE_ID,
+                SYS_INSPECT_RUNTIME_BINDINGS_TYPE_NAME,
+                SYS_INSPECT_RUNTIME_BINDINGS_REPRESENTATION_CONTRACT,
+                0xfe,
+            ),
+            (
+                SYS_INSPECT_SECURITY_DECISIONS_TYPE_ID,
+                SYS_INSPECT_SECURITY_DECISIONS_TYPE_NAME,
+                SYS_INSPECT_SECURITY_DECISIONS_REPRESENTATION_CONTRACT,
+                0xff,
+            ),
+        ];
+        let mut ids = [SYS_INSPECT_INVOCATION_NODES_TYPE_ID; 8];
+        for (index, (id, name, contract, last_byte)) in carriers.into_iter().enumerate() {
+            ids[index] = id;
+            assert_eq!(id.to_bytes()[15], last_byte);
+            assert!(name.starts_with("sys.inspect."));
+            assert!(contract.starts_with("orna.sys.inspect."));
+            assert!(contract.ends_with("@1"));
+        }
+        let mut sorted = ids.to_vec();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(sorted.len(), carriers.len());
+        assert!(!ids.contains(&SYS_SECURITY_PRINCIPAL_TYPE_ID));
+        assert!(!ids.iter().any(|id| {
+            [
+                SYS_INSPECT_INVOCATION_TYPE_ID,
+                SYS_INSPECT_SNAPSHOT_TYPE_ID,
+                SYS_INSPECT_SNAPSHOT_OPTIONS_TYPE_ID,
+                SYS_INSPECT_TRACE_EVENT_TYPE_ID,
+                SYS_SECURITY_PRINCIPAL_TYPE_ID,
+            ]
+            .contains(id)
+        }));
     }
 
     #[test]
