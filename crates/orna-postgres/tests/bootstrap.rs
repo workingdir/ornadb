@@ -244,6 +244,16 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         "resource request identity history",
         include_str!("../migrations/0034_resource_request_history.sql"),
     ),
+    (
+        35,
+        "resource audit target authorities",
+        include_str!("../migrations/0035_resource_audit_target_authority.sql"),
+    ),
+    (
+        36,
+        "sealed Inspector value types",
+        include_str!("../migrations/0036_sealed_inspect_value_types.sql"),
+    ),
 ];
 const MIGRATION_DATA_STEP_SEPARATOR: &[u8] = b"\0orna.kernel.migration-step\0";
 const CANONICAL_HASH_V1_EMPTY_SEED_STEP: &[u8] = b"canonical-hash-v1-empty-seed/v1";
@@ -348,6 +358,15 @@ fn is_later_catalogue_relation(relation: &str) -> bool {
         || relation.starts_with("user_state_cells")
 }
 
+fn is_later_catalogue_trigger(trigger: &str) -> bool {
+    matches!(
+        trigger,
+        "catalogue_function_parameters_catalogue_revision_id_target_fkey"
+            | "catalogue_functions_catalogue_revision_id_return_target_ty_fkey"
+            | "catalogue_object_types_function_target_fkey"
+    )
+}
+
 fn without_later_relations(snapshot: &CatalogueSurfaceSnapshot) -> CatalogueSurfaceSnapshot {
     CatalogueSurfaceSnapshot {
         relations_and_indexes: snapshot
@@ -359,7 +378,9 @@ fn without_later_relations(snapshot: &CatalogueSurfaceSnapshot) -> CatalogueSurf
         triggers: snapshot
             .triggers
             .iter()
-            .filter(|(_, relation, _, _)| !is_later_catalogue_relation(relation))
+            .filter(|(_, relation, trigger, _)| {
+                !is_later_catalogue_relation(relation) && !is_later_catalogue_trigger(trigger)
+            })
             .cloned()
             .collect(),
         relation_acls: snapshot
@@ -371,6 +392,7 @@ fn without_later_relations(snapshot: &CatalogueSurfaceSnapshot) -> CatalogueSurf
         schema_acls: snapshot.schema_acls.clone(),
     }
 }
+
 
 #[derive(Debug, Eq, PartialEq)]
 struct TargetForeignKeySnapshot(Vec<(String, String, String, bool, bool)>);
@@ -890,8 +912,8 @@ async fn bootstrap_upgrades_the_registered_v20_empty_catalogue() -> TestResult<(
 
         let after = snapshot_upgrade_state(&database).await?;
         require(
-            after.migrations.len() == 34 && after.migrations[..20] == before.migrations[..],
-            format!("v21-v34 changed prior migration records: {:?}", after.migrations),
+            after.migrations.len() == MIGRATIONS.len() && after.migrations[..20] == before.migrations[..],
+            format!("v21-v36 changed prior migration records: {:?}", after.migrations),
         )?;
         require(
             after.migrations[20]
@@ -1012,7 +1034,7 @@ async fn bootstrap_upgrades_the_registered_v20_empty_catalogue() -> TestResult<(
         )?;
         require(
             after.active_pair == before.active_pair,
-            "v21-v34 changed the active revision pair",
+            "v21-v36 changed the active revision pair",
         )?;
 
         let recovered = kernel.recover().await?;
@@ -1682,8 +1704,8 @@ async fn bootstrap_upgrades_v5_write_reference_evidence_without_mutating_semanti
 
         let after = snapshot_upgrade_state(&database).await?;
         require(
-            after.migrations.len() == 34 && after.migrations[..5] == before.migrations[..],
-            format!("v6-v34 changed prior migration records: {:?}", after.migrations),
+            after.migrations.len() == MIGRATIONS.len() && after.migrations[..5] == before.migrations[..],
+            format!("v6-v36 changed prior migration records: {:?}", after.migrations),
         )?;
         require(
             after.migrations[5]
@@ -2023,7 +2045,7 @@ async fn bootstrap_upgrades_registered_v6_without_standard_rows() -> TestResult<
 
         let after = snapshot_upgrade_state(&database).await?;
         require(
-            after.migrations.len() == 34
+            after.migrations.len() == MIGRATIONS.len()
                 && after.migrations[..6] == before.migrations[..]
                 && after.migrations[6]
                     == (
@@ -2302,7 +2324,7 @@ async fn bootstrap_upgrades_registered_v7_without_resolved_value_rows() -> TestR
         let after_surface = snapshot_catalogue_surface(&database).await?;
         let after_target_fks = snapshot_application_target_foreign_keys(&database).await?;
         require(
-            after.migrations.len() == 34
+            after.migrations.len() == MIGRATIONS.len()
                 && after.migrations[..7] == before.migrations[..]
                 && after.migrations[7]
                     == (
@@ -2460,7 +2482,7 @@ async fn bootstrap_upgrades_registered_v7_without_resolved_value_rows() -> TestR
                         "stream function returns".to_owned(),
                         expected_migration_checksum(33, MIGRATIONS[32].2),
                     ),
-            format!("v7-v34 upgrade produced unexpected migrations: {:?}", after.migrations),
+            format!("v7-v36 upgrade produced unexpected migrations: {:?}", after.migrations),
         )?;
         require(
             after.active_pair == before.active_pair
@@ -2477,14 +2499,10 @@ async fn bootstrap_upgrades_registered_v7_without_resolved_value_rows() -> TestR
             ),
         )?;
         require(
-            before_target_fks == after_target_fks,
+            after_target_fks == expected_application_target_foreign_keys_after_sealed_inspector(),
             format!(
-                "migration 0008 changed application target foreign keys: before={before_target_fks:?}, after={after_target_fks:?}"
+                "migration 0036 changed application target foreign keys unexpectedly: before={before_target_fks:?}, after={after_target_fks:?}"
             ),
-        )?;
-        require(
-            after_target_fks == expected_target_fks,
-            format!("v8 application target foreign keys are not exact: {after_target_fks:?}"),
         )?;
 
         let recovered = kernel.recover().await?;
@@ -3298,7 +3316,7 @@ async fn inspect_resource_audit_schema(client: &Client) -> TestResult<()> {
         ),
         (
             "resource_audit_events_target_fk",
-            "FOREIGN KEY (catalogue_revision_id, target_function_id) REFERENCES _orna_kernel.catalogue_functions(catalogue_revision_id, function_id)",
+            "FOREIGN KEY (catalogue_revision_id, target_function_id) REFERENCES _orna_kernel.invocation_target_authorities(catalogue_revision_id, function_id)",
         ),
         (
             "resource_audit_events_revision_pair_fk",
@@ -3679,6 +3697,12 @@ async fn inspect_resolved_value_storage(
         ),
         (
             "catalogue_function_parameters",
+            "catalogue_function_parameters_value_pin_check",
+            false,
+            false,
+        ),
+        (
+            "catalogue_function_parameters",
             "catalogue_function_parameters_type_kind_check",
             false,
             false,
@@ -3761,7 +3785,42 @@ async fn inspect_resolved_value_storage(
             false,
             false,
         ),
+        (
+            "catalogue_functions",
+            "catalogue_functions_return_value_pin_check",
+            false,
+            false,
+        ),
     ] {
+        if let Some((value_type_column, standard_revision_column, require_shape)) =
+            match constraint {
+                "catalogue_function_parameters_check"
+                | "catalogue_function_parameters_value_pin_check" => Some((
+                    "value_type_id",
+                    "value_standard_library_revision_id",
+                    constraint == "catalogue_function_parameters_check",
+                )),
+                "catalogue_functions_check1"
+                | "catalogue_functions_return_value_pin_check" => Some((
+                    "return_value_type_id",
+                    "return_standard_library_revision_id",
+                    constraint == "catalogue_functions_check1",
+                )),
+                _ => None,
+            }
+        {
+            inspect_sealed_value_type_constraint(
+                client,
+                table,
+                constraint,
+                value_type_column,
+                standard_revision_column,
+                require_shape,
+            )
+            .await?;
+            continue;
+        }
+
         let definition =
             exact_resolved_type_constraint_definition(constraint).ok_or_else(|| {
                 failure(format!(
@@ -3781,6 +3840,48 @@ async fn inspect_resolved_value_storage(
     inspect_resolved_value_public_privileges(client).await
 }
 
+async fn inspect_sealed_value_type_constraint(
+    client: &Client,
+    table: &str,
+    constraint: &str,
+    value_type_column: &str,
+    standard_revision_column: &str,
+    require_shape: bool,
+) -> TestResult<()> {
+    let definition = constraint_definition(client, table, constraint).await?;
+    let value_type_not_null = format!("{value_type_column} IS NOT NULL");
+    let value_type_null = format!("{value_type_column} IS NULL");
+    let value_type_exclusion = format!("{value_type_column} <> ALL");
+    let value_type_inclusion = format!("{value_type_column} = ANY");
+    let standard_revision_not_null = format!("{standard_revision_column} IS NOT NULL");
+    let standard_revision_null = format!("{standard_revision_column} IS NULL");
+    let shape_is_valid = !require_shape
+        || (value_type_column == "value_type_id"
+            && definition.contains("type_kind = 'scalar'::text")
+            && definition.contains("type_kind = 'value'::text")
+            && definition.contains("type_kind = 'enum'::text")
+            && definition.contains("type_kind = 'record'::text"))
+        || (value_type_column == "return_value_type_id"
+            && definition.contains("return_shape = 'rows'::text")
+            && definition.contains("return_shape = 'single'::text")
+            && definition.contains("return_shape = 'stream'::text"));
+    require(
+        definition.contains(&value_type_not_null)
+            && (!require_shape || definition.contains(&value_type_null))
+            && definition.contains(&value_type_exclusion)
+            && definition.contains(&value_type_inclusion)
+            && definition.contains(&standard_revision_not_null)
+            && definition.contains(&standard_revision_null)
+            && definition.contains("decode('000000000000000000000000000000f3'::text, 'hex'::text)")
+            && definition.contains("decode('000000000000000000000000000000ff'::text, 'hex'::text)")
+            && shape_is_valid,
+        format!(
+            "{table} constraint {constraint} has an incomplete sealed value-type contract: {definition:?}"
+        ),
+    )
+
+}
+
 fn exact_resolved_type_constraint_definition(constraint: &str) -> Option<&'static str> {
     Some(match constraint {
         "catalogue_fields_type_kind_check"
@@ -3789,7 +3890,6 @@ fn exact_resolved_type_constraint_definition(constraint: &str) -> Option<&'stati
             "CHECK ((type_kind = ANY (ARRAY['scalar'::text, 'named'::text, 'reference'::text, 'value'::text, 'enum'::text, 'record'::text])))"
         }
         "catalogue_fields_check"
-        | "catalogue_function_parameters_check"
         | "catalogue_function_return_columns_check" => {
             "CHECK ((((type_kind = 'scalar'::text) AND (scalar_type IS NOT NULL) AND (target_type_id IS NULL) AND (value_type_id IS NULL) AND (value_standard_library_revision_id IS NULL) AND (enum_type_id IS NULL) AND (record_type_id IS NULL)) OR ((type_kind = ANY (ARRAY['named'::text, 'reference'::text])) AND (scalar_type IS NULL) AND (target_type_id IS NOT NULL) AND (value_type_id IS NULL) AND (value_standard_library_revision_id IS NULL) AND (enum_type_id IS NULL) AND (record_type_id IS NULL)) OR ((type_kind = 'value'::text) AND (scalar_type IS NULL) AND (target_type_id IS NULL) AND (value_type_id IS NOT NULL) AND (value_standard_library_revision_id IS NOT NULL) AND (enum_type_id IS NULL) AND (record_type_id IS NULL)) OR ((type_kind = 'enum'::text) AND (scalar_type IS NULL) AND (target_type_id IS NULL) AND (value_type_id IS NULL) AND (value_standard_library_revision_id IS NULL) AND (enum_type_id IS NOT NULL) AND (record_type_id IS NULL)) OR ((type_kind = 'record'::text) AND (scalar_type IS NULL) AND (target_type_id IS NULL) AND (value_type_id IS NULL) AND (value_standard_library_revision_id IS NULL) AND (enum_type_id IS NULL) AND (record_type_id IS NOT NULL))))"
         }
@@ -3798,9 +3898,6 @@ fn exact_resolved_type_constraint_definition(constraint: &str) -> Option<&'stati
         }
         "catalogue_functions_return_shape_check" => {
             "CHECK ((return_shape = ANY (ARRAY['single'::text, 'rows'::text, 'stream'::text])))"
-        }
-        "catalogue_functions_check1" => {
-            "CHECK ((((return_shape = 'rows'::text) AND (return_type_kind IS NULL) AND (return_scalar_type IS NULL) AND (return_target_type_id IS NULL) AND (return_value_type_id IS NULL) AND (return_standard_library_revision_id IS NULL) AND (return_enum_type_id IS NULL) AND (return_record_type_id IS NULL)) OR ((return_shape = 'single'::text) AND (((return_type_kind = 'scalar'::text) AND (return_scalar_type IS NOT NULL) AND (return_target_type_id IS NULL) AND (return_value_type_id IS NULL) AND (return_standard_library_revision_id IS NULL) AND (return_enum_type_id IS NULL) AND (return_record_type_id IS NULL)) OR ((return_type_kind = ANY (ARRAY['named'::text, 'reference'::text])) AND (return_scalar_type IS NULL) AND (return_target_type_id IS NOT NULL) AND (return_value_type_id IS NULL) AND (return_standard_library_revision_id IS NULL) AND (return_enum_type_id IS NULL) AND (return_record_type_id IS NULL)) OR ((return_type_kind = 'value'::text) AND (return_scalar_type IS NULL) AND (return_target_type_id IS NULL) AND (return_value_type_id IS NOT NULL) AND (return_standard_library_revision_id IS NOT NULL) AND (return_enum_type_id IS NULL) AND (return_record_type_id IS NULL)) OR ((return_type_kind = 'enum'::text) AND (return_scalar_type IS NULL) AND (return_target_type_id IS NULL) AND (return_value_type_id IS NULL) AND (return_standard_library_revision_id IS NULL) AND (return_enum_type_id IS NOT NULL) AND (return_record_type_id IS NULL)) OR ((return_type_kind = 'record'::text) AND (return_scalar_type IS NULL) AND (return_target_type_id IS NULL) AND (return_value_type_id IS NULL) AND (return_standard_library_revision_id IS NULL) AND (return_enum_type_id IS NULL) AND (return_record_type_id IS NOT NULL)))) OR ((return_shape = 'stream'::text) AND (((return_type_kind = 'scalar'::text) AND (return_scalar_type IS NOT NULL) AND (return_target_type_id IS NULL) AND (return_value_type_id IS NULL) AND (return_standard_library_revision_id IS NULL) AND (return_enum_type_id IS NULL) AND (return_record_type_id IS NULL)) OR ((return_type_kind = ANY (ARRAY['named'::text, 'reference'::text])) AND (return_scalar_type IS NULL) AND (return_target_type_id IS NOT NULL) AND (return_value_type_id IS NULL) AND (return_standard_library_revision_id IS NULL) AND (return_enum_type_id IS NULL) AND (return_record_type_id IS NULL)) OR ((return_type_kind = 'value'::text) AND (return_scalar_type IS NULL) AND (return_target_type_id IS NULL) AND (return_value_type_id IS NOT NULL) AND (return_standard_library_revision_id IS NOT NULL) AND (return_enum_type_id IS NULL) AND (return_record_type_id IS NULL)) OR ((return_type_kind = 'enum'::text) AND (return_scalar_type IS NULL) AND (return_target_type_id IS NULL) AND (return_value_type_id IS NULL) AND (return_standard_library_revision_id IS NULL) AND (return_enum_type_id IS NOT NULL) AND (return_record_type_id IS NULL)) OR ((return_type_kind = 'record'::text) AND (return_scalar_type IS NULL) AND (return_target_type_id IS NULL) AND (return_value_type_id IS NULL) AND (return_standard_library_revision_id IS NULL) AND (return_enum_type_id IS NULL) AND (return_record_type_id IS NOT NULL))))))"
         }
         "cat_fields_val_type_len"
         | "cat_fn_params_val_type_len"
@@ -5190,6 +5287,25 @@ fn expected_application_target_foreign_keys() -> TargetForeignKeySnapshot {
     ])
 }
 
+fn expected_application_target_foreign_keys_after_sealed_inspector() -> TargetForeignKeySnapshot {
+    TargetForeignKeySnapshot(vec![
+        (
+            "catalogue_fields".to_owned(),
+            "catalogue_fields_catalogue_revision_id_target_type_id_fkey".to_owned(),
+            "FOREIGN KEY (catalogue_revision_id, target_type_id) REFERENCES _orna_kernel.catalogue_object_types(catalogue_revision_id, type_id) DEFERRABLE INITIALLY DEFERRED".to_owned(),
+            true,
+            true,
+        ),
+        (
+            "catalogue_function_return_columns".to_owned(),
+            "catalogue_function_return_col_catalogue_revision_id_target_fkey".to_owned(),
+            "FOREIGN KEY (catalogue_revision_id, target_type_id) REFERENCES _orna_kernel.catalogue_object_types(catalogue_revision_id, type_id) DEFERRABLE INITIALLY DEFERRED".to_owned(),
+            true,
+            true,
+        ),
+    ])
+}
+
 async fn inspect_empty_aggregate_hashes(client: &Client) -> TestResult<()> {
     let row = client
         .query_one(
@@ -5519,15 +5635,24 @@ async fn inspect_definition_references(client: &Client) -> TestResult<()> {
         false,
     )
     .await?;
-    require_exact_constraint(
+    let target_std_lib_rev_shape = constraint_definition(
         client,
         "definition_references",
         "definition_references_target_std_lib_rev_shape_check",
-        "CHECK ((((target_kind = 'value_type'::text) AND (target_standard_library_revision_id IS NOT NULL)) OR ((target_kind <> 'value_type'::text) AND (target_standard_library_revision_id IS NULL))))",
-        false,
-        false,
     )
     .await?;
+    require(
+        target_std_lib_rev_shape.contains("target_kind = 'value_type'::text")
+            && target_std_lib_rev_shape.contains("target_standard_library_revision_id IS NOT NULL")
+            && target_std_lib_rev_shape.contains("target_standard_library_revision_id IS NULL")
+            && target_std_lib_rev_shape.contains("target_definition_id <> ALL")
+            && target_std_lib_rev_shape.contains("target_definition_id = ANY")
+            && target_std_lib_rev_shape.contains("decode('000000000000000000000000000000f3'::text, 'hex'::text)")
+            && target_std_lib_rev_shape.contains("decode('000000000000000000000000000000ff'::text, 'hex'::text)"),
+        format!(
+            "definition_references sealed value-type shape is not closed: {target_std_lib_rev_shape:?}"
+        ),
+    )?;
     require_exact_constraint(
         client,
         "definition_references",
