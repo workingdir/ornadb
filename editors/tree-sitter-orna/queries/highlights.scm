@@ -25,8 +25,9 @@
     (kw_default) (kw_not) (kw_null) (kw_unique) (kw_check) (kw_call)
     (kw_await) (kw_return) (kw_and) (kw_or) (kw_like) (kw_ilike) (kw_true)
     (kw_false) (kw_case) (kw_when) (kw_ref) (kw_list) (kw_set) (kw_map)
-    (kw_stream) (kw_option) (kw_bool) (kw_int) (kw_bigint) (kw_float)
-    (kw_decimal) (kw_text) (kw_bytes) (kw_uuid) (kw_date) (kw_time)
+    (kw_stream) (kw_option) (kw_boolean) (kw_bool) (kw_integer) (kw_int)
+    (kw_bigint) (kw_float) (kw_decimal) (kw_character) (kw_large) (kw_text)
+    (kw_binary) (kw_bytes) (kw_uuid) (kw_date) (kw_time)
     (kw_timestamp) (kw_duration) (kw_void) (kw_distinct) (kw_order) (kw_by)
     (kw_values) (kw_returning) (kw_into) (kw_where)
 ] @keyword

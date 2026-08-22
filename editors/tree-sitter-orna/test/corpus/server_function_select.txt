@@ -252,8 +252,8 @@ AS SELECT DISTINCT entry.marker FROM predicate_test.entry entry WHERE entry.visi
       (table_column_definition
         name: (identifier)
         type: (type_spec
-          (qualified_name
-            (identifier))))
+          (scalar_type
+            (kw_boolean))))
       (rparen))
     (security_clause
       (kw_security)

@@ -4286,7 +4286,15 @@
       "members": [
         {
           "type": "SYMBOL",
+          "name": "kw_boolean"
+        },
+        {
+          "type": "SYMBOL",
           "name": "kw_bool"
+        },
+        {
+          "type": "SYMBOL",
+          "name": "kw_integer"
         },
         {
           "type": "SYMBOL",
@@ -4305,8 +4313,42 @@
           "name": "kw_decimal"
         },
         {
+          "type": "SEQ",
+          "members": [
+            {
+              "type": "SYMBOL",
+              "name": "kw_character"
+            },
+            {
+              "type": "SYMBOL",
+              "name": "kw_large"
+            },
+            {
+              "type": "SYMBOL",
+              "name": "kw_object"
+            }
+          ]
+        },
+        {
           "type": "SYMBOL",
           "name": "kw_text"
+        },
+        {
+          "type": "SEQ",
+          "members": [
+            {
+              "type": "SYMBOL",
+              "name": "kw_binary"
+            },
+            {
+              "type": "SYMBOL",
+              "name": "kw_large"
+            },
+            {
+              "type": "SYMBOL",
+              "name": "kw_object"
+            }
+          ]
         },
         {
           "type": "SYMBOL",
@@ -4797,7 +4839,15 @@
           },
           {
             "type": "SYMBOL",
+            "name": "kw_boolean"
+          },
+          {
+            "type": "SYMBOL",
             "name": "kw_bool"
+          },
+          {
+            "type": "SYMBOL",
+            "name": "kw_integer"
           },
           {
             "type": "SYMBOL",
@@ -4817,7 +4867,19 @@
           },
           {
             "type": "SYMBOL",
+            "name": "kw_character"
+          },
+          {
+            "type": "SYMBOL",
+            "name": "kw_large"
+          },
+          {
+            "type": "SYMBOL",
             "name": "kw_text"
+          },
+          {
+            "type": "SYMBOL",
+            "name": "kw_binary"
           },
           {
             "type": "SYMBOL",
@@ -4900,7 +4962,15 @@
         },
         {
           "type": "SYMBOL",
+          "name": "kw_boolean"
+        },
+        {
+          "type": "SYMBOL",
           "name": "kw_bool"
+        },
+        {
+          "type": "SYMBOL",
+          "name": "kw_integer"
         },
         {
           "type": "SYMBOL",
@@ -4919,8 +4989,42 @@
           "name": "kw_decimal"
         },
         {
+          "type": "SEQ",
+          "members": [
+            {
+              "type": "SYMBOL",
+              "name": "kw_character"
+            },
+            {
+              "type": "SYMBOL",
+              "name": "kw_large"
+            },
+            {
+              "type": "SYMBOL",
+              "name": "kw_object"
+            }
+          ]
+        },
+        {
           "type": "SYMBOL",
           "name": "kw_text"
+        },
+        {
+          "type": "SEQ",
+          "members": [
+            {
+              "type": "SYMBOL",
+              "name": "kw_binary"
+            },
+            {
+              "type": "SYMBOL",
+              "name": "kw_large"
+            },
+            {
+              "type": "SYMBOL",
+              "name": "kw_object"
+            }
+          ]
         },
         {
           "type": "SYMBOL",
@@ -6572,6 +6676,18 @@
         }
       }
     },
+    "kw_boolean": {
+      "type": "TOKEN",
+      "content": {
+        "type": "PREC",
+        "value": 100,
+        "content": {
+          "type": "PATTERN",
+          "value": "boolean",
+          "flags": "i"
+        }
+      }
+    },
     "kw_bool": {
       "type": "TOKEN",
       "content": {
@@ -6580,6 +6696,18 @@
         "content": {
           "type": "PATTERN",
           "value": "bool",
+          "flags": "i"
+        }
+      }
+    },
+    "kw_integer": {
+      "type": "TOKEN",
+      "content": {
+        "type": "PREC",
+        "value": 100,
+        "content": {
+          "type": "PATTERN",
+          "value": "integer",
           "flags": "i"
         }
       }
@@ -6632,6 +6760,30 @@
         }
       }
     },
+    "kw_character": {
+      "type": "TOKEN",
+      "content": {
+        "type": "PREC",
+        "value": 100,
+        "content": {
+          "type": "PATTERN",
+          "value": "character",
+          "flags": "i"
+        }
+      }
+    },
+    "kw_large": {
+      "type": "TOKEN",
+      "content": {
+        "type": "PREC",
+        "value": 100,
+        "content": {
+          "type": "PATTERN",
+          "value": "large",
+          "flags": "i"
+        }
+      }
+    },
     "kw_text": {
       "type": "TOKEN",
       "content": {
@@ -6640,6 +6792,18 @@
         "content": {
           "type": "PATTERN",
           "value": "text",
+          "flags": "i"
+        }
+      }
+    },
+    "kw_binary": {
+      "type": "TOKEN",
+      "content": {
+        "type": "PREC",
+        "value": 100,
+        "content": {
+          "type": "PATTERN",
+          "value": "binary",
           "flags": "i"
         }
       }

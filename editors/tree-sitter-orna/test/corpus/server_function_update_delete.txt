@@ -189,8 +189,8 @@ RETURNING TRUE;
       (table_column_definition
         name: (identifier)
         type: (type_spec
-          (qualified_name
-            (identifier))))
+          (scalar_type
+            (kw_boolean))))
       (rparen))
     (security_clause
       (kw_security)
