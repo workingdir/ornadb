@@ -1056,29 +1056,26 @@ mod tests {
             "DROP CONSTRAINT catalogue_functions_catalogue_revision_id_return_target_ty_fkey"
         ));
         assert!(migration.sql.contains(
-            "CREATE CONSTRAINT TRIGGER catalogue_function_parameters_catalogue_revision_id_target_fkey"
+            "ADD COLUMN target_type_id_fk bytea\n        GENERATED ALWAYS AS"
         ));
         assert!(migration.sql.contains(
-            "CREATE CONSTRAINT TRIGGER catalogue_functions_catalogue_revision_id_return_target_ty_fkey"
+            "ADD COLUMN return_target_type_id_fk bytea\n        GENERATED ALWAYS AS"
         ));
         assert!(migration.sql.contains(
-            "CREATE CONSTRAINT TRIGGER catalogue_object_types_function_target_fkey"
-        ));
-        assert!(migration
-            .sql
-            .contains("current_type_kind NOT IN ('named', 'reference')"));
-        assert!(migration.sql.contains(
-            "current_type_kind = 'reference'\n       AND current_target_type_id = decode('000000000000000000000000000000f3', 'hex')"
+            "FOREIGN KEY (catalogue_revision_id, target_type_id_fk)"
         ));
         assert!(migration.sql.contains(
-            "current_return_type_kind IS DISTINCT FROM 'named'\n          AND current_return_type_kind IS DISTINCT FROM 'reference'"
+            "FOREIGN KEY (catalogue_revision_id, return_target_type_id_fk)"
         ));
         assert!(migration.sql.contains(
-            "current_return_type_kind = 'reference'\n       AND current_return_target_type_id = decode('000000000000000000000000000000f3', 'hex')"
+            "target_type_id = decode('000000000000000000000000000000f3', 'hex')"
         ));
-        assert!(migration.sql.contains("FOR KEY SHARE"));
-        assert!(migration.sql.contains("DEFERRABLE INITIALLY DEFERRED"));
-        assert!(migration.sql.contains("USING ERRCODE = 'foreign_key_violation'"));
+        assert!(migration.sql.contains(
+            "return_target_type_id = decode('000000000000000000000000000000f3', 'hex')"
+        ));
+        assert!(!migration.sql.to_ascii_lowercase().contains("plpgsql"));
+        assert!(!migration.sql.contains("CREATE CONSTRAINT TRIGGER"));
+        assert!(!migration.sql.contains("FOR KEY SHARE"));
     }
 
     #[test]
