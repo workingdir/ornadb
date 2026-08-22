@@ -17,7 +17,7 @@ use orna_protocol::CallFailure;
 mod package_maintenance;
 mod source_check;
 
-const USAGE: &str = "Usage:\n  orna --version\n  orna server run\n  orna server upgrade\n  orna server backend-shell\n  orna source check <file.orna>\n  orna source apply <file.orna>\n  orna source diff <file.orna>\n  orna security grant-execute <canonical-function-id>\n  orna security user create|disable <canonical-principal-id>\n  orna security role create|grant|revoke <canonical-principal-id> [canonical-principal-id]\n  orna security grants grant|revoke <canonical-principal-id> <class> [canonical-function-id]\n  orna security check can-execute <canonical-principal-id> <canonical-function-id>\n  orna security check has-privilege <canonical-principal-id> <class> [canonical-function-id]\n  orna security whoami\n  orna raw-call <canonical-function-id>\n  orna raw-call <canonical-function-id> <canonical-parameter-id>\n  orna [--runtime <family>] invoke <qualified-name | canonical-function-id> [options]\n  orna state get <root-function-id> [options]\n  orna state set <root-function-id> [options]\n  orna inspect <invocation-id> [options]";
+const USAGE: &str = "Usage:\n  orna --version\n  orna server run\n  orna server upgrade\n  orna server backend-shell\n  orna source check <file.orna>\n  orna source apply <file.orna>\n  orna source diff <file.orna>\n  orna security grant-execute <canonical-function-id>\n  orna security user create|disable <canonical-principal-id>\n  orna security role create|grant|revoke <canonical-principal-id> [canonical-principal-id]\n  orna security grants grant|revoke <canonical-principal-id> <class> [canonical-function-id]\n  orna security grants list <canonical-principal-id>\n  orna security check can-execute <canonical-principal-id> <canonical-function-id>\n  orna security check has-privilege <canonical-principal-id> <class> [canonical-function-id]\n  orna security whoami\n  orna raw-call <canonical-function-id>\n  orna raw-call <canonical-function-id> <canonical-parameter-id>\n  orna [--runtime <family>] invoke <qualified-name | canonical-function-id> [options]\n  orna state get <root-function-id> [options]\n  orna state set <root-function-id> [options]\n  orna inspect <invocation-id> [options]";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum RawCallParameters {
@@ -625,10 +625,10 @@ where
 ///
 /// The subcommand verb is consumed by the dispatcher and passed here. The
 /// closed shapes are: `user create|disable <principal-id>`; `role
-/// create|grant|revoke <role-id> [member-id]`; `grants grant|revoke|list
-/// <grantee-id> [<class> [<object-id>]]`; `check can-execute <principal-id>
-/// <function-id>`; `check has-privilege <principal-id> <class>
-/// [<object-id>]`; and `whoami`. Any other shape is a usage error (`None`).
+/// create|grant|revoke <role-id> [member-id]`; `grants grant|revoke
+/// <grantee-id> <class> [<object-id>]`; `grants list <grantee-id>`;
+/// `check can-execute <principal-id> <function-id>`; `check has-privilege
+/// <principal-id> <class> [<object-id>]`; and `whoami`. Any other shape is a usage error (`None`).
 fn parse_security_admin_command<I>(subcommand: &str, args: I) -> Option<Command>
 where
     I: IntoIterator<Item = OsString>,
@@ -686,6 +686,12 @@ where
             let action = args.next()?.into_string().ok()?;
             let grantee = parse_principal_id(args.next()?.into_string().ok()?)?;
             match action.as_str() {
+                "list" => {
+                    if args.next().is_some() {
+                        return None;
+                    }
+                    Operation::ListGrants { grantee }
+                }
                 "grant" | "revoke" => {
                     let class_text = args.next()?.into_string().ok()?;
                     let class = orna_server::parse_privilege_class(&class_text)?;
@@ -1267,6 +1273,16 @@ mod tests {
             parse_command(arguments(&[
                 "orna",
                 "security",
+                "grants",
+                "list",
+                &grantee_canonical,
+            ])),
+            request(orna_server::InstalledSecurityAdminOperation::ListGrants { grantee })
+        );
+        assert_eq!(
+            parse_command(arguments(&[
+                "orna",
+                "security",
                 "check",
                 "can-execute",
                 &grantee_canonical,
@@ -1296,12 +1312,32 @@ mod tests {
 
     #[test]
     fn rejects_malformed_security_admin_shapes() {
+        let grantee_canonical = PrincipalId::from_bytes([0x88; 16]).canonical();
+        let function_canonical = FunctionId::from_bytes([0x99; 16]).canonical();
         for values in [
             vec!["orna", "security", "user"],
             vec!["orna", "security", "user", "create"],
             vec!["orna", "security", "user", "bogus", "principal:deadbeef"],
             vec!["orna", "security", "role", "revoke", "r1"],
-            vec!["orna", "security", "grants", "list", "g1"],
+            vec!["orna", "security", "grants", "list"],
+            vec!["orna", "security", "grants", "list", "not-a-principal"],
+            vec![
+                "orna",
+                "security",
+                "grants",
+                "list",
+                grantee_canonical.as_str(),
+                "execute",
+            ],
+            vec![
+                "orna",
+                "security",
+                "grants",
+                "list",
+                grantee_canonical.as_str(),
+                "execute",
+                function_canonical.as_str(),
+            ],
             vec!["orna", "security", "grants", "grant", "g1", "not-a-class"],
             vec!["orna", "security", "check", "can-execute", "p1"],
             vec!["orna", "security", "check", "bogus"],
@@ -2264,7 +2300,7 @@ mod tests {
     fn usage_diagnostic_is_exact() {
         assert_eq!(
             USAGE,
-            "Usage:\n  orna --version\n  orna server run\n  orna server upgrade\n  orna server backend-shell\n  orna source check <file.orna>\n  orna source apply <file.orna>\n  orna source diff <file.orna>\n  orna security grant-execute <canonical-function-id>\n  orna security user create|disable <canonical-principal-id>\n  orna security role create|grant|revoke <canonical-principal-id> [canonical-principal-id]\n  orna security grants grant|revoke <canonical-principal-id> <class> [canonical-function-id]\n  orna security check can-execute <canonical-principal-id> <canonical-function-id>\n  orna security check has-privilege <canonical-principal-id> <class> [canonical-function-id]\n  orna security whoami\n  orna raw-call <canonical-function-id>\n  orna raw-call <canonical-function-id> <canonical-parameter-id>\n  orna [--runtime <family>] invoke <qualified-name | canonical-function-id> [options]\n  orna state get <root-function-id> [options]\n  orna state set <root-function-id> [options]\n  orna inspect <invocation-id> [options]"
+            "Usage:\n  orna --version\n  orna server run\n  orna server upgrade\n  orna server backend-shell\n  orna source check <file.orna>\n  orna source apply <file.orna>\n  orna source diff <file.orna>\n  orna security grant-execute <canonical-function-id>\n  orna security user create|disable <canonical-principal-id>\n  orna security role create|grant|revoke <canonical-principal-id> [canonical-principal-id]\n  orna security grants grant|revoke <canonical-principal-id> <class> [canonical-function-id]\n  orna security grants list <canonical-principal-id>\n  orna security check can-execute <canonical-principal-id> <canonical-function-id>\n  orna security check has-privilege <canonical-principal-id> <class> [canonical-function-id]\n  orna security whoami\n  orna raw-call <canonical-function-id>\n  orna raw-call <canonical-function-id> <canonical-parameter-id>\n  orna [--runtime <family>] invoke <qualified-name | canonical-function-id> [options]\n  orna state get <root-function-id> [options]\n  orna state set <root-function-id> [options]\n  orna inspect <invocation-id> [options]"
         );
     }
 }
