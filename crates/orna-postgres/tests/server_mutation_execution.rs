@@ -5,6 +5,8 @@ mod support;
 use std::{collections::BTreeSet, str::FromStr};
 
 #[cfg(feature = "test-hooks")]
+use std::future::Future;
+#[cfg(feature = "test-hooks")]
 use std::{
     io::{Read, Write},
     net::{Shutdown, SocketAddr, TcpListener, TcpStream, ToSocketAddrs},
@@ -2504,11 +2506,42 @@ impl ExactTask {
 fn kernel(database: &TestDatabase) -> TestResult<PostgresKernel> {
     Ok(PostgresKernel::from_str(&database.connection_string())?)
 }
+#[cfg(feature = "test-hooks")]
+fn run_large_stack_live_test<F, Fut>(name: &'static str, test: F) -> TestResult<()>
+where
+    F: FnOnce() -> Fut + Send + 'static,
+    Fut: Future<Output = TestResult<()>> + Send + 'static,
+{
+    let handle = std::thread::Builder::new()
+        .name(name.to_owned())
+        .stack_size(4 * 1024 * 1024)
+        .spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|error| failure(format!("{name} live runtime could not start: {error}")))?;
+            runtime.block_on(test())
+        })
+        .map_err(|error| failure(format!("{name} live thread could not start: {error}")))?;
+    match handle.join() {
+        Ok(result) => result,
+        Err(_) => Err(failure(format!("{name} live thread panicked"))),
+    }
+}
 
 #[cfg(feature = "test-hooks")]
-#[tokio::test]
+#[test]
 #[ignore = "requires the Compose PostgreSQL development service"]
-async fn authenticated_raw_insert_is_denied_then_granted_and_audited() -> TestResult<()> {
+fn authenticated_raw_insert_is_denied_then_granted_and_audited() -> TestResult<()> {
+    run_large_stack_live_test(
+        "authenticated-raw-insert-live",
+        authenticated_raw_insert_is_denied_then_granted_and_audited_inner,
+    )
+}
+
+#[cfg(feature = "test-hooks")]
+async fn authenticated_raw_insert_is_denied_then_granted_and_audited_inner() -> TestResult<()> {
+
     with_test_database(|database| async move {
         let kernel: PostgresKernel = database.connection_string().parse()?;
         kernel.bootstrap().await?;
@@ -3046,35 +3079,13 @@ async fn authenticated_raw_insert_is_denied_then_granted_and_audited() -> TestRe
 #[test]
 #[ignore = "requires the Compose PostgreSQL development service"]
 fn authenticated_raw_argument_pair_binds_two_active_parameters_and_audits() -> TestResult<()> {
-    let handle = std::thread::Builder::new()
-        .name("authenticated-raw-argument-pair-live".to_owned())
-        .stack_size(4 * 1024 * 1024)
-        .spawn(|| {
-            let runtime = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .map_err(|error| {
-                    failure(format!(
-                        "authenticated raw argument pair live runtime could not start: {error}"
-                    ))
-                })?;
-            runtime.block_on(
-                authenticated_raw_argument_pair_binds_two_active_parameters_and_audits_inner(),
-            )
-        })
-        .map_err(|error| {
-            failure(format!(
-                "authenticated raw argument pair live thread could not start: {error}"
-            ))
-        })?;
-    match handle.join() {
-        Ok(result) => result,
-        Err(_) => Err(failure(
-            "authenticated raw argument pair live thread panicked",
-        )),
-    }
+    run_large_stack_live_test(
+        "authenticated-raw-argument-pair-live",
+        authenticated_raw_argument_pair_binds_two_active_parameters_and_audits_inner,
+    )
 }
 
+#[cfg(feature = "test-hooks")]
 async fn authenticated_raw_argument_pair_binds_two_active_parameters_and_audits_inner(
 ) -> TestResult<()> {
     with_test_database(|database| async move {
@@ -3536,10 +3547,18 @@ async fn authenticated_raw_argument_pair_binds_two_active_parameters_and_audits_
 /// nullable and defaulted mutation parameters before this live boundary; this
 /// test covers every remaining public pair shape and the savepoint path.
 #[cfg(feature = "test-hooks")]
-#[tokio::test]
+#[test]
 #[ignore = "requires the Compose PostgreSQL development service and ADR 0050 dispatch"]
-async fn authenticated_raw_reference_value_update_binds_by_parameter_id_and_audits()
--> TestResult<()> {
+fn authenticated_raw_reference_value_update_binds_by_parameter_id_and_audits() -> TestResult<()> {
+    run_large_stack_live_test(
+        "authenticated-raw-reference-value-update-live",
+        authenticated_raw_reference_value_update_binds_by_parameter_id_and_audits_inner,
+    )
+}
+
+#[cfg(feature = "test-hooks")]
+async fn authenticated_raw_reference_value_update_binds_by_parameter_id_and_audits_inner(
+) -> TestResult<()> {
     with_test_database(|database| async move {
         let kernel: PostgresKernel = database.connection_string().parse()?;
         kernel.bootstrap().await?;
@@ -3786,9 +3805,17 @@ async fn read_probe_values(
 }
 
 #[cfg(feature = "test-hooks")]
-#[tokio::test]
+#[test]
 #[ignore = "requires the Compose PostgreSQL development service"]
-async fn authenticated_raw_reference_mutation_authority_and_selection() -> TestResult<()> {
+fn authenticated_raw_reference_mutation_authority_and_selection() -> TestResult<()> {
+    run_large_stack_live_test(
+        "authenticated-raw-reference-authority-live",
+        authenticated_raw_reference_mutation_authority_and_selection_inner,
+    )
+}
+
+#[cfg(feature = "test-hooks")]
+async fn authenticated_raw_reference_mutation_authority_and_selection_inner() -> TestResult<()> {
     with_test_database(|database| async move {
         let kernel: PostgresKernel = database.connection_string().parse()?;
         kernel.bootstrap().await?;
@@ -4142,10 +4169,18 @@ async fn authenticated_raw_reference_mutation_authority_and_selection() -> TestR
 }
 
 #[cfg(feature = "test-hooks")]
-#[tokio::test]
+#[test]
 #[ignore = "requires the Compose PostgreSQL development service"]
-async fn authenticated_raw_reference_update_rejects_non_literal_assignment_after_audit()
--> TestResult<()> {
+fn authenticated_raw_reference_update_rejects_non_literal_assignment_after_audit() -> TestResult<()> {
+    run_large_stack_live_test(
+        "authenticated-raw-reference-non-literal-live",
+        authenticated_raw_reference_update_rejects_non_literal_assignment_after_audit_inner,
+    )
+}
+
+#[cfg(feature = "test-hooks")]
+async fn authenticated_raw_reference_update_rejects_non_literal_assignment_after_audit_inner(
+) -> TestResult<()> {
     with_test_database(|database| async move {
         let kernel: PostgresKernel = database.connection_string().parse()?;
         kernel.bootstrap().await?;
@@ -4291,10 +4326,19 @@ async fn authenticated_raw_reference_update_rejects_non_literal_assignment_after
 }
 
 #[cfg(feature = "test-hooks")]
-#[tokio::test]
+#[test]
 #[ignore = "requires the Compose PostgreSQL development service"]
-async fn authenticated_raw_reference_update_database_failure_rolls_back_rows_and_retains_audit()
--> TestResult<()> {
+fn authenticated_raw_reference_update_database_failure_rolls_back_rows_and_retains_audit(
+) -> TestResult<()> {
+    run_large_stack_live_test(
+        "authenticated-raw-reference-database-failure-live",
+        authenticated_raw_reference_update_database_failure_rolls_back_rows_and_retains_audit_inner,
+    )
+}
+
+#[cfg(feature = "test-hooks")]
+async fn authenticated_raw_reference_update_database_failure_rolls_back_rows_and_retains_audit_inner(
+) -> TestResult<()> {
     with_test_database(|database| async move {
         let kernel: PostgresKernel = database.connection_string().parse()?;
         kernel.bootstrap().await?;
@@ -7040,10 +7084,19 @@ fn require_raw_reference_insert_conflict(
 /// pair is unchanged and the grant set is exactly the five fixed-service
 /// grants. Rows are asserted only through the public raw reader.
 #[cfg(feature = "test-hooks")]
-#[tokio::test]
+#[test]
 #[ignore = "requires the Compose PostgreSQL development service"]
-async fn authenticated_raw_reference_insert_is_denied_then_granted_transactional_and_unique()
--> TestResult<()> {
+fn authenticated_raw_reference_insert_is_denied_then_granted_transactional_and_unique(
+) -> TestResult<()> {
+    run_large_stack_live_test(
+        "authenticated-raw-reference-insert-live",
+        authenticated_raw_reference_insert_is_denied_then_granted_transactional_and_unique_inner,
+    )
+}
+
+#[cfg(feature = "test-hooks")]
+async fn authenticated_raw_reference_insert_is_denied_then_granted_transactional_and_unique_inner(
+) -> TestResult<()> {
     with_test_database(|database| async move {
         let kernel: PostgresKernel = database.connection_string().parse()?;
         kernel.bootstrap().await?;
@@ -7788,10 +7841,18 @@ fn require_raw_scalar_target_unavailable(
 /// `authenticated_raw_reference_insert_is_denied_then_granted_transactional_and_unique`
 /// test; this test does not duplicate its reference setup.
 #[cfg(feature = "test-hooks")]
-#[tokio::test]
+#[test]
 #[ignore = "requires the Compose PostgreSQL development service"]
-async fn authenticated_raw_scalar_insert_binds_exact_parameters_and_stores_exact_values()
--> TestResult<()> {
+fn authenticated_raw_scalar_insert_binds_exact_parameters_and_stores_exact_values() -> TestResult<()> {
+    run_large_stack_live_test(
+        "authenticated-raw-scalar-insert-live",
+        authenticated_raw_scalar_insert_binds_exact_parameters_and_stores_exact_values_inner,
+    )
+}
+
+#[cfg(feature = "test-hooks")]
+async fn authenticated_raw_scalar_insert_binds_exact_parameters_and_stores_exact_values_inner(
+) -> TestResult<()> {
     with_test_database(|database| async move {
         let kernel: PostgresKernel = database.connection_string().parse()?;
         kernel.bootstrap().await?;
