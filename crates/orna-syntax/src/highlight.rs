@@ -153,7 +153,6 @@ fn walk_node(
             walk_children_with_role(node, Some(NameRole::Variable), tokens)
         }
         SyntaxKind::NamedTypeSpecification
-        | SyntaxKind::StandardLargeObjectTypeSpecification
         | SyntaxKind::ReferenceTypeSpecification
         | SyntaxKind::ListTypeSpecification
         | SyntaxKind::SetTypeSpecification
@@ -162,6 +161,9 @@ fn walk_node(
         | SyntaxKind::StreamTypeSpecification
         | SyntaxKind::StreamReturnType => {
             walk_children_with_role(node, Some(NameRole::Type), tokens)
+        }
+        SyntaxKind::StandardLargeObjectTypeSpecification => {
+            walk_standard_large_object(node, tokens)
         }
         SyntaxKind::CapabilitySpecification => {
             walk_children_with_role(node, Some(NameRole::Function), tokens)
@@ -186,6 +188,23 @@ fn walk_children_with_role(
         node.children_with_tokens().collect();
     for index in 0..children.len() {
         classify_child(&children, index, &mut role, tokens);
+    }
+}
+
+/// Classifies every word in a canonical multi-word scalar type as a type name.
+fn walk_standard_large_object(node: &SyntaxNode<OrnaLanguage>, tokens: &mut Vec<HighlightToken>) {
+    let children: Vec<NodeOrToken<SyntaxNode<OrnaLanguage>, SyntaxToken<OrnaLanguage>>> =
+        node.children_with_tokens().collect();
+    let mut role = None;
+    for (index, child) in children.iter().enumerate() {
+        match child {
+            NodeOrToken::Token(token) if token.kind() == SyntaxKind::Word => {
+                let (start, end) = token_range(token);
+                tokens.push(HighlightToken::new(start, end, HighlightKind::TypeName));
+            }
+            NodeOrToken::Token(token) => classify_token(&children, index, token, &mut role, tokens),
+            NodeOrToken::Node(child) => walk_node(child, &mut role, tokens),
+        }
     }
 }
 
@@ -728,13 +747,17 @@ pub const KEYWORDS: &[&str] = &[
 /// Standard scalar type names, sorted for binary search.
 pub const SCALAR_TYPES: &[&str] = &[
     "BIGINT",
+    "BINARY LARGE OBJECT",
     "BOOL",
+    "BOOLEAN",
     "BYTES",
+    "CHARACTER LARGE OBJECT",
     "DATE",
     "DECIMAL",
     "DURATION",
     "FLOAT",
     "INT",
+    "INTEGER",
     "TEXT",
     "TIME",
     "TIMESTAMP",
@@ -807,6 +830,25 @@ mod tests {
         assert_eq!(kind_at(opaque, "CONTRACT"), HighlightKind::Keyword);
         assert_eq!(kind_at(opaque, "TRANSIENT"), HighlightKind::Keyword);
         assert_eq!(kind_at(opaque, "'x'"), HighlightKind::StringLiteral);
+    }
+
+    #[test]
+    fn classifies_canonical_scalar_type_spellings() {
+        let source = "CREATE SERVER FUNCTION files.boolean_value() RETURNS BOOLEAN AS SELECT TRUE;
+            CREATE SERVER FUNCTION files.integer_value() RETURNS INTEGER AS SELECT TRUE;
+            CREATE SERVER FUNCTION files.text_value() RETURNS CHARACTER LARGE OBJECT AS SELECT TRUE;
+            CREATE SERVER FUNCTION files.bytes_value() RETURNS BINARY LARGE OBJECT AS SELECT TRUE;";
+
+        for needle in [
+            "BOOLEAN",
+            "INTEGER",
+            "CHARACTER",
+            "LARGE",
+            "OBJECT",
+            "BINARY",
+        ] {
+            assert_eq!(kind_at(source, needle), HighlightKind::TypeName, "{needle}");
+        }
     }
 
     #[test]
