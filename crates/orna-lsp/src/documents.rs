@@ -120,7 +120,11 @@ impl<'text> PositionMapper<'text> {
             let position = self.position(start);
             let length = utf16_len(&self.text[start..segment_end]);
             segments.push((position, length as u32));
-            start = segment_end;
+            start = if segment_end == end {
+                segment_end
+            } else {
+                self.line_starts[line + 1]
+            };
         }
         segments
     }
@@ -129,4 +133,32 @@ impl<'text> PositionMapper<'text> {
 /// Returns the UTF-16 code-unit length of one string.
 fn utf16_len(text: &str) -> usize {
     text.chars().map(|character| character.len_utf16()).sum()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn segments_advance_across_multiline_tokens() {
+        let text = "/* first\n😀 second\nthird */";
+        let mapper = PositionMapper::new(text);
+        let comment = orna_syntax::highlight(text)
+            .into_iter()
+            .find(|token| token.kind == orna_syntax::HighlightKind::Comment)
+            .expect("multiline comment token");
+        let span = SourceSpan {
+            start: comment.range.start,
+            end: comment.range.end,
+        };
+
+        assert_eq!(
+            mapper.segments(&span),
+            vec![
+                (Position { line: 0, character: 0 }, 8),
+                (Position { line: 1, character: 0 }, 9),
+                (Position { line: 2, character: 0 }, 8),
+            ]
+        );
+    }
 }

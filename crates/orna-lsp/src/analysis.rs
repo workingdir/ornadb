@@ -896,3 +896,26 @@ pub fn completion(parse: &Parse, standard: Option<&StandardLibrary>) -> Vec<Comp
     }
     items
 }
+
+#[cfg(test)]
+mod tests {
+    use super::completion;
+
+    #[test]
+    fn completion_includes_canonical_scalar_type_spellings() {
+        let parse = orna_syntax::parse("");
+        let labels: Vec<_> = completion(&parse, None)
+            .into_iter()
+            .map(|item| item.label)
+            .collect();
+
+        for expected in [
+            "BOOLEAN",
+            "INTEGER",
+            "CHARACTER LARGE OBJECT",
+            "BINARY LARGE OBJECT",
+        ] {
+            assert!(labels.iter().any(|label| label == expected), "missing {expected}");
+        }
+    }
+}
