@@ -49,7 +49,8 @@ use orna_core::inspect_carrier::{
     InspectCarrierEnvelope, InspectCarrierKind, InspectCarrierProvenance,
 };
 use orna_core::{
-    FunctionRevisionId, InspectEpochId, InvocationId, TypeId,
+    CatalogueRevisionId, FunctionId, FunctionRevisionId, InspectEpochId, InvocationId, SourceRevisionId,
+    TypeId,
     catalogue::{
         FunctionDefinition, FunctionDomain, FunctionReturn, QualifiedSemanticName, ValueTypeKind,
         ValueTypeMutability, ValueTypePersistence,
@@ -72,8 +73,8 @@ use orna_core::{
     },
 };
 use orna_postgres::{
-    AuthenticatedServerResourceEvent, AuthenticatedServerResourceStart, PostgresKernel,
-    PostgresKernelError, ResourceCancellation, ResourceCredit, SealedInvocationResult,
+    AuthenticatedInspectSnapshot, AuthenticatedServerResourceEvent, AuthenticatedServerResourceStart,
+    PostgresKernel, PostgresKernelError, ResourceCancellation, ResourceCredit, SealedInvocationResult,
 };
 use orna_protocol::{
     CallFailure, Channel, ClientFrame, Event, InvocationEventRecord, MAX_CHANNEL_WINDOW,
@@ -1142,21 +1143,21 @@ async fn run_installed_inspect(
             else {
                 return Err("inspect.stale_epoch".to_owned());
             };
-            let Some(epoch) = kernel
-                .load_inspect_snapshot(epoch_id)
+            let Some(loaded_snapshot) = kernel
+                .load_inspect_snapshot(&session, epoch_id)
                 .await
                 .map_err(inspect_kernel_error_code)?
             else {
                 return Err("inspect.stale_epoch".to_owned());
             };
-            validate_epoch(&epoch, invocation, active.pair())?;
+            validate_epoch(&loaded_snapshot, invocation, active.pair())?;
             let payload = make_inspect_carrier(
                 &active,
                 &registry,
                 InspectCarrierKind::Snapshot,
-                &epoch,
+                &loaded_snapshot,
                 invocation,
-                vec![encode_snapshot_row(&epoch)],
+                vec![encode_snapshot_row(&loaded_snapshot)],
                 0,
             )?;
             make_opaque(&active, SYS_INSPECT_SNAPSHOT_TYPE_ID, payload)
@@ -1217,14 +1218,14 @@ async fn run_installed_inspect(
             else {
                 return Err("inspect.stale_epoch".to_owned());
             };
-            let Some(epoch) = kernel
-                .load_inspect_snapshot(epoch_id)
+            let Some(loaded_snapshot) = kernel
+                .load_inspect_snapshot(&session, epoch_id)
                 .await
                 .map_err(inspect_kernel_error_code)?
             else {
                 return Err("inspect.stale_epoch".to_owned());
             };
-            validate_epoch(&epoch, target_invocation, active.pair())?;
+            validate_epoch(&loaded_snapshot, target_invocation, active.pair())?;
             let privilege = InspectPrivilege::OwnInvocation;
             let granted = [InspectPrivilege::OwnInvocation];
             let values_granted = inspect_classifier_granted(&granted, InspectPrivilege::Values);
@@ -1241,48 +1242,48 @@ async fn run_installed_inspect(
             let rows = match tag {
                 2 => encode_invocation_nodes(
                     &kernel
-                        .inspect_invocation_nodes(&session, &epoch, privilege, &granted)
+                        .inspect_invocation_nodes(&loaded_snapshot, privilege)
                         .map_err(inspect_kernel_error_code)?,
                 ),
                 3 => encode_calls(
                     &kernel
-                        .inspect_calls(&session, &epoch, privilege, &granted)
+                        .inspect_calls(&loaded_snapshot, privilege)
                         .map_err(inspect_kernel_error_code)?,
                     values_granted,
                 ),
                 4 => encode_resources(
                     &kernel
-                        .inspect_resources(&session, &epoch, privilege, &granted)
+                        .inspect_resources(&loaded_snapshot, privilege)
                         .map_err(inspect_kernel_error_code)?,
                 ),
                 5 => encode_state_cells(
                     &kernel
-                        .inspect_state_cells(&session, &epoch, privilege, &granted)
+                        .inspect_state_cells(&loaded_snapshot, privilege)
                         .await
                         .map_err(inspect_kernel_error_code)?,
                 ),
                 6 => encode_ui_nodes(
                     &kernel
-                        .inspect_ui_nodes(&session, &epoch, privilege, &granted)
+                        .inspect_ui_nodes(&loaded_snapshot, privilege)
                         .map_err(inspect_kernel_error_code)?,
                     source_granted,
                     runtime_internals_granted,
                 ),
                 7 => encode_presentation_candidates(
                     &kernel
-                        .inspect_presentation_candidates(&session, &epoch, privilege, &granted)
+                        .inspect_presentation_candidates(&loaded_snapshot, privilege)
                         .map_err(inspect_kernel_error_code)?,
                     runtime_internals_granted,
                 ),
                 8 => encode_runtime_bindings(
                     &kernel
-                        .inspect_runtime_bindings(&session, &epoch, privilege, &granted)
+                        .inspect_runtime_bindings(&loaded_snapshot, privilege)
                         .map_err(inspect_kernel_error_code)?,
                     runtime_internals_granted,
                 ),
                 9 => encode_security_decisions(
                     &kernel
-                        .inspect_security_decisions(&session, &epoch, privilege, &granted)
+                        .inspect_security_decisions(&loaded_snapshot, privilege)
                         .await
                         .map_err(inspect_kernel_error_code)?,
                     security_details_granted,
@@ -1295,7 +1296,7 @@ async fn run_installed_inspect(
                 &active,
                 &registry,
                 kind,
-                &epoch,
+                &loaded_snapshot,
                 target_invocation,
                 rows,
                 inspect_classification_tag(kind, privilege),
@@ -1377,15 +1378,15 @@ fn inspect_kernel_error_code(error: PostgresKernelError) -> String {
 }
 
 fn validate_epoch(
-    epoch: &orna_core::inspect::InspectSnapshotEpoch,
+    snapshot: &AuthenticatedInspectSnapshot,
     invocation: InvocationId,
     pair: orna_core::revision::RevisionPair,
 ) -> Result<(), String> {
-    if epoch.invocation_id() != invocation {
+    if snapshot.invocation_id() != invocation {
         return Err("inspect.epoch_mismatch".to_owned());
     }
-    if epoch.source_revision_id() != pair.source()
-        || epoch.catalogue_revision_id() != pair.catalogue()
+    if snapshot.source_revision_id() != pair.source()
+        || snapshot.catalogue_revision_id() != pair.catalogue()
     {
         return Err("inspect.epoch_mismatch".to_owned());
     }
@@ -1401,24 +1402,77 @@ fn make_opaque(
         .map(RuntimeValue::Opaque)
         .map_err(|_| "inspect.projection_failed".to_owned())
 }
+trait InspectCarrierSnapshot {
+    fn id(&self) -> InspectEpochId;
+    fn invocation_id(&self) -> InvocationId;
+    fn root_target(&self) -> FunctionId;
+    fn source_revision_id(&self) -> SourceRevisionId;
+    fn catalogue_revision_id(&self) -> CatalogueRevisionId;
+}
+
+impl InspectCarrierSnapshot for AuthenticatedInspectSnapshot {
+    fn id(&self) -> InspectEpochId {
+        AuthenticatedInspectSnapshot::id(self)
+    }
+
+    fn invocation_id(&self) -> InvocationId {
+        AuthenticatedInspectSnapshot::invocation_id(self)
+    }
+
+    fn root_target(&self) -> FunctionId {
+        AuthenticatedInspectSnapshot::root_target(self)
+    }
+
+    fn source_revision_id(&self) -> SourceRevisionId {
+        AuthenticatedInspectSnapshot::source_revision_id(self)
+    }
+
+    fn catalogue_revision_id(&self) -> CatalogueRevisionId {
+        AuthenticatedInspectSnapshot::catalogue_revision_id(self)
+    }
+}
+
+#[cfg(test)]
+impl InspectCarrierSnapshot for orna_core::inspect::InspectSnapshotEpoch {
+    fn id(&self) -> InspectEpochId {
+        self.id()
+    }
+
+    fn invocation_id(&self) -> InvocationId {
+        self.invocation_id()
+    }
+
+    fn root_target(&self) -> FunctionId {
+        self.root_target()
+    }
+
+    fn source_revision_id(&self) -> SourceRevisionId {
+        self.source_revision_id()
+    }
+
+    fn catalogue_revision_id(&self) -> CatalogueRevisionId {
+        self.catalogue_revision_id()
+    }
+}
+
 
 fn make_inspect_carrier(
     active: &ActiveDatabaseRevision,
     registry: &OpaqueCodecRegistry,
     kind: InspectCarrierKind,
-    epoch: &orna_core::inspect::InspectSnapshotEpoch,
+    snapshot: &impl InspectCarrierSnapshot,
     target_invocation: InvocationId,
     rows: Vec<Vec<u8>>,
     classification: u8,
 ) -> Result<Vec<u8>, String> {
-    let epoch_id = u64::from_be_bytes(epoch.id().to_bytes()[8..].try_into().expect("epoch id"));
+    let epoch_id = u64::from_be_bytes(snapshot.id().to_bytes()[8..].try_into().expect("epoch id"));
     let mut encoded_rows = rows
         .into_iter()
         .map(|row| {
             let row = if kind == InspectCarrierKind::Snapshot {
                 row
             } else {
-                enrich_inspect_row(epoch, row, classification)
+                enrich_inspect_row(snapshot, row, classification)
             };
             encode_inspect_row(active, registry, row)
         })
@@ -1429,8 +1483,8 @@ fn make_inspect_carrier(
         target_invocation,
         InspectCarrierProvenance::trusted(
             epoch_id,
-            epoch.source_revision_id(),
-            epoch.catalogue_revision_id(),
+            snapshot.source_revision_id(),
+            snapshot.catalogue_revision_id(),
         ),
         encoded_rows,
     )
@@ -1466,7 +1520,7 @@ fn row(tag: u8, index: usize) -> Vec<u8> {
 /// projection-specific encoders retain their complete row fields after this
 /// fixed header; all identities use their full sixteen-byte form.
 fn enrich_inspect_row(
-    epoch: &orna_core::inspect::InspectSnapshotEpoch,
+    snapshot: &impl InspectCarrierSnapshot,
     row: Vec<u8>,
     classification: u8,
 ) -> Vec<u8> {
@@ -1479,11 +1533,11 @@ fn enrich_inspect_row(
     // pinned revisions, own-invocation scope, and classifier evidence. The
     // owner principal is deliberately not copied: the scope fact is enough
     // for this CLIENT carrier and the principal is security-classified.
-    enriched.extend_from_slice(&epoch.id().to_bytes());
-    enriched.extend_from_slice(&epoch.invocation_id().to_bytes());
-    enriched.extend_from_slice(&epoch.root_target().to_bytes());
-    enriched.extend_from_slice(&epoch.source_revision_id().to_bytes());
-    enriched.extend_from_slice(&epoch.catalogue_revision_id().to_bytes());
+    enriched.extend_from_slice(&snapshot.id().to_bytes());
+    enriched.extend_from_slice(&snapshot.invocation_id().to_bytes());
+    enriched.extend_from_slice(&snapshot.root_target().to_bytes());
+    enriched.extend_from_slice(&snapshot.source_revision_id().to_bytes());
+    enriched.extend_from_slice(&snapshot.catalogue_revision_id().to_bytes());
     enriched.push(1);
     enriched.push(classification);
     enriched.extend_from_slice(&row[9..]);
@@ -1543,18 +1597,18 @@ fn text(bytes: &mut Vec<u8>, value: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn encode_snapshot_row(epoch: &orna_core::inspect::InspectSnapshotEpoch) -> Vec<u8> {
+fn encode_snapshot_row(snapshot: &AuthenticatedInspectSnapshot) -> Vec<u8> {
     let mut bytes = row(INSPECT_SNAPSHOT_ROW_TAG, 0);
-    id(&mut bytes, &epoch.id().to_bytes());
-    id(&mut bytes, &epoch.invocation_id().to_bytes());
-    id(&mut bytes, &epoch.root_target().to_bytes());
-    bytes.push(match epoch.outcome() {
+    id(&mut bytes, &snapshot.id().to_bytes());
+    id(&mut bytes, &snapshot.invocation_id().to_bytes());
+    id(&mut bytes, &snapshot.root_target().to_bytes());
+    bytes.push(match snapshot.outcome() {
         InspectOutcomeKind::Allowed => 1,
         InspectOutcomeKind::Denied => 2,
         InspectOutcomeKind::Failed => 3,
         InspectOutcomeKind::Cancelled => 4,
     });
-    let summary = epoch.summary();
+    let summary = snapshot.summary();
     bytes.extend_from_slice(&summary.event_count().to_be_bytes());
     match summary.result() {
         InspectResultSummary::NoValues => bytes.push(0),
