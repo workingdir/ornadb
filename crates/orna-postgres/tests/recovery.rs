@@ -1321,9 +1321,27 @@ async fn decodes_an_exact_opaque_standard_row_before_detecting_digest_tamper() -
     .await
 }
 
-#[tokio::test]
+#[test]
 #[ignore = "requires the Compose PostgreSQL development service"]
-async fn persists_recovers_revokes_and_disables_execute_authority() -> TestResult<()> {
+fn persists_recovers_revokes_and_disables_execute_authority() -> TestResult<()> {
+    let handle = std::thread::Builder::new()
+        .name("security-recovery-live".to_owned())
+        .stack_size(4 * 1024 * 1024)
+        .spawn(|| {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|error| failure(format!("security recovery live runtime could not start: {error}")))?;
+            runtime.block_on(persists_recovers_revokes_and_disables_execute_authority_inner())
+        })
+        .map_err(|error| failure(format!("security recovery live thread could not start: {error}")))?;
+    match handle.join() {
+        Ok(result) => result,
+        Err(_) => Err(failure("security recovery live thread panicked")),
+    }
+}
+
+async fn persists_recovers_revokes_and_disables_execute_authority_inner() -> TestResult<()> {
     const USER_UID: u32 = 1_001;
     const USER: PrincipalId = PrincipalId::from_bytes([0x31; 16]);
     const ROLE: PrincipalId = PrincipalId::from_bytes([0x32; 16]);
