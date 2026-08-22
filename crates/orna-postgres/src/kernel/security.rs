@@ -4508,6 +4508,31 @@ fn resource_values_from_server_result(
     Some(values)
 }
 
+fn classify_sealed_server_error(error: &PostgresKernelError) -> SealedInvocationFailureClass {
+    match error {
+        PostgresKernelError::ServerSelect(source) if raw_server_target_is_unavailable(source) => {
+            SealedInvocationFailureClass::Target
+        }
+        PostgresKernelError::ServerInsert(source)
+            if raw_server_insert_target_is_unavailable(source) =>
+        {
+            SealedInvocationFailureClass::Target
+        }
+        PostgresKernelError::ServerUpdate(source)
+            if raw_server_update_target_is_unavailable(source) =>
+        {
+            SealedInvocationFailureClass::Target
+        }
+        PostgresKernelError::ServerDelete(source)
+            if raw_server_delete_target_is_unavailable(source) =>
+        {
+            SealedInvocationFailureClass::Target
+        }
+        _ => SealedInvocationFailureClass::Internal,
+    }
+}
+
+
 async fn execute_sealed_server_target(
     transaction: &mut Transaction<'_>,
     active: &ActiveDatabaseRevision,
@@ -4542,17 +4567,37 @@ async fn execute_sealed_server_target(
                 )
                 .await
             };
-            result.ok().map(|value| vec![value])
+            match result {
+                Ok(value) => Some(vec![value]),
+                Err(error) => {
+                    let class = classify_sealed_server_error(&error);
+                    if savepoint.rollback().await.is_err() {
+                        return Err(SealedInvocationFailureClass::Internal);
+                    }
+                    return Err(class);
+                }
+            }
         }
-        Some(Some(operation)) => execute_authorised_raw_server_reference_mutation(
-            &savepoint,
-            active,
-            authorisation,
-            operation,
-            arguments,
-        )
-        .await
-        .ok(),
+        Some(Some(operation)) => {
+            match execute_authorised_raw_server_reference_mutation(
+                &savepoint,
+                active,
+                authorisation,
+                operation,
+                arguments,
+            )
+            .await
+            {
+                Ok(values) => Some(values),
+                Err(error) => {
+                    let class = classify_sealed_server_error(&error);
+                    if savepoint.rollback().await.is_err() {
+                        return Err(SealedInvocationFailureClass::Internal);
+                    }
+                    return Err(class);
+                }
+            }
+        }
         None => match execute_authorised_server_select(
             &savepoint,
             active,
@@ -4562,7 +4607,13 @@ async fn execute_sealed_server_target(
         .await
         {
             Ok(server) => resource_values_from_server_result(kind, server),
-            Err(_) => None,
+            Err(error) => {
+                let class = classify_sealed_server_error(&error);
+                if savepoint.rollback().await.is_err() {
+                    return Err(SealedInvocationFailureClass::Internal);
+                }
+                return Err(class);
+            }
         },
     };
     let Some(values) = values.filter(|values| {
@@ -8846,6 +8897,36 @@ mod tests {
                 rule: "raw SERVER INSERT argument target is unavailable",
             }
         ));
+    }
+
+    #[test]
+    fn sealed_server_error_classification_preserves_internal_failures() {
+        let pair = RevisionPair::new(
+            SourceRevisionId::from_bytes([0x71; 16]),
+            CatalogueRevisionId::from_bytes([0x72; 16]),
+        );
+        let target = PostgresKernelError::ServerUpdate(
+            crate::ServerUpdateError::FunctionNotActive {
+                pair,
+                function: RAW_CALL_FUNCTION,
+            },
+        );
+        assert_eq!(
+            classify_sealed_server_error(&target),
+            SealedInvocationFailureClass::Target
+        );
+
+        let internal = PostgresKernelError::ServerUpdate(crate::ServerUpdateError::Unavailable {
+            source: Box::new(PostgresKernelError::DurableInvariant {
+                relation: "test relation",
+                record: "test record".to_owned(),
+                rule: "test rule",
+            }),
+        });
+        assert_eq!(
+            classify_sealed_server_error(&internal),
+            SealedInvocationFailureClass::Internal
+        );
     }
 
     #[test]
