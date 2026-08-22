@@ -441,10 +441,38 @@ async fn executes_canonical_named_record_results_and_rejects_malformed_storage()
 }
 
 #[cfg(feature = "test-hooks")]
-#[tokio::test]
+#[test]
 #[ignore = "requires the Compose PostgreSQL development service"]
-async fn authenticated_server_select_commits_allowed_and_denied_execute_decisions() -> TestResult<()>
-{
+fn authenticated_server_select_commits_allowed_and_denied_execute_decisions() -> TestResult<()> {
+    let handle = std::thread::Builder::new()
+        .name("authenticated-server-select-live".to_owned())
+        .stack_size(4 * 1024 * 1024)
+        .spawn(|| {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|error| {
+                    failure(format!(
+                        "authenticated SERVER SELECT live runtime could not start: {error}"
+                    ))
+                })?;
+            runtime.block_on(
+                authenticated_server_select_commits_allowed_and_denied_execute_decisions_inner(),
+            )
+        })
+        .map_err(|error| {
+            failure(format!(
+                "authenticated SERVER SELECT live thread could not start: {error}"
+            ))
+        })?;
+    match handle.join() {
+        Ok(result) => result,
+        Err(_) => Err(failure("authenticated SERVER SELECT live thread panicked")),
+    }
+}
+
+async fn authenticated_server_select_commits_allowed_and_denied_execute_decisions_inner(
+) -> TestResult<()> {
     with_test_database(|database| async move {
         let kernel = hostile_kernel(&database)?;
         kernel.bootstrap().await?;
