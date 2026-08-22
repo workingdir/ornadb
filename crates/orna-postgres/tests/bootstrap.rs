@@ -5297,9 +5297,23 @@ fn expected_application_target_foreign_keys_after_sealed_inspector() -> TargetFo
             true,
         ),
         (
+            "catalogue_function_parameters".to_owned(),
+            "catalogue_function_parameters_catalogue_revision_id_target_fkey".to_owned(),
+            "FOREIGN KEY (catalogue_revision_id, target_type_id_fk) REFERENCES _orna_kernel.catalogue_object_types(catalogue_revision_id, type_id) DEFERRABLE INITIALLY DEFERRED".to_owned(),
+            true,
+            true,
+        ),
+        (
             "catalogue_function_return_columns".to_owned(),
             "catalogue_function_return_col_catalogue_revision_id_target_fkey".to_owned(),
             "FOREIGN KEY (catalogue_revision_id, target_type_id) REFERENCES _orna_kernel.catalogue_object_types(catalogue_revision_id, type_id) DEFERRABLE INITIALLY DEFERRED".to_owned(),
+            true,
+            true,
+        ),
+        (
+            "catalogue_functions".to_owned(),
+            "catalogue_functions_catalogue_revision_id_return_target_ty_fkey".to_owned(),
+            "FOREIGN KEY (catalogue_revision_id, return_target_type_id_fk) REFERENCES _orna_kernel.catalogue_object_types(catalogue_revision_id, type_id) DEFERRABLE INITIALLY DEFERRED".to_owned(),
             true,
             true,
         ),
