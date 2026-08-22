@@ -1290,9 +1290,27 @@ async fn sealed_sys_invoke_entry_is_unavailable_after_system_authorisation() -> 
     .await
 }
 
-#[tokio::test]
+#[test]
 #[ignore = "requires the Compose PostgreSQL development service"]
-async fn proves_standard_invocation_dogfooding_through_sealed_sys_invoke() -> TestResult<()> {
+fn proves_standard_invocation_dogfooding_through_sealed_sys_invoke() -> TestResult<()> {
+    let handle = std::thread::Builder::new()
+        .name("standard-invoke-live".to_owned())
+        .stack_size(4 * 1024 * 1024)
+        .spawn(|| {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|error| failure(format!("standard invocation live runtime could not start: {error}")))?;
+            runtime.block_on(proves_standard_invocation_dogfooding_through_sealed_sys_invoke_inner())
+        })
+        .map_err(|error| failure(format!("standard invocation live thread could not start: {error}")))?;
+    match handle.join() {
+        Ok(result) => result,
+        Err(_) => Err(failure("standard invocation live thread panicked")),
+    }
+}
+
+async fn proves_standard_invocation_dogfooding_through_sealed_sys_invoke_inner() -> TestResult<()> {
     const ECHO_BY_NAME: i32 = 41;
     const ECHO_BY_IDENTITY: i32 = 42;
     const RAW_DENIED_VALUE: i32 = 7;
