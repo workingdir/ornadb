@@ -23,6 +23,7 @@
 //! success without dispatching, authorising, or auditing.
 
 use std::{
+    cmp::Ordering,
     collections::BTreeMap,
     error::Error,
     fmt,
@@ -4481,6 +4482,35 @@ fn resolve_target<'a>(
     }
 }
 
+fn invocation_argument_order(
+    left: &InvocationArgument,
+    right: &InvocationArgument,
+) -> Ordering {
+    use orna_core::invocation::InvocationParameterSelector;
+
+    match (left.selector(), right.selector()) {
+        (
+            InvocationParameterSelector::ParameterId(left),
+            InvocationParameterSelector::ParameterId(right),
+        ) => left.to_bytes().cmp(&right.to_bytes()),
+        (InvocationParameterSelector::ParameterId(_), InvocationParameterSelector::Name(_)) => {
+            Ordering::Less
+        }
+        (InvocationParameterSelector::Name(_), InvocationParameterSelector::ParameterId(_)) => {
+            Ordering::Greater
+        }
+        (InvocationParameterSelector::Name(left), InvocationParameterSelector::Name(right)) => {
+            left.as_bytes().cmp(right.as_bytes())
+        }
+        _ => Ordering::Equal,
+    }
+}
+
+fn canonicalise_invocation_arguments(mut arguments: Vec<InvocationArgument>) -> Vec<InvocationArgument> {
+    arguments.sort_by(invocation_argument_order);
+    arguments
+}
+
 /// Builds one checked sealed `sys.invoke.Request` from the CLI request and
 /// the bound typed arguments.
 ///
@@ -4494,6 +4524,7 @@ fn build_sealed_request(
     request: &InstalledInvokeRequest,
     arguments: Vec<InvocationArgument>,
 ) -> Result<InvokeRequest, InstalledInvokeError> {
+    let arguments = canonicalise_invocation_arguments(arguments);
     let caller_context = build_caller_context()?;
     let runtime_offers = match selected_runtime(request)? {
         Some(RuntimeFamily::Tty) => installed_runtime_offers(),
@@ -5086,8 +5117,8 @@ mod tests {
         },
         inspect::{InspectSnapshotEpoch, InspectSnapshotOptions, InspectSnapshotSummary},
         invocation::{
-            InvocationFailure, InvocationFailurePhase, InvocationRetryability, InvokeEvent,
-            InvokeValue,
+            InvocationFailure, InvocationFailurePhase, InvocationParameterSelector,
+            InvocationRetryability, InvokeEvent, InvokeValue,
         },
         revision::{
             ActiveDatabaseRevisionInput, ActiveRevisionContent, CatalogueHashContext, RevisionPair,
@@ -6745,6 +6776,33 @@ mod tests {
         )
         .expect_err("an unknown parameter is rejected");
         assert_eq!(unknown.to_string(), "unknown parameter `p_other`");
+    }
+
+    #[test]
+    fn canonicalises_sealed_invoke_arguments_by_parameter_identity() {
+        let lower = ParameterId::from_bytes([0x01; 16]);
+        let higher = ParameterId::from_bytes([0x02; 16]);
+        let arguments = vec![
+            InvocationArgument::new(
+                InvocationParameterSelector::parameter_id(higher),
+                InvokeValue::new(RuntimeValue::Integer(2)).expect("integer value"),
+            ),
+            InvocationArgument::new(
+                InvocationParameterSelector::parameter_id(lower),
+                InvokeValue::new(RuntimeValue::Integer(1)).expect("integer value"),
+            ),
+        ];
+
+        let canonical = canonicalise_invocation_arguments(arguments);
+
+        assert!(matches!(
+            canonical[0].selector(),
+            InvocationParameterSelector::ParameterId(id) if *id == lower
+        ));
+        assert!(matches!(
+            canonical[1].selector(),
+            InvocationParameterSelector::ParameterId(id) if *id == higher
+        ));
     }
     #[test]
     fn binding_maps_verified_standard_integer_value_type_to_cli_scalar() {
