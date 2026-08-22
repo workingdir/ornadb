@@ -1124,16 +1124,14 @@ async fn run_installed_inspect(
             }
             let invocation = inspect_snapshot_request_target(target)?;
             require_inspect_target_provenance(request.target_invocation_id(), invocation)?;
-            let recursive_from_root = kernel
-                .inspect_target_is_recursive(request.observer_root_invocation_id(), invocation)
-                .await
-                .map_err(inspect_kernel_error_code)?;
-            let recursive_from_parent = kernel
-                .inspect_target_is_recursive(request.observer_parent_invocation_id(), invocation)
-                .await
-                .map_err(inspect_kernel_error_code)?;
-            if recursive_from_root || recursive_from_parent {
-                return Err("inspect.recursion".to_owned());
+            for anchor in request.observer_lineage() {
+                if kernel
+                    .inspect_target_is_recursive(*anchor, invocation)
+                    .await
+                    .map_err(inspect_kernel_error_code)?
+                {
+                    return Err("inspect.recursion".to_owned());
+                }
             }
             let Some(epoch_id) = kernel
                 .find_latest_inspect_epoch(&session, invocation)
