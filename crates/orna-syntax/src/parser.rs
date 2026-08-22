@@ -1262,9 +1262,7 @@ impl<'source> Parser<'source> {
                     return None;
                 };
                 if token.is_word("LET") {
-                    let Some(mut statement) = self.parse_client_let_statement() else {
-                        return None;
-                    };
+                    let mut statement = self.parse_client_let_statement()?;
                     statement.expression =
                         rewrite_client_local_name_references(statement.expression, &local_names);
                     local_names.push(statement.name.clone());
@@ -1276,9 +1274,7 @@ impl<'source> Parser<'source> {
                         .peek_significant(1)
                         .is_some_and(|next| next.text == ":")
                 {
-                    let Some(mut statement) = self.parse_client_assignment_statement() else {
-                        return None;
-                    };
+                    let mut statement = self.parse_client_assignment_statement()?;
                     statement.expression =
                         rewrite_client_local_name_references(statement.expression, &local_names);
                     statements.push(ClientProceduralStatement::Assignment(statement));
@@ -3082,7 +3078,7 @@ impl<'source> Parser<'source> {
         };
         self.builder.finish_node();
         let span = SourceSpan { start, end };
-        debug_assert!(depth + type_specification_depth(&element) + 1 <= maximum_depth);
+        debug_assert!(depth + type_specification_depth(&element) < maximum_depth);
         Some((Box::new(element), span))
     }
 
