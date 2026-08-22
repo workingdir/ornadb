@@ -1,6 +1,7 @@
 mod support;
 
 use std::{
+    collections::BTreeMap,
     str::FromStr,
     time::{Duration, Instant},
 };
@@ -76,13 +77,14 @@ use orna_core::{
         ExecuteDecision, ExecuteDenial, ExecuteGrant, InvocationTarget, Principal, PrincipalKind,
         PrincipalStatus, PrivilegeClass, PrivilegeDecision, PrivilegeDenial, PrivilegeGrant,
         RoleMembership, SecurityAdminAuditOperation, SecurityAuditKind, SecurityAuditOutcome,
-        SecurityFunctionTarget, SecuritySnapshot,
+        SecurityFunctionTarget, SecuritySnapshot, UserStateAuditOperation,
     },
     system::{
         SYS_SECURITY_ACTIVE_ROLES_FUNCTION_ID, SYS_SECURITY_CREATE_PRINCIPAL_FUNCTION_ID,
         SYS_SECURITY_EFFECTIVE_PRINCIPAL_FUNCTION_ID, SYS_SECURITY_PRINCIPAL_TYPE_ID,
         SYS_SECURITY_SESSION_PRINCIPAL_FUNCTION_ID,
     },
+    state::{UserStateChange, UserStateWriteOutcome},
 };
 use orna_postgres::{PostgresKernel, PostgresKernelError, SealedInvocationResult};
 use orna_protocol::{
@@ -6283,6 +6285,319 @@ async fn install_v3_standard_chain(database: &TestDatabase) -> TestResult<V3Stan
         version_three,
         version_three_upgrade,
     })
+}
+
+
+fn user_state_plan_candidate(
+    active: &ActiveDatabaseRevision,
+    upgrade: &orna_standard::StandardUpgrade,
+) -> TestResult<DeployableRevision> {
+    let candidate =
+        standard_application_candidate(STANDARD_APPLICATION_SOURCE_EDIT, active, upgrade)?;
+    let function = candidate
+        .candidate()
+        .function_by_name(&orna_core::catalogue::QualifiedSemanticName::new([
+            "app", "enabled",
+        ])?)
+        .ok_or_else(|| failure("existing CLIENT fixture did not contain app.enabled"))?
+        .id();
+    let revision = candidate
+        .new_function_revisions()
+        .iter()
+        .find(|revision| revision.function() == function)
+        .ok_or_else(|| failure("existing CLIENT fixture revision did not persist"))?;
+    let slot = StateSlotId::from_bytes([0xa5; 16]);
+    let plan = orna_artifact::client_plan::StateClientPlan::new(
+        orna_artifact::client_plan::ClientExpressionNode::Boolean { value: false },
+        vec![orna_artifact::client_plan::StateSlot::new(
+            slot,
+            orna_standard::BOOLEAN_TYPE_ID,
+            orna_artifact::client_plan::StateScope::User,
+            orna_artifact::client_plan::StateDefault::Unset,
+        )],
+    );
+    let payload = plan
+        .encode()
+        .map_err(|error| failure(format!("USER state plan encoding failed: {error}")))?;
+    let content_hash = orna_core::canonical_hash::artifact_payload_digest(&payload)?;
+    let artifact = orna_core::revision::ExecutableArtifact::new(
+        orna_core::revision::ExecutableArtifactKind::Client,
+        orna_artifact::client_plan::FORMAT_IDENTITY,
+        orna_artifact::client_plan::STATE_FORMAT_VERSION,
+        payload,
+        content_hash,
+    )?;
+    let function_definition = candidate
+        .candidate()
+        .function_by_id(function)
+        .ok_or_else(|| failure("USER state fixture function declaration disappeared"))?;
+    let function_references = candidate
+        .references()
+        .iter()
+        .filter(|reference| reference.source_function() == function)
+        .cloned()
+        .collect::<Vec<_>>();
+    let semantic_hash = orna_core::canonical_hash::function_semantic_digest_with_version(
+        revision.semantic_hash_version(),
+        function_definition,
+        revision.language_version(),
+        &artifact,
+        candidate.expressions(),
+        &function_references,
+    )?;
+    let replacement = orna_core::revision::FunctionRevisionRecord::new(
+        revision.function(),
+        revision.id(),
+        revision.revision_number(),
+        revision.declaration_origin(),
+        revision.declaration_content_hash(),
+        semantic_hash,
+        revision.language_version(),
+        artifact,
+    )
+    .map_err(|error| failure(format!("USER state function revision rebuild failed: {error}")))?
+    .with_semantic_hash_version(revision.semantic_hash_version());
+    let new_revisions = candidate
+        .new_function_revisions()
+        .iter()
+        .map(|item| if item.function() == function { replacement.clone() } else { item.clone() })
+        .collect::<Vec<_>>();
+    let current_revisions = candidate
+        .current_function_revisions()
+        .ok_or_else(|| failure("V3 application candidate omitted current function revisions"))?
+        .iter()
+        .map(|item| if item.function() == function { replacement.clone() } else { item.clone() })
+        .collect::<Vec<_>>();
+    let catalogue_hash = catalogue_digest_with_context(
+        candidate.catalogue_hash_context(),
+        candidate.candidate(),
+        &current_revisions,
+        candidate.expressions(),
+        candidate.origins(),
+        candidate.references(),
+    )?;
+    let content = DeployableRevisionContent::new(
+        candidate.origins().to_vec(),
+        candidate.expressions().to_vec(),
+        new_revisions,
+        candidate.references().to_vec(),
+    )
+    .with_current_function_revisions(current_revisions);
+    Ok(DeployableRevision::new_with_catalogue_hash_context(
+        orna_core::revision::DeployableRevisionInput::new(
+            candidate.expected_base(),
+            candidate.source().clone(),
+            candidate.parent_catalogue(),
+            candidate.candidate().clone(),
+            catalogue_hash,
+            content,
+        ),
+        candidate.catalogue_hash_context().clone(),
+    )?)
+}
+
+#[tokio::test]
+#[ignore = "requires the Compose PostgreSQL development service"]
+async fn proves_public_user_state_profiles_and_atomic_conflict_batch() -> TestResult<()> {
+    with_test_database(|database| async move {
+        let chain = install_v3_standard_chain(&database).await?;
+        let kernel = kernel(&database)?;
+        let application =
+            user_state_plan_candidate(&chain.version_three, &chain.version_three_upgrade)?;
+        let active = kernel.apply(&application).await?;
+        let function = active
+            .catalogue()
+            .function_by_name(&orna_core::catalogue::QualifiedSemanticName::new([
+                "app", "enabled",
+            ])?)
+            .ok_or_else(|| failure("USER state proof function did not persist"))?
+            .id();
+        let slot = StateSlotId::from_bytes([0xa5; 16]);
+        let value_type = orna_standard::BOOLEAN_TYPE_ID;
+        let expected_types = BTreeMap::from([((function, slot), value_type)]);
+        let recovered_security = kernel.recover_security_snapshot().await?;
+        let security = SecuritySnapshot::new_with_function_targets(
+            active.pair(),
+            recovered_security.function_targets().collect(),
+            vec![Principal::new(V3_PROOF_CLIENT_USER, PrincipalKind::User, PrincipalStatus::Active)],
+            vec![],
+            vec![],
+        )?;
+        let security = kernel.replace_security_snapshot(&security).await?;
+        let session = security.bind_authenticated_session(V3_PROOF_CLIENT_USER, vec![])?;
+
+        let default_change = UserStateChange::new(
+            function, String::new(), function, String::new(), slot, None,
+            RuntimeValue::Boolean(true), value_type,
+        )?;
+        let named_change = UserStateChange::new(
+            function, "blue".to_owned(), function, String::new(), slot, None,
+            RuntimeValue::Boolean(false), value_type,
+        )?;
+        let default_key = default_change.key_without_principal();
+        let named_key = named_change.key_without_principal();
+        let seeded = kernel.write_user_state(&session, &[default_change, named_change]).await?;
+        require(
+            seeded.len() == 2
+                && seeded[0].key() == &default_key
+                && seeded[1].key() == &named_key
+                && seeded[0].outcome() == UserStateWriteOutcome::Written { revision: 1 }
+                && seeded[1].outcome() == UserStateWriteOutcome::Written { revision: 1 },
+            "initial USER state write did not return exact ordered keys and revisions",
+        )?;
+        let initial_audits = kernel.recover_security_audit_events().await?;
+        let write_audits = initial_audits
+            .iter()
+            .filter(|event| {
+                let decision = event.decision();
+                decision.kind() == SecurityAuditKind::UserState
+                    && decision.outcome() == SecurityAuditOutcome::Allowed
+                    && decision.session_principal() == Some(V3_PROOF_CLIENT_USER)
+                    && decision.user_state_operation() == Some(UserStateAuditOperation::Write)
+                    && decision.user_state_root_function() == Some(function)
+                    && decision.user_state_cell_count() == Some(2)
+            })
+            .count();
+        require(
+            write_audits == 1,
+            "successful USER state batch did not record one write audit",
+        )?;
+
+        let default_cells = kernel
+            .load_user_state(&session, function, "", &[], &expected_types)
+            .await?;
+        let named_cells = kernel
+            .load_user_state(&session, function, "blue", &[], &expected_types)
+            .await?;
+        require(
+            default_cells.len() == 1
+                && default_cells[0].key().without_principal() == default_key
+                && default_cells[0].revision() == 1
+                && default_cells[0].value() == &RuntimeValue::Boolean(true)
+                && named_cells.len() == 1
+                && named_cells[0].key().without_principal() == named_key
+                && named_cells[0].revision() == 1
+                && named_cells[0].value() == &RuntimeValue::Boolean(false),
+            "default and named USER state profile loads did not return persisted cells",
+        )?;
+        let profile_load_audits = kernel
+            .recover_security_audit_events()
+            .await?
+            .into_iter()
+            .filter(|event| {
+                let decision = event.decision();
+                decision.kind() == SecurityAuditKind::UserState
+                    && decision.outcome() == SecurityAuditOutcome::Allowed
+                    && decision.session_principal() == Some(V3_PROOF_CLIENT_USER)
+                    && decision.user_state_operation() == Some(UserStateAuditOperation::Load)
+                    && decision.user_state_root_function() == Some(function)
+                    && decision.user_state_cell_count() == Some(1)
+            })
+            .count();
+        require(
+            profile_load_audits == 2,
+            "default and named USER state loads did not record two redacted load audits",
+        )?;
+
+        let revisioned_default = UserStateChange::new(
+            function,
+            String::new(),
+            function,
+            String::new(),
+            slot,
+            Some(1),
+            RuntimeValue::Boolean(false),
+            value_type,
+        )?;
+        let revised = kernel
+            .write_user_state(&session, &[revisioned_default])
+            .await?;
+        require(
+            revised.len() == 1
+                && revised[0].key() == &default_key
+                && revised[0].outcome() == UserStateWriteOutcome::Written { revision: 2 },
+            "USER state successor write did not advance the revision to two",
+        )?;
+        let revised_default_cells = kernel
+            .load_user_state(&session, function, "", &[], &expected_types)
+            .await?;
+        require(
+            revised_default_cells.len() == 1
+                && revised_default_cells[0].key().without_principal() == default_key
+                && revised_default_cells[0].revision() == 2
+                && revised_default_cells[0].value() == &RuntimeValue::Boolean(false),
+            "USER state successor load did not return revision two",
+        )?;
+        let audit_count_before_conflict = kernel.recover_security_audit_events().await?.len();
+        let stale_default = UserStateChange::new(
+            function,
+            String::new(),
+            function,
+            String::new(),
+            slot,
+            Some(1),
+            RuntimeValue::Boolean(true),
+            value_type,
+        )?;
+        let fresh_named = UserStateChange::new(
+            function,
+            "blue".to_owned(),
+            function,
+            String::new(),
+            slot,
+            Some(1),
+            RuntimeValue::Boolean(true),
+            value_type,
+        )?;
+        let stale_default_key = stale_default.key_without_principal();
+        let fresh_named_key = fresh_named.key_without_principal();
+        let conflicts = kernel
+            .write_user_state(&session, &[stale_default, fresh_named])
+            .await?;
+        require(
+            conflicts.len() == 2
+                && conflicts[0].key() == &stale_default_key
+                && conflicts[1].key() == &fresh_named_key
+                && conflicts[0].outcome() == UserStateWriteOutcome::Conflict { current_revision: 2 }
+                && conflicts[1].outcome() == UserStateWriteOutcome::Conflict { current_revision: 1 },
+            "mixed USER state conflict did not return exact ordered per-key results",
+        )?;
+        let audits_after_conflict = kernel.recover_security_audit_events().await?;
+        let write_audits_after_conflict = audits_after_conflict
+            .iter()
+            .filter(|event| {
+                let decision = event.decision();
+                decision.kind() == SecurityAuditKind::UserState
+                    && decision.outcome() == SecurityAuditOutcome::Allowed
+                    && decision.session_principal() == Some(V3_PROOF_CLIENT_USER)
+                    && decision.user_state_operation() == Some(UserStateAuditOperation::Write)
+                    && decision.user_state_root_function() == Some(function)
+            })
+            .count();
+        require(
+            audits_after_conflict.len() == audit_count_before_conflict + 1
+                && write_audits_after_conflict == 3,
+            "mixed USER state conflict did not record its redacted write audit",
+        )?;
+        let default_after = kernel
+            .load_user_state(&session, function, "", &[], &expected_types)
+            .await?;
+        let named_after = kernel
+            .load_user_state(&session, function, "blue", &[], &expected_types)
+            .await?;
+        require(
+            default_after.len() == 1
+                && default_after[0].key().without_principal() == default_key
+                && default_after[0].revision() == 2
+                && default_after[0].value() == &RuntimeValue::Boolean(false)
+                && named_after.len() == 1
+                && named_after[0].key().without_principal() == named_key
+                && named_after[0].revision() == 1
+                && named_after[0].value() == &RuntimeValue::Boolean(false),
+            "mixed USER state conflict changed persisted cells",
+        )?;
+        Ok(())
+    }).await
 }
 
 #[tokio::test]
