@@ -3043,10 +3043,40 @@ async fn authenticated_raw_insert_is_denied_then_granted_and_audited() -> TestRe
 /// shapes that can reach PostgreSQL, authorisation order, U+0000 rollback,
 /// and the typed execution-failure path.
 #[cfg(feature = "test-hooks")]
-#[tokio::test]
+#[test]
 #[ignore = "requires the Compose PostgreSQL development service"]
-async fn authenticated_raw_argument_pair_binds_two_active_parameters_and_audits() -> TestResult<()>
-{
+fn authenticated_raw_argument_pair_binds_two_active_parameters_and_audits() -> TestResult<()> {
+    let handle = std::thread::Builder::new()
+        .name("authenticated-raw-argument-pair-live".to_owned())
+        .stack_size(4 * 1024 * 1024)
+        .spawn(|| {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|error| {
+                    failure(format!(
+                        "authenticated raw argument pair live runtime could not start: {error}"
+                    ))
+                })?;
+            runtime.block_on(
+                authenticated_raw_argument_pair_binds_two_active_parameters_and_audits_inner(),
+            )
+        })
+        .map_err(|error| {
+            failure(format!(
+                "authenticated raw argument pair live thread could not start: {error}"
+            ))
+        })?;
+    match handle.join() {
+        Ok(result) => result,
+        Err(_) => Err(failure(
+            "authenticated raw argument pair live thread panicked",
+        )),
+    }
+}
+
+async fn authenticated_raw_argument_pair_binds_two_active_parameters_and_audits_inner(
+) -> TestResult<()> {
     with_test_database(|database| async move {
         let kernel: PostgresKernel = database.connection_string().parse()?;
         kernel.bootstrap().await?;
