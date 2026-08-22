@@ -2761,9 +2761,10 @@ impl ClientStateStore {
                 .expect("USER state key was validated above");
             match result.outcome() {
                 UserStateWriteOutcome::Written { revision } => {
-                    let valid =
-                        revision > 0 && local.revision.is_none_or(|current| revision > current);
-                    if !valid {
+                    let expected_revision = local
+                        .revision
+                        .map_or(Some(1), |current| current.checked_add(1));
+                    if expected_revision != Some(revision) {
                         return Err(ClientUserStateError::InvalidRevision(key));
                     }
                     staged_writes.push((key, revision));
@@ -9357,6 +9358,21 @@ fn client_stream_cancellation_clears_batches_and_rejects_stale_completions() {
         let changes = state.pending_user_state_changes().unwrap();
         assert_eq!(changes.len(), 1);
         assert_eq!(changes[0].expected_revision(), Some(7));
+        let before = state.user().clone();
+        let leap_result = UserStateWriteResult::new(
+            changes[0].key_without_principal(),
+            UserStateWriteOutcome::Written { revision: 9 },
+        );
+        let leap_error = state
+            .apply_user_state_write_results(&changes, &[leap_result])
+            .unwrap_err();
+        assert!(matches!(
+            leap_error,
+            super::ClientUserStateError::InvalidRevision(key) if key == client_key
+        ));
+        assert_eq!(state.user(), &before);
+        assert_eq!(state.pending_user_state_changes().unwrap(), changes);
+
         let result = UserStateWriteResult::new(
             changes[0].key_without_principal(),
             UserStateWriteOutcome::Written { revision: 8 },
@@ -9370,6 +9386,49 @@ fn client_stream_cancellation_clears_batches_and_rejects_stale_completions() {
         assert_eq!(stored.revision(), Some(8));
         assert!(!stored.is_dirty());
         assert!(state.pending_user_state_changes().unwrap().is_empty());
+    }
+
+    #[test]
+    fn client_user_state_store_rejects_first_write_revision_leap() {
+        let root_function = FunctionId::from_bytes([0x51; 16]);
+        let function = FunctionId::from_bytes([0x52; 16]);
+        let slot = StateSlotId::from_bytes([0x53; 16]);
+        let value_type = orna_standard::CHARACTER_LARGE_OBJECT_TYPE_ID;
+        let context = super::ClientStateContext::new(
+            root_function,
+            "profile".to_owned(),
+            "root-instance".to_owned(),
+        )
+        .unwrap();
+        let client_key = super::ClientStateKey::from_context(&context, function, slot);
+        let mut state = super::ClientStateStore::new();
+        state.set_context(context);
+        state
+            .set_user_state(
+                client_key.clone(),
+                RuntimeValue::Text("new".to_owned()),
+                value_type,
+            )
+            .unwrap();
+        let changes = state.pending_user_state_changes().unwrap();
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].expected_revision(), None);
+        let before = state.user().clone();
+        let result = UserStateWriteResult::new(
+            changes[0].key_without_principal(),
+            UserStateWriteOutcome::Written { revision: 2 },
+        );
+
+        let error = state
+            .apply_user_state_write_results(&changes, &[result])
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            super::ClientUserStateError::InvalidRevision(key) if key == client_key
+        ));
+        assert_eq!(state.user(), &before);
+        assert_eq!(state.pending_user_state_changes().unwrap(), changes);
     }
 
     #[test]
@@ -9446,7 +9505,7 @@ fn client_stream_cancellation_clears_batches_and_rejects_stale_completions() {
         let results = vec![
             UserStateWriteResult::new(
                 changes[0].key_without_principal(),
-                UserStateWriteOutcome::Written { revision: 12 },
+                UserStateWriteOutcome::Written { revision: 8 },
             ),
             UserStateWriteResult::new(
                 changes[1].key_without_principal(),
@@ -9464,7 +9523,7 @@ fn client_stream_cancellation_clears_batches_and_rejects_stale_completions() {
         let mixed_results = vec![
             UserStateWriteResult::new(
                 changes[0].key_without_principal(),
-                UserStateWriteOutcome::Written { revision: 12 },
+                UserStateWriteOutcome::Written { revision: 8 },
             ),
             UserStateWriteResult::new(
                 changes[1].key_without_principal(),
@@ -9486,7 +9545,7 @@ fn client_stream_cancellation_clears_batches_and_rejects_stale_completions() {
             } if key == second_client_key
         ));
         let first_after_mixed = state.user().get(&first_client_key).unwrap();
-        assert_eq!(first_after_mixed.revision(), Some(12));
+        assert_eq!(first_after_mixed.revision(), Some(8));
         assert!(!first_after_mixed.is_dirty());
         let second_after_mixed = state.user().get(&second_client_key).unwrap();
         assert_eq!(second_after_mixed.revision(), Some(11));
