@@ -1833,10 +1833,13 @@ impl ResourceProtocolConnection {
             require_resource_value(&argument.value)
                 .map_err(|source| ResourceConnectionError::InvalidFrame { source })?;
         }
-        if let Some(previous) = self.high_water_mark {
-            if request.stream_id <= previous {
-                return Err(ResourceConnectionError::StreamNotIncreasing { stream_id: request.stream_id, previous });
-            }
+        if let Some(previous) = self.high_water_mark
+            && request.stream_id <= previous
+        {
+            return Err(ResourceConnectionError::StreamNotIncreasing {
+                stream_id: request.stream_id,
+                previous,
+            });
         }
         if self.streams.contains_key(&request.stream_id) || self.terminal.contains_key(&request.stream_id) {
             return Err(ResourceConnectionError::StreamNotIncreasing { stream_id: request.stream_id, previous: self.high_water_mark.unwrap_or(0) });
