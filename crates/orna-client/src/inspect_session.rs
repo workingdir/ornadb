@@ -532,7 +532,9 @@ mod tests {
         );
         assert_eq!(
             session.publish_completion(future),
-            Err(ClientInspectError::Failed("inspect.stale_epoch".to_owned()))
+            Err(ClientInspectError::Failed(
+                "inspect.future_epoch".to_owned()
+            ))
         );
 
         let principal = InspectEpochBinding::new(
