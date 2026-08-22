@@ -4356,7 +4356,8 @@ async fn rejects_function_signature_revision_artifact_and_reference_tampering() 
          SET transaction_mode = 'manual'
          WHERE function_id = decode(repeat('d1', 16), 'hex')",
         "ALTER TABLE _orna_kernel.catalogue_functions
-             DROP CONSTRAINT catalogue_functions_check1;
+             DROP CONSTRAINT catalogue_functions_check1,
+             DROP CONSTRAINT catalogue_functions_return_kind_presence_check;
          UPDATE _orna_kernel.catalogue_functions
          SET return_type_kind = 'scalar', return_scalar_type = 'boolean'
          WHERE function_id = decode(repeat('d1', 16), 'hex')",
