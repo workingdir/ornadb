@@ -23,6 +23,8 @@ use orna_client::{
     evaluate_client_function_with_grants,
 };
 #[cfg(feature = "test-hooks")]
+use orna_client::{ClientResource, ClientResourceInvocationContext, ClientResourceKey};
+#[cfg(feature = "test-hooks")]
 use orna_client::ClientInspectError;
 #[cfg(feature = "test-hooks")]
 use orna_client::{
@@ -38,6 +40,8 @@ use orna_compiler::{
     STD_INVOKE_ECHO_PARAMETER_ID, StandardApplicationCheckContext, check,
     check_standard_application, check_standard_library_source, prepare, prepare_standard_application,
 };
+#[cfg(feature = "test-hooks")]
+use orna_core::revision::Sha256Digest;
 use orna_core::{
     CallSiteId, CatalogueRevisionId, FunctionId, FunctionRevisionId, InvocationId, ObjectId,
     ParameterId, PrincipalId, SourceBundleId, SourceRevisionId, TypeId,
@@ -103,6 +107,7 @@ use orna_protocol::{
 #[cfg(feature = "test-hooks")]
 use orna_protocol::{
     ResourceCancel, ResourceCancellationCode, ResourceClientFrame, ResourceServerFrame,
+    decode_resource_client_frame,
     ResourceWindowUpdate, decode_resource_server_frame, encode_resource_client_frame,
     encode_resource_server_frame,
 };
@@ -5812,12 +5817,21 @@ async fn authenticated_resource_worker_failure_is_compensated_once() -> TestResu
                 &ResourceCancellation::new(),
             )
             .await?;
-        match post_start {
-            orna_postgres::AuthenticatedServerResourceStart::Accepted(producer) => drop(producer),
+        let post_producer = match post_start {
+            orna_postgres::AuthenticatedServerResourceStart::Accepted(producer) => {
+                let pull_result = producer
+                    .pull(orna_postgres::ResourceCredit::new(1, 1024).expect("valid test credit"))
+                    .await;
+                require(
+                    pull_result.is_err(),
+                    "forced post-acceptance failure did not reach the producer pull",
+                )?;
+                Some(producer)
+            }
             orna_postgres::AuthenticatedServerResourceStart::Failed { .. } => {
                 return Err(failure("forced post-acceptance failure did not publish acceptance"));
             }
-        }
+        };
         let post_request_bytes = post_request.request_id.to_bytes().to_vec();
         let post_audit_session = database.open().await?;
         let post_audit_operation = async {
@@ -5900,6 +5914,7 @@ async fn authenticated_resource_worker_failure_is_compensated_once() -> TestResu
             post_audit_session.shutdown().await,
             "post-acceptance worker compensation audit",
         )?;
+        drop(post_producer);
         let mut post_audit_request = request.clone();
         post_audit_request.stream_id += 2;
         post_audit_request.request_id = InvocationId::from_bytes([0xc1; 16]);
@@ -6415,6 +6430,239 @@ async fn direct_scalar_resource_holds_active_revision_lock_through_execution() -
             "source-only apply did not advance the active revision pair",
         )?;
         require_no_database_sessions(&database).await
+    })
+    .await
+}
+
+#[cfg(feature = "test-hooks")]
+#[tokio::test]
+#[ignore = "requires the Compose PostgreSQL development service"]
+async fn installed_executor_reclaims_transport_after_terminal_cancellation() -> TestResult<()> {
+    with_test_database(|database| async move {
+        let kernel = open_standard_database(kernel(&database)?).await
+            .map_err(|error| failure(format!("open standard database failed: {error:?}")))?;
+        let active = kernel
+            .recover()
+            .await
+            .map_err(|error| failure(format!("recover installed standard failed: {error:?}")))?;
+        let standard_source = active
+            .catalogue_hash_context()
+            .standard()
+            .cloned()
+            .ok_or_else(|| failure("executor cancellation fixture has no checked standard source"))?;
+        let checked_standard = check_standard_library_source(&standard_source)
+            .map_err(|error| failure(format!("installed standard source check failed: {error:?}")))?;
+        let (active, _client, target, parameter, call_site) =
+            install_stream_resource_client_fixture(&kernel, &active, &checked_standard).await?;
+        let expected_type = match active
+            .catalogue()
+            .function_by_id(target)
+            .ok_or_else(|| failure("executor cancellation fixture target is missing"))?
+            .return_type()
+        {
+            FunctionReturn::Stream(expected_type) => *expected_type,
+            _ => return Err(failure("executor cancellation fixture target is not a stream")),
+        };
+        let arguments = vec![FunctionArgument::new(
+            parameter,
+            RuntimeValue::Text("resource-value".to_owned()),
+        )?];
+        let key = ClientResourceKey::new(
+            InvocationTarget::new(target, active.pair()),
+            RAW_CLIENT_USER,
+            ClientResourceKey::canonical_arguments_digest(&active, &arguments)?,
+            Sha256Digest::from_bytes([0; 32]),
+        );
+        let mut resource = ClientResource::new_stream(key, expected_type);
+        let context = ClientResourceInvocationContext::new(
+            InvocationId::from_bytes([0x91; 16]),
+            call_site,
+            String::new(),
+            String::new(),
+        );
+        let first = resource.begin_stream_request_with_context(
+            &active,
+            context.clone(),
+            arguments.clone(),
+        )?;
+        let replacement = resource.begin_stream_request_with_context(&active, context, arguments)?;
+        let security = SecuritySnapshot::new_with_local_peer_credentials(
+            active.pair(),
+            vec![],
+            vec![Principal::new(
+                RAW_CLIENT_USER,
+                PrincipalKind::User,
+                PrincipalStatus::Active,
+            )],
+            vec![],
+            vec![],
+            vec![],
+        )?;
+        let session = security.bind_authenticated_session(RAW_CLIENT_USER, vec![])?;
+        let registry = registered_opaque_codecs(&standard_source)?;
+        let (server, client) = StandardUnixStream::pair()?;
+        server.set_nonblocking(true)?;
+        client.set_nonblocking(true)?;
+        let server_active = active.clone();
+        let server_registry = registry.clone();
+        let (accepted_sender, accepted_receiver) = tokio::sync::oneshot::channel();
+        let server_task = tokio::spawn(async move {
+            let mut server = UnixStream::from_std(server)?;
+            let mut hello = [0_u8; 12];
+            server
+                .read_exact(&mut hello)
+                .await
+                .map_err(|error| failure(format!("handshake read failed: {error}")))?;
+            require(
+                hello == *b"ORNA\x01\x00\x00\x05\x00\x00\x00\x00",
+                "executor cancellation fixture received an invalid handshake",
+            )?;
+            server.write_all(b"ORNA\x81\x00\x00\x05\x00\x00\x00\x00").await?;
+            let ResourceClientFrame::Request(first_wire) = read_resource_client_frame_from_socket(
+                &mut server,
+                &server_active,
+                &server_registry,
+            )
+            .await
+            .map_err(|error| failure(format!("first request read failed: {error}")))?
+            else {
+                return Err(failure("executor cancellation fixture did not receive its first request"));
+            };
+            require(
+                first_wire.stream_id == 1,
+                "first executor resource did not use stream 1",
+            )?;
+            send_resource_server_frame_to_socket(
+                &mut server,
+                &server_active,
+                &server_registry,
+                &ResourceServerFrame::Accepted(orna_protocol::ResourceAccepted {
+                    stream_id: first_wire.stream_id,
+                    request_id: first_wire.request_id,
+                    nested_invocation_id: InvocationId::from_bytes([0xa1; 16]),
+                    target_revision: first_wire.target_revision,
+                    resource_kind: ResourceKind::Stream,
+                }),
+            )
+            .await?;
+            accepted_sender
+                .send(())
+                .map_err(|_| failure("executor cancellation fixture lost acceptance waiter"))?;
+            let ResourceClientFrame::Cancel(cancel) = read_resource_client_frame_from_socket(
+                &mut server,
+                &server_active,
+                &server_registry,
+            )
+            .await
+            .map_err(|error| failure(format!("cancel read failed: {error}")))?
+            else {
+                return Err(failure("executor cancellation fixture did not receive cancel"));
+            };
+            require(
+                cancel.stream_id == first_wire.stream_id
+                    && cancel.request_id == first_wire.request_id
+                    && cancel.reason == ResourceCancellationCode::ClientRequested,
+                "executor cancellation fixture received an incorrect cancel frame",
+            )?;
+            send_resource_server_frame_to_socket(
+                &mut server,
+                &server_active,
+                &server_registry,
+                &ResourceServerFrame::Cancelled(orna_protocol::ResourceCancelled {
+                    stream_id: cancel.stream_id,
+                    request_id: cancel.request_id,
+                    reason: ResourceCancellationCode::ClientRequested,
+                }),
+            )
+            .await?;
+            let ResourceClientFrame::Request(replacement_wire) = read_resource_client_frame_from_socket(
+                &mut server,
+                &server_active,
+                &server_registry,
+            )
+            .await
+            .map_err(|error| failure(format!("replacement request read failed: {error}")))?
+            else {
+                return Err(failure("executor cancellation fixture did not receive replacement request"));
+            };
+            require(
+                replacement_wire.stream_id == 2,
+                "replacement executor resource did not wait for terminal cancellation reclamation",
+            )?;
+            send_resource_server_frame_to_socket(
+                &mut server,
+                &server_active,
+                &server_registry,
+                &ResourceServerFrame::Accepted(orna_protocol::ResourceAccepted {
+                    stream_id: replacement_wire.stream_id,
+                    request_id: replacement_wire.request_id,
+                    nested_invocation_id: InvocationId::from_bytes([0xa2; 16]),
+                    target_revision: replacement_wire.target_revision,
+                    resource_kind: ResourceKind::Stream,
+                }),
+            )
+            .await?;
+            send_resource_server_frame_to_socket(
+                &mut server,
+                &server_active,
+                &server_registry,
+                &ResourceServerFrame::Completed(orna_protocol::ResourceCompleted {
+                    stream_id: replacement_wire.stream_id,
+                    request_id: replacement_wire.request_id,
+                    final_batch_sequence: 0,
+                    total_items: 0,
+                }),
+            )
+            .await?;
+            Ok::<(), Box<dyn Error + Send + Sync>>(())
+        });
+        let mut executor = InstalledClientResourceExecutor::new_with_stream(
+            kernel,
+            session,
+            active,
+            client,
+        );
+        require(
+            matches!(executor.execute(first.clone()), ClientResourceCompletion::Pending { .. }),
+            "first executor resource did not become pending",
+        )?;
+        tokio::time::timeout(Duration::from_secs(5), accepted_receiver)
+            .await
+            .map_err(|_| failure("executor cancellation fixture did not reach acceptance"))?
+            .map_err(|_| failure("executor cancellation fixture acceptance waiter failed"))?;
+        let (mut executor, cancelled) = tokio::task::spawn_blocking(move || {
+            let cancelled = executor.cancel(first);
+            (executor, cancelled)
+        })
+        .await
+        .map_err(|error| failure(format!("executor cancellation task failed: {error}")))?;
+        require(
+            matches!(cancelled, ClientResourceCompletion::Cancelled { .. }),
+            "terminal resource cancellation did not complete as cancelled",
+        )?;
+        require(
+            matches!(executor.execute(replacement), ClientResourceCompletion::Pending { .. }),
+            "executor rejected a replacement after terminal cancellation",
+        )?;
+        let server_result = tokio::time::timeout(Duration::from_secs(5), server_task)
+            .await
+            .map_err(|_| failure("executor cancellation server timed out"))?
+            .map_err(|error| failure(format!("executor cancellation server failed: {error}")))?;
+        server_result?;
+        let replacement_completion = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let Some(completion) = executor.poll() {
+                    return completion;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .map_err(|_| failure("replacement polling timed out"))?;
+        require(
+            matches!(replacement_completion, ClientResourceCompletion::StreamCompleted { .. }),
+            "replacement resource did not complete after terminal cancellation reclaimed transport",
+        )
     })
     .await
 }
@@ -10687,6 +10935,35 @@ async fn require_invalid_local_raw_hello(
 }
 #[cfg(feature = "test-hooks")]
 const RESOURCE_WIRE_HEADER_LENGTH: usize = 21;
+
+#[cfg(feature = "test-hooks")]
+async fn read_resource_client_frame_from_socket(
+    stream: &mut UnixStream,
+    active: &ActiveDatabaseRevision,
+    registry: &OpaqueCodecRegistry,
+) -> TestResult<ResourceClientFrame> {
+    let mut header = [0_u8; RESOURCE_WIRE_HEADER_LENGTH];
+    stream.read_exact(&mut header).await?;
+    let payload_length = u32::from_be_bytes(header[17..21].try_into()?) as usize;
+    let mut encoded = header.to_vec();
+    encoded.resize(RESOURCE_WIRE_HEADER_LENGTH + payload_length, 0);
+    stream
+        .read_exact(&mut encoded[RESOURCE_WIRE_HEADER_LENGTH..])
+        .await?;
+    Ok(decode_resource_client_frame(active, registry, &encoded)?)
+}
+
+#[cfg(feature = "test-hooks")]
+async fn send_resource_server_frame_to_socket(
+    stream: &mut UnixStream,
+    active: &ActiveDatabaseRevision,
+    registry: &OpaqueCodecRegistry,
+    frame: &ResourceServerFrame,
+) -> TestResult<()> {
+    let encoded = encode_resource_server_frame(active, registry, frame)?;
+    stream.write_all(&encoded).await?;
+    Ok(())
+}
 
 #[cfg(feature = "test-hooks")]
 async fn read_resource_server_frame_with_encoded(
