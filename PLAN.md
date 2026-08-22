@@ -92,6 +92,9 @@ contract:
   `orna-lsp` stdio binary;
 - direct resource revision pinning was audited against the accepted locks and
   needs no source change.
+- bare `has_privilege` checks now fail closed for inactive principals and reject
+  object-scoped INSPECT requests; the installed security-admin proof covers both
+  enforcement boundaries.
 
 The accepted slices have focused proof in the repository. Installed proofs
 that require Compose remain environment-dependent and must be reported as
