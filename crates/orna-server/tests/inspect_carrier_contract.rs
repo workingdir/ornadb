@@ -303,6 +303,39 @@ fn target_provenance_and_stale_epoch_bindings_fail_closed() {
 }
 
 #[test]
+fn revision_mismatch_fails_closed_with_public_epoch_error() {
+    let target = invocation(0xc3);
+    let current = binding(4, target);
+    let revision_mismatch = InspectEpochBinding::new(
+        invocation(0x10),
+        0x0102_0304_0506_0708,
+        target,
+        principal(0x20),
+        RevisionPair::new(source(0x31), catalogue(0x40)),
+        invocation(0x50),
+        invocation(0x60),
+        InspectProjectionVersions::v1(),
+        4,
+    );
+
+    assert_eq!(
+        revision_mismatch.validate_against(&current),
+        Err(InspectLifecycleError::RevisionMismatch {
+            expected: current.revision(),
+            actual: revision_mismatch.revision(),
+        })
+    );
+    assert_eq!(
+        InspectLifecycleError::RevisionMismatch {
+            expected: current.revision(),
+            actual: revision_mismatch.revision(),
+        }
+        .code(),
+        "inspect.epoch_mismatch"
+    );
+}
+
+#[test]
 fn installed_projection_names_remain_aligned_with_carrier_tags() {
     let names = [
         ("invocation_nodes", InspectCarrierKind::InvocationNodes),
