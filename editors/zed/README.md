@@ -6,9 +6,8 @@ language server.
 
 There are two ways to use it:
 
-1. **Manual settings.json** (recommended, works today, no build step).
-2. **The bundled extension** (requires a Rust shim for the LSP command in
-   current Zed, see below).
+1. **Manual settings.json** (no build step).
+2. **The bundled extension** (recommended for a reusable setup).
 
 ## 1. Manual settings.json
 
@@ -27,7 +26,7 @@ your checkout of the OrnaDB workspace):
     "orna-lsp": {
       "binary": {
         "path": "orna-lsp",
-        "arguments": ["--stdio"]
+        "arguments": []
       }
     }
   }
@@ -45,11 +44,19 @@ your checkout of the OrnaDB workspace):
 
 ## 2. Bundled extension
 
+The bundled extension registers the `orna-lsp` language server and the
+`tree-sitter-orna` grammar. Zed builds the small Rust shim as WebAssembly;
+the shim resolves `orna-lsp` from the worktree shell `PATH`. The server
+speaks LSP over stdio and takes no command-line arguments.
+
 Extension layout:
 
 ```text
 editors/zed/
-├── extension.toml                              # manifest + server registration
+├── extension.toml                              # manifest + registrations
+├── Cargo.toml                                  # Zed WebAssembly shim
+├── src/
+│   └── lib.rs                                  # PATH-based LSP command
 └── languages/
     └── orna/
         ├── config.toml                         # name, grammar, suffixes, comments, brackets
@@ -59,19 +66,14 @@ editors/zed/
                 └── config.toml                 # legacy per-language server definition
 ```
 
-- `extension.toml` registers the language server under
-  `[language_servers.orna-lsp]` with `languages = ["Orna"]` (matching the
-  `name` in `languages/orna/config.toml`).
-- The tree-sitter grammar is vendored at
-  `editors/tree-sitter-orna`; it is not bundled. Once the grammar is
-  published, add a `[grammars.orna]` entry to `extension.toml` (see the
-  comment there).
-- Current Zed resolves the server executable from the extension's
-  `src/lib.rs` (a Rust shim that returns the `orna-lsp` command) or from
-  the `lsp.orna-lsp.binary.path` settings override. Until a Rust shim is
-  added, keep the settings override above in place — it always takes
-  precedence and needs no build.
+The grammar registration points at the repository root with
+`path = "editors/tree-sitter-orna"` and a fixed Git revision, so the
+extension uses the existing grammar asset without inventing a release process.
+The `language_ids` mapping sends Zed's `Orna` language name as the LSP `orna`
+language id expected by the server.
 
 To load the extension during development, use the Extensions panel's
 "Install Dev Extension" action and select `editors/zed/`. Check the log
-(`zed: open log`) if the server does not start.
+(`zed: open log`) if the server does not start. The `orna-lsp` binary must
+be on the worktree shell `PATH` (build it with
+`cargo build -p orna-lsp --release`).
