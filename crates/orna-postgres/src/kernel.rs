@@ -64,6 +64,7 @@ pub(crate) mod storage;
 
 pub use apply::StandardContextIdentity;
 pub use bootstrap::ActiveRevision;
+pub use inspect::AuthenticatedInspectSnapshot;
 pub use orna_core::inspect::InspectSnapshotEpoch;
 pub use security::{
     AuthenticatedRawCallResult, AuthenticatedServerResourceAccepted,
