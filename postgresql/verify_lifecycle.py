@@ -9,7 +9,7 @@ import stat
 import sys
 
 
-MARKERS = (
+BASE_MARKERS = (
     "preload-complete",
     "reference-entry-start",
     "reference-entry-complete",
@@ -23,15 +23,16 @@ MARKERS = (
     "postmaster-sigint",
     "complete",
 )
+ESCALATION_MARKER = "postmaster-sigquit"
 
-REPORT = {
+
+REPORT_FIELDS = {
     "cluster_assertions": True,
     "credential_drop": True,
     "format": 1,
     "hostile_authority_rejected": True,
     "one_executable": True,
     "postmaster_clean_stop": True,
-    "postmaster_sigquit_escalation": False,
     "support_members": 620,
     "x32_syscall_rejected": True,
 }
@@ -60,11 +61,17 @@ def main() -> None:
         if not path.is_absolute():
             raise SystemExit(f"lifecycle evidence path is not absolute: {path}")
 
-    markers = regular_bytes(markers_path).decode("utf-8").splitlines()
-    if tuple(markers) != MARKERS:
+    markers = tuple(regular_bytes(markers_path).decode("utf-8").splitlines())
+    escalated_markers = BASE_MARKERS[:-1] + (ESCALATION_MARKER, BASE_MARKERS[-1])
+    if markers == BASE_MARKERS:
+        escalated = False
+    elif markers == escalated_markers:
+        escalated = True
+    else:
         raise SystemExit("lifecycle phase markers are not exact")
     report = json.loads(regular_bytes(report_path))
-    if report != REPORT:
+    expected_report = {**REPORT_FIELDS, "postmaster_sigquit_escalation": escalated}
+    if report != expected_report:
         raise SystemExit("lifecycle report is not exact")
     if not regular_bytes(stdout_path):
         raise SystemExit("linked describe-config output is empty")

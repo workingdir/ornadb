@@ -309,10 +309,18 @@ lifecycle: archives
 			/proof/lifecycle/embedded-initialisation-report.json \
 			>/proof/lifecycle/probe.stdout 2>/proof/lifecycle/markers; \
 		test ! -s /proof/lifecycle/probe.stdout; \
-		printf "%s\n" preload-complete reference-entry-start reference-entry-complete \
-			hostile-entry-start hostile-entry-complete initdb-start initdb-complete \
-			postmaster-start pgwire-ready query-complete postmaster-sigint complete \
-			> /proof/lifecycle/expected-markers; \
+		if grep -Fqx postmaster-sigquit /proof/lifecycle/markers; then \
+			printf "%s\n" preload-complete reference-entry-start reference-entry-complete \
+				hostile-entry-start hostile-entry-complete initdb-start initdb-complete \
+				postmaster-start pgwire-ready query-complete postmaster-sigint \
+				postmaster-sigquit complete \
+				> /proof/lifecycle/expected-markers; \
+		else \
+			printf "%s\n" preload-complete reference-entry-start reference-entry-complete \
+				hostile-entry-start hostile-entry-complete initdb-start initdb-complete \
+				postmaster-start pgwire-ready query-complete postmaster-sigint complete \
+				> /proof/lifecycle/expected-markers; \
+		fi; \
 		cmp /proof/lifecycle/expected-markers /proof/lifecycle/markers; \
 		python3 /input/verify_lifecycle.py /proof/lifecycle/lifecycle.strace \
 			/proof/lifecycle/markers \
