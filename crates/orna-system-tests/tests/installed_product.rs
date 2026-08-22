@@ -2195,13 +2195,15 @@ fn installed_field_rename_preserves_function_identities_and_values_across_restar
     );
 }
 
-/// Prove that the packaged `orna source diff` command renders a semantic
-/// field rename and leaves the active revision untouched.
+/// Prove that the packaged `orna source diff` command renders semantic field
+/// and function renames while leaving the active revision untouched.
 ///
 /// The test applies the original fixture, diffs the evidence-bearing renamed
 /// fixture through `/usr/bin/orna`, and then diffs the original fixture again.
 /// The final no-change report is the public-command proof that the first diff
-/// prepared a candidate without applying it.
+/// prepared a candidate without applying it. The changed lines are asserted
+/// in their complete deterministic form, including the canonical stable
+/// identities.
 #[test]
 #[ignore = "requires Docker, ORNA_SYSTEM_TEST_DEBIAN_PACKAGE, and the installed orna executable"]
 fn installed_source_diff_renders_semantic_changes_without_apply() {
@@ -2225,6 +2227,12 @@ fn installed_source_diff_renders_semantic_changes_without_apply() {
         apply.stderr.is_empty(),
         "source apply must keep standard error empty"
     );
+    let apply_document =
+        parse_apply_document(&apply.stdout).expect("source apply JSON must parse");
+    let read_probes_id = apply_document
+        .function_id(&["product_test", "read_probes"])
+        .expect("source apply must report read_probes")
+        .to_owned();
 
     machine
         .write_fixture(&renamed)
@@ -2240,16 +2248,62 @@ fn installed_source_diff_renders_semantic_changes_without_apply() {
     );
     let text = std::str::from_utf8(&diff.stdout).expect("source diff output must be UTF-8");
     assert!(
-        text.starts_with("semantic diff "),
-        "source diff must render its semantic-diff header, got {text:?}"
-    );
-    assert!(
-        text.contains("~ field product_test.probe.stored -> product_test.probe.retained [field:"),
-        "source diff must render the stable-ID field rename, got {text:?}"
-    );
-    assert!(
         text.ends_with('\n'),
         "source diff output must end with one line feed"
+    );
+    let mut lines = text.lines();
+    let header = lines.next().expect("source diff must render a header");
+    assert!(
+        header.starts_with("semantic diff "),
+        "source diff must render its semantic-diff header, got {text:?}"
+    );
+    let rendered: Vec<_> = lines.collect();
+    assert_eq!(
+        rendered.len(),
+        2,
+        "source diff must render exactly the field and function rename lines, got {text:?}"
+    );
+
+    let field_prefix = "~ field product_test.probe.stored -> product_test.probe.retained [";
+    let field_line = rendered
+        .iter()
+        .find(|line| line.starts_with(field_prefix))
+        .copied()
+        .expect("source diff must render the field rename in the expected direction");
+    let field_id = field_line
+        .strip_prefix(field_prefix)
+        .and_then(|line| line.strip_suffix(']'))
+        .expect("source diff field rename must close with one canonical ID");
+
+    const CANONICAL_ID_ALPHABET: &[u8] = b"0123456789abcdefghjkmnpqrstvwxyz";
+    for (id, prefix) in [
+        (field_id, "field:"),
+        (read_probes_id.as_str(), "function:"),
+    ] {
+        let encoded = id
+            .strip_prefix(prefix)
+            .unwrap_or_else(|| panic!("source diff identity must use the {prefix} prefix: {id}"));
+        assert_eq!(
+            encoded.len(),
+            26,
+            "source diff identity must use the canonical 16-byte base32 length: {id}"
+        );
+        assert!(
+            encoded
+                .as_bytes()
+                .iter()
+                .all(|byte| CANONICAL_ID_ALPHABET.contains(byte)),
+            "source diff identity must use the canonical base32 alphabet: {id}"
+        );
+    }
+
+    let expected_field = format!("{field_prefix}{field_id}]");
+    let expected_function =
+        format!("~ function product_test.read_probes -> product_test.load_probes [{read_probes_id}]");
+    assert_eq!(
+        rendered,
+        vec![expected_field.as_str(), expected_function.as_str()],
+        "source diff must render the exact field and function rename lines"
     );
 
     machine
