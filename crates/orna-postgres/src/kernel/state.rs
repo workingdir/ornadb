@@ -1263,20 +1263,25 @@ mod tests {
     #[test]
     fn hard_failure_returns_no_commit_plan_for_prior_success() {
         let current = cell(PRINCIPAL, 1, 1);
+        let second_current = cell_for_instance(PRINCIPAL, "other".to_owned(), 1, 1);
         let first = change(Some(1), 2);
         let second = UserStateChange::new(
             ROOT,
             String::new(),
             FUNCTION,
-            String::new(),
+            "other".to_owned(),
             SLOT,
-            Some(2),
+            Some(1),
             RuntimeValue::BigInt(3),
-            TypeId::from_bytes([0x35; 16]),
+            TEXT,
         )
         .expect("test change is valid");
-        let key = first.key_without_principal().with_principal(PRINCIPAL);
-        let mut current_cells = HashMap::from([(key, Some(current))]);
+        let first_key = first.key_without_principal().with_principal(PRINCIPAL);
+        let second_key = second.key_without_principal().with_principal(PRINCIPAL);
+        let mut current_cells = HashMap::from([
+            (first_key, Some(current)),
+            (second_key, Some(second_current)),
+        ]);
         let error = plan_user_state_changes(&[first, second], PRINCIPAL, &mut current_cells)
             .expect_err("type mismatch aborts the batch");
         assert!(
