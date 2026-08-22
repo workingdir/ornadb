@@ -21,11 +21,12 @@
 use std::{fmt, io, io::Write, time::SystemTime};
 
 use orna_core::{
-    InspectEpochId, InvocationId,
+    CatalogueRevisionId, FunctionId, InspectEpochId, InvocationId, PrincipalId, SourceRevisionId,
     inspect::{
         CallRow, InspectInvocationNodeKind, InspectInvocationPhase, InspectOutcomeKind,
         InspectPrivilege, InspectResourceKind, InspectResourceStatus, InspectResultSummary,
-        InspectSecurityDecisionKind, InspectSecurityDecisionOutcome, InspectSnapshotEpoch,
+        InspectSecurityDecisionKind, InspectSecurityDecisionOutcome,
+        InspectSnapshotSummary,
         InspectTraceEvent, InspectTraceEventKind, InspectTracePayload, InvocationNodeRow,
         PresentationCandidateRow, ResourceRow, RuntimeBindingRow, SecurityDecisionRow,
         StateCellRow, UiNodeRow,
@@ -33,7 +34,7 @@ use orna_core::{
     invocation::InvokeValue,
     types::{TypeDescriptor, TypeDescriptorKind},
 };
-use orna_postgres::{PostgresKernel, PostgresKernelError};
+use orna_postgres::{AuthenticatedInspectSnapshot, PostgresKernel, PostgresKernelError};
 use orna_protocol::{ValueCodecError, encode_constructed_value};
 use orna_standard::registered_opaque_codecs;
 
@@ -43,9 +44,10 @@ use crate::{EmbeddedHostError, inspect_ready_embedded_host};
 ///
 /// The command parser parses the invocation identity, the optional exact
 /// epoch override, the optional projection selector, the trace switch and
-/// resume sequence, the four classifier flags, and the optional observer
-/// invocation into this closed request; the host derives the session
-/// principal and dispatches.
+/// resume sequence, and the four classifier flags into this closed request;
+/// the host derives the session principal and dispatches. The installed
+/// command has no trusted CLIENT observer invocation, so trace suppression
+/// uses the target invocation by default.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[non_exhaustive]
 pub struct InstalledInspectRequest {
@@ -73,9 +75,6 @@ pub struct InstalledInspectRequest {
     /// Requests the `RuntimeInternals` classifier for the
     /// `runtime_bindings` projection.
     pub include_runtime: bool,
-    /// The observing invocation used for self-observation suppression. When
-    /// absent, the target invocation is used by the trace provider.
-    pub observer: Option<InvocationId>,
 }
 
 impl InstalledInspectRequest {
@@ -91,7 +90,6 @@ impl InstalledInspectRequest {
         include_source: bool,
         include_security: bool,
         include_runtime: bool,
-        observer: Option<InvocationId>,
     ) -> Self {
         Self {
             invocation,
@@ -103,7 +101,6 @@ impl InstalledInspectRequest {
             include_source,
             include_security,
             include_runtime,
-            observer,
         }
     }
 }
@@ -345,8 +342,8 @@ async fn execute_inspect(
             epoch
         }
     };
-    let Some(epoch) = kernel
-        .load_inspect_snapshot(epoch_id)
+    let Some(snapshot) = kernel
+        .load_inspect_snapshot(&session, epoch_id)
         .await
         .map_err(map_kernel_error)?
     else {
@@ -355,7 +352,7 @@ async fn execute_inspect(
             format!("inspection epoch {} does not exist", epoch_id.canonical()),
         ));
     };
-    if epoch.invocation_id() != request.invocation {
+    if snapshot.invocation_id() != request.invocation {
         return Err(InstalledInspectError::with_code(
             InstalledInspectErrorKind::Kernel,
             "inspection epoch target does not match requested invocation".to_owned(),
@@ -371,13 +368,21 @@ async fn execute_inspect(
         Ok(encode_hex(&encoded))
     };
 
+    let values_granted = request.include_values
+        && snapshot.granted().contains(&InspectPrivilege::Values);
+    let source_granted = request.include_source
+        && snapshot.granted().contains(&InspectPrivilege::Source);
+    let security_details_granted = request.include_security
+        && snapshot.granted().contains(&InspectPrivilege::SecurityDetails);
+    let runtime_internals_granted = request.include_runtime
+        && snapshot.granted().contains(&InspectPrivilege::RuntimeInternals);
+
     if let Some(projection) = &request.projection {
-        let granted = granted_privileges(request);
         let requested = requested_privilege(projection, request);
         match projection {
             InstalledInspectProjection::InvocationNodes => {
                 let rows = kernel
-                    .inspect_invocation_nodes(&session, &epoch, requested, &granted)
+                    .inspect_invocation_nodes(&snapshot, requested)
                     .map_err(map_kernel_error)?;
                 for row in &rows {
                     write_json_line(stdout, &invocation_node_record(row))?;
@@ -385,15 +390,15 @@ async fn execute_inspect(
             }
             InstalledInspectProjection::Calls => {
                 let rows = kernel
-                    .inspect_calls(&session, &epoch, requested, &granted)
+                    .inspect_calls(&snapshot, requested)
                     .map_err(map_kernel_error)?;
                 for row in &rows {
-                    write_json_line(stdout, &call_record(row, &hex)?)?;
+                    write_json_line(stdout, &call_record(row, &hex, values_granted)?)?;
                 }
             }
             InstalledInspectProjection::Resources => {
                 let rows = kernel
-                    .inspect_resources(&session, &epoch, requested, &granted)
+                    .inspect_resources(&snapshot, requested)
                     .map_err(map_kernel_error)?;
                 for row in &rows {
                     write_json_line(stdout, &resource_record(row))?;
@@ -401,103 +406,77 @@ async fn execute_inspect(
             }
             InstalledInspectProjection::StateCells => {
                 let rows = kernel
-                    .inspect_state_cells(&session, &epoch, requested, &granted)
+                    .inspect_state_cells(&snapshot, requested)
                     .await
                     .map_err(map_kernel_error)?;
                 for row in &rows {
-                    write_json_line(stdout, &state_cell_record(row, &hex)?)?;
+                    write_json_line(stdout, &state_cell_record(row, &hex, values_granted)?)?;
                 }
             }
             InstalledInspectProjection::UiNodes => {
                 let rows = kernel
-                    .inspect_ui_nodes(&session, &epoch, requested, &granted)
+                    .inspect_ui_nodes(&snapshot, requested)
                     .map_err(map_kernel_error)?;
                 for row in &rows {
-                    write_json_line(stdout, &ui_node_record(row))?;
+                    write_json_line(stdout, &ui_node_record(row, source_granted, runtime_internals_granted))?;
                 }
             }
             InstalledInspectProjection::PresentationCandidates => {
                 let rows = kernel
-                    .inspect_presentation_candidates(&session, &epoch, requested, &granted)
+                    .inspect_presentation_candidates(&snapshot, requested)
                     .map_err(map_kernel_error)?;
                 for row in &rows {
-                    write_json_line(stdout, &presentation_candidate_record(row))?;
+                    write_json_line(stdout, &presentation_candidate_record(row, runtime_internals_granted))?;
                 }
             }
             InstalledInspectProjection::RuntimeBindings => {
                 let rows = kernel
-                    .inspect_runtime_bindings(&session, &epoch, requested, &granted)
+                    .inspect_runtime_bindings(&snapshot, requested)
                     .map_err(map_kernel_error)?;
                 for row in &rows {
-                    write_json_line(stdout, &runtime_binding_record(row))?;
+                    write_json_line(stdout, &runtime_binding_record(row, runtime_internals_granted))?;
                 }
             }
             InstalledInspectProjection::SecurityDecisions => {
                 let rows = kernel
-                    .inspect_security_decisions(&session, &epoch, requested, &granted)
+                    .inspect_security_decisions(&snapshot, requested)
                     .await
                     .map_err(map_kernel_error)?;
                 for row in &rows {
-                    write_json_line(stdout, &security_decision_record(row))?;
+                    write_json_line(stdout, &security_decision_record(row, security_details_granted))?;
                 }
             }
         }
     }
 
     if request.trace {
-        // Trace uses the same structural and classifier privileges as the
-        // projections. The target invocation is the default observer identity
-        // so self-observer rows are suppressed unless explicitly included.
-        let granted = granted_privileges(request);
+        // The installed host has no trusted CLIENT observer invocation.
+        // Passing `None` makes the trace provider use the target invocation,
+        // which suppresses self-observation rows without accepting caller
+        // supplied identity as authority.
         let requested = trace_privilege(request);
         let events = kernel
             .stream_inspect_trace(
-                &session,
-                &epoch,
+                &snapshot,
                 requested,
-                &granted,
                 request.invocation,
                 request.after_sequence,
-                request.observer,
+                None,
                 false,
             )
             .await
             .map_err(map_kernel_error)?;
         for event in &events {
-            write_json_line(stdout, &trace_record(event, &hex)?)?;
+            write_json_line(stdout, &trace_record(event, &hex, values_granted)?)?;
         }
     }
 
     // A bare command renders the resolved epoch's summary record.
     if request.projection.is_none() && !request.trace {
-        write_json_line(stdout, &summary_record(&epoch))?;
+        write_json_line(stdout, &summary_record(&snapshot))?;
     }
 
     Ok(InstalledInspectOutcome::Completed)
-}
-
-/// Builds the granted privilege set from the four classifier flags.
-///
-/// Every installed command holds the `OwnInvocation` ladder rung; each armed
-/// classifier flag grants exactly its content dimension. The set is what the
-/// kernel's INSPECT ladder checks, so an unarmed command can never read
-/// values, source, security details, or runtime internals, and a foreign
-/// epoch fails closed.
-fn granted_privileges(request: &InstalledInspectRequest) -> Vec<InspectPrivilege> {
-    let mut granted = vec![InspectPrivilege::OwnInvocation];
-    if request.include_values {
-        granted.push(InspectPrivilege::Values);
-    }
-    if request.include_source {
-        granted.push(InspectPrivilege::Source);
-    }
-    if request.include_security {
-        granted.push(InspectPrivilege::SecurityDetails);
-    }
-    if request.include_runtime {
-        granted.push(InspectPrivilege::RuntimeInternals);
-    }
-    granted
 }
 
 /// Selects the requested privilege for one projection.
@@ -512,7 +491,8 @@ fn requested_privilege(
     request: &InstalledInspectRequest,
 ) -> InspectPrivilege {
     match projection {
-        InstalledInspectProjection::StateCells if request.include_values => {
+        InstalledInspectProjection::Calls | InstalledInspectProjection::StateCells
+            if request.include_values => {
             InspectPrivilege::Values
         }
         InstalledInspectProjection::SecurityDecisions if request.include_security => {
@@ -542,25 +522,64 @@ fn trace_privilege(request: &InstalledInspectRequest) -> InspectPrivilege {
 /// The record carries the epoch identity, the pinned invocation and owner,
 /// the root target and outcome, the captured summary, the recording time as
 /// milliseconds since the Unix epoch, and the pinned revision pair.
-fn summary_record(epoch: &InspectSnapshotEpoch) -> serde_json::Value {
+fn summary_record(snapshot: &AuthenticatedInspectSnapshot) -> serde_json::Value {
+    summary_record_parts(
+        snapshot.id(),
+        snapshot.invocation_id(),
+        snapshot.owner(),
+        snapshot.root_target(),
+        snapshot.outcome(),
+        snapshot.summary(),
+        snapshot.recorded_at(),
+        snapshot.source_revision_id(),
+        snapshot.catalogue_revision_id(),
+    )
+}
+
+#[cfg(test)]
+fn epoch_summary_record(epoch: &orna_core::inspect::InspectSnapshotEpoch) -> serde_json::Value {
+    summary_record_parts(
+        epoch.id(),
+        epoch.invocation_id(),
+        epoch.owner(),
+        epoch.root_target(),
+        epoch.outcome(),
+        epoch.summary(),
+        epoch.recorded_at(),
+        epoch.source_revision_id(),
+        epoch.catalogue_revision_id(),
+    )
+}
+
+fn summary_record_parts(
+    epoch: InspectEpochId,
+    invocation: InvocationId,
+    owner: PrincipalId,
+    root_target: FunctionId,
+    outcome: InspectOutcomeKind,
+    summary: InspectSnapshotSummary,
+    recorded_at: SystemTime,
+    source_revision: SourceRevisionId,
+    catalogue_revision: CatalogueRevisionId,
+) -> serde_json::Value {
     let mut record = serde_json::json!({
-        "epoch": epoch.id().canonical(),
-        "invocation": epoch.invocation_id().canonical(),
-        "owner": epoch.owner().canonical(),
-        "root_target": epoch.root_target().canonical(),
-        "outcome": match epoch.outcome() {
+        "epoch": epoch.canonical(),
+        "invocation": invocation.canonical(),
+        "owner": owner.canonical(),
+        "root_target": root_target.canonical(),
+        "outcome": match outcome {
             InspectOutcomeKind::Allowed => "allowed",
             InspectOutcomeKind::Denied => "denied",
             InspectOutcomeKind::Failed => "failed",
             InspectOutcomeKind::Cancelled => "cancelled",
         },
-        "event_count": epoch.summary().event_count(),
-        "duration_nanoseconds": epoch.summary().duration_nanoseconds(),
-        "recorded_at": system_time_millis(epoch.recorded_at()),
-        "source_revision": epoch.source_revision_id().canonical(),
-        "catalogue_revision": epoch.catalogue_revision_id().canonical(),
+        "event_count": summary.event_count(),
+        "duration_nanoseconds": summary.duration_nanoseconds(),
+        "recorded_at": system_time_millis(recorded_at),
+        "source_revision": source_revision.canonical(),
+        "catalogue_revision": catalogue_revision.canonical(),
     });
-    match epoch.summary().result() {
+    match summary.result() {
         InspectResultSummary::NoValues => {
             record["result"] = serde_json::json!("no_values");
         }
@@ -601,10 +620,15 @@ fn invocation_node_record(row: &InvocationNodeRow) -> serde_json::Value {
 fn call_record(
     row: &CallRow,
     hex: &dyn Fn(&InvokeValue) -> Result<String, InstalledInspectError>,
+    values_granted: bool,
 ) -> Result<serde_json::Value, InstalledInspectError> {
-    let schema_hex = match row.schema() {
-        Some(schema) => Some(hex(schema)?),
-        None => None,
+    let schema_hex = if values_granted {
+        match row.schema() {
+            Some(schema) => Some(hex(schema)?),
+            None => None,
+        }
+    } else {
+        None
     };
     Ok(serde_json::json!({
         "projection": "calls",
@@ -640,10 +664,15 @@ fn resource_record(row: &ResourceRow) -> serde_json::Value {
 fn state_cell_record(
     row: &StateCellRow,
     hex: &dyn Fn(&InvokeValue) -> Result<String, InstalledInspectError>,
+    values_granted: bool,
 ) -> Result<serde_json::Value, InstalledInspectError> {
-    let value_hex = match row.value() {
-        Some(value) => Some(hex(value)?),
-        None => None,
+    let value_hex = if values_granted {
+        match row.value() {
+            Some(value) => Some(hex(value)?),
+            None => None,
+        }
+    } else {
+        None
     };
     Ok(serde_json::json!({
         "projection": "state_cells",
@@ -659,30 +688,50 @@ fn state_cell_record(
 }
 
 /// Renders one `ui_nodes` projection row as its closed JSON record.
-fn ui_node_record(row: &UiNodeRow) -> serde_json::Value {
+fn ui_node_record(
+    row: &UiNodeRow,
+    source_granted: bool,
+    runtime_internals_granted: bool,
+) -> serde_json::Value {
     serde_json::json!({
         "projection": "ui_nodes",
         "function": row.function().canonical(),
-        "call_site": row.call_site(),
-        "runtime_contract": row.runtime_contract(),
+        "call_site": source_granted.then(|| row.call_site()),
+        "runtime_contract": runtime_internals_granted.then(|| row.runtime_contract()),
     })
 }
 
 /// Renders one `presentation_candidates` projection row as its closed JSON
 /// record.
-fn presentation_candidate_record(row: &PresentationCandidateRow) -> serde_json::Value {
+fn presentation_candidate_record(
+    row: &PresentationCandidateRow,
+    runtime_internals_granted: bool,
+) -> serde_json::Value {
     serde_json::json!({
         "projection": "presentation_candidates",
-        "presenter": row.presenter(),
+        "presenter": runtime_internals_granted.then(|| row.presenter()),
         "accepted": row.accepted(),
-        "reason": row.reason(),
-        "selected_sink": row.selected_sink().map(descriptor_label),
-        "runtime": row.runtime(),
+        "reason": runtime_internals_granted.then(|| row.reason()),
+        "selected_sink": runtime_internals_granted
+            .then(|| row.selected_sink().map(descriptor_label))
+            .flatten(),
+        "runtime": runtime_internals_granted.then(|| row.runtime()).flatten(),
     })
 }
 
 /// Renders one `runtime_bindings` projection row as its closed JSON record.
-fn runtime_binding_record(row: &RuntimeBindingRow) -> serde_json::Value {
+fn runtime_binding_record(
+    row: &RuntimeBindingRow,
+    runtime_internals_granted: bool,
+) -> serde_json::Value {
+    if !runtime_internals_granted {
+        return serde_json::json!({
+            "projection": "runtime_bindings",
+            "runtime_name": row.runtime_name(),
+            "version": row.version(),
+            "redacted": true,
+        });
+    }
     serde_json::json!({
         "projection": "runtime_bindings",
         "runtime_name": row.runtime_name(),
@@ -706,8 +755,11 @@ fn runtime_binding_record(row: &RuntimeBindingRow) -> serde_json::Value {
 
 /// Renders one `security_decisions` projection row as its closed JSON
 /// record.
-fn security_decision_record(row: &SecurityDecisionRow) -> serde_json::Value {
-    serde_json::json!({
+fn security_decision_record(
+    row: &SecurityDecisionRow,
+    security_details_granted: bool,
+) -> serde_json::Value {
+    let mut record = serde_json::json!({
         "projection": "security_decisions",
         "kind": match row.kind() {
             InspectSecurityDecisionKind::Execute => "execute",
@@ -719,19 +771,23 @@ fn security_decision_record(row: &SecurityDecisionRow) -> serde_json::Value {
             InspectSecurityDecisionOutcome::Allowed => "allowed",
             InspectSecurityDecisionOutcome::Denied => "denied",
         },
-        "principals": row
+        "principals": security_details_granted.then(|| row
             .principals()
             .iter()
             .map(|id| id.canonical())
-            .collect::<Vec<_>>(),
+            .collect::<Vec<_>>()),
         "target": row.target().map(|id| id.canonical()),
-        "denial_reason": row.denial_reason(),
-        "audit_refs": row
+        "denial_reason": security_details_granted.then(|| row.denial_reason()).flatten(),
+        "audit_refs": security_details_granted.then(|| row
             .audit_refs()
             .iter()
             .map(|id| id.canonical())
-            .collect::<Vec<_>>(),
-    })
+            .collect::<Vec<_>>()),
+    });
+    if !security_details_granted {
+        record["redacted"] = serde_json::json!(true);
+    }
+    record
 }
 
 /// Renders one trace event as its closed JSON record.
@@ -742,11 +798,12 @@ fn security_decision_record(row: &SecurityDecisionRow) -> serde_json::Value {
 fn trace_record(
     event: &InspectTraceEvent,
     hex: &dyn Fn(&InvokeValue) -> Result<String, InstalledInspectError>,
+    values_granted: bool,
 ) -> Result<serde_json::Value, InstalledInspectError> {
     let mut payload = serde_json::Map::new();
     match event.payload() {
         InspectTracePayload::Started => {}
-        InspectTracePayload::ValueBatch { schema, values } => {
+        InspectTracePayload::ValueBatch { schema, values } if values_granted => {
             let schema_hex = match schema {
                 Some(schema) => Some(hex(schema)?),
                 None => None,
@@ -758,6 +815,10 @@ fn trace_record(
                 values_hex.push(hex(value)?);
             }
             payload.insert("values_hex".to_owned(), serde_json::json!(values_hex));
+        }
+        InspectTracePayload::ValueBatch { values, .. } => {
+            payload.insert("value_count".to_owned(), serde_json::json!(values.len()));
+            payload.insert("redacted".to_owned(), serde_json::json!(true));
         }
         InspectTracePayload::ValueBatchRedacted { value_count } => {
             payload.insert("value_count".to_owned(), serde_json::json!(value_count));
@@ -903,8 +964,8 @@ mod tests {
         inspect::{
             CallRow, InspectInvocationNodeKind, InspectInvocationPhase, InspectOutcomeKind,
             InspectResourceKind, InspectResourceStatus, InspectResultSummary,
-            InspectSecurityDecisionKind, InspectSecurityDecisionOutcome, InspectSnapshotOptions,
-            InspectSnapshotSummary, InspectTraceEvent, InspectTracePayload, InvocationNodeRow,
+            InspectSnapshotEpoch, InspectSnapshotOptions, InspectSnapshotSummary,
+            InspectTraceEvent, InspectTracePayload, InvocationNodeRow,
             PresentationCandidateRow, ResourceRow, RuntimeBindingRow, SecurityDecisionRow,
             StateCellRow, UiNodeRow,
         },
@@ -1039,7 +1100,6 @@ mod tests {
     #[test]
     fn request_construction_keeps_every_field() {
         let epoch = InspectEpochId::from_bytes([0x02; 16]);
-        let observer = invocation(0x03);
         let request = InstalledInspectRequest::new(
             invocation(0x01),
             Some(epoch),
@@ -1050,7 +1110,6 @@ mod tests {
             true,
             false,
             true,
-            Some(observer),
         );
         assert_eq!(request.invocation, invocation(0x01));
         assert_eq!(request.epoch, Some(epoch));
@@ -1064,52 +1123,27 @@ mod tests {
         assert!(request.include_source);
         assert!(!request.include_security);
         assert!(request.include_runtime);
-        assert_eq!(request.observer, Some(observer));
     }
 
-    /// The granted set is the closed ladder rung plus exactly the armed
-    /// classifier dimensions.
+    /// Classifier flags select requested detail but never manufacture a grant.
     #[test]
-    fn granted_privileges_follow_the_classifier_flags() {
-        let bare = InstalledInspectRequest::new(
+    fn classifier_flags_select_requested_detail() {
+        let values = InstalledInspectRequest::new(
             invocation(0x01),
             None,
-            None,
-            false,
-            0,
-            false,
-            false,
-            false,
-            false,
-            None,
-        );
-        assert_eq!(
-            granted_privileges(&bare),
-            vec![InspectPrivilege::OwnInvocation]
-        );
-
-        let armed = InstalledInspectRequest::new(
-            invocation(0x01),
-            None,
-            None,
+            Some(InstalledInspectProjection::Calls),
             false,
             0,
             true,
-            true,
-            true,
-            true,
-            None,
+            false,
+            false,
+            false,
         );
         assert_eq!(
-            granted_privileges(&armed),
-            vec![
-                InspectPrivilege::OwnInvocation,
-                InspectPrivilege::Values,
-                InspectPrivilege::Source,
-                InspectPrivilege::SecurityDetails,
-                InspectPrivilege::RuntimeInternals,
-            ]
+            requested_privilege(&InstalledInspectProjection::Calls, &values),
+            InspectPrivilege::Values
         );
+        assert_eq!(trace_privilege(&values), InspectPrivilege::Values);
     }
 
     /// The requested privilege arms the matching classifier per projection
@@ -1126,7 +1160,6 @@ mod tests {
             false,
             false,
             false,
-            None,
         );
         assert_eq!(
             requested_privilege(&InstalledInspectProjection::StateCells, &values),
@@ -1144,7 +1177,6 @@ mod tests {
             false,
             true,
             false,
-            None,
         );
         assert_eq!(
             requested_privilege(&InstalledInspectProjection::SecurityDecisions, &security),
@@ -1161,7 +1193,6 @@ mod tests {
             false,
             false,
             true,
-            None,
         );
         assert_eq!(
             requested_privilege(&InstalledInspectProjection::RuntimeBindings, &runtime),
@@ -1178,7 +1209,6 @@ mod tests {
             false,
             false,
             false,
-            None,
         );
         assert_eq!(trace_privilege(&bare), InspectPrivilege::OwnInvocation);
         for projection in [
@@ -1205,7 +1235,7 @@ mod tests {
     fn epoch_summary_renders_closed_records() {
         let epoch = small_epoch();
         assert_eq!(
-            summary_record(&epoch),
+            epoch_summary_record(&epoch),
             serde_json::json!({
                 "epoch": InspectEpochId::from_bytes([0x01; 16]).canonical(),
                 "invocation": invocation(0x21).canonical(),
@@ -1236,7 +1266,7 @@ mod tests {
             None,
         );
         assert_eq!(
-            state_cell_record(&redacted, &stub_hex()).expect("record must render"),
+            state_cell_record(&redacted, &stub_hex(), false).expect("record must render"),
             serde_json::json!({
                 "projection": "state_cells",
                 "root_function": function(0x10).canonical(),
@@ -1260,7 +1290,7 @@ mod tests {
             ),
         );
         assert_eq!(
-            state_cell_record(&retained, &stub_hex()).expect("record must render"),
+            state_cell_record(&retained, &stub_hex(), true).expect("record must render"),
             serde_json::json!({
                 "projection": "state_cells",
                 "root_function": function(0x10).canonical(),
@@ -1309,7 +1339,7 @@ mod tests {
         )
         .expect("fixture call must validate");
         assert_eq!(
-            call_record(&call, &stub_hex()).expect("record must render"),
+            call_record(&call, &stub_hex(), true).expect("record must render"),
             serde_json::json!({
                 "projection": "calls",
                 "invocation": invocation(0x21).canonical(),
@@ -1332,7 +1362,7 @@ mod tests {
         let ui_node = UiNodeRow::new(function(0x13), "call-site".to_owned(), "tty@1".to_owned())
             .expect("fixture UI node must validate");
         assert_eq!(
-            ui_node_record(&ui_node),
+            ui_node_record(&ui_node, true, true),
             serde_json::json!({
                 "projection": "ui_nodes",
                 "function": function(0x13).canonical(),
@@ -1350,7 +1380,7 @@ mod tests {
         )
         .expect("fixture candidate must validate");
         assert_eq!(
-            presentation_candidate_record(&candidate),
+            presentation_candidate_record(&candidate, true),
             serde_json::json!({
                 "projection": "presentation_candidates",
                 "presenter": "terminal-table",
@@ -1371,7 +1401,7 @@ mod tests {
         )
         .expect("fixture binding must validate");
         assert_eq!(
-            runtime_binding_record(&binding),
+            runtime_binding_record(&binding, true),
             serde_json::json!({
                 "projection": "runtime_bindings",
                 "runtime_name": "tty",
@@ -1393,7 +1423,7 @@ mod tests {
         )
         .expect("fixture decision must validate");
         assert_eq!(
-            security_decision_record(&decision),
+            security_decision_record(&decision, true),
             serde_json::json!({
                 "projection": "security_decisions",
                 "kind": "execute",
@@ -1404,6 +1434,94 @@ mod tests {
                 "audit_refs": [orna_core::SecurityAuditEventId::from_bytes([0x06; 16]).canonical()],
             })
         );
+    }
+
+    /// Installed JSON records retain structural facts while hiding classified
+    /// fields when the corresponding durable classifier is absent.
+    #[test]
+    fn classified_fields_redact_without_durable_grants() {
+        let call = CallRow::new(
+            invocation(0x21),
+            Some(InvokeValue::new(RuntimeValue::Boolean(true)).expect("fixture value")),
+            1,
+            9,
+        )
+        .expect("fixture call must validate");
+        let call_record = call_record(&call, &stub_hex(), false).expect("call record");
+        assert_eq!(call_record["invocation"], invocation(0x21).canonical());
+        assert!(call_record["schema_hex"].is_null());
+
+        let ui_node = UiNodeRow::new(function(0x13), "source".to_owned(), "runtime".to_owned())
+            .expect("fixture UI node must validate");
+        let ui_record = ui_node_record(&ui_node, false, false);
+        assert_eq!(ui_record["function"], function(0x13).canonical());
+        assert!(ui_record["call_site"].is_null());
+        assert!(ui_record["runtime_contract"].is_null());
+
+        let candidate = PresentationCandidateRow::new(
+            "presenter".to_owned(),
+            true,
+            "reason".to_owned(),
+            Some(TypeDescriptor::named(value_type(0x41))),
+            Some("runtime".to_owned()),
+        )
+        .expect("fixture candidate must validate");
+        let candidate_record = presentation_candidate_record(&candidate, false);
+        assert_eq!(candidate_record["accepted"], true);
+        assert!(candidate_record["presenter"].is_null());
+        assert!(candidate_record["reason"].is_null());
+        assert!(candidate_record["selected_sink"].is_null());
+        assert!(candidate_record["runtime"].is_null());
+
+        let binding = RuntimeBindingRow::new(
+            "runtime".to_owned(),
+            "1".to_owned(),
+            Vec::new(),
+            Vec::new(),
+            true,
+            0,
+        )
+        .expect("fixture binding must validate");
+        let binding_record = runtime_binding_record(&binding, false);
+        assert_eq!(binding_record["projection"], "runtime_bindings");
+        assert_eq!(binding_record["runtime_name"], "runtime");
+        assert_eq!(binding_record["version"], "1");
+        assert_eq!(binding_record["redacted"], true);
+
+        let decision = SecurityDecisionRow::new(
+            InspectSecurityDecisionKind::Execute,
+            InspectSecurityDecisionOutcome::Allowed,
+            vec![principal(0x04)],
+            Some(function(0x10)),
+            None,
+            vec![orna_core::SecurityAuditEventId::from_bytes([0x06; 16])],
+        )
+        .expect("fixture decision must validate");
+        let decision_record = security_decision_record(&decision, false);
+        assert_eq!(decision_record["kind"], "execute");
+        assert_eq!(decision_record["target"], function(0x10).canonical());
+        assert!(decision_record["principals"].is_null());
+        assert!(decision_record["denial_reason"].is_null());
+        assert!(decision_record["audit_refs"].is_null());
+        assert_eq!(decision_record["redacted"], true);
+
+        let event = InspectTraceEvent::new(
+            invocation(0x21),
+            1,
+            InspectTracePayload::ValueBatch {
+                schema: None,
+                values: vec![InvokeValue::new(RuntimeValue::Integer(7))
+                    .expect("fixture value")],
+            },
+            SystemTime::UNIX_EPOCH,
+            None,
+            None,
+        )
+        .expect("fixture event must validate");
+        let trace = trace_record(&event, &stub_hex(), false).expect("trace record");
+        assert_eq!(trace["payload"]["value_count"], 1);
+        assert_eq!(trace["payload"]["redacted"], true);
+        assert!(trace["payload"].get("values_hex").is_none());
     }
 
     /// Every trace payload renders its closed record with the derived kind
@@ -1420,7 +1538,7 @@ mod tests {
         )
         .expect("fixture event must validate");
         assert_eq!(
-            trace_record(&started, &stub_hex()).expect("record must render"),
+            trace_record(&started, &stub_hex(), false).expect("record must render"),
             serde_json::json!({
                 "trace": true,
                 "invocation": invocation(0x21).canonical(),
@@ -1449,7 +1567,7 @@ mod tests {
         )
         .expect("fixture event must validate");
         assert_eq!(
-            trace_record(&batch, &stub_hex()).expect("record must render"),
+            trace_record(&batch, &stub_hex(), true).expect("record must render"),
             serde_json::json!({
                 "trace": true,
                 "invocation": invocation(0x21).canonical(),
@@ -1476,7 +1594,7 @@ mod tests {
         )
         .expect("redacted fixture event must validate");
         assert_eq!(
-            trace_record(&redacted, &stub_hex()).expect("record must render"),
+            trace_record(&redacted, &stub_hex(), false).expect("record must render"),
             serde_json::json!({
                 "trace": true,
                 "invocation": invocation(0x21).canonical(),
@@ -1503,7 +1621,7 @@ mod tests {
             None,
         )
         .expect("fixture event must validate");
-        let record = trace_record(&completed, &stub_hex()).expect("record must render");
+        let record = trace_record(&completed, &stub_hex(), false).expect("record must render");
         assert_eq!(record["kind"], "completed");
         assert_eq!(record["payload"]["duration_nanoseconds"], 12);
 
@@ -1518,7 +1636,7 @@ mod tests {
             None,
         )
         .expect("fixture event must validate");
-        let record = trace_record(&failed, &stub_hex()).expect("record must render");
+        let record = trace_record(&failed, &stub_hex(), false).expect("record must render");
         assert_eq!(record["kind"], "failed");
         assert_eq!(record["payload"]["code"], "internal");
 
@@ -1531,7 +1649,7 @@ mod tests {
             None,
         )
         .expect("fixture event must validate");
-        let record = trace_record(&cancelled, &stub_hex()).expect("record must render");
+        let record = trace_record(&cancelled, &stub_hex(), false).expect("record must render");
         assert_eq!(record["kind"], "cancelled");
         assert_eq!(record["payload"]["reason"], serde_json::Value::Null);
     }

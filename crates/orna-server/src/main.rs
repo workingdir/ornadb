@@ -617,7 +617,6 @@ where
         include_source,
         include_security,
         include_runtime,
-        None,
     )))
 }
 
@@ -2089,7 +2088,7 @@ mod tests {
         assert_eq!(
             parse_command(arguments(&["orna", "inspect", &invocation.canonical()])),
             Some(Command::Inspect(orna_server::InstalledInspectRequest::new(
-                invocation, None, None, false, 0, false, false, false, false, None,
+                invocation, None, None, false, 0, false, false, false, false,
             )))
         );
     }
@@ -2125,7 +2124,6 @@ mod tests {
                 true,
                 true,
                 true,
-                None,
             )))
         );
     }
@@ -2180,7 +2178,6 @@ mod tests {
                     false,
                     false,
                     false,
-                    None,
                 ))),
                 "{name}"
             );
