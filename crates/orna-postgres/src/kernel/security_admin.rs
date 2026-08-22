@@ -148,6 +148,72 @@ impl PostgresKernel {
         finish_security_session(operation, database_session.shutdown().await)
     }
 
+    /// Lists one principal's direct `EXECUTE` and privilege-class grants.
+    ///
+    /// The active security snapshot is recovered in a read-only transaction,
+    /// and the authenticated session must hold the class-wide
+    /// `SecurityAdmin` privilege before any grant data is returned. The two
+    /// returned vectors retain the snapshot's canonical grant ordering.
+    pub async fn list_grants(
+        &self,
+        session: &AuthenticatedSession,
+        grantee: PrincipalId,
+    ) -> Result<(Vec<orna_core::security::ExecuteGrant>, Vec<PrivilegeGrant>), PostgresKernelError>
+    {
+        let mut database_session = self.open().await?;
+        let operation = async {
+            let transaction = database_session
+                .client
+                .build_transaction()
+                .isolation_level(IsolationLevel::RepeatableRead)
+                .read_only(true)
+                .start()
+                .await
+                .map_err(PostgresKernelError::Database)?;
+            require_current_migrations(&transaction).await?;
+            let active = configure_and_recover(&transaction).await?;
+            let security = recover_security_snapshot_for_active(&transaction, &active).await?;
+            let bound_session = match security.bind_authenticated_session(
+                session.principal(),
+                session.active_roles().to_vec(),
+            ) {
+                Ok(bound_session) => bound_session,
+                Err(_) => {
+                    return Err(PostgresKernelError::SecurityAdminDenied {
+                        reason: PrivilegeDenial::MissingPrivilege {
+                            requested: PrivilegeClass::SecurityAdmin,
+                        },
+                    });
+                }
+            };
+            let gate = authorise_privilege(
+                bound_session.principal(),
+                PrivilegeClass::SecurityAdmin,
+                None,
+                &privilege_classes_for_session(&security, &bound_session, None),
+            );
+            if let PrivilegeDecision::Denied(reason) = gate {
+                return Err(PostgresKernelError::SecurityAdminDenied { reason });
+            }
+
+            let execute_grants = security
+                .execute_grants()
+                .filter(|grant| grant.grantee() == grantee)
+                .collect();
+            let privilege_grants = security
+                .privilege_grants()
+                .filter(|grant| grant.grantee() == grantee)
+                .collect();
+            transaction
+                .commit()
+                .await
+                .map_err(PostgresKernelError::Database)?;
+            Ok((execute_grants, privilege_grants))
+        }
+        .await;
+        finish_security_session(operation, database_session.shutdown().await)
+    }
+
     /// Creates one user or service principal (ADR 0065 `create_principal`).
     pub async fn create_principal(
         &self,
