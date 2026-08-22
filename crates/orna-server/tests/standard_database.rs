@@ -586,9 +586,29 @@ async fn opens_reopens_and_rejects_tampered_standard_database() -> TestResult<()
     .await
 }
 
-#[tokio::test]
+#[test]
 #[ignore = "requires the Compose PostgreSQL development service"]
-async fn dispatches_raw_client_calls_through_security_audit_and_evaluation() -> TestResult<()> {
+fn dispatches_raw_client_calls_through_security_audit_and_evaluation() -> TestResult<()> {
+    let handle = std::thread::Builder::new()
+        .name("raw-client-live".to_owned())
+        .stack_size(4 * 1024 * 1024)
+        .spawn(|| {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|error| failure(format!("raw CLIENT live runtime could not start: {error}")))?;
+            runtime.block_on(
+                dispatches_raw_client_calls_through_security_audit_and_evaluation_inner(),
+            )
+        })
+        .map_err(|error| failure(format!("raw CLIENT live thread could not start: {error}")))?;
+    match handle.join() {
+        Ok(result) => result,
+        Err(_) => Err(failure("raw CLIENT live thread panicked")),
+    }
+}
+
+async fn dispatches_raw_client_calls_through_security_audit_and_evaluation_inner() -> TestResult<()> {
     with_test_database(|database| async move {
         let kernel = kernel(&database)?;
         let (active, standard_upgrade, client_function, server_function) =
