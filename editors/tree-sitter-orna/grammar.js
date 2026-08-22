@@ -31,7 +31,8 @@ const KEYWORDS = [
     'state', 'scope', 'local', 'session', 'default', 'not', 'null', 'unique',
     'check', 'call', 'await', 'return', 'and', 'or', 'like', 'ilike', 'true',
     'false', 'case', 'when', 'ref', 'list', 'set', 'map', 'stream', 'option',
-    'bool', 'int', 'bigint', 'float', 'decimal', 'text', 'bytes', 'uuid',
+    'boolean', 'bool', 'integer', 'int', 'bigint', 'float', 'decimal',
+    'character', 'large', 'text', 'binary', 'bytes', 'uuid',
     'date', 'time', 'timestamp', 'duration', 'void', 'distinct', 'order',
     'by', 'values', 'returning', 'into', 'where',
 ];
@@ -757,12 +758,16 @@ module.exports = grammar({
 
             scalar_type: ($) =>
                 choice(
+                    $.kw_boolean,
                     $.kw_bool,
+                    $.kw_integer,
                     $.kw_int,
                     $.kw_bigint,
                     $.kw_float,
                     $.kw_decimal,
+                    seq($.kw_character, $.kw_large, $.kw_object),
                     $.kw_text,
+                    seq($.kw_binary, $.kw_large, $.kw_object),
                     $.kw_bytes,
                     $.kw_uuid,
                     $.kw_date,
@@ -803,12 +808,16 @@ module.exports = grammar({
             _prelude_name: ($) =>
                 choice(
                     $.identifier,
+                    $.kw_boolean,
                     $.kw_bool,
+                    $.kw_integer,
                     $.kw_int,
                     $.kw_bigint,
                     $.kw_float,
                     $.kw_decimal,
+                    seq($.kw_character, $.kw_large, $.kw_object),
                     $.kw_text,
+                    seq($.kw_binary, $.kw_large, $.kw_object),
                     $.kw_bytes,
                     $.kw_uuid,
                     $.kw_date,

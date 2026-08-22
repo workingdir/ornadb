@@ -1,0 +1,83 @@
+====================
+canonical scalar type spellings and alias boundaries
+====================
+
+CREATE TYPE canonical.scalar_types AS OBJECT (
+    boolean_value BOOLEAN,
+    integer_count INTEGER,
+    character_large_object_name CHARACTER LARGE OBJECT,
+    binary_large_object_name BINARY LARGE OBJECT,
+    bool_alias BOOL,
+    int_alias INT,
+    text_alias TEXT,
+    bytes_alias BYTES
+);
+
+---
+
+(source_file
+  (create_type_statement
+    (create_object_type_statement
+      (kw_create)
+      (kw_type)
+      (qualified_name
+        (qualified_name
+          (identifier))
+        (dot)
+        (identifier))
+      (kw_as)
+      (kw_object)
+      (lparen)
+      (field_definition
+        (identifier)
+        (type_spec
+          (scalar_type
+            (kw_boolean))))
+      (comma)
+      (field_definition
+        (identifier)
+        (type_spec
+          (scalar_type
+            (kw_integer))))
+      (comma)
+      (field_definition
+        (identifier)
+        (type_spec
+          (scalar_type
+            (kw_character)
+            (kw_large)
+            (kw_object))))
+      (comma)
+      (field_definition
+        (identifier)
+        (type_spec
+          (scalar_type
+            (kw_binary)
+            (kw_large)
+            (kw_object))))
+      (comma)
+      (field_definition
+        (identifier)
+        (type_spec
+          (scalar_type
+            (kw_bool))))
+      (comma)
+      (field_definition
+        (identifier)
+        (type_spec
+          (scalar_type
+            (kw_int))))
+      (comma)
+      (field_definition
+        (identifier)
+        (type_spec
+          (scalar_type
+            (kw_text))))
+      (comma)
+      (field_definition
+        (identifier)
+        (type_spec
+          (scalar_type
+            (kw_bytes))))
+      (rparen)
+      (semicolon))))
