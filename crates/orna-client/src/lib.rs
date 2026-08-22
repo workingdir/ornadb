@@ -3636,7 +3636,6 @@ fn evaluate_function(
         parent_invocation_id: lineage.parent,
         observer_lineage: Some(lineage),
     };
-    validate_artifact_identity(revision.artifact(), context)?;
     // A version-5 capability envelope is decoded before function-shape
     // validation (work ADR 0060). Its inner plan version classifies the
     // function, and its stored requirements gate evaluation; the caller's
@@ -3698,6 +3697,7 @@ fn evaluate_function(
         }
     }
     let return_shape = validate_function_shape(active, definition, context, artifact_version)?;
+    validate_artifact_identity(revision.artifact(), context)?;
     if arguments.len() != definition.parameters().len()
         || definition.parameters().iter().any(|parameter| {
             arguments
