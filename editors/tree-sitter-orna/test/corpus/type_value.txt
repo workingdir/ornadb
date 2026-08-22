@@ -137,7 +137,7 @@ CREATE TYPE std.types.BOOLEAN AS VALUE PRIMITIVE
           (dot)
           (identifier))
         (dot)
-        (identifier))
+        (kw_boolean))
       (kw_as)
       (kw_value)
       (kw_primitive)
@@ -169,13 +169,26 @@ EXPORT TYPE std.CHARACTER_LARGE_OBJECT TO PRELUDE AS CHARACTER LARGE OBJECT;
         (dot)
         (identifier))
       (dot)
-      (identifier))
+      (kw_boolean))
     (kw_as)
     alias: (qualified_name
       (qualified_name
         (identifier))
       (dot)
-      (identifier))
+      (kw_boolean))
+    (semicolon))
+  (export_type_statement
+    (kw_export)
+    (kw_type)
+    name: (qualified_name
+      (qualified_name
+        (identifier))
+      (dot)
+      (kw_boolean))
+    (kw_to)
+    (kw_prelude)
+    (kw_as)
+    prelude_name: (kw_boolean)
     (semicolon))
   (export_type_statement
     (kw_export)
@@ -188,21 +201,8 @@ EXPORT TYPE std.CHARACTER_LARGE_OBJECT TO PRELUDE AS CHARACTER LARGE OBJECT;
     (kw_to)
     (kw_prelude)
     (kw_as)
-    prelude_name: (identifier)
-    (semicolon))
-  (export_type_statement
-    (kw_export)
-    (kw_type)
-    name: (qualified_name
-      (qualified_name
-        (identifier))
-      (dot)
-      (identifier))
-    (kw_to)
-    (kw_prelude)
-    (kw_as)
-    prelude_name: (identifier)
-    prelude_name: (identifier)
+    prelude_name: (kw_character)
+    prelude_name: (kw_large)
     prelude_name: (kw_object)
     (semicolon)))
 
