@@ -915,53 +915,138 @@ mod tests {
             .iter()
             .map(|change| render_change(change, &candidate))
             .collect();
-        let ids = [
-            schema_id.canonical(),
-            schema_id.canonical(),
-            schema_id.canonical(),
-            object_id.canonical(),
-            object_id.canonical(),
-            object_id.canonical(),
-            value_id.canonical(),
-            value_id.canonical(),
-            value_id.canonical(),
-            value_id.canonical(),
-            value_id.canonical(),
-            value_id.canonical(),
-            value_id.canonical(),
-            record_id.canonical(),
-            record_id.canonical(),
-            record_id.canonical(),
-            field_id.canonical(),
-            field_id.canonical(),
-            field_id.canonical(),
-            field_id.canonical(),
-            field_id.canonical(),
-            field_id.canonical(),
-            field_id.canonical(),
-            field_id.canonical(),
-            enum_id.canonical(),
-            enum_id.canonical(),
-            enum_id.canonical(),
-            enum_id.canonical(),
-            function_id.canonical(),
-            function_id.canonical(),
-            function_id.canonical(),
-            function_id.canonical(),
-            function_id.canonical(),
-            function_id.canonical(),
-            function_id.canonical(),
-            function_id.canonical(),
-            parameter_id.canonical(),
-            parameter_id.canonical(),
-            parameter_id.canonical(),
-            parameter_id.canonical(),
+        let expected = vec![
+            format!("+ schema app [{}]", schema_id.canonical()),
+            format!("- schema app [{}]", schema_id.canonical()),
+            format!("~ schema app -> core [{}]", schema_id.canonical()),
+            format!("+ object type app.widget [{}]", object_id.canonical()),
+            format!("- object type app.widget [{}]", object_id.canonical()),
+            format!(
+                "~ object type app.widget -> app.gadget [{}]",
+                object_id.canonical()
+            ),
+            format!("+ value type app.money [{}]", value_id.canonical()),
+            format!("- value type app.money [{}]", value_id.canonical()),
+            format!(
+                "~ value type app.money -> app.currency [{}]",
+                value_id.canonical()
+            ),
+            format!("! value type app.currency kind [{}]", value_id.canonical()),
+            format!(
+                "! value type app.currency mutability [{}]",
+                value_id.canonical()
+            ),
+            format!(
+                "! value type app.currency persistence [{}]",
+                value_id.canonical()
+            ),
+            format!(
+                "! value type app.currency representation [{}]",
+                value_id.canonical()
+            ),
+            format!(
+                "+ record value type app.point [{}]",
+                record_id.canonical()
+            ),
+            format!(
+                "- record value type app.point [{}]",
+                record_id.canonical()
+            ),
+            format!(
+                "~ record value type app.point -> app.coordinate [{}]",
+                record_id.canonical()
+            ),
+            format!(
+                "+ field app.point.longitude [{}]",
+                field_id.canonical()
+            ),
+            format!(
+                "- field app.point.longitude [{}]",
+                field_id.canonical()
+            ),
+            format!(
+                "~ field app.point.longitude -> app.point.east [{}]",
+                field_id.canonical()
+            ),
+            format!(
+                "! field app.point.longitude type [{}]",
+                field_id.canonical()
+            ),
+            format!(
+                "! field app.point.longitude ordinal [{}]",
+                field_id.canonical()
+            ),
+            format!(
+                "! field app.point.longitude nullability [{}]",
+                field_id.canonical()
+            ),
+            format!(
+                "! field app.point.longitude uniqueness [{}]",
+                field_id.canonical()
+            ),
+            format!(
+                "! field app.point.longitude default/on-delete [{}]",
+                field_id.canonical()
+            ),
+            format!("+ enum type app.stage [{}]", enum_id.canonical()),
+            format!("- enum type app.stage [{}]", enum_id.canonical()),
+            format!(
+                "~ enum type app.stage -> app.phase [{}]",
+                enum_id.canonical()
+            ),
+            format!(
+                "! enum type app.phase labels [{}]",
+                enum_id.canonical()
+            ),
+            format!("+ function app.read [{}]", function_id.canonical()),
+            format!("- function app.read [{}]", function_id.canonical()),
+            format!(
+                "~ function app.read -> app.load [{}]",
+                function_id.canonical()
+            ),
+            format!(
+                "! function app.load return type [{}]",
+                function_id.canonical()
+            ),
+            format!(
+                "! function app.load domain [{}]",
+                function_id.canonical()
+            ),
+            format!(
+                "! function app.load security [{}]",
+                function_id.canonical()
+            ),
+            format!(
+                "! function app.load transaction [{}]",
+                function_id.canonical()
+            ),
+            format!(
+                "! function app.load volatility [{}]",
+                function_id.canonical()
+            ),
+            format!(
+                "+ parameter {}.query [{}]",
+                function_id.canonical(),
+                parameter_id.canonical()
+            ),
+            format!(
+                "- parameter {}.query [{}]",
+                function_id.canonical(),
+                parameter_id.canonical()
+            ),
+            format!(
+                "~ parameter {}.query -> {}.search [{}]",
+                function_id.canonical(),
+                function_id.canonical(),
+                parameter_id.canonical()
+            ),
+            format!(
+                "! parameter {}.search type [{}]",
+                function_id.canonical(),
+                parameter_id.canonical()
+            ),
         ];
-        assert_eq!(rendered.len(), 40);
-        for (line, id) in rendered.iter().zip(ids) {
-            assert!(!line.contains("unsupported change"), "{line}");
-            assert!(line.contains(&id), "{line} does not contain {id}");
-        }
+        assert_eq!(rendered, expected);
     }
     #[test]
     fn escapes_diagnostic_scalars_like_source_check() {
