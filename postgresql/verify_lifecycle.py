@@ -66,10 +66,11 @@ def trace_pid(path: Path, trace_prefix: Path) -> int:
 
 def marker_indexes(lines: list[str], marker: str) -> list[int]:
     needle = f'write(2, "{marker}", '
+    result = re.compile(rf"\)\s+=\s+{len(marker)}$")
     return [
         index
         for index, line in enumerate(lines)
-        if needle in line and line.rstrip().endswith(f") = {len(marker)}")
+        if needle in line and result.search(line.rstrip()) is not None
     ]
 
 
@@ -155,10 +156,11 @@ def verify_stop_evidence(
     terminal_waits = terminal_wait_indexes(parent_lines, postmaster_pid)
     if not any(index > stop_index for index in terminal_waits):
         raise SystemExit("lifecycle trace does not observe the terminal postmaster wait")
+    clean_exit = re.compile(r"^exit_group\(0\)\s+=\s+\?$")
     exit_indexes = [
         index
         for index, line in enumerate(postmaster_lines)
-        if line.strip() == "+++ exited with 0 +++"
+        if line.strip() == "+++ exited with 0 +++" or clean_exit.match(line.strip())
     ]
     if not exit_indexes or exit_indexes[-1] <= sigint_delivery[0]:
         raise SystemExit("lifecycle trace does not observe a clean postmaster exit")
