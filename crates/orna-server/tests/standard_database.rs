@@ -98,7 +98,8 @@ use orna_postgres::{
 use orna_protocol::{
     CallFailure, Channel, ClientFrame, ConnectionError, Event, MAX_RESOURCE_WINDOW, ProtocolConnection,
     RawCall, ResourceArgument, ResourceKind, ResourceRequest, ServerAction, ServerFrame,
-    decode_active_server_frame, decode_constructed_server_frame, decode_invocation_event_batch,
+    decode_active_server_frame, decode_constructed_invocation_event_frame,
+    decode_constructed_server_frame, decode_invocation_event_batch,
     decode_registered_server_frame, decode_server_frame, encode_active_client_frame,
     encode_active_server_frame, encode_client_frame, encode_constructed_client_frame,
     encode_constructed_value, encode_invocation_event_batch, encode_invoke_request,
@@ -2415,12 +2416,13 @@ async fn proves_installed_no_broker_resource_returns_typed_result_and_terminal()
             }
             require(
                 matches!(
-                    read_constructed_protocol_frame(&mut client, &active, &registry).await?,
+                    read_constructed_invocation_protocol_frame(&mut client, &active, &registry).await?,
                     ServerFrame::CallAccepted { stream: 1, .. }
                 ),
                 "no-broker resource socket did not accept the sealed invocation",
             )?;
-            let started = read_constructed_protocol_frame(&mut client, &active, &registry).await?;
+            let started =
+                read_constructed_invocation_protocol_frame(&mut client, &active, &registry).await?;
             require(
                 matches!(
                     &started,
@@ -2435,7 +2437,7 @@ async fn proves_installed_no_broker_resource_returns_typed_result_and_terminal()
                 "no-broker resource socket did not publish invocation start",
             )?;
             let terminal_events =
-                read_constructed_protocol_frame(&mut client, &active, &registry).await?;
+                read_constructed_invocation_protocol_frame(&mut client, &active, &registry).await?;
             require(
                 matches!(
                     &terminal_events,
@@ -2461,7 +2463,7 @@ async fn proves_installed_no_broker_resource_returns_typed_result_and_terminal()
                 "no-broker resource socket did not return its typed scalar and terminal event",
             )?;
             require(
-                read_constructed_protocol_frame(&mut client, &active, &registry).await?
+                read_constructed_invocation_protocol_frame(&mut client, &active, &registry).await?
                     == ServerFrame::CallCompleted { stream: 1 },
                 "no-broker resource socket did not close the sealed invocation terminally",
             )
@@ -11459,6 +11461,17 @@ async fn read_constructed_protocol_frame(
 ) -> TestResult<ServerFrame> {
     let encoded = read_encoded_protocol_frame(stream).await?;
     Ok(decode_constructed_server_frame(active, registry, &encoded)?)
+}
+async fn read_constructed_invocation_protocol_frame(
+    stream: &mut UnixStream,
+    active: &orna_core::revision::ActiveDatabaseRevision,
+    registry: &orna_core::value::OpaqueCodecRegistry,
+) -> TestResult<ServerFrame> {
+    let encoded = read_encoded_protocol_frame(stream).await?;
+    Ok(
+        decode_constructed_invocation_event_frame(active, registry, &encoded)
+            .or_else(|_| decode_constructed_server_frame(active, registry, &encoded))?,
+    )
 }
 
 async fn send_legacy_protocol_frame(
