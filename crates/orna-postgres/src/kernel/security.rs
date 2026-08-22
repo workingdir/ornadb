@@ -4519,31 +4519,66 @@ async fn execute_sealed_server_target(
         .savepoint("sealed_server_execution")
         .await
         .map_err(|_| SealedInvocationFailureClass::Internal)?;
-    let execution = execute_authorised_server_select(
-        &savepoint,
-        active,
-        authorisation,
-        arguments,
-    )
-    .await;
-    let server = match execution {
-        Ok(server) => server,
-        Err(_) => {
-            if savepoint.rollback().await.is_err() {
-                return Err(SealedInvocationFailureClass::Internal);
-            }
-            return Err(SealedInvocationFailureClass::Target);
-        }
+    let function = authorisation.target().function();
+    let mutation = if raw_server_insert_target_is_selected(active, function) {
+        Some(None)
+    } else if arguments.len() == 2
+        && raw_server_reference_value_update_target_is_selected(active, function)
+    {
+        Some(Some(RawServerReferenceMutation::Update))
+    } else {
+        raw_server_reference_mutation_target(active, function).map(Some)
     };
-    let values = match resource_values_from_server_result(kind, server) {
-        Some(values) => values,
-        None => {
-            if savepoint.rollback().await.is_err() {
-                return Err(SealedInvocationFailureClass::Internal);
-            }
-            return Err(SealedInvocationFailureClass::Target);
+    let values = match mutation {
+        Some(None) => {
+            let result = if arguments.is_empty() {
+                execute_authorised_raw_server_insert(&savepoint, active, authorisation).await
+            } else {
+                execute_authorised_raw_server_insert_with_arguments(
+                    &savepoint,
+                    active,
+                    authorisation,
+                    arguments,
+                )
+                .await
+            };
+            result.ok().map(|value| vec![value])
         }
+        Some(Some(operation)) => execute_authorised_raw_server_reference_mutation(
+            &savepoint,
+            active,
+            authorisation,
+            operation,
+            arguments,
+        )
+        .await
+        .ok(),
+        None => match execute_authorised_server_select(
+            &savepoint,
+            active,
+            authorisation,
+            arguments,
+        )
+        .await
+        {
+            Ok(server) => resource_values_from_server_result(kind, server),
+            Err(_) => None,
+        },
     };
+    let Some(values) = values.filter(|values| {
+        values.len() == 1 || kind == ProtocolResourceKind::Stream
+    }) else {
+        if savepoint.rollback().await.is_err() {
+            return Err(SealedInvocationFailureClass::Internal);
+        }
+        return Err(SealedInvocationFailureClass::Target);
+    };
+    if values.iter().any(|value| !resource_result_value_is_supported(value)) {
+        if savepoint.rollback().await.is_err() {
+            return Err(SealedInvocationFailureClass::Internal);
+        }
+        return Err(SealedInvocationFailureClass::Target);
+    }
     savepoint
         .commit()
         .await

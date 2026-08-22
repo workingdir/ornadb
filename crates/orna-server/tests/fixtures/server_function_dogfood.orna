@@ -11,3 +11,23 @@ TRANSACTION READ ONLY
 VOLATILITY STABLE
 AS
     SELECT item.value FROM dogfood.item item;
+
+CREATE SERVER FUNCTION dogfood.read_item(p_item REF dogfood.item)
+RETURNS ROWS (value INTEGER)
+SECURITY INVOKER
+TRANSACTION READ ONLY
+VOLATILITY STABLE
+AS
+    SELECT item.value FROM dogfood.item item
+    WHERE REF(item) = p_item;
+
+CREATE SERVER FUNCTION dogfood.update(p_item REF dogfood.item, p_value INT)
+RETURNS ROWS (updated REF dogfood.item)
+SECURITY INVOKER
+TRANSACTION ATOMIC
+VOLATILITY VOLATILE
+AS
+    UPDATE dogfood.item AS updated
+    SET value = p_value
+    WHERE REF(updated) = p_item
+    RETURNING REF(updated);
