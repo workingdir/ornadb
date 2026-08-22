@@ -352,16 +352,12 @@ fn render_diff_document(
     );
     if diff.is_empty() {
         let _ = writeln!(document, "no semantic changes");
-        let mut bytes = document.into_bytes();
-        bytes.push(b'\n');
-        return Ok(bytes);
+        return Ok(document.into_bytes());
     }
     for change in diff.changes() {
         let _ = writeln!(document, "{}", render_change(change, candidate.candidate()));
     }
-    let mut bytes = document.into_bytes();
-    bytes.push(b'\n');
-    Ok(bytes)
+    Ok(document.into_bytes())
 }
 
 fn render_change(
@@ -372,65 +368,61 @@ fn render_change(
 
     let mut line = String::new();
     match change {
-        SemanticChange::SchemaAdded { name, .. } => {
-            let _ = write!(line, "+ schema {name}");
+        SemanticChange::SchemaAdded { id, name } => {
+            let _ = write!(line, "+ schema {name} [{}]", id.canonical());
         }
-        SemanticChange::SchemaDropped { name, .. } => {
-            let _ = write!(line, "- schema {name}");
+        SemanticChange::SchemaDropped { id, name } => {
+            let _ = write!(line, "- schema {name} [{}]", id.canonical());
         }
-        SemanticChange::SchemaRenamed { from, to, .. } => {
-            let _ = write!(line, "~ schema {from} -> {to}");
+        SemanticChange::SchemaRenamed { id, from, to } => {
+            let _ = write!(line, "~ schema {from} -> {to} [{}]", id.canonical());
         }
-        SemanticChange::ObjectTypeAdded { name, .. } => {
-            let _ = write!(line, "+ object type {name}");
+        SemanticChange::ObjectTypeAdded { id, name } => {
+            let _ = write!(line, "+ object type {name} [{}]", id.canonical());
         }
-        SemanticChange::ObjectTypeDropped { name, .. } => {
-            let _ = write!(line, "- object type {name}");
+        SemanticChange::ObjectTypeDropped { id, name } => {
+            let _ = write!(line, "- object type {name} [{}]", id.canonical());
         }
         SemanticChange::ObjectTypeRenamed { id, from, to } => {
             let _ = write!(line, "~ object type {from} -> {to} [{}]", id.canonical());
         }
-        SemanticChange::ValueTypeAdded { name, .. } => {
-            let _ = write!(line, "+ value type {name}");
+        SemanticChange::ValueTypeAdded { id, name } => {
+            let _ = write!(line, "+ value type {name} [{}]", id.canonical());
         }
-        SemanticChange::ValueTypeDropped { name, .. } => {
-            let _ = write!(line, "- value type {name}");
+        SemanticChange::ValueTypeDropped { id, name } => {
+            let _ = write!(line, "- value type {name} [{}]", id.canonical());
         }
         SemanticChange::ValueTypeRenamed { id, from, to } => {
             let _ = write!(line, "~ value type {from} -> {to} [{}]", id.canonical());
         }
-        SemanticChange::ValueTypeKindChanged { name, .. } => {
-            let _ = write!(line, "! value type {name} kind");
+        SemanticChange::ValueTypeKindChanged { id, name } => {
+            let _ = write!(line, "! value type {name} kind [{}]", id.canonical());
         }
-        SemanticChange::ValueTypeMutabilityChanged { name, .. } => {
-            let _ = write!(line, "! value type {name} mutability");
+        SemanticChange::ValueTypeMutabilityChanged { id, name } => {
+            let _ = write!(line, "! value type {name} mutability [{}]", id.canonical());
         }
-        SemanticChange::ValueTypePersistenceChanged { name, .. } => {
-            let _ = write!(line, "! value type {name} persistence");
+        SemanticChange::ValueTypePersistenceChanged { id, name } => {
+            let _ = write!(line, "! value type {name} persistence [{}]", id.canonical());
         }
-        SemanticChange::ValueTypeRepresentationChanged { name, .. } => {
-            let _ = write!(line, "! value type {name} representation");
+        SemanticChange::ValueTypeRepresentationChanged { id, name } => {
+            let _ = write!(line, "! value type {name} representation [{}]", id.canonical());
         }
-        SemanticChange::RecordValueTypeAdded { name, .. } => {
-            let _ = write!(line, "+ record value type {name}");
+        SemanticChange::RecordValueTypeAdded { id, name } => {
+            let _ = write!(line, "+ record value type {name} [{}]", id.canonical());
         }
-        SemanticChange::RecordValueTypeDropped { name, .. } => {
-            let _ = write!(line, "- record value type {name}");
+        SemanticChange::RecordValueTypeDropped { id, name } => {
+            let _ = write!(line, "- record value type {name} [{}]", id.canonical());
         }
         SemanticChange::RecordValueTypeRenamed { id, from, to } => {
             let _ = write!(line, "~ record value type {from} -> {to} [{}]", id.canonical());
         }
-        SemanticChange::FieldAdded {
-            owner, name, id, ..
-        } => {
+        SemanticChange::FieldAdded { owner, name, id } => {
             let owner = field_owner_name(candidate, *owner);
-            let _ = write!(line, "+ field {owner}.{name} [{id:?}]");
+            let _ = write!(line, "+ field {owner}.{name} [{}]", id.canonical());
         }
-        SemanticChange::FieldDropped {
-            owner, name, id, ..
-        } => {
+        SemanticChange::FieldDropped { owner, name, id } => {
             let owner = field_owner_name(candidate, *owner);
-            let _ = write!(line, "- field {owner}.{name} [{id:?}]");
+            let _ = write!(line, "- field {owner}.{name} [{}]", id.canonical());
         }
         SemanticChange::FieldRenamed {
             owner, id, from, to,
@@ -438,41 +430,37 @@ fn render_change(
             let owner = field_owner_name(candidate, *owner);
             let _ = write!(line, "~ field {owner}.{from} -> {owner}.{to} [{}]", id.canonical());
         }
-        SemanticChange::EnumTypeAdded { name, .. } => {
-            let _ = write!(line, "+ enum type {name}");
+        SemanticChange::EnumTypeAdded { id, name } => {
+            let _ = write!(line, "+ enum type {name} [{}]", id.canonical());
         }
-        SemanticChange::EnumTypeDropped { name, .. } => {
-            let _ = write!(line, "- enum type {name}");
+        SemanticChange::EnumTypeDropped { id, name } => {
+            let _ = write!(line, "- enum type {name} [{}]", id.canonical());
         }
-        SemanticChange::EnumTypeRenamed { from, to, .. } => {
-            let _ = write!(line, "~ enum type {from} -> {to}");
+        SemanticChange::EnumTypeRenamed { id, from, to } => {
+            let _ = write!(line, "~ enum type {from} -> {to} [{}]", id.canonical());
         }
-        SemanticChange::FunctionAdded { name, .. } => {
-            let _ = write!(line, "+ function {name}");
+        SemanticChange::FunctionAdded { id, name } => {
+            let _ = write!(line, "+ function {name} [{}]", id.canonical());
         }
-        SemanticChange::FunctionDropped { name, .. } => {
-            let _ = write!(line, "- function {name}");
+        SemanticChange::FunctionDropped { id, name } => {
+            let _ = write!(line, "- function {name} [{}]", id.canonical());
         }
         SemanticChange::FunctionRenamed { id, from, to } => {
             let _ = write!(line, "~ function {from} -> {to} [{}]", id.canonical());
         }
-        SemanticChange::ParameterAdded {
-            owner, name, id, ..
-        } => {
+        SemanticChange::ParameterAdded { owner, name, id } => {
             let owner = candidate
                 .function_by_id(*owner)
                 .map(|definition| qualified(definition.name()))
                 .unwrap_or_else(|| owner.canonical());
-            let _ = write!(line, "+ parameter {owner}.{name} [{id:?}]");
+            let _ = write!(line, "+ parameter {owner}.{name} [{}]", id.canonical());
         }
-        SemanticChange::ParameterDropped {
-            owner, name, id, ..
-        } => {
+        SemanticChange::ParameterDropped { owner, name, id } => {
             let owner = candidate
                 .function_by_id(*owner)
                 .map(|definition| qualified(definition.name()))
                 .unwrap_or_else(|| owner.canonical());
-            let _ = write!(line, "- parameter {owner}.{name} [{id:?}]");
+            let _ = write!(line, "- parameter {owner}.{name} [{}]", id.canonical());
         }
         SemanticChange::ParameterRenamed {
             owner, id, from, to,
@@ -483,62 +471,50 @@ fn render_change(
                 .unwrap_or_else(|| owner.canonical());
             let _ = write!(line, "~ parameter {owner}.{from} -> {owner}.{to} [{}]", id.canonical());
         }
-        SemanticChange::FieldTypeChanged {
-            owner, name, id, ..
-        } => {
+        SemanticChange::FieldTypeChanged { owner, name, id } => {
             let owner = field_owner_name(candidate, *owner);
-            let _ = write!(line, "! field {owner}.{name} type [{id:?}]");
+            let _ = write!(line, "! field {owner}.{name} type [{}]", id.canonical());
         }
-        SemanticChange::FieldOrdinalChanged {
-            owner, name, id, ..
-        } => {
+        SemanticChange::FieldOrdinalChanged { owner, name, id } => {
             let owner = field_owner_name(candidate, *owner);
-            let _ = write!(line, "! field {owner}.{name} ordinal [{id:?}]");
+            let _ = write!(line, "! field {owner}.{name} ordinal [{}]", id.canonical());
         }
-        SemanticChange::FieldNullabilityChanged {
-            owner, name, id, ..
-        } => {
+        SemanticChange::FieldNullabilityChanged { owner, name, id } => {
             let owner = field_owner_name(candidate, *owner);
-            let _ = write!(line, "! field {owner}.{name} nullability [{id:?}]");
+            let _ = write!(line, "! field {owner}.{name} nullability [{}]", id.canonical());
         }
-        SemanticChange::FieldUniquenessChanged {
-            owner, name, id, ..
-        } => {
+        SemanticChange::FieldUniquenessChanged { owner, name, id } => {
             let owner = field_owner_name(candidate, *owner);
-            let _ = write!(line, "! field {owner}.{name} uniqueness [{id:?}]");
+            let _ = write!(line, "! field {owner}.{name} uniqueness [{}]", id.canonical());
         }
-        SemanticChange::FieldConstraintChanged {
-            owner, name, id, ..
-        } => {
+        SemanticChange::FieldConstraintChanged { owner, name, id } => {
             let owner = field_owner_name(candidate, *owner);
-            let _ = write!(line, "! field {owner}.{name} default/on-delete [{id:?}]");
+            let _ = write!(line, "! field {owner}.{name} default/on-delete [{}]", id.canonical());
         }
-        SemanticChange::EnumLabelsChanged { name, .. } => {
-            let _ = write!(line, "! enum type {name} labels");
+        SemanticChange::EnumLabelsChanged { id, name } => {
+            let _ = write!(line, "! enum type {name} labels [{}]", id.canonical());
         }
-        SemanticChange::FunctionReturnChanged { name, .. } => {
-            let _ = write!(line, "! function {name} return type");
+        SemanticChange::FunctionReturnChanged { id, name } => {
+            let _ = write!(line, "! function {name} return type [{}]", id.canonical());
         }
-        SemanticChange::FunctionDomainChanged { name, .. } => {
-            let _ = write!(line, "! function {name} domain");
+        SemanticChange::FunctionDomainChanged { id, name } => {
+            let _ = write!(line, "! function {name} domain [{}]", id.canonical());
         }
-        SemanticChange::FunctionSecurityChanged { name, .. } => {
-            let _ = write!(line, "! function {name} security");
+        SemanticChange::FunctionSecurityChanged { id, name } => {
+            let _ = write!(line, "! function {name} security [{}]", id.canonical());
         }
-        SemanticChange::FunctionTransactionChanged { name, .. } => {
-            let _ = write!(line, "! function {name} transaction");
+        SemanticChange::FunctionTransactionChanged { id, name } => {
+            let _ = write!(line, "! function {name} transaction [{}]", id.canonical());
         }
-        SemanticChange::FunctionVolatilityChanged { name, .. } => {
-            let _ = write!(line, "! function {name} volatility");
+        SemanticChange::FunctionVolatilityChanged { id, name } => {
+            let _ = write!(line, "! function {name} volatility [{}]", id.canonical());
         }
-        SemanticChange::ParameterTypeChanged {
-            owner, name, id, ..
-        } => {
+        SemanticChange::ParameterTypeChanged { owner, name, id } => {
             let owner = candidate
                 .function_by_id(*owner)
                 .map(|definition| qualified(definition.name()))
                 .unwrap_or_else(|| owner.canonical());
-            let _ = write!(line, "! parameter {owner}.{name} type [{id:?}]");
+            let _ = write!(line, "! parameter {owner}.{name} type [{}]", id.canonical());
         }
         change @ _ => {
             let _ = write!(line, "! unsupported change ({})", change.category());
@@ -617,12 +593,19 @@ fn escape_message(message: &str) -> String {
             '\n' => escaped.push_str("\\n"),
             '\r' => escaped.push_str("\\r"),
             '\t' => escaped.push_str("\\t"),
+            '\u{2028}' | '\u{2029}' => {
+                use std::fmt::Write as _;
+                let _ = write!(escaped, "\\u{{{:04X}}}", character as u32);
+            }
+            character if character.is_control() => {
+                use std::fmt::Write as _;
+                let _ = write!(escaped, "\\u{{{:04X}}}", character as u32);
+            }
             character => escaped.push(character),
         }
     }
     escaped
 }
-
 fn read_source_bundle(path: &str) -> Result<SourceBundle, InstalledSourceDiffError> {
     let mut file = fs::OpenOptions::new()
         .read(true)
@@ -736,12 +719,43 @@ mod tests {
     }
 
     #[test]
-    fn renders_value_record_and_record_field_changes_explicitly() {
+    fn renders_all_known_changes_with_stable_ids() {
+        let schema_id = SchemaId::from_bytes([1; 16]);
+        let object_id = TypeId::from_bytes([2; 16]);
         let value_id = TypeId::from_bytes([3; 16]);
         let record_id = TypeId::from_bytes([4; 16]);
         let field_id = FieldId::from_bytes([5; 16]);
+        let enum_id = TypeId::from_bytes([6; 16]);
+        let function_id = orna_core::FunctionId::from_bytes([7; 16]);
+        let parameter_id = orna_core::ParameterId::from_bytes([8; 16]);
         let candidate = candidate_with_record(record_id);
         let changes = [
+            SemanticChange::SchemaAdded {
+                id: schema_id,
+                name: "app".to_owned(),
+            },
+            SemanticChange::SchemaDropped {
+                id: schema_id,
+                name: "app".to_owned(),
+            },
+            SemanticChange::SchemaRenamed {
+                id: schema_id,
+                from: "app".to_owned(),
+                to: "core".to_owned(),
+            },
+            SemanticChange::ObjectTypeAdded {
+                id: object_id,
+                name: "app.widget".to_owned(),
+            },
+            SemanticChange::ObjectTypeDropped {
+                id: object_id,
+                name: "app.widget".to_owned(),
+            },
+            SemanticChange::ObjectTypeRenamed {
+                id: object_id,
+                from: "app.widget".to_owned(),
+                to: "app.gadget".to_owned(),
+            },
             SemanticChange::ValueTypeAdded {
                 id: value_id,
                 name: "app.money".to_owned(),
@@ -757,19 +771,19 @@ mod tests {
             },
             SemanticChange::ValueTypeKindChanged {
                 id: value_id,
-                name: "app.money".to_owned(),
+                name: "app.currency".to_owned(),
             },
             SemanticChange::ValueTypeMutabilityChanged {
                 id: value_id,
-                name: "app.money".to_owned(),
+                name: "app.currency".to_owned(),
             },
             SemanticChange::ValueTypePersistenceChanged {
                 id: value_id,
-                name: "app.money".to_owned(),
+                name: "app.currency".to_owned(),
             },
             SemanticChange::ValueTypeRepresentationChanged {
                 id: value_id,
-                name: "app.money".to_owned(),
+                name: "app.currency".to_owned(),
             },
             SemanticChange::RecordValueTypeAdded {
                 id: record_id,
@@ -810,29 +824,150 @@ mod tests {
                 id: field_id,
                 name: "longitude".to_owned(),
             },
+            SemanticChange::FieldNullabilityChanged {
+                owner: record_id,
+                id: field_id,
+                name: "longitude".to_owned(),
+            },
+            SemanticChange::FieldUniquenessChanged {
+                owner: record_id,
+                id: field_id,
+                name: "longitude".to_owned(),
+            },
+            SemanticChange::FieldConstraintChanged {
+                owner: record_id,
+                id: field_id,
+                name: "longitude".to_owned(),
+            },
+            SemanticChange::EnumTypeAdded {
+                id: enum_id,
+                name: "app.stage".to_owned(),
+            },
+            SemanticChange::EnumTypeDropped {
+                id: enum_id,
+                name: "app.stage".to_owned(),
+            },
+            SemanticChange::EnumTypeRenamed {
+                id: enum_id,
+                from: "app.stage".to_owned(),
+                to: "app.phase".to_owned(),
+            },
+            SemanticChange::EnumLabelsChanged {
+                id: enum_id,
+                name: "app.phase".to_owned(),
+            },
+            SemanticChange::FunctionAdded {
+                id: function_id,
+                name: "app.read".to_owned(),
+            },
+            SemanticChange::FunctionDropped {
+                id: function_id,
+                name: "app.read".to_owned(),
+            },
+            SemanticChange::FunctionRenamed {
+                id: function_id,
+                from: "app.read".to_owned(),
+                to: "app.load".to_owned(),
+            },
+            SemanticChange::FunctionReturnChanged {
+                id: function_id,
+                name: "app.load".to_owned(),
+            },
+            SemanticChange::FunctionDomainChanged {
+                id: function_id,
+                name: "app.load".to_owned(),
+            },
+            SemanticChange::FunctionSecurityChanged {
+                id: function_id,
+                name: "app.load".to_owned(),
+            },
+            SemanticChange::FunctionTransactionChanged {
+                id: function_id,
+                name: "app.load".to_owned(),
+            },
+            SemanticChange::FunctionVolatilityChanged {
+                id: function_id,
+                name: "app.load".to_owned(),
+            },
+            SemanticChange::ParameterAdded {
+                owner: function_id,
+                id: parameter_id,
+                name: "query".to_owned(),
+            },
+            SemanticChange::ParameterDropped {
+                owner: function_id,
+                id: parameter_id,
+                name: "query".to_owned(),
+            },
+            SemanticChange::ParameterRenamed {
+                owner: function_id,
+                id: parameter_id,
+                from: "query".to_owned(),
+                to: "search".to_owned(),
+            },
+            SemanticChange::ParameterTypeChanged {
+                owner: function_id,
+                id: parameter_id,
+                name: "search".to_owned(),
+            },
         ];
-
         let rendered: Vec<_> = changes
             .iter()
             .map(|change| render_change(change, &candidate))
             .collect();
-        assert!(rendered
-            .iter()
-            .all(|line| !line.contains("unsupported change")), "{rendered:?}");
-        assert_eq!(rendered[0], "+ value type app.money");
-        assert_eq!(rendered[1], "- value type app.money");
-        assert!(rendered[2].starts_with("~ value type app.money -> app.currency ["));
-        assert_eq!(rendered[3], "! value type app.money kind");
-        assert_eq!(rendered[4], "! value type app.money mutability");
-        assert_eq!(rendered[5], "! value type app.money persistence");
-        assert_eq!(rendered[6], "! value type app.money representation");
-        assert_eq!(rendered[7], "+ record value type app.point");
-        assert_eq!(rendered[8], "- record value type app.point");
-        assert!(rendered[9].starts_with("~ record value type app.point -> app.coordinate ["));
-        assert!(rendered[10].starts_with("+ field app.point.longitude ["));
-        assert!(rendered[11].starts_with("- field app.point.longitude ["));
-        assert!(rendered[12].starts_with("~ field app.point.longitude -> app.point.east ["));
-        assert!(rendered[13].starts_with("! field app.point.longitude type ["));
-        assert!(rendered[14].starts_with("! field app.point.longitude ordinal ["));
+        let ids = [
+            schema_id.canonical(),
+            schema_id.canonical(),
+            schema_id.canonical(),
+            object_id.canonical(),
+            object_id.canonical(),
+            object_id.canonical(),
+            value_id.canonical(),
+            value_id.canonical(),
+            value_id.canonical(),
+            value_id.canonical(),
+            value_id.canonical(),
+            value_id.canonical(),
+            value_id.canonical(),
+            record_id.canonical(),
+            record_id.canonical(),
+            record_id.canonical(),
+            field_id.canonical(),
+            field_id.canonical(),
+            field_id.canonical(),
+            field_id.canonical(),
+            field_id.canonical(),
+            field_id.canonical(),
+            field_id.canonical(),
+            field_id.canonical(),
+            enum_id.canonical(),
+            enum_id.canonical(),
+            enum_id.canonical(),
+            enum_id.canonical(),
+            function_id.canonical(),
+            function_id.canonical(),
+            function_id.canonical(),
+            function_id.canonical(),
+            function_id.canonical(),
+            function_id.canonical(),
+            function_id.canonical(),
+            function_id.canonical(),
+            parameter_id.canonical(),
+            parameter_id.canonical(),
+            parameter_id.canonical(),
+            parameter_id.canonical(),
+        ];
+        assert_eq!(rendered.len(), 40);
+        for (line, id) in rendered.iter().zip(ids) {
+            assert!(!line.contains("unsupported change"), "{line}");
+            assert!(line.contains(&id), "{line} does not contain {id}");
+        }
+    }
+    #[test]
+    fn escapes_diagnostic_scalars_like_source_check() {
+        assert_eq!(
+            super::escape_message("\\\0\u{001B}\u{2028}\u{2029}\n\r\t"),
+            r"\\\u{0000}\u{001B}\u{2028}\u{2029}\n\r\t"
+        );
     }
 }
