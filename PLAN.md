@@ -2,43 +2,39 @@
 
 ## Status and scope
 
-This plan covers the remaining roadmap surfaces after the accepted `orna.std/5`
-JSON value slice and the CLIENT resource and USER state slices.
+This plan covers the remaining roadmap surfaces after the accepted `orna.std/6`
+action snapshot, headless runtime conformance boundary, CLIENT resource and
+transport slices, and the headless ordinary CLIENT Inspector v1 and render
+contracts.
 
-The plan tracks implementation hardening and integration after the accepted
-headless ordinary CLIENT Inspector v1 in work ADR 0080 and the generic standard
-render contract `std.inspect.render@1` accepted by work ADR 0081. The current
-specification still marks the graphical runtime ABI, UI event boundary,
-populated resource/UI projections beyond that accepted scope, and reflective
-gateway details as `CURRENT PROPOSAL` or `OPEN`; the repository must not treat
-those drafts as implementation contracts.
+It tracks implementation hardening, external release evidence, and the
+contract work that must precede production graphical runtimes, populated
+Inspector projections, Studio, and reflective gateways. The canonical
+specification still marks those broader surfaces as `CURRENT PROPOSAL` or
+`OPEN`; this plan must not turn them into implementation contracts.
 
-Current accepted implementation evidence:
-
-- `TODO.md:54-89` records the completed CLIENT, TTY, Inspector-core, source,
-  security, presenter, state, resource, identity, transport, and JSON slices;
-  `TODO.md:90-94` records the delivered headless ordinary CLIENT Inspector v1
-  and the accepted generic standard render contract `std.inspect.render@1`.
+- `TODO.md:54-94` records the completed CLIENT, TTY, Inspector-core, source,
+  security, presenter, state, resource, action, identity, transport, JSON,
+  runtime-conformance, LSP, and tooling slices. It also records the two
+  external evidence blockers.
+- Work ADRs 0068-0079 define the closed CLIENT expression, state, JSON,
+  resource, transport, action, and test-only runtime contracts. Work ADRs 0080
+  and 0081 define the headless ordinary CLIENT Inspector v1 and the generic
+  `std.inspect.render@1` contract.
 - `docs/decisions/0062-std-ui-value-type.md` accepts the transient `std.ui.UI`
-  value only. It defers the graphical runtime ABI and UI sink.
-- `docs/decisions/0063-automatic-runtime-selection.md` accepts the TTY offer and
-  deterministic selection only. Non-TTY runtimes remain later work.
-- `docs/decisions/0064-sys-inspect-core.md` accepts server-side snapshots and
-  the `orna inspect` CLI. Work ADRs 0080 and 0081 accept the headless ordinary
-  CLIENT Inspector v1 and generic standard render contract `std.inspect.render@1`;
-  populated resource/UI projections beyond that scope remain deferred.
-- `docs/decisions/0068-client-expression-bodies.md` accepts closed CLIENT
-  expressions but defers CLIENT-to-SERVER async calls and graphical contracts.
-- `docs/decisions/0071-client-resource-lifecycle.md` and
-  `docs/decisions/0074-client-resource-executor-seam.md` accept resource
-  identity, lifecycle, and completion validation. Work ADRs 0080 and 0081 accept
-  the headless ordinary CLIENT Inspector v1 and generic standard render contract;
-  broader populated projections remain deferred.
-- `docs/decisions/0075-std-json-value.md` accepts the append-only V5 JSON value
-  snapshot.
+  value and TTY runtime offer only. A production graphical runtime remains
+  outside the accepted scope.
+- `docs/decisions/0064-sys-inspect-core.md`, work ADR 0080, and work ADR 0081
+  define the current Inspector boundary. Resource and UI projections beyond
+  the accepted headless carriers remain deferred.
+- `docs/decisions/0075-std-json-value.md` and
+  `docs/decisions/0079-client-action-values.md` define the append-only V5 JSON
+  and V6 action snapshots. Work ADRs 0077 and 0078 supersede the deferred
+  CLIENT-to-SERVER portion of ADR 0068 for their accepted resource surface.
 
-The canonical research plan confirms this boundary in
-`../spec/docs/49-gap-research-and-contract-plan.md:14-19,39-43,77-93`.
+The canonical research plan remains useful as historical evidence, but this
+plan is the current implementation projection. Accepted ADRs and
+`../spec/docs/02-status-decisions.md` remain authoritative.
 
 ## Language and standard-library dogfooding
 
@@ -81,89 +77,68 @@ featured language needs source users can read, modify, check, and run.
 
 ## Post-audit status
 
-The accepted implementation audit found no missing executable slice in the
-current locked scope. The canonical status locks the function, invocation,
-identity, USER state, Inspector, and reflective-gateway directions
-(`../spec/docs/02-status-decisions.md:5-29`), but the executable details for
-non-TTY runtimes, populated Inspector resource/UI projections, and gateways
-remain proposal-level in
-the canonical gap plan (`../spec/docs/49-gap-research-and-contract-plan.md:14-19,39-43`).
+The 2026-08-22 locked-scope audit found no missing accepted executable slice.
+It did find and close evidence and tooling defects without broadening the
+contract:
 
-The accepted closed slices have focused proof in the repository, including:
+- retained V5 JSON and V6 action source, catalogue, digest, and codec parity
+  now have focused goldens in `crates/orna-standard/src/lib.rs`;
+- canonical scalar spellings now have parser, LSP, and tree-sitter coverage;
+- the Inspector ORV5 carrier rejects duplicate and descending record-field
+  identities;
+- the lifecycle verifier accepts only the exact normal or SIGQUIT-escalated
+  stop sequence and derives the escalation report flag from that sequence;
+- the Zed integration now registers the real grammar and the existing
+  `orna-lsp` stdio binary;
+- direct resource revision pinning was audited against the accepted locks and
+  needs no source change.
 
-- offline source checking and filesystem/network no-write checks in
-  `crates/orna-server/tests/source_check.rs`;
-- CLIENT capability and resource lifecycle rejection tests in
-  `crates/orna-client/src/lib.rs`;
-- installed standard-library, capability, and JSON presenter proofs in
-  `crates/orna-server/tests/standard_database.rs`;
-- framed LSP navigation proof in `crates/orna-lsp/tests/lsp_e2e.rs`.
+The accepted slices have focused proof in the repository. Installed proofs
+that require Compose remain environment-dependent and must be reported as
+such. The fresh network-disabled Debian 12 host proof and the same-major
+PostgreSQL predecessor transition remain separate blockers. No proposal-level
+implementation should start without the contract gate below.
 
-These tests do not remove the two external evidence blockers: the fresh
-network-disabled Debian 12 host proof remains unavailable, and the
-same-major embedded-engine transition remains deferred until a real
-predecessor edge exists. No proposal-level implementation should start
-without the acceptance gate above.
+## 2026-08-22 next contract checkpoint
 
-## 2026-08-19 contract research checkpoint
+The previously recorded 2026-08-19 checkpoint is superseded by work ADRs
+0076-0081. The current boundary is:
 
-A read-only review of the three deferred contract surfaces and an independent
-locked-scope audit found no missing accepted executable slice. The current
-runtime header passes its C syntax check, but its semantic contract remains
-open.
+- the test-only headless runtime conformance fixture is accepted and
+  implemented; the production runtime ABI remains a proposal;
+- CLIENT resource language, transport, scheduling, actions, and their
+  focused installed proofs are accepted and implemented;
+- the ordinary CLIENT Inspector v1 and generic render contract are accepted
+  and implemented; populated resource/UI projections remain outside that
+  contract;
+- reflective gateways remain on the sealed `sys.invoke` boundary until
+  Endpoint, Exposure, Service, authentication, conversion, redaction, and
+  protocol lifecycle contracts are accepted.
 
-Evidence and boundaries:
+The next implementation plan is therefore conditional, not an instruction to
+start code:
 
-- Runtime ABI: `../spec/api/runtime-abi.md`,
-  `../spec/api/ui-runtime.md`, and
-  `../spec/spec/orna_runtime_abi_v1.h` leave value ownership, callback
-  lifetime, thread and re-entry rules, atomic batches, typed events,
-  cancellation, and shutdown behaviour unresolved. Work ADR 0076 is a
-  proposal only.
-- CLIENT-to-SERVER resources: `../spec/docs/21-resources-actions-streams.md`
-  is a current proposal. ADRs 0071 and 0074 provide only the
-  executor-independent identity, generation, completion, and stale-result
-  checks. They do not define source syntax, transport frames, scheduling,
-  server execution, audit events, or stream backpressure.
-- Reflective gateways:
-  `../spec/docs/19-reflective-gateways.md`,
-  `../spec/api/protocol-gateways.md`, and
-  `../spec/docs/27-wire-protocol.md` lock the direction but not the
-  Endpoint, Exposure, Service, authentication, version pinning, conversion,
-  redaction, or protocol lifecycle contracts. Existing code must remain on
-  the sealed `sys.invoke` boundary.
-- Locked scope: the accepted CLIENT, USER state, resource lifecycle,
-  identity/ORV6, JSON V5, security-admin, presenter, Inspector-core,
-  source-diff, LSP, and embedded slices have implementation and focused proof
-  evidence. The remaining embedded items are external evidence or a future
-  predecessor release, not code gaps.
-Follow-up scope checks for language/compiler, storage/transactions,
-security/authentication, and tooling/operations found the same result:
-accepted contracts have implementation and focused proof evidence. The
-legacy unchecked rows in `../spec/IMPLEMENTATION_CHECKLIST.md` do not
-override the canonical status or accepted work ADRs. No accepted code gap is
-available for the next implementation step; work must either close the
-recorded Debian host evidence blocker or wait for an accepted proposal
-contract.
+1. Accept one new contract and update the canonical status, work ADR index,
+   traceability, and exact source/generated artefact list.
+2. Add stable identities, exact errors, ownership, security, compatibility,
+   cancellation, and shutdown rules before implementation.
+3. Add one focused unit slice and one integration or live proof.
+4. Implement the smallest vertical path, then run the package gate and the
+   installed proof before extending the surface.
 
-The next contract order is:
+The candidate order is:
 
-1. Accept the test-only headless runtime conformance boundary in ADR 0076.
-   It is the smallest reversible contract and is a prerequisite for runtime
-   events and later Inspector projections.
-2. Accept the CLIENT-to-SERVER asynchronous resource contract, including
-   syntax, versioned request/completion frames, principal derivation,
-   capability checks, cancellation, backpressure, shutdown, and audit events.
-3. Harden and integrate the accepted headless ordinary CLIENT Inspector v1
-   after the runtime and resource contracts define its epoch and redaction
-   inputs.
-4. Accept the reflective gateway contract separately, then implement its
-   disabled/enabled exposure proof through sealed `sys.invoke`.
+1. production runtime ABI and one non-TTY runtime, after the canonical ABI
+   resolves ownership, re-entry, thread, event, and shutdown rules;
+2. populated Inspector resource/UI projections, after the contract resolves
+   epoch ownership, lifecycle capture, privilege, and redaction;
+3. reflective gateway contracts and adapters, after the external
+   authentication, exposure versioning, conversion, and protocol rules are
+   executable.
 
-No implementation starts for these surfaces until the acceptance gate below
-has an accepted contract, exact error and ownership rules, compatibility
-rules, cancellation behaviour, focused tests, an integration or live proof,
-and an explicit file and artefact list.
+Until one candidate is accepted, close the Debian host evidence blocker or
+maintain the current baseline. Do not implement a graphical runtime, populate
+Inspector projections, or add a JSON-RPC/MCP gateway from proposal text alone.
 
 ## Non-negotiable contract gate
 
@@ -186,34 +161,37 @@ not an implementation authority.
 ## Dependency graph
 
 ```text
-Accepted runtime ABI and CLIENT-to-SERVER contracts
-                    |
-                    +--> resource transport and runtime events
-                    |                 |
-                    |                 +--> Inspector resource/UI projections
-                    |                                      |
-                    |                                      +--> ordinary CLIENT Inspector
-                    |                                                           |
-                    |                                                           +--> Studio
-                    |
-                    +--> Exposure, Service, and protocol contracts
-                                      |
-                                      +--> JSON-RPC gateway
-                                      |
-                                      +--> MCP gateway
-
-Headless runtime conformance is the first runtime proof.
-A production second runtime follows only after the ABI passes conformance.
+Accepted headless runtime conformance
+ |
+ +--> [contract gate] production runtime ABI and non-TTY runtime
+ |                                      |
+ |                                      +--> Studio
+ |
+ +--> [contract gate] populated Inspector resource/UI projections
+                                        |
+                                        +--> Studio Inspector explorer
+ |
+ +--> [contract gate] Exposure, Service, and protocol contracts
+                                        |
+                                        +--> JSON-RPC gateway
+                                        |
+                                        +--> MCP gateway
 ```
+
+The accepted headless runtime and ordinary CLIENT Inspector are baselines.
+They do not imply acceptance of the production runtime, populated projections,
+Studio, or gateways.
 
 ## Phase 0: Contract research and acceptance
 
-These work streams can run in parallel. They must produce evidence and a
-reviewable contract draft. They must not edit implementation code.
+Phase 0 is a contract gate. Sections 0.1-0.3 research and accept new
+contracts. Section 0.4 hardens the already accepted Inspector contracts. No
+proposal-level implementation belongs in this phase.
 
-### 0.1 Runtime ABI and headless conformance contract
+### 0.1 Production runtime ABI and non-TTY runtime contract
 
-Define the first executable runtime boundary from the proposal in
+The test-only headless runtime conformance fixture is accepted and implemented.
+Define the next production boundary from the proposal in
 `../spec/api/runtime-abi.md`, `../spec/api/ui-runtime.md`,
 `../spec/docs/15-runtime-architecture.md`, and
 `../spec/spec/orna_runtime_abi_v1.h`.
@@ -228,46 +206,50 @@ The contract must settle:
 - typed event payloads, model request completion, and cancellation;
 - shutdown ordering, outstanding request handling, and failure reporting.
 
-**Deliverables:** accepted ABI ADR, updated ABI header, conformance fixtures,
-and a test-only headless runtime harness. Do not add Qt, GTK, browser, or other
-native runtime code in this task.
+**Deliverables:** accepted production ABI ADR, updated ABI header, one selected
+non-TTY runtime contract, conformance fixtures, and a runtime proof. Do not
+select Qt, GTK, browser, or other native runtime code before the contract is
+accepted.
 
-**Acceptance:** the harness proves descriptor rejection, ownership rules,
-atomic batches, stale revisions, typed events, cancellation, and clean
-shutdown. The C header passes its syntax check and the Rust client can load and
-reject an incompatible fixture deterministically.
+**Acceptance:** the selected runtime loads through the accepted ABI, rejects
+incompatible descriptors, obeys ownership and thread rules, applies atomic
+batches, rejects stale revisions, reports typed events, handles cancellation,
+and shuts down cleanly. The proof must cover the same lifecycle cases as the
+headless fixture.
 
 **Likely files:** `spec/api/runtime-abi.md`,
-`spec/spec/orna_runtime_abi_v1.h`, one new work ADR, and one runtime/client
-conformance module per commit.
+`spec/spec/orna_runtime_abi_v1.h`, one new work ADR, and the selected runtime
+and client modules.
 
-### 0.2 CLIENT-to-SERVER and asynchronous resource contract
+### 0.2 Populated Inspector resource and UI projection contract
 
-The current resource seam is executor-independent. Define the missing source,
-transport, and server execution contract before connecting it to a CLIENT
-function.
+The accepted Inspector v1 exposes immutable headless invocation, state, and
+source carriers. Define the additional resource and UI projections before
+adding them to the Inspector or Studio.
 
 The contract must settle:
 
-- `RESOURCE`, `AWAIT`, action, stream, and assignment syntax;
-- typed request and completion frames, including stream and backpressure rules;
-- cancellation, timeout, retry, and shutdown ownership;
-- authenticated principal derivation and capability checks;
-- function-instance identity, state-session context, and invalidation epochs;
-- server execution and audit events for resource requests.
+- resource, stream, UI surface, node, and runtime identity schemas;
+- snapshot epoch ownership, capture timing, and freeze/resume behaviour;
+- projection revision, invalidation, and stale-read handling;
+- privilege, principal, source, argument, value, and audit redaction rules;
+- bounded carrier sizes, ordering, truncation, and error forms;
+- observer suppression and recursion rules for resource and UI inspection;
+- the relationship between server epochs and client runtime epochs.
 
-**Deliverables:** accepted language and transport ADRs, parser/compiler
-acceptance tests, versioned artefact layout, and one installed host proof.
+**Deliverables:** accepted projection ADR, versioned carrier schema, compiler
+and artefact identities, focused carrier tests, and one installed Inspector
+proof with redacted resource/UI data.
 
-**Acceptance:** a parameterised CLIENT function can issue one authenticated
-request, receive a checked typed result, reject a stale completion, cancel the
-request, and leave complete audit evidence. A client cannot provide a
-principal, `run_as`, or unchecked result type.
+**Acceptance:** an ordinary CLIENT Inspector can request one permitted
+resource or UI projection, receive an immutable checked carrier, reject stale
+or over-limit data, suppress observer recursion, and redact values outside the
+privilege ladder. The proof must not require a graphical UI sink.
 
-**Likely files:** `spec/spec/orna.ebnf`, `spec/docs/21-resources-actions-streams.md`,
-`crates/orna-syntax`, `crates/orna-compiler`, `crates/orna-artifact`,
-`crates/orna-client`, `crates/orna-protocol`, `crates/orna-postgres`, and
-`crates/orna-server`.
+**Likely files:** `spec/docs/30-inspector.md`,
+`spec/docs/31-self-inspection.md`, `spec/api/inspect.md`,
+`crates/orna-core/src/inspect.rs`, `crates/orna-artifact`,
+`crates/orna-client`, `crates/orna-server`, and focused live tests.
 
 ### 0.3 Exposure, Service, and gateway contract
 
@@ -334,45 +316,48 @@ gateways.
 `crates/orna-compiler`, `crates/orna-artifact`,
 `crates/orna-server/src/inspect.rs`, and focused live tests.
 
-## Phase 1: Implement the accepted runtime and invocation foundations
 
-Phase 1 starts only after Phase 0 contracts are accepted.
+## Phase 1: Implement the next accepted contract
 
-1. Add stable ABI and transport identifiers, with golden encode/decode tests.
-2. Add the headless runtime conformance harness and deterministic fixture.
-3. Add the CLIENT-to-SERVER request path through the existing authenticated
-   invocation boundary.
-4. Add resource completion, stream, cancellation, and audit handling.
-5. Extend Inspector snapshots with resource and runtime identity rows.
+Phase 1 starts only after one Phase 0 contract is accepted and its exact
+source, generated artefact, and proof list is recorded.
 
-Each step must leave the tree buildable. Keep each commit to one to three
-files. Run focused tests after every step, then run `cargo test --workspace
---all-targets` and `just kernel-test` at the phase checkpoint.
+1. Add stable identities, exact errors, ownership, security, compatibility,
+   cancellation, and shutdown rules.
+2. Add one focused unit slice and one integration or live proof.
+3. Implement the smallest vertical path through the existing accepted
+   boundary.
+4. Keep the tree buildable and preserve all accepted baselines.
 
-## Phase 2: Implement the ordinary CLIENT Inspector
+Keep each commit to one to three files. Run focused tests after every step,
+then run the workspace and installed gates at the phase checkpoint.
+
+## Phase 2: Maintain the headless ordinary CLIENT Inspector baseline
 
 ADRs 0080 and 0081 accept and current HEAD delivers the headless ordinary
-CLIENT Inspector v1 and generic standard render contract `std.inspect.render@1`.
-Remaining work is implementation hardening and integration:
+CLIENT Inspector v1 and generic standard render contract
+`std.inspect.render@1`.
 
-1. Harden the checked Inspector function and versioned client plan against the
-   accepted signature, generic render contract, and stable projection identities.
-2. Verify snapshot reads through the client runtime without executing the
-   observed target.
-3. Preserve recursion suppression, privilege checks, redaction, epoch
-   freeze/resume, and the installed self-inspection proof.
-4. Keep graphical runtime/UI sink integration, populated resource/UI
-   projections beyond the accepted headless scope, and reflective gateways
-   outside this phase until their contracts are accepted.
+The baseline work is complete. Further work in this phase is conditional on an
+accepted projection contract:
 
-The proof must cover the Inspector observing a normal function, observing
-itself, a denied projection, a stale epoch, and a bounded resource/UI carrier
-case with redacted values within the accepted headless scope.
+1. preserve the checked Inspector signature and stable projection identities;
+2. preserve snapshot reads without executing the observed target;
+3. preserve recursion suppression, privilege checks, redaction, epoch
+   freeze/resume, and the installed self-inspection proof;
+4. add resource/UI carriers only after the Phase 0.2 contract is accepted.
+
+The current proof covers the accepted headless scope. It must not be described
+as proof of a graphical runtime, populated resource/UI projections, or
+reflective gateways.
 
 ## Phase 3: Implement Studio and the first production UI runtime
 
-Studio is an ordinary CLIENT application, not a new core language construct.
-Implement vertical slices in this order:
+This phase is blocked until the production runtime and populated Inspector
+projection contracts are accepted. Studio remains an ordinary CLIENT
+application, not a new core language construct.
+
+After those contracts are accepted, implement vertical slices in this order:
 
 1. catalogue tree and function/type search;
 2. SQL/source editor with offline diagnostics;
@@ -382,14 +367,16 @@ Implement vertical slices in this order:
 6. runtime and presenter explorer through Inspector projections;
 7. source reload and hot-revision flow with explicit state/session identity.
 
-Select the first production non-TTY runtime only after the conformance harness
-passes. The selected runtime must implement the accepted ABI, offer one stable
-UI sink, report typed events, and pass the same lifecycle and shutdown suite.
-
 Each Studio slice requires a focused CLIENT proof and one installed end-to-end
 proof. Do not add a second toolkit until the first runtime is stable.
 
+
 ## Phase 4: Implement the reflective gateways
+
+This phase is blocked until the Exposure, Service, authentication, conversion,
+redaction, and wire lifecycle contracts are accepted.
+
+After acceptance:
 
 1. Register the accepted `std.protocol` and `std.service` value contracts.
 2. Add explicit exposure listing, version resolution, schema generation, and
@@ -406,7 +393,10 @@ accept a principal, `run_as`, or arbitrary SQL from an external request.
 
 ## Phase 5: Add a second runtime and complete M10-M12 proofs
 
-After the first runtime and Studio are proven:
+This phase is blocked until Phase 3 has a proven production runtime and Studio
+path, and Phase 4 has accepted gateway contracts.
+
+After those prerequisites:
 
 - implement the second runtime family against the same accepted ABI;
 - run the full runtime conformance suite for both runtimes;
@@ -433,20 +423,20 @@ For every implementation increment:
 - do not reformat unrelated files or fabricate a same-major PostgreSQL
   predecessor edge.
 
+
 ## Current blockers
 
-These are specification blockers, not missing implementation effort:
+These are contract and external-evidence blockers, not missing implementation
+effort:
 
-- `spec/api/runtime-abi.md:1-44` and `spec/api/ui-runtime.md:1-47` are
-  `CURRENT PROPOSAL` and leave ownership, lifetime, threading, and value
-  representation unresolved.
-- `spec/docs/49-gap-research-and-contract-plan.md:14-19,39-43` explicitly
-  says not to implement graphical runtimes, resource inspection, or reflective
-  gateways from the proposal alone.
-- `spec/api/inspect.md:1-3` and the self-inspection safety model remain
-  `CURRENT PROPOSAL`.
+- `spec/api/runtime-abi.md:1-44` and `spec/api/ui-runtime.md:1-47` remain
+  `CURRENT PROPOSAL` and leave production ownership, lifetime, threading, and
+  value representation unresolved.
+- `spec/docs/30-inspector.md`, `spec/docs/31-self-inspection.md`, and
+  `spec/api/inspect.md` do not yet accept populated resource/UI projections.
 - `spec/api/protocol-gateways.md:1-3` and the wire protocol remain
-  `CURRENT PROPOSAL`; Exposure and Service details are not executable.
+  `CURRENT PROPOSAL`; Endpoint, Exposure, Service, authentication, conversion,
+  redaction, and lifecycle details are not executable.
 - Work ADR 0019 requires a clean Debian 12 amd64, network-disabled host proof,
   which is not available on the current Fedora host.
 - The checked-in `debian-clean-machine.sh` scenario currently runs its proof
@@ -459,7 +449,7 @@ These are specification blockers, not missing implementation effort:
 - The same-major PostgreSQL upgrade remains intentionally deferred until a
   real successor release declares a predecessor edge.
 
-Until these blockers change status, the correct action is research and plan
-maintenance, not implementation. The existing accepted slices remain the
-working baseline and must continue to pass their focused and installed-host
-gates.
+Until these blockers change status, maintain the accepted implementation
+baseline, improve its evidence, and prepare the next contract. Do not
+implement a graphical runtime, populated Inspector projections, or a
+JSON-RPC/MCP gateway from proposal text alone.
