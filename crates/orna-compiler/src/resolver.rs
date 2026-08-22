@@ -4293,6 +4293,16 @@ fn resolve_client_function_inputs<'a>(
                 ));
                 continue;
             }
+            if let Some(default) = &parameter.default_expression {
+                diagnostics.push(diagnostic(
+                    DiagnosticCode::TypeMismatch,
+                    "CLIENT function parameters do not yet support default values",
+                    header.logical_path,
+                    &default.span,
+                ));
+                continue;
+            }
+
             let Some(resolved_type) = resolve_application_type_with_named_standard(
                 &parameter.type_specification,
                 submitted_ids,
@@ -19801,6 +19811,24 @@ mod tests {
         assert_eq!(
             report.diagnostics()[0].message(),
             "accepted CLIENT function bodies must not declare capabilities"
+        );
+        assert_no_checked_bundle(&report);
+    }
+
+    #[test]
+    fn rejects_client_parameter_defaults_before_expression_lowering() {
+        let source = "CREATE SCHEMA examples; CREATE CLIENT FUNCTION examples.identity(p TEXT DEFAULT 'fallback') RETURNS TEXT AS p;";
+        let report = check(&bundle([("client.orna", source)]), &empty_catalogue());
+
+        assert_eq!(report.diagnostics().len(), 1);
+        assert_eq!(report.diagnostics()[0].code(), DiagnosticCode::TypeMismatch);
+        assert_eq!(
+            report.diagnostics()[0].message(),
+            "CLIENT function parameters do not yet support default values"
+        );
+        assert_eq!(
+            report.diagnostics()[0].location().span().start(),
+            source.find("'fallback'").unwrap()
         );
         assert_no_checked_bundle(&report);
     }
