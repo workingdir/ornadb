@@ -575,12 +575,14 @@ fn validate_record_payload(payload: &[u8], depth: usize) -> Result<(), InspectRo
     }
     let count = u32::from_be_bytes(payload[..4].try_into().expect("record count width")) as usize;
     let mut cursor = 4;
+    let mut previous_field_identity: Option<&[u8]> = None;
     for _ in 0..count {
         if payload.len().saturating_sub(cursor) < RECORD_FIELD_HEADER_BYTES {
             return Err(InspectRowError::TruncatedRecord {
                 actual: payload.len().saturating_sub(cursor),
             });
         }
+        let field_identity = &payload[cursor..cursor + 16];
         cursor += 16;
         let length = u32::from_be_bytes(
             payload[cursor..cursor + 4]
@@ -596,6 +598,10 @@ fn validate_record_payload(payload: &[u8], depth: usize) -> Result<(), InspectRo
             });
         }
         validate_orv5_value(&payload[cursor..cursor + length], depth + 1)?;
+        if previous_field_identity.is_some_and(|previous| previous >= field_identity) {
+            return Err(InspectRowError::NonCanonicalRecordFieldOrder);
+        }
+        previous_field_identity = Some(field_identity);
         cursor += length;
     }
     if cursor == payload.len() {
@@ -893,6 +899,7 @@ pub enum InspectRowError {
         declared: usize,
         actual: usize,
     },
+    NonCanonicalRecordFieldOrder,
     ConstructedTypeIdentityNotZero,
     TruncatedConstructedHeader,
     EmptyConstructedDescriptor,
@@ -980,6 +987,18 @@ mod tests {
 
     fn integer_row(value: i32) -> Vec<u8> {
         row(0x03, [0; 16], &value.to_be_bytes())
+    }
+
+    fn record_row(fields: &[([u8; 16], i32)]) -> Vec<u8> {
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&(fields.len() as u32).to_be_bytes());
+        for (identity, value) in fields {
+            let nested = integer_row(*value);
+            payload.extend_from_slice(identity);
+            payload.extend_from_slice(&(nested.len() as u32).to_be_bytes());
+            payload.extend_from_slice(&nested);
+        }
+        row(0x0b, [0; 16], &payload)
     }
 
     #[test]
@@ -1095,6 +1114,82 @@ mod tests {
         assert_eq!(
             InspectCarrierEnvelope::decode(&envelope_trailing),
             Err(InspectCarrierError::TrailingBytes)
+        );
+    }
+
+    #[test]
+    fn duplicate_record_field_identity_is_rejected() {
+        let duplicate = record_row(&[([1; 16], 1), ([1; 16], 2)]);
+        assert_eq!(
+            validate_orv5_row_frame(&duplicate),
+            Err(InspectRowError::NonCanonicalRecordFieldOrder)
+        );
+        assert_eq!(
+            InspectCarrierEnvelope::new(
+                InspectCarrierKind::Calls,
+                1,
+                source(),
+                catalogue(),
+                vec![duplicate],
+            ),
+            Err(InspectCarrierError::InvalidRow(
+                InspectRowError::NonCanonicalRecordFieldOrder
+            ))
+        );
+    }
+
+    #[test]
+    fn descending_record_field_identity_is_rejected() {
+        let descending = record_row(&[([2; 16], 1), ([1; 16], 2)]);
+        assert_eq!(
+            validate_orv5_row_frame(&descending),
+            Err(InspectRowError::NonCanonicalRecordFieldOrder)
+        );
+        assert_eq!(
+            InspectCarrierEnvelope::new(
+                InspectCarrierKind::Calls,
+                1,
+                source(),
+                catalogue(),
+                vec![descending],
+            ),
+            Err(InspectCarrierError::InvalidRow(
+                InspectRowError::NonCanonicalRecordFieldOrder
+            ))
+        );
+    }
+
+    #[test]
+    fn decode_rejects_noncanonical_record_field_identity_order() {
+        let valid = InspectCarrierEnvelope::new(
+            InspectCarrierKind::Calls,
+            1,
+            source(),
+            catalogue(),
+            vec![record_row(&[([1; 16], 1), ([2; 16], 2)])],
+        )
+        .expect("strictly ordered record fields are valid")
+        .encode()
+        .expect("valid record carrier encodes");
+        let second_identity = 66 + ORV5_HEADER_BYTES + 4 + RECORD_FIELD_HEADER_BYTES
+            + integer_row(1).len();
+
+        let mut duplicate_wire = valid.clone();
+        duplicate_wire[second_identity..second_identity + 16].copy_from_slice(&[1; 16]);
+        assert_eq!(
+            InspectCarrierEnvelope::decode(&duplicate_wire),
+            Err(InspectCarrierError::InvalidRow(
+                InspectRowError::NonCanonicalRecordFieldOrder
+            ))
+        );
+
+        let mut descending_wire = valid;
+        descending_wire[second_identity..second_identity + 16].copy_from_slice(&[0; 16]);
+        assert_eq!(
+            InspectCarrierEnvelope::decode(&descending_wire),
+            Err(InspectCarrierError::InvalidRow(
+                InspectRowError::NonCanonicalRecordFieldOrder
+            ))
         );
     }
 
