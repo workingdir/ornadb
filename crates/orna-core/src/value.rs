@@ -1214,6 +1214,12 @@ enum OpaquePayloadContract {
         /// The exact ASCII magic prefix, including any separating space.
         magic: String,
     },
+    /// `MAGIC <len:u32 be> <utf-8 bytes>` with the terminal-document text
+    /// invariants: a final newline and no control codes except line feeds.
+    TerminalDocument {
+        /// The exact ASCII magic prefix, including any separating space.
+        magic: String,
+    },
     /// `MAGIC <len:u32 be> <bytes>`: a fixed ASCII magic prefix, then a
     /// big-endian `u32` body length, then exactly that many bytes and no
     /// trailing bytes.
@@ -1283,12 +1289,22 @@ impl OpaqueCodecRegistration {
         magic: impl Into<String>,
     ) -> Result<Self, OpaqueCodecRegistryError> {
         let magic = magic.into();
+        let representation_contract = representation_contract.into();
         validate_codec_magic(opaque_type, &magic)?;
+        let contract = if is_terminal_document_codec(
+            &semantic_name,
+            &representation_contract,
+            &magic,
+        ) {
+            OpaquePayloadContract::TerminalDocument { magic }
+        } else {
+            OpaquePayloadContract::LengthPrefixedUtf8 { magic }
+        };
         Ok(Self {
             opaque_type,
             semantic_name,
-            representation_contract: representation_contract.into(),
-            contract: OpaquePayloadContract::LengthPrefixedUtf8 { magic },
+            representation_contract,
+            contract,
         })
     }
 
@@ -1347,6 +1363,22 @@ impl OpaqueCodecRegistration {
             contract: OpaquePayloadContract::LengthPrefixedCanonicalJson { magic },
         })
     }
+}
+
+/// Identifies the accepted standard terminal-document codec without changing
+/// the generic length-prefixed UTF-8 constructor's public API.
+fn is_terminal_document_codec(
+    semantic_name: &QualifiedSemanticName,
+    representation_contract: &str,
+    magic: &str,
+) -> bool {
+    magic == "ORNA-TERMINAL-DOCUMENT/1 "
+        && representation_contract == "orna.std.value.terminal-document@1"
+        && semantic_name.parts().iter().map(String::as_str).eq([
+            "std",
+            "terminal",
+            "document",
+        ])
 }
 
 /// Rejects an empty, non-ASCII, or oversized framed-codec magic prefix.
@@ -1466,6 +1498,9 @@ fn validate_opaque_payload(
         OpaquePayloadContract::LengthPrefixedUtf8 { magic } => {
             validate_length_prefixed_utf8(opaque_type, magic.as_bytes(), payload)
         }
+        OpaquePayloadContract::TerminalDocument { magic } => {
+            validate_terminal_document(opaque_type, magic.as_bytes(), payload)
+        }
         OpaquePayloadContract::LengthPrefixedBytes { magic } => {
             validate_length_prefixed_bytes(opaque_type, magic.as_bytes(), payload)
         }
@@ -1520,6 +1555,43 @@ fn validate_length_prefixed_canonical_json(
     Ok(())
 }
 
+/// Validates the canonical terminal-document framing and text invariants.
+fn validate_terminal_document(
+    opaque_type: TypeId,
+    magic: &[u8],
+    payload: &[u8],
+) -> Result<(), OpaqueValueError> {
+    let prefix_length = magic
+        .len()
+        .checked_add(4)
+        .ok_or(OpaqueValueError::InvalidFrameLength { opaque_type })?;
+    if payload.len() < prefix_length || !payload.starts_with(magic) {
+        return Err(if payload.starts_with(magic) {
+            OpaqueValueError::InvalidFrameLength { opaque_type }
+        } else {
+            OpaqueValueError::InvalidMagic { opaque_type }
+        });
+    }
+    let body_length = u32::from_be_bytes(
+        payload[magic.len()..prefix_length]
+            .try_into()
+            .expect("the length prefix is exactly four bytes"),
+    ) as usize;
+    if body_length > MAX_OPAQUE_CODEC_PAYLOAD_LENGTH
+        || payload.len() != prefix_length + body_length
+    {
+        return Err(OpaqueValueError::InvalidFrameLength { opaque_type });
+    }
+    let body = &payload[prefix_length..];
+    let text = std::str::from_utf8(body)
+        .map_err(|_| OpaqueValueError::InvalidUtf8Body { opaque_type })?;
+    if !body.ends_with(b"\n") || text.chars().any(is_document_control) {
+        return Err(OpaqueValueError::InvalidDocumentBody { opaque_type });
+    }
+    Ok(())
+}
+
+
 /// Validates `MAGIC <len:u32 be> <utf-8 bytes>` with exactly `len` body bytes.
 fn validate_length_prefixed_utf8(
     opaque_type: TypeId,
@@ -1542,7 +1614,9 @@ fn validate_length_prefixed_utf8(
             .try_into()
             .expect("the length prefix is exactly four bytes"),
     ) as usize;
-    if payload.len() != prefix_length + body_length {
+    if body_length > MAX_OPAQUE_CODEC_PAYLOAD_LENGTH
+        || payload.len() != prefix_length + body_length
+    {
         return Err(OpaqueValueError::InvalidFrameLength { opaque_type });
     }
     let body = &payload[prefix_length..];
@@ -1622,10 +1696,18 @@ fn validate_media_type_framed(
             .try_into()
             .expect("the length prefix is exactly four bytes"),
     ) as usize;
-    if payload.len() != body_length_start + body_length {
+    if body_length > MAX_OPAQUE_CODEC_PAYLOAD_LENGTH
+        || payload.len() != body_length_start + body_length
+    {
         return Err(OpaqueValueError::InvalidFrameLength { opaque_type });
     }
     Ok(())
+}
+
+/// Returns whether `ch` is forbidden in a terminal document body. Newline is
+/// the only permitted control character because it is the canonical separator.
+fn is_document_control(ch: char) -> bool {
+    ch != '\n' && matches!(ch, '\u{0000}'..='\u{001F}' | '\u{007F}'..='\u{009F}')
 }
 
 fn validate_opaque_registration(
@@ -1907,6 +1989,12 @@ pub enum OpaqueValueError {
         /// The opaque type whose payload was rejected.
         opaque_type: TypeId,
     },
+    /// A terminal-document body is empty, lacks a final newline, or contains
+    /// a forbidden control character.
+    InvalidDocumentBody {
+        /// The opaque type whose payload was rejected.
+        opaque_type: TypeId,
+    },
     /// A canonical JSON payload body is invalid or not in canonical form.
     InvalidJsonBody {
         /// The opaque type whose payload was rejected.
@@ -1954,6 +2042,9 @@ impl fmt::Display for OpaqueValueError {
             }
             Self::InvalidUtf8Body { .. } => {
                 formatter.write_str("opaque value payload body is not valid UTF-8")
+            }
+            Self::InvalidDocumentBody { .. } => {
+                formatter.write_str("terminal document payload body is invalid")
             }
             Self::InvalidJsonBody { .. } => {
                 formatter.write_str("opaque value payload body is not valid canonical JSON")
@@ -6791,7 +6882,7 @@ mod tests {
     }
 
     #[test]
-    fn framed_codecs_validate_length_prefixed_utf8_payloads() {
+    fn terminal_document_codec_enforces_canonical_text_payloads() {
         const DOCUMENT_TYPE: TypeId = TypeId::from_bytes([0x4d; 16]);
         const DOCUMENT_MAGIC: &str = "ORNA-TERMINAL-DOCUMENT/1 ";
         const DOCUMENT_NAME: [&str; 3] = ["std", "terminal", "document"];
@@ -6828,16 +6919,65 @@ mod tests {
         .unwrap();
 
         let mut payload = Vec::from(DOCUMENT_MAGIC.as_bytes());
-        payload.extend_from_slice(&5_u32.to_be_bytes());
-        payload.extend_from_slice(b"hello");
+        payload.extend_from_slice(&6_u32.to_be_bytes());
+        payload.extend_from_slice(b"hello\n");
         let value = OpaqueValue::new(&active, &registry, DOCUMENT_TYPE, &payload).unwrap();
         assert_eq!(value.opaque_type(), DOCUMENT_TYPE);
         assert_eq!(value.canonical_payload(), payload);
 
         let mut empty_body = Vec::from(DOCUMENT_MAGIC.as_bytes());
         empty_body.extend_from_slice(&0_u32.to_be_bytes());
-        let value = OpaqueValue::new(&active, &registry, DOCUMENT_TYPE, &empty_body).unwrap();
-        assert_eq!(value.canonical_payload(), empty_body);
+        assert_eq!(
+            OpaqueValue::new(&active, &registry, DOCUMENT_TYPE, &empty_body),
+            Err(OpaqueValueError::InvalidDocumentBody {
+                opaque_type: DOCUMENT_TYPE,
+            })
+        );
+        let mut missing_final_newline = Vec::from(DOCUMENT_MAGIC.as_bytes());
+        missing_final_newline.extend_from_slice(&5_u32.to_be_bytes());
+        missing_final_newline.extend_from_slice(b"hello");
+        assert_eq!(
+            OpaqueValue::new(
+                &active,
+                &registry,
+                DOCUMENT_TYPE,
+                &missing_final_newline
+            ),
+            Err(OpaqueValueError::InvalidDocumentBody {
+                opaque_type: DOCUMENT_TYPE,
+            })
+        );
+
+        for body in [
+            b"\0\n".as_slice(),
+            b"\t\n".as_slice(),
+            b"\r\n".as_slice(),
+            b"\x7f\n".as_slice(),
+            "\u{0085}\n".as_bytes(),
+        ] {
+            let mut control_byte = Vec::from(DOCUMENT_MAGIC.as_bytes());
+            control_byte.extend_from_slice(&(body.len() as u32).to_be_bytes());
+            control_byte.extend_from_slice(body);
+            assert_eq!(
+                OpaqueValue::new(&active, &registry, DOCUMENT_TYPE, &control_byte),
+                Err(OpaqueValueError::InvalidDocumentBody {
+                    opaque_type: DOCUMENT_TYPE,
+                })
+            );
+        }
+
+        let mut over_limit = Vec::from(DOCUMENT_MAGIC.as_bytes());
+        over_limit.extend_from_slice(
+            &u32::try_from(MAX_OPAQUE_CODEC_PAYLOAD_LENGTH + 1)
+                .unwrap()
+                .to_be_bytes(),
+        );
+        assert_eq!(
+            OpaqueValue::new(&active, &registry, DOCUMENT_TYPE, &over_limit),
+            Err(OpaqueValueError::InvalidFrameLength {
+                opaque_type: DOCUMENT_TYPE,
+            })
+        );
 
         let bad_magic = b"WRONG-DOCUMENT/1 \0\0\0\0".to_vec();
         assert_eq!(
@@ -7104,6 +7244,24 @@ mod tests {
         assert_eq!(
             OpaqueValue::new(&active, &registry, BYTE_STREAM_TYPE, &bad_magic),
             Err(OpaqueValueError::InvalidMagic {
+                opaque_type: BYTE_STREAM_TYPE,
+            })
+        );
+        let mut over_limit = Vec::from(BYTE_STREAM_MAGIC.as_bytes());
+        over_limit.extend_from_slice(&(media_type.len() as u32).to_be_bytes());
+        over_limit.extend_from_slice(media_type);
+        over_limit.extend_from_slice(
+            &u32::try_from(MAX_OPAQUE_CODEC_PAYLOAD_LENGTH + 1)
+                .unwrap()
+                .to_be_bytes(),
+        );
+        over_limit.extend(std::iter::repeat_n(
+            0_u8,
+            MAX_OPAQUE_CODEC_PAYLOAD_LENGTH + 1,
+        ));
+        assert_eq!(
+            OpaqueValue::new(&active, &registry, BYTE_STREAM_TYPE, &over_limit),
+            Err(OpaqueValueError::InvalidFrameLength {
                 opaque_type: BYTE_STREAM_TYPE,
             })
         );
