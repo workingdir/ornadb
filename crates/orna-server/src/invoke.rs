@@ -19,8 +19,10 @@
 //!   without progress or warning interleave;
 //! - `InvocationFailed` events print one redacted failure line to stderr and exit 1.
 //!
-//! `--explain` renders the resolution and sealed request facts and exits
-//! success without dispatching, authorising, or auditing.
+//! `--explain` renders the resolution, sealed request, and local
+//! sink/runtime offer facts and exits success without dispatching, authorising,
+//! or auditing. Presenter candidates remain deferred because they are computed
+//! only by the sealed route after target execution.
 
 use std::{
     cmp::Ordering,
@@ -4967,7 +4969,15 @@ fn map_runtime_tty_error(error: orna_runtime_tty::RuntimeTtyError) -> InstalledI
 }
 
 /// Renders the `--explain` plan: resolved target identity and revision,
-/// domain, parameters, return type, and the sealed request facts.
+/// domain, parameters, return type, the sealed request facts, and the local
+/// sink/runtime offers that shape presentation.
+///
+/// Presenter candidates are deliberately not reconstructed here. The sealed
+/// route resolves those candidates after target execution, while `--explain`
+/// must remain observational and side-effect free. The request does retain
+/// the client offers, however, so those facts (including the deterministic
+/// single-runtime selection used by this client) are rendered rather than
+/// hidden behind the offer count.
 fn render_explain(
     output: &mut impl Write,
     function: &FunctionDefinition,
@@ -5019,11 +5029,138 @@ fn render_explain(
         "  output: {}\n",
         render_output_requirement(request.output_requirement())
     ));
+    plan.push_str("presentation:\n");
+    if request.output_requirement().is_some() {
+        plan.push_str("  candidates: unavailable before sealed dispatch\n");
+        plan.push_str("  rejections: unavailable before sealed dispatch\n");
+        plan.push_str("  selected presenter: unavailable before sealed dispatch\n");
+    } else {
+        plan.push_str("  candidates: none (no output requirement)\n");
+        plan.push_str("  rejections: none (no output requirement)\n");
+        plan.push_str("  selected presenter: none\n");
+    }
+    plan.push_str(&format!(
+        "  final sink: {}\n",
+        render_explain_final_sink(request.output_requirement())
+    ));
+    plan.push_str("sinks:\n");
+    render_explain_sink_offers(&mut plan, request.client_offer().sink_offers());
+    plan.push_str("runtime:\n");
+    render_explain_runtime_offers(&mut plan, request.client_offer().runtime_offers());
 
     output
         .write_all(plan.as_bytes())
         .map_err(presentation_error)?;
     Ok(())
+}
+
+/// Returns the final sink fact available without executing the target.
+///
+/// An absent output requirement means no presenter is requested and the
+/// canonical result remains the final value. With an output requirement, the
+/// presenter registry and result-compatible path are resolved inside the
+/// sealed route, so claiming a selected sink here would invent a plan that
+/// this boundary does not compute.
+fn render_explain_final_sink(requirement: Option<&InvocationOutputRequirement>) -> String {
+    if requirement.is_some() {
+        "deferred until sealed presenter selection".to_owned()
+    } else {
+        "none (canonical result)".to_owned()
+    }
+}
+
+/// Renders client sink offers in their checked, deterministic order.
+fn render_explain_sink_offers(plan: &mut String, offers: &[InvocationSinkOffer]) {
+    if offers.is_empty() {
+        plan.push_str("  none\n");
+        return;
+    }
+    for offer in offers {
+        let media_types = if offer.media_types().is_empty() {
+            "none".to_owned()
+        } else {
+            offer.media_types().join(", ")
+        };
+        plan.push_str(&format!(
+            "  {} (media {}; {}; preference rank {})\n",
+            render_type_descriptor(offer.descriptor()),
+            media_types,
+            if offer.streaming() {
+                "streaming"
+            } else {
+                "non-streaming"
+            },
+            offer.preference_rank(),
+        ));
+    }
+}
+
+/// Renders runtime offers and the local selection available to this client.
+///
+/// The current client emits exactly one installed runtime offer. If that
+/// invariant changes, retain the offers but avoid presenting an arbitrary
+/// first entry as selected until the selection policy is propagated here.
+fn render_explain_runtime_offers(plan: &mut String, offers: &[InvocationRuntimeOffer]) {
+    if offers.is_empty() {
+        plan.push_str("  selected: none\n");
+        plan.push_str("  offers: none\n");
+        return;
+    }
+
+    if offers.len() == 1 {
+        let offer = &offers[0];
+        plan.push_str(&format!(
+            "  selected: {}@{}\n",
+            offer.name(),
+            offer.version()
+        ));
+    } else {
+        plan.push_str("  selected: unavailable (multiple runtime offers)\n");
+    }
+
+    plan.push_str("  offers:\n");
+    for offer in offers {
+        let descriptors = if offer.consumed_descriptors().is_empty() {
+            "none".to_owned()
+        } else {
+            offer
+                .consumed_descriptors()
+                .iter()
+                .map(render_type_descriptor)
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        plan.push_str(&format!(
+            "    {}@{} (consumes {}; preference rank {}; {})\n",
+            offer.name(),
+            offer.version(),
+            descriptors,
+            offer.preference_rank(),
+            if offer.trusted() {
+                "trusted"
+            } else {
+                "untrusted"
+            },
+        ));
+    }
+}
+
+/// Renders a closed invocation type descriptor without exposing typed values.
+fn render_type_descriptor(descriptor: &TypeDescriptor) -> String {
+    match descriptor.kind() {
+        TypeDescriptorKind::Named(type_id) | TypeDescriptorKind::Reference(type_id) => {
+            type_id.canonical()
+        }
+        TypeDescriptorKind::List(inner) => format!("list<{}>", render_type_descriptor(inner)),
+        TypeDescriptorKind::Set(inner) => format!("set<{}>", render_type_descriptor(inner)),
+        TypeDescriptorKind::Map { key, value } => format!(
+            "map<{},{}>",
+            render_type_descriptor(key),
+            render_type_descriptor(value)
+        ),
+        TypeDescriptorKind::Option(inner) => format!("option<{}>", render_type_descriptor(inner)),
+        TypeDescriptorKind::Stream(inner) => format!("stream<{}>", render_type_descriptor(inner)),
+    }
 }
 
 /// Renders the offered runtimes as `name@version` entries, or `none`.
@@ -6755,6 +6892,57 @@ mod tests {
         ));
         assert!(plan.contains("trace: Off"));
         assert!(plan.contains("output: none"));
+    }
+
+    #[test]
+    fn explain_renders_sink_and_runtime_plan_without_fabricating_candidates() {
+        let mut input = pipe_request().into_input();
+        input.client_offer = InvocationClientOffer::new(
+            5,
+            "en-GB",
+            "UTC",
+            client_sink_offers().expect("client sink offers"),
+            installed_runtime_offers(),
+            MAXIMUM_FRAME_SIZE,
+            MAXIMUM_ARTIFACT_SIZE,
+            None,
+            None,
+        )
+        .expect("client offer");
+        input.output_requirement = Some(
+            InvocationOutputRequirement::new(
+                Some("json".to_owned()),
+                None,
+                None,
+                InvocationStreamingRequirement::Unspecified,
+            )
+            .expect("output requirement"),
+        );
+        let request = InvokeRequest::new(input).expect("request");
+
+        let mut output = Vec::new();
+        render_explain(
+            &mut output,
+            &echo_definition(),
+            &request,
+            "function-rev:test",
+            "verified standard std:test",
+        )
+        .expect("explain renders");
+        let plan = String::from_utf8(output).expect("plan is text");
+
+        assert!(plan.contains("presentation:\n"));
+        assert!(plan.contains("  candidates: unavailable before sealed dispatch"));
+        assert!(plan.contains("  rejections: unavailable before sealed dispatch"));
+        assert!(plan.contains("  selected presenter: unavailable before sealed dispatch"));
+        assert!(plan.contains("  final sink: deferred until sealed presenter selection"));
+        assert!(plan.contains("sinks:\n"));
+        let document_id = STD_TERMINAL_DOCUMENT_TYPE_ID.canonical();
+        let byte_stream_id = STD_IO_BYTE_STREAM_TYPE_ID.canonical();
+        assert!(plan.contains(document_id.as_str()));
+        assert!(plan.contains(byte_stream_id.as_str()));
+        assert!(plan.contains("runtime:\n  selected: tty@"));
+        assert!(plan.contains("consumes"));
     }
 
     #[test]
