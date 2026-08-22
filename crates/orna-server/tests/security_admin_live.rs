@@ -20,11 +20,13 @@ use orna_core::{
     FunctionId, PrincipalId,
     security::{
         ExecuteGrant, LocalPeerCredential, Principal, PrincipalKind, PrincipalStatus,
-        PrivilegeClass, PrivilegeDenial, PrivilegeGrant, RoleMembership, SecurityAdminAuditOperation,
-        SecurityAuditKind, SecurityAuditOutcome, SecurityFunctionTarget, SecuritySnapshot,
+        PrivilegeClass, PrivilegeDecision, PrivilegeDenial, PrivilegeGrant, RoleMembership,
+        SecurityAdminAuditOperation, SecurityAuditKind, SecurityAuditOutcome, SecurityFunctionTarget,
+        SecuritySnapshot,
     },
     source::{SourceBundle, SourceUnit},
 };
+use orna_core::inspect::InspectPrivilege;
 use orna_core::system::{
     SYS_SECURITY_CREATE_PRINCIPAL_FUNCTION_ID, SYS_SECURITY_CREATE_ROLE_FUNCTION_ID,
     SYS_SECURITY_DISABLE_PRINCIPAL_FUNCTION_ID, SYS_SECURITY_GRANT_PRIVILEGE_FUNCTION_ID,
@@ -168,6 +170,92 @@ async fn admin_run(
     )
     .await;
     Ok((outcome, stdout))
+}
+
+/// Proves that bare privilege checks apply principal status and class scope.
+async fn prove_has_privilege_filters(
+    database: &TestDatabase,
+    snapshot: &SecuritySnapshot,
+    application_function: FunctionId,
+) -> TestResult<()> {
+    // A disabled principal must not satisfy has_privilege even when its
+    // retained direct grant remains in the durable snapshot.
+    let mut privilege_grants = snapshot.privilege_grants().collect::<Vec<_>>();
+    privilege_grants.push(
+        PrivilegeGrant::new(
+            SECOND_PRINCIPAL,
+            PrivilegeClass::Execute,
+            Some(application_function),
+        )
+        .map_err(|error| failure(format!("disabled grant fixture failed: {error}")))?,
+    );
+    privilege_grants.push(
+        PrivilegeGrant::new(
+            ADMIN_PRINCIPAL,
+            PrivilegeClass::Inspect(InspectPrivilege::OwnInvocation),
+            None,
+        )
+        .map_err(|error| failure(format!("class-wide inspect fixture failed: {error}")))?,
+    );
+    privilege_grants.push(
+        PrivilegeGrant::new(
+            ADMIN_PRINCIPAL,
+            PrivilegeClass::Inspect(InspectPrivilege::Values),
+            Some(application_function),
+        )
+        .map_err(|error| failure(format!("scoped inspect fixture failed: {error}")))?,
+    );
+
+    let with_disabled_direct_grant =
+        SecuritySnapshot::new_with_function_targets_local_peer_credentials_and_privilege_grants(
+            snapshot.revision(),
+            snapshot.function_targets().collect(),
+            snapshot.principals().collect(),
+            snapshot.memberships().collect(),
+            snapshot.execute_grants().collect(),
+            snapshot.local_peer_credentials().collect(),
+            privilege_grants,
+        )
+        .map_err(|error| failure(format!("disabled grant snapshot failed: {error}")))?;
+    kernel(database)
+        .replace_security_snapshot(&with_disabled_direct_grant)
+        .await
+        .map_err(|error| failure(format!("disabled grant snapshot replace failed: {error}")))?;
+    let disabled_privilege = kernel(database)
+        .has_privilege(
+            SECOND_PRINCIPAL,
+            PrivilegeClass::Execute,
+            Some(application_function),
+        )
+        .await
+        .map_err(|error| failure(format!("disabled has_privilege check failed: {error}")))?;
+    require(
+        matches!(
+            disabled_privilege,
+            PrivilegeDecision::Denied(PrivilegeDenial::MissingPrivilege {
+                requested: PrivilegeClass::Execute,
+            })
+        ),
+        "disabled principal retained an effective has_privilege grant",
+    )?;
+    let scoped_inspect = kernel(database)
+        .has_privilege(
+            ADMIN_PRINCIPAL,
+            PrivilegeClass::Inspect(InspectPrivilege::Values),
+            Some(application_function),
+        )
+        .await
+        .map_err(|error| failure(format!("scoped inspect check failed: {error}")))?;
+    require(
+        matches!(
+            scoped_inspect,
+            PrivilegeDecision::Denied(PrivilegeDenial::MissingPrivilege {
+                requested: PrivilegeClass::Inspect(InspectPrivilege::Values),
+            })
+        ),
+        "object-scoped INSPECT grant passed has_privilege",
+    )?;
+    Ok(())
 }
 
 #[tokio::test]
@@ -383,6 +471,8 @@ async fn proves_installed_security_admin_end_to_end() -> TestResult<()> {
             }),
             "grant_privilege did not persist the role's object-scoped execute grant",
         )?;
+
+        prove_has_privilege_filters(&database, &snapshot, application_function).await?;
 
         // The role grant remains visible to the durable role check after the
         // later disable mutation; disabling the member does not rewrite the
