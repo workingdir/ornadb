@@ -5338,6 +5338,11 @@ fn trigger_client_action_with_lineage(
     if !client_action_target_is_provenance_safe(active, *parent, descriptor.target) {
         return Err(ClientActionError::TargetMismatch);
     }
+    // Call-site metadata in a transient action payload is caller-controlled.
+    // Keep it out of the invocation context until the reference schema carries
+    // an authenticated binding for it; a fresh identity prevents forged
+    // metadata from spoofing nested audit correlation.
+    let call_site = CallSiteId::new();
     match descriptor.domain {
         ActionTargetDomain::Server => {
             let key = ClientResourceKey::new(
@@ -5363,7 +5368,7 @@ fn trigger_client_action_with_lineage(
                     kind,
                     ClientResourceInvocationContext::new(
                         lineage.current,
-                        descriptor.call_site,
+                        call_site,
                         state.context().state_profile().to_owned(),
                         state.context().instance_key().to_owned(),
                     ),
@@ -5400,7 +5405,7 @@ fn trigger_client_action_with_lineage(
                     kind,
                     ClientResourceInvocationContext::new(
                         lineage.current,
-                        descriptor.call_site,
+                        call_site,
                         state.context().state_profile().to_owned(),
                         state.context().instance_key().to_owned(),
                     ),
@@ -14528,6 +14533,13 @@ fn client_stream_cancellation_clears_batches_and_rejects_stale_completions() {
         );
         assert_eq!(request.arguments(), &[argument]);
         assert_eq!(request.expected_type(), ResolvedType::Scalar(StandardScalar::Integer));
+        assert_ne!(
+            request
+                .invocation_context()
+                .expect("server action carries invocation provenance")
+                .call_site_id(),
+            CallSiteId::from_bytes([0xf6; 16]),
+        );
         assert_eq!(action_state.status(), ClientResourceStatus::Idle);
     }
 
@@ -14588,6 +14600,61 @@ fn client_stream_cancellation_clears_batches_and_rejects_stale_completions() {
         assert_eq!(action_state.status(), ClientResourceStatus::Idle);
     }
 
+
+    #[test]
+    fn action_trigger_does_not_forward_forged_call_site_metadata() {
+        let (active, parent_function, pair, parent_revision, _parameter) =
+            version_six_client_resource_action_active();
+        let target = FunctionId::from_bytes([0xd1; 16]);
+        let forged_call_site = CallSiteId::from_bytes([0x9a; 16]);
+        let auth = authorise(pair, parent_function);
+        let parent = ClientExecutionContext {
+            pair,
+            function: parent_function,
+            function_revision: parent_revision,
+            parent_invocation_id: InvocationId::from_bytes([0x9b; 16]),
+            observer_lineage: None,
+        };
+        let argument = FunctionArgument::new(
+            ParameterId::from_bytes([0xd3; 16]),
+            RuntimeValue::Text("/tmp/action".to_owned()),
+        )
+        .unwrap();
+        let action = action_value(
+            &active,
+            ActionTargetDomain::Server,
+            target,
+            pair,
+            forged_call_site,
+            vec![argument],
+            orna_standard::CHARACTER_LARGE_OBJECT_TYPE_ID,
+        );
+        let mut state = ClientStateStore::default();
+        let mut action_state = ClientActionState::default();
+        let mut executor = RecordingActionExecutor::new(None);
+
+        assert_eq!(
+            trigger_client_action(
+                &active,
+                &action,
+                &auth,
+                &parent,
+                &mut action_state,
+                &[],
+                &capability::LocalCapabilityGrantSet::default(),
+                &mut state,
+                &mut executor,
+            ),
+            Err(ClientActionError::Pending),
+        );
+        let request = executor.executed.first().expect("action was dispatched");
+        let context = request
+            .invocation_context()
+            .expect("server action carries invocation provenance");
+        assert_ne!(context.call_site_id(), forged_call_site);
+        assert_eq!(context.parent_invocation_id(), parent.parent_invocation_id());
+        assert_eq!(request.target().function(), target);
+    }
 
     #[test]
     fn action_trigger_rejects_unreferenced_target_provenance() {
