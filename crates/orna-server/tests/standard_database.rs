@@ -4810,9 +4810,27 @@ async fn raw_identity_selected_server_read_authorises_binds_and_redacts_inner() 
     .await
 }
 
-#[tokio::test]
+#[test]
 #[ignore = "requires the Compose PostgreSQL development service"]
-async fn server_raw_reference_mutation_authority_selection_and_audit() -> TestResult<()> {
+fn server_raw_reference_mutation_authority_selection_and_audit() -> TestResult<()> {
+    let handle = std::thread::Builder::new()
+        .name("raw-reference-mutation-live".to_owned())
+        .stack_size(4 * 1024 * 1024)
+        .spawn(|| {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|error| failure(format!("raw reference mutation live runtime could not start: {error}")))?;
+            runtime.block_on(server_raw_reference_mutation_authority_selection_and_audit_inner())
+        })
+        .map_err(|error| failure(format!("raw reference mutation live thread could not start: {error}")))?;
+    match handle.join() {
+        Ok(result) => result,
+        Err(_) => Err(failure("raw reference mutation live thread panicked")),
+    }
+}
+
+async fn server_raw_reference_mutation_authority_selection_and_audit_inner() -> TestResult<()> {
     with_test_database(|database| async move {
         let kernel = kernel(&database)?;
         let (active, _standard_upgrade, _client_function, server_function) =
