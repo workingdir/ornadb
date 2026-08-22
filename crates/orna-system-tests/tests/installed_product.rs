@@ -2195,6 +2195,83 @@ fn installed_field_rename_preserves_function_identities_and_values_across_restar
     );
 }
 
+/// Prove that the packaged `orna source diff` command renders a semantic
+/// field rename and leaves the active revision untouched.
+///
+/// The test applies the original fixture, diffs the evidence-bearing renamed
+/// fixture through `/usr/bin/orna`, and then diffs the original fixture again.
+/// The final no-change report is the public-command proof that the first diff
+/// prepared a candidate without applying it.
+#[test]
+#[ignore = "requires Docker, ORNA_SYSTEM_TEST_DEBIAN_PACKAGE, and the installed orna executable"]
+fn installed_source_diff_renders_semantic_changes_without_apply() {
+    let package = std::env::var("ORNA_SYSTEM_TEST_DEBIAN_PACKAGE")
+        .expect("ORNA_SYSTEM_TEST_DEBIAN_PACKAGE must point at the reproduced .deb package");
+    let artifact = FrozenPackageArtifact::new(PackageFormat::Debian, &package)
+        .expect("freeze the reproduced Debian package");
+    let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures");
+    let original = fs::read(fixtures.join("product_test.orna")).expect("read the product fixture");
+    let renamed = fs::read(fixtures.join("product_test_renamed.orna"))
+        .expect("read the renamed product fixture");
+
+    let machine = InstalledMachine::start(&artifact, &original)
+        .expect("start the installed Debian test machine");
+
+    let apply = machine
+        .run_as_orna(&["source", "apply", FIXTURE_PATH])
+        .expect("run installed source apply");
+    let apply = require_success("orna source apply", apply).expect("source apply must succeed");
+    assert!(
+        apply.stderr.is_empty(),
+        "source apply must keep standard error empty"
+    );
+
+    machine
+        .write_fixture(&renamed)
+        .expect("replace the fixture with the renamed source");
+    let diff = machine
+        .run_as_orna(&["source", "diff", FIXTURE_PATH])
+        .expect("run installed source diff");
+    let diff = require_success("orna source diff renamed", diff)
+        .expect("source diff must succeed for the renamed source");
+    assert!(
+        diff.stderr.is_empty(),
+        "source diff must keep standard error empty"
+    );
+    let text = std::str::from_utf8(&diff.stdout).expect("source diff output must be UTF-8");
+    assert!(
+        text.starts_with("semantic diff "),
+        "source diff must render its semantic-diff header, got {text:?}"
+    );
+    assert!(
+        text.contains("~ field product_test.probe.stored -> product_test.probe.retained [field:"),
+        "source diff must render the stable-ID field rename, got {text:?}"
+    );
+    assert!(
+        text.ends_with('\n'),
+        "source diff output must end with one line feed"
+    );
+
+    machine
+        .write_fixture(&original)
+        .expect("restore the original source fixture");
+    let unchanged = machine
+        .run_as_orna(&["source", "diff", FIXTURE_PATH])
+        .expect("run installed source diff against the original source");
+    let unchanged = require_success("orna source diff unchanged", unchanged)
+        .expect("source diff must succeed for the unchanged source");
+    assert!(
+        unchanged.stderr.is_empty(),
+        "unchanged source diff must keep standard error empty"
+    );
+    let text = std::str::from_utf8(&unchanged.stdout)
+        .expect("unchanged source diff output must be UTF-8");
+    assert!(
+        text.contains("no semantic changes"),
+        "the active revision must remain unchanged after source diff, got {text:?}"
+    );
+}
+
 /// Prove that an omitted nullable object field persists as a typed Boolean
 /// NULL while a present nullable field persists its exact FALSE value.
 ///
