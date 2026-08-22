@@ -2262,6 +2262,206 @@ async fn proves_scalar_client_resource_pending_continues_through_installed_evalu
 
 #[tokio::test]
 #[ignore = "requires the Compose PostgreSQL development service"]
+async fn proves_installed_no_broker_resource_returns_typed_result_and_terminal() -> TestResult<()> {
+    const CONNECTION_PROTOCOL_MAJOR: u16 = 5;
+
+    with_test_database(|database| async move {
+        let uid = nix::unistd::getuid().as_raw();
+        let kernel = kernel(&database)?;
+        kernel
+            .bootstrap()
+            .await
+            .map_err(|error| failure(format!("bootstrap failed: {error:?}")))?;
+        let empty = kernel
+            .recover()
+            .await
+            .map_err(|error| failure(format!("recover empty database failed: {error:?}")))?;
+        let upgrade = orna_standard::prepare_standard_upgrade_v1_to_v2(&empty)
+            .map_err(|error| failure(format!("prepare V1-to-V2 upgrade failed: {error:?}")))?;
+        let active = kernel
+            .apply_standard_upgrade(&upgrade)
+            .await
+            .map_err(|error| failure(format!("apply V1-to-V2 upgrade failed: {error:?}")))?;
+        let standard_source = active
+            .catalogue_hash_context()
+            .standard()
+            .cloned()
+            .ok_or_else(|| failure("no-broker resource fixture has no checked standard source"))?;
+        let standard = check_standard_library_source(&standard_source)
+            .map_err(|error| failure(format!("installed standard source check failed: {error:?}")))?;
+        let (active, client_function, target, _call_site) =
+            install_scalar_resource_client_fixture(&kernel, &active, &standard).await?;
+        let mut function_targets = active
+            .catalogue()
+            .functions()
+            .iter()
+            .map(|function| SecurityFunctionTarget::application(function.id()))
+            .collect::<Vec<_>>();
+        function_targets.push(SecurityFunctionTarget::verified_standard(
+            target,
+            standard.verified_snapshot().revision(),
+            STD_INVOKE_ECHO_FUNCTION_REVISION_ID,
+        ));
+        let security = SecuritySnapshot::new_with_function_targets_and_local_peer_credentials(
+            active.pair(),
+            function_targets,
+            vec![Principal::new(
+                RAW_CLIENT_USER,
+                PrincipalKind::User,
+                PrincipalStatus::Active,
+            )],
+            vec![],
+            vec![
+                ExecuteGrant::new(RAW_CLIENT_USER, client_function),
+                ExecuteGrant::new(RAW_CLIENT_USER, target),
+            ],
+            vec![LocalPeerCredential::new(uid, RAW_CLIENT_USER)],
+        )?;
+        kernel.replace_security_snapshot(&security).await?;
+
+        let standard = active
+            .catalogue_hash_context()
+            .standard()
+            .ok_or_else(|| failure("no-broker resource proof has no standard context"))?;
+        let registry = registered_opaque_codecs(standard)?;
+        let request = InvokeRequest::new(InvokeRequestInput {
+            target: InvocationRequestTarget::function_id(client_function),
+            arguments: Vec::new(),
+            caller_context: InvocationCallerContext::new(
+                InvocationCallerKind::TestRunner,
+                false,
+                false,
+                None,
+                None,
+                "en-GB",
+                "UTC",
+                None,
+            )?,
+            client_offer: InvocationClientOffer::new(
+                CONNECTION_PROTOCOL_MAJOR,
+                "en-GB",
+                "UTC",
+                Vec::new(),
+                Vec::new(),
+                1_024,
+                0,
+                None,
+                None,
+            )?,
+            output_requirement: None,
+            state_profile: None,
+            trace_policy: InvocationTracePolicy::Off,
+            idempotency_key: None,
+            parent_invocation_id: None,
+            observer_context: None,
+        })?;
+        let retained = encode_invoke_request(&active, &registry, &request)?;
+
+        let (server, client_stream) = StandardUnixStream::pair()?;
+        client_stream.set_nonblocking(true)?;
+        let mut client = UnixStream::from_std(client_stream)?;
+        let connection = tokio::spawn(serve_local_raw_stream(
+            kernel.clone(),
+            server,
+            LocalRawSocketResources::new(),
+        ));
+        let operation = async {
+            client
+                .write_all(b"ORNA\x01\x00\x00\x05\x00\x00\x00\x00")
+                .await?;
+            let mut acknowledgement = [0_u8; 12];
+            client.read_exact(&mut acknowledgement).await?;
+            require(
+                acknowledgement == *b"ORNA\x81\x00\x00\x05\x00\x00\x00\x00",
+                "no-broker resource socket did not complete its constructed handshake",
+            )?;
+            for frame in [
+                ClientFrame::CallRawStart {
+                    stream: 1,
+                    function: SYS_INVOKE_FUNCTION_ID,
+                },
+                ClientFrame::WindowUpdate {
+                    stream: 1,
+                    channel: Channel::ResultValues,
+                    credit: 1_024,
+                },
+                ClientFrame::CallInvokeRequest {
+                    stream: 1,
+                    request: retained.clone(),
+                },
+                ClientFrame::CallArgumentsComplete { stream: 1 },
+            ] {
+                send_constructed_protocol_frame(&mut client, &active, &registry, &frame).await?;
+            }
+            require(
+                matches!(
+                    read_constructed_protocol_frame(&mut client, &active, &registry).await?,
+                    ServerFrame::CallAccepted { stream: 1, .. }
+                ),
+                "no-broker resource socket did not accept the sealed invocation",
+            )?;
+            let started = read_constructed_protocol_frame(&mut client, &active, &registry).await?;
+            require(
+                matches!(
+                    &started,
+                    ServerFrame::EventBatch { stream: 1, channel: Channel::ResultValues, events }
+                        if events.len() == 1
+                            && matches!(
+                                &events[0].event,
+                                Event::Value(RuntimeValue::InvokeEvent(event))
+                                    if event.kind() == InvocationEventKind::InvocationStarted
+                            )
+                ),
+                "no-broker resource socket did not publish invocation start",
+            )?;
+            let terminal_events =
+                read_constructed_protocol_frame(&mut client, &active, &registry).await?;
+            require(
+                matches!(
+                    &terminal_events,
+                    ServerFrame::EventBatch { stream: 1, channel: Channel::ResultValues, events }
+                        if events.len() == 2
+                            && matches!(
+                                &events[0].event,
+                                Event::Value(RuntimeValue::InvokeEvent(event))
+                                    if event.kind() == InvocationEventKind::ValueBatch
+                                        && matches!(
+                                            event.body(),
+                                            InvocationEventBody::ValueBatch { schema: None, values }
+                                                if values.len() == 1
+                                                    && values[0].value() == &RuntimeValue::Integer(43)
+                                        )
+                            )
+                            && matches!(
+                                &events[1].event,
+                                Event::Value(RuntimeValue::InvokeEvent(event))
+                                    if event.kind() == InvocationEventKind::InvocationCompleted
+                            )
+                ),
+                "no-broker resource socket did not return its typed scalar and terminal event",
+            )?;
+            require(
+                read_constructed_protocol_frame(&mut client, &active, &registry).await?
+                    == ServerFrame::CallCompleted { stream: 1 },
+                "no-broker resource socket did not close the sealed invocation terminally",
+            )
+        }
+        .await;
+        let shutdown = client.shutdown().await.map_err(Into::into);
+        let connection = connection.await.map_err(Into::into).and_then(|result| {
+            result.map_err(|error| -> Box<dyn Error + Send + Sync> { Box::new(error) })
+        });
+        finish_session(
+            operation,
+            finish_session(shutdown, connection, "no-broker resource socket cleanup"),
+            "no-broker resource socket operation",
+        )?;
+        require_no_database_sessions(&database).await
+    })
+    .await
+}
+#[tokio::test]
+#[ignore = "requires the Compose PostgreSQL development service"]
 async fn proves_procedural_client_resource_through_installed_evaluator() -> TestResult<()> {
     with_test_database(|database| async move {
         let uid = nix::unistd::geteuid().as_raw();
