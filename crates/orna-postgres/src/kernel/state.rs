@@ -285,6 +285,7 @@ impl PostgresKernel {
                 rule: "all USER state changes in one batch must share a root function",
             });
         }
+        reject_duplicate_user_state_keys(changes)?;
         let principal = authenticated_session.principal();
         let mut database_session = self.open().await?;
         let operation = async {
@@ -378,6 +379,7 @@ fn plan_user_state_changes(
     principal: orna_core::PrincipalId,
     current_cells: &mut HashMap<UserStateKey, Option<UserStateCell>>,
 ) -> Result<(Vec<UserStateWriteResult>, Vec<PendingStateWrite>), PostgresKernelError> {
+    reject_duplicate_user_state_keys(changes)?;
     let mut results = Vec::with_capacity(changes.len());
     let mut pending = Vec::new();
     let mut staged_cells = HashMap::<UserStateKey, UserStateCell>::new();
@@ -443,6 +445,21 @@ fn plan_user_state_changes(
         current_cells.insert(key, Some(cell));
     }
     Ok((results, pending))
+}
+
+fn reject_duplicate_user_state_keys(
+    changes: &[UserStateChange],
+) -> Result<(), PostgresKernelError> {
+    let mut keys = HashSet::with_capacity(changes.len());
+    for change in changes {
+        let key = change.key_without_principal();
+        if !keys.insert(key.clone()) {
+            return Err(PostgresKernelError::UserState(UserStateError::InvalidChange {
+                reason: format!("USER state write batch contains duplicate key {key}"),
+            }));
+        }
+    }
+    Ok(())
 }
 
 async fn load_state_cell(
@@ -1221,6 +1238,26 @@ mod tests {
         }));
         assert_eq!(current_cells.get(&default_key), Some(&Some(original_default)));
         assert_eq!(current_cells.get(&named_key), Some(&Some(original_named)));
+    }
+
+    #[test]
+    fn duplicate_keys_fail_preflight_without_staging_or_persistence_plan() {
+        let current = cell(PRINCIPAL, 1, 1);
+        let key = current.key().clone();
+        let original = current.clone();
+        let first = change(Some(1), 2);
+        let second = change(Some(1), 3);
+        let mut current_cells = HashMap::from([(key, Some(current))]);
+
+        let error = plan_user_state_changes(&[first, second], PRINCIPAL, &mut current_cells)
+            .expect_err("duplicate USER state keys must fail before planning");
+
+        assert!(matches!(
+            error,
+            PostgresKernelError::UserState(UserStateError::InvalidChange { .. })
+        ));
+        assert!(error.to_string().contains("duplicate key"));
+        assert_eq!(current_cells.values().next(), Some(&Some(original)));
     }
 
     #[test]
