@@ -7390,7 +7390,7 @@ async fn proves_inspect_capture_and_projections_after_sealed_echo() -> TestResul
 
         // Grant EXECUTE on std.invoke.echo to the proof principal and bind a
         // session, exactly as the sealed-echo proof does.
-        let security = SecuritySnapshot::new_with_function_targets(
+        let security = SecuritySnapshot::new_with_function_targets_local_peer_credentials_and_privilege_grants(
             pair,
             vec![SecurityFunctionTarget::verified_standard(
                 orna_compiler::STD_INVOKE_ECHO_FUNCTION_ID,
@@ -7407,6 +7407,12 @@ async fn proves_inspect_capture_and_projections_after_sealed_echo() -> TestResul
                 V3_PROOF_CLIENT_USER,
                 orna_compiler::STD_INVOKE_ECHO_FUNCTION_ID,
             )],
+            vec![],
+            vec![PrivilegeGrant::new(
+                V3_PROOF_CLIENT_USER,
+                PrivilegeClass::Inspect(InspectPrivilege::Values),
+                None,
+            )?],
         )?;
         let security = kernel.replace_security_snapshot(&security).await?;
         let session = security.bind_authenticated_session(V3_PROOF_CLIENT_USER, vec![])?;
@@ -7478,7 +7484,7 @@ async fn proves_inspect_capture_and_projections_after_sealed_echo() -> TestResul
         // The epoch round-trips through the canonical ORV5 payload and
         // agrees with the invocation, the pinned pair, and the owner.
         let loaded = kernel
-            .load_inspect_snapshot(epoch_id)
+            .load_inspect_snapshot(&session, epoch_id)
             .await?
             .ok_or_else(|| failure("the captured epoch did not load"))?;
         require(
@@ -7497,85 +7503,43 @@ async fn proves_inspect_capture_and_projections_after_sealed_echo() -> TestResul
                     == orna_core::inspect::InspectResultSummary::ValueBatch { value_count: 1 },
             "the loaded epoch did not retain the batch summary",
         )?;
-        require(
-            loaded.invocation_nodes().len() == 1
-                && loaded.invocation_nodes()[0].id() == invocation
-                && loaded.invocation_nodes()[0].kind()
-                    == orna_core::inspect::InspectInvocationNodeKind::Root
-                && loaded.invocation_nodes()[0].phase()
-                    == orna_core::inspect::InspectInvocationPhase::Completed
-                && loaded.invocation_nodes()[0].target()
-                    == orna_compiler::STD_INVOKE_ECHO_FUNCTION_ID,
-            "the loaded epoch did not retain the root invocation node",
-        )?;
-        require(
-            loaded.calls().len() == 1
-                && loaded.calls()[0].invocation_id() == invocation
-                && loaded.calls()[0].value_count() == 1
-                && loaded.calls()[0].duration_nanoseconds() == 0,
-            "the loaded epoch did not retain the root call row",
-        )?;
 
         // The projections return the epoch rows after the ladder check, and
         // a request without a granted privilege fails closed.
-        let nodes = kernel.inspect_invocation_nodes(
-            &session,
-            &loaded,
-            InspectPrivilege::OwnInvocation,
-            &[InspectPrivilege::OwnInvocation],
-        )?;
+        let nodes = kernel.inspect_invocation_nodes(&loaded, InspectPrivilege::OwnInvocation)?;
         require(
-            nodes == loaded.invocation_nodes(),
-            "invocation_nodes projection drifted",
+            nodes.len() == 1
+                && nodes[0].id() == invocation
+                && nodes[0].kind() == orna_core::inspect::InspectInvocationNodeKind::Root
+                && nodes[0].phase() == orna_core::inspect::InspectInvocationPhase::Completed
+                && nodes[0].target() == orna_compiler::STD_INVOKE_ECHO_FUNCTION_ID,
+            "the loaded epoch did not retain the root invocation node",
         )?;
-        let calls = kernel.inspect_calls(
-            &session,
-            &loaded,
-            InspectPrivilege::OwnInvocation,
-            &[InspectPrivilege::OwnInvocation],
+        let calls = kernel.inspect_calls(&loaded, InspectPrivilege::OwnInvocation)?;
+        require(
+            calls.len() == 1
+                && calls[0].invocation_id() == invocation
+                && calls[0].value_count() == 1
+                && calls[0].duration_nanoseconds() == 0,
+            "the loaded epoch did not retain the root call row",
         )?;
-        require(calls == loaded.calls(), "calls projection drifted")?;
+
         require(
             kernel
-                .inspect_resources(
-                    &session,
-                    &loaded,
-                    InspectPrivilege::OwnInvocation,
-                    &[InspectPrivilege::OwnInvocation],
-                )?
+                .inspect_resources(&loaded, InspectPrivilege::OwnInvocation)?
                 .is_empty()
                 && kernel
-                    .inspect_ui_nodes(
-                        &session,
-                        &loaded,
-                        InspectPrivilege::OwnInvocation,
-                        &[InspectPrivilege::OwnInvocation],
-                    )?
+                    .inspect_ui_nodes(&loaded, InspectPrivilege::OwnInvocation)?
                     .is_empty()
                 && kernel
-                    .inspect_presentation_candidates(
-                        &session,
-                        &loaded,
-                        InspectPrivilege::OwnInvocation,
-                        &[InspectPrivilege::OwnInvocation],
-                    )?
+                    .inspect_presentation_candidates(&loaded, InspectPrivilege::OwnInvocation)?
                     .is_empty()
                 && kernel
-                    .inspect_runtime_bindings(
-                        &session,
-                        &loaded,
-                        InspectPrivilege::OwnInvocation,
-                        &[InspectPrivilege::OwnInvocation],
-                    )?
+                    .inspect_runtime_bindings(&loaded, InspectPrivilege::OwnInvocation)?
                     .is_empty(),
             "the v1-empty projections returned non-empty rows",
         )?;
-        let denied = kernel.inspect_invocation_nodes(
-            &session,
-            &loaded,
-            InspectPrivilege::OwnInvocation,
-            &[],
-        );
+        let denied = kernel.inspect_invocation_nodes(&loaded, InspectPrivilege::Source);
         require(
             matches!(denied, Err(PostgresKernelError::InspectDenied { .. })),
             "a projection without a granted privilege did not fail closed",
@@ -7605,10 +7569,8 @@ async fn proves_inspect_capture_and_projections_after_sealed_echo() -> TestResul
         // returns only rows strictly after it.
         let stream = kernel
             .stream_inspect_trace(
-                &session,
                 &loaded,
                 InspectPrivilege::Values,
-                &[InspectPrivilege::OwnInvocation, InspectPrivilege::Values],
                 invocation,
                 0,
                 None,
@@ -7635,10 +7597,8 @@ async fn proves_inspect_capture_and_projections_after_sealed_echo() -> TestResul
         )?;
         let resumed = kernel
             .stream_inspect_trace(
-                &session,
                 &loaded,
                 InspectPrivilege::Values,
-                &[InspectPrivilege::OwnInvocation, InspectPrivilege::Values],
                 invocation,
                 1,
                 None,
@@ -7691,10 +7651,8 @@ async fn proves_inspect_capture_and_projections_after_sealed_echo() -> TestResul
         }
         let suppressed = kernel
             .stream_inspect_trace(
-                &session,
                 &loaded,
                 InspectPrivilege::Values,
-                &[InspectPrivilege::OwnInvocation, InspectPrivilege::Values],
                 invocation,
                 1,
                 Some(observer),
@@ -7707,10 +7665,8 @@ async fn proves_inspect_capture_and_projections_after_sealed_echo() -> TestResul
         )?;
         let included = kernel
             .stream_inspect_trace(
-                &session,
                 &loaded,
                 InspectPrivilege::Values,
-                &[InspectPrivilege::OwnInvocation, InspectPrivilege::Values],
                 invocation,
                 1,
                 Some(observer),
@@ -7727,13 +7683,11 @@ async fn proves_inspect_capture_and_projections_after_sealed_echo() -> TestResul
 
         let redacted = kernel
             .stream_inspect_trace(
-                &session,
                 &loaded,
                 InspectPrivilege::OwnInvocation,
-                &[InspectPrivilege::OwnInvocation],
                 invocation,
                 0,
-                None,
+                Some(observer),
                 false,
             )
             .await?;
@@ -7747,10 +7701,8 @@ async fn proves_inspect_capture_and_projections_after_sealed_echo() -> TestResul
         )?;
         let denied = kernel
             .stream_inspect_trace(
-                &session,
                 &loaded,
-                InspectPrivilege::OwnInvocation,
-                &[],
+                InspectPrivilege::Source,
                 invocation,
                 0,
                 None,
@@ -7772,10 +7724,8 @@ async fn proves_inspect_capture_and_projections_after_sealed_echo() -> TestResul
         // granted.
         let cells = kernel
             .inspect_state_cells(
-                &session,
                 &loaded,
                 InspectPrivilege::Values,
-                &[InspectPrivilege::OwnInvocation, InspectPrivilege::Values],
             )
             .await?;
         require(
@@ -7797,10 +7747,8 @@ async fn proves_inspect_capture_and_projections_after_sealed_echo() -> TestResul
         )?;
         let redacted = kernel
             .inspect_state_cells(
-                &session,
                 &loaded,
                 InspectPrivilege::OwnInvocation,
-                &[InspectPrivilege::OwnInvocation],
             )
             .await?;
         require(
@@ -7809,24 +7757,28 @@ async fn proves_inspect_capture_and_projections_after_sealed_echo() -> TestResul
         )?;
 
         // The security_decisions projection returns the linked EXECUTE
-        // decision that admitted the captured invocation.
+        // decision and the INSPECT decision that captured this epoch.
         let decisions = kernel
             .inspect_security_decisions(
-                &session,
                 &loaded,
                 InspectPrivilege::OwnInvocation,
-                &[InspectPrivilege::OwnInvocation],
             )
             .await?;
         require(
-            decisions.len() == 1
+            decisions.len() == 2
                 && decisions[0].kind() == InspectSecurityDecisionKind::Execute
                 && decisions[0].outcome() == InspectSecurityDecisionOutcome::Allowed
                 && decisions[0].principals().contains(&V3_PROOF_CLIENT_USER)
                 && decisions[0].target() == Some(orna_compiler::STD_INVOKE_ECHO_FUNCTION_ID)
                 && decisions[0].denial_reason().is_none()
-                && decisions[0].audit_refs().len() == 1,
-            "the security_decisions projection did not return the linked EXECUTE decision",
+                && decisions[0].audit_refs().len() == 1
+                && decisions[1].kind() == InspectSecurityDecisionKind::Inspect
+                && decisions[1].outcome() == InspectSecurityDecisionOutcome::Allowed
+                && decisions[1].principals().contains(&V3_PROOF_CLIENT_USER)
+                && decisions[1].target().is_none()
+                && decisions[1].denial_reason().is_none()
+                && decisions[1].audit_refs().len() == 1,
+            "the security_decisions projection did not return the linked EXECUTE and INSPECT decisions",
         )?;
 
         // A fresh recovery validates the inspection relations and the
@@ -8211,7 +8163,7 @@ async fn proves_find_latest_inspect_epoch_resolves_the_dispatch_epoch() -> TestR
             .await?;
         let epoch_id = found.ok_or_else(|| failure("the dispatched invocation has no epoch"))?;
         let loaded = kernel
-            .load_inspect_snapshot(epoch_id)
+            .load_inspect_snapshot(&session, epoch_id)
             .await?
             .ok_or_else(|| failure("the resolved epoch did not load"))?;
         require(
