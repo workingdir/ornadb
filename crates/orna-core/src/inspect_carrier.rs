@@ -3,7 +3,7 @@
 //! This module knows only the *shape* of ORV5 values. Active-catalogue and
 //! opaque-codec validation remains at the protocol/server boundary.
 
-use std::{error::Error, fmt};
+use std::{collections::HashSet, error::Error, fmt};
 
 use crate::{CatalogueRevisionId, InvocationId, SourceRevisionId, TypeId};
 
@@ -575,7 +575,7 @@ fn validate_record_payload(payload: &[u8], depth: usize) -> Result<(), InspectRo
     }
     let count = u32::from_be_bytes(payload[..4].try_into().expect("record count width")) as usize;
     let mut cursor = 4;
-    let mut previous_field_identity: Option<&[u8]> = None;
+    let mut field_identities = HashSet::new();
     for _ in 0..count {
         if payload.len().saturating_sub(cursor) < RECORD_FIELD_HEADER_BYTES {
             return Err(InspectRowError::TruncatedRecord {
@@ -598,10 +598,9 @@ fn validate_record_payload(payload: &[u8], depth: usize) -> Result<(), InspectRo
             });
         }
         validate_orv5_value(&payload[cursor..cursor + length], depth + 1)?;
-        if previous_field_identity.is_some_and(|previous| previous >= field_identity) {
+        if !field_identities.insert(field_identity) {
             return Err(InspectRowError::NonCanonicalRecordFieldOrder);
         }
-        previous_field_identity = Some(field_identity);
         cursor += length;
     }
     if cursor == payload.len() {
@@ -1139,28 +1138,24 @@ mod tests {
     }
 
     #[test]
-    fn descending_record_field_identity_is_rejected() {
-        let descending = record_row(&[([2; 16], 1), ([1; 16], 2)]);
-        assert_eq!(
-            validate_orv5_row_frame(&descending),
-            Err(InspectRowError::NonCanonicalRecordFieldOrder)
-        );
+    fn declaration_order_allows_non_lexicographic_field_identities() {
+        let declaration_order = record_row(&[([2; 16], 1), ([1; 16], 2)]);
+        assert_eq!(validate_orv5_row_frame(&declaration_order), Ok(()));
         assert_eq!(
             InspectCarrierEnvelope::new(
                 InspectCarrierKind::Calls,
                 1,
                 source(),
                 catalogue(),
-                vec![descending],
-            ),
-            Err(InspectCarrierError::InvalidRow(
-                InspectRowError::NonCanonicalRecordFieldOrder
-            ))
+                vec![declaration_order],
+            )
+            .map(|_| ()),
+            Ok(())
         );
     }
 
     #[test]
-    fn decode_rejects_noncanonical_record_field_identity_order() {
+    fn decode_rejects_duplicate_record_field_identity() {
         let valid = InspectCarrierEnvelope::new(
             InspectCarrierKind::Calls,
             1,
@@ -1168,7 +1163,7 @@ mod tests {
             catalogue(),
             vec![record_row(&[([1; 16], 1), ([2; 16], 2)])],
         )
-        .expect("strictly ordered record fields are valid")
+        .expect("record fields are valid")
         .encode()
         .expect("valid record carrier encodes");
         let second_identity = 66 + ORV5_HEADER_BYTES + 4 + RECORD_FIELD_HEADER_BYTES
@@ -1185,12 +1180,7 @@ mod tests {
 
         let mut descending_wire = valid;
         descending_wire[second_identity..second_identity + 16].copy_from_slice(&[0; 16]);
-        assert_eq!(
-            InspectCarrierEnvelope::decode(&descending_wire),
-            Err(InspectCarrierError::InvalidRow(
-                InspectRowError::NonCanonicalRecordFieldOrder
-            ))
-        );
+        assert!(InspectCarrierEnvelope::decode(&descending_wire).is_ok());
     }
 
     #[test]
