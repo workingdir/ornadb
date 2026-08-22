@@ -51,6 +51,18 @@ const BASE_SOURCE: &str = "CREATE SCHEMA app;\n\
     TRANSACTION READ ONLY VOLATILITY STABLE\n\
     AS SELECT widget.name FROM app.widget widget;\n";
 
+/// The candidate changes only the executable body of `app.read`; its
+/// catalogue definition remains unchanged, so the function revision facts are
+/// the only semantic difference.
+const BODY_ONLY_SOURCE: &str = "CREATE SCHEMA app;\n\
+    CREATE TYPE app.widget AS OBJECT (name TEXT NOT NULL);\n\
+    CREATE SERVER FUNCTION app.read() RETURNS ROWS (name TEXT)\n\
+    TRANSACTION READ ONLY VOLATILITY STABLE\n\
+    AS SELECT widget.name FROM app.widget widget ORDER BY widget.name;\n\
+    CREATE SERVER FUNCTION app.gone() RETURNS ROWS (name TEXT)\n\
+    TRANSACTION READ ONLY VOLATILITY STABLE\n\
+    AS SELECT widget.name FROM app.widget widget;\n";
+
 /// The candidate: the field `name` is renamed to `label` through the
 /// identity-preserving `ALTER TYPE ... RENAME FIELD` form (work ADR 0006),
 /// `app.fresh` is added, and `app.gone` is dropped.
@@ -146,6 +158,21 @@ async fn proves_installed_source_diff_end_to_end() -> TestResult<()> {
             .and_then(|object| object.fields().iter().find(|field| field.name() == "name"))
             .map(|field| field.id().canonical().to_owned())
             .ok_or_else(|| failure("the installed base is missing app.widget.name"))?;
+
+        // A body-only edit keeps the FunctionDefinition stable but allocates
+        // a new immutable executable revision.
+        let (outcome, stdout) = diff_run(&database, BODY_ONLY_SOURCE).await?;
+        require(
+            matches!(outcome, Ok(InstalledSourceDiffOutcome::Diff(_))),
+            "the body-only candidate did not produce a prepared report",
+        )?;
+        let text =
+            String::from_utf8(stdout).map_err(|_| failure("the diff stdout was not UTF-8 text"))?;
+        require(
+            text.contains("! function app.read executable revision")
+                && !text.contains("no semantic changes"),
+            "the body-only revision change was not rendered: {text}",
+        )?;
 
         // The candidate renames the object field through the identity
         // preserving ALTER form, adds one function, and drops one; the
