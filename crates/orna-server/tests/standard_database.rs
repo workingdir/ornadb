@@ -4197,9 +4197,27 @@ async fn raw_argument_authority_denies_then_grants_and_audits_each_dispatch() ->
 
 /// Proves the raw socket-facing dispatch boundary exposes only the approved
 /// version-2 identity-selected SERVER SELECT form.
-#[tokio::test]
+#[test]
 #[ignore = "requires the Compose PostgreSQL development service"]
-async fn raw_identity_selected_server_read_authorises_binds_and_redacts() -> TestResult<()> {
+fn raw_identity_selected_server_read_authorises_binds_and_redacts() -> TestResult<()> {
+    let handle = std::thread::Builder::new()
+        .name("raw-identity-live".to_owned())
+        .stack_size(4 * 1024 * 1024)
+        .spawn(|| {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|error| failure(format!("raw identity live runtime could not start: {error}")))?;
+            runtime.block_on(raw_identity_selected_server_read_authorises_binds_and_redacts_inner())
+        })
+        .map_err(|error| failure(format!("raw identity live thread could not start: {error}")))?;
+    match handle.join() {
+        Ok(result) => result,
+        Err(_) => Err(failure("raw identity live thread panicked")),
+    }
+}
+
+async fn raw_identity_selected_server_read_authorises_binds_and_redacts_inner() -> TestResult<()> {
     with_test_database(|database| async move {
         let kernel = kernel(&database)?;
         let (active, _standard_upgrade, _client_function, legacy_read) =
