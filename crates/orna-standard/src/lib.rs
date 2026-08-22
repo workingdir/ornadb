@@ -4092,15 +4092,24 @@ mod tests {
         STANDARD_LIBRARY_V2_REVISION_ID, STANDARD_LIBRARY_V2_VERSION_IDENTITY,
         STANDARD_LIBRARY_V3_REVISION_ID, STANDARD_LIBRARY_V3_VERSION_IDENTITY,
         STANDARD_LIBRARY_V4_REVISION_ID, STANDARD_LIBRARY_V4_VERSION_IDENTITY,
+        STANDARD_LIBRARY_V5_REVISION_ID, STANDARD_LIBRARY_V5_VERSION_IDENTITY,
+        STANDARD_LIBRARY_V6_REVISION_ID, STANDARD_LIBRARY_V6_VERSION_IDENTITY,
         STANDARD_LIBRARY_VERSION_IDENTITY, STANDARD_SOURCE_BUNDLE_ID,
         STANDARD_SOURCE_REVISION_ID, STANDARD_SOURCE_UNIT_ID, STANDARD_SOURCE_V2_BUNDLE_ID,
         STANDARD_SOURCE_V2_REVISION_ID, STANDARD_SOURCE_V3_BUNDLE_ID,
         STANDARD_SOURCE_V3_REVISION_ID, STANDARD_SOURCE_V4_BUNDLE_ID,
-        STANDARD_SOURCE_V4_REVISION_ID, STANDARD_TYPE_IDS, STD_INTEGER_TYPE_ID,
+        STANDARD_SOURCE_V4_REVISION_ID, STANDARD_SOURCE_V5_BUNDLE_ID,
+        STANDARD_SOURCE_V5_REVISION_ID, STANDARD_SOURCE_V6_BUNDLE_ID,
+        STANDARD_SOURCE_V6_REVISION_ID, STANDARD_TYPE_IDS, STD_INTEGER_TYPE_ID,
+        STANDARD_CATALOGUE_V5_REVISION_ID, STANDARD_CATALOGUE_V6_REVISION_ID,
+        ACTION_MAGIC, JSON_MAGIC, STD_ACTION_CONTRACT, STD_ACTION_SCHEMA_ID,
+        STD_ACTION_SOURCE_LOGICAL_PATH, STD_ACTION_SOURCE_UNIT_ID, STD_ACTION_TYPE_ID,
         STD_INVOKE_ECHO_FUNCTION_ID, STD_INVOKE_ECHO_FUNCTION_REVISION_ID,
         STD_INVOKE_ECHO_PARAMETER_ID, STD_INVOKE_ECHO_REVISION_NUMBER, STD_INVOKE_SCHEMA_ID,
         STD_INVOKE_SOURCE_LOGICAL_PATH, STD_INVOKE_SOURCE_UNIT_ID, STD_IO_BYTE_STREAM_CONTRACT,
-        STD_IO_BYTE_STREAM_TYPE_ID, STD_IO_SCHEMA_ID, STD_OUTPUT_SOURCE_LOGICAL_PATH,
+        STD_IO_BYTE_STREAM_TYPE_ID, STD_IO_SCHEMA_ID, STD_JSON_CONTRACT,
+        STD_JSON_ENCODE_FUNCTION_ID, STD_JSON_SCHEMA_ID, STD_JSON_SOURCE_LOGICAL_PATH,
+        STD_JSON_SOURCE_UNIT_ID, STD_JSON_VALUE_TYPE_ID, STD_OUTPUT_SOURCE_LOGICAL_PATH,
         STD_OUTPUT_SOURCE_UNIT_ID, STD_SCHEMA_ID, STD_TERMINAL_DOCUMENT_CONTRACT,
         STD_TERMINAL_DOCUMENT_TYPE_ID, STD_TERMINAL_SCHEMA_ID, STD_TYPES_SCHEMA_ID,
         STD_TYPES_SOURCE_UNIT_ID, STD_UI_CONTRACT, STD_UI_SCHEMA_ID, STD_UI_SOURCE_LOGICAL_PATH,
@@ -8311,6 +8320,259 @@ EXPORT TYPE std.ui.UI AS std.UI;
     }
 
 
+
+    #[test]
+    fn v5_and_v6_retain_the_locked_sources_and_catalogue_identities() {
+        let v4 = super::retained_standard_library_v4_snapshot()
+            .expect("the retained V4 source is valid");
+        let v5 = super::retained_standard_library_v5_snapshot()
+            .expect("the retained V5 source is valid");
+        let v6 = super::retained_standard_library_v6_snapshot()
+            .expect("the retained V6 source is valid");
+
+        assert_eq!(
+            super::standard_library_v5_manifest()
+                .expect("the V5 manifest is valid")
+                .standard_library_version(),
+            STANDARD_LIBRARY_V5_VERSION_IDENTITY
+        );
+        assert_eq!(v5.revision(), STANDARD_LIBRARY_V5_REVISION_ID);
+        assert_eq!(v5.catalogue().revision(), STANDARD_CATALOGUE_V5_REVISION_ID);
+        assert_eq!(v5.source().bundle(), STANDARD_SOURCE_V5_BUNDLE_ID);
+        assert_eq!(v5.source().id(), STANDARD_SOURCE_V5_REVISION_ID);
+        assert_eq!(v5.source().parent(), Some(STANDARD_SOURCE_V4_REVISION_ID));
+        assert_eq!(v5.source().units().len(), 5);
+        assert_eq!(&v5.source().units()[..4], v4.source().units());
+        assert_eq!(v5.source().units()[4].id(), STD_JSON_SOURCE_UNIT_ID);
+        assert_eq!(v5.source().units()[4].ordinal(), 4);
+        assert_eq!(
+            v5.source().units()[4].logical_path(),
+            STD_JSON_SOURCE_LOGICAL_PATH
+        );
+        assert_eq!(v5.source().units()[4].content(), super::RETAINED_STANDARD_JSON_SOURCE);
+        assert_eq!(v5.catalogue().schemas().len(), 7);
+        assert_eq!(v5.catalogue().value_types().len(), 18);
+        assert_eq!(v5.catalogue().type_bindings().len(), 35);
+        assert_eq!(v5.catalogue().functions().len(), 2);
+        assert_eq!(v5.origins().len(), 64);
+
+        let json_schema = v5
+            .catalogue()
+            .schema_by_id(STD_JSON_SCHEMA_ID)
+            .expect("the V5 JSON schema is retained");
+        assert_eq!(json_schema.name().to_string(), "std.json");
+        let json_type = v5
+            .catalogue()
+            .type_definition_by_id(STD_JSON_VALUE_TYPE_ID)
+            .expect("the V5 JSON value type is retained")
+            .as_opaque_value()
+            .expect("the V5 JSON value type is opaque");
+        assert_eq!(json_type.name().to_string(), "std.json.value");
+        assert_eq!(json_type.representation_contract(), STD_JSON_CONTRACT);
+        assert_eq!(
+            v5.catalogue()
+                .type_bindings()
+                .iter()
+                .find(|binding| binding.target() == STD_JSON_VALUE_TYPE_ID)
+                .expect("the V5 JSON export is retained")
+                .name()
+                .to_string(),
+            "std.jsonvalue"
+        );
+        assert!(v5
+            .catalogue()
+            .function_by_id(STD_JSON_ENCODE_FUNCTION_ID)
+            .is_some());
+
+        assert_eq!(
+            super::standard_library_v6_manifest()
+                .expect("the V6 manifest is valid")
+                .standard_library_version(),
+            STANDARD_LIBRARY_V6_VERSION_IDENTITY
+        );
+        assert_eq!(v6.revision(), STANDARD_LIBRARY_V6_REVISION_ID);
+        assert_eq!(v6.catalogue().revision(), STANDARD_CATALOGUE_V6_REVISION_ID);
+        assert_eq!(v6.source().bundle(), STANDARD_SOURCE_V6_BUNDLE_ID);
+        assert_eq!(v6.source().id(), STANDARD_SOURCE_V6_REVISION_ID);
+        assert_eq!(v6.source().parent(), Some(STANDARD_SOURCE_V5_REVISION_ID));
+        assert_eq!(v6.source().units().len(), 6);
+        assert_eq!(&v6.source().units()[..5], v5.source().units());
+        assert_eq!(v6.source().units()[5].id(), STD_ACTION_SOURCE_UNIT_ID);
+        assert_eq!(v6.source().units()[5].ordinal(), 5);
+        assert_eq!(
+            v6.source().units()[5].logical_path(),
+            STD_ACTION_SOURCE_LOGICAL_PATH
+        );
+        assert_eq!(
+            v6.source().units()[5].content(),
+            super::RETAINED_STANDARD_ACTION_SOURCE
+        );
+        assert_eq!(v6.catalogue().schemas().len(), 8);
+        assert_eq!(v6.catalogue().value_types().len(), 19);
+        assert_eq!(v6.catalogue().type_bindings().len(), 36);
+        assert_eq!(v6.catalogue().functions(), v5.catalogue().functions());
+        assert_eq!(v6.origins().len(), 67);
+
+        let action_schema = v6
+            .catalogue()
+            .schema_by_id(STD_ACTION_SCHEMA_ID)
+            .expect("the V6 action schema is retained");
+        assert_eq!(action_schema.name().to_string(), "std.action");
+        let action_type = v6
+            .catalogue()
+            .type_definition_by_id(STD_ACTION_TYPE_ID)
+            .expect("the V6 action value type is retained")
+            .as_opaque_value()
+            .expect("the V6 action value type is opaque");
+        assert_eq!(action_type.name().to_string(), "std.action.action");
+        assert_eq!(action_type.representation_contract(), STD_ACTION_CONTRACT);
+        assert_eq!(
+            v6.catalogue()
+                .type_bindings()
+                .iter()
+                .find(|binding| binding.target() == STD_ACTION_TYPE_ID)
+                .expect("the V6 action export is retained")
+                .name()
+                .to_string(),
+            "std.action"
+        );
+    }
+
+    #[test]
+    fn v5_and_v6_digest_goldens_cover_retained_units_and_catalogues() {
+        let v5 = super::retained_standard_library_v5_snapshot()
+            .expect("the retained V5 source is valid");
+        let v6 = super::retained_standard_library_v6_snapshot()
+            .expect("the retained V6 source is valid");
+
+        let v5_expected = [
+            super::ACCEPTED_V5_TYPES_CONTENT_DIGEST,
+            super::ACCEPTED_V5_INVOKE_CONTENT_DIGEST,
+            super::ACCEPTED_V5_OUTPUT_CONTENT_DIGEST,
+            super::ACCEPTED_V5_UI_CONTENT_DIGEST,
+            super::ACCEPTED_V5_JSON_CONTENT_DIGEST,
+        ];
+        for (unit, expected) in v5.source().units().iter().zip(v5_expected) {
+            assert_eq!(
+                source_unit_content_digest(unit.content()).expect("the V5 unit digest is valid"),
+                expected
+            );
+        }
+        assert_eq!(
+            source_bundle_digest(v5.source().units()).expect("the V5 bundle digest is valid"),
+            super::ACCEPTED_V5_SOURCE_BUNDLE_DIGEST
+        );
+        assert_eq!(
+            source_revision_record_digest(
+                STANDARD_SOURCE_V5_BUNDLE_ID,
+                Some(STANDARD_SOURCE_V4_REVISION_ID),
+                v5.source().bundle_hash(),
+            )
+            .expect("the V5 source revision digest is valid"),
+            super::ACCEPTED_V5_SOURCE_REVISION_DIGEST
+        );
+        assert_eq!(
+            standard_library_digest(&v5).expect("the V5 standard digest recomputes"),
+            super::ACCEPTED_V5_STANDARD_LIBRARY_DIGEST
+        );
+        assert_eq!(v5.digest(), super::ACCEPTED_V5_STANDARD_LIBRARY_DIGEST);
+
+        let v6_expected = [
+            super::ACCEPTED_V6_TYPES_CONTENT_DIGEST,
+            super::ACCEPTED_V6_INVOKE_CONTENT_DIGEST,
+            super::ACCEPTED_V6_OUTPUT_CONTENT_DIGEST,
+            super::ACCEPTED_V6_UI_CONTENT_DIGEST,
+            super::ACCEPTED_V6_JSON_CONTENT_DIGEST,
+            super::ACCEPTED_V6_ACTION_CONTENT_DIGEST,
+        ];
+        for (unit, expected) in v6.source().units().iter().zip(v6_expected) {
+            assert_eq!(
+                source_unit_content_digest(unit.content()).expect("the V6 unit digest is valid"),
+                expected
+            );
+        }
+        assert_eq!(
+            source_bundle_digest(v6.source().units()).expect("the V6 bundle digest is valid"),
+            super::ACCEPTED_V6_SOURCE_BUNDLE_DIGEST
+        );
+        assert_eq!(
+            source_revision_record_digest(
+                STANDARD_SOURCE_V6_BUNDLE_ID,
+                Some(STANDARD_SOURCE_V5_REVISION_ID),
+                v6.source().bundle_hash(),
+            )
+            .expect("the V6 source revision digest is valid"),
+            super::ACCEPTED_V6_SOURCE_REVISION_DIGEST
+        );
+        assert_eq!(
+            standard_library_digest(&v6).expect("the V6 standard digest recomputes"),
+            super::ACCEPTED_V6_STANDARD_LIBRARY_DIGEST
+        );
+        assert_eq!(v6.digest(), super::ACCEPTED_V6_STANDARD_LIBRARY_DIGEST);
+    }
+
+    #[test]
+    fn v5_and_v6_opaque_codecs_match_the_append_only_registration_surface() {
+        let v4 = super::verify_standard_library_v4_snapshot(
+            super::retained_standard_library_v4_snapshot()
+                .expect("the retained V4 source is valid"),
+        )
+        .expect("the retained V4 source verifies");
+        let v5 = super::verify_standard_library_v5_snapshot(
+            super::retained_standard_library_v5_snapshot()
+                .expect("the retained V5 source is valid"),
+        )
+        .expect("the retained V5 source verifies");
+        let v6 = super::verify_standard_library_v6_snapshot(
+            super::retained_standard_library_v6_snapshot()
+                .expect("the retained V6 source is valid"),
+        )
+        .expect("the retained V6 source verifies");
+        let v4_registry = super::registered_opaque_codecs(&v4).expect("the V4 codecs register");
+        let v5_registry = super::registered_opaque_codecs(&v5).expect("the V5 codecs register");
+        let v6_registry = super::registered_opaque_codecs(&v6).expect("the V6 codecs register");
+        let v4_active = empty_version_two_active_revision(&v4);
+        let v5_active = empty_version_two_active_revision(&v5);
+        let v6_active = empty_version_two_active_revision(&v6);
+
+        let mut json_payload = Vec::from(JSON_MAGIC.as_bytes());
+        json_payload.extend_from_slice(&7_u32.to_be_bytes());
+        json_payload.extend_from_slice(br#"{"a":1}"#);
+        assert_eq!(
+            OpaqueValue::new(&v4_active, &v4_registry, STD_JSON_VALUE_TYPE_ID, &json_payload),
+            Err(OpaqueValueError::UnregisteredType {
+                opaque_type: STD_JSON_VALUE_TYPE_ID
+            })
+        );
+        assert_eq!(
+            OpaqueValue::new(&v5_active, &v5_registry, STD_JSON_VALUE_TYPE_ID, &json_payload)
+                .expect("the V5 JSON codec is registered")
+                .canonical_payload(),
+            json_payload.as_slice()
+        );
+        assert_eq!(
+            OpaqueValue::new(&v6_active, &v6_registry, STD_JSON_VALUE_TYPE_ID, &json_payload)
+                .expect("the V6 retained JSON codec is registered")
+                .canonical_payload(),
+            json_payload.as_slice()
+        );
+
+        let mut action_payload = Vec::from(ACTION_MAGIC.as_bytes());
+        action_payload.extend_from_slice(&3_u32.to_be_bytes());
+        action_payload.extend_from_slice(&[0xa5, 0x00, 0xff]);
+        assert_eq!(
+            OpaqueValue::new(&v5_active, &v5_registry, STD_ACTION_TYPE_ID, &action_payload),
+            Err(OpaqueValueError::UnregisteredType {
+                opaque_type: STD_ACTION_TYPE_ID
+            })
+        );
+        assert_eq!(
+            OpaqueValue::new(&v6_active, &v6_registry, STD_ACTION_TYPE_ID, &action_payload)
+                .expect("the V6 action codec is registered")
+                .canonical_payload(),
+            action_payload.as_slice()
+        );
+    }
 
     #[test]
     fn inspect_carrier_registry_is_fixed_and_deterministic() {
