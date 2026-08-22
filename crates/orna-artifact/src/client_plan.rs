@@ -1897,6 +1897,7 @@ fn encode_expression_node_with_inspect(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn encode_expression_node_with_resources(
     node: &ClientExpressionNode,
     writer: &mut NodeWriter,
@@ -2290,14 +2291,14 @@ fn validate_procedural_model(plan: &ProceduralClientPlan) -> Result<(), ClientPl
             ClientLocalKind::Value | ClientLocalKind::Resource(_) => {}
         }
         match (target.kind, statement.expression()) {
-            (ClientLocalKind::Resource(_), ClientExpressionNode::Resource { operation }) => {
-                if operation.result_type() != target.type_id {
-                    return Err(ClientPlanError::ProceduralLocalTypeMismatch {
-                        local: target.local,
-                        expected: target.type_id,
-                        actual: operation.result_type(),
-                    });
-                }
+            (ClientLocalKind::Resource(_), ClientExpressionNode::Resource { operation })
+                if operation.result_type() != target.type_id =>
+            {
+                return Err(ClientPlanError::ProceduralLocalTypeMismatch {
+                    local: target.local,
+                    expected: target.type_id,
+                    actual: operation.result_type(),
+                });
             }
             (ClientLocalKind::Resource(_), ClientExpressionNode::LocalRead { local }) => {
                 let source = locals
