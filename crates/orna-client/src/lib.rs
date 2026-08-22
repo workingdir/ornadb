@@ -16779,7 +16779,7 @@ pub mod runtime_conformance {
                         .is_some_and(|children| children.iter().all(valid_ui_value))
             }
             Some("node") => {
-                if value.len() < 8 || value.len() > 9 {
+                if value.len() < 5 || value.len() > 9 {
                     return false;
                 }
                 if value.keys().any(|key| {
@@ -16801,11 +16801,10 @@ pub mod runtime_conformance {
                 if !value.get("contract").is_some_and(valid_contract)
                     || !value
                         .get("call_site_id")
-                        .is_some_and(|id| id.is_null() || id.is_string())
+                        .is_none_or(|id| id.is_null() || id.is_string())
                     || !value
                         .get("function_instance_id")
-                        .is_some_and(|id| id.is_null() || id.is_string())
-                    || !value.get("key").is_some()
+                        .is_none_or(|id| id.is_null() || id.is_string())
                 {
                     return false;
                 }
@@ -20130,6 +20129,33 @@ pub mod runtime_conformance {
         assert!(!valid_canonical_frame(
             b"ORNA-UI/1 \0\0\0\x0f{\"kind\":\"node\"}"
         ));
+    }
+    #[test]
+    fn canonical_frame_validation_accepts_minimal_nodes_and_optional_metadata() {
+        let frame_for = |body: &[u8]| {
+            let mut frame = Vec::from(b"ORNA-UI/1 ".as_slice());
+            frame.extend_from_slice(&(body.len() as u32).to_be_bytes());
+            frame.extend_from_slice(body);
+            frame
+        };
+        let minimal = frame_for(
+            br#"{"actions":{},"contract":{"id":"std.ui.UI","name":"std.ui.UI","version":"1.0"},"kind":"node","properties":{},"slots":{}}"#,
+        );
+        assert!(valid_canonical_frame(&minimal));
+
+        let with_optional = frame_for(
+            br#"{"actions":{"activate":{"action_id":"action","debug_kind":null,"input_type":"bool","label":"Activate"}},"call_site_id":"call-site","contract":{"id":"std.ui.UI","name":"std.ui.UI","version":"1.0"},"function_instance_id":null,"key":null,"kind":"node","properties":{},"slots":{},"source_origin":{"source_unit_id":"unit"}}"#,
+        );
+        assert!(valid_canonical_frame(&with_optional));
+    }
+
+    #[test]
+    fn canonical_frame_validation_rejects_unknown_node_fields() {
+        let body = br#"{"actions":{},"contract":{"id":"std.ui.UI","name":"std.ui.UI","version":"1.0"},"kind":"node","properties":{},"slots":{},"unexpected":true}"#;
+        let mut frame = Vec::from(b"ORNA-UI/1 ".as_slice());
+        frame.extend_from_slice(&(body.len() as u32).to_be_bytes());
+        frame.extend_from_slice(body);
+        assert!(!valid_canonical_frame(&frame));
     }
     #[cfg(feature = "test-hooks")]
     #[test]
