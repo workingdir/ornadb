@@ -2332,6 +2332,12 @@ impl ClientResourceExecutor for InstalledClientResourceExecutor {
         self.discard_raw_resource_request(pending.stream_id);
         match outcome {
             Some(CancellationWaitOutcome::Terminal(result)) => {
+                let _ = pending.worker.join();
+                self.transport = pending
+                    .transport_return
+                    .lock()
+                    .expect("resource transport return lock")
+                    .take();
                 map_resource_transport_completion(pending.request, result)
             }
             Some(CancellationWaitOutcome::TimedOut) | None => {
