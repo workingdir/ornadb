@@ -2,9 +2,10 @@
 //!
 //! [`run_installed_source_diff`] checks one application source file against
 //! the fixed private instance, prepares its candidate revision without
-//! applying it, and renders the semantic changes between the candidate and
-//! the active catalogue. The command never writes a standard stream, never
-//! installs a candidate, and never changes the active revision pair.
+//! applying it, and renders semantic changes between the candidate and active
+//! catalogues and their executable function revisions. The command never
+//! writes a standard stream, never installs a candidate, and never changes the
+//! active revision pair.
 
 use std::{
     error::Error,
@@ -330,16 +331,99 @@ async fn diff_source_bundle(
     let candidate = prepare_standard_application(&report, active.pair(), &active)
         .map_err(|source| InstalledSourceDiffError::Preparation { source })?;
     let diff = orna_core::catalogue_diff::catalogue_diff(active.catalogue(), candidate.candidate());
-    let bytes = render_diff_document(&active, &candidate, &diff)?;
+    let revision_changes = function_revision_changes(&active, &candidate);
+    let bytes = render_diff_document(&active, &candidate, &diff, &revision_changes)?;
     Ok(InstalledSourceDiffOutcome::Diff(
         InstalledSourceDiffReport { bytes },
     ))
+}
+
+fn function_revision_changes(
+    active: &orna_core::revision::ActiveDatabaseRevision,
+    candidate: &orna_core::revision::DeployableRevision,
+) -> Vec<FunctionRevisionChange> {
+    let candidate_revisions = candidate
+        .current_function_revisions()
+        .unwrap_or_else(|| candidate.new_function_revisions());
+    changed_function_revisions(active.function_revisions(), candidate_revisions)
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct FunctionRevisionChange {
+    function: orna_core::FunctionId,
+    old_id: orna_core::FunctionRevisionId,
+    new_id: orna_core::FunctionRevisionId,
+    old_semantic_hash: orna_core::revision::Sha256Digest,
+    new_semantic_hash: orna_core::revision::Sha256Digest,
+}
+
+fn changed_function_revisions(
+    active: &[orna_core::revision::FunctionRevisionRecord],
+    candidate: &[orna_core::revision::FunctionRevisionRecord],
+) -> Vec<FunctionRevisionChange> {
+    let mut changes = Vec::new();
+    for candidate_revision in candidate {
+        let Some(active_revision) = active
+            .iter()
+            .find(|revision| revision.function() == candidate_revision.function())
+        else {
+            continue;
+        };
+        if active_revision.id() == candidate_revision.id()
+            && active_revision.semantic_hash() == candidate_revision.semantic_hash()
+        {
+            continue;
+        }
+        changes.push(FunctionRevisionChange {
+            function: candidate_revision.function(),
+            old_id: active_revision.id(),
+            new_id: candidate_revision.id(),
+            old_semantic_hash: active_revision.semantic_hash(),
+            new_semantic_hash: candidate_revision.semantic_hash(),
+        });
+    }
+    changes.sort_unstable_by_key(|change| change.function);
+    changes
+}
+
+fn render_function_revision_change(
+    change: &FunctionRevisionChange,
+    candidate: &orna_core::catalogue::CatalogueSnapshot,
+) -> String {
+    use std::fmt::Write as _;
+
+    let name = candidate
+        .function_by_id(change.function)
+        .map(|definition| qualified(definition.name()))
+        .unwrap_or_else(|| change.function.canonical());
+    let mut line = String::new();
+    let _ = write!(
+        line,
+        "! function {name} executable revision {} -> {} semantic hash {} -> {} [{}]",
+        change.old_id.canonical(),
+        change.new_id.canonical(),
+        digest_hex(change.old_semantic_hash),
+        digest_hex(change.new_semantic_hash),
+        change.function.canonical(),
+    );
+    line
+}
+
+fn digest_hex(digest: orna_core::revision::Sha256Digest) -> String {
+    use std::fmt::Write as _;
+
+    let mut text = String::with_capacity(64);
+    for byte in digest.to_bytes() {
+        let _ = write!(text, "{byte:02x}");
+    }
+    text
 }
 
 fn render_diff_document(
     active: &orna_core::revision::ActiveDatabaseRevision,
     candidate: &orna_core::revision::DeployableRevision,
     diff: &CatalogueSemanticDiff,
+    revision_changes: &[FunctionRevisionChange],
 ) -> Result<Vec<u8>, InstalledSourceDiffError> {
     use std::fmt::Write as _;
 
@@ -350,12 +434,19 @@ fn render_diff_document(
         active.pair().source().canonical(),
         candidate.candidate_pair().source().canonical(),
     );
-    if diff.is_empty() {
+    if diff.is_empty() && revision_changes.is_empty() {
         let _ = writeln!(document, "no semantic changes");
         return Ok(document.into_bytes());
     }
     for change in diff.changes() {
         let _ = writeln!(document, "{}", render_change(change, candidate.candidate()));
+    }
+    for change in revision_changes {
+        let _ = writeln!(
+            document,
+            "{}",
+            render_function_revision_change(change, candidate.candidate())
+        );
     }
     Ok(document.into_bytes())
 }
@@ -682,16 +773,102 @@ fn map_recovery_error(source: PostgresKernelError) -> InstalledSourceDiffError {
 
 #[cfg(test)]
 mod tests {
-    use super::render_change;
+    use super::{
+        FunctionRevisionChange, changed_function_revisions, digest_hex, render_change,
+        render_function_revision_change,
+    };
     use orna_core::{
-        CatalogueRevisionId, FieldId, SchemaId, TypeId,
+        CatalogueRevisionId, FieldId, FunctionId, FunctionRevisionId, SchemaId, SourceUnitId,
+        TypeId,
         catalogue::{
             CatalogueSnapshot, EnumTypeDefinition, QualifiedSemanticName,
             RecordValueFieldDefinition, RecordValueTypeDefinition, SchemaDefinition,
         },
-        types::TypeDescriptor,
         catalogue_diff::SemanticChange,
+        revision::{
+            ExecutableArtifact, ExecutableArtifactKind, FunctionRevisionRecord, Sha256Digest,
+            SourceOrigin,
+        },
+        types::TypeDescriptor,
     };
+
+    fn function_revision(
+        function: FunctionId,
+        revision: FunctionRevisionId,
+        semantic_hash_byte: u8,
+    ) -> FunctionRevisionRecord {
+        let artifact = ExecutableArtifact::new(
+            ExecutableArtifactKind::Server,
+            "test.server-plan",
+            1,
+            vec![semantic_hash_byte],
+            Sha256Digest::from_bytes([semantic_hash_byte; 32]),
+        )
+        .unwrap();
+        FunctionRevisionRecord::new(
+            function,
+            revision,
+            1,
+            SourceOrigin::new(SourceUnitId::from_bytes([8; 16]), 0, 1).unwrap(),
+            Sha256Digest::from_bytes([9; 32]),
+            Sha256Digest::from_bytes([semantic_hash_byte; 32]),
+            "orna.language/1",
+            artifact,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn reports_body_only_revision_changes_in_function_id_order() {
+        let first = FunctionId::from_bytes([1; 16]);
+        let second = FunctionId::from_bytes([2; 16]);
+        let first_old = function_revision(first, FunctionRevisionId::from_bytes([3; 16]), 4);
+        let second_old = function_revision(second, FunctionRevisionId::from_bytes([5; 16]), 6);
+        let first_new = function_revision(first, FunctionRevisionId::from_bytes([7; 16]), 8);
+        let second_new = function_revision(second, FunctionRevisionId::from_bytes([9; 16]), 10);
+
+        let changes = changed_function_revisions(
+            &[second_old.clone(), first_old.clone()],
+            &[second_new, first_new],
+        );
+        assert_eq!(
+            changes,
+            vec![
+                FunctionRevisionChange {
+                    function: first,
+                    old_id: first_old.id(),
+                    new_id: FunctionRevisionId::from_bytes([7; 16]),
+                    old_semantic_hash: first_old.semantic_hash(),
+                    new_semantic_hash: Sha256Digest::from_bytes([8; 32]),
+                },
+                FunctionRevisionChange {
+                    function: second,
+                    old_id: FunctionRevisionId::from_bytes([5; 16]),
+                    new_id: FunctionRevisionId::from_bytes([9; 16]),
+                    old_semantic_hash: Sha256Digest::from_bytes([6; 32]),
+                    new_semantic_hash: Sha256Digest::from_bytes([10; 32]),
+                },
+            ]
+        );
+        assert!(changed_function_revisions(&[first_old.clone()], &[first_old]).is_empty());
+
+        let rendered = render_function_revision_change(
+            &changes[0],
+            &candidate_with_record(TypeId::from_bytes([4; 16])),
+        );
+        assert_eq!(
+            rendered,
+            format!(
+                "! function {} executable revision {} -> {} semantic hash {} -> {} [{}]",
+                first.canonical(),
+                FunctionRevisionId::from_bytes([3; 16]).canonical(),
+                FunctionRevisionId::from_bytes([7; 16]).canonical(),
+                digest_hex(Sha256Digest::from_bytes([4; 32])),
+                digest_hex(Sha256Digest::from_bytes([8; 32])),
+                first.canonical(),
+            )
+        );
+    }
 
     fn candidate_with_record(record_id: TypeId) -> CatalogueSnapshot {
         let enum_id = TypeId::from_bytes([6; 16]);
