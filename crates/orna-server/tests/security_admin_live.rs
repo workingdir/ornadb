@@ -5,9 +5,9 @@
 //! one real application SERVER function on top of it, replaces the security
 //! snapshot with one that maps the invoking local peer to the proof admin
 //! principal holding the `SecurityAdmin` privilege, and drives
-//! `run_security_admin_with_kernel`: identity reads, principal and role
-//! mutation, privilege grant and check, execution check, and a disabled
-//! principal.
+//! `run_security_admin_with_kernel`: identity reads, grant listing, principal
+//! and role mutation, privilege grant and check, execution check, and a
+//! disabled principal.
 
 #![cfg(unix)]
 
@@ -192,6 +192,30 @@ async fn proves_installed_security_admin_end_to_end() -> TestResult<()> {
         require(
             text.contains(&format!("\"principal\":\"{}\"", ADMIN_PRINCIPAL.canonical())),
             "whoami did not render the admin principal: {text}",
+        )?;
+        // list_grants: the protected read exposes only the admin's direct
+        // execute grant and class-wide SecurityAdmin grant.
+        let (outcome, stdout) = admin_run(
+            &database,
+            InstalledSecurityAdminOperation::ListGrants {
+                grantee: ADMIN_PRINCIPAL,
+            },
+        )
+        .await?;
+        require(
+            outcome == Ok(InstalledSecurityAdminOutcome::Completed),
+            "list_grants must complete for the security administrator",
+        )?;
+        let text = String::from_utf8(stdout)
+            .map_err(|_| failure("the list_grants stdout was not UTF-8"))?;
+        require(
+            text.contains("\"operation\":\"list_grants\"")
+                && text.contains(&format!(
+                    "\"function\":\"{}\"",
+                    application_function.canonical()
+                ))
+                && text.contains("\"class\":\"security_admin\",\"object\":null"),
+            "list_grants did not render the admin's direct grants: {text}",
         )?;
 
         // create_principal and create_role create fresh identities; the
