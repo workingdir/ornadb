@@ -137,6 +137,14 @@ impl PostgresKernel {
                 .commit()
                 .await
                 .map_err(PostgresKernelError::Database)?;
+            if !security.principals().any(|candidate| {
+                candidate.id() == principal && candidate.status() == PrincipalStatus::Active
+            }) {
+                return Ok(authorise_privilege(principal, class, object, &[]));
+            }
+            if matches!(class, PrivilegeClass::Inspect(_)) && object.is_some() {
+                return Ok(authorise_privilege(principal, class, object, &[]));
+            }
             Ok(authorise_privilege(
                 principal,
                 class,
