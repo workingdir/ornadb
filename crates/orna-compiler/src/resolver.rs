@@ -7019,8 +7019,8 @@ impl<'a> ClientResourceTypeParser<'a> {
                 }
                 continue;
             }
-            if remaining.starts_with("/*") {
-                let Some(end) = remaining[2..].find("*/") else {
+            if let Some(comment) = remaining.strip_prefix("/*") {
+                let Some(end) = comment.find("*/") else {
                     self.invalid_trivia = true;
                     self.offset = self.text.len();
                     return;
@@ -7258,6 +7258,7 @@ fn is_inspect_render_identity(identity: &str) -> bool {
         || identity.starts_with("std.inspect.render@")
 }
 
+#[allow(clippy::too_many_arguments)]
 fn validate_registered_client_external_contract(
     _name: &QualifiedSemanticName,
     identity: &str,
@@ -7666,11 +7667,11 @@ fn check_client_functions(
                         CheckedClientExpression::Resource { operation } => operation.kind,
                         _ => unreachable!("resource constructor checker returns a resource"),
                     };
-                    if let Some(expected_kind) = declared_resource_kind {
-                        if actual_kind != expected_kind {
-                            diagnostics.push(diagnostic(DiagnosticCode::TypeMismatch, format!("CLIENT local {local_name} type does not match its resource constructor"), input.logical_path, statement.type_source.as_ref().map_or(&statement.span, |source| &source.span)));
-                            return None;
-                        }
+                    if let Some(expected_kind) = declared_resource_kind
+                        && actual_kind != expected_kind
+                    {
+                        diagnostics.push(diagnostic(DiagnosticCode::TypeMismatch, format!("CLIENT local {local_name} type does not match its resource constructor"), input.logical_path, statement.type_source.as_ref().map_or(&statement.span, |source| &source.span)));
+                        return None;
                     }
                     (checked, expression_type, CheckedClientLocalKind::Resource(actual_kind))
                 } else {
@@ -13810,7 +13811,7 @@ mod tests {
             .map(|diagnostic| diagnostic.message())
             .collect::<Vec<_>>();
         assert!(
-            messages.iter().any(|message| *message == "unknown std.action.call target ui.stream"),
+            messages.contains(&"unknown std.action.call target ui.stream"),
             "{messages:?}"
         );
         assert_eq!(
