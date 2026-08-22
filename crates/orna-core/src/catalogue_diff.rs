@@ -182,6 +182,12 @@ pub enum SemanticChange {
         id: ParameterId,
         name: String,
     },
+    /// A retained function parameter changed its default expression.
+    ParameterDefaultChanged {
+        owner: FunctionId,
+        id: ParameterId,
+        name: String,
+    },
 }
 
 impl SemanticChange {
@@ -226,7 +232,8 @@ impl SemanticChange {
             Self::ParameterAdded { .. }
             | Self::ParameterRenamed { .. }
             | Self::ParameterDropped { .. }
-            | Self::ParameterTypeChanged { .. } => "parameter",
+            | Self::ParameterTypeChanged { .. }
+            | Self::ParameterDefaultChanged { .. } => "parameter",
         }
     }
 }
@@ -594,11 +601,19 @@ fn diff_enum_types(
                     });
                 }
             }
-            Some(found) => diff.push(SemanticChange::EnumTypeRenamed {
-                id: definition.id(),
-                from: qualified(found.name()),
-                to: qualified(definition.name()),
-            }),
+            Some(found) => {
+                diff.push(SemanticChange::EnumTypeRenamed {
+                    id: definition.id(),
+                    from: qualified(found.name()),
+                    to: qualified(definition.name()),
+                });
+                if found.labels() != definition.labels() {
+                    diff.push(SemanticChange::EnumLabelsChanged {
+                        id: definition.id(),
+                        name: qualified(definition.name()),
+                    });
+                }
+            },
             None => diff.push(SemanticChange::EnumTypeAdded {
                 id: definition.id(),
                 name: qualified(definition.name()),
@@ -738,6 +753,13 @@ fn diff_parameter_payload(
             name: candidate.name().to_owned(),
         });
     }
+    if base.default_expression() != candidate.default_expression() {
+        diff.push(SemanticChange::ParameterDefaultChanged {
+            owner,
+            id: candidate.id(),
+            name: candidate.name().to_owned(),
+        });
+    }
 }
 
 fn qualified(name: &crate::catalogue::QualifiedSemanticName) -> String {
@@ -755,7 +777,7 @@ mod tests {
     };
     use crate::{
         types::{ResolvedType, StandardScalar, TypeDescriptor},
-        CatalogueRevisionId, FunctionRevisionId,
+        CatalogueRevisionId, ExpressionId, FunctionRevisionId,
     };
 
     fn name(parts: &[&str]) -> QualifiedSemanticName {
@@ -1190,6 +1212,51 @@ mod tests {
     }
 
     #[test]
+    fn retained_parameter_reports_default_expression_changes() {
+        let base = full_snapshot(
+            vec![schema(1, &["app"])],
+            vec![],
+            vec![],
+            vec![function(
+                5,
+                &["app", "read"],
+                vec![ParameterDefinition::new(
+                    ParameterId::from_bytes([6; 16]),
+                    "p_q",
+                    0,
+                    ResolvedType::scalar(StandardScalar::Integer),
+                    Some(ExpressionId::from_bytes([7; 16])),
+                )],
+            )],
+        );
+        let candidate = full_snapshot(
+            vec![schema(1, &["app"])],
+            vec![],
+            vec![],
+            vec![function(
+                5,
+                &["app", "read"],
+                vec![ParameterDefinition::new(
+                    ParameterId::from_bytes([6; 16]),
+                    "p_q",
+                    0,
+                    ResolvedType::scalar(StandardScalar::Integer),
+                    Some(ExpressionId::from_bytes([8; 16])),
+                )],
+            )],
+        );
+        let diff = catalogue_diff(&base, &candidate);
+        assert_eq!(
+            diff.changes(),
+            &[SemanticChange::ParameterDefaultChanged {
+                owner: FunctionId::from_bytes([5; 16]),
+                id: ParameterId::from_bytes([6; 16]),
+                name: "p_q".to_owned(),
+            }]
+        );
+    }
+
+    #[test]
     fn add_and_drop_report_identity_keyed_entries() {
         let base = full_snapshot(
             vec![schema(1, &["app"])],
@@ -1277,6 +1344,41 @@ mod tests {
                 from: "app.stage".to_owned(),
                 to: "app.phase".to_owned(),
             }]
+        );
+    }
+
+    #[test]
+    fn renamed_enum_reports_label_changes_independently() {
+        let base = full_snapshot(
+            vec![schema(1, &["app"])],
+            vec![],
+            vec![enum_type(2, &["app", "stage"])],
+            vec![],
+        );
+        let candidate = full_snapshot(
+            vec![schema(1, &["app"])],
+            vec![],
+            vec![EnumTypeDefinition::new(
+                TypeId::from_bytes([2; 16]),
+                name(&["app", "phase"]),
+                vec!["lead".to_owned(), "won".to_owned()],
+            )],
+            vec![],
+        );
+        let diff = catalogue_diff(&base, &candidate);
+        assert_eq!(
+            diff.changes(),
+            &[
+                SemanticChange::EnumTypeRenamed {
+                    id: TypeId::from_bytes([2; 16]),
+                    from: "app.stage".to_owned(),
+                    to: "app.phase".to_owned(),
+                },
+                SemanticChange::EnumLabelsChanged {
+                    id: TypeId::from_bytes([2; 16]),
+                    name: "app.phase".to_owned(),
+                },
+            ]
         );
     }
 

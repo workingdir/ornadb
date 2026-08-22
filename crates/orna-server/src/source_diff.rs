@@ -516,6 +516,13 @@ fn render_change(
                 .unwrap_or_else(|| owner.canonical());
             let _ = write!(line, "! parameter {owner}.{name} type [{}]", id.canonical());
         }
+        SemanticChange::ParameterDefaultChanged { owner, name, id } => {
+            let owner = candidate
+                .function_by_id(*owner)
+                .map(|definition| qualified(definition.name()))
+                .unwrap_or_else(|| owner.canonical());
+            let _ = write!(line, "! parameter {owner}.{name} default [{}]", id.canonical());
+        }
         change @ _ => {
             let _ = write!(line, "! unsupported change ({})", change.category());
         }
@@ -910,6 +917,11 @@ mod tests {
                 id: parameter_id,
                 name: "search".to_owned(),
             },
+            SemanticChange::ParameterDefaultChanged {
+                owner: function_id,
+                id: parameter_id,
+                name: "search".to_owned(),
+            },
         ];
         let rendered: Vec<_> = changes
             .iter()
@@ -1042,6 +1054,11 @@ mod tests {
             ),
             format!(
                 "! parameter {}.search type [{}]",
+                function_id.canonical(),
+                parameter_id.canonical()
+            ),
+            format!(
+                "! parameter {}.search default [{}]",
                 function_id.canonical(),
                 parameter_id.canonical()
             ),
