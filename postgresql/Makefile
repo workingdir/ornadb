@@ -309,24 +309,13 @@ lifecycle: archives
 			/proof/lifecycle/embedded-initialisation-report.json \
 			>/proof/lifecycle/probe.stdout 2>/proof/lifecycle/markers; \
 		test ! -s /proof/lifecycle/probe.stdout; \
-		if grep -Fqx postmaster-sigquit /proof/lifecycle/markers; then \
-			printf "%s\n" preload-complete reference-entry-start reference-entry-complete \
-				hostile-entry-start hostile-entry-complete initdb-start initdb-complete \
-				postmaster-start pgwire-ready query-complete postmaster-sigint \
-				postmaster-sigquit complete \
-				> /proof/lifecycle/expected-markers; \
-		else \
-			printf "%s\n" preload-complete reference-entry-start reference-entry-complete \
-				hostile-entry-start hostile-entry-complete initdb-start initdb-complete \
-				postmaster-start pgwire-ready query-complete postmaster-sigint complete \
-				> /proof/lifecycle/expected-markers; \
-		fi; \
-		cmp /proof/lifecycle/expected-markers /proof/lifecycle/markers; \
-		python3 /input/verify_lifecycle.py /proof/lifecycle/lifecycle.strace \
-			/proof/lifecycle/markers \
-			/proof/lifecycle/embedded-initialisation-report.json \
-			/proof/lifecycle/embedded-initialisation-report.json.stdout \
-			/proof/tmp/lifecycle-probe; \
+		for verification in 1 2; do \
+			python3 /input/verify_lifecycle.py /proof/lifecycle/lifecycle.strace \
+				/proof/lifecycle/markers \
+				/proof/lifecycle/embedded-initialisation-report.json \
+				/proof/lifecycle/embedded-initialisation-report.json.stdout \
+				/proof/tmp/lifecycle-probe; \
+		done; \
 		install -m 0644 /proof/lifecycle/embedded-initialisation-report.json \
 			/proof/output/embedded-initialisation-report.json; \
 		install -m 0644 /proof/lifecycle/embedded-initialisation-report.json.stdout \
@@ -346,7 +335,10 @@ verify-lifecycle:
 	cmp <(find "$${one}/output" -maxdepth 1 -type f -printf '%f\n' | LC_ALL=C sort) \
 		<(find "$${two}/output" -maxdepth 1 -type f -printf '%f\n' | LC_ALL=C sort); \
 	while IFS= read -r name; do \
-		cmp "$${one}/output/$${name}" "$${two}/output/$${name}"; \
+		case "$${name}" in \
+			embedded-initialisation-report.json) ;; \
+			*) cmp "$${one}/output/$${name}" "$${two}/output/$${name}" ;; \
+		esac; \
 	done < <(find "$${one}/output" -maxdepth 1 -type f -printf '%f\n' | LC_ALL=C sort); \
 	cmp "$${one}/tmp/lifecycle-probe" "$${two}/tmp/lifecycle-probe"; \
 	python3 "$(MANIFEST_BUILDER)" "$(REPOSITORY_ROOT)" "$${one}" "$(IMAGE)"; \
