@@ -21,8 +21,8 @@ use orna_core::{
     FunctionId, PrincipalId,
     inspect::InspectPrivilege,
     security::{
-        ExecuteDecision, ExecuteDenial, PrincipalKind, PrivilegeClass, PrivilegeDecision,
-        SecuritySnapshot,
+        ExecuteDecision, ExecuteDenial, ExecuteGrant, PrincipalKind, PrivilegeClass,
+        PrivilegeDecision, PrivilegeGrant, SecuritySnapshot,
     },
 };
 use orna_postgres::{PostgresKernel, PostgresKernelError};
@@ -114,8 +114,8 @@ fn map_host_error(error: EmbeddedHostError) -> SecurityGrantError {
 /// One closed `orna security` administrative operation (ADR 0065).
 ///
 /// The operations match the sealed `sys.security.*` identities registered in
-/// the core: the three session-identity reads, the protected SERVER admin
-/// mutations, and the two checks.
+/// the core: the three session-identity reads, the grant listing, the
+/// protected SERVER admin mutations, and the two checks.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[non_exhaustive]
 pub enum InstalledSecurityAdminOperation {
@@ -125,6 +125,11 @@ pub enum InstalledSecurityAdminOperation {
     EffectivePrincipal,
     /// `sys.security.active_roles()`.
     ActiveRoles,
+    /// Lists direct and privilege-class grants for one principal.
+    ListGrants {
+        /// The principal whose grants are returned.
+        grantee: PrincipalId,
+    },
     /// `sys.security.create_principal(id, kind)`.
     CreatePrincipal {
         /// The new principal identity.
@@ -355,6 +360,13 @@ pub async fn run_security_admin_with_kernel(
             let roles = kernel.active_roles(&session);
             write_roles_line(stdout, &roles)?;
         }
+        InstalledSecurityAdminOperation::ListGrants { grantee } => {
+            let (execute_grants, privilege_grants) = kernel
+                .list_grants(&session, grantee)
+                .await
+                .map_err(map_kernel_admin_error)?;
+            write_grants_line(stdout, grantee, &execute_grants, &privilege_grants)?;
+        }
         InstalledSecurityAdminOperation::CreatePrincipal { principal, kind } => {
             let snapshot = kernel
                 .create_principal(&session, principal, kind)
@@ -446,6 +458,36 @@ fn write_identity_line(
     let line = format!(
         "{{\"operation\":\"{operation}\",\"principal\":\"{}\"}}\n",
         principal.canonical()
+    );
+    write_admin_line(stdout, &line)
+}
+
+/// Writes one JSON line for a principal's direct and privilege-class grants.
+fn write_grants_line(
+    stdout: &mut impl Write,
+    grantee: PrincipalId,
+    execute_grants: &[ExecuteGrant],
+    privilege_grants: &[PrivilegeGrant],
+) -> Result<(), InstalledSecurityAdminError> {
+    let grants = execute_grants
+        .iter()
+        .map(|grant| format!("{{\"function\":\"{}\"}}", grant.function().canonical()))
+        .collect::<Vec<_>>()
+        .join(",");
+    let privileges = privilege_grants
+        .iter()
+        .map(|grant| {
+            let object = grant
+                .object()
+                .map(|function| format!("\"{}\"", function.canonical()))
+                .unwrap_or_else(|| "null".to_owned());
+            format!("{{\"class\":\"{}\",\"object\":{object}}}", grant.class())
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    let line = format!(
+        "{{\"operation\":\"list_grants\",\"principal\":\"{}\",\"grants\":[{grants}],\"privileges\":[{privileges}]}}\n",
+        grantee.canonical(),
     );
     write_admin_line(stdout, &line)
 }
