@@ -13,10 +13,10 @@ Inspector projections, Studio, and reflective gateways. The canonical
 specification still marks those broader surfaces as `CURRENT PROPOSAL` or
 `OPEN`; this plan must not turn them into implementation contracts.
 
-- `TODO.md:54-94` records the completed CLIENT, TTY, Inspector-core, source,
+- `TODO.md:50-97` records the completed CLIENT, TTY, Inspector-core, source,
   security, presenter, state, resource, action, identity, transport, JSON,
-  runtime-conformance, LSP, and tooling slices. It also records the two
-  external evidence blockers.
+  runtime-conformance, LSP, and tooling slices, plus the host-proof and
+  gateway blockers.
 - Work ADRs 0068-0079 define the closed CLIENT expression, state, JSON,
   resource, transport, action, and test-only runtime contracts. Work ADRs 0080
   and 0081 define the headless ordinary CLIENT Inspector v1 and the generic
