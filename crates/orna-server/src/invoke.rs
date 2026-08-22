@@ -51,6 +51,7 @@ use orna_core::{
     FunctionRevisionId, InspectEpochId, InvocationId, TypeId,
     catalogue::{
         FunctionDefinition, FunctionDomain, FunctionReturn, QualifiedSemanticName, ValueTypeKind,
+        ValueTypeMutability, ValueTypePersistence,
     },
     invocation::InvocationCarrierConstructionError,
     invocation::{
@@ -4232,6 +4233,71 @@ pub async fn run_invoke_with_kernel(
     host_invoke(kernel, request, stdout, stderr).await
 }
 
+fn bind_installed_cli_arguments(
+    application: &orna_core::catalogue::CatalogueSnapshot,
+    standard: Option<&VerifiedStandardLibrarySnapshot>,
+    function: &FunctionDefinition,
+    arguments: &[CliArgumentInput],
+) -> Result<Vec<InvocationArgument>, orna_core::invocation_binding::InvocationBindingError> {
+    let definition = FunctionDefinition::new(
+        function.id(),
+        function.name().clone(),
+        function.domain(),
+        function
+            .parameters()
+            .iter()
+            .map(|parameter| {
+                orna_core::catalogue::ParameterDefinition::new(
+                    parameter.id(),
+                    parameter.name(),
+                    parameter.ordinal(),
+                    installed_cli_resolved_type(application, standard, parameter.resolved_type()),
+                    parameter.default_expression(),
+                )
+            })
+            .collect(),
+        function.return_type().clone(),
+        function.current_revision(),
+        function.security(),
+        function.transaction(),
+        function.volatility(),
+    );
+    bind_cli_arguments(&definition, arguments)
+}
+
+fn installed_cli_resolved_type(
+    application: &orna_core::catalogue::CatalogueSnapshot,
+    standard: Option<&VerifiedStandardLibrarySnapshot>,
+    resolved_type: ResolvedType,
+) -> ResolvedType {
+    let ResolvedType::Value(type_id) = resolved_type else {
+        return resolved_type;
+    };
+    if application.type_definition_by_id(type_id).is_some() {
+        return resolved_type;
+    }
+    let Some(value_type) = standard.and_then(|snapshot| snapshot.catalogue().value_type_by_id(type_id))
+    else {
+        return resolved_type;
+    };
+    if value_type.kind() != ValueTypeKind::Primitive
+        || value_type.mutability() != ValueTypeMutability::Immutable
+        || value_type.persistence() != ValueTypePersistence::Persistable
+    {
+        return resolved_type;
+    }
+    let scalar = match value_type.representation_contract() {
+        "orna.kernel.value.boolean@1" => StandardScalar::Boolean,
+        "orna.kernel.value.integer@1" => StandardScalar::Integer,
+        "orna.kernel.value.bigint@1" => StandardScalar::BigInt,
+        "orna.kernel.value.float@1" => StandardScalar::Float,
+        "orna.kernel.value.character-large-object@1" => StandardScalar::CharacterLargeObject,
+        "orna.kernel.value.binary-large-object@1" => StandardScalar::BinaryLargeObject,
+        _ => return resolved_type,
+    };
+    ResolvedType::Scalar(scalar)
+}
+
 async fn host_invoke(
     kernel: PostgresKernel,
     request: InstalledInvokeRequest,
@@ -4247,8 +4313,13 @@ async fn host_invoke(
     let standard = active.catalogue_hash_context().standard();
     let resolved = resolve_target(&active, standard, &request.target)?;
 
-    let arguments = bind_cli_arguments(resolved.function, &request.arguments)
-        .map_err(|error| usage_error(error.to_string()))?;
+    let arguments = bind_installed_cli_arguments(
+        active.catalogue(),
+        standard,
+        resolved.function,
+        &request.arguments,
+    )
+    .map_err(|error| usage_error(error.to_string()))?;
     let sealed = build_sealed_request(&request, arguments)?;
 
     if request.explain {
@@ -5004,12 +5075,14 @@ fn map_host_error(error: EmbeddedHostError) -> InstalledInvokeError {
 mod tests {
     use super::*;
     use orna_core::{
-        CatalogueRevisionId, FunctionId, InvocationId, ParameterId, PrincipalId,
+        CatalogueRevisionId, FunctionId, InvocationId, ParameterId, PrincipalId, SchemaId,
         SecurityAuditEventId, SourceBundleId, SourceRevisionId,
         canonical_hash::{catalogue_digest, source_bundle_digest, source_revision_record_digest},
         catalogue::{
             CatalogueSnapshot, FunctionDomain, FunctionReturn, FunctionSecurity,
-            FunctionVolatility, ParameterDefinition,
+            FunctionVolatility,
+            ParameterDefinition, SchemaDefinition, ValueTypeDefinition, ValueTypeMutability,
+            ValueTypePersistence,
         },
         inspect::{InspectSnapshotEpoch, InspectSnapshotOptions, InspectSnapshotSummary},
         invocation::{
@@ -6481,6 +6554,26 @@ mod tests {
         )
     }
 
+    fn value_typed_definition(resolved_type: ResolvedType) -> FunctionDefinition {
+        FunctionDefinition::new(
+            FunctionId::from_bytes([0x11; 16]),
+            QualifiedSemanticName::new(["app", "update"]).expect("qualified name"),
+            FunctionDomain::Server,
+            vec![ParameterDefinition::new(
+                ParameterId::from_bytes([0x11; 16]),
+                "p_value",
+                0,
+                resolved_type,
+                None,
+            )],
+            FunctionReturn::Single(resolved_type),
+            FunctionRevisionId::from_bytes([0x21; 16]),
+            FunctionSecurity::Invoker,
+            None,
+            FunctionVolatility::Immutable,
+        )
+    }
+
     fn pipe_request() -> InvokeRequest {
         let caller = InvocationCallerContext::new(
             InvocationCallerKind::CliPipe,
@@ -6653,6 +6746,121 @@ mod tests {
         .expect_err("an unknown parameter is rejected");
         assert_eq!(unknown.to_string(), "unknown parameter `p_other`");
     }
+    #[test]
+    fn binding_maps_verified_standard_integer_value_type_to_cli_scalar() {
+        let standard = verify_standard_library_snapshot(
+            retained_standard_library_snapshot().expect("retained standard snapshot"),
+        )
+        .expect("verified standard snapshot");
+        let application = CatalogueSnapshot::new(
+            CatalogueRevisionId::from_bytes([0x94; 16]),
+            Vec::new(),
+            Vec::new(),
+        )
+        .expect("empty application catalogue");
+        let definition = value_typed_definition(ResolvedType::value(
+            orna_standard::INTEGER_TYPE_ID,
+        ));
+        let bound = bind_installed_cli_arguments(
+            &application,
+            Some(&standard),
+            &definition,
+            &[CliArgumentInput::Friendly {
+                name: "value".to_owned(),
+                value: "74".to_owned(),
+            }],
+        )
+        .expect("the verified standard INTEGER value binds as a CLI scalar");
+        assert_eq!(bound[0].value().value(), &RuntimeValue::Integer(74));
+    }
+
+    #[test]
+    fn binding_rejects_application_value_types_and_ambiguous_standard_ids() {
+        let standard = verify_standard_library_snapshot(
+            retained_standard_library_snapshot().expect("retained standard snapshot"),
+        )
+        .expect("verified standard snapshot");
+        let application_value_id = TypeId::from_bytes([0xa7; 16]);
+        let application = CatalogueSnapshot::new_with_types(
+            CatalogueRevisionId::from_bytes([0x95; 16]),
+            vec![SchemaDefinition::new(
+                SchemaId::from_bytes([0x96; 16]),
+                QualifiedSemanticName::new(["app"]).expect("schema name"),
+            )],
+            Vec::new(),
+            vec![
+                ValueTypeDefinition::primitive(
+                    application_value_id,
+                    QualifiedSemanticName::new(["app", "integer"]).expect("value name"),
+                    ValueTypeMutability::Immutable,
+                    ValueTypePersistence::Persistable,
+                    "orna.kernel.value.integer@1",
+                ),
+                ValueTypeDefinition::primitive(
+                    orna_standard::INTEGER_TYPE_ID,
+                    QualifiedSemanticName::new(["app", "shadow_integer"])
+                        .expect("ambiguous value name"),
+                    ValueTypeMutability::Immutable,
+                    ValueTypePersistence::Persistable,
+                    "orna.kernel.value.integer@1",
+                ),
+            ],
+            Vec::new(),
+        )
+        .expect("application value catalogue");
+
+        assert_eq!(
+            installed_cli_resolved_type(
+                &application,
+                Some(&standard),
+                ResolvedType::value(application_value_id),
+            ),
+            ResolvedType::value(application_value_id),
+        );
+        assert_eq!(
+            installed_cli_resolved_type(
+                &application,
+                Some(&standard),
+                ResolvedType::value(orna_standard::INTEGER_TYPE_ID),
+            ),
+            ResolvedType::value(orna_standard::INTEGER_TYPE_ID),
+        );
+        for resolved_type in [
+            ResolvedType::value(application_value_id),
+            ResolvedType::value(orna_standard::INTEGER_TYPE_ID),
+        ] {
+            let error = bind_installed_cli_arguments(
+                &application,
+                Some(&standard),
+                &value_typed_definition(resolved_type),
+                &[CliArgumentInput::Friendly {
+                    name: "value".to_owned(),
+                    value: "74".to_owned(),
+                }],
+            )
+            .expect_err("application and ambiguous value types stay unsupported");
+            assert!(matches!(
+                error,
+                orna_core::invocation_binding::InvocationBindingError::ConversionFailed {
+                    detail: orna_core::invocation_binding::InvocationConversionError::UnsupportedType {
+                        resolved_type: actual,
+                    },
+                    ..
+                } if actual == resolved_type
+            ));
+        }
+
+        // UUID has no ordinary RuntimeValue representation in ADR 0016 v1.
+        assert_eq!(
+            installed_cli_resolved_type(
+                &application,
+                Some(&standard),
+                ResolvedType::value(orna_standard::UUID_TYPE_ID),
+            ),
+            ResolvedType::value(orna_standard::UUID_TYPE_ID),
+        );
+    }
+
     fn inspect_test_context() -> (
         ActiveDatabaseRevision,
         orna_core::value::OpaqueCodecRegistry,
