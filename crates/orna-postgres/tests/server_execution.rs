@@ -471,6 +471,7 @@ fn authenticated_server_select_commits_allowed_and_denied_execute_decisions() ->
     }
 }
 
+#[cfg(feature = "test-hooks")]
 async fn authenticated_server_select_commits_allowed_and_denied_execute_decisions_inner(
 ) -> TestResult<()> {
     with_test_database(|database| async move {
