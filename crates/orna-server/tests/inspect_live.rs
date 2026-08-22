@@ -39,6 +39,7 @@ use orna_compiler::{
 };
 use orna_core::{
     FunctionId, InvocationId, PrincipalId, StateSlotId,
+    inspect::InspectPrivilege,
     invocation::{
         InvocationArgument, InvocationCallerContext, InvocationCallerKind, InvocationClientOffer,
         InvocationEventBody, InvocationEventKind, InvocationParameterSelector,
@@ -47,7 +48,7 @@ use orna_core::{
     },
     security::{
         ExecuteGrant, LocalPeerCredential, Principal, PrincipalKind, PrincipalStatus,
-        SecurityFunctionTarget, SecuritySnapshot,
+        PrivilegeClass, PrivilegeGrant, SecurityFunctionTarget, SecuritySnapshot,
     },
     source::{SourceBundle, SourceUnit},
     value::RuntimeValue,
@@ -299,9 +300,27 @@ fn require_echo_completion(
     Ok(*invocation)
 }
 
-#[tokio::test]
+#[test]
 #[ignore = "requires the Compose PostgreSQL development service"]
-async fn proves_installed_inspect_end_to_end() -> TestResult<()> {
+fn proves_installed_inspect_end_to_end() -> TestResult<()> {
+    let handle = std::thread::Builder::new()
+        .name("inspect-live".to_owned())
+        .stack_size(4 * 1024 * 1024)
+        .spawn(|| {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|error| failure(format!("Inspector live runtime could not start: {error}")))?;
+            runtime.block_on(proves_installed_inspect_end_to_end_inner())
+        })
+        .map_err(|error| failure(format!("Inspector live thread could not start: {error}")))?;
+    match handle.join() {
+        Ok(result) => result,
+        Err(_) => Err(failure("Inspector live thread panicked")),
+    }
+}
+
+async fn proves_installed_inspect_end_to_end_inner() -> TestResult<()> {
     with_test_database(|database| async move {
         let standard_upgrade = install_standard(&database).await?;
         let (state_function, state_slot) =
@@ -319,29 +338,49 @@ async fn proves_installed_inspect_end_to_end() -> TestResult<()> {
 
         // The local peer maps to the inspect principal, which holds EXECUTE
         // on std.invoke.echo. The same snapshot serves authentication and
-        // the sealed dispatch, exactly like the installed product.
-        let security = SecuritySnapshot::new_with_function_targets_and_local_peer_credentials(
-            pair,
-            vec![
-                SecurityFunctionTarget::verified_standard(
+        // the sealed dispatch, exactly like the installed product. The
+        // durable INSPECT grants are resolved by the installed host; request
+        // classifier flags cannot create these grants.
+        let security =
+            SecuritySnapshot::new_with_function_targets_local_peer_credentials_and_privilege_grants(
+                pair,
+                vec![
+                    SecurityFunctionTarget::verified_standard(
+                        STD_INVOKE_ECHO_FUNCTION_ID,
+                        standard_revision,
+                        STD_INVOKE_ECHO_FUNCTION_REVISION_ID,
+                    ),
+                    SecurityFunctionTarget::application(state_function),
+                ],
+                vec![Principal::new(
+                    INSPECT_PRINCIPAL,
+                    PrincipalKind::User,
+                    PrincipalStatus::Active,
+                )],
+                vec![],
+                vec![ExecuteGrant::new(
+                    INSPECT_PRINCIPAL,
                     STD_INVOKE_ECHO_FUNCTION_ID,
-                    standard_revision,
-                    STD_INVOKE_ECHO_FUNCTION_REVISION_ID,
-                ),
-                SecurityFunctionTarget::application(state_function),
-            ],
-            vec![Principal::new(
-                INSPECT_PRINCIPAL,
-                PrincipalKind::User,
-                PrincipalStatus::Active,
-            )],
-            vec![],
-            vec![ExecuteGrant::new(
-                INSPECT_PRINCIPAL,
-                STD_INVOKE_ECHO_FUNCTION_ID,
-            )],
-            vec![LocalPeerCredential::new(uid, INSPECT_PRINCIPAL)],
-        )?;
+                )],
+                vec![LocalPeerCredential::new(uid, INSPECT_PRINCIPAL)],
+                vec![
+                    PrivilegeGrant::new(
+                        INSPECT_PRINCIPAL,
+                        PrivilegeClass::Inspect(InspectPrivilege::OwnInvocation),
+                        None,
+                    )?,
+                    PrivilegeGrant::new(
+                        INSPECT_PRINCIPAL,
+                        PrivilegeClass::Inspect(InspectPrivilege::Values),
+                        None,
+                    )?,
+                    PrivilegeGrant::new(
+                        INSPECT_PRINCIPAL,
+                        PrivilegeClass::Inspect(InspectPrivilege::SecurityDetails),
+                        None,
+                    )?,
+                ],
+            )?;
         db_kernel.replace_security_snapshot(&security).await?;
 
         // One cell under the echo root for the state_cells redaction proof.
@@ -376,7 +415,6 @@ async fn proves_installed_inspect_end_to_end() -> TestResult<()> {
                 false,
                 false,
                 false,
-                None,
             ),
         )
         .await?;
@@ -418,7 +456,6 @@ async fn proves_installed_inspect_end_to_end() -> TestResult<()> {
                 false,
                 false,
                 false,
-                None,
             ),
         )
         .await?;
@@ -453,7 +490,6 @@ async fn proves_installed_inspect_end_to_end() -> TestResult<()> {
                 false,
                 false,
                 false,
-                None,
             ),
         )
         .await?;
@@ -497,7 +533,6 @@ async fn proves_installed_inspect_end_to_end() -> TestResult<()> {
                 false,
                 false,
                 false,
-                None,
             ),
         )
         .await?;
@@ -529,7 +564,6 @@ async fn proves_installed_inspect_end_to_end() -> TestResult<()> {
                 false,
                 false,
                 false,
-                None,
             ),
         )
         .await?;
@@ -560,7 +594,6 @@ async fn proves_installed_inspect_end_to_end() -> TestResult<()> {
                 false,
                 false,
                 false,
-                None,
             ),
         )
         .await?;
@@ -588,7 +621,6 @@ async fn proves_installed_inspect_end_to_end() -> TestResult<()> {
                 false,
                 false,
                 false,
-                None,
             ),
         )
         .await?;
@@ -617,7 +649,6 @@ async fn proves_installed_inspect_end_to_end() -> TestResult<()> {
                 false,
                 true,
                 false,
-                None,
             ),
         )
         .await?;
@@ -659,7 +690,6 @@ async fn proves_installed_inspect_end_to_end() -> TestResult<()> {
                 false,
                 false,
                 false,
-                None,
             ),
         )
         .await?;
@@ -739,7 +769,7 @@ async fn rejects_an_owned_epoch_for_a_different_requested_invocation() -> TestRe
             .await?
             .ok_or_else(|| failure("invocation B did not resolve its captured epoch"))?;
         let loaded_b = db_kernel
-            .load_inspect_snapshot(epoch_b)
+            .load_inspect_snapshot(&session, epoch_b)
             .await?
             .ok_or_else(|| failure("invocation B's epoch did not load"))?;
         require(
@@ -759,7 +789,6 @@ async fn rejects_an_owned_epoch_for_a_different_requested_invocation() -> TestRe
                 false,
                 false,
                 false,
-                None,
             ),
         )
         .await?;
