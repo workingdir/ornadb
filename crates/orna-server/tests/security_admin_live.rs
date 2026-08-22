@@ -20,7 +20,7 @@ use orna_core::{
     FunctionId, PrincipalId,
     security::{
         ExecuteGrant, LocalPeerCredential, Principal, PrincipalKind, PrincipalStatus,
-        PrivilegeClass, PrivilegeGrant, RoleMembership, SecurityAdminAuditOperation,
+        PrivilegeClass, PrivilegeDenial, PrivilegeGrant, RoleMembership, SecurityAdminAuditOperation,
         SecurityAuditKind, SecurityAuditOutcome, SecurityFunctionTarget, SecuritySnapshot,
     },
     source::{SourceBundle, SourceUnit},
@@ -34,7 +34,7 @@ use orna_compiler::{
     STD_INVOKE_ECHO_FUNCTION_ID, STD_INVOKE_ECHO_FUNCTION_REVISION_ID,
     StandardApplicationCheckContext, check_standard_application, prepare_standard_application,
 };
-use orna_postgres::PostgresKernel;
+use orna_postgres::{PostgresKernel, PostgresKernelError};
 use orna_server::{
     InstalledSecurityAdminError, InstalledSecurityAdminOperation,
     InstalledSecurityAdminOutcome, InstalledSecurityAdminRequest, run_security_admin_with_kernel,
@@ -513,6 +513,56 @@ async fn proves_installed_security_admin_end_to_end() -> TestResult<()> {
                 format!("security-admin row contains unexpected payload or shape: {row:?}"),
             )?;
         }
+
+        // A session bound while the admin grant existed must be re-authorised
+        // against the current snapshot before a later mutation is accepted.
+        let stale_session = snapshot
+            .bind_authenticated_session(ADMIN_PRINCIPAL, vec![])
+            .map_err(|error| failure(format!("stale admin session bind failed: {error}")))?;
+        let without_security_admin =
+            SecuritySnapshot::new_with_function_targets_local_peer_credentials_and_privilege_grants(
+                snapshot.revision(),
+                snapshot.function_targets().collect(),
+                snapshot.principals().collect(),
+                snapshot.memberships().collect(),
+                snapshot.execute_grants().collect(),
+                snapshot.local_peer_credentials().collect(),
+                snapshot
+                    .privilege_grants()
+                    .filter(|grant| grant.class() != PrivilegeClass::SecurityAdmin)
+                    .collect(),
+            )
+            .map_err(|error| failure(format!("security-admin removal snapshot failed: {error}")))?;
+        kernel(&database)
+            .replace_security_snapshot(&without_security_admin)
+            .await
+            .map_err(|error| failure(format!("security-admin removal snapshot replace failed: {error}")))?;
+
+        let denied = kernel(&database)
+            .grant_role(&stale_session, ROLE_PRINCIPAL, ADMIN_PRINCIPAL)
+            .await
+            .expect_err("a stale admin session must not grant a later role membership");
+        require(
+            matches!(
+                denied,
+                PostgresKernelError::SecurityAdminDenied {
+                    reason: PrivilegeDenial::MissingPrivilege {
+                        requested: PrivilegeClass::SecurityAdmin,
+                    },
+                }
+            ),
+            "stale admin mutation returned the wrong typed denial",
+        )?;
+        let after_denied = kernel(&database)
+            .recover_security_snapshot()
+            .await
+            .map_err(|error| failure(format!("post-denial security recover failed: {error}")))?;
+        require(
+            !after_denied
+                .memberships()
+                .any(|membership| membership == RoleMembership::new(ROLE_PRINCIPAL, ADMIN_PRINCIPAL)),
+            "stale admin mutation added the target role membership",
+        )?;
 
         Ok(())
     })
