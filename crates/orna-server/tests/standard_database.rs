@@ -12916,20 +12916,33 @@ async fn assert_resource_audit_rows(
 
 async fn require_no_database_sessions(database: &TestDatabase) -> TestResult<()> {
     let session = database.open().await?;
-    let operation = async {
-        let row = session
-            .client()
-            .query_one(
-                "SELECT count(*) FROM pg_stat_activity
-                 WHERE datname = current_database() AND pid <> pg_backend_pid()",
-                &[],
-            )
-            .await?;
-        let count: i64 = row.try_get(0)?;
-        require(
-            count == 0,
-            "raw CLIENT dispatch leaked a PostgreSQL database session",
-        )
+    let operation: TestResult<()> = async {
+        // PostgreSQL can retain a just-closed backend row briefly after the
+        // client driver has completed its shutdown handshake.
+        match tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                let row = session
+                    .client()
+                    .query_one(
+                        "SELECT count(*) FROM pg_stat_activity
+                         WHERE datname = current_database() AND pid <> pg_backend_pid()",
+                        &[],
+                    )
+                    .await?;
+                let count: i64 = row.try_get(0)?;
+                if count == 0 {
+                    return Ok::<(), Box<dyn Error + Send + Sync>>(());
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        {
+            Ok(result) => result,
+            Err(_) => Err(failure(
+                "raw CLIENT dispatch leaked a PostgreSQL database session",
+            )),
+        }
     }
     .await;
     finish_session(
