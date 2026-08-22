@@ -5096,9 +5096,9 @@ fn decode_envelope<'a>(
     Ok((tag, type_id, &encoded[HEADER_LENGTH..]))
 }
 
-fn decode_constructed_envelope<'a>(
-    encoded: &'a [u8],
-) -> Result<(bool, u8, TypeId, &'a [u8]), ValueCodecError> {
+fn decode_constructed_envelope(
+    encoded: &[u8],
+) -> Result<(bool, u8, TypeId, &[u8]), ValueCodecError> {
     if encoded.len() < HEADER_LENGTH {
         return Err(ValueCodecError::TruncatedHeader {
             actual: encoded.len(),

@@ -4117,18 +4117,17 @@ mod tests {
         StandardUpgradeError, TERMINAL_DOCUMENT_MAGIC, TIME_TYPE_ID, TIMESTAMP_TYPE_ID, UI_MAGIC,
         UUID_TYPE_ID, VOID_TYPE_ID, build_type_bindings, prepare_standard_upgrade,
         prepare_standard_upgrade_v1_to_v2, prepare_standard_upgrade_v2_to_v3,
-        prepare_standard_upgrade_v4_to_v5, prepare_standard_upgrade_with,
+        prepare_standard_upgrade_with,
         is_registered_inspect_carrier_type, registered_inspect_carrier_codecs,
         registered_opaque_codecs,
         retained_standard_library_snapshot, retained_standard_library_snapshot_from_source,
         retained_standard_library_v2_snapshot, retained_standard_library_v2_snapshot_from_source,
         retained_standard_library_v3_snapshot, retained_standard_library_v4_snapshot,
-        retained_standard_library_v5_snapshot,
         standard_library_manifest, standard_library_v2_manifest, standard_library_v3_manifest,
-        standard_library_v4_manifest, standard_library_v5_manifest,
+        standard_library_v4_manifest,
         verify_standard_library_snapshot,
         verify_standard_library_v2_snapshot, verify_standard_library_v3_snapshot,
-        verify_standard_library_v4_snapshot, verify_standard_library_v5_snapshot,
+        verify_standard_library_v4_snapshot,
     };
 
     const EXPECTED_RETAINED_STANDARD_SOURCE: &str = r#"CREATE SCHEMA std;
