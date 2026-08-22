@@ -213,10 +213,10 @@ impl InspectLifecycleError {
     /// Returns the stable public error code for this failure.
     pub const fn code(self) -> &'static str {
         match self {
-            Self::StaleEpoch { .. }
-            | Self::FutureEpoch { .. }
-            | Self::TokenMismatch
-            | Self::NotFrozen => "inspect.stale_epoch",
+            Self::StaleEpoch { .. } | Self::TokenMismatch | Self::NotFrozen => {
+                "inspect.stale_epoch"
+            }
+            Self::FutureEpoch { .. } => "inspect.future_epoch",
             Self::PrincipalMismatch | Self::RevisionMismatch { .. } | Self::EpochMismatch => {
                 "inspect.epoch_mismatch"
             }
@@ -382,7 +382,7 @@ mod tests {
                     expected: 1,
                     actual: 2,
                 },
-                "inspect.stale_epoch",
+                "inspect.future_epoch",
             ),
             (
                 InspectLifecycleError::PrincipalMismatch,
