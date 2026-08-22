@@ -26,8 +26,8 @@ use orna_core::{
     security::{
         AuthenticatedSession, CATALOGUE_HEALTH_SERVICE_PRINCIPAL_ID, ExecuteDecision,
         ExecuteDenial, InvocationTarget, Principal, PrincipalKind, PrincipalStatus, PrivilegeClass,
-        PrivilegeDecision, PrivilegeGrant, RoleMembership, SecurityAdminAuditOperation,
-        SecurityAuditDecision, SecuritySnapshot, authorise_privilege,
+        PrivilegeDecision, PrivilegeDenial, PrivilegeGrant, RoleMembership,
+        SecurityAdminAuditOperation, SecurityAuditDecision, SecuritySnapshot, authorise_privilege,
     },
     system::{
         SYS_SECURITY_CREATE_PRINCIPAL_FUNCTION_ID, SYS_SECURITY_CREATE_ROLE_FUNCTION_ID,
@@ -623,12 +623,38 @@ async fn run_security_admin_mutation(
         let active = configure_and_recover(&transaction).await?;
         lock_active_revision(&transaction, active.pair()).await?;
         let current = recover_security_snapshot_for_active(&transaction, &active).await?;
+        let bound_session = match current.bind_authenticated_session(
+            session.principal(),
+            session.active_roles().to_vec(),
+        ) {
+            Ok(bound_session) => bound_session,
+            Err(_) => {
+                let reason = PrivilegeDenial::MissingPrivilege {
+                    requested: PrivilegeClass::SecurityAdmin,
+                };
+                append_security_audit_event(
+                    &transaction,
+                    SecurityAuditDecision::security_admin_denied(
+                        session,
+                        mutation.operation(),
+                        mutation.target(),
+                        reason,
+                    ),
+                )
+                .await?;
+                transaction
+                    .commit()
+                    .await
+                    .map_err(PostgresKernelError::Database)?;
+                return Err(PostgresKernelError::SecurityAdminDenied { reason });
+            }
+        };
 
         let gate = authorise_privilege(
-            session.principal(),
+            bound_session.principal(),
             PrivilegeClass::SecurityAdmin,
             None,
-            &privilege_classes_for_session(&current, session, None),
+            &privilege_classes_for_session(&current, &bound_session, None),
         );
         let PrivilegeDecision::Allowed { .. } = gate else {
             let reason = match gate {
@@ -638,7 +664,7 @@ async fn run_security_admin_mutation(
             append_security_audit_event(
                 &transaction,
                 SecurityAuditDecision::security_admin_denied(
-                    session,
+                    &bound_session,
                     mutation.operation(),
                     mutation.target(),
                     reason,
@@ -668,7 +694,7 @@ async fn run_security_admin_mutation(
         append_security_audit_event(
             &transaction,
             SecurityAuditDecision::security_admin_allowed(
-                session,
+                &bound_session,
                 PrivilegeDecision::Allowed {
                     requested: PrivilegeClass::SecurityAdmin,
                 },
@@ -728,6 +754,23 @@ fn privilege_classes_for_session(
                 && (grant.object().is_none() || grant.object() == object)
         })
         .map(|grant| grant.class())
+        .collect()
+}
+
+/// Resolves the durable, class-wide INSPECT privileges held by one
+/// authenticated session. The session principal and every explicitly active
+/// role participate in the resolution; object-scoped grants are deliberately
+/// excluded because INSPECT privileges are class-wide.
+pub(crate) fn inspect_privileges_for_session(
+    snapshot: &SecuritySnapshot,
+    session: &AuthenticatedSession,
+) -> Vec<orna_core::inspect::InspectPrivilege> {
+    privilege_classes_for_session(snapshot, session, None)
+        .into_iter()
+        .filter_map(|class| match class {
+            PrivilegeClass::Inspect(privilege) => Some(privilege),
+            PrivilegeClass::Execute | PrivilegeClass::SecurityAdmin => None,
+        })
         .collect()
 }
 
