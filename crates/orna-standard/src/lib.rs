@@ -7756,8 +7756,8 @@ EXPORT TYPE std.ui.UI AS std.UI;
         let active = empty_version_two_active_revision(&verified);
 
         let mut document_payload = Vec::from(TERMINAL_DOCUMENT_MAGIC.as_bytes());
-        document_payload.extend_from_slice(&5_u32.to_be_bytes());
-        document_payload.extend_from_slice(b"hello");
+        document_payload.extend_from_slice(&6_u32.to_be_bytes());
+        document_payload.extend_from_slice(b"hello\n");
         let document = OpaqueValue::new(
             &active,
             &registry,
@@ -7930,8 +7930,8 @@ EXPORT TYPE std.ui.UI AS std.UI;
             .expect("the opaque-token payload constructs");
         assert_eq!(token.opaque_type(), OPAQUE_TOKEN_TYPE_ID);
         let mut document_payload = Vec::from(TERMINAL_DOCUMENT_MAGIC.as_bytes());
-        document_payload.extend_from_slice(&2_u32.to_be_bytes());
-        document_payload.extend_from_slice(b"{}");
+        document_payload.extend_from_slice(&3_u32.to_be_bytes());
+        document_payload.extend_from_slice(b"{}\n");
         let document = OpaqueValue::new(
             &active,
             &registry,
