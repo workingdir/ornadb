@@ -5041,7 +5041,7 @@ fn render_explain(
     }
     plan.push_str(&format!(
         "  final sink: {}\n",
-        render_explain_final_sink(request.output_requirement())
+        render_explain_final_sink(request.output_requirement(), function.return_type())
     ));
     plan.push_str("sinks:\n");
     render_explain_sink_offers(&mut plan, request.client_offer().sink_offers());
@@ -5056,16 +5056,27 @@ fn render_explain(
 
 /// Returns the final sink fact available without executing the target.
 ///
-/// An absent output requirement means no presenter is requested and the
-/// canonical result remains the final value. With an output requirement, the
-/// presenter registry and result-compatible path are resolved inside the
-/// sealed route, so claiming a selected sink here would invent a plan that
-/// this boundary does not compute.
-fn render_explain_final_sink(requirement: Option<&InvocationOutputRequirement>) -> String {
+/// An output requirement defers presenter selection to the sealed route,
+/// which resolves the presenter after target execution. Without an output
+/// requirement, the normal renderer still consumes the two installed opaque
+/// result types through the tty runtime, while all other results retain the
+/// canonical value envelope.
+fn render_explain_final_sink(
+    requirement: Option<&InvocationOutputRequirement>,
+    return_type: &FunctionReturn,
+) -> String {
     if requirement.is_some() {
-        "deferred until sealed presenter selection".to_owned()
-    } else {
-        "none (canonical result)".to_owned()
+        return "deferred until sealed presenter selection".to_owned();
+    }
+    match return_type {
+        FunctionReturn::Single(ResolvedType::Value(type_id)) => match select_runtime_sink(*type_id) {
+            Some(orna_runtime_tty::Sink::Document) => "tty document sink (opaque result)".to_owned(),
+            Some(orna_runtime_tty::Sink::ByteStream) => {
+                "tty byte-stream sink (opaque result)".to_owned()
+            }
+            None => "none (canonical result)".to_owned(),
+        },
+        _ => "none (canonical result)".to_owned(),
     }
 }
 
@@ -6861,6 +6872,30 @@ mod tests {
                 ),
             ])),
             "ROWS (value INTEGER)",
+        );
+    }
+    #[test]
+    fn explain_final_sink_matches_implicit_tty_opaque_routing() {
+        assert_eq!(
+            render_explain_final_sink(
+                None,
+                &FunctionReturn::Single(ResolvedType::Value(STD_TERMINAL_DOCUMENT_TYPE_ID)),
+            ),
+            "tty document sink (opaque result)",
+        );
+        assert_eq!(
+            render_explain_final_sink(
+                None,
+                &FunctionReturn::Single(ResolvedType::Value(STD_IO_BYTE_STREAM_TYPE_ID)),
+            ),
+            "tty byte-stream sink (opaque result)",
+        );
+        assert_eq!(
+            render_explain_final_sink(
+                None,
+                &FunctionReturn::Single(ResolvedType::Scalar(StandardScalar::Integer)),
+            ),
+            "none (canonical result)",
         );
     }
 
