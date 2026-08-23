@@ -508,6 +508,29 @@ mod tests {
         assert_eq!(session.pending_request_id, None);
     }
     #[test]
+    fn request_target_mismatch_is_rejected_before_pending() {
+        let current = binding(1);
+        let mut session = ClientInspectLifecycleSession::new(current);
+        let mismatched = ClientInspectRequest::new(
+            context(),
+            ClientInspectOperation::Snapshot {
+                target: RuntimeValue::Reference {
+                    target: SYS_INSPECT_INVOCATION_TYPE_ID,
+                    object: ObjectId::from_bytes([8; 16]),
+                },
+            },
+        );
+
+        assert_eq!(
+            session.begin_request(mismatched, current),
+            Err(ClientInspectError::Failed(
+                "inspect.epoch_mismatch".to_owned(),
+            ))
+        );
+        assert_eq!(session.pending_request_id, None);
+    }
+
+    #[test]
     fn stale_future_principal_and_revision_completions_keep_the_request_pending() {
         let current = binding(2);
         let mut session = ClientInspectLifecycleSession::new(current);
