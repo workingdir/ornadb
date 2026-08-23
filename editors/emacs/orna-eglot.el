@@ -117,8 +117,9 @@ never changes its meaning."
     "Orna and SQL keywords (case-insensitive).")
 
 (defvar orna-types
-    '("BIGINT" "BOOL" "BYTES" "DATE" "DECIMAL" "DURATION" "FLOAT" "INT"
-      "TEXT" "TIME" "TIMESTAMP" "UUID" "VOID")
+    '("BIGINT" "BINARY LARGE OBJECT" "BOOL" "BOOLEAN" "BYTES"
+      "CHARACTER LARGE OBJECT" "DATE" "DECIMAL" "DURATION" "FLOAT"
+      "INT" "INTEGER" "TEXT" "TIME" "TIMESTAMP" "UUID" "VOID")
     "Standard scalar type names (case-insensitive).")
 
 (defvar orna-font-lock-keywords
