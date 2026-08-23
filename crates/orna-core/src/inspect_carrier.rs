@@ -576,6 +576,7 @@ fn validate_record_payload(payload: &[u8], depth: usize) -> Result<(), InspectRo
     let count = u32::from_be_bytes(payload[..4].try_into().expect("record count width")) as usize;
     let mut cursor = 4;
     let mut field_identities = HashSet::new();
+    let mut previous_field_identity: Option<&[u8]> = None;
     for _ in 0..count {
         if payload.len().saturating_sub(cursor) < RECORD_FIELD_HEADER_BYTES {
             return Err(InspectRowError::TruncatedRecord {
@@ -601,6 +602,10 @@ fn validate_record_payload(payload: &[u8], depth: usize) -> Result<(), InspectRo
         if !field_identities.insert(field_identity) {
             return Err(InspectRowError::NonCanonicalRecordFieldOrder);
         }
+        if previous_field_identity.is_some_and(|previous| previous >= field_identity) {
+            return Err(InspectRowError::NonCanonicalRecordFieldOrder);
+        }
+        previous_field_identity = Some(field_identity);
         cursor += length;
     }
     if cursor == payload.len() {
@@ -1138,9 +1143,12 @@ mod tests {
     }
 
     #[test]
-    fn declaration_order_allows_non_lexicographic_field_identities() {
+    fn declaration_order_rejects_non_lexicographic_field_identities() {
         let declaration_order = record_row(&[([2; 16], 1), ([1; 16], 2)]);
-        assert_eq!(validate_orv5_row_frame(&declaration_order), Ok(()));
+        assert_eq!(
+            validate_orv5_row_frame(&declaration_order),
+            Err(InspectRowError::NonCanonicalRecordFieldOrder)
+        );
         assert_eq!(
             InspectCarrierEnvelope::new(
                 InspectCarrierKind::Calls,
@@ -1148,9 +1156,19 @@ mod tests {
                 source(),
                 catalogue(),
                 vec![declaration_order],
-            )
-            .map(|_| ()),
-            Ok(())
+            ),
+            Err(InspectCarrierError::InvalidRow(
+                InspectRowError::NonCanonicalRecordFieldOrder
+            ))
+        );
+    }
+
+    #[test]
+    fn non_adjacent_unsorted_record_field_identity_is_rejected() {
+        let unsorted = record_row(&[([1; 16], 1), ([3; 16], 2), ([2; 16], 3)]);
+        assert_eq!(
+            validate_orv5_row_frame(&unsorted),
+            Err(InspectRowError::NonCanonicalRecordFieldOrder)
         );
     }
 
@@ -1180,7 +1198,12 @@ mod tests {
 
         let mut descending_wire = valid;
         descending_wire[second_identity..second_identity + 16].copy_from_slice(&[0; 16]);
-        assert!(InspectCarrierEnvelope::decode(&descending_wire).is_ok());
+        assert_eq!(
+            InspectCarrierEnvelope::decode(&descending_wire),
+            Err(InspectCarrierError::InvalidRow(
+                InspectRowError::NonCanonicalRecordFieldOrder
+            ))
+        );
     }
 
     #[test]
