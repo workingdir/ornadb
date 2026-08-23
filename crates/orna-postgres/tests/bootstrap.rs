@@ -1033,6 +1033,33 @@ async fn bootstrap_upgrades_the_registered_v20_empty_catalogue() -> TestResult<(
             format!("v33 migration record is not exact: {:?}", after.migrations[32]),
         )?;
         require(
+            after.migrations[33]
+                == (
+                    34,
+                    "resource request identity history".to_owned(),
+                    expected_migration_checksum(34, MIGRATIONS[33].2),
+                ),
+            format!("v34 migration record is not exact: {:?}", after.migrations[33]),
+        )?;
+        require(
+            after.migrations[34]
+                == (
+                    35,
+                    "resource audit target authorities".to_owned(),
+                    expected_migration_checksum(35, MIGRATIONS[34].2),
+                ),
+            format!("v35 migration record is not exact: {:?}", after.migrations[34]),
+        )?;
+        require(
+            after.migrations[35]
+                == (
+                    36,
+                    "sealed Inspector value types".to_owned(),
+                    expected_migration_checksum(36, MIGRATIONS[35].2),
+                ),
+            format!("v36 migration record is not exact: {:?}", after.migrations[35]),
+        )?;
+        require(
             after.active_pair == before.active_pair,
             "v21-v36 changed the active revision pair",
         )?;
@@ -1042,7 +1069,7 @@ async fn bootstrap_upgrades_the_registered_v20_empty_catalogue() -> TestResult<(
         require(
             recovered.pair().source().to_bytes().to_vec() == source_revision_id
                 && recovered.pair().catalogue().to_bytes().to_vec() == catalogue_revision_id,
-            "v21-v27 recovery does not preserve the active revision pair",
+            "v21-v36 recovery does not preserve the active revision pair",
         )?;
         Ok(())
     })
