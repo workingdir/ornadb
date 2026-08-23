@@ -238,7 +238,7 @@
             "patterns": [
                 {
                     "name": "storage.type.orna",
-                    "match": "(?i)\\b(?:BIGINT|BOOL|BYTES|DATE|DECIMAL|DURATION|FLOAT|INT|TEXT|TIME|TIMESTAMP|UUID|VOID)\\b"
+                    "match": "(?i)\\b(?:BIGINT|BINARY LARGE OBJECT|BOOL|BOOLEAN|BYTES|CHARACTER LARGE OBJECT|DATE|DECIMAL|DURATION|FLOAT|INT|INTEGER|TEXT|TIME|TIMESTAMP|UUID|VOID)\\b"
                 }
             ]
         },
