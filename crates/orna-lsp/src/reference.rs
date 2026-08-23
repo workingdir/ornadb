@@ -365,8 +365,8 @@ const KEYWORD_REFERENCES: &[KeywordReference] = &[
     },
     KeywordReference {
         keyword: "ON",
-        summary: "Names the securable of a grant or a join condition.",
-        context: "GRANT ... ON FUNCTION|TYPE|SCHEMA; JOIN ... ON condition; ON DELETE policy.",
+        summary: "Names the securable of a grant or the policy of a reference field.",
+        context: "GRANT ... ON FUNCTION|TYPE|SCHEMA; ON DELETE policy.",
         example: "GRANT SELECT ON TYPE tasks.task TO analyst;",
     },
     // Procedural
@@ -487,8 +487,8 @@ const KEYWORD_REFERENCES: &[KeywordReference] = &[
     KeywordReference {
         keyword: "AWAIT",
         summary: "Waits for an asynchronous value.",
-        context: "AWAIT expression; statement in a procedural body.",
-        example: "AWAIT std.launch.run(entry);",
+        context: "CLIENT LET, assignment, or RETURN expression.",
+        example: "RETURN AWAIT std.data.resource(target => std.invoke.echo, arguments => std.call.args());",
     },
     KeywordReference {
         keyword: "CALL",
@@ -582,52 +582,10 @@ const KEYWORD_REFERENCES: &[KeywordReference] = &[
         example: "email TEXT UNIQUE",
     },
     KeywordReference {
-        keyword: "NULLS",
-        summary: "Controls null placement in ordering.",
-        context: "ORDER BY ... NULLS FIRST | LAST.",
-        example: "ORDER BY t.due_at NULLS LAST",
-    },
-    KeywordReference {
-        keyword: "FIRST",
-        summary: "Orders nulls first.",
-        context: "NULLS FIRST in ORDER BY.",
-        example: "NULLS FIRST",
-    },
-    KeywordReference {
-        keyword: "LAST",
-        summary: "Orders nulls last.",
-        context: "NULLS LAST in ORDER BY.",
-        example: "NULLS LAST",
-    },
-    KeywordReference {
-        keyword: "BETWEEN",
-        summary: "Range membership test.",
-        context: "expression BETWEEN expression AND expression.",
-        example: "WHERE t.due_at BETWEEN p_start AND p_end",
-    },
-    KeywordReference {
-        keyword: "EXISTS",
-        summary: "Tests whether a query produces rows.",
-        context: "EXISTS ( query ).",
-        example: "WHERE EXISTS (SELECT ... FROM ...)",
-    },
-    KeywordReference {
         keyword: "DISTINCT",
         summary: "Removes duplicate rows.",
         context: "SELECT DISTINCT ...",
         example: "SELECT DISTINCT t.status FROM tasks.task t;",
-    },
-    KeywordReference {
-        keyword: "ALL",
-        summary: "Compares against every row of a subquery.",
-        context: "expression operator ALL ( query ).",
-        example: "WHERE x > ALL (SELECT ...)",
-    },
-    KeywordReference {
-        keyword: "UNION",
-        summary: "Combines the rows of two queries.",
-        context: "query UNION [ALL] query.",
-        example: "SELECT a FROM t UNION SELECT b FROM u;",
     },
     // Query
     KeywordReference {
@@ -686,33 +644,9 @@ const KEYWORD_REFERENCES: &[KeywordReference] = &[
     },
     KeywordReference {
         keyword: "BY",
-        summary: "Completes ORDER BY and GROUP BY.",
-        context: "ORDER BY column [ASC|DESC]; GROUP BY columns.",
+        summary: "Completes ORDER BY.",
+        context: "ORDER BY column [ASC|DESC].",
         example: "ORDER BY t.due_at DESC",
-    },
-    KeywordReference {
-        keyword: "GROUP",
-        summary: "Groups rows for aggregation.",
-        context: "GROUP BY columns.",
-        example: "GROUP BY t.status",
-    },
-    KeywordReference {
-        keyword: "HAVING",
-        summary: "Filters grouped rows.",
-        context: "HAVING aggregate condition.",
-        example: "HAVING COUNT(*) > 0",
-    },
-    KeywordReference {
-        keyword: "LIMIT",
-        summary: "Caps the number of returned rows.",
-        context: "LIMIT count.",
-        example: "LIMIT 10",
-    },
-    KeywordReference {
-        keyword: "OFFSET",
-        summary: "Skips rows before returning results.",
-        context: "OFFSET count.",
-        example: "OFFSET 20",
     },
     KeywordReference {
         keyword: "ASC",
@@ -725,48 +659,6 @@ const KEYWORD_REFERENCES: &[KeywordReference] = &[
         summary: "Descending order.",
         context: "ORDER BY ... DESC.",
         example: "ORDER BY t.due_at DESC",
-    },
-    KeywordReference {
-        keyword: "JOIN",
-        summary: "Combines rows from two sources.",
-        context: "source JOIN source ON condition.",
-        example: "FROM tasks.task t JOIN tasks.project p ON t.project = p.id",
-    },
-    KeywordReference {
-        keyword: "INNER",
-        summary: "Inner join.",
-        context: "INNER JOIN.",
-        example: "INNER JOIN tasks.project p ON ...",
-    },
-    KeywordReference {
-        keyword: "LEFT",
-        summary: "Left outer join.",
-        context: "LEFT JOIN.",
-        example: "LEFT JOIN tasks.project p ON ...",
-    },
-    KeywordReference {
-        keyword: "RIGHT",
-        summary: "Right outer join.",
-        context: "RIGHT JOIN.",
-        example: "RIGHT JOIN ...",
-    },
-    KeywordReference {
-        keyword: "OUTER",
-        summary: "Outer join.",
-        context: "LEFT/RIGHT/FULL OUTER JOIN.",
-        example: "FULL OUTER JOIN ...",
-    },
-    KeywordReference {
-        keyword: "FULL",
-        summary: "Full outer join.",
-        context: "FULL JOIN.",
-        example: "FULL JOIN ...",
-    },
-    KeywordReference {
-        keyword: "CROSS",
-        summary: "Cross join.",
-        context: "CROSS JOIN.",
-        example: "CROSS JOIN tasks.task",
     },
     // Types
     KeywordReference {
