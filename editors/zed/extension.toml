@@ -13,5 +13,5 @@ language_ids = { "Orna" = "orna" }
 
 [grammars.orna]
 repository = "https://github.com/workingdir/ornadb"
-rev = "9b701f6a3cf0c93712bf2636069a801a8bbd80a8"
+rev = "b52e5ab3bf3e036d8a4feec5765e1e1f3c04874b"
 path = "editors/tree-sitter-orna"
