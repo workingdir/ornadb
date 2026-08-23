@@ -3,8 +3,8 @@
 
 This helper only reads already-collected evidence. It never installs a
 package, starts a service, invokes Docker, or treats a container run as native
-host evidence. A lifecycle claim is accepted only after a passing host
-preflight report and explicit process and trace inputs have been supplied.
+host evidence. It records `NOT_PROVEN` until an authoritative native lifecycle
+verifier supplies the complete proof.
 """
 
 from __future__ import annotations
@@ -81,10 +81,6 @@ def digest(path: Path, label: str) -> dict[str, Any]:
     }
 
 
-def optional_digest(path: Path | None, label: str, reason: str) -> dict[str, Any]:
-    if path is None:
-        return {"path": None, "status": NOT_PROVEN, "reason": reason}
-    return {"status": PASS, **digest(path, label)}
 
 
 def read_json(path: Path, label: str) -> dict[str, Any]:
@@ -98,7 +94,7 @@ def read_json(path: Path, label: str) -> dict[str, Any]:
     return value
 
 
-def validate_preflight(path: Path, package: Path, lifecycle_status: str) -> dict[str, Any]:
+def validate_preflight(path: Path, package: Path) -> dict[str, Any]:
     report = read_json(path, "preflight report")
     if report.get("format") != 1 or report.get("kind") != PREFLIGHT_KIND:
         raise EvidenceError("preflight report has an unsupported format or kind")
@@ -122,8 +118,6 @@ def validate_preflight(path: Path, package: Path, lifecycle_status: str) -> dict
         raise EvidenceError("preflight report must not claim lifecycle completion")
     if report.get("fresh_host_status") not in {PASS, NOT_PROVEN}:
         raise EvidenceError("preflight report has a failed fresh-host status")
-    if lifecycle_status == "pass" and report.get("fresh_host_status") != PASS:
-        raise EvidenceError("PASS requires a passing fresh-host attestation")
     if report.get("preflight_status") != PASS or statuses != {PASS}:
         raise EvidenceError("host preflight did not pass all checks")
     return report
@@ -159,37 +153,16 @@ def build_manifest(args: argparse.Namespace) -> tuple[Path, dict[str, Any]]:
     output = absolute(args.evidence_dir, "--evidence-dir")
     preflight_path = absolute(args.preflight_report, "--preflight-report")
     machine_path = absolute(args.machine_evidence, "--machine-evidence")
-    process_path = (
-        absolute(args.process_evidence, "--process-evidence")
-        if args.process_evidence is not None
-        else None
-    )
-    trace_path = (
-        absolute(args.trace_evidence, "--trace-evidence")
-        if args.trace_evidence is not None
-        else None
-    )
 
-    # Validate preflight before interpreting --lifecycle-status. A stale,
-    # failed, or container-derived report can never unlock a lifecycle claim.
-    preflight = validate_preflight(preflight_path, package, args.lifecycle_status)
+    # A preflight-only result cannot unlock a native lifecycle claim.
+    preflight = validate_preflight(preflight_path, package)
     package_input = digest(package, "package input")
     machine_input = digest(machine_path, "machine evidence")
-
-    if args.lifecycle_status == "pass":
-        if process_path is None or trace_path is None:
-            raise EvidenceError("PASS requires explicit process and trace evidence paths")
-        process_input = optional_digest(process_path, "process evidence", "not supplied")
-        trace_input = optional_digest(trace_path, "trace evidence", "not supplied")
-        lifecycle_status = PASS
-        lifecycle_reason = "native lifecycle matrix inputs were supplied after passing preflight"
-    else:
-        process_input = optional_digest(
-            process_path, "process evidence", "native lifecycle matrix was not run"
-        )
-        trace_input = optional_digest(trace_path, "trace evidence", "native lifecycle matrix was not run")
-        lifecycle_status = NOT_PROVEN
-        lifecycle_reason = "native lifecycle matrix was not run"
+    not_proven = {
+        "path": None,
+        "status": NOT_PROVEN,
+        "reason": "native lifecycle verifier has not run",
+    }
 
     create_output(output)
     manifest = {
@@ -197,13 +170,13 @@ def build_manifest(args: argparse.Namespace) -> tuple[Path, dict[str, Any]]:
         "kind": EVIDENCE_KIND,
         "preflight_status": preflight["preflight_status"],
         "fresh_host_status": preflight.get("fresh_host_status", NOT_PROVEN),
-        "complete_lifecycle_status": lifecycle_status,
-        "lifecycle_reason": lifecycle_reason,
+        "complete_lifecycle_status": NOT_PROVEN,
+        "lifecycle_reason": "native lifecycle verifier has not run",
         "inputs": {
             "machine": machine_input,
             "package": package_input,
-            "process": process_input,
-            "trace": trace_input,
+            "process": not_proven.copy(),
+            "trace": not_proven.copy(),
         },
         "preflight_report": digest(preflight_path, "preflight report"),
     }
@@ -216,9 +189,7 @@ def main() -> int:
     parser.add_argument("--evidence-dir", required=True)
     parser.add_argument("--preflight-report", required=True)
     parser.add_argument("--machine-evidence", required=True)
-    parser.add_argument("--process-evidence")
-    parser.add_argument("--trace-evidence")
-    parser.add_argument("--lifecycle-status", choices=("not-run", "pass"), required=True)
+    parser.add_argument("--lifecycle-status", choices=("not-run",), required=True)
     args = parser.parse_args()
     try:
         output, manifest = build_manifest(args)
@@ -234,7 +205,7 @@ def main() -> int:
             sort_keys=True,
         )
     )
-    return 0 if manifest["complete_lifecycle_status"] == PASS else 1
+    return 1
 
 
 if __name__ == "__main__":
