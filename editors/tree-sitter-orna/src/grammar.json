@@ -1584,8 +1584,17 @@
           "type": "FIELD",
           "name": "value",
           "content": {
-            "type": "SYMBOL",
-            "name": "client_expression"
+            "type": "CHOICE",
+            "members": [
+              {
+                "type": "SYMBOL",
+                "name": "client_await_expression"
+              },
+              {
+                "type": "SYMBOL",
+                "name": "client_expression"
+              }
+            ]
           }
         },
         {
@@ -1646,8 +1655,17 @@
           "type": "FIELD",
           "name": "value",
           "content": {
-            "type": "SYMBOL",
-            "name": "client_expression"
+            "type": "CHOICE",
+            "members": [
+              {
+                "type": "SYMBOL",
+                "name": "client_await_expression"
+              },
+              {
+                "type": "SYMBOL",
+                "name": "client_expression"
+              }
+            ]
           }
         },
         {
@@ -1675,8 +1693,17 @@
           "type": "FIELD",
           "name": "value",
           "content": {
-            "type": "SYMBOL",
-            "name": "client_expression"
+            "type": "CHOICE",
+            "members": [
+              {
+                "type": "SYMBOL",
+                "name": "client_await_expression"
+              },
+              {
+                "type": "SYMBOL",
+                "name": "client_expression"
+              }
+            ]
           }
         },
         {
@@ -1699,8 +1726,17 @@
               "type": "FIELD",
               "name": "expression",
               "content": {
-                "type": "SYMBOL",
-                "name": "client_expression"
+                "type": "CHOICE",
+                "members": [
+                  {
+                    "type": "SYMBOL",
+                    "name": "client_await_expression"
+                  },
+                  {
+                    "type": "SYMBOL",
+                    "name": "client_expression"
+                  }
+                ]
               }
             },
             {
@@ -1750,10 +1786,6 @@
         {
           "type": "SYMBOL",
           "name": "client_call_expression"
-        },
-        {
-          "type": "SYMBOL",
-          "name": "client_await_expression"
         },
         {
           "type": "SYMBOL",
