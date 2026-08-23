@@ -402,7 +402,8 @@ async fn source_apply_failure_rolls_back_candidate_and_audit_event() -> TestResu
                 .iter()
                 .all(|event| event.decision().kind() != SecurityAuditKind::SourceApply),
             "failed source apply left a protected SourceApply audit event",
-        )
+        )?;
+        require_no_candidate_residue(&database, &candidate, &base).await
     })
     .await
 }
@@ -431,7 +432,7 @@ async fn source_apply_audit_rejects_a_mismatched_revision_pair() -> TestResult<(
 
         let reopened = PostgresKernel::from_str(&database.connection_string())?;
         let error = reopened
-            .recover_security_audit_events()
+            .recover()
             .await
             .expect_err("mismatched source apply audit pair must fail recovery");
         if !matches!(
