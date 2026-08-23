@@ -1234,6 +1234,13 @@ enum OpaquePayloadContract {
         /// The exact ASCII magic prefix, including any separating space.
         magic: String,
     },
+    /// `MAGIC <len:u32 be> <canonical std.ui.UI JSON UTF-8 bytes>`: a fixed
+    /// ASCII magic prefix, then a big-endian `u32` body length, then exactly
+    /// that many canonical JSON UTF-8 bytes representing one closed UI value.
+    LengthPrefixedUiValue {
+        /// The exact ASCII magic prefix, including any separating space.
+        magic: String,
+    },
     /// `MAGIC <media-type-len:u32 be> <media-type> <len:u32 be> <bytes>`: a
     /// fixed ASCII magic prefix, a big-endian `u32` media-type length, the
     /// non-empty media-type bytes, a big-endian `u32` body length, then
@@ -1356,11 +1363,17 @@ impl OpaqueCodecRegistration {
     ) -> Result<Self, OpaqueCodecRegistryError> {
         let magic = magic.into();
         validate_codec_magic(opaque_type, &magic)?;
+        let representation_contract = representation_contract.into();
+        let contract = if is_ui_value_codec(&semantic_name, &representation_contract, &magic) {
+            OpaquePayloadContract::LengthPrefixedUiValue { magic }
+        } else {
+            OpaquePayloadContract::LengthPrefixedCanonicalJson { magic }
+        };
         Ok(Self {
             opaque_type,
             semantic_name,
-            representation_contract: representation_contract.into(),
-            contract: OpaquePayloadContract::LengthPrefixedCanonicalJson { magic },
+            representation_contract,
+            contract,
         })
     }
 }
@@ -1379,6 +1392,22 @@ fn is_terminal_document_codec(
             "terminal",
             "document",
         ])
+}
+
+/// Identifies the accepted standard UI codec without changing the generic
+/// length-prefixed canonical-JSON constructor's public API.
+fn is_ui_value_codec(
+    semantic_name: &QualifiedSemanticName,
+    representation_contract: &str,
+    magic: &str,
+) -> bool {
+    magic == "ORNA-UI/1 "
+        && representation_contract == "orna.std.value.ui@1"
+        && semantic_name
+            .parts()
+            .iter()
+            .map(String::as_str)
+            .eq(["std", "ui", "ui"])
 }
 
 /// Rejects an empty, non-ASCII, or oversized framed-codec magic prefix.
@@ -1507,19 +1536,22 @@ fn validate_opaque_payload(
         OpaquePayloadContract::LengthPrefixedCanonicalJson { magic } => {
             validate_length_prefixed_canonical_json(opaque_type, magic.as_bytes(), payload)
         }
+        OpaquePayloadContract::LengthPrefixedUiValue { magic } => {
+            validate_length_prefixed_ui_value(opaque_type, magic.as_bytes(), payload)
+        }
         OpaquePayloadContract::MediaTypeFramed { magic } => {
             validate_media_type_framed(opaque_type, magic.as_bytes(), payload)
         }
     }
 }
 
-/// Validates `MAGIC <len:u32 be> <canonical JSON UTF-8 bytes>` with exactly
-/// `len` canonical JSON body bytes and no trailing bytes.
-fn validate_length_prefixed_canonical_json(
+/// Parses and validates one canonical JSON frame, returning its body value for
+/// contracts that apply a schema-specific check after the generic framing.
+fn canonical_json_body(
     opaque_type: TypeId,
     magic: &[u8],
     payload: &[u8],
-) -> Result<(), OpaqueValueError> {
+) -> Result<serde_json::Value, OpaqueValueError> {
     let prefix_length = magic
         .len()
         .checked_add(4)
@@ -1552,7 +1584,201 @@ fn validate_length_prefixed_canonical_json(
     if canonical_body != body {
         return Err(OpaqueValueError::InvalidJsonBody { opaque_type });
     }
+    Ok(value)
+}
+
+/// Validates `MAGIC <len:u32 be> <canonical JSON UTF-8 bytes>` with exactly
+/// `len` canonical JSON body bytes and no trailing bytes.
+fn validate_length_prefixed_canonical_json(
+    opaque_type: TypeId,
+    magic: &[u8],
+    payload: &[u8],
+) -> Result<(), OpaqueValueError> {
+    canonical_json_body(opaque_type, magic, payload).map(|_| ())
+}
+
+/// Validates the canonical frame and then the closed `std.ui.UI` JSON shape.
+fn validate_length_prefixed_ui_value(
+    opaque_type: TypeId,
+    magic: &[u8],
+    payload: &[u8],
+) -> Result<(), OpaqueValueError> {
+    let value = canonical_json_body(opaque_type, magic, payload)?;
+    let mut state = UiValueValidationState { node_count: 0 };
+    validate_ui_value(opaque_type, &value, &mut state)
+}
+
+struct UiValueValidationState {
+    node_count: usize,
+}
+
+fn invalid_ui_value(opaque_type: TypeId) -> Result<(), OpaqueValueError> {
+    Err(OpaqueValueError::InvalidJsonBody { opaque_type })
+}
+
+fn validate_ui_value(
+    opaque_type: TypeId,
+    value: &serde_json::Value,
+    state: &mut UiValueValidationState,
+) -> Result<(), OpaqueValueError> {
+    // Walk the recursive schema iteratively. The node bound and frame length
+    // remain the resource limits without adding an unrelated depth limit.
+    let mut pending = vec![value];
+    while let Some(value) = pending.pop() {
+        state.node_count = state
+            .node_count
+            .checked_add(1)
+            .ok_or(OpaqueValueError::InvalidJsonBody { opaque_type })?;
+        if state.node_count > MAX_RUNTIME_VALUE_NODES {
+            return invalid_ui_value(opaque_type);
+        }
+
+        let Some(object) = value.as_object() else {
+            return invalid_ui_value(opaque_type);
+        };
+        match object.get("kind").and_then(serde_json::Value::as_str) {
+            Some("empty") if object.len() == 1 => {}
+            Some("fragment") => {
+                if object.len() != 2 {
+                    return invalid_ui_value(opaque_type);
+                }
+                let Some(children) = object.get("children").and_then(serde_json::Value::as_array)
+                else {
+                    return invalid_ui_value(opaque_type);
+                };
+                pending.extend(children.iter());
+            }
+            Some("node") => {
+                if !(5..=9).contains(&object.len())
+                    || object.keys().any(|key| {
+                        !matches!(
+                            key.as_str(),
+                            "kind"
+                                | "contract"
+                                | "call_site_id"
+                                | "function_instance_id"
+                                | "key"
+                                | "properties"
+                                | "slots"
+                                | "actions"
+                                | "source_origin"
+                        )
+                    })
+                {
+                    return invalid_ui_value(opaque_type);
+                }
+                if !object.get("contract").is_some_and(valid_ui_contract)
+                    || !object
+                        .get("call_site_id")
+                        .is_none_or(|id| id.is_null() || id.is_string())
+                    || !object
+                        .get("function_instance_id")
+                        .is_none_or(|id| id.is_null() || id.is_string())
+                    || !object.get("properties").is_some_and(valid_ui_properties)
+                    || !object.get("slots").is_some_and(valid_ui_slots)
+                    || !object.get("actions").is_some_and(valid_ui_actions)
+                    || !object
+                        .get("source_origin")
+                        .is_none_or(valid_ui_source_origin)
+                {
+                    return invalid_ui_value(opaque_type);
+                }
+                let Some(slots) = object.get("slots").and_then(serde_json::Value::as_object)
+                else {
+                    return invalid_ui_value(opaque_type);
+                };
+                for children in slots.values() {
+                    let Some(children) = children.as_array() else {
+                        return invalid_ui_value(opaque_type);
+                    };
+                    pending.extend(children.iter());
+                }
+            }
+            _ => return invalid_ui_value(opaque_type),
+        }
+    }
     Ok(())
+}
+
+fn valid_ui_contract(value: &serde_json::Value) -> bool {
+    let Some(object) = value.as_object() else {
+        return false;
+    };
+    object.len() == 3
+        && object
+            .get("id")
+            .and_then(serde_json::Value::as_str)
+            .is_some()
+        && object
+            .get("name")
+            .and_then(serde_json::Value::as_str)
+            .is_some()
+        && object
+            .get("version")
+            .and_then(serde_json::Value::as_str)
+            .is_some()
+}
+
+fn valid_ui_typed_value(value: &serde_json::Value) -> bool {
+    let Some(object) = value.as_object() else {
+        return false;
+    };
+    object.len() == 2
+        && object
+            .get("type")
+            .and_then(serde_json::Value::as_str)
+            .is_some()
+        && object.contains_key("value")
+}
+
+fn valid_ui_properties(value: &serde_json::Value) -> bool {
+    value
+        .as_object()
+        .is_some_and(|object| object.values().all(valid_ui_typed_value))
+}
+
+fn valid_ui_slots(value: &serde_json::Value) -> bool {
+    value
+        .as_object()
+        .is_some_and(|object| object.values().all(serde_json::Value::is_array))
+}
+
+fn valid_ui_actions(value: &serde_json::Value) -> bool {
+    value.as_object().is_some_and(|object| {
+        object.values().all(|action| {
+            let Some(action) = action.as_object() else {
+                return false;
+            };
+            action
+                .get("action_id")
+                .and_then(serde_json::Value::as_str)
+                .is_some()
+                && action
+                    .get("input_type")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some()
+                && action
+                    .get("debug_kind")
+                    .is_none_or(|kind| kind.is_null() || kind.is_string())
+        })
+    })
+}
+
+fn valid_ui_source_origin(value: &serde_json::Value) -> bool {
+    let Some(object) = value.as_object() else {
+        return value.is_null();
+    };
+    object.keys().all(|key| {
+        matches!(key.as_str(), "source_unit_id" | "start" | "end")
+    }) && object
+        .get("source_unit_id")
+        .is_none_or(serde_json::Value::is_string)
+        && object
+            .get("start")
+            .is_none_or(|value| value.as_i64().is_some())
+        && object
+            .get("end")
+            .is_none_or(|value| value.as_i64().is_some())
 }
 
 /// Validates the canonical terminal-document framing and text invariants.
@@ -6822,6 +7048,80 @@ mod tests {
                 canonical_payload: vec![0; 16],
             }
         );
+    }
+
+    #[test]
+    fn ui_value_codec_enforces_closed_canonical_shape_after_framing() {
+        const UI_TYPE: TypeId = TypeId::from_bytes([0x55; 16]);
+        const UI_NAME: [&str; 3] = ["std", "ui", "ui"];
+        const UI_CONTRACT: &str = "orna.std.value.ui@1";
+        const UI_MAGIC: &str = "ORNA-UI/1 ";
+
+        let active = active_record_revision_with_standard(
+            RECORD_TYPE,
+            verified_standard_with_value_types_and_schemas(
+                vec![
+                    standard_boolean_definition(),
+                    opaque_definition(OPAQUE_TYPE, OPAQUE_NAME, OPAQUE_CONTRACT),
+                    opaque_definition(UI_TYPE, UI_NAME, UI_CONTRACT),
+                ],
+                vec![SchemaDefinition::new(
+                    SchemaId::from_bytes([0x56; 16]),
+                    QualifiedSemanticName::new(["std", "ui"]).unwrap(),
+                )],
+            ),
+        );
+        let standard = active.catalogue_hash_context().standard().unwrap();
+        let registry = OpaqueCodecRegistry::new(
+            standard,
+            [
+                opaque_registration(OPAQUE_TYPE, OPAQUE_NAME, OPAQUE_CONTRACT),
+                OpaqueCodecRegistration::length_prefixed_canonical_json(
+                    UI_TYPE,
+                    QualifiedSemanticName::new(UI_NAME).unwrap(),
+                    UI_CONTRACT,
+                    UI_MAGIC,
+                )
+                .unwrap(),
+            ],
+        )
+        .unwrap();
+        let frame = |body: &[u8]| {
+            let mut payload = Vec::from(UI_MAGIC.as_bytes());
+            payload.extend_from_slice(&(body.len() as u32).to_be_bytes());
+            payload.extend_from_slice(body);
+            payload
+        };
+
+        for body in [
+            br#"{"kind":"empty"}"#.as_slice(),
+            br#"{"children":[{"kind":"empty"}],"kind":"fragment"}"#.as_slice(),
+            br#"{"actions":{"activate":{"action_id":"activate","debug_kind":null,"input_type":"std.ui.event","trace":true}},"call_site_id":null,"contract":{"id":"std.ui.window@1","name":"std.ui.window","version":"1.0"},"function_instance_id":"fn-1","key":{"id":1},"kind":"node","properties":{"title":{"type":"std.text","value":"Hello"}},"slots":{"content":[{"kind":"empty"}]},"source_origin":{"end":2,"source_unit_id":"unit-1","start":1}}"#.as_slice(),
+        ] {
+            let payload = frame(body);
+            let value = OpaqueValue::new(&active, &registry, UI_TYPE, &payload)
+                .expect("the closed canonical UI shape constructs");
+            assert_eq!(value.canonical_payload(), payload.as_slice());
+        }
+
+        for body in [
+            br#"{"kind":"not-a-ui-kind"}"#.as_slice(),
+            br#"{"actions":{},"contract":{"id":"std.ui.window@1","name":"std.ui.window","version":"1.0"},"kind":"node","properties":{},"slots":{},"unknown":null}"#.as_slice(),
+            br#"{"children":[{"kind":"not-a-ui-kind"}],"kind":"fragment"}"#.as_slice(),
+        ] {
+            assert_eq!(
+                OpaqueValue::new(&active, &registry, UI_TYPE, &frame(body)),
+                Err(OpaqueValueError::InvalidJsonBody { opaque_type: UI_TYPE })
+            );
+        }
+        let mut deep = serde_json::json!({"kind": "empty"});
+        for _ in 0..40 {
+            deep = serde_json::json!({"children": [deep], "kind": "fragment"});
+        }
+        let deep_body = serde_json::to_vec(&deep).unwrap();
+        let deep_value = OpaqueValue::new(&active, &registry, UI_TYPE, &frame(&deep_body))
+            .expect("schema-valid UI values do not have an arbitrary depth limit");
+        assert_eq!(deep_value.canonical_payload(), frame(&deep_body));
     }
 
     #[test]
