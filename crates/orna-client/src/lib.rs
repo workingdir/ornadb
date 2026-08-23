@@ -3740,6 +3740,7 @@ fn evaluate_client_function_in_state_context_with_executor(
     Ok(ClientExecutionResult { context, value })
 }
 
+
 fn evaluate_function(
     active: &ActiveDatabaseRevision,
     function: FunctionId,
@@ -3954,29 +3955,49 @@ fn evaluate_plan(
                 .map_err(|source| ClientExecutionError::InvalidArtifact { context, source })?;
             evaluate_opaque_plan(active, &plan, context, expected)
         }
-        ClientReturnShape::Expression(expected) | ClientReturnShape::Inspect(expected) => {
+        ClientReturnShape::Expression(expected) | ClientReturnShape::StreamExpression(expected) => {
             let plan = ExpressionClientPlan::decode(payload)
                 .map_err(|source| ClientExecutionError::InvalidArtifact { context, source })?;
-            evaluate_expression_plan(
-                active,
-                plan.expression(),
-                context,
-                lineage,
-                expected,
-                arguments,
-                declarations,
-                grants,
-                state,
-                depth,
-                principal,
-                executor,
-                local_environment,
-            )
+            preflight_client_expression_calls(active, plan.expression(), context)?;
+            if matches!(return_shape, ClientReturnShape::StreamExpression(_)) {
+                evaluate_stream_expression_plan(
+                    active,
+                    plan.expression(),
+                    context,
+                    lineage,
+                    expected,
+                    arguments,
+                    declarations,
+                    grants,
+                    state,
+                    depth,
+                    principal,
+                    executor,
+                    local_environment,
+                )
+            } else {
+                evaluate_expression_plan(
+                    active,
+                    plan.expression(),
+                    context,
+                    lineage,
+                    expected,
+                    arguments,
+                    declarations,
+                    grants,
+                    state,
+                    depth,
+                    principal,
+                    executor,
+                    local_environment,
+                )
+            }
         }
-        ClientReturnShape::StreamExpression(expected) => {
+        ClientReturnShape::Inspect(expected) => {
             let plan = ExpressionClientPlan::decode(payload)
                 .map_err(|source| ClientExecutionError::InvalidArtifact { context, source })?;
-            evaluate_stream_expression_plan(
+            preflight_client_expression_calls(active, plan.expression(), context)?;
+            evaluate_expression_plan(
                 active,
                 plan.expression(),
                 context,
@@ -4518,6 +4539,7 @@ fn evaluate_capability_plan(
             evaluate_opaque_plan(active, inner, context, expected)
         }
         InnerClientPlan::Expression(inner) => {
+            preflight_client_expression_calls(active, inner.expression(), context)?;
             if let ClientReturnShape::StreamExpression(expected) = return_shape {
                 return evaluate_stream_expression_plan(
                     active,
@@ -7223,6 +7245,117 @@ fn client_call_target_is_referenced(
             && reference.kind() == DefinitionReferenceKind::FunctionCall
             && reference.target() == DefinitionReferenceTarget::Function(target)
     })
+}
+
+/// Preflights every CLIENT call in one decoded version-3 expression plan.
+///
+/// The compiler records call references in postorder, so nested calls precede
+/// their enclosing call. Matching that sequence against the owning revision's
+/// durable references closes the gap left by a target-set-only check: target
+/// substitutions, reordered/duplicated/missing calls, and malformed argument
+/// bindings are all rejected before any expression is evaluated.
+fn preflight_client_expression_calls(
+    active: &ActiveDatabaseRevision,
+    expression: &ClientExpressionNode,
+    context: ClientExecutionContext,
+) -> Result<(), ClientExecutionError> {
+    let mut decoded_targets = Vec::new();
+    collect_client_expression_call_targets(active, expression, context, &mut decoded_targets)?;
+
+    let mut durable_references = active
+        .references()
+        .iter()
+        .filter(|reference| {
+            reference.source_function() == context.function()
+                && reference.source_revision() == context.function_revision()
+                && reference.kind() == DefinitionReferenceKind::FunctionCall
+        })
+        .collect::<Vec<_>>();
+    durable_references.sort_unstable_by_key(|reference| reference.ordinal());
+
+    if durable_references.len() != decoded_targets.len()
+        || durable_references
+            .iter()
+            .zip(decoded_targets)
+            .any(|(reference, target)| {
+                reference.target() != DefinitionReferenceTarget::Function(target)
+            })
+    {
+        return Err(expression_error(context, ClientExpressionError::InvalidCall));
+    }
+    Ok(())
+}
+
+fn collect_client_expression_call_targets(
+    active: &ActiveDatabaseRevision,
+    expression: &ClientExpressionNode,
+    context: ClientExecutionContext,
+    decoded_targets: &mut Vec<FunctionId>,
+) -> Result<(), ClientExecutionError> {
+    match expression {
+        ClientExpressionNode::Await { expression } => {
+            collect_client_expression_call_targets(active, expression, context, decoded_targets)?;
+        }
+        ClientExpressionNode::Resource { operation } => {
+            for (_, expression) in operation.arguments() {
+                collect_client_expression_call_targets(active, expression, context, decoded_targets)?;
+            }
+        }
+        ClientExpressionNode::Action { operation } => {
+            for (_, expression) in operation.arguments() {
+                collect_client_expression_call_targets(active, expression, context, decoded_targets)?;
+            }
+        }
+        ClientExpressionNode::Inspect { operation } => {
+            if let Some(expression) = operation.target() {
+                collect_client_expression_call_targets(active, expression, context, decoded_targets)?;
+            }
+            if let Some(expression) = operation.options() {
+                collect_client_expression_call_targets(active, expression, context, decoded_targets)?;
+            }
+            if let Some(expression) = operation.snapshot_expression() {
+                collect_client_expression_call_targets(active, expression, context, decoded_targets)?;
+            }
+        }
+        ClientExpressionNode::Call { function, arguments } => {
+            let Some(definition) = active.catalogue().function_by_id(*function) else {
+                return Err(expression_error(context, ClientExpressionError::InvalidCall));
+            };
+            if arguments.len() != definition.parameters().len()
+                || definition.parameters().iter().any(|parameter| {
+                    arguments
+                        .iter()
+                        .filter(|(candidate, _)| *candidate == parameter.id())
+                        .count()
+                        != 1
+                })
+                || arguments.iter().any(|(parameter, _)| {
+                    definition
+                        .parameters()
+                        .iter()
+                        .all(|candidate| candidate.id() != *parameter)
+                })
+            {
+                return Err(expression_error(context, ClientExpressionError::InvalidCall));
+            }
+            for (_, expression) in arguments {
+                collect_client_expression_call_targets(active, expression, context, decoded_targets)?;
+            }
+            decoded_targets.push(*function);
+        }
+        ClientExpressionNode::Concat { left, right } => {
+            collect_client_expression_call_targets(active, left, context, decoded_targets)?;
+            collect_client_expression_call_targets(active, right, context, decoded_targets)?;
+        }
+        ClientExpressionNode::String { .. }
+        | ClientExpressionNode::Integer { .. }
+        | ClientExpressionNode::Boolean { .. }
+        | ClientExpressionNode::ParameterRead { .. }
+        | ClientExpressionNode::LocalRead { .. }
+        | ClientExpressionNode::FieldPath { .. }
+        | ClientExpressionNode::ExternalContract { .. } => {}
+    }
+    Ok(())
 }
 
 /// Validates the saved artefact contract against the effective plan version.
@@ -11585,6 +11718,60 @@ fn client_stream_cancellation_clears_batches_and_rejects_stale_completions() {
     }
 
     #[test]
+    fn capability_expression_calls_reject_reference_sequence_mismatch() {
+        let function = FunctionId::from_bytes([6; 16]);
+        let call = || orna_artifact::client_plan::ClientExpressionNode::Call {
+            function,
+            arguments: Vec::new(),
+        };
+        let expression = orna_artifact::client_plan::ClientExpressionNode::Concat {
+            left: Box::new(call()),
+            right: Box::new(call()),
+        };
+        let payload = orna_artifact::client_plan::CapabilityClientPlan::new(
+            orna_artifact::client_plan::InnerClientPlan::Expression(
+                orna_artifact::client_plan::ExpressionClientPlan::new(expression),
+            ),
+            vec![orna_artifact::client_plan::CapabilityRequirement::new(
+                "std.fs.read",
+                orna_artifact::client_plan::CapabilityArgumentSource::Text("/tmp".to_owned()),
+            )],
+        )
+        .encode()
+        .expect("the capability expression plan encodes");
+        let (active, function, pair, _) = version_two_active_with_artifact(
+            standard_v6(),
+            orna_standard::BOOLEAN_TYPE_ID,
+            DefinitionReferenceTarget::Function(function),
+            DefinitionReferenceKind::FunctionCall,
+            orna_artifact::client_plan::CAPABILITY_FORMAT_VERSION,
+            payload,
+        );
+
+        let grant = capability::LocalCapabilityGrant::new(
+            capability::LocalCapabilityName::StdFsRead,
+            capability::LocalCapabilityScope::path("/tmp").unwrap(),
+        )
+        .unwrap();
+        let grants = capability::LocalCapabilityGrantSet::from_grants([grant]).unwrap();
+        let error = super::evaluate_client_function_with_grants(
+            &active,
+            &authorise(pair, function),
+            &[],
+            &grants,
+        )
+        .expect_err("the decoded call sequence must match durable references");
+
+        assert!(matches!(
+            error,
+            super::ClientExecutionError::ExpressionEvaluation {
+                context,
+                source: super::ClientExpressionError::InvalidCall,
+            } if context.function() == function
+        ));
+    }
+
+    #[test]
     fn transfers_the_evaluated_value_without_cloning_its_payload() {
         let (active, function, _, _) = version_one_active(true);
 
@@ -13646,6 +13833,7 @@ fn client_stream_cancellation_clears_batches_and_rejects_stale_completions() {
             b"ORNACP\0\0\0\0\0\x01\x01\x01".to_vec(),
         )
     }
+
     fn version_two_opaque_active(
         plan_type: TypeId,
         payload: [u8; 16],
@@ -13705,6 +13893,177 @@ fn client_stream_cancellation_clears_batches_and_rejects_stale_completions() {
             .encode()
             .unwrap(),
         )
+    }
+
+    fn version_two_local_action_active() -> (
+        ActiveDatabaseRevision,
+        FunctionId,
+        FunctionId,
+        RevisionPair,
+        FunctionRevisionId,
+    ) {
+        let (base, parent_id, pair, parent_revision_id) = version_one_active(true);
+        let target_id = FunctionId::from_bytes([0xc2; 16]);
+        let target_revision_id = FunctionRevisionId::from_bytes([0xc3; 16]);
+        let previous_revision = &base.function_revisions()[0];
+        let parent_name = base
+            .catalogue()
+            .function_by_id(parent_id)
+            .unwrap()
+            .name()
+            .clone();
+        let parent = FunctionDefinition::new(
+            parent_id,
+            parent_name,
+            FunctionDomain::Client,
+            Vec::new(),
+            FunctionReturn::Single(ResolvedType::Value(orna_standard::BOOLEAN_TYPE_ID)),
+            parent_revision_id,
+            FunctionSecurity::Invoker,
+            None,
+            FunctionVolatility::Immutable,
+        );
+        let target = FunctionDefinition::new(
+            target_id,
+            QualifiedSemanticName::new(["app", "action_target"]).unwrap(),
+            FunctionDomain::Client,
+            Vec::new(),
+            FunctionReturn::Single(ResolvedType::Value(orna_standard::BOOLEAN_TYPE_ID)),
+            target_revision_id,
+            FunctionSecurity::Invoker,
+            None,
+            FunctionVolatility::Immutable,
+        );
+        let catalogue = CatalogueSnapshot::new_with_functions(
+            base.catalogue().revision(),
+            base.catalogue().schemas().to_vec(),
+            base.catalogue().object_types().to_vec(),
+            vec![parent.clone(), target.clone()],
+        )
+        .unwrap();
+        let parent_payload = orna_artifact::client_plan::ExpressionClientPlan::new(
+            orna_artifact::client_plan::ClientExpressionNode::Call {
+                function: target_id,
+                arguments: Vec::new(),
+            },
+        )
+        .encode()
+        .unwrap();
+        let target_payload = orna_artifact::client_plan::ExpressionClientPlan::new(
+            orna_artifact::client_plan::ClientExpressionNode::Boolean { value: true },
+        )
+        .encode()
+        .unwrap();
+        let parent_artifact = ExecutableArtifact::new(
+            ExecutableArtifactKind::Client,
+            "orna.client-plan",
+            orna_artifact::client_plan::EXPRESSION_FORMAT_VERSION,
+            parent_payload.clone(),
+            artifact_payload_digest(&parent_payload).unwrap(),
+        )
+        .unwrap();
+        let target_artifact = ExecutableArtifact::new(
+            ExecutableArtifactKind::Client,
+            "orna.client-plan",
+            orna_artifact::client_plan::EXPRESSION_FORMAT_VERSION,
+            target_payload.clone(),
+            artifact_payload_digest(&target_payload).unwrap(),
+        )
+        .unwrap();
+        let parent_reference = DefinitionReference::new(
+            parent_id,
+            parent_revision_id,
+            0,
+            DefinitionReferenceTarget::Function(target_id),
+            DefinitionReferenceKind::FunctionCall,
+            previous_revision.declaration_origin(),
+        );
+        let parent_semantic_hash = function_semantic_digest_with_version(
+            FunctionSemanticHashVersion::Version2,
+            &parent,
+            previous_revision.language_version(),
+            &parent_artifact,
+            base.expressions(),
+            std::slice::from_ref(&parent_reference),
+        )
+        .unwrap();
+        let target_semantic_hash = function_semantic_digest_with_version(
+            FunctionSemanticHashVersion::Version2,
+            &target,
+            previous_revision.language_version(),
+            &target_artifact,
+            base.expressions(),
+            &[],
+        )
+        .unwrap();
+        let parent_revision = FunctionRevisionRecord::new(
+            parent_id,
+            parent_revision_id,
+            previous_revision.revision_number(),
+            previous_revision.declaration_origin(),
+            previous_revision.declaration_content_hash(),
+            parent_semantic_hash,
+            previous_revision.language_version(),
+            parent_artifact,
+        )
+        .unwrap()
+        .with_semantic_hash_version(FunctionSemanticHashVersion::Version2);
+        let target_origin = SourceOrigin::new(
+            previous_revision.declaration_origin().source_unit(),
+            previous_revision.declaration_origin().byte_start(),
+            previous_revision.declaration_origin().byte_end(),
+        )
+        .unwrap();
+        let target_revision = FunctionRevisionRecord::new(
+            target_id,
+            target_revision_id,
+            previous_revision.revision_number(),
+            target_origin,
+            previous_revision.declaration_content_hash(),
+            target_semantic_hash,
+            previous_revision.language_version(),
+            target_artifact,
+        )
+        .unwrap()
+        .with_semantic_hash_version(FunctionSemanticHashVersion::Version2);
+        let mut origins = base.origins().to_vec();
+        origins.push(DefinitionOrigin::new(
+            DefinitionIdentity::Function(target_id),
+            target_origin,
+        ));
+        let revisions = vec![parent_revision, target_revision];
+        let standard = orna_standard::verify_standard_library_v6_snapshot(
+            orna_standard::retained_standard_library_v6_snapshot().unwrap(),
+        )
+        .unwrap();
+        let context = orna_core::revision::CatalogueHashContext::version_two(standard);
+        let catalogue_hash = catalogue_digest_with_context(
+            &context,
+            &catalogue,
+            &revisions,
+            base.expressions(),
+            &origins,
+            std::slice::from_ref(&parent_reference),
+        )
+        .unwrap();
+        let active = ActiveDatabaseRevision::new_with_catalogue_hash_context(
+            ActiveDatabaseRevisionInput::new(
+                pair,
+                base.source().clone(),
+                catalogue,
+                catalogue_hash,
+                ActiveRevisionContent::new(
+                    base.expressions().to_vec(),
+                    revisions,
+                    origins,
+                    vec![parent_reference],
+                ),
+            ),
+            context,
+        )
+        .unwrap();
+
+        (active, parent_id, target_id, pair, parent_revision_id)
     }
     fn version_two_active_with_artifact(
         standard: VerifiedStandardLibrarySnapshot,
@@ -15554,11 +15913,11 @@ fn client_stream_cancellation_clears_batches_and_rejects_stale_completions() {
 
     #[test]
     fn action_trigger_executes_a_local_client_target() {
-        let (active, target, pair, revision) = version_two_client_call_active();
-        let auth = authorise(pair, target);
+        let (active, parent_function, target, pair, revision) = version_two_local_action_active();
+        let auth = authorise(pair, parent_function);
         let parent = ClientExecutionContext {
             pair,
-            function: target,
+            function: parent_function,
             function_revision: revision,
             parent_invocation_id: InvocationId::from_bytes([0xf3; 16]),
             observer_lineage: None,
