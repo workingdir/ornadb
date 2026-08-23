@@ -474,6 +474,7 @@ mod tests {
         match kind {
             CheckedTypeUseKind::Field { .. } => "field",
             CheckedTypeUseKind::Parameter { .. } => "parameter",
+            CheckedTypeUseKind::State { .. } => "state",
             CheckedTypeUseKind::Return { .. } => "return",
             CheckedTypeUseKind::Expression { .. } => "expression",
             CheckedTypeUseKind::Result { .. } => "result",

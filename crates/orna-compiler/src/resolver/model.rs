@@ -2934,6 +2934,13 @@ pub enum CheckedTypeUseKind {
         /// The checked parameter identity.
         parameter: CheckedParameterId,
     },
+    /// A direct type written on one CLIENT state slot.
+    State {
+        /// The checked CLIENT function that owns the state slot.
+        owner: CheckedFunctionId,
+        /// The zero-based state-slot ordinal in declaration order.
+        ordinal: u32,
+    },
     /// A direct type written on a function return or `ROWS` column.
     Return {
         /// The checked function that declares the return.
@@ -2956,6 +2963,7 @@ pub enum CheckedTypeUseKind {
         ordinal: u32,
     },
 }
+
 
 /// One standard value-type use resolved through the checked standard library.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -3475,6 +3483,9 @@ impl StandardApplicationCheckReport {
                         owner: id,
                         parameter,
                     }
+                }
+                CheckedTypeUseKind::State { owner, ordinal } if owner == previous => {
+                    CheckedTypeUseKind::State { owner: id, ordinal }
                 }
                 CheckedTypeUseKind::Return { owner, ordinal } if owner == previous => {
                     CheckedTypeUseKind::Return { owner: id, ordinal }
@@ -3999,6 +4010,7 @@ impl StandardApplicationPreparationEvidence {
         match kind {
             CheckedTypeUseKind::Field { .. }
             | CheckedTypeUseKind::Parameter { .. }
+            | CheckedTypeUseKind::State { .. }
             | CheckedTypeUseKind::Return { .. } => true,
             CheckedTypeUseKind::Expression { .. } | CheckedTypeUseKind::Result { .. } => false,
         }
