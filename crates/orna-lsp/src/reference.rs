@@ -269,21 +269,21 @@ const KEYWORD_REFERENCES: &[KeywordReference] = &[
     },
     KeywordReference {
         keyword: "ALTER",
-        summary: "Changes a type or function in place.",
-        context: "ALTER TYPE ... RENAME | ADD FIELD | DROP FIELD; ALTER FUNCTION ... RENAME TO.",
+        summary: "Renames a field in an object type in place.",
+        context: "ALTER TYPE qualified_name RENAME FIELD old TO new.",
         example: "ALTER TYPE tasks.task RENAME FIELD title TO heading;",
     },
     KeywordReference {
         keyword: "RENAME",
-        summary: "Renames a type, function, or field.",
-        context: "ALTER TYPE ... RENAME TO; RENAME FIELD old TO new; ALTER FUNCTION ... RENAME TO.",
-        example: "ALTER TYPE tasks.task RENAME TO tasks.item;",
+        summary: "Renames an object-type field while preserving its identity.",
+        context: "ALTER TYPE qualified_name RENAME FIELD old TO new. Type and function rename syntax is deferred pending a separate accepted language contract.",
+        example: "ALTER TYPE tasks.task RENAME FIELD title TO heading;",
     },
     KeywordReference {
         keyword: "FIELD",
         summary: "Names a field of an object type in ALTER statements.",
-        context: "RENAME FIELD old TO new; ADD FIELD definition; DROP FIELD name.",
-        example: "ALTER TYPE tasks.task ADD FIELD completed BOOLEAN;",
+        context: "ALTER TYPE ... RENAME FIELD old TO new.",
+        example: "ALTER TYPE tasks.task RENAME FIELD title TO heading;",
     },
     KeywordReference {
         keyword: "ADD",
