@@ -74,6 +74,12 @@
 (let_statement name: (identifier) @variable)
 (const_declaration name: (identifier) @variable)
 (state_declaration name: (identifier) @variable)
+
+; CLIENT locals and state slots
+(client_local_declaration name: (_) @variable)
+(client_let_statement name: (_) @variable)
+(client_assignment_statement target: (_) @variable)
+(client_state_declaration name: (_) @variable)
 (for_statement name: (identifier) @variable)
 (create_user_statement name: (identifier) @variable)
 (create_role_statement name: (identifier) @variable)

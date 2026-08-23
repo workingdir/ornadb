@@ -5,8 +5,10 @@ Orna language — the DDL/DML/procedural language of the OrnaDB database.
 
 The grammar provides syntax highlighting (and a concrete syntax tree) for
 Neovim, Helix, Zed, Emacs and other tree-sitter-based editors. It is written
-from `spec/spec/orna.ebnf` and is validated against the real sources in
-`spec/examples`, `crates/orna-system-tests/fixtures` and `stdlib/std`.
+from `spec/spec/orna.ebnf` and is validated against executable sources in
+`crates/` and `stdlib/`. Proposal-only examples that use deferred language
+surfaces are excluded from the executable tooling gate.
+
 
 ## Building
 
@@ -33,8 +35,11 @@ To check that a file parses without error:
 tree-sitter parse path/to/file.orna
 ```
 
-The grammar is expected to produce zero `ERROR` nodes on every `.orna` file
-in `spec/examples`, `crates/orna-system-tests/fixtures` and `stdlib/std`.
+The grammar is expected to produce zero `ERROR` nodes on every executable
+`.orna` file under `crates/` and `stdlib/`. The proposal-only UI examples
+`03_client_ui.orna`, `04_studio_shell.orna`, and `05_security_admin.orna` use
+deferred language surfaces and are excluded from this gate.
+
 
 ## Editor setup
 
@@ -96,9 +101,12 @@ this grammar) and `highlights.scm`, with a matching language declaration:
 - `RETURNS ROWS (...)` and `RETURNS TABLE (...)` are both accepted.
 - `EXPORT TYPE ... AS ... [TO PRELUDE AS ...]` is supported, including
   multi-word prelude names such as `CHARACTER LARGE OBJECT`.
-- Function bodies can be `AS` expressions, `AS` SQL statements, or
+- SERVER function bodies can be `AS` expressions, `AS` SQL statements, or
   `IS ... BEGIN ... END` procedural blocks with `LET`/`CONST`/`STATE`
   declarations and `IF`/`WHILE`/`FOR` statements.
+- Accepted CLIENT bodies use the closed expression and state/procedural subsets
+  covered by the CLIENT corpus tests; deferred UI proposal syntax is not part
+  of the executable grammar contract.
 - Keywords are usable as name components (`std.types.DATE`, `filter.SET`),
   and a few keywords (`security`, `rows`) also appear as name-initial
   components in real code; other keywords are reserved in name-initial
