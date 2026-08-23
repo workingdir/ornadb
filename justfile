@@ -19,6 +19,10 @@ lint:
 test:
     cargo test --workspace --all-targets
 
+# Validate the tree-sitter grammar and editor metadata without installing tools.
+editor-tooling-check:
+    python3 scripts/check-editor-tooling.py
+
 # Start the private PostgreSQL development kernel.
 postgres-up:
     docker compose up --detach postgres
