@@ -9,8 +9,7 @@ use orna_core::{
     TypeBindingId, TypeId,
     canonical_hash::{
         artifact_payload_digest, catalogue_digest_with_context, source_bundle_digest,
-        source_revision_digest, source_unit_content_digest, verify_standard_library_snapshot,
-        verify_standard_library_v2_snapshot,
+        source_revision_digest, source_unit_content_digest,
     },
     catalogue::{
         CatalogueSnapshot, EnumTypeDefinition, FieldDefinition, FunctionDefinition, FunctionDomain,
@@ -31,6 +30,14 @@ use orna_core::{
     },
     system::SYS_INSPECT_INVOCATION_TYPE_ID,
     types::{ResolvedType, StandardScalar, TypeDescriptor},
+};
+use orna_standard::{
+    STANDARD_LIBRARY_REVISION_ID, STANDARD_LIBRARY_V2_REVISION_ID,
+    STANDARD_LIBRARY_V3_REVISION_ID, STANDARD_LIBRARY_V4_REVISION_ID,
+    STANDARD_LIBRARY_V5_REVISION_ID, STANDARD_LIBRARY_V6_REVISION_ID,
+    verify_standard_library_snapshot, verify_standard_library_v2_snapshot,
+    verify_standard_library_v3_snapshot, verify_standard_library_v4_snapshot,
+    verify_standard_library_v5_snapshot, verify_standard_library_v6_snapshot,
 };
 use tokio_postgres::{Client, IsolationLevel, Row, Transaction};
 
@@ -1098,10 +1105,10 @@ pub(crate) async fn load_verified_standard_library(
     }
 
     let (catalogue, origins) = load_standard_catalogue(transaction, &header).await?;
-    match header.digest_version {
+    let snapshot = match header.digest_version {
         StandardLibraryDigestVersion::Version1 => {
             require_no_standard_executable_rows(transaction, header.revision).await?;
-            let snapshot = StandardLibrarySnapshot::new(
+            StandardLibrarySnapshot::new(
                 header.revision,
                 header.digest_version,
                 source,
@@ -1110,13 +1117,12 @@ pub(crate) async fn load_verified_standard_library(
                 origins,
                 header.digest,
             )
-            .map_err(PostgresKernelError::RevisionInvariant)?;
-            verify_standard_library_snapshot(snapshot).map_err(PostgresKernelError::CanonicalHash)
+            .map_err(PostgresKernelError::RevisionInvariant)?
         }
         StandardLibraryDigestVersion::Version2 => {
             let executables =
                 load_standard_executable_facts(transaction, header.revision, &catalogue).await?;
-            let snapshot = StandardLibrarySnapshot::new_with_executables(
+            StandardLibrarySnapshot::new_with_executables(
                 header.revision,
                 header.digest_version,
                 source,
@@ -1126,16 +1132,49 @@ pub(crate) async fn load_verified_standard_library(
                 origins,
                 header.digest,
             )
-            .map_err(PostgresKernelError::RevisionInvariant)?;
-            verify_standard_library_v2_snapshot(snapshot)
-                .map_err(PostgresKernelError::CanonicalHash)
+            .map_err(PostgresKernelError::RevisionInvariant)?
         }
-        _ => Err(DurableRecord::new(
+        _ => return Err(DurableRecord::new(
             "_orna_kernel.standard_library_revisions",
             header.revision.canonical(),
         )
         .invariant("standard library digest version is unsupported")),
-    }
+    };
+    verify_recovered_standard_snapshot(snapshot)
+}
+
+fn verify_recovered_standard_snapshot(
+    snapshot: StandardLibrarySnapshot,
+) -> Result<VerifiedStandardLibrarySnapshot, PostgresKernelError> {
+    let revision = snapshot.revision();
+    let result = match revision {
+        STANDARD_LIBRARY_REVISION_ID => verify_standard_library_snapshot(snapshot),
+        STANDARD_LIBRARY_V2_REVISION_ID => verify_standard_library_v2_snapshot(snapshot),
+        STANDARD_LIBRARY_V3_REVISION_ID => verify_standard_library_v3_snapshot(snapshot),
+        STANDARD_LIBRARY_V4_REVISION_ID => verify_standard_library_v4_snapshot(snapshot),
+        STANDARD_LIBRARY_V5_REVISION_ID => verify_standard_library_v5_snapshot(snapshot),
+        STANDARD_LIBRARY_V6_REVISION_ID => verify_standard_library_v6_snapshot(snapshot),
+        _ => {
+            return Err(DurableRecord::new(
+                "_orna_kernel.standard_library_revisions",
+                revision.canonical(),
+            )
+            .invariant("standard library revision identity is not an accepted retained revision"));
+        }
+    };
+    result.map_err(|error| match error {
+        orna_standard::StandardLibraryError::CanonicalHash { source } => {
+            PostgresKernelError::CanonicalHash(source)
+        }
+        orna_standard::StandardLibraryError::Revision { source } => {
+            PostgresKernelError::RevisionInvariant(source)
+        }
+        _ => DurableRecord::new(
+            "_orna_kernel.standard_library_revisions",
+            revision.canonical(),
+        )
+        .invariant("standard library retained verifier rejected the recovered snapshot"),
+    })
 }
 
 async fn load_standard_header(
@@ -4831,8 +4870,70 @@ mod tests {
         decode_legacy_resolved_type_tuple_kind, decode_record_value_field_descriptor,
         decode_resolved_type_tuple, decode_revision_pair_values, decode_standard_binding_target,
         recovered_standard_value_definition, validate_function_type,
-        validate_revision_pair_listing, RevisionPairHistoryEntry,
+        validate_revision_pair_listing, verify_recovered_standard_snapshot,
+        RevisionPairHistoryEntry,
     };
+
+    #[test]
+    fn recovered_standard_verifier_dispatches_all_retained_revisions_and_rejects_crossed_identity() {
+        let retained = [
+            orna_standard::retained_standard_library_snapshot().expect("retained V1 standard"),
+            orna_standard::retained_standard_library_v2_snapshot().expect("retained V2 standard"),
+            orna_standard::retained_standard_library_v3_snapshot().expect("retained V3 standard"),
+            orna_standard::retained_standard_library_v4_snapshot().expect("retained V4 standard"),
+            orna_standard::retained_standard_library_v5_snapshot().expect("retained V5 standard"),
+            orna_standard::retained_standard_library_v6_snapshot().expect("retained V6 standard"),
+        ];
+        for snapshot in retained {
+            let revision = snapshot.revision();
+            let verified = verify_recovered_standard_snapshot(snapshot)
+                .expect("each retained standard revision must use its matching verifier");
+            assert_eq!(verified.revision(), revision);
+        }
+
+        let v3 = orna_standard::retained_standard_library_v3_snapshot()
+            .expect("retained V3 standard");
+        let crossed = orna_core::revision::StandardLibrarySnapshot::new_with_executables(
+            orna_standard::STANDARD_LIBRARY_V2_REVISION_ID,
+            v3.digest_version(),
+            v3.source().clone(),
+            v3.language_version(),
+            v3.catalogue().clone(),
+            v3.executables().to_vec(),
+            v3.origins().to_vec(),
+            v3.digest(),
+        )
+        .expect("crossed identity keeps snapshot shape valid");
+        assert!(matches!(
+            verify_recovered_standard_snapshot(crossed),
+            Err(PostgresKernelError::DurableInvariant {
+                relation: "_orna_kernel.standard_library_revisions",
+                rule: "standard library retained verifier rejected the recovered snapshot",
+                ..
+            })
+        ));
+
+        let v1 = orna_standard::retained_standard_library_snapshot()
+            .expect("retained V1 standard");
+        let unknown = orna_core::revision::StandardLibrarySnapshot::new(
+            StandardLibraryRevisionId::from_bytes([0xee; 16]),
+            v1.digest_version(),
+            v1.source().clone(),
+            v1.language_version(),
+            v1.catalogue().clone(),
+            v1.origins().to_vec(),
+            v1.digest(),
+        )
+        .expect("unknown identity keeps snapshot shape valid");
+        assert!(matches!(
+            verify_recovered_standard_snapshot(unknown),
+            Err(PostgresKernelError::DurableInvariant {
+                relation: "_orna_kernel.standard_library_revisions",
+                rule: "standard library revision identity is not an accepted retained revision",
+                ..
+            })
+        ));
+    }
 
     fn revision_pair_history_entry(
         source: u8,
@@ -4963,6 +5064,40 @@ mod tests {
             Err(PostgresKernelError::DurableInvariant {
                 relation: CATALOGUE_REVISION_RELATION,
                 rule: "each catalogue parent must exist and identify the corresponding source parent",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn revision_pair_listing_rejects_duplicate_source_identity() {
+        let entries = vec![
+            revision_pair_history_entry(1, None, 2, None),
+            revision_pair_history_entry_with_active(1, None, 4, None, 1, 4),
+        ];
+
+        assert!(matches!(
+            validate_revision_pair_listing(&entries),
+            Err(PostgresKernelError::DurableInvariant {
+                relation: SOURCE_REVISION_RELATION,
+                rule: "source revision identities must be unique",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn revision_pair_listing_rejects_duplicate_catalogue_identity() {
+        let entries = vec![
+            revision_pair_history_entry(1, None, 2, None),
+            revision_pair_history_entry_with_active(2, None, 2, None, 2, 2),
+        ];
+
+        assert!(matches!(
+            validate_revision_pair_listing(&entries),
+            Err(PostgresKernelError::DurableInvariant {
+                relation: CATALOGUE_REVISION_RELATION,
+                rule: "catalogue revision identities must be unique",
                 ..
             })
         ));
