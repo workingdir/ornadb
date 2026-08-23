@@ -2786,6 +2786,13 @@ fn reconcile_retained_json_source(
         )?,
     ];
     declarations.sort_by_key(|origin| (origin.source().byte_start(), origin.source().byte_end()));
+    orna_compiler::check_standard_json_encode(
+        function,
+        catalogue,
+        &declarations,
+        STD_JSON_VALUE_TYPE_ID,
+    )
+    .map_err(|_| StandardLibraryError::RetainedSourceMismatch)?;
     Ok(declarations)
 }
 
@@ -8120,6 +8127,18 @@ EXPORT TYPE std.ui.UI AS std.UI;
         let verified = super::verify_standard_library_v5_snapshot(snapshot)
             .expect("the retained V5 source verifies");
         assert!(super::registered_opaque_codecs(&verified).is_ok());
+    }
+
+    #[test]
+    fn rejects_a_malformed_v5_json_presenter_declaration() {
+        let json_source = super::RETAINED_STANDARD_JSON_SOURCE.replace("p_value", "wrong");
+        let manifest = super::standard_library_v5_manifest().expect("the V5 manifest is valid");
+        let error = super::reconcile_retained_json_source(&json_source, manifest.catalogue())
+            .expect_err("the JSON presenter must retain its closed ADR 0057 signature");
+        assert!(matches!(
+            error,
+            super::StandardLibraryError::RetainedSourceMismatch
+        ));
     }
 
     #[test]
