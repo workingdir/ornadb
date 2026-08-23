@@ -383,6 +383,7 @@ async fn execute_inspect(
             InstalledInspectProjection::InvocationNodes => {
                 let rows = kernel
                     .inspect_invocation_nodes(&snapshot, requested)
+                    .await
                     .map_err(map_kernel_error)?;
                 for row in &rows {
                     write_json_line(stdout, &invocation_node_record(row))?;
@@ -391,6 +392,7 @@ async fn execute_inspect(
             InstalledInspectProjection::Calls => {
                 let rows = kernel
                     .inspect_calls(&snapshot, requested)
+                    .await
                     .map_err(map_kernel_error)?;
                 for row in &rows {
                     write_json_line(stdout, &call_record(row, &hex, values_granted)?)?;
@@ -399,6 +401,7 @@ async fn execute_inspect(
             InstalledInspectProjection::Resources => {
                 let rows = kernel
                     .inspect_resources(&snapshot, requested)
+                    .await
                     .map_err(map_kernel_error)?;
                 for row in &rows {
                     write_json_line(stdout, &resource_record(row))?;
@@ -416,6 +419,7 @@ async fn execute_inspect(
             InstalledInspectProjection::UiNodes => {
                 let rows = kernel
                     .inspect_ui_nodes(&snapshot, requested)
+                    .await
                     .map_err(map_kernel_error)?;
                 for row in &rows {
                     write_json_line(stdout, &ui_node_record(row, source_granted, runtime_internals_granted))?;
@@ -424,6 +428,7 @@ async fn execute_inspect(
             InstalledInspectProjection::PresentationCandidates => {
                 let rows = kernel
                     .inspect_presentation_candidates(&snapshot, requested)
+                    .await
                     .map_err(map_kernel_error)?;
                 for row in &rows {
                     write_json_line(stdout, &presentation_candidate_record(row, runtime_internals_granted))?;
@@ -432,6 +437,7 @@ async fn execute_inspect(
             InstalledInspectProjection::RuntimeBindings => {
                 let rows = kernel
                     .inspect_runtime_bindings(&snapshot, requested)
+                    .await
                     .map_err(map_kernel_error)?;
                 for row in &rows {
                     write_json_line(stdout, &runtime_binding_record(row, runtime_internals_granted))?;
