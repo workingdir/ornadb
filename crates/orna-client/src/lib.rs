@@ -6350,6 +6350,9 @@ fn evaluate_expression(
             if depth > orna_artifact::client_plan::MAX_EXPRESSION_DEPTH {
                 return Err(expression_error(context, ClientExpressionError::RecursionLimit));
             }
+            if !client_call_target_is_referenced(active, context, *function) {
+                return Err(expression_error(context, ClientExpressionError::InvalidCall));
+            }
             let mut evaluated = Vec::with_capacity(bound.len());
             for (parameter, expression) in bound {
                 if evaluated.iter().any(|(candidate, _)| candidate == parameter) {
@@ -7199,6 +7202,27 @@ fn validate_selected_references(
         _ => return Err(invalid_function(context, ClientExecutionRule::References)),
     }
     Ok(())
+}
+
+/// Checks that a decoded expression call targets one of the durable
+/// `FunctionCall` references recorded for its owning revision.
+///
+/// The artifact payload is integrity checked, but its function IDs are still
+/// untrusted input at this boundary. The compiler emits one resolved
+/// `FunctionCall` reference for every call node; requiring the target to be in
+/// that set prevents a validly encoded artifact from invoking an unrelated
+/// function that was not part of the checked call graph.
+fn client_call_target_is_referenced(
+    active: &ActiveDatabaseRevision,
+    context: ClientExecutionContext,
+    target: FunctionId,
+) -> bool {
+    active.references().iter().any(|reference| {
+        reference.source_function() == context.function()
+            && reference.source_revision() == context.function_revision()
+            && reference.kind() == DefinitionReferenceKind::FunctionCall
+            && reference.target() == DefinitionReferenceTarget::Function(target)
+    })
 }
 
 /// Validates the saved artefact contract against the effective plan version.
@@ -11509,6 +11533,55 @@ fn client_stream_cancellation_clears_batches_and_rejects_stale_completions() {
         )
         .unwrap();
         assert_eq!(result.value(), &RuntimeValue::Boolean(true));
+    }
+
+    #[test]
+    fn expression_calls_reject_targets_absent_from_the_active_reference_set() {
+        let prepared = prepared_client_source(
+            "CREATE SCHEMA app; \
+             CREATE CLIENT FUNCTION app.first() RETURNS BOOLEAN RETURN app.second(); \
+             CREATE CLIENT FUNCTION app.second() RETURNS BOOLEAN RETURN TRUE;",
+        );
+        let first = prepared
+            .candidate()
+            .functions()
+            .iter()
+            .find(|function| function.name().to_string() == "app.first")
+            .expect("first function is present");
+        let second = prepared
+            .candidate()
+            .functions()
+            .iter()
+            .find(|function| function.name().to_string() == "app.second")
+            .expect("second function is present");
+        let mut references = prepared.references().to_vec();
+        let index = references
+            .iter()
+            .position(|reference| {
+                reference.source_function() == first.id()
+                    && reference.target() == DefinitionReferenceTarget::Function(second.id())
+            })
+            .expect("first call reference is present");
+        let original = references[index].clone();
+        references[index] = DefinitionReference::new(
+            original.source_function(),
+            original.source_revision(),
+            original.ordinal(),
+            DefinitionReferenceTarget::Function(first.id()),
+            original.kind(),
+            original.source_origin(),
+        );
+        let active = active_from_prepared_with_references(&prepared, references);
+
+        let error = evaluate_client_function(&active, first.id()).unwrap_err();
+
+        assert!(matches!(
+            error,
+            super::ClientExecutionError::ExpressionEvaluation {
+                context,
+                source: super::ClientExpressionError::InvalidCall,
+            } if context.function() == first.id()
+        ));
     }
 
     #[test]

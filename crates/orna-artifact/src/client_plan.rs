@@ -52,7 +52,7 @@
 //! shape, the depth cap, the node-count cap, and per-node limits, so an
 //! untrusted artefact cannot exhaust the evaluator.
 //!
-//! Version 5 (work ADR 0060) wraps one complete version 1-4, version 6, version 7, or version 8
+//! Version 5 (work ADR 0060) wraps one complete version 1-4, version 6, version 7, version 8, or version 9
 //! with the owning function's ordered, closed capability requirements:
 //!
 //! ```text
@@ -1578,7 +1578,7 @@ pub enum InnerClientPlan {
     Boolean(ClientPlan),
     /// A version-2 opaque-value plan.
     Opaque(OpaqueClientPlan),
-    /// A version-3 expression plan.
+    /// A version-3 or version-9 expression plan.
     Expression(ExpressionClientPlan),
     /// A version-4 state plan.
     State(StateClientPlan),
@@ -1596,7 +1596,7 @@ impl InnerClientPlan {
         match self {
             Self::Boolean(_) => FORMAT_VERSION,
             Self::Opaque(_) => OPAQUE_FORMAT_VERSION,
-            Self::Expression(_) => EXPRESSION_FORMAT_VERSION,
+            Self::Expression(plan) => plan.format_version(),
             Self::State(_) => STATE_FORMAT_VERSION,
             Self::Resource(_) => RESOURCE_FORMAT_VERSION,
             Self::Procedural(_) => PROCEDURAL_FORMAT_VERSION,
@@ -1779,6 +1779,13 @@ impl CapabilityClientPlan {
             ACTION_FORMAT_VERSION => InnerClientPlan::Action(ActionClientPlan::decode(inner_payload)?),
             version => return Err(ClientPlanError::UnsupportedInnerVersion(version)),
         };
+        let actual_inner_plan_version = inner_plan.format_version();
+        if inner_plan_version != actual_inner_plan_version {
+            return Err(ClientPlanError::InnerVersionMismatch {
+                declared: inner_plan_version,
+                actual: actual_inner_plan_version,
+            });
+        }
         let requirement_count = reader.u32()?;
         if requirement_count == 0 {
             return Err(ClientPlanError::InvalidCapabilityCount { actual: 0 });
@@ -1874,13 +1881,6 @@ fn expression_contains_inspect(node: &ClientExpressionNode) -> bool {
 fn validate_external_contract_identity(identity: &str) -> Result<(), ClientPlanError> {
     let invalid = || Err(ClientPlanError::InvalidExpressionNode(NODE_EXTERNAL_CONTRACT));
 
-    if identity
-        .chars()
-        .any(|character| character.is_whitespace() || character.is_control())
-    {
-        return invalid();
-    }
-
     let Some((name, revision)) = identity.rsplit_once('@') else {
         return invalid();
     };
@@ -1895,21 +1895,47 @@ fn validate_external_contract_identity(identity: &str) -> Result<(), ClientPlanE
         return invalid();
     }
 
-    for segment in name.split('.') {
-        let mut characters = segment.chars();
-        let Some(first) = characters.next() else {
-            return invalid();
-        };
-        if (first != '_' && !first.is_alphabetic())
-            || characters.any(|character| {
-                character != '_' && !character.is_alphabetic() && !character.is_numeric()
-            })
-        {
+    for segment in name.split(".") {
+        if !valid_external_contract_name_segment(segment) {
             return invalid();
         }
     }
 
     Ok(())
+}
+
+fn valid_external_contract_name_segment(segment: &str) -> bool {
+    let quote = '"';
+    let underscore = '_';
+    if segment.starts_with(quote) {
+        if !segment.ends_with(quote) || segment.len() < 2 {
+            return false;
+        }
+        let inner = &segment[1..segment.len() - 1];
+        if inner.is_empty() {
+            return false;
+        }
+        let mut characters = inner.chars().peekable();
+        while let Some(character) = characters.next() {
+            if character == quote {
+                if characters.peek() == Some(&quote) {
+                    characters.next();
+                } else {
+                    return false;
+                }
+            }
+        }
+        return true;
+    }
+
+    let mut characters = segment.chars();
+    let Some(first) = characters.next() else {
+        return false;
+    };
+    (first == underscore || first.is_alphabetic())
+        && characters.all(|character| {
+            character == underscore || character.is_alphabetic() || character.is_numeric()
+        })
 }
 
 /// Encodes one expression node recursively.
@@ -2974,6 +3000,13 @@ pub enum ClientPlanError {
     InvalidCapabilityArgumentTag(u8),
     /// A version-5 envelope carries an unsupported inner plan version.
     UnsupportedInnerVersion(u32),
+    /// A version-5 envelope declares a version that does not match its payload.
+    InnerVersionMismatch {
+        /// The version declared by the envelope.
+        declared: u32,
+        /// The canonical version decoded from the payload.
+        actual: u32,
+    },
     /// The encoded artefact exceeds the format byte limit.
     ArtifactSizeLimit {
         /// The supplied artefact size.
@@ -3175,6 +3208,10 @@ impl fmt::Display for ClientPlanError {
             Self::UnsupportedInnerVersion(version) => {
                 write!(formatter, "unsupported inner client-plan version {version}")
             }
+            Self::InnerVersionMismatch { declared, actual } => write!(
+                formatter,
+                "declared inner client-plan version {declared} does not match payload version {actual}"
+            ),
             Self::ArtifactSizeLimit { size, maximum } => write!(
                 formatter,
                 "orna.client-plan artefact size {size} exceeds the limit {maximum}"
@@ -3578,6 +3615,17 @@ mod tests {
     }
 
     #[test]
+    fn external_contract_identity_accepts_quoted_identifier_segments() {
+        for identity in ["app.\"window\"@1", "\"window\"@2", "app.\"with\"\"quote\"@3", "app.\"display name\"@4"] {
+            let plan = ExpressionClientPlan::new(ClientExpressionNode::ExternalContract {
+                identity: identity.to_owned(),
+            });
+            let encoded = plan.encode().expect("quoted identity must encode");
+            assert_eq!(ExpressionClientPlan::decode(&encoded), Ok(plan));
+        }
+    }
+
+    #[test]
     fn external_contract_identity_rejects_malformed_values_at_encode_boundary() {
         for identity in [
             "",
@@ -3596,6 +3644,9 @@ mod tests {
             "std.ui-window@1",
             "1std.ui@1",
             "std.ui window@1",
+            "app.\"\"@1",
+            "app.\"unterminated@1",
+            "app.\"bad\"suffix@1",
             "std.ui\u{7f}window@1",
             "std.ui\0window@1",
         ] {
@@ -4464,6 +4515,12 @@ mod tests {
             InnerClientPlan::Expression(ExpressionClientPlan::new(ClientExpressionNode::String {
                 value: "hi".to_owned(),
             })),
+            InnerClientPlan::Expression(ExpressionClientPlan::new(ClientExpressionNode::Inspect {
+                operation: InspectOperationNode::Snapshot {
+                    target: Box::new(ClientExpressionNode::Boolean { value: true }),
+                    options: None,
+                },
+            })),
             InnerClientPlan::State(minimal_state_plan()),
         ];
         for inner in inner_forms {
@@ -4564,6 +4621,53 @@ mod tests {
                 Err(ClientPlanError::UnsupportedVersion(version))
             );
         }
+    }
+
+    #[test]
+    fn capability_plan_rejects_declared_inner_version_mismatch() {
+        let mut expression_payload = CapabilityClientPlan::new(
+            InnerClientPlan::Expression(ExpressionClientPlan::new(ClientExpressionNode::Boolean {
+                value: true,
+            })),
+            vec![CapabilityRequirement::new(
+                "std.secret.use",
+                CapabilityArgumentSource::Parameter("p_secret".to_owned()),
+            )],
+        )
+        .encode()
+        .expect("the plan encodes");
+        expression_payload[13..17].copy_from_slice(&INSPECT_FORMAT_VERSION.to_be_bytes());
+        assert_eq!(
+            CapabilityClientPlan::decode(&expression_payload),
+            Err(ClientPlanError::InnerVersionMismatch {
+                declared: INSPECT_FORMAT_VERSION,
+                actual: EXPRESSION_FORMAT_VERSION,
+            })
+        );
+
+        let inspect = ExpressionClientPlan::new(ClientExpressionNode::Inspect {
+            operation: InspectOperationNode::Snapshot {
+                target: Box::new(ClientExpressionNode::Boolean { value: true }),
+                options: None,
+            },
+        });
+        let mut inspect_payload = CapabilityClientPlan::new(
+            InnerClientPlan::Expression(inspect),
+            vec![CapabilityRequirement::new(
+                "std.secret.use",
+                CapabilityArgumentSource::Parameter("p_secret".to_owned()),
+            )],
+        )
+        .encode()
+        .expect("the plan encodes");
+        inspect_payload[13..17].copy_from_slice(&EXPRESSION_FORMAT_VERSION.to_be_bytes());
+        assert_eq!(
+            CapabilityClientPlan::decode(&inspect_payload),
+            Err(ClientPlanError::InnerVersionMismatch {
+                declared: EXPRESSION_FORMAT_VERSION,
+                actual: INSPECT_FORMAT_VERSION,
+            })
+        );
     }
 
     #[test]
