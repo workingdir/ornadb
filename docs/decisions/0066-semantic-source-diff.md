@@ -39,15 +39,25 @@ candidate's `CatalogueSnapshot` is then compared against the active
   identity is absent from the active catalogue;
 - **dropped** — a schema, object type, enum type, or function whose stable
   identity is absent from the candidate;
-- **renamed** — a schema, object type, enum type, or function present in both
-  by stable identity but with a different resolved qualified name; references
-  survive because resolution uses stable IDs;
+- **renamed** — in the semantic-diff model, a schema, object type, enum type,
+  or function present in both by stable identity but with a different resolved
+  qualified name; references survive because resolution uses stable IDs. The
+  diff model also has
+  `FunctionRenamed` and `ParameterRenamed` kinds for these identity-keyed
+  catalogue comparisons. Those model-level kinds do not imply that the source
+  language accepts a corresponding rename statement;
 - **unchanged** — present in both with the same identity and name (reported
   only in a `--verbose` mode, not by default).
 
-Field-level changes inside a renamed or retained object type are reported as
-nested field additions/drops/renames using the same stable-ID comparison.
-Function parameter changes are likewise reported per parameter identity.
+The model reports field-level changes inside a renamed or retained object type
+as nested field additions/drops/renames using the same stable-ID comparison.
+It likewise reports function parameter changes per parameter identity. The
+currently accepted source evidence is narrower: source accepts the
+identity-preserving `ALTER TYPE ... RENAME FIELD ... TO ...` form, while
+additions, drops, and unchanged definitions come from comparing the candidate
+and active declarations. Source-level function and parameter rename syntax is
+deferred until a separate language contract defines its identity and
+dependency rules.
 
 Comparison keys are stable identities (`SchemaId`, `TypeId`, `FunctionId`,
 `FieldId`, `ParameterId`), never name strings, matching the durable
@@ -64,12 +74,16 @@ classes from work ADR 0038.
 ## Proof
 
 A live proof (`source_diff_live.rs`) boots the standard chain, installs one
-application revision with an object type and two functions, then diffs a
-candidate that renames one field and one function, adds one function, and
-drops another. The rendered report must show the rename with the stable
-identity preserved (so dependent references survive), the addition, and the
-drop — and the active pair must be byte-identical before and after the diff
-command.
+application revision with an object type and two functions, and exercises
+body-only, field-rename, broken-source, and identical candidates. The field
+rename candidate uses the identity-preserving `ALTER TYPE ... RENAME FIELD`
+form, adds one function, and drops another. The rendered report must show the
+field rename with its stable identity preserved (so dependent references
+survive), the addition, and the drop; the identical candidate must report no
+semantic changes; and the active pair must be byte-identical before and after
+the diff command. This proof does not cover function or parameter renames:
+source syntax for those transitions remains deferred pending a separate
+accepted language contract.
 
 ## Consequences
 
