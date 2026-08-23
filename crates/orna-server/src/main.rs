@@ -308,8 +308,9 @@ where
     // The optional global `--runtime <family>` override (ADR 0063) is
     // consumed before the command word so `orna --runtime tty invoke ...`
     // works. A missing value or an unknown family is a usage error (`None`).
-    // The override is threaded into the invoke command below and ignored by
-    // every other command; unknown leading flags still fall to `_ => None`.
+    // The override is threaded into the invoke command below. Source
+    // commands reject it per their accepted command contracts. Unknown leading
+    // flags still fall to `_ => None`.
     let runtime = if args
         .peek()
         .is_some_and(|value| value == OsStr::new("--runtime"))
@@ -339,6 +340,14 @@ where
         }
         Some(value) if value == OsStr::new("source") => {
             let command = match args.next().as_deref() {
+                Some(value)
+                    if runtime.is_some()
+                        && (value == OsStr::new("check")
+                            || value == OsStr::new("apply")
+                            || value == OsStr::new("diff")) =>
+                {
+                    return None;
+                }
                 Some(value) if value == OsStr::new("check") => Command::SourceCheck,
                 Some(value) if value == OsStr::new("apply") => Command::SourceApply,
                 Some(value) if value == OsStr::new("diff") => Command::SourceDiff,
@@ -1067,6 +1076,24 @@ mod tests {
             parse_command(arguments(&["orna", "source", "apply", "app.orna"])),
             Some(Command::SourceApply("app.orna".to_owned()))
         );
+    }
+
+    #[test]
+    fn rejects_runtime_override_on_source_commands() {
+        for subcommand in ["check", "apply", "diff"] {
+            assert_eq!(
+                parse_command(arguments(&[
+                    "orna",
+                    "--runtime",
+                    "tty",
+                    "source",
+                    subcommand,
+                    "app.orna",
+                ])),
+                None,
+                "runtime override must be rejected for source {subcommand}"
+            );
+        }
     }
 
     #[test]
