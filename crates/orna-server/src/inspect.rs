@@ -889,7 +889,6 @@ const INSPECT_DENIED_CODE: &str = "inspect.denied";
 const INSPECT_PROJECTION_FAILED_CODE: &str = "inspect.projection_failed";
 const INSPECT_RUNTIME_UNAVAILABLE_CODE: &str = "inspect.runtime_unavailable";
 const INSPECT_RENDERING_FAILED_CODE: &str = "inspect.rendering_failed";
-const INSPECT_STALE_EPOCH_CODE: &str = "inspect.stale_epoch";
 const INSPECT_RECURSION_CODE: &str = "inspect.recursion";
 
 fn runtime_unavailable_error() -> InstalledInspectError {
@@ -908,14 +907,6 @@ fn denied_error() -> InstalledInspectError {
     )
 }
 
-fn stale_epoch_error() -> InstalledInspectError {
-    InstalledInspectError::with_code(
-        InstalledInspectErrorKind::Kernel,
-        format!("INSPECT epoch is stale: {INSPECT_STALE_EPOCH_CODE}"),
-        INSPECT_STALE_EPOCH_CODE,
-    )
-}
-
 fn recursion_error() -> InstalledInspectError {
     InstalledInspectError::with_code(
         InstalledInspectErrorKind::Kernel,
@@ -925,7 +916,7 @@ fn recursion_error() -> InstalledInspectError {
 }
 
 fn missing_epoch_error() -> InstalledInspectError {
-    stale_epoch_error()
+    denied_error()
 }
 
 fn inspect_projection_failed_error() -> InstalledInspectError {
@@ -944,8 +935,8 @@ fn map_kernel_error(error: PostgresKernelError) -> InstalledInspectError {
     match error {
         PostgresKernelError::Inspect(_) => inspect_projection_failed_error(),
         PostgresKernelError::InspectDenied { reason } => match reason {
-            orna_core::security::InspectDenial::MissingEpoch => stale_epoch_error(),
-            orna_core::security::InspectDenial::MissingPrivilege => denied_error(),
+            orna_core::security::InspectDenial::MissingEpoch
+            | orna_core::security::InspectDenial::MissingPrivilege => denied_error(),
             orna_core::security::InspectDenial::ObserverSuppressed => recursion_error(),
         },
         PostgresKernelError::InspectValueCodec(_) => inspect_projection_failed_error(),
@@ -1728,10 +1719,10 @@ mod tests {
             reason: orna_core::security::InspectDenial::MissingEpoch,
         });
         assert_eq!(missing_epoch.kind(), InstalledInspectErrorKind::Kernel);
-        assert_eq!(missing_epoch.code(), Some("inspect.stale_epoch"));
+        assert_eq!(missing_epoch.code(), Some("inspect.denied"));
         assert_eq!(
             missing_epoch.message(),
-            "INSPECT epoch is stale: inspect.stale_epoch"
+            "INSPECT access was denied: inspect.denied"
         );
 
         let recursion = map_kernel_error(PostgresKernelError::InspectDenied {
@@ -1795,16 +1786,16 @@ mod tests {
         );
     }
 
-    /// Missing epochs use the stable stale-epoch surface whether the kernel
-    /// reports the denial or the installed command resolves no epoch.
+    /// Missing epochs use the stable denial surface to avoid disclosing
+    /// whether another principal has a matching invocation.
     #[test]
-    fn missing_epoch_error_is_stable() {
+    fn missing_epoch_error_is_denied() {
         let error = missing_epoch_error();
         assert_eq!(error.kind(), InstalledInspectErrorKind::Kernel);
-        assert_eq!(error.code(), Some("inspect.stale_epoch"));
+        assert_eq!(error.code(), Some("inspect.denied"));
         assert_eq!(
             error.message(),
-            "INSPECT epoch is stale: inspect.stale_epoch"
+            "INSPECT access was denied: inspect.denied"
         );
     }
 
