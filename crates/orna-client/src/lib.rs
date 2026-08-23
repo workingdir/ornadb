@@ -3793,6 +3793,11 @@ fn evaluate_function(
         .map_or(revision.artifact().version(), |plan| {
             plan.inner_plan_version()
         });
+    // Bind caller-owned parameter references once, while the declaration owner
+    // and its invocation arguments are still in scope. Passing the resulting
+    // literal declarations through nested calls prevents a callee from trying
+    // to resolve the caller parameter name against its own parameters.
+    let bound_declarations = bind_capability_declarations(definition, &arguments, declarations);
     let resolve_parameter =
         |parameter: &str| resolve_parameter_argument(definition, &arguments, parameter);
     match &envelope {
@@ -3825,7 +3830,7 @@ fn evaluate_function(
             }
         }
         None => {
-            for declaration in declarations {
+            for declaration in &bound_declarations {
                 if !grants.satisfies_declaration(declaration, resolve_parameter) {
                     return Err(ClientExecutionError::CapabilityDenied {
                         context,
@@ -3881,7 +3886,7 @@ fn evaluate_function(
             lineage,
             return_shape,
             &arguments,
-            declarations,
+            &bound_declarations,
             grants,
             state,
             depth,
@@ -3896,7 +3901,7 @@ fn evaluate_function(
             lineage,
             return_shape,
             &arguments,
-            declarations,
+            &bound_declarations,
             grants,
             state,
             depth,
@@ -3930,6 +3935,35 @@ fn resolve_parameter_argument(
             RuntimeValue::Text(value) => Some(value.clone()),
             _ => None,
         })
+}
+
+/// Binds capability declarations to the function invocation that owns them.
+///
+/// Caller-supplied declarations are checked before nested CLIENT calls run. A
+/// parameter reference that resolves here is converted to a literal so that
+/// nested callees never reinterpret the caller parameter name in their own
+/// parameter namespace. Unresolved references remain parameter-scoped and are
+/// rejected by the owning gate, preserving fail-closed behavior.
+fn bind_capability_declarations(
+    definition: &orna_core::catalogue::FunctionDefinition,
+    arguments: &[(ParameterId, RuntimeValue)],
+    declarations: &[capability::LocalCapabilityDeclaration],
+) -> Vec<capability::LocalCapabilityDeclaration> {
+    declarations
+        .iter()
+        .map(|declaration| match declaration.argument() {
+            capability::LocalCapabilityArgumentSource::Text(_) => declaration.clone(),
+            capability::LocalCapabilityArgumentSource::Parameter(parameter) => {
+                match resolve_parameter_argument(definition, arguments, parameter) {
+                    Some(value) => capability::LocalCapabilityDeclaration::new(
+                        declaration.name(),
+                        capability::LocalCapabilityArgumentSource::Text(value),
+                    ),
+                    None => declaration.clone(),
+                }
+            }
+        })
+        .collect()
 }
 
 fn evaluate_plan(
@@ -6106,7 +6140,9 @@ fn evaluate_inspect_expression(
             if options.is_some() {
                 return Err(ClientExecutionError::Inspect {
                     context,
-                    source: ClientInspectError::Failed("inspect.invalid_options".to_owned()),
+                    source: ClientInspectError::Failed(stable_inspect_provider_error(
+                        "inspect.invalid_options",
+                    )),
                 });
             }
             let target = evaluate_expression(
@@ -8346,7 +8382,7 @@ mod tests {
             result,
             Err(super::ClientExecutionError::Inspect {
                 context,
-                source: super::ClientInspectError::Failed("inspect.invalid_options".to_owned()),
+                source: super::ClientInspectError::Failed("inspect.projection_failed".to_owned()),
             }),
             "unsupported snapshot options must be rejected before either expression is evaluated",
         );
