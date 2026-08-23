@@ -3584,19 +3584,38 @@ fn evaluate_client_function_in_state_context_with_executor(
     ) {
         Ok(result) => result,
         Err(error) => {
-            if let ClientExecutionError::ResourceEvaluation {
-                source: ClientResourceExecutionError::Pending { key, generation },
-                ..
-            } = &error
-            {
-                if let Some(resource) = staged.resources.get(key) {
-                    if resource.key() == *key
-                        && resource.generation() == *generation
-                        && resource.status() == ClientResourceStatus::Loading
-                    {
-                        state.resources.insert(*key, resource.clone());
+            match &error {
+                ClientExecutionError::ResourceEvaluation {
+                    source: ClientResourceExecutionError::Pending { key, generation },
+                    ..
+                } => {
+                    if let Some(resource) = staged.resources.get(key) {
+                        if resource.key() == *key
+                            && resource.generation() == *generation
+                            && resource.status() == ClientResourceStatus::Loading
+                        {
+                            state.resources.insert(*key, resource.clone());
+                        }
                     }
                 }
+                ClientExecutionError::ResourceEvaluation {
+                    source: ClientResourceExecutionError::Failed(_)
+                        | ClientResourceExecutionError::Cancelled,
+                    ..
+                } => {
+                    // Preserve terminal resource state when the invocation
+                    // fails. The caller can inspect the redacted failure or
+                    // cancellation and decide whether to retry or invalidate.
+                    for (key, resource) in &staged.resources {
+                        if matches!(
+                            resource.status(),
+                            ClientResourceStatus::Failed | ClientResourceStatus::Cancelled
+                        ) {
+                            state.resources.insert(*key, resource.clone());
+                        }
+                    }
+                }
+                _ => {}
             }
             return Err(error);
         }
@@ -7056,6 +7075,13 @@ mod tests {
     }
 
     struct FailingActionExecutor;
+    struct CancelledActionExecutor;
+
+    impl ClientResourceExecutor for CancelledActionExecutor {
+        fn execute(&mut self, request: ClientResourceRequest) -> ClientResourceCompletion {
+            request.cancelled()
+        }
+    }
 
     #[derive(Default)]
     struct PollingTestExecutor {
@@ -10031,6 +10057,81 @@ fn client_stream_cancellation_clears_batches_and_rejects_stale_completions() {
             Some(ClientResourceStatus::Ready),
         );
     }
+    #[test]
+    fn terminal_resource_states_persist_when_evaluation_fails() {
+        let (active, function, pair, _, parameter) = version_six_client_resource_action_active();
+        let grant = capability::LocalCapabilityGrant::new(
+            capability::LocalCapabilityName::StdFsRead,
+            capability::LocalCapabilityScope::path("/tmp").unwrap(),
+        )
+        .unwrap();
+        let grants = capability::LocalCapabilityGrantSet::from_grants([grant]).unwrap();
+        let argument = FunctionArgument::new(
+            parameter,
+            RuntimeValue::Text("/tmp/resource".to_owned()),
+        )
+        .unwrap();
+
+        let mut failed_state = ClientStateStore::new();
+        let mut failing_executor = FailingActionExecutor;
+        let failure = super::evaluate_client_function_with_state_and_grants_and_arguments_and_executor_with_parent_invocation(
+            &active,
+            &authorise(pair, function),
+            std::slice::from_ref(&argument),
+            &[],
+            &grants,
+            &mut failed_state,
+            InvocationId::from_bytes([0x92; 16]),
+            &mut failing_executor,
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            failure,
+            super::ClientExecutionError::ResourceEvaluation {
+                source: super::ClientResourceExecutionError::Failed(code),
+                ..
+            } if code == "secret.executor.detail"
+        ));
+        let failed_resource = failed_state
+            .resources
+            .values()
+            .find(|resource| resource.status() == ClientResourceStatus::Failed)
+            .expect("failed resource remains in caller state");
+        assert_eq!(
+            failed_resource.failure().map(super::ClientResourceFailure::code),
+            Some("secret.executor.detail"),
+        );
+
+        let mut cancelled_state = ClientStateStore::new();
+        let mut cancelled_executor = CancelledActionExecutor;
+        let cancellation = super::evaluate_client_function_with_state_and_grants_and_arguments_and_executor_with_parent_invocation(
+            &active,
+            &authorise(pair, function),
+            std::slice::from_ref(&argument),
+            &[],
+            &grants,
+            &mut cancelled_state,
+            InvocationId::from_bytes([0x93; 16]),
+            &mut cancelled_executor,
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            cancellation,
+            super::ClientExecutionError::ResourceEvaluation {
+                source: super::ClientResourceExecutionError::Cancelled,
+                ..
+            }
+        ));
+        let cancelled_resource = cancelled_state
+            .resources
+            .values()
+            .find(|resource| resource.status() == ClientResourceStatus::Cancelled)
+            .expect("cancelled resource remains in caller state");
+        assert_eq!(cancelled_resource.failure(), None);
+    }
+
 
 
     #[test]
