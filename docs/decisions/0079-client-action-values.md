@@ -25,6 +25,15 @@ The first implementation accepts one call node. The forms
 later scheduler contract. The implementation must reject those forms rather
 than encode an unrecognised action node.
 
+## Scope and precedence
+
+This ADR is authoritative for the accepted executable v1 action boundary. Any
+broader conceptual action language in the canonical resources/actions/streams
+specification or in ADR 0077 is bounded by this decision: `std.action.call`
+only is accepted, while `std.action.sequence(...)` and
+`std.action.parallel(...)` are reserved and rejected until a later scheduler
+contract.
+
 ## Catalogue and source snapshot
 
 V6 retains every V5 source unit and adds `std/action.orna`:
