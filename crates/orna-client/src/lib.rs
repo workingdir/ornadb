@@ -7074,11 +7074,19 @@ mod tests {
         }
     }
 
-    struct FailingActionExecutor;
-    struct CancelledActionExecutor;
+    #[derive(Default)]
+    struct FailingActionExecutor {
+        request: Option<ClientResourceRequest>,
+    }
+
+    #[derive(Default)]
+    struct CancelledActionExecutor {
+        request: Option<ClientResourceRequest>,
+    }
 
     impl ClientResourceExecutor for CancelledActionExecutor {
         fn execute(&mut self, request: ClientResourceRequest) -> ClientResourceCompletion {
+            self.request = Some(request.clone());
             request.cancelled()
         }
     }
@@ -7111,6 +7119,7 @@ mod tests {
 
     impl ClientResourceExecutor for FailingActionExecutor {
         fn execute(&mut self, request: ClientResourceRequest) -> ClientResourceCompletion {
+            self.request = Some(request.clone());
             request.failed("secret.executor.detail".to_owned())
         }
 
@@ -10073,7 +10082,7 @@ fn client_stream_cancellation_clears_batches_and_rejects_stale_completions() {
         .unwrap();
 
         let mut failed_state = ClientStateStore::new();
-        let mut failing_executor = FailingActionExecutor;
+        let mut failing_executor = FailingActionExecutor::default();
         let failure = super::evaluate_client_function_with_state_and_grants_and_arguments_and_executor_with_parent_invocation(
             &active,
             &authorise(pair, function),
@@ -10093,18 +10102,27 @@ fn client_stream_cancellation_clears_batches_and_rejects_stale_completions() {
                 ..
             } if code == "secret.executor.detail"
         ));
+        let failed_request = failing_executor
+            .request
+            .as_ref()
+            .expect("failing executor received a resource request");
         let failed_resource = failed_state
-            .resources
-            .values()
-            .find(|resource| resource.status() == ClientResourceStatus::Failed)
-            .expect("failed resource remains in caller state");
+            .resource(failed_request.key())
+            .expect("failed resource remains at the evaluated request key");
+        assert_eq!(failed_resource.key(), failed_request.key());
+        assert_eq!(failed_resource.generation(), failed_request.generation());
+        assert_eq!(
+            failed_resource.request_id(),
+            Some(failed_request.request_id()),
+        );
+        assert_eq!(failed_resource.status(), ClientResourceStatus::Failed);
         assert_eq!(
             failed_resource.failure().map(super::ClientResourceFailure::code),
             Some("secret.executor.detail"),
         );
 
         let mut cancelled_state = ClientStateStore::new();
-        let mut cancelled_executor = CancelledActionExecutor;
+        let mut cancelled_executor = CancelledActionExecutor::default();
         let cancellation = super::evaluate_client_function_with_state_and_grants_and_arguments_and_executor_with_parent_invocation(
             &active,
             &authorise(pair, function),
@@ -10124,11 +10142,20 @@ fn client_stream_cancellation_clears_batches_and_rejects_stale_completions() {
                 ..
             }
         ));
+        let cancelled_request = cancelled_executor
+            .request
+            .as_ref()
+            .expect("cancelled executor received a resource request");
         let cancelled_resource = cancelled_state
-            .resources
-            .values()
-            .find(|resource| resource.status() == ClientResourceStatus::Cancelled)
-            .expect("cancelled resource remains in caller state");
+            .resource(cancelled_request.key())
+            .expect("cancelled resource remains at the evaluated request key");
+        assert_eq!(cancelled_resource.key(), cancelled_request.key());
+        assert_eq!(cancelled_resource.generation(), cancelled_request.generation());
+        assert_eq!(
+            cancelled_resource.request_id(),
+            Some(cancelled_request.request_id()),
+        );
+        assert_eq!(cancelled_resource.status(), ClientResourceStatus::Cancelled);
         assert_eq!(cancelled_resource.failure(), None);
     }
 
@@ -14269,7 +14296,7 @@ fn client_stream_cancellation_clears_batches_and_rejects_stale_completions() {
         );
         let mut state = ClientStateStore::default();
         let mut action_state = ClientActionState::default();
-        let mut executor = FailingActionExecutor;
+        let mut executor = FailingActionExecutor::default();
 
         assert_eq!(
             trigger_client_action(
