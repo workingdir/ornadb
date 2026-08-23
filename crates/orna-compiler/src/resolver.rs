@@ -7505,6 +7505,20 @@ fn check_client_functions(
                         })
                         .and_then(|block| block.return_expression.as_ref())
                 }) {
+                    if matches!(
+                        input.body,
+                        orna_syntax::ClientFunctionBody::Expression { .. }
+                    ) && input.return_type
+                        == SemanticType::Named(CheckedTypeId::Existing(STD_UI_TYPE_ID))
+                    {
+                        diagnostics.push(diagnostic(
+                            DiagnosticCode::DomainIncompatible,
+                            "CLIENT UI functions must use explicit RETURN instead of AS expression",
+                            input.logical_path,
+                            expression.span(),
+                        ));
+                        return None;
+                    }
                     let diagnostics_before = diagnostics.len();
                     validate_client_await_positions(expression, true, input, diagnostics);
                     if diagnostics.len() != diagnostics_before {
@@ -11608,6 +11622,55 @@ mod tests {
             vec!["sys.inspect.snapshot options are not supported in Inspector v1"],
         );
         assert_no_checked_bundle(&report);
+    }
+
+    #[test]
+    fn enforces_explicit_return_for_ui_expression_bodies() {
+        let standard =
+            check_standard_library_source(&verified_standard_v4_snapshot()).unwrap();
+        let application = empty_catalogue();
+        let context =
+            StandardApplicationCheckContext::try_new(&application, &standard).unwrap();
+
+        let short = check_standard_application(
+            &bundle([(
+                "ui-return.orna",
+                "CREATE SCHEMA app; CREATE EXTERNAL CLIENT FUNCTION app.factory() RETURNS std.UI RUNTIME CONTRACT 'app.factory@1'; CREATE CLIENT FUNCTION app.ui() RETURNS std.UI RETURN app.factory();",
+            )]),
+            &context,
+        );
+        assert!(short.diagnostics().is_empty(), "{:?}", short.diagnostics());
+        assert!(short.checked_bundle().is_some());
+
+        let as_ui = check_standard_application(
+            &bundle([(
+                "ui-as.orna",
+                "CREATE SCHEMA app; CREATE EXTERNAL CLIENT FUNCTION app.factory() RETURNS std.UI RUNTIME CONTRACT 'app.factory@1'; CREATE CLIENT FUNCTION app.ui() RETURNS std.UI AS app.factory();",
+            )]),
+            &context,
+        );
+        assert_eq!(
+            as_ui
+                .diagnostics()
+                .iter()
+                .map(|diagnostic| diagnostic.message())
+                .collect::<Vec<_>>(),
+            vec!["CLIENT UI functions must use explicit RETURN instead of AS expression"],
+        );
+        assert!(as_ui.checked_bundle().is_none());
+
+        let non_ui_as = check_standard_application(
+            &bundle([(
+                "non-ui-as.orna",
+                "CREATE SCHEMA app; CREATE CLIENT FUNCTION app.text() RETURNS INTEGER AS 1;",
+            )]),
+            &context,
+        );
+        assert!(
+            non_ui_as.diagnostics().is_empty(),
+            "{:?}",
+            non_ui_as.diagnostics()
+        );
     }
 
     #[test]
