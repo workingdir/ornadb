@@ -207,11 +207,12 @@ client function with no-STATE procedural locals and assignments
 CREATE CLIENT FUNCTION examples.procedural(p_value TEXT)
 RETURNS TEXT
 IS
-    LET rows TEXT := p_value;
+    LET rows TEXT := std.data.resource();
 BEGIN
-    LET result TEXT := rows;
+    LET result TEXT := AWAIT rows;
     result := result || '!';
-    RETURN result;
+    result := AWAIT rows;
+    RETURN AWAIT rows;
 END;
 
 ---
@@ -251,8 +252,15 @@ END;
           (assignment_operator)
           (client_expression
             (client_primary_expression
-              (client_parameter_read
-                (identifier))))
+              (client_call_expression
+                (client_call_callee
+                  (identifier)
+                  (dot)
+                  (identifier)
+                  (dot)
+                  (identifier))
+                (lparen)
+                (rparen))))
           (semicolon))
         (kw_begin)
         (client_procedural_statement
@@ -263,10 +271,12 @@ END;
               (scalar_type
                 (kw_text)))
             (assignment_operator)
-            (client_expression
-              (client_primary_expression
-                (client_parameter_read
-                  (kw_rows))))
+            (client_await_expression
+              (kw_await)
+              (client_expression
+                (client_primary_expression
+                  (client_parameter_read
+                    (kw_rows)))))
             (semicolon)))
         (client_procedural_statement
           (client_assignment_statement
@@ -281,12 +291,25 @@ END;
               (client_primary_expression
                 (string_literal)))
             (semicolon)))
+        (client_procedural_statement
+          (client_assignment_statement
+            (identifier)
+            (assignment_operator)
+            (client_await_expression
+              (kw_await)
+              (client_expression
+                (client_primary_expression
+                  (client_parameter_read
+                    (kw_rows)))))
+            (semicolon)))
         (client_return_statement
           (kw_return)
-          (client_expression
-            (client_primary_expression
-              (client_parameter_read
-                (identifier))))
+          (client_await_expression
+            (kw_await)
+            (client_expression
+              (client_primary_expression
+                (client_parameter_read
+                  (kw_rows)))))
           (semicolon))
         (kw_end)))
     (semicolon)))
