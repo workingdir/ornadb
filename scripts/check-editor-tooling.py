@@ -244,6 +244,22 @@ def check_zed_extension(
     log("Zed extension check passed")
     return True
 
+def check_lsp_protocol(cargo: str, repository: Path) -> bool:
+    """Run the framed LSP protocol test against the checked-in binary."""
+    log("checking orna-lsp framed protocol tests")
+    result = run_command(
+        [cargo, "test", "--package", "orna-lsp", "--test", "lsp_e2e"],
+        cwd=repository,
+        label="orna-lsp protocol test",
+    )
+    if result is None or result.returncode != 0:
+        status = "could not start" if result is None else f"exited with status {result.returncode}"
+        log(f"orna-lsp protocol check failed ({status})", error=True)
+        return False
+    log("orna-lsp protocol check passed")
+    return True
+
+
 
 def main() -> int:
     repository = Path(__file__).resolve().parents[1]
@@ -288,6 +304,9 @@ def main() -> int:
 
     if not check_zed_extension(cargo, zed_directory, repository):
         return 1
+    if not check_lsp_protocol(cargo, repository):
+        return 1
+
 
     if not check_generated_artefacts(tree_sitter, tree_sitter_directory, repository):
         return 1
