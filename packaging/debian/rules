@@ -192,7 +192,8 @@ verify:
 		printf '%s\n' '[debian] error: product payload is not one executable' >&2; exit 1; }; \
 	[[ -z "$$(find "$(PACKAGE_ROOT)" -type f \
 		\( -name '*.so' -o -name '*.so.*' -o -name '*.a' -o -name '*.o' \
-		-o -name postgres -o -name initdb -o -name psql -o -name pg_upgrade \) -print -quit)" ]] || { \
+		-o -name postgres -o -name initdb -o -name psql -o -name pg_upgrade -o -name postmaster \
+		-o -name pg_ctl -o -name pg_resetwal \) -print -quit)" ]] || { \
 		printf '%s\n' '[debian] error: PostgreSQL runtime artefact entered the package' >&2; exit 1; }; \
 	readelf --dynamic "$(PACKAGE_ROOT)/usr/bin/orna" >"$(TARGET_ROOT)/orna.dynamic"; \
 	! grep -Eqi 'NEEDED.*(libpq|libz|postgres)' "$(TARGET_ROOT)/orna.dynamic" || { \
