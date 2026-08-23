@@ -31,6 +31,12 @@ use orna_core::{
     system::SYS_INSPECT_INVOCATION_TYPE_ID,
     types::{ResolvedType, StandardScalar, TypeDescriptor},
 };
+#[cfg(feature = "test-hooks")]
+use orna_core::canonical_hash::{
+    verify_standard_library_snapshot as verify_structural_standard_library_snapshot,
+    verify_standard_library_v2_snapshot as verify_structural_standard_library_v2_snapshot,
+};
+
 use orna_standard::{
     STANDARD_LIBRARY_REVISION_ID, STANDARD_LIBRARY_V2_REVISION_ID,
     STANDARD_LIBRARY_V3_REVISION_ID, STANDARD_LIBRARY_V4_REVISION_ID,
@@ -1140,7 +1146,14 @@ pub(crate) async fn load_verified_standard_library(
         )
         .invariant("standard library digest version is unsupported")),
     };
-    verify_recovered_standard_snapshot(snapshot)
+    #[cfg(feature = "test-hooks")]
+    {
+        return verify_recovered_standard_snapshot_for_test_hooks(snapshot);
+    }
+    #[cfg(not(feature = "test-hooks"))]
+    {
+        verify_recovered_standard_snapshot(snapshot)
+    }
 }
 
 fn verify_recovered_standard_snapshot(
@@ -1162,7 +1175,14 @@ fn verify_recovered_standard_snapshot(
             .invariant("standard library revision identity is not an accepted retained revision"));
         }
     };
-    result.map_err(|error| match error {
+    result.map_err(|error| map_recovered_standard_verifier_error(error, revision))
+}
+
+fn map_recovered_standard_verifier_error(
+    error: orna_standard::StandardLibraryError,
+    revision: StandardLibraryRevisionId,
+) -> PostgresKernelError {
+    match error {
         orna_standard::StandardLibraryError::CanonicalHash { source } => {
             PostgresKernelError::CanonicalHash(source)
         }
@@ -1174,7 +1194,42 @@ fn verify_recovered_standard_snapshot(
             revision.canonical(),
         )
         .invariant("standard library retained verifier rejected the recovered snapshot"),
-    })
+    }
+}
+
+#[cfg(feature = "test-hooks")]
+fn verify_recovered_standard_snapshot_for_test_hooks(
+    snapshot: StandardLibrarySnapshot,
+) -> Result<VerifiedStandardLibrarySnapshot, PostgresKernelError> {
+    let revision = snapshot.revision();
+    if matches!(
+        revision,
+        STANDARD_LIBRARY_REVISION_ID
+            | STANDARD_LIBRARY_V2_REVISION_ID
+            | STANDARD_LIBRARY_V3_REVISION_ID
+            | STANDARD_LIBRARY_V4_REVISION_ID
+            | STANDARD_LIBRARY_V5_REVISION_ID
+            | STANDARD_LIBRARY_V6_REVISION_ID
+    ) {
+        return verify_recovered_standard_snapshot(snapshot);
+    }
+
+    let result = match snapshot.digest_version() {
+        StandardLibraryDigestVersion::Version1 => {
+            verify_structural_standard_library_snapshot(snapshot)
+        }
+        StandardLibraryDigestVersion::Version2 => {
+            verify_structural_standard_library_v2_snapshot(snapshot)
+        }
+        _ => {
+            return Err(DurableRecord::new(
+                "_orna_kernel.standard_library_revisions",
+                revision.canonical(),
+            )
+            .invariant("standard library test fixture digest version is unsupported"));
+        }
+    };
+    result.map_err(PostgresKernelError::CanonicalHash)
 }
 
 async fn load_standard_header(

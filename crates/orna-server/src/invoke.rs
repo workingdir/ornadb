@@ -122,6 +122,8 @@ const SERVER_RESOURCE_INTERNAL_CODE: &str = "server.resource.internal-failure";
 /// The stable CLIENT failure code for a result shape that the scalar evaluator
 /// cannot publish.
 const SERVER_RESOURCE_SHAPE_CODE: &str = "server.resource.invalid-result-shape";
+/// The stable CLIENT failure code for an unavailable or unauthorised INSPECT epoch.
+const INSPECT_DENIED_CODE: &str = "inspect.denied";
 
 /// The sealed connection protocol major offered by every host run.
 const CONNECTION_PROTOCOL_MAJOR: u16 = 5;
@@ -1082,7 +1084,7 @@ async fn run_installed_external_contract(
         .await
         .map_err(inspect_kernel_error_code)?
     else {
-        return Err("inspect.stale_epoch".to_owned());
+        return Err(INSPECT_DENIED_CODE.to_owned());
     };
     validate_epoch(
         &snapshot,
@@ -1182,14 +1184,14 @@ async fn run_installed_inspect(
                 .await
                 .map_err(inspect_kernel_error_code)?
             else {
-                return Err("inspect.stale_epoch".to_owned());
+                return Err(INSPECT_DENIED_CODE.to_owned());
             };
             let Some(loaded_snapshot) = kernel
                 .load_inspect_snapshot(&session, epoch_id)
                 .await
                 .map_err(inspect_kernel_error_code)?
             else {
-                return Err("inspect.stale_epoch".to_owned());
+                return Err(INSPECT_DENIED_CODE.to_owned());
             };
             validate_epoch(&loaded_snapshot, invocation, active.pair())?;
             let payload = make_inspect_carrier(
@@ -1257,14 +1259,14 @@ async fn run_installed_inspect(
                 .await
                 .map_err(inspect_kernel_error_code)?
             else {
-                return Err("inspect.stale_epoch".to_owned());
+                return Err(INSPECT_DENIED_CODE.to_owned());
             };
             let Some(loaded_snapshot) = kernel
                 .load_inspect_snapshot(&session, epoch_id)
                 .await
                 .map_err(inspect_kernel_error_code)?
             else {
-                return Err("inspect.stale_epoch".to_owned());
+                return Err(INSPECT_DENIED_CODE.to_owned());
             };
             validate_epoch(&loaded_snapshot, target_invocation, active.pair())?;
             let privilege = InspectPrivilege::OwnInvocation;
@@ -1420,8 +1422,8 @@ fn validate_inspect_projection_binding(
 fn inspect_kernel_error_code(error: PostgresKernelError) -> String {
     match error {
         PostgresKernelError::InspectDenied { reason } => match reason {
-            orna_core::security::InspectDenial::MissingEpoch => "inspect.stale_epoch".to_owned(),
-            orna_core::security::InspectDenial::MissingPrivilege => "inspect.denied".to_owned(),
+            orna_core::security::InspectDenial::MissingEpoch
+            | orna_core::security::InspectDenial::MissingPrivilege => INSPECT_DENIED_CODE.to_owned(),
             orna_core::security::InspectDenial::ObserverSuppressed => {
                 "inspect.recursion".to_owned()
             }
@@ -8426,5 +8428,18 @@ mod tests {
         assert!(!transport.handshake_complete);
         assert_eq!(transport.protocol.high_water_mark(), None);
         assert_eq!(transport.protocol.live_resources(), 0);
+    }
+
+    #[test]
+    fn inspect_denials_do_not_disclose_epoch_existence() {
+        let missing_epoch = inspect_kernel_error_code(PostgresKernelError::InspectDenied {
+            reason: orna_core::security::InspectDenial::MissingEpoch,
+        });
+        let missing_privilege = inspect_kernel_error_code(PostgresKernelError::InspectDenied {
+            reason: orna_core::security::InspectDenial::MissingPrivilege,
+        });
+
+        assert_eq!(missing_epoch, INSPECT_DENIED_CODE);
+        assert_eq!(missing_privilege, INSPECT_DENIED_CODE);
     }
 }
