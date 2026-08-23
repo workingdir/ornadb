@@ -2035,6 +2035,9 @@ impl ResourceProtocolConnection {
             return Ok(disposition);
         }
         let state = self.state_for(stream_id, request_id)?;
+        if !(state.accepted && matches!(state.phase, ResourcePhase::Live)) {
+            return Err(ResourceConnectionError::WrongState { stream_id });
+        }
         if matches!(state.resource_kind, ResourceKind::Single) && state.last_batch_sequence.is_some() {
             return Err(ResourceConnectionError::WrongState { stream_id });
         }
@@ -7784,6 +7787,58 @@ mod tests {
     }
 
     #[test]
+    fn resource_connection_rejects_terminal_frames_before_acceptance() {
+        let request = resource_request_fixture();
+        let request_id = request.request_id;
+        let mut connection = ResourceProtocolConnection::new();
+        connection.open(request.clone()).unwrap();
+
+        let failed = connection.apply(ResourceServerFrame::Failed(ResourceFailed {
+            stream_id: request.stream_id,
+            request_id,
+            failure: CallFailure::InternalFailure,
+        }));
+        assert_eq!(
+            failed,
+            Err(ResourceConnectionError::WrongState {
+                stream_id: request.stream_id,
+            })
+        );
+        assert_eq!(failed.unwrap_err().to_string(), "resource frame violates stream state");
+
+        let cancelled = connection.apply(ResourceServerFrame::Cancelled(ResourceCancelled {
+            stream_id: request.stream_id,
+            request_id,
+            reason: ResourceCancellationCode::ServerRequested,
+        }));
+        assert_eq!(
+            cancelled,
+            Err(ResourceConnectionError::WrongState {
+                stream_id: request.stream_id,
+            })
+        );
+        assert_eq!(cancelled.unwrap_err().to_string(), "resource frame violates stream state");
+        assert_eq!(connection.live_resources(), 1);
+
+        let nested_invocation_id = InvocationId::from_bytes([0x64; 16]);
+        assert_eq!(
+            connection.apply(ResourceServerFrame::Accepted(ResourceAccepted {
+                stream_id: request.stream_id,
+                request_id,
+                nested_invocation_id,
+                target_revision: request.target_revision,
+                resource_kind: request.resource_kind,
+            })),
+            Ok(ResourceFrameDisposition::Applied)
+        );
+        assert_eq!(
+            connection.resource_nested_invocation_id(request.stream_id, request_id),
+            Ok(Some(nested_invocation_id))
+        );
+        assert_eq!(connection.live_resources(), 1);
+    }
+
+    #[test]
     fn resource_connection_reports_available_credit_for_live_stream() {
         let mut request = resource_request_fixture();
         request.resource_kind = ResourceKind::Stream;
@@ -8080,6 +8135,16 @@ mod tests {
             request.request_id = InvocationId::from_bytes([stream_id as u8; 16]);
             assert_eq!(connection.open(request.clone()), Ok(ResourceFrameDisposition::Applied));
             assert_eq!(
+                connection.apply(ResourceServerFrame::Accepted(ResourceAccepted {
+                    stream_id,
+                    request_id: request.request_id,
+                    nested_invocation_id: InvocationId::from_bytes([0x80; 16]),
+                    target_revision: request.target_revision,
+                    resource_kind: request.resource_kind,
+                })),
+                Ok(ResourceFrameDisposition::Applied)
+            );
+            assert_eq!(
                 connection.apply(ResourceServerFrame::Failed(ResourceFailed {
                     stream_id,
                     request_id: request.request_id,
@@ -8161,6 +8226,16 @@ mod tests {
         assert_eq!(connection, before_duplicate);
 
         assert_eq!(
+            connection.apply(ResourceServerFrame::Accepted(ResourceAccepted {
+                stream_id: first.stream_id,
+                request_id: first.request_id,
+                nested_invocation_id: InvocationId::from_bytes([0x81; 16]),
+                target_revision: first.target_revision,
+                resource_kind: first.resource_kind,
+            })),
+            Ok(ResourceFrameDisposition::Applied)
+        );
+        assert_eq!(
             connection.apply(ResourceServerFrame::Failed(ResourceFailed {
                 stream_id: first.stream_id,
                 request_id: first.request_id,
@@ -8202,6 +8277,16 @@ mod tests {
             request.request_id = InvocationId::from_bytes([stream_id as u8; 16]);
             assert_eq!(connection.open(request.clone()), Ok(ResourceFrameDisposition::Applied));
             assert_eq!(
+                connection.apply(ResourceServerFrame::Accepted(ResourceAccepted {
+                    stream_id,
+                    request_id: request.request_id,
+                    nested_invocation_id: InvocationId::from_bytes([0x80; 16]),
+                    target_revision: request.target_revision,
+                    resource_kind: request.resource_kind,
+                })),
+                Ok(ResourceFrameDisposition::Applied)
+            );
+            assert_eq!(
                 connection.apply(ResourceServerFrame::Failed(ResourceFailed {
                     stream_id,
                     request_id: request.request_id,
@@ -8230,6 +8315,16 @@ mod tests {
             request.stream_id = stream_id;
             request.request_id = InvocationId::from_bytes([stream_id as u8; 16]);
             assert_eq!(connection.open(request.clone()), Ok(ResourceFrameDisposition::Applied));
+            assert_eq!(
+                connection.apply(ResourceServerFrame::Accepted(ResourceAccepted {
+                    stream_id,
+                    request_id: request.request_id,
+                    nested_invocation_id: InvocationId::from_bytes([0x80; 16]),
+                    target_revision: request.target_revision,
+                    resource_kind: request.resource_kind,
+                })),
+                Ok(ResourceFrameDisposition::Applied)
+            );
             assert_eq!(
                 connection.apply(ResourceServerFrame::Failed(ResourceFailed {
                     stream_id,
