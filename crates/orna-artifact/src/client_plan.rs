@@ -2433,6 +2433,7 @@ fn validate_procedural_model(plan: &ProceduralClientPlan) -> Result<(), ClientPl
         }
         locals.push(*local);
     }
+    let mut initialized_locals = Vec::with_capacity(locals.len());
     for statement in &plan.statements {
         let target = locals
             .iter()
@@ -2447,6 +2448,14 @@ fn validate_procedural_model(plan: &ProceduralClientPlan) -> Result<(), ClientPl
             true,
             value_position,
         )?;
+        if matches!(statement, ClientStatement::Assignment { .. })
+            && !initialized_locals.contains(&statement.local())
+        {
+            return Err(ClientPlanError::ProceduralAssignmentBeforeLet(
+                statement.local(),
+            ));
+        }
+        validate_procedural_local_reads(statement.expression(), &initialized_locals)?;
         let expression_kind = procedural_resource_kind(statement.expression(), &locals);
         match target.kind {
             ClientLocalKind::Value if expression_kind.is_some() => {
@@ -2482,6 +2491,9 @@ fn validate_procedural_model(plan: &ProceduralClientPlan) -> Result<(), ClientPl
             }
             _ => {}
         }
+        if matches!(statement, ClientStatement::Let { .. }) {
+            initialized_locals.push(statement.local());
+        }
     }
     let mut let_locals = Vec::with_capacity(locals.len());
     for statement in &plan.statements {
@@ -2506,7 +2518,61 @@ fn validate_procedural_model(plan: &ProceduralClientPlan) -> Result<(), ClientPl
     }
     // A final return must produce a value; a resource handle has to be awaited.
     validate_external_contract_placement(&plan.return_expression, false)?;
-    validate_procedural_expression(&plan.return_expression, &locals, false, true, true)
+    validate_procedural_expression(&plan.return_expression, &locals, false, true, true)?;
+    validate_procedural_local_reads(&plan.return_expression, &initialized_locals)
+}
+
+fn validate_procedural_local_reads(
+    node: &ClientExpressionNode,
+    initialized_locals: &[LocalId],
+) -> Result<(), ClientPlanError> {
+    match node {
+        ClientExpressionNode::Await { expression } => {
+            validate_procedural_local_reads(expression, initialized_locals)?;
+        }
+        ClientExpressionNode::Resource { operation } => {
+            for (_, value) in &operation.arguments {
+                validate_procedural_local_reads(value, initialized_locals)?;
+            }
+        }
+        ClientExpressionNode::Inspect { operation } => match operation {
+            InspectOperationNode::Snapshot { target, options } => {
+                validate_procedural_local_reads(target, initialized_locals)?;
+                if let Some(options) = options {
+                    validate_procedural_local_reads(options, initialized_locals)?;
+                }
+            }
+            InspectOperationNode::Projection { snapshot, .. } => {
+                validate_procedural_local_reads(snapshot, initialized_locals)?;
+            }
+        },
+        ClientExpressionNode::Action { operation } => {
+            for (_, value) in &operation.arguments {
+                validate_procedural_local_reads(value, initialized_locals)?;
+            }
+        }
+        ClientExpressionNode::Call { arguments, .. } => {
+            for (_, value) in arguments {
+                validate_procedural_local_reads(value, initialized_locals)?;
+            }
+        }
+        ClientExpressionNode::LocalRead { local } => {
+            if !initialized_locals.contains(local) {
+                return Err(ClientPlanError::ProceduralLocalReadBeforeLet(*local));
+            }
+        }
+        ClientExpressionNode::Concat { left, right } => {
+            validate_procedural_local_reads(left, initialized_locals)?;
+            validate_procedural_local_reads(right, initialized_locals)?;
+        }
+        ClientExpressionNode::String { .. }
+        | ClientExpressionNode::Integer { .. }
+        | ClientExpressionNode::Boolean { .. }
+        | ClientExpressionNode::ParameterRead { .. }
+        | ClientExpressionNode::FieldPath { .. }
+        | ClientExpressionNode::ExternalContract { .. } => {}
+    }
+    Ok(())
 }
 
 fn procedural_resource_kind(
@@ -3021,6 +3087,8 @@ pub enum ClientPlanError {
     DuplicateProceduralLocal(LocalId),
     /// A statement or expression reads a local not declared by the plan.
     UnknownProceduralLocal(LocalId),
+    /// A procedural expression reads a declared local before its LET statement.
+    ProceduralLocalReadBeforeLet(LocalId),
     /// A statement initializer does not match its local's resource/value kind.
     ProceduralLocalKindMismatch(LocalId),
     /// A direct resource initializer result type does not match its local declaration.
@@ -3210,6 +3278,10 @@ impl fmt::Display for ClientPlanError {
             Self::UnknownProceduralLocal(local) => {
                 write!(formatter, "unknown client-plan procedural local {local}")
             }
+            Self::ProceduralLocalReadBeforeLet(local) => write!(
+                formatter,
+                "client-plan procedural local {local} is read before LET"
+            ),
             Self::ProceduralLocalKindMismatch(local) => write!(
                 formatter,
                 "client-plan procedural local {local} has an incompatible initializer kind"
@@ -5668,6 +5740,49 @@ mod tests {
         assert_eq!(ProceduralClientPlan::decode(&encoded), Ok(plan));
     }
 
+
+    #[test]
+    fn procedural_plan_rejects_forward_local_reads_at_encode_and_decode_boundaries() {
+        let first = LocalId::from_bytes([0x71; 16]);
+        let second = LocalId::from_bytes([0x72; 16]);
+        let type_id = TypeId::from_bytes([0x73; 16]);
+        let forward = ProceduralClientPlan::new(
+            vec![
+                ClientLocal::new(first, type_id, ClientLocalKind::Value),
+                ClientLocal::new(second, type_id, ClientLocalKind::Value),
+            ],
+            vec![
+                ClientStatement::let_(first, ClientExpressionNode::LocalRead { local: second }),
+                ClientStatement::let_(second, ClientExpressionNode::Boolean { value: true }),
+            ],
+            ClientExpressionNode::Boolean { value: true },
+        );
+        assert_eq!(
+            forward.encode(),
+            Err(ClientPlanError::ProceduralLocalReadBeforeLet(second))
+        );
+
+        let valid = ProceduralClientPlan::new(
+            vec![
+                ClientLocal::new(first, type_id, ClientLocalKind::Value),
+                ClientLocal::new(second, type_id, ClientLocalKind::Value),
+            ],
+            vec![
+                ClientStatement::let_(first, ClientExpressionNode::Boolean { value: true }),
+                ClientStatement::let_(second, ClientExpressionNode::Boolean { value: false }),
+            ],
+            ClientExpressionNode::Boolean { value: true },
+        );
+        let mut malformed = valid.encode().expect("valid procedural plan encodes");
+        let first_expression = 13 + 4 + 2 * (16 + 16 + 1) + 4 + 1 + 16;
+        let mut replacement = vec![NODE_LOCAL_READ];
+        replacement.extend_from_slice(&second.to_bytes());
+        malformed.splice(first_expression..first_expression + 2, replacement);
+        assert_eq!(
+            ProceduralClientPlan::decode(&malformed),
+            Err(ClientPlanError::ProceduralLocalReadBeforeLet(second))
+        );
+    }
 
     #[test]
     fn procedural_plan_rejects_unknown_locals_and_legacy_local_reads() {
