@@ -1143,6 +1143,7 @@ impl ResourceClientPlan {
 
     /// Encodes this plan into its exact version-6 bytes.
     pub fn encode(&self) -> Result<Vec<u8>, ClientPlanError> {
+        validate_external_contract_placement(&self.expression, false)?;
         validate_resource_await_placement(&self.expression, true, false)?;
         let mut bytes = Vec::new();
         bytes.extend_from_slice(&MAGIC);
@@ -1206,6 +1207,7 @@ impl ResourceClientPlan {
             &mut resource_count,
         )?;
         reader.require_finished()?;
+        validate_external_contract_placement(&expression, false)?;
         validate_resource_await_placement(&expression, true, false)?;
         if resource_count == 0 {
             return Err(ClientPlanError::InvalidResourceOperationCount { actual: 0 });
@@ -1230,6 +1232,7 @@ impl ExpressionClientPlan {
 
     /// Encodes this plan into its exact version-3 or version-9 bytes.
     pub fn encode(&self) -> Result<Vec<u8>, ClientPlanError> {
+        validate_external_contract_placement(&self.expression, true)?;
         let version = self.format_version();
         let mut bytes = Vec::new();
         bytes.extend_from_slice(&MAGIC);
@@ -1290,6 +1293,7 @@ impl ExpressionClientPlan {
             &mut count,
             version == INSPECT_FORMAT_VERSION,
         )?;
+        validate_external_contract_placement(&expression, true)?;
         reader.require_finished()?;
         if version == INSPECT_FORMAT_VERSION && !expression_contains_inspect(&expression) {
             return Err(ClientPlanError::InvalidInspectPlan);
@@ -1432,6 +1436,7 @@ impl StateClientPlan {
         bytes.push(RETURN_STATE_OPERATION);
         let mut writer = NodeWriter::new();
         let mut count = 0;
+        validate_external_contract_placement(&self.expression, false)?;
         encode_expression_node(&self.expression, &mut writer, 0, &mut count)?;
         bytes.extend_from_slice(&writer.finish());
         bytes.extend_from_slice(&(slot_count as u32).to_be_bytes());
@@ -1446,6 +1451,7 @@ impl StateClientPlan {
                     bytes.push(STATE_DEFAULT_EXPRESSION);
                     let mut writer = NodeWriter::new();
                     let mut count = 0;
+                    validate_external_contract_placement(node, false)?;
                     encode_expression_node(node, &mut writer, 0, &mut count)?;
                     bytes.extend_from_slice(&writer.finish());
                 }
@@ -1482,6 +1488,7 @@ impl StateClientPlan {
         }
         let mut count = 0usize;
         let expression = decode_expression_node(&mut reader, 0, &mut count)?;
+        validate_external_contract_placement(&expression, false)?;
         let slot_count = reader.u32()?;
         if slot_count == 0 {
             return Err(ClientPlanError::InvalidStateSlotCount { actual: 0 });
@@ -1511,7 +1518,9 @@ impl StateClientPlan {
                 STATE_DEFAULT_NULL => StateDefault::Null,
                 STATE_DEFAULT_EXPRESSION => {
                     let mut count = 0usize;
-                    StateDefault::Expression(decode_expression_node(&mut reader, 0, &mut count)?)
+                    let expression = decode_expression_node(&mut reader, 0, &mut count)?;
+                    validate_external_contract_placement(&expression, false)?;
+                    StateDefault::Expression(expression)
                 }
                 tag => return Err(ClientPlanError::InvalidStateDefaultTag(tag)),
             };
@@ -1904,6 +1913,83 @@ fn validate_external_contract_identity(identity: &str) -> Result<(), ClientPlanE
     Ok(())
 }
 
+fn validate_external_contract_placement(
+    node: &ClientExpressionNode,
+    allow_root: bool,
+) -> Result<(), ClientPlanError> {
+    let mut count = 0;
+    validate_external_contract_placement_inner(node, allow_root, 0, &mut count)
+}
+
+fn validate_external_contract_placement_inner(
+    node: &ClientExpressionNode,
+    allow_root: bool,
+    depth: usize,
+    count: &mut usize,
+) -> Result<(), ClientPlanError> {
+    if depth > MAX_EXPRESSION_DEPTH {
+        return Err(ClientPlanError::ExpressionDepthExceeded);
+    }
+    *count += 1;
+    if *count > MAX_EXPRESSION_NODES {
+        return Err(ClientPlanError::ExpressionNodeCountExceeded);
+    }
+    match node {
+        ClientExpressionNode::ExternalContract { .. } => {
+            if allow_root {
+                Ok(())
+            } else {
+                Err(ClientPlanError::InvalidExpressionNode(NODE_EXTERNAL_CONTRACT))
+            }
+        }
+        ClientExpressionNode::Await { expression } => {
+            validate_external_contract_placement_inner(expression, false, depth + 1, count)
+        }
+        ClientExpressionNode::Resource { operation } => {
+            for (_, value) in &operation.arguments {
+                validate_external_contract_placement_inner(value, false, depth + 1, count)?;
+            }
+            Ok(())
+        }
+        ClientExpressionNode::Inspect { operation } => {
+            match operation {
+                InspectOperationNode::Snapshot { target, options } => {
+                    validate_external_contract_placement_inner(target, false, depth + 1, count)?;
+                    if let Some(options) = options {
+                        validate_external_contract_placement_inner(options, false, depth + 1, count)?;
+                    }
+                }
+                InspectOperationNode::Projection { snapshot, .. } => {
+                    validate_external_contract_placement_inner(snapshot, false, depth + 1, count)?;
+                }
+            }
+            Ok(())
+        }
+        ClientExpressionNode::Action { operation } => {
+            for (_, value) in &operation.arguments {
+                validate_external_contract_placement_inner(value, false, depth + 1, count)?;
+            }
+            Ok(())
+        }
+        ClientExpressionNode::Call { arguments, .. } => {
+            for (_, value) in arguments {
+                validate_external_contract_placement_inner(value, false, depth + 1, count)?;
+            }
+            Ok(())
+        }
+        ClientExpressionNode::Concat { left, right } => {
+            validate_external_contract_placement_inner(left, false, depth + 1, count)?;
+            validate_external_contract_placement_inner(right, false, depth + 1, count)
+        }
+        ClientExpressionNode::String { .. }
+        | ClientExpressionNode::Integer { .. }
+        | ClientExpressionNode::Boolean { .. }
+        | ClientExpressionNode::ParameterRead { .. }
+        | ClientExpressionNode::LocalRead { .. }
+        | ClientExpressionNode::FieldPath { .. } => Ok(()),
+    }
+}
+
 fn valid_external_contract_name_segment(segment: &str) -> bool {
     let quote = '"';
     let underscore = '_';
@@ -2262,6 +2348,7 @@ fn decode_action_plan(bytes: &[u8]) -> Result<ActionClientPlan, ClientPlanError>
         }
         previous = Some(parameter);
         let value = decode_expression_node(&mut reader, 0, &mut expression_count)?;
+        validate_external_contract_placement(&value, false)?;
         arguments.push((parameter, value));
     }
     reader.require_finished()?;
@@ -2284,6 +2371,9 @@ fn validate_action_arguments(
             }
         }
         previous = Some(*parameter);
+    }
+    for (_, value) in arguments {
+        validate_external_contract_placement(value, false)?;
     }
     Ok(())
 }
@@ -2341,6 +2431,7 @@ fn validate_procedural_model(plan: &ProceduralClientPlan) -> Result<(), ClientPl
             .find(|candidate| candidate.local == statement.local())
             .ok_or(ClientPlanError::UnknownProceduralLocal(statement.local()))?;
         let value_position = matches!(target.kind, ClientLocalKind::Value);
+        validate_external_contract_placement(statement.expression(), false)?;
         validate_procedural_expression(
             statement.expression(),
             &locals,
@@ -2406,6 +2497,7 @@ fn validate_procedural_model(plan: &ProceduralClientPlan) -> Result<(), ClientPl
         }
     }
     // A final return must produce a value; a resource handle has to be awaited.
+    validate_external_contract_placement(&plan.return_expression, false)?;
     validate_procedural_expression(&plan.return_expression, &locals, false, true, true)
 }
 
@@ -3690,6 +3782,126 @@ mod tests {
         bytes
     }
 
+    fn encoded_nested_external_contract_bytes(root: u8) -> Vec<u8> {
+        let identity = b"std.ui.window@1";
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&MAGIC);
+        bytes.extend_from_slice(&EXPRESSION_FORMAT_VERSION.to_be_bytes());
+        bytes.push(RETURN_EXPRESSION_OPERATION);
+        bytes.push(root);
+        match root {
+            NODE_CALL => {
+                bytes.extend_from_slice(&[0x21; 16]);
+                bytes.extend_from_slice(&1_u32.to_be_bytes());
+                bytes.extend_from_slice(&[0x31; 16]);
+                bytes.push(NODE_EXTERNAL_CONTRACT);
+                bytes.extend_from_slice(&(identity.len() as u32).to_be_bytes());
+                bytes.extend_from_slice(identity);
+            }
+            NODE_CONCAT => {
+                bytes.push(NODE_EXTERNAL_CONTRACT);
+                bytes.extend_from_slice(&(identity.len() as u32).to_be_bytes());
+                bytes.extend_from_slice(identity);
+                bytes.push(NODE_BOOLEAN);
+                bytes.push(1);
+            }
+            _ => unreachable!("test helper only supports call and concat roots"),
+        }
+        bytes
+    }
+
+    #[test]
+    fn nested_external_contracts_are_rejected_at_expression_encode_and_decode_boundaries() {
+        let nested_call = ClientExpressionNode::Call {
+            function: FunctionId::from_bytes([0x21; 16]),
+            arguments: vec![(
+                ParameterId::from_bytes([0x31; 16]),
+                ClientExpressionNode::ExternalContract {
+                    identity: "std.ui.window@1".to_owned(),
+                },
+            )],
+        };
+        let nested_concat = ClientExpressionNode::Concat {
+            left: Box::new(ClientExpressionNode::ExternalContract {
+                identity: "std.ui.window@1".to_owned(),
+            }),
+            right: Box::new(ClientExpressionNode::Boolean { value: true }),
+        };
+
+        for (root, node) in [(NODE_CALL, nested_call), (NODE_CONCAT, nested_concat)] {
+            assert_eq!(
+                ExpressionClientPlan::new(node).encode(),
+                Err(ClientPlanError::InvalidExpressionNode(NODE_EXTERNAL_CONTRACT))
+            );
+            assert_eq!(
+                ExpressionClientPlan::decode(&encoded_nested_external_contract_bytes(root)),
+                Err(ClientPlanError::InvalidExpressionNode(NODE_EXTERNAL_CONTRACT))
+            );
+        }
+    }
+
+    #[test]
+    fn state_plan_rejects_external_contract_root_at_encode_and_decode_boundaries() {
+        let plan = StateClientPlan::new(
+            ClientExpressionNode::ExternalContract {
+                identity: "std.ui.window@1".to_owned(),
+            },
+            vec![StateSlot::new(
+                StateSlotId::from_bytes([0x11; 16]),
+                TypeId::from_bytes([0x12; 16]),
+                StateScope::Local,
+                StateDefault::Unset,
+            )],
+        );
+        assert_eq!(
+            plan.encode(),
+            Err(ClientPlanError::InvalidExpressionNode(NODE_EXTERNAL_CONTRACT))
+        );
+
+        let identity = b"std.ui.window@1";
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&MAGIC);
+        bytes.extend_from_slice(&STATE_FORMAT_VERSION.to_be_bytes());
+        bytes.push(RETURN_STATE_OPERATION);
+        bytes.push(NODE_EXTERNAL_CONTRACT);
+        bytes.extend_from_slice(&(identity.len() as u32).to_be_bytes());
+        bytes.extend_from_slice(identity);
+        bytes.extend_from_slice(&1_u32.to_be_bytes());
+        bytes.extend_from_slice(&[0x11; 16]);
+        bytes.extend_from_slice(&[0x12; 16]);
+        bytes.push(STATE_SCOPE_LOCAL);
+        bytes.push(STATE_DEFAULT_UNSET);
+        assert_eq!(
+            StateClientPlan::decode(&bytes),
+            Err(ClientPlanError::InvalidExpressionNode(NODE_EXTERNAL_CONTRACT))
+        );
+    }
+
+    #[test]
+    fn external_contract_placement_reuses_expression_depth_limit() {
+        let mut expression = ClientExpressionNode::Boolean { value: true };
+        for _ in 0..=MAX_EXPRESSION_DEPTH {
+            expression = ClientExpressionNode::Concat {
+                left: Box::new(expression),
+                right: Box::new(ClientExpressionNode::Boolean { value: true }),
+            };
+        }
+        let plan = StateClientPlan::new(
+            expression,
+            vec![StateSlot::new(
+                StateSlotId::from_bytes([0x11; 16]),
+                TypeId::from_bytes([0x12; 16]),
+                StateScope::Local,
+                StateDefault::Unset,
+            )],
+        );
+
+        assert_eq!(
+            plan.encode(),
+            Err(ClientPlanError::ExpressionDepthExceeded)
+        );
+    }
+
     #[test]
     fn expression_plan_has_the_exact_version_three_header() {
         let plan = ExpressionClientPlan::new(ClientExpressionNode::Boolean { value: true });
@@ -3922,9 +4134,6 @@ mod tests {
                     value: "x".to_owned(),
                 }),
                 right: Box::new(ClientExpressionNode::Integer { value: 7 }),
-            },
-            ClientExpressionNode::ExternalContract {
-                identity: "std.ui.window@1".to_owned(),
             },
         ];
         let slots = forms
