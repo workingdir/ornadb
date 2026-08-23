@@ -7815,6 +7815,70 @@ mod tests {
     }
 
     #[test]
+    fn resource_connection_isolates_pre_acceptance_terminal_outcomes_from_live_resources() {
+        let request_id = InvocationId::from_bytes([0x12; 16]);
+        let live_request_id = InvocationId::from_bytes([0x13; 16]);
+        let outcomes = [
+            ResourceServerFrame::Failed(ResourceFailed {
+                stream_id: 1,
+                request_id,
+                failure: CallFailure::InternalFailure,
+            }),
+            ResourceServerFrame::Cancelled(ResourceCancelled {
+                stream_id: 1,
+                request_id,
+                reason: ResourceCancellationCode::ServerRequested,
+            }),
+        ];
+
+        for outcome in outcomes {
+            let mut requested = resource_request_fixture();
+            requested.request_id = request_id;
+            let mut live = resource_request_fixture();
+            live.stream_id = 2;
+            live.request_id = live_request_id;
+            live.resource_kind = ResourceKind::Stream;
+            live.item_window = 17;
+            live.byte_window = 19;
+
+            let mut connection = ResourceProtocolConnection::new();
+            connection.open(requested.clone()).unwrap();
+            connection.open(live.clone()).unwrap();
+            let nested_invocation_id = InvocationId::from_bytes([0x14; 16]);
+            connection
+                .apply(ResourceServerFrame::Accepted(ResourceAccepted {
+                    stream_id: live.stream_id,
+                    request_id: live.request_id,
+                    nested_invocation_id,
+                    target_revision: live.target_revision,
+                    resource_kind: live.resource_kind,
+                }))
+                .unwrap();
+
+            assert_eq!(connection.live_resources(), 2);
+            assert_eq!(connection.apply(outcome), Ok(ResourceFrameDisposition::Applied));
+            assert_eq!(connection.live_resources(), 1);
+            assert_eq!(
+                connection.resource_credit(requested.stream_id, requested.request_id),
+                Err(ResourceConnectionError::UnknownStream {
+                    stream_id: requested.stream_id,
+                }),
+            );
+            assert_eq!(
+                connection.resource_credit(live.stream_id, live.request_id),
+                Ok(ResourceCredit {
+                    item_available: 17,
+                    byte_available: 19,
+                }),
+            );
+            assert_eq!(
+                connection.resource_nested_invocation_id(live.stream_id, live.request_id),
+                Ok(Some(nested_invocation_id)),
+            );
+        }
+    }
+
+    #[test]
     fn resource_connection_reports_available_credit_for_live_stream() {
         let mut request = resource_request_fixture();
         request.resource_kind = ResourceKind::Stream;
