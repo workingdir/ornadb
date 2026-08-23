@@ -314,8 +314,10 @@ module.exports = grammar({
                 seq($.kw_as, field('expression', $.client_expression)),
 
             client_return_body: ($) =>
-                seq($.kw_return, field('expression', $.client_expression)),
-
+                seq(
+                    $.kw_return,
+                    field('expression', choice($.client_await_expression, $.client_expression)),
+                ),
             // CLIENT procedural blocks deliberately use a closed statement
             // surface instead of SERVER's generic procedural_body. A state
             // block has one or more STATE declarations, then BEGIN and exactly
