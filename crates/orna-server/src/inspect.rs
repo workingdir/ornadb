@@ -332,6 +332,11 @@ async fn execute_inspect(
             "inspect.epoch_mismatch",
         ));
     }
+    validate_epoch_revisions(
+        snapshot.source_revision_id(),
+        snapshot.catalogue_revision_id(),
+        active.pair(),
+    )?;
 
     // Typed values render as canonical ORV5 hex through the pinned standard
     // registry, mirroring the `orna state` render path.
@@ -938,6 +943,21 @@ fn missing_epoch_error() -> InstalledInspectError {
     denied_error()
 }
 
+fn validate_epoch_revisions(
+    source_revision: SourceRevisionId,
+    catalogue_revision: CatalogueRevisionId,
+    active_pair: orna_core::revision::RevisionPair,
+) -> Result<(), InstalledInspectError> {
+    if source_revision != active_pair.source() || catalogue_revision != active_pair.catalogue() {
+        return Err(InstalledInspectError::with_code(
+            InstalledInspectErrorKind::Kernel,
+            "inspection epoch revisions do not match the active revision pair".to_owned(),
+            "inspect.epoch_mismatch",
+        ));
+    }
+    Ok(())
+}
+
 fn inspect_projection_failed_error() -> InstalledInspectError {
     InstalledInspectError::with_code(
         InstalledInspectErrorKind::Kernel,
@@ -1152,6 +1172,36 @@ mod tests {
         assert!(request.include_source);
         assert!(!request.include_security);
         assert!(request.include_runtime);
+    }
+
+    #[test]
+    fn epoch_revision_pair_mismatch_is_rejected() {
+        let source_revision = SourceRevisionId::from_bytes([0x02; 16]);
+        let catalogue_revision = CatalogueRevisionId::from_bytes([0x03; 16]);
+        let active_pair =
+            orna_core::revision::RevisionPair::new(source_revision, catalogue_revision);
+
+        assert!(validate_epoch_revisions(source_revision, catalogue_revision, active_pair).is_ok());
+
+        for (stale_source, stale_catalogue) in [
+            (
+                SourceRevisionId::from_bytes([0x12; 16]),
+                catalogue_revision,
+            ),
+            (
+                source_revision,
+                CatalogueRevisionId::from_bytes([0x13; 16]),
+            ),
+        ] {
+            let error = validate_epoch_revisions(stale_source, stale_catalogue, active_pair)
+                .expect_err("stale epoch revisions must fail closed");
+            assert_eq!(error.kind(), InstalledInspectErrorKind::Kernel);
+            assert_eq!(error.code(), Some("inspect.epoch_mismatch"));
+            assert_eq!(
+                error.message(),
+                "inspection epoch revisions do not match the active revision pair"
+            );
+        }
     }
 
     /// Classifier flags select requested detail but never manufacture a grant.
