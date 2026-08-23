@@ -79,18 +79,18 @@ verify-inputs:
 		printf '%s\n' '[postgresql] error: the upstream checkout is not clean' >&2; exit 1; }; \
 	git -C "$(REPOSITORY_ROOT)" ls-files --error-unmatch -- \
 		postgresql/Makefile postgresql/Containerfile \
-		postgresql/support_bundle.py postgresql/engine_manifest.py postgresql/lifecycle_probe.c \
+		postgresql/debian12_host_preflight.py postgresql/support_bundle.py postgresql/engine_manifest.py postgresql/lifecycle_probe.c \
 		postgresql/verify_lifecycle.py \
 		postgresql/overlays/18.4 postgresql/patches/18.4 >/dev/null; \
 	[[ -z "$$(git -C "$(REPOSITORY_ROOT)" ls-files --others --exclude-standard -- \
 		postgresql/Makefile postgresql/Containerfile \
-		postgresql/support_bundle.py postgresql/engine_manifest.py postgresql/lifecycle_probe.c \
+		postgresql/debian12_host_preflight.py postgresql/support_bundle.py postgresql/engine_manifest.py postgresql/lifecycle_probe.c \
 		postgresql/verify_lifecycle.py \
 		postgresql/overlays/18.4 postgresql/patches/18.4)" ]] || { \
 		printf '%s\n' '[postgresql] error: the integration input contains an untracked file' >&2; exit 1; }; \
 	git -C "$(REPOSITORY_ROOT)" diff --quiet -- \
 		postgresql/Makefile postgresql/Containerfile \
-		postgresql/support_bundle.py postgresql/engine_manifest.py postgresql/lifecycle_probe.c \
+		postgresql/debian12_host_preflight.py postgresql/support_bundle.py postgresql/engine_manifest.py postgresql/lifecycle_probe.c \
 		postgresql/verify_lifecycle.py \
 		postgresql/overlays/18.4 postgresql/patches/18.4 || { \
 		printf '%s\n' '[postgresql] error: the integration input differs from the Git index' >&2; exit 1; }; \
