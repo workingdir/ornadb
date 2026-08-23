@@ -95,6 +95,10 @@ contract:
 - bare `has_privilege` checks now fail closed for inactive principals and reject
   object-scoped INSPECT requests; the installed security-admin proof covers both
   enforcement boundaries.
+- applied migration SQL remains append-only; commit `a4d6ff0` restored the
+  exact version-23, version-29, and version-30 bytes after the live bootstrap
+  gate detected a checksum mismatch, and the focused bootstrap proof,
+  `cargo test --workspace --all-targets`, and `just kernel-test` now pass.
 
 The accepted slices have focused proof in the repository. Installed proofs
 that require Compose remain environment-dependent and must be reported as
