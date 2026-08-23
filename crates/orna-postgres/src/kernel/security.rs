@@ -6882,7 +6882,7 @@ async fn load_local_peer_credentials(
 async fn load_security_audit_events(
     transaction: &Transaction<'_>,
 ) -> Result<Vec<SecurityAuditEvent>, PostgresKernelError> {
-    transaction
+    let events = transaction
         .query(
             "SELECT sequence, event_id, recorded_at, event_kind, outcome,
                     session_principal_id, effective_principal_id,
@@ -6896,7 +6896,47 @@ async fn load_security_audit_events(
         .map_err(PostgresKernelError::Database)?
         .iter()
         .map(decode_security_audit_event)
-        .collect()
+        .collect::<Result<Vec<_>, _>>()?;
+    for event in &events {
+        if let Some(candidate) = event.decision().source_apply_candidate() {
+            require_source_apply_audit_target(
+                transaction,
+                candidate,
+                &event.sequence().to_string(),
+            )
+            .await?;
+        }
+    }
+    Ok(events)
+}
+
+async fn require_source_apply_audit_target(
+    transaction: &Transaction<'_>,
+    candidate: RevisionPair,
+    record: &str,
+) -> Result<(), PostgresKernelError> {
+    let source = candidate.source().to_bytes().to_vec();
+    let catalogue = candidate.catalogue().to_bytes().to_vec();
+    let exists = transaction
+        .query_opt(
+            "SELECT 1
+             FROM _orna_kernel.catalogue_revisions AS catalogue
+             JOIN _orna_kernel.source_revisions AS source
+               ON source.id = catalogue.source_revision_id
+             WHERE catalogue.id = $1
+               AND catalogue.source_revision_id = $2",
+            &[&catalogue, &source],
+        )
+        .await
+        .map_err(PostgresKernelError::Database)?
+        .is_some();
+    if !exists {
+        return Err(audit_invariant(
+            record,
+            "source apply audit target pair must exist in protected revisions",
+        ));
+    }
+    Ok(())
 }
 
 /// Validates every durable protected invocation decision during normal recovery.
@@ -7769,12 +7809,19 @@ fn decode_security_audit_event(row: &Row) -> Result<SecurityAuditEvent, Postgres
                 )?,
                 &record,
             )?;
-            SecurityAuditDecision::recover_source_apply_allowed(
-                require_audit_value(
-                    session_principal,
+            let session_principal = require_audit_value(
+                session_principal,
+                &record,
+                "source apply audit requires a session principal",
+            )?;
+            if session_principal != CATALOGUE_HEALTH_SERVICE_PRINCIPAL_ID {
+                return Err(audit_invariant(
                     &record,
-                    "allowed source apply audit requires a session principal",
-                )?,
+                    "source apply audit must use the catalogue-health service principal",
+                ));
+            }
+            SecurityAuditDecision::recover_source_apply_allowed(
+                session_principal,
                 RevisionPair::new(
                     require_audit_value(
                         source_revision,
