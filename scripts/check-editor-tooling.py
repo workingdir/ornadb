@@ -199,10 +199,38 @@ def check_tree_sitter_package(tree_sitter_directory: Path, repository: Path) -> 
         return False
     return True
 
+def check_zed_extension(
+    cargo: str,
+    zed_directory: Path,
+    repository: Path,
+) -> bool:
+    """Compile the separate Zed extension workspace."""
+    manifest = zed_directory / "Cargo.toml"
+    if not manifest.is_file():
+        log(
+            f"required file is missing: {display_path(manifest, repository)}",
+            error=True,
+        )
+        return False
+
+    log("checking editors/zed with cargo check")
+    result = run_command(
+        [cargo, "check", "--manifest-path", str(manifest)],
+        cwd=repository,
+        label="zed cargo check",
+    )
+    if result is None or result.returncode != 0:
+        status = "could not start" if result is None else f"exited with status {result.returncode}"
+        log(f"Zed extension check failed ({status})", error=True)
+        return False
+    log("Zed extension check passed")
+    return True
+
 
 def main() -> int:
     repository = Path(__file__).resolve().parents[1]
     tree_sitter_directory = repository / "editors" / "tree-sitter-orna"
+    zed_directory = repository / "editors" / "zed"
     spec_examples = repository.parent / "spec" / "examples"
 
     tree_sitter = shutil.which("tree-sitter")
@@ -219,6 +247,11 @@ def main() -> int:
         log("missing prerequisite: node was not found on PATH", error=True)
         return 2
 
+    cargo = shutil.which("cargo")
+    if cargo is None:
+        log("missing prerequisite: cargo was not found on PATH", error=True)
+        return 2
+
     if not tree_sitter_directory.is_dir():
         log(
             f"required directory is missing: {display_path(tree_sitter_directory, repository)}",
@@ -227,6 +260,15 @@ def main() -> int:
         return 1
 
     if not check_tree_sitter_package(tree_sitter_directory, repository):
+        return 1
+    if not zed_directory.is_dir():
+        log(
+            f"required directory is missing: {display_path(zed_directory, repository)}",
+            error=True,
+        )
+        return 1
+
+    if not check_zed_extension(cargo, zed_directory, repository):
         return 1
 
     if not check_generated_artefacts(tree_sitter, tree_sitter_directory, repository):
