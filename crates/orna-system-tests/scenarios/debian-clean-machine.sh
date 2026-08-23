@@ -3,7 +3,15 @@ set -euo pipefail
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
 repository_root=$(cd "$(dirname "$0")/../../.." && pwd -P)
-package=${1:-"${repository_root}/target/debian-package/orna_0.1.0-1_amd64.deb"}
+changelog="${repository_root}/packaging/debian/changelog"
+source="$(dpkg-parsechangelog -l"${changelog}" -S Source)"
+version="$(dpkg-parsechangelog -l"${changelog}" -S Version)"
+architecture="$(dpkg --print-architecture)"
+[[ "${architecture}" == 'amd64' ]] || {
+    printf '%s\n' '[clean-machine] error: package proof requires amd64' >&2
+    exit 1
+}
+package=${1:-"${repository_root}/target/debian-package/${source}_${version}_${architecture}.deb"}
 
 [[ "${package}" == /* && -f "${package}" && ! -L "${package}" ]] || {
     printf '%s\n' '[clean-machine] error: package must be one absolute regular file' >&2
