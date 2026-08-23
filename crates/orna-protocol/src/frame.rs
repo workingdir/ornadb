@@ -805,7 +805,8 @@ impl Error for ConnectionError {
 }
 
 const MAX_LIVE_STREAMS: usize = 64;
-/// The maximum number of unique resource request identities retained per connection.
+/// The maximum number of unique resource request identities and terminal
+/// stream tombstones retained per connection.
 const MAX_REQUEST_ID_HISTORY: usize = MAX_LIVE_STREAMS * 2;
 const MAX_ARGUMENTS: usize = 256;
 const MAX_ARGUMENT_BYTES: usize = MAX_FRAME_PAYLOAD_LENGTH;
@@ -1761,12 +1762,18 @@ struct ResourceState {
 pub struct ResourceProtocolConnection {
     high_water_mark: Option<u64>,
     streams: BTreeMap<u64, ResourceState>,
-    /// Request IDs remain reserved for the whole connection lifetime.
+    /// Request IDs remain reserved for the whole connection lifetime, bounded
+    /// by [`MAX_REQUEST_ID_HISTORY`].
     ///
-    /// Unlike terminal stream tombstones, this bounded history is never
-    /// evicted; once full, new request identities are rejected rather than
-    /// permitting reuse.
+    /// This history is never evicted; once full, new request identities are
+    /// rejected rather than permitting reuse. Terminal stream tombstones use
+    /// the same bound so that late controls retain their request identity for
+    /// the whole request-history lifetime, rather than only the live-resource
+    /// lifetime.
     request_ids: BTreeSet<InvocationId>,
+    /// Terminal stream tombstones are retained for the same bounded history as
+    /// [`Self::request_ids`], not [`MAX_LIVE_STREAMS`]. This keeps repeated
+    /// late controls idempotent while preserving the live-resource limit.
     terminal: BTreeMap<u64, InvocationId>,
 }
 
@@ -2076,7 +2083,7 @@ impl ResourceProtocolConnection {
     fn finish(&mut self, stream_id: u64, request_id: InvocationId) {
         self.streams.remove(&stream_id);
         self.terminal.insert(stream_id, request_id);
-        while self.terminal.len() > MAX_LIVE_STREAMS {
+        while self.terminal.len() > MAX_REQUEST_ID_HISTORY {
             let Some(stream) = self.terminal.keys().next().copied() else { break; };
             self.terminal.remove(&stream);
         }
@@ -2087,7 +2094,7 @@ impl ResourceProtocolConnection {
         let streams: Vec<_> = self.streams.iter().map(|(stream, state)| (*stream, state.request_id)).collect();
         self.streams.clear();
         for (stream, request_id) in streams { self.terminal.insert(stream, request_id); }
-        while self.terminal.len() > MAX_LIVE_STREAMS {
+        while self.terminal.len() > MAX_REQUEST_ID_HISTORY {
             let Some(stream) = self.terminal.keys().next().copied() else { break; };
             self.terminal.remove(&stream);
         }
@@ -8210,6 +8217,39 @@ mod tests {
             })),
             Ok(ResourceFrameDisposition::DroppedLate)
         );
+    }
+
+    #[test]
+    fn resource_terminal_tombstones_retain_oldest_cancelled_stream() {
+        let mut connection = ResourceProtocolConnection::new();
+        let oldest_request_id = InvocationId::from_bytes([1; 16]);
+
+        for stream_id in 1..=(MAX_LIVE_STREAMS + 1) as u64 {
+            let mut request = resource_request_fixture();
+            request.stream_id = stream_id;
+            request.request_id = InvocationId::from_bytes([stream_id as u8; 16]);
+            assert_eq!(connection.open(request.clone()), Ok(ResourceFrameDisposition::Applied));
+            assert_eq!(
+                connection.receive(ResourceClientFrame::Cancel(ResourceCancel {
+                    stream_id,
+                    request_id: request.request_id,
+                    reason: ResourceCancellationCode::ClientRequested,
+                })),
+                Ok(ResourceFrameDisposition::Applied)
+            );
+        }
+
+        assert_eq!(connection.live_resources(), 0);
+        assert_eq!(connection.terminal.len(), MAX_LIVE_STREAMS + 1);
+        assert_eq!(connection.terminal.get(&1), Some(&oldest_request_id));
+
+        let oldest_cancel = ResourceClientFrame::Cancel(ResourceCancel {
+            stream_id: 1,
+            request_id: oldest_request_id,
+            reason: ResourceCancellationCode::ClientRequested,
+        });
+        assert_eq!(connection.receive(oldest_cancel.clone()), Ok(ResourceFrameDisposition::DroppedLate));
+        assert_eq!(connection.receive(oldest_cancel), Ok(ResourceFrameDisposition::DroppedLate));
     }
 
     #[test]
