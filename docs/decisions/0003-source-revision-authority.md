@@ -17,6 +17,21 @@ activates all of them or none of them.
 After restart, OrnaDB reconstructs its active state from durable catalogue
 data. It does not require undeployed local source files.
 
+## Retained revision-pair history
+
+The private PostgreSQL kernel exposes a read-only
+`PostgresKernel::list_revision_pairs` operation for retained revision
+inspection. It runs in one `REPEATABLE READ` read-only transaction and returns
+catalogue/source pairs in deterministic source-then-catalogue identity order.
+Each entry carries both parent identities and the one active marker.
+
+The operation decodes all rows before validation. It fails closed on duplicate
+source or catalogue identities, source/catalogue parent asymmetry, missing or
+mismatched parents, ancestry cycles, and any active-marker count other than
+one. This is an internal recovery API. It does not accept or define a public
+`orna revisions list` command; the broader CLI and Studio revision browser
+remain proposal-level surfaces.
+
 ## Precedence
 
 This accepted amendment supersedes the conflicting or incomplete parts of
