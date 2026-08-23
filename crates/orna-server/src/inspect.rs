@@ -908,7 +908,6 @@ fn encode_hex(bytes: &[u8]) -> String {
 const INSPECT_DENIED_CODE: &str = "inspect.denied";
 const INSPECT_PROJECTION_FAILED_CODE: &str = "inspect.projection_failed";
 const INSPECT_RUNTIME_UNAVAILABLE_CODE: &str = "inspect.runtime_unavailable";
-const INSPECT_RENDERING_FAILED_CODE: &str = "inspect.rendering_failed";
 const INSPECT_RECURSION_CODE: &str = "inspect.recursion";
 
 fn runtime_unavailable_error() -> InstalledInspectError {
@@ -976,8 +975,8 @@ fn map_value_codec_error(_error: ValueCodecError) -> InstalledInspectError {
 fn rendering_failed_error() -> InstalledInspectError {
     InstalledInspectError::with_code(
         InstalledInspectErrorKind::Rendering,
-        format!("INSPECT rendering failed: {INSPECT_RENDERING_FAILED_CODE}"),
-        INSPECT_RENDERING_FAILED_CODE,
+        format!("INSPECT rendering failed: {INSPECT_PROJECTION_FAILED_CODE}"),
+        INSPECT_PROJECTION_FAILED_CODE,
     )
 }
 
@@ -1843,10 +1842,10 @@ mod tests {
             "secret rendering detail",
         ));
         assert_eq!(error.kind(), InstalledInspectErrorKind::Rendering);
-        assert_eq!(error.code(), Some("inspect.rendering_failed"));
+        assert_eq!(error.code(), Some("inspect.projection_failed"));
         assert_eq!(
             error.message(),
-            "INSPECT rendering failed: inspect.rendering_failed"
+            "INSPECT rendering failed: inspect.projection_failed"
         );
     }
 
