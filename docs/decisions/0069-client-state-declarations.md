@@ -33,8 +33,9 @@ STATE identifier type_spec
 ```
 
 An omitted scope means `LOCAL`. An omitted default means an unset value. The
-state type must be a supported scalar or registered opaque value type, and a
-default expression must have the declared type when it is present.
+state type must be a supported scalar. Opaque values, including registered
+opaque value types and sealed Inspector carriers, are transient and cannot be
+stored in CLIENT state.
 
 ## Closed block subset
 
@@ -44,7 +45,7 @@ This ADR accepts the following body shape:
 IS
     { state_declaration }
 BEGIN
-    RETURN [ expression ] ;
+    RETURN expression ;
 END
 ```
 
@@ -62,6 +63,13 @@ The parser keeps declaration order and source spans. The compiler resolves
 state types, validates defaults, rejects duplicate names, and adds each slot
 to the checked function model. State declarations do not change the meaning
 of existing expression-body or Boolean CLIENT functions.
+
+For a standard-backed application, each state slot also records one canonical
+`CheckedTypeUseKind::State { owner, ordinal }` declaration use with the exact
+written type span and resolved `TypeId`. The preparation evidence gate checks
+these uses with the other declaration types. State uses do not enter the
+flattened function-signature reference list, which contains only parameters
+and returns.
 
 ## State-slot identity
 
