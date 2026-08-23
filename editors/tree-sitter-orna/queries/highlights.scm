@@ -13,7 +13,7 @@
     (kw_value) (kw_opaque) (kw_primitive) (kw_final) (kw_documentation)
     (kw_immutable) (kw_transient) (kw_persistable) (kw_sealed) (kw_kernel)
     (kw_contract) (kw_export) (kw_to) (kw_prelude) (kw_server) (kw_function)
-    (kw_client) (kw_external) (kw_returns) (kw_table) (kw_rows) (kw_security)
+    (kw_client) (kw_external) (kw_runtime) (kw_returns) (kw_table) (kw_rows) (kw_security)
     (kw_invoker) (kw_definer) (kw_transaction) (kw_atomic) (kw_read) (kw_only)
     (kw_manual) (kw_volatility) (kw_stable) (kw_volatile) (kw_requires)
     (kw_capability) (kw_alter) (kw_rename) (kw_field) (kw_add) (kw_drop)
