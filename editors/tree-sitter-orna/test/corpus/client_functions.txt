@@ -82,21 +82,13 @@ IS
         SCOPE USER
         DEFAULT '';
 
-    LET rows std.data.Resource<TABLE(
-        task REF tasks.task,
-        title TEXT
-    )> := std.data.resource(tasks.overdue);
 BEGIN
     RETURN std.ui.window(
         title => 'Overdue Tasks',
-        content => std.ui.column(
-            children => [
-                std.ui.text_input(
-                    value       => filter,
-                    placeholder => 'Filter tasks',
-                    on_change   => filter.SET
-                )
-            ]
+        content => std.ui.text(
+            value => filter,
+            placeholder => 'Filter tasks',
+            on_change => filter.SET
         )
     );
 END;
@@ -127,235 +119,478 @@ END;
             (identifier))
           (dot)
           (identifier))))
-    body: (procedural_body
-      (kw_is)
-      (state_declaration
-        (kw_state)
-        name: (identifier)
-        type: (type_spec
-          (scalar_type
-            (kw_text)))
-        (kw_scope)
-        (kw_user)
-        (kw_default)
-        default: (expression
-          (logical_expression
-            (comparison_expression
-              (additive_expression
-                (multiplicative_expression
-                  (unary_expression
-                    (postfix_expression
-                      (primary_expression
-                        (literal
-                          (string_literal))))))))))
-        (semicolon))
-      (let_declaration
-        (kw_let)
-        name: (kw_rows)
-        type: (type_spec
-          (qualified_name
-            (qualified_name
-              (qualified_name
-                (identifier))
-              (dot)
-              (identifier))
-            (dot)
-            (identifier))
-          (lt)
-          (type_spec
-            (kw_table)
-            (lparen)
-            (table_column_definition
-              name: (identifier)
-              type: (type_spec
-                (kw_ref)
-                (type_spec
-                  (qualified_name
-                    (qualified_name
-                      (identifier))
-                    (dot)
-                    (identifier)))))
-            (comma)
-            (table_column_definition
-              name: (identifier)
-              type: (type_spec
-                (scalar_type
-                  (kw_text))))
-            (rparen))
-          (gt))
-        (assignment_operator)
-        value: (expression
-          (logical_expression
-            (comparison_expression
-              (additive_expression
-                (multiplicative_expression
-                  (unary_expression
-                    (postfix_expression
-                      (primary_expression
-                        (qualified_name
-                          (qualified_name
-                            (qualified_name
-                              (identifier))
-                            (dot)
-                            (identifier))
-                          (dot)
-                          (identifier)))
-                      (lparen)
-                      (argument_list
-                        (argument
-                          value: (expression
-                            (logical_expression
-                              (comparison_expression
-                                (additive_expression
-                                  (multiplicative_expression
-                                    (unary_expression
-                                      (postfix_expression
-                                        (primary_expression
-                                          (qualified_name
-                                            (qualified_name
-                                              (identifier))
-                                            (dot)
-                                            (identifier))))))))))))
-                      (rparen))))))))
-        (semicolon))
-      (kw_begin)
-      (procedural_statement
-        (return_statement
+    body: (client_procedural_body
+      (client_state_body
+        (kw_is)
+        (client_state_declaration
+          (kw_state)
+          name: (identifier)
+          type: (type_spec
+            (scalar_type
+              (kw_text)))
+          (kw_scope)
+          (kw_user)
+          (kw_default)
+          default: (client_expression
+            (client_primary_expression
+              (string_literal)))
+          (semicolon))
+        (kw_begin)
+        (client_return_statement
           (kw_return)
-          (expression
-            (logical_expression
-              (comparison_expression
-                (additive_expression
-                  (multiplicative_expression
-                    (unary_expression
-                      (postfix_expression
-                        (primary_expression
-                          (qualified_name
-                            (qualified_name
-                              (qualified_name
-                                (identifier))
-                              (dot)
-                              (identifier))
+          expression: (client_expression
+            (client_primary_expression
+              (client_call_expression
+                callee: (client_call_callee
+                  (identifier)
+                  (dot)
+                  (identifier)
+                  (dot)
+                  (identifier))
+                (lparen)
+                (client_argument_list
+                  (client_argument
+                    name: (identifier)
+                    (arrow_operator)
+                    value: (client_expression
+                      (client_primary_expression
+                        (string_literal))))
+                  (comma)
+                  (client_argument
+                    name: (identifier)
+                    (arrow_operator)
+                    value: (client_expression
+                      (client_primary_expression
+                        (client_call_expression
+                          callee: (client_call_callee
+                            (identifier)
                             (dot)
-                            (identifier)))
-                        (lparen)
-                        (argument_list
-                          (argument
-                            name: (identifier)
-                            (arrow_operator)
-                            value: (expression
-                              (logical_expression
-                                (comparison_expression
-                                  (additive_expression
-                                    (multiplicative_expression
-                                      (unary_expression
-                                        (postfix_expression
-                                          (primary_expression
-                                            (literal
-                                              (string_literal)))))))))))
-                          (comma)
-                          (argument
-                            name: (identifier)
-                            (arrow_operator)
-                            value: (expression
-                              (logical_expression
-                                (comparison_expression
-                                  (additive_expression
-                                    (multiplicative_expression
-                                      (unary_expression
-                                        (postfix_expression
-                                          (primary_expression
-                                            (qualified_name
-                                              (qualified_name
-                                                (qualified_name
-                                                  (identifier))
-                                                (dot)
-                                                (identifier))
-                                              (dot)
-                                              (identifier)))
-                                          (lparen)
-                                          (argument_list
-                                            (argument
-                                              name: (identifier)
-                                              (arrow_operator)
-                                              value: (expression
-                                                (logical_expression
-                                                  (comparison_expression
-                                                    (additive_expression
-                                                      (multiplicative_expression
-                                                        (unary_expression
-                                                          (postfix_expression
-                                                            (primary_expression
-                                                              (list_literal
-                                                                (lbracket)
-                                                                (expression
-                                                                  (logical_expression
-                                                                    (comparison_expression
-                                                                      (additive_expression
-                                                                        (multiplicative_expression
-                                                                          (unary_expression
-                                                                            (postfix_expression
-                                                                              (primary_expression
-                                                                                (qualified_name
-                                                                                  (qualified_name
-                                                                                    (qualified_name
-                                                                                      (identifier))
-                                                                                    (dot)
-                                                                                    (identifier))
-                                                                                  (dot)
-                                                                                  (identifier)))
-                                                                              (lparen)
-                                                                              (argument_list
-                                                                                (argument
-                                                                                  name: (kw_value)
-                                                                                  (arrow_operator)
-                                                                                  value: (expression
-                                                                                    (logical_expression
-                                                                                      (comparison_expression
-                                                                                        (additive_expression
-                                                                                          (multiplicative_expression
-                                                                                            (unary_expression
-                                                                                              (postfix_expression
-                                                                                                (primary_expression
-                                                                                                  (qualified_name
-                                                                                                    (identifier)))))))))))
-                                                                                (comma)
-                                                                                (argument
-                                                                                  name: (identifier)
-                                                                                  (arrow_operator)
-                                                                                  value: (expression
-                                                                                    (logical_expression
-                                                                                      (comparison_expression
-                                                                                        (additive_expression
-                                                                                          (multiplicative_expression
-                                                                                            (unary_expression
-                                                                                              (postfix_expression
-                                                                                                (primary_expression
-                                                                                                  (literal
-                                                                                                    (string_literal)))))))))))
-                                                                                (comma)
-                                                                                (argument
-                                                                                  name: (identifier)
-                                                                                  (arrow_operator)
-                                                                                  value: (expression
-                                                                                    (logical_expression
-                                                                                      (comparison_expression
-                                                                                        (additive_expression
-                                                                                          (multiplicative_expression
-                                                                                            (unary_expression
-                                                                                              (postfix_expression
-                                                                                                (primary_expression
-                                                                                                  (qualified_name
-                                                                                                    (qualified_name
-                                                                                                      (identifier))
-                                                                                                    (dot)
-                                                                                                    (kw_set))))))))))))
-                                                                              (rparen))))))))
-                                                                (rbracket))))))))))))
-                                          (rparen))))))))))
-                        (rparen))))))))
-          (semicolon)))
-      (kw_end))
+                            (identifier)
+                            (dot)
+                            (kw_text))
+                          (lparen)
+                          (client_argument_list
+                            (client_argument
+                              name: (kw_value)
+                              (arrow_operator)
+                              value: (client_expression
+                                (client_primary_expression
+                                  (client_parameter_read
+                                    (identifier)))))
+                            (comma)
+                            (client_argument
+                              name: (identifier)
+                              (arrow_operator)
+                              value: (client_expression
+                                (client_primary_expression
+                                  (string_literal))))
+                            (comma)
+                            (client_argument
+                              name: (identifier)
+                              (arrow_operator)
+                              value: (client_expression
+                                (client_primary_expression
+                                  (client_field_path
+                                    parameter: (identifier)
+                                    (dot)
+                                    field: (kw_set))))))
+                          (rparen))))))
+                (rparen))))
+          (semicolon))
+        (kw_end)))
+    (semicolon)))
+
+====================
+client function with no-STATE procedural locals and assignments
+====================
+
+CREATE CLIENT FUNCTION examples.procedural(p_value TEXT)
+RETURNS TEXT
+IS
+    LET rows TEXT := p_value;
+BEGIN
+    LET result TEXT := rows;
+    result := result || '!';
+    RETURN result;
+END;
+
+---
+
+(source_file
+  (create_client_function_statement
+    (kw_create)
+    (kw_client)
+    (kw_function)
+    (qualified_name
+      (qualified_name
+        (identifier))
+      (dot)
+      (identifier))
+    (parameter_list
+      (lparen)
+      (parameter_definition
+        (identifier)
+        (type_spec
+          (scalar_type
+            (kw_text))))
+      (rparen))
+    (kw_returns)
+    (return_type_spec
+      (type_spec
+        (scalar_type
+          (kw_text))))
+    (client_procedural_body
+      (client_no_state_body
+        (kw_is)
+        (client_local_declaration
+          (kw_let)
+          (kw_rows)
+          (type_spec
+            (scalar_type
+              (kw_text)))
+          (assignment_operator)
+          (client_expression
+            (client_primary_expression
+              (client_parameter_read
+                (identifier))))
+          (semicolon))
+        (kw_begin)
+        (client_procedural_statement
+          (client_let_statement
+            (kw_let)
+            (identifier)
+            (type_spec
+              (scalar_type
+                (kw_text)))
+            (assignment_operator)
+            (client_expression
+              (client_primary_expression
+                (client_parameter_read
+                  (kw_rows))))
+            (semicolon)))
+        (client_procedural_statement
+          (client_assignment_statement
+            (identifier)
+            (assignment_operator)
+            (client_expression
+              (client_expression
+                (client_primary_expression
+                  (client_parameter_read
+                    (identifier))))
+              (client_concat_operator)
+              (client_primary_expression
+                (string_literal)))
+            (semicolon)))
+        (client_return_statement
+          (kw_return)
+          (client_expression
+            (client_primary_expression
+              (client_parameter_read
+                (identifier))))
+          (semicolon))
+        (kw_end)))
+    (semicolon)))
+
+====================
+CLIENT state blocks reject pre-BEGIN LET locals
+====================
+
+CREATE CLIENT FUNCTION examples.bad_state_local() RETURNS TEXT
+IS
+    STATE value TEXT;
+    LET local TEXT := 'bad';
+BEGIN
+    RETURN value;
+END;
+
+---
+(source_file
+  (create_client_function_statement
+    (kw_create)
+    (kw_client)
+    (kw_function)
+    name: (qualified_name
+      (qualified_name
+        (identifier))
+      (dot)
+      (identifier))
+    parameters: (parameter_list
+      (lparen)
+      (rparen))
+    (kw_returns)
+    returns: (return_type_spec
+      (type_spec
+        (scalar_type
+          (kw_text))))
+    body: (client_procedural_body
+      (client_state_body
+        (kw_is)
+        (client_state_declaration
+          (kw_state)
+          name: (kw_value)
+          type: (type_spec
+            (scalar_type
+              (kw_text)))
+          (semicolon))
+        (ERROR
+          (kw_local)
+          (kw_text)
+          (assignment_operator)
+          (string_literal)
+          (semicolon))
+        (kw_begin)
+        (client_return_statement
+          (kw_return)
+          expression: (client_expression
+            (client_primary_expression
+              (client_parameter_read
+                (identifier))))
+          (semicolon))
+        (kw_end)))
+    (semicolon)))
+
+====================
+CLIENT procedural blocks reject CONST declarations
+====================
+
+CREATE CLIENT FUNCTION examples.bad_const() RETURNS TEXT
+IS
+    CONST value TEXT := 'bad';
+BEGIN
+    RETURN value;
+END;
+
+---
+
+(source_file
+  (create_client_function_statement
+    (kw_create)
+    (kw_client)
+    (kw_function)
+    name: (qualified_name
+      (qualified_name
+        (identifier))
+      (dot)
+      (identifier))
+    parameters: (parameter_list
+      (lparen)
+      (rparen))
+    (kw_returns)
+    returns: (return_type_spec
+      (type_spec
+        (scalar_type
+          (kw_text))))
+    body: (client_procedural_body
+      (client_no_state_body
+        (kw_is)
+        (ERROR
+          (kw_value)
+          (kw_text)
+          (assignment_operator)
+          (string_literal)
+          (semicolon))
+        (kw_begin)
+        (client_return_statement
+          (kw_return)
+          expression: (client_expression
+            (client_primary_expression
+              (client_parameter_read
+                (identifier))))
+          (semicolon))
+        (kw_end)))
+    (semicolon)))
+
+====================
+CLIENT procedural blocks reject CALL statements
+====================
+
+CREATE CLIENT FUNCTION examples.bad_call() RETURNS TEXT
+IS
+BEGIN
+    CALL helper();
+    RETURN 'ok';
+END;
+
+---
+
+(source_file
+  (create_client_function_statement
+    (kw_create)
+    (kw_client)
+    (kw_function)
+    name: (qualified_name
+      (qualified_name
+        (identifier))
+      (dot)
+      (identifier))
+    parameters: (parameter_list
+      (lparen)
+      (rparen))
+    (kw_returns)
+    returns: (return_type_spec
+      (type_spec
+        (scalar_type
+          (kw_text))))
+    body: (client_procedural_body
+      (client_no_state_body
+        (kw_is)
+        (kw_begin)
+        (ERROR
+          (kw_call)
+          (lparen)
+          (rparen)
+          (semicolon))
+        (client_return_statement
+          (kw_return)
+          expression: (client_expression
+            (client_primary_expression
+              (string_literal)))
+          (semicolon))
+        (kw_end)))
+    (semicolon)))
+
+====================
+CLIENT procedural blocks reject standalone AWAIT statements
+====================
+
+CREATE CLIENT FUNCTION examples.bad_await() RETURNS TEXT
+IS
+BEGIN
+    AWAIT helper();
+    RETURN 'ok';
+END;
+
+---
+
+(source_file
+  (create_client_function_statement
+    (kw_create)
+    (kw_client)
+    (kw_function)
+    name: (qualified_name
+      (qualified_name
+        (identifier))
+      (dot)
+      (identifier))
+    parameters: (parameter_list
+      (lparen)
+      (rparen))
+    (kw_returns)
+    returns: (return_type_spec
+      (type_spec
+        (scalar_type
+          (kw_text))))
+    body: (client_procedural_body
+      (client_no_state_body
+        (kw_is)
+        (kw_begin)
+        (ERROR
+          (kw_await)
+          (lparen)
+          (rparen)
+          (semicolon))
+        (client_return_statement
+          (kw_return)
+          expression: (client_expression
+            (client_primary_expression
+              (string_literal)))
+          (semicolon))
+        (kw_end)))
+    (semicolon)))
+
+====================
+CLIENT procedural blocks reject IF statements
+====================
+
+CREATE CLIENT FUNCTION examples.bad_if() RETURNS TEXT
+IS
+BEGIN
+    IF TRUE THEN
+        RETURN 'bad';
+END;
+
+---
+
+(source_file
+  (create_client_function_statement
+    (kw_create)
+    (kw_client)
+    (kw_function)
+    name: (qualified_name
+      (qualified_name
+        (identifier))
+      (dot)
+      (identifier))
+    parameters: (parameter_list
+      (lparen)
+      (rparen))
+    (kw_returns)
+    returns: (return_type_spec
+      (type_spec
+        (scalar_type
+          (kw_text))))
+    body: (client_procedural_body
+      (client_no_state_body
+        (kw_is)
+        (kw_begin)
+        (ERROR
+          (kw_if)
+          (kw_then))
+        (client_return_statement
+          (kw_return)
+          expression: (client_expression
+            (client_primary_expression
+              (string_literal)))
+          (semicolon))
+        (kw_end)))
+    (semicolon)))
+
+====================
+CLIENT procedural blocks reject SQL statements
+====================
+
+CREATE CLIENT FUNCTION examples.bad_sql() RETURNS TEXT
+IS
+BEGIN
+    SELECT value FROM values_table;
+    RETURN 'ok';
+END;
+
+---
+
+(source_file
+  (create_client_function_statement
+    (kw_create)
+    (kw_client)
+    (kw_function)
+    name: (qualified_name
+      (qualified_name
+        (identifier))
+      (dot)
+      (identifier))
+    parameters: (parameter_list
+      (lparen)
+      (rparen))
+    (kw_returns)
+    returns: (return_type_spec
+      (type_spec
+        (scalar_type
+          (kw_text))))
+    body: (client_procedural_body
+      (client_no_state_body
+        (kw_is)
+        (kw_begin)
+        (ERROR
+          (kw_select)
+          (kw_from)
+          (semicolon))
+        (client_return_statement
+          (kw_return)
+          expression: (client_expression
+            (client_primary_expression
+              (string_literal)))
+          (semicolon))
+        (kw_end)))
     (semicolon)))
 
 ====================
