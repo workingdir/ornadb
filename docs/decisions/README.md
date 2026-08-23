@@ -18,6 +18,22 @@ section governs the conflict for the scope stated in that section. This index
 defines naming and traceability only. It does not change the existing
 source-of-truth or authority rules.
 
+## Status convention
+
+The recent accepted slices below are implemented unless a deferred portion is
+called out explicitly. Historical ADRs retain their original rationale and
+closed boundaries; later ADRs supersede only the named deferred portion.
+
+| Work ADRs | Implemented slice | Still deferred or superseded by |
+|---|---|---|
+| 0068 | CLIENT expression bodies and external runtime contracts | Resource language/transport and actions are implemented by 0077-0079; LOCAL/SESSION state, sandbox forms, tracing, and graphical runtime contracts remain deferred. |
+| 0071, 0074 | Resource identity/lifecycle and the runtime executor seam | Resource language, transport, scheduling, and executable actions are implemented by 0077-0079; virtual models, retry/cache policy, and production runtime integration remain deferred. |
+| 0072, 0073 | Scalar identity calls, ORV6 SET values, and sealed `active_roles` | Other sealed security calls, generic STREAM values, arbitrary SET elements, presentation-specific renderers, remote transport, and new source syntax remain deferred. |
+| 0075 | V5 `std.json.Value` snapshot and recovery | GUI runtimes, resource inspection, and reflective gateways remain outside the decision. |
+| 0076 | Test-only headless runtime conformance fixture | Production runtime ABI/loading, toolkit, platform selection, and native event-loop integration remain deferred. |
+| 0077, 0078, 0079 | Resource language/transport and `std.action.call` | Virtual models, replay/cursor/cleanup semantics, sequence/parallel actions, automatic retries, graphical bindings, and reflective gateways remain deferred. |
+| 0080, 0081 | Headless ordinary Inspector v1 and generic `std.inspect.render@1` | Graphical/native runtimes, live trace streams, durable snapshots, source editing/apply, and reflective gateways remain deferred. |
+
 ## Current work ADRs
 
 * **work ADR 0001:** [PostgreSQL Is a Private Kernel](0001-private-postgresql-kernel.md)
@@ -134,9 +150,9 @@ source-of-truth or authority rules.
 * **work ADR 0065:**
   [Security Admin Functions](0065-security-admin-functions.md)
 * **work ADR 0066:**
-  [`orna source diff` — Semantic Source Changes Without Apply](0066-semantic-source-diff.md)
+  [`orna source diff` - Semantic Source Changes Without Apply](0066-semantic-source-diff.md)
 * **work ADR 0067:**
-  [`std.csv.encode` — the Sealed CSV Output Presenter](0067-csv-output-presenter.md)
+  [`std.csv.encode` - the Sealed CSV Output Presenter](0067-csv-output-presenter.md)
 * **work ADR 0068:**
   [CLIENT Expression Bodies and RUNTIME CONTRACT Clauses](0068-client-expression-bodies.md)
 * **work ADR 0069:**
