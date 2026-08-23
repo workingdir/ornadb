@@ -6569,6 +6569,10 @@
         "required": true,
         "types": [
           {
+            "type": "client_await_expression",
+            "named": true
+          },
+          {
             "type": "client_expression",
             "named": true
           }

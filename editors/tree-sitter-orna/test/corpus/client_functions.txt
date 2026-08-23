@@ -313,6 +313,50 @@ END;
           (semicolon))
         (kw_end)))
     (semicolon)))
+====================
+CLIENT short RETURN body accepts AWAIT
+====================
+
+CREATE CLIENT FUNCTION examples.short_return() RETURNS TEXT
+RETURN AWAIT std.data.resource();
+
+---
+
+(source_file
+  (create_client_function_statement
+    (kw_create)
+    (kw_client)
+    (kw_function)
+    name: (qualified_name
+      (qualified_name
+        (identifier))
+      (dot)
+      (identifier))
+    parameters: (parameter_list
+      (lparen)
+      (rparen))
+    (kw_returns)
+    returns: (return_type_spec
+      (type_spec
+        (scalar_type
+          (kw_text))))
+    body: (client_return_body
+      (kw_return)
+      expression: (client_await_expression
+        (kw_await)
+        expression: (client_expression
+          (client_primary_expression
+            (client_call_expression
+              callee: (client_call_callee
+                (identifier)
+                (dot)
+                (identifier)
+                (dot)
+                (identifier))
+              (lparen)
+              (rparen))))))
+    (semicolon)))
+
 
 ====================
 CLIENT state blocks reject pre-BEGIN LET locals
