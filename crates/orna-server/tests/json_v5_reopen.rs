@@ -20,7 +20,7 @@ use orna_core::{
         ExecuteGrant, LocalPeerCredential, Principal, PrincipalKind, PrincipalStatus,
         SecurityFunctionTarget, SecuritySnapshot,
     },
-    value::{OpaqueValue, RuntimeValue},
+    value::{OpaqueValue, OpaqueValueError, RuntimeValue},
     CatalogueRevisionId, SourceBundleId, SourceRevisionId,
 };
 use orna_postgres::{PostgresKernel, SealedInvocationResult};
@@ -75,6 +75,22 @@ async fn v5_json_encode_survives_reopen_with_exact_retained_identity() -> TestRe
         json_payload.extend_from_slice(body);
         let json_value =
             OpaqueValue::new(&recovered, &registry, STD_JSON_VALUE_TYPE_ID, &json_payload)?;
+
+        let noncanonical_body = br#"{ "items":[1,2],"ok":true}"#;
+        let mut noncanonical_payload = Vec::from(JSON_MAGIC.as_bytes());
+        noncanonical_payload.extend_from_slice(&(noncanonical_body.len() as u32).to_be_bytes());
+        noncanonical_payload.extend_from_slice(noncanonical_body);
+        require(
+            OpaqueValue::new(
+                &recovered,
+                &registry,
+                STD_JSON_VALUE_TYPE_ID,
+                &noncanonical_payload,
+            ) == Err(OpaqueValueError::InvalidJsonBody {
+                opaque_type: STD_JSON_VALUE_TYPE_ID,
+            }),
+            "the V5 JSON codec accepted non-canonical JSON bytes",
+        )?;
 
         let mut expected_payload = Vec::from(BYTE_STREAM_MAGIC.as_bytes());
         expected_payload.extend_from_slice(&16_u32.to_be_bytes());
