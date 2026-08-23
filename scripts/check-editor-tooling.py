@@ -174,6 +174,32 @@ def check_generated_artefacts(
     return True
 
 
+def check_tree_sitter_package(tree_sitter_directory: Path, repository: Path) -> bool:
+    """Validate the grammar's source-only npm package boundary."""
+    package_path = tree_sitter_directory / "package.json"
+    try:
+        with package_path.open(encoding="utf-8") as stream:
+            package = json.load(stream)
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        log(f"invalid tree-sitter package metadata: {exc}", error=True)
+        return False
+
+    if package.get("private") is not True:
+        log(
+            f"{display_path(package_path, repository)} must be marked private "
+            "because no Node binding is shipped",
+            error=True,
+        )
+        return False
+    if "main" in package:
+        log(
+            f"{display_path(package_path, repository)} must not advertise a missing Node entrypoint",
+            error=True,
+        )
+        return False
+    return True
+
+
 def main() -> int:
     repository = Path(__file__).resolve().parents[1]
     tree_sitter_directory = repository / "editors" / "tree-sitter-orna"
@@ -198,6 +224,9 @@ def main() -> int:
             f"required directory is missing: {display_path(tree_sitter_directory, repository)}",
             error=True,
         )
+        return 1
+
+    if not check_tree_sitter_package(tree_sitter_directory, repository):
         return 1
 
     if not check_generated_artefacts(tree_sitter, tree_sitter_directory, repository):
