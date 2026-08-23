@@ -63,7 +63,11 @@ maximum.
 
 ## Server frames
 
-The server emits one of these frames for an accepted request:
+The server emits one of these frames for an accepted request. A request that
+is denied or cancelled before acceptance emits `RESOURCE_FAILED` or
+`RESOURCE_CANCELLED` directly. It does not emit `RESOURCE_ACCEPTED` and has no
+nested invocation identity. The terminal frame still closes only that
+resource request.
 
 ```text
 RESOURCE_ACCEPTED {
@@ -108,11 +112,12 @@ RESOURCE_CANCELLED {
 }
 ```
 
-`RESOURCE_ACCEPTED` appears once and binds the client request to the nested
-server invocation. A scalar request emits one non-empty `RESOURCE_VALUES`
-frame followed by `RESOURCE_COMPLETED`. A stream emits zero or more non-empty
-batches followed by one terminal frame. A batch sequence starts at zero and
-increases by one. `total_items` includes all accepted batches.
+For an accepted request, `RESOURCE_ACCEPTED` appears once and binds the client
+request to the nested server invocation. A scalar request emits one non-empty
+`RESOURCE_VALUES` frame followed by `RESOURCE_COMPLETED`. A stream emits zero
+or more non-empty batches followed by one terminal frame. A batch sequence
+starts at zero and increases by one. `total_items` includes all accepted
+batches.
 
 A result frame must echo the request and active target revision. The client
 rejects a mismatched request ID, stream ID, target revision, batch sequence,
