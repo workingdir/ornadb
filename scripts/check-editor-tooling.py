@@ -1,0 +1,225 @@
+#!/usr/bin/env python3
+"""Run the dependency-light validation gate for checked-in editor tooling."""
+
+from __future__ import annotations
+
+import json
+import os
+from pathlib import Path
+import shutil
+import subprocess
+import sys
+from typing import Sequence
+
+
+LOG_PREFIX = "[editor]"
+
+
+def log(message: str, *, error: bool = False) -> None:
+    print(f"{LOG_PREFIX} {message}", file=sys.stderr if error else sys.stdout, flush=True)
+
+
+def display_path(path: Path, repository: Path) -> str:
+    """Render paths relative to the repository, including its sibling spec."""
+    try:
+        return path.relative_to(repository).as_posix()
+    except ValueError:
+        return Path(os.path.relpath(path, repository)).as_posix()
+
+
+def emit_output(label: str, output: str) -> None:
+    for line in output.splitlines():
+        log(f"{label}: {line}", error=True)
+
+
+def run_command(
+    command: Sequence[str],
+    *,
+    cwd: Path,
+    label: str,
+) -> subprocess.CompletedProcess[str] | None:
+    try:
+        completed = subprocess.run(
+            command,
+            cwd=cwd,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    except OSError as exc:
+        log(f"{label} could not start: {exc}", error=True)
+        return None
+
+    emit_output(label, completed.stdout)
+    emit_output(label, completed.stderr)
+    return completed
+
+
+def sorted_orna_files(directory: Path) -> list[Path]:
+    return sorted(
+        (path for path in directory.rglob("*.orna") if path.is_file()),
+        key=lambda path: path.as_posix(),
+    )
+
+
+def checked_in_editor_json_files(repository: Path) -> list[Path] | None:
+    """Return tracked editor JSON files, excluding local dependency trees."""
+    try:
+        completed = subprocess.run(
+            ["git", "-C", str(repository), "ls-files", "-z", "--", "editors"],
+            check=False,
+            capture_output=True,
+        )
+    except OSError as exc:
+        log(f"could not enumerate checked-in editor JSON files with git: {exc}", error=True)
+        return None
+    if completed.returncode != 0:
+        detail = completed.stderr.decode("utf-8", errors="replace").strip()
+        suffix = f": {detail}" if detail else ""
+        log(f"git ls-files failed while enumerating editor JSON files{suffix}", error=True)
+        return None
+
+    paths = []
+    for filename in completed.stdout.decode("utf-8").split("\0"):
+        if filename.endswith(".json"):
+            path = repository / filename
+            if path.is_file():
+                paths.append(path)
+    return sorted(paths, key=lambda path: path.as_posix())
+
+
+def main() -> int:
+    repository = Path(__file__).resolve().parents[1]
+    tree_sitter_directory = repository / "editors" / "tree-sitter-orna"
+    spec_examples = repository.parent / "spec" / "examples"
+
+    tree_sitter = shutil.which("tree-sitter")
+    if tree_sitter is None:
+        log(
+            "missing prerequisite: tree-sitter CLI was not found on PATH; "
+            "install tree-sitter-cli before running this gate",
+            error=True,
+        )
+        return 2
+
+    node = shutil.which("node")
+    if node is None:
+        log("missing prerequisite: node was not found on PATH", error=True)
+        return 2
+
+    if not tree_sitter_directory.is_dir():
+        log(
+            f"required directory is missing: {display_path(tree_sitter_directory, repository)}",
+            error=True,
+        )
+        return 1
+
+    required_fixture_roots = (
+        repository / "stdlib",
+        repository / "crates",
+        tree_sitter_directory / "test" / "corpus",
+    )
+    for directory in required_fixture_roots:
+        if not directory.is_dir():
+            log(
+                f"required fixture directory is missing: {display_path(directory, repository)}",
+                error=True,
+            )
+            return 1
+
+    log("running tree-sitter test in editors/tree-sitter-orna")
+    corpus_result = run_command(
+        [tree_sitter, "test"],
+        cwd=tree_sitter_directory,
+        label="tree-sitter test",
+    )
+    if corpus_result is None or corpus_result.returncode != 0:
+        status = (
+            "could not start"
+            if corpus_result is None
+            else f"exited with status {corpus_result.returncode}"
+        )
+        log(f"tree-sitter test failed ({status})", error=True)
+        return 1
+    log("tree-sitter test passed")
+
+    parse_paths: list[Path] = []
+    if spec_examples.is_dir():
+        canonical_paths = sorted_orna_files(spec_examples)
+        log(f"canonical examples: {len(canonical_paths)} .orna files")
+        parse_paths.extend(canonical_paths)
+    else:
+        log("canonical examples: ../spec/examples is absent; skipping")
+
+    for directory in required_fixture_roots:
+        fixture_paths = sorted_orna_files(directory)
+        log(
+            f"fixtures under {display_path(directory, repository)}: "
+            f"{len(fixture_paths)} .orna files"
+        )
+        parse_paths.extend(fixture_paths)
+
+    parse_paths.sort(key=lambda path: path.as_posix())
+    if parse_paths:
+        for path in parse_paths:
+            log(f"parsing {display_path(path, repository)}")
+        parse_arguments = [os.path.relpath(path, tree_sitter_directory) for path in parse_paths]
+        parse_result = run_command(
+            [tree_sitter, "parse", "--quiet", *parse_arguments],
+            cwd=tree_sitter_directory,
+            label="tree-sitter parse",
+        )
+        parser_error_node = parse_result is not None and (
+            "(ERROR" in parse_result.stdout or "(ERROR" in parse_result.stderr
+        )
+        if parse_result is None or parse_result.returncode != 0 or parser_error_node:
+            status = (
+                "could not start"
+                if parse_result is None
+                else f"exited with status {parse_result.returncode}"
+            )
+            detail = "; parser error nodes detected" if parser_error_node else ""
+            log(f"tree-sitter parse failed ({status}{detail})", error=True)
+            return 1
+    log(f"parsed {len(parse_paths)} .orna files without parser errors")
+
+    json_files = checked_in_editor_json_files(repository)
+    if json_files is None:
+        return 1
+    for path in json_files:
+        relative_path = display_path(path, repository)
+        log(f"validating JSON {relative_path}")
+        try:
+            with path.open(encoding="utf-8") as stream:
+                json.load(stream)
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            log(f"invalid JSON in {relative_path}: {exc}", error=True)
+            return 1
+    log(f"validated {len(json_files)} editor JSON files")
+
+    extension = repository / "editors" / "vscode" / "extension.js"
+    if not extension.is_file():
+        log(f"required file is missing: {display_path(extension, repository)}", error=True)
+        return 1
+    log("checking editors/vscode/extension.js with node --check")
+    node_result = run_command(
+        [node, "--check", str(extension)],
+        cwd=repository,
+        label="node --check",
+    )
+    if node_result is None or node_result.returncode != 0:
+        status = (
+            "could not start"
+            if node_result is None
+            else f"exited with status {node_result.returncode}"
+        )
+        log(f"node --check failed ({status})", error=True)
+        return 1
+    log("node --check passed")
+
+    log("editor tooling gate passed")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
