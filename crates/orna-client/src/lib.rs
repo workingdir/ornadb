@@ -593,6 +593,9 @@ pub enum ClientResourceError {
     InvalidFailureCode,
     /// The result does not match the declared resolved type.
     TypeMismatch,
+    /// The invocation context contains a NUL byte in its state profile or
+    /// function-instance key.
+    InvalidInvocationContext,
 }
 
 impl fmt::Display for ClientResourceError {
@@ -663,6 +666,11 @@ impl fmt::Display for ClientResourceError {
             }
             Self::TypeMismatch => {
                 formatter.write_str("CLIENT resource result does not match its type")
+            }
+            Self::InvalidInvocationContext => {
+                formatter.write_str(
+                    "CLIENT resource invocation context must be valid NUL-free text",
+                )
             }
         }
     }
@@ -739,6 +747,12 @@ impl ClientResourceRequest {
         arguments: Vec<FunctionArgument>,
         invocation_context: Option<ClientResourceInvocationContext>,
     ) -> Result<Self, ClientResourceError> {
+        if invocation_context.as_ref().is_some_and(|context| {
+            context.state_profile.as_bytes().contains(&0)
+                || context.function_instance_key.as_bytes().contains(&0)
+        }) {
+            return Err(ClientResourceError::InvalidInvocationContext);
+        }
         if active.pair() != key.target().revision() {
             return Err(ClientResourceError::RevisionMismatch {
                 expected: key.target().revision(),
@@ -8072,6 +8086,39 @@ mod tests {
             assert_eq!(result.context().function(), function);
             assert_eq!(result.context().function_revision(), function_revision);
             assert_eq!(result.value(), &RuntimeValue::Boolean(value));
+        }
+    }
+
+    #[test]
+    fn resource_request_rejects_nul_invocation_context_before_loading() {
+        let (active, function, pair, _) = version_one_active(true);
+        let principal = PrincipalId::from_bytes([0x7b; 16]);
+        let digest = super::ClientResourceKey::canonical_arguments_digest(&active, &[]).unwrap();
+        let key = super::ClientResourceKey::new(
+            InvocationTarget::new(function, pair),
+            principal,
+            digest,
+            Sha256Digest::from_bytes([0x23; 32]),
+        );
+        let mut resource =
+            super::ClientResource::new(key, ResolvedType::Scalar(StandardScalar::Boolean));
+
+        for (profile, instance) in [
+            ("profile\0invalid", "instance"),
+            ("profile", "instance\0invalid"),
+        ] {
+            let context = super::ClientResourceInvocationContext::new(
+                InvocationId::from_bytes([0x24; 16]),
+                CallSiteId::from_bytes([0x25; 16]),
+                profile.to_owned(),
+                instance.to_owned(),
+            );
+            assert!(matches!(
+                resource.begin_request_with_context(&active, context, Vec::new()),
+                Err(super::ClientResourceError::InvalidInvocationContext)
+            ));
+            assert_eq!(resource.status(), super::ClientResourceStatus::Idle);
+            assert_eq!(resource.generation().value(), 0);
         }
     }
 
