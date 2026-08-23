@@ -926,11 +926,18 @@ fn map_kernel_error(error: PostgresKernelError) -> InstalledInspectError {
         PostgresKernelError::Inspect(model) => {
             InstalledInspectError::new(InstalledInspectErrorKind::Kernel, model.to_string())
         }
-        PostgresKernelError::InspectDenied { reason } => InstalledInspectError::with_code(
-            InstalledInspectErrorKind::Kernel,
-            format!("INSPECT access was denied: {}", reason.audit_reason()),
-            reason.audit_reason(),
-        ),
+        PostgresKernelError::InspectDenied { reason } => {
+            let code = match reason {
+                orna_core::security::InspectDenial::MissingEpoch
+                | orna_core::security::InspectDenial::MissingPrivilege => "inspect.denied",
+                reason => reason.audit_reason(),
+            };
+            InstalledInspectError::with_code(
+                InstalledInspectErrorKind::Kernel,
+                format!("INSPECT access was denied: {code}"),
+                code,
+            )
+        }
         PostgresKernelError::InspectValueCodec(error) => InstalledInspectError::new(
             InstalledInspectErrorKind::Kernel,
             format!("inspection payload codec failed: {error}"),
@@ -1702,7 +1709,18 @@ mod tests {
             reason: orna_core::security::InspectDenial::MissingPrivilege,
         });
         assert_eq!(denied.kind(), InstalledInspectErrorKind::Kernel);
-        assert_eq!(denied.code(), Some("inspect:missing-privilege"));
+        assert_eq!(denied.code(), Some("inspect.denied"));
+        assert_eq!(denied.message(), "INSPECT access was denied: inspect.denied");
+
+        let missing_epoch = map_kernel_error(PostgresKernelError::InspectDenied {
+            reason: orna_core::security::InspectDenial::MissingEpoch,
+        });
+        assert_eq!(missing_epoch.kind(), InstalledInspectErrorKind::Kernel);
+        assert_eq!(missing_epoch.code(), Some("inspect.denied"));
+        assert_eq!(
+            missing_epoch.message(),
+            "INSPECT access was denied: inspect.denied"
+        );
 
         let codec = map_kernel_error(PostgresKernelError::InspectValueCodec(
             orna_protocol::ValueCodecError::UnsupportedValue,
