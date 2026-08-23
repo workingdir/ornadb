@@ -53,7 +53,7 @@ use orna_core::{
     source::{SourceBundle, SourceUnit},
     value::RuntimeValue,
 };
-use orna_postgres::{PostgresKernel, SealedInvocationResult};
+use orna_postgres::{PostgresKernel, PostgresKernelError, SealedInvocationResult};
 use orna_protocol::{encode_constructed_value, encode_invoke_request};
 use orna_server::{
     InstalledInspectError, InstalledInspectErrorKind, InstalledInspectOutcome,
@@ -67,6 +67,7 @@ use postgres_test_support::{TestDatabase, TestResult, failure, with_test_databas
 const ECHO_VALUE: i32 = 41;
 const CONNECTION_PROTOCOL_MAJOR: u16 = 5;
 const INSPECT_PRINCIPAL: PrincipalId = PrincipalId::from_bytes([0x5a; 16]);
+const FOREIGN_INSPECT_PRINCIPAL: PrincipalId = PrincipalId::from_bytes([0x5b; 16]);
 const RAW_INSPECT_STATE_SOURCE: &str = "CREATE SCHEMA inspect_fixture;\n\
     CREATE CLIENT FUNCTION inspect_fixture.state() RETURNS BOOLEAN IS\n\
       STATE value INTEGER SCOPE USER DEFAULT 0;\n\
@@ -803,6 +804,195 @@ async fn rejects_an_owned_epoch_for_a_different_requested_invocation() -> TestRe
                 && error.message() == "inspection epoch target does not match requested invocation",
             format!(
                 "the mismatched epoch target returned the wrong stable error: kind={:?}, code={:?}, message={}",
+                error.kind(),
+                error.code(),
+                error.message()
+            ),
+        )?;
+
+        Ok(())
+    })
+    .await
+}
+
+
+/// An active principal may inspect its own invocation, but must not discover
+/// or load an epoch owned by another principal. The installed runner must also
+/// reject that cross-principal target before rendering any output.
+#[tokio::test]
+#[ignore = "requires the Compose PostgreSQL development service"]
+async fn rejects_a_cross_principal_owned_epoch_without_disclosure_or_output() -> TestResult<()> {
+    with_test_database(|database| async move {
+        let _standard_upgrade = install_standard(&database).await?;
+        let db_kernel = kernel(&database);
+        let uid = nix::unistd::geteuid().as_raw();
+        let active = db_kernel.recover().await?;
+        let pair = active.pair();
+        let standard = active
+            .catalogue_hash_context()
+            .standard()
+            .ok_or_else(|| failure("the standard snapshot is pinned by the V1-to-V2 upgrade"))?;
+        let standard_revision = standard.revision();
+        let registry = registered_opaque_codecs(standard)?;
+
+        let security_for_peer = |peer: PrincipalId| -> TestResult<SecuritySnapshot> {
+            Ok(
+                SecuritySnapshot::new_with_function_targets_local_peer_credentials_and_privilege_grants(
+                    pair,
+                    vec![SecurityFunctionTarget::verified_standard(
+                        STD_INVOKE_ECHO_FUNCTION_ID,
+                        standard_revision,
+                        STD_INVOKE_ECHO_FUNCTION_REVISION_ID,
+                    )],
+                    vec![
+                        Principal::new(
+                            INSPECT_PRINCIPAL,
+                            PrincipalKind::User,
+                            PrincipalStatus::Active,
+                        ),
+                        Principal::new(
+                            FOREIGN_INSPECT_PRINCIPAL,
+                            PrincipalKind::User,
+                            PrincipalStatus::Active,
+                        ),
+                    ],
+                    vec![],
+                    vec![
+                        ExecuteGrant::new(INSPECT_PRINCIPAL, STD_INVOKE_ECHO_FUNCTION_ID),
+                        ExecuteGrant::new(
+                            FOREIGN_INSPECT_PRINCIPAL,
+                            STD_INVOKE_ECHO_FUNCTION_ID,
+                        ),
+                    ],
+                    vec![LocalPeerCredential::new(uid, peer)],
+                    vec![
+                        PrivilegeGrant::new(
+                            INSPECT_PRINCIPAL,
+                            PrivilegeClass::Inspect(InspectPrivilege::OwnInvocation),
+                            None,
+                        )?,
+                        PrivilegeGrant::new(
+                            FOREIGN_INSPECT_PRINCIPAL,
+                            PrivilegeClass::Inspect(InspectPrivilege::OwnInvocation),
+                            None,
+                        )?,
+                    ],
+                )?,
+            )
+        };
+
+        let security = security_for_peer(INSPECT_PRINCIPAL)?;
+        db_kernel.replace_security_snapshot(&security).await?;
+        let owner_session = security.bind_authenticated_session(INSPECT_PRINCIPAL, vec![])?;
+        let foreign_session =
+            security.bind_authenticated_session(FOREIGN_INSPECT_PRINCIPAL, vec![])?;
+
+        let request_a = sealed_echo_request(41)?;
+        let retained_a = encode_invoke_request(&active, &registry, &request_a)?;
+        let result_a = db_kernel
+            .dispatch_sealed_sys_invoke(
+                &owner_session,
+                CONNECTION_PROTOCOL_MAJOR,
+                &retained_a,
+            )
+            .await?;
+        let invocation_a = require_echo_completion(&result_a, 41)?;
+        let epoch_a = db_kernel
+            .find_latest_inspect_epoch(&owner_session, invocation_a)
+            .await?
+            .ok_or_else(|| failure("the owner invocation did not resolve its captured epoch"))?;
+        let loaded_a = db_kernel
+            .load_inspect_snapshot(&owner_session, epoch_a)
+            .await?
+            .ok_or_else(|| failure("the owner epoch did not load"))?;
+        require(
+            loaded_a.invocation_id() == invocation_a,
+            "the owner session did not load its own invocation epoch",
+        )?;
+
+        let request_b = sealed_echo_request(42)?;
+        let retained_b = encode_invoke_request(&active, &registry, &request_b)?;
+        let result_b = db_kernel
+            .dispatch_sealed_sys_invoke(
+                &foreign_session,
+                CONNECTION_PROTOCOL_MAJOR,
+                &retained_b,
+            )
+            .await?;
+        let invocation_b = require_echo_completion(&result_b, 42)?;
+        let epoch_b = db_kernel
+            .find_latest_inspect_epoch(&foreign_session, invocation_b)
+            .await?
+            .ok_or_else(|| failure("the foreign principal could not resolve its own epoch"))?;
+        let loaded_b = db_kernel
+            .load_inspect_snapshot(&foreign_session, epoch_b)
+            .await?
+            .ok_or_else(|| failure("the foreign principal could not load its own epoch"))?;
+        require(
+            loaded_b.invocation_id() == invocation_b,
+            "the foreign principal did not load its own invocation epoch",
+        )?;
+
+        let cross_latest = db_kernel
+            .find_latest_inspect_epoch(&foreign_session, invocation_a)
+            .await;
+        require(
+            matches!(
+                cross_latest,
+                Err(PostgresKernelError::InspectDenied {
+                    reason: orna_core::security::InspectDenial::MissingPrivilege,
+                })
+            ),
+            format!(
+                "cross-principal latest lookup must fail with MissingPrivilege, got {cross_latest:?}"
+            ),
+        )?;
+
+        let cross_load = db_kernel
+            .load_inspect_snapshot(&foreign_session, epoch_a)
+            .await;
+        require(
+            matches!(
+                cross_load,
+                Err(PostgresKernelError::InspectDenied {
+                    reason: orna_core::security::InspectDenial::MissingPrivilege,
+                })
+            ),
+            "cross-principal exact load must fail with MissingPrivilege",
+        )?;
+
+        // Rebind the local peer to the second active principal and exercise the
+        // installed runner. The denial must happen before any record is written.
+        let foreign_peer_security = security_for_peer(FOREIGN_INSPECT_PRINCIPAL)?;
+        db_kernel
+            .replace_security_snapshot(&foreign_peer_security)
+            .await?;
+        let (outcome, stdout) = inspect_run(
+            &database,
+            InstalledInspectRequest::new(
+                invocation_a,
+                Some(epoch_a),
+                None,
+                false,
+                0,
+                false,
+                false,
+                false,
+                false,
+            ),
+        )
+        .await?;
+        let error = outcome.expect_err("a foreign principal must not render a foreign epoch");
+        require(
+            stdout.is_empty(),
+            "a cross-principal epoch denial must not render inspect output",
+        )?;
+        require(
+            error.kind() == InstalledInspectErrorKind::Kernel
+                && error.code() == Some("inspect:missing-privilege")
+                && error.message() == "INSPECT access was denied: inspect:missing-privilege",
+            format!(
+                "the cross-principal denial returned the wrong stable error: kind={:?}, code={:?}, message={}",
                 error.kind(),
                 error.code(),
                 error.message()
