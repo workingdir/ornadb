@@ -113,6 +113,32 @@ impl std::error::Error for OpenStandardDatabaseError {
     }
 }
 
+fn retained_verified_standard_snapshot(
+    revision: orna_core::StandardLibraryRevisionId,
+) -> Result<orna_core::revision::VerifiedStandardLibrarySnapshot, StandardLibraryError> {
+    match revision {
+        revision if revision == orna_standard::STANDARD_LIBRARY_REVISION_ID =>
+            orna_standard::retained_standard_library_snapshot()
+                .and_then(orna_standard::verify_standard_library_snapshot),
+        revision if revision == orna_standard::STANDARD_LIBRARY_V2_REVISION_ID =>
+            orna_standard::retained_standard_library_v2_snapshot()
+                .and_then(orna_standard::verify_standard_library_v2_snapshot),
+        revision if revision == orna_standard::STANDARD_LIBRARY_V3_REVISION_ID =>
+            orna_standard::retained_standard_library_v3_snapshot()
+                .and_then(orna_standard::verify_standard_library_v3_snapshot),
+        revision if revision == orna_standard::STANDARD_LIBRARY_V4_REVISION_ID =>
+            orna_standard::retained_standard_library_v4_snapshot()
+                .and_then(orna_standard::verify_standard_library_v4_snapshot),
+        revision if revision == orna_standard::STANDARD_LIBRARY_V5_REVISION_ID =>
+            orna_standard::retained_standard_library_v5_snapshot()
+                .and_then(orna_standard::verify_standard_library_v5_snapshot),
+        revision if revision == orna_standard::STANDARD_LIBRARY_V6_REVISION_ID =>
+            orna_standard::retained_standard_library_v6_snapshot()
+                .and_then(orna_standard::verify_standard_library_v6_snapshot),
+        _ => Err(StandardLibraryError::Unavailable),
+    }
+}
+
 /// Bootstraps and opens one database with the accepted standard library active.
 ///
 /// The returned kernel has completed bare bootstrap and verified recovery. When
@@ -129,9 +155,8 @@ pub async fn open_standard_database(
         .recover()
         .await
         .map_err(|source| OpenStandardDatabaseError::Kernel { source })?;
-    let expected = if active.catalogue_hash_context().standard().is_some() {
-        orna_standard::retained_standard_library_snapshot()
-            .and_then(orna_standard::verify_standard_library_snapshot)
+    let expected = if let Some(selected) = active.catalogue_hash_context().standard() {
+        retained_verified_standard_snapshot(selected.revision())
             .map_err(|source| OpenStandardDatabaseError::StandardLibrary { source })?
     } else {
         let upgrade = orna_standard::prepare_standard_upgrade(&active)
@@ -152,6 +177,11 @@ pub async fn open_standard_database(
             source: StandardLibraryError::Unavailable,
         });
     };
+    if selected.revision() != expected.revision() {
+        return Err(OpenStandardDatabaseError::StandardLibrary {
+            source: StandardLibraryError::Unavailable,
+        });
+    }
     if selected.catalogue().revision() != expected.catalogue().revision() {
         return Err(OpenStandardDatabaseError::StandardLibrary {
             source: StandardLibraryError::CatalogueIdentityMismatch {
@@ -217,5 +247,28 @@ mod tests {
                 Some(expected.to_owned())
             );
         }
+    }
+    #[test]
+    fn retained_standard_dispatch_covers_each_accepted_revision() {
+        let revisions = [
+            orna_standard::STANDARD_LIBRARY_REVISION_ID,
+            orna_standard::STANDARD_LIBRARY_V2_REVISION_ID,
+            orna_standard::STANDARD_LIBRARY_V3_REVISION_ID,
+            orna_standard::STANDARD_LIBRARY_V4_REVISION_ID,
+            orna_standard::STANDARD_LIBRARY_V5_REVISION_ID,
+            orna_standard::STANDARD_LIBRARY_V6_REVISION_ID,
+        ];
+
+        for revision in revisions {
+            let verified = retained_verified_standard_snapshot(revision)
+                .expect("every accepted standard revision has a retained verifier");
+            assert_eq!(verified.revision(), revision);
+        }
+
+        let unknown = orna_core::StandardLibraryRevisionId::from_bytes([0xff; 16]);
+        assert!(matches!(
+            retained_verified_standard_snapshot(unknown),
+            Err(StandardLibraryError::Unavailable)
+        ));
     }
 }
