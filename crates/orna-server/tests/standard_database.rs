@@ -13731,8 +13731,10 @@ async fn proves_installed_client_boolean_expression_dogfood_source_through_orna_
     with_test_database(|database| async move {
         let uid = nix::unistd::geteuid().as_raw();
         let kernel = kernel(&database)?;
-        let (active, standard_upgrade, _raw_client, _raw_server) =
-            install_raw_client_fixture(&kernel).await?;
+        kernel.bootstrap().await?;
+        let empty = kernel.recover().await?;
+        let standard_upgrade = orna_standard::prepare_standard_upgrade_v1_to_v2(&empty)?;
+        let active = kernel.apply_standard_upgrade(&standard_upgrade).await?;
         let context = StandardApplicationCheckContext::try_new(
             active.catalogue(),
             standard_upgrade.checked_standard_library(),
@@ -13762,12 +13764,22 @@ async fn proves_installed_client_boolean_expression_dogfood_source_through_orna_
             .find(|function| function.name().parts() == ["client_dogfood", "enabled"])
             .ok_or_else(|| failure("the installed CLIENT dogfood source is missing client_dogfood.enabled"))?
             .id();
-        let function_targets = active
+        let mut function_targets = active
             .catalogue()
             .functions()
             .iter()
             .map(FunctionDefinition::id)
             .collect::<Vec<_>>();
+        if let Some(standard) = active.catalogue_hash_context().standard() {
+            function_targets.extend(
+                standard
+                    .catalogue()
+                    .functions()
+                    .iter()
+                    .map(FunctionDefinition::id),
+            );
+        }
+        function_targets.sort_unstable();
         let security = SecuritySnapshot::new_with_local_peer_credentials(
             active.pair(),
             function_targets,
