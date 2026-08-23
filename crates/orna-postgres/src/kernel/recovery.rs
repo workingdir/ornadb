@@ -48,6 +48,50 @@ use self::functions::{RecoveredFunctionState, load_function_state};
 
 const ACTIVE_RELATION: &str = "_orna_kernel.active_revision";
 const SOURCE_UNIT_RELATION: &str = "_orna_kernel.source_units";
+const SOURCE_REVISION_RELATION: &str = "_orna_kernel.source_revisions";
+const CATALOGUE_REVISION_RELATION: &str = "_orna_kernel.catalogue_revisions";
+
+/// One immutable source/catalogue revision pair retained by the kernel.
+///
+/// Entries expose only revision identities and their stored parent links. The
+/// pair whose identities match the durable active marker is reported by
+/// [`RevisionPairHistoryEntry::is_active`]. Returned entries are ordered by ascending source then
+/// catalogue identity, using the canonical ordering of the opaque IDs.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RevisionPairHistoryEntry {
+    source_revision_id: SourceRevisionId,
+    source_parent_revision_id: Option<SourceRevisionId>,
+    catalogue_revision_id: CatalogueRevisionId,
+    catalogue_parent_revision_id: Option<CatalogueRevisionId>,
+    is_active: bool,
+}
+
+impl RevisionPairHistoryEntry {
+    /// Returns the source revision identity.
+    pub const fn source_revision_id(self) -> SourceRevisionId {
+        self.source_revision_id
+    }
+
+    /// Returns the optional parent source revision identity.
+    pub const fn source_parent_revision_id(self) -> Option<SourceRevisionId> {
+        self.source_parent_revision_id
+    }
+
+    /// Returns the catalogue revision identity.
+    pub const fn catalogue_revision_id(self) -> CatalogueRevisionId {
+        self.catalogue_revision_id
+    }
+
+    /// Returns the optional parent catalogue revision identity.
+    pub const fn catalogue_parent_revision_id(self) -> Option<CatalogueRevisionId> {
+        self.catalogue_parent_revision_id
+    }
+
+    /// Returns whether this pair is the durable active revision pair.
+    pub const fn is_active(self) -> bool {
+        self.is_active
+    }
+}
 
 #[derive(Clone, Copy)]
 enum HashAlgorithm {
@@ -185,6 +229,27 @@ struct RecoveredCatalogueSemantics {
 }
 
 impl PostgresKernel {
+    /// Lists every immutable source/catalogue revision pair retained by the
+    /// kernel, marking the pair selected by the durable active marker.
+    ///
+    /// The listing runs in one read-only repeatable-read transaction after the
+    /// trusted search path and current migration registry have been checked.
+    /// Entries are ordered by ascending source then catalogue identity. This
+    /// method only reads revision metadata; it does not activate or reconstruct
+    /// a historical revision.
+    pub async fn list_revision_pairs(
+        &self,
+    ) -> Result<Vec<RevisionPairHistoryEntry>, PostgresKernelError> {
+        let mut session = self.open().await?;
+        let listing_result = list_revision_pairs_client(&mut session.client).await;
+        let shutdown_result = session.shutdown().await;
+
+        match (listing_result, shutdown_result) {
+            (Ok(entries), Ok(())) => Ok(entries),
+            (Err(error), _) | (Ok(_), Err(error)) => Err(error),
+        }
+    }
+
     /// Reconstructs and validates the complete active durable database revision.
     ///
     /// This recovery slice supports schemas, object and record value types,
@@ -202,6 +267,176 @@ impl PostgresKernel {
             (Err(error), _) | (Ok(_), Err(error)) => Err(error),
         }
     }
+}
+
+async fn list_revision_pairs_client(
+    client: &mut Client,
+) -> Result<Vec<RevisionPairHistoryEntry>, PostgresKernelError> {
+    let transaction = client
+        .build_transaction()
+        .isolation_level(IsolationLevel::RepeatableRead)
+        .read_only(true)
+        .start()
+        .await
+        .map_err(PostgresKernelError::Database)?;
+
+    establish_trusted_search_path(&transaction).await?;
+    require_current_migrations(&transaction).await?;
+    let active_pair = load_active_revision_pair(&transaction).await?;
+    let rows = transaction
+        .query(
+            "SELECT
+                source.id AS source_id,
+                source.parent_source_revision_id AS source_parent_id,
+                catalogue.id AS catalogue_id,
+                catalogue.parent_catalogue_revision_id AS catalogue_parent_id
+             FROM _orna_kernel.catalogue_revisions AS catalogue
+             JOIN _orna_kernel.source_revisions AS source
+               ON source.id = catalogue.source_revision_id
+             ORDER BY source.id ASC, catalogue.id ASC",
+            &[],
+        )
+        .await
+        .map_err(PostgresKernelError::Database)?;
+
+    let entries = rows
+        .iter()
+        .enumerate()
+        .map(|(index, row)| decode_revision_pair_row(row, index, active_pair))
+        .collect::<Result<Vec<_>, _>>()?;
+    let active_count = entries.iter().filter(|entry| entry.is_active()).count();
+    if active_count != 1 {
+        return Err(DurableRecord::new(ACTIVE_RELATION, "singleton=true").invariant(
+            "exactly one listed revision pair must match the active marker",
+        ));
+    }
+
+    transaction
+        .commit()
+        .await
+        .map_err(PostgresKernelError::Database)?;
+    Ok(entries)
+}
+
+async fn load_active_revision_pair(
+    transaction: &Transaction<'_>,
+) -> Result<RevisionPair, PostgresKernelError> {
+    let rows = transaction
+        .query(
+            "SELECT singleton,
+                    source_revision_id AS active_source_id,
+                    catalogue_revision_id AS active_catalogue_id
+             FROM _orna_kernel.active_revision",
+            &[],
+        )
+        .await
+        .map_err(PostgresKernelError::Database)?;
+    let record = DurableRecord::new(ACTIVE_RELATION, "singleton=true");
+    if rows.len() != 1 {
+        return Err(record.invariant(
+            "exactly one active source and catalogue revision pair must exist",
+        ));
+    }
+
+    let row = &rows[0];
+    if !record.column::<bool>(row, "singleton", "active revision singleton flag must be true")? {
+        return Err(record.invariant("active revision singleton flag must be true"));
+    }
+    let source = SourceRevisionId::from_bytes(identity_bytes(
+        record.column(
+            row,
+            "active_source_id",
+            "active source revision identity must be 16 bytes",
+        )?,
+        &record,
+        "active source revision identity must be 16 bytes",
+    )?);
+    let catalogue = CatalogueRevisionId::from_bytes(identity_bytes(
+        record.column(
+            row,
+            "active_catalogue_id",
+            "active catalogue revision identity must be 16 bytes",
+        )?,
+        &record,
+        "active catalogue revision identity must be 16 bytes",
+    )?);
+    Ok(RevisionPair::new(source, catalogue))
+}
+
+fn decode_revision_pair_row(
+    row: &Row,
+    row_index: usize,
+    active_pair: RevisionPair,
+) -> Result<RevisionPairHistoryEntry, PostgresKernelError> {
+    let source_record = DurableRecord::new(SOURCE_REVISION_RELATION, format!("row={row_index}"));
+    let catalogue_record =
+        DurableRecord::new(CATALOGUE_REVISION_RELATION, format!("row={row_index}"));
+    decode_revision_pair_values(
+        source_record.column(
+            row,
+            "source_id",
+            "source revision identity must be 16 bytes",
+        )?,
+        source_record.column(
+            row,
+            "source_parent_id",
+            "source parent identity must be null or 16 bytes",
+        )?,
+        catalogue_record.column(
+            row,
+            "catalogue_id",
+            "catalogue revision identity must be 16 bytes",
+        )?,
+        catalogue_record.column(
+            row,
+            "catalogue_parent_id",
+            "catalogue parent identity must be null or 16 bytes",
+        )?,
+        active_pair,
+        &source_record,
+        &catalogue_record,
+    )
+}
+
+fn decode_revision_pair_values(
+    source_id: Vec<u8>,
+    source_parent_id: Option<Vec<u8>>,
+    catalogue_id: Vec<u8>,
+    catalogue_parent_id: Option<Vec<u8>>,
+    active_pair: RevisionPair,
+    source_record: &DurableRecord,
+    catalogue_record: &DurableRecord,
+) -> Result<RevisionPairHistoryEntry, PostgresKernelError> {
+    let source_revision_id = SourceRevisionId::from_bytes(identity_bytes(
+        source_id,
+        source_record,
+        "source revision identity must be 16 bytes",
+    )?);
+    let source_parent_revision_id = optional_identity_bytes(
+        source_parent_id,
+        source_record,
+        "source parent identity must be null or 16 bytes",
+    )?
+    .map(SourceRevisionId::from_bytes);
+    let catalogue_revision_id = CatalogueRevisionId::from_bytes(identity_bytes(
+        catalogue_id,
+        catalogue_record,
+        "catalogue revision identity must be 16 bytes",
+    )?);
+    let catalogue_parent_revision_id = optional_identity_bytes(
+        catalogue_parent_id,
+        catalogue_record,
+        "catalogue parent identity must be null or 16 bytes",
+    )?
+    .map(CatalogueRevisionId::from_bytes);
+
+    Ok(RevisionPairHistoryEntry {
+        source_revision_id,
+        source_parent_revision_id,
+        catalogue_revision_id,
+        catalogue_parent_revision_id,
+        is_active: RevisionPair::new(source_revision_id, catalogue_revision_id) == active_pair,
+    })
 }
 
 async fn recover_client(
@@ -4458,7 +4693,7 @@ mod tests {
         },
         revision::{
             CatalogueHashContext, CatalogueHashVersion, DefinitionIdentity, DefinitionOrigin,
-            SourceOrigin, StoredSourceUnit,
+            RevisionPair, SourceOrigin, StoredSourceUnit,
         },
         types::{ResolvedType, StandardScalar, TypeDescriptor},
     };
@@ -4470,6 +4705,7 @@ mod tests {
         RecoveredFunctionState, RecoveredRecordValueField, RecoveredRecordValueType,
         RecoveredRevisionHeader, RecoveredSchema, ResolvedTypeTuple, assemble_catalogue_semantics,
         assemble_revision, decode_catalogue_hash_version, decode_legacy_resolved_type_tuple,
+        decode_revision_pair_values,
         decode_legacy_resolved_type_tuple_kind, decode_record_value_field_descriptor,
         decode_resolved_type_tuple, decode_standard_binding_target,
         recovered_standard_value_definition, validate_function_type,
@@ -4481,6 +4717,54 @@ mod tests {
             SourceOrigin::new(SourceUnitId::from_bytes([0x91; 16]), start, start + 1)
                 .expect("test source origin"),
         )
+    }
+
+    #[test]
+    fn revision_pair_history_decoder_requires_exact_identity_shapes() {
+        let source_record = DurableRecord::new("_orna_kernel.source_revisions", "row=0");
+        let catalogue_record = DurableRecord::new("_orna_kernel.catalogue_revisions", "row=0");
+        let active = RevisionPair::new(
+            SourceRevisionId::from_bytes([2; 16]),
+            CatalogueRevisionId::from_bytes([4; 16]),
+        );
+
+        let entry = decode_revision_pair_values(
+            vec![2; 16],
+            None,
+            vec![4; 16],
+            Some(vec![3; 16]),
+            active,
+            &source_record,
+            &catalogue_record,
+        )
+        .expect("valid revision pair row");
+        assert!(entry.is_active());
+        assert_eq!(entry.source_parent_revision_id(), None);
+        assert_eq!(
+            entry.catalogue_parent_revision_id(),
+            Some(CatalogueRevisionId::from_bytes([3; 16]))
+        );
+
+        assert!(decode_revision_pair_values(
+            vec![2; 15],
+            None,
+            vec![4; 16],
+            None,
+            active,
+            &source_record,
+            &catalogue_record,
+        )
+        .is_err());
+        assert!(decode_revision_pair_values(
+            vec![2; 16],
+            Some(vec![3; 17]),
+            vec![4; 16],
+            None,
+            active,
+            &source_record,
+            &catalogue_record,
+        )
+        .is_err());
     }
 
     #[test]
