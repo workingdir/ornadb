@@ -2747,6 +2747,7 @@ async fn run_shared_invoke_broker(
                     &registry,
                     &mut root,
                     &mut resources,
+                    resource_high_water_mark,
                     &mut resource_tombstones,
                 )
                 .await
@@ -2966,6 +2967,7 @@ async fn handle_shared_broker_frame<W>(
     registry: &OpaqueCodecRegistry,
     root: &mut Option<BrokerRootState>,
     resources: &mut BTreeMap<u64, BrokerResourceState>,
+    resource_high_water_mark: Option<u64>,
     resource_tombstones: &mut BrokerResourceTombstones,
 ) -> Result<(), ResourceTransportFailure>
 where
@@ -2984,6 +2986,13 @@ where
             return Ok(());
         }
         let Some(mut state) = resources.remove(&stream_id) else {
+            if stream_id != 0 && resource_high_water_mark.is_some_and(|high| stream_id <= high) {
+                // Stream IDs are monotonic for this broker connection. Once a
+                // terminal tombstone is evicted, an ID below the allocation
+                // high-water mark is still an old late frame, never a new
+                // resource that could receive this frame.
+                return Ok(());
+            }
             return Err(ResourceTransportFailure::Shape);
         };
         let keep =
@@ -5513,6 +5522,7 @@ mod tests {
                 &registry,
                 &mut root,
                 &mut resources,
+                Some(request.stream_id),
                 &mut tombstones,
             )
             .await
@@ -5544,6 +5554,7 @@ mod tests {
             &registry,
             &mut root,
             &mut resources,
+            Some(request.stream_id),
             &mut tombstones,
         )
         .await
@@ -5572,6 +5583,7 @@ mod tests {
                 &registry,
                 &mut root,
                 &mut resources,
+                Some(request.stream_id),
                 &mut tombstones,
             )
             .await,
@@ -5600,6 +5612,7 @@ mod tests {
                 &registry,
                 &mut root,
                 &mut resources,
+                Some(request.stream_id),
                 &mut tombstones,
             )
             .await,
@@ -5635,6 +5648,191 @@ mod tests {
         assert_eq!(tombstones.len(), BROKER_RESOURCE_TOMBSTONE_CAPACITY);
         assert!(!tombstones.contains_key(&1));
         assert!(tombstones.contains_key(&(BROKER_RESOURCE_TOMBSTONE_CAPACITY as u64 + 1)));
+    }
+
+    #[tokio::test]
+    async fn shared_broker_drops_evicted_terminal_frames_by_high_water_mark() {
+        let (active, registry) = transport_test_context();
+        let (_reader, mut writer) = tokio::io::duplex(128);
+        let mut resources = BTreeMap::new();
+        let mut tombstones = BrokerResourceTombstones::new();
+        let mut root = None;
+        let mut terminal_completions = Vec::new();
+        let make_state =
+            |request: ResourceRequest,
+             completion: Sender<Result<ResourceTransportOutcome, ResourceTransportFailure>>| {
+                let mut protocol = ResourceProtocolConnection::new();
+                protocol.open(request.clone()).expect("resource request opens");
+                BrokerResourceState {
+                    request,
+                    expected_type: ResolvedType::Scalar(StandardScalar::Integer),
+                    resource_kind: ProtocolResourceKind::Single,
+                    protocol,
+                    completion,
+                    accepted: false,
+                    accepted_nested_invocation_id: None,
+                    scalar_value: None,
+                    cancellation_requested: false,
+                    stream_values_seen: false,
+                }
+            };
+
+        for stream_id in 1..=(BROKER_RESOURCE_TOMBSTONE_CAPACITY as u64 + 1) {
+            let request = transport_test_request(active.pair(), stream_id);
+            let (completion, receiver) = mpsc::channel(BROKER_RESOURCE_COMPLETION_CAPACITY);
+            terminal_completions.push(receiver);
+            resources.insert(stream_id, make_state(request.clone(), completion));
+            let bytes = encode_resource_server_frame(
+                &active,
+                &registry,
+                &ResourceServerFrame::Failed(ResourceFailed {
+                    stream_id,
+                    request_id: request.request_id,
+                    failure: CallFailure::ExecuteDenied,
+                }),
+            )
+            .expect("encoded terminal resource response");
+            handle_shared_broker_frame(
+                BrokerWireFrame {
+                    resource: true,
+                    bytes,
+                },
+                &mut writer,
+                &active,
+                &registry,
+                &mut root,
+                &mut resources,
+                Some(stream_id),
+                &mut tombstones,
+            )
+            .await
+            .expect("terminal resource response");
+        }
+        assert_eq!(tombstones.len(), BROKER_RESOURCE_TOMBSTONE_CAPACITY);
+        assert!(!tombstones.contains_key(&1));
+
+        let current_stream_id = BROKER_RESOURCE_TOMBSTONE_CAPACITY as u64 + 2;
+        let current_request = transport_test_request(active.pair(), current_stream_id);
+        let (current_completion, mut current_completions) = mpsc::channel(2);
+        resources.insert(
+            current_stream_id,
+            make_state(current_request.clone(), current_completion),
+        );
+        let high_water_mark = Some(current_stream_id);
+
+        let late_bytes = encode_resource_server_frame(
+            &active,
+            &registry,
+            &ResourceServerFrame::Failed(ResourceFailed {
+                stream_id: 1,
+                request_id: InvocationId::from_bytes([1; 16]),
+                failure: CallFailure::ExecuteDenied,
+            }),
+        )
+        .expect("encoded evicted late resource response");
+        handle_shared_broker_frame(
+            BrokerWireFrame {
+                resource: true,
+                bytes: late_bytes,
+            },
+            &mut writer,
+            &active,
+            &registry,
+            &mut root,
+            &mut resources,
+            high_water_mark,
+            &mut tombstones,
+        )
+        .await
+        .expect("evicted late resource response is dropped");
+        assert!(resources.contains_key(&current_stream_id));
+
+        let accepted = ResourceAccepted {
+            stream_id: current_stream_id,
+            request_id: current_request.request_id,
+            nested_invocation_id: InvocationId::from_bytes([0x40; 16]),
+            target_revision: current_request.target_revision,
+            resource_kind: current_request.resource_kind,
+        };
+        let value = RuntimeValue::Integer(7);
+        let byte_count = encode_constructed_value(&active, &registry, &value)
+            .expect("encoded current resource value")
+            .len() as u32;
+        let values = ResourceValues {
+            stream_id: current_stream_id,
+            request_id: current_request.request_id,
+            batch_sequence: 0,
+            item_count: 1,
+            byte_count,
+            values: vec![value],
+        };
+        let completed = ResourceCompleted {
+            stream_id: current_stream_id,
+            request_id: current_request.request_id,
+            final_batch_sequence: 0,
+            total_items: 1,
+        };
+        for frame in [
+            ResourceServerFrame::Accepted(accepted),
+            ResourceServerFrame::Values(values),
+            ResourceServerFrame::Completed(completed),
+        ] {
+            let bytes = encode_resource_server_frame(&active, &registry, &frame)
+                .expect("encoded current resource response");
+            handle_shared_broker_frame(
+                BrokerWireFrame {
+                    resource: true,
+                    bytes,
+                },
+                &mut writer,
+                &active,
+                &registry,
+                &mut root,
+                &mut resources,
+                high_water_mark,
+                &mut tombstones,
+            )
+            .await
+            .expect("current resource remains usable");
+        }
+        assert!(!resources.contains_key(&current_stream_id));
+        assert!(matches!(
+            current_completions.recv().await,
+            Some(Ok(ResourceTransportOutcome::Ready {
+                value: RuntimeValue::Integer(7),
+                nested_invocation_id,
+            })) if nested_invocation_id == InvocationId::from_bytes([0x40; 16])
+        ));
+
+        let future_stream_id = current_stream_id + 1;
+        let future_request = transport_test_request(active.pair(), future_stream_id);
+        let future_bytes = encode_resource_server_frame(
+            &active,
+            &registry,
+            &ResourceServerFrame::Failed(ResourceFailed {
+                stream_id: future_stream_id,
+                request_id: future_request.request_id,
+                failure: CallFailure::ExecuteDenied,
+            }),
+        )
+        .expect("encoded future resource response");
+        assert!(matches!(
+            handle_shared_broker_frame(
+                BrokerWireFrame {
+                    resource: true,
+                    bytes: future_bytes,
+                },
+                &mut writer,
+                &active,
+                &registry,
+                &mut root,
+                &mut resources,
+                high_water_mark,
+                &mut tombstones,
+            )
+            .await,
+            Err(ResourceTransportFailure::Shape)
+        ));
     }
 
     #[test]
