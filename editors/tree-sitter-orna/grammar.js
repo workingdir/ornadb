@@ -331,7 +331,7 @@ module.exports = grammar({
                     $.kw_is,
                     repeat1($.client_state_declaration),
                     $.kw_begin,
-                    $.client_return_statement,
+                    $.client_state_return_statement,
                     $.kw_end,
                 ),
 
@@ -388,6 +388,15 @@ module.exports = grammar({
                     $.semicolon,
                 ),
 
+            // State-bearing CLIENT blocks accept only one non-suspending return.
+            client_state_return_statement: ($) =>
+                seq(
+                    $.kw_return,
+                    optional(field('expression', $.client_expression)),
+                    $.semicolon,
+                ),
+
+            // No-state CLIENT blocks may suspend at a return position.
             client_return_statement: ($) =>
                 seq(
                     $.kw_return,
