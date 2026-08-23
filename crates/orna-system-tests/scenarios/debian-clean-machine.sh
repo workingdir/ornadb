@@ -114,7 +114,7 @@ mapfile -t product_executables < <(
 [[ "${product_executables[*]}" == /usr/bin/orna ]] ||
     fail 'installed product executable inventory is not exact'
 [[ -z "$(find /usr -xdev -type f \
-    \( -name postgres -o -name initdb -o -name psql -o -name pg_upgrade \
+    \( -name postgres -o -name initdb -o -name psql -o -name pg_upgrade -o -name postmaster -o -name pg_ctl -o -name pg_resetwal \
     -o -name '*.so' -o -name '*.so.*' -o -name '*.a' -o -name '*.o' \) \
     -path '*orna*' -print -quit)" ]] || fail 'PostgreSQL runtime artefact is installed'
 mkdir -m 0700 -p /work
