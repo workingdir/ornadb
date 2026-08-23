@@ -2,7 +2,7 @@
 list, map and record literals, lambda
 ====================
 
-CREATE CLIENT FUNCTION demo.collect()
+CREATE SERVER FUNCTION demo.collect()
 RETURNS std.ui.UI
 AS
     std.ui.render(
@@ -19,9 +19,9 @@ AS
 ---
 
 (source_file
-  (create_client_function_statement
+  (create_server_function_statement
     (kw_create)
-    (kw_client)
+    (kw_server)
     (kw_function)
     name: (qualified_name
       (qualified_name
@@ -268,4 +268,3 @@ AS
                                               (number))))))))))))))
                     (rparen)))))))))
     (semicolon)))
-
