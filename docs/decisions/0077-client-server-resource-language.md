@@ -2,6 +2,17 @@
 
 **Status:** Accepted
 
+**Implementation status:** The source/parser/compiler/artifact resource surface
+and focused client lifecycle checks are implemented. Installed
+resource/transport/action proof paths are present in
+`crates/orna-server/tests/standard_database.rs`, but the PostgreSQL-backed
+tests are marked `#[ignore]` because they require the
+Compose PostgreSQL development service; no local Compose result is claimed
+here.
+Transport and executable action boundaries are maintained by successor ADRs
+[0078](0078-client-server-resource-transport.md) and
+[0079](0079-client-action-values.md).
+
 ## Decision
 
 Implement the source surface accepted by spec ADR 0017. CLIENT-to-SERVER work
@@ -75,7 +86,10 @@ ordinary expression call rules from work ADR 0068.
 ## Actions
 
 The action language in this ADR is conceptual and is bounded for executable v1
-by ADR 0079. The accepted executable v1 constructor is `std.action.call` only.
+by [ADR 0079](0079-client-action-values.md). SERVER actions use the accepted
+resource transport and scheduling boundary in
+[ADR 0078](0078-client-server-resource-transport.md). The accepted executable
+v1 constructor is `std.action.call` only.
 `std.action.sequence` and `std.action.parallel` are reserved and rejected
 until a later scheduler contract. A constructor does not submit work. A trigger
 submits a new resource request with a new request identity and generation under
@@ -179,24 +193,36 @@ The language slice requires focused parser/compiler tests for:
 5. `AWAIT` in `LET`, assignment, and `RETURN` positions;
 6. rejection of `AWAIT` in SERVER bodies, arbitrary non-suspending expressions,
    and malformed resource operands;
-7. action construction without submission and action target/capability checks;
+7. action construction without submission and action target/capability checks,
+   as bounded by successor [ADR 0079](0079-client-action-values.md);
 8. plan round trips that preserve call-site, target revision, argument identity,
    and resource kind without principal or grant fields.
 
 An installed host proof must invoke one parameterised SERVER function from a
 CLIENT resource and show a checked typed result. The proof must also show a
 stale completion cannot update the resource and that a denied capability or
-server authorisation returns the redacted error form.
+server authorisation returns the redacted error form. The repository proof path
+is Compose-gated in `crates/orna-server/tests/standard_database.rs` and is
+marked `#[ignore]` until the Compose PostgreSQL development service is
+available; no local Compose result is claimed.
 
 ## Deferred surface
 
 Virtual models, automatic stream replay, cursor semantics, cleanup/finally
 syntax, graphical event bindings, and reflective gateways remain outside this
-ADR. The transport and server execution details are defined by work ADR 0078.
+ADR. The transport and server execution details are defined by successor
+[ADR 0078](0078-client-server-resource-transport.md), and executable action
+values by successor [ADR 0079](0079-client-action-values.md).
 
 ## Precedence
 
-This ADR implements spec ADR 0017 and extends work ADR 0068. Work ADRs 0060,
-0069, 0070, 0071, 0073, and 0074 remain authoritative for capabilities, state,
-resource identity, value transport, and local lifecycle validation. The sealed
-`sys.invoke` boundary remains authoritative for server execution and security.
+This ADR implements spec ADR 0017 and extends work ADR 0068. Work ADR 0071
+remains authoritative for resource identity and lifecycle;
+successor ADR 0078 governs transport/scheduling, and successor ADR 0079 governs
+executable action values. Work ADRs 0060, 0069, 0070, 0073, and 0074 remain
+authoritative for capabilities, state, value transport, and local lifecycle
+validation. Adjacent headless Inspector and render boundaries are defined by
+[ADR 0080](0080-client-inspector.md) and its successor
+[ADR 0081](0081-standard-inspector-render-contract.md);
+they do not broaden this resource contract. The sealed `sys.invoke` boundary
+remains authoritative for server execution and security.
