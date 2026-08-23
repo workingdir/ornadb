@@ -5634,8 +5634,31 @@ fn validate_inspect_render_contract(
     };
     let snapshot = decode_inspect_carrier(active, snapshot, SYS_INSPECT_SNAPSHOT_TYPE_ID)
         .map_err(|_| inspect_render_contract_error(context))?;
-    inspect_snapshot_target_from_envelope(active, &snapshot)
+    let snapshot_target = inspect_snapshot_target_from_envelope(active, &snapshot)
         .map_err(|_| inspect_render_contract_error(context))?;
+
+    // The render provider is a generic executor boundary, so it cannot rely on
+    // the installed server provider's request-side checks. Validate every
+    // carrier against the decoded snapshot before allowing the provider to
+    // render. ORNA-INSPECT/1 intentionally omits target provenance from the
+    // envelope; projection rows retain that fact in memory when populated.
+    // Empty projections remain valid, but then there is no carrier-local target
+    // evidence to compare (the opaque API exposes no generic target metadata).
+    for ((_, value), (_, expected_type, expected_kind)) in arguments
+        .iter()
+        .zip(INSPECT_RENDER_CARRIER_SIGNATURE)
+    {
+        let carrier = decode_inspect_carrier(active, value, expected_type)
+            .map_err(|_| inspect_render_contract_error(context))?;
+        inspect_carrier_matches_snapshot(
+            active,
+            &snapshot,
+            snapshot_target,
+            expected_kind,
+            &carrier,
+        )
+        .map_err(|_| inspect_render_contract_error(context))?;
+    }
     Ok(())
 }
 
@@ -5697,6 +5720,123 @@ fn decode_inspect_carrier(
         return Err(inspect_carrier_error("inspect.malformed_carrier"));
     }
     decode_inspect_carrier_payload(active, opaque.canonical_payload(), expected)
+}
+
+/// Decodes one canonical ORV5 row into the opaque byte payload emitted by the
+/// installed Inspector provider.
+///
+/// Projection carrier provenance is carried in this in-memory row prefix, not
+/// in the ORNA-INSPECT/1 envelope. Keep this decoder local to the client: the
+/// opaque carrier API intentionally exposes no generic row/provenance object.
+fn decode_inspect_carrier_row_payload(
+    active: &ActiveDatabaseRevision,
+    row: &[u8],
+) -> Result<Vec<u8>, ClientInspectError> {
+    let Some(standard) = active.catalogue_hash_context().standard() else {
+        return Err(inspect_carrier_error("inspect.projection_failed"));
+    };
+    let registry = registered_opaque_codecs(standard)
+        .map_err(|_| inspect_carrier_error("inspect.projection_failed"))?;
+    let row = decode_constructed_value(active, &registry, row)
+        .map_err(|_| inspect_carrier_error("inspect.malformed_carrier"))?;
+    let RuntimeValue::Constructed(constructed) = row else {
+        return Err(inspect_carrier_error("inspect.malformed_carrier"));
+    };
+    let TypeDescriptorKind::List(child) = constructed.descriptor().kind() else {
+        return Err(inspect_carrier_error("inspect.malformed_carrier"));
+    };
+    if child.kind() != TypeDescriptorKind::Named(BINARY_LARGE_OBJECT_TYPE_ID) {
+        return Err(inspect_carrier_error("inspect.malformed_carrier"));
+    }
+    let ConstructedValueKind::List(values) = constructed.kind() else {
+        return Err(inspect_carrier_error("inspect.malformed_carrier"));
+    };
+    let [RuntimeValue::Bytes(payload)] = values else {
+        return Err(inspect_carrier_error("inspect.malformed_carrier"));
+    };
+    Ok(payload.clone())
+}
+
+/// Returns the target invocation proven by projection rows, if any.
+///
+/// A projection with no rows is valid (notably the currently accepted
+/// resource/UI carriers), so it returns None rather than treating an empty
+/// payload as malformed. A non-empty row must carry the common provenance
+/// prefix emitted by the installed provider; accepting an unrecognised row
+/// would let a custom provider bypass target/revision binding.
+fn inspect_projection_target_from_envelope(
+    active: &ActiveDatabaseRevision,
+    envelope: &InspectCarrierEnvelope,
+    expected_kind: InspectCarrierKind,
+) -> Result<Option<InvocationId>, ClientInspectError> {
+    let mut target = None;
+    for row in envelope.rows() {
+        let payload = decode_inspect_carrier_row_payload(active, row)?;
+        if payload.len() < 91 || payload[0] != expected_kind.tag() {
+            return Err(inspect_carrier_error("inspect.malformed_carrier"));
+        }
+        if payload[9..17] != [0; 8]
+            || u64::from_be_bytes(payload[17..25].try_into().expect("projection epoch width"))
+                != envelope.epoch_id()
+        {
+            return Err(inspect_carrier_error("inspect.epoch_mismatch"));
+        }
+        if payload[57..73] != active.pair().source().to_bytes()
+            || payload[73..89] != active.pair().catalogue().to_bytes()
+        {
+            return Err(inspect_carrier_error("inspect.epoch_mismatch"));
+        }
+        if payload[89] != 1 || payload[90] > 4 {
+            return Err(inspect_carrier_error("inspect.malformed_carrier"));
+        }
+        let row_target = InvocationId::from_bytes(
+            payload[25..41]
+                .try_into()
+                .expect("projection target width"),
+        );
+        if row_target.to_bytes() == [0; 16] {
+            return Err(inspect_carrier_error("inspect.invalid_target"));
+        }
+        if target.is_some_and(|known| known != row_target) {
+            return Err(inspect_carrier_error("inspect.epoch_mismatch"));
+        }
+        target = Some(row_target);
+    }
+    Ok(target)
+}
+
+/// Checks one carrier's accepted provenance against the render snapshot.
+fn inspect_carrier_matches_snapshot(
+    active: &ActiveDatabaseRevision,
+    snapshot: &InspectCarrierEnvelope,
+    snapshot_target: InvocationId,
+    expected_kind: InspectCarrierKind,
+    carrier: &InspectCarrierEnvelope,
+) -> Result<(), ClientInspectError> {
+    if carrier.carrier_kind() != expected_kind {
+        return Err(inspect_carrier_error("inspect.malformed_carrier"));
+    }
+    if carrier.source_revision_id() != snapshot.source_revision_id()
+        || carrier.catalogue_revision_id() != snapshot.catalogue_revision_id()
+    {
+        return Err(inspect_carrier_error("inspect.epoch_mismatch"));
+    }
+    if carrier.epoch_id() != snapshot.epoch_id() {
+        return Err(inspect_carrier_error("inspect.epoch_mismatch"));
+    }
+    if expected_kind == InspectCarrierKind::Snapshot {
+        let target = inspect_snapshot_target_from_envelope(active, carrier)?;
+        if target != snapshot_target {
+            return Err(inspect_carrier_error("inspect.epoch_mismatch"));
+        }
+        return Ok(());
+    }
+    if let Some(target) = inspect_projection_target_from_envelope(active, carrier, expected_kind)?
+        && target != snapshot_target
+    {
+        return Err(inspect_carrier_error("inspect.epoch_mismatch"));
+    }
+    Ok(())
 }
 
 fn inspect_projection_result_type(projection: InspectProjection) -> TypeId {
@@ -5846,6 +5986,7 @@ fn evaluate_inspect_expression(
         });
     }
     let mut snapshot_epoch_id = None;
+    let mut snapshot_envelope_for_projection = None;
     let target_invocation_id;
     let mut snapshot_options = None;
     let operation = match operation {
@@ -5912,6 +6053,7 @@ fn evaluate_inspect_expression(
             }
             target_invocation_id = Some(invocation);
             snapshot_epoch_id = Some(snapshot_envelope.epoch_id());
+            snapshot_envelope_for_projection = Some(snapshot_envelope);
             ClientInspectOperation::Projection {
                 projection: *projection,
                 snapshot,
@@ -5970,14 +6112,30 @@ fn evaluate_inspect_expression(
         });
     }
     if let Some(expected_target) = target_invocation_id {
-        if matches!(operation, ClientInspectOperation::Snapshot { .. }) {
-            let actual_target = inspect_snapshot_target_from_envelope(active, &envelope)
+        match operation {
+            ClientInspectOperation::Snapshot { .. } => {
+                let actual_target = inspect_snapshot_target_from_envelope(active, &envelope)
+                    .map_err(|source| ClientExecutionError::Inspect { context, source })?;
+                if actual_target != expected_target {
+                    return Err(ClientExecutionError::Inspect {
+                        context,
+                        source: inspect_carrier_error("inspect.epoch_mismatch"),
+                    });
+                }
+            }
+            ClientInspectOperation::Projection { projection, .. } => {
+                let snapshot = snapshot_envelope_for_projection
+                    .as_ref()
+                    .expect("projection operations retain their decoded snapshot");
+                inspect_carrier_matches_snapshot(
+                    active,
+                    snapshot,
+                    expected_target,
+                    InspectCarrierKind::from_type_id(inspect_projection_result_type(projection))
+                        .expect("sealed projection type must map to a carrier"),
+                    &envelope,
+                )
                 .map_err(|source| ClientExecutionError::Inspect { context, source })?;
-            if actual_target != expected_target {
-                return Err(ClientExecutionError::Inspect {
-                    context,
-                    source: inspect_carrier_error("inspect.epoch_mismatch"),
-                });
             }
         }
     }
@@ -7482,6 +7640,148 @@ mod tests {
                 source: super::ClientInspectError::Failed(code), ..
             }) if code == "inspect.malformed_carrier"
         ));
+    }
+
+    #[test]
+    fn inspect_render_rejects_mixed_target_before_rendering() {
+        let verified = orna_standard::verify_standard_library_snapshot(
+            orna_standard::retained_standard_library_snapshot().unwrap(),
+        )
+        .unwrap();
+        let active = empty_version_two_active(&verified);
+        let pair = active.pair();
+        let function = FunctionId::from_bytes([0x90; 16]);
+        let function_revision = FunctionRevisionId::from_bytes([0x8f; 16]);
+        let target = InvocationId::from_bytes([0x91; 16]);
+        let epoch = 7_u64;
+        let parameter = ParameterId::from_bytes([0x92; 16]);
+        let context = super::ClientExecutionContext {
+            pair,
+            function,
+            function_revision,
+            parent_invocation_id: InvocationId::from_bytes([0x93; 16]),
+            observer_lineage: None,
+        };
+        let encode_row = |payload: Vec<u8>| {
+            let standard = active
+                .catalogue_hash_context()
+                .standard()
+                .expect("standard catalogue");
+            let registry = super::registered_opaque_codecs(standard).expect("opaque registry");
+            let descriptor = super::TypeDescriptor::list(super::TypeDescriptor::named(
+                super::BINARY_LARGE_OBJECT_TYPE_ID,
+            ))
+            .expect("row descriptor");
+            let value = super::RuntimeValue::list(
+                &active,
+                descriptor,
+                vec![super::RuntimeValue::Bytes(payload)],
+            )
+            .expect("row value");
+            orna_protocol::encode_constructed_value(&active, &registry, &value).expect("encoded row")
+        };
+
+        let mut snapshot_row = vec![1, 0, 0, 0, 0, 0, 0, 0, 0];
+        snapshot_row.extend_from_slice(&[0; 8]);
+        snapshot_row.extend_from_slice(&epoch.to_be_bytes());
+        snapshot_row.extend_from_slice(&target.to_bytes());
+        snapshot_row.extend_from_slice(&[0x94; 16]);
+        snapshot_row.push(1);
+        snapshot_row.extend_from_slice(&0_u64.to_be_bytes());
+        snapshot_row.push(0);
+        snapshot_row.push(0);
+        let snapshot_bytes = super::InspectCarrierEnvelope::new(
+            super::InspectCarrierKind::Snapshot,
+            epoch,
+            pair.source(),
+            pair.catalogue(),
+            vec![encode_row(snapshot_row)],
+        )
+        .expect("snapshot envelope")
+        .encode()
+        .expect("snapshot bytes");
+        let snapshot = super::RuntimeValue::Opaque(
+            super::OpaqueValue::new_inspect_carrier(
+                &active,
+                super::SYS_INSPECT_SNAPSHOT_TYPE_ID,
+                snapshot_bytes,
+            )
+            .expect("snapshot carrier"),
+        );
+
+        let mut mixed_row = vec![3, 0, 0, 0, 0, 0, 0, 0, 0];
+        mixed_row.extend_from_slice(&[0; 8]);
+        mixed_row.extend_from_slice(&epoch.to_be_bytes());
+        mixed_row.extend_from_slice(&[0xaa; 16]);
+        mixed_row.extend_from_slice(&[0x94; 16]);
+        mixed_row.extend_from_slice(&pair.source().to_bytes());
+        mixed_row.extend_from_slice(&pair.catalogue().to_bytes());
+        mixed_row.push(1);
+        mixed_row.push(0);
+        let mixed_bytes = super::InspectCarrierEnvelope::new(
+            super::InspectCarrierKind::Calls,
+            epoch,
+            pair.source(),
+            pair.catalogue(),
+            vec![encode_row(mixed_row)],
+        )
+        .expect("mixed projection envelope")
+        .encode()
+        .expect("mixed projection bytes");
+        let mixed = super::RuntimeValue::Opaque(
+            super::OpaqueValue::new_inspect_carrier(
+                &active,
+                super::SYS_INSPECT_CALLS_TYPE_ID,
+                mixed_bytes,
+            )
+            .expect("mixed projection carrier"),
+        );
+
+        let expression = orna_artifact::client_plan::ClientExpressionNode::Inspect {
+            operation: orna_artifact::client_plan::InspectOperationNode::Projection {
+                projection: InspectProjection::Calls,
+                snapshot: Box::new(orna_artifact::client_plan::ClientExpressionNode::ParameterRead {
+                    parameter,
+                }),
+            },
+        };
+        let provider_calls = Rc::new(Cell::new(0_u8));
+        let provider_calls_for_executor = Rc::clone(&provider_calls);
+        let mut executor = super::DeterministicClientResourceExecutor::new(
+            |_: &super::ClientResourceRequest| Ok::<_, String>(super::RuntimeValue::Boolean(false)),
+        )
+        .with_inspect(move |_| {
+            provider_calls_for_executor.set(provider_calls_for_executor.get() + 1);
+            Ok(mixed.clone())
+        });
+        let mut executor_slot: Option<&mut dyn super::ClientResourceExecutor> = Some(&mut executor);
+        let mut state = super::ClientStateStore::new();
+        let mut locals = std::collections::HashMap::new();
+        let arguments = [(parameter, snapshot)];
+
+        let result = super::evaluate_expression_plan(
+            &active,
+            &expression,
+            context,
+            super::ObserverLineage::compatibility(context),
+            ResolvedType::Value(super::SYS_INSPECT_CALLS_TYPE_ID),
+            &arguments,
+            &[],
+            &super::capability::LocalCapabilityGrantSet::new(),
+            &mut state,
+            0,
+            PrincipalId::from_bytes([0x95; 16]),
+            &mut executor_slot,
+            &mut locals,
+        );
+        assert!(matches!(
+            result,
+            Err(super::ClientExecutionError::Inspect {
+                source: super::ClientInspectError::Failed(code),
+                ..
+            }) if code == "inspect.epoch_mismatch"
+        ));
+        assert_eq!(provider_calls.get(), 1, "the mixed carrier came from the custom provider");
     }
 
     #[test]
