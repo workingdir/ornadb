@@ -62,6 +62,7 @@
 (update_statement table: (qualified_name) @type)
 (delete_statement table: (qualified_name) @type)
 (call_statement callee: (invocation name: (qualified_name) @function))
+(client_call_expression callee: (client_call_callee) @function)
 
 ; Names and fields
 (parameter_definition name: (identifier) @parameter)
