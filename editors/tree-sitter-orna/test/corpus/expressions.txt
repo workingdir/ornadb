@@ -95,6 +95,53 @@ AS
     (semicolon)))
 
 ====================
+closed CLIENT AWAIT resource expression
+====================
+
+CREATE CLIENT FUNCTION demo.awaited()
+RETURNS TEXT
+AS AWAIT std.data.resource();
+
+---
+
+(source_file
+  (create_client_function_statement
+    (kw_create)
+    (kw_client)
+    (kw_function)
+    name: (qualified_name
+      (qualified_name
+        (identifier))
+      (dot)
+      (identifier))
+    parameters: (parameter_list
+      (lparen)
+      (rparen))
+    (kw_returns)
+    returns: (return_type_spec
+      (type_spec
+        (scalar_type
+          (kw_text))))
+    body: (client_expression_body
+      (kw_as)
+      expression: (client_expression
+        (client_primary_expression
+          (client_await_expression
+            (kw_await)
+            expression: (client_expression
+              (client_primary_expression
+                (client_call_expression
+                  callee: (client_call_callee
+                    (identifier)
+                    (dot)
+                    (identifier)
+                    (dot)
+                    (identifier))
+                  (lparen)
+                  (rparen))))))))
+    (semicolon)))
+
+====================
 expression literals and qualified names
 ====================
 
