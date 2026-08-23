@@ -44,23 +44,28 @@ Source apply performs these operations in order:
 8. call `prepare_standard_application` with the recovered active
    `RevisionPair` as the expected base;
 9. construct the bounded success document before database mutation;
-10. call `PostgresKernel::apply`; and
+10. call `PostgresKernel::apply_source_apply`; and
 11. write the success document only after apply has committed, recovered the
     exact candidate, and closed its PostgreSQL session successfully.
 
 The recovered pair in step 4 is the expected base required by work ADR 0003.
-It is not an optional command argument. `PostgresKernel::apply` locks the
-active pair and compares it with the prepared expected base before it installs
-physical changes. A concurrent winner therefore makes the other candidate
-stale. A stale candidate cannot be silently rechecked or rebased in the same
-command.
+It is not an optional command argument. `PostgresKernel::apply_source_apply`
+locks the active pair and compares it with the prepared expected base before it
+installs physical changes. A concurrent winner therefore makes the other
+candidate stale. A stale candidate cannot be silently rechecked or rebased in
+the same command.
 
-The existing kernel apply transaction remains the only activation seam. It
-contains physical PostgreSQL changes, exact source storage, lossless syntax
-evidence, semantic catalogue records, executable artefacts, revision status
-changes, active-pair replacement, and post-apply recovery. It commits all of
-them or none of them. Host code does not install physical tables, persist
-catalogue rows, or change the active pair itself.
+The existing kernel apply transaction remains the only activation seam. The
+`apply_source_apply` entry point uses that transaction for physical PostgreSQL
+changes, exact source storage, lossless syntax evidence, semantic catalogue
+records, executable artefacts, revision status changes, active-pair
+replacement, post-apply recovery, and one protected `source_apply` audit event.
+The event records the fixed catalogue-health service principal, the candidate
+source and catalogue revisions, and `source_apply:committed`. The event is
+appended before commit. An audit append or recovery failure rolls back the
+candidate activation with the rest of the transaction. Host code does not
+install physical tables, persist catalogue rows, or change the active pair
+itself.
 
 ## Success output
 
