@@ -2539,6 +2539,17 @@ fn valid_resource_invocation_id(invocation: orna_core::InvocationId) -> bool {
     invocation.to_bytes().iter().any(|byte| *byte != 0)
 }
 
+/// Signals broker shutdown to one resource without waiting for its bounded
+/// completion queue. Existing terminal outcomes stay ahead of the transport
+/// failure; when the queue is full, dropping this sender lets the receiver
+/// drain its bounded backlog and then observe closure.
+fn signal_broker_resource_cleanup(
+    completion: Sender<Result<ResourceTransportOutcome, ResourceTransportFailure>>,
+) {
+    let _ = completion.try_send(Err(ResourceTransportFailure::Transport));
+    drop(completion);
+}
+
 enum ResourceFrameResult {
     Continue,
     Completed,
@@ -2765,10 +2776,7 @@ async fn run_shared_invoke_broker(
         let _ = root.response.send(Err(ResourceTransportFailure::Transport));
     }
     for (_, resource) in resources {
-        let _ = resource
-            .completion
-            .send(Err(ResourceTransportFailure::Transport))
-            .await;
+        signal_broker_resource_cleanup(resource.completion);
     }
 }
 
@@ -5421,6 +5429,68 @@ mod tests {
         assert_eq!(decoded.bytes, frame);
         reader.abort();
         let _ = reader.await;
+    }
+
+    #[tokio::test]
+    async fn broker_cleanup_completion_signal_does_not_wait_for_full_queue() {
+        let (sender, mut receiver) = mpsc::channel::<
+            Result<ResourceTransportOutcome, ResourceTransportFailure>,
+        >(BROKER_RESOURCE_COMPLETION_CAPACITY);
+        for _ in 0..BROKER_RESOURCE_COMPLETION_CAPACITY {
+            sender
+                .send(Ok(ResourceTransportOutcome::StreamCompleted {
+                    nested_invocation_id: InvocationId::from_bytes([0x40; 16]),
+                }))
+                .await
+                .expect("queue accepts its configured capacity");
+        }
+
+        tokio::time::timeout(
+            Duration::from_millis(100),
+            async { signal_broker_resource_cleanup(sender) },
+        )
+        .await
+        .expect("cleanup signal must not wait for a receiver");
+
+        for _ in 0..BROKER_RESOURCE_COMPLETION_CAPACITY {
+            assert!(matches!(
+                receiver.recv().await,
+                Some(Ok(ResourceTransportOutcome::StreamCompleted {
+                    nested_invocation_id,
+                })) if nested_invocation_id == InvocationId::from_bytes([0x40; 16])
+            ));
+        }
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), receiver.recv())
+                .await
+                .expect("full cleanup queue must close after its backlog drains")
+                .is_none()
+        );
+
+        let (sender, mut receiver) = mpsc::channel(BROKER_RESOURCE_COMPLETION_CAPACITY);
+        sender
+            .send(Ok(ResourceTransportOutcome::StreamCompleted {
+                nested_invocation_id: InvocationId::from_bytes([0x41; 16]),
+            }))
+            .await
+            .expect("queue accepts a buffered terminal outcome");
+        signal_broker_resource_cleanup(sender);
+        assert!(matches!(
+            receiver.recv().await,
+            Some(Ok(ResourceTransportOutcome::StreamCompleted {
+                nested_invocation_id,
+            })) if nested_invocation_id == InvocationId::from_bytes([0x41; 16])
+        ));
+        assert!(matches!(
+            receiver.recv().await,
+            Some(Err(ResourceTransportFailure::Transport))
+        ));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), receiver.recv())
+                .await
+                .expect("cleanup queue must close after publishing transport failure")
+                .is_none()
+        );
     }
 
     #[tokio::test]
