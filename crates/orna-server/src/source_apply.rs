@@ -344,7 +344,10 @@ async fn apply_source_bundle(
         .map_err(|source| InstalledSourceApplyError::Preparation { source })?;
     let expected_pair = candidate.candidate_pair();
     let document = build_success_document(expected_pair, candidate.candidate())?;
-    let committed = kernel.apply(&candidate).await.map_err(map_apply_error)?;
+    let committed = kernel
+        .apply_source_apply(&candidate)
+        .await
+        .map_err(map_apply_error)?;
     if committed.pair() != expected_pair
         || committed.source().bundle_hash() != candidate.source().bundle_hash()
         || committed.source().revision_hash() != candidate.source().revision_hash()

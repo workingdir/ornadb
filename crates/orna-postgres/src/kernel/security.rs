@@ -5361,21 +5361,8 @@ pub(crate) async fn append_security_audit_event(
     let authorising_principal = decision
         .authorising_principal()
         .map(|principal| principal.to_bytes().to_vec());
-    let (function, source_revision, catalogue_revision) = match decision.target() {
-        Some(target) => (
-            Some(target.function().to_bytes().to_vec()),
-            Some(target.revision().source().to_bytes().to_vec()),
-            Some(target.revision().catalogue().to_bytes().to_vec()),
-        ),
-        None => (
-            decision
-                .user_state_root_function()
-                .or_else(|| decision.security_admin_target())
-                .map(|function| function.to_bytes().to_vec()),
-            None,
-            None,
-        ),
-    };
+    let (function, source_revision, catalogue_revision) =
+        encode_security_audit_identity_columns(&decision);
     let denial_reason = match decision.denial() {
         None => decision
             .user_state_operation()
@@ -5396,6 +5383,11 @@ pub(crate) async fn append_security_audit_event(
                 decision
                     .security_admin_operation()
                     .map(encode_security_admin_audit_detail)
+            })
+            .or_else(|| {
+                decision
+                    .source_apply_candidate()
+                    .map(|_| encode_source_apply_audit_detail().to_owned())
             }),
         Some(SecurityAuditDenial::Authentication(reason)) => {
             Some(encode_authentication_audit_denial(reason).to_owned())
@@ -7762,6 +7754,41 @@ fn decode_security_audit_event(row: &Row) -> Result<SecurityAuditEvent, Postgres
                 reason,
             )
         }
+        ("source_apply", "allowed")
+            if effective_principal.is_none()
+                && authorising_principal.is_none()
+                && function.is_none()
+                && source_revision.is_some()
+                && catalogue_revision.is_some() =>
+        {
+            decode_source_apply_audit_detail(
+                &require_audit_value(
+                    denial_reason,
+                    &record,
+                    "allowed source apply audit requires a committed detail",
+                )?,
+                &record,
+            )?;
+            SecurityAuditDecision::recover_source_apply_allowed(
+                require_audit_value(
+                    session_principal,
+                    &record,
+                    "allowed source apply audit requires a session principal",
+                )?,
+                RevisionPair::new(
+                    require_audit_value(
+                        source_revision,
+                        &record,
+                        "source apply audit requires a source revision",
+                    )?,
+                    require_audit_value(
+                        catalogue_revision,
+                        &record,
+                        "source apply audit requires a catalogue revision",
+                    )?,
+                ),
+            )
+        }
         ("security_admin", "allowed")
             if effective_principal.is_none()
                 && authorising_principal.is_none()
@@ -7945,6 +7972,33 @@ fn encode_execute_audit_denial(reason: orna_core::security::ExecuteDenial) -> &'
     }
 }
 
+fn encode_security_audit_identity_columns(
+    decision: &SecurityAuditDecision,
+) -> (Option<Vec<u8>>, Option<Vec<u8>>, Option<Vec<u8>>) {
+    if let Some(candidate) = decision.source_apply_candidate() {
+        return (
+            None,
+            Some(candidate.source().to_bytes().to_vec()),
+            Some(candidate.catalogue().to_bytes().to_vec()),
+        );
+    }
+    match decision.target() {
+        Some(target) => (
+            Some(target.function().to_bytes().to_vec()),
+            Some(target.revision().source().to_bytes().to_vec()),
+            Some(target.revision().catalogue().to_bytes().to_vec()),
+        ),
+        None => (
+            decision
+                .user_state_root_function()
+                .or_else(|| decision.security_admin_target())
+                .map(|function| function.to_bytes().to_vec()),
+            None,
+            None,
+        ),
+    }
+}
+
 fn encode_security_audit_kind(kind: SecurityAuditKind) -> &'static str {
     match kind {
         SecurityAuditKind::Authentication => "authentication",
@@ -7953,11 +8007,29 @@ fn encode_security_audit_kind(kind: SecurityAuditKind) -> &'static str {
         SecurityAuditKind::UserState => "user_state",
         SecurityAuditKind::Inspect => "inspect",
         SecurityAuditKind::SecurityAdmin => "security_admin",
+        SecurityAuditKind::SourceApply => "source_apply",
     }
 }
 
 fn encode_capability_audit_denial(capability: &str) -> String {
     format!("capability:{capability}")
+}
+fn encode_source_apply_audit_detail() -> &'static str {
+    "source_apply:committed"
+}
+
+fn decode_source_apply_audit_detail(
+    value: &str,
+    record: &str,
+) -> Result<(), PostgresKernelError> {
+    if value == encode_source_apply_audit_detail() {
+        Ok(())
+    } else {
+        Err(audit_invariant(
+            record,
+            "source apply audit detail is unsupported",
+        ))
+    }
 }
 fn encode_user_state_audit_detail(operation: UserStateAuditOperation, cell_count: u64) -> String {
     let operation = match operation {
@@ -9250,6 +9322,34 @@ mod tests {
         assert_eq!(denied.outcome(), SecurityAuditOutcome::Denied);
         assert_eq!(allowed.target(), Some(target));
         assert_eq!(denied.target(), Some(target));
+    }
+
+    #[test]
+    fn source_apply_audit_codec_preserves_candidate_pair_and_committed_detail() {
+        let principal = PrincipalId::from_bytes([0xa5; 16]);
+        let candidate = RevisionPair::new(
+            SourceRevisionId::from_bytes([0xa6; 16]),
+            CatalogueRevisionId::from_bytes([0xa7; 16]),
+        );
+        let decision = SecurityAuditDecision::recover_source_apply_allowed(principal, candidate);
+
+        assert_eq!(encode_security_audit_kind(decision.kind()), "source_apply");
+        assert_eq!(encode_source_apply_audit_detail(), "source_apply:committed");
+        decode_source_apply_audit_detail("source_apply:committed", "source-apply")
+            .expect("committed source apply detail must decode");
+        assert_eq!(
+            encode_security_audit_identity_columns(&decision),
+            (
+                None,
+                Some(candidate.source().to_bytes().to_vec()),
+                Some(candidate.catalogue().to_bytes().to_vec()),
+            )
+        );
+        assert_eq!(decision.outcome(), SecurityAuditOutcome::Allowed);
+        assert_eq!(decision.session_principal(), Some(principal));
+        assert_eq!(decision.source_apply_candidate(), Some(candidate));
+        assert_eq!(decision.target(), None);
+        assert_eq!(decision.denial(), None);
     }
 
     #[test]

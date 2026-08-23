@@ -29,6 +29,7 @@ use orna_standard::{
     STANDARD_SOURCE_REVISION_ID, StandardUpgrade, StandardUpgradeIdentity,
     retained_standard_library_snapshot, verify_standard_library_snapshot,
 };
+use orna_core::security::{CATALOGUE_HEALTH_SERVICE_PRINCIPAL_ID, SecurityAuditDecision};
 use orna_core::system::{
     SYS_SECURITY_ACTIVE_ROLES_FUNCTION_ID, SYS_SECURITY_EFFECTIVE_PRINCIPAL_FUNCTION_ID,
     SYS_SECURITY_SESSION_PRINCIPAL_FUNCTION_ID, system_function_by_id,
@@ -40,7 +41,7 @@ use crate::{
     decode::{DurableRecord, identity_bytes},
     physical::{establish_trusted_search_path, install_physical_plan},
     recovery::recover_active_revision,
-    security::is_admitted_security_identity,
+    security::{append_security_audit_event, is_admitted_security_identity},
 };
 
 const ACTIVE_RELATION: &str = "_orna_kernel.active_revision";
@@ -119,7 +120,25 @@ impl PostgresKernel {
         candidate: &DeployableRevision,
     ) -> Result<ActiveDatabaseRevision, PostgresKernelError> {
         let mut session = self.open().await?;
-        let apply_result = apply_client(&mut session.client, candidate).await;
+        let apply_result = apply_client(&mut session.client, candidate, false).await;
+        let shutdown_result = session.shutdown().await;
+        match (apply_result, shutdown_result) {
+            (Ok(active), Ok(())) => Ok(active),
+            (Err(error), _) | (Ok(_), Err(error)) => Err(error),
+        }
+    }
+
+    /// Installs a source-apply candidate and records its committed candidate
+    /// pair in protected audit using the reserved catalogue-health principal.
+    ///
+    /// The principal is fixed by the installed host contract; callers cannot
+    /// provide request-derived audit identity.
+    pub async fn apply_source_apply(
+        &self,
+        candidate: &DeployableRevision,
+    ) -> Result<ActiveDatabaseRevision, PostgresKernelError> {
+        let mut session = self.open().await?;
+        let apply_result = apply_client(&mut session.client, candidate, true).await;
         let shutdown_result = session.shutdown().await;
         match (apply_result, shutdown_result) {
             (Ok(active), Ok(())) => Ok(active),
@@ -170,6 +189,7 @@ impl PostgresKernel {
 async fn apply_client(
     client: &mut Client,
     candidate: &DeployableRevision,
+    source_apply_audit: bool,
 ) -> Result<ActiveDatabaseRevision, PostgresKernelError> {
     let transaction = client
         .build_transaction()
@@ -178,7 +198,7 @@ async fn apply_client(
         .start()
         .await
         .map_err(PostgresKernelError::Database)?;
-    let result = apply_transaction(&transaction, candidate).await;
+    let result = apply_transaction(&transaction, candidate, source_apply_audit).await;
     match result {
         Ok(active) => transaction
             .commit()
@@ -221,6 +241,7 @@ async fn apply_standard_upgrade_client(
 async fn apply_transaction(
     transaction: &Transaction<'_>,
     candidate: &DeployableRevision,
+    source_apply_audit: bool,
 ) -> Result<ActiveDatabaseRevision, PostgresKernelError> {
     // This must remain the first statement. It prevents untrusted schemas from
     // changing the meaning of every later static query and DDL statement.
@@ -247,6 +268,7 @@ async fn apply_transaction(
         &encoder,
         None,
         candidate.catalogue_hash_context().standard(),
+        source_apply_audit,
     )
     .await
 }
@@ -290,6 +312,7 @@ async fn apply_standard_upgrade_transaction(
         &encoder,
         Some(standard),
         Some(standard),
+        false,
     )
     .await
 }
@@ -355,6 +378,7 @@ async fn apply_materialized_candidate(
     encoder: &CandidateEncoder<'_>,
     install_standard: Option<&VerifiedStandardLibrarySnapshot>,
     authority_standard: Option<&VerifiedStandardLibrarySnapshot>,
+    source_apply_audit: bool,
 ) -> Result<ActiveDatabaseRevision, PostgresKernelError> {
     let plan =
         plan_physical_changes(active, candidate).map_err(PostgresKernelError::PhysicalPlan)?;
@@ -385,6 +409,16 @@ async fn apply_materialized_candidate(
         return Err(invariant(
             "post-apply recovery must exactly reproduce the candidate hashes",
         ));
+    }
+    if source_apply_audit {
+        append_security_audit_event(
+            transaction,
+            SecurityAuditDecision::recover_source_apply_allowed(
+                CATALOGUE_HEALTH_SERVICE_PRINCIPAL_ID,
+                candidate.candidate_pair(),
+            ),
+        )
+        .await?;
     }
     Ok(recovered)
 }
