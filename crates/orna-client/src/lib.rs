@@ -5775,9 +5775,8 @@ fn inspect_projection_target_from_envelope(
         if payload.len() < 91 || payload[0] != expected_kind.tag() {
             return Err(inspect_carrier_error("inspect.malformed_carrier"));
         }
-        if payload[9..17] != [0; 8]
-            || u64::from_be_bytes(payload[17..25].try_into().expect("projection epoch width"))
-                != envelope.epoch_id()
+        if u64::from_be_bytes(payload[17..25].try_into().expect("projection epoch width"))
+            != envelope.epoch_id()
         {
             return Err(inspect_carrier_error("inspect.epoch_mismatch"));
         }
@@ -7681,9 +7680,10 @@ mod tests {
             orna_protocol::encode_constructed_value(&active, &registry, &value).expect("encoded row")
         };
 
+        let mut epoch_bytes = [0x96; 16];
+        epoch_bytes[8..].copy_from_slice(&epoch.to_be_bytes());
         let mut snapshot_row = vec![1, 0, 0, 0, 0, 0, 0, 0, 0];
-        snapshot_row.extend_from_slice(&[0; 8]);
-        snapshot_row.extend_from_slice(&epoch.to_be_bytes());
+        snapshot_row.extend_from_slice(&epoch_bytes);
         snapshot_row.extend_from_slice(&target.to_bytes());
         snapshot_row.extend_from_slice(&[0x94; 16]);
         snapshot_row.push(1);
@@ -7710,8 +7710,7 @@ mod tests {
         );
 
         let mut mixed_row = vec![3, 0, 0, 0, 0, 0, 0, 0, 0];
-        mixed_row.extend_from_slice(&[0; 8]);
-        mixed_row.extend_from_slice(&epoch.to_be_bytes());
+        mixed_row.extend_from_slice(&epoch_bytes);
         mixed_row.extend_from_slice(&[0xaa; 16]);
         mixed_row.extend_from_slice(&[0x94; 16]);
         mixed_row.extend_from_slice(&pair.source().to_bytes());
