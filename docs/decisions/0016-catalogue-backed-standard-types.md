@@ -1990,6 +1990,10 @@ pub enum CheckedTypeUseKind {
         owner: CheckedFunctionId,
         parameter: CheckedParameterId,
     },
+    State {
+        owner: CheckedFunctionId,
+        ordinal: u32,
+    },
     Return {
         owner: CheckedFunctionId,
         ordinal: u32,
@@ -2046,18 +2050,20 @@ impl CheckedApplicationTypeUse {
 ```
 
 The public model rustdoc describes both declared and body type uses. Each
-direct field, SERVER parameter, accepted CLIENT scalar return, accepted SERVER
-`ROWS` column, or `REF` target records its exact written target span in this
-arena. Each body `Expression` or `Result` records its complete expression
-span. `Field`, `Parameter`, and `Return` are emitted by the active checker row.
-`Parameter` currently records SERVER parameters only. Both the legacy and
-standard-backed paths retain the exact accepted diagnostic `this CLIENT
-function cannot declare parameters yet`; a successful CLIENT view's
-`parameters()` iterator is empty and remains a future-safe surface. `Return`
-records an accepted CLIENT scalar return or each accepted SERVER `ROWS` column,
-never a body result. A rejected SERVER scalar `Single` return produces no
-declaration evidence. Body-owner rows emit `Expression` and `Result`; they
-must not use `CheckedExpressionId`.
+direct field, SERVER parameter, CLIENT parameter, accepted CLIENT scalar
+return, CLIENT state slot, accepted SERVER `ROWS` column, or `REF` target
+records its exact written target span in this arena. Each body `Expression` or
+`Result` records its complete expression span. `Field`, `Parameter`, `State`,
+and `Return` are emitted by the active checker row. `Parameter` currently
+records SERVER parameters only. Both the legacy and standard-backed paths
+retain the exact accepted CLIENT-parameter diagnostic
+`this CLIENT function cannot declare parameters yet`; a successful CLIENT
+view's `parameters()` iterator is empty and remains a future-safe surface.
+`State` records each accepted CLIENT state declaration in declaration order.
+`Return` records an accepted CLIENT scalar return or each accepted SERVER
+`ROWS` column, never a body result. A rejected SERVER scalar `Single` return
+produces no declaration evidence. Body-owner rows emit `Expression` and
+`Result`; they must not use `CheckedExpressionId`.
 
 `Expression` records every accepted value-producing body expression. Its
 ordinal is zero-based deterministic preorder within the owning function body.
@@ -2068,10 +2074,10 @@ Boolean body therefore adds `Expression { ordinal: 0 }` and
 `Result { ordinal: 0 }` in its relational owner row.
 
 The complete arena order is source-unit ordinal, source start, source end, and
-then kind tag in this order: `Field`, `Parameter`, `Return`, `Expression`,
-`Result`. Within one kind, the stored ordinal or durable checked identity order
-breaks a tie. Family views borrow the corresponding arena use through the
-private lookup; they never copy it.
+then kind tag in this order: `Field`, `Parameter`, `State`, `Return`,
+`Expression`, `Result`. Within one kind, the stored ordinal or durable checked
+identity order breaks a tie. Family views borrow the corresponding arena use
+through the private lookup; they never copy it.
 
 Resolution retains exact lossless spelling and quotedness. It accepts the
 unquoted standard type spelling set fixed by this decision: all thirteen
