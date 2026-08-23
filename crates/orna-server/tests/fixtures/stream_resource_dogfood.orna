@@ -1,0 +1,21 @@
+CREATE SCHEMA stream_fixture;
+
+CREATE TYPE stream_fixture.probe AS OBJECT (
+    marker TEXT NOT NULL
+);
+
+CREATE SERVER FUNCTION stream_fixture.events()
+RETURNS STREAM<TEXT>
+SECURITY INVOKER
+TRANSACTION READ ONLY
+VOLATILITY STABLE
+AS
+    SELECT probe.marker FROM stream_fixture.probe probe;
+
+CREATE CLIENT FUNCTION stream_fixture.read() RETURNS STREAM<TEXT> IS
+BEGIN
+    RETURN AWAIT std.data.stream_resource(
+        target => stream_fixture.events,
+        arguments => std.call.args()
+    );
+END;
