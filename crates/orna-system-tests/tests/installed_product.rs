@@ -933,8 +933,10 @@ impl ApplyDocument {
 /// {"source_revision":"source-revision:<id>","catalogue_revision":"catalogue-revision:<id>","functions":[{"qualified_name":["schema","function"],"function_id":"function:<id>"}]}
 /// ```
 ///
-/// The object key order and the entry shape are exact. Every deviation is
-/// rejected with a closed message.
+/// The required object key order and compact framing are exact. Parameter-free
+/// entries use the two-key form shown above. Parameterised entries may include
+/// the ordered optional `parameters` array defined by work ADR 0040; deviations
+/// from those accepted forms are rejected with a closed message.
 fn parse_apply_document(bytes: &[u8]) -> Result<ApplyDocument, Error> {
     let text = std::str::from_utf8(bytes).map_err(|_| Error::Unexpected {
         message: "source apply output is not UTF-8".to_string(),
