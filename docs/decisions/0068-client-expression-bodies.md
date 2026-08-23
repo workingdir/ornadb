@@ -2,15 +2,21 @@
 
 **Status:** Accepted
 
+**Implementation status:** The expression-body and `RUNTIME CONTRACT` slices are
+implemented. The CLIENT-to-SERVER resource language, transport, and action
+portions that were deferred here are now accepted and implemented by work ADRs
+0077, 0078, and 0079; this ADR remains authoritative for the closed
+same-domain expression and external-contract forms.
+
 ## Decision
 
 CLIENT functions gain two closed surface extensions (spec roadmap milestone
 7, and the tracked next step named in work ADR 0062:177-182):
 
-1. **Expression bodies** — `CREATE CLIENT FUNCTION ... AS <expression> ;`
+1. **Expression bodies** - `CREATE CLIENT FUNCTION ... AS <expression> ;`
    replaces the Boolean-literal-only body with a closed expression language
    that the local `orna` client evaluates.
-2. **External CLIENT functions with RUNTIME CONTRACT** —
+2. **External CLIENT functions with RUNTIME CONTRACT** -
    `CREATE EXTERNAL CLIENT FUNCTION ... RUNTIME CONTRACT '<name>@<version>' ;`
    declares a runtime-provided function with no body.
 
@@ -39,9 +45,9 @@ concatenation  := expression "||" expression
 The closed rules:
 
 - A call resolves to a CLIENT function in the active application catalogue
-  (same-domain calls only). Cross-domain CLIENT→SERVER async calls,
-  resources, and `AWAIT` remain deferred (spec 23:88, ADR 0060 deferred
-  surface).
+  (same-domain calls only). Cross-domain CLIENT-to-SERVER async calls, resources,
+  and `AWAIT` were deferred by this slice; their accepted language and
+  transport contracts are defined by work ADRs 0077 and 0078.
 - Named arguments bind by parameter identity; positional arguments bind in
   declaration order; the compiler rejects unknown, duplicate, missing, or
   trailing arguments with the declaration span.
@@ -145,22 +151,22 @@ remains a closed `TARGET_UNAVAILABLE` target-shape failure.
 
 ## Required implementation order
 
-1. `docs(client): define CLIENT expression bodies and RUNTIME CONTRACT` —
+1. `docs(client): define CLIENT expression bodies and RUNTIME CONTRACT` -
    this ADR and the work-ADR index only.
-2. `feat(syntax): parse CLIENT expression bodies and RUNTIME CONTRACT` —
+2. `feat(syntax): parse CLIENT expression bodies and RUNTIME CONTRACT` -
    the `ClientFunctionBody::Expression`/`ExternalContract` forms, the
    `AS` clause, the `EXTERNAL`/`RUNTIME CONTRACT` clause, and parse tests.
-3. `feat(artifact): client-plan version 3 expression trees` — the checked
+3. `feat(artifact): client-plan version 3 expression trees` - the checked
    expression encoding, decode validation, and tests.
-4. `feat(compiler): check CLIENT expression bodies` — call resolution,
+4. `feat(compiler): check CLIENT expression bodies` - call resolution,
    argument binding, closed expression rules, contract-identity
    validation, and rejection tests.
-5. `feat(compiler): emit version-3 CLIENT artifacts and call references` —
+5. `feat(compiler): emit version-3 CLIENT artifacts and call references` -
    prepare.rs lowering and the `FunctionCall` reference records.
-6. `feat(client): evaluate version-3 CLIENT plans` — the closed evaluator
+6. `feat(client): evaluate version-3 CLIENT plans` - the closed evaluator
    for literals/reads/paths/calls/concat and the external-contract
    fail-closed rule, with unit tests.
-7. `test(server): prove CLIENT expression evaluation end to end` — a live
+7. `test(server): prove CLIENT expression evaluation end to end` - a live
    proof installing one CLIENT function with an expression body (a call
    returning a literal-derived value) and one external contract function,
    then invoking both through the installed host: the expression function
@@ -172,17 +178,19 @@ keeps the workspace buildable.
 
 ## Deferred surface
 
-CLIENT→SERVER async calls, resources, streams, `AWAIT`, LOCAL/SESSION
-state declarations, function-instance identity, the sandbox body forms,
-trace hooks, and the graphical runtime contract set remain later ADRs
-(spec roadmap M7 remainder, M8). SERVER functions gain no expression
-bodies in this slice. The expression vocabulary is closed to the forms
-above until a later ADR extends it.
+LOCAL/SESSION state declarations, function-instance identity, the sandbox body
+forms, trace hooks, and the graphical runtime contract set remain outside this
+ADR. The CLIENT-to-SERVER resource language and transport, including `AWAIT` and
+streams, are implemented by work ADRs 0077 and 0078; action values are
+implemented by ADR 0079. SERVER functions gain no expression bodies in this
+slice. The expression vocabulary is closed to the forms above until a later
+ADR extends it.
 
 ## Precedence
 
 This decision extends work ADR 0060 (capability gate) and implements the
-expression path named as the next step in work ADR 0062:177-182. Spec
-ADRs and docs remain authoritative outside this accepted implementation
-scope; the EBNF and DDL reference define the surface this decision makes
-executable.
+expression path named as the next step in work ADR 0062:177-182. Work ADRs
+0077-0079 now govern the accepted resource, transport, and action successors
+to the deferred portions recorded above. Spec ADRs and docs remain
+authoritative outside this accepted implementation scope; the EBNF and DDL
+reference define the surface this decision makes executable.

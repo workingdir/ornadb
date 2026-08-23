@@ -2,12 +2,19 @@
 
 **Status:** Accepted
 
+**Implementation status:** The runtime-only request/completion seam and
+deterministic immediate executor are implemented. The source, transport,
+scheduling, and action slices deferred here are now accepted by work ADRs 0077,
+0078, and 0079; this ADR remains authoritative for the executor-independent
+seam and completion checks.
+
 ## Decision
 
 OrnaDB adds a runtime-only executor seam for the resource lifecycle defined by
-work ADR 0071. This slice does not add `RESOURCE`, `AWAIT`, action, stream, or
-assignment syntax. It does not define a transport protocol or start background
-work.
+work ADR 0071. This slice did not add `RESOURCE`, `AWAIT`, action, stream, or
+assignment syntax, define a transport protocol, or start background work. Those
+later language, transport, and action contracts are now defined by work ADRs
+0077-0079.
 
 The local CLIENT runtime exposes three closed contracts:
 
@@ -92,21 +99,24 @@ otherwise reach the wrong state object.
 3. Prove reordered arguments, digest mismatch, cancellation, stale
    completions, failure, and successful typed publication.
 4. Keep source syntax, transport, and asynchronous executor integration
-   deferred to a later ADR.
+   deferred to a later ADR; those accepted successors are now work ADRs
+   0077-0079.
 
 Each implementation commit changes one to three files and keeps the workspace
 buildable.
 
 ## Deferred surface
 
-`RESOURCE` declarations, `AWAIT`, actions, streams, retry and cache policy,
-transport framing, server resource execution, scheduler selection, event-loop
-integration, and runtime-specific cancellation remain outside this ADR.
+Retry and cache policy, production event-loop integration, and runtime-specific
+scheduling/cancellation remain outside this ADR. The accepted resource language,
+transport framing, server execution, and executable action slice are defined by
+work ADRs 0077, 0078, and 0079.
 
 ## Precedence
 
 This decision extends work ADR 0071 only with a runtime request/completion seam.
 ADR 0071 remains authoritative for resource identity and lifecycle semantics.
 Work ADRs 0060, 0068, 0069, 0070, and 0073 remain authoritative for capability,
-expression, state, USER state, and SET transport behaviour. The canonical
+expression, state, USER state, and SET transport behaviour. Work ADRs 0077-0079
+define the accepted language, transport, and action successors. The canonical
 specification remains authoritative outside this accepted implementation scope.
