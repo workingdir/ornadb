@@ -411,6 +411,7 @@ pub struct ClientResourceKey {
     target: InvocationTarget,
     principal: PrincipalId,
     arguments_digest: Sha256Digest,
+    /// Combined active-catalogue, host-data, and security-context digest.
     invalidation_token: Sha256Digest,
 }
 
@@ -453,7 +454,7 @@ impl ClientResourceKey {
         self.arguments_digest
     }
 
-    /// Returns the catalogue or data invalidation token.
+    /// Returns the local catalogue/data/security invalidation identity.
     pub const fn invalidation_token(self) -> Sha256Digest {
         self.invalidation_token
     }
@@ -2160,6 +2161,47 @@ fn canonical_resource_argument_digest(
     Ok(Sha256Digest::from_bytes(hasher.finalize().into()))
 }
 
+const DEFAULT_DATA_INVALIDATION_TOKEN: Sha256Digest = Sha256Digest::from_bytes([0; 32]);
+const DEFAULT_SECURITY_CONTEXT_DIGEST: Sha256Digest = Sha256Digest::from_bytes([0; 32]);
+
+/// Derives the local cache identity for the authenticated security context.
+///
+/// The role list is sorted defensively even though AuthorisedInvocation
+/// already exposes roles in canonical order. This keeps the digest stable for
+/// every trusted invocation representation and makes the ordering contract
+/// explicit at this cache boundary.
+fn security_context_digest(authorisation: &AuthorisedInvocation) -> Sha256Digest {
+    let mut roles = authorisation.active_roles().to_vec();
+    roles.sort_unstable();
+
+    let mut hasher = Sha256::new();
+    hasher.update(b"ornadb.client-resource-security-context/v1\0");
+    hasher.update(authorisation.session_principal().to_bytes());
+    hasher.update(authorisation.effective_principal().to_bytes());
+    hasher.update(authorisation.authorising_principal().to_bytes());
+    hasher.update((roles.len() as u64).to_be_bytes());
+    for role in roles {
+        hasher.update(role.to_bytes());
+    }
+    Sha256Digest::from_bytes(hasher.finalize().into())
+}
+
+/// Combines the active catalogue, host data epoch, and security context into
+/// one local-only invalidation identity. None of these bytes are transport
+/// fields; only the resulting key selects a local resource cache entry.
+fn resource_invalidation_identity(
+    catalogue_hash: Sha256Digest,
+    data_invalidation_token: Sha256Digest,
+    security_digest: Sha256Digest,
+) -> Sha256Digest {
+    let mut hasher = Sha256::new();
+    hasher.update(b"ornadb.client-resource-invalidation/v1\0");
+    hasher.update(catalogue_hash.to_bytes());
+    hasher.update(data_invalidation_token.to_bytes());
+    hasher.update(security_digest.to_bytes());
+    Sha256Digest::from_bytes(hasher.finalize().into())
+}
+
 fn validate_state_text(value: &str, field: &'static str) -> Result<(), ClientStateIdentityError> {
     if value.contains('\0') {
         return Err(ClientStateIdentityError::InvalidText { field });
@@ -2194,15 +2236,32 @@ pub struct ClientStateContext {
     root_function: FunctionId,
     state_profile: String,
     instance_key: String,
+    data_invalidation_token: Sha256Digest,
 }
 
 impl ClientStateContext {
     /// Creates one state context. Empty profile and instance values select
-    /// their default identities.
+    /// their default identities. The host data invalidation token defaults to
+    /// the all-zero digest for compatibility with existing callers.
     pub fn new(
         root_function: FunctionId,
         state_profile: String,
         instance_key: String,
+    ) -> Result<Self, ClientStateIdentityError> {
+        Self::new_with_data_invalidation_token(
+            root_function,
+            state_profile,
+            instance_key,
+            DEFAULT_DATA_INVALIDATION_TOKEN,
+        )
+    }
+
+    /// Creates one state context with a host-owned data invalidation token.
+    pub fn new_with_data_invalidation_token(
+        root_function: FunctionId,
+        state_profile: String,
+        instance_key: String,
+        data_invalidation_token: Sha256Digest,
     ) -> Result<Self, ClientStateIdentityError> {
         validate_state_text(&state_profile, "state profile")?;
         validate_state_text(&instance_key, "instance key")?;
@@ -2210,6 +2269,7 @@ impl ClientStateContext {
             root_function,
             state_profile,
             instance_key,
+            data_invalidation_token,
         })
     }
 
@@ -2219,7 +2279,18 @@ impl ClientStateContext {
             root_function,
             state_profile: String::new(),
             instance_key: String::new(),
+            data_invalidation_token: DEFAULT_DATA_INVALIDATION_TOKEN,
         }
+    }
+
+    /// Sets the host-owned data invalidation token used by local resources.
+    pub fn set_data_invalidation_token(&mut self, data_invalidation_token: Sha256Digest) {
+        self.data_invalidation_token = data_invalidation_token;
+    }
+
+    /// Returns the host-owned data invalidation token.
+    pub const fn data_invalidation_token(&self) -> Sha256Digest {
+        self.data_invalidation_token
     }
 
     /// Returns the root function identity.
@@ -2391,6 +2462,7 @@ impl ClientUserState {
 #[derive(Clone, Debug, PartialEq)]
 pub struct ClientStateStore {
     context: ClientStateContext,
+    security_context_digest: Sha256Digest,
     local: HashMap<ClientStateKey, RuntimeValue>,
     session: HashMap<ClientStateKey, RuntimeValue>,
     user: HashMap<ClientStateKey, ClientUserState>,
@@ -2401,6 +2473,7 @@ impl Default for ClientStateStore {
     fn default() -> Self {
         Self {
             context: ClientStateContext::default_for(FunctionId::from_bytes([0; 16])),
+            security_context_digest: DEFAULT_SECURITY_CONTEXT_DIGEST,
             local: HashMap::new(),
             session: HashMap::new(),
             user: HashMap::new(),
@@ -2423,6 +2496,16 @@ impl ClientStateStore {
     /// Returns the selected root state context.
     pub const fn context(&self) -> &ClientStateContext {
         &self.context
+    }
+
+    /// Refreshes the invocation-derived security identity for local resources.
+    fn set_security_context_digest(&mut self, digest: Sha256Digest) {
+        self.security_context_digest = digest;
+    }
+
+    /// Returns the invocation-derived security identity for local resources.
+    fn security_context_digest(&self) -> Sha256Digest {
+        self.security_context_digest
     }
 
     /// Creates one state key in the selected root context.
@@ -3581,6 +3664,9 @@ fn evaluate_client_function_in_state_context_with_executor(
     validate_active_catalogue(active, target.function())?;
     let mut staged = state.clone();
     staged.set_context(state_context.clone());
+    // Security is invocation-scoped; refresh it for every root evaluation while
+    // retaining the host-configured data invalidation token in the context.
+    staged.set_security_context_digest(security_context_digest(authorisation));
     let result = match evaluate_function(
         active,
         target.function(),
@@ -3603,13 +3689,28 @@ fn evaluate_client_function_in_state_context_with_executor(
                     source: ClientResourceExecutionError::Pending { key, generation },
                     ..
                 } => {
-                    if let Some(resource) = staged.resources.get(key) {
-                        if resource.key() == *key
-                            && resource.generation() == *generation
-                            && resource.status() == ClientResourceStatus::Loading
-                        {
-                            state.resources.insert(*key, resource.clone());
-                        }
+                    // Persist the pending resource and any matching generation
+                    // that was cancelled while replacing its local identity.
+                    let changed_resources: Vec<_> = staged
+                        .resources
+                        .iter()
+                        .filter_map(|(candidate_key, resource)| {
+                            let replacement_cancelled = state.resources.get(candidate_key).is_some_and(
+                                |previous| {
+                                    previous.status() == ClientResourceStatus::Loading
+                                        && resource.status() == ClientResourceStatus::Idle
+                                        && resource.generation().value() > previous.generation().value()
+                                },
+                            );
+                            let pending_resource = resource.key() == *key
+                                && resource.generation() == *generation
+                                && resource.status() == ClientResourceStatus::Loading;
+                            (pending_resource || replacement_cancelled)
+                                .then_some((*candidate_key, resource.clone()))
+                        })
+                        .collect();
+                    for (candidate_key, resource) in changed_resources {
+                        state.resources.insert(candidate_key, resource);
                     }
                 }
                 ClientExecutionError::ResourceEvaluation {
@@ -4705,13 +4806,15 @@ fn evaluate_resource_expression(
     })?;
     let digest = ClientResourceKey::canonical_arguments_digest(active, &evaluated)
         .map_err(|source| evaluate_resource_error(context, ClientResourceExecutionError::Invalid(source)))?;
-    // The active catalogue hash is the deterministic invalidation identity in
-    // this runtime seam; external data epochs belong to the host executor.
     let key = ClientResourceKey::new(
         target,
         principal,
         digest,
-        active.catalogue_hash(),
+        resource_invalidation_identity(
+            active.catalogue_hash(),
+            state.context().data_invalidation_token(),
+            state.security_context_digest(),
+        ),
     );
     let state_profile = state.context().state_profile().to_owned();
     let function_instance_key = state.context().instance_key().to_owned();
@@ -5373,7 +5476,11 @@ fn trigger_client_action_with_lineage(
                 target,
                 authorisation.session_principal(),
                 digest,
-                active.catalogue_hash(),
+                resource_invalidation_identity(
+                    active.catalogue_hash(),
+                    state.context().data_invalidation_token(),
+                    security_context_digest(authorisation),
+                ),
             );
             if let Some(resource) = action_state.resource_mut() {
                 if resource.status() == ClientResourceStatus::Loading {
@@ -5410,7 +5517,11 @@ fn trigger_client_action_with_lineage(
                 target,
                 authorisation.session_principal(),
                 digest,
-                active.catalogue_hash(),
+                resource_invalidation_identity(
+                    active.catalogue_hash(),
+                    state.context().data_invalidation_token(),
+                    security_context_digest(authorisation),
+                ),
             );
             if let Some(resource) = action_state.resource_mut() {
                 if resource.status() == ClientResourceStatus::Loading {
@@ -5441,6 +5552,7 @@ fn trigger_client_action_with_lineage(
             action_state.set_resource(resource);
 
             let mut staged = state.clone();
+            staged.set_security_context_digest(security_context_digest(authorisation));
             let mut nested_executor = ClientActionNestedExecutor { inner: executor };
             let mut nested = Some(&mut nested_executor as &mut dyn ClientResourceExecutor);
             let result = evaluate_function(
@@ -7200,7 +7312,7 @@ mod tests {
         },
         security::{
             AuthorisedInvocation, ExecuteDecision, ExecuteGrant, InvocationTarget, Principal,
-            PrincipalKind, PrincipalStatus, SecuritySnapshot,
+            PrincipalKind, PrincipalStatus, RoleMembership, SecuritySnapshot,
         },
         source::{SourceBundle, SourceUnit},
         state::{UserStateCell, UserStateKey, UserStateWriteOutcome, UserStateWriteResult},
@@ -8066,6 +8178,53 @@ mod tests {
             panic!("test security grant should allow the function");
         };
         authorisation
+    }
+
+    fn authorise_with_role_context(
+        pair: RevisionPair,
+        function: FunctionId,
+    ) -> (AuthorisedInvocation, AuthorisedInvocation) {
+        let session_principal = PrincipalId::from_bytes([0x7a; 16]);
+        let role = PrincipalId::from_bytes([0x7b; 16]);
+        let principals = vec![
+            Principal::new(session_principal, PrincipalKind::User, PrincipalStatus::Active),
+            Principal::new(role, PrincipalKind::Role, PrincipalStatus::Active),
+        ];
+        let direct_snapshot = SecuritySnapshot::new(
+            pair,
+            vec![function],
+            principals.clone(),
+            vec![RoleMembership::new(role, session_principal)],
+            vec![ExecuteGrant::new(session_principal, function)],
+        )
+        .expect("direct security snapshot should validate");
+        let role_snapshot = SecuritySnapshot::new(
+            pair,
+            vec![function],
+            principals,
+            vec![RoleMembership::new(role, session_principal)],
+            vec![ExecuteGrant::new(role, function)],
+        )
+        .expect("role security snapshot should validate");
+        let direct_session = direct_snapshot
+            .bind_authenticated_session(session_principal, vec![])
+            .expect("direct session should bind");
+        let role_session = role_snapshot
+            .bind_authenticated_session(session_principal, vec![role])
+            .expect("role session should bind");
+        let ExecuteDecision::Allowed(direct) = direct_snapshot.authorise_execute(
+            &direct_session,
+            InvocationTarget::new(function, pair),
+        ) else {
+            panic!("direct grant should allow the function");
+        };
+        let ExecuteDecision::Allowed(role_authorisation) = role_snapshot.authorise_execute(
+            &role_session,
+            InvocationTarget::new(function, pair),
+        ) else {
+            panic!("role grant should allow the function");
+        };
+        (direct, role_authorisation)
     }
 
     fn evaluate_client_function(
@@ -9564,6 +9723,25 @@ fn client_stream_cancellation_clears_batches_and_rejects_stale_completions() {
     }
 
     #[test]
+    fn state_context_data_invalidation_token_preserves_existing_defaults() {
+        let function = FunctionId::from_bytes([0x61; 16]);
+        let mut context = super::ClientStateContext::default_for(function);
+        assert_eq!(context.data_invalidation_token(), Sha256Digest::from_bytes([0; 32]));
+        assert_eq!(
+            super::ClientStateContext::new(function, "profile".to_owned(), "instance".to_owned())
+                .unwrap()
+                .data_invalidation_token(),
+            Sha256Digest::from_bytes([0; 32]),
+        );
+        let token = Sha256Digest::from_bytes([0x62; 32]);
+        context.set_data_invalidation_token(token);
+        assert_eq!(context.data_invalidation_token(), token);
+        assert_eq!(context.root_function(), function);
+        assert_eq!(context.state_profile(), "");
+        assert_eq!(context.instance_key(), "");
+    }
+
+    #[test]
     fn version_four_state_context_profiles_are_isolated() {
         let (active, function, _) = version_four_text_state_plan();
         let profile_a =
@@ -10288,6 +10466,200 @@ fn client_stream_cancellation_clears_batches_and_rejects_stale_completions() {
         .unwrap();
 
         assert_eq!(result.value(), &RuntimeValue::Text("executor-value".to_owned()));
+    }
+
+    #[test]
+    fn evaluator_resource_key_includes_host_data_invalidation_token() {
+        let (active, function, pair, _, parameter) = version_six_client_resource_action_active();
+        let grants = capability::LocalCapabilityGrantSet::from_grants([
+            capability::LocalCapabilityGrant::new(
+                capability::LocalCapabilityName::StdFsRead,
+                capability::LocalCapabilityScope::path("/tmp").unwrap(),
+            )
+            .unwrap(),
+        ])
+        .unwrap();
+        let argument = FunctionArgument::new(
+            parameter,
+            RuntimeValue::Text("/tmp/data-token".to_owned()),
+        )
+        .unwrap();
+        let context_a = super::ClientStateContext::new_with_data_invalidation_token(
+            function,
+            "profile".to_owned(),
+            "instance".to_owned(),
+            Sha256Digest::from_bytes([0x11; 32]),
+        )
+        .unwrap();
+        let context_b = super::ClientStateContext::new_with_data_invalidation_token(
+            function,
+            "profile".to_owned(),
+            "instance".to_owned(),
+            Sha256Digest::from_bytes([0x12; 32]),
+        )
+        .unwrap();
+        let mut state = ClientStateStore::new();
+        let mut executor = RecordingActionExecutor::new(None);
+        let pending_key = |error: super::ClientExecutionError| match error {
+            super::ClientExecutionError::ResourceEvaluation {
+                source: super::ClientResourceExecutionError::Pending { key, .. },
+                ..
+            } => key,
+            other => panic!("expected pending resource evaluation, got {other:?}"),
+        };
+        let key_a = pending_key(
+            super::evaluate_client_function_in_state_context_with_grants_and_arguments_and_executor_with_parent_invocation(
+                &active,
+                &authorise(pair, function),
+                &context_a,
+                std::slice::from_ref(&argument),
+                &[],
+                &grants,
+                &mut state,
+                InvocationId::from_bytes([0x31; 16]),
+                &mut executor,
+            )
+            .unwrap_err(),
+        );
+        let key_b = pending_key(
+            super::evaluate_client_function_in_state_context_with_grants_and_arguments_and_executor_with_parent_invocation(
+                &active,
+                &authorise(pair, function),
+                &context_b,
+                std::slice::from_ref(&argument),
+                &[],
+                &grants,
+                &mut state,
+                InvocationId::from_bytes([0x32; 16]),
+                &mut executor,
+            )
+            .unwrap_err(),
+        );
+
+        assert_ne!(key_a, key_b, "host data invalidation must select a new local key");
+        assert_eq!(executor.cancelled.len(), 1, "the old loading generation is cancelled");
+        assert_eq!(state.resource(key_a).map(ClientResource::status), Some(ClientResourceStatus::Idle));
+        assert_eq!(state.resource(key_b).map(ClientResource::status), Some(ClientResourceStatus::Loading));
+        assert_eq!(key_a.target(), key_b.target());
+        assert_eq!(key_a.arguments_digest(), key_b.arguments_digest());
+    }
+
+    #[test]
+    fn evaluator_resource_key_includes_authorised_security_context() {
+        let (active, function, pair, _, parameter) = version_six_client_resource_action_active();
+        let (direct_authorisation, role_authorisation) = authorise_with_role_context(pair, function);
+        let grants = capability::LocalCapabilityGrantSet::from_grants([
+            capability::LocalCapabilityGrant::new(
+                capability::LocalCapabilityName::StdFsRead,
+                capability::LocalCapabilityScope::path("/tmp").unwrap(),
+            )
+            .unwrap(),
+        ])
+        .unwrap();
+        let argument = FunctionArgument::new(
+            parameter,
+            RuntimeValue::Text("/tmp/security-context".to_owned()),
+        )
+        .unwrap();
+        let context = super::ClientStateContext::new_with_data_invalidation_token(
+            function,
+            "profile".to_owned(),
+            "instance".to_owned(),
+            Sha256Digest::from_bytes([0x21; 32]),
+        )
+        .unwrap();
+
+        // A changed security context cannot reuse a READY value.
+        let mut ready_state = ClientStateStore::new();
+        let mut ready_executor = RecordingActionExecutor::new(Some(RuntimeValue::Text(
+            "direct".to_owned(),
+        )));
+        let direct_result = super::evaluate_client_function_in_state_context_with_grants_and_arguments_and_executor_with_parent_invocation(
+            &active,
+            &direct_authorisation,
+            &context,
+            std::slice::from_ref(&argument),
+            &[],
+            &grants,
+            &mut ready_state,
+            InvocationId::from_bytes([0x41; 16]),
+            &mut ready_executor,
+        )
+        .unwrap();
+        let key_a = ready_executor.executed[0].key();
+        assert_eq!(direct_result.value(), &RuntimeValue::Text("direct".to_owned()));
+        assert_eq!(ready_state.resource(key_a).map(ClientResource::status), Some(ClientResourceStatus::Ready));
+
+        let mut role_executor = RecordingActionExecutor::new(Some(RuntimeValue::Text(
+            "role".to_owned(),
+        )));
+        let role_result = super::evaluate_client_function_in_state_context_with_grants_and_arguments_and_executor_with_parent_invocation(
+            &active,
+            &role_authorisation,
+            &context,
+            std::slice::from_ref(&argument),
+            &[],
+            &grants,
+            &mut ready_state,
+            InvocationId::from_bytes([0x42; 16]),
+            &mut role_executor,
+        )
+        .unwrap();
+        let key_b = role_executor.executed[0].key();
+        assert_ne!(key_a, key_b, "security context must select a new local key");
+        assert_eq!(role_result.value(), &RuntimeValue::Text("role".to_owned()));
+        assert_eq!(ready_state.resource(key_a).map(ClientResource::status), Some(ClientResourceStatus::Ready));
+        assert_eq!(ready_state.resource(key_b).map(ClientResource::status), Some(ClientResourceStatus::Ready));
+        assert_eq!(key_a.target(), key_b.target());
+        assert_eq!(key_a.arguments_digest(), key_b.arguments_digest());
+        assert_ne!(key_a.invalidation_token(), key_b.invalidation_token());
+
+        // The same security change also replaces an old loading generation and
+        // routes cancellation through the caller-owned executor.
+        let mut loading_state = ClientStateStore::new();
+        let mut loading_executor = RecordingActionExecutor::new(None);
+        let direct_error = super::evaluate_client_function_in_state_context_with_grants_and_arguments_and_executor_with_parent_invocation(
+            &active,
+            &direct_authorisation,
+            &context,
+            std::slice::from_ref(&argument),
+            &[],
+            &grants,
+            &mut loading_state,
+            InvocationId::from_bytes([0x43; 16]),
+            &mut loading_executor,
+        )
+        .unwrap_err();
+        let loading_key_a = match direct_error {
+            super::ClientExecutionError::ResourceEvaluation {
+                source: super::ClientResourceExecutionError::Pending { key, .. },
+                ..
+            } => key,
+            other => panic!("expected pending direct resource, got {other:?}"),
+        };
+        let role_error = super::evaluate_client_function_in_state_context_with_grants_and_arguments_and_executor_with_parent_invocation(
+            &active,
+            &role_authorisation,
+            &context,
+            std::slice::from_ref(&argument),
+            &[],
+            &grants,
+            &mut loading_state,
+            InvocationId::from_bytes([0x44; 16]),
+            &mut loading_executor,
+        )
+        .unwrap_err();
+        let loading_key_b = match role_error {
+            super::ClientExecutionError::ResourceEvaluation {
+                source: super::ClientResourceExecutionError::Pending { key, .. },
+                ..
+            } => key,
+            other => panic!("expected pending role resource, got {other:?}"),
+        };
+        assert_ne!(loading_key_a, loading_key_b);
+        assert_eq!(loading_executor.cancelled.len(), 1);
+        assert_eq!(loading_state.resource(loading_key_a).map(ClientResource::status), Some(ClientResourceStatus::Idle));
+        assert_eq!(loading_state.resource(loading_key_b).map(ClientResource::status), Some(ClientResourceStatus::Loading));
     }
 
     #[test]
