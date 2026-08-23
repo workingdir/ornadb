@@ -254,6 +254,11 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         "sealed Inspector value types",
         include_str!("../migrations/0036_sealed_inspect_value_types.sql"),
     ),
+    (
+        37,
+        "source apply audit",
+        include_str!("../migrations/0037_source_apply_audit.sql"),
+    ),
 ];
 const MIGRATION_DATA_STEP_SEPARATOR: &[u8] = b"\0orna.kernel.migration-step\0";
 const CANONICAL_HASH_V1_EMPTY_SEED_STEP: &[u8] = b"canonical-hash-v1-empty-seed/v1";
@@ -493,6 +498,14 @@ fn local_peer_credential_migration_checksum_binds_exact_sql_bytes() {
 }
 
 #[test]
+fn source_apply_audit_migration_checksum_binds_exact_sql_bytes() {
+    assert_eq!(
+        hex_bytes(expected_migration_checksum(37, MIGRATIONS[36].2)),
+        "23afc307eefed842ea24b0eab50d21a8108f20983da24454792fe4fc44e2d66b"
+    );
+}
+
+#[test]
 fn protected_security_audit_migration_checksum_binds_exact_sql_bytes() {
     assert_eq!(
         hex_bytes(expected_migration_checksum(11, MIGRATIONS[10].2)),
@@ -565,6 +578,27 @@ fn local_peer_credential_migration_is_the_registered_version_ten() -> TestResult
     require(
         sql.contains("CREATE TABLE _orna_kernel.security_local_peer_credentials"),
         "local peer credential migration does not create its protected table",
+    )
+}
+
+#[test]
+fn source_apply_audit_is_the_registered_version_thirty_seven() -> TestResult<()> {
+    let (version, name, sql) = MIGRATIONS[36];
+
+    require(
+        version == 37,
+        format!("source apply audit migration is version {version}"),
+    )?;
+    require(
+        name == "source apply audit",
+        format!("source apply audit migration has unexpected name {name:?}"),
+    )?;
+    require(
+        sql.contains("event_kind = 'source_apply'")
+            && sql.contains("denial_reason = 'source_apply:committed'")
+            && sql.contains("source_revision_id IS NOT NULL")
+            && sql.contains("catalogue_revision_id IS NOT NULL"),
+        "source apply audit migration does not constrain the committed candidate shape",
     )
 }
 
@@ -913,7 +947,7 @@ async fn bootstrap_upgrades_the_registered_v20_empty_catalogue() -> TestResult<(
         let after = snapshot_upgrade_state(&database).await?;
         require(
             after.migrations.len() == MIGRATIONS.len() && after.migrations[..20] == before.migrations[..],
-            format!("v21-v36 changed prior migration records: {:?}", after.migrations),
+            format!("v21-v37 changed prior migration records: {:?}", after.migrations),
         )?;
         require(
             after.migrations[20]
@@ -1060,8 +1094,17 @@ async fn bootstrap_upgrades_the_registered_v20_empty_catalogue() -> TestResult<(
             format!("v36 migration record is not exact: {:?}", after.migrations[35]),
         )?;
         require(
+            after.migrations[36]
+                == (
+                    37,
+                    "source apply audit".to_owned(),
+                    expected_migration_checksum(37, MIGRATIONS[36].2),
+                ),
+            format!("v37 migration record is not exact: {:?}", after.migrations[36]),
+        )?;
+        require(
             after.active_pair == before.active_pair,
-            "v21-v36 changed the active revision pair",
+            "v21-v37 changed the active revision pair",
         )?;
 
         let recovered = kernel.recover().await?;
@@ -1069,7 +1112,7 @@ async fn bootstrap_upgrades_the_registered_v20_empty_catalogue() -> TestResult<(
         require(
             recovered.pair().source().to_bytes().to_vec() == source_revision_id
                 && recovered.pair().catalogue().to_bytes().to_vec() == catalogue_revision_id,
-            "v21-v36 recovery does not preserve the active revision pair",
+            "v21-v37 recovery does not preserve the active revision pair",
         )?;
         Ok(())
     })
@@ -1732,7 +1775,7 @@ async fn bootstrap_upgrades_v5_write_reference_evidence_without_mutating_semanti
         let after = snapshot_upgrade_state(&database).await?;
         require(
             after.migrations.len() == MIGRATIONS.len() && after.migrations[..5] == before.migrations[..],
-            format!("v6-v36 changed prior migration records: {:?}", after.migrations),
+            format!("v6-v37 changed prior migration records: {:?}", after.migrations),
         )?;
         require(
             after.migrations[5]
@@ -2509,7 +2552,7 @@ async fn bootstrap_upgrades_registered_v7_without_resolved_value_rows() -> TestR
                         "stream function returns".to_owned(),
                         expected_migration_checksum(33, MIGRATIONS[32].2),
                     ),
-            format!("v7-v36 upgrade produced unexpected migrations: {:?}", after.migrations),
+            format!("v7-v37 upgrade produced unexpected migrations: {:?}", after.migrations),
         )?;
         require(
             after.active_pair == before.active_pair
@@ -3079,12 +3122,12 @@ async fn inspect_security_snapshot_schema(client: &Client) -> TestResult<()> {
         (
             "security_audit_events",
             "security_audit_events_denial_reason_check",
-            "authentication_unknown_uid",
+            "source_apply:committed",
         ),
         (
             "security_audit_events",
             "security_audit_events_shape_check",
-            "event_kind = 'authentication'::text",
+            "event_kind = 'source_apply'::text",
         ),
     ] {
         require_constraint(client, table, constraint, expected).await?;
