@@ -6103,6 +6103,12 @@ fn evaluate_inspect_expression(
     let mut snapshot_options = None;
     let operation = match operation {
         InspectOperationNode::Snapshot { target, options } => {
+            if options.is_some() {
+                return Err(ClientExecutionError::Inspect {
+                    context,
+                    source: ClientInspectError::Failed("inspect.invalid_options".to_owned()),
+                });
+            }
             let target = evaluate_expression(
                 active, target, context, lineage, arguments, declarations, grants, state, depth + 1,
                 principal, executor, local_environment,
@@ -8290,6 +8296,60 @@ mod tests {
                 "{label} target must not invoke the Inspector provider",
             );
         }
+    }
+
+    #[test]
+    fn inspect_snapshot_options_reject_before_evaluating_target_or_options() {
+        let (active, function, pair, function_revision) = version_one_active(true);
+        let context = super::ClientExecutionContext {
+            pair,
+            function,
+            function_revision,
+            parent_invocation_id: super::InvocationId::from_bytes([0xa7; 16]),
+            observer_lineage: None,
+        };
+        let target = super::ParameterId::from_bytes([0xa8; 16]);
+        let options = super::ParameterId::from_bytes([0xa9; 16]);
+        let expression = orna_artifact::client_plan::ClientExpressionNode::Inspect {
+            operation: orna_artifact::client_plan::InspectOperationNode::Snapshot {
+                target: Box::new(orna_artifact::client_plan::ClientExpressionNode::ParameterRead {
+                    parameter: target,
+                }),
+                options: Some(Box::new(
+                    orna_artifact::client_plan::ClientExpressionNode::ParameterRead {
+                        parameter: options,
+                    },
+                )),
+            },
+        };
+        let mut state = super::ClientStateStore::new();
+        let mut locals = std::collections::HashMap::new();
+        let mut executor_slot: Option<&mut dyn ClientResourceExecutor> = None;
+
+        let result = super::evaluate_expression_plan(
+            &active,
+            &expression,
+            context,
+            super::ObserverLineage::compatibility(context),
+            ResolvedType::Value(super::SYS_INSPECT_SNAPSHOT_TYPE_ID),
+            &[],
+            &[],
+            &super::capability::LocalCapabilityGrantSet::new(),
+            &mut state,
+            0,
+            PrincipalId::from_bytes([0xaa; 16]),
+            &mut executor_slot,
+            &mut locals,
+        );
+
+        assert_eq!(
+            result,
+            Err(super::ClientExecutionError::Inspect {
+                context,
+                source: super::ClientInspectError::Failed("inspect.invalid_options".to_owned()),
+            }),
+            "unsupported snapshot options must be rejected before either expression is evaluated",
+        );
     }
 
     fn authorise(pair: RevisionPair, function: FunctionId) -> AuthorisedInvocation {
@@ -11637,6 +11697,164 @@ fn client_stream_cancellation_clears_batches_and_rejects_stale_completions() {
         )
         .unwrap();
         assert_eq!(result.value(), &RuntimeValue::Boolean(true));
+    }
+
+    #[test]
+    fn nested_call_preserves_caller_bound_capability_parameter() {
+        let prepared = prepared_client_source(
+            "CREATE SCHEMA app; \
+             CREATE CLIENT FUNCTION app.first(p_path TEXT) RETURNS TEXT RETURN app.second(); \
+             CREATE CLIENT FUNCTION app.second() RETURNS TEXT RETURN 'ok';",
+        );
+        let initial = active_from_prepared_candidate(&prepared);
+        let caller = initial
+            .catalogue()
+            .functions()
+            .iter()
+            .find(|function| function.name().to_string() == "app.first")
+            .expect("caller is present")
+            .clone();
+        let callee = initial
+            .catalogue()
+            .functions()
+            .iter()
+            .find(|function| function.name().to_string() == "app.second")
+            .expect("callee is present")
+            .clone();
+        let parameter = caller
+            .parameters()
+            .first()
+            .expect("caller path parameter is present")
+            .id();
+        let payload = orna_artifact::client_plan::ExpressionClientPlan::new(
+            orna_artifact::client_plan::ClientExpressionNode::Call {
+                function: callee.id(),
+                arguments: Vec::new(),
+            },
+        )
+        .encode()
+        .expect("caller expression plan encodes");
+        let artifact = ExecutableArtifact::new(
+            ExecutableArtifactKind::Client,
+            "orna.client-plan",
+            orna_artifact::client_plan::EXPRESSION_FORMAT_VERSION,
+            payload.clone(),
+            artifact_payload_digest(&payload).unwrap(),
+        )
+        .unwrap();
+        let current = initial
+            .function_revisions()
+            .iter()
+            .find(|revision| revision.function() == caller.id())
+            .expect("caller revision is present");
+        let caller_references = initial
+            .references()
+            .iter()
+            .filter(|reference| reference.source_function() == caller.id())
+            .cloned()
+            .collect::<Vec<_>>();
+        let semantic_hash = function_semantic_digest_with_version(
+            current.semantic_hash_version(),
+            &caller,
+            current.language_version(),
+            &artifact,
+            initial.expressions(),
+            &caller_references,
+        )
+        .unwrap();
+        let replacement = FunctionRevisionRecord::new(
+            caller.id(),
+            current.id(),
+            current.revision_number(),
+            current.declaration_origin(),
+            current.declaration_content_hash(),
+            semantic_hash,
+            current.language_version(),
+            artifact,
+        )
+        .unwrap()
+        .with_semantic_hash_version(current.semantic_hash_version());
+        let revisions = initial
+            .function_revisions()
+            .iter()
+            .map(|revision| {
+                if revision.function() == caller.id() {
+                    replacement.clone()
+                } else {
+                    revision.clone()
+                }
+            })
+            .collect::<Vec<_>>();
+        let catalogue_hash = catalogue_digest_with_context(
+            initial.catalogue_hash_context(),
+            initial.catalogue(),
+            &revisions,
+            initial.expressions(),
+            initial.origins(),
+            initial.references(),
+        )
+        .unwrap();
+        let active = ActiveDatabaseRevision::new_with_catalogue_hash_context(
+            ActiveDatabaseRevisionInput::new(
+                initial.pair(),
+                initial.source().clone(),
+                initial.catalogue().clone(),
+                catalogue_hash,
+                ActiveRevisionContent::new(
+                    initial.expressions().to_vec(),
+                    revisions,
+                    initial.origins().to_vec(),
+                    initial.references().to_vec(),
+                ),
+            ),
+            initial.catalogue_hash_context().clone(),
+        )
+        .unwrap();
+        let declaration = capability::LocalCapabilityDeclaration::new(
+            capability::LocalCapabilityName::StdFsRead,
+            capability::LocalCapabilityArgumentSource::Parameter("p_path".to_owned()),
+        );
+        let argument = FunctionArgument::new(
+            parameter,
+            RuntimeValue::Text("/home/bob/notes.txt".to_owned()),
+        )
+        .unwrap();
+        let grant = capability::LocalCapabilityGrant::new(
+            capability::LocalCapabilityName::StdFsRead,
+            capability::LocalCapabilityScope::path("/home/bob").unwrap(),
+        )
+        .unwrap();
+        let grants = capability::LocalCapabilityGrantSet::from_grants([grant]).unwrap();
+
+        let result = super::evaluate_client_function_with_grants_and_arguments(
+            &active,
+            &authorise(active.pair(), caller.id()),
+            std::slice::from_ref(&argument),
+            std::slice::from_ref(&declaration),
+            &grants,
+        )
+        .expect("caller-scoped capability remains bound in the nested call");
+        assert_eq!(result.value(), &RuntimeValue::Text("ok".to_owned()));
+
+        let mismatched_grant = capability::LocalCapabilityGrant::new(
+            capability::LocalCapabilityName::StdFsRead,
+            capability::LocalCapabilityScope::path("/tmp").unwrap(),
+        )
+        .unwrap();
+        let mismatched_grants = capability::LocalCapabilityGrantSet::from_grants([mismatched_grant]).unwrap();
+        let error = super::evaluate_client_function_with_grants_and_arguments(
+            &active,
+            &authorise(active.pair(), caller.id()),
+            &[argument],
+            &[declaration],
+            &mismatched_grants,
+        )
+        .expect_err("a mismatched caller scope still fails closed");
+        assert!(matches!(
+            error,
+            super::ClientExecutionError::CapabilityDenied { context, capability }
+                if context.function() == caller.id() && capability == "std.fs.read"
+        ));
     }
 
     #[test]
@@ -16269,7 +16487,7 @@ fn client_stream_cancellation_clears_batches_and_rejects_stale_completions() {
     }
 }
 
-#[cfg(any(test, feature = "test-hooks"))]
+#[cfg(test)]
 mod runtime_abi {
     use std::ffi::{c_char, c_void};
 
@@ -16847,8 +17065,8 @@ mod runtime_abi {
     };
 }
 
-#[cfg(any(test, feature = "test-hooks"))]
-pub mod runtime_conformance {
+#[cfg(test)]
+mod runtime_conformance {
     use super::runtime_abi::*;
     use std::{
         collections::{BTreeMap, HashMap, HashSet, VecDeque},
@@ -16923,7 +17141,6 @@ pub mod runtime_conformance {
         }
     }
 
-    #[cfg(feature = "test-hooks")]
     fn next_unreserved_alias_handle() -> Handle {
         loop {
             let handle = NEXT_HANDLE.fetch_add(1, Ordering::SeqCst);
@@ -20450,7 +20667,6 @@ pub mod runtime_conformance {
             }
         }
 
-        #[cfg(feature = "test-hooks")]
         fn create_surface_result(
             &self,
             title: &'static [u8],
@@ -20525,7 +20741,6 @@ pub mod runtime_conformance {
             bytes
         }
 
-        #[cfg(feature = "test-hooks")]
         fn capture_result(&self, surface: SurfaceHandle) -> Result<Vec<u8>, StatusCode> {
             let mut output = OwnedBytes {
                 data: ptr::null_mut(),
@@ -20692,22 +20907,19 @@ pub mod runtime_conformance {
         }
     }
 
-    #[cfg(feature = "test-hooks")]
     struct HeadlessFixtureState {
         surface: Option<SurfaceHandle>,
         node: Option<NodeHandle>,
         revision: u64,
     }
 
-    #[cfg(feature = "test-hooks")]
-    pub struct HeadlessFixtureSession {
+    struct HeadlessFixtureSession {
         fixture: FixtureSession,
         state: Mutex<HeadlessFixtureState>,
     }
 
-    #[cfg(feature = "test-hooks")]
     impl HeadlessFixtureSession {
-        pub fn new() -> Self {
+        fn new() -> Self {
             Self {
                 fixture: FixtureSession::new(),
                 state: Mutex::new(HeadlessFixtureState {
@@ -20718,7 +20930,7 @@ pub mod runtime_conformance {
             }
         }
 
-        pub fn create_surface(&self) -> Result<u64, String> {
+        fn create_surface(&self) -> Result<u64, String> {
             let surface = self
                 .fixture
                 .create_surface_result(b"Headless fixture")
@@ -20730,7 +20942,7 @@ pub mod runtime_conformance {
             Ok(surface)
         }
 
-        pub fn apply_ui_payload(&self, payload: &[u8]) -> Result<Vec<u8>, String> {
+        fn apply_ui_payload(&self, payload: &[u8]) -> Result<Vec<u8>, String> {
             if !valid_canonical_frame(payload) {
                 return Err(status_error(StatusCode::InvalidArgument));
             }
@@ -20770,7 +20982,7 @@ pub mod runtime_conformance {
                 .map_err(status_error)
         }
 
-        pub fn destroy_surface(&self, surface: u64) -> Result<(), String> {
+        fn destroy_surface(&self, surface: u64) -> Result<(), String> {
             let result = self.fixture.destroy_surface(surface);
             if result != StatusCode::Ok {
                 return Err(status_error(result));
@@ -20784,7 +20996,7 @@ pub mod runtime_conformance {
             Ok(())
         }
 
-        pub fn shutdown(&self) -> Result<(), String> {
+        fn shutdown(&self) -> Result<(), String> {
             let result = self.fixture.shutdown();
             if result == StatusCode::Ok {
                 Ok(())
@@ -20793,12 +21005,12 @@ pub mod runtime_conformance {
             }
         }
 
-        pub fn is_terminal(&self) -> bool {
+        fn is_terminal(&self) -> bool {
             let guard = global().lock().unwrap_or_else(|error| error.into_inner());
             guard.runtime.as_ref().is_some_and(|runtime| runtime.terminal)
         }
 
-        pub fn last_callback_is_terminal(&self) -> bool {
+        fn last_callback_is_terminal(&self) -> bool {
             self.fixture
                 .callback_log()
                 .sequence
@@ -20807,7 +21019,6 @@ pub mod runtime_conformance {
         }
     }
 
-    #[cfg(feature = "test-hooks")]
     fn status_error(code: StatusCode) -> String {
         String::from_utf8_lossy(status_message(code)).into_owned()
     }
@@ -21657,7 +21868,6 @@ pub mod runtime_conformance {
         frame.extend_from_slice(body);
         assert!(!valid_canonical_frame(&frame));
     }
-    #[cfg(feature = "test-hooks")]
     #[test]
     fn headless_fixture_validates_and_retains_canonical_ui_payload() {
         let session = HeadlessFixtureSession::new();
