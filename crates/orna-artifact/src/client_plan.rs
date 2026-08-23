@@ -1232,8 +1232,11 @@ impl ExpressionClientPlan {
 
     /// Encodes this plan into its exact version-3 or version-9 bytes.
     pub fn encode(&self) -> Result<Vec<u8>, ClientPlanError> {
-        validate_external_contract_placement(&self.expression, true)?;
         let version = self.format_version();
+        validate_external_contract_placement(
+            &self.expression,
+            version == EXPRESSION_FORMAT_VERSION,
+        )?;
         let mut bytes = Vec::new();
         bytes.extend_from_slice(&MAGIC);
         bytes.extend_from_slice(&version.to_be_bytes());
@@ -1293,7 +1296,10 @@ impl ExpressionClientPlan {
             &mut count,
             version == INSPECT_FORMAT_VERSION,
         )?;
-        validate_external_contract_placement(&expression, true)?;
+        validate_external_contract_placement(
+            &expression,
+            version == EXPRESSION_FORMAT_VERSION,
+        )?;
         reader.require_finished()?;
         if version == INSPECT_FORMAT_VERSION && !expression_contains_inspect(&expression) {
             return Err(ClientPlanError::InvalidInspectPlan);
@@ -3874,6 +3880,24 @@ mod tests {
         assert_eq!(
             StateClientPlan::decode(&bytes),
             Err(ClientPlanError::InvalidExpressionNode(NODE_EXTERNAL_CONTRACT))
+        );
+    }
+
+    #[test]
+    fn inspector_plan_rejects_external_contract_root() {
+        let identity = b"std.ui.window@1";
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&MAGIC);
+        bytes.extend_from_slice(&INSPECT_FORMAT_VERSION.to_be_bytes());
+        bytes.push(RETURN_INSPECT_OPERATION);
+        bytes.push(NODE_EXTERNAL_CONTRACT);
+        bytes.extend_from_slice(&(identity.len() as u32).to_be_bytes());
+        bytes.extend_from_slice(identity);
+        assert_eq!(
+            ExpressionClientPlan::decode(&bytes),
+            Err(ClientPlanError::InvalidExpressionNode(
+                NODE_EXTERNAL_CONTRACT
+            ))
         );
     }
 
