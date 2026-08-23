@@ -95,7 +95,7 @@ AS
     (semicolon)))
 
 ====================
-closed CLIENT AWAIT resource expression
+CLIENT expression bodies reject AWAIT
 ====================
 
 CREATE CLIENT FUNCTION demo.awaited()
@@ -126,19 +126,16 @@ AS AWAIT std.data.resource();
       (kw_as)
       expression: (client_expression
         (client_primary_expression
-          (client_await_expression
-            (kw_await)
-            expression: (client_expression
-              (client_primary_expression
-                (client_call_expression
-                  callee: (client_call_callee
-                    (identifier)
-                    (dot)
-                    (identifier)
-                    (dot)
-                    (identifier))
-                  (lparen)
-                  (rparen))))))))
+          (client_call_expression
+            callee: (client_call_callee
+              (identifier)
+              (ERROR)
+              (dot)
+              (identifier)
+              (dot)
+              (identifier))
+            (lparen)
+            (rparen)))))
     (semicolon)))
 
 ====================

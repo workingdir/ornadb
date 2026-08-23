@@ -4108,6 +4108,10 @@
         "required": true,
         "types": [
           {
+            "type": "client_await_expression",
+            "named": true
+          },
+          {
             "type": "client_expression",
             "named": true
           }
@@ -5834,6 +5838,10 @@
         "required": true,
         "types": [
           {
+            "type": "client_await_expression",
+            "named": true
+          },
+          {
             "type": "client_expression",
             "named": true
           }
@@ -6388,6 +6396,10 @@
         "required": true,
         "types": [
           {
+            "type": "client_await_expression",
+            "named": true
+          },
+          {
             "type": "client_expression",
             "named": true
           }
@@ -6488,10 +6500,6 @@
           "named": true
         },
         {
-          "type": "client_await_expression",
-          "named": true
-        },
-        {
           "type": "client_call_expression",
           "named": true
         },
@@ -6586,6 +6594,10 @@
         "multiple": false,
         "required": false,
         "types": [
+          {
+            "type": "client_await_expression",
+            "named": true
+          },
           {
             "type": "client_expression",
             "named": true

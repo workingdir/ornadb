@@ -360,7 +360,7 @@ module.exports = grammar({
                     field('name', $._name),
                     field('type', $.type_spec),
                     $.assignment_operator,
-                    field('value', $.client_expression),
+                    field('value', choice($.client_await_expression, $.client_expression)),
                     $.semicolon,
                 ),
 
@@ -374,7 +374,7 @@ module.exports = grammar({
                     field('name', $._name),
                     optional(field('type', $.type_spec)),
                     $.assignment_operator,
-                    field('value', $.client_expression),
+                    field('value', choice($.client_await_expression, $.client_expression)),
                     $.semicolon,
                 ),
 
@@ -382,12 +382,16 @@ module.exports = grammar({
                 seq(
                     field('target', $._name),
                     $.assignment_operator,
-                    field('value', $.client_expression),
+                    field('value', choice($.client_await_expression, $.client_expression)),
                     $.semicolon,
                 ),
 
             client_return_statement: ($) =>
-                seq($.kw_return, optional(field('expression', $.client_expression)), $.semicolon),
+                seq(
+                    $.kw_return,
+                    optional(field('expression', choice($.client_await_expression, $.client_expression))),
+                    $.semicolon,
+                ),
 
             client_expression: ($) =>
                 prec.left(
@@ -401,7 +405,6 @@ module.exports = grammar({
             client_primary_expression: ($) =>
                 choice(
                     $.client_call_expression,
-                    $.client_await_expression,
                     $.string_literal,
                     $.client_integer_literal,
                     $.boolean_literal,
@@ -409,8 +412,9 @@ module.exports = grammar({
                     $.client_parameter_read,
                 ),
 
-            // AWAIT is a CLIENT-only prefix over the closed CLIENT expression
-            // surface; semantic checks restrict its operand to a resource call.
+            // AWAIT is only valid in procedural LET, assignment, and RETURN
+            // positions. Its operand remains a closed non-suspending CLIENT
+            // expression; semantic checks restrict it to a resource value.
             client_await_expression: ($) =>
                 seq($.kw_await, field('expression', $.client_expression)),
 
