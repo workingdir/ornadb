@@ -1422,7 +1422,7 @@
         },
         {
           "type": "SYMBOL",
-          "name": "client_return_statement"
+          "name": "client_state_return_statement"
         },
         {
           "type": "SYMBOL",
@@ -1714,6 +1714,35 @@
               }
             ]
           }
+        },
+        {
+          "type": "SYMBOL",
+          "name": "semicolon"
+        }
+      ]
+    },
+    "client_state_return_statement": {
+      "type": "SEQ",
+      "members": [
+        {
+          "type": "SYMBOL",
+          "name": "kw_return"
+        },
+        {
+          "type": "CHOICE",
+          "members": [
+            {
+              "type": "FIELD",
+              "name": "expression",
+              "content": {
+                "type": "SYMBOL",
+                "name": "client_expression"
+              }
+            },
+            {
+              "type": "BLANK"
+            }
+          ]
         },
         {
           "type": "SYMBOL",
