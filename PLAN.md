@@ -15,22 +15,32 @@ specification still marks those broader surfaces as `CURRENT PROPOSAL` or
 
 - `TODO.md:50-97` records the completed CLIENT, TTY, Inspector-core, source,
   security, presenter, state, resource, action, identity, transport, JSON,
-  runtime-conformance, LSP, and tooling slices, plus the host-proof and
-  gateway blockers.
+  runtime-conformance, LSP, and verified editor/tooling slices, plus the
+  editor-runtime (Neovim/Vim), host-proof, and gateway blockers.
 - Work ADRs 0068-0079 define the closed CLIENT expression, state, JSON,
-  resource, transport, action, and test-only runtime contracts. Work ADRs 0080
-  and 0081 define the headless ordinary CLIENT Inspector v1 and the generic
-  `std.inspect.render@1` contract.
+  resource, transport, action, and test-only runtime contracts. The accepted
+  resource chain is explicit: [0071](docs/decisions/0071-client-resource-lifecycle.md)
+  owns lifecycle identity, [0077](docs/decisions/0077-client-server-resource-language.md)
+  owns source constructors and `AWAIT`, [0078](docs/decisions/0078-client-server-resource-transport.md)
+  owns transport and scheduling, and [0079](docs/decisions/0079-client-action-values.md)
+  owns executable `std.action.call` values. Work ADRs [0080](docs/decisions/0080-client-inspector.md)
+  and [0081](docs/decisions/0081-standard-inspector-render-contract.md) define
+  the headless ordinary CLIENT Inspector v1 and the generic
+  `std.inspect.render@1` contract; 0081 supersedes only 0080's product-specific
+  helper naming.
 - `docs/decisions/0062-std-ui-value-type.md` accepts the transient `std.ui.UI`
   value and TTY runtime offer only. A production graphical runtime remains
   outside the accepted scope.
 - `docs/decisions/0064-sys-inspect-core.md`, work ADR 0080, and work ADR 0081
-  define the current Inspector boundary. Resource and UI projections beyond
-  the accepted headless carriers remain deferred.
+  define the current Inspector boundary. The sealed resource and UI carrier
+  identities are accepted, but populated resource/UI rows and richer
+  projection semantics remain deferred.
 - `docs/decisions/0075-std-json-value.md` and
   `docs/decisions/0079-client-action-values.md` define the append-only V5 JSON
-  and V6 action snapshots. Work ADRs 0077 and 0078 supersede the deferred
-  CLIENT-to-SERVER portion of ADR 0068 for their accepted resource surface.
+  and V6 action snapshots. Work ADR 0077 owns the accepted CLIENT-to-SERVER
+  language surface, with 0078 as its transport/scheduling successor and 0079
+  as its executable action successor; these ADRs do not accept the proposal-
+  level model, gateway, or runtime surfaces.
 
 The canonical research plan remains useful as historical evidence, but this
 plan is the current implementation projection. Accepted ADRs and
@@ -59,9 +69,10 @@ This work has three separate goals:
    boundary must have a documented reason and a focused proof.
 3. **Runnable dogfood applications.** Add small source programs that use the
    accepted language and standard library through the same parse, check,
-   install, and invoke path as user programs. Proposal-only resources,
-   graphical runtimes, populated Inspector resource/UI projections, and reflective
-   gateways stay out of these fixtures until their contracts become executable.
+   install, and invoke path as user programs. Resource model/consumer
+   semantics beyond the accepted scalar and stream forms, graphical runtimes,
+   populated Inspector resource/UI projections, and reflective gateways stay
+   out of these fixtures until their contracts become executable.
 
 - use the existing accepted CLIENT expression and state syntax as the first
   source base, then extend it only when the corresponding contract is accepted;
@@ -106,12 +117,14 @@ contract:
   including parent parity, cycles, identity uniqueness, and the single active
   marker, without per-entry database round trips;
 
-The accepted slices have focused proof in the repository. Installed proofs
-that require Compose remain environment-dependent and must be reported as
-such. The source-apply audit, rollback, tamper, and retained-listing
-integration tests are present but marked `#[ignore]` because they require the
-Compose PostgreSQL development service. Local evidence covers compilation,
-migration registry checks, codec checks, and focused in-memory validators only.
+The accepted slices have focused proof in the repository. The resource,
+transport, action, and Inspector slices have local parser/compiler/codec/
+carrier checks plus installed proof paths; the installed paths that exercise
+PostgreSQL are marked `#[ignore]` because they require the Compose PostgreSQL
+development service. No local Compose result is claimed. The source-apply
+audit, rollback, tamper, and retained-listing integration tests are likewise
+present but Compose-gated. Local evidence covers compilation, migration
+registry checks, codec checks, and focused in-memory validators only.
 The fresh network-disabled Debian 12 host proof and the same-major PostgreSQL
 predecessor transition remain separate blockers. No proposal-level
 implementation should start without the contract gate below.
@@ -123,11 +136,23 @@ The previously recorded 2026-08-19 checkpoint is superseded by work ADRs
 
 - the test-only headless runtime conformance fixture is accepted and
   implemented; the production runtime ABI remains a proposal;
-- CLIENT resource language, transport, scheduling, actions, and their
-  focused installed proofs are accepted and implemented;
-- the ordinary CLIENT Inspector v1 and generic render contract are accepted
-  and implemented; populated resource/UI projections remain outside that
-  contract;
+- CLIENT resource language, transport, and scheduling are accepted and
+  implemented under [0077](docs/decisions/0077-client-server-resource-language.md)
+  and [0078](docs/decisions/0078-client-server-resource-transport.md). Focused
+  parser/compiler/codec checks are local; installed resource/transport proofs
+  in `crates/orna-server/tests/standard_database.rs` are Compose-gated
+  `#[ignore]` tests, so no local Compose result is claimed.
+- Executable actions are limited to `std.action.call` under
+  [0079](docs/decisions/0079-client-action-values.md); focused plan/trigger
+  checks are present, while the installed SERVER-action proof is also
+  Compose-gated. `std.action.sequence` and `std.action.parallel` remain
+  reserved until a later scheduler contract.
+- The ordinary CLIENT Inspector v1 and generic render contract are accepted
+  and implemented under [0080](docs/decisions/0080-client-inspector.md) and
+  [0081](docs/decisions/0081-standard-inspector-render-contract.md). Focused
+  carrier/epoch/lineage checks are local; installed evaluator, recursion, and
+  cross-principal proofs are Compose-gated. Populated resource/UI projections
+  remain outside this contract.
 - reflective gateways remain on the sealed `sys.invoke` boundary until
   Endpoint, Exposure, Service, authentication, conversion, redaction, and
   protocol lifecycle contracts are accepted.
@@ -240,9 +265,10 @@ and client modules.
 
 ### 0.2 Populated Inspector resource and UI projection contract
 
-The accepted Inspector v1 exposes immutable headless invocation, state, and
-source carriers. Define the additional resource and UI projections before
-adding them to the Inspector or Studio.
+The accepted Inspector v1 exposes immutable headless carriers, including the
+resource and UI carrier identities. Current installed fixtures keep the
+resource/UI rows empty. Define populated resource and UI projection semantics
+before adding data to the Inspector or Studio.
 
 The contract must settle:
 
@@ -254,9 +280,11 @@ The contract must settle:
 - observer suppression and recursion rules for resource and UI inspection;
 - the relationship between server epochs and client runtime epochs.
 
-**Deliverables:** accepted projection ADR, versioned carrier schema, compiler
-and artefact identities, focused carrier tests, and one installed Inspector
-proof with redacted resource/UI data.
+**Deliverables:** accepted populated-projection ADR, versioned carrier schema,
+compiler and artefact identities, focused carrier tests, and one installed
+Inspector proof with redacted resource/UI data. The proof is an environment-
+dependent Compose integration proof and must not be reported as locally run
+until that service is available.
 
 **Acceptance:** an ordinary CLIENT Inspector can request one permitted
 resource or UI projection, receive an immutable checked carrier, reject stale
@@ -320,7 +348,8 @@ Implementation hardening and integration must preserve:
 - the relationship between server snapshot epochs and client runtime epochs.
 
 **Deliverables:** focused hardening changes, checked CLIENT function,
-versioned snapshot/projection schema, and installed self-inspection proof.
+versioned snapshot/projection schema, and the Compose-gated installed
+self-inspection proof path.
 
 **Acceptance:** the headless Inspector root continues to inspect another
 invocation without executing it, inspect itself without an observer loop,
@@ -353,7 +382,9 @@ then run the workspace and installed gates at the phase checkpoint.
 
 ADRs 0080 and 0081 accept and current HEAD delivers the headless ordinary
 CLIENT Inspector v1 and generic standard render contract
-`std.inspect.render@1`.
+`std.inspect.render@1`. Focused local checks are present; the installed
+self-inspection/evaluator proofs remain Compose-gated and are not claimed as
+locally run.
 
 The baseline work is complete. Further work in this phase is conditional on an
 accepted projection contract:
@@ -361,12 +392,13 @@ accepted projection contract:
 1. preserve the checked Inspector signature and stable projection identities;
 2. preserve snapshot reads without executing the observed target;
 3. preserve recursion suppression, privilege checks, redaction, epoch
-   freeze/resume, and the installed self-inspection proof;
-4. add resource/UI carriers only after the Phase 0.2 contract is accepted.
+   freeze/resume, and the Compose-gated installed self-inspection proof path;
+4. add populated resource/UI rows only after the Phase 0.2 contract is accepted.
 
-The current proof covers the accepted headless scope. It must not be described
-as proof of a graphical runtime, populated resource/UI projections, or
-reflective gateways.
+The current local proof covers the accepted headless scope. The installed proof
+paths remain Compose-gated and must not be described as locally run, or as
+proof of a graphical runtime, populated resource/UI projections, or reflective
+gateways.
 
 ## Phase 3: Implement Studio and the first production UI runtime
 
@@ -449,8 +481,9 @@ effort:
 - `spec/api/runtime-abi.md:1-44` and `spec/api/ui-runtime.md:1-47` remain
   `CURRENT PROPOSAL` and leave production ownership, lifetime, threading, and
   value representation unresolved.
-- `spec/docs/30-inspector.md`, `spec/docs/31-self-inspection.md`, and
-  `spec/api/inspect.md` do not yet accept populated resource/UI projections.
+- `spec/docs/30-inspector.md` and `spec/docs/31-self-inspection.md` lock the
+  headless carrier and recursion boundaries, but `spec/api/inspect.md` remains
+  `CURRENT PROPOSAL` for populated resource/UI projection semantics.
 - `spec/api/protocol-gateways.md:1-3` and the wire protocol remain
   `CURRENT PROPOSAL`; Endpoint, Exposure, Service, authentication, conversion,
   redaction, and lifecycle details are not executable.

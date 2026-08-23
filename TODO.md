@@ -1,9 +1,11 @@
 # OrnaDB delivery checklist
 
 This checklist tracks user-visible delivery. The work ADRs contain the exact
-contracts and small commit sequences. A checked item means that the slice is
-implemented, reviewed, committed, and verified locally. Publication is a
-separate release action.
+contracts and small commit sequences. A checked item means that the accepted
+implementation slice is implemented, reviewed, committed, and has focused
+local evidence. A checked item does not imply that an environment-gated live
+proof ran: tests marked `#[ignore]` for Compose or Docker remain pending and
+are named explicitly. Publication is a separate release action.
 
 ## Current focus
 
@@ -54,53 +56,79 @@ separate release action.
 
 ## Product expansion
 
-- [x] Complete the first verified CLIENT Boolean function path.
+- [x] Complete the first verified CLIENT Boolean function path (focused local
+  CLIENT evaluator and plan evidence passes; the installed invocation proof is
+  Compose-gated `#[ignore]` and remains pending).
 - [x] Add the accepted invocation, authorisation, and public protocol slices
   (sealed `sys.invoke` carriers, protected decisions, invocation audit,
-  `orna.std/2` executable source, live dogfooding proof).
+  `orna.std/2` executable source; focused local compiler/codec evidence
+  passes; installed dogfooding proofs are Compose-gated `#[ignore]` tests and
+  remain pending).
 - [x] Extend catalogue-backed types with accepted enum identity, syntax,
-  catalogue, storage, codec, protocol, and first SERVER execution slices.
+  catalogue, storage, codec, protocol, and first SERVER execution slices
+  (focused local catalogue, compiler, and codec evidence passes; installed
+  execution tests are Compose-gated `#[ignore]` and remain pending).
 - [x] Add a separately accepted record value type.
 - [x] Add a separately accepted opaque value type.
 - [x] Add the installed `orna source diff` semantic diff surface
-  (identity-keyed add/drop/rename report, no apply, live proof;
-  work ADR 0066).
+  (identity-keyed add/drop/rename report, no apply; focused local identity and
+  diff evidence passes; the installed live proof is a Compose-gated
+  `#[ignore]` test and remains pending; work ADR 0066).
 - [x] Implement the installed one-file source apply transaction and its
-  protected `SourceApply` audit contract (focused local kernel, migration, and
-  codec tests pass; the Compose-gated product proof remains pending).
+  protected `SourceApply` audit contract (focused local `source_apply.rs`
+  boundary, kernel preflight, migration, and codec tests pass; the
+  Compose-gated product proof remains pending).
 - [x] Implement the read-only retained revision-pair listing kernel API with
-  in-memory integrity validation (focused local validator tests pass; the
-  Compose-gated listing proof remains pending).
+  in-memory integrity validation (focused local `recovery.rs` validator tests
+  pass; the Compose-gated listing proof remains pending).
 - [ ] Run the ignored Compose-gated source-apply audit, rollback, tamper, and
   retained-revision-listing integration proofs; no local Compose result is
   claimed.
 - [x] Register `std.ui.UI`, the deterministic TTY runtime offer, and the
-  server-side `sys.inspect` core with installed proofs (work ADRs 0062-0064).
+  server-side `sys.inspect` core (focused local value, carrier, and runtime
+  evidence passes; installed proofs are Compose-gated `#[ignore]` tests;
+  work ADRs 0062-0064).
 - [x] Add security administration and the sealed CSV output presenter
-  (work ADRs 0065 and 0067).
+  (focused local policy and presenter evidence passes; installed security and
+  output proofs are Compose-gated `#[ignore]` tests; work ADRs 0065 and 0067).
 - [x] Add CLIENT expression bodies and external `RUNTIME CONTRACT` clauses,
-  including version-three plans, closed evaluation, and installed proof
-  (work ADR 0068).
+  including version-three plans and closed evaluation (focused local
+  parser/compiler/plan evidence passes; the installed proof is a Compose-gated
+  `#[ignore]` test and remains pending; work ADR 0068).
 - [x] Add CLIENT STATE declarations, version-four plans, and the authenticated
-  USER state lifecycle with conflict handling (work ADRs 0069-0070).
+  USER state lifecycle with conflict handling (focused local parser/plan and
+  lifecycle evidence passes; installed USER-state proofs are Compose-gated
+  `#[ignore]` tests and remain pending; work ADRs 0069-0070).
 - [x] Add the executor-independent CLIENT resource lifecycle and runtime-only
-  executor seam (work ADRs 0071 and 0074).
+  executor seam (focused local resource lifecycle evidence passes; installed
+  evaluator proofs are Compose-gated `#[ignore]` and remain pending; work ADRs
+  0071 and 0074).
 - [x] Add sealed system identity calls, ORV6 SET transport, and the
   `std.json.Value` standard snapshot with persisted V5 executable recovery
-  (work ADRs 0072, 0073, and 0075).
+  (focused local identity, transport, source, and codec evidence passes; the
+  installed JSON reopen proof is Compose-gated `#[ignore]` and remains pending;
+  work ADRs 0072, 0073, and 0075).
 - [x] Add the test-only headless runtime conformance fixture and focused
   lifecycle proof (work ADR 0076).
 - [x] Add the CLIENT-to-SERVER resource language surface, including typed
-  resource and stream constructors with `AWAIT` (work ADR 0077).
+  resource and stream constructors with `AWAIT` (focused local parser,
+  compiler, and plan evidence passes; installed typed-result proofs are
+  Compose-gated `#[ignore]` tests and remain pending; work ADR 0077).
 - [x] Add authenticated `ORNA-RESOURCE/1` transport, stream credits,
-  cancellation, terminal ordering, and bounded scheduling (work ADR 0078).
+  cancellation, terminal ordering, and bounded scheduling (focused local frame,
+  codec, and resource-lifecycle evidence passes; installed transport proofs are
+  Compose-gated `#[ignore]` tests and remain pending; work ADR 0078).
 - [x] Add CLIENT action values and `std.action.call`, including checked plans
-  and trigger lifecycle proof (work ADR 0079).
+  and trigger lifecycle (focused local V6 source, compiler, codec, and
+  lifecycle evidence passes; installed trigger proofs are Compose-gated
+  `#[ignore]` tests and remain pending; work ADR 0079).
 - [x] Deliver the headless ordinary CLIENT Inspector v1 accepted by work ADR
   0080 and the generic standard render contract `std.inspect.render@1` accepted
-  by work ADR 0081. The production graphical runtime/UI sink, populated
-  resource/UI projections beyond the accepted headless scope, and reflective
-  gateways remain proposal-only.
+  by work ADR 0081 (focused local carrier, plan, lifecycle, and contract
+  evidence passes; installed ordinary-Inspector and recursion proofs are
+  Compose-gated `#[ignore]` tests and remain pending). The production graphical
+  runtime/UI sink, populated resource/UI projections beyond the accepted
+  headless scope, and reflective gateways remain proposal-only.
 - [ ] Implement reflective JSON-RPC and MCP gateway programs after the
   canonical Exposure and Service value contracts become accepted executable
   specifications.
