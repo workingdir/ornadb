@@ -1871,6 +1871,47 @@ fn expression_contains_inspect(node: &ClientExpressionNode) -> bool {
     }
 }
 
+fn validate_external_contract_identity(identity: &str) -> Result<(), ClientPlanError> {
+    let invalid = || Err(ClientPlanError::InvalidExpressionNode(NODE_EXTERNAL_CONTRACT));
+
+    if identity
+        .chars()
+        .any(|character| character.is_whitespace() || character.is_control())
+    {
+        return invalid();
+    }
+
+    let Some((name, revision)) = identity.rsplit_once('@') else {
+        return invalid();
+    };
+    if name.is_empty() || name.contains('@') {
+        return invalid();
+    }
+    if revision
+        .parse::<u64>()
+        .ok()
+        .is_none_or(|revision| revision == 0)
+    {
+        return invalid();
+    }
+
+    for segment in name.split('.') {
+        let mut characters = segment.chars();
+        let Some(first) = characters.next() else {
+            return invalid();
+        };
+        if (first != '_' && !first.is_alphabetic())
+            || characters.any(|character| {
+                character != '_' && !character.is_alphabetic() && !character.is_numeric()
+            })
+        {
+            return invalid();
+        }
+    }
+
+    Ok(())
+}
+
 /// Encodes one expression node recursively.
 fn encode_expression_node(
     node: &ClientExpressionNode,
@@ -2072,6 +2113,7 @@ fn encode_expression_node_with_resources(
             )?;
         }
         ClientExpressionNode::ExternalContract { identity } => {
+            validate_external_contract_identity(identity)?;
             writer.push(NODE_EXTERNAL_CONTRACT);
             let bytes = identity.as_bytes();
             let length = u32::try_from(bytes.len()).map_err(|_| {
@@ -2694,9 +2736,11 @@ fn decode_expression_node_with_resources(
             let length = reader.u32()? as usize;
             let bytes = reader.bytes(length)?;
             let identity = std::str::from_utf8(bytes)
-                .map_err(|_| ClientPlanError::InvalidExpressionNode(NODE_EXTERNAL_CONTRACT))?
-                .to_owned();
-            Ok(ClientExpressionNode::ExternalContract { identity })
+                .map_err(|_| ClientPlanError::InvalidExpressionNode(NODE_EXTERNAL_CONTRACT))?;
+            validate_external_contract_identity(identity)?;
+            Ok(ClientExpressionNode::ExternalContract {
+                identity: identity.to_owned(),
+            })
         }
         tag => Err(ClientPlanError::InvalidExpressionNode(tag)),
     }
@@ -3516,6 +3560,83 @@ mod tests {
             assert_eq!(decoded, plan);
             assert_eq!(decoded.format_version(), EXPRESSION_FORMAT_VERSION);
         }
+    }
+
+    #[test]
+    fn external_contract_identity_accepts_valid_qualified_names_and_revisions() {
+        for identity in [
+            "std.ui.window@1",
+            "app._internal9@42",
+            "über.runtime.value@18446744073709551615",
+        ] {
+            let plan = ExpressionClientPlan::new(ClientExpressionNode::ExternalContract {
+                identity: identity.to_owned(),
+            });
+            let encoded = plan.encode().expect("valid identity must encode");
+            assert_eq!(ExpressionClientPlan::decode(&encoded), Ok(plan));
+        }
+    }
+
+    #[test]
+    fn external_contract_identity_rejects_malformed_values_at_encode_boundary() {
+        for identity in [
+            "",
+            "@1",
+            "std.ui",
+            "std..ui@1",
+            ".std.ui@1",
+            "std.ui.@1",
+            "std.ui@",
+            "std.ui@0",
+            "std.ui@-1",
+            "std.ui@18446744073709551616",
+            "std.ui@not-a-number",
+            "std@ui@1",
+            "std.ui@1@2",
+            "std.ui-window@1",
+            "1std.ui@1",
+            "std.ui window@1",
+            "std.ui\u{7f}window@1",
+            "std.ui\0window@1",
+        ] {
+            let plan = ExpressionClientPlan::new(ClientExpressionNode::ExternalContract {
+                identity: identity.to_owned(),
+            });
+            assert_eq!(
+                plan.encode(),
+                Err(ClientPlanError::InvalidExpressionNode(NODE_EXTERNAL_CONTRACT)),
+                "identity {identity:?} must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn external_contract_identity_rejects_malformed_encoded_payloads() {
+        for identity in [b"std..ui@1".as_slice(), b"std.ui@0".as_slice(), b"std.ui@-1".as_slice()] {
+            let bytes = encoded_external_contract_bytes(identity);
+            assert_eq!(
+                ExpressionClientPlan::decode(&bytes),
+                Err(ClientPlanError::InvalidExpressionNode(NODE_EXTERNAL_CONTRACT)),
+                "encoded identity {identity:?} must be rejected"
+            );
+        }
+
+        let bytes = encoded_external_contract_bytes(&[b's', b't', b'd', b'.', 0xff, b'@', b'1']);
+        assert_eq!(
+            ExpressionClientPlan::decode(&bytes),
+            Err(ClientPlanError::InvalidExpressionNode(NODE_EXTERNAL_CONTRACT))
+        );
+    }
+
+    fn encoded_external_contract_bytes(identity: &[u8]) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&MAGIC);
+        bytes.extend_from_slice(&EXPRESSION_FORMAT_VERSION.to_be_bytes());
+        bytes.push(RETURN_EXPRESSION_OPERATION);
+        bytes.push(NODE_EXTERNAL_CONTRACT);
+        bytes.extend_from_slice(&(identity.len() as u32).to_be_bytes());
+        bytes.extend_from_slice(identity);
+        bytes
     }
 
     #[test]
