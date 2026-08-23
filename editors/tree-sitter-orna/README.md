@@ -10,6 +10,9 @@ from `spec/spec/orna.ebnf` and is validated against executable sources in
 surfaces are excluded from the executable tooling gate.
 
 
+This directory is a private source package. It does not ship a Node binding,
+so it must not be loaded through a `bindings/node` entrypoint.
+
 ## Building
 
 The generated parser (`src/`) is committed, so most editors can use the
