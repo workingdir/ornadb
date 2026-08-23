@@ -13,10 +13,12 @@ Inspector projections, Studio, and reflective gateways. The canonical
 specification still marks those broader surfaces as `CURRENT PROPOSAL` or
 `OPEN`; this plan must not turn them into implementation contracts.
 
-- `TODO.md:50-97` records the completed CLIENT, TTY, Inspector-core, source,
-  security, presenter, state, resource, action, identity, transport, JSON,
-  runtime-conformance, LSP, and verified editor/tooling slices, plus the
-  editor-runtime (Neovim/Vim), host-proof, and gateway blockers.
+- The external `../TODO.md` checklist records the completed CLIENT, TTY,
+  Inspector-core, source, security, presenter, state, resource, action,
+  identity, transport, JSON, runtime-conformance, LSP, and verified
+  editor/tooling slices, plus the editor-runtime (Neovim/Vim), host-proof, and
+  gateway blockers. It is intentionally outside `work/` and outside Git.
+
 - Work ADRs 0068-0079 define the closed CLIENT expression, state, JSON,
   resource, transport, action, and test-only runtime contracts. The accepted
   resource chain is explicit: [0071](docs/decisions/0071-client-resource-lifecycle.md)
@@ -495,7 +497,7 @@ effort:
   proof. Obtain a fresh Debian 12 amd64 host or VM runner with networking
   disabled, run the same package and lifecycle matrix without Docker, archive
   machine/package/manifest/process/trace evidence, and update the CI proof path
-  before restoring the checked item in `TODO.md`.
+  before restoring the checked item in `../TODO.md`.
 - The same-major PostgreSQL upgrade remains intentionally deferred until a
   real successor release declares a predecessor edge.
 
