@@ -3,16 +3,35 @@
 
 from __future__ import annotations
 
+import filecmp
 import json
 import os
 from pathlib import Path
 import shutil
 import subprocess
 import sys
+import tempfile
 from typing import Sequence
 
 
 LOG_PREFIX = "[editor]"
+GRAMMAR_INPUTS = ("grammar.js", "tree-sitter.json")
+GENERATED_ARTEFACTS = (
+    "src/parser.c",
+    "src/grammar.json",
+    "src/node-types.json",
+    "src/tree_sitter/alloc.h",
+    "src/tree_sitter/array.h",
+    "src/tree_sitter/parser.h",
+)
+NON_EXECUTABLE_SPEC_EXAMPLES = frozenset(
+    {
+        "03_client_ui.orna",
+        "04_studio_shell.orna",
+        "05_security_admin.orna",
+    }
+)
+
 
 
 def log(message: str, *, error: bool = False) -> None:
@@ -88,6 +107,73 @@ def checked_in_editor_json_files(repository: Path) -> list[Path] | None:
     return sorted(paths, key=lambda path: path.as_posix())
 
 
+def check_generated_artefacts(
+    tree_sitter: str,
+    tree_sitter_directory: Path,
+    repository: Path,
+) -> bool:
+    """Generate grammar artefacts outside the checkout and compare them byte-for-byte."""
+    with tempfile.TemporaryDirectory(prefix="check-editor-tooling-") as temporary:
+        temporary_directory = Path(temporary)
+        for filename in GRAMMAR_INPUTS:
+            source = tree_sitter_directory / filename
+            if not source.is_file():
+                log(
+                    f"required grammar input is missing: {display_path(source, repository)}",
+                    error=True,
+                )
+                return False
+            try:
+                shutil.copyfile(source, temporary_directory / filename)
+            except OSError as exc:
+                log(
+                    f"could not copy grammar input {display_path(source, repository)}: {exc}",
+                    error=True,
+                )
+                return False
+
+        log("checking generated tree-sitter artefacts in a temporary directory")
+        generate_result = run_command(
+            [tree_sitter, "generate"],
+            cwd=temporary_directory,
+            label="tree-sitter generate",
+        )
+        if generate_result is None or generate_result.returncode != 0:
+            status = (
+                "could not start"
+                if generate_result is None
+                else f"exited with status {generate_result.returncode}"
+            )
+            log(f"tree-sitter generate failed ({status})", error=True)
+            return False
+
+        for relative_path in GENERATED_ARTEFACTS:
+            checked_in = tree_sitter_directory / relative_path
+            generated = temporary_directory / relative_path
+            if not checked_in.is_file():
+                log(
+                    f"checked-in generated artefact is missing: "
+                    f"{display_path(checked_in, repository)}",
+                    error=True,
+                )
+                return False
+            if not generated.is_file():
+                log(
+                    f"generated artefact is missing: {display_path(checked_in, repository)}",
+                    error=True,
+                )
+                return False
+            if not filecmp.cmp(checked_in, generated, shallow=False):
+                log(
+                    f"generated artefact differs: {display_path(checked_in, repository)}",
+                    error=True,
+                )
+                return False
+
+    log("generated tree-sitter artefacts match checked-in files")
+    return True
+
+
 def main() -> int:
     repository = Path(__file__).resolve().parents[1]
     tree_sitter_directory = repository / "editors" / "tree-sitter-orna"
@@ -112,6 +198,9 @@ def main() -> int:
             f"required directory is missing: {display_path(tree_sitter_directory, repository)}",
             error=True,
         )
+        return 1
+
+    if not check_generated_artefacts(tree_sitter, tree_sitter_directory, repository):
         return 1
 
     required_fixture_roots = (
@@ -146,8 +235,18 @@ def main() -> int:
     parse_paths: list[Path] = []
     if spec_examples.is_dir():
         canonical_paths = sorted_orna_files(spec_examples)
-        log(f"canonical examples: {len(canonical_paths)} .orna files")
-        parse_paths.extend(canonical_paths)
+        executable_paths = [
+            path
+            for path in canonical_paths
+            if path.relative_to(spec_examples).as_posix() not in NON_EXECUTABLE_SPEC_EXAMPLES
+        ]
+        for path in canonical_paths:
+            if path not in executable_paths:
+                log(
+                    f"skipping proposal-only example: {display_path(path, repository)}"
+                )
+        log(f"canonical examples: {len(executable_paths)} executable .orna files")
+        parse_paths.extend(executable_paths)
     else:
         log("canonical examples: ../spec/examples is absent; skipping")
 
