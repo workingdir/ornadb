@@ -25,11 +25,10 @@ use orna_core::{
     inspect::{
         CallRow, InspectInvocationNodeKind, InspectInvocationPhase, InspectOutcomeKind,
         InspectPrivilege, InspectResourceKind, InspectResourceStatus, InspectResultSummary,
-        InspectSecurityDecisionKind, InspectSecurityDecisionOutcome,
-        InspectSnapshotSummary,
+        InspectSecurityDecisionKind, InspectSecurityDecisionOutcome, InspectSnapshotSummary,
         InspectTraceEvent, InspectTraceEventKind, InspectTracePayload, InvocationNodeRow,
         PresentationCandidateRow, ResourceRow, RuntimeBindingRow, SecurityDecisionRow,
-        StateCellRow, UiNodeRow,
+        StateCellRow, UiNodeRow, stable_inspect_error_code,
     },
     invocation::InvokeValue,
     types::{TypeDescriptor, TypeDescriptorKind},
@@ -284,8 +283,7 @@ async fn execute_inspect(
         .catalogue_hash_context()
         .standard()
         .ok_or_else(runtime_unavailable_error)?;
-    let registry =
-        registered_opaque_codecs(standard).map_err(|_| runtime_unavailable_error())?;
+    let registry = registered_opaque_codecs(standard).map_err(|_| runtime_unavailable_error())?;
 
     let uid = nix::unistd::geteuid().as_raw();
     let session = kernel
@@ -343,14 +341,18 @@ async fn execute_inspect(
         Ok(encode_hex(&encoded))
     };
 
-    let values_granted = request.include_values
-        && snapshot.granted().contains(&InspectPrivilege::Values);
-    let source_granted = request.include_source
-        && snapshot.granted().contains(&InspectPrivilege::Source);
+    let values_granted =
+        request.include_values && snapshot.granted().contains(&InspectPrivilege::Values);
+    let source_granted =
+        request.include_source && snapshot.granted().contains(&InspectPrivilege::Source);
     let security_details_granted = request.include_security
-        && snapshot.granted().contains(&InspectPrivilege::SecurityDetails);
+        && snapshot
+            .granted()
+            .contains(&InspectPrivilege::SecurityDetails);
     let runtime_internals_granted = request.include_runtime
-        && snapshot.granted().contains(&InspectPrivilege::RuntimeInternals);
+        && snapshot
+            .granted()
+            .contains(&InspectPrivilege::RuntimeInternals);
 
     if let Some(projection) = &request.projection {
         let requested = requested_privilege(projection, request);
@@ -397,7 +399,10 @@ async fn execute_inspect(
                     .await
                     .map_err(map_kernel_error)?;
                 for row in &rows {
-                    write_json_line(stdout, &ui_node_record(row, source_granted, runtime_internals_granted))?;
+                    write_json_line(
+                        stdout,
+                        &ui_node_record(row, source_granted, runtime_internals_granted),
+                    )?;
                 }
             }
             InstalledInspectProjection::PresentationCandidates => {
@@ -406,7 +411,10 @@ async fn execute_inspect(
                     .await
                     .map_err(map_kernel_error)?;
                 for row in &rows {
-                    write_json_line(stdout, &presentation_candidate_record(row, runtime_internals_granted))?;
+                    write_json_line(
+                        stdout,
+                        &presentation_candidate_record(row, runtime_internals_granted),
+                    )?;
                 }
             }
             InstalledInspectProjection::RuntimeBindings => {
@@ -415,7 +423,10 @@ async fn execute_inspect(
                     .await
                     .map_err(map_kernel_error)?;
                 for row in &rows {
-                    write_json_line(stdout, &runtime_binding_record(row, runtime_internals_granted))?;
+                    write_json_line(
+                        stdout,
+                        &runtime_binding_record(row, runtime_internals_granted),
+                    )?;
                 }
             }
             InstalledInspectProjection::SecurityDecisions => {
@@ -424,7 +435,10 @@ async fn execute_inspect(
                     .await
                     .map_err(map_kernel_error)?;
                 for row in &rows {
-                    write_json_line(stdout, &security_decision_record(row, security_details_granted))?;
+                    write_json_line(
+                        stdout,
+                        &security_decision_record(row, security_details_granted),
+                    )?;
                 }
             }
         }
@@ -473,7 +487,8 @@ fn requested_privilege(
 ) -> InspectPrivilege {
     match projection {
         InstalledInspectProjection::Calls | InstalledInspectProjection::StateCells
-            if request.include_values => {
+            if request.include_values =>
+        {
             InspectPrivilege::Values
         }
         InstalledInspectProjection::SecurityDecisions if request.include_security => {
@@ -814,10 +829,16 @@ fn trace_record(
             );
         }
         InspectTracePayload::Failed { code } => {
-            payload.insert("code".to_owned(), serde_json::json!(code));
+            payload.insert(
+                "code".to_owned(),
+                serde_json::json!(stable_inspect_error_code(code)),
+            );
         }
         InspectTracePayload::Cancelled { reason } => {
-            payload.insert("reason".to_owned(), serde_json::json!(reason));
+            payload.insert(
+                "reason".to_owned(),
+                serde_json::json!(reason.as_deref().map(stable_inspect_error_code)),
+            );
         }
     }
     Ok(serde_json::json!({
@@ -866,8 +887,7 @@ fn write_json_line(
     output: &mut impl Write,
     record: &serde_json::Value,
 ) -> Result<(), InstalledInspectError> {
-    let mut line = serde_json::to_string(record)
-        .map_err(|_| rendering_failed_error())?;
+    let mut line = serde_json::to_string(record).map_err(|_| rendering_failed_error())?;
     line.push('\n');
     output
         .write_all(line.as_bytes())
@@ -974,11 +994,10 @@ mod tests {
         SourceRevisionId, StateSlotId, TypeId,
         inspect::{
             CallRow, InspectInvocationNodeKind, InspectInvocationPhase, InspectOutcomeKind,
-            InspectResourceKind, InspectResourceStatus, InspectResultSummary,
-            InspectSnapshotEpoch, InspectSnapshotOptions, InspectSnapshotSummary,
-            InspectTraceEvent, InspectTracePayload, InvocationNodeRow,
-            PresentationCandidateRow, ResourceRow, RuntimeBindingRow, SecurityDecisionRow,
-            StateCellRow, UiNodeRow,
+            InspectResourceKind, InspectResourceStatus, InspectResultSummary, InspectSnapshotEpoch,
+            InspectSnapshotOptions, InspectSnapshotSummary, InspectTraceEvent, InspectTracePayload,
+            InvocationNodeRow, PresentationCandidateRow, ResourceRow, RuntimeBindingRow,
+            SecurityDecisionRow, StateCellRow, UiNodeRow,
         },
         invocation::InvokeValue,
         security::LocalPeerAuthenticationError,
@@ -1521,8 +1540,7 @@ mod tests {
             1,
             InspectTracePayload::ValueBatch {
                 schema: None,
-                values: vec![InvokeValue::new(RuntimeValue::Integer(7))
-                    .expect("fixture value")],
+                values: vec![InvokeValue::new(RuntimeValue::Integer(7)).expect("fixture value")],
             },
             SystemTime::UNIX_EPOCH,
             None,
@@ -1649,7 +1667,7 @@ mod tests {
         .expect("fixture event must validate");
         let record = trace_record(&failed, &stub_hex(), false).expect("record must render");
         assert_eq!(record["kind"], "failed");
-        assert_eq!(record["payload"]["code"], "internal");
+        assert_eq!(record["payload"]["code"], "inspect.projection_failed");
 
         let cancelled = InspectTraceEvent::new(
             invocation(0x21),
@@ -1663,6 +1681,25 @@ mod tests {
         let record = trace_record(&cancelled, &stub_hex(), false).expect("record must render");
         assert_eq!(record["kind"], "cancelled");
         assert_eq!(record["payload"]["reason"], serde_json::Value::Null);
+
+        let cancelled_with_detail = InspectTraceEvent::new(
+            invocation(0x21),
+            3,
+            InspectTracePayload::Cancelled {
+                reason: Some("provider secret".to_owned()),
+            },
+            SystemTime::UNIX_EPOCH,
+            None,
+            None,
+        )
+        .expect("cancelled detail fixture must validate");
+        let record = trace_record(&cancelled_with_detail, &stub_hex(), false)
+            .expect("record must render");
+        assert_eq!(record["kind"], "cancelled");
+        assert_eq!(
+            record["payload"]["reason"],
+            "inspect.projection_failed"
+        );
     }
 
     /// Type descriptors render stable closed nested labels.
@@ -1713,7 +1750,10 @@ mod tests {
         });
         assert_eq!(denied.kind(), InstalledInspectErrorKind::Kernel);
         assert_eq!(denied.code(), Some("inspect.denied"));
-        assert_eq!(denied.message(), "INSPECT access was denied: inspect.denied");
+        assert_eq!(
+            denied.message(),
+            "INSPECT access was denied: inspect.denied"
+        );
 
         let missing_epoch = map_kernel_error(PostgresKernelError::InspectDenied {
             reason: orna_core::security::InspectDenial::MissingEpoch,
@@ -1793,10 +1833,7 @@ mod tests {
         let error = missing_epoch_error();
         assert_eq!(error.kind(), InstalledInspectErrorKind::Kernel);
         assert_eq!(error.code(), Some("inspect.denied"));
-        assert_eq!(
-            error.message(),
-            "INSPECT access was denied: inspect.denied"
-        );
+        assert_eq!(error.message(), "INSPECT access was denied: inspect.denied");
     }
 
     #[test]

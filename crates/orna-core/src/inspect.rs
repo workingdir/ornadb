@@ -32,7 +32,9 @@
 
 use std::{error::Error, fmt, sync::Arc, time::SystemTime};
 
-pub use crate::inspect_carrier::{InspectCarrierEnvelope, InspectCarrierError, InspectCarrierKind, InspectProjection};
+pub use crate::inspect_carrier::{
+    InspectCarrierEnvelope, InspectCarrierError, InspectCarrierKind, InspectProjection,
+};
 
 use crate::{
     CatalogueRevisionId, FunctionId, InspectEpochId, InvocationId, PrincipalId,
@@ -53,16 +55,96 @@ pub const INSPECT_RENDER_CONTRACT: &str = "std.inspect.render@1";
 /// the corresponding InspectCarrierKind. The order is part of the stable
 /// contract and must not be changed without a new contract version.
 pub const INSPECT_RENDER_CARRIER_SIGNATURE: [(&str, TypeId, InspectCarrierKind); 9] = [
-    ("p_snapshot", crate::system::SYS_INSPECT_SNAPSHOT_TYPE_ID, InspectCarrierKind::Snapshot),
-    ("p_invocation_nodes", crate::system::SYS_INSPECT_INVOCATION_NODES_TYPE_ID, InspectCarrierKind::InvocationNodes),
-    ("p_calls", crate::system::SYS_INSPECT_CALLS_TYPE_ID, InspectCarrierKind::Calls),
-    ("p_resources", crate::system::SYS_INSPECT_RESOURCES_TYPE_ID, InspectCarrierKind::Resources),
-    ("p_state_cells", crate::system::SYS_INSPECT_STATE_CELLS_TYPE_ID, InspectCarrierKind::StateCells),
-    ("p_ui_nodes", crate::system::SYS_INSPECT_UI_NODES_TYPE_ID, InspectCarrierKind::UiNodes),
-    ("p_presentation_candidates", crate::system::SYS_INSPECT_PRESENTATION_CANDIDATES_TYPE_ID, InspectCarrierKind::PresentationCandidates),
-    ("p_runtime_bindings", crate::system::SYS_INSPECT_RUNTIME_BINDINGS_TYPE_ID, InspectCarrierKind::RuntimeBindings),
-    ("p_security_decisions", crate::system::SYS_INSPECT_SECURITY_DECISIONS_TYPE_ID, InspectCarrierKind::SecurityDecisions),
+    (
+        "p_snapshot",
+        crate::system::SYS_INSPECT_SNAPSHOT_TYPE_ID,
+        InspectCarrierKind::Snapshot,
+    ),
+    (
+        "p_invocation_nodes",
+        crate::system::SYS_INSPECT_INVOCATION_NODES_TYPE_ID,
+        InspectCarrierKind::InvocationNodes,
+    ),
+    (
+        "p_calls",
+        crate::system::SYS_INSPECT_CALLS_TYPE_ID,
+        InspectCarrierKind::Calls,
+    ),
+    (
+        "p_resources",
+        crate::system::SYS_INSPECT_RESOURCES_TYPE_ID,
+        InspectCarrierKind::Resources,
+    ),
+    (
+        "p_state_cells",
+        crate::system::SYS_INSPECT_STATE_CELLS_TYPE_ID,
+        InspectCarrierKind::StateCells,
+    ),
+    (
+        "p_ui_nodes",
+        crate::system::SYS_INSPECT_UI_NODES_TYPE_ID,
+        InspectCarrierKind::UiNodes,
+    ),
+    (
+        "p_presentation_candidates",
+        crate::system::SYS_INSPECT_PRESENTATION_CANDIDATES_TYPE_ID,
+        InspectCarrierKind::PresentationCandidates,
+    ),
+    (
+        "p_runtime_bindings",
+        crate::system::SYS_INSPECT_RUNTIME_BINDINGS_TYPE_ID,
+        InspectCarrierKind::RuntimeBindings,
+    ),
+    (
+        "p_security_decisions",
+        crate::system::SYS_INSPECT_SECURITY_DECISIONS_TYPE_ID,
+        InspectCarrierKind::SecurityDecisions,
+    ),
 ];
+
+/// The closed Inspector error-code set exposed at public boundaries.
+///
+/// Model values may retain richer internal failure labels, but exported
+/// Inspector errors and trace payloads must use one of these stable codes.
+/// Unknown labels are redacted to [`INSPECT_PROJECTION_FAILED_CODE`].
+pub const INSPECT_PUBLIC_ERROR_CODES: &[&str] = &[
+    "inspect.invalid_target",
+    "inspect.unknown_carrier",
+    "inspect.malformed_carrier",
+    "inspect.limit",
+    "inspect.denied",
+    "inspect.epoch_mismatch",
+    "inspect.stale_epoch",
+    "inspect.future_epoch",
+    "inspect.recursion",
+    "inspect.cancelled",
+    "inspect.closed",
+    "inspect.runtime_unavailable",
+    "inspect.projection_failed",
+];
+
+/// The stable fallback for an Inspector failure that has no public code.
+pub const INSPECT_PROJECTION_FAILED_CODE: &str = "inspect.projection_failed";
+
+/// Maps one provider or trace label to the stable Inspector error surface.
+///
+/// A small set of historical provider labels is translated to the current
+/// ADR 0080 names. Internal model labels and arbitrary detail are never
+/// returned to a public boundary; they become the generic projection-failed
+/// code instead.
+pub fn stable_inspect_error_code(error: &str) -> &'static str {
+    let normalized = match error {
+        "inspect.revision_mismatch" => "inspect.epoch_mismatch",
+        "inspect.invalid_snapshot" | "inspect.invalid_projection" => "inspect.malformed_carrier",
+        "inspect.epoch_unavailable" => "inspect.stale_epoch",
+        _ => error,
+    };
+    INSPECT_PUBLIC_ERROR_CODES
+        .iter()
+        .copied()
+        .find(|code| *code == normalized)
+        .unwrap_or(INSPECT_PROJECTION_FAILED_CODE)
+}
 
 /// The closed INSPECT privilege set (spec `api/inspect.md`).
 ///
@@ -1429,6 +1511,27 @@ mod tests {
     const SOURCE_REVISION: u8 = 0x99;
     const CATALOGUE_REVISION: u8 = 0xaa;
     const EPOCH: u8 = 0xbb;
+
+    #[test]
+    fn public_inspect_error_codes_normalize_aliases_and_redact_details() {
+        assert_eq!(stable_inspect_error_code("inspect.denied"), "inspect.denied");
+        assert_eq!(
+            stable_inspect_error_code("inspect.revision_mismatch"),
+            "inspect.epoch_mismatch"
+        );
+        assert_eq!(
+            stable_inspect_error_code("inspect.invalid_projection"),
+            "inspect.malformed_carrier"
+        );
+        assert_eq!(
+            stable_inspect_error_code("internal"),
+            INSPECT_PROJECTION_FAILED_CODE
+        );
+        assert_eq!(
+            stable_inspect_error_code("inspect.projection_failed\0secret"),
+            INSPECT_PROJECTION_FAILED_CODE
+        );
+    }
 
     fn invocation_id(byte: u8) -> InvocationId {
         InvocationId::from_bytes([byte; 16])

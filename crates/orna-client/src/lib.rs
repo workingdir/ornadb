@@ -37,7 +37,9 @@ use orna_core::{
         FunctionDefinition, FunctionDomain, FunctionReturn, FunctionSecurity, FunctionVolatility,
         TypeDefinition, ValueTypeDefinition, ValueTypeKind,
     },
-    inspect::{INSPECT_RENDER_CARRIER_SIGNATURE, INSPECT_RENDER_CONTRACT},
+    inspect::{
+        INSPECT_RENDER_CARRIER_SIGNATURE, INSPECT_RENDER_CONTRACT, stable_inspect_error_code,
+    },
     revision::{
         ActiveDatabaseRevision, DefinitionReferenceKind, DefinitionReferenceTarget,
         ExecutableArtifactKind, FunctionSemanticHashVersion, RevisionPair, Sha256Digest,
@@ -3879,6 +3881,7 @@ fn evaluate_function(
             lineage,
             return_shape,
             &arguments,
+            declarations,
             grants,
             state,
             depth,
@@ -4523,6 +4526,7 @@ fn evaluate_capability_plan(
     lineage: ObserverLineage,
     return_shape: ClientReturnShape,
     arguments: &[(ParameterId, RuntimeValue)],
+    declarations: &[capability::LocalCapabilityDeclaration],
     grants: &capability::LocalCapabilityGrantSet,
     state: &mut ClientStateStore,
     depth: usize,
@@ -4548,7 +4552,7 @@ fn evaluate_capability_plan(
                     lineage,
                     expected,
                     arguments,
-                    &[],
+                    declarations,
                     grants,
                     state,
                     depth,
@@ -4567,7 +4571,7 @@ fn evaluate_capability_plan(
                 lineage,
                 expected,
                 arguments,
-                &[],
+                declarations,
                 grants,
                 state,
                 depth,
@@ -5613,41 +5617,8 @@ fn trigger_client_action_with_lineage(
     }
 }
 
-const INSPECT_PROJECTION_FAILED: &str = "inspect.projection_failed";
-
-const INSPECT_PUBLIC_ERROR_CODES: &[&str] = &[
-    "inspect.invalid_target",
-    "inspect.unknown_carrier",
-    "inspect.malformed_carrier",
-    "inspect.limit",
-    "inspect.denied",
-    "inspect.epoch_mismatch",
-    "inspect.stale_epoch",
-    "inspect.future_epoch",
-    "inspect.recursion",
-    "inspect.cancelled",
-    "inspect.closed",
-    "inspect.runtime_unavailable",
-    INSPECT_PROJECTION_FAILED,
-];
-
 pub(crate) fn stable_inspect_provider_error(error: &str) -> String {
-    // The server seam historically used `inspect.revision_mismatch`; ADR 0080
-    // exposes the equivalent provenance failure as `inspect.epoch_mismatch`.
-    // Keep this translation at the client boundary so provider details never
-    // become part of the public error surface.
-    let normalized = match error {
-        "inspect.revision_mismatch" => "inspect.epoch_mismatch",
-        "inspect.invalid_snapshot" => "inspect.malformed_carrier",
-        "inspect.invalid_projection" => "inspect.malformed_carrier",
-        "inspect.epoch_unavailable" => "inspect.stale_epoch",
-        _ => error,
-    };
-    if INSPECT_PUBLIC_ERROR_CODES.contains(&normalized) {
-        normalized.to_owned()
-    } else {
-        INSPECT_PROJECTION_FAILED.to_owned()
-    }
+    stable_inspect_error_code(error).to_owned()
 }
 
 fn evaluate_external_contract(
@@ -11769,6 +11740,31 @@ fn client_stream_cancellation_clears_batches_and_rejects_stale_completions() {
                 source: super::ClientExpressionError::InvalidCall,
             } if context.function() == function
         ));
+    }
+
+    #[test]
+    fn capability_expression_calls_preserve_declarations_for_direct_callees() {
+        let prepared = prepared_client_source(
+            "CREATE SCHEMA app; CREATE CLIENT FUNCTION app.first() RETURNS TEXT RETURN app.second(); CREATE CLIENT FUNCTION app.second() RETURNS TEXT RETURN 'ok';",
+        );
+        let initial = active_from_prepared_candidate(&prepared);
+        let caller = initial.catalogue().functions().iter().find(|function| function.name().to_string() == "app.first").expect("caller is present").clone();
+        let callee = initial.catalogue().functions().iter().find(|function| function.name().to_string() == "app.second").expect("callee is present").clone();
+        let expression = orna_artifact::client_plan::ClientExpressionNode::Call { function: callee.id(), arguments: Vec::new() };
+        let payload = orna_artifact::client_plan::CapabilityClientPlan::new(orna_artifact::client_plan::InnerClientPlan::Expression(orna_artifact::client_plan::ExpressionClientPlan::new(expression)), vec![orna_artifact::client_plan::CapabilityRequirement::new("std.fs.write", orna_artifact::client_plan::CapabilityArgumentSource::Text("/tmp".to_owned()))]).encode().expect("the capability expression plan encodes");
+        let artifact = ExecutableArtifact::new(ExecutableArtifactKind::Client, "orna.client-plan", orna_artifact::client_plan::CAPABILITY_FORMAT_VERSION, payload.clone(), artifact_payload_digest(&payload).unwrap()).unwrap();
+        let current = initial.function_revisions().iter().find(|revision| revision.function() == caller.id()).expect("caller revision is present");
+        let caller_references = initial.references().iter().filter(|reference| reference.source_function() == caller.id()).cloned().collect::<Vec<_>>();
+        let semantic_hash = function_semantic_digest_with_version(current.semantic_hash_version(), &caller, current.language_version(), &artifact, initial.expressions(), &caller_references).unwrap();
+        let replacement = FunctionRevisionRecord::new(caller.id(), current.id(), current.revision_number(), current.declaration_origin(), current.declaration_content_hash(), semantic_hash, current.language_version(), artifact).unwrap().with_semantic_hash_version(current.semantic_hash_version());
+        let revisions = initial.function_revisions().iter().map(|revision| if revision.function() == caller.id() { replacement.clone() } else { revision.clone() }).collect::<Vec<_>>();
+        let catalogue_hash = catalogue_digest_with_context(initial.catalogue_hash_context(), initial.catalogue(), &revisions, initial.expressions(), initial.origins(), initial.references()).unwrap();
+        let active = ActiveDatabaseRevision::new_with_catalogue_hash_context(ActiveDatabaseRevisionInput::new(initial.pair(), initial.source().clone(), initial.catalogue().clone(), catalogue_hash, ActiveRevisionContent::new(initial.expressions().to_vec(), revisions, initial.origins().to_vec(), initial.references().to_vec())), initial.catalogue_hash_context().clone()).unwrap();
+        let declaration = capability::LocalCapabilityDeclaration::new(capability::LocalCapabilityName::StdFsRead, capability::LocalCapabilityArgumentSource::Text("/tmp".to_owned()));
+        let write_grant = capability::LocalCapabilityGrant::new(capability::LocalCapabilityName::StdFsWrite, capability::LocalCapabilityScope::path("/tmp").unwrap()).unwrap();
+        let grants = capability::LocalCapabilityGrantSet::from_grants([write_grant]).unwrap();
+        let error = super::evaluate_client_function_with_grants(&active, &authorise(active.pair(), caller.id()), &[declaration], &grants).expect_err("the direct callee must inherit the checked declaration context");
+        assert!(matches!(error, super::ClientExecutionError::CapabilityDenied { context, capability } if context.function() == callee.id() && capability == "std.fs.read"));
     }
 
     #[test]
