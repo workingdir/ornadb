@@ -168,6 +168,48 @@ impl AuthenticatedInspectSnapshot {
 
 impl PostgresKernel {
 
+    /// Appends one protected INSPECT denial before returning it to the caller.
+    ///
+    /// The audit transaction is deliberately separate from read-only inspection
+    /// transactions. This keeps the denial durable even when the lookup itself
+    /// is rolled back, and makes an insert or commit failure replace the denied
+    /// result with the operational database error.
+    async fn append_inspect_denial_audit(
+        &self,
+        authenticated_session: &AuthenticatedSession,
+        epoch_owner: Option<PrincipalId>,
+        reason: InspectDenial,
+    ) -> Result<(), PostgresKernelError> {
+        let mut database_session = self.open().await?;
+        let operation = Box::pin(async {
+            let transaction = database_session
+                .client
+                .build_transaction()
+                .isolation_level(IsolationLevel::RepeatableRead)
+                .read_only(false)
+                .start()
+                .await
+                .map_err(PostgresKernelError::Database)?;
+            require_current_migrations(&transaction).await?;
+            append_security_audit_event(
+                &transaction,
+                SecurityAuditDecision::inspect_denied(
+                    authenticated_session,
+                    epoch_owner,
+                    reason,
+                ),
+            )
+            .await?;
+            transaction
+                .commit()
+                .await
+                .map_err(PostgresKernelError::Database)?;
+            Ok(())
+        })
+        .await;
+        finish_inspect_session(operation, database_session.shutdown().await)
+    }
+
     /// Loads one immutable inspection epoch by its exact epoch identity.
     ///
     /// The `summary_bytes` payload decodes through the verified standard's
@@ -192,7 +234,8 @@ impl PostgresKernel {
             require_current_migrations(&transaction).await?;
             let active = configure_and_recover(&transaction).await?;
             let security = recover_security_snapshot_for_active(&transaction, &active).await?;
-            let bound_session = rebind_inspect_session(&security, authenticated_session)?;
+            let bound_session = rebind_inspect_session(self, &security, authenticated_session)
+                .await?;
             let mut granted = vec![InspectPrivilege::OwnInvocation];
             granted.extend(inspect_privileges_for_session(&security, &bound_session));
             let registry = inspect_value_registry(&active)?;
@@ -208,11 +251,16 @@ impl PostgresKernel {
                 .await
                 .map_err(PostgresKernelError::Database)?;
             let Some(row) = row else {
-                transaction
-                    .commit()
-                    .await
-                    .map_err(PostgresKernelError::Database)?;
-                return Ok(None);
+                drop(transaction);
+                self.append_inspect_denial_audit(
+                    authenticated_session,
+                    None,
+                    InspectDenial::MissingEpoch,
+                )
+                .await?;
+                return Err(PostgresKernelError::InspectDenied {
+                    reason: InspectDenial::MissingEpoch,
+                });
             };
             let owner = PrincipalId::from_bytes(inspect_id(
                 INSPECT_SNAPSHOT_RELATION,
@@ -220,7 +268,7 @@ impl PostgresKernel {
                 epoch_id.canonical().as_str(),
                 "owner_principal_id",
             )?);
-            require_inspect_epoch_access(&bound_session, owner, &granted)?;
+            require_inspect_epoch_access(self, &bound_session, owner, &granted).await?;
             let epoch = decode_inspect_snapshot_row(&row, &active, &registry)?;
             transaction
                 .commit()
@@ -239,9 +287,9 @@ impl PostgresKernel {
     /// Resolves one exact inspection epoch after applying the authenticated
     /// ownership/scope gate used by [`Self::find_latest_inspect_epoch`].
     ///
-    /// A missing epoch returns `None`. An epoch owned by another principal
-    /// fails closed with the stable INSPECT denial instead of revealing that
-    /// the epoch exists.
+    /// A missing epoch fails closed with `InspectDenial::MissingEpoch`. An epoch
+    /// owned by another principal fails closed with the stable INSPECT denial
+    /// instead of revealing that the epoch exists.
     pub async fn find_inspect_epoch(
         &self,
         authenticated_session: &AuthenticatedSession,
@@ -260,7 +308,8 @@ impl PostgresKernel {
             require_current_migrations(&transaction).await?;
             let active = configure_and_recover(&transaction).await?;
             let security = recover_security_snapshot_for_active(&transaction, &active).await?;
-            let bound_session = rebind_inspect_session(&security, authenticated_session)?;
+            let bound_session = rebind_inspect_session(self, &security, authenticated_session)
+                .await?;
             let granted = inspect_privileges_for_session(&security, &bound_session);
             let row = transaction
                 .query_opt(
@@ -272,11 +321,16 @@ impl PostgresKernel {
                 .await
                 .map_err(PostgresKernelError::Database)?;
             let Some(row) = row else {
-                transaction
-                    .commit()
-                    .await
-                    .map_err(PostgresKernelError::Database)?;
-                return Ok(None);
+                drop(transaction);
+                self.append_inspect_denial_audit(
+                    authenticated_session,
+                    None,
+                    InspectDenial::MissingEpoch,
+                )
+                .await?;
+                return Err(PostgresKernelError::InspectDenied {
+                    reason: InspectDenial::MissingEpoch,
+                });
             };
             let owner = PrincipalId::from_bytes(inspect_id(
                 INSPECT_SNAPSHOT_RELATION,
@@ -284,7 +338,7 @@ impl PostgresKernel {
                 epoch_id.canonical().as_str(),
                 "owner_principal_id",
             )?);
-            require_inspect_epoch_access(&bound_session, owner, &granted)?;
+            require_inspect_epoch_access(self, &bound_session, owner, &granted).await?;
             transaction
                 .commit()
                 .await
@@ -298,11 +352,11 @@ impl PostgresKernel {
     /// Resolves the most recent inspection epoch captured for one invocation.
     ///
     /// The lookup returns the latest epoch for the invocation (the most
-    /// recently captured, breaking ties by epoch identity order) or `None`
-    /// when the invocation has no captured epoch. The result is gated by the
-    /// INSPECT privilege ladder against the resolved epoch owner, so a
-    /// caller with no privilege that reaches the epoch's scope fails closed
-    /// with the closed denial reason and no epoch identity is disclosed.
+    /// recently captured, breaking ties by epoch identity order). A missing
+    /// epoch fails closed with `InspectDenial::MissingEpoch`. The result is
+    /// gated by the INSPECT privilege ladder against the resolved epoch owner,
+    /// so a caller with no privilege that reaches the epoch's scope fails
+    /// closed with the closed denial reason and no epoch identity is disclosed.
     /// The sealed dispatch auto-captures one structural epoch for every
     /// completed invocation, so a completed invocation normally resolves.
     pub async fn find_latest_inspect_epoch(
@@ -323,7 +377,8 @@ impl PostgresKernel {
             require_current_migrations(&transaction).await?;
             let active = configure_and_recover(&transaction).await?;
             let security = recover_security_snapshot_for_active(&transaction, &active).await?;
-            let bound_session = rebind_inspect_session(&security, authenticated_session)?;
+            let bound_session = rebind_inspect_session(self, &security, authenticated_session)
+                .await?;
             let granted = inspect_privileges_for_session(&security, &bound_session);
             let row = transaction
                 .query_opt(
@@ -337,11 +392,16 @@ impl PostgresKernel {
                 .await
                 .map_err(PostgresKernelError::Database)?;
             let Some(row) = row else {
-                transaction
-                    .commit()
-                    .await
-                    .map_err(PostgresKernelError::Database)?;
-                return Ok(None);
+                drop(transaction);
+                self.append_inspect_denial_audit(
+                    authenticated_session,
+                    None,
+                    InspectDenial::MissingEpoch,
+                )
+                .await?;
+                return Err(PostgresKernelError::InspectDenied {
+                    reason: InspectDenial::MissingEpoch,
+                });
             };
             let epoch_id = InspectEpochId::from_bytes(inspect_id(
                 INSPECT_SNAPSHOT_RELATION,
@@ -355,7 +415,7 @@ impl PostgresKernel {
                 invocation.canonical().as_str(),
                 "owner_principal_id",
             )?);
-            require_inspect_epoch_access(&bound_session, owner, &granted)?;
+            require_inspect_epoch_access(self, &bound_session, owner, &granted).await?;
             transaction
                 .commit()
                 .await
@@ -386,7 +446,8 @@ impl PostgresKernel {
             require_current_migrations(&transaction).await?;
             let active = configure_and_recover(&transaction).await?;
             let security = recover_security_snapshot_for_active(&transaction, &active).await?;
-            let bound_session = rebind_inspect_session(&security, authenticated_session)?;
+            let bound_session = rebind_inspect_session(self, &security, authenticated_session)
+                .await?;
             transaction
                 .commit()
                 .await
@@ -461,22 +522,22 @@ impl PostgresKernel {
     ///
     /// The projection is gated by the INSPECT privilege ladder; a denied
     /// request fails closed with the closed denial reason.
-    pub fn inspect_invocation_nodes(
+    pub async fn inspect_invocation_nodes(
         &self,
         snapshot: &AuthenticatedInspectSnapshot,
         requested: InspectPrivilege,
     ) -> Result<Vec<InvocationNodeRow>, PostgresKernelError> {
-        require_inspect_privilege(snapshot, requested)?;
+        require_inspect_privilege(self, snapshot, requested).await?;
         Ok(snapshot.epoch.invocation_nodes().to_vec())
     }
 
     /// Returns the `calls` projection over one epoch.
-    pub fn inspect_calls(
+    pub async fn inspect_calls(
         &self,
         snapshot: &AuthenticatedInspectSnapshot,
         requested: InspectPrivilege,
     ) -> Result<Vec<CallRow>, PostgresKernelError> {
-        require_inspect_privilege(snapshot, requested)?;
+        require_inspect_privilege(self, snapshot, requested).await?;
         Ok(snapshot.epoch.calls().to_vec())
     }
 
@@ -484,12 +545,12 @@ impl PostgresKernel {
     ///
     /// No resource tracking exists in v1, so the captured set is always
     /// empty; the closed row type is sealed for the later resource slice.
-    pub fn inspect_resources(
+    pub async fn inspect_resources(
         &self,
         snapshot: &AuthenticatedInspectSnapshot,
         requested: InspectPrivilege,
     ) -> Result<Vec<ResourceRow>, PostgresKernelError> {
-        require_inspect_privilege(snapshot, requested)?;
+        require_inspect_privilege(self, snapshot, requested).await?;
         Ok(snapshot.epoch.resources().to_vec())
     }
 
@@ -503,7 +564,7 @@ impl PostgresKernel {
         snapshot: &AuthenticatedInspectSnapshot,
         requested: InspectPrivilege,
     ) -> Result<Vec<StateCellRow>, PostgresKernelError> {
-        require_inspect_privilege(snapshot, requested)?;
+        require_inspect_privilege(self, snapshot, requested).await?;
         if requested == InspectPrivilege::Values {
             return Ok(snapshot.epoch.state_cells().to_vec());
         }
@@ -526,12 +587,12 @@ impl PostgresKernel {
     ///
     /// CLIENT execution is blocked in v1, so the captured set is always
     /// empty; the closed row type is sealed for the CLIENT slice.
-    pub fn inspect_ui_nodes(
+    pub async fn inspect_ui_nodes(
         &self,
         snapshot: &AuthenticatedInspectSnapshot,
         requested: InspectPrivilege,
     ) -> Result<Vec<UiNodeRow>, PostgresKernelError> {
-        require_inspect_privilege(snapshot, requested)?;
+        require_inspect_privilege(self, snapshot, requested).await?;
         Ok(snapshot.epoch.ui_nodes().to_vec())
     }
 
@@ -540,22 +601,22 @@ impl PostgresKernel {
     /// The sealed v1 dispatch path does not expose the presenter resolution
     /// at capture time, so the captured set is empty; the closed row type is
     /// sealed for the planner-instrumented slice.
-    pub fn inspect_presentation_candidates(
+    pub async fn inspect_presentation_candidates(
         &self,
         snapshot: &AuthenticatedInspectSnapshot,
         requested: InspectPrivilege,
     ) -> Result<Vec<PresentationCandidateRow>, PostgresKernelError> {
-        require_inspect_privilege(snapshot, requested)?;
+        require_inspect_privilege(self, snapshot, requested).await?;
         Ok(snapshot.epoch.presentation_candidates().to_vec())
     }
 
     /// Returns the `runtime_bindings` projection over one epoch.
-    pub fn inspect_runtime_bindings(
+    pub async fn inspect_runtime_bindings(
         &self,
         snapshot: &AuthenticatedInspectSnapshot,
         requested: InspectPrivilege,
     ) -> Result<Vec<RuntimeBindingRow>, PostgresKernelError> {
-        require_inspect_privilege(snapshot, requested)?;
+        require_inspect_privilege(self, snapshot, requested).await?;
         Ok(snapshot.epoch.runtime_bindings().to_vec())
     }
 
@@ -565,7 +626,7 @@ impl PostgresKernel {
         snapshot: &AuthenticatedInspectSnapshot,
         requested: InspectPrivilege,
     ) -> Result<Vec<SecurityDecisionRow>, PostgresKernelError> {
-        require_inspect_privilege(snapshot, requested)?;
+        require_inspect_privilege(self, snapshot, requested).await?;
         Ok(snapshot.epoch.security_decisions().to_vec())
     }
 
@@ -585,7 +646,7 @@ impl PostgresKernel {
         observer_invocation: Option<InvocationId>,
         include_observer: bool,
     ) -> Result<Vec<InspectTraceEvent>, PostgresKernelError> {
-        require_inspect_privilege(snapshot, requested)?;
+        require_inspect_privilege(self, snapshot, requested).await?;
         if snapshot.epoch.invocation_id() != invocation_id {
             return Err(PostgresKernelError::DurableInvariant {
                 relation: INSPECT_TRACE_RELATION,
@@ -1584,23 +1645,30 @@ fn decode_revision(row: &Row) -> Result<u64, PostgresKernelError> {
 /// Authentication state is durable and can change after a caller obtains a
 /// session. Invalid or stale principals and roles fail closed as a normal
 /// INSPECT denial before any epoch or classifier grant is considered.
-fn rebind_inspect_session(
+async fn rebind_inspect_session(
+    kernel: &PostgresKernel,
     security: &SecuritySnapshot,
     authenticated_session: &AuthenticatedSession,
 ) -> Result<AuthenticatedSession, PostgresKernelError> {
-    security
-        .bind_authenticated_session(
-            authenticated_session.principal(),
-            authenticated_session.active_roles().to_vec(),
-        )
-        .map_err(|_| PostgresKernelError::InspectDenied {
-            reason: InspectDenial::MissingPrivilege,
-        })
+    match security.bind_authenticated_session(
+        authenticated_session.principal(),
+        authenticated_session.active_roles().to_vec(),
+    ) {
+        Ok(session) => Ok(session),
+        Err(_) => {
+            let reason = InspectDenial::MissingPrivilege;
+            kernel
+                .append_inspect_denial_audit(authenticated_session, None, reason)
+                .await?;
+            Err(PostgresKernelError::InspectDenied { reason })
+        }
+    }
 }
 
 /// Applies the structural INSPECT ownership/scope gate used while resolving
 /// both latest and exact epochs.
-fn require_inspect_epoch_access(
+async fn require_inspect_epoch_access(
+    kernel: &PostgresKernel,
     authenticated_session: &AuthenticatedSession,
     owner: PrincipalId,
     granted: &[InspectPrivilege],
@@ -1617,13 +1685,19 @@ fn require_inspect_epoch_access(
         &effective,
     ) {
         InspectDecision::Allowed { .. } => Ok(()),
-        InspectDecision::Denied(reason) => Err(PostgresKernelError::InspectDenied { reason }),
+        InspectDecision::Denied(reason) => {
+            kernel
+                .append_inspect_denial_audit(authenticated_session, Some(owner), reason)
+                .await?;
+            Err(PostgresKernelError::InspectDenied { reason })
+        },
     }
 }
 
 /// Decides whether one session principal may apply one INSPECT privilege to
 /// one epoch, failing closed with the closed denial reason.
-fn require_inspect_privilege(
+async fn require_inspect_privilege(
+    kernel: &PostgresKernel,
     snapshot: &AuthenticatedInspectSnapshot,
     requested: InspectPrivilege,
 ) -> Result<(), PostgresKernelError> {
@@ -1634,7 +1708,12 @@ fn require_inspect_privilege(
         &snapshot.granted,
     ) {
         InspectDecision::Allowed { .. } => Ok(()),
-        InspectDecision::Denied(reason) => Err(PostgresKernelError::InspectDenied { reason }),
+        InspectDecision::Denied(reason) => {
+            kernel
+                .append_inspect_denial_audit(&snapshot.session, Some(snapshot.owner()), reason)
+                .await?;
+            Err(PostgresKernelError::InspectDenied { reason })
+        },
     }
 }
 
