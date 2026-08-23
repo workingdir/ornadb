@@ -2,6 +2,11 @@
 
 **Status:** Accepted
 
+**Implementation status:** ORV6 SET values and sealed `active_roles` execution
+are implemented. The resource transport that was deferred here is now accepted
+and implemented by work ADR 0078; this ADR remains authoritative for the ORV6
+value and sealed active-role result boundary.
+
 ## Decision
 
 OrnaDB adds a bounded SET runtime value and a version-six canonical value
@@ -91,8 +96,8 @@ buildable.
 ## Deferred surface
 
 STREAM values, arbitrary constructed SET elements, CLIENT expression calls to
-sealed system functions, runtime resource transport, and presentation-specific
-SET renderers remain outside this ADR.
+sealed system functions, and presentation-specific SET renderers remain outside
+this ADR. Runtime resource transport is implemented by work ADR 0078.
 
 ## Precedence
 
@@ -100,5 +105,6 @@ This decision supersedes the SET exclusion in work ADR 0039 only for the ORV6
 transport and the admitted `active_roles` return value. ADR 0039 remains
 authoritative for ORV5, and STREAM remains excluded. Work ADRs 0042, 0053,
 0054, and 0072 remain authoritative for sealed registry identity, carrier
-framing, invocation ordering, and scalar security identities. The canonical
-specification remains authoritative outside this accepted implementation scope.
+framing, invocation ordering, and scalar security identities. Work ADR 0078
+governs the accepted resource transport successor. The canonical specification
+remains authoritative outside this accepted implementation scope.
