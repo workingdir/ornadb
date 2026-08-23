@@ -715,6 +715,15 @@ pub enum ClientFunctionBody {
         /// The checked expression returned by the function.
         expression: ClientExpression,
     },
+    /// A closed CLIENT expression returned by the short `RETURN` form.
+    ///
+    /// This remains distinct from [`Self::Expression`] so the compiler can
+    /// enforce the public UI rule that `AS expression` is not a CLIENT UI
+    /// body, while both forms share the same closed expression grammar.
+    ReturnExpression {
+        /// The checked expression returned by the function.
+        expression: ClientExpression,
+    },
     /// An external function body declared only by its runtime contract.
     ExternalContract {
         /// The exact contract identity spelling and source span.
@@ -735,6 +744,7 @@ impl ClientFunctionBody {
         match self {
             Self::BooleanLiteral { value, source } => Some((*value, source)),
             Self::Expression { .. }
+            | Self::ReturnExpression { .. }
             | Self::ExternalContract { .. }
             | Self::StateBlock(_) => None,
         }
@@ -744,7 +754,9 @@ impl ClientFunctionBody {
     #[must_use]
     pub fn as_expression(&self) -> Option<&ClientExpression> {
         match self {
-            Self::Expression { expression } => Some(expression),
+            Self::Expression { expression } | Self::ReturnExpression { expression } => {
+                Some(expression)
+            }
             Self::BooleanLiteral { .. } | Self::ExternalContract { .. } | Self::StateBlock(_) => {
                 None
             }
@@ -756,7 +768,10 @@ impl ClientFunctionBody {
     pub fn as_external_contract(&self) -> Option<&SourceSlice> {
         match self {
             Self::ExternalContract { identity } => Some(identity),
-            Self::BooleanLiteral { .. } | Self::Expression { .. } | Self::StateBlock(_) => None,
+            Self::BooleanLiteral { .. }
+            | Self::Expression { .. }
+            | Self::ReturnExpression { .. }
+            | Self::StateBlock(_) => None,
         }
     }
 
@@ -767,6 +782,7 @@ impl ClientFunctionBody {
             Self::StateBlock(block) => Some(block),
             Self::BooleanLiteral { .. }
             | Self::Expression { .. }
+            | Self::ReturnExpression { .. }
             | Self::ExternalContract { .. } => None,
         }
     }
@@ -4917,6 +4933,31 @@ mod tests {
     }
 
     #[test]
+    fn parses_short_client_return_expressions_without_broadening_the_closed_surface() {
+        let source = "CREATE CLIENT FUNCTION examples.ui() RETURNS UI RETURN std.ui.text('Example');\n\
+            CREATE CLIENT FUNCTION examples.text() RETURNS TEXT RETURN 'ready';";
+        let parsed = parse(source);
+
+        assert!(parsed.diagnostics().is_empty(), "{:?}", parsed.diagnostics());
+        assert_eq!(parsed.client_functions().len(), 2);
+        let ui = &parsed.client_functions()[0];
+        let ClientFunctionBody::ReturnExpression { expression } = &ui.body else {
+            panic!("expected a short RETURN expression body");
+        };
+        assert!(matches!(
+            expression,
+            ClientExpression::Call { callee, arguments, .. }
+                if callee.parts.iter().map(|part| part.text.as_str()).eq(["std", "ui", "text"])
+                    && arguments.len() == 1
+        ));
+        let text = &parsed.client_functions()[1];
+        assert!(matches!(
+            text.body.as_expression(),
+            Some(ClientExpression::StringLiteral { value, .. }) if value == "ready"
+        ));
+    }
+
+    #[test]
     fn parses_accepted_client_fixture_losslessly_with_expression_and_state_bodies() {
         let source = include_str!("../testdata/accepted-client.orna");
         let parsed = parse(source);
@@ -5014,31 +5055,6 @@ mod tests {
     #[test]
     fn reports_closed_client_body_diagnostics_with_exact_public_messages() {
         let cases = [
-            (
-                "CREATE CLIENT FUNCTION examples.expression() RETURNS BOOLEAN RETURN NULL;",
-                "CLIENT RETURN currently supports only TRUE or FALSE",
-                "NULL",
-            ),
-            (
-                "CREATE CLIENT FUNCTION examples.call() RETURNS BOOLEAN RETURN helper();",
-                "CLIENT RETURN currently supports only TRUE or FALSE",
-                "helper",
-            ),
-            (
-                "CREATE CLIENT FUNCTION examples.identifier() RETURNS BOOLEAN RETURN p_value;",
-                "CLIENT RETURN currently supports only TRUE or FALSE",
-                "p_value",
-            ),
-            (
-                "CREATE CLIENT FUNCTION examples.number() RETURNS BOOLEAN RETURN 1;",
-                "CLIENT RETURN currently supports only TRUE or FALSE",
-                "1",
-            ),
-            (
-                "CREATE CLIENT FUNCTION examples.text() RETURNS BOOLEAN RETURN 'yes';",
-                "CLIENT RETURN currently supports only TRUE or FALSE",
-                "'yes'",
-            ),
             (
                 "CREATE CLIENT FUNCTION examples.security() RETURNS BOOLEAN SECURITY INVOKER RETURN TRUE;",
                 "CLIENT functions use RETURN before their result value",

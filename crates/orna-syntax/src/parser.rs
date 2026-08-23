@@ -801,8 +801,21 @@ impl<'source> Parser<'source> {
         if self.current().is_some_and(|token| token.is_word("IS")) {
             return self.parse_client_state_block();
         }
-        self.builder
-            .start_node(SyntaxKind::ClientBooleanReturnBody.into());
+        let is_boolean_return = self.current().is_some_and(|token| token.is_word("RETURN"))
+            && self
+                .peek_significant(1)
+                .is_some_and(|token| token.is_word("TRUE") || token.is_word("FALSE"))
+            && self
+                .peek_significant(2)
+                .is_none_or(|token| token.kind == TokenKind::Semicolon);
+        self.builder.start_node(
+            if is_boolean_return {
+                SyntaxKind::ClientBooleanReturnBody
+            } else {
+                SyntaxKind::ClientExpressionBody
+            }
+            .into(),
+        );
         let result = (|| {
             if !self.current().is_some_and(|token| token.is_word("RETURN")) {
                 self.error_current(
@@ -814,31 +827,22 @@ impl<'source> Parser<'source> {
             self.bump();
             self.skip_trivia();
             let Some(token) = self.current().cloned() else {
-                self.error_current(
-                    "ORNA0001",
-                    "CLIENT RETURN currently supports only TRUE or FALSE",
-                );
+                self.error_current("ORNA0001", "expected a CLIENT expression");
                 return None;
             };
-            let value = if token.is_word("TRUE") {
-                true
-            } else if token.is_word("FALSE") {
-                false
-            } else {
-                self.error_current(
-                    "ORNA0001",
-                    "CLIENT RETURN currently supports only TRUE or FALSE",
-                );
-                return None;
-            };
-            self.bump();
-            Some(ClientFunctionBody::BooleanLiteral {
-                value,
-                source: SourceSlice {
-                    text: token.text.to_owned(),
-                    span: token.span(),
-                },
-            })
+            if is_boolean_return {
+                let value = token.is_word("TRUE");
+                self.bump();
+                return Some(ClientFunctionBody::BooleanLiteral {
+                    value,
+                    source: SourceSlice {
+                        text: token.text.to_owned(),
+                        span: token.span(),
+                    },
+                });
+            }
+            let expression = self.parse_client_expression()?;
+            Some(ClientFunctionBody::ReturnExpression { expression })
         })();
         self.builder.finish_node();
         result
