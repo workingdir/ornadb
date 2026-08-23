@@ -248,12 +248,7 @@ pub fn run_installed_inspect(
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
-        .map_err(|_| {
-            InstalledInspectError::new(
-                InstalledInspectErrorKind::Internal,
-                "the private runtime could not start".to_owned(),
-            )
-        })?;
+        .map_err(|_| runtime_unavailable_error())?;
 
     runtime.block_on(run_inspect_with_kernel(kernel, request, stdout))
 }
@@ -281,24 +276,16 @@ async fn execute_inspect(
     request: &InstalledInspectRequest,
     stdout: &mut impl Write,
 ) -> Result<InstalledInspectOutcome, InstalledInspectError> {
-    let active = kernel.recover().await.map_err(|_| {
-        InstalledInspectError::new(
-            InstalledInspectErrorKind::Internal,
-            "the active revision could not be recovered".to_owned(),
-        )
-    })?;
-    let standard = active.catalogue_hash_context().standard().ok_or_else(|| {
-        InstalledInspectError::new(
-            InstalledInspectErrorKind::Internal,
-            "the Inspector core requires the verified standard snapshot".to_owned(),
-        )
-    })?;
-    let registry = registered_opaque_codecs(standard).map_err(|_| {
-        InstalledInspectError::new(
-            InstalledInspectErrorKind::Internal,
-            "the verified standard snapshot does not bind its opaque codec registry".to_owned(),
-        )
-    })?;
+    let active = kernel
+        .recover()
+        .await
+        .map_err(|_| runtime_unavailable_error())?;
+    let standard = active
+        .catalogue_hash_context()
+        .standard()
+        .ok_or_else(runtime_unavailable_error)?;
+    let registry =
+        registered_opaque_codecs(standard).map_err(|_| runtime_unavailable_error())?;
 
     let uid = nix::unistd::geteuid().as_raw();
     let session = kernel
@@ -318,10 +305,7 @@ async fn execute_inspect(
                 .await
                 .map_err(map_kernel_error)?
             else {
-                return Err(InstalledInspectError::new(
-                    InstalledInspectErrorKind::Kernel,
-                    format!("inspection epoch {} does not exist", epoch.canonical()),
-                ));
+                return Err(missing_epoch_error());
             };
             epoch
         }
@@ -331,13 +315,7 @@ async fn execute_inspect(
                 .await
                 .map_err(map_kernel_error)?
             else {
-                return Err(InstalledInspectError::new(
-                    InstalledInspectErrorKind::Kernel,
-                    format!(
-                        "no inspect epoch for invocation {}",
-                        request.invocation.canonical()
-                    ),
-                ));
+                return Err(missing_epoch_error());
             };
             epoch
         }
@@ -347,10 +325,7 @@ async fn execute_inspect(
         .await
         .map_err(map_kernel_error)?
     else {
-        return Err(InstalledInspectError::new(
-            InstalledInspectErrorKind::Kernel,
-            format!("inspection epoch {} does not exist", epoch_id.canonical()),
-        ));
+        return Err(missing_epoch_error());
     };
     if snapshot.invocation_id() != request.invocation {
         return Err(InstalledInspectError::with_code(
@@ -891,12 +866,8 @@ fn write_json_line(
     output: &mut impl Write,
     record: &serde_json::Value,
 ) -> Result<(), InstalledInspectError> {
-    let mut line = serde_json::to_string(record).map_err(|error| {
-        InstalledInspectError::new(
-            InstalledInspectErrorKind::Internal,
-            format!("an inspect record could not be rendered: {error}"),
-        )
-    })?;
+    let mut line = serde_json::to_string(record)
+        .map_err(|_| rendering_failed_error())?;
     line.push('\n');
     output
         .write_all(line.as_bytes())
@@ -914,57 +885,93 @@ fn encode_hex(bytes: &[u8]) -> String {
     text
 }
 
-fn map_host_error(error: EmbeddedHostError) -> InstalledInspectError {
-    InstalledInspectError::new(
+const INSPECT_DENIED_CODE: &str = "inspect.denied";
+const INSPECT_PROJECTION_FAILED_CODE: &str = "inspect.projection_failed";
+const INSPECT_RUNTIME_UNAVAILABLE_CODE: &str = "inspect.runtime_unavailable";
+const INSPECT_RENDERING_FAILED_CODE: &str = "inspect.rendering_failed";
+const INSPECT_STALE_EPOCH_CODE: &str = "inspect.stale_epoch";
+const INSPECT_RECURSION_CODE: &str = "inspect.recursion";
+
+fn runtime_unavailable_error() -> InstalledInspectError {
+    InstalledInspectError::with_code(
         InstalledInspectErrorKind::Internal,
-        format!("the installed Orna instance is not available: {error}"),
+        format!("INSPECT runtime unavailable: {INSPECT_RUNTIME_UNAVAILABLE_CODE}"),
+        INSPECT_RUNTIME_UNAVAILABLE_CODE,
     )
+}
+
+fn denied_error() -> InstalledInspectError {
+    InstalledInspectError::with_code(
+        InstalledInspectErrorKind::Kernel,
+        format!("INSPECT access was denied: {INSPECT_DENIED_CODE}"),
+        INSPECT_DENIED_CODE,
+    )
+}
+
+fn stale_epoch_error() -> InstalledInspectError {
+    InstalledInspectError::with_code(
+        InstalledInspectErrorKind::Kernel,
+        format!("INSPECT epoch is stale: {INSPECT_STALE_EPOCH_CODE}"),
+        INSPECT_STALE_EPOCH_CODE,
+    )
+}
+
+fn recursion_error() -> InstalledInspectError {
+    InstalledInspectError::with_code(
+        InstalledInspectErrorKind::Kernel,
+        format!("INSPECT recursion was denied: {INSPECT_RECURSION_CODE}"),
+        INSPECT_RECURSION_CODE,
+    )
+}
+
+fn missing_epoch_error() -> InstalledInspectError {
+    stale_epoch_error()
+}
+
+fn inspect_projection_failed_error() -> InstalledInspectError {
+    InstalledInspectError::with_code(
+        InstalledInspectErrorKind::Kernel,
+        format!("INSPECT projection failed: {INSPECT_PROJECTION_FAILED_CODE}"),
+        INSPECT_PROJECTION_FAILED_CODE,
+    )
+}
+
+fn map_host_error(_error: EmbeddedHostError) -> InstalledInspectError {
+    runtime_unavailable_error()
 }
 
 fn map_kernel_error(error: PostgresKernelError) -> InstalledInspectError {
     match error {
-        PostgresKernelError::Inspect(model) => {
-            InstalledInspectError::new(InstalledInspectErrorKind::Kernel, model.to_string())
-        }
-        PostgresKernelError::InspectDenied { reason } => {
-            let code = match reason {
-                orna_core::security::InspectDenial::MissingEpoch
-                | orna_core::security::InspectDenial::MissingPrivilege => "inspect.denied",
-                reason => reason.audit_reason(),
-            };
-            InstalledInspectError::with_code(
-                InstalledInspectErrorKind::Kernel,
-                format!("INSPECT access was denied: {code}"),
-                code,
-            )
-        }
-        PostgresKernelError::InspectValueCodec(error) => InstalledInspectError::new(
-            InstalledInspectErrorKind::Kernel,
-            format!("inspection payload codec failed: {error}"),
-        ),
-        PostgresKernelError::LocalPeerAuthentication(error) => InstalledInspectError::new(
+        PostgresKernelError::Inspect(_) => inspect_projection_failed_error(),
+        PostgresKernelError::InspectDenied { reason } => match reason {
+            orna_core::security::InspectDenial::MissingEpoch => stale_epoch_error(),
+            orna_core::security::InspectDenial::MissingPrivilege => denied_error(),
+            orna_core::security::InspectDenial::ObserverSuppressed => recursion_error(),
+        },
+        PostgresKernelError::InspectValueCodec(_) => inspect_projection_failed_error(),
+        PostgresKernelError::LocalPeerAuthentication(_) => runtime_unavailable_error(),
+        _other => InstalledInspectError::with_code(
             InstalledInspectErrorKind::Internal,
-            format!("the local peer could not authenticate: {error}"),
-        ),
-        other => InstalledInspectError::new(
-            InstalledInspectErrorKind::Internal,
-            format!("the inspection operation failed: {other}"),
+            format!("INSPECT projection failed: {INSPECT_PROJECTION_FAILED_CODE}"),
+            INSPECT_PROJECTION_FAILED_CODE,
         ),
     }
 }
 
-fn map_value_codec_error(error: ValueCodecError) -> InstalledInspectError {
-    InstalledInspectError::new(
-        InstalledInspectErrorKind::Kernel,
-        format!("the canonical typed value codec failed: {error}"),
+fn map_value_codec_error(_error: ValueCodecError) -> InstalledInspectError {
+    inspect_projection_failed_error()
+}
+
+fn rendering_failed_error() -> InstalledInspectError {
+    InstalledInspectError::with_code(
+        InstalledInspectErrorKind::Rendering,
+        format!("INSPECT rendering failed: {INSPECT_RENDERING_FAILED_CODE}"),
+        INSPECT_RENDERING_FAILED_CODE,
     )
 }
 
-fn presentation_error(error: io::Error) -> InstalledInspectError {
-    InstalledInspectError::new(
-        InstalledInspectErrorKind::Rendering,
-        format!("an inspect record could not be written: {error}"),
-    )
+fn presentation_error(_error: io::Error) -> InstalledInspectError {
+    rendering_failed_error()
 }
 
 #[cfg(test)]
@@ -1695,15 +1702,20 @@ mod tests {
         );
     }
 
-    /// Kernel inspect failures classify as the closed kernel class with the
-    /// stable audit reason; every other kernel failure is internal.
+    /// Kernel inspect failures retain the closed kernel class and stable public
+    /// code; every other kernel failure is internal.
     #[test]
     fn kernel_errors_classify_inspect_outcomes() {
-        let model = orna_core::inspect::InspectError::EmptyValueBatch;
+        let model = orna_core::inspect::InspectError::EmptyEpoch {
+            id: InspectEpochId::from_bytes([0xab; 16]),
+        };
         let mapped = map_kernel_error(PostgresKernelError::Inspect(model));
         assert_eq!(mapped.kind(), InstalledInspectErrorKind::Kernel);
-        assert_eq!(mapped.code(), None);
-        assert!(mapped.message().contains("batch"));
+        assert_eq!(mapped.code(), Some("inspect.projection_failed"));
+        assert_eq!(
+            mapped.message(),
+            "INSPECT projection failed: inspect.projection_failed"
+        );
 
         let denied = map_kernel_error(PostgresKernelError::InspectDenied {
             reason: orna_core::security::InspectDenial::MissingPrivilege,
@@ -1716,27 +1728,98 @@ mod tests {
             reason: orna_core::security::InspectDenial::MissingEpoch,
         });
         assert_eq!(missing_epoch.kind(), InstalledInspectErrorKind::Kernel);
-        assert_eq!(missing_epoch.code(), Some("inspect.denied"));
+        assert_eq!(missing_epoch.code(), Some("inspect.stale_epoch"));
         assert_eq!(
             missing_epoch.message(),
-            "INSPECT access was denied: inspect.denied"
+            "INSPECT epoch is stale: inspect.stale_epoch"
+        );
+
+        let recursion = map_kernel_error(PostgresKernelError::InspectDenied {
+            reason: orna_core::security::InspectDenial::ObserverSuppressed,
+        });
+        assert_eq!(recursion.kind(), InstalledInspectErrorKind::Kernel);
+        assert_eq!(recursion.code(), Some("inspect.recursion"));
+        assert_eq!(
+            recursion.message(),
+            "INSPECT recursion was denied: inspect.recursion"
         );
 
         let codec = map_kernel_error(PostgresKernelError::InspectValueCodec(
             orna_protocol::ValueCodecError::UnsupportedValue,
         ));
         assert_eq!(codec.kind(), InstalledInspectErrorKind::Kernel);
+        assert_eq!(codec.code(), Some("inspect.projection_failed"));
+        assert_eq!(
+            codec.message(),
+            "INSPECT projection failed: inspect.projection_failed"
+        );
+
+        let value_codec = map_value_codec_error(orna_protocol::ValueCodecError::UnsupportedValue);
+        assert_eq!(value_codec.kind(), InstalledInspectErrorKind::Kernel);
+        assert_eq!(value_codec.code(), Some("inspect.projection_failed"));
+        assert_eq!(
+            value_codec.message(),
+            "INSPECT projection failed: inspect.projection_failed"
+        );
 
         let authentication = map_kernel_error(PostgresKernelError::LocalPeerAuthentication(
             LocalPeerAuthenticationError::UnknownUid,
         ));
         assert_eq!(authentication.kind(), InstalledInspectErrorKind::Internal);
+        assert_eq!(authentication.code(), Some("inspect.runtime_unavailable"));
+        assert_eq!(
+            authentication.message(),
+            "INSPECT runtime unavailable: inspect.runtime_unavailable"
+        );
 
         let other = map_kernel_error(PostgresKernelError::RawCallTargetUnavailable {
             function: function(0x10),
             rule: "closed raw-call rule",
         });
         assert_eq!(other.kind(), InstalledInspectErrorKind::Internal);
+        assert_eq!(other.code(), Some("inspect.projection_failed"));
+        assert_eq!(
+            other.message(),
+            "INSPECT projection failed: inspect.projection_failed"
+        );
+    }
+
+    #[test]
+    fn host_errors_use_a_stable_runtime_code() {
+        let host = map_host_error(EmbeddedHostError::InvalidPackageState);
+        assert_eq!(host.kind(), InstalledInspectErrorKind::Internal);
+        assert_eq!(host.code(), Some("inspect.runtime_unavailable"));
+        assert_eq!(
+            host.message(),
+            "INSPECT runtime unavailable: inspect.runtime_unavailable"
+        );
+    }
+
+    /// Missing epochs use the stable stale-epoch surface whether the kernel
+    /// reports the denial or the installed command resolves no epoch.
+    #[test]
+    fn missing_epoch_error_is_stable() {
+        let error = missing_epoch_error();
+        assert_eq!(error.kind(), InstalledInspectErrorKind::Kernel);
+        assert_eq!(error.code(), Some("inspect.stale_epoch"));
+        assert_eq!(
+            error.message(),
+            "INSPECT epoch is stale: inspect.stale_epoch"
+        );
+    }
+
+    #[test]
+    fn rendering_errors_use_a_stable_code() {
+        let error = presentation_error(std::io::Error::new(
+            std::io::ErrorKind::BrokenPipe,
+            "secret rendering detail",
+        ));
+        assert_eq!(error.kind(), InstalledInspectErrorKind::Rendering);
+        assert_eq!(error.code(), Some("inspect.rendering_failed"));
+        assert_eq!(
+            error.message(),
+            "INSPECT rendering failed: inspect.rendering_failed"
+        );
     }
 
     /// The closed failure display names the installed command.
