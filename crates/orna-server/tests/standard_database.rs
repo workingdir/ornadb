@@ -13461,6 +13461,13 @@ async fn proves_installed_server_function_dogfood_source_through_orna_invoke() -
             .find(|function| function.name().parts() == ["dogfood", "read"])
             .ok_or_else(|| failure("the installed dogfood source is missing dogfood.read"))?
             .id();
+        let distinct_id = active
+            .catalogue()
+            .functions()
+            .iter()
+            .find(|function| function.name().parts() == ["dogfood", "distinct_values"])
+            .ok_or_else(|| failure("the installed dogfood source is missing dogfood.distinct_values"))?
+            .id();
         let read_item = active
             .catalogue()
             .functions()
@@ -13509,6 +13516,7 @@ async fn proves_installed_server_function_dogfood_source_through_orna_invoke() -
             vec![],
             vec![
                 ExecuteGrant::new(RAW_CLIENT_USER, read_id),
+                ExecuteGrant::new(RAW_CLIENT_USER, distinct_id),
                 ExecuteGrant::new(RAW_CLIENT_USER, read_item_id),
                 ExecuteGrant::new(RAW_CLIENT_USER, update_id),
             ],
@@ -13644,6 +13652,45 @@ async fn proves_installed_server_function_dogfood_source_through_orna_invoke() -
         require(
             read_item_stderr.is_empty(),
             "the quiet SERVER dogfood read_item invocation wrote progress diagnostics",
+        )?;
+
+        let duplicate_object_id = format!("{:032x}", u128::from_be_bytes([0x92; 16]));
+        run_database_statement(
+            &database,
+            &format!(
+                "INSERT INTO _orna_data.{table} (_orna_object_id, {column}) VALUES (decode('{duplicate_object_id}', 'hex'), 74)"
+            ),
+        )
+        .await?;
+        let mut expected_distinct = encode_constructed_value(
+            &active,
+            &registry,
+            &RuntimeValue::Integer(74),
+        )?;
+        expected_distinct.push(b'\n');
+        let (distinct_outcome, distinct_stdout, distinct_stderr) = installed_invoke_run(
+            &database,
+            installed_invoke_request(
+                InvocationRequestTarget::qualified_name(QualifiedSemanticName::new([
+                    "dogfood", "distinct_values",
+                ])?)?,
+                vec![],
+                true,
+                false,
+            ),
+        )
+        .await?;
+        require(
+            distinct_outcome == Ok(InstalledInvokeOutcome::Completed),
+            "the installed SERVER dogfood distinct_values invocation did not complete",
+        )?;
+        require(
+            distinct_stdout == expected_distinct,
+            "the installed SERVER dogfood distinct_values invocation returned the wrong value",
+        )?;
+        require(
+            distinct_stderr.is_empty(),
+            "the quiet SERVER dogfood distinct_values invocation wrote progress diagnostics",
         )?;
 
         require_no_database_sessions(&database).await
