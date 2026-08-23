@@ -135,6 +135,14 @@ pub enum SemanticChange {
         from: String,
         to: String,
     },
+    /// A retained function parameter changed its declaration ordinal.
+    ParameterOrdinalChanged {
+        owner: FunctionId,
+        id: ParameterId,
+        name: String,
+        from: u32,
+        to: u32,
+    },
     /// A retained object or record value field changed its resolved type.
     FieldTypeChanged {
         owner: TypeId,
@@ -233,7 +241,8 @@ impl SemanticChange {
             | Self::ParameterRenamed { .. }
             | Self::ParameterDropped { .. }
             | Self::ParameterTypeChanged { .. }
-            | Self::ParameterDefaultChanged { .. } => "parameter",
+            | Self::ParameterDefaultChanged { .. }
+            | Self::ParameterOrdinalChanged { .. } => "parameter",
         }
     }
 }
@@ -746,6 +755,15 @@ fn diff_parameter_payload(
     owner: FunctionId,
     diff: &mut CatalogueSemanticDiff,
 ) {
+    if base.ordinal() != candidate.ordinal() {
+        diff.push(SemanticChange::ParameterOrdinalChanged {
+            owner,
+            id: candidate.id(),
+            name: candidate.name().to_owned(),
+            from: base.ordinal(),
+            to: candidate.ordinal(),
+        });
+    }
     if base.resolved_type() != candidate.resolved_type() {
         diff.push(SemanticChange::ParameterTypeChanged {
             owner,
@@ -1253,6 +1271,57 @@ mod tests {
                 id: ParameterId::from_bytes([6; 16]),
                 name: "p_q".to_owned(),
             }]
+        );
+    }
+
+    #[test]
+    fn retained_parameters_report_declaration_ordinal_changes() {
+        let base = full_snapshot(
+            vec![schema(1, &["app"])],
+            vec![],
+            vec![],
+            vec![function(
+                5,
+                &["app", "read"],
+                vec![parameter(6, "first", 0), parameter(7, "second", 1)],
+            )],
+        );
+        let candidate = full_snapshot(
+            vec![schema(1, &["app"])],
+            vec![],
+            vec![],
+            vec![function(
+                5,
+                &["app", "read"],
+                vec![parameter(7, "second", 0), parameter(6, "first", 1)],
+            )],
+        );
+
+        let diff = catalogue_diff(&base, &candidate);
+
+        assert_eq!(
+            diff.changes(),
+            &[
+                SemanticChange::ParameterOrdinalChanged {
+                    owner: FunctionId::from_bytes([5; 16]),
+                    id: ParameterId::from_bytes([7; 16]),
+                    name: "second".to_owned(),
+                    from: 1,
+                    to: 0,
+                },
+                SemanticChange::ParameterOrdinalChanged {
+                    owner: FunctionId::from_bytes([5; 16]),
+                    id: ParameterId::from_bytes([6; 16]),
+                    name: "first".to_owned(),
+                    from: 0,
+                    to: 1,
+                },
+            ]
+        );
+        assert!(
+            diff.changes()
+                .iter()
+                .all(|change| change.category() == "parameter")
         );
     }
 
