@@ -328,12 +328,18 @@ module.exports = grammar({
             client_primary_expression: ($) =>
                 choice(
                     $.client_call_expression,
+                    $.client_await_expression,
                     $.string_literal,
                     $.client_integer_literal,
                     $.boolean_literal,
                     $.client_field_path,
                     $.client_parameter_read,
                 ),
+
+            // AWAIT is a CLIENT-only prefix over the closed CLIENT expression
+            // surface; semantic checks restrict its operand to a resource call.
+            client_await_expression: ($) =>
+                seq($.kw_await, field('expression', $.client_expression)),
 
             client_call_expression: ($) =>
                 seq(
