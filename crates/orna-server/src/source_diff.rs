@@ -562,6 +562,19 @@ fn render_change(
                 .unwrap_or_else(|| owner.canonical());
             let _ = write!(line, "~ parameter {owner}.{from} -> {owner}.{to} [{}]", id.canonical());
         }
+        SemanticChange::ParameterOrdinalChanged {
+            owner, id, name, from, to,
+        } => {
+            let owner = candidate
+                .function_by_id(*owner)
+                .map(|definition| qualified(definition.name()))
+                .unwrap_or_else(|| owner.canonical());
+            let _ = write!(
+                line,
+                "! parameter {owner}.{name} ordinal {from} -> {to} [{}]",
+                id.canonical()
+            );
+        }
         SemanticChange::FieldTypeChanged { owner, name, id } => {
             let owner = field_owner_name(candidate, *owner);
             let _ = write!(line, "! field {owner}.{name} type [{}]", id.canonical());
@@ -1089,6 +1102,13 @@ mod tests {
                 from: "query".to_owned(),
                 to: "search".to_owned(),
             },
+            SemanticChange::ParameterOrdinalChanged {
+                owner: function_id,
+                id: parameter_id,
+                name: "search".to_owned(),
+                from: 1,
+                to: 0,
+            },
             SemanticChange::ParameterTypeChanged {
                 owner: function_id,
                 id: parameter_id,
@@ -1226,6 +1246,11 @@ mod tests {
             format!(
                 "~ parameter {}.query -> {}.search [{}]",
                 function_id.canonical(),
+                function_id.canonical(),
+                parameter_id.canonical()
+            ),
+            format!(
+                "! parameter {}.search ordinal 1 -> 0 [{}]",
                 function_id.canonical(),
                 parameter_id.canonical()
             ),
