@@ -50,3 +50,30 @@ CROSS JOIN (
         (decode('00000000000000000000000000000040', 'hex')),
         (decode('00000000000000000000000000000041', 'hex'))
 ) AS identity(function_id);
+
+DO $$
+DECLARE
+    missing bigint;
+BEGIN
+    SELECT count(*) INTO missing
+    FROM _orna_kernel.catalogue_revisions AS revision
+    CROSS JOIN (
+        VALUES
+            (decode('00000000000000000000000000000040', 'hex')),
+            (decode('00000000000000000000000000000041', 'hex'))
+    ) AS identity(function_id)
+    WHERE NOT EXISTS (
+        SELECT 1
+        FROM _orna_kernel.invocation_target_authorities AS authority
+        WHERE authority.catalogue_revision_id = revision.id
+          AND authority.function_id = identity.function_id
+          AND authority.target_class = 'system'
+          AND authority.function_revision_id = identity.function_id
+          AND authority.standard_library_revision_id IS NULL
+    );
+    IF missing <> 0 THEN
+        RAISE EXCEPTION
+            'sealed system invocation authority backfill is incomplete';
+    END IF;
+END
+$$;
