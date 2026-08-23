@@ -6523,6 +6523,15 @@ fn check_client_expression(
             ))
         }
         ClientExpression::IntegerLiteral { value, source } => {
+            if i32::try_from(*value).is_err() {
+                diagnostics.push(diagnostic(
+                    DiagnosticCode::TypeMismatch,
+                    "CLIENT integer literal is outside the INTEGER range",
+                    input.logical_path,
+                    &source.span,
+                ));
+                return None;
+            }
             let expression_type = ClientExpressionType {
                 semantic_type: SemanticType::scalar(StandardScalar::Integer),
                 standard_value_type: standard_scalar_type_id(standard, StandardScalar::Integer),
@@ -19798,6 +19807,34 @@ mod tests {
         assert_eq!(literal_location.logical_path(), "client.orna");
         assert_eq!(literal_location.span().start(), literal_start);
         assert_eq!(literal_location.span().end(), literal_start + 4);
+    }
+
+    #[test]
+    fn rejects_client_integer_literals_outside_i32_range_and_accepts_boundary() {
+        let out_of_range = "CREATE SCHEMA examples; CREATE CLIENT FUNCTION examples.value() RETURNS INTEGER AS 2147483648;";
+        let report = check(&bundle([("client.orna", out_of_range)]), &empty_catalogue());
+        assert_eq!(report.diagnostics().len(), 1);
+        assert_eq!(report.diagnostics()[0].code(), DiagnosticCode::TypeMismatch);
+        assert_eq!(
+            report.diagnostics()[0].message(),
+            "CLIENT integer literal is outside the INTEGER range"
+        );
+        assert_eq!(
+            report.diagnostics()[0].location().span().start(),
+            out_of_range.find("2147483648").unwrap()
+        );
+        assert_no_checked_bundle(&report);
+
+        let in_range = "CREATE SCHEMA examples; CREATE CLIENT FUNCTION examples.value() RETURNS INTEGER AS 2147483647;";
+        let report = check(&bundle([("client.orna", in_range)]), &empty_catalogue());
+        assert!(report.diagnostics().is_empty(), "{:?}", report.diagnostics());
+        let function = &report.checked_bundle().unwrap().client_functions()[0];
+        assert!(matches!(
+            function.body(),
+            CheckedClientFunctionBody::Expression {
+                expression: CheckedClientExpression::Integer { value: 2_147_483_647, .. }
+            }
+        ));
     }
 
     fn validate_capability_text(
