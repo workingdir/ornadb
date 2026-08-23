@@ -12427,19 +12427,12 @@ async fn install_external_capability_fixture(
 /// Installs `orna.std/3` as the active standard from the empty base (ADR 0057
 /// step 10).
 ///
-/// The V2-to-V3 upgrade pipeline is deliberately not supported in this build
-/// (work ADR 0055 defers standard upgrades after `orna.std/2`, so
-/// `prepare_standard_upgrade_v2_to_v3` fails closed), but the live proof
-/// needs the V3 snapshot active so the sealed route's opaque codec registry
-/// binds the `std.terminal.Document` and `std.io.ByteStream` codecs. The
-/// proof therefore installs V3 exactly as the accepted V1-to-V2 pipeline
-/// installs V2 from the empty base: retain and verify the V3 snapshot, seed
-/// the retained V1 and V2 source records the V3 source parent chain requires,
-/// build the empty-base application candidate pinned to the V3 snapshot
-/// through the version-two catalogue hash context, and apply candidate plus
-/// snapshot through the kernel's test-hooks persistence seam (the same path
-/// [`PostgresKernel::apply_standard_upgrade`] uses for the compiler-produced
-/// V2 upgrade).
+/// The live proof uses a test-only empty-base/source-chain seeding seam because
+/// the retained V3 snapshot requires its V1 and V2 source parents. The
+/// compiler-backed V2-to-V3 upgrade remains the production path; this helper
+/// prepares the same V3 snapshot through the test-hooks persistence seam so
+/// the sealed route's opaque codec registry binds the
+/// `std.terminal.Document` and `std.io.ByteStream` codecs.
 async fn install_v3_standard(
     kernel: &PostgresKernel,
     empty: &ActiveDatabaseRevision,
