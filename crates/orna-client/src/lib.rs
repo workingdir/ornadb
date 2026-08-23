@@ -6856,7 +6856,10 @@ fn resolve_state_slot_type(
             definition.representation_contract(),
             "orna.kernel.value.boolean@1"
                 | "orna.kernel.value.integer@1"
+                | "orna.kernel.value.bigint@1"
+                | "orna.kernel.value.float@1"
                 | "orna.kernel.value.character-large-object@1"
+                | "orna.kernel.value.binary-large-object@1"
         )
     {
         Some(ResolvedType::value(type_id))
@@ -10180,12 +10183,53 @@ fn client_stream_cancellation_clears_batches_and_rejects_stale_completions() {
         ));
     }
     #[test]
+    fn version_four_supported_scalar_slot_types_initialise() {
+        for type_id in [
+            orna_standard::BIGINT_TYPE_ID,
+            orna_standard::FLOAT_TYPE_ID,
+            orna_standard::BINARY_LARGE_OBJECT_TYPE_ID,
+        ] {
+            let slot_id = StateSlotId::from_bytes(type_id.to_bytes());
+            let plan = orna_artifact::client_plan::StateClientPlan::new(
+                orna_artifact::client_plan::ClientExpressionNode::Boolean { value: true },
+                vec![orna_artifact::client_plan::StateSlot::new(
+                    slot_id,
+                    type_id,
+                    orna_artifact::client_plan::StateScope::Local,
+                    orna_artifact::client_plan::StateDefault::Null,
+                )],
+            );
+            let (active, function, _, _) = version_four_state_active(
+                orna_standard::BOOLEAN_TYPE_ID,
+                plan.encode().expect("the state plan encodes"),
+            );
+            let mut state = super::ClientStateStore::new();
+
+            let result = super::evaluate_client_function_with_state(
+                &active,
+                &authorise(active.pair(), function),
+                &mut state,
+            )
+            .expect("supported scalar state slot initialises");
+
+            assert_eq!(result.value(), &RuntimeValue::Boolean(true));
+            assert_eq!(
+                state.local().get(&super::ClientStateKey::new(function, slot_id)),
+                Some(
+                    &RuntimeValue::null(ResolvedType::value(type_id))
+                        .expect("supported scalar null constructs"),
+                ),
+            );
+        }
+    }
+
+    #[test]
     fn version_four_unsupported_slot_type_fails_closed() {
         let plan = orna_artifact::client_plan::StateClientPlan::new(
             orna_artifact::client_plan::ClientExpressionNode::Boolean { value: true },
             vec![orna_artifact::client_plan::StateSlot::new(
                 StateSlotId::from_bytes([0x41; 16]),
-                orna_standard::BIGINT_TYPE_ID,
+                orna_standard::DATE_TYPE_ID,
                 orna_artifact::client_plan::StateScope::Local,
                 orna_artifact::client_plan::StateDefault::Unset,
             )],
