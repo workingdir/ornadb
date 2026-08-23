@@ -3035,6 +3035,1799 @@
     }
   },
   {
+    "type": "client_argument",
+    "named": true,
+    "fields": {
+      "name": {
+        "multiple": false,
+        "required": false,
+        "types": [
+          {
+            "type": "identifier",
+            "named": true
+          },
+          {
+            "type": "kw_add",
+            "named": true
+          },
+          {
+            "type": "kw_alter",
+            "named": true
+          },
+          {
+            "type": "kw_and",
+            "named": true
+          },
+          {
+            "type": "kw_as",
+            "named": true
+          },
+          {
+            "type": "kw_atomic",
+            "named": true
+          },
+          {
+            "type": "kw_await",
+            "named": true
+          },
+          {
+            "type": "kw_begin",
+            "named": true
+          },
+          {
+            "type": "kw_bigint",
+            "named": true
+          },
+          {
+            "type": "kw_binary",
+            "named": true
+          },
+          {
+            "type": "kw_bool",
+            "named": true
+          },
+          {
+            "type": "kw_boolean",
+            "named": true
+          },
+          {
+            "type": "kw_by",
+            "named": true
+          },
+          {
+            "type": "kw_bytes",
+            "named": true
+          },
+          {
+            "type": "kw_call",
+            "named": true
+          },
+          {
+            "type": "kw_capability",
+            "named": true
+          },
+          {
+            "type": "kw_cascade",
+            "named": true
+          },
+          {
+            "type": "kw_case",
+            "named": true
+          },
+          {
+            "type": "kw_character",
+            "named": true
+          },
+          {
+            "type": "kw_check",
+            "named": true
+          },
+          {
+            "type": "kw_client",
+            "named": true
+          },
+          {
+            "type": "kw_const",
+            "named": true
+          },
+          {
+            "type": "kw_contract",
+            "named": true
+          },
+          {
+            "type": "kw_create",
+            "named": true
+          },
+          {
+            "type": "kw_date",
+            "named": true
+          },
+          {
+            "type": "kw_decimal",
+            "named": true
+          },
+          {
+            "type": "kw_default",
+            "named": true
+          },
+          {
+            "type": "kw_definer",
+            "named": true
+          },
+          {
+            "type": "kw_delete",
+            "named": true
+          },
+          {
+            "type": "kw_disabled",
+            "named": true
+          },
+          {
+            "type": "kw_distinct",
+            "named": true
+          },
+          {
+            "type": "kw_documentation",
+            "named": true
+          },
+          {
+            "type": "kw_drop",
+            "named": true
+          },
+          {
+            "type": "kw_duration",
+            "named": true
+          },
+          {
+            "type": "kw_else",
+            "named": true
+          },
+          {
+            "type": "kw_elsif",
+            "named": true
+          },
+          {
+            "type": "kw_end",
+            "named": true
+          },
+          {
+            "type": "kw_enum",
+            "named": true
+          },
+          {
+            "type": "kw_execute",
+            "named": true
+          },
+          {
+            "type": "kw_export",
+            "named": true
+          },
+          {
+            "type": "kw_external",
+            "named": true
+          },
+          {
+            "type": "kw_false",
+            "named": true
+          },
+          {
+            "type": "kw_field",
+            "named": true
+          },
+          {
+            "type": "kw_final",
+            "named": true
+          },
+          {
+            "type": "kw_float",
+            "named": true
+          },
+          {
+            "type": "kw_for",
+            "named": true
+          },
+          {
+            "type": "kw_from",
+            "named": true
+          },
+          {
+            "type": "kw_function",
+            "named": true
+          },
+          {
+            "type": "kw_grant",
+            "named": true
+          },
+          {
+            "type": "kw_if",
+            "named": true
+          },
+          {
+            "type": "kw_ilike",
+            "named": true
+          },
+          {
+            "type": "kw_immutable",
+            "named": true
+          },
+          {
+            "type": "kw_in",
+            "named": true
+          },
+          {
+            "type": "kw_insert",
+            "named": true
+          },
+          {
+            "type": "kw_inspect",
+            "named": true
+          },
+          {
+            "type": "kw_int",
+            "named": true
+          },
+          {
+            "type": "kw_integer",
+            "named": true
+          },
+          {
+            "type": "kw_into",
+            "named": true
+          },
+          {
+            "type": "kw_invoker",
+            "named": true
+          },
+          {
+            "type": "kw_is",
+            "named": true
+          },
+          {
+            "type": "kw_kernel",
+            "named": true
+          },
+          {
+            "type": "kw_large",
+            "named": true
+          },
+          {
+            "type": "kw_let",
+            "named": true
+          },
+          {
+            "type": "kw_like",
+            "named": true
+          },
+          {
+            "type": "kw_list",
+            "named": true
+          },
+          {
+            "type": "kw_local",
+            "named": true
+          },
+          {
+            "type": "kw_loop",
+            "named": true
+          },
+          {
+            "type": "kw_manual",
+            "named": true
+          },
+          {
+            "type": "kw_map",
+            "named": true
+          },
+          {
+            "type": "kw_not",
+            "named": true
+          },
+          {
+            "type": "kw_null",
+            "named": true
+          },
+          {
+            "type": "kw_object",
+            "named": true
+          },
+          {
+            "type": "kw_on",
+            "named": true
+          },
+          {
+            "type": "kw_only",
+            "named": true
+          },
+          {
+            "type": "kw_opaque",
+            "named": true
+          },
+          {
+            "type": "kw_option",
+            "named": true
+          },
+          {
+            "type": "kw_or",
+            "named": true
+          },
+          {
+            "type": "kw_order",
+            "named": true
+          },
+          {
+            "type": "kw_persistable",
+            "named": true
+          },
+          {
+            "type": "kw_prelude",
+            "named": true
+          },
+          {
+            "type": "kw_primitive",
+            "named": true
+          },
+          {
+            "type": "kw_read",
+            "named": true
+          },
+          {
+            "type": "kw_ref",
+            "named": true
+          },
+          {
+            "type": "kw_rename",
+            "named": true
+          },
+          {
+            "type": "kw_requires",
+            "named": true
+          },
+          {
+            "type": "kw_restrict",
+            "named": true
+          },
+          {
+            "type": "kw_return",
+            "named": true
+          },
+          {
+            "type": "kw_returning",
+            "named": true
+          },
+          {
+            "type": "kw_returns",
+            "named": true
+          },
+          {
+            "type": "kw_revoke",
+            "named": true
+          },
+          {
+            "type": "kw_role",
+            "named": true
+          },
+          {
+            "type": "kw_rows",
+            "named": true
+          },
+          {
+            "type": "kw_runtime",
+            "named": true
+          },
+          {
+            "type": "kw_schema",
+            "named": true
+          },
+          {
+            "type": "kw_scope",
+            "named": true
+          },
+          {
+            "type": "kw_sealed",
+            "named": true
+          },
+          {
+            "type": "kw_security",
+            "named": true
+          },
+          {
+            "type": "kw_select",
+            "named": true
+          },
+          {
+            "type": "kw_server",
+            "named": true
+          },
+          {
+            "type": "kw_session",
+            "named": true
+          },
+          {
+            "type": "kw_set",
+            "named": true
+          },
+          {
+            "type": "kw_stable",
+            "named": true
+          },
+          {
+            "type": "kw_state",
+            "named": true
+          },
+          {
+            "type": "kw_stream",
+            "named": true
+          },
+          {
+            "type": "kw_table",
+            "named": true
+          },
+          {
+            "type": "kw_text",
+            "named": true
+          },
+          {
+            "type": "kw_then",
+            "named": true
+          },
+          {
+            "type": "kw_time",
+            "named": true
+          },
+          {
+            "type": "kw_timestamp",
+            "named": true
+          },
+          {
+            "type": "kw_to",
+            "named": true
+          },
+          {
+            "type": "kw_transaction",
+            "named": true
+          },
+          {
+            "type": "kw_transient",
+            "named": true
+          },
+          {
+            "type": "kw_true",
+            "named": true
+          },
+          {
+            "type": "kw_type",
+            "named": true
+          },
+          {
+            "type": "kw_unique",
+            "named": true
+          },
+          {
+            "type": "kw_update",
+            "named": true
+          },
+          {
+            "type": "kw_user",
+            "named": true
+          },
+          {
+            "type": "kw_uuid",
+            "named": true
+          },
+          {
+            "type": "kw_value",
+            "named": true
+          },
+          {
+            "type": "kw_values",
+            "named": true
+          },
+          {
+            "type": "kw_void",
+            "named": true
+          },
+          {
+            "type": "kw_volatile",
+            "named": true
+          },
+          {
+            "type": "kw_volatility",
+            "named": true
+          },
+          {
+            "type": "kw_when",
+            "named": true
+          },
+          {
+            "type": "kw_where",
+            "named": true
+          },
+          {
+            "type": "kw_while",
+            "named": true
+          }
+        ]
+      },
+      "value": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "client_expression",
+            "named": true
+          }
+        ]
+      }
+    },
+    "children": {
+      "multiple": false,
+      "required": false,
+      "types": [
+        {
+          "type": "arrow_operator",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "client_argument_list",
+    "named": true,
+    "fields": {},
+    "children": {
+      "multiple": true,
+      "required": true,
+      "types": [
+        {
+          "type": "client_argument",
+          "named": true
+        },
+        {
+          "type": "comma",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "client_call_callee",
+    "named": true,
+    "fields": {},
+    "children": {
+      "multiple": true,
+      "required": true,
+      "types": [
+        {
+          "type": "dot",
+          "named": true
+        },
+        {
+          "type": "identifier",
+          "named": true
+        },
+        {
+          "type": "kw_add",
+          "named": true
+        },
+        {
+          "type": "kw_alter",
+          "named": true
+        },
+        {
+          "type": "kw_and",
+          "named": true
+        },
+        {
+          "type": "kw_as",
+          "named": true
+        },
+        {
+          "type": "kw_atomic",
+          "named": true
+        },
+        {
+          "type": "kw_await",
+          "named": true
+        },
+        {
+          "type": "kw_begin",
+          "named": true
+        },
+        {
+          "type": "kw_bigint",
+          "named": true
+        },
+        {
+          "type": "kw_binary",
+          "named": true
+        },
+        {
+          "type": "kw_bool",
+          "named": true
+        },
+        {
+          "type": "kw_boolean",
+          "named": true
+        },
+        {
+          "type": "kw_by",
+          "named": true
+        },
+        {
+          "type": "kw_bytes",
+          "named": true
+        },
+        {
+          "type": "kw_call",
+          "named": true
+        },
+        {
+          "type": "kw_capability",
+          "named": true
+        },
+        {
+          "type": "kw_cascade",
+          "named": true
+        },
+        {
+          "type": "kw_case",
+          "named": true
+        },
+        {
+          "type": "kw_character",
+          "named": true
+        },
+        {
+          "type": "kw_check",
+          "named": true
+        },
+        {
+          "type": "kw_client",
+          "named": true
+        },
+        {
+          "type": "kw_const",
+          "named": true
+        },
+        {
+          "type": "kw_contract",
+          "named": true
+        },
+        {
+          "type": "kw_create",
+          "named": true
+        },
+        {
+          "type": "kw_date",
+          "named": true
+        },
+        {
+          "type": "kw_decimal",
+          "named": true
+        },
+        {
+          "type": "kw_default",
+          "named": true
+        },
+        {
+          "type": "kw_definer",
+          "named": true
+        },
+        {
+          "type": "kw_delete",
+          "named": true
+        },
+        {
+          "type": "kw_disabled",
+          "named": true
+        },
+        {
+          "type": "kw_distinct",
+          "named": true
+        },
+        {
+          "type": "kw_documentation",
+          "named": true
+        },
+        {
+          "type": "kw_drop",
+          "named": true
+        },
+        {
+          "type": "kw_duration",
+          "named": true
+        },
+        {
+          "type": "kw_else",
+          "named": true
+        },
+        {
+          "type": "kw_elsif",
+          "named": true
+        },
+        {
+          "type": "kw_end",
+          "named": true
+        },
+        {
+          "type": "kw_enum",
+          "named": true
+        },
+        {
+          "type": "kw_execute",
+          "named": true
+        },
+        {
+          "type": "kw_export",
+          "named": true
+        },
+        {
+          "type": "kw_external",
+          "named": true
+        },
+        {
+          "type": "kw_false",
+          "named": true
+        },
+        {
+          "type": "kw_field",
+          "named": true
+        },
+        {
+          "type": "kw_final",
+          "named": true
+        },
+        {
+          "type": "kw_float",
+          "named": true
+        },
+        {
+          "type": "kw_for",
+          "named": true
+        },
+        {
+          "type": "kw_from",
+          "named": true
+        },
+        {
+          "type": "kw_function",
+          "named": true
+        },
+        {
+          "type": "kw_grant",
+          "named": true
+        },
+        {
+          "type": "kw_if",
+          "named": true
+        },
+        {
+          "type": "kw_ilike",
+          "named": true
+        },
+        {
+          "type": "kw_immutable",
+          "named": true
+        },
+        {
+          "type": "kw_in",
+          "named": true
+        },
+        {
+          "type": "kw_insert",
+          "named": true
+        },
+        {
+          "type": "kw_inspect",
+          "named": true
+        },
+        {
+          "type": "kw_int",
+          "named": true
+        },
+        {
+          "type": "kw_integer",
+          "named": true
+        },
+        {
+          "type": "kw_into",
+          "named": true
+        },
+        {
+          "type": "kw_invoker",
+          "named": true
+        },
+        {
+          "type": "kw_is",
+          "named": true
+        },
+        {
+          "type": "kw_kernel",
+          "named": true
+        },
+        {
+          "type": "kw_large",
+          "named": true
+        },
+        {
+          "type": "kw_let",
+          "named": true
+        },
+        {
+          "type": "kw_like",
+          "named": true
+        },
+        {
+          "type": "kw_list",
+          "named": true
+        },
+        {
+          "type": "kw_local",
+          "named": true
+        },
+        {
+          "type": "kw_loop",
+          "named": true
+        },
+        {
+          "type": "kw_manual",
+          "named": true
+        },
+        {
+          "type": "kw_map",
+          "named": true
+        },
+        {
+          "type": "kw_not",
+          "named": true
+        },
+        {
+          "type": "kw_null",
+          "named": true
+        },
+        {
+          "type": "kw_object",
+          "named": true
+        },
+        {
+          "type": "kw_on",
+          "named": true
+        },
+        {
+          "type": "kw_only",
+          "named": true
+        },
+        {
+          "type": "kw_opaque",
+          "named": true
+        },
+        {
+          "type": "kw_option",
+          "named": true
+        },
+        {
+          "type": "kw_or",
+          "named": true
+        },
+        {
+          "type": "kw_order",
+          "named": true
+        },
+        {
+          "type": "kw_persistable",
+          "named": true
+        },
+        {
+          "type": "kw_prelude",
+          "named": true
+        },
+        {
+          "type": "kw_primitive",
+          "named": true
+        },
+        {
+          "type": "kw_read",
+          "named": true
+        },
+        {
+          "type": "kw_ref",
+          "named": true
+        },
+        {
+          "type": "kw_rename",
+          "named": true
+        },
+        {
+          "type": "kw_requires",
+          "named": true
+        },
+        {
+          "type": "kw_restrict",
+          "named": true
+        },
+        {
+          "type": "kw_return",
+          "named": true
+        },
+        {
+          "type": "kw_returning",
+          "named": true
+        },
+        {
+          "type": "kw_returns",
+          "named": true
+        },
+        {
+          "type": "kw_revoke",
+          "named": true
+        },
+        {
+          "type": "kw_role",
+          "named": true
+        },
+        {
+          "type": "kw_rows",
+          "named": true
+        },
+        {
+          "type": "kw_runtime",
+          "named": true
+        },
+        {
+          "type": "kw_schema",
+          "named": true
+        },
+        {
+          "type": "kw_scope",
+          "named": true
+        },
+        {
+          "type": "kw_sealed",
+          "named": true
+        },
+        {
+          "type": "kw_security",
+          "named": true
+        },
+        {
+          "type": "kw_select",
+          "named": true
+        },
+        {
+          "type": "kw_server",
+          "named": true
+        },
+        {
+          "type": "kw_session",
+          "named": true
+        },
+        {
+          "type": "kw_set",
+          "named": true
+        },
+        {
+          "type": "kw_stable",
+          "named": true
+        },
+        {
+          "type": "kw_state",
+          "named": true
+        },
+        {
+          "type": "kw_stream",
+          "named": true
+        },
+        {
+          "type": "kw_table",
+          "named": true
+        },
+        {
+          "type": "kw_text",
+          "named": true
+        },
+        {
+          "type": "kw_then",
+          "named": true
+        },
+        {
+          "type": "kw_time",
+          "named": true
+        },
+        {
+          "type": "kw_timestamp",
+          "named": true
+        },
+        {
+          "type": "kw_to",
+          "named": true
+        },
+        {
+          "type": "kw_transaction",
+          "named": true
+        },
+        {
+          "type": "kw_transient",
+          "named": true
+        },
+        {
+          "type": "kw_true",
+          "named": true
+        },
+        {
+          "type": "kw_type",
+          "named": true
+        },
+        {
+          "type": "kw_unique",
+          "named": true
+        },
+        {
+          "type": "kw_update",
+          "named": true
+        },
+        {
+          "type": "kw_user",
+          "named": true
+        },
+        {
+          "type": "kw_uuid",
+          "named": true
+        },
+        {
+          "type": "kw_value",
+          "named": true
+        },
+        {
+          "type": "kw_values",
+          "named": true
+        },
+        {
+          "type": "kw_void",
+          "named": true
+        },
+        {
+          "type": "kw_volatile",
+          "named": true
+        },
+        {
+          "type": "kw_volatility",
+          "named": true
+        },
+        {
+          "type": "kw_when",
+          "named": true
+        },
+        {
+          "type": "kw_where",
+          "named": true
+        },
+        {
+          "type": "kw_while",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "client_call_expression",
+    "named": true,
+    "fields": {
+      "callee": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "client_call_callee",
+            "named": true
+          }
+        ]
+      }
+    },
+    "children": {
+      "multiple": true,
+      "required": true,
+      "types": [
+        {
+          "type": "client_argument_list",
+          "named": true
+        },
+        {
+          "type": "lparen",
+          "named": true
+        },
+        {
+          "type": "rparen",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "client_expression",
+    "named": true,
+    "fields": {},
+    "children": {
+      "multiple": true,
+      "required": true,
+      "types": [
+        {
+          "type": "client_concat_operator",
+          "named": true
+        },
+        {
+          "type": "client_expression",
+          "named": true
+        },
+        {
+          "type": "client_primary_expression",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "client_expression_body",
+    "named": true,
+    "fields": {
+      "expression": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "client_expression",
+            "named": true
+          }
+        ]
+      }
+    },
+    "children": {
+      "multiple": false,
+      "required": true,
+      "types": [
+        {
+          "type": "kw_as",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "client_field_path",
+    "named": true,
+    "fields": {
+      "field": {
+        "multiple": true,
+        "required": true,
+        "types": [
+          {
+            "type": "identifier",
+            "named": true
+          },
+          {
+            "type": "kw_add",
+            "named": true
+          },
+          {
+            "type": "kw_alter",
+            "named": true
+          },
+          {
+            "type": "kw_and",
+            "named": true
+          },
+          {
+            "type": "kw_as",
+            "named": true
+          },
+          {
+            "type": "kw_atomic",
+            "named": true
+          },
+          {
+            "type": "kw_await",
+            "named": true
+          },
+          {
+            "type": "kw_begin",
+            "named": true
+          },
+          {
+            "type": "kw_bigint",
+            "named": true
+          },
+          {
+            "type": "kw_binary",
+            "named": true
+          },
+          {
+            "type": "kw_bool",
+            "named": true
+          },
+          {
+            "type": "kw_boolean",
+            "named": true
+          },
+          {
+            "type": "kw_by",
+            "named": true
+          },
+          {
+            "type": "kw_bytes",
+            "named": true
+          },
+          {
+            "type": "kw_call",
+            "named": true
+          },
+          {
+            "type": "kw_capability",
+            "named": true
+          },
+          {
+            "type": "kw_cascade",
+            "named": true
+          },
+          {
+            "type": "kw_case",
+            "named": true
+          },
+          {
+            "type": "kw_character",
+            "named": true
+          },
+          {
+            "type": "kw_check",
+            "named": true
+          },
+          {
+            "type": "kw_client",
+            "named": true
+          },
+          {
+            "type": "kw_const",
+            "named": true
+          },
+          {
+            "type": "kw_contract",
+            "named": true
+          },
+          {
+            "type": "kw_create",
+            "named": true
+          },
+          {
+            "type": "kw_date",
+            "named": true
+          },
+          {
+            "type": "kw_decimal",
+            "named": true
+          },
+          {
+            "type": "kw_default",
+            "named": true
+          },
+          {
+            "type": "kw_definer",
+            "named": true
+          },
+          {
+            "type": "kw_delete",
+            "named": true
+          },
+          {
+            "type": "kw_disabled",
+            "named": true
+          },
+          {
+            "type": "kw_distinct",
+            "named": true
+          },
+          {
+            "type": "kw_documentation",
+            "named": true
+          },
+          {
+            "type": "kw_drop",
+            "named": true
+          },
+          {
+            "type": "kw_duration",
+            "named": true
+          },
+          {
+            "type": "kw_else",
+            "named": true
+          },
+          {
+            "type": "kw_elsif",
+            "named": true
+          },
+          {
+            "type": "kw_end",
+            "named": true
+          },
+          {
+            "type": "kw_enum",
+            "named": true
+          },
+          {
+            "type": "kw_execute",
+            "named": true
+          },
+          {
+            "type": "kw_export",
+            "named": true
+          },
+          {
+            "type": "kw_external",
+            "named": true
+          },
+          {
+            "type": "kw_false",
+            "named": true
+          },
+          {
+            "type": "kw_field",
+            "named": true
+          },
+          {
+            "type": "kw_final",
+            "named": true
+          },
+          {
+            "type": "kw_float",
+            "named": true
+          },
+          {
+            "type": "kw_for",
+            "named": true
+          },
+          {
+            "type": "kw_from",
+            "named": true
+          },
+          {
+            "type": "kw_function",
+            "named": true
+          },
+          {
+            "type": "kw_grant",
+            "named": true
+          },
+          {
+            "type": "kw_if",
+            "named": true
+          },
+          {
+            "type": "kw_ilike",
+            "named": true
+          },
+          {
+            "type": "kw_immutable",
+            "named": true
+          },
+          {
+            "type": "kw_in",
+            "named": true
+          },
+          {
+            "type": "kw_insert",
+            "named": true
+          },
+          {
+            "type": "kw_inspect",
+            "named": true
+          },
+          {
+            "type": "kw_int",
+            "named": true
+          },
+          {
+            "type": "kw_integer",
+            "named": true
+          },
+          {
+            "type": "kw_into",
+            "named": true
+          },
+          {
+            "type": "kw_invoker",
+            "named": true
+          },
+          {
+            "type": "kw_is",
+            "named": true
+          },
+          {
+            "type": "kw_kernel",
+            "named": true
+          },
+          {
+            "type": "kw_large",
+            "named": true
+          },
+          {
+            "type": "kw_let",
+            "named": true
+          },
+          {
+            "type": "kw_like",
+            "named": true
+          },
+          {
+            "type": "kw_list",
+            "named": true
+          },
+          {
+            "type": "kw_local",
+            "named": true
+          },
+          {
+            "type": "kw_loop",
+            "named": true
+          },
+          {
+            "type": "kw_manual",
+            "named": true
+          },
+          {
+            "type": "kw_map",
+            "named": true
+          },
+          {
+            "type": "kw_not",
+            "named": true
+          },
+          {
+            "type": "kw_null",
+            "named": true
+          },
+          {
+            "type": "kw_object",
+            "named": true
+          },
+          {
+            "type": "kw_on",
+            "named": true
+          },
+          {
+            "type": "kw_only",
+            "named": true
+          },
+          {
+            "type": "kw_opaque",
+            "named": true
+          },
+          {
+            "type": "kw_option",
+            "named": true
+          },
+          {
+            "type": "kw_or",
+            "named": true
+          },
+          {
+            "type": "kw_order",
+            "named": true
+          },
+          {
+            "type": "kw_persistable",
+            "named": true
+          },
+          {
+            "type": "kw_prelude",
+            "named": true
+          },
+          {
+            "type": "kw_primitive",
+            "named": true
+          },
+          {
+            "type": "kw_read",
+            "named": true
+          },
+          {
+            "type": "kw_ref",
+            "named": true
+          },
+          {
+            "type": "kw_rename",
+            "named": true
+          },
+          {
+            "type": "kw_requires",
+            "named": true
+          },
+          {
+            "type": "kw_restrict",
+            "named": true
+          },
+          {
+            "type": "kw_return",
+            "named": true
+          },
+          {
+            "type": "kw_returning",
+            "named": true
+          },
+          {
+            "type": "kw_returns",
+            "named": true
+          },
+          {
+            "type": "kw_revoke",
+            "named": true
+          },
+          {
+            "type": "kw_role",
+            "named": true
+          },
+          {
+            "type": "kw_rows",
+            "named": true
+          },
+          {
+            "type": "kw_runtime",
+            "named": true
+          },
+          {
+            "type": "kw_schema",
+            "named": true
+          },
+          {
+            "type": "kw_scope",
+            "named": true
+          },
+          {
+            "type": "kw_sealed",
+            "named": true
+          },
+          {
+            "type": "kw_security",
+            "named": true
+          },
+          {
+            "type": "kw_select",
+            "named": true
+          },
+          {
+            "type": "kw_server",
+            "named": true
+          },
+          {
+            "type": "kw_session",
+            "named": true
+          },
+          {
+            "type": "kw_set",
+            "named": true
+          },
+          {
+            "type": "kw_stable",
+            "named": true
+          },
+          {
+            "type": "kw_state",
+            "named": true
+          },
+          {
+            "type": "kw_stream",
+            "named": true
+          },
+          {
+            "type": "kw_table",
+            "named": true
+          },
+          {
+            "type": "kw_text",
+            "named": true
+          },
+          {
+            "type": "kw_then",
+            "named": true
+          },
+          {
+            "type": "kw_time",
+            "named": true
+          },
+          {
+            "type": "kw_timestamp",
+            "named": true
+          },
+          {
+            "type": "kw_to",
+            "named": true
+          },
+          {
+            "type": "kw_transaction",
+            "named": true
+          },
+          {
+            "type": "kw_transient",
+            "named": true
+          },
+          {
+            "type": "kw_true",
+            "named": true
+          },
+          {
+            "type": "kw_type",
+            "named": true
+          },
+          {
+            "type": "kw_unique",
+            "named": true
+          },
+          {
+            "type": "kw_update",
+            "named": true
+          },
+          {
+            "type": "kw_user",
+            "named": true
+          },
+          {
+            "type": "kw_uuid",
+            "named": true
+          },
+          {
+            "type": "kw_value",
+            "named": true
+          },
+          {
+            "type": "kw_values",
+            "named": true
+          },
+          {
+            "type": "kw_void",
+            "named": true
+          },
+          {
+            "type": "kw_volatile",
+            "named": true
+          },
+          {
+            "type": "kw_volatility",
+            "named": true
+          },
+          {
+            "type": "kw_when",
+            "named": true
+          },
+          {
+            "type": "kw_where",
+            "named": true
+          },
+          {
+            "type": "kw_while",
+            "named": true
+          }
+        ]
+      },
+      "parameter": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "identifier",
+            "named": true
+          },
+          {
+            "type": "kw_ref",
+            "named": true
+          },
+          {
+            "type": "kw_rows",
+            "named": true
+          },
+          {
+            "type": "kw_security",
+            "named": true
+          }
+        ]
+      }
+    },
+    "children": {
+      "multiple": true,
+      "required": true,
+      "types": [
+        {
+          "type": "dot",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "client_parameter_read",
+    "named": true,
+    "fields": {},
+    "children": {
+      "multiple": false,
+      "required": true,
+      "types": [
+        {
+          "type": "identifier",
+          "named": true
+        },
+        {
+          "type": "kw_ref",
+          "named": true
+        },
+        {
+          "type": "kw_rows",
+          "named": true
+        },
+        {
+          "type": "kw_security",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "client_primary_expression",
+    "named": true,
+    "fields": {},
+    "children": {
+      "multiple": false,
+      "required": true,
+      "types": [
+        {
+          "type": "boolean_literal",
+          "named": true
+        },
+        {
+          "type": "client_call_expression",
+          "named": true
+        },
+        {
+          "type": "client_field_path",
+          "named": true
+        },
+        {
+          "type": "client_integer_literal",
+          "named": true
+        },
+        {
+          "type": "client_parameter_read",
+          "named": true
+        },
+        {
+          "type": "string_literal",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "client_return_body",
+    "named": true,
+    "fields": {
+      "expression": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "client_expression",
+            "named": true
+          }
+        ]
+      }
+    },
+    "children": {
+      "multiple": false,
+      "required": true,
+      "types": [
+        {
+          "type": "kw_return",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
     "type": "comparison_expression",
     "named": true,
     "fields": {},
@@ -3668,7 +5461,15 @@
         "required": true,
         "types": [
           {
-            "type": "function_body",
+            "type": "client_expression_body",
+            "named": true
+          },
+          {
+            "type": "client_return_body",
+            "named": true
+          },
+          {
+            "type": "procedural_body",
             "named": true
           }
         ]
@@ -14100,6 +15901,14 @@
   },
   {
     "type": "assignment_operator",
+    "named": true
+  },
+  {
+    "type": "client_concat_operator",
+    "named": true
+  },
+  {
+    "type": "client_integer_literal",
     "named": true
   },
   {
