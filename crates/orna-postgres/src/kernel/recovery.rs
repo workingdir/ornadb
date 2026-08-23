@@ -286,14 +286,15 @@ async fn list_revision_pairs_client(
     let rows = transaction
         .query(
             "SELECT
-                source.id AS source_id,
+                catalogue.source_revision_id AS source_id,
                 source.parent_source_revision_id AS source_parent_id,
                 catalogue.id AS catalogue_id,
-                catalogue.parent_catalogue_revision_id AS catalogue_parent_id
+                catalogue.parent_catalogue_revision_id AS catalogue_parent_id,
+                source.id IS NOT NULL AS source_exists
              FROM _orna_kernel.catalogue_revisions AS catalogue
-             JOIN _orna_kernel.source_revisions AS source
+             LEFT JOIN _orna_kernel.source_revisions AS source
                ON source.id = catalogue.source_revision_id
-             ORDER BY source.id ASC, catalogue.id ASC",
+             ORDER BY catalogue.source_revision_id ASC, catalogue.id ASC",
             &[],
         )
         .await
@@ -304,6 +305,14 @@ async fn list_revision_pairs_client(
         .enumerate()
         .map(|(index, row)| decode_revision_pair_row(row, index, active_pair))
         .collect::<Result<Vec<_>, _>>()?;
+    for entry in &entries {
+        validate_revision_ancestry(
+            &transaction,
+            entry.catalogue_revision_id(),
+            entry.source_revision_id(),
+        )
+        .await?;
+    }
     let active_count = entries.iter().filter(|entry| entry.is_active()).count();
     if active_count != 1 {
         return Err(DurableRecord::new(ACTIVE_RELATION, "singleton=true").invariant(
@@ -371,6 +380,15 @@ fn decode_revision_pair_row(
     let source_record = DurableRecord::new(SOURCE_REVISION_RELATION, format!("row={row_index}"));
     let catalogue_record =
         DurableRecord::new(CATALOGUE_REVISION_RELATION, format!("row={row_index}"));
+    if !catalogue_record.column::<bool>(
+        row,
+        "source_exists",
+        "catalogue source join must identify a source row",
+    )? {
+        return Err(catalogue_record.invariant(
+            "each catalogue revision must have a matching source revision",
+        ));
+    }
     decode_revision_pair_values(
         source_record.column(
             row,
@@ -429,6 +447,11 @@ fn decode_revision_pair_values(
         "catalogue parent identity must be null or 16 bytes",
     )?
     .map(CatalogueRevisionId::from_bytes);
+    if source_parent_revision_id.is_some() != catalogue_parent_revision_id.is_some() {
+        return Err(catalogue_record.invariant(
+            "source and catalogue parent identities must both be null or both be present",
+        ));
+    }
 
     Ok(RevisionPairHistoryEntry {
         source_revision_id,
@@ -4730,7 +4753,7 @@ mod tests {
 
         let entry = decode_revision_pair_values(
             vec![2; 16],
-            None,
+            Some(vec![1; 16]),
             vec![4; 16],
             Some(vec![3; 16]),
             active,
@@ -4739,7 +4762,10 @@ mod tests {
         )
         .expect("valid revision pair row");
         assert!(entry.is_active());
-        assert_eq!(entry.source_parent_revision_id(), None);
+        assert_eq!(
+            entry.source_parent_revision_id(),
+            Some(SourceRevisionId::from_bytes([1; 16]))
+        );
         assert_eq!(
             entry.catalogue_parent_revision_id(),
             Some(CatalogueRevisionId::from_bytes([3; 16]))
@@ -4758,6 +4784,26 @@ mod tests {
         assert!(decode_revision_pair_values(
             vec![2; 16],
             Some(vec![3; 17]),
+            vec![4; 16],
+            None,
+            active,
+            &source_record,
+            &catalogue_record,
+        )
+        .is_err());
+        assert!(decode_revision_pair_values(
+            vec![2; 16],
+            None,
+            vec![4; 16],
+            Some(vec![3; 16]),
+            active,
+            &source_record,
+            &catalogue_record,
+        )
+        .is_err());
+        assert!(decode_revision_pair_values(
+            vec![2; 16],
+            Some(vec![3; 16]),
             vec![4; 16],
             None,
             active,

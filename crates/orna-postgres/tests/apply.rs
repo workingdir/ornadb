@@ -74,7 +74,8 @@ use orna_core::{
         InvokeRequest, InvokeRequestInput, InvokeValue,
     },
     security::{
-        ExecuteDecision, ExecuteDenial, ExecuteGrant, InvocationTarget, Principal, PrincipalKind,
+        CATALOGUE_HEALTH_SERVICE_PRINCIPAL_ID, ExecuteDecision, ExecuteDenial, ExecuteGrant,
+        InvocationTarget, Principal, PrincipalKind,
         PrincipalStatus, PrivilegeClass, PrivilegeDecision, PrivilegeDenial, PrivilegeGrant,
         RoleMembership, SecurityAdminAuditOperation, SecurityAuditKind, SecurityAuditOutcome,
         SecurityFunctionTarget, SecuritySnapshot, UserStateAuditOperation,
@@ -265,6 +266,115 @@ async fn applies_a_compiler_candidate_and_recovers_exactly() -> TestResult<()> {
     .await
 }
 
+#[tokio::test]
+#[ignore = "requires the Compose PostgreSQL development service"]
+async fn applies_source_apply_and_records_one_protected_audit_event() -> TestResult<()> {
+    with_test_database(|database| async move {
+        let kernel = kernel(&database)?;
+        kernel.bootstrap().await?;
+        let base = kernel.recover().await?;
+        let candidate = candidate(BASIC_SOURCE, &base)?;
+
+        let applied = kernel.apply_source_apply(&candidate).await?;
+        require_recovered_new_candidate(&candidate, &applied)?;
+        let recovered = kernel.recover().await?;
+        require_recovered_new_candidate(&candidate, &recovered)?;
+        let reopened = PostgresKernel::from_str(&database.connection_string())?;
+        reopened.recover().await?;
+
+        let events = reopened.recover_security_audit_events().await?;
+        let source_apply_events = events
+            .iter()
+            .filter(|event| event.decision().kind() == SecurityAuditKind::SourceApply)
+            .collect::<Vec<_>>();
+        require(
+            source_apply_events.len() == 1,
+            "source apply did not record exactly one protected SourceApply event",
+        )?;
+        let decision = source_apply_events[0].decision();
+        require(
+            decision.outcome() == SecurityAuditOutcome::Allowed
+                && decision.session_principal() == Some(CATALOGUE_HEALTH_SERVICE_PRINCIPAL_ID)
+                && decision.source_apply_candidate() == Some(candidate.candidate_pair())
+                && decision.target().is_none()
+                && decision.denial().is_none(),
+            "SourceApply audit detail did not match the committed candidate",
+        )
+    })
+    .await
+}
+
+#[tokio::test]
+#[ignore = "requires the Compose PostgreSQL development service"]
+async fn lists_revision_pairs_with_parent_links_and_active_candidate() -> TestResult<()> {
+    with_test_database(|database| async move {
+        let kernel = kernel(&database)?;
+        kernel.bootstrap().await?;
+        let base = kernel.recover().await?;
+        let base_pair = base.pair();
+        let candidate = candidate(BASIC_SOURCE, &base)?;
+        let candidate_pair = candidate.candidate_pair();
+        kernel.apply(&candidate).await?;
+        let reopened = PostgresKernel::from_str(&database.connection_string())?;
+        reopened.recover().await?;
+        let entries = reopened.list_revision_pairs().await?;
+        let reopened_again = PostgresKernel::from_str(&database.connection_string())?;
+        reopened_again.recover().await?;
+        let repeated_entries = reopened_again.list_revision_pairs().await?;
+        require(
+            entries == repeated_entries,
+            "revision pair history changed across repeated reopen and listing",
+        )?;
+        require(
+            entries.len() == 2,
+            "revision pair history did not contain exactly the bootstrap and candidate pairs",
+        )?;
+        require(
+            entries.windows(2).all(|window| {
+                (
+                    window[0].source_revision_id(),
+                    window[0].catalogue_revision_id(),
+                ) < (
+                    window[1].source_revision_id(),
+                    window[1].catalogue_revision_id(),
+                )
+            }),
+            "revision pair history was not returned in deterministic source/catalogue order",
+        )?;
+        let base_entry = entries
+            .iter()
+            .find(|entry| {
+                RevisionPair::new(entry.source_revision_id(), entry.catalogue_revision_id()) == base_pair
+            })
+            .ok_or_else(|| failure("revision pair history did not contain the bootstrap pair"))?;
+        require(
+            base_entry.source_parent_revision_id().is_none()
+                && base_entry.catalogue_parent_revision_id().is_none(),
+            "bootstrap revision pair unexpectedly carried parent links",
+        )?;
+        let candidate_entry = entries
+            .iter()
+            .find(|entry| {
+                RevisionPair::new(entry.source_revision_id(), entry.catalogue_revision_id()) == candidate_pair
+            })
+            .ok_or_else(|| failure("revision pair history did not contain the candidate pair"))?;
+        require(
+            candidate_entry.source_parent_revision_id() == Some(base_pair.source())
+                && candidate_entry.catalogue_parent_revision_id() == Some(base_pair.catalogue()),
+            "candidate revision pair did not retain the bootstrap pair as both parents",
+        )?;
+        let active_entries = entries.iter().filter(|entry| entry.is_active()).collect::<Vec<_>>();
+        require(
+            active_entries.len() == 1
+                && RevisionPair::new(
+                    active_entries[0].source_revision_id(),
+                    active_entries[0].catalogue_revision_id(),
+                ) == candidate_pair,
+            "revision pair history did not mark exactly the candidate pair active",
+        )
+    })
+    .await
+}
 #[tokio::test]
 #[ignore = "requires the Compose PostgreSQL development service"]
 async fn rejects_a_version_two_candidate_before_any_apply_write() -> TestResult<()> {
