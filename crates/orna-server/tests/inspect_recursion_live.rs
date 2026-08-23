@@ -49,11 +49,13 @@ const PROOF_USER: PrincipalId = PrincipalId::from_bytes([0x91; 16]);
 const RAW_SCHEMA_SOURCE: &str = "CREATE SCHEMA recursion_fixture;\n";
 const RAW_RECURSION_SOURCE: &str = include_str!("fixtures/client_inspector_dogfood.orna");
 const RAW_RESOURCE_SOURCE: &str = "CREATE SCHEMA recursion_fixture;\n\
-    CREATE CLIENT FUNCTION recursion_fixture.call() RETURNS INTEGER AS\n\
-    AWAIT std.data.resource(\n\
-      target => std.invoke.echo,\n\
-      arguments => std.call.args(p_value => 43)\n\
-    );\n";
+    CREATE CLIENT FUNCTION recursion_fixture.call() RETURNS INTEGER IS\n\
+    BEGIN\n\
+        RETURN AWAIT std.data.resource(\n\
+          target => std.invoke.echo,\n\
+          arguments => std.call.args(p_value => 43)\n\
+        );\n\
+    END;\n";
 
 fn require(condition: bool, message: impl Into<String>) -> TestResult<()> {
     if condition {
