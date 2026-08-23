@@ -245,6 +245,14 @@ Tests must prove:
 * compiler failure, preparation failure, a forced failure after physical DDL,
   and post-apply recovery failure leave the complete active pair, protected
   catalogue, revision records, physical relation inventory, and data unchanged;
+* the successful apply produces exactly one protected `SourceApply` event
+  with the fixed `CATALOGUE_HEALTH_SERVICE_PRINCIPAL_ID`, the committed
+  candidate `RevisionPair`, and `source_apply:committed`, and the recovered
+  audit history returns that exact evidence;
+* a failure after physical changes and before commit leaves no changed active
+  pair, candidate residue, or `SourceApply` audit event, and recovery rejects a
+  tampered audit row whose source and catalogue IDs do not form a real retained
+  revision pair;
 * two candidates prepared from one base cannot both activate: one winner
   commits and one stale loser returns the exact expected/active identities with
   no partial state;
@@ -278,6 +286,7 @@ three files, and keeps the repository buildable.
 | `feat(cli): grant fixed-service execution` | `crates/orna-server/src/main.rs`; `crates/orna-server/src/security_admin.rs`; `crates/orna-server/tests/security_admin.rs` | Add the exact installed administration command and its closed host diagnostics. |
 | `feat(postgres): dispatch parameter-free server insert` | `crates/orna-postgres/src/kernel/security.rs`; `crates/orna-postgres/src/kernel/server_mutation_execution.rs`; `crates/orna-postgres/tests/server_mutation_execution.rs` | Add the internal authorised same-transaction raw INSERT path, savepoint outcome, and audit proof. |
 | `test(system): exercise installed Orna data path` | `crates/orna-system-tests/tests/installed_product.rs`; `crates/orna-system-tests/fixtures/product_test.orna`; `.github/workflows/debian-package.yml` | Apply, discover, grant, insert, read, restart, and read again through the exact packaged executable. |
+| `fix(postgres): enforce source-apply audit recovery` | `crates/orna-postgres/src/kernel/security.rs`; `crates/orna-postgres/migrations/0038_source_apply_principal.sql`; `crates/orna-postgres/tests/apply.rs` | Bind the protected event to the fixed service principal, require its historical revision pair, and prove rollback and tamper rejection in the Compose-gated suite. |
 
 ## Deferred surface
 

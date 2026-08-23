@@ -99,11 +99,21 @@ contract:
   exact version-23, version-29, and version-30 bytes after the live bootstrap
   gate detected a checksum mismatch, and the focused bootstrap proof,
   `cargo test --workspace --all-targets`, and `just kernel-test` now pass.
+- the installed source-apply path now records one fixed-principal protected
+  `SourceApply` event, and audit recovery checks both the principal and the
+  historical source/catalogue pair;
+- retained revision-pair listing now validates all decoded ancestry in memory,
+  including parent parity, cycles, identity uniqueness, and the single active
+  marker, without per-entry database round trips;
 
 The accepted slices have focused proof in the repository. Installed proofs
 that require Compose remain environment-dependent and must be reported as
-such. The fresh network-disabled Debian 12 host proof and the same-major
-PostgreSQL predecessor transition remain separate blockers. No proposal-level
+such. The source-apply audit, rollback, tamper, and retained-listing
+integration tests are present but marked `#[ignore]` because they require the
+Compose PostgreSQL development service. Local evidence covers compilation,
+migration registry checks, codec checks, and focused in-memory validators only.
+The fresh network-disabled Debian 12 host proof and the same-major PostgreSQL
+predecessor transition remain separate blockers. No proposal-level
 implementation should start without the contract gate below.
 
 ## 2026-08-22 next contract checkpoint
