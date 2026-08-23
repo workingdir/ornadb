@@ -5229,15 +5229,6 @@ pub fn complete_client_action(
     Ok(outcome)
 }
 
-pub fn cancel_client_action(action_state: &mut ClientActionState) -> Result<ClientActionOutcome, ClientActionError> {
-    let Some(resource) = action_state.resource_mut() else { return Err(ClientActionError::Executor(ACTION_FAILURE_CODE.to_owned())); };
-    if resource.status() != ClientResourceStatus::Loading { return Err(ClientActionError::Executor(ACTION_FAILURE_CODE.to_owned())); }
-    let generation = resource.generation();
-    if resource.cancel(generation).is_err() { action_state.clear(); return Err(ClientActionError::Executor(ACTION_FAILURE_CODE.to_owned())); }
-    action_state.clear();
-    Ok(ClientActionOutcome::Cancelled)
-}
-
 /// Cancels one pending SERVER action through its resource executor.
 ///
 /// The executor owns the transport control. A terminal completion clears the
