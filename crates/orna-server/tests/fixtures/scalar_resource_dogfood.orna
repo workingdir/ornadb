@@ -1,0 +1,6 @@
+CREATE SCHEMA scalar_fixture;
+    CREATE CLIENT FUNCTION scalar_fixture.call() RETURNS INTEGER IS
+    BEGIN
+        RETURN AWAIT std.data.resource(target => std.invoke.echo,
+          arguments => std.call.args(p_value => 43));
+    END;

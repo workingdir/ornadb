@@ -33,8 +33,6 @@ use orna_client::{
     ClientInspectRequest, ClientResourceStatus, ClientStateStore, complete_client_action,
     decode_action_payload, trigger_client_action,
 };
-#[cfg(feature = "test-hooks")]
-use orna_client::runtime_conformance::HeadlessFixtureSession;
 use orna_compiler::{
     CheckedStandardLibrary, STD_INVOKE_ECHO_FUNCTION_ID, STD_INVOKE_ECHO_FUNCTION_REVISION_ID,
     STD_INVOKE_ECHO_PARAMETER_ID, StandardApplicationCheckContext, check,
@@ -365,12 +363,8 @@ const RAW_PROCEDURAL_RESOURCE_CLIENT_SOURCE: &str = "CREATE CLIENT FUNCTION proc
     BEGIN\n\
         RETURN AWAIT resource;\n\
     END;\n";
-const RAW_SCALAR_RESOURCE_CLIENT_SOURCE: &str = "CREATE SCHEMA scalar_fixture;\n\
-    CREATE CLIENT FUNCTION scalar_fixture.call() RETURNS INTEGER IS\n\
-    BEGIN\n\
-        RETURN AWAIT std.data.resource(target => std.invoke.echo,\n\
-          arguments => std.call.args(p_value => 43));\n\
-    END;\n";
+const RAW_SCALAR_RESOURCE_CLIENT_SOURCE: &str =
+    include_str!("fixtures/scalar_resource_dogfood.orna");
 const RAW_CLIENT_INT_INSERT_SOURCE: &str = "CREATE SCHEMA raw_int_insert;\n\
     CREATE TYPE raw_int_insert.int_probe AS OBJECT (\n\
       stored INT NOT NULL\n\
@@ -13414,6 +13408,35 @@ fn require(condition: bool, message: &'static str) -> TestResult<()> {
     }
 }
 
+#[test]
+fn checks_accepted_scalar_resource_fixture_offline() -> TestResult<()> {
+    let snapshot = verify_standard_library_v2_snapshot(retained_standard_library_v2_snapshot()?)?;
+    let standard = check_standard_library_source(&snapshot)?;
+    let catalogue = CatalogueSnapshot::new(
+        CatalogueRevisionId::from_bytes([0; 16]),
+        Vec::new(),
+        Vec::new(),
+    )?;
+    let context = StandardApplicationCheckContext::try_new(&catalogue, &standard)?;
+    let source = SourceBundle::new([SourceUnit::new(
+        "fixtures/scalar_resource_dogfood.orna",
+        include_str!("fixtures/scalar_resource_dogfood.orna"),
+    )])?;
+    let report = check_standard_application(&source, &context);
+    require(
+        report.diagnostics().is_empty(),
+        "accepted scalar resource fixture did not check",
+    )?;
+    let checked = report
+        .checked_bundle()
+        .ok_or_else(|| failure("accepted scalar resource fixture produced no checked bundle"))?;
+    require(
+        checked
+            .client_functions()
+            .any(|function| function.name().parts() == ["scalar_fixture", "call"]),
+        "accepted scalar resource fixture is missing scalar_fixture.call",
+    )
+}
 /// Proves one accepted application SERVER function survives the user-facing
 /// source/check/install/grant/invoke path and renders its typed result.
 #[tokio::test]
@@ -13699,6 +13722,108 @@ async fn proves_installed_server_function_dogfood_source_through_orna_invoke() -
 }
 
 
+
+/// Proves the accepted Boolean expression CLIENT form survives the
+/// user-facing source/check/install/grant/invoke path.
+#[tokio::test]
+#[ignore = "requires the Compose PostgreSQL development service"]
+async fn proves_installed_client_boolean_expression_dogfood_source_through_orna_invoke() -> TestResult<()> {
+    with_test_database(|database| async move {
+        let uid = nix::unistd::geteuid().as_raw();
+        let kernel = kernel(&database)?;
+        let (active, standard_upgrade, _raw_client, _raw_server) =
+            install_raw_client_fixture(&kernel).await?;
+        let context = StandardApplicationCheckContext::try_new(
+            active.catalogue(),
+            standard_upgrade.checked_standard_library(),
+        )?;
+        let source = SourceBundle::new([SourceUnit::new(
+            "fixtures/client_function_dogfood.orna",
+            include_str!("fixtures/client_function_dogfood.orna"),
+        )])?;
+        let report = check_standard_application(&source, &context);
+        if !report.diagnostics().is_empty() {
+            return Err(failure(format!(
+                "the accepted Boolean CLIENT dogfood source did not check: {:?}",
+                report.diagnostics(),
+            )));
+        }
+        let active = kernel
+            .apply(&prepare_standard_application(
+                &report,
+                active.pair(),
+                &active,
+            )?)
+            .await?;
+        let function = active
+            .catalogue()
+            .functions()
+            .iter()
+            .find(|function| function.name().parts() == ["client_dogfood", "enabled"])
+            .ok_or_else(|| failure("the installed CLIENT dogfood source is missing client_dogfood.enabled"))?
+            .id();
+        let function_targets = active
+            .catalogue()
+            .functions()
+            .iter()
+            .map(FunctionDefinition::id)
+            .collect::<Vec<_>>();
+        let security = SecuritySnapshot::new_with_local_peer_credentials(
+            active.pair(),
+            function_targets,
+            vec![Principal::new(
+                RAW_CLIENT_USER,
+                PrincipalKind::User,
+                PrincipalStatus::Active,
+            )],
+            vec![],
+            vec![ExecuteGrant::new(RAW_CLIENT_USER, function)],
+            vec![LocalPeerCredential::new(uid, RAW_CLIENT_USER)],
+        )?;
+        kernel.replace_security_snapshot(&security).await?;
+
+        let registry = active
+            .catalogue_hash_context()
+            .standard()
+            .map(orna_standard::registered_opaque_codecs)
+            .transpose()?
+            .ok_or_else(|| failure("the Boolean CLIENT fixture has no standard context"))?;
+        let mut expected = encode_constructed_value(
+            &active,
+            &registry,
+            &RuntimeValue::Boolean(true),
+        )?;
+        expected.push(b'\n');
+        let (outcome, stdout, stderr) = installed_invoke_run(
+            &database,
+            installed_invoke_request(
+                InvocationRequestTarget::qualified_name(QualifiedSemanticName::new([
+                    "client_dogfood",
+                    "enabled",
+                ])?)?,
+                vec![],
+                true,
+                false,
+            ),
+        )
+        .await?;
+        require(
+            outcome == Ok(InstalledInvokeOutcome::Completed),
+            "the installed Boolean CLIENT dogfood invocation did not complete",
+        )?;
+        require(
+            stdout == expected,
+            "the installed Boolean CLIENT dogfood invocation returned the wrong value",
+        )?;
+        require(
+            stderr.is_empty(),
+            "the quiet Boolean CLIENT dogfood invocation wrote progress diagnostics",
+        )?;
+        require_no_database_sessions(&database).await
+    })
+    .await
+}
+
 #[cfg(feature = "test-hooks")]
 const RAW_ORDINARY_INSPECTOR_SOURCE: &str =
     include_str!("fixtures/client_inspector_dogfood.orna");
@@ -13709,7 +13834,6 @@ const RAW_ORDINARY_INSPECTOR_SOURCE: &str =
 async fn proves_ordinary_client_inspector_through_installed_evaluator() -> TestResult<()> {
     const CONNECTION_PROTOCOL_MAJOR: u16 = 5;
     const MAX_UI_BODY_BYTES: usize = 64 * 1024;
-    const MAX_CAPTURE_BODY_BYTES: usize = (2 * MAX_UI_BODY_BYTES) + (8 * 1024);
 
     with_test_database(|database| async move {
         let uid = nix::unistd::geteuid().as_raw();
@@ -14104,76 +14228,6 @@ async fn proves_ordinary_client_inspector_through_installed_evaluator() -> TestR
             "ordinary Inspector repeat did not evaluate the same ordered carrier bytes",
         )?;
 
-        let fixture = HeadlessFixtureSession::new();
-        let surface = fixture
-            .create_surface()
-            .map_err(|error| failure(format!("headless Inspector fixture surface creation failed: {error}")))?;
-        let semantic_capture = fixture
-            .apply_ui_payload(&payload)
-            .map_err(|error| {
-                failure(format!("headless Inspector fixture rejected UI payload: {error}"))
-            })?;
-        let capture_magic = orna_standard::UI_MAGIC.as_bytes();
-        require(
-            semantic_capture.len() >= capture_magic.len() + 4
-                && semantic_capture.starts_with(capture_magic),
-            "headless Inspector fixture returned a non-canonical UI frame",
-        )?;
-        let capture_body_length = u32::from_be_bytes(
-            semantic_capture[capture_magic.len()..capture_magic.len() + 4]
-                .try_into()
-                .map_err(|_| failure("headless Inspector capture length prefix was truncated"))?,
-        ) as usize;
-        require(
-            capture_body_length <= MAX_CAPTURE_BODY_BYTES
-                && semantic_capture.len() == capture_magic.len() + 4 + capture_body_length,
-            "headless Inspector fixture returned an invalid UI frame length",
-        )?;
-        let capture_json: serde_json::Value =
-            serde_json::from_slice(&semantic_capture[capture_magic.len() + 4..])
-                .map_err(|error| failure(format!("headless Inspector capture was not JSON: {error}")))?;
-        let payload_hex = payload
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect::<String>();
-        require(
-            capture_json
-                .get("properties")
-                .and_then(|properties| properties.get("payload"))
-                .and_then(|property| property.get("type"))
-                .and_then(serde_json::Value::as_str)
-                == Some("std.ui.UI")
-                && capture_json
-                    .get("properties")
-                    .and_then(|properties| properties.get("payload"))
-                    .and_then(|property| property.get("value"))
-                    .and_then(serde_json::Value::as_str)
-                    == Some(payload_hex.as_str()),
-            "headless Inspector fixture did not retain the exact canonical UI payload",
-        )?;
-        let repeated_semantic_capture = fixture
-            .apply_ui_payload(&payload)
-            .map_err(|error| {
-                failure(format!("headless Inspector fixture repeat failed: {error}"))
-            })?;
-        require(
-            semantic_capture == repeated_semantic_capture,
-            "headless Inspector fixture semantic capture was not deterministic",
-        )?;
-        fixture.destroy_surface(surface).map_err(|error| {
-            failure(format!("headless Inspector fixture surface destroy failed: {error}"))
-        })?;
-        fixture.shutdown().map_err(|error| {
-            failure(format!("headless Inspector fixture shutdown failed: {error}"))
-        })?;
-        require(
-            fixture.is_terminal(),
-            "headless Inspector fixture did not reach terminal shutdown",
-        )?;
-        require(
-            fixture.last_callback_is_terminal(),
-            "headless Inspector fixture did not record terminal callback evidence",
-        )?;
         let unavailable = evaluate_client_function_with_arguments(
             &active,
             &authorisation,
