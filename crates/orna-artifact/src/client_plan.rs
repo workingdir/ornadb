@@ -5969,7 +5969,11 @@ mod tests {
         };
         let direct = |local_type, result_type| {
             ProceduralClientPlan::new(
-                vec![ClientLocal::new(value_local, local_type, ClientLocalKind::Value)],
+                vec![ClientLocal::new(
+                    value_local,
+                    local_type,
+                    ClientLocalKind::Value,
+                )],
                 vec![ClientStatement::let_(
                     value_local,
                     ClientExpressionNode::Await {
@@ -6036,7 +6040,9 @@ mod tests {
                     },
                 ),
             ],
-            ClientExpressionNode::LocalRead { local: target_local },
+            ClientExpressionNode::LocalRead {
+                local: target_local,
+            },
         );
         assert_eq!(
             local_read.encode(),
