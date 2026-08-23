@@ -49,12 +49,14 @@ END
 ```
 
 The return expression uses the closed expression vocabulary from work ADR
-0068. The body has exactly one return statement. `LET`, `CONST`, assignments,
-ordinary call statements, `AWAIT`, conditionals, loops, SQL statements, and
-other procedural statements remain rejected until a later ADR adds their
-checked semantics. This restriction keeps the first state slice deterministic
-and prevents an unimplemented procedural language from being accepted as if it
-were executable.
+0068. The body has exactly one return statement. For a state-bearing block,
+`LET`, `CONST`, assignments, ordinary call statements, `AWAIT`, conditionals,
+loops, SQL statements, and other procedural statements remain rejected until a
+later ADR adds their checked semantics. A CLIENT block with no state
+declarations uses the separate expression and procedural subset accepted by
+work ADR 0077. This restriction keeps the first state slice deterministic and
+prevents an unimplemented stateful procedural language from being accepted as
+if it were executable.
 
 The parser keeps declaration order and source spans. The compiler resolves
 state types, validates defaults, rejects duplicate names, and adds each slot
@@ -158,11 +160,10 @@ would create misleading accepted source and hidden runtime behaviour.
 Each commit changes one to three files, uses a Conventional Commit subject,
 and leaves the workspace buildable.
 
-## Deferred surface
-
-Full procedural statements, state reads and writes in expressions, function
-instance identity, root state profiles, USER-state lifecycle, async calls,
-resources, streams, `AWAIT`, and graphical runtime state remain later ADRs.
+State reads and writes in expressions, state-bearing resources and streams,
+function instance identity, root state profiles, USER-state lifecycle, and
+graphical runtime state remain later ADRs. The no-state resource and
+procedural forms accepted by work ADR 0077 are outside this deferred list.
 
 ## Precedence
 
