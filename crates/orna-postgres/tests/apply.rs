@@ -377,6 +377,81 @@ async fn lists_revision_pairs_with_parent_links_and_active_candidate() -> TestRe
 }
 #[tokio::test]
 #[ignore = "requires the Compose PostgreSQL development service"]
+async fn source_apply_failure_rolls_back_candidate_and_audit_event() -> TestResult<()> {
+    with_test_database(|database| async move {
+        let kernel = kernel(&database)?;
+        kernel.bootstrap().await?;
+        let base = kernel.recover().await?;
+        let candidate = candidate(BASIC_SOURCE, &base)?;
+        install_failure_point(&database, FailurePoint::PostPointerRecovery, &candidate).await?;
+
+        let error = kernel
+            .apply_source_apply(&candidate)
+            .await
+            .expect_err("source apply must fail when post-pointer recovery is tampered");
+        assert_failure_shape(FailurePoint::PostPointerRecovery, &error)?;
+
+        let recovered = kernel.recover().await?;
+        require(
+            same_recovered(&base, &recovered),
+            "failed source apply changed the active revision",
+        )?;
+        let events = kernel.recover_security_audit_events().await?;
+        require(
+            events
+                .iter()
+                .all(|event| event.decision().kind() != SecurityAuditKind::SourceApply),
+            "failed source apply left a protected SourceApply audit event",
+        )
+    })
+    .await
+}
+
+#[tokio::test]
+#[ignore = "requires the Compose PostgreSQL development service"]
+async fn source_apply_audit_rejects_a_mismatched_revision_pair() -> TestResult<()> {
+    with_test_database(|database| async move {
+        let kernel = kernel(&database)?;
+        kernel.bootstrap().await?;
+        let base = kernel.recover().await?;
+        let candidate = candidate(BASIC_SOURCE, &base)?;
+        kernel.apply_source_apply(&candidate).await?;
+
+        let session = database.open().await?;
+        session
+            .client()
+            .execute(
+                "UPDATE _orna_kernel.security_audit_events
+                 SET source_revision_id = $1
+                 WHERE event_kind = 'source_apply'",
+                &[&base.pair().source().to_bytes().to_vec()],
+            )
+            .await?;
+        session.shutdown().await?;
+
+        let reopened = PostgresKernel::from_str(&database.connection_string())?;
+        let error = reopened
+            .recover_security_audit_events()
+            .await
+            .expect_err("mismatched source apply audit pair must fail recovery");
+        if !matches!(
+            error,
+            PostgresKernelError::DurableInvariant {
+                relation: "_orna_kernel.security_audit_events",
+                rule: "source apply audit target pair must exist in protected revisions",
+                ..
+            }
+        ) {
+            return Err(failure(format!(
+                "unexpected mismatched source apply audit error: {error:?}"
+            )));
+        }
+        Ok(())
+    })
+    .await
+}
+#[tokio::test]
+#[ignore = "requires the Compose PostgreSQL development service"]
 async fn rejects_a_version_two_candidate_before_any_apply_write() -> TestResult<()> {
     with_test_database(|database| async move {
         let kernel = kernel(&database)?;
