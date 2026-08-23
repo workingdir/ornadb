@@ -24,11 +24,10 @@ GENERATED_ARTEFACTS = (
     "src/tree_sitter/array.h",
     "src/tree_sitter/parser.h",
 )
-NON_EXECUTABLE_SPEC_EXAMPLES = frozenset(
+PROPOSAL_ONLY_SPEC_EXAMPLES = frozenset(
     {
-        # The canonical bundle is illustrative proposal material. Keep every proposal-only
-        # example outside the executable source gate, while parsing each grammar-compatible
-        # one below.
+        # The canonical bundle is illustrative proposal material. Classify proposal-only
+        # examples separately, while parsing each grammar-compatible one below.
         "01_people_tasks.orna",
         "02_server_functions.orna",
         "03_client_ui.orna",
@@ -325,10 +324,10 @@ def main() -> int:
     parse_paths: list[Path] = []
     if spec_examples.is_dir():
         canonical_paths = sorted_orna_files(spec_examples)
-        executable_paths = [
+        grammar_compatible_paths = [
             path
             for path in canonical_paths
-            if path.relative_to(spec_examples).as_posix() not in NON_EXECUTABLE_SPEC_EXAMPLES
+            if path.relative_to(spec_examples).as_posix() not in NON_PARSEABLE_SPEC_EXAMPLES
         ]
         for path in canonical_paths:
             relative_path = path.relative_to(spec_examples).as_posix()
@@ -336,19 +335,15 @@ def main() -> int:
                 log(
                     f"skipping non-parseable proposal example: {display_path(path, repository)}"
                 )
-            elif path not in executable_paths:
+            elif relative_path in PROPOSAL_ONLY_SPEC_EXAMPLES:
                 log(
-                    f"skipping proposal-only example from source check: "
+                    f"including proposal-only example in grammar-compatible tree-sitter parse: "
                     f"{display_path(path, repository)}"
                 )
-        log(f"canonical examples: {len(executable_paths)} executable .orna files")
+        log(f"canonical examples: {len(grammar_compatible_paths)} grammar-compatible .orna files")
         # Tree-sitter coverage includes proposal examples that use accepted syntax,
         # but does not claim coverage for proposal syntax outside the grammar.
-        parse_paths.extend(
-            path
-            for path in canonical_paths
-            if path.relative_to(spec_examples).as_posix() not in NON_PARSEABLE_SPEC_EXAMPLES
-        )
+        parse_paths.extend(grammar_compatible_paths)
     else:
         log("canonical examples: ../spec/examples is absent; skipping")
 
