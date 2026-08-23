@@ -2863,11 +2863,10 @@ impl<'source> Parser<'source> {
                 self.parse_type_specification_with_message("expected a record value field type")?;
             let field_end = type_specification.span().end;
             self.skip_trivia();
-            let documentation = self.parse_documentation_modifier();
-            self.skip_trivia();
             if self.current().is_some_and(|token| {
                 token.is_word("DEFAULT")
                     || token.is_word("CHECK")
+                    || token.is_word("DOCUMENTATION")
                     || token.is_word("NULL")
                     || token.is_word("NOT")
                     || token.is_word("UNIQUE")
@@ -2877,14 +2876,11 @@ impl<'source> Parser<'source> {
                 self.error_current("ORNA0001", "record value fields do not accept modifiers");
                 return None;
             }
-            let field_end = documentation
-                .as_ref()
-                .map_or(field_end, |documentation| documentation.span.end);
             Some(ValueFieldDeclaration {
                 name,
                 order,
                 type_specification,
-                documentation,
+                documentation: None,
                 span: SourceSpan {
                     start: field_start,
                     end: field_end,

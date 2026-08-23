@@ -1097,9 +1097,9 @@ pub struct ValueFieldDeclaration {
     pub order: usize,
     /// The type written for the field.
     pub type_specification: TypeSpecification,
-    /// The documentation text declared by a `DOCUMENTATION` modifier.
+    /// Reserved for a future value-field documentation modifier; currently always `None`.
     pub documentation: Option<SourceSlice>,
-    /// The span from the field name through its final modifier.
+    /// The span from the field name through its type specification.
     pub span: SourceSpan,
 }
 
@@ -1641,14 +1641,19 @@ mod tests {
         let value_field =
             "CREATE TYPE app.point AS VALUE (x INT DOCUMENTATION 'the x') IMMUTABLE PERSISTABLE;";
         let parsed = parse(value_field);
-        assert!(parsed.diagnostics().is_empty(), "{value_field}");
+        assert!(parsed.record_value_types().is_empty(), "{value_field}");
+        assert_eq!(parsed.diagnostics().len(), 1, "{value_field}");
         assert_eq!(
-            parsed.record_value_types()[0].fields[0]
-                .documentation
-                .as_ref()
-                .expect("value field documentation")
-                .text,
-            "'the x'"
+            parsed.diagnostics()[0].message,
+            "record value fields do not accept modifiers"
+        );
+        let documentation_start = value_field.find("DOCUMENTATION").unwrap();
+        assert_eq!(
+            parsed.diagnostics()[0].span,
+            SourceSpan {
+                start: documentation_start,
+                end: documentation_start + "DOCUMENTATION".len(),
+            }
         );
 
         let record =
