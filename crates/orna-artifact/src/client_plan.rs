@@ -2456,6 +2456,31 @@ fn validate_procedural_model(plan: &ProceduralClientPlan) -> Result<(), ClientPl
             ));
         }
         validate_procedural_local_reads(statement.expression(), &initialized_locals)?;
+        if matches!(target.kind, ClientLocalKind::Value) {
+            let awaited_type = match statement.expression() {
+                ClientExpressionNode::Await { expression } => match expression.as_ref() {
+                    ClientExpressionNode::Resource { operation } => Some(operation.result_type()),
+                    ClientExpressionNode::LocalRead { local } => locals
+                        .iter()
+                        .find(|candidate| candidate.local == *local)
+                        .and_then(|source| match source.kind {
+                            ClientLocalKind::Resource(_) => Some(source.type_id),
+                            ClientLocalKind::Value => None,
+                        }),
+                    _ => None,
+                },
+                _ => None,
+            };
+            if let Some(actual) = awaited_type {
+                if actual != target.type_id {
+                    return Err(ClientPlanError::ProceduralLocalTypeMismatch {
+                        local: target.local,
+                        expected: target.type_id,
+                        actual,
+                    });
+                }
+            }
+        }
         let expression_kind = procedural_resource_kind(statement.expression(), &locals);
         match target.kind {
             ClientLocalKind::Value if expression_kind.is_some() => {
@@ -5918,6 +5943,105 @@ mod tests {
             plan.encode(),
             Err(ClientPlanError::ProceduralLocalTypeMismatch {
                 local,
+                expected,
+                actual,
+            })
+        );
+    }
+
+    #[test]
+    fn procedural_plan_rejects_awaited_value_type_mismatch_for_resource_and_local_read() {
+        let value_local = LocalId::from_bytes([0x95; 16]);
+        let expected = TypeId::from_bytes([0x96; 16]);
+        let actual = TypeId::from_bytes([0x97; 16]);
+        let operation = |result_type| {
+            ResourceOperationNode::new(
+                ResourceKind::Scalar,
+                FunctionId::from_bytes([0x98; 16]),
+                RevisionPair::new(
+                    SourceRevisionId::from_bytes([0x99; 16]),
+                    CatalogueRevisionId::from_bytes([0x9a; 16]),
+                ),
+                CallSiteId::from_bytes([0x9b; 16]),
+                Vec::new(),
+                result_type,
+            )
+        };
+        let direct = |local_type, result_type| {
+            ProceduralClientPlan::new(
+                vec![ClientLocal::new(value_local, local_type, ClientLocalKind::Value)],
+                vec![ClientStatement::let_(
+                    value_local,
+                    ClientExpressionNode::Await {
+                        expression: Box::new(ClientExpressionNode::Resource {
+                            operation: operation(result_type),
+                        }),
+                    },
+                )],
+                ClientExpressionNode::LocalRead { local: value_local },
+            )
+        };
+        assert_eq!(
+            direct(expected, actual).encode(),
+            Err(ClientPlanError::ProceduralLocalTypeMismatch {
+                local: value_local,
+                expected,
+                actual,
+            })
+        );
+
+        let mut malformed = direct(expected, expected)
+            .encode()
+            .expect("matching awaited value plan encodes");
+        let expected_bytes = expected.to_bytes();
+        let operation_result_offset = malformed
+            .windows(expected_bytes.len())
+            .rposition(|window| window == expected_bytes.as_slice())
+            .expect("resource result type is encoded");
+        malformed[operation_result_offset..operation_result_offset + 16]
+            .copy_from_slice(&actual.to_bytes());
+        assert_eq!(
+            ProceduralClientPlan::decode(&malformed),
+            Err(ClientPlanError::ProceduralLocalTypeMismatch {
+                local: value_local,
+                expected,
+                actual,
+            })
+        );
+
+        let resource_local = LocalId::from_bytes([0x9c; 16]);
+        let target_local = LocalId::from_bytes([0x9d; 16]);
+        let local_read = ProceduralClientPlan::new(
+            vec![
+                ClientLocal::new(
+                    resource_local,
+                    actual,
+                    ClientLocalKind::Resource(ResourceKind::Scalar),
+                ),
+                ClientLocal::new(target_local, expected, ClientLocalKind::Value),
+            ],
+            vec![
+                ClientStatement::let_(
+                    resource_local,
+                    ClientExpressionNode::Resource {
+                        operation: operation(actual),
+                    },
+                ),
+                ClientStatement::let_(
+                    target_local,
+                    ClientExpressionNode::Await {
+                        expression: Box::new(ClientExpressionNode::LocalRead {
+                            local: resource_local,
+                        }),
+                    },
+                ),
+            ],
+            ClientExpressionNode::LocalRead { local: target_local },
+        );
+        assert_eq!(
+            local_read.encode(),
+            Err(ClientPlanError::ProceduralLocalTypeMismatch {
+                local: target_local,
                 expected,
                 actual,
             })
