@@ -136,7 +136,7 @@ END;
               (string_literal)))
           (semicolon))
         (kw_begin)
-        (client_return_statement
+        (client_state_return_statement
           (kw_return)
           expression: (client_expression
             (client_primary_expression
@@ -406,12 +406,67 @@ END;
           (string_literal)
           (semicolon))
         (kw_begin)
-        (client_return_statement
+        (client_state_return_statement
           (kw_return)
           expression: (client_expression
             (client_primary_expression
               (client_parameter_read
                 (identifier))))
+          (semicolon))
+        (kw_end)))
+    (semicolon)))
+
+
+====================
+CLIENT state blocks reject AWAIT in returns
+====================
+
+CREATE CLIENT FUNCTION examples.bad_state_await() RETURNS TEXT
+IS
+    STATE value TEXT;
+BEGIN
+    RETURN AWAIT rows;
+END;
+
+---
+
+(source_file
+  (create_client_function_statement
+    (kw_create)
+    (kw_client)
+    (kw_function)
+    name: (qualified_name
+      (qualified_name
+        (identifier))
+      (dot)
+      (identifier))
+    parameters: (parameter_list
+      (lparen)
+      (rparen))
+    (kw_returns)
+    returns: (return_type_spec
+      (type_spec
+        (scalar_type
+          (kw_text))))
+    body: (client_procedural_body
+      (client_state_body
+        (kw_is)
+        (client_state_declaration
+          (kw_state)
+          name: (kw_value)
+          type: (type_spec
+            (scalar_type
+              (kw_text)))
+          (semicolon))
+        (kw_begin)
+        (client_state_return_statement
+          (kw_return)
+          expression: (client_expression
+            (client_primary_expression
+              (client_parameter_read
+                (identifier))))
+          (ERROR
+            (kw_rows))
           (semicolon))
         (kw_end)))
     (semicolon)))

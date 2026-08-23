@@ -6633,11 +6633,11 @@
       "required": true,
       "types": [
         {
-          "type": "client_return_statement",
+          "type": "client_state_declaration",
           "named": true
         },
         {
-          "type": "client_state_declaration",
+          "type": "client_state_return_statement",
           "named": true
         },
         {
@@ -7220,6 +7220,36 @@
         },
         {
           "type": "kw_user",
+          "named": true
+        },
+        {
+          "type": "semicolon",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "client_state_return_statement",
+    "named": true,
+    "fields": {
+      "expression": {
+        "multiple": false,
+        "required": false,
+        "types": [
+          {
+            "type": "client_expression",
+            "named": true
+          }
+        ]
+      }
+    },
+    "children": {
+      "multiple": true,
+      "required": true,
+      "types": [
+        {
+          "type": "kw_return",
           "named": true
         },
         {
