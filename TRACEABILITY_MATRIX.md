@@ -8,7 +8,7 @@ a test marked `#[ignore = "requires the Compose PostgreSQL development service"]
 is Compose-gated and remains pending until it is run; this matrix claims no
 local Compose result. The fresh network-disabled Debian 12 host proof and the
 same-major PostgreSQL predecessor transition remain the two explicit
-environment or roadmap blockers in `TODO.md` and `PLAN.md`.
+environment or roadmap blockers remain in `../TODO.md` and `PLAN.md`.
 
 ## Language and compiler
 
