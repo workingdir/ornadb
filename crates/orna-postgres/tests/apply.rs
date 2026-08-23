@@ -7602,9 +7602,35 @@ async fn proves_sealed_security_identity_invocation_and_audit() -> TestResult<()
 /// per the requested INSPECT classifier, and the `security_decisions`
 /// projection returns the linked EXECUTE decision. A fresh recovery then
 /// validates the inspection relations and the appended INSPECT audit row.
-#[tokio::test]
+#[test]
 #[ignore = "requires the Compose PostgreSQL development service"]
-async fn proves_inspect_capture_and_projections_after_sealed_echo() -> TestResult<()> {
+fn proves_inspect_capture_and_projections_after_sealed_echo() -> TestResult<()> {
+    let handle = std::thread::Builder::new()
+        .name("inspect-capture-live".to_owned())
+        .stack_size(4 * 1024 * 1024)
+        .spawn(|| {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|error| {
+                    failure(format!(
+                        "inspect capture live runtime could not start: {error}"
+                    ))
+                })?;
+            runtime.block_on(proves_inspect_capture_and_projections_after_sealed_echo_inner())
+        })
+        .map_err(|error| {
+            failure(format!(
+                "inspect capture live thread could not start: {error}"
+            ))
+        })?;
+    match handle.join() {
+        Ok(result) => result,
+        Err(_) => Err(failure("inspect capture live thread panicked")),
+    }
+}
+
+async fn proves_inspect_capture_and_projections_after_sealed_echo_inner() -> TestResult<()> {
     const ECHO_VALUE: i32 = 41;
 
     with_test_database(|database| async move {
