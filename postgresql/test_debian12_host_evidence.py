@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 import subprocess
 import sys
@@ -84,40 +83,25 @@ class Debian12HostEvidenceTests(unittest.TestCase):
         self.assertEqual(completed.returncode, 1, completed.stderr)
         manifest = json.loads((output / "host-evidence.json").read_text(encoding="utf-8"))
         self.assertEqual(manifest["complete_lifecycle_status"], "NOT_PROVEN")
-        self.assertEqual(manifest["lifecycle_reason"], "native lifecycle matrix was not run")
+        self.assertEqual(manifest["lifecycle_reason"], "native lifecycle verifier has not run")
         self.assertEqual(manifest["inputs"]["package"]["size"], len(b"package bytes"))
         self.assertEqual(manifest["inputs"]["process"]["status"], "NOT_PROVEN")
         self.assertEqual(manifest["inputs"]["trace"]["status"], "NOT_PROVEN")
 
-    def test_pass_requires_explicit_process_and_trace_files(self) -> None:
-        self.preflight.write_text(
-            self.preflight.read_text(encoding="utf-8").replace(
-                '"fresh_host_status": "NOT_PROVEN"', '"fresh_host_status": "PASS"'
-            ),
-            encoding="utf-8",
-        )
-        completed = self.run_helper(self.root / "missing", "--lifecycle-status", "pass")
+    def test_pass_status_is_rejected_without_verifier(self) -> None:
+        completed = self.run_helper(self.root / "pass", "--lifecycle-status", "pass")
         self.assertNotEqual(completed.returncode, 0)
-        self.assertIn("PASS requires explicit process and trace", completed.stderr)
-        self.assertFalse((self.root / "missing").exists())
+        self.assertIn("invalid choice", completed.stderr)
+        self.assertFalse((self.root / "pass").exists())
 
-    def test_pass_requires_fresh_host_attestation(self) -> None:
-        process = self.root / "process.json"
-        trace = self.root / "trace.txt"
-        process.write_text('{"pids":[1]}\n', encoding="utf-8")
-        trace.write_text("lifecycle\n", encoding="utf-8")
-        completed = self.run_helper(
-            self.root / "unattested",
-            "--process-evidence",
-            str(process),
-            "--trace-evidence",
-            str(trace),
-            "--lifecycle-status",
-            "pass",
-        )
+    def test_incomplete_preflight_is_rejected(self) -> None:
+        report = json.loads(self.preflight.read_text(encoding="utf-8"))
+        report["checks"] = report["checks"][:1]
+        self.preflight.write_text(json.dumps(report) + "\n", encoding="utf-8")
+        completed = self.run_helper(self.root / "incomplete", "--lifecycle-status", "not-run")
         self.assertNotEqual(completed.returncode, 0)
-        self.assertIn("fresh-host attestation", completed.stderr)
-        self.assertFalse((self.root / "unattested").exists())
+        self.assertIn("canonical checks", completed.stderr)
+        self.assertFalse((self.root / "incomplete").exists())
 
     def test_relative_package_is_rejected_without_output(self) -> None:
         completed = subprocess.run(
@@ -153,34 +137,6 @@ class Debian12HostEvidenceTests(unittest.TestCase):
         self.assertNotEqual(completed.returncode, 0)
         self.assertIn("host preflight did not pass", completed.stderr)
         self.assertFalse((self.root / "failed").exists())
-
-    def test_pass_records_process_and_trace_inputs(self) -> None:
-        process = self.root / "process.json"
-        trace = self.root / "trace.txt"
-        process.write_text('{"pids":[1]}\n', encoding="utf-8")
-        trace.write_text("execve absent\n", encoding="utf-8")
-        self.preflight.write_text(
-            self.preflight.read_text(encoding="utf-8").replace(
-                '"fresh_host_status": "NOT_PROVEN"', '"fresh_host_status": "PASS"'
-            ),
-            encoding="utf-8",
-        )
-        completed = self.run_helper(
-            self.root / "pass",
-            "--process-evidence",
-            str(process),
-            "--trace-evidence",
-            str(trace),
-            "--lifecycle-status",
-            "pass",
-        )
-        self.assertEqual(completed.returncode, 0, completed.stderr)
-        manifest = json.loads((self.root / "pass" / "host-evidence.json").read_text(encoding="utf-8"))
-        self.assertEqual(manifest["complete_lifecycle_status"], "PASS")
-        expected = hashlib.sha256(process.read_bytes()).hexdigest()
-        self.assertEqual(manifest["inputs"]["process"]["sha256"], expected)
-        self.assertEqual(manifest["inputs"]["trace"]["size"], len("execve absent\n"))
-
 
 if __name__ == "__main__":
     unittest.main()
