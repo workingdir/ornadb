@@ -7691,7 +7691,7 @@ async fn proves_inspect_capture_and_projections_after_sealed_echo() -> TestResul
 
         // The projections return the epoch rows after the ladder check, and
         // a request without a granted privilege fails closed.
-        let nodes = kernel.inspect_invocation_nodes(&loaded, InspectPrivilege::OwnInvocation)?;
+        let nodes = kernel.inspect_invocation_nodes(&loaded, InspectPrivilege::OwnInvocation).await?;
         require(
             nodes.len() == 1
                 && nodes[0].id() == invocation
@@ -7700,7 +7700,7 @@ async fn proves_inspect_capture_and_projections_after_sealed_echo() -> TestResul
                 && nodes[0].target() == orna_compiler::STD_INVOKE_ECHO_FUNCTION_ID,
             "the loaded epoch did not retain the root invocation node",
         )?;
-        let calls = kernel.inspect_calls(&loaded, InspectPrivilege::OwnInvocation)?;
+        let calls = kernel.inspect_calls(&loaded, InspectPrivilege::OwnInvocation).await?;
         require(
             calls.len() == 1
                 && calls[0].invocation_id() == invocation
@@ -7711,20 +7711,23 @@ async fn proves_inspect_capture_and_projections_after_sealed_echo() -> TestResul
 
         require(
             kernel
-                .inspect_resources(&loaded, InspectPrivilege::OwnInvocation)?
+                .inspect_resources(&loaded, InspectPrivilege::OwnInvocation).await?
                 .is_empty()
                 && kernel
-                    .inspect_ui_nodes(&loaded, InspectPrivilege::OwnInvocation)?
+                    .inspect_ui_nodes(&loaded, InspectPrivilege::OwnInvocation).await?
                     .is_empty()
                 && kernel
-                    .inspect_presentation_candidates(&loaded, InspectPrivilege::OwnInvocation)?
+                    .inspect_presentation_candidates(&loaded, InspectPrivilege::OwnInvocation).await?
                     .is_empty()
                 && kernel
-                    .inspect_runtime_bindings(&loaded, InspectPrivilege::OwnInvocation)?
+                    .inspect_runtime_bindings(&loaded, InspectPrivilege::OwnInvocation).await?
                     .is_empty(),
             "the v1-empty projections returned non-empty rows",
         )?;
-        let denied = kernel.inspect_invocation_nodes(&loaded, InspectPrivilege::Source);
+        let denied_audits_before = inspect_denied_audit_rows(&database).await?.len();
+        let denied = kernel
+            .inspect_invocation_nodes(&loaded, InspectPrivilege::Source)
+            .await;
         require(
             matches!(denied, Err(PostgresKernelError::InspectDenied { .. })),
             "a projection without a granted privilege did not fail closed",
@@ -7902,6 +7905,17 @@ async fn proves_inspect_capture_and_projections_after_sealed_echo() -> TestResul
                 })
             ),
             "a trace request without a granted privilege did not fail closed",
+        )?;
+        let denied_audits = inspect_denied_audit_rows(&database).await?;
+        require(
+            denied_audits.len() == denied_audits_before + 2
+                && denied_audits[denied_audits_before..].iter().all(|audit| {
+                    audit.0 == V3_PROOF_CLIENT_USER.to_bytes().to_vec()
+                        && audit.1.is_none()
+                        && audit.2.is_none()
+                        && audit.3 == "inspect:missing-privilege"
+                }),
+            "projection and trace denials did not append exactly one protected audit each",
         )?;
 
         // The live state_cells projection returns the stored cell; the typed
@@ -8281,9 +8295,9 @@ async fn proves_security_admin_identity_checks_mutations_and_audit() -> TestResu
 }
 
 /// `find_latest_inspect_epoch` resolves the dispatch-auto-captured epoch for
-/// a completed invocation, returns `None` for an invocation with no epoch,
-/// and fails closed with `InspectDenied` for a caller whose granted ladder
-/// does not reach the epoch's owner scope.
+/// a completed invocation, fails closed with `InspectDenial::MissingEpoch` when
+/// no epoch exists, and fails closed with `InspectDenied` for a caller whose
+/// granted ladder does not reach the epoch's owner scope.
 #[tokio::test]
 #[ignore = "requires the Compose PostgreSQL development service"]
 async fn proves_find_latest_inspect_epoch_resolves_the_dispatch_epoch() -> TestResult<()> {
@@ -8366,21 +8380,44 @@ async fn proves_find_latest_inspect_epoch_resolves_the_dispatch_epoch() -> TestR
             "the owning principal must resolve its explicit inspect epoch",
         )?;
 
+        let missing_before = inspect_denied_audit_rows(&database).await?.len();
         let unknown_epoch = kernel
             .find_inspect_epoch(&session, InspectEpochId::from_bytes([0xef; 16]))
-            .await?;
+            .await;
         require(
-            unknown_epoch.is_none(),
-            "an unknown explicit inspect epoch must resolve as None",
+            matches!(
+                unknown_epoch,
+                Err(PostgresKernelError::InspectDenied {
+                    reason: orna_core::security::InspectDenial::MissingEpoch
+                })
+            ),
+            "an unknown explicit inspect epoch must fail closed as MissingEpoch",
         )?;
 
-        // An invocation with no captured epoch resolves as `None`.
+        // An invocation with no captured epoch also fails closed without
+        // disclosing whether the invocation or epoch exists.
         let absent = kernel
             .find_latest_inspect_epoch(&session, InvocationId::from_bytes([0xee; 16]))
-            .await?;
+            .await;
         require(
-            absent.is_none(),
-            "an invocation without an epoch must resolve as None",
+            matches!(
+                absent,
+                Err(PostgresKernelError::InspectDenied {
+                    reason: orna_core::security::InspectDenial::MissingEpoch
+                })
+            ),
+            "an invocation without an epoch must fail closed as MissingEpoch",
+        )?;
+        let missing_audits = inspect_denied_audit_rows(&database).await?;
+        require(
+            missing_audits.len() == missing_before + 2
+                && missing_audits[missing_before..].iter().all(|audit| {
+                    audit.0 == V3_PROOF_CLIENT_USER.to_bytes().to_vec()
+                        && audit.1.is_none()
+                        && audit.2.is_none()
+                        && audit.3 == "inspect:missing-epoch"
+                }),
+            "missing epoch lookups did not append exactly one protected denial each",
         )?;
 
         // A foreign principal whose granted ladder is only OwnInvocation
@@ -8410,10 +8447,58 @@ async fn proves_find_latest_inspect_epoch_resolves_the_dispatch_epoch() -> TestR
             ),
             "a foreign principal must fail closed for an explicit epoch",
         )?;
+        let denial_audits = inspect_denied_audit_rows(&database).await?;
+        require(
+            denial_audits.len() == missing_before + 4
+                && denial_audits[missing_before + 2..].iter().all(|audit| {
+                    audit.0 == FOREIGN_PRINCIPAL.to_bytes().to_vec()
+                        && audit.1.is_none()
+                        && audit.2.is_none()
+                        && audit.3 == "inspect:missing-privilege"
+                }),
+            "foreign inspect denials did not append exactly one protected audit each",
+        )?;
 
         Ok(())
     })
     .await
+}
+
+/// Returns the protected columns for every denied INSPECT audit row.
+async fn inspect_denied_audit_rows(
+    database: &TestDatabase,
+) -> TestResult<Vec<(Vec<u8>, Option<Vec<u8>>, Option<Vec<u8>>, String)>> {
+    let session = database.open().await?;
+    let result: TestResult<Vec<(Vec<u8>, Option<Vec<u8>>, Option<Vec<u8>>, String)>> = async {
+        let rows = session
+            .client()
+            .query(
+                "SELECT session_principal_id, effective_principal_id,
+                        authorising_principal_id, denial_reason
+                 FROM _orna_kernel.security_audit_events
+                 WHERE event_kind = 'inspect' AND outcome = 'denied'
+                 ORDER BY sequence",
+                &[],
+            )
+            .await?;
+        let mut audits = Vec::with_capacity(rows.len());
+        for row in &rows {
+            audits.push((
+                row.try_get(0)?,
+                row.try_get(1)?,
+                row.try_get(2)?,
+                row.try_get(3)?,
+            ));
+        }
+        Ok(audits)
+    }
+    .await;
+    let shutdown_result = session.shutdown().await;
+    match (result, shutdown_result) {
+        (Ok(audits), Ok(())) => Ok(audits),
+        (Err(error), _) => Err(error),
+        (Ok(_), Err(error)) => Err(error.into()),
+    }
 }
 
 /// Returns `(invocation_id, sequence, kind)` for every trace row of one
