@@ -66,7 +66,14 @@ impl<'text> PositionMapper<'text> {
     /// terminator.
     fn line_end_byte(&self, line: usize) -> usize {
         match self.line_starts.get(line + 1) {
-            Some(&next_start) => next_start.saturating_sub(1),
+            Some(&next_start) => {
+                let line_end = next_start.saturating_sub(1);
+                if self.text.as_bytes().get(line_end.saturating_sub(1)) == Some(&b'\r') {
+                    line_end.saturating_sub(1)
+                } else {
+                    line_end
+                }
+            }
             None => self.text.len(),
         }
     }
@@ -158,6 +165,24 @@ mod tests {
                 (Position { line: 0, character: 0 }, 8),
                 (Position { line: 1, character: 0 }, 9),
                 (Position { line: 2, character: 0 }, 8),
+            ]
+        );
+    }
+
+    #[test]
+    fn crlf_line_segments_exclude_carriage_return() {
+        let text = "first\r\nsecond";
+        let mapper = PositionMapper::new(text);
+        let span = SourceSpan {
+            start: 0,
+            end: text.len(),
+        };
+
+        assert_eq!(
+            mapper.segments(&span),
+            vec![
+                (Position { line: 0, character: 0 }, 5),
+                (Position { line: 1, character: 0 }, 6),
             ]
         );
     }
