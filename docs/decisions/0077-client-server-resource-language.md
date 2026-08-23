@@ -74,16 +74,20 @@ ordinary expression call rules from work ADR 0068.
 
 ## Actions
 
-`std.action.call`, `std.action.sequence`, and `std.action.parallel` are checked
-standard-library constructors that return typed action values. A constructor
-does not submit work. A trigger submits a new resource request with a new
-request identity and generation under the current authenticated invocation.
+The action language in this ADR is conceptual and is bounded for executable v1
+by ADR 0079. The accepted executable v1 constructor is `std.action.call` only.
+`std.action.sequence` and `std.action.parallel` are reserved and rejected
+until a later scheduler contract. A constructor does not submit work. A trigger
+submits a new resource request with a new request identity and generation under
+the current authenticated invocation.
 
 `std.action.call` accepts either a CLIENT target or a SERVER target. A SERVER
-target uses the resource request contract. `sequence` starts members in source
-order and stops at the first failure or cancellation. `parallel` starts all
-members, waits for terminal outcomes, and cancels outstanding members when one
-fails or is cancelled. A completed member is not rolled back.
+target uses the resource request contract. Conceptually, `sequence` starts
+members in source order and stops at the first failure or cancellation, while
+`parallel` starts all members, waits for terminal outcomes, and cancels
+outstanding members when one fails or is cancelled. Those descriptions are not
+executable v1 scheduler semantics; the two forms remain reserved and rejected
+until a later scheduler contract. A completed member is not rolled back.
 
 An action value contains no principal, role, `run_as`, capability grant, or
 credential. The runtime derives the authenticated context when the action is
