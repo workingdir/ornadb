@@ -2,11 +2,18 @@
 
 **Status:** Accepted
 
+**Implementation status:** The executor-independent resource identity and
+lifecycle described here are implemented. The formerly open resource language,
+transport, and action portions are accepted successors in work ADRs 0077, 0078,
+and 0079; this ADR remains the authority for cache identity and lifecycle
+transitions.
+
 ## Decision
 
 The first CLIENT resource slice is an executor-independent lifecycle and cache
-identity model. It does not add `RESOURCE`, `AWAIT`, action, stream, or
-assignment syntax. Those forms remain open in the canonical specification.
+identity model. It did not add `RESOURCE`, `AWAIT`, action, stream, or
+assignment syntax; those forms were open at the time and are now defined by
+work ADRs 0077-0079.
 
 A resource is owned by the CLIENT runtime and represents one typed asynchronous
 request. Its identity contains the complete cache boundary:
@@ -96,13 +103,16 @@ buildable.
 
 ## Deferred surface
 
-`RESOURCE` declarations, `AWAIT`, actions, streams, virtual models, retry and
-cache policy, transport framing, server resource execution, and runtime event
-loop integration remain outside this ADR.
+Virtual models, retry and cache policy, and production runtime event-loop
+integration remain outside this ADR. The accepted `RESOURCE`/`AWAIT` language,
+stream transport, server resource execution, and executable action slice are
+defined by work ADRs 0077, 0078, and 0079.
 
 ## Precedence
 
 This decision narrows the current proposal in
 `spec/docs/21-resources-actions-streams.md` without changing the canonical
 specification. Work ADRs 0060, 0068, 0069, and 0070 remain authoritative for
-capability, expression, state declaration, and USER state semantics.
+capability, expression, state declaration, and USER state semantics. Work ADRs
+0077-0079 define the accepted language, transport, and action successors to the
+open portions recorded here.
