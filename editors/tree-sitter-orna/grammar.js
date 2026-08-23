@@ -73,6 +73,9 @@ module.exports = grammar({
         [$._type_base, $._name_first],
         // ELSIF clauses vs statement repetition inside IF bodies.
         [$.if_statement],
+        // A dotted CLIENT call callee and a parameter field path share the
+        // same prefix until the call opening parenthesis.
+        [$.client_call_callee, $.client_field_path],
     ],
 
     rules: Object.assign(
@@ -240,7 +243,7 @@ module.exports = grammar({
                     $.kw_returns,
                     field('returns', $.return_type_spec),
                     optional($.capability_clause),
-                    field('body', $.function_body),
+                    field('body', $._client_function_body),
                     $.semicolon,
                 ),
 
@@ -299,6 +302,79 @@ module.exports = grammar({
                     seq($.kw_as, choice($.expression, $.sql_body)),
                     $.procedural_body,
                 ),
+
+            _client_function_body: ($) =>
+                choice(
+                    $.client_expression_body,
+                    $.procedural_body,
+                    $.client_return_body,
+                ),
+
+            client_expression_body: ($) =>
+                seq($.kw_as, field('expression', $.client_expression)),
+
+            client_return_body: ($) =>
+                seq($.kw_return, field('expression', $.client_expression)),
+
+            client_expression: ($) =>
+                prec.left(
+                    1,
+                    choice(
+                        seq($.client_expression, $.client_concat_operator, $.client_primary_expression),
+                        $.client_primary_expression,
+                    ),
+                ),
+
+            client_primary_expression: ($) =>
+                choice(
+                    $.client_call_expression,
+                    $.string_literal,
+                    $.client_integer_literal,
+                    $.boolean_literal,
+                    $.client_field_path,
+                    $.client_parameter_read,
+                ),
+
+            client_call_expression: ($) =>
+                seq(
+                    field('callee', $.client_call_callee),
+                    $.lparen,
+                    optional($.client_argument_list),
+                    $.rparen,
+                ),
+
+            client_call_callee: ($) =>
+                prec(4, seq($._name_first, repeat(seq($.dot, $._name)))),
+
+            client_argument_list: ($) => sep1($.client_argument, $.comma),
+
+            client_argument: ($) =>
+                choice(
+                    prec(
+                        2,
+                        seq(
+                            field('name', $._name),
+                            $.arrow_operator,
+                            field('value', $.client_expression),
+                        ),
+                    ),
+                    prec(1, field('value', $.client_expression)),
+                ),
+
+            client_field_path: ($) =>
+                prec(
+                    3,
+                    seq(
+                        field('parameter', $._name_first),
+                        repeat1(seq($.dot, field('field', $._name))),
+                    ),
+                ),
+
+            client_parameter_read: ($) => $._name_first,
+
+            client_integer_literal: ($) => token(/\d+/),
+
+            client_concat_operator: ($) => token('||'),
 
             procedural_body: ($) =>
                 seq(
