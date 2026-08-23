@@ -65,6 +65,15 @@ separate release action.
 - [x] Add the installed `orna source diff` semantic diff surface
   (identity-keyed add/drop/rename report, no apply, live proof;
   work ADR 0066).
+- [x] Implement the installed one-file source apply transaction and its
+  protected `SourceApply` audit contract (focused local kernel, migration, and
+  codec tests pass; the Compose-gated product proof remains pending).
+- [x] Implement the read-only retained revision-pair listing kernel API with
+  in-memory integrity validation (focused local validator tests pass; the
+  Compose-gated listing proof remains pending).
+- [ ] Run the ignored Compose-gated source-apply audit, rollback, tamper, and
+  retained-revision-listing integration proofs; no local Compose result is
+  claimed.
 - [x] Register `std.ui.UI`, the deterministic TTY runtime offer, and the
   server-side `sys.inspect` core with installed proofs (work ADRs 0062-0064).
 - [x] Add security administration and the sealed CSV output presenter
