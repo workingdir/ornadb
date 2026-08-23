@@ -3239,7 +3239,7 @@ fn retained_standard_library_v2_snapshot_from_source(
 /// accepted `orna.std/3` snapshot additionally binds the two framed output
 /// codecs for `std.terminal.Document` and `std.io.ByteStream` (work ADR
 /// 0058); the accepted `orna.std/4` snapshot additionally binds the
-/// `ORNA-UI/1 ` length-prefixed-canonical-JSON codec for `std.ui.UI` (work ADR 0062);
+/// `ORNA-UI/1 ` length-prefixed canonical UI-value codec for `std.ui.UI` (work ADR 0062);
 /// the accepted V6 snapshot additionally binds the bounded raw-byte action
 /// codec (ADR 0079).
 pub fn registered_opaque_codecs(
@@ -7909,20 +7909,33 @@ EXPORT TYPE std.ui.UI AS std.UI;
             })
         );
 
-        // The core codec validates canonical JSON only; UI schema-shape
-        // validation remains outside this registration's validator surface.
-        let invalid_shape_body = br#"{"kind":"not-a-ui-kind"}"#;
-        let mut invalid_shape_payload = Vec::from(UI_MAGIC.as_bytes());
-        invalid_shape_payload
-            .extend_from_slice(&(invalid_shape_body.len() as u32).to_be_bytes());
-        invalid_shape_payload.extend_from_slice(invalid_shape_body);
-        assert!(OpaqueValue::new(
-            &active,
-            &registry,
-            STD_UI_TYPE_ID,
-            &invalid_shape_payload,
-        )
-        .is_ok());
+        for body in [
+            br#"{"children":[{"kind":"empty"}],"kind":"fragment"}"#.as_slice(),
+            br#"{"actions":{},"contract":{"id":"std.ui.window@1","name":"std.ui.window","version":"1.0"},"kind":"node","properties":{},"slots":{}}"#.as_slice(),
+        ] {
+            let mut payload = Vec::from(UI_MAGIC.as_bytes());
+            payload.extend_from_slice(&(body.len() as u32).to_be_bytes());
+            payload.extend_from_slice(body);
+            let value = OpaqueValue::new(&active, &registry, STD_UI_TYPE_ID, &payload)
+                .expect("the closed UI shape constructs");
+            assert_eq!(value.canonical_payload(), payload.as_slice());
+        }
+
+        for body in [
+            br#"{"kind":"not-a-ui-kind"}"#.as_slice(),
+            br#"{"actions":{},"contract":{"id":"std.ui.window@1","name":"std.ui.window","version":"1.0"},"kind":"node","properties":{},"slots":{},"unknown":null}"#.as_slice(),
+            br#"{"children":[{"kind":"not-a-ui-kind"}],"kind":"fragment"}"#.as_slice(),
+        ] {
+            let mut payload = Vec::from(UI_MAGIC.as_bytes());
+            payload.extend_from_slice(&(body.len() as u32).to_be_bytes());
+            payload.extend_from_slice(body);
+            assert_eq!(
+                OpaqueValue::new(&active, &registry, STD_UI_TYPE_ID, &payload),
+                Err(OpaqueValueError::InvalidJsonBody {
+                    opaque_type: STD_UI_TYPE_ID,
+                })
+            );
+        }
 
         // The V4 registry also binds the opaque-token, terminal-document, and
         // byte-stream codecs unchanged.
