@@ -90,12 +90,13 @@ use orna_core::{
 };
 use orna_syntax::{
     CapabilitySpecification, ClientExpression, ClientFunctionDeclaration, FieldRenameDeclaration,
-    FunctionReturnType, FunctionSecurity as SyntaxFunctionSecurity,
+    FunctionReturnType, FunctionSecurity as SyntaxFunctionSecurity, NamePart,
     FunctionTransaction as SyntaxFunctionTransaction,
     FunctionVolatility as SyntaxFunctionVolatility, ObjectTypeDeclaration, OnDeletePolicy,
     PrimitiveValueTypePersistence, QualifiedName, RecordValueTypeDeclaration, SelectQuantifier,
     ServerFunctionBody, ServerFunctionDeclaration, SourceSlice, SourceSpan,
     StandardLargeObjectKind, StateDefault, StateScope, TypeExportTarget, TypeSpecification,
+    OptionTypeSpelling,
 };
 
 use crate::mutation::{
@@ -4935,6 +4936,61 @@ fn client_expression_contains_await_or_resource(
         | CheckedClientExpression::FieldPath { .. } => false,
     }
 }
+fn client_expression_contains_inspect(expression: &CheckedClientExpression) -> bool {
+    match expression {
+        CheckedClientExpression::Inspect { .. } => true,
+        CheckedClientExpression::Await { expression, .. } => {
+            client_expression_contains_inspect(expression)
+        }
+        CheckedClientExpression::Call { arguments, .. } => arguments
+            .iter()
+            .any(|(_, argument)| client_expression_contains_inspect(argument)),
+        CheckedClientExpression::Resource { operation } => operation
+            .arguments()
+            .iter()
+            .any(|(_, argument)| client_expression_contains_inspect(argument)),
+        CheckedClientExpression::Action { operation } => operation
+            .arguments()
+            .iter()
+            .any(|(_, argument)| client_expression_contains_inspect(argument)),
+        CheckedClientExpression::Concat { left, right, .. } => {
+            client_expression_contains_inspect(left)
+                || client_expression_contains_inspect(right)
+        }
+        CheckedClientExpression::String { .. }
+        | CheckedClientExpression::Integer { .. }
+        | CheckedClientExpression::Boolean { .. }
+        | CheckedClientExpression::ParameterRead { .. }
+        | CheckedClientExpression::LocalRead { .. }
+        | CheckedClientExpression::FieldPath { .. } => false,
+    }
+}
+
+
+fn client_expression_contains_action(expression: &ClientExpression) -> bool {
+    let action_name =
+        QualifiedSemanticName::new(["std", "action", "call"]).expect("std.action.call is valid");
+    match expression {
+        ClientExpression::Call {
+            callee, arguments, ..
+        } => {
+            semantic_name(callee) == action_name
+                || arguments
+                    .iter()
+                    .any(|argument| client_expression_contains_action(&argument.value))
+        }
+        ClientExpression::Await { expression, .. } => client_expression_contains_action(expression),
+        ClientExpression::Concat { left, right, .. } => {
+            client_expression_contains_action(left) || client_expression_contains_action(right)
+        }
+        ClientExpression::StringLiteral { .. }
+        | ClientExpression::IntegerLiteral { .. }
+        | ClientExpression::BooleanLiteral { .. }
+        | ClientExpression::ParameterRead { .. }
+        | ClientExpression::LocalRead { .. }
+        | ClientExpression::FieldPath { .. } => false,
+    }
+}
 
 fn action_target_parameters(
     parameters: &[ResolvedServerFunctionParameter],
@@ -5455,7 +5511,10 @@ fn client_expression_type_is_evaluable(
             scalar,
             StandardScalar::Boolean
                 | StandardScalar::Integer
+                | StandardScalar::BigInt
+                | StandardScalar::Float
                 | StandardScalar::CharacterLargeObject
+                | StandardScalar::BinaryLargeObject
         ),
         SemanticType::Named(CheckedTypeId::Existing(type_id))
             if is_sealed_inspect_type_id(type_id) || type_id == STD_UI_TYPE_ID => true,
@@ -5472,7 +5531,10 @@ fn client_expression_type_is_evaluable(
                         value_type.representation_contract(),
                         "orna.kernel.value.boolean@1"
                             | "orna.kernel.value.integer@1"
+                            | "orna.kernel.value.bigint@1"
+                            | "orna.kernel.value.float@1"
                             | "orna.kernel.value.character-large-object@1"
+                            | "orna.kernel.value.binary-large-object@1"
                     )
             }),
         SemanticType::Named(CheckedTypeId::Provisional(_)) | SemanticType::Reference { .. } => {
@@ -6960,36 +7022,50 @@ fn check_client_expression(
 }
 
 fn client_local_resource_family(source: &SourceSlice) -> Option<ResourceKind> {
-    let mut parser = ClientResourceTypeParser::new(&source.text);
-    let outer = parser.parse_qualified_name()?;
+    let mut parser = ClientResourceTypeParser::new(&source.text, source.span.start);
+    let outer = parser.parse_qualified_name_parts()?;
+    if outer.len() != 3 || !outer[0].text.eq_ignore_ascii_case("std") || !outer[1].text.eq_ignore_ascii_case("data") { return None; }
+    match outer[2].text.to_ascii_lowercase().as_str() { "resource" => Some(ResourceKind::Scalar), "streamresource" => Some(ResourceKind::Stream), _ => None }
+}
+
+/// Parses a CLIENT resource declaration and returns its family plus inner descriptor.
+///
+/// The descriptor is resolved later against submitted and standard types; the SERVER
+/// target remains authoritative for the resulting expression type.
+fn client_local_resource_type(
+    source: &SourceSlice,
+) -> Option<(ResourceKind, Option<TypeSpecification>)> {
+    let mut parser = ClientResourceTypeParser::new(&source.text, source.span.start);
+    let outer = parser.parse_qualified_name_parts()?;
     if outer.len() != 3
-        || !outer[0].eq_ignore_ascii_case("std")
-        || !outer[1].eq_ignore_ascii_case("data")
+        || !outer[0].text.eq_ignore_ascii_case("std")
+        || !outer[1].text.eq_ignore_ascii_case("data")
     {
         return None;
     }
-    match outer[2].to_ascii_lowercase().as_str() {
-        "resource" => Some(ResourceKind::Scalar),
-        "streamresource" => Some(ResourceKind::Stream),
-        _ => None,
-    }
-}
-
-fn client_local_resource_kind(source: &SourceSlice) -> Option<ResourceKind> {
-    let kind = client_local_resource_family(source)?;
-    let mut parser = ClientResourceTypeParser::new(&source.text);
-    parser.parse_qualified_name()?;
-    if !parser.consume(b'<') || !parser.parse_type() || !parser.consume(b'>') || !parser.is_end() {
+    let kind = match outer[2].text.to_ascii_lowercase().as_str() {
+        "resource" => ResourceKind::Scalar,
+        "streamresource" => ResourceKind::Stream,
+        _ => return None,
+    };
+    if !parser.consume(b'<') {
         return None;
     }
-    Some(kind)
+    let descriptor = if parser.consume_keyword("TABLE") || parser.consume_keyword("RECORD") {
+        parser.parse_inline_record_shape(0)?;
+        None
+    } else {
+        Some(parser.parse_type_specification(0)?)
+    };
+    if !parser.consume(b'>') || !parser.is_end() {
+        return None;
+    }
+    Some((kind, descriptor))
 }
 
-/// A syntax-only parser for the descriptor inside a CLIENT resource local
-/// type. The target SERVER declaration remains authoritative for the resolved
-/// result type; this parser only rejects empty or malformed descriptors.
 struct ClientResourceTypeParser<'a> {
     text: &'a str,
+    base: usize,
     offset: usize,
     invalid_trivia: bool,
 }
@@ -6997,11 +7073,26 @@ struct ClientResourceTypeParser<'a> {
 impl<'a> ClientResourceTypeParser<'a> {
     const MAX_TYPE_DEPTH: usize = 32;
 
-    fn new(text: &'a str) -> Self {
+    fn new(text: &'a str, base: usize) -> Self {
         Self {
             text,
+            base,
             offset: 0,
             invalid_trivia: false,
+        }
+    }
+
+    fn span(&self, start: usize, end: usize) -> SourceSpan {
+        SourceSpan {
+            start: self.base + start,
+            end: self.base + end,
+        }
+    }
+
+    fn source_slice(&self, start: usize, end: usize) -> SourceSlice {
+        SourceSlice {
+            text: self.text[start..end].to_owned(),
+            span: self.span(start, end),
         }
     }
 
@@ -7018,12 +7109,11 @@ impl<'a> ClientResourceTypeParser<'a> {
                 .and_then(|text| text.chars().next())
                 .is_some_and(char::is_whitespace)
             {
-                let width = self.text[self.offset..]
+                self.offset += self.text[self.offset..]
                     .chars()
                     .next()
                     .expect("character exists")
                     .len_utf8();
-                self.offset += width;
             }
             let Some(remaining) = self.text.get(self.offset..) else {
                 return;
@@ -7061,7 +7151,7 @@ impl<'a> ClientResourceTypeParser<'a> {
         }
     }
 
-    fn parse_identifier(&mut self) -> Option<String> {
+    fn parse_identifier_part(&mut self) -> Option<NamePart> {
         self.skip_trivia();
         let start = self.offset;
         if self.text.as_bytes().get(self.offset) == Some(&b'"') {
@@ -7072,7 +7162,10 @@ impl<'a> ClientResourceTypeParser<'a> {
                     if self.text.as_bytes().get(self.offset) == Some(&b'"') {
                         self.offset += 1;
                     } else {
-                        return Some(self.text[start..self.offset].to_owned());
+                        return Some(NamePart {
+                            text: self.text[start..self.offset].to_owned(),
+                            span: self.span(start, self.offset),
+                        });
                     }
                 }
             }
@@ -7089,13 +7182,20 @@ impl<'a> ClientResourceTypeParser<'a> {
             }
             self.offset += character.len_utf8();
         }
-        Some(self.text[start..self.offset].to_owned())
+        Some(NamePart {
+            text: self.text[start..self.offset].to_owned(),
+            span: self.span(start, self.offset),
+        })
     }
 
-    fn parse_qualified_name(&mut self) -> Option<Vec<String>> {
-        let mut parts = vec![self.parse_identifier()?];
+    fn parse_identifier(&mut self) -> Option<String> {
+        self.parse_identifier_part().map(|part| part.text)
+    }
+
+    fn parse_qualified_name_parts(&mut self) -> Option<Vec<NamePart>> {
+        let mut parts = vec![self.parse_identifier_part()?];
         while self.consume(b'.') {
-            parts.push(self.parse_identifier()?);
+            parts.push(self.parse_identifier_part()?);
         }
         Some(parts)
     }
@@ -7117,98 +7217,153 @@ impl<'a> ClientResourceTypeParser<'a> {
         }
     }
 
-    fn parse_type(&mut self) -> bool {
-        self.parse_type_at_depth(0)
-    }
-
-    fn parse_type_at_depth(&mut self, depth: usize) -> bool {
+    fn parse_type_specification(&mut self, depth: usize) -> Option<TypeSpecification> {
         if depth > Self::MAX_TYPE_DEPTH {
-            return false;
+            return None;
         }
+        self.skip_trivia();
         let saved = self.offset;
         if self.consume_keyword("REF") {
-            return self.parse_type_at_depth(depth + 1) && self.parse_optional_suffix(depth + 1);
+            let target = self.parse_type_specification(depth + 1)?;
+            let spec = TypeSpecification::Reference {
+                span: self.span(saved, target.span().end - self.base),
+                target: Box::new(target),
+            };
+            return self.parse_postfix_options(spec, depth);
         }
-        for keyword in ["LIST", "SET", "OPTION", "STREAM", "MAP"] {
+        for keyword in ["LIST", "SET", "MAP", "OPTION", "STREAM"] {
             self.offset = saved;
             if !self.consume_keyword(keyword) {
                 continue;
             }
-            if !self.consume(b'<') || !self.parse_type_at_depth(depth + 1) {
-                return false;
+            if !self.consume(b'<') {
+                return None;
             }
-            if keyword == "MAP" && (!self.consume(b',') || !self.parse_type_at_depth(depth + 1)) {
-                return false;
+            let first = self.parse_type_specification(depth + 1)?;
+            let second = if keyword == "MAP" {
+                if !self.consume(b',') {
+                    return None;
+                }
+                Some(self.parse_type_specification(depth + 1)?)
+            } else {
+                None
+            };
+            if !self.consume(b'>') {
+                return None;
             }
-            return self.consume(b'>') && self.parse_optional_suffix(depth + 1);
+            let spec = match keyword {
+                "LIST" => TypeSpecification::List {
+                    span: self.span(saved, self.offset),
+                    element: Box::new(first),
+                },
+                "SET" => TypeSpecification::Set {
+                    span: self.span(saved, self.offset),
+                    element: Box::new(first),
+                },
+                "MAP" => TypeSpecification::Map {
+                    span: self.span(saved, self.offset),
+                    key: Box::new(first),
+                    value: Box::new(second.expect("MAP value exists")),
+                },
+                "OPTION" => TypeSpecification::Option {
+                    span: self.span(saved, self.offset),
+                    value: Box::new(first),
+                    spelling: OptionTypeSpelling::Prefix,
+                },
+                "STREAM" => TypeSpecification::Stream {
+                    span: self.span(saved, self.offset),
+                    element: Box::new(first),
+                },
+                _ => unreachable!(),
+            };
+            return self.parse_postfix_options(spec, depth);
         }
         self.offset = saved;
-        if self.parse_standard_large_object() {
-            return self.parse_optional_suffix(depth + 1);
+        if let Some(spec) = self.parse_standard_large_object_specification() {
+            return self.parse_postfix_options(spec, depth);
         }
         self.offset = saved;
-        for keyword in ["TABLE", "RECORD"] {
-            self.offset = saved;
-            if !self.consume_keyword(keyword) {
-                continue;
-            }
-            if self.peek(b'(') {
-                return self.parse_record(depth + 1) && self.parse_optional_suffix(depth + 1);
-            }
-            break;
-        }
-        self.offset = saved;
-        self.parse_qualified_name().is_some() && self.parse_optional_suffix(depth + 1)
+        let parts = self.parse_qualified_name_parts()?;
+        let start = parts.first().expect("nonempty").span.start - self.base;
+        let end = parts.last().expect("nonempty").span.end - self.base;
+        self.parse_postfix_options(
+            TypeSpecification::Named(QualifiedName {
+                parts,
+                span: self.span(start, end),
+            }),
+            depth,
+        )
     }
 
-    fn parse_standard_large_object(&mut self) -> bool {
-        let saved = self.offset;
-        if (self.consume_keyword("CHARACTER") || self.consume_keyword("BINARY"))
-            && self.consume_keyword("LARGE")
-            && self.consume_keyword("OBJECT")
-        {
-            true
-        } else {
-            self.offset = saved;
-            false
-        }
-    }
-
-    fn parse_record(&mut self, depth: usize) -> bool {
-        if !self.consume(b'(') {
-            return false;
+    fn parse_inline_record_shape(&mut self, depth: usize) -> Option<()> {
+        if depth > Self::MAX_TYPE_DEPTH || !self.consume(b'(') {
+            return None;
         }
         if self.consume(b')') {
-            return true;
+            return Some(());
         }
         loop {
-            if self.parse_identifier().is_none() || !self.parse_type_at_depth(depth + 1) {
-                return false;
-            }
+            self.parse_identifier_part()?;
+            self.parse_type_specification(depth + 1)?;
             if self.consume(b')') {
-                return true;
+                return Some(());
             }
             if !self.consume(b',') {
-                return false;
+                return None;
             }
         }
     }
 
-    fn parse_optional_suffix(&mut self, mut depth: usize) -> bool {
-        while self.consume(b'?') {
-            depth += 1;
-            if depth > Self::MAX_TYPE_DEPTH {
-                return false;
-            }
-        }
-        true
-    }
-
-    fn peek(&mut self, expected: u8) -> bool {
+    fn parse_standard_large_object_specification(&mut self) -> Option<TypeSpecification> {
         self.skip_trivia();
-        self.text.as_bytes().get(self.offset) == Some(&expected)
+        let start = self.offset;
+        let kind = if self.consume_keyword("CHARACTER") {
+            StandardLargeObjectKind::Character
+        } else {
+            self.offset = start;
+            if self.consume_keyword("BINARY") {
+                StandardLargeObjectKind::Binary
+            } else {
+                self.offset = start;
+                return None;
+            }
+        };
+        if !self.consume_keyword("LARGE") || !self.consume_keyword("OBJECT") {
+            self.offset = start;
+            return None;
+        }
+        Some(TypeSpecification::StandardLargeObject {
+            kind,
+            source: self.source_slice(start, self.offset),
+        })
+    }
+
+    fn parse_postfix_options(
+        &mut self,
+        mut spec: TypeSpecification,
+        depth: usize,
+    ) -> Option<TypeSpecification> {
+        let mut option_depth = depth;
+        loop {
+            self.skip_trivia();
+            if self.text.as_bytes().get(self.offset) != Some(&b'?') {
+                return Some(spec);
+            }
+            if option_depth >= Self::MAX_TYPE_DEPTH {
+                return None;
+            }
+            self.offset += 1;
+            option_depth += 1;
+            let start = spec.span().start - self.base;
+            spec = TypeSpecification::Option {
+                value: Box::new(spec),
+                spelling: OptionTypeSpelling::Postfix,
+                span: self.span(start, self.offset),
+            };
+        }
     }
 }
+
 
 fn client_type_specification_from_source(source: &SourceSlice) -> Option<TypeSpecification> {
     let text = source.text.trim();
@@ -7345,6 +7500,12 @@ fn validate_registered_client_external_contract(
         return false;
     }
     true
+}
+
+impl CheckedClientStateSlot {
+    pub(crate) fn location(&self) -> &SourceLocation {
+        &self.location
+    }
 }
 
 fn checked_state_slot_id(function: CheckedFunctionId, name: &str) -> CheckedStateSlotId {
@@ -7529,7 +7690,12 @@ fn check_client_functions(
                         return None;
                     }
                     let diagnostics_before = diagnostics.len();
-                    validate_client_await_positions(expression, true, input, diagnostics);
+                    validate_client_await_positions(
+                        expression,
+                        !matches!(input.body, orna_syntax::ClientFunctionBody::Expression { .. }),
+                        input,
+                        diagnostics,
+                    );
                     if diagnostics.len() != diagnostics_before {
                         return None;
                     }
@@ -7604,7 +7770,7 @@ fn check_client_functions(
             return None;
         }
         let diagnostics_before = diagnostics.len();
-        validate_client_await_positions(&local.expression, false, input, diagnostics);
+        validate_client_await_positions(&local.expression, true, input, diagnostics);
         if diagnostics.len() != diagnostics_before { return None; }
         let direct_resource = matches!(
             &local.expression,
@@ -7613,6 +7779,37 @@ fn check_client_functions(
         );
         let (checked, expression_type, kind) =
             if client_local_resource_family(&local.type_source).is_some() || direct_resource {
+                let Some((kind, descriptor)) = client_local_resource_type(&local.type_source) else {
+                    diagnostics.push(diagnostic(
+                        DiagnosticCode::TypeMismatch,
+                        format!(
+                            "CLIENT local {local_name} must declare std.data.Resource<T> or std.data.StreamResource<T>"
+                        ),
+                        input.logical_path,
+                        &local.type_source.span,
+                    ));
+                    return None;
+                };
+                let expected_type = match descriptor.as_ref() {
+                    Some(descriptor) => {
+                        let Some(resolved) = resolve_application_type_with_named_standard(
+                            descriptor,
+                            submitted_ids,
+                            input.logical_path,
+                            diagnostics,
+                            standard,
+                            true,
+                        ) else {
+                            return None;
+                        };
+                        Some(ClientExpressionType {
+                            semantic_type: resolved.semantic_type,
+                            standard_value_type: resolved.standard_value_type,
+                            result_shape: ClientExpressionResultShape::Value,
+                        })
+                    }
+                    None => None,
+                };
                 let (checked, expression_type) = check_resource_constructor(
                     &local.expression,
                     input,
@@ -7628,17 +7825,6 @@ fn check_client_functions(
                     &mut used_capabilities,
                     &locals,
                 )?;
-                let Some(kind) = client_local_resource_kind(&local.type_source) else {
-                    diagnostics.push(diagnostic(
-                        DiagnosticCode::TypeMismatch,
-                        format!(
-                            "CLIENT local {local_name} must declare std.data.Resource<T> or std.data.StreamResource<T>"
-                        ),
-                        input.logical_path,
-                        &local.type_source.span,
-                    ));
-                    return None;
-                };
                 let actual_kind = match &checked {
                     CheckedClientExpression::Resource { operation } => operation.kind,
                     _ => unreachable!("resource constructor checker returns a resource"),
@@ -7647,6 +7833,19 @@ fn check_client_functions(
                     diagnostics.push(diagnostic(
                         DiagnosticCode::TypeMismatch,
                         format!("CLIENT local {local_name} type does not match its resource constructor"),
+                        input.logical_path,
+                        &local.type_source.span,
+                    ));
+                    return None;
+                }
+                if let Some(expected_type) = expected_type
+                    && !client_expression_types_compatible(expression_type, expected_type)
+                {
+                    diagnostics.push(diagnostic(
+                        DiagnosticCode::TypeMismatch,
+                        format!(
+                            "CLIENT local {local_name} descriptor does not match its SERVER resource result"
+                        ),
                         input.logical_path,
                         &local.type_source.span,
                     ));
@@ -7688,9 +7887,12 @@ fn check_client_functions(
                 let diagnostics_before = diagnostics.len();
                 validate_client_await_positions(&statement.expression, true, input, diagnostics);
                 if diagnostics.len() != diagnostics_before { return None; }
-                let declared_resource_kind = statement.type_source.as_ref().and_then(client_local_resource_kind);
+                let declared_resource_family = statement
+                    .type_source
+                    .as_ref()
+                    .and_then(client_local_resource_family);
                 let direct_resource = matches!(&statement.expression, ClientExpression::Call { callee, .. } if resource_constructor_kind(&semantic_name(callee)).is_some());
-                let (checked, expression_type, kind) = if declared_resource_kind.is_some() || direct_resource {
+                let (checked, expression_type, kind) = if declared_resource_family.is_some() || direct_resource {
                     if !direct_resource {
                         diagnostics.push(diagnostic(DiagnosticCode::TypeMismatch, format!("CLIENT local {local_name} resource type requires a resource constructor"), input.logical_path, &statement.span));
                         return None;
@@ -7700,11 +7902,43 @@ fn check_client_functions(
                         CheckedClientExpression::Resource { operation } => operation.kind,
                         _ => unreachable!("resource constructor checker returns a resource"),
                     };
-                    if let Some(expected_kind) = declared_resource_kind
-                        && actual_kind != expected_kind
-                    {
-                        diagnostics.push(diagnostic(DiagnosticCode::TypeMismatch, format!("CLIENT local {local_name} type does not match its resource constructor"), input.logical_path, statement.type_source.as_ref().map_or(&statement.span, |source| &source.span)));
-                        return None;
+                    if let Some(source) = &statement.type_source {
+                        let Some((expected_kind, descriptor)) = client_local_resource_type(source) else {
+                            diagnostics.push(diagnostic(DiagnosticCode::TypeMismatch, format!("CLIENT local {local_name} must declare std.data.Resource<T> or std.data.StreamResource<T>"), input.logical_path, &source.span));
+                            return None;
+                        };
+                        let expected_type = match descriptor.as_ref() {
+                            Some(descriptor) => {
+                                let Some(resolved) =
+                                    resolve_application_type_with_named_standard(
+                                        descriptor,
+                                        submitted_ids,
+                                        input.logical_path,
+                                        diagnostics,
+                                        standard,
+                                        true,
+                                    )
+                                else {
+                                    return None;
+                                };
+                                Some(ClientExpressionType {
+                                    semantic_type: resolved.semantic_type,
+                                    standard_value_type: resolved.standard_value_type,
+                                    result_shape: ClientExpressionResultShape::Value,
+                                })
+                            }
+                            None => None,
+                        };
+                        if actual_kind != expected_kind {
+                            diagnostics.push(diagnostic(DiagnosticCode::TypeMismatch, format!("CLIENT local {local_name} type does not match its resource constructor"), input.logical_path, &source.span));
+                            return None;
+                        }
+                        if let Some(expected_type) = expected_type
+                            && !client_expression_types_compatible(expression_type, expected_type)
+                        {
+                            diagnostics.push(diagnostic(DiagnosticCode::TypeMismatch, format!("CLIENT local {local_name} descriptor does not match its SERVER resource result"), input.logical_path, &source.span));
+                            return None;
+                        }
                     }
                     (checked, expression_type, CheckedClientLocalKind::Resource(actual_kind))
                 } else {
@@ -7809,20 +8043,42 @@ fn check_client_functions(
                             standard,
                             true,
                         )?;
-                        if matches!(state.scope, StateScope::Session | StateScope::User)
-                            && matches!(
-                                resolved.semantic_type,
-                                SemanticType::Named(CheckedTypeId::Existing(type_id))
-                                    if is_sealed_inspect_type_id(type_id)
-                            )
+                        record_standard_type_use(
+                            uses,
+                            standard,
+                            CheckedTypeUseKind::State {
+                                owner: input.id,
+                                ordinal: ordinal as u32,
+                            },
+                            resolved,
+                            type_use_location(&state.type_specification, input.logical_path),
+                        );
+                        if let SemanticType::Named(CheckedTypeId::Existing(type_id)) =
+                            resolved.semantic_type
                         {
-                            diagnostics.push(diagnostic(
-                                DiagnosticCode::DomainIncompatible,
-                                "sealed sys.inspect carriers are transient and cannot be stored in SESSION or USER state",
-                                input.logical_path,
-                                state.type_specification.span(),
-                            ));
-                            return None;
+                            if is_sealed_inspect_type_id(type_id) {
+                                diagnostics.push(diagnostic(
+                                    DiagnosticCode::DomainIncompatible,
+                                    "sealed sys.inspect carriers are transient and cannot be stored in CLIENT state",
+                                    input.logical_path,
+                                    state.type_specification.span(),
+                                ));
+                                return None;
+                            }
+                            if standard.is_some_and(|standard| {
+                                standard.value_types().iter().any(|value_type| {
+                                    value_type.id() == type_id
+                                        && value_type.kind() == ValueTypeKind::Opaque
+                                })
+                            }) {
+                                diagnostics.push(diagnostic(
+                                    DiagnosticCode::DomainIncompatible,
+                                    "opaque CLIENT values are transient and cannot be stored in state",
+                                    input.logical_path,
+                                    state.type_specification.span(),
+                                ));
+                                return None;
+                            }
                         }
                         let state_type = ClientExpressionType {
                             semantic_type: resolved.semantic_type,
@@ -7845,6 +8101,15 @@ fn check_client_functions(
                                 let diagnostics_before = diagnostics.len();
                                 validate_client_await_positions(expression, false, input, diagnostics);
                                 if diagnostics.len() != diagnostics_before {
+                                    return None;
+                                }
+                                if client_expression_contains_action(expression) {
+                                    diagnostics.push(diagnostic(
+                                        DiagnosticCode::DomainIncompatible,
+                                        "CLIENT state defaults do not support action expressions",
+                                        input.logical_path,
+                                        expression.span(),
+                                    ));
                                     return None;
                                 }
                                 if let Some(span) = unsupported_client_state_reference(
@@ -7875,6 +8140,15 @@ fn check_client_functions(
                                     &mut used_capabilities,
                                     &ClientLocalEnvironment::new(),
                                 )?;
+                                if client_expression_contains_inspect(&checked) {
+                                    diagnostics.push(diagnostic(
+                                        DiagnosticCode::DomainIncompatible,
+                                        "CLIENT state defaults do not support Inspector expressions",
+                                        input.logical_path,
+                                        expression.span(),
+                                    ));
+                                    return None;
+                                }
                                 if !client_expression_types_compatible(expression_type, state_type) {
                                     diagnostics.push(diagnostic(
                                         DiagnosticCode::TypeMismatch,
@@ -7948,7 +8222,7 @@ fn check_client_functions(
                             &mut used_capabilities,
                             &locals,
                         )?;
-                        let Some(expected_kind) = client_local_resource_kind(&local.type_source) else {
+                        let Some((expected_kind, descriptor)) = client_local_resource_type(&local.type_source) else {
                             diagnostics.push(diagnostic(
                                 DiagnosticCode::TypeMismatch,
                                 format!("CLIENT local {local_name} must declare std.data.Resource<T> or std.data.StreamResource<T>"),
@@ -7956,6 +8230,28 @@ fn check_client_functions(
                                 &local.type_source.span,
                             ));
                             return None;
+                        };
+                        let expected_type = match descriptor.as_ref() {
+                            Some(descriptor) => {
+                                let Some(resolved) =
+                                    resolve_application_type_with_named_standard(
+                                        descriptor,
+                                        submitted_ids,
+                                        input.logical_path,
+                                        diagnostics,
+                                        standard,
+                                        true,
+                                    )
+                                else {
+                                    return None;
+                                };
+                                Some(ClientExpressionType {
+                                    semantic_type: resolved.semantic_type,
+                                    standard_value_type: resolved.standard_value_type,
+                                    result_shape: ClientExpressionResultShape::Value,
+                                })
+                            }
+                            None => None,
                         };
                         let actual_kind = match &checked {
                             CheckedClientExpression::Resource { operation } => operation.kind,
@@ -7965,6 +8261,19 @@ fn check_client_functions(
                             diagnostics.push(diagnostic(
                                 DiagnosticCode::TypeMismatch,
                                 format!("CLIENT local {local_name} type does not match its resource constructor"),
+                                input.logical_path,
+                                &local.type_source.span,
+                            ));
+                            return None;
+                        }
+                        if let Some(expected_type) = expected_type
+                            && !client_expression_types_compatible(expression_type, expected_type)
+                        {
+                            diagnostics.push(diagnostic(
+                                DiagnosticCode::TypeMismatch,
+                                format!(
+                                    "CLIENT local {local_name} descriptor does not match its SERVER resource result"
+                                ),
                                 input.logical_path,
                                 &local.type_source.span,
                             ));
@@ -7993,8 +8302,17 @@ fn check_client_functions(
                         return None;
                     }
                     let diagnostics_before = diagnostics.len();
-                    validate_client_await_positions(expression, true, input, diagnostics);
+                    validate_client_await_positions(expression, false, input, diagnostics);
                     if diagnostics.len() != diagnostics_before {
+                        return None;
+                    }
+                    if client_expression_contains_action(expression) {
+                        diagnostics.push(diagnostic(
+                            DiagnosticCode::DomainIncompatible,
+                            "CLIENT state blocks do not support action expressions",
+                            input.logical_path,
+                            expression.span(),
+                        ));
                         return None;
                     }
                     let (checked_return, return_type) = check_client_expression(
@@ -8012,6 +8330,15 @@ fn check_client_functions(
                         &mut used_capabilities,
                         &locals,
                     )?;
+                    if client_expression_contains_inspect(&checked_return) {
+                        diagnostics.push(diagnostic(
+                            DiagnosticCode::DomainIncompatible,
+                            "CLIENT state blocks do not support Inspector expressions",
+                            input.logical_path,
+                            expression.span(),
+                        ));
+                        return None;
+                    }
                     if !client_expression_types_compatible(
                         return_type,
                         ClientExpressionType {
@@ -9841,7 +10168,6 @@ fn collect_standard_type_references(
             },
         );
     }
-
     let mut references = uses
         .iter()
         .filter_map(|type_use| {
@@ -9856,6 +10182,7 @@ fn collect_standard_type_references(
                     (owner, function.return_offset.checked_add(ordinal)?)
                 }
                 CheckedTypeUseKind::Field { .. }
+                | CheckedTypeUseKind::State { .. }
                 | CheckedTypeUseKind::Expression { .. }
                 | CheckedTypeUseKind::Result { .. } => return None,
             };
@@ -9886,9 +10213,10 @@ const fn type_use_kind_tag(kind: CheckedTypeUseKind) -> u8 {
     match kind {
         CheckedTypeUseKind::Field { .. } => 0,
         CheckedTypeUseKind::Parameter { .. } => 1,
-        CheckedTypeUseKind::Return { .. } => 2,
-        CheckedTypeUseKind::Expression { .. } => 3,
-        CheckedTypeUseKind::Result { .. } => 4,
+        CheckedTypeUseKind::State { .. } => 2,
+        CheckedTypeUseKind::Return { .. } => 3,
+        CheckedTypeUseKind::Expression { .. } => 4,
+        CheckedTypeUseKind::Result { .. } => 5,
     }
 }
 
@@ -9896,6 +10224,7 @@ const fn type_use_kind_tag(kind: CheckedTypeUseKind) -> u8 {
 enum TypeUseTieBreak {
     Field(CheckedTypeId, CheckedFieldId),
     Parameter(CheckedFunctionId, CheckedParameterId),
+    State(u32, CheckedFunctionId),
     Return(u32, CheckedFunctionId),
     Expression(u32, CheckedFunctionId),
     Result(u32, CheckedFunctionId),
@@ -9907,6 +10236,7 @@ const fn type_use_tie_break(kind: CheckedTypeUseKind) -> TypeUseTieBreak {
         CheckedTypeUseKind::Parameter { owner, parameter } => {
             TypeUseTieBreak::Parameter(owner, parameter)
         }
+        CheckedTypeUseKind::State { owner, ordinal } => TypeUseTieBreak::State(ordinal, owner),
         CheckedTypeUseKind::Return { owner, ordinal } => TypeUseTieBreak::Return(ordinal, owner),
         CheckedTypeUseKind::Expression { owner, ordinal } => {
             TypeUseTieBreak::Expression(ordinal, owner)
@@ -10966,7 +11296,9 @@ fn diagnostic(
 
 #[cfg(test)]
 mod tests {
-    use super::{CheckedClientExpression, CheckedClientFunctionBody};
+    use super::{
+        CheckedClientExpression, CheckedClientFunctionBody, ClientResourceTypeParser,
+    };
     use std::{cell::Cell, error::Error};
 
     use orna_artifact::server_mutation_plan::{
@@ -11005,13 +11337,12 @@ mod tests {
         source::{SourceBundle, SourceUnit},
         types::{ResolvedType, StandardScalar},
     };
-
     use crate::relational::ExpressionKind;
     use orna_syntax::{
         FunctionSecurity as SyntaxFunctionSecurity,
         FunctionTransaction as SyntaxFunctionTransaction,
-        FunctionVolatility as SyntaxFunctionVolatility, ServerFunctionDeclaration, SourceSpan,
-        TypeExportTarget, TypeSpecification, parse,
+        FunctionVolatility as SyntaxFunctionVolatility, ServerFunctionDeclaration, SourceSlice,
+        SourceSpan, TypeExportTarget, TypeSpecification, parse,
     };
 
     use super::{
@@ -11257,6 +11588,8 @@ mod tests {
         let second_field = assignments.field_id(Some(FieldId::from_bytes([0x20; 16])));
         let first_return_owner = assignments.function_id(Some(FunctionId::from_bytes([0x10; 16])));
         let second_return_owner = assignments.function_id(Some(FunctionId::from_bytes([0x20; 16])));
+        let first_parameter = assignments.parameter_id(Some(ParameterId::from_bytes([0x10; 16])));
+        let second_parameter = assignments.parameter_id(Some(ParameterId::from_bytes([0x20; 16])));
         let span = SourceSpan { start: 0, end: 0 };
         let type_id = TypeId::from_bytes([0x55; 16]);
         let mut uses = vec![
@@ -11294,9 +11627,33 @@ mod tests {
             }),
             CheckedApplicationTypeUse::Value(CheckedValueTypeUse {
                 type_id,
+                kind: CheckedTypeUseKind::Parameter {
+                    owner: second_return_owner,
+                    parameter: second_parameter,
+                },
+                location: location("application.orna", &span),
+            }),
+            CheckedApplicationTypeUse::Value(CheckedValueTypeUse {
+                type_id,
+                kind: CheckedTypeUseKind::Parameter {
+                    owner: first_return_owner,
+                    parameter: first_parameter,
+                },
+                location: location("application.orna", &span),
+            }),
+            CheckedApplicationTypeUse::Value(CheckedValueTypeUse {
+                type_id,
                 kind: CheckedTypeUseKind::Return {
                     owner: first_return_owner,
                     ordinal: 1,
+                },
+                location: location("application.orna", &span),
+            }),
+            CheckedApplicationTypeUse::Value(CheckedValueTypeUse {
+                type_id,
+                kind: CheckedTypeUseKind::State {
+                    owner: second_return_owner,
+                    ordinal: 0,
                 },
                 location: location("application.orna", &span),
             }),
@@ -11349,6 +11706,18 @@ mod tests {
                 CheckedTypeUseKind::Field {
                     owner: second_field_owner,
                     field: second_field,
+                },
+                CheckedTypeUseKind::Parameter {
+                    owner: first_return_owner,
+                    parameter: first_parameter,
+                },
+                CheckedTypeUseKind::Parameter {
+                    owner: second_return_owner,
+                    parameter: second_parameter,
+                },
+                CheckedTypeUseKind::State {
+                    owner: second_return_owner,
+                    ordinal: 0,
                 },
                 CheckedTypeUseKind::Return {
                     owner: second_return_owner,
@@ -13763,6 +14132,57 @@ mod tests {
     }
 
     #[test]
+    fn rejects_actions_in_client_state_returns_before_preparation() {
+        let target_id = FunctionId::from_bytes([0x51; 16]);
+        let argument_type = ResolvedType::Scalar(StandardScalar::Integer);
+        let base = CatalogueSnapshot::new_with_functions(
+            CatalogueRevisionId::from_bytes([0x53; 16]),
+            vec![SchemaDefinition::new(
+                SchemaId::from_bytes([0x54; 16]),
+                QualifiedSemanticName::new(["tasks"]).unwrap(),
+            )],
+            Vec::new(),
+            vec![FunctionDefinition::new(
+                target_id,
+                QualifiedSemanticName::new(["tasks", "run"]).unwrap(),
+                FunctionDomain::Client,
+                Vec::new(),
+                FunctionReturn::Single(argument_type),
+                FunctionRevisionId::from_bytes([0x55; 16]),
+                FunctionSecurity::Invoker,
+                None,
+                FunctionVolatility::Immutable,
+            )],
+        )
+        .unwrap();
+        let standard =
+            check_standard_library_source(&verified_standard_library_with_action_for_test())
+                .unwrap();
+        let context = StandardApplicationCheckContext::try_new(&base, &standard).unwrap();
+        let source = "CREATE SCHEMA ui; CREATE CLIENT FUNCTION ui.run() RETURNS std.Action IS \
+            STATE ready INTEGER; \
+            BEGIN RETURN std.action.call(target => tasks.run, arguments => std.call.args()); END;";
+        let report = check_standard_application(&bundle([("state-action.orna", source)]), &context);
+        assert_eq!(
+            report.diagnostics().len(),
+            1,
+            "{:?}",
+            report.diagnostics()
+        );
+        assert_eq!(
+            report.diagnostics()[0].code(),
+            DiagnosticCode::DomainIncompatible,
+            "{:?}",
+            report.diagnostics()
+        );
+        assert_eq!(
+            report.diagnostics()[0].message(),
+            "CLIENT state blocks do not support action expressions"
+        );
+        assert!(report.preparation_view().is_none());
+    }
+
+    #[test]
     fn accepts_client_action_call_with_canonical_server_target() {
         let target_id = FunctionId::from_bytes([0x56; 16]);
         let target_parameter_id = ParameterId::from_bytes([0x57; 16]);
@@ -14374,6 +14794,50 @@ mod tests {
                 literal_start + "TRUE".len(),
             )
         );
+    }
+
+    #[test]
+    fn records_standard_client_state_slot_use_as_declaration_evidence() {
+        let standard =
+            check_standard_library_source(&verified_standard_library_for_relational_test())
+                .unwrap();
+        let application = empty_catalogue();
+        let context = StandardApplicationCheckContext::try_new(&application, &standard).unwrap();
+        let source = "CREATE SCHEMA app; \
+            CREATE CLIENT FUNCTION app.state() RETURNS BOOLEAN IS \
+            STATE flag BOOLEAN; BEGIN RETURN TRUE; END;";
+        let report = check_standard_application(&bundle([("state.orna", source)]), &context);
+
+        assert_eq!(report.diagnostics(), &[]);
+        let checked = report.checked_bundle().unwrap();
+        let function = checked.client_functions().next().unwrap();
+        let state_kind = CheckedTypeUseKind::State {
+            owner: function.id(),
+            ordinal: 0,
+        };
+        let state_start = source.find("STATE flag BOOLEAN").unwrap() + "STATE flag ".len();
+        let state_use = checked
+            .uses()
+            .iter()
+            .find(|type_use| type_use.kind() == state_kind)
+            .expect("state type use");
+
+        assert_eq!(checked.uses().len(), 4);
+        assert_eq!(
+            state_use.value().map(CheckedValueTypeUse::type_id),
+            Some(TypeId::from_bytes([3; 16]))
+        );
+        assert_type_use_span(state_use, state_start, "BOOLEAN");
+        assert!(
+            checked
+                .preparation_evidence
+                .declaration_uses
+                .iter()
+                .any(|type_use| type_use.kind() == state_kind)
+        );
+        assert_eq!(checked.standard_type_references().len(), 1);
+        assert_eq!(checked.standard_type_references()[0].owner(), function.id());
+        assert_eq!(checked.standard_type_references()[0].ordinal(), 0);
     }
 
     #[test]
@@ -19964,6 +20428,9 @@ mod tests {
             STATE filter TEXT SCOPE LOCAL DEFAULT ''; \
             STATE selected TEXT SCOPE SESSION DEFAULT NULL; \
             STATE count INTEGER; \
+            STATE total BIGINT; \
+            STATE ratio FLOAT; \
+            STATE payload BYTES; \
             BEGIN RETURN 'ready'; END;";
         let report = check(&bundle([("client.orna", valid)]), &empty_catalogue());
         assert!(
@@ -19975,13 +20442,19 @@ mod tests {
         let CheckedClientFunctionBody::StateBlock { states, .. } = function.body() else {
             panic!("expected checked CLIENT state block");
         };
-        assert_eq!(states.len(), 3);
+        assert_eq!(states.len(), 6);
+        assert_eq!(states[3].name(), "total");
+        assert_eq!(states[4].name(), "ratio");
+        assert_eq!(states[5].name(), "payload");
         assert!(matches!(
             states[0].default(),
             CheckedStateDefault::Expression(_)
         ));
         assert!(matches!(states[1].default(), CheckedStateDefault::Null));
         assert!(matches!(states[2].default(), CheckedStateDefault::Unset));
+        assert!(matches!(states[3].default(), CheckedStateDefault::Unset));
+        assert!(matches!(states[4].default(), CheckedStateDefault::Unset));
+        assert!(matches!(states[5].default(), CheckedStateDefault::Unset));
 
         let sealed_session = "CREATE SCHEMA examples; CREATE CLIENT FUNCTION examples.state() RETURNS BOOLEAN IS STATE snapshot sys.inspect.snapshot SCOPE SESSION; BEGIN RETURN TRUE; END;";
         let report = check(&bundle([("client.orna", sealed_session)]), &empty_catalogue());
@@ -19990,7 +20463,14 @@ mod tests {
         assert!(report.diagnostics()[0].message().contains("sealed sys.inspect carriers are transient"));
 
         let sealed_user = "CREATE SCHEMA examples; CREATE CLIENT FUNCTION examples.state() RETURNS BOOLEAN IS STATE snapshot_options sys.inspect.snapshot_options SCOPE USER; BEGIN RETURN TRUE; END;";
+
+
         let report = check(&bundle([("client.orna", sealed_user)]), &empty_catalogue());
+        assert_eq!(report.diagnostics().len(), 1);
+        assert_eq!(report.diagnostics()[0].code(), DiagnosticCode::DomainIncompatible);
+        assert!(report.diagnostics()[0].message().contains("sealed sys.inspect carriers are transient"));
+        let sealed_local = "CREATE SCHEMA examples; CREATE CLIENT FUNCTION examples.state() RETURNS BOOLEAN IS STATE snapshot sys.inspect.snapshot SCOPE LOCAL; BEGIN RETURN TRUE; END;";
+        let report = check(&bundle([("client.orna", sealed_local)]), &empty_catalogue());
         assert_eq!(report.diagnostics().len(), 1);
         assert_eq!(report.diagnostics()[0].code(), DiagnosticCode::DomainIncompatible);
         assert!(report.diagnostics()[0].message().contains("sealed sys.inspect carriers are transient"));
@@ -20011,6 +20491,7 @@ mod tests {
 
         let bad_default = "CREATE SCHEMA examples; CREATE CLIENT FUNCTION examples.state() RETURNS TEXT IS \
             STATE value TEXT DEFAULT 1; BEGIN RETURN 'ready'; END;";
+
         let report = check(&bundle([("client.orna", bad_default)]), &empty_catalogue());
         assert_eq!(report.diagnostics().len(), 1);
         assert_eq!(report.diagnostics()[0].code(), DiagnosticCode::TypeMismatch);
@@ -20028,6 +20509,57 @@ mod tests {
             report.diagnostics()[0].message(),
             "this CLIENT function must return the declared value type"
         );
+    }
+
+    #[test]
+    fn rejects_opaque_values_in_client_state() {
+        let standard =
+            check_standard_library_source(&verified_standard_library_with_action_for_test())
+                .unwrap();
+        let base = empty_catalogue();
+        let context = StandardApplicationCheckContext::try_new(&base, &standard).unwrap();
+        let source = "CREATE SCHEMA examples; \
+            CREATE CLIENT FUNCTION examples.state() RETURNS INTEGER IS \
+            STATE action std.Action; \
+            BEGIN RETURN 1; END;";
+        let report = check_standard_application(&bundle([("state.orna", source)]), &context);
+
+        assert_eq!(report.diagnostics().len(), 1, "{:?}", report.diagnostics());
+        assert_eq!(
+            report.diagnostics()[0].code(),
+            DiagnosticCode::DomainIncompatible,
+            "{:?}",
+            report.diagnostics()
+        );
+        assert_eq!(
+            report.diagnostics()[0].message(),
+            "opaque CLIENT values are transient and cannot be stored in state"
+        );
+        assert!(report.preparation_view().is_none());
+    }
+    #[test]
+    fn rejects_inspector_expressions_in_state_defaults_and_returns() {
+        let cases = [
+            (
+                "CREATE SCHEMA devtools; CREATE CLIENT FUNCTION devtools.state(p_target REF sys.inspect.invocation) RETURNS BOOLEAN IS \
+                    STATE snapshot TEXT SCOPE LOCAL DEFAULT sys.inspect.snapshot(p_target => p_target); \
+                    BEGIN RETURN TRUE; END;",
+                "CLIENT state defaults do not support Inspector expressions",
+            ),
+            (
+                "CREATE SCHEMA devtools; CREATE CLIENT FUNCTION devtools.state(p_target REF sys.inspect.invocation) RETURNS sys.inspect.snapshot IS \
+                    STATE value TEXT; BEGIN RETURN sys.inspect.snapshot(p_target => p_target); END;",
+                "CLIENT state blocks do not support Inspector expressions",
+            ),
+        ];
+
+        for (source, message) in cases {
+            let report = check(&bundle([("inspector-state.orna", source)]), &empty_catalogue());
+            assert_eq!(report.diagnostics().len(), 1, "{:?}", report.diagnostics());
+            assert_eq!(report.diagnostics()[0].code(), DiagnosticCode::DomainIncompatible);
+            assert_eq!(report.diagnostics()[0].message(), message);
+            assert_no_checked_bundle(&report);
+        }
     }
 
     #[test]
@@ -20238,18 +20770,109 @@ mod tests {
     }
 
     #[test]
+    fn rejects_bare_as_and_state_return_await_but_accepts_procedural_await() {
+        let base = CatalogueSnapshot::new_with_functions(
+            CatalogueRevisionId::from_bytes([0x51; 16]),
+            vec![SchemaDefinition::new(SchemaId::from_bytes([0x52; 16]), QualifiedSemanticName::new(["tasks"]).unwrap())],
+            Vec::new(),
+            vec![FunctionDefinition::new(
+                FunctionId::from_bytes([0x53; 16]),
+                QualifiedSemanticName::new(["tasks", "find"]).unwrap(),
+                FunctionDomain::Server,
+                Vec::new(),
+                FunctionReturn::Single(ResolvedType::Scalar(StandardScalar::CharacterLargeObject)),
+                FunctionRevisionId::from_bytes([0x54; 16]),
+                FunctionSecurity::Invoker,
+                Some(FunctionTransaction::ReadOnly),
+                FunctionVolatility::Stable,
+            )],
+        ).unwrap();
+        let source = "CREATE SCHEMA ui; CREATE CLIENT FUNCTION ui.bare() RETURNS TEXT AS \
+            AWAIT std.data.resource(target => tasks.find, arguments => std.call.args()); \
+            CREATE CLIENT FUNCTION ui.procedural() RETURNS TEXT IS \
+            LET value std.data.Resource<TEXT> := std.data.resource(target => tasks.find, arguments => std.call.args()); \
+            BEGIN RETURN AWAIT value; END; \
+            CREATE CLIENT FUNCTION ui.stateful() RETURNS TEXT IS \
+            STATE value TEXT; BEGIN RETURN AWAIT std.data.resource(target => tasks.find, arguments => std.call.args()); END;";
+        let report = check(&bundle([("await-positions.orna", source)]), &base);
+        assert!(report.diagnostics().iter().any(|diagnostic| {
+            diagnostic.code() == DiagnosticCode::DomainIncompatible && diagnostic.message().contains("AWAIT is only valid")
+        }), "{:?}", report.diagnostics());
+        assert_no_checked_bundle(&report);
+
+        let procedural = "CREATE SCHEMA ui; CREATE CLIENT FUNCTION ui.procedural() RETURNS TEXT IS \
+            LET value TEXT := AWAIT std.data.resource(target => tasks.find, arguments => std.call.args()); \
+            BEGIN value := AWAIT std.data.resource(target => tasks.find, arguments => std.call.args()); RETURN value; END;";
+        let report = check(&bundle([("await-procedural.orna", procedural)]), &base);
+        assert!(report.diagnostics().is_empty(), "{:?}", report.diagnostics());
+    }
+
+    #[test]
+    fn rejects_scalar_and_stream_resource_descriptor_mismatches() {
+        let base = CatalogueSnapshot::new_with_functions(
+            CatalogueRevisionId::from_bytes([0x61; 16]),
+            vec![SchemaDefinition::new(SchemaId::from_bytes([0x62; 16]), QualifiedSemanticName::new(["tasks"]).unwrap())],
+            Vec::new(),
+            vec![
+                FunctionDefinition::new(
+                    FunctionId::from_bytes([0x63; 16]),
+                    QualifiedSemanticName::new(["tasks", "find"]).unwrap(),
+                    FunctionDomain::Server,
+                    Vec::new(),
+                    FunctionReturn::Single(ResolvedType::Scalar(StandardScalar::CharacterLargeObject)),
+                    FunctionRevisionId::from_bytes([0x64; 16]),
+                    FunctionSecurity::Invoker,
+                    Some(FunctionTransaction::ReadOnly),
+                    FunctionVolatility::Stable,
+                ),
+                FunctionDefinition::new(
+                    FunctionId::from_bytes([0x65; 16]),
+                    QualifiedSemanticName::new(["tasks", "events"]).unwrap(),
+                    FunctionDomain::Server,
+                    Vec::new(),
+                    FunctionReturn::Stream(ResolvedType::Scalar(StandardScalar::CharacterLargeObject)),
+                    FunctionRevisionId::from_bytes([0x66; 16]),
+                    FunctionSecurity::Invoker,
+                    Some(FunctionTransaction::ReadOnly),
+                    FunctionVolatility::Stable,
+                ),
+            ],
+        ).unwrap();
+        let source = "CREATE SCHEMA ui; CREATE CLIENT FUNCTION ui.scalar() RETURNS TEXT IS \
+            LET value std.data.Resource<INTEGER> := std.data.resource(target => tasks.find, arguments => std.call.args()); \
+            BEGIN RETURN AWAIT value; END; \
+            CREATE CLIENT FUNCTION ui.stream() RETURNS STREAM<TEXT> IS \
+            LET rows std.data.StreamResource<INTEGER> := std.data.stream_resource(target => tasks.events, arguments => std.call.args()); \
+            BEGIN RETURN AWAIT rows; END;";
+        let report = check(&bundle([("resource-descriptor-mismatch.orna", source)]), &base);
+        assert_eq!(report.diagnostics().len(), 2, "{:?}", report.diagnostics());
+        assert!(report.diagnostics().iter().all(|diagnostic| {
+            diagnostic.code() == DiagnosticCode::TypeMismatch && diagnostic.message().contains("descriptor does not match")
+        }));
+        assert_no_checked_bundle(&report);
+    }
+
+    #[test]
+    fn rejects_state_block_pre_begin_let_locals_in_parser_shape() {
+        let source = "CREATE SCHEMA examples; CREATE CLIENT FUNCTION examples.mixed() RETURNS BOOLEAN IS \
+            STATE value TEXT; LET other TEXT := 'x'; BEGIN RETURN TRUE; END;";
+        let report = check(&bundle([("state-shape.orna", source)]), &empty_catalogue());
+        assert!(report.diagnostics().iter().any(|diagnostic| {
+            diagnostic.code() == DiagnosticCode::UnexpectedToken
+                && diagnostic.message() == "CLIENT state blocks cannot contain pre-BEGIN LET locals"
+        }), "{:?}", report.diagnostics());
+        assert_no_checked_bundle(&report);
+    }
+
+    #[test]
     fn rejects_state_blocks_mixed_with_procedural_declarations() {
         let source = "CREATE SCHEMA examples; CREATE CLIENT FUNCTION examples.mixed() RETURNS BOOLEAN IS STATE value TEXT; BEGIN LET other := 'x'; RETURN TRUE; END;";
         let report = check(&bundle([("client.orna", source)]), &empty_catalogue());
-        assert_eq!(report.diagnostics().len(), 1);
-        assert_eq!(
-            report.diagnostics()[0].code(),
-            DiagnosticCode::DomainIncompatible
-        );
-        assert_eq!(
-            report.diagnostics()[0].message(),
-            "CLIENT state blocks do not support procedural statements"
-        );
+        assert!(report.diagnostics().iter().any(|diagnostic| {
+            diagnostic.code() == DiagnosticCode::UnexpectedToken
+                && diagnostic.message() == "CLIENT state blocks accept only a single RETURN statement"
+        }), "{:?}", report.diagnostics());
+        assert_no_checked_bundle(&report);
     }
 
     #[test]
@@ -24953,7 +25576,7 @@ mod tests {
         .unwrap();
         let context = StandardApplicationCheckContext::try_new(active.catalogue(), &standard)
             .unwrap();
-        let source = "CREATE SCHEMA scalar_fixture; CREATE CLIENT FUNCTION scalar_fixture.call() RETURNS INTEGER AS AWAIT std.data.resource(target => std.invoke.echo, arguments => std.call.args(p_value => 43));";
+        let source = "CREATE SCHEMA scalar_fixture; CREATE CLIENT FUNCTION scalar_fixture.call() RETURNS INTEGER IS BEGIN RETURN AWAIT std.data.resource(target => std.invoke.echo, arguments => std.call.args(p_value => 43)); END;";
         let report = check_standard_application(&bundle([("resource.orna", source)]), &context);
         assert!(report.diagnostics().is_empty(), "{:?}", report.diagnostics());
         let checked = report.preparation_view().unwrap().checked();
@@ -25043,8 +25666,7 @@ mod tests {
             )],
         )
         .unwrap();
-        let source = "CREATE SCHEMA ui; CREATE CLIENT FUNCTION ui.find(p_name TEXT) RETURNS TEXT AS \
-            AWAIT std.data.resource(target => tasks.find, arguments => std.call.args(p_name => p_name));";
+        let source = "CREATE SCHEMA ui; CREATE CLIENT FUNCTION ui.find(p_name TEXT) RETURNS TEXT IS BEGIN RETURN AWAIT std.data.resource(target => tasks.find, arguments => std.call.args(p_name => p_name)); END;";
         let report = check(&bundle([("resource.orna", source)]), &base);
         assert!(
             report.diagnostics().is_empty(),
@@ -25127,6 +25749,40 @@ mod tests {
             );
             assert_no_checked_bundle(&report);
         }
+    }
+
+    #[test]
+    fn rejects_client_resource_descriptor_beyond_type_depth() {
+        let text = format!(
+            "std.data.Resource<TEXT{}>",
+            "?".repeat(ClientResourceTypeParser::MAX_TYPE_DEPTH + 1),
+        );
+        let source = SourceSlice {
+            span: SourceSpan {
+                start: 0,
+                end: text.len(),
+            },
+            text,
+        };
+
+        assert!(super::client_local_resource_type(&source).is_none());
+    }
+
+    #[test]
+    fn accepts_inline_table_resource_descriptor_shape() {
+        let text = "std.data.Resource<TABLE (task_id UUID, title TEXT)>";
+        let source = orna_syntax::SourceSlice {
+            text: text.to_owned(),
+            span: SourceSpan {
+                start: 0,
+                end: text.len(),
+            },
+        };
+        let Some((kind, descriptor)) = super::client_local_resource_type(&source) else {
+            panic!("inline table resource descriptor should parse");
+        };
+        assert_eq!(kind, orna_artifact::client_plan::ResourceKind::Scalar);
+        assert!(descriptor.is_none());
     }
 
     #[test]
