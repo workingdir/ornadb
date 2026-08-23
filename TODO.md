@@ -103,15 +103,16 @@ separate release action.
 - [x] Prove diagnostics, semantic tokens, symbols, hover, navigation,
   and completion through a framed end-to-end protocol test.
 - [x] Land the tree-sitter grammar with corpus tests and queries
-  (30 corpus cases pass; every `spec/examples/*.orna` file parses).
-- [x] Land the TextMate grammar and VS Code extension (valid package,
-  syntaxes, and built `orna-vscode-0.1.0.vsix`).
+  (the executable spec examples and repository fixtures parse without errors;
+  proposal-only UI examples remain outside the executable language gate).
+- [x] Land the TextMate grammar and VS Code extension (valid package metadata
+  and syntax files; use the documented command to build a VSIX when needed).
 - [x] Land the Helix, Zed, and Emacs integrations (TOML validated;
   Emacs loads under batch Emacs).
-- [x] Verify the Neovim and Vim integrations at runtime in a temporary
-  Fedora container (Neovim 0.12.4 native LSP attachment and Vim 9.2 syntax loading).
-- [x] Verify the whole tooling surface against the spec examples
-  (tree-sitter parses all ten examples; LSP suite exercises the server).
+- [ ] Verify the Neovim and Vim integrations at runtime
+  (blocked because those editor binaries are not installed on this workstation).
+- [x] Verify the executable tooling surface against the spec examples
+  (tree-sitter parses executable examples; LSP suite exercises the server).
 
 ## Completed foundations
 
