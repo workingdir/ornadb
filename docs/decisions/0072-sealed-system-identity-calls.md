@@ -2,6 +2,11 @@
 
 **Status:** Accepted
 
+**Implementation status:** The two scalar identity calls are implemented. The
+former `active_roles` denial and set-valued transport boundary were superseded
+by work ADR 0073, which implements ORV6 and sealed `active_roles`; this ADR
+remains authoritative for scalar identity resolution and audit ordering.
+
 ## Decision
 
 The first sealed system-call execution slice makes the two scalar security
@@ -32,12 +37,11 @@ The result uses the existing typed reference runtime value with
 the authenticated session principal until a later accepted definer or policy
 model changes that rule.
 
-`sys.security.active_roles()` remains outside this execution slice. Its
-accepted signature returns `SET OF REF sys.security.principal`, but the current
-ORV5 constructed-value contract does not admit `SET` descriptors or values.
-The route must therefore deny this target rather than return a `LIST` with a
-different type. A later decision may admit the required set value and wire the
-function without changing the scalar identity contract here.
+At the time of this decision, `sys.security.active_roles()` remained outside
+this execution slice because the ORV5 constructed-value contract did not admit
+`SET` descriptors or values. Work ADR 0073 now supplies the ORV6 set-valued
+transport and implements this sealed target without changing the scalar identity
+contract here.
 
 All other sealed system functions remain outside this route. In particular,
 security administration, inspection, state, catalogue health, and the root
@@ -81,8 +85,9 @@ and stable identity can execute `session_principal` and
 `effective_principal`, that both return the expected typed principal reference,
 that each invocation emits the normal completed event sequence, and that the
 security and invocation audit rows retain the active application revision pair.
-Tests must also prove that `active_roles` remains denied until a set-valued
-runtime transport is accepted.
+The former `active_roles` denial proof is superseded by work ADR 0073, whose
+execution proof covers the ORV6 set-valued result. The scalar identity proofs
+required by this ADR remain unchanged.
 
 ## Implementation order
 
@@ -98,13 +103,14 @@ buildable.
 
 ## Deferred surface
 
-Set-valued runtime construction and ORV5 transport, `active_roles` execution,
-all other `sys.security` calls, system-function presentation changes, remote
-transport, and new source syntax remain outside this ADR.
+All other `sys.security` calls, system-function presentation changes, remote
+transport, and new source syntax remain outside this ADR. Set-valued transport
+and `active_roles` execution are implemented by work ADR 0073.
 
 ## Precedence
 
 This decision narrows the current proposal in `spec/api/security.md` without
 changing the canonical specification. Work ADRs 0042, 0053, 0054, and 0065
 remain authoritative for registry identity, carrier transport, protected
-invocation ordering, and the security-admin model.
+invocation ordering, and the security-admin model. Work ADR 0073 governs the
+accepted ORV6 and `active_roles` successor.
