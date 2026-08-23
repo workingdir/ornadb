@@ -1245,17 +1245,20 @@ async fn run_installed_inspect(
                 2 => encode_invocation_nodes(
                     &kernel
                         .inspect_invocation_nodes(&loaded_snapshot, privilege)
+                        .await
                         .map_err(inspect_kernel_error_code)?,
                 ),
                 3 => encode_calls(
                     &kernel
                         .inspect_calls(&loaded_snapshot, privilege)
+                        .await
                         .map_err(inspect_kernel_error_code)?,
                     values_granted,
                 ),
                 4 => encode_resources(
                     &kernel
                         .inspect_resources(&loaded_snapshot, privilege)
+                        .await
                         .map_err(inspect_kernel_error_code)?,
                 ),
                 5 => encode_state_cells(
@@ -1267,6 +1270,7 @@ async fn run_installed_inspect(
                 6 => encode_ui_nodes(
                     &kernel
                         .inspect_ui_nodes(&loaded_snapshot, privilege)
+                        .await
                         .map_err(inspect_kernel_error_code)?,
                     source_granted,
                     runtime_internals_granted,
@@ -1274,12 +1278,14 @@ async fn run_installed_inspect(
                 7 => encode_presentation_candidates(
                     &kernel
                         .inspect_presentation_candidates(&loaded_snapshot, privilege)
+                        .await
                         .map_err(inspect_kernel_error_code)?,
                     runtime_internals_granted,
                 ),
                 8 => encode_runtime_bindings(
                     &kernel
                         .inspect_runtime_bindings(&loaded_snapshot, privilege)
+                        .await
                         .map_err(inspect_kernel_error_code)?,
                     runtime_internals_granted,
                 ),
