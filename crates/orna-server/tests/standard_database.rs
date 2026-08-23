@@ -333,9 +333,11 @@ const RAW_STREAM_RESOURCE_SERVER_SOURCE: &str = "CREATE SCHEMA resource_fixture;
     RETURNS STREAM<TEXT> SECURITY INVOKER\n\
     TRANSACTION READ ONLY VOLATILITY STABLE\n\
     AS SELECT probe.marker FROM resource_fixture.probe probe ORDER BY probe.sequence;\n";
-const RAW_STREAM_RESOURCE_CLIENT_SOURCE: &str = "CREATE CLIENT FUNCTION resource_fixture.call(p_marker TEXT) RETURNS STREAM<TEXT> AS\n\
-    AWAIT std.data.stream_resource(target => resource_fixture.resource,\n\
-      arguments => std.call.args(p_marker => p_marker));\n";
+const RAW_STREAM_RESOURCE_CLIENT_SOURCE: &str = "CREATE CLIENT FUNCTION resource_fixture.call(p_marker TEXT) RETURNS STREAM<TEXT> IS\n\
+    BEGIN\n\
+        RETURN AWAIT std.data.stream_resource(target => resource_fixture.resource,\n\
+          arguments => std.call.args(p_marker => p_marker));\n\
+    END;\n";
 const RAW_PROCEDURAL_RESOURCE_SERVER_SOURCE: &str = "CREATE SCHEMA procedural_fixture;\n\
     CREATE TYPE procedural_fixture.probe AS OBJECT (marker TEXT UNIQUE NOT NULL);\n\
     CREATE SERVER FUNCTION procedural_fixture.create(p_marker TEXT)\n\
@@ -364,9 +366,11 @@ const RAW_PROCEDURAL_RESOURCE_CLIENT_SOURCE: &str = "CREATE CLIENT FUNCTION proc
         RETURN AWAIT resource;\n\
     END;\n";
 const RAW_SCALAR_RESOURCE_CLIENT_SOURCE: &str = "CREATE SCHEMA scalar_fixture;\n\
-    CREATE CLIENT FUNCTION scalar_fixture.call() RETURNS INTEGER AS\n\
-    AWAIT std.data.resource(target => std.invoke.echo,\n\
-      arguments => std.call.args(p_value => 43));\n";
+    CREATE CLIENT FUNCTION scalar_fixture.call() RETURNS INTEGER IS\n\
+    BEGIN\n\
+        RETURN AWAIT std.data.resource(target => std.invoke.echo,\n\
+          arguments => std.call.args(p_value => 43));\n\
+    END;\n";
 const RAW_CLIENT_INT_INSERT_SOURCE: &str = "CREATE SCHEMA raw_int_insert;\n\
     CREATE TYPE raw_int_insert.int_probe AS OBJECT (\n\
       stored INT NOT NULL\n\
