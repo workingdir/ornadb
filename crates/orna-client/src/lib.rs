@@ -3774,9 +3774,10 @@ fn evaluate_function(
     // A version-5 capability envelope is decoded before function-shape
     // validation (work ADR 0060). Its inner plan version classifies the
     // function, and its stored requirements gate evaluation; the caller's
-    // declaration list never replaces them. Any decode failure fails closed
-    // with the invalid-artifact path before anything executes.
+    // declaration list never replaces them. Verify the artifact identity
+    // before this decoder so no untrusted payload reaches it.
     let envelope = if revision.artifact().version() == CAPABILITY_FORMAT_VERSION {
+        validate_artifact_identity(revision.artifact(), context)?;
         Some(
             CapabilityClientPlan::decode(revision.artifact().payload())
                 .map_err(|source| ClientExecutionError::InvalidArtifact { context, source })?,
@@ -3832,7 +3833,9 @@ fn evaluate_function(
         }
     }
     let return_shape = validate_function_shape(active, definition, context, artifact_version)?;
-    validate_artifact_identity(revision.artifact(), context)?;
+    if envelope.is_none() {
+        validate_artifact_identity(revision.artifact(), context)?;
+    }
     if arguments.len() != definition.parameters().len()
         || definition.parameters().iter().any(|parameter| {
             arguments
@@ -11109,6 +11112,39 @@ fn client_stream_cancellation_clears_batches_and_rejects_stale_completions() {
             error.to_string(),
             "the CLIENT function requires the capability std.fs.read which is not granted"
         );
+    }
+
+    #[test]
+    fn version_five_artifact_hash_is_checked_before_capability_decode() {
+        let requirements = vec![orna_artifact::client_plan::CapabilityRequirement::new(
+            "std.fs.read",
+            orna_artifact::client_plan::CapabilityArgumentSource::Text("/home/bob/x".to_owned()),
+        )];
+        let (active, function, pair, _) =
+            version_five_boolean_active(version_five_boolean_envelope(true, requirements));
+        let untrusted = active_with_mismatched_function_artifact_payload_hash(&active);
+        let mut state = ClientStateStore::new();
+        let mut executor_slot: Option<&mut dyn ClientResourceExecutor> = None;
+
+        let error = super::evaluate_function(
+            &untrusted,
+            function,
+            Vec::new(),
+            &[],
+            &capability::LocalCapabilityGrantSet::new(),
+            &mut state,
+            0,
+            PrincipalId::from_bytes([0x7b; 16]),
+            super::ObserverLineage::top_level(InvocationId::from_bytes([0xa2; 16])),
+            &mut executor_slot,
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            error,
+            super::ClientExecutionError::InvalidArtifact { context, .. }
+                if context.pair() == pair && context.function() == function
+        ));
     }
 
     #[test]
