@@ -305,20 +305,7 @@ async fn list_revision_pairs_client(
         .enumerate()
         .map(|(index, row)| decode_revision_pair_row(row, index, active_pair))
         .collect::<Result<Vec<_>, _>>()?;
-    for entry in &entries {
-        validate_revision_ancestry(
-            &transaction,
-            entry.catalogue_revision_id(),
-            entry.source_revision_id(),
-        )
-        .await?;
-    }
-    let active_count = entries.iter().filter(|entry| entry.is_active()).count();
-    if active_count != 1 {
-        return Err(DurableRecord::new(ACTIVE_RELATION, "singleton=true").invariant(
-            "exactly one listed revision pair must match the active marker",
-        ));
-    }
+    validate_revision_pair_listing(&entries)?;
 
     transaction
         .commit()
@@ -460,6 +447,118 @@ fn decode_revision_pair_values(
         catalogue_parent_revision_id,
         is_active: RevisionPair::new(source_revision_id, catalogue_revision_id) == active_pair,
     })
+}
+
+fn validate_revision_pair_listing(
+    entries: &[RevisionPairHistoryEntry],
+) -> Result<(), PostgresKernelError> {
+    let mut by_catalogue = BTreeMap::new();
+    let mut source_ids = BTreeSet::new();
+    for entry in entries {
+        let catalogue = entry.catalogue_revision_id();
+        let catalogue_record =
+            DurableRecord::new(CATALOGUE_REVISION_RELATION, catalogue.canonical());
+        if by_catalogue.insert(catalogue, *entry).is_some() {
+            return Err(catalogue_record.invariant(
+                "catalogue revision identities must be unique",
+            ));
+        }
+        if !source_ids.insert(entry.source_revision_id()) {
+            return Err(DurableRecord::new(
+                SOURCE_REVISION_RELATION,
+                entry.source_revision_id().canonical(),
+            )
+            .invariant("source revision identities must be unique"));
+        }
+        if entry.source_parent_revision_id().is_some()
+            != entry.catalogue_parent_revision_id().is_some()
+        {
+            return Err(catalogue_record.invariant(
+                "source and catalogue parent identities must both be null or both be present",
+            ));
+        }
+    }
+
+    for entry in entries {
+        let Some(parent_catalogue) = entry.catalogue_parent_revision_id() else {
+            continue;
+        };
+        let Some(parent_source) = entry.source_parent_revision_id() else {
+            return Err(DurableRecord::new(
+                CATALOGUE_REVISION_RELATION,
+                entry.catalogue_revision_id().canonical(),
+            )
+            .invariant(
+                "each catalogue parent must exist and identify the corresponding source parent",
+            ));
+        };
+        let Some(parent_entry) = by_catalogue.get(&parent_catalogue) else {
+            return Err(DurableRecord::new(
+                CATALOGUE_REVISION_RELATION,
+                parent_catalogue.canonical(),
+            )
+            .invariant(
+                "each catalogue parent must exist and identify the corresponding source parent",
+            ));
+        };
+        if parent_entry.source_revision_id() != parent_source {
+            return Err(DurableRecord::new(
+                CATALOGUE_REVISION_RELATION,
+                entry.catalogue_revision_id().canonical(),
+            )
+            .invariant(
+                "each catalogue parent must exist and identify the corresponding source parent",
+            ));
+        }
+    }
+
+    let mut state = BTreeMap::new();
+    for entry in entries {
+        let mut current = entry.catalogue_revision_id();
+        let mut path = Vec::new();
+        loop {
+            match state.get(&current).copied().unwrap_or(0) {
+                0 => {
+                    state.insert(current, 1);
+                    path.push(current);
+                    let Some(current_entry) = by_catalogue.get(&current) else {
+                        return Err(DurableRecord::new(
+                            CATALOGUE_REVISION_RELATION,
+                            current.canonical(),
+                        )
+                        .invariant(
+                            "each catalogue parent must exist and identify the corresponding source parent",
+                        ));
+                    };
+                    let Some(parent) = current_entry.catalogue_parent_revision_id() else {
+                        break;
+                    };
+                    current = parent;
+                }
+                1 => {
+                    return Err(DurableRecord::new(
+                        CATALOGUE_REVISION_RELATION,
+                        current.canonical(),
+                    )
+                    .invariant(
+                        "catalogue and source revision ancestry must terminate without repeated identities",
+                    ));
+                }
+                2 => break,
+                _ => unreachable!("revision listing state has only three values"),
+            }
+        }
+        for catalogue in path {
+            state.insert(catalogue, 2);
+        }
+    }
+
+    if entries.iter().filter(|entry| entry.is_active()).count() != 1 {
+        return Err(DurableRecord::new(ACTIVE_RELATION, "singleton=true").invariant(
+            "exactly one listed revision pair must match the active marker",
+        ));
+    }
+    Ok(())
 }
 
 async fn recover_client(
@@ -4724,15 +4823,57 @@ mod tests {
     use crate::{PostgresKernelError, decode::DurableRecord};
 
     use super::{
-        LegacyResolvedTypeTupleMember, RecordValueFieldTypeTuple, RecoveredCatalogueSemantics,
+        ACTIVE_RELATION, CATALOGUE_REVISION_RELATION, LegacyResolvedTypeTupleMember,
+        RecordValueFieldTypeTuple, RecoveredCatalogueSemantics, SOURCE_REVISION_RELATION,
         RecoveredFunctionState, RecoveredRecordValueField, RecoveredRecordValueType,
         RecoveredRevisionHeader, RecoveredSchema, ResolvedTypeTuple, assemble_catalogue_semantics,
         assemble_revision, decode_catalogue_hash_version, decode_legacy_resolved_type_tuple,
-        decode_revision_pair_values,
         decode_legacy_resolved_type_tuple_kind, decode_record_value_field_descriptor,
-        decode_resolved_type_tuple, decode_standard_binding_target,
+        decode_resolved_type_tuple, decode_revision_pair_values, decode_standard_binding_target,
         recovered_standard_value_definition, validate_function_type,
+        validate_revision_pair_listing, RevisionPairHistoryEntry,
     };
+
+    fn revision_pair_history_entry(
+        source: u8,
+        source_parent: Option<u8>,
+        catalogue: u8,
+        catalogue_parent: Option<u8>,
+    ) -> RevisionPairHistoryEntry {
+        revision_pair_history_entry_with_active(
+            source,
+            source_parent,
+            catalogue,
+            catalogue_parent,
+            source,
+            catalogue,
+        )
+    }
+
+    fn revision_pair_history_entry_with_active(
+        source: u8,
+        source_parent: Option<u8>,
+        catalogue: u8,
+        catalogue_parent: Option<u8>,
+        active_source: u8,
+        active_catalogue: u8,
+    ) -> RevisionPairHistoryEntry {
+        let source_record = DurableRecord::new(SOURCE_REVISION_RELATION, "test");
+        let catalogue_record = DurableRecord::new(CATALOGUE_REVISION_RELATION, "test");
+        decode_revision_pair_values(
+            vec![source; 16],
+            source_parent.map(|id| vec![id; 16]),
+            vec![catalogue; 16],
+            catalogue_parent.map(|id| vec![id; 16]),
+            RevisionPair::new(
+                SourceRevisionId::from_bytes([active_source; 16]),
+                CatalogueRevisionId::from_bytes([active_catalogue; 16]),
+            ),
+            &source_record,
+            &catalogue_record,
+        )
+        .expect("valid revision pair test entry")
+    }
 
     fn test_origin(identity: DefinitionIdentity, start: u32) -> DefinitionOrigin {
         DefinitionOrigin::new(
@@ -4811,6 +4952,87 @@ mod tests {
             &catalogue_record,
         )
         .is_err());
+    }
+
+    #[test]
+    fn revision_pair_listing_rejects_orphan_parent() {
+        let entries = vec![revision_pair_history_entry(2, Some(1), 4, Some(3))];
+
+        assert!(matches!(
+            validate_revision_pair_listing(&entries),
+            Err(PostgresKernelError::DurableInvariant {
+                relation: CATALOGUE_REVISION_RELATION,
+                rule: "each catalogue parent must exist and identify the corresponding source parent",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn revision_pair_listing_rejects_cycles() {
+        let entries = vec![
+            revision_pair_history_entry(2, Some(1), 4, Some(3)),
+            revision_pair_history_entry(1, Some(2), 3, Some(4)),
+        ];
+
+        assert!(matches!(
+            validate_revision_pair_listing(&entries),
+            Err(PostgresKernelError::DurableInvariant {
+                relation: CATALOGUE_REVISION_RELATION,
+                rule: "catalogue and source revision ancestry must terminate without repeated identities",
+                ..
+            })
+        ));
+    }
+    #[test]
+    fn revision_pair_listing_rejects_mismatched_parent_source() {
+        let entries = vec![
+            revision_pair_history_entry(1, None, 3, None),
+            revision_pair_history_entry_with_active(2, Some(9), 4, Some(3), 2, 4),
+        ];
+
+        assert!(matches!(
+            validate_revision_pair_listing(&entries),
+            Err(PostgresKernelError::DurableInvariant {
+                relation: CATALOGUE_REVISION_RELATION,
+                rule: "each catalogue parent must exist and identify the corresponding source parent",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn revision_pair_listing_requires_exactly_one_active_pair() {
+        let entries = vec![
+            revision_pair_history_entry_with_active(1, None, 2, None, 9, 9),
+            revision_pair_history_entry_with_active(2, Some(1), 4, Some(2), 9, 9),
+        ];
+
+        assert!(matches!(
+            validate_revision_pair_listing(&entries),
+            Err(PostgresKernelError::DurableInvariant {
+                relation: ACTIVE_RELATION,
+                rule: "exactly one listed revision pair must match the active marker",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn revision_pair_listing_rejects_multiple_active_pairs() {
+        let entries = vec![
+            revision_pair_history_entry_with_active(1, None, 2, None, 1, 2),
+            revision_pair_history_entry_with_active(2, Some(1), 4, Some(2), 2, 4),
+        ];
+
+        assert!(matches!(
+            validate_revision_pair_listing(&entries),
+            Err(PostgresKernelError::DurableInvariant {
+                relation: ACTIVE_RELATION,
+                rule: "exactly one listed revision pair must match the active marker",
+                ..
+            })
+        ));
     }
 
     #[test]
