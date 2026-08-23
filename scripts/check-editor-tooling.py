@@ -26,9 +26,17 @@ GENERATED_ARTEFACTS = (
 )
 NON_EXECUTABLE_SPEC_EXAMPLES = frozenset(
     {
+        # The canonical bundle is illustrative proposal material. Keep the proposal-only
+        # UI/studio/security examples, reflective gateways, presenter selection/registry,
+        # and launch metadata outside the executable gate. The accepted Inspector path
+        # is 06_inspector.orna and remains checked (work ADRs 0080-0081).
         "03_client_ui.orna",
         "04_studio_shell.orna",
         "05_security_admin.orna",
+        "07_jsonrpc_gateway.orna",
+        "08_mcp_gateway.orna",
+        "09_presenters.orna",
+        "10_launch_entries.orna",
     }
 )
 
