@@ -52,10 +52,34 @@ Run the protocol tests:
 cargo test -p orna-lsp
 ```
 
-A manual smoke test of the wire protocol:
+A manual smoke test of the framed lifecycle (the helper computes each JSON body's exact UTF-8 byte length and checks that the binary exits successfully):
 
 ```bash
-printf 'Content-Length: 86\r\n\r\n{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"processId":null,"rootUri":null,"capabilities":{}}}' | target/release/orna-lsp
+python3 - <<'PY'
+import json
+import subprocess
+
+messages = [
+    {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"processId": None, "rootUri": None, "capabilities": {}}},
+    {"jsonrpc": "2.0", "method": "initialized", "params": {}},
+    {"jsonrpc": "2.0", "id": 2, "method": "shutdown", "params": None},
+    {"jsonrpc": "2.0", "method": "exit", "params": None},
+]
+
+def frame(message):
+    body = json.dumps(message, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    return f"Content-Length: {len(body)}\r\n\r\n".encode("ascii") + body
+
+wire = b"".join(frame(message) for message in messages)
+process = subprocess.Popen(
+    ["target/release/orna-lsp"],
+    stdin=subprocess.PIPE,
+    stdout=subprocess.PIPE,
+)
+process.communicate(wire)
+if process.returncode != 0:
+    raise SystemExit(f"orna-lsp exited with status {process.returncode}")
+PY
 ```
 
 ## Layout
