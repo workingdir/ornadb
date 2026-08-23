@@ -259,6 +259,11 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         "source apply audit",
         include_str!("../migrations/0037_source_apply_audit.sql"),
     ),
+    (
+        38,
+        "source apply principal binding",
+        include_str!("../migrations/0038_source_apply_principal.sql"),
+    ),
 ];
 const MIGRATION_DATA_STEP_SEPARATOR: &[u8] = b"\0orna.kernel.migration-step\0";
 const CANONICAL_HASH_V1_EMPTY_SEED_STEP: &[u8] = b"canonical-hash-v1-empty-seed/v1";
@@ -506,6 +511,14 @@ fn source_apply_audit_migration_checksum_binds_exact_sql_bytes() {
 }
 
 #[test]
+fn source_apply_principal_binding_migration_checksum_binds_exact_sql_bytes() {
+    assert_eq!(
+        hex_bytes(expected_migration_checksum(38, MIGRATIONS[37].2)),
+        "ada9f1e5b7080ab8955484a3e2c602ba1966f344f6577bf2a48bbc7e444d7179"
+    );
+}
+
+#[test]
 fn protected_security_audit_migration_checksum_binds_exact_sql_bytes() {
     assert_eq!(
         hex_bytes(expected_migration_checksum(11, MIGRATIONS[10].2)),
@@ -599,6 +612,25 @@ fn source_apply_audit_is_the_registered_version_thirty_seven() -> TestResult<()>
             && sql.contains("source_revision_id IS NOT NULL")
             && sql.contains("catalogue_revision_id IS NOT NULL"),
         "source apply audit migration does not constrain the committed candidate shape",
+    )
+}
+
+#[test]
+fn source_apply_principal_binding_is_the_registered_version_thirty_eight() -> TestResult<()> {
+    let (version, name, sql) = MIGRATIONS[37];
+
+    require(
+        version == 38,
+        format!("source apply principal binding migration is version {version}"),
+    )?;
+    require(
+        name == "source apply principal binding",
+        format!("source apply principal binding migration has unexpected name {name:?}"),
+    )?;
+    require(
+        sql.contains("event_kind <> 'source_apply'")
+            && sql.contains("session_principal_id = decode('00000000000000000000000000000001', 'hex')"),
+        "source apply principal binding migration does not bind the fixed service principal",
     )
 }
 
