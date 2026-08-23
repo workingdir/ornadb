@@ -2,6 +2,12 @@
 
 **Status:** Accepted
 
+**Implementation status:** The headless ordinary CLIENT Inspector v1 and its
+focused installed proof are implemented. Work ADR 0081 supersedes only the
+product-specific `devtools.*` naming with the generic `std.inspect.render@1`
+contract; this ADR remains historical authority for the headless carrier,
+provenance, redaction, recursion, and no-toolkit constraints.
+
 ## Decision
 
 Accept the smallest executable Inspector surface as an ordinary, user-declared
@@ -50,11 +56,12 @@ filesystem state, and emits no native toolkit operation. Its result is an
 immutable transient UI value. A headless runtime may render or compare that
 value; it may not interpret it as permission to load a graphical runtime.
 
-The exact body spelling is an implementation seam: the parser, checked CLIENT
-plan, and evaluator must agree on the ordinary expression/state form before
-source is accepted. The signature and helper contract are stable. A compiler
-rejects an unregistered helper, a wrong carrier version, or a carrier obtained
-from a different snapshot.
+The exact body spelling was an implementation seam: the parser, checked CLIENT
+plan, and evaluator had to agree on the ordinary expression/state form before
+source was accepted. The signature and helper contract were stable for this
+slice. Work ADR 0081 now governs the generic render contract and rejects an
+unregistered helper, wrong carrier version, or carrier from a different
+snapshot.
 
 ## Sealed snapshot and projection carriers
 
@@ -391,7 +398,7 @@ and authorization checks.
 
 ## Focused proof and installed proof
 
-The implementation must add tests for:
+The accepted implementation proof covers:
 
 1. ordinary parsing and checked-plan acceptance of the exact signature, rejecting
    an unregistered helper or wrong return type;
@@ -433,9 +440,10 @@ crates/orna-system-tests/     installed ordinary CLIENT and negative proofs
 docs/decisions/0080-client-inspector.md
 ```
 
-This ADR commit changes documentation only. Each implementation increment must
-keep the workspace buildable and add its focused proof before enabling the next
-seam.
+The implementation artifacts and focused proof for this boundary are complete.
+Later refinements must retain the same headless, immutable, redacted, and
+no-toolkit constraints; work ADR 0081 records the generic render-contract
+refinement.
 
 ## Alternatives considered
 
@@ -495,7 +503,7 @@ authoritative. Work ADR 0064 remains authoritative for the server-side
 0062 and 0076 remain authoritative for transient `std.ui.UI` and the test-only
 ORNA-UI/1 boundary. Work ADR 0068 remains authoritative for CLIENT expressions
 and runtime contracts; ADR 0069 for CLIENT state declarations; ADRs 0071, 0077,
-and 0078 for resource identity, language, and transport. The sealed `sys.invoke`
-boundary remains authoritative for SERVER execution and security. This ADR's
-carrier, epoch, observer, and helper constraints govern the v1 headless
-implementation only.
+and 0078 for resource identity, language, and transport. Work ADR 0081
+supersedes the product-specific render naming while retaining this ADR's
+headless carrier, epoch, observer, and helper constraints. The sealed
+`sys.invoke` boundary remains authoritative for SERVER execution and security.
