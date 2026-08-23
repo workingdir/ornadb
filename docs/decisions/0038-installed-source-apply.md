@@ -89,6 +89,11 @@ other punctuation. Each `function_id` is the corresponding stable canonical
 by `FunctionId`. JSON strings use the normal JSON escaping rules. There is no
 indentation or other insignificant whitespace.
 
+Work ADR 0040 supersedes this entry shape for functions with declared
+parameters and defines an optional ordered `parameters` array after
+`function_id`. Parameter-free entries remain unchanged, so the example above
+intentionally omits `parameters`.
+
 The output is discovery evidence, not identity authority. The database
 catalogue remains authoritative. The command emits no success byte before the
 commit is confirmed. If writing standard output fails after that confirmation,
