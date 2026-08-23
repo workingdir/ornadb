@@ -34,8 +34,8 @@ use orna_core::{
     },
     canonical_hash::{CanonicalHashError, artifact_payload_digest, catalogue_digest_with_context},
     catalogue::{
-        FunctionDefinition, FunctionDomain, FunctionReturn, FunctionSecurity, FunctionVolatility, TypeDefinition,
-        ValueTypeKind,
+        FunctionDefinition, FunctionDomain, FunctionReturn, FunctionSecurity, FunctionVolatility,
+        TypeDefinition, ValueTypeDefinition, ValueTypeKind,
     },
     inspect::{INSPECT_RENDER_CARRIER_SIGNATURE, INSPECT_RENDER_CONTRACT},
     revision::{
@@ -6851,8 +6851,16 @@ fn resolve_state_slot_type(
         .standard()?
         .catalogue()
         .value_type_by_id(type_id)?;
-    if definition.kind() == ValueTypeKind::Opaque
-        || matches!(
+    if state_slot_type_is_supported(definition) {
+        Some(ResolvedType::value(type_id))
+    } else {
+        None
+    }
+}
+
+fn state_slot_type_is_supported(definition: &ValueTypeDefinition) -> bool {
+    definition.kind() != ValueTypeKind::Opaque
+        && matches!(
             definition.representation_contract(),
             "orna.kernel.value.boolean@1"
                 | "orna.kernel.value.integer@1"
@@ -6861,11 +6869,6 @@ fn resolve_state_slot_type(
                 | "orna.kernel.value.character-large-object@1"
                 | "orna.kernel.value.binary-large-object@1"
         )
-    {
-        Some(ResolvedType::value(type_id))
-    } else {
-        None
-    }
 }
 
 fn validate_active_catalogue(
@@ -7302,8 +7305,8 @@ mod tests {
         },
         catalogue::{
             CatalogueSnapshot, FunctionDefinition, FunctionDomain, FunctionReturn,
-            FunctionReturnColumnDefinition, FunctionSecurity, FunctionVolatility,
-            ParameterDefinition, QualifiedSemanticName, SchemaDefinition,
+            FunctionReturnColumnDefinition, FunctionSecurity, FunctionVolatility, ParameterDefinition,
+            QualifiedSemanticName, SchemaDefinition, ValueTypeDefinition,
         },
         revision::{
             ActiveDatabaseRevision, ActiveDatabaseRevisionInput, ActiveRevisionContent,
@@ -10225,36 +10228,52 @@ fn client_stream_cancellation_clears_batches_and_rejects_stale_completions() {
 
     #[test]
     fn version_four_unsupported_slot_type_fails_closed() {
-        let plan = orna_artifact::client_plan::StateClientPlan::new(
-            orna_artifact::client_plan::ClientExpressionNode::Boolean { value: true },
-            vec![orna_artifact::client_plan::StateSlot::new(
-                StateSlotId::from_bytes([0x41; 16]),
-                orna_standard::DATE_TYPE_ID,
-                orna_artifact::client_plan::StateScope::Local,
-                orna_artifact::client_plan::StateDefault::Unset,
-            )],
-        );
-        let (active, function, _, _) = version_four_state_active(
-            orna_standard::BOOLEAN_TYPE_ID,
-            plan.encode().expect("the state plan encodes"),
-        );
-        let mut state = super::ClientStateStore::new();
+        for type_id in [
+            orna_standard::DATE_TYPE_ID,
+            orna_standard::OPAQUE_TOKEN_TYPE_ID,
+        ] {
+            let slot_id = StateSlotId::from_bytes(type_id.to_bytes());
+            let plan = orna_artifact::client_plan::StateClientPlan::new(
+                orna_artifact::client_plan::ClientExpressionNode::Boolean { value: true },
+                vec![orna_artifact::client_plan::StateSlot::new(
+                    slot_id,
+                    type_id,
+                    orna_artifact::client_plan::StateScope::Local,
+                    orna_artifact::client_plan::StateDefault::Unset,
+                )],
+            );
+            let (active, function, _, _) = version_four_state_active(
+                orna_standard::BOOLEAN_TYPE_ID,
+                plan.encode().expect("the state plan encodes"),
+            );
+            let mut state = super::ClientStateStore::new();
 
-        let error = super::evaluate_client_function_with_state(
-            &active,
-            &authorise(active.pair(), function),
-            &mut state,
-        )
-        .unwrap_err();
+            let error = super::evaluate_client_function_with_state(
+                &active,
+                &authorise(active.pair(), function),
+                &mut state,
+            )
+            .unwrap_err();
 
-        assert!(matches!(
-            &error,
-            super::ClientExecutionError::StateEvaluation {
-                context,
-                source: super::ClientStateError::UnsupportedSlotType { slot },
-            } if context.function() == function
-                && *slot == StateSlotId::from_bytes([0x41; 16])
-        ));
+            assert!(matches!(
+                &error,
+                super::ClientExecutionError::StateEvaluation {
+                    context,
+                    source: super::ClientStateError::UnsupportedSlotType { slot },
+                } if context.function() == function && *slot == slot_id
+            ));
+        }
+    }
+
+    #[test]
+    fn opaque_value_with_scalar_contract_is_not_a_supported_state_slot_type() {
+        let definition = ValueTypeDefinition::opaque(
+            TypeId::from_bytes([0xf2; 16]),
+            QualifiedSemanticName::new(["tests", "opaque_scalar"]).unwrap(),
+            "orna.kernel.value.boolean@1",
+        );
+
+        assert!(!super::state_slot_type_is_supported(&definition));
     }
 
     #[test]
