@@ -817,9 +817,9 @@ fn sealed_started_events(
 impl PostgresKernel {
     /// Validates the protected entry and retained request before acceptance.
     ///
-    /// This method does not resolve the requested target or append invocation
-    /// audit evidence. It returns only a closed public rejection or an
-    /// accepted continuation carrying the pinned decode context.
+    /// This method does not resolve the requested target. An entry denial
+    /// records only closed audit evidence before returning the public rejection;
+    /// an accepted continuation carries the pinned decode context.
     #[doc(hidden)]
     pub async fn validate_sealed_sys_invoke(
         &self,
@@ -843,17 +843,33 @@ impl PostgresKernel {
             // ADR 0054 requires the protected entry decision to precede any
             // retained Request decoding. An unauthorized caller therefore gets
             // only the closed EXECUTE_DENIED result, even for malformed bytes.
-            if !matches!(
-                security.authorise_system_function(authenticated_session, system_target),
-                ExecuteDecision::Allowed(_)
-            ) {
-                transaction
-                    .rollback()
-                    .await
-                    .map_err(PostgresKernelError::Database)?;
-                return Ok(SealedInvocationPreflight::Rejected {
-                    failure: CallFailure::ExecuteDenied,
-                });
+            match security.authorise_system_function(authenticated_session, system_target) {
+                ExecuteDecision::Denied(reason) => {
+                    let invocation = InvocationId::new();
+                    append_security_audit_event(
+                        &transaction,
+                        SecurityAuditDecision::execute_denied(
+                            authenticated_session,
+                            system_target,
+                            reason,
+                        ),
+                    )
+                    .await?;
+                    append_unresolved_invocation_audit(
+                        &transaction,
+                        authenticated_session,
+                        invocation,
+                    )
+                    .await?;
+                    transaction
+                        .commit()
+                        .await
+                        .map_err(PostgresKernelError::Database)?;
+                    return Ok(SealedInvocationPreflight::Rejected {
+                        failure: CallFailure::ExecuteDenied,
+                    });
+                }
+                ExecuteDecision::Allowed(_) => {}
             }
             let standard = active.catalogue_hash_context().standard().ok_or_else(|| {
                 PostgresKernelError::DurableInvariant {
