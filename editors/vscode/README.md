@@ -1,6 +1,6 @@
 # Orna for VS Code
 
-This extension adds language support for [Orna](https://github.com/kieran/ornadb), including TextMate syntax highlighting and integration with the Orna language server.
+This extension adds language support for [Orna](https://github.com/workingdir/ornadb), including TextMate syntax highlighting and integration with the Orna language server.
 
 ## Install for development
 
