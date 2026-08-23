@@ -2,6 +2,10 @@
 
 **Status:** Accepted
 
+**Implementation status:** The test-only headless fixture and focused conformance
+proof described here are implemented. Production runtime loading, toolkit, and
+ABI decisions remain deferred; accepted CLIENT resource successors are governed
+by work ADRs 0077 and 0078.
 
 ## Decision
 
@@ -218,8 +222,9 @@ fixture, but it must separately accept shared-library loading, platform
 selection, event-loop integration, native ownership, and toolkit-specific
 behaviour.
 
-The canonical status change, header update, and work ADR acceptance are already
-complete. The remaining work is the private fixture and its focused proof.
+The canonical status change, header update, work ADR acceptance, private
+fixture, and focused proof are complete. Remaining work is the separate
+production runtime contract and implementation.
 
 ## Alternatives considered
 
@@ -256,8 +261,9 @@ contract would violate the source-of-truth status. Rejected.
 Native runtime libraries, automatic platform selection, shared-library trust
 and discovery, graphical widgets, accessibility bridges, browser deployment,
 production event-loop integration, and runtime-specific opaque layout state
-remain outside this accepted test-only boundary. CLIENT-to-SERVER resources
-and reflective protocol gateways remain governed by their own contract work.
+remain outside this accepted test-only boundary. CLIENT-to-SERVER resources are
+implemented under work ADRs 0077 and 0078; reflective protocol gateways remain
+governed by future contract work.
 
 ## Precedence
 
