@@ -2035,9 +2035,6 @@ impl ResourceProtocolConnection {
             return Ok(disposition);
         }
         let state = self.state_for(stream_id, request_id)?;
-        if !(state.accepted && matches!(state.phase, ResourcePhase::Live)) {
-            return Err(ResourceConnectionError::WrongState { stream_id });
-        }
         if matches!(state.resource_kind, ResourceKind::Single) && state.last_batch_sequence.is_some() {
             return Err(ResourceConnectionError::WrongState { stream_id });
         }
@@ -7787,55 +7784,34 @@ mod tests {
     }
 
     #[test]
-    fn resource_connection_rejects_terminal_frames_before_acceptance() {
+    fn resource_connection_accepts_terminal_frames_before_acceptance() {
         let request = resource_request_fixture();
         let request_id = request.request_id;
-        let mut connection = ResourceProtocolConnection::new();
-        connection.open(request.clone()).unwrap();
+        let stream_id = request.stream_id;
 
-        let failed = connection.apply(ResourceServerFrame::Failed(ResourceFailed {
-            stream_id: request.stream_id,
-            request_id,
-            failure: CallFailure::InternalFailure,
-        }));
+        let mut failed_connection = ResourceProtocolConnection::new();
+        failed_connection.open(request.clone()).unwrap();
         assert_eq!(
-            failed,
-            Err(ResourceConnectionError::WrongState {
-                stream_id: request.stream_id,
-            })
-        );
-        assert_eq!(failed.unwrap_err().to_string(), "resource frame violates stream state");
-
-        let cancelled = connection.apply(ResourceServerFrame::Cancelled(ResourceCancelled {
-            stream_id: request.stream_id,
-            request_id,
-            reason: ResourceCancellationCode::ServerRequested,
-        }));
-        assert_eq!(
-            cancelled,
-            Err(ResourceConnectionError::WrongState {
-                stream_id: request.stream_id,
-            })
-        );
-        assert_eq!(cancelled.unwrap_err().to_string(), "resource frame violates stream state");
-        assert_eq!(connection.live_resources(), 1);
-
-        let nested_invocation_id = InvocationId::from_bytes([0x64; 16]);
-        assert_eq!(
-            connection.apply(ResourceServerFrame::Accepted(ResourceAccepted {
-                stream_id: request.stream_id,
+            failed_connection.apply(ResourceServerFrame::Failed(ResourceFailed {
+                stream_id,
                 request_id,
-                nested_invocation_id,
-                target_revision: request.target_revision,
-                resource_kind: request.resource_kind,
+                failure: CallFailure::InternalFailure,
             })),
             Ok(ResourceFrameDisposition::Applied)
         );
+        assert_eq!(failed_connection.live_resources(), 0);
+
+        let mut cancelled_connection = ResourceProtocolConnection::new();
+        cancelled_connection.open(request).unwrap();
         assert_eq!(
-            connection.resource_nested_invocation_id(request.stream_id, request_id),
-            Ok(Some(nested_invocation_id))
+            cancelled_connection.apply(ResourceServerFrame::Cancelled(ResourceCancelled {
+                stream_id,
+                request_id,
+                reason: ResourceCancellationCode::ServerRequested,
+            })),
+            Ok(ResourceFrameDisposition::Applied)
         );
-        assert_eq!(connection.live_resources(), 1);
+        assert_eq!(cancelled_connection.live_resources(), 0);
     }
 
     #[test]
