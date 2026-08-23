@@ -28,8 +28,9 @@ syntax keyword ornaStatement ADD ALL ALTER AND AS ASC ATOMIC AWAIT BEGIN BETWEEN
 syntax keyword ornaBoolean FALSE NULL TRUE
 
 " Standard scalar types.
-syntax keyword ornaType BIGINT BOOL BYTES DATE DECIMAL DURATION FLOAT INT TEXT
+syntax keyword ornaType BIGINT BOOL BOOLEAN BYTES DATE DECIMAL DURATION FLOAT INT INTEGER TEXT
             \ TIME TIMESTAMP UUID VOID
+syntax match ornaType "\<\(BINARY LARGE OBJECT\|CHARACTER LARGE OBJECT\)\>"
 
 " Strings: '...' with '' as the escape for a literal quote.
 syntax region ornaString start=+'+ skip=+''+ end=+'+
