@@ -10,6 +10,7 @@ on:
       - "crates/**"
       - "packaging/debian/**"
       - "postgresql/**"
+      - "stdlib/**"
       - "third_party/postgresql"
   pull_request:
     paths:
@@ -20,6 +21,7 @@ on:
       - "crates/**"
       - "packaging/debian/**"
       - "postgresql/**"
+      - "stdlib/**"
       - "third_party/postgresql"
 
 permissions:
@@ -39,17 +41,36 @@ jobs:
         run: cargo fetch --locked
       - name: Reproduce the package twice
         run: make --file packaging/debian/rules development-package
+      - name: Resolve package path from Debian changelog
+        id: package
+        run: |
+          set -euo pipefail
+          changelog="${GITHUB_WORKSPACE}/packaging/debian/changelog"
+          source="$(dpkg-parsechangelog -l"${changelog}" -S Source)"
+          version="$(dpkg-parsechangelog -l"${changelog}" -S Version)"
+          architecture="$(dpkg --print-architecture)"
+          [[ "${architecture}" == 'amd64' ]] || {
+              printf '%s\n' '[debian] error: package proof requires amd64' >&2
+              exit 1
+          }
+          package_relative="target/debian-package/${source}_${version}_${architecture}.deb"
+          printf 'path=%s/%s\n' "${GITHUB_WORKSPACE}" "${package_relative}" >>"${GITHUB_OUTPUT}"
+          printf 'relative_path=%s\n' "${package_relative}" >>"${GITHUB_OUTPUT}"
       - name: Prove package transaction exclusion
+        env:
+          ORNA_DEBIAN_PACKAGE: "${{ steps.package.outputs.path }}"
         run: >-
           crates/orna-system-tests/scenarios/debian-package.sh
-          "${GITHUB_WORKSPACE}/target/debian-package/orna_0.1.0-1_amd64.deb"
+          "${ORNA_DEBIAN_PACKAGE}"
       - name: Prove the installed one-executable lifecycle
+        env:
+          ORNA_DEBIAN_PACKAGE: "${{ steps.package.outputs.path }}"
         run: >-
           crates/orna-system-tests/scenarios/debian-clean-machine.sh
-          "${GITHUB_WORKSPACE}/target/debian-package/orna_0.1.0-1_amd64.deb"
+          "${ORNA_DEBIAN_PACKAGE}"
       - name: Prove the installed Orna data path
         env:
-          ORNA_SYSTEM_TEST_DEBIAN_PACKAGE: "${{ github.workspace }}/target/debian-package/orna_0.1.0-1_amd64.deb"
+          ORNA_SYSTEM_TEST_DEBIAN_PACKAGE: "${{ steps.package.outputs.path }}"
         run: >-
           cargo test --frozen --package orna-system-tests --test installed_product
           -- --ignored --test-threads=1
@@ -58,7 +79,7 @@ jobs:
         with:
           name: orna-debian-one-executable
           path: |
-            target/debian-package/orna_0.1.0-1_amd64.deb
+            ${{ steps.package.outputs.relative_path }}
             target/debian-package/payload/usr/share/orna/distribution-manifest.toml
             target/debian-package/payload/usr/share/orna/embedded-engine-manifest.json
             target/debian-package/orna.dynamic
