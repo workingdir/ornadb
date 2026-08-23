@@ -7822,6 +7822,52 @@ mod tests {
     }
 
     #[test]
+    fn resource_connection_accepts_empty_stream_completion() {
+        let mut request = resource_request_fixture();
+        request.resource_kind = ResourceKind::Stream;
+        request.item_window = 1;
+        request.byte_window = 1;
+        let request_id = request.request_id;
+        let mut connection = ResourceProtocolConnection::new();
+
+        assert_eq!(
+            connection.open(request.clone()),
+            Ok(ResourceFrameDisposition::Applied)
+        );
+        assert_eq!(
+            connection.apply(ResourceServerFrame::Accepted(ResourceAccepted {
+                stream_id: request.stream_id,
+                request_id,
+                nested_invocation_id: InvocationId::from_bytes([0x64; 16]),
+                target_revision: request.target_revision,
+                resource_kind: ResourceKind::Stream,
+            })),
+            Ok(ResourceFrameDisposition::Applied)
+        );
+        assert_eq!(
+            connection.apply(ResourceServerFrame::Completed(ResourceCompleted {
+                stream_id: request.stream_id,
+                request_id,
+                final_batch_sequence: 0,
+                total_items: 0,
+            })),
+            Ok(ResourceFrameDisposition::Applied)
+        );
+        assert_eq!(connection.live_resources(), 0);
+        assert_eq!(
+            connection.apply(ResourceServerFrame::Values(ResourceValues {
+                stream_id: request.stream_id,
+                request_id,
+                batch_sequence: 0,
+                item_count: 1,
+                byte_count: 1,
+                values: vec![RuntimeValue::Integer(1)],
+            })),
+            Ok(ResourceFrameDisposition::DroppedLate)
+        );
+    }
+
+    #[test]
     fn resource_connection_isolates_pre_acceptance_terminal_outcomes_from_live_resources() {
         let request_id = InvocationId::from_bytes([0x12; 16]);
         let live_request_id = InvocationId::from_bytes([0x13; 16]);
