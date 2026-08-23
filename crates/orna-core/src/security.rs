@@ -408,6 +408,8 @@ pub enum SecuritySnapshotError {
     DuplicatePrivilegeGrant,
     /// A privilege grant names a principal absent from the snapshot.
     UnknownPrivilegeGrantPrincipal,
+    /// An object-scoped privilege grant names a function absent from the snapshot.
+    UnknownPrivilegeGrantObject,
 }
 
 impl fmt::Display for SecuritySnapshotError {
@@ -436,6 +438,9 @@ impl fmt::Display for SecuritySnapshotError {
             }
             Self::UnknownPrivilegeGrantPrincipal => {
                 "security snapshot privilege grant has an unknown principal"
+            }
+            Self::UnknownPrivilegeGrantObject => {
+                "security snapshot privilege grant has an unknown object"
             }
         })
     }
@@ -1838,6 +1843,12 @@ impl SecuritySnapshot {
             }
             if !principals_by_id.contains_key(&privilege_grant.grantee) {
                 return Err(SecuritySnapshotError::UnknownPrivilegeGrantPrincipal);
+            }
+            if let Some(object) = privilege_grant.object()
+                && !known_functions.contains_key(&object)
+                && system_function_by_id(object).is_none()
+            {
+                return Err(SecuritySnapshotError::UnknownPrivilegeGrantObject);
             }
         }
 
@@ -4012,8 +4023,10 @@ mod tests {
 
     #[test]
     fn snapshot_privilege_grants_round_trip_through_the_deepest_constructor() {
-        let grant = PrivilegeGrant::new(USER, PrivilegeClass::SecurityAdmin, None)
+        let class_wide = PrivilegeGrant::new(USER, PrivilegeClass::SecurityAdmin, None)
             .expect("a class-wide grant is valid");
+        let scoped = PrivilegeGrant::new(USER, PrivilegeClass::Execute, Some(FUNCTION))
+            .expect("a known object-scoped grant is valid");
         let snapshot = SecuritySnapshot::new_with_function_targets_local_peer_credentials_and_privilege_grants(
             REVISION,
             vec![SecurityFunctionTarget::application(FUNCTION)],
@@ -4021,10 +4034,13 @@ mod tests {
             vec![],
             vec![],
             vec![],
-            vec![grant],
+            vec![class_wide, scoped],
         )
-        .expect("a snapshot with one privilege grant is valid");
-        assert_eq!(snapshot.privilege_grants().collect::<Vec<_>>(), vec![grant]);
+        .expect("a snapshot with privilege grants is valid");
+        assert_eq!(
+            snapshot.privilege_grants().collect::<Vec<_>>(),
+            vec![scoped, class_wide]
+        );
 
         // The stable existing constructors default to no privilege grants.
         let plain = SecuritySnapshot::new(
@@ -4036,6 +4052,46 @@ mod tests {
         )
         .expect("the flat constructor stays valid");
         assert_eq!(plain.privilege_grants().count(), 0);
+    }
+
+    #[test]
+    fn snapshot_rejects_privilege_grants_for_unknown_objects() {
+        let grant = PrivilegeGrant::new(USER, PrivilegeClass::Execute, Some(OTHER_FUNCTION))
+            .expect("an unknown object-scoped grant still has a valid grant shape");
+        assert!(matches!(
+            SecuritySnapshot::new_with_function_targets_local_peer_credentials_and_privilege_grants(
+                REVISION,
+                vec![SecurityFunctionTarget::application(FUNCTION)],
+                vec![active(USER, PrincipalKind::User)],
+                vec![],
+                vec![],
+                vec![],
+                vec![grant],
+            ),
+            Err(SecuritySnapshotError::UnknownPrivilegeGrantObject)
+        ));
+    }
+
+    #[test]
+    fn snapshot_accepts_privilege_grants_for_sealed_system_functions() {
+        let grant = PrivilegeGrant::new(
+            USER,
+            PrivilegeClass::Execute,
+            Some(SYS_SECURITY_GRANT_PRIVILEGE_FUNCTION_ID),
+        )
+        .expect("a sealed system function object has a valid grant shape");
+        let snapshot =
+            SecuritySnapshot::new_with_function_targets_local_peer_credentials_and_privilege_grants(
+                REVISION,
+                vec![],
+                vec![active(USER, PrincipalKind::User)],
+                vec![],
+                vec![],
+                vec![],
+                vec![grant],
+            )
+            .expect("sealed system function objects are valid privilege targets");
+        assert_eq!(snapshot.privilege_grants().collect::<Vec<_>>(), vec![grant]);
     }
 
     #[test]
