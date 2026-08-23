@@ -26,17 +26,28 @@ GENERATED_ARTEFACTS = (
 )
 NON_EXECUTABLE_SPEC_EXAMPLES = frozenset(
     {
-        # The canonical bundle is illustrative proposal material. Keep the proposal-only
-        # UI/studio/security examples, reflective gateways, presenter selection/registry,
-        # and launch metadata outside the executable gate. The accepted Inspector path
-        # is 06_inspector.orna and remains checked (work ADRs 0080-0081).
+        # The canonical bundle is illustrative proposal material. Keep every proposal-only
+        # example outside the executable source gate, while parsing each grammar-compatible
+        # one below.
+        "01_people_tasks.orna",
+        "02_server_functions.orna",
         "03_client_ui.orna",
         "04_studio_shell.orna",
         "05_security_admin.orna",
+        "06_inspector.orna",
         "07_jsonrpc_gateway.orna",
         "08_mcp_gateway.orna",
         "09_presenters.orna",
         "10_launch_entries.orna",
+    }
+)
+
+NON_PARSEABLE_SPEC_EXAMPLES = frozenset(
+    {
+        # These proposal examples use syntax outside the accepted tree-sitter grammar.
+        "03_client_ui.orna",
+        "04_studio_shell.orna",
+        "05_security_admin.orna",
     }
 )
 
@@ -320,12 +331,24 @@ def main() -> int:
             if path.relative_to(spec_examples).as_posix() not in NON_EXECUTABLE_SPEC_EXAMPLES
         ]
         for path in canonical_paths:
-            if path not in executable_paths:
+            relative_path = path.relative_to(spec_examples).as_posix()
+            if relative_path in NON_PARSEABLE_SPEC_EXAMPLES:
                 log(
-                    f"skipping proposal-only example: {display_path(path, repository)}"
+                    f"skipping non-parseable proposal example: {display_path(path, repository)}"
+                )
+            elif path not in executable_paths:
+                log(
+                    f"skipping proposal-only example from source check: "
+                    f"{display_path(path, repository)}"
                 )
         log(f"canonical examples: {len(executable_paths)} executable .orna files")
-        parse_paths.extend(executable_paths)
+        # Tree-sitter coverage includes proposal examples that use accepted syntax,
+        # but does not claim coverage for proposal syntax outside the grammar.
+        parse_paths.extend(
+            path
+            for path in canonical_paths
+            if path.relative_to(spec_examples).as_posix() not in NON_PARSEABLE_SPEC_EXAMPLES
+        )
     else:
         log("canonical examples: ../spec/examples is absent; skipping")
 
