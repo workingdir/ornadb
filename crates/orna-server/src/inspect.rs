@@ -1184,14 +1184,8 @@ mod tests {
         assert!(validate_epoch_revisions(source_revision, catalogue_revision, active_pair).is_ok());
 
         for (stale_source, stale_catalogue) in [
-            (
-                SourceRevisionId::from_bytes([0x12; 16]),
-                catalogue_revision,
-            ),
-            (
-                source_revision,
-                CatalogueRevisionId::from_bytes([0x13; 16]),
-            ),
+            (SourceRevisionId::from_bytes([0x12; 16]), catalogue_revision),
+            (source_revision, CatalogueRevisionId::from_bytes([0x13; 16])),
         ] {
             let error = validate_epoch_revisions(stale_source, stale_catalogue, active_pair)
                 .expect_err("stale epoch revisions must fail closed");
