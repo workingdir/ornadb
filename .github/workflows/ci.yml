@@ -18,6 +18,10 @@ jobs:
           toolchain: "1.95"
           components: rustfmt, clippy
       - uses: extractions/setup-just@v3
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - run: npm install --global tree-sitter-cli@0.26.5 --no-audit --no-fund
       - run: just check
       - run: just editor-tooling-check
       - run: just kernel-test
