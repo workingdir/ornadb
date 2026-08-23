@@ -989,8 +989,8 @@ async fn rejects_a_cross_principal_owned_epoch_without_disclosure_or_output() ->
         )?;
         require(
             error.kind() == InstalledInspectErrorKind::Kernel
-                && error.code() == Some("inspect:missing-privilege")
-                && error.message() == "INSPECT access was denied: inspect:missing-privilege",
+                && error.code() == Some("inspect.denied")
+                && error.message() == "INSPECT access was denied: inspect.denied",
             format!(
                 "the cross-principal denial returned the wrong stable error: kind={:?}, code={:?}, message={}",
                 error.kind(),

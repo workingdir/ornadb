@@ -933,8 +933,12 @@ const INSPECT_REDACTED_FIELD_TAG: u8 = 2;
 const INSPECT_REDACTED_TEXT_LENGTH: u32 = u32::MAX;
 
 /// Evaluates the installed standard Inspector render contract without selecting a
-/// graphical runtime or reading mutable state.
-fn run_installed_external_contract(
+/// graphical runtime or reading mutable state. The carrier envelope does not
+/// encode its owning principal, so the full epoch is authenticated through the
+/// installed session before the UI value is constructed.
+async fn run_installed_external_contract(
+    kernel: &PostgresKernel,
+    session: &AuthenticatedSession,
     active: &ActiveDatabaseRevision,
     request: &ClientExternalContractRequest,
 ) -> Result<RuntimeValue, String> {
@@ -973,6 +977,7 @@ fn run_installed_external_contract(
     let registry =
         registered_opaque_codecs(standard).map_err(|_| "inspect.runtime_unavailable".to_owned())?;
     let mut epoch_id = None;
+    let mut server_epoch = None;
     let mut target_invocation_id = None;
     let mut row_counts = Vec::with_capacity(arguments.len());
     for (index, ((parameter_id, value), (expected_name, expected_type, expected_kind))) in arguments
@@ -1015,18 +1020,26 @@ fn run_installed_external_contract(
                 .rows()
                 .first()
                 .ok_or_else(|| "inspect.malformed_carrier".to_owned())?;
-            carrier_target = Some(
-                decode_snapshot_row_epoch(active, &registry, snapshot_row, envelope.epoch_id())?.1,
-            );
+            let (carrier_epoch, carrier_target_id) =
+                decode_snapshot_row_epoch(active, &registry, snapshot_row, envelope.epoch_id())?;
+            if server_epoch.is_some_and(|known| known != carrier_epoch) {
+                return Err("inspect.epoch_mismatch".to_owned());
+            }
+            server_epoch = Some(carrier_epoch);
+            carrier_target = Some(carrier_target_id);
         } else {
             for row in envelope.rows() {
-                let target = decode_enriched_inspect_row_target(
+                let (carrier_epoch, target) = decode_enriched_inspect_row_target(
                     active,
                     &registry,
                     row,
                     expected_kind,
                     envelope.epoch_id(),
                 )?;
+                if server_epoch.is_some_and(|known| known != carrier_epoch) {
+                    return Err("inspect.epoch_mismatch".to_owned());
+                }
+                server_epoch = Some(carrier_epoch);
                 if carrier_target.is_some_and(|known| known != target) {
                     return Err("inspect.epoch_mismatch".to_owned());
                 }
@@ -1050,6 +1063,32 @@ fn run_installed_external_contract(
     }
 
     let epoch_id = epoch_id.ok_or_else(|| "inspect.malformed_carrier".to_owned())?;
+    // The required snapshot carrier is the epoch-bearing anchor. Empty
+    // projections have no row payload, so their header epoch is checked
+    // against this anchor and the authenticated snapshot below.
+    let server_epoch = server_epoch.ok_or_else(|| "inspect.malformed_carrier".to_owned())?;
+    if u64::from_be_bytes(
+        server_epoch.to_bytes()[8..]
+            .try_into()
+            .expect("inspect epoch identity width"),
+    ) != epoch_id
+    {
+        return Err("inspect.epoch_mismatch".to_owned());
+    }
+    let target_invocation_id =
+        target_invocation_id.ok_or_else(|| "inspect.malformed_carrier".to_owned())?;
+    let Some(snapshot) = kernel
+        .load_inspect_snapshot(session, server_epoch)
+        .await
+        .map_err(inspect_kernel_error_code)?
+    else {
+        return Err("inspect.stale_epoch".to_owned());
+    };
+    validate_epoch(
+        &snapshot,
+        target_invocation_id,
+        active.pair(),
+    )?;
     let client_epoch_id = request.context().client_epoch_id().invocation_id();
     let body = serde_json::to_vec(&serde_json::json!({
         "kind": "node",
@@ -1380,7 +1419,13 @@ fn validate_inspect_projection_binding(
 
 fn inspect_kernel_error_code(error: PostgresKernelError) -> String {
     match error {
-        PostgresKernelError::InspectDenied { .. } => "inspect.denied".to_owned(),
+        PostgresKernelError::InspectDenied { reason } => match reason {
+            orna_core::security::InspectDenial::MissingEpoch => "inspect.stale_epoch".to_owned(),
+            orna_core::security::InspectDenial::MissingPrivilege => "inspect.denied".to_owned(),
+            orna_core::security::InspectDenial::ObserverSuppressed => {
+                "inspect.recursion".to_owned()
+            }
+        },
         _ => "inspect.projection_failed".to_owned(),
     }
 }
@@ -1640,7 +1685,7 @@ fn decode_enriched_inspect_row_target(
     row: &[u8],
     expected_kind: InspectCarrierKind,
     epoch_id: u64,
-) -> Result<InvocationId, String> {
+) -> Result<(InspectEpochId, InvocationId), String> {
     let value = decode_constructed_value(active, registry, row)
         .map_err(|_| "inspect.malformed_carrier".to_owned())?;
     let RuntimeValue::Constructed(constructed) = value else {
@@ -1677,10 +1722,13 @@ fn decode_enriched_inspect_row_target(
     if payload[89] != 1 || payload[90] > 4 {
         return Err("inspect.malformed_carrier".to_owned());
     }
-    Ok(InvocationId::from_bytes(
-        payload[25..41]
-            .try_into()
-            .map_err(|_| "inspect.malformed_carrier".to_owned())?,
+    Ok((
+        epoch,
+        InvocationId::from_bytes(
+            payload[25..41]
+                .try_into()
+                .map_err(|_| "inspect.malformed_carrier".to_owned())?,
+        ),
     ))
 }
 
@@ -1996,7 +2044,39 @@ impl ClientResourceExecutor for InstalledClientResourceExecutor {
         &mut self,
         request: ClientExternalContractRequest,
     ) -> Result<RuntimeValue, String> {
-        run_installed_external_contract(&self.active, &request)
+        let (Some(kernel), Some(session)) =
+            (self.inspect_kernel.clone(), self.inspect_session.clone())
+        else {
+            return Err("inspect.runtime_unavailable".to_owned());
+        };
+        if self.cancellation.is_requested() {
+            return Err("inspect.cancelled".to_owned());
+        }
+        let active = self.active.clone();
+        let cancellation = self.cancellation.clone();
+        let result = thread::Builder::new()
+            .name("orna-inspect-render".to_owned())
+            .spawn(move || {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .map_err(|_| "inspect.runtime_unavailable".to_owned())?;
+                let result = runtime.block_on(run_installed_external_contract(
+                    &kernel, &session, &active, &request,
+                ));
+                if cancellation.is_requested() {
+                    Err("inspect.cancelled".to_owned())
+                } else {
+                    result
+                }
+            })
+            .map_err(|_| "inspect.runtime_unavailable".to_owned())?
+            .join()
+            .map_err(|_| "inspect.runtime_unavailable".to_owned())?;
+        if self.cancellation.is_requested() {
+            return Err("inspect.cancelled".to_owned());
+        }
+        result
     }
 
     fn execute(&mut self, request: ClientResourceRequest) -> ClientResourceCompletion {
