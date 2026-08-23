@@ -453,6 +453,47 @@ async fn source_apply_audit_rejects_a_mismatched_revision_pair() -> TestResult<(
 }
 #[tokio::test]
 #[ignore = "requires the Compose PostgreSQL development service"]
+async fn source_apply_audit_rejects_a_wrong_principal() -> TestResult<()> {
+    with_test_database(|database| async move {
+        let kernel = kernel(&database)?;
+        kernel.bootstrap().await?;
+        let base = kernel.recover().await?;
+        let candidate = candidate(BASIC_SOURCE, &base)?;
+        kernel.apply_source_apply(&candidate).await?;
+
+        let session = database.open().await?;
+        let wrong_principal = vec![0_u8; 16];
+        let error = session
+            .client()
+            .execute(
+                "UPDATE _orna_kernel.security_audit_events
+                 SET session_principal_id = $1
+                 WHERE event_kind = 'source_apply'",
+                &[&wrong_principal],
+            )
+            .await
+            .expect_err("source apply audit row with a wrong principal must be rejected");
+        session.shutdown().await?;
+
+        let database_error = error
+            .as_db_error()
+            .ok_or_else(|| {
+                failure(format!(
+                    "wrong-principal update was not a database error: {error}"
+                ))
+            })?;
+        require(
+            database_error.code().code() == "23514"
+                && database_error.constraint()
+                    == Some("security_audit_events_source_apply_principal_check"),
+            "wrong-principal source apply update did not fail its principal CHECK constraint",
+        )
+    })
+    .await
+}
+
+#[tokio::test]
+#[ignore = "requires the Compose PostgreSQL development service"]
 async fn rejects_a_version_two_candidate_before_any_apply_write() -> TestResult<()> {
     with_test_database(|database| async move {
         let kernel = kernel(&database)?;
