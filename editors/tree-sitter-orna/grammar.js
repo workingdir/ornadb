@@ -306,7 +306,7 @@ module.exports = grammar({
             _client_function_body: ($) =>
                 choice(
                     $.client_expression_body,
-                    $.procedural_body,
+                    $.client_procedural_body,
                     $.client_return_body,
                 ),
 
@@ -315,6 +315,79 @@ module.exports = grammar({
 
             client_return_body: ($) =>
                 seq($.kw_return, field('expression', $.client_expression)),
+
+            // CLIENT procedural blocks deliberately use a closed statement
+            // surface instead of SERVER's generic procedural_body. A state
+            // block has one or more STATE declarations, then BEGIN and exactly
+            // one RETURN. A no-STATE block may start with typed LET locals and
+            // has only LET or assignment statements before exactly one RETURN.
+            client_procedural_body: ($) =>
+                choice($.client_state_body, $.client_no_state_body),
+
+            client_state_body: ($) =>
+                seq(
+                    $.kw_is,
+                    repeat1($.client_state_declaration),
+                    $.kw_begin,
+                    $.client_return_statement,
+                    $.kw_end,
+                ),
+
+            client_no_state_body: ($) =>
+                seq(
+                    $.kw_is,
+                    repeat($.client_local_declaration),
+                    $.kw_begin,
+                    repeat($.client_procedural_statement),
+                    $.client_return_statement,
+                    $.kw_end,
+                ),
+
+            client_state_declaration: ($) =>
+                seq(
+                    $.kw_state,
+                    field('name', $._name),
+                    field('type', $.type_spec),
+                    optional(seq($.kw_scope, choice($.kw_local, $.kw_session, $.kw_user))),
+                    optional(seq($.kw_default, field('default', choice($.kw_null, $.client_expression)))),
+                    $.semicolon,
+                ),
+
+            // Pre-BEGIN CLIENT locals require an explicit type and := value.
+            client_local_declaration: ($) =>
+                seq(
+                    $.kw_let,
+                    field('name', $._name),
+                    field('type', $.type_spec),
+                    $.assignment_operator,
+                    field('value', $.client_expression),
+                    $.semicolon,
+                ),
+
+            client_procedural_statement: ($) =>
+                choice($.client_let_statement, $.client_assignment_statement),
+
+            // Post-BEGIN LET may omit its type, unlike a pre-BEGIN local.
+            client_let_statement: ($) =>
+                seq(
+                    $.kw_let,
+                    field('name', $._name),
+                    optional(field('type', $.type_spec)),
+                    $.assignment_operator,
+                    field('value', $.client_expression),
+                    $.semicolon,
+                ),
+
+            client_assignment_statement: ($) =>
+                seq(
+                    field('target', $._name),
+                    $.assignment_operator,
+                    field('value', $.client_expression),
+                    $.semicolon,
+                ),
+
+            client_return_statement: ($) =>
+                seq($.kw_return, optional(field('expression', $.client_expression)), $.semicolon),
 
             client_expression: ($) =>
                 prec.left(
