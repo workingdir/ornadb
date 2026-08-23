@@ -1180,6 +1180,7 @@ fn checked_type_use_kind_tag(kind: crate::CheckedTypeUseKind) -> &'static str {
     match kind {
         crate::CheckedTypeUseKind::Field { .. } => "field",
         crate::CheckedTypeUseKind::Parameter { .. } => "parameter",
+        crate::CheckedTypeUseKind::State { .. } => "state",
         crate::CheckedTypeUseKind::Return { .. } => "return",
         crate::CheckedTypeUseKind::Expression { .. } => "expression",
         crate::CheckedTypeUseKind::Result { .. } => "result",
@@ -1602,6 +1603,7 @@ fn declaration_type_evidence(
 fn signature_owner(kind: crate::CheckedTypeUseKind) -> Option<CheckedFunctionId> {
     match kind {
         crate::CheckedTypeUseKind::Field { .. }
+        | crate::CheckedTypeUseKind::State { .. }
         | crate::CheckedTypeUseKind::Expression { .. }
         | crate::CheckedTypeUseKind::Result { .. } => None,
         crate::CheckedTypeUseKind::Parameter { owner, .. }
@@ -1921,6 +1923,7 @@ fn is_declaration_kind(kind: crate::CheckedTypeUseKind) -> bool {
     match kind {
         crate::CheckedTypeUseKind::Field { .. }
         | crate::CheckedTypeUseKind::Parameter { .. }
+        | crate::CheckedTypeUseKind::State { .. }
         | crate::CheckedTypeUseKind::Return { .. } => true,
         crate::CheckedTypeUseKind::Expression { .. } | crate::CheckedTypeUseKind::Result { .. } => {
             false
@@ -1967,6 +1970,7 @@ fn type_use_function(kind: crate::CheckedTypeUseKind) -> Option<CheckedFunctionI
         crate::CheckedTypeUseKind::Field { .. } => None,
         crate::CheckedTypeUseKind::Parameter { owner, .. }
         | crate::CheckedTypeUseKind::Return { owner, .. }
+        | crate::CheckedTypeUseKind::State { owner, .. }
         | crate::CheckedTypeUseKind::Expression { owner, .. }
         | crate::CheckedTypeUseKind::Result { owner, .. } => Some(owner),
     }
@@ -4254,7 +4258,18 @@ fn standard_checked_locations<'a>(
                 }
                 client_expression_locations(return_expression, &mut locations);
             }
-            CheckedClientFunctionBody::StateBlock { .. } => {}
+            CheckedClientFunctionBody::StateBlock {
+                states,
+                return_expression,
+            } => {
+                for state in states {
+                    locations.push(state.location());
+                    if let CheckedStateDefault::Expression(expression) = state.default() {
+                        client_expression_locations(expression, &mut locations);
+                    }
+                }
+                client_expression_locations(return_expression, &mut locations);
+            }
             #[cfg(test)]
             CheckedClientFunctionBody::Unsupported => {}
         }
@@ -5732,6 +5747,36 @@ fn client_expression_contains_action(expression: &CheckedClientExpression) -> bo
     }
 }
 
+fn client_expression_contains_inspect(expression: &CheckedClientExpression) -> bool {
+    match expression {
+        CheckedClientExpression::Inspect { .. } => true,
+        CheckedClientExpression::Await { expression, .. } => {
+            client_expression_contains_inspect(expression)
+        }
+        CheckedClientExpression::Call { arguments, .. } => arguments
+            .iter()
+            .any(|(_, value)| client_expression_contains_inspect(value)),
+        CheckedClientExpression::Resource { operation } => operation
+            .arguments()
+            .iter()
+            .any(|(_, value)| client_expression_contains_inspect(value)),
+        CheckedClientExpression::Action { operation } => operation
+            .arguments()
+            .iter()
+            .any(|(_, value)| client_expression_contains_inspect(value)),
+        CheckedClientExpression::Concat { left, right, .. } => {
+            client_expression_contains_inspect(left)
+                || client_expression_contains_inspect(right)
+        }
+        CheckedClientExpression::String { .. }
+        | CheckedClientExpression::Integer { .. }
+        | CheckedClientExpression::Boolean { .. }
+        | CheckedClientExpression::ParameterRead { .. }
+        | CheckedClientExpression::LocalRead { .. }
+        | CheckedClientExpression::FieldPath { .. } => false,
+    }
+}
+
 fn client_expression_contains_resource(expression: &CheckedClientExpression) -> bool {
     match expression {
         CheckedClientExpression::Await { .. }
@@ -6226,6 +6271,16 @@ impl<'a> CandidateBuilder<'a> {
             for checked in self.checked.server_functions() {
                 self.build_server_function(checked, object_types, enum_types, record_value_types)?;
             }
+            if self.checked.client_functions().iter().any(|function| {
+                matches!(
+                    function.body(),
+                    CheckedClientFunctionBody::StateBlock { states, .. } if !states.is_empty()
+                )
+            }) {
+                return Err(PrepareError::InvalidCheckedBundle {
+                    reason: "checked CLIENT state declarations require standard-backed preparation",
+                });
+            }
             return Ok(());
         };
 
@@ -6479,6 +6534,17 @@ impl<'a> CandidateBuilder<'a> {
     }
 
     fn build_client_function(&mut self, validated: &ValidatedClient) -> Result<(), PrepareError> {
+        if matches!(&self.mode, PreparationMode::LegacyV1)
+            && matches!(
+                &validated.body,
+                ValidatedClientBody::StateBlock { states, .. } if !states.is_empty()
+            )
+        {
+            return Err(PrepareError::InvalidCheckedBundle {
+                reason: "checked CLIENT state declarations require standard-backed preparation",
+            });
+        }
+
         let function_id = self.identities.function(validated.id)?;
         let initial_revision = self.initial_function_revision(validated.id, function_id)?;
         let initial_definition = self.client_function_definition(
@@ -6527,6 +6593,19 @@ impl<'a> CandidateBuilder<'a> {
         projection: CandidateTypeProjection,
     ) -> Result<FunctionDefinition, PrepareError> {
         let return_type = self.client_return_type(validated, consume_evidence, projection)?;
+        if let ValidatedClientBody::StateBlock { states, .. } = &validated.body {
+            for (ordinal, state) in states.iter().enumerate() {
+                let _ = self.declaration_type(
+                    state.semantic_type(),
+                    crate::CheckedTypeUseKind::State {
+                        owner: validated.id,
+                        ordinal: ordinal as u32,
+                    },
+                    consume_evidence,
+                    projection,
+                )?;
+            }
+        }
         let return_type = match validated.return_shape {
             CheckedClientReturnShape::Single => FunctionReturn::Single(return_type),
             CheckedClientReturnShape::Stream => FunctionReturn::Stream(return_type),
@@ -6724,6 +6803,7 @@ impl<'a> CandidateBuilder<'a> {
             } => {
                 let contains_action = client_expression_contains_action(return_expression);
                 let contains_resource = client_expression_contains_resource(return_expression);
+                let contains_inspect = client_expression_contains_inspect(return_expression);
                 let expression = self.client_expression_node(return_expression)?;
                 if states.is_empty() {
                     if contains_action {
@@ -6776,10 +6856,23 @@ impl<'a> CandidateBuilder<'a> {
                             reason: "checked CLIENT action is only supported in expression bodies",
                         });
                     }
+                    if contains_inspect {
+                        return Err(PrepareError::InvalidCheckedBundle {
+                            reason: "checked CLIENT state block cannot contain Inspector expressions",
+                        });
+                    }
                     let function_id = self.identities.function(validated.id)?;
                     let slots = states
                         .iter()
-                        .map(|state| self.client_state_slot(state, function_id))
+                        .enumerate()
+                        .map(|(ordinal, state)| {
+                            self.client_state_slot(
+                                state,
+                                function_id,
+                                validated.id,
+                                ordinal as u32,
+                            )
+                        })
                         .collect::<Result<Vec<_>, PrepareError>>()?;
                     let plan = StateClientPlan::new(expression, slots);
                     let payload =
@@ -6845,15 +6938,28 @@ impl<'a> CandidateBuilder<'a> {
         &self,
         state: &CheckedClientStateSlot,
         function_id: FunctionId,
+        owner: CheckedFunctionId,
+        ordinal: u32,
     ) -> Result<StateSlot, PrepareError> {
+        let expected_state_slot_id = durable_state_slot_id(function_id, state.name());
         let state_slot_id = match state.id() {
-            crate::resolver::CheckedStateSlotId::Existing(id) => id,
-            crate::resolver::CheckedStateSlotId::Provisional(_) => {
-                durable_state_slot_id(function_id, state.name())
+            crate::resolver::CheckedStateSlotId::Existing(id) if id == expected_state_slot_id => id,
+            crate::resolver::CheckedStateSlotId::Existing(_) => {
+                return Err(PrepareError::InvalidCheckedBundle {
+                    reason: "checked CLIENT state slot identity does not match its function and name",
+                });
             }
+            crate::resolver::CheckedStateSlotId::Provisional(_) => expected_state_slot_id,
         };
-        let type_id = state
-            .standard_value_type()
+        let resolved_type = self.declaration_type(
+            state.semantic_type(),
+            crate::CheckedTypeUseKind::State { owner, ordinal },
+            false,
+            CandidateTypeProjection::Durable,
+        )?;
+        let type_id = resolved_type
+            .value_type()
+            .or_else(|| state.standard_value_type())
             .or_else(|| match state.semantic_type() {
                 SemanticType::Named(id) | SemanticType::Reference { target: id } => {
                     self.identities.type_id(id).ok()
@@ -6872,6 +6978,11 @@ impl<'a> CandidateBuilder<'a> {
             CheckedStateDefault::Unset => StateDefault::Unset,
             CheckedStateDefault::Null => StateDefault::Null,
             CheckedStateDefault::Expression(expression) => {
+                if client_expression_contains_inspect(expression) {
+                    return Err(PrepareError::InvalidCheckedBundle {
+                        reason: "checked CLIENT state default cannot contain Inspector expressions",
+                    });
+                }
                 StateDefault::Expression(self.client_expression_node(expression)?)
             }
         };
@@ -13467,6 +13578,143 @@ mod tests {
             plan.expression(),
             &ClientExpressionNode::Boolean { value: true },
         );
+    }
+
+    #[test]
+    fn rejects_legacy_client_state_plan_without_standard_type_identity() {
+        let active = empty_active();
+        let source = "CREATE SCHEMA examples; \
+            CREATE CLIENT FUNCTION examples.state() RETURNS BOOLEAN IS \
+            STATE flag BOOLEAN DEFAULT TRUE; \
+            BEGIN RETURN TRUE; END;";
+        let report = checked_report(source, active.catalogue());
+        assert!(
+            report.diagnostics().is_empty(),
+            "{:?}",
+            report.diagnostics()
+        );
+
+        let result = prepare(&report, active.pair(), &active);
+        assert!(
+            matches!(
+                result,
+                Err(PrepareError::InvalidCheckedBundle { reason })
+                    if reason == "checked CLIENT state declarations require standard-backed preparation"
+            ),
+            "result: {result:?}"
+        );
+    }
+
+
+    #[test]
+    fn standard_client_state_plan_uses_resolved_slot_type_and_default() {
+        let verified = invocation_carrier_standard();
+        let standard = check_standard_library_source(&verified).unwrap();
+        let active = empty_standard_application_active(&verified);
+        let context =
+            StandardApplicationCheckContext::try_new(active.catalogue(), &standard).unwrap();
+        let source = "CREATE SCHEMA examples; \
+            CREATE CLIENT FUNCTION examples.ready() RETURNS BOOLEAN IS \
+            STATE flag BOOLEAN DEFAULT TRUE; \
+            STATE session_flag BOOLEAN SCOPE SESSION DEFAULT NULL; \
+            STATE user_flag BOOLEAN SCOPE USER; \
+            BEGIN RETURN TRUE; END;";
+        let bundle = SourceBundle::new([SourceUnit::new("application.orna", source)]).unwrap();
+        let report = check_standard_application(&bundle, &context);
+        assert!(
+            report.diagnostics().is_empty(),
+            "{:?}",
+            report.diagnostics()
+        );
+
+        let prepared = prepare_standard_application(&report, active.pair(), &active).unwrap();
+        let revision = &prepared.new_function_revisions()[0];
+        assert_eq!(revision.artifact().version(), CLIENT_PLAN_STATE_VERSION);
+        let plan = StateClientPlan::decode(revision.artifact().payload()).unwrap();
+        assert_eq!(
+            plan.expression(),
+            &ClientExpressionNode::Boolean { value: true }
+        );
+        assert_eq!(plan.slots().len(), 3);
+        let function_id = prepared.candidate().functions()[0].id();
+        let flag = &plan.slots()[0];
+        assert_eq!(
+            flag.state_slot_id(),
+            durable_state_slot_id(function_id, "flag")
+        );
+        assert_eq!(flag.type_id(), TypeId::from_bytes([3; 16]));
+        assert_eq!(flag.scope(), StateScope::Local);
+        assert_eq!(
+            flag.default(),
+            &StateDefault::Expression(ClientExpressionNode::Boolean { value: true })
+        );
+        let session_flag = &plan.slots()[1];
+        assert_eq!(
+            session_flag.state_slot_id(),
+            durable_state_slot_id(function_id, "session_flag")
+        );
+        assert_eq!(session_flag.type_id(), TypeId::from_bytes([3; 16]));
+        assert_eq!(session_flag.scope(), StateScope::Session);
+        assert_eq!(session_flag.default(), &StateDefault::Null);
+        let user_flag = &plan.slots()[2];
+        assert_eq!(
+            user_flag.state_slot_id(),
+            durable_state_slot_id(function_id, "user_flag")
+        );
+        assert_eq!(user_flag.type_id(), TypeId::from_bytes([3; 16]));
+        assert_eq!(user_flag.scope(), StateScope::User);
+        assert_eq!(user_flag.default(), &StateDefault::Unset);
+    }
+
+    #[test]
+    fn standard_client_state_declaration_evidence_rejects_tampered_owner_or_ordinal() {
+        let verified = invocation_carrier_standard();
+        let standard = check_standard_library_source(&verified).unwrap();
+        let active = empty_standard_application_active(&verified);
+        let context =
+            StandardApplicationCheckContext::try_new(active.catalogue(), &standard).unwrap();
+        let source = "CREATE SCHEMA examples; \
+            CREATE CLIENT FUNCTION examples.ready() RETURNS BOOLEAN IS \
+            STATE flag BOOLEAN DEFAULT TRUE; \
+            BEGIN RETURN TRUE; END;";
+        let bundle = SourceBundle::new([SourceUnit::new("application.orna", source)]).unwrap();
+        let report = check_standard_application(&bundle, &context);
+        assert!(report.diagnostics().is_empty(), "{:?}", report.diagnostics());
+        let state_index = report
+            .checked_bundle()
+            .unwrap()
+            .uses()
+            .iter()
+            .position(|type_use| {
+                matches!(type_use.kind(), crate::CheckedTypeUseKind::State { .. })
+            })
+            .unwrap();
+        let state_kind = report.checked_bundle().unwrap().uses()[state_index].kind();
+        let crate::CheckedTypeUseKind::State { owner, ordinal } = state_kind else {
+            unreachable!();
+        };
+
+        for tampered_kind in [
+            crate::CheckedTypeUseKind::State {
+                owner: crate::CheckedFunctionId::Existing(FunctionId::from_bytes([0xf1; 16])),
+                ordinal,
+            },
+            crate::CheckedTypeUseKind::State {
+                owner,
+                ordinal: ordinal + 1,
+            },
+        ] {
+            let mut tampered = report.clone();
+            assert!(tampered.replace_type_use_kind_for_test(state_index, tampered_kind));
+            let error = prepare_standard_application(&tampered, active.pair(), &active)
+                .expect_err("tampered state declaration evidence must fail closed");
+            assert!(matches!(
+                error,
+                PrepareStandardApplicationError::DeclarationTypeEvidenceMismatch {
+                    kind: crate::CheckedTypeUseKind::State { .. },
+                }
+            ));
+        }
     }
 
     #[test]
