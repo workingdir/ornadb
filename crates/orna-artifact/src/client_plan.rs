@@ -1232,11 +1232,13 @@ impl ExpressionClientPlan {
 
     /// Encodes this plan into its exact version-3 or version-9 bytes.
     pub fn encode(&self) -> Result<Vec<u8>, ClientPlanError> {
+        // Validate before format detection so an untrusted tree cannot recurse
+        // past the bounded expression depth or node count.
+        validate_external_contract_placement(&self.expression, true)?;
         let version = self.format_version();
-        validate_external_contract_placement(
-            &self.expression,
-            version == EXPRESSION_FORMAT_VERSION,
-        )?;
+        if version == INSPECT_FORMAT_VERSION {
+            validate_external_contract_placement(&self.expression, false)?;
+        }
         let mut bytes = Vec::new();
         bytes.extend_from_slice(&MAGIC);
         bytes.extend_from_slice(&version.to_be_bytes());
