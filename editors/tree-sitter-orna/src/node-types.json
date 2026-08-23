@@ -3590,6 +3590,32 @@
     }
   },
   {
+    "type": "client_await_expression",
+    "named": true,
+    "fields": {
+      "expression": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "client_expression",
+            "named": true
+          }
+        ]
+      }
+    },
+    "children": {
+      "multiple": false,
+      "required": true,
+      "types": [
+        {
+          "type": "kw_await",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
     "type": "client_call_callee",
     "named": true,
     "fields": {},
@@ -4776,6 +4802,10 @@
       "types": [
         {
           "type": "boolean_literal",
+          "named": true
+        },
+        {
+          "type": "client_await_expression",
           "named": true
         },
         {

@@ -1419,6 +1419,10 @@
         },
         {
           "type": "SYMBOL",
+          "name": "client_await_expression"
+        },
+        {
+          "type": "SYMBOL",
           "name": "string_literal"
         },
         {
@@ -1436,6 +1440,23 @@
         {
           "type": "SYMBOL",
           "name": "client_parameter_read"
+        }
+      ]
+    },
+    "client_await_expression": {
+      "type": "SEQ",
+      "members": [
+        {
+          "type": "SYMBOL",
+          "name": "kw_await"
+        },
+        {
+          "type": "FIELD",
+          "name": "expression",
+          "content": {
+            "type": "SYMBOL",
+            "name": "client_expression"
+          }
         }
       ]
     },
