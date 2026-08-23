@@ -13437,6 +13437,36 @@ fn checks_accepted_scalar_resource_fixture_offline() -> TestResult<()> {
         "accepted scalar resource fixture is missing scalar_fixture.call",
     )
 }
+
+#[test]
+fn checks_accepted_stream_resource_fixture_offline() -> TestResult<()> {
+    let snapshot = verify_standard_library_v2_snapshot(retained_standard_library_v2_snapshot()?)?;
+    let standard = check_standard_library_source(&snapshot)?;
+    let catalogue = CatalogueSnapshot::new(
+        CatalogueRevisionId::from_bytes([0; 16]),
+        Vec::new(),
+        Vec::new(),
+    )?;
+    let context = StandardApplicationCheckContext::try_new(&catalogue, &standard)?;
+    let source = SourceBundle::new([SourceUnit::new(
+        "fixtures/stream_resource_dogfood.orna",
+        include_str!("fixtures/stream_resource_dogfood.orna"),
+    )])?;
+    let report = check_standard_application(&source, &context);
+    require(
+        report.diagnostics().is_empty(),
+        "accepted stream resource fixture did not check",
+    )?;
+    let checked = report
+        .checked_bundle()
+        .ok_or_else(|| failure("accepted stream resource fixture produced no checked bundle"))?;
+    require(
+        checked
+            .client_functions()
+            .any(|function| function.name().parts() == ["stream_fixture", "read"]),
+        "accepted stream resource fixture is missing stream_fixture.read",
+    )
+}
 /// Proves one accepted application SERVER function survives the user-facing
 /// source/check/install/grant/invoke path and renders its typed result.
 #[tokio::test]
