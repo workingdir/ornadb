@@ -835,6 +835,8 @@ pub enum SecurityAuditKind {
     /// An authenticated session performed or attempted a security-admin
     /// mutation.
     SecurityAdmin,
+    /// An installed host applied a prepared source revision.
+    SourceApply,
 }
 
 /// The closed USER state operation family recorded in protected audit.
@@ -952,10 +954,14 @@ enum SecurityAuditDecisionShape {
         target: FunctionId,
         reason: PrivilegeDenial,
     },
+    SourceApplyAllowed {
+        session_principal: PrincipalId,
+        candidate: RevisionPair,
+    },
 }
 
-/// An immutable authentication, `EXECUTE`, CLIENT capability, or USER state
-/// decision prepared for auditing.
+/// An immutable authentication, `EXECUTE`, CLIENT capability, USER state,
+/// or installed source-apply decision prepared for auditing.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SecurityAuditDecision(SecurityAuditDecisionShape);
 
@@ -1251,6 +1257,22 @@ impl SecurityAuditDecision {
         })
     }
 
+    /// Records an allowed installed source apply from a trusted session.
+    pub fn source_apply_allowed(session: &AuthenticatedSession, candidate: RevisionPair) -> Self {
+        Self::recover_source_apply_allowed(session.principal, candidate)
+    }
+
+    /// Recovers an allowed installed source apply from protected storage.
+    pub const fn recover_source_apply_allowed(
+        session_principal: PrincipalId,
+        candidate: RevisionPair,
+    ) -> Self {
+        Self(SecurityAuditDecisionShape::SourceApplyAllowed {
+            session_principal,
+            candidate,
+        })
+    }
+
     /// Returns the USER state operation when this decision records one.
     pub const fn user_state_operation(&self) -> Option<UserStateAuditOperation> {
         match self.0 {
@@ -1311,6 +1333,15 @@ impl SecurityAuditDecision {
         }
     }
 
+    /// Returns the candidate revision when this decision records an installed
+    /// source apply.
+    pub const fn source_apply_candidate(&self) -> Option<RevisionPair> {
+        match self.0 {
+            SecurityAuditDecisionShape::SourceApplyAllowed { candidate, .. } => Some(candidate),
+            _ => None,
+        }
+    }
+
     /// Returns the sealed target identity when this decision records
     /// security admin.
     pub const fn security_admin_target(&self) -> Option<FunctionId> {
@@ -1348,6 +1379,7 @@ impl SecurityAuditDecision {
             | SecurityAuditDecisionShape::SecurityAdminDenied { .. } => {
                 SecurityAuditKind::SecurityAdmin
             }
+            SecurityAuditDecisionShape::SourceApplyAllowed { .. } => SecurityAuditKind::SourceApply,
         }
     }
 
@@ -1359,7 +1391,8 @@ impl SecurityAuditDecision {
             | SecurityAuditDecisionShape::CapabilityAllowed { .. }
             | SecurityAuditDecisionShape::UserStateAllowed { .. }
             | SecurityAuditDecisionShape::InspectAllowed { .. }
-            | SecurityAuditDecisionShape::SecurityAdminAllowed { .. } => {
+            | SecurityAuditDecisionShape::SecurityAdminAllowed { .. }
+            | SecurityAuditDecisionShape::SourceApplyAllowed { .. } => {
                 SecurityAuditOutcome::Allowed
             }
             SecurityAuditDecisionShape::AuthenticationDenied { .. }
@@ -1401,6 +1434,9 @@ impl SecurityAuditDecision {
                 session_principal, ..
             }
             | SecurityAuditDecisionShape::SecurityAdminDenied {
+                session_principal, ..
+            }
+            | SecurityAuditDecisionShape::SourceApplyAllowed {
                 session_principal, ..
             } => Some(session_principal),
             SecurityAuditDecisionShape::AuthenticationDenied {
@@ -4219,6 +4255,18 @@ mod tests {
             denied.security_admin_target(),
             Some(SYS_SECURITY_GRANT_PRIVILEGE_FUNCTION_ID)
         );
+    }
+
+    #[test]
+    fn source_apply_audit_records_only_trusted_session_and_candidate() {
+        let decision = SecurityAuditDecision::recover_source_apply_allowed(USER, OTHER_REVISION);
+
+        assert_eq!(decision.kind(), SecurityAuditKind::SourceApply);
+        assert_eq!(decision.outcome(), SecurityAuditOutcome::Allowed);
+        assert_eq!(decision.session_principal(), Some(USER));
+        assert_eq!(decision.source_apply_candidate(), Some(OTHER_REVISION));
+        assert_eq!(decision.target(), None);
+        assert_eq!(decision.denial(), None);
     }
 
     #[test]
