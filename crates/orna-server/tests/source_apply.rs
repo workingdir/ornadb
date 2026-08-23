@@ -283,6 +283,27 @@ fn usage_shape_failures_all_fail_closed_with_exact_usage() {
     let directory = TestDirectory::new("usage").expect("scratch directory");
     let before = snapshot(directory.path()).expect("snapshot empty scratch");
     let cases = [
+        vec![
+            OsString::from("--runtime"),
+            OsString::from("tty"),
+            OsString::from("source"),
+            OsString::from("check"),
+            OsString::from("app.orna"),
+        ],
+        vec![
+            OsString::from("--runtime"),
+            OsString::from("tty"),
+            OsString::from("source"),
+            OsString::from("apply"),
+            OsString::from("app.orna"),
+        ],
+        vec![
+            OsString::from("--runtime"),
+            OsString::from("tty"),
+            OsString::from("source"),
+            OsString::from("diff"),
+            OsString::from("app.orna"),
+        ],
         vec![],
         vec![OsString::new()],
         vec![OsString::from("source")],
