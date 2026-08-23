@@ -1206,8 +1206,9 @@ impl<'source> Parser<'source> {
     /// END
     /// ```
     ///
-    /// The subset is deliberately closed: only `STATE` declarations or `LET`
-    /// local bindings may precede `BEGIN`; after `BEGIN`, `LET` and simple-name
+    /// The subset is deliberately closed: a state-bearing block admits only
+    /// `STATE` declarations before `BEGIN`, while a no-state block may use
+    /// `LET` local bindings there; after `BEGIN`, `LET` and simple-name
     /// assignments are retained before exactly one `RETURN`. Every other
     /// procedural statement is rejected with a closed diagnostic. On failure
     /// the caller recovers to the statement terminator.
@@ -1226,11 +1227,25 @@ impl<'source> Parser<'source> {
                     break;
                 }
                 if self.current().is_some_and(|token| token.is_word("STATE")) {
+                    if !locals.is_empty() {
+                        self.error_current(
+                            "ORNA0001",
+                            "CLIENT state blocks cannot contain pre-BEGIN LET locals",
+                        );
+                        return None;
+                    }
                     let state = self.parse_client_state_declaration()?;
                     states.push(state);
                     continue;
                 }
                 if self.current().is_some_and(|token| token.is_word("LET")) {
+                    if !states.is_empty() {
+                        self.error_current(
+                            "ORNA0001",
+                            "CLIENT state blocks cannot contain pre-BEGIN LET locals",
+                        );
+                        return None;
+                    }
                     let local = self.parse_client_local_binding()?;
                     locals.push(local);
                     continue;
@@ -1253,42 +1268,53 @@ impl<'source> Parser<'source> {
                 .iter()
                 .map(|local| local.name.clone())
                 .collect::<Vec<_>>();
-            loop {
-                self.skip_trivia();
-                if self.current().is_some_and(|token| token.is_word("RETURN")) {
-                    break;
-                }
-                let Some(token) = self.current() else {
+            if states.is_empty() {
+                loop {
+                    self.skip_trivia();
+                    if self.current().is_some_and(|token| token.is_word("RETURN")) {
+                        break;
+                    }
+                    let Some(token) = self.current() else {
+                        self.error_current(
+                            "ORNA0001",
+                            "CLIENT blocks require exactly one RETURN statement",
+                        );
+                        return None;
+                    };
+                    if token.is_word("LET") {
+                        let mut statement = self.parse_client_let_statement()?;
+                        statement.expression =
+                            rewrite_client_local_name_references(statement.expression, &local_names);
+                        local_names.push(statement.name.clone());
+                        statements.push(ClientProceduralStatement::Let(statement));
+                        continue;
+                    }
+                    if token.is_identifier()
+                        && self
+                            .peek_significant(1)
+                            .is_some_and(|next| next.text == ":")
+                    {
+                        let mut statement = self.parse_client_assignment_statement()?;
+                        statement.expression =
+                            rewrite_client_local_name_references(statement.expression, &local_names);
+                        statements.push(ClientProceduralStatement::Assignment(statement));
+                        continue;
+                    }
                     self.error_current(
                         "ORNA0001",
-                        "CLIENT blocks require exactly one RETURN statement",
+                        "CLIENT blocks accept only a single RETURN statement",
                     );
                     return None;
-                };
-                if token.is_word("LET") {
-                    let mut statement = self.parse_client_let_statement()?;
-                    statement.expression =
-                        rewrite_client_local_name_references(statement.expression, &local_names);
-                    local_names.push(statement.name.clone());
-                    statements.push(ClientProceduralStatement::Let(statement));
-                    continue;
                 }
-                if token.is_identifier()
-                    && self
-                        .peek_significant(1)
-                        .is_some_and(|next| next.text == ":")
-                {
-                    let mut statement = self.parse_client_assignment_statement()?;
-                    statement.expression =
-                        rewrite_client_local_name_references(statement.expression, &local_names);
-                    statements.push(ClientProceduralStatement::Assignment(statement));
-                    continue;
+            } else {
+                self.skip_trivia();
+                if !self.current().is_some_and(|token| token.is_word("RETURN")) {
+                    self.error_current(
+                        "ORNA0001",
+                        "CLIENT state blocks accept only a single RETURN statement",
+                    );
+                    return None;
                 }
-                self.error_current(
-                    "ORNA0001",
-                    "CLIENT blocks accept only a single RETURN statement",
-                );
-                return None;
             }
             let return_expression = self.parse_client_state_return()?;
             let return_expression = return_expression
