@@ -48,6 +48,47 @@ The canonical research plan remains useful as historical evidence, but this
 plan is the current implementation projection. Accepted ADRs and
 `../spec/docs/02-status-decisions.md` remain authoritative.
 
+## Evidence status (2026-08-24)
+
+- **Current validated focused evidence:** the `work/` checkout records the
+  protocol, sealed-server, LSP UTF-16, no-`STATE` dogfood, resource-span,
+  buffered-preflight, V3/V5 upgrade, same-revision replacement, selected-package
+  check, formatter, workspace, and editor-tooling commands listed below; each
+  returned success. Compose/Docker and clean-host gates remain pending.
+
+## Current validated focused evidence (`work/` checkout)
+
+- `cargo test -p orna-protocol sealed_event_batch_uses_event_tag_and_result_credit_lifecycle` — 1 test returned success.
+- `cargo test -p orna-server --lib sealed_` — 4 tests returned success.
+- `cargo test -p orna-lsp --test lsp_e2e serves_accepted_client_semantic_tokens_with_utf16_and_nested_ranges` — 1 test returned success after correcting the expected UTF-16 token range.
+- `cargo test -p orna-server --test standard_database checks_and_evaluates_accepted_client_local_assignment_fixture_offline` — 1 test returned success after correcting the fixture test's durable function-identity conversion.
+- `cargo test -p orna-compiler accepts_scalar_resource_assignment_await_with_exact_spans_and_call_provenance` — 1 test returned success.
+- `cargo test -p orna-compiler discovers_stream_resource_target_with_resolved_element_type` — 1 test returned success.
+- `cargo test -p orna-server buffered_sealed_cancel_prevents_acceptance_for_all_preflight_outcomes` — 1 test returned success.
+- `cargo test -p orna-standard prepares_the_v3_to_v4_standard_upgrade_from_an_empty_v3_active_revision` — 1 test returned success.
+- `cargo test -p orna-standard prepares_the_v5_to_v6_standard_upgrade_from_an_empty_v5_active_revision` — 1 test returned success.
+- `cargo test -p orna-client same_revision_terminal_replacement_persists_when_new_evaluation_fails` — 1 test returned success.
+- `cargo test -p orna-client same_revision_terminal_replacement_persists_when_later_expression_fails` — 1 test returned success.
+- `cargo check -p orna-client -p orna-compiler -p orna-lsp -p orna-postgres -p orna-protocol -p orna-server -p orna-standard -p orna-syntax` — returned success with existing dead-code warnings.
+- `cargo fmt --all -- --check` — returned success.
+- `cargo test --workspace --all-targets` — 2518 tests passed, 0 failed, 233 ignored across 40 suites, after correcting a private `InspectPrivilege` import exposed by the initial compile.
+- `just editor-tooling-check` — all subchecks returned success, including 14 LSP protocol tests and the 31-case tree-sitter corpus.
+
+The initial LSP expectation mismatch, CLIENT fixture compile mismatch, and
+workspace private-import compile failure were development corrections, not gate
+failures. Compose/Docker and clean-host results remain pending.
+- **Implementation present, proof pending:** remaining nested source work includes
+  cancellation identity/ownership, the companion raw-preflight ordering check,
+  SecurityAdmin privilege filtering, raw sealed-invocation terminal/cancellation
+  handling, ordinary CLIENT compiler fixtures, and Compose/clean-host proof.
+  The focused, workspace, and editor-tooling results listed above are current.
+- **Historical evidence (not current validation):** the post-audit reports and
+  nested commit IDs below are retained for provenance only. The outer checkout
+  has only `master` ref `ff31b4e`; nested work commit IDs are not verifiable
+  as current evidence.
+
+
+
 ## Language and standard-library dogfooding
 
 The answer to the current concern is yes: future work must make Orna
@@ -88,7 +129,10 @@ This work has three separate goals:
 This is a product requirement, not optional documentation polish. A fully
 featured language needs source users can read, modify, check, and run.
 
-## Post-audit status
+## Historical post-audit record (not current validation)
+
+The entries in this section preserve earlier implementation and evidence
+reports. They do not establish current validation for the outer checkout.
 
 The 2026-08-22 locked-scope audit found no missing accepted executable slice.
 It did find and close evidence and tooling defects without broadening the
@@ -145,7 +189,7 @@ contract:
 - commit `64d9603` covers both retained legacy Inspector public error-code
   aliases; the accepted Inspector boundary still has no populated projection
   or graphical-runtime claim.
-- Current CLIENT lifecycle evidence includes bounded stream queue rollback and
+- The prior report listed CLIENT lifecycle evidence including bounded stream queue rollback and
   dequeue capacity release (`crates/orna-client/src/lib.rs::client_stream_queue_overflow_preserves_existing_batches`
   and `crates/orna-client/src/lib.rs::client_stream_queue_dequeue_releases_capacity`),
   sequential terminal action re-trigger identity and repeated-pending rejection
@@ -158,20 +202,21 @@ contract:
   `nested_executor_rejects_mismatched_completion_identity`), and generation
   exhaustion preflight (`resource_invalidation_preflights_generation_before_releasing_request`).
   Commit `538769d` adds the corresponding client and installed raw/broker
-  transport ownership hardening. Focused client/server suites, workspace
-  compilation/tests, source-apply boundary tests, and editor tooling passed;
+  transport ownership hardening. The prior report listed focused client/server
+  suites, workspace compilation/tests, source-apply boundary tests, and editor
+  tooling as passing;
   detached transport restoration remains conditional on source reusability.
   Stream-action execution, Compose proofs, clean-host proof, and proposal-level
   runtime/Inspector/gateway surfaces remain deferred.
 
-The accepted slices have focused proof in the repository. The resource,
+The prior report described focused proof in the repository. The resource,
 transport, action, and Inspector slices have local parser/compiler/codec/
 carrier checks plus installed proof paths; the installed paths that exercise
 PostgreSQL are marked `#[ignore]` because they require the Compose PostgreSQL
 development service. No local Compose result is claimed. The source-apply
 audit, rollback, tamper, and retained-listing integration tests are likewise
-present but Compose-gated. Local evidence covers compilation, migration
-registry checks, codec checks, and focused in-memory validators only.
+present but Compose-gated. The prior report described compilation, migration registry checks, codec checks,
+and focused in-memory validators only.
 The commits above add local compiler, private-fixture, offline SERVER-dogfood,
 and CLIENT lifecycle evidence only; they do not upgrade any Compose or
 host-gated proof, or broaden the accepted boundary. No proposal-level
@@ -179,6 +224,71 @@ implementation should start without the contract gate below.
 The fresh network-disabled Debian 12 host proof and the same-major PostgreSQL
 predecessor transition remain separate blockers. No proposal-level
 implementation should start without the contract gate below.
+
+
+### Current implementation present, proof pending
+
+The current nested source contains the following proof work. Focused,
+workspace, and editor-tooling results recorded above are current; Compose/Docker
+and clean-host gates remain pending:
+
+- same-revision terminal replacement retention across staged CLIENT evaluator
+  errors (same_revision_terminal_replacement_persists_when_new_evaluation_fails
+  and same_revision_terminal_replacement_persists_when_later_expression_fails);
+  both focused checks are current; broader lifecycle proof remains pending;
+- cancellation identity and executor ownership checks (validate_owned_request
+  and the mismatched-identity lifecycle fixtures);
+- buffered raw CALL_CANCEL handling during preflight
+  (buffered_sealed_cancel_prevents_acceptance_for_all_preflight_outcomes and
+  buffered_cancel_precedes_first_finish_poll_but_finish_still_runs); the first
+  focused check is current and the companion check remains pending;
+- resource assignment and AWAIT source spans
+  (accepts_procedural_scalar_resource_local_await and
+  discovers_stream_resource_target_with_resolved_element_type); both focused
+  checks are current; broader compiler proof remains pending;
+- the accepted no-`STATE` CLIENT procedural local/assignment/`RETURN`
+  source-dogfood fixture at
+  `crates/orna-server/tests/fixtures/client_local_assignment_dogfood.orna`
+  with the offline check
+  `checks_and_evaluates_accepted_client_local_assignment_fixture_offline`;
+  its focused offline check and workspace validation are current; installed/Compose proof remains pending;
+- LSP UTF-16 position and semantic-token coverage, including
+  `orna-lsp/tests/lsp_e2e.rs::serves_accepted_client_semantic_tokens_with_utf16_and_nested_ranges`;
+  its focused check is current; the editor-tooling result is recorded above;
+- focused positive V3-pinned and V5-pinned standard-library upgrade checks:
+  `prepares_the_v3_to_v4_standard_upgrade_from_an_empty_v3_active_revision`
+  and `prepares_the_v5_to_v6_standard_upgrade_from_an_empty_v5_active_revision`;
+  both focused checks are current; installed/Compose proof remains pending;
+- SecurityAdmin privilege filtering for inactive principals and object-scoped
+  INSPECT requests (`security_admin_live.rs::prove_has_privilege_filters`);
+- raw sealed-invocation queued terminal/cancellation handling, including
+  `dispatch_completion_has_claimed_terminal` and the buffered cancellation
+  checks in `crates/orna-server/src/raw_socket.rs`;
+- trusted audit-recovery search-path establishment before loading audit rows;
+  implementation is present, but the direct recovery proof remains
+  Compose-gated and pending;
+- ordinary CLIENT call/REF-field compiler fixtures plus accepted resource,
+  action, and LSP/editor fixtures; resource and LSP/editor-tooling checks are
+  current, while ordinary-call compiler proof remains pending.
+
+Run the remaining lifecycle, raw-preflight, compiler, Compose/Docker, and
+clean-host checks before extending the current validated result.
+
+### Historical 2026-08-24 report (not current validation)
+
+A prior nested worktree report recorded workspace/package test counts, cargo
+check, and cargo fmt results, plus bounded ORNA-RESOURCE request identity,
+target-revision ordering, sealed InvokeEvents terminal precedence,
+executor-owned resource completion validation, StreamValues cancellation and
+abandon ordering, failed-abandon retention, nested ownership, zero action
+identities, redacted source-apply errors, and four source-apply integration
+tests. Those results were not rerun and cannot be verified from the outer
+checkout.
+
+Direct PostgreSQL recovery and installed source-apply audit remain Compose-gated;
+manual VSIX parity was not a tracked package gate or editor-runtime result.
+Production graphical runtimes, populated Inspector projections, and gateways
+remain pending behind their accepted contract boundaries.
 
 ## 2026-08-22 next contract checkpoint
 
@@ -431,9 +541,9 @@ then run the workspace and installed gates at the phase checkpoint.
 
 ## Phase 2: Maintain the headless ordinary CLIENT Inspector baseline
 
-ADRs 0080 and 0081 accept and current HEAD delivers the headless ordinary
-CLIENT Inspector v1 and generic standard render contract
-`std.inspect.render@1`. Focused local checks are present; the installed
+ADRs 0080 and 0081 accept the headless ordinary CLIENT Inspector v1 and
+generic standard render contract; the current source contains the implementation
+`std.inspect.render@1`. Focused local checks are present but unvalidated; the installed
 self-inspection/evaluator proofs remain Compose-gated and are not claimed as
 locally run.
 
@@ -446,10 +556,10 @@ accepted projection contract:
    freeze/resume, and the Compose-gated installed self-inspection proof path;
 4. add populated resource/UI rows only after the Phase 0.2 contract is accepted.
 
-The current local proof covers the accepted headless scope. The installed proof
-paths remain Compose-gated and must not be described as locally run, or as
-proof of a graphical runtime, populated resource/UI projections, or reflective
-gateways.
+The current source contains the accepted headless scope, but this checkout has
+no validated local result. Installed proof paths remain Compose-gated and must
+not be described as locally run, or as proof of a graphical runtime, populated
+resource/UI projections, or reflective gateways.
 
 ## Phase 3: Implement Studio and the first production UI runtime
 
