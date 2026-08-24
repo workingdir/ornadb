@@ -434,5 +434,5 @@ stop_server "${server_process}"
 [[ "$(cat "${manifest}")" == "${original_manifest}" ]] ||
     fail 'restart changed the committed instance manifest'
 
-printf '%s\n' '[clean-machine] one executable lifecycle passed'
+printf '%s\n' '[clean-machine] Docker isolation evidence passed; not Debian host proof'
 TEST

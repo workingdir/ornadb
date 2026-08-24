@@ -11,7 +11,12 @@ import shutil
 import subprocess
 import sys
 import tempfile
+try:
+    import tomllib
+except ModuleNotFoundError:
+    tomllib = None
 from typing import Sequence
+
 
 
 LOG_PREFIX = "[editor]"
@@ -217,6 +222,136 @@ def check_tree_sitter_package(tree_sitter_directory: Path, repository: Path) -> 
         return False
     return True
 
+def check_helix_configuration(configuration_path: Path, repository: Path) -> bool:
+    """Validate the checked-in Helix language, server, and grammar entries."""
+    if tomllib is None:
+        log(
+            "Helix configuration check unavailable: Python 3.11+ is required; "
+            "checked-in Helix TOML was not validated",
+            error=True,
+        )
+        return False
+    try:
+        with configuration_path.open("rb") as stream:
+            configuration = tomllib.load(stream)
+    except (OSError, tomllib.TOMLDecodeError) as exc:
+        log(f"invalid Helix configuration: {exc}", error=True)
+        return False
+
+    languages = configuration.get("language")
+    language_servers = configuration.get("language-server")
+    grammars = configuration.get("grammar")
+    if not isinstance(languages, list) or not isinstance(language_servers, list) or not isinstance(grammars, list):
+        log("Helix configuration does not contain the required table arrays", error=True)
+        return False
+
+    orna_language = next(
+        (entry for entry in languages if isinstance(entry, dict) and entry.get("name") == "orna"),
+        None,
+    )
+    if not isinstance(orna_language, dict):
+        log("Helix configuration does not define the orna language", error=True)
+        return False
+    file_types = orna_language.get("file-types")
+    language_server_names = orna_language.get("language-servers")
+    if (
+        orna_language.get("scope") != "source.orna"
+        or not isinstance(file_types, list)
+        or "orna" not in file_types
+    ):
+        log("Helix orna language entry has an invalid scope or file type", error=True)
+        return False
+    if not isinstance(language_server_names, list) or "orna-lsp" not in language_server_names:
+        log("Helix orna language does not register orna-lsp", error=True)
+        return False
+
+    orna_server = next(
+        (entry for entry in language_servers if isinstance(entry, dict) and entry.get("name") == "orna-lsp"),
+        None,
+    )
+    if not isinstance(orna_server, dict) or orna_server.get("command") != "orna-lsp":
+        log("Helix configuration has an invalid orna-lsp server entry", error=True)
+        return False
+
+    orna_grammar = next(
+        (entry for entry in grammars if isinstance(entry, dict) and entry.get("name") == "orna"),
+        None,
+    )
+    if not isinstance(orna_grammar, dict):
+        log("Helix configuration does not define the orna grammar", error=True)
+        return False
+    source = orna_grammar.get("source")
+    if not isinstance(source, dict) or source.get("path") != "editors/tree-sitter-orna":
+        log("Helix orna grammar does not point to editors/tree-sitter-orna", error=True)
+        return False
+
+    log(f"validated Helix configuration {display_path(configuration_path, repository)}")
+    return True
+
+
+def check_emacs_integration(
+    emacs: str | None,
+    integration_path: Path,
+    repository: Path,
+) -> bool | None:
+    """Load the checked-in Emacs mode when its optional runtime is available."""
+    if not integration_path.is_file():
+        log(
+            f"required Emacs integration is missing: {display_path(integration_path, repository)}",
+            error=True,
+        )
+        return False
+    if emacs is None:
+        log(
+            "Emacs batch load unavailable: emacs was not found on PATH; "
+            "checked-in Emacs integration was not runtime-verified",
+        )
+        return None
+
+    log("checking Emacs Eglot prerequisite")
+    eglot_result = run_command(
+        [
+            emacs,
+            "--batch",
+            "--quick",
+            "--eval",
+            "(if (require 'eglot nil t) (princ \"eglot-available\") (kill-emacs 2))",
+        ],
+        cwd=repository,
+        label="Emacs Eglot prerequisite",
+    )
+    if eglot_result is None or eglot_result.returncode != 0 or "eglot-available" not in eglot_result.stdout:
+        status = "could not start" if eglot_result is None else f"exited with status {eglot_result.returncode}"
+        log(
+            f"Emacs batch load unavailable ({status}): Eglot is not available; "
+            "checked-in Emacs integration was not runtime-verified",
+        )
+        return None
+
+    log("checking editors/emacs/orna-eglot.el with Emacs batch load")
+    result = run_command(
+        [
+            emacs,
+            "--batch",
+            "--quick",
+            "--load",
+            str(integration_path),
+            "--eval",
+            "(progn (unless (fboundp 'orna-mode) (error \"orna-mode is not defined\")) "
+            "(unless (fboundp 'orna-setup-eglot) (error \"orna-setup-eglot is not defined\")) "
+            "(princ \"orna-mode-loaded\"))",
+        ],
+        cwd=repository,
+        label="Emacs batch load",
+    )
+    if result is None or result.returncode != 0 or "orna-mode-loaded" not in result.stdout:
+        status = "could not start" if result is None else f"exited with status {result.returncode}"
+        log(f"Emacs batch load failed ({status})", error=True)
+        return False
+    log("Emacs batch load passed")
+    return True
+
+
 def check_zed_extension(
     cargo: str,
     zed_directory: Path,
@@ -266,6 +401,9 @@ def main() -> int:
     tree_sitter_directory = repository / "editors" / "tree-sitter-orna"
     zed_directory = repository / "editors" / "zed"
     spec_examples = repository.parent / "spec" / "examples"
+    helix_configuration = repository / "editors" / "helix" / "languages.toml"
+    emacs_integration = repository / "editors" / "emacs" / "orna-eglot.el"
+
 
     tree_sitter = shutil.which("tree-sitter")
     if tree_sitter is None:
@@ -280,11 +418,16 @@ def main() -> int:
     if node is None:
         log("missing prerequisite: node was not found on PATH", error=True)
         return 2
+    if tomllib is None:
+        log("missing prerequisite: Python 3.11+ is required for Helix TOML validation", error=True)
+        return 2
 
     cargo = shutil.which("cargo")
     if cargo is None:
         log("missing prerequisite: cargo was not found on PATH", error=True)
         return 2
+    emacs = shutil.which("emacs")
+
 
     if not tree_sitter_directory.is_dir():
         log(
@@ -301,6 +444,12 @@ def main() -> int:
             error=True,
         )
         return 1
+    if not check_helix_configuration(helix_configuration, repository):
+        return 1
+    emacs_check = check_emacs_integration(emacs, emacs_integration, repository)
+    if emacs_check is False:
+        return 1
+
 
     if not check_zed_extension(cargo, zed_directory, repository):
         return 1
@@ -431,8 +580,10 @@ def main() -> int:
         log(f"node --check failed ({status})", error=True)
         return 1
     log("node --check passed")
-
-    log("editor tooling gate passed")
+    if emacs_check is None:
+        log("editor tooling gate completed; optional Emacs runtime check was unavailable")
+    else:
+        log("editor tooling gate passed")
     return 0
 
 
