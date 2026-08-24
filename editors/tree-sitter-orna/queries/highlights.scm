@@ -22,7 +22,7 @@
     (kw_update) (kw_delete) (kw_inspect) (kw_is) (kw_begin) (kw_end) (kw_if)
     (kw_then) (kw_elsif) (kw_else) (kw_while) (kw_loop) (kw_for) (kw_in)
     (kw_let) (kw_const) (kw_state) (kw_scope) (kw_local) (kw_session)
-    (kw_default) (kw_not) (kw_null) (kw_unique) (kw_check) (kw_call)
+    (kw_default) (kw_not) (kw_null) (kw_unique) (kw_check) (kw_set) (kw_call)
     (kw_await) (kw_return) (kw_and) (kw_or) (kw_like) (kw_ilike) (kw_true)
     (kw_false) (kw_case) (kw_when) (kw_ref) (kw_list) (kw_set) (kw_map)
     (kw_stream) (kw_option) (kw_boolean) (kw_bool) (kw_integer) (kw_int)
