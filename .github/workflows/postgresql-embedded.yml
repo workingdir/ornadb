@@ -1,4 +1,4 @@
-name: PostgreSQL embedded lifecycle
+name: PostgreSQL embedded Docker-isolated build/verifier summary (not fresh native Debian 12 host proof for ADR 0019)
 
 on:
   push:
@@ -19,7 +19,7 @@ permissions:
 
 jobs:
   build:
-    name: Prove the embedded PostgreSQL lifecycle
+    name: Collect Docker-isolated embedded PostgreSQL build/verifier summary (not fresh native Debian 12 host proof for ADR 0019)
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
@@ -28,14 +28,14 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
           submodules: recursive
-      - name: Build and compare two isolated embedded lifecycles
+      - name: Build and compare two Docker-isolated embedded lifecycles; collect build/verifier summary (not fresh native Debian 12 host proof for ADR 0019)
         run: |
           make -C postgresql verify-lifecycle \
             TARGET_ROOT="${GITHUB_WORKSPACE}/target/postgresql-embedded-native"
-      - name: Upload embedded PostgreSQL lifecycle evidence and static inputs
+      - name: Upload Docker-isolated embedded PostgreSQL build/verifier summary and static inputs (not fresh native Debian 12 host proof for ADR 0019)
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: postgresql-embedded-lifecycle-evidence
+          name: postgresql-embedded-build-verifier-summary-docker-isolated-not-native-debian12-host-proof-adr0019
           path: target/postgresql-embedded-native-one/output/*
           if-no-files-found: error
           retention-days: 7
