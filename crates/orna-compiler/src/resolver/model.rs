@@ -1617,7 +1617,6 @@ pub(crate) enum CheckedServerFunctionReturn {
     },
 }
 
-
 /// A checked definition target referenced by one declaration or query.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum CheckedDefinitionReferenceTarget {
@@ -2963,7 +2962,6 @@ pub enum CheckedTypeUseKind {
         ordinal: u32,
     },
 }
-
 
 /// One standard value-type use resolved through the checked standard library.
 #[derive(Clone, Debug, Eq, PartialEq)]
