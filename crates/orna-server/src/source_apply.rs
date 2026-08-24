@@ -753,6 +753,18 @@ mod tests {
     }
 
     #[test]
+    fn post_apply_recovery_invariant_fails_closed_as_recovery_mismatch() {
+        let error = map_apply_error(PostgresKernelError::CatalogueInvariant(
+            "post-apply recovery must exactly reproduce the candidate hashes",
+        ));
+
+        assert!(matches!(
+            error,
+            InstalledSourceApplyError::RecoveryMismatch
+        ));
+    }
+
+    #[test]
     fn success_document_sorts_functions_and_renders_ordered_parameters() {
         let source_revision = SourceRevisionId::from_bytes([0x31; 16]);
         let catalogue_revision = CatalogueRevisionId::from_bytes([0x32; 16]);
