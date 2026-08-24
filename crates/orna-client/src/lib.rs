@@ -17180,6 +17180,7 @@ CREATE CLIENT FUNCTION app.owner() RETURNS INTEGER IS
         )
         .encode();
         malformed[29..33].copy_from_slice(&15_u32.to_be_bytes());
+        malformed.truncate(malformed.len() - 1);
         let (active, function, _, _) = version_two_value_active_with_artifact(
             orna_standard::OPAQUE_TOKEN_TYPE_ID,
             orna_standard::OPAQUE_TOKEN_TYPE_ID,
@@ -17189,12 +17190,17 @@ CREATE CLIENT FUNCTION app.owner() RETURNS INTEGER IS
         let error = evaluate_client_function(&active, function).unwrap_err();
         assert!(matches!(
             error,
-            super::ClientExecutionError::InvalidArtifact {
-                source: orna_artifact::client_plan::ClientPlanError::InvalidOpaquePayloadLength {
-                    actual: 15,
-                },
+            super::ClientExecutionError::InvalidOpaqueValue {
+                source:
+                    super::ClientOpaqueValueError::Value(
+                        super::OpaqueValueError::WrongPayloadLength {
+                            opaque_type,
+                            expected: 16,
+                            actual: 15,
+                        },
+                    ),
                 ..
-            }
+            } if opaque_type == orna_standard::OPAQUE_TOKEN_TYPE_ID
         ));
     }
 
