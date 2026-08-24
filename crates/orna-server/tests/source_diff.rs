@@ -243,7 +243,8 @@ fn source_read_rejections_fail_closed_before_host() {
     );
     assert_snapshot_unchanged(directory.path(), &before);
     let dangling_error = format!(
-        "orna source diff: could not read {dangling:?}: Too many levels of symbolic links (os error 40)\n"
+        "orna source diff: could not read {dangling:?}: {}\n",
+        io::Error::from_raw_os_error(nix::libc::ELOOP)
     );
     assert_read_failure(
         &run_source_diff(directory.path(), &dangling).expect("bounded dangling source"),
