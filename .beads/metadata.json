@@ -1,0 +1,7 @@
+{
+  "database": "dolt",
+  "backend": "dolt",
+  "dolt_mode": "embedded",
+  "dolt_database": "ornadb",
+  "project_id": "c72f684f-9483-49ad-a2f3-a2468a5d2e96"
+}
