@@ -875,16 +875,18 @@ fn client_root_binding(
     };
     match kind {
         ClientExpressionPart::LocalRoot(_) => find_local(),
-        ClientExpressionPart::ParameterRoot(_) => find_local().or_else(find_state).or_else(|| {
-            declaration
-                .parameters
-                .iter()
-                .find(|parameter| name_part_matches_text(&parameter.name, &root.text))
-                .map(|parameter| ClientRootBinding {
-                    declaration_span: parameter.name.span.clone(),
-                    owner: type_owner_name(&parameter.type_specification),
-                })
-        }),
+        ClientExpressionPart::ParameterRoot(_) => find_local()
+            .or_else(|| {
+                declaration
+                    .parameters
+                    .iter()
+                    .find(|parameter| name_part_matches_text(&parameter.name, &root.text))
+                    .map(|parameter| ClientRootBinding {
+                        declaration_span: parameter.name.span.clone(),
+                        owner: type_owner_name(&parameter.type_specification),
+                    })
+            })
+            .or_else(find_state),
         // The compiler's FieldPath grammar starts from a parameter. Keep
         // that precedence when a local happens to share its name.
         ClientExpressionPart::FieldRoot(_) => declaration
