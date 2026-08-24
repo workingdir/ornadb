@@ -12,7 +12,7 @@
 //! checks need base or storage context and do not belong in this module.
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     error::Error,
     fmt,
     sync::Arc,
@@ -2953,6 +2953,7 @@ fn validate_references(
         .map(|revision| (revision.id, revision))
         .collect::<HashMap<_, _>>();
     let mut ordinals = HashSet::with_capacity(references.len());
+    let mut ordinals_by_revision = BTreeMap::<FunctionRevisionId, Vec<u32>>::new();
     let expression_ids = expressions
         .iter()
         .map(ExpressionArtifact::id)
@@ -2997,6 +2998,24 @@ fn validate_references(
                 revision: reference.source_revision,
                 ordinal: reference.ordinal,
             });
+        }
+        ordinals_by_revision
+            .entry(reference.source_revision)
+            .or_default()
+            .push(reference.ordinal);
+    }
+    for (revision, mut ordinals) in ordinals_by_revision {
+        ordinals.sort_unstable();
+        for (index, actual) in ordinals.into_iter().enumerate() {
+            let expected = u32::try_from(index)
+                .map_err(|_| RevisionInvariantError::ReferenceOrdinalOutOfRange { revision })?;
+            if actual != expected {
+                return Err(RevisionInvariantError::ReferenceOrdinalOutOfSequence {
+                    revision,
+                    expected,
+                    actual,
+                });
+            }
         }
     }
     Ok(())
@@ -3734,6 +3753,14 @@ pub enum RevisionInvariantError {
         revision: FunctionRevisionId,
         ordinal: u32,
     },
+    /// A source function revision has a missing or out-of-sequence reference ordinal.
+    ReferenceOrdinalOutOfSequence {
+        revision: FunctionRevisionId,
+        expected: u32,
+        actual: u32,
+    },
+    /// A source function revision has more references than durable ordinals can represent.
+    ReferenceOrdinalOutOfRange { revision: FunctionRevisionId },
 }
 
 impl fmt::Display for RevisionInvariantError {
@@ -3945,6 +3972,12 @@ impl fmt::Display for RevisionInvariantError {
                 formatter.write_str("reference kind cannot target that definition kind")
             }
             DuplicateReferenceOrdinal { .. } => formatter.write_str("duplicate reference ordinal"),
+            ReferenceOrdinalOutOfSequence { .. } => {
+                formatter.write_str("reference ordinals are not contiguous")
+            }
+            ReferenceOrdinalOutOfRange { .. } => {
+                formatter.write_str("reference ordinal exceeds durable ordinal")
+            }
         }
     }
 }
@@ -9345,6 +9378,201 @@ mod tests {
         for (error, message) in cases {
             assert_eq!(error.to_string(), message);
         }
+    }
+
+    #[test]
+    fn rejects_sparse_reference_ordinals_in_deployable_revision() {
+        let expected = RevisionPair::new(
+            SourceRevisionId::from_bytes(id::<20>()),
+            CatalogueRevisionId::from_bytes(id::<21>()),
+        );
+        let revision = function_revision();
+        let sparse_references = [0, 2]
+            .into_iter()
+            .map(|ordinal| {
+                DefinitionReference::new(
+                    revision.function(),
+                    revision.id(),
+                    ordinal,
+                    DefinitionReferenceTarget::Function(revision.function()),
+                    DefinitionReferenceKind::FunctionCall,
+                    revision.declaration_origin(),
+                )
+            })
+            .collect();
+
+        assert_eq!(
+            DeployableRevision::new(
+                expected,
+                source(Some(expected.source())),
+                expected.catalogue(),
+                function_catalogue(revision.id()),
+                digest::<7>(),
+                function_origins(&revision),
+                vec![],
+                vec![revision],
+                sparse_references,
+            ).unwrap_err(),
+            RevisionInvariantError::ReferenceOrdinalOutOfSequence {
+                revision: FunctionRevisionId::from_bytes(id::<11>()),
+                expected: 1,
+                actual: 2,
+            }
+        );
+
+        let revision = function_revision();
+        let leading_sparse_reference = DefinitionReference::new(
+            revision.function(),
+            revision.id(),
+            1,
+            DefinitionReferenceTarget::Function(revision.function()),
+            DefinitionReferenceKind::FunctionCall,
+            revision.declaration_origin(),
+        );
+        assert_eq!(
+            DeployableRevision::new(
+                expected,
+                source(Some(expected.source())),
+                expected.catalogue(),
+                function_catalogue(revision.id()),
+                digest::<7>(),
+                function_origins(&revision),
+                vec![],
+                vec![revision],
+                vec![leading_sparse_reference],
+            ).unwrap_err(),
+            RevisionInvariantError::ReferenceOrdinalOutOfSequence {
+                revision: FunctionRevisionId::from_bytes(id::<11>()),
+                expected: 0,
+                actual: 1,
+            }
+        );
+    }
+
+    #[test]
+    fn rejects_sparse_reference_ordinals_in_active_revision() {
+        let source = source(None);
+        let revision = function_revision();
+        let reference = DefinitionReference::new(
+            revision.function(),
+            revision.id(),
+            1,
+            DefinitionReferenceTarget::Function(revision.function()),
+            DefinitionReferenceKind::FunctionCall,
+            revision.declaration_origin(),
+        );
+
+        assert_eq!(
+            ActiveDatabaseRevision::new(
+                RevisionPair::new(source.id(), CatalogueRevisionId::from_bytes(id::<7>())),
+                source,
+                function_catalogue(revision.id()),
+                digest::<7>(),
+                vec![],
+                vec![revision.clone()],
+                function_origins(&revision),
+                vec![reference],
+            )
+            .unwrap_err(),
+            RevisionInvariantError::ReferenceOrdinalOutOfSequence {
+                revision: revision.id(),
+                expected: 0,
+                actual: 1,
+            }
+        );
+    }
+
+    #[test]
+    fn accepts_interleaved_reference_ordinals_for_multiple_revisions() {
+        let source = source(None);
+        let function_a = FunctionId::from_bytes(id::<90>());
+        let function_b = FunctionId::from_bytes(id::<91>());
+        let revision_a = function_revision_fixture(
+            function_a,
+            FunctionRevisionId::from_bytes(id::<92>()),
+            digest::<93>(),
+            digest::<94>(),
+        );
+        let revision_b = function_revision_fixture(
+            function_b,
+            FunctionRevisionId::from_bytes(id::<95>()),
+            digest::<96>(),
+            digest::<97>(),
+        );
+        let catalogue = function_catalogue_with_functions(vec![
+            function_definition_named(
+                ["crm", "lookup_a"].as_slice(),
+                function_a,
+                revision_a.id(),
+                ResolvedType::scalar(StandardScalar::Boolean),
+            ),
+            function_definition_named(
+                ["crm", "lookup_b"].as_slice(),
+                function_b,
+                revision_b.id(),
+                ResolvedType::scalar(StandardScalar::Boolean),
+            ),
+        ]);
+        let mut origins = function_origins(&revision_a);
+        origins.extend([
+            DefinitionOrigin::new(
+                DefinitionIdentity::Function(function_b),
+                revision_b.declaration_origin(),
+            ),
+            DefinitionOrigin::new(
+                DefinitionIdentity::FunctionReturnColumn {
+                    owner: function_b,
+                    ordinal: 0,
+                },
+                revision_b.declaration_origin(),
+            ),
+        ]);
+        let references = vec![
+            DefinitionReference::new(
+                function_a,
+                revision_a.id(),
+                0,
+                DefinitionReferenceTarget::Function(function_b),
+                DefinitionReferenceKind::FunctionCall,
+                revision_a.declaration_origin(),
+            ),
+            DefinitionReference::new(
+                function_b,
+                revision_b.id(),
+                0,
+                DefinitionReferenceTarget::Function(function_a),
+                DefinitionReferenceKind::FunctionCall,
+                revision_b.declaration_origin(),
+            ),
+            DefinitionReference::new(
+                function_a,
+                revision_a.id(),
+                1,
+                DefinitionReferenceTarget::Function(function_b),
+                DefinitionReferenceKind::FunctionCall,
+                revision_a.declaration_origin(),
+            ),
+            DefinitionReference::new(
+                function_b,
+                revision_b.id(),
+                1,
+                DefinitionReferenceTarget::Function(function_a),
+                DefinitionReferenceKind::FunctionCall,
+                revision_b.declaration_origin(),
+            ),
+        ];
+
+        assert!(ActiveDatabaseRevision::new(
+            RevisionPair::new(source.id(), catalogue.revision()),
+            source,
+            catalogue,
+            digest::<98>(),
+            vec![],
+            vec![revision_a, revision_b],
+            origins,
+            references,
+        )
+        .is_ok());
     }
 
     #[test]
