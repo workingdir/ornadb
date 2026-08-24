@@ -15851,6 +15851,49 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn client_expression_call_depth_is_bounded_by_artifact_limit() {
+        let (active, function, pair, function_revision) = version_one_active(true);
+        let context = super::ClientExecutionContext {
+            pair,
+            function,
+            function_revision,
+            parent_invocation_id: InvocationId::new(),
+            observer_lineage: None,
+        };
+        let expression = orna_artifact::client_plan::ClientExpressionNode::Call {
+            function,
+            arguments: Vec::new(),
+        };
+        let mut state = super::ClientStateStore::new();
+        let mut executor: Option<&mut dyn super::ClientResourceExecutor> = None;
+        let mut local_environment = super::ClientLocalEnvironment::new();
+
+        let error = super::evaluate_expression(
+            &active,
+            &expression,
+            context,
+            super::ObserverLineage::top_level(context.parent_invocation_id()),
+            &[],
+            &[],
+            &super::capability::LocalCapabilityGrantSet::new(),
+            &mut state,
+            orna_artifact::client_plan::MAX_EXPRESSION_DEPTH + 1,
+            PrincipalId::from_bytes([0x7a; 16]),
+            &mut executor,
+            &mut local_environment,
+        )
+        .expect_err("recursive CLIENT calls must stop at the closed depth cap");
+
+        assert!(matches!(
+            error,
+            super::ClientExecutionError::ExpressionEvaluation {
+                source: super::ClientExpressionError::RecursionLimit,
+                ..
+            }
+        ));
+    }
+
     fn assert_reordered_client_plan_rejects_before_executor(source: &str, function_name: &str) {
         let prepared = prepared_client_source_v6(source);
         let (active, function) =
