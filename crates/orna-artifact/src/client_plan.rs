@@ -6840,6 +6840,42 @@ mod tests {
     }
 
     #[test]
+    fn action_plan_decode_rejects_noncanonical_and_duplicate_argument_parameter_ids() {
+        let source_plan = action_plan();
+        let operation = source_plan.operation();
+        let first = ParameterId::from_bytes([0x31; 16]);
+        let second = ParameterId::from_bytes([0x32; 16]);
+        let plan = ActionClientPlan::new(ActionOperationNode::new(
+            operation.domain(),
+            operation.target(),
+            operation.target_revision(),
+            operation.call_site(),
+            vec![
+                (first, ClientExpressionNode::Boolean { value: true }),
+                (second, ClientExpressionNode::Boolean { value: false }),
+            ],
+            operation.result_type(),
+        ));
+        let encoded = plan.encode().expect("the two-argument action plan encodes");
+        let count_offset = 8 + 4 + 1 + 1 + 16 * 5;
+        let second_parameter_offset = count_offset + 4 + 16 + 2;
+
+        let mut unsorted = encoded.clone();
+        unsorted[second_parameter_offset..second_parameter_offset + 16].fill(0x30);
+        assert_eq!(
+            ActionClientPlan::decode(&unsorted),
+            Err(ClientPlanError::NonCanonicalActionArgumentOrder)
+        );
+
+        let mut duplicate = encoded;
+        duplicate[second_parameter_offset..second_parameter_offset + 16].fill(0x31);
+        assert_eq!(
+            ActionClientPlan::decode(&duplicate),
+            Err(ClientPlanError::DuplicateActionArgument(first))
+        );
+    }
+
+    #[test]
     fn action_plan_round_trips_client_target_domain() {
         let source_plan = action_plan();
         let operation = source_plan.operation();
