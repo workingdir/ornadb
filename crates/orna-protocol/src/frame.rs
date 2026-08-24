@@ -1,11 +1,15 @@
 //! Bounded raw-call protocol frames and connection state.
 
-use std::{collections::{BTreeMap, BTreeSet}, error::Error, fmt};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    error::Error,
+    fmt,
+};
 
 use orna_core::{
     CallSiteId, FunctionId, InvocationId, ParameterId, TypeId,
     catalogue::CatalogueSnapshot,
-    invocation::{InvokeEvent, InvokeRequest, InvocationEventKind, invocation_carrier_type_id},
+    invocation::{InvocationEventKind, InvokeEvent, InvokeRequest, invocation_carrier_type_id},
     revision::{ActiveDatabaseRevision, RevisionPair},
     system::{
         SYS_INVOKE_EVENT_TYPE_ID, SYS_INVOKE_FUNCTION_ID, SYS_INVOKE_PARAMETER_ID,
@@ -547,24 +551,60 @@ pub enum ResourceServerFrame {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ResourceFrameDisposition { Applied, DroppedLate }
+pub enum ResourceFrameDisposition {
+    Applied,
+    DroppedLate,
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ResourceConnectionError {
-    InvalidFrame { source: FrameCodecError },
-    UnknownStream { stream_id: u64 },
-    MismatchedRequest { stream_id: u64 },
-    DuplicateRequestId { request_id: InvocationId },
-    WrongState { stream_id: u64 },
-    StreamNotIncreasing { stream_id: u64, previous: u64 },
+    InvalidFrame {
+        source: FrameCodecError,
+    },
+    UnknownStream {
+        stream_id: u64,
+    },
+    MismatchedRequest {
+        stream_id: u64,
+    },
+    DuplicateRequestId {
+        request_id: InvocationId,
+    },
+    WrongState {
+        stream_id: u64,
+    },
+    StreamNotIncreasing {
+        stream_id: u64,
+        previous: u64,
+    },
     TooManyLiveResources,
     RequestIdHistoryExhausted,
-    BatchSequenceMismatch { stream_id: u64, expected: u64, actual: u64 },
-    InsufficientCredit { stream_id: u64, item_available: u64, item_required: u64, byte_available: u64, byte_required: u64 },
-    ResourceTotalMismatch { stream_id: u64, expected: u64, actual: u64 },
-    ResourceBatchMismatch { stream_id: u64 },
-    ResourceAcceptanceMismatch { stream_id: u64 },
-    SequenceExhausted { stream_id: u64 },
+    BatchSequenceMismatch {
+        stream_id: u64,
+        expected: u64,
+        actual: u64,
+    },
+    InsufficientCredit {
+        stream_id: u64,
+        item_available: u64,
+        item_required: u64,
+        byte_available: u64,
+        byte_required: u64,
+    },
+    ResourceTotalMismatch {
+        stream_id: u64,
+        expected: u64,
+        actual: u64,
+    },
+    ResourceBatchMismatch {
+        stream_id: u64,
+    },
+    ResourceAcceptanceMismatch {
+        stream_id: u64,
+    },
+    SequenceExhausted {
+        stream_id: u64,
+    },
 }
 
 impl fmt::Display for ResourceConnectionError {
@@ -572,18 +612,38 @@ impl fmt::Display for ResourceConnectionError {
         match self {
             Self::InvalidFrame { .. } => formatter.write_str("invalid resource frame"),
             Self::UnknownStream { .. } => formatter.write_str("unknown resource stream"),
-            Self::MismatchedRequest { .. } => formatter.write_str("resource request identity mismatches stream"),
-            Self::DuplicateRequestId { .. } => formatter.write_str("resource request ID was already used on this connection"),
+            Self::MismatchedRequest { .. } => {
+                formatter.write_str("resource request identity mismatches stream")
+            }
+            Self::DuplicateRequestId { .. } => {
+                formatter.write_str("resource request ID was already used on this connection")
+            }
             Self::WrongState { .. } => formatter.write_str("resource frame violates stream state"),
-            Self::StreamNotIncreasing { .. } => formatter.write_str("resource stream id is not increasing"),
+            Self::StreamNotIncreasing { .. } => {
+                formatter.write_str("resource stream id is not increasing")
+            }
             Self::TooManyLiveResources => formatter.write_str("too many live resource streams"),
-            Self::RequestIdHistoryExhausted => formatter.write_str("resource request ID history is exhausted"),
-            Self::BatchSequenceMismatch { .. } => formatter.write_str("resource batch sequence is not contiguous"),
-            Self::InsufficientCredit { .. } => formatter.write_str("resource stream credit is insufficient"),
-            Self::ResourceTotalMismatch { .. } => formatter.write_str("resource total item count mismatches stream"),
-            Self::ResourceBatchMismatch { .. } => formatter.write_str("resource batch metadata mismatches values"),
-            Self::ResourceAcceptanceMismatch { .. } => formatter.write_str("resource acceptance does not match request"),
-            Self::SequenceExhausted { .. } => formatter.write_str("resource batch sequence is exhausted"),
+            Self::RequestIdHistoryExhausted => {
+                formatter.write_str("resource request ID history is exhausted")
+            }
+            Self::BatchSequenceMismatch { .. } => {
+                formatter.write_str("resource batch sequence is not contiguous")
+            }
+            Self::InsufficientCredit { .. } => {
+                formatter.write_str("resource stream credit is insufficient")
+            }
+            Self::ResourceTotalMismatch { .. } => {
+                formatter.write_str("resource total item count mismatches stream")
+            }
+            Self::ResourceBatchMismatch { .. } => {
+                formatter.write_str("resource batch metadata mismatches values")
+            }
+            Self::ResourceAcceptanceMismatch { .. } => {
+                formatter.write_str("resource acceptance does not match request")
+            }
+            Self::SequenceExhausted { .. } => {
+                formatter.write_str("resource batch sequence is exhausted")
+            }
         }
     }
 }
@@ -913,7 +973,9 @@ enum Phase {
     Running {
         invocation: InvocationId,
     },
-    RunningCancelling { invocation: InvocationId },
+    RunningCancelling {
+        invocation: InvocationId,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -1156,7 +1218,9 @@ impl ProtocolConnection {
         match action {
             ServerAction::Accepted { stream, invocation } => self.accept(stream, invocation),
             ServerAction::Events { stream, events } => self.events(version, stream, events),
-            ServerAction::InvokeEvents { stream, events } => self.invoke_events(version, stream, events),
+            ServerAction::InvokeEvents { stream, events } => {
+                self.invoke_events(version, stream, events)
+            }
             ServerAction::InvokeCancelled { stream } => self.invoke_cancelled(version, stream),
             ServerAction::Completed { stream } => self.complete(stream),
             ServerAction::Failed { stream, failure } => self.fail(stream, failure),
@@ -1220,7 +1284,8 @@ impl ProtocolConnection {
         else {
             return Err(ConnectionError::WrongState { stream });
         };
-        if matches!(&state.phase, Phase::Receiving { function, .. } if *function == SYS_INVOKE_FUNCTION_ID) {
+        if matches!(&state.phase, Phase::Receiving { function, .. } if *function == SYS_INVOKE_FUNCTION_ID)
+        {
             return Err(ConnectionError::WrongState { stream });
         }
         if arguments.contains_key(&parameter) {
@@ -1264,7 +1329,8 @@ impl ProtocolConnection {
             .streams
             .get(&stream)
             .ok_or(ConnectionError::UnknownStream { stream })?;
-        if !matches!(state.phase, Phase::Receiving { function, .. } if function == SYS_INVOKE_FUNCTION_ID) {
+        if !matches!(state.phase, Phase::Receiving { function, .. } if function == SYS_INVOKE_FUNCTION_ID)
+        {
             return Err(ConnectionError::WrongState { stream });
         }
         self.streams
@@ -1292,7 +1358,11 @@ impl ProtocolConnection {
                     .phase = Phase::Dispatching;
                 Ok(Some(ClientAction::InvokeDispatch { stream, request }))
             }
-            Phase::Receiving { function, arguments, .. } => {
+            Phase::Receiving {
+                function,
+                arguments,
+                ..
+            } => {
                 if *function == SYS_INVOKE_FUNCTION_ID {
                     return Err(ConnectionError::WrongState { stream });
                 }
@@ -1532,7 +1602,11 @@ impl ProtocolConnection {
             .ok_or(ConnectionError::EventSequenceExhausted { stream })?;
         let expected_inner = state
             .last_invocation_event_sequence
-            .map(|value| value.checked_add(1).ok_or(ConnectionError::EventSequenceExhausted { stream }))
+            .map(|value| {
+                value
+                    .checked_add(1)
+                    .ok_or(ConnectionError::EventSequenceExhausted { stream })
+            })
             .transpose()?
             .unwrap_or(0);
         let records = batch.records();
@@ -1608,7 +1682,8 @@ impl ProtocolConnection {
             .expect("sealed event batch is non-empty")
             .outer_sequence();
         state.last_sequence = state.last_invocation_outer_sequence;
-        state.last_invocation_event_sequence = records.last().map(|record| record.event().sequence());
+        state.last_invocation_event_sequence =
+            records.last().map(|record| record.event().sequence());
         state.invocation_terminal = terminal;
         Ok(frame)
     }
@@ -1647,15 +1722,22 @@ impl ProtocolConnection {
                     .ok_or(ConnectionError::EventSequenceExhausted { stream })?,
                 None,
             ),
-            None => (2, 1, Some(InvokeEvent::new(
-                invocation,
-                0,
-                orna_core::invocation::InvocationEventBody::Started {
-                    visible_principal: None,
-                },
-            ).map_err(|_| ConnectionError::InvalidFrame {
-                source: FrameCodecError::InvalidInvocationEventSequence,
-            })?)),
+            None => (
+                2,
+                1,
+                Some(
+                    InvokeEvent::new(
+                        invocation,
+                        0,
+                        orna_core::invocation::InvocationEventBody::Started {
+                            visible_principal: None,
+                        },
+                    )
+                    .map_err(|_| ConnectionError::InvalidFrame {
+                        source: FrameCodecError::InvalidInvocationEventSequence,
+                    })?,
+                ),
+            ),
         };
         let cancelled = InvokeEvent::new(
             invocation,
@@ -1713,7 +1795,10 @@ impl ProtocolConnection {
             return Err(ConnectionError::WrongState { stream });
         }
         if state.is_invocation
-            && matches!(state.phase, Phase::Running { .. } | Phase::RunningCancelling { .. })
+            && matches!(
+                state.phase,
+                Phase::Running { .. } | Phase::RunningCancelling { .. }
+            )
         {
             return Err(ConnectionError::WrongState { stream });
         }
@@ -1741,7 +1826,10 @@ impl ProtocolConnection {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum ResourcePhase { Requested, Live }
+enum ResourcePhase {
+    Requested,
+    Live,
+}
 
 #[derive(Clone, Debug, PartialEq)]
 struct ResourceState {
@@ -1779,12 +1867,21 @@ pub struct ResourceProtocolConnection {
 
 impl ResourceProtocolConnection {
     pub const fn new() -> Self {
-        Self { high_water_mark: None, streams: BTreeMap::new(), request_ids: BTreeSet::new(), terminal: BTreeMap::new() }
+        Self {
+            high_water_mark: None,
+            streams: BTreeMap::new(),
+            request_ids: BTreeSet::new(),
+            terminal: BTreeMap::new(),
+        }
     }
 
-    pub const fn high_water_mark(&self) -> Option<u64> { self.high_water_mark }
+    pub const fn high_water_mark(&self) -> Option<u64> {
+        self.high_water_mark
+    }
 
-    pub fn live_resources(&self) -> usize { self.streams.len() }
+    pub fn live_resources(&self) -> usize {
+        self.streams.len()
+    }
 
     /// Returns the current item and byte credit for a retained resource stream.
     ///
@@ -1820,7 +1917,10 @@ impl ResourceProtocolConnection {
         Ok(self.state_for(stream_id, request_id)?.nested_invocation_id)
     }
 
-    pub fn receive(&mut self, frame: ResourceClientFrame) -> Result<ResourceFrameDisposition, ResourceConnectionError> {
+    pub fn receive(
+        &mut self,
+        frame: ResourceClientFrame,
+    ) -> Result<ResourceFrameDisposition, ResourceConnectionError> {
         match frame {
             ResourceClientFrame::Request(request) => self.open(request),
             ResourceClientFrame::WindowUpdate(update) => self.window_update(update),
@@ -1830,14 +1930,22 @@ impl ResourceProtocolConnection {
 
     /// Opens one resource stream and reserves its request identity.
     ///
-    pub fn open(&mut self, request: ResourceRequest) -> Result<ResourceFrameDisposition, ResourceConnectionError> {
-        require_resource_stream(request.stream_id).map_err(|source| ResourceConnectionError::InvalidFrame { source })?;
+    pub fn open(
+        &mut self,
+        request: ResourceRequest,
+    ) -> Result<ResourceFrameDisposition, ResourceConnectionError> {
+        require_resource_stream(request.stream_id)
+            .map_err(|source| ResourceConnectionError::InvalidFrame { source })?;
         require_resource_invocation_id(request.request_id)
             .map_err(|source| ResourceConnectionError::InvalidFrame { source })?;
         require_resource_generation(request.generation)
             .map_err(|source| ResourceConnectionError::InvalidFrame { source })?;
-        require_resource_kind_windows(request.resource_kind, request.item_window, request.byte_window)
-            .map_err(|source| ResourceConnectionError::InvalidFrame { source })?;
+        require_resource_kind_windows(
+            request.resource_kind,
+            request.item_window,
+            request.byte_window,
+        )
+        .map_err(|source| ResourceConnectionError::InvalidFrame { source })?;
         validate_resource_arguments(&request.arguments)
             .map_err(|source| ResourceConnectionError::InvalidFrame { source })?;
         for argument in &request.arguments {
@@ -1852,11 +1960,18 @@ impl ResourceProtocolConnection {
                 previous,
             });
         }
-        if self.streams.contains_key(&request.stream_id) || self.terminal.contains_key(&request.stream_id) {
-            return Err(ResourceConnectionError::StreamNotIncreasing { stream_id: request.stream_id, previous: self.high_water_mark.unwrap_or(0) });
+        if self.streams.contains_key(&request.stream_id)
+            || self.terminal.contains_key(&request.stream_id)
+        {
+            return Err(ResourceConnectionError::StreamNotIncreasing {
+                stream_id: request.stream_id,
+                previous: self.high_water_mark.unwrap_or(0),
+            });
         }
         if self.request_ids.contains(&request.request_id) {
-            return Err(ResourceConnectionError::DuplicateRequestId { request_id: request.request_id });
+            return Err(ResourceConnectionError::DuplicateRequestId {
+                request_id: request.request_id,
+            });
         }
         if self.request_ids.len() >= MAX_REQUEST_ID_HISTORY {
             return Err(ResourceConnectionError::RequestIdHistoryExhausted);
@@ -1866,29 +1981,39 @@ impl ResourceProtocolConnection {
         }
         self.high_water_mark = Some(request.stream_id);
         self.request_ids.insert(request.request_id);
-        self.streams.insert(request.stream_id, ResourceState {
-            request_id: request.request_id,
-            nested_invocation_id: None,
-            target_revision: request.target_revision,
-            resource_kind: request.resource_kind,
-            phase: ResourcePhase::Requested,
-            accepted: false,
-            item_window: request.item_window,
-            byte_window: request.byte_window,
-            next_batch_sequence: 0,
-            last_batch_sequence: None,
-            total_items: 0,
-        });
+        self.streams.insert(
+            request.stream_id,
+            ResourceState {
+                request_id: request.request_id,
+                nested_invocation_id: None,
+                target_revision: request.target_revision,
+                resource_kind: request.resource_kind,
+                phase: ResourcePhase::Requested,
+                accepted: false,
+                item_window: request.item_window,
+                byte_window: request.byte_window,
+                next_batch_sequence: 0,
+                last_batch_sequence: None,
+                total_items: 0,
+            },
+        );
         Ok(ResourceFrameDisposition::Applied)
     }
 
-    pub fn apply(&mut self, frame: ResourceServerFrame) -> Result<ResourceFrameDisposition, ResourceConnectionError> {
+    pub fn apply(
+        &mut self,
+        frame: ResourceServerFrame,
+    ) -> Result<ResourceFrameDisposition, ResourceConnectionError> {
         match frame {
             ResourceServerFrame::Accepted(frame) => self.accepted(frame),
             ResourceServerFrame::Values(frame) => self.values(frame),
             ResourceServerFrame::Completed(frame) => self.completed(frame),
-            ResourceServerFrame::Failed(frame) => self.terminal_frame(frame.stream_id, frame.request_id),
-            ResourceServerFrame::Cancelled(frame) => self.terminal_frame(frame.stream_id, frame.request_id),
+            ResourceServerFrame::Failed(frame) => {
+                self.terminal_frame(frame.stream_id, frame.request_id)
+            }
+            ResourceServerFrame::Cancelled(frame) => {
+                self.terminal_frame(frame.stream_id, frame.request_id)
+            }
         }
     }
 
@@ -1934,7 +2059,6 @@ impl ResourceProtocolConnection {
         }
     }
 
-
     fn check_terminal(
         &self,
         stream_id: u64,
@@ -1949,38 +2073,72 @@ impl ResourceProtocolConnection {
         Ok(None)
     }
 
-    fn state_for(&self, stream_id: u64, request_id: InvocationId) -> Result<&ResourceState, ResourceConnectionError> {
-        let state = self.streams.get(&stream_id).ok_or(ResourceConnectionError::UnknownStream { stream_id })?;
+    fn state_for(
+        &self,
+        stream_id: u64,
+        request_id: InvocationId,
+    ) -> Result<&ResourceState, ResourceConnectionError> {
+        let state = self
+            .streams
+            .get(&stream_id)
+            .ok_or(ResourceConnectionError::UnknownStream { stream_id })?;
         if state.request_id != request_id {
             return Err(ResourceConnectionError::MismatchedRequest { stream_id });
         }
         Ok(state)
     }
 
-    fn accepted(&mut self, frame: ResourceAccepted) -> Result<ResourceFrameDisposition, ResourceConnectionError> {
-        if let Some(disposition) = self.check_terminal(frame.stream_id, frame.request_id)? { return Ok(disposition); }
-        let state = self.state_for(frame.stream_id, frame.request_id)?;
-        if state.target_revision != frame.target_revision || state.resource_kind != frame.resource_kind {
-            return Err(ResourceConnectionError::ResourceAcceptanceMismatch { stream_id: frame.stream_id });
+    fn accepted(
+        &mut self,
+        frame: ResourceAccepted,
+    ) -> Result<ResourceFrameDisposition, ResourceConnectionError> {
+        if let Some(disposition) = self.check_terminal(frame.stream_id, frame.request_id)? {
+            return Ok(disposition);
         }
-        if state.accepted { return Err(ResourceConnectionError::WrongState { stream_id: frame.stream_id }); }
+        let state = self.state_for(frame.stream_id, frame.request_id)?;
+        if state.target_revision != frame.target_revision
+            || state.resource_kind != frame.resource_kind
+        {
+            return Err(ResourceConnectionError::ResourceAcceptanceMismatch {
+                stream_id: frame.stream_id,
+            });
+        }
+        if state.accepted {
+            return Err(ResourceConnectionError::WrongState {
+                stream_id: frame.stream_id,
+            });
+        }
         if !matches!(state.phase, ResourcePhase::Requested) {
-            return Err(ResourceConnectionError::WrongState { stream_id: frame.stream_id });
+            return Err(ResourceConnectionError::WrongState {
+                stream_id: frame.stream_id,
+            });
         }
         require_resource_invocation_id(frame.nested_invocation_id)
             .map_err(|source| ResourceConnectionError::InvalidFrame { source })?;
-        let state = self.streams.get_mut(&frame.stream_id).expect("resource state checked");
+        let state = self
+            .streams
+            .get_mut(&frame.stream_id)
+            .expect("resource state checked");
         state.accepted = true;
         state.nested_invocation_id = Some(frame.nested_invocation_id);
-        if matches!(state.phase, ResourcePhase::Requested) { state.phase = ResourcePhase::Live; }
+        if matches!(state.phase, ResourcePhase::Requested) {
+            state.phase = ResourcePhase::Live;
+        }
         Ok(ResourceFrameDisposition::Applied)
     }
 
-    fn values(&mut self, frame: ResourceValues) -> Result<ResourceFrameDisposition, ResourceConnectionError> {
-        if let Some(disposition) = self.check_terminal(frame.stream_id, frame.request_id)? { return Ok(disposition); }
+    fn values(
+        &mut self,
+        frame: ResourceValues,
+    ) -> Result<ResourceFrameDisposition, ResourceConnectionError> {
+        if let Some(disposition) = self.check_terminal(frame.stream_id, frame.request_id)? {
+            return Ok(disposition);
+        }
         let state = self.state_for(frame.stream_id, frame.request_id)?;
         if !(state.accepted && matches!(state.phase, ResourcePhase::Live)) {
-            return Err(ResourceConnectionError::WrongState { stream_id: frame.stream_id });
+            return Err(ResourceConnectionError::WrongState {
+                stream_id: frame.stream_id,
+            });
         }
         if frame.values.len() > MAX_RESOURCE_BATCH_ITEMS {
             return Err(ResourceConnectionError::InvalidFrame {
@@ -1998,31 +2156,76 @@ impl ResourceProtocolConnection {
                 },
             });
         }
-        if frame.values.iter().any(|value| invocation_carrier_type_id(value).is_some()) {
-            let carrier = frame.values.iter().find_map(invocation_carrier_type_id).expect("carrier checked");
-            return Err(ResourceConnectionError::InvalidFrame { source: FrameCodecError::InvocationCarrierNotAccepted { carrier } });
+        if frame
+            .values
+            .iter()
+            .any(|value| invocation_carrier_type_id(value).is_some())
+        {
+            let carrier = frame
+                .values
+                .iter()
+                .find_map(invocation_carrier_type_id)
+                .expect("carrier checked");
+            return Err(ResourceConnectionError::InvalidFrame {
+                source: FrameCodecError::InvocationCarrierNotAccepted { carrier },
+            });
         }
-        if frame.values.is_empty() || frame.item_count == 0 || frame.item_count as usize != frame.values.len() {
-            return Err(ResourceConnectionError::ResourceBatchMismatch { stream_id: frame.stream_id });
+        if frame.values.is_empty()
+            || frame.item_count == 0
+            || frame.item_count as usize != frame.values.len()
+        {
+            return Err(ResourceConnectionError::ResourceBatchMismatch {
+                stream_id: frame.stream_id,
+            });
         }
         if matches!(state.resource_kind, ResourceKind::Single) && frame.item_count != 1 {
-            return Err(ResourceConnectionError::ResourceBatchMismatch { stream_id: frame.stream_id });
+            return Err(ResourceConnectionError::ResourceBatchMismatch {
+                stream_id: frame.stream_id,
+            });
         }
-        if matches!(state.resource_kind, ResourceKind::Single) && state.last_batch_sequence.is_some() {
-            return Err(ResourceConnectionError::WrongState { stream_id: frame.stream_id });
+        if matches!(state.resource_kind, ResourceKind::Single)
+            && state.last_batch_sequence.is_some()
+        {
+            return Err(ResourceConnectionError::WrongState {
+                stream_id: frame.stream_id,
+            });
         }
         if frame.batch_sequence != state.next_batch_sequence {
-            return Err(ResourceConnectionError::BatchSequenceMismatch { stream_id: frame.stream_id, expected: state.next_batch_sequence, actual: frame.batch_sequence });
+            return Err(ResourceConnectionError::BatchSequenceMismatch {
+                stream_id: frame.stream_id,
+                expected: state.next_batch_sequence,
+                actual: frame.batch_sequence,
+            });
         }
         let required_items = u64::from(frame.item_count);
         let required_bytes = u64::from(frame.byte_count);
         if required_items > state.item_window || required_bytes > state.byte_window {
-            return Err(ResourceConnectionError::InsufficientCredit { stream_id: frame.stream_id, item_available: state.item_window, item_required: required_items, byte_available: state.byte_window, byte_required: required_bytes });
+            return Err(ResourceConnectionError::InsufficientCredit {
+                stream_id: frame.stream_id,
+                item_available: state.item_window,
+                item_required: required_items,
+                byte_available: state.byte_window,
+                byte_required: required_bytes,
+            });
         }
-        let total_items = state.total_items.checked_add(required_items).ok_or(ResourceConnectionError::ResourceTotalMismatch { stream_id: frame.stream_id, expected: MAX_RESOURCE_TOTAL_ITEMS, actual: u64::MAX })?;
-        require_resource_total_items(total_items).map_err(|source| ResourceConnectionError::InvalidFrame { source })?;
-        let next_sequence = state.next_batch_sequence.checked_add(1).ok_or(ResourceConnectionError::SequenceExhausted { stream_id: frame.stream_id })?;
-        let state = self.streams.get_mut(&frame.stream_id).expect("resource state checked");
+        let total_items = state.total_items.checked_add(required_items).ok_or(
+            ResourceConnectionError::ResourceTotalMismatch {
+                stream_id: frame.stream_id,
+                expected: MAX_RESOURCE_TOTAL_ITEMS,
+                actual: u64::MAX,
+            },
+        )?;
+        require_resource_total_items(total_items)
+            .map_err(|source| ResourceConnectionError::InvalidFrame { source })?;
+        let next_sequence = state.next_batch_sequence.checked_add(1).ok_or(
+            ResourceConnectionError::SequenceExhausted {
+                stream_id: frame.stream_id,
+            },
+        )?;
+        let state = self
+            .streams
+            .get_mut(&frame.stream_id)
+            .expect("resource state checked");
         state.item_window -= required_items;
         state.byte_window -= required_bytes;
         state.next_batch_sequence = next_sequence;
@@ -2031,85 +2234,146 @@ impl ResourceProtocolConnection {
         Ok(ResourceFrameDisposition::Applied)
     }
 
-    fn completed(&mut self, frame: ResourceCompleted) -> Result<ResourceFrameDisposition, ResourceConnectionError> {
-        if let Some(disposition) = self.check_terminal(frame.stream_id, frame.request_id)? { return Ok(disposition); }
+    fn completed(
+        &mut self,
+        frame: ResourceCompleted,
+    ) -> Result<ResourceFrameDisposition, ResourceConnectionError> {
+        if let Some(disposition) = self.check_terminal(frame.stream_id, frame.request_id)? {
+            return Ok(disposition);
+        }
         let state = self.state_for(frame.stream_id, frame.request_id)?;
         if !(state.accepted && matches!(state.phase, ResourcePhase::Live)) {
-            return Err(ResourceConnectionError::WrongState { stream_id: frame.stream_id });
+            return Err(ResourceConnectionError::WrongState {
+                stream_id: frame.stream_id,
+            });
         }
-        if matches!(state.resource_kind, ResourceKind::Single) && state.last_batch_sequence.is_none() {
-            return Err(ResourceConnectionError::WrongState { stream_id: frame.stream_id });
+        if matches!(state.resource_kind, ResourceKind::Single)
+            && state.last_batch_sequence.is_none()
+        {
+            return Err(ResourceConnectionError::WrongState {
+                stream_id: frame.stream_id,
+            });
         }
         let expected_sequence = state.last_batch_sequence.unwrap_or(0);
         if frame.final_batch_sequence != expected_sequence {
-            return Err(ResourceConnectionError::BatchSequenceMismatch { stream_id: frame.stream_id, expected: expected_sequence, actual: frame.final_batch_sequence });
+            return Err(ResourceConnectionError::BatchSequenceMismatch {
+                stream_id: frame.stream_id,
+                expected: expected_sequence,
+                actual: frame.final_batch_sequence,
+            });
         }
         if frame.total_items != state.total_items {
-            return Err(ResourceConnectionError::ResourceTotalMismatch { stream_id: frame.stream_id, expected: state.total_items, actual: frame.total_items });
+            return Err(ResourceConnectionError::ResourceTotalMismatch {
+                stream_id: frame.stream_id,
+                expected: state.total_items,
+                actual: frame.total_items,
+            });
         }
         self.finish(frame.stream_id, frame.request_id);
         Ok(ResourceFrameDisposition::Applied)
     }
 
-    fn terminal_frame(&mut self, stream_id: u64, request_id: InvocationId) -> Result<ResourceFrameDisposition, ResourceConnectionError> {
+    fn terminal_frame(
+        &mut self,
+        stream_id: u64,
+        request_id: InvocationId,
+    ) -> Result<ResourceFrameDisposition, ResourceConnectionError> {
         if let Some(disposition) = self.check_terminal(stream_id, request_id)? {
             return Ok(disposition);
         }
         let state = self.state_for(stream_id, request_id)?;
-        if matches!(state.resource_kind, ResourceKind::Single) && state.last_batch_sequence.is_some() {
+        if matches!(state.resource_kind, ResourceKind::Single)
+            && state.last_batch_sequence.is_some()
+        {
             return Err(ResourceConnectionError::WrongState { stream_id });
         }
         self.finish(stream_id, request_id);
         Ok(ResourceFrameDisposition::Applied)
     }
 
-    fn window_update(&mut self, update: ResourceWindowUpdate) -> Result<ResourceFrameDisposition, ResourceConnectionError> {
-        if let Some(disposition) = self.check_terminal(update.stream_id, update.request_id)? { return Ok(disposition); }
+    fn window_update(
+        &mut self,
+        update: ResourceWindowUpdate,
+    ) -> Result<ResourceFrameDisposition, ResourceConnectionError> {
+        if let Some(disposition) = self.check_terminal(update.stream_id, update.request_id)? {
+            return Ok(disposition);
+        }
         let state = self.state_for(update.stream_id, update.request_id)?;
         if state.resource_kind != ResourceKind::Stream
             || !state.accepted
             || !matches!(state.phase, ResourcePhase::Live)
         {
-            return Err(ResourceConnectionError::WrongState { stream_id: update.stream_id });
+            return Err(ResourceConnectionError::WrongState {
+                stream_id: update.stream_id,
+            });
         }
-        require_resource_window_addition(update.add_items, update.add_bytes).map_err(|source| ResourceConnectionError::InvalidFrame { source })?;
-        let items = state.item_window.checked_add(update.add_items).filter(|value| *value <= MAX_RESOURCE_WINDOW);
-        let bytes = state.byte_window.checked_add(update.add_bytes).filter(|value| *value <= MAX_RESOURCE_WINDOW);
+        require_resource_window_addition(update.add_items, update.add_bytes)
+            .map_err(|source| ResourceConnectionError::InvalidFrame { source })?;
+        let items = state
+            .item_window
+            .checked_add(update.add_items)
+            .filter(|value| *value <= MAX_RESOURCE_WINDOW);
+        let bytes = state
+            .byte_window
+            .checked_add(update.add_bytes)
+            .filter(|value| *value <= MAX_RESOURCE_WINDOW);
         let (Some(items), Some(bytes)) = (items, bytes) else {
-            return Err(ResourceConnectionError::InvalidFrame { source: FrameCodecError::ResourceWindowOverflow });
+            return Err(ResourceConnectionError::InvalidFrame {
+                source: FrameCodecError::ResourceWindowOverflow,
+            });
         };
-        let state = self.streams.get_mut(&update.stream_id).expect("resource state checked");
+        let state = self
+            .streams
+            .get_mut(&update.stream_id)
+            .expect("resource state checked");
         state.item_window = items;
         state.byte_window = bytes;
         Ok(ResourceFrameDisposition::Applied)
     }
 
-    fn cancel(&mut self, cancel: ResourceCancel) -> Result<ResourceFrameDisposition, ResourceConnectionError> {
-        if let Some(disposition) = self.check_terminal(cancel.stream_id, cancel.request_id)? { return Ok(disposition); }
+    fn cancel(
+        &mut self,
+        cancel: ResourceCancel,
+    ) -> Result<ResourceFrameDisposition, ResourceConnectionError> {
+        if let Some(disposition) = self.check_terminal(cancel.stream_id, cancel.request_id)? {
+            return Ok(disposition);
+        }
         let state = self.state_for(cancel.stream_id, cancel.request_id)?;
         if matches!(state.phase, ResourcePhase::Requested | ResourcePhase::Live) {
             self.finish(cancel.stream_id, cancel.request_id);
             return Ok(ResourceFrameDisposition::Applied);
         }
-        Err(ResourceConnectionError::WrongState { stream_id: cancel.stream_id })
+        Err(ResourceConnectionError::WrongState {
+            stream_id: cancel.stream_id,
+        })
     }
 
     fn finish(&mut self, stream_id: u64, request_id: InvocationId) {
         self.streams.remove(&stream_id);
         self.terminal.insert(stream_id, request_id);
         while self.terminal.len() > MAX_REQUEST_ID_HISTORY {
-            let Some(stream) = self.terminal.keys().next().copied() else { break; };
+            let Some(stream) = self.terminal.keys().next().copied() else {
+                break;
+            };
             self.terminal.remove(&stream);
         }
     }
 
     pub fn shutdown(&mut self) -> usize {
         let finished = self.streams.len();
-        let streams: Vec<_> = self.streams.iter().map(|(stream, state)| (*stream, state.request_id)).collect();
+        let streams: Vec<_> = self
+            .streams
+            .iter()
+            .map(|(stream, state)| (*stream, state.request_id))
+            .collect();
         self.streams.clear();
-        for (stream, request_id) in streams { self.terminal.insert(stream, request_id); }
+        for (stream, request_id) in streams {
+            self.terminal.insert(stream, request_id);
+        }
         while self.terminal.len() > MAX_REQUEST_ID_HISTORY {
-            let Some(stream) = self.terminal.keys().next().copied() else { break; };
+            let Some(stream) = self.terminal.keys().next().copied() else {
+                break;
+            };
             self.terminal.remove(&stream);
         }
         finished
@@ -2502,7 +2766,10 @@ pub enum FrameCodecError {
     /// A resource request or batch has too many entries.
     TooManyResourceEntries { actual: usize, maximum: usize },
     /// Resource arguments are not strictly ascending by ParameterId.
-    NonCanonicalResourceArgumentOrder { previous: ParameterId, current: ParameterId },
+    NonCanonicalResourceArgumentOrder {
+        previous: ParameterId,
+        current: ParameterId,
+    },
     /// A resource request repeats one ParameterId.
     DuplicateResourceArgument { parameter: ParameterId },
     /// A resource values frame is empty.
@@ -2620,9 +2887,7 @@ impl fmt::Display for FrameCodecError {
             Self::ResourceRequiresConstructed => {
                 formatter.write_str("resource frames require the constructed value protocol")
             }
-            Self::ResourceInvalidMarker => {
-                formatter.write_str("resource frame marker is invalid")
-            }
+            Self::ResourceInvalidMarker => formatter.write_str("resource frame marker is invalid"),
             Self::ResourceUnknownTag { .. } => formatter.write_str("resource frame tag is unknown"),
             Self::ResourceWrongDirection { .. } => {
                 formatter.write_str("resource frame has the wrong direction")
@@ -2908,7 +3173,8 @@ pub fn decode_constructed_invocation_event_frame(
     registry: &OpaqueCodecRegistry,
     encoded: &[u8],
 ) -> Result<ServerFrame, FrameCodecError> {
-    let (tag, stream, payload) = decode_envelope(FrameVersion::Constructed(active, registry), encoded)?;
+    let (tag, stream, payload) =
+        decode_envelope(FrameVersion::Constructed(active, registry), encoded)?;
     if tag != EVENT_BATCH_TAG {
         return Err(FrameCodecError::WrongDirection { tag });
     }
@@ -2928,7 +3194,6 @@ pub fn decode_constructed_invocation_event_frame(
     })
 }
 
-
 /// Encodes one complete ORNA-RESOURCE/1 client frame.
 pub fn encode_resource_client_frame(
     active: &ActiveDatabaseRevision,
@@ -2937,9 +3202,7 @@ pub fn encode_resource_client_frame(
 ) -> Result<Vec<u8>, FrameCodecError> {
     match frame {
         ResourceClientFrame::Request(request) => encode_resource_request(active, registry, request),
-        ResourceClientFrame::WindowUpdate(update) => {
-            encode_resource_window_update(update)
-        }
+        ResourceClientFrame::WindowUpdate(update) => encode_resource_window_update(update),
         ResourceClientFrame::Cancel(cancel) => encode_resource_cancel(cancel),
     }
 }
@@ -2958,7 +3221,9 @@ pub fn decode_resource_client_frame(
         RESOURCE_WINDOW_UPDATE_TAG => Ok(ResourceClientFrame::WindowUpdate(
             decode_resource_window_update(encoded)?,
         )),
-        RESOURCE_CANCEL_TAG => Ok(ResourceClientFrame::Cancel(decode_resource_cancel(encoded)?)),
+        RESOURCE_CANCEL_TAG => Ok(ResourceClientFrame::Cancel(decode_resource_cancel(
+            encoded,
+        )?)),
         RESOURCE_ACCEPTED_TAG..=RESOURCE_CANCELLED_TAG => {
             Err(FrameCodecError::ResourceWrongDirection { tag })
         }
@@ -2975,7 +3240,11 @@ pub fn encode_resource_request(
     require_resource_stream(request.stream_id)?;
     require_resource_invocation_id(request.request_id)?;
     require_resource_generation(request.generation)?;
-    require_resource_kind_windows(request.resource_kind, request.item_window, request.byte_window)?;
+    require_resource_kind_windows(
+        request.resource_kind,
+        request.item_window,
+        request.byte_window,
+    )?;
     validate_resource_arguments(&request.arguments)?;
     let mut payload = Vec::new();
     payload.extend_from_slice(&request.stream_id.to_be_bytes());
@@ -3152,12 +3421,11 @@ pub fn encode_resource_values(
         }
         encoded_values.push(encoded);
     }
-    let item_count = u32::try_from(frame.values.len()).map_err(|_| {
-        FrameCodecError::TooManyResourceEntries {
+    let item_count =
+        u32::try_from(frame.values.len()).map_err(|_| FrameCodecError::TooManyResourceEntries {
             actual: frame.values.len(),
             maximum: MAX_RESOURCE_BATCH_ITEMS,
-        }
-    })?;
+        })?;
     let actual_bytes = u32::try_from(byte_count).map_err(|_| FrameCodecError::PayloadTooLarge {
         actual: byte_count,
         maximum: MAX_FRAME_PAYLOAD_LENGTH,
@@ -3458,13 +3726,21 @@ pub fn decode_resource_server_frame(
 ) -> Result<ResourceServerFrame, FrameCodecError> {
     let (tag, _) = decode_resource_envelope(encoded)?;
     match tag {
-        RESOURCE_ACCEPTED_TAG => Ok(ResourceServerFrame::Accepted(decode_resource_accepted(encoded)?)),
+        RESOURCE_ACCEPTED_TAG => Ok(ResourceServerFrame::Accepted(decode_resource_accepted(
+            encoded,
+        )?)),
         RESOURCE_VALUES_TAG => Ok(ResourceServerFrame::Values(decode_resource_values(
             active, registry, encoded,
         )?)),
-        RESOURCE_COMPLETED_TAG => Ok(ResourceServerFrame::Completed(decode_resource_completed(encoded)?)),
-        RESOURCE_FAILED_TAG => Ok(ResourceServerFrame::Failed(decode_resource_failed(encoded)?)),
-        RESOURCE_CANCELLED_TAG => Ok(ResourceServerFrame::Cancelled(decode_resource_cancelled(encoded)?)),
+        RESOURCE_COMPLETED_TAG => Ok(ResourceServerFrame::Completed(decode_resource_completed(
+            encoded,
+        )?)),
+        RESOURCE_FAILED_TAG => Ok(ResourceServerFrame::Failed(decode_resource_failed(
+            encoded,
+        )?)),
+        RESOURCE_CANCELLED_TAG => Ok(ResourceServerFrame::Cancelled(decode_resource_cancelled(
+            encoded,
+        )?)),
         RESOURCE_REQUEST_TAG..=RESOURCE_CANCEL_TAG => {
             Err(FrameCodecError::ResourceWrongDirection { tag })
         }
@@ -3511,7 +3787,10 @@ fn append_revision_pair(payload: &mut Vec<u8>, revision: RevisionPair) {
     payload.extend_from_slice(&revision.catalogue().to_bytes());
 }
 
-fn parse_revision_pair(payload: &[u8], cursor: &mut usize) -> Result<RevisionPair, FrameCodecError> {
+fn parse_revision_pair(
+    payload: &[u8],
+    cursor: &mut usize,
+) -> Result<RevisionPair, FrameCodecError> {
     let source = resource_id(payload, cursor, orna_core::SourceRevisionId::from_bytes)?;
     let catalogue = resource_id(payload, cursor, orna_core::CatalogueRevisionId::from_bytes)?;
     Ok(RevisionPair::new(source, catalogue))
@@ -3651,7 +3930,9 @@ fn encode_resource_envelope(tag: u8, payload: &[u8]) -> Result<Vec<u8>, FrameCod
 
 fn decode_resource_envelope(encoded: &[u8]) -> Result<(u8, &[u8]), FrameCodecError> {
     if encoded.len() < RESOURCE_HEADER_LENGTH {
-        return Err(FrameCodecError::TruncatedHeader { actual: encoded.len() });
+        return Err(FrameCodecError::TruncatedHeader {
+            actual: encoded.len(),
+        });
     }
     if &encoded[..RESOURCE_MARKER.len()] != RESOURCE_MARKER {
         return Err(FrameCodecError::ResourceInvalidMarker);
@@ -4669,7 +4950,6 @@ mod tests {
             .collect()
     }
 
-
     fn minimal_request(idempotency_key: Option<Vec<u8>>) -> InvokeRequest {
         InvokeRequest::new(InvokeRequestInput {
             target: InvocationTarget::function_id(FunctionId::from_bytes([0x11; 16])),
@@ -4862,7 +5142,10 @@ mod tests {
         expected.extend_from_slice(&SYS_INVOKE_PARAMETER_ID.to_bytes());
         expected.extend_from_slice(&request.encoded);
         assert_eq!(encoded, expected);
-        assert_eq!(decode_constructed_client_frame(&active, &registry, &encoded), Ok(frame.clone()));
+        assert_eq!(
+            decode_constructed_client_frame(&active, &registry, &encoded),
+            Ok(frame.clone())
+        );
 
         let mut malformed = encoded.clone();
         malformed[HEADER_LENGTH + 16] = 0;
@@ -4976,10 +5259,7 @@ mod tests {
             .receive_constructed(
                 &active,
                 &registry,
-                ClientFrame::CallInvokeRequest {
-                    stream: 1,
-                    request,
-                },
+                ClientFrame::CallInvokeRequest { stream: 1, request },
             )
             .unwrap();
         assert!(matches!(
@@ -5001,7 +5281,10 @@ mod tests {
                     invocation,
                 },
             ),
-            Ok(ServerFrame::CallAccepted { stream: 1, invocation })
+            Ok(ServerFrame::CallAccepted {
+                stream: 1,
+                invocation
+            })
         );
         let mut cancellation_connection = connection.clone();
         let mut queued_cancellation_connection = connection.clone();
@@ -5155,11 +5438,8 @@ mod tests {
         );
 
         assert_eq!(
-            connection.apply_constructed(
-                &active,
-                &registry,
-                ServerAction::Completed { stream: 1 },
-            ),
+            connection
+                .apply_constructed(&active, &registry, ServerAction::Completed { stream: 1 },),
             Ok(ServerFrame::CallCompleted { stream: 1 })
         );
     }
@@ -5253,7 +5533,10 @@ mod tests {
                     invocation,
                 },
             ),
-            Ok(ServerFrame::CallAccepted { stream: 1, invocation })
+            Ok(ServerFrame::CallAccepted {
+                stream: 1,
+                invocation
+            })
         );
         connection
             .receive_constructed(
@@ -6915,7 +7198,10 @@ mod tests {
         let decoded = decode_resource_request(&active, &registry, &encoded)
             .expect("generation one request decodes");
         assert_eq!(decoded, request);
-        assert_eq!(encode_resource_request(&active, &registry, &decoded), Ok(encoded));
+        assert_eq!(
+            encode_resource_request(&active, &registry, &decoded),
+            Ok(encoded)
+        );
     }
 
     #[test]
@@ -6976,17 +7262,28 @@ mod tests {
         assert_eq!(encoded, expected);
         let decoded = decode_resource_request(&active, &registry, &encoded).unwrap();
         assert_eq!(decoded, request);
-        assert_eq!(encode_resource_request(&active, &registry, &decoded), Ok(encoded));
+        assert_eq!(
+            encode_resource_request(&active, &registry, &decoded),
+            Ok(encoded)
+        );
     }
 
     #[test]
     fn resource_request_with_typed_arguments_has_exact_canonical_golden_bytes() {
         let active = empty_active_revision();
         let registry = test_registry();
-        let first_value = encode_constructed_value(&active, &registry, &RuntimeValue::Integer(1)).unwrap();
-        let second_value = encode_constructed_value(&active, &registry, &RuntimeValue::Integer(2)).unwrap();
-        assert_eq!(first_value, resource_hex("4f52563503000000000000000000000000000000020000000400000001"));
-        assert_eq!(second_value, resource_hex("4f52563503000000000000000000000000000000020000000400000002"));
+        let first_value =
+            encode_constructed_value(&active, &registry, &RuntimeValue::Integer(1)).unwrap();
+        let second_value =
+            encode_constructed_value(&active, &registry, &RuntimeValue::Integer(2)).unwrap();
+        assert_eq!(
+            first_value,
+            resource_hex("4f52563503000000000000000000000000000000020000000400000001")
+        );
+        assert_eq!(
+            second_value,
+            resource_hex("4f52563503000000000000000000000000000000020000000400000002")
+        );
         let request = ResourceRequest {
             arguments: vec![
                 ResourceArgument {
@@ -7024,7 +7321,10 @@ mod tests {
         assert_eq!(encoded, expected);
         let decoded = decode_resource_request(&active, &registry, &encoded).unwrap();
         assert_eq!(decoded, request);
-        assert_eq!(encode_resource_request(&active, &registry, &decoded), Ok(expected));
+        assert_eq!(
+            encode_resource_request(&active, &registry, &decoded),
+            Ok(expected)
+        );
     }
 
     #[test]
@@ -7082,7 +7382,8 @@ mod tests {
     fn resource_request_and_controls_reject_unframed_payloads() {
         let active = empty_active_revision();
         let registry = test_registry();
-        let request = encode_resource_request(&active, &registry, &resource_request_fixture()).unwrap();
+        let request =
+            encode_resource_request(&active, &registry, &resource_request_fixture()).unwrap();
         assert!(matches!(
             decode_resource_request(&active, &registry, &request[RESOURCE_HEADER_LENGTH..]),
             Err(FrameCodecError::ResourceInvalidMarker)
@@ -7115,7 +7416,8 @@ mod tests {
     fn resource_envelope_rejects_wrong_major_flags_and_length_errors() {
         let active = empty_active_revision();
         let registry = test_registry();
-        let encoded = encode_resource_request(&active, &registry, &resource_request_fixture()).unwrap();
+        let encoded =
+            encode_resource_request(&active, &registry, &resource_request_fixture()).unwrap();
 
         let mut wrong_major = encoded.clone();
         wrong_major[RESOURCE_MARKER.len() - 1] = b'2';
@@ -7157,8 +7459,11 @@ mod tests {
         );
 
         let mut oversized = encoded;
-        oversized[RESOURCE_MARKER.len() + 2..RESOURCE_HEADER_LENGTH]
-            .copy_from_slice(&u32::try_from(MAX_FRAME_PAYLOAD_LENGTH + 1).unwrap().to_be_bytes());
+        oversized[RESOURCE_MARKER.len() + 2..RESOURCE_HEADER_LENGTH].copy_from_slice(
+            &u32::try_from(MAX_FRAME_PAYLOAD_LENGTH + 1)
+                .unwrap()
+                .to_be_bytes(),
+        );
         assert_eq!(
             decode_resource_request(&active, &registry, &oversized),
             Err(FrameCodecError::PayloadTooLarge {
@@ -7238,7 +7543,10 @@ mod tests {
             "0000000000000000",
             "0000000000000001",
         ));
-        assert_eq!(encode_resource_completed(&completed).unwrap(), completed_wire);
+        assert_eq!(
+            encode_resource_completed(&completed).unwrap(),
+            completed_wire
+        );
         assert_eq!(decode_resource_completed(&completed_wire), Ok(completed));
 
         let failed = ResourceFailed {
@@ -7266,7 +7574,10 @@ mod tests {
             "31313131313131313131313131313131",
             "01",
         ));
-        assert_eq!(encode_resource_cancelled(&cancelled).unwrap(), cancelled_wire);
+        assert_eq!(
+            encode_resource_cancelled(&cancelled).unwrap(),
+            cancelled_wire
+        );
         assert_eq!(decode_resource_cancelled(&cancelled_wire), Ok(cancelled));
 
         let window = ResourceWindowUpdate {
@@ -7300,8 +7611,6 @@ mod tests {
         assert_eq!(decode_resource_cancel(&cancel_wire), Ok(cancel));
     }
 
-
-
     #[test]
     fn resource_values_round_trip_preserves_canonical_value_bytes() {
         let active = empty_active_revision();
@@ -7319,7 +7628,10 @@ mod tests {
         let encoded = encode_resource_values(&active, &registry, &frame).unwrap();
         let decoded = decode_resource_values(&active, &registry, &encoded).unwrap();
         assert_eq!(decoded, frame);
-        assert_eq!(encode_resource_values(&active, &registry, &decoded), Ok(encoded));
+        assert_eq!(
+            encode_resource_values(&active, &registry, &decoded),
+            Ok(encoded)
+        );
     }
 
     #[test]
@@ -7340,8 +7652,11 @@ mod tests {
 
         let item_count_offset = RESOURCE_HEADER_LENGTH + 8 + 16 + 8;
         let mut too_many_items = encoded.clone();
-        too_many_items[item_count_offset..item_count_offset + 4]
-            .copy_from_slice(&u32::try_from(MAX_RESOURCE_BATCH_ITEMS + 1).unwrap().to_be_bytes());
+        too_many_items[item_count_offset..item_count_offset + 4].copy_from_slice(
+            &u32::try_from(MAX_RESOURCE_BATCH_ITEMS + 1)
+                .unwrap()
+                .to_be_bytes(),
+        );
         assert_eq!(
             decode_resource_values(&active, &registry, &too_many_items),
             Err(FrameCodecError::TooManyResourceEntries {
@@ -7352,8 +7667,11 @@ mod tests {
 
         let byte_count_offset = item_count_offset + 4;
         let mut oversized_bytes = encoded;
-        oversized_bytes[byte_count_offset..byte_count_offset + 4]
-            .copy_from_slice(&u32::try_from(MAX_FRAME_PAYLOAD_LENGTH + 1).unwrap().to_be_bytes());
+        oversized_bytes[byte_count_offset..byte_count_offset + 4].copy_from_slice(
+            &u32::try_from(MAX_FRAME_PAYLOAD_LENGTH + 1)
+                .unwrap()
+                .to_be_bytes(),
+        );
         assert_eq!(
             decode_resource_values(&active, &registry, &oversized_bytes),
             Err(FrameCodecError::PayloadTooLarge {
@@ -7435,7 +7753,8 @@ mod tests {
             },
         ];
         let valid = encode_resource_request(&active, &registry, &canonical).unwrap();
-        let first_value = encode_constructed_value(&active, &registry, &RuntimeValue::Integer(1)).unwrap();
+        let first_value =
+            encode_constructed_value(&active, &registry, &RuntimeValue::Integer(1)).unwrap();
         let second_parameter_offset = RESOURCE_HEADER_LENGTH + 125 + 16 + 4 + first_value.len();
         let mut duplicate = valid.clone();
         duplicate[second_parameter_offset..second_parameter_offset + 16].copy_from_slice(&[1; 16]);
@@ -7444,12 +7763,14 @@ mod tests {
             Err(FrameCodecError::DuplicateResourceArgument { .. })
         ));
         let mut descending_wire = valid;
-        descending_wire[second_parameter_offset..second_parameter_offset + 16].copy_from_slice(&[0; 16]);
+        descending_wire[second_parameter_offset..second_parameter_offset + 16]
+            .copy_from_slice(&[0; 16]);
         assert!(matches!(
             decode_resource_request(&active, &registry, &descending_wire),
             Err(FrameCodecError::NonCanonicalResourceArgumentOrder { .. })
         ));
-        let mut bytes = encode_resource_request(&active, &registry, &resource_request_fixture()).unwrap();
+        let mut bytes =
+            encode_resource_request(&active, &registry, &resource_request_fixture()).unwrap();
         bytes.extend_from_slice(&[0]);
         assert!(matches!(
             decode_resource_request(&active, &registry, &bytes),
@@ -7506,7 +7827,8 @@ mod tests {
             encode_resource_request(&active, &registry, &request),
             Err(FrameCodecError::ResourceWindowExceeded { .. })
         ));
-        let mut encoded = encode_resource_request(&active, &registry, &resource_request_fixture()).unwrap();
+        let mut encoded =
+            encode_resource_request(&active, &registry, &resource_request_fixture()).unwrap();
         let kind_offset = RESOURCE_HEADER_LENGTH + 8 + 16 + 16 + 16 + 4 + 4 + 16 + 16 + 16 + 8;
         encoded[kind_offset] = 0xff;
         assert!(matches!(
@@ -7631,7 +7953,10 @@ mod tests {
         for frame in server_frames {
             let encoded = encode_resource_server_frame(&active, &registry, &frame).unwrap();
             assert!(encoded.starts_with(RESOURCE_MARKER));
-            assert_eq!(decode_resource_server_frame(&active, &registry, &encoded), Ok(frame));
+            assert_eq!(
+                decode_resource_server_frame(&active, &registry, &encoded),
+                Ok(frame)
+            );
         }
 
         let controls = [
@@ -7649,7 +7974,10 @@ mod tests {
         ];
         for frame in controls {
             let encoded = encode_resource_client_frame(&active, &registry, &frame).unwrap();
-            assert_eq!(decode_resource_client_frame(&active, &registry, &encoded), Ok(frame));
+            assert_eq!(
+                decode_resource_client_frame(&active, &registry, &encoded),
+                Ok(frame)
+            );
             let mut trailing = encoded;
             trailing.push(0);
             assert!(matches!(
@@ -7820,7 +8148,10 @@ mod tests {
         let request = resource_request_fixture();
         let request_id = request.request_id;
         let mut connection = ResourceProtocolConnection::new();
-        assert_eq!(connection.open(request.clone()), Ok(ResourceFrameDisposition::Applied));
+        assert_eq!(
+            connection.open(request.clone()),
+            Ok(ResourceFrameDisposition::Applied)
+        );
         assert_eq!(
             connection.apply(ResourceServerFrame::Accepted(ResourceAccepted {
                 stream_id: request.stream_id,
@@ -7851,7 +8182,10 @@ mod tests {
         let request = resource_request_fixture();
         let request_id = request.request_id;
         let mut connection = ResourceProtocolConnection::new();
-        assert_eq!(connection.open(request.clone()), Ok(ResourceFrameDisposition::Applied));
+        assert_eq!(
+            connection.open(request.clone()),
+            Ok(ResourceFrameDisposition::Applied)
+        );
         assert_eq!(
             connection.resource_nested_invocation_id(request.stream_id, request_id),
             Ok(None),
@@ -7895,9 +8229,16 @@ mod tests {
             target_revision: request.target_revision,
             resource_kind: request.resource_kind,
         };
-        let decoded = decode_resource_accepted(&encode_resource_accepted(&accepted).unwrap()).unwrap();
-        assert_eq!(connection.apply(ResourceServerFrame::Accepted(decoded)), Ok(ResourceFrameDisposition::Applied));
-        assert_eq!(connection.resource_nested_invocation_id(request.stream_id, request_id), Ok(Some(InvocationId::from_bytes([0x62; 16]))));
+        let decoded =
+            decode_resource_accepted(&encode_resource_accepted(&accepted).unwrap()).unwrap();
+        assert_eq!(
+            connection.apply(ResourceServerFrame::Accepted(decoded)),
+            Ok(ResourceFrameDisposition::Applied)
+        );
+        assert_eq!(
+            connection.resource_nested_invocation_id(request.stream_id, request_id),
+            Ok(Some(InvocationId::from_bytes([0x62; 16])))
+        );
         assert_eq!(
             connection.apply(ResourceServerFrame::Accepted(ResourceAccepted {
                 stream_id: request.stream_id,
@@ -7906,9 +8247,14 @@ mod tests {
                 target_revision: request.target_revision,
                 resource_kind: request.resource_kind,
             })),
-            Err(ResourceConnectionError::WrongState { stream_id: request.stream_id }),
+            Err(ResourceConnectionError::WrongState {
+                stream_id: request.stream_id
+            }),
         );
-        assert_eq!(connection.resource_nested_invocation_id(request.stream_id, request_id), Ok(Some(InvocationId::from_bytes([0x62; 16]))));
+        assert_eq!(
+            connection.resource_nested_invocation_id(request.stream_id, request_id),
+            Ok(Some(InvocationId::from_bytes([0x62; 16])))
+        );
         assert_eq!(connection.live_resources(), 1);
     }
 
@@ -7917,7 +8263,10 @@ mod tests {
         let request = resource_request_fixture();
         let request_id = request.request_id;
         let mut connection = ResourceProtocolConnection::new();
-        assert_eq!(connection.open(request.clone()), Ok(ResourceFrameDisposition::Applied));
+        assert_eq!(
+            connection.open(request.clone()),
+            Ok(ResourceFrameDisposition::Applied)
+        );
         assert_eq!(
             connection.apply(ResourceServerFrame::Accepted(ResourceAccepted {
                 stream_id: request.stream_id,
@@ -7952,7 +8301,10 @@ mod tests {
         request.byte_window = 1;
         let request_id = request.request_id;
         let mut connection = ResourceProtocolConnection::new();
-        assert_eq!(connection.open(request.clone()), Ok(ResourceFrameDisposition::Applied));
+        assert_eq!(
+            connection.open(request.clone()),
+            Ok(ResourceFrameDisposition::Applied)
+        );
         assert_eq!(
             connection.apply(ResourceServerFrame::Accepted(ResourceAccepted {
                 stream_id: request.stream_id,
@@ -8126,7 +8478,10 @@ mod tests {
                 .unwrap();
 
             assert_eq!(connection.live_resources(), 2);
-            assert_eq!(connection.apply(outcome), Ok(ResourceFrameDisposition::Applied));
+            assert_eq!(
+                connection.apply(outcome),
+                Ok(ResourceFrameDisposition::Applied)
+            );
             assert_eq!(connection.live_resources(), 1);
             assert_eq!(
                 connection.resource_credit(requested.stream_id, requested.request_id),
@@ -8157,13 +8512,15 @@ mod tests {
         let request_id = request.request_id;
         let mut connection = ResourceProtocolConnection::new();
         connection.open(request.clone()).unwrap();
-        connection.apply(ResourceServerFrame::Accepted(ResourceAccepted {
-            stream_id: request.stream_id,
-            request_id,
-            nested_invocation_id: InvocationId::from_bytes([0x54; 16]),
-            target_revision: request.target_revision,
-            resource_kind: ResourceKind::Stream,
-        })).unwrap();
+        connection
+            .apply(ResourceServerFrame::Accepted(ResourceAccepted {
+                stream_id: request.stream_id,
+                request_id,
+                nested_invocation_id: InvocationId::from_bytes([0x54; 16]),
+                target_revision: request.target_revision,
+                resource_kind: ResourceKind::Stream,
+            }))
+            .unwrap();
         let before = connection.clone();
 
         assert_eq!(
@@ -8189,21 +8546,25 @@ mod tests {
         let request_id = request.request_id;
         let mut connection = ResourceProtocolConnection::new();
         connection.open(request.clone()).unwrap();
-        connection.apply(ResourceServerFrame::Accepted(ResourceAccepted {
-            stream_id: request.stream_id,
-            request_id,
-            nested_invocation_id: InvocationId::from_bytes([0x55; 16]),
-            target_revision: request.target_revision,
-            resource_kind: ResourceKind::Stream,
-        })).unwrap();
-        connection.apply(ResourceServerFrame::Values(ResourceValues {
-            stream_id: request.stream_id,
-            request_id,
-            batch_sequence: 0,
-            item_count: 1,
-            byte_count: value_bytes.len() as u32,
-            values: vec![value],
-        })).unwrap();
+        connection
+            .apply(ResourceServerFrame::Accepted(ResourceAccepted {
+                stream_id: request.stream_id,
+                request_id,
+                nested_invocation_id: InvocationId::from_bytes([0x55; 16]),
+                target_revision: request.target_revision,
+                resource_kind: ResourceKind::Stream,
+            }))
+            .unwrap();
+        connection
+            .apply(ResourceServerFrame::Values(ResourceValues {
+                stream_id: request.stream_id,
+                request_id,
+                batch_sequence: 0,
+                item_count: 1,
+                byte_count: value_bytes.len() as u32,
+                values: vec![value],
+            }))
+            .unwrap();
 
         assert_eq!(
             connection.resource_credit(request.stream_id, request_id),
@@ -8223,13 +8584,15 @@ mod tests {
         let request_id = request.request_id;
         let mut connection = ResourceProtocolConnection::new();
         connection.open(request.clone()).unwrap();
-        connection.apply(ResourceServerFrame::Accepted(ResourceAccepted {
-            stream_id: request.stream_id,
-            request_id,
-            nested_invocation_id: InvocationId::from_bytes([0x56; 16]),
-            target_revision: request.target_revision,
-            resource_kind: ResourceKind::Stream,
-        })).unwrap();
+        connection
+            .apply(ResourceServerFrame::Accepted(ResourceAccepted {
+                stream_id: request.stream_id,
+                request_id,
+                nested_invocation_id: InvocationId::from_bytes([0x56; 16]),
+                target_revision: request.target_revision,
+                resource_kind: ResourceKind::Stream,
+            }))
+            .unwrap();
 
         assert_eq!(
             connection.receive(ResourceClientFrame::WindowUpdate(ResourceWindowUpdate {
@@ -8280,7 +8643,10 @@ mod tests {
         request.byte_window = value_bytes.len() as u64;
         let request_id = request.request_id;
         let mut connection = ResourceProtocolConnection::new();
-        assert_eq!(connection.open(request.clone()), Ok(ResourceFrameDisposition::Applied));
+        assert_eq!(
+            connection.open(request.clone()),
+            Ok(ResourceFrameDisposition::Applied)
+        );
         let accepted = ResourceAccepted {
             stream_id: request.stream_id,
             request_id,
@@ -8288,7 +8654,10 @@ mod tests {
             target_revision: request.target_revision,
             resource_kind: ResourceKind::Stream,
         };
-        assert_eq!(connection.apply(ResourceServerFrame::Accepted(accepted)), Ok(ResourceFrameDisposition::Applied));
+        assert_eq!(
+            connection.apply(ResourceServerFrame::Accepted(accepted)),
+            Ok(ResourceFrameDisposition::Applied)
+        );
         let values = ResourceValues {
             stream_id: request.stream_id,
             request_id,
@@ -8297,7 +8666,10 @@ mod tests {
             byte_count: value_bytes.len() as u32,
             values: vec![value.clone()],
         };
-        assert_eq!(connection.apply(ResourceServerFrame::Values(values.clone())), Ok(ResourceFrameDisposition::Applied));
+        assert_eq!(
+            connection.apply(ResourceServerFrame::Values(values.clone())),
+            Ok(ResourceFrameDisposition::Applied)
+        );
         let mut exhausted = values.clone();
         exhausted.batch_sequence = 1;
         assert_eq!(
@@ -8339,7 +8711,10 @@ mod tests {
             })),
             Ok(ResourceFrameDisposition::Applied)
         );
-        assert_eq!(connection.apply(ResourceServerFrame::Values(values)), Ok(ResourceFrameDisposition::DroppedLate));
+        assert_eq!(
+            connection.apply(ResourceServerFrame::Values(values)),
+            Ok(ResourceFrameDisposition::DroppedLate)
+        );
         assert_eq!(connection.live_resources(), 0);
         assert_eq!(
             connection.resource_nested_invocation_id(1, request_id),
@@ -8362,21 +8737,25 @@ mod tests {
         item_request.item_window = 1;
         item_request.byte_window = (value_bytes.len() * 2) as u64;
         connection.open(item_request.clone()).unwrap();
-        connection.apply(ResourceServerFrame::Accepted(ResourceAccepted {
-            stream_id: 10,
-            request_id: item_request.request_id,
-            nested_invocation_id: InvocationId::from_bytes([0x71; 16]),
-            target_revision: item_request.target_revision,
-            resource_kind: ResourceKind::Stream,
-        })).unwrap();
-        connection.apply(ResourceServerFrame::Values(ResourceValues {
-            stream_id: 10,
-            request_id: item_request.request_id,
-            batch_sequence: 0,
-            item_count: 1,
-            byte_count: value_bytes.len() as u32,
-            values: vec![value.clone()],
-        })).unwrap();
+        connection
+            .apply(ResourceServerFrame::Accepted(ResourceAccepted {
+                stream_id: 10,
+                request_id: item_request.request_id,
+                nested_invocation_id: InvocationId::from_bytes([0x71; 16]),
+                target_revision: item_request.target_revision,
+                resource_kind: ResourceKind::Stream,
+            }))
+            .unwrap();
+        connection
+            .apply(ResourceServerFrame::Values(ResourceValues {
+                stream_id: 10,
+                request_id: item_request.request_id,
+                batch_sequence: 0,
+                item_count: 1,
+                byte_count: value_bytes.len() as u32,
+                values: vec![value.clone()],
+            }))
+            .unwrap();
         assert_eq!(
             connection.apply(ResourceServerFrame::Values(ResourceValues {
                 stream_id: 10,
@@ -8402,21 +8781,25 @@ mod tests {
         byte_request.item_window = 2;
         byte_request.byte_window = value_bytes.len() as u64;
         connection.open(byte_request.clone()).unwrap();
-        connection.apply(ResourceServerFrame::Accepted(ResourceAccepted {
-            stream_id: 11,
-            request_id: byte_request.request_id,
-            nested_invocation_id: InvocationId::from_bytes([0x73; 16]),
-            target_revision: byte_request.target_revision,
-            resource_kind: ResourceKind::Stream,
-        })).unwrap();
-        connection.apply(ResourceServerFrame::Values(ResourceValues {
-            stream_id: 11,
-            request_id: byte_request.request_id,
-            batch_sequence: 0,
-            item_count: 1,
-            byte_count: value_bytes.len() as u32,
-            values: vec![value.clone()],
-        })).unwrap();
+        connection
+            .apply(ResourceServerFrame::Accepted(ResourceAccepted {
+                stream_id: 11,
+                request_id: byte_request.request_id,
+                nested_invocation_id: InvocationId::from_bytes([0x73; 16]),
+                target_revision: byte_request.target_revision,
+                resource_kind: ResourceKind::Stream,
+            }))
+            .unwrap();
+        connection
+            .apply(ResourceServerFrame::Values(ResourceValues {
+                stream_id: 11,
+                request_id: byte_request.request_id,
+                batch_sequence: 0,
+                item_count: 1,
+                byte_count: value_bytes.len() as u32,
+                values: vec![value.clone()],
+            }))
+            .unwrap();
         assert_eq!(
             connection.apply(ResourceServerFrame::Values(ResourceValues {
                 stream_id: 11,
@@ -8443,7 +8826,10 @@ mod tests {
             let mut request = resource_request_fixture();
             request.stream_id = stream_id;
             request.request_id = InvocationId::from_bytes([stream_id as u8; 16]);
-            assert_eq!(connection.open(request.clone()), Ok(ResourceFrameDisposition::Applied));
+            assert_eq!(
+                connection.open(request.clone()),
+                Ok(ResourceFrameDisposition::Applied)
+            );
             assert_eq!(
                 connection.apply(ResourceServerFrame::Accepted(ResourceAccepted {
                     stream_id,
@@ -8491,7 +8877,10 @@ mod tests {
             let mut request = resource_request_fixture();
             request.stream_id = stream_id;
             request.request_id = InvocationId::from_bytes([stream_id as u8; 16]);
-            assert_eq!(connection.open(request.clone()), Ok(ResourceFrameDisposition::Applied));
+            assert_eq!(
+                connection.open(request.clone()),
+                Ok(ResourceFrameDisposition::Applied)
+            );
             assert_eq!(
                 connection.receive(ResourceClientFrame::Cancel(ResourceCancel {
                     stream_id,
@@ -8511,8 +8900,14 @@ mod tests {
             request_id: oldest_request_id,
             reason: ResourceCancellationCode::ClientRequested,
         });
-        assert_eq!(connection.receive(oldest_cancel.clone()), Ok(ResourceFrameDisposition::DroppedLate));
-        assert_eq!(connection.receive(oldest_cancel), Ok(ResourceFrameDisposition::DroppedLate));
+        assert_eq!(
+            connection.receive(oldest_cancel.clone()),
+            Ok(ResourceFrameDisposition::DroppedLate)
+        );
+        assert_eq!(
+            connection.receive(oldest_cancel),
+            Ok(ResourceFrameDisposition::DroppedLate)
+        );
     }
 
     #[test]
@@ -8523,10 +8918,29 @@ mod tests {
         request.resource_kind = ResourceKind::Stream;
         let request_id = request.request_id;
         let mut connection = ResourceProtocolConnection::new();
-        assert_eq!(connection.receive(ResourceClientFrame::Request(request.clone())), Ok(ResourceFrameDisposition::Applied));
-        let accepted = ResourceAccepted { stream_id: 2, request_id, nested_invocation_id: InvocationId::from_bytes([0x56; 16]), target_revision: request.target_revision, resource_kind: ResourceKind::Stream };
-        assert_eq!(connection.apply(ResourceServerFrame::Accepted(accepted.clone())), Ok(ResourceFrameDisposition::Applied));
-        assert_eq!(connection.receive(ResourceClientFrame::Cancel(ResourceCancel { stream_id: 2, request_id, reason: ResourceCancellationCode::ClientRequested })), Ok(ResourceFrameDisposition::Applied));
+        assert_eq!(
+            connection.receive(ResourceClientFrame::Request(request.clone())),
+            Ok(ResourceFrameDisposition::Applied)
+        );
+        let accepted = ResourceAccepted {
+            stream_id: 2,
+            request_id,
+            nested_invocation_id: InvocationId::from_bytes([0x56; 16]),
+            target_revision: request.target_revision,
+            resource_kind: ResourceKind::Stream,
+        };
+        assert_eq!(
+            connection.apply(ResourceServerFrame::Accepted(accepted.clone())),
+            Ok(ResourceFrameDisposition::Applied)
+        );
+        assert_eq!(
+            connection.receive(ResourceClientFrame::Cancel(ResourceCancel {
+                stream_id: 2,
+                request_id,
+                reason: ResourceCancellationCode::ClientRequested
+            })),
+            Ok(ResourceFrameDisposition::Applied)
+        );
         assert_eq!(
             connection.apply_cancelled_after_client_cancel(ResourceCancelled {
                 stream_id: 2,
@@ -8535,18 +8949,63 @@ mod tests {
             }),
             Ok(ResourceFrameDisposition::Applied)
         );
-        assert_eq!(connection.apply(ResourceServerFrame::Accepted(accepted)), Ok(ResourceFrameDisposition::DroppedLate));
-        assert_eq!(connection.apply(ResourceServerFrame::Values(ResourceValues { stream_id: 2, request_id, batch_sequence: 0, item_count: 1, byte_count: 1, values: vec![RuntimeValue::Integer(1)] })), Ok(ResourceFrameDisposition::DroppedLate));
-        assert_eq!(connection.apply(ResourceServerFrame::Completed(ResourceCompleted { stream_id: 2, request_id, final_batch_sequence: 0, total_items: 0 })), Ok(ResourceFrameDisposition::DroppedLate));
-        assert_eq!(connection.apply(ResourceServerFrame::Failed(ResourceFailed { stream_id: 2, request_id, failure: CallFailure::InternalFailure })), Ok(ResourceFrameDisposition::DroppedLate));
-        assert_eq!(connection.apply(ResourceServerFrame::Cancelled(ResourceCancelled { stream_id: 2, request_id, reason: ResourceCancellationCode::ClientRequested })), Ok(ResourceFrameDisposition::DroppedLate));
+        assert_eq!(
+            connection.apply(ResourceServerFrame::Accepted(accepted)),
+            Ok(ResourceFrameDisposition::DroppedLate)
+        );
+        assert_eq!(
+            connection.apply(ResourceServerFrame::Values(ResourceValues {
+                stream_id: 2,
+                request_id,
+                batch_sequence: 0,
+                item_count: 1,
+                byte_count: 1,
+                values: vec![RuntimeValue::Integer(1)]
+            })),
+            Ok(ResourceFrameDisposition::DroppedLate)
+        );
+        assert_eq!(
+            connection.apply(ResourceServerFrame::Completed(ResourceCompleted {
+                stream_id: 2,
+                request_id,
+                final_batch_sequence: 0,
+                total_items: 0
+            })),
+            Ok(ResourceFrameDisposition::DroppedLate)
+        );
+        assert_eq!(
+            connection.apply(ResourceServerFrame::Failed(ResourceFailed {
+                stream_id: 2,
+                request_id,
+                failure: CallFailure::InternalFailure
+            })),
+            Ok(ResourceFrameDisposition::DroppedLate)
+        );
+        assert_eq!(
+            connection.apply(ResourceServerFrame::Cancelled(ResourceCancelled {
+                stream_id: 2,
+                request_id,
+                reason: ResourceCancellationCode::ClientRequested
+            })),
+            Ok(ResourceFrameDisposition::DroppedLate)
+        );
 
         let mut second = resource_request_fixture();
         second.stream_id = 3;
         second.request_id = InvocationId::from_bytes([0x45; 16]);
-        assert_eq!(connection.open(second.clone()), Ok(ResourceFrameDisposition::Applied));
+        assert_eq!(
+            connection.open(second.clone()),
+            Ok(ResourceFrameDisposition::Applied)
+        );
         assert_eq!(connection.shutdown(), 1);
-        assert_eq!(connection.apply(ResourceServerFrame::Failed(ResourceFailed { stream_id: 3, request_id: second.request_id, failure: CallFailure::InternalFailure })), Ok(ResourceFrameDisposition::DroppedLate));
+        assert_eq!(
+            connection.apply(ResourceServerFrame::Failed(ResourceFailed {
+                stream_id: 3,
+                request_id: second.request_id,
+                failure: CallFailure::InternalFailure
+            })),
+            Ok(ResourceFrameDisposition::DroppedLate)
+        );
     }
 
     #[test]
@@ -8558,7 +9017,10 @@ mod tests {
         duplicate.stream_id = 2;
         let mut connection = ResourceProtocolConnection::new();
 
-        assert_eq!(connection.open(first.clone()), Ok(ResourceFrameDisposition::Applied));
+        assert_eq!(
+            connection.open(first.clone()),
+            Ok(ResourceFrameDisposition::Applied)
+        );
         let before_duplicate = connection.clone();
         assert_eq!(
             connection.open(duplicate),
@@ -8596,7 +9058,6 @@ mod tests {
         );
     }
 
-
     #[test]
     fn resource_connection_accepts_distinct_request_ids_on_distinct_streams() {
         let mut first = resource_request_fixture();
@@ -8607,8 +9068,14 @@ mod tests {
         second.request_id = InvocationId::from_bytes([0x73; 16]);
         let mut connection = ResourceProtocolConnection::new();
 
-        assert_eq!(connection.open(first), Ok(ResourceFrameDisposition::Applied));
-        assert_eq!(connection.open(second), Ok(ResourceFrameDisposition::Applied));
+        assert_eq!(
+            connection.open(first),
+            Ok(ResourceFrameDisposition::Applied)
+        );
+        assert_eq!(
+            connection.open(second),
+            Ok(ResourceFrameDisposition::Applied)
+        );
         assert_eq!(connection.live_resources(), 2);
     }
     #[test]
@@ -8639,7 +9106,10 @@ mod tests {
             let mut request = resource_request_fixture();
             request.stream_id = stream_id;
             request.request_id = InvocationId::from_bytes([stream_id as u8; 16]);
-            assert_eq!(connection.open(request.clone()), Ok(ResourceFrameDisposition::Applied));
+            assert_eq!(
+                connection.open(request.clone()),
+                Ok(ResourceFrameDisposition::Applied)
+            );
             assert_eq!(
                 connection.apply(ResourceServerFrame::Accepted(ResourceAccepted {
                     stream_id,
@@ -8678,7 +9148,10 @@ mod tests {
             let mut request = resource_request_fixture();
             request.stream_id = stream_id;
             request.request_id = InvocationId::from_bytes([stream_id as u8; 16]);
-            assert_eq!(connection.open(request.clone()), Ok(ResourceFrameDisposition::Applied));
+            assert_eq!(
+                connection.open(request.clone()),
+                Ok(ResourceFrameDisposition::Applied)
+            );
             assert_eq!(
                 connection.apply(ResourceServerFrame::Accepted(ResourceAccepted {
                     stream_id,
@@ -8712,5 +9185,4 @@ mod tests {
         );
         assert_eq!(connection, before_duplicate);
     }
-
 }
