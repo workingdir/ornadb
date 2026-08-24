@@ -1370,6 +1370,57 @@ fn serves_final_field_name_through_accepted_rename_transition() {
         })
     );
 
+    let tokens = decode_semantic_tokens(&client.request(
+        "textDocument/semanticTokens/full",
+        json!({ "textDocument": { "uri": uri } }),
+    ));
+    let rename_line: Vec<_> = tokens
+        .iter()
+        .filter(|token| token.line == 5)
+        .cloned()
+        .collect();
+    assert_eq!(
+        rename_line,
+        vec![
+            DecodedSemanticToken {
+                line: 5,
+                character: 4,
+                length: 6,
+                token_type: 0,
+                modifiers: 0,
+            },
+            DecodedSemanticToken {
+                line: 5,
+                character: 11,
+                length: 5,
+                token_type: 0,
+                modifiers: 0,
+            },
+            DecodedSemanticToken {
+                line: 5,
+                character: 17,
+                length: 5,
+                token_type: 5,
+                modifiers: 0,
+            },
+            DecodedSemanticToken {
+                line: 5,
+                character: 23,
+                length: 2,
+                token_type: 0,
+                modifiers: 0,
+            },
+            DecodedSemanticToken {
+                line: 5,
+                character: 26,
+                length: 13,
+                token_type: 5,
+                modifiers: 0,
+            },
+        ],
+        "ALTER FIELD rename tokens preserve old and final property spellings"
+    );
+
     let symbols = client.request(
         "textDocument/documentSymbol",
         json!({ "textDocument": { "uri": uri } }),
