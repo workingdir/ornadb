@@ -482,6 +482,88 @@ def check_fallback_keyword_parity(
         log(f"validated {label} fallback keyword parity {display_path(path, repository)} ({len(keywords)} tree-sitter keywords; editor supersets allowed)")
     return True
 
+def check_unicode_identifier_parity(
+    tree_sitter_grammar: Path,
+    textmate_grammars: Sequence[Path],
+    vim_syntax: Path,
+    repository: Path,
+) -> bool:
+    """Check exact Unicode rules and Vim's documented bounded fallback.
+
+    Tree-sitter and TextMate expose the accepted ``Alphabetic`` property and ``N`` category. Vim
+    does not expose Rust's full ``char.is_alphabetic()``/``is_numeric()``
+    predicates as regexp atoms, so its fallback is deliberately bounded to a
+    syntax-local ``iskeyword`` value and the documented ``\\k``/``\\K``
+    atoms. Explicit lookarounds must provide the identifier boundaries; the
+    buffer-local ``\\<``/``\\>`` atoms and ASCII-only ``\\d`` are not
+    acceptable substitutes.
+    """
+    try:
+        tree_sitter_source = tree_sitter_grammar.read_text(encoding="utf-8")
+        vim_source = vim_syntax.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        log(f"could not read Unicode identifier tooling: {exc}", error=True)
+        return False
+
+    tree_sitter_pattern = r"_unquoted_identifier:\s*\(\$\)\s*=>\s*/\[\\p{Alphabetic}_\]\[\\p{Alphabetic}\\p{N}_\]\*/"
+    if re.search(tree_sitter_pattern, tree_sitter_source) is None:
+        log(
+            "tree-sitter unquoted identifier rule must use Unicode alphabetic code points, Unicode number code points, and underscore",
+            error=True,
+        )
+        return False
+
+    textmate_pattern = r"[\\p{Alphabetic}_][\\p{Alphabetic}\\p{N}_]*"
+    for grammar_path in textmate_grammars:
+        try:
+            grammar_source = grammar_path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as exc:
+            log(f"could not read TextMate grammar {display_path(grammar_path, repository)}: {exc}", error=True)
+            return False
+        if textmate_pattern not in grammar_source or "[A-Za-z_][A-Za-z0-9_]*" in grammar_source:
+            log(
+                f"TextMate identifier/function rules do not cover Unicode alphabetic and number code points: "
+                f"{display_path(grammar_path, repository)}",
+                error=True,
+            )
+            return False
+
+    if re.search(r"(?m)^syntax\s+iskeyword\s+@,48-57,_\s*$", vim_source) is None:
+        log(
+            "Vim fallback must set syntax-local iskeyword to @,48-57,_ for its bounded keyword class",
+            error=True,
+        )
+        return False
+
+    vim_rule_matches = re.findall(r"(?m)^syntax\s+match\s+orna(Function|Identifier)\s+(.+)$", vim_source)
+    vim_rules = dict(vim_rule_matches)
+    if len(vim_rule_matches) != 2 or set(vim_rules) != {"Function", "Identifier"}:
+        log("Vim fallback must define exactly one Function and one Identifier rule", error=True)
+        return False
+
+    for kind, rule in vim_rules.items():
+        required = (r"\%#=2", r"\k\@<!", r"\K", r"\k*")
+        if any(atom not in rule for atom in required) or r"\<" in rule or r"\>" in rule or r"\d" in rule:
+            log(
+                f"Vim {kind} fallback must use Unicode-aware \\k/\\K atoms with explicit lookaround boundaries; "
+                "buffer word boundaries and ASCII \\d are forbidden",
+                error=True,
+            )
+            return False
+        if kind == "Function" and r"\ze\s*(" not in rule:
+            log("Vim Function fallback must end the match before optional whitespace and (", error=True)
+            return False
+        if kind == "Identifier" and r"\k\@!" not in rule:
+            log("Vim Identifier fallback must end at an explicit non-identifier boundary", error=True)
+            return False
+
+    log(
+        "validated Unicode identifier rules across tree-sitter and TextMate; "
+        "Vim uses a documented syntax-local iskeyword/\\k bounded fallback, not exact Rust category parity"
+    )
+    return True
+
+
 def check_helix_configuration(configuration_path: Path, repository: Path) -> bool:
     """Validate the checked-in Helix language, server, and grammar entries."""
     if tomllib is None:
@@ -838,6 +920,13 @@ def main() -> int:
         textmate_grammars,
         vim_syntax,
         emacs_integration,
+        repository,
+    ):
+        return 1
+    if not check_unicode_identifier_parity(
+        tree_sitter_directory / "grammar.js",
+        textmate_grammars,
+        vim_syntax,
         repository,
     ):
         return 1

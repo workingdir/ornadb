@@ -10,6 +10,13 @@ endif
 " Keywords and type names are case-insensitive.
 syntax case ignore
 
+" Keep keyword declarations and explicit identifier boundaries on the same
+" syntax-local option. Vim documents \k/\K as option-backed keyword atoms;
+" its Unicode word classification is broader than Rust Alphabetic/Numeric
+" (notably, it can include emoji), so this is a bounded fallback rather than
+" exact Unicode-category parity.
+syntax iskeyword @,48-57,_
+
 " Statements, declarations, control flow and SQL keywords.
 syntax keyword ornaStatement ADD ALL ALTER AND AS ASC ATOMIC AWAIT BEGIN BETWEEN BY
             \ CALL CAPABILITY CASCADE CASE CHECK CLIENT CONST CONTRACT CREATE CROSS
@@ -30,7 +37,7 @@ syntax keyword ornaBoolean FALSE NULL TRUE
 " Standard scalar types.
 syntax keyword ornaType BIGINT BOOL BOOLEAN BYTES DATE DECIMAL DURATION FLOAT INT INTEGER TEXT
             \ TIME TIMESTAMP UUID VOID
-syntax match ornaType "\<\(BINARY LARGE OBJECT\|CHARACTER LARGE OBJECT\)\>"
+syntax match ornaType "\%#=2\k\@<!\%(BINARY LARGE OBJECT\|CHARACTER LARGE OBJECT\)\k\@!"
 
 " Strings: '...' with '' as the escape for a literal quote.
 syntax region ornaString start=+'+ skip=+''+ end=+'+
@@ -43,7 +50,7 @@ syntax match ornaComment "--.*$" contains=@Spell
 syntax region ornaComment start=+/\*+ end=+\*/+ contains=@Spell
 
 " Numbers: integers, decimals and exponents.
-syntax match ornaNumber "\<\d\+\(\.\d\+\)\?\([eE][+-]\?\d\+\)\?\>"
+syntax match ornaNumber "\%#=2\k\@<![0-9]\+\(\.[0-9]\+\)\?\([eE][+-]\?[0-9]\+\)\?\k\@!"
 
 " Operators.
 syntax match ornaOperator "[-+*/%=<>!]"
@@ -51,10 +58,11 @@ syntax match ornaOperator "::"
 syntax match ornaOperator "||"
 
 " Function calls: identifier immediately followed by (.
-syntax match ornaFunction "\<[A-Za-z_][A-Za-z0-9_]*\(\s*(\)"me=e-1
+syntax match ornaFunction "\%#=2\k\@<!\K\k*\ze\s*("
 
-" Default identifiers (keywords take precedence over this match).
-syntax match ornaIdentifier "\<[A-Za-z_][A-Za-z0-9_]*\>"
+" Default identifiers (keywords take precedence over this match). The
+" explicit \k lookarounds avoid buffer-local word-boundary settings.
+syntax match ornaIdentifier "\%#=2\k\@<!\K\k*\k\@!"
 
 hi def link ornaStatement Statement
 hi def link ornaBoolean Boolean

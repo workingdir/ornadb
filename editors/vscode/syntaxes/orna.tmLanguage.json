@@ -75,11 +75,11 @@
                     "end": "(?=\\s|[;,(\\[\\]{}]|$)",
                     "patterns": [
                         {
-                            "match": "[A-Za-z_][A-Za-z0-9_]*(?=\\.)",
+                            "match": "[\\p{Alphabetic}_][\\p{Alphabetic}\\p{N}_]*(?=\\.)",
                             "name": "entity.name.namespace.orna"
                         },
                         {
-                            "match": "[A-Za-z_][A-Za-z0-9_]*",
+                            "match": "[\\p{Alphabetic}_][\\p{Alphabetic}\\p{N}_]*",
                             "name": "entity.name.function.orna"
                         }
                     ]
@@ -97,11 +97,11 @@
                     "end": "(?=\\s|[;,(\\[\\]{}]|$)",
                     "patterns": [
                         {
-                            "match": "[A-Za-z_][A-Za-z0-9_]*(?=\\.)",
+                            "match": "[\\p{Alphabetic}_][\\p{Alphabetic}\\p{N}_]*(?=\\.)",
                             "name": "entity.name.namespace.orna"
                         },
                         {
-                            "match": "[A-Za-z_][A-Za-z0-9_]*",
+                            "match": "[\\p{Alphabetic}_][\\p{Alphabetic}\\p{N}_]*",
                             "name": "entity.name.function.orna"
                         }
                     ]
@@ -119,11 +119,11 @@
                     "end": "(?=\\s|[;,(\\[\\]{}]|$)",
                     "patterns": [
                         {
-                            "match": "[A-Za-z_][A-Za-z0-9_]*(?=\\.)",
+                            "match": "[\\p{Alphabetic}_][\\p{Alphabetic}\\p{N}_]*(?=\\.)",
                             "name": "entity.name.namespace.orna"
                         },
                         {
-                            "match": "[A-Za-z_][A-Za-z0-9_]*",
+                            "match": "[\\p{Alphabetic}_][\\p{Alphabetic}\\p{N}_]*",
                             "name": "entity.name.function.orna"
                         }
                     ]
@@ -141,11 +141,11 @@
                     "end": "(?=\\s|[;,(\\[\\]{}]|$)",
                     "patterns": [
                         {
-                            "match": "[A-Za-z_][A-Za-z0-9_]*(?=\\.)",
+                            "match": "[\\p{Alphabetic}_][\\p{Alphabetic}\\p{N}_]*(?=\\.)",
                             "name": "entity.name.namespace.orna"
                         },
                         {
-                            "match": "[A-Za-z_][A-Za-z0-9_]*",
+                            "match": "[\\p{Alphabetic}_][\\p{Alphabetic}\\p{N}_]*",
                             "name": "entity.name.type.orna"
                         }
                     ]
@@ -163,11 +163,11 @@
                     "end": "(?=\\s|[;,(\\[\\]{}]|$)",
                     "patterns": [
                         {
-                            "match": "[A-Za-z_][A-Za-z0-9_]*(?=\\.)",
+                            "match": "[\\p{Alphabetic}_][\\p{Alphabetic}\\p{N}_]*(?=\\.)",
                             "name": "entity.name.namespace.orna"
                         },
                         {
-                            "match": "[A-Za-z_][A-Za-z0-9_]*",
+                            "match": "[\\p{Alphabetic}_][\\p{Alphabetic}\\p{N}_]*",
                             "name": "entity.name.namespace.orna"
                         }
                     ]
@@ -185,11 +185,11 @@
                     "end": "(?=\\s|[;,(\\[\\]{}]|$)",
                     "patterns": [
                         {
-                            "match": "[A-Za-z_][A-Za-z0-9_]*(?=\\.)",
+                            "match": "[\\p{Alphabetic}_][\\p{Alphabetic}\\p{N}_]*(?=\\.)",
                             "name": "entity.name.namespace.orna"
                         },
                         {
-                            "match": "[A-Za-z_][A-Za-z0-9_]*",
+                            "match": "[\\p{Alphabetic}_][\\p{Alphabetic}\\p{N}_]*",
                             "name": "entity.name.function.orna"
                         }
                     ]
@@ -207,11 +207,11 @@
                     "end": "(?=\\s|[;,(\\[\\]{}]|$)",
                     "patterns": [
                         {
-                            "match": "[A-Za-z_][A-Za-z0-9_]*(?=\\.)",
+                            "match": "[\\p{Alphabetic}_][\\p{Alphabetic}\\p{N}_]*(?=\\.)",
                             "name": "entity.name.namespace.orna"
                         },
                         {
-                            "match": "[A-Za-z_][A-Za-z0-9_]*",
+                            "match": "[\\p{Alphabetic}_][\\p{Alphabetic}\\p{N}_]*",
                             "name": "entity.name.type.orna"
                         }
                     ]
@@ -230,7 +230,7 @@
             "patterns": [
                 {
                     "name": "entity.name.function.orna",
-                    "match": "\\b[A-Za-z_][A-Za-z0-9_]*(?=\\s*\\()"
+                    "match": "\\b[\\p{Alphabetic}_][\\p{Alphabetic}\\p{N}_]*(?=\\s*\\()"
                 }
             ]
         },
@@ -270,7 +270,7 @@
             "patterns": [
                 {
                     "name": "variable.other.orna",
-                    "match": "[A-Za-z_][A-Za-z0-9_]*"
+                    "match": "[\\p{Alphabetic}_][\\p{Alphabetic}\\p{N}_]*"
                 }
             ]
         }
