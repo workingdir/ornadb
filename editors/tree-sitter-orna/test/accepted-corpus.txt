@@ -1,0 +1,29 @@
+accepted client fixture stays in the editor grammar contract
+alter type rename field
+client function with expression body
+client function with procedural body
+client function with no-STATE procedural locals and assignments
+CLIENT short RETURN body accepts AWAIT
+CLIENT state blocks reject pre-BEGIN LET locals
+CLIENT state blocks reject AWAIT in returns
+CLIENT procedural blocks reject CONST declarations
+CLIENT procedural blocks reject CALL statements
+CLIENT procedural blocks reject standalone AWAIT statements
+CLIENT procedural blocks reject IF statements
+closed CLIENT calls, named arguments, concatenation
+CLIENT expression bodies reject AWAIT
+expression literals and qualified names
+server expression calls, named arguments, operators
+line and block comments
+server function with select body
+server function with rows return and select distinct
+server function with insert body
+top-level insert statement
+server function with update body
+server function with delete body
+create schema
+create schema lowercase keywords
+string escapes and quoted identifiers
+create enum type
+create object type with field modifiers
+canonical scalar type spellings and alias boundaries
