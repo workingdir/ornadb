@@ -566,7 +566,7 @@ def check_alter_rename_highlights(
             tree_sitter_directory,
             repository,
             "accepted_resources_streams.orna",
-            12,
+            13,
         )
     )
 
