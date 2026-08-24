@@ -34,7 +34,7 @@ use orna_client::{
     decode_action_payload, trigger_client_action,
 };
 use orna_compiler::{
-    CheckedStandardLibrary, STD_INVOKE_ECHO_FUNCTION_ID, STD_INVOKE_ECHO_FUNCTION_REVISION_ID,
+    CheckedStandardLibrary, CheckedTypeId, STD_INVOKE_ECHO_FUNCTION_ID, STD_INVOKE_ECHO_FUNCTION_REVISION_ID,
     STD_INVOKE_ECHO_PARAMETER_ID, StandardApplicationCheckContext, check,
     check_standard_application, check_standard_library_source, prepare, prepare_standard_application,
 };
@@ -122,13 +122,14 @@ use orna_server::{
     serve_local_raw_stream_with_resource_authorizer,
 };
 use orna_standard::{
-    BOOLEAN_TYPE_ID, BYTE_STREAM_MAGIC, JSON_MAGIC, OPAQUE_TOKEN_TYPE_ID,
+    BOOLEAN_TYPE_ID, BYTE_STREAM_MAGIC, STD_ACTION_TYPE_ID, JSON_MAGIC, OPAQUE_TOKEN_TYPE_ID,
     STANDARD_LIBRARY_V3_REVISION_ID, STANDARD_LIBRARY_V5_REVISION_ID, STD_IO_BYTE_STREAM_TYPE_ID,
     STD_JSON_ENCODE_FUNCTION_ID, STD_JSON_ENCODE_FUNCTION_REVISION_ID, STD_JSON_ENCODE_PARAMETER_ID,
     STD_JSON_VALUE_TYPE_ID, STD_TERMINAL_DOCUMENT_TYPE_ID, registered_opaque_codecs,
     retained_standard_library_snapshot, retained_standard_library_v2_snapshot,
-    retained_standard_library_v3_snapshot, verify_standard_library_snapshot,
+    retained_standard_library_v3_snapshot, retained_standard_library_v6_snapshot, verify_standard_library_snapshot,
     verify_standard_library_v2_snapshot, verify_standard_library_v3_snapshot,
+    verify_standard_library_v6_snapshot,
 };
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -294,9 +295,7 @@ const RAW_EXPRESSION_CLIENT_FUNCTION_SOURCE: &str = "CREATE SCHEMA expr;\n\
     CREATE CLIENT FUNCTION expr.composed() RETURNS TEXT AS expr.literal() || ' world';\n\
     CREATE EXTERNAL CLIENT FUNCTION expr.external() RETURNS TEXT\n\
     RUNTIME CONTRACT 'expr.runtime@1';\n";
-#[cfg(feature = "test-hooks")]
 const RAW_ACTION_SERVER_SOURCE: &str = "CREATE SCHEMA action_fixture;\n";
-#[cfg(feature = "test-hooks")]
 const RAW_ACTION_CLIENT_SOURCE: &str = "CREATE CLIENT FUNCTION action_fixture.call(p_value INTEGER)\n\
     RETURNS std.Action\n\
     AS std.action.call(\n\
@@ -13467,6 +13466,52 @@ fn checks_accepted_stream_resource_fixture_offline() -> TestResult<()> {
         "accepted stream resource fixture is missing stream_fixture.read",
     )
 }
+#[test]
+fn checks_accepted_action_fixture_offline() -> TestResult<()> {
+    let snapshot = verify_standard_library_v6_snapshot(retained_standard_library_v6_snapshot()?)?;
+    let standard = check_standard_library_source(&snapshot)?;
+    let catalogue = CatalogueSnapshot::new(
+        CatalogueRevisionId::from_bytes([0; 16]),
+        Vec::new(),
+        Vec::new(),
+    )?;
+    let context = StandardApplicationCheckContext::try_new(&catalogue, &standard)?;
+    let source = SourceBundle::new([SourceUnit::new(
+        "fixtures/action_dogfood.orna",
+        format!("{RAW_ACTION_SERVER_SOURCE}\n{RAW_ACTION_CLIENT_SOURCE}"),
+    )])?;
+    let report = check_standard_application(&source, &context);
+    if !report.diagnostics().is_empty() {
+        return Err(failure(format!("accepted V6 action fixture did not check: {:?}", report.diagnostics())));
+    }
+    let checked = report
+        .checked_bundle()
+        .ok_or_else(|| failure("accepted V6 action fixture produced no checked bundle"))?;
+    let call = checked
+        .client_functions()
+        .find(|function| function.name().parts() == ["action_fixture", "call"])
+        .ok_or_else(|| failure("accepted V6 action fixture is missing action_fixture.call"))?;
+    let call_local = checked
+        .client_functions()
+        .find(|function| function.name().parts() == ["action_fixture", "call_local"])
+        .ok_or_else(|| failure("accepted V6 action fixture is missing action_fixture.call_local"))?;
+    if !(matches!(call.return_type().named_type(), Some(CheckedTypeId::Existing(type_id)) if type_id == STD_ACTION_TYPE_ID)
+        && matches!(call_local.return_type().named_type(), Some(CheckedTypeId::Existing(type_id)) if type_id == STD_ACTION_TYPE_ID))
+    {
+        return Err(failure(format!(
+            "accepted V6 action fixture did not retain std.Action return shape: call={:?}, local={:?}",
+            call.return_type(),
+            call_local.return_type(),
+        )));
+    }
+    require(
+        checked
+            .client_functions()
+            .any(|function| function.name().parts() == ["action_fixture", "local"]),
+        "accepted V6 action fixture is missing local CLIENT action target",
+    )
+}
+
 /// Proves one accepted application SERVER function survives the user-facing
 /// source/check/install/grant/invoke path and renders its typed result.
 #[tokio::test]
