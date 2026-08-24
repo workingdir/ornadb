@@ -1946,12 +1946,6 @@ impl ResourceProtocolConnection {
             }
             return Err(ResourceConnectionError::MismatchedRequest { stream_id });
         }
-        if !self.streams.contains_key(&stream_id)
-            && stream_id != 0
-            && self.high_water_mark.is_some_and(|high| stream_id <= high)
-        {
-            return Ok(Some(ResourceFrameDisposition::DroppedLate));
-        }
         Ok(None)
     }
 
@@ -8617,6 +8611,27 @@ mod tests {
         assert_eq!(connection.open(second), Ok(ResourceFrameDisposition::Applied));
         assert_eq!(connection.live_resources(), 2);
     }
+    #[test]
+    fn resource_connection_rejects_unknown_lower_stream_without_tombstone() {
+        let mut request = resource_request_fixture();
+        request.stream_id = 2;
+        let mut connection = ResourceProtocolConnection::new();
+        assert_eq!(
+            connection.open(request),
+            Ok(ResourceFrameDisposition::Applied)
+        );
+
+        assert_eq!(
+            connection.apply(ResourceServerFrame::Failed(ResourceFailed {
+                stream_id: 1,
+                request_id: InvocationId::from_bytes([0x99; 16]),
+                failure: CallFailure::InternalFailure,
+            })),
+            Err(ResourceConnectionError::UnknownStream { stream_id: 1 }),
+        );
+        assert_eq!(connection.live_resources(), 1);
+    }
+
     #[test]
     fn resource_connection_bounds_request_id_history_without_eviction() {
         let mut connection = ResourceProtocolConnection::new();
