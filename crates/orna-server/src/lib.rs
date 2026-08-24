@@ -26,25 +26,25 @@ pub use inspect::{
     InstalledInspectProjection, InstalledInspectRequest, run_inspect_with_kernel,
     run_installed_inspect,
 };
+#[cfg(feature = "test-hooks")]
+pub use invoke::RawResourceRequestAuthorizer;
 pub use invoke::{
     InstalledClientResourceExecutor, InstalledInvokeError, InstalledInvokeErrorKind,
     InstalledInvokeOutcome, InstalledInvokeRequest, RuntimeFamily, run_installed_invoke,
     run_invoke_with_kernel,
 };
-#[cfg(feature = "test-hooks")]
-pub use invoke::RawResourceRequestAuthorizer;
 pub use local_auth::{LocalAuthenticationError, authenticate_local_stream};
 pub use raw_call::{
     LocalRawCallError, LocalRawCallOutcome, run_local_raw_call, run_local_raw_call_with_argument,
     run_local_raw_call_with_argument_pair,
 };
 pub use raw_client_dispatch::{RawClientDispatch, RawClientDispatchResult};
+#[cfg(feature = "test-hooks")]
+pub use raw_socket::serve_local_raw_stream_with_resource_authorizer;
 pub use raw_socket::{
     LocalRawSocketError, LocalRawSocketResources, LocalRawSocketServer, LocalRawSocketServerError,
     serve_local_raw_stream, start_local_raw_socket,
 };
-#[cfg(feature = "test-hooks")]
-pub use raw_socket::serve_local_raw_stream_with_resource_authorizer;
 pub use security_admin::{
     InstalledSecurityAdminError, InstalledSecurityAdminErrorKind, InstalledSecurityAdminOperation,
     InstalledSecurityAdminOutcome, InstalledSecurityAdminRequest, parse_privilege_class,
@@ -117,24 +117,30 @@ fn retained_verified_standard_snapshot(
     revision: orna_core::StandardLibraryRevisionId,
 ) -> Result<orna_core::revision::VerifiedStandardLibrarySnapshot, StandardLibraryError> {
     match revision {
-        revision if revision == orna_standard::STANDARD_LIBRARY_REVISION_ID =>
+        revision if revision == orna_standard::STANDARD_LIBRARY_REVISION_ID => {
             orna_standard::retained_standard_library_snapshot()
-                .and_then(orna_standard::verify_standard_library_snapshot),
-        revision if revision == orna_standard::STANDARD_LIBRARY_V2_REVISION_ID =>
+                .and_then(orna_standard::verify_standard_library_snapshot)
+        }
+        revision if revision == orna_standard::STANDARD_LIBRARY_V2_REVISION_ID => {
             orna_standard::retained_standard_library_v2_snapshot()
-                .and_then(orna_standard::verify_standard_library_v2_snapshot),
-        revision if revision == orna_standard::STANDARD_LIBRARY_V3_REVISION_ID =>
+                .and_then(orna_standard::verify_standard_library_v2_snapshot)
+        }
+        revision if revision == orna_standard::STANDARD_LIBRARY_V3_REVISION_ID => {
             orna_standard::retained_standard_library_v3_snapshot()
-                .and_then(orna_standard::verify_standard_library_v3_snapshot),
-        revision if revision == orna_standard::STANDARD_LIBRARY_V4_REVISION_ID =>
+                .and_then(orna_standard::verify_standard_library_v3_snapshot)
+        }
+        revision if revision == orna_standard::STANDARD_LIBRARY_V4_REVISION_ID => {
             orna_standard::retained_standard_library_v4_snapshot()
-                .and_then(orna_standard::verify_standard_library_v4_snapshot),
-        revision if revision == orna_standard::STANDARD_LIBRARY_V5_REVISION_ID =>
+                .and_then(orna_standard::verify_standard_library_v4_snapshot)
+        }
+        revision if revision == orna_standard::STANDARD_LIBRARY_V5_REVISION_ID => {
             orna_standard::retained_standard_library_v5_snapshot()
-                .and_then(orna_standard::verify_standard_library_v5_snapshot),
-        revision if revision == orna_standard::STANDARD_LIBRARY_V6_REVISION_ID =>
+                .and_then(orna_standard::verify_standard_library_v5_snapshot)
+        }
+        revision if revision == orna_standard::STANDARD_LIBRARY_V6_REVISION_ID => {
             orna_standard::retained_standard_library_v6_snapshot()
-                .and_then(orna_standard::verify_standard_library_v6_snapshot),
+                .and_then(orna_standard::verify_standard_library_v6_snapshot)
+        }
         _ => Err(StandardLibraryError::Unavailable),
     }
 }

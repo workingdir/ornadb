@@ -1093,7 +1093,13 @@ mod tests {
     #[test]
     fn rejects_global_runtime_override_on_server_upgrade() {
         assert_eq!(
-            parse_command(arguments(&["orna", "--runtime", "tty", "server", "upgrade"])),
+            parse_command(arguments(&[
+                "orna",
+                "--runtime",
+                "tty",
+                "server",
+                "upgrade"
+            ])),
             None,
             "runtime override must be rejected for server upgrade"
         );
@@ -1103,7 +1109,11 @@ mod tests {
     fn rejects_global_runtime_override_on_server_backend_shell() {
         assert_eq!(
             parse_command(arguments(&[
-                "orna", "--runtime", "tty", "server", "backend-shell",
+                "orna",
+                "--runtime",
+                "tty",
+                "server",
+                "backend-shell",
             ])),
             None,
             "runtime override must be rejected for server backend-shell"

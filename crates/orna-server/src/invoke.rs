@@ -41,19 +41,18 @@ use orna_client::{
     ClientResourceCompletion, ClientResourceExecutor, ClientResourceRequest,
 };
 use orna_core::inspect::{
-    CallRow, InspectInvocationNodeKind, InspectInvocationPhase, InspectOutcomeKind,
-    INSPECT_RENDER_CARRIER_SIGNATURE, INSPECT_RENDER_CONTRACT,
-    InspectPrivilege, InspectResourceKind, InspectResourceStatus, InspectResultSummary,
-    InspectSecurityDecisionKind, InspectSecurityDecisionOutcome, InvocationNodeRow,
-    PresentationCandidateRow, ResourceRow, RuntimeBindingRow, SecurityDecisionRow, StateCellRow,
-    UiNodeRow,
+    CallRow, INSPECT_RENDER_CARRIER_SIGNATURE, INSPECT_RENDER_CONTRACT, InspectInvocationNodeKind,
+    InspectInvocationPhase, InspectOutcomeKind, InspectPrivilege, InspectResourceKind,
+    InspectResourceStatus, InspectResultSummary, InspectSecurityDecisionKind,
+    InspectSecurityDecisionOutcome, InvocationNodeRow, PresentationCandidateRow, ResourceRow,
+    RuntimeBindingRow, SecurityDecisionRow, StateCellRow, UiNodeRow,
 };
 use orna_core::inspect_carrier::{
     InspectCarrierEnvelope, InspectCarrierKind, InspectCarrierProvenance,
 };
 use orna_core::{
-    CatalogueRevisionId, FunctionId, FunctionRevisionId, InspectEpochId, InvocationId, SourceRevisionId,
-    TypeId,
+    CatalogueRevisionId, FunctionId, FunctionRevisionId, InspectEpochId, InvocationId,
+    SourceRevisionId, TypeId,
     catalogue::{
         FunctionDefinition, FunctionDomain, FunctionReturn, QualifiedSemanticName, ValueTypeKind,
         ValueTypeMutability, ValueTypePersistence,
@@ -69,26 +68,28 @@ use orna_core::{
     invocation_binding::{CliArgumentInput, bind_cli_arguments},
     revision::{ActiveDatabaseRevision, VerifiedStandardLibrarySnapshot},
     security::AuthenticatedSession,
-    system::{SYS_INSPECT_INVOCATION_TYPE_ID, SYS_INSPECT_SNAPSHOT_TYPE_ID, SYS_INVOKE_FUNCTION_ID},
+    system::{
+        SYS_INSPECT_INVOCATION_TYPE_ID, SYS_INSPECT_SNAPSHOT_TYPE_ID, SYS_INVOKE_FUNCTION_ID,
+    },
     types::{ResolvedType, StandardScalar, TypeDescriptor, TypeDescriptorKind},
     value::{
         ConstructedValueKind, OpaqueCodecRegistry, OpaqueValue, OpaqueValueError, RuntimeValue,
     },
 };
 use orna_postgres::{
-    AuthenticatedInspectSnapshot, AuthenticatedServerResourceEvent, AuthenticatedServerResourceStart,
-    PostgresKernel, PostgresKernelError, ResourceCancellation, ResourceCredit, SealedInvocationResult,
+    AuthenticatedInspectSnapshot, AuthenticatedServerResourceEvent,
+    AuthenticatedServerResourceStart, PostgresKernel, PostgresKernelError, ResourceCancellation,
+    ResourceCredit, SealedInvocationResult,
 };
 use orna_protocol::{
-    CallFailure, Channel, ClientFrame, Event, EventRecord, InvocationEventRecord, MAX_CHANNEL_WINDOW,
+    CallFailure, Channel, ClientFrame, Event, InvocationEventRecord, MAX_CHANNEL_WINDOW,
     MAX_FRAME_PAYLOAD_LENGTH, MAX_RESOURCE_WINDOW, ProtocolConnection, ResourceArgument,
     ResourceCancel, ResourceCancellationCode, ResourceClientFrame,
     ResourceKind as ProtocolResourceKind, ResourceProtocolConnection, ResourceRequest,
     ResourceServerFrame, ResourceWindowUpdate, ServerFrame,
     decode_constructed_invocation_event_frame, decode_constructed_server_frame,
     decode_constructed_value, decode_resource_server_frame, encode_constructed_client_frame,
-    encode_constructed_server_frame, encode_constructed_value, encode_invoke_request,
-    encode_resource_client_frame,
+    encode_constructed_value, encode_invoke_request, encode_resource_client_frame,
 };
 use orna_standard::{
     BINARY_LARGE_OBJECT_TYPE_ID, STD_IO_BYTE_STREAM_TYPE_ID, STD_TERMINAL_DOCUMENT_TYPE_ID,
@@ -560,11 +561,13 @@ impl CancellationWaiter {
                             loop {
                                 match receiver.recv().await {
                                     Some(Ok(ResourceTransportOutcome::StreamValues(_))) => {}
-                                    Some(result) => break CancellationWaitOutcome::Terminal(result),
+                                    Some(result) => {
+                                        break CancellationWaitOutcome::Terminal(result);
+                                    }
                                     None => {
                                         break CancellationWaitOutcome::Terminal(Err(
                                             ResourceTransportFailure::Transport,
-                                        ))
+                                        ));
                                     }
                                 }
                             }
@@ -573,9 +576,9 @@ impl CancellationWaiter {
                             .await
                             .unwrap_or(CancellationWaitOutcome::TimedOut)
                     }),
-                    Err(_) => CancellationWaitOutcome::Terminal(Err(
-                        ResourceTransportFailure::Transport,
-                    )),
+                    Err(_) => {
+                        CancellationWaitOutcome::Terminal(Err(ResourceTransportFailure::Transport))
+                    }
                 };
                 let _ = sender.send(outcome);
             }) {
@@ -591,14 +594,13 @@ impl CancellationWaiter {
         Ok(Self { completion, thread })
     }
 
-    fn wait(self) -> (
+    fn wait(
+        self,
+    ) -> (
         Option<CancellationWaitOutcome>,
         Option<thread::JoinHandle<()>>,
     ) {
-        let Self {
-            completion,
-            thread,
-        } = self;
+        let Self { completion, thread } = self;
         match completion.recv_timeout(RESOURCE_FRAME_TIMEOUT + Duration::from_secs(1)) {
             Ok(outcome) => {
                 let _ = thread.join();
@@ -845,9 +847,7 @@ impl InstalledClientResourceExecutor {
                 let result = match pending.receiver.try_recv() {
                     Ok(result) => result,
                     Err(TryRecvError::Empty) => return None,
-                    Err(TryRecvError::Disconnected) => {
-                        Err(ResourceTransportFailure::Transport)
-                    }
+                    Err(TryRecvError::Disconnected) => Err(ResourceTransportFailure::Transport),
                 };
                 (result, pending.cancel_requested, pending.request.clone())
             };
@@ -900,11 +900,14 @@ impl InstalledClientResourceExecutor {
                 if let Some(waiter) = resource.waiter.take() {
                     let _ = waiter.join();
                 }
-                let _ = resource.control.commands.send(BrokerCommand::AbandonResource {
-                    stream_id: resource.stream_id,
-                    request_id: resource.request_id,
-                    reason: ResourceCancellationCode::RuntimeShutdown,
-                });
+                let _ = resource
+                    .control
+                    .commands
+                    .send(BrokerCommand::AbandonResource {
+                        stream_id: resource.stream_id,
+                        request_id: resource.request_id,
+                        reason: ResourceCancellationCode::RuntimeShutdown,
+                    });
             } else {
                 self.detached_broker = Some(resource);
             }
@@ -1102,11 +1105,7 @@ async fn run_installed_external_contract(
     else {
         return Err(INSPECT_DENIED_CODE.to_owned());
     };
-    validate_epoch(
-        &snapshot,
-        target_invocation_id,
-        active.pair(),
-    )?;
+    validate_epoch(&snapshot, target_invocation_id, active.pair())?;
     let client_epoch_id = request.context().client_epoch_id().invocation_id();
     let body = serde_json::to_vec(&serde_json::json!({
         "kind": "node",
@@ -1458,7 +1457,9 @@ fn inspect_kernel_error_code(error: PostgresKernelError) -> String {
     match error {
         PostgresKernelError::InspectDenied { reason } => match reason {
             orna_core::security::InspectDenial::MissingEpoch
-            | orna_core::security::InspectDenial::MissingPrivilege => INSPECT_DENIED_CODE.to_owned(),
+            | orna_core::security::InspectDenial::MissingPrivilege => {
+                INSPECT_DENIED_CODE.to_owned()
+            }
             orna_core::security::InspectDenial::ObserverSuppressed => {
                 "inspect.recursion".to_owned()
             }
@@ -1544,7 +1545,6 @@ impl InspectCarrierSnapshot for orna_core::inspect::InspectSnapshotEpoch {
         self.catalogue_revision_id()
     }
 }
-
 
 fn make_inspect_carrier(
     active: &ActiveDatabaseRevision,
@@ -2414,11 +2414,14 @@ impl ClientResourceExecutor for InstalledClientResourceExecutor {
                     }
                     Err(TryRecvError::Empty) => {}
                 }
-                let _ = pending.control.commands.send(BrokerCommand::CancelResource {
-                    stream_id: pending.stream_id,
-                    request_id: pending.request.request_id(),
-                    reason: ResourceCancellationCode::ClientRequested,
-                });
+                let _ = pending
+                    .control
+                    .commands
+                    .send(BrokerCommand::CancelResource {
+                        stream_id: pending.stream_id,
+                        request_id: pending.request.request_id(),
+                        reason: ResourceCancellationCode::ClientRequested,
+                    });
                 pending.cancel_requested = true;
             }
             let waiter = match Self::wait_for_cancelled_transport(pending.receiver) {
@@ -2433,19 +2436,25 @@ impl ClientResourceExecutor for InstalledClientResourceExecutor {
             self.discard_raw_resource_request(pending.stream_id);
             return match outcome {
                 Some(CancellationWaitOutcome::Terminal(result)) => {
-                    let _ = pending.control.commands.send(BrokerCommand::AbandonResource {
-                        stream_id: pending.stream_id,
-                        request_id: pending.request.request_id(),
-                        reason: ResourceCancellationCode::RuntimeShutdown,
-                    });
+                    let _ = pending
+                        .control
+                        .commands
+                        .send(BrokerCommand::AbandonResource {
+                            stream_id: pending.stream_id,
+                            request_id: pending.request.request_id(),
+                            reason: ResourceCancellationCode::RuntimeShutdown,
+                        });
                     map_resource_transport_completion(pending.request, result)
                 }
                 Some(CancellationWaitOutcome::TimedOut) => {
-                    let _ = pending.control.commands.send(BrokerCommand::AbandonResource {
-                        stream_id: pending.stream_id,
-                        request_id: pending.request.request_id(),
-                        reason: ResourceCancellationCode::RuntimeShutdown,
-                    });
+                    let _ = pending
+                        .control
+                        .commands
+                        .send(BrokerCommand::AbandonResource {
+                            stream_id: pending.stream_id,
+                            request_id: pending.request.request_id(),
+                            reason: ResourceCancellationCode::RuntimeShutdown,
+                        });
                     pending
                         .request
                         .failed(SERVER_RESOURCE_INTERNAL_CODE.to_owned())
@@ -2625,9 +2634,10 @@ fn map_resource_transport_completion(
             request.failed(SERVER_RESOURCE_SHAPE_CODE.to_owned())
         }
         Err(ResourceTransportFailure::Cancelled) => request.cancelled(),
-        Err(ResourceTransportFailure::RootSealedDispatchInternal) => {
-            request.failed(SERVER_RESOURCE_INTERNAL_CODE.to_owned())
-        }
+        Err(
+            ResourceTransportFailure::RootPreflightDenied
+            | ResourceTransportFailure::RootSealedDispatchInternal,
+        ) => request.failed(SERVER_RESOURCE_INTERNAL_CODE.to_owned()),
         Err(ResourceTransportFailure::Transport) => {
             request.failed(SERVER_RESOURCE_INTERNAL_CODE.to_owned())
         }
@@ -2658,6 +2668,9 @@ enum ResourceTransportFailure {
     Transport,
     Shape,
     Cancelled,
+    /// The sealed root was denied before acceptance, so no InvocationId exists
+    /// to carry in a [`SealedInvocationResult::Denied`] value.
+    RootPreflightDenied,
     RootSealedDispatchInternal,
 }
 
@@ -3171,11 +3184,32 @@ where
             let Some(invocation) = state.invocation else {
                 return Err(ResourceTransportFailure::Shape);
             };
-            for record in events {
+            if state.records.last().is_some_and(|last| {
+                matches!(
+                    last.event().body(),
+                    InvocationEventBody::Completed { .. }
+                        | InvocationEventBody::Failed(_)
+                        | InvocationEventBody::Cancelled { .. }
+                )
+            }) {
+                return Err(ResourceTransportFailure::Shape);
+            }
+            let event_count = events.len();
+            for (index, record) in events.into_iter().enumerate() {
                 let Event::Value(RuntimeValue::InvokeEvent(event)) = record.event else {
                     return Err(ResourceTransportFailure::Shape);
                 };
                 if event.invocation_id() != invocation {
+                    return Err(ResourceTransportFailure::Shape);
+                }
+                if state.records.is_empty()
+                    && !matches!(event.body(), InvocationEventBody::Started { .. })
+                {
+                    return Err(ResourceTransportFailure::Shape);
+                }
+                if !state.records.is_empty()
+                    && matches!(event.body(), InvocationEventBody::Started { .. })
+                {
                     return Err(ResourceTransportFailure::Shape);
                 }
                 if state.records.is_empty() && (record.sequence != 1 || event.sequence() != 0) {
@@ -3185,6 +3219,15 @@ where
                     last.outer_sequence().checked_add(1) != Some(record.sequence)
                         || last.event().sequence().checked_add(1) != Some(event.sequence())
                 }) {
+                    return Err(ResourceTransportFailure::Shape);
+                }
+                if matches!(
+                    event.body(),
+                    InvocationEventBody::Completed { .. }
+                        | InvocationEventBody::Failed(_)
+                        | InvocationEventBody::Cancelled { .. }
+                ) && index + 1 != event_count
+                {
                     return Err(ResourceTransportFailure::Shape);
                 }
                 state
@@ -3198,9 +3241,8 @@ where
                 return Err(ResourceTransportFailure::Shape);
             };
             if state.records.is_empty() {
-                let _ = state
-                    .response
-                    .send(Ok(SealedInvocationResult::Denied { invocation }));
+                let _ = state.response.send(Err(ResourceTransportFailure::Shape));
+                return Err(ResourceTransportFailure::Shape);
             } else {
                 match reconstruct_shared_root_result(invocation, state.records) {
                     Ok(result) => {
@@ -3220,18 +3262,46 @@ where
         }
         ServerFrame::CallFailed { stream: 1, failure } => {
             let state = root.take().expect("root state checked above");
-            let invocation = state
-                .invocation
-                .unwrap_or_else(orna_core::InvocationId::new);
-            let result = if failure == CallFailure::ExecuteDenied {
-                Ok(SealedInvocationResult::Denied { invocation })
-            } else {
-                Err(ResourceTransportFailure::Transport)
+            let result = match (state.invocation, failure) {
+                // Entry denial is the one legal pre-accept terminal result. It
+                // has no InvocationId by contract, so keep it out of the
+                // accepted-only SealedInvocationResult::Denied variant.
+                (None, CallFailure::ExecuteDenied) if state.records.is_empty() => {
+                    Err(ResourceTransportFailure::RootPreflightDenied)
+                }
+                // Request decode, protocol-major, and standard-snapshot failures
+                // are terminal internal outcomes before acceptance.
+                (None, CallFailure::InternalFailure) if state.records.is_empty() => {
+                    Err(ResourceTransportFailure::RootSealedDispatchInternal)
+                }
+                // Every other missing identity is an invalid root frame.
+                (None, _) => {
+                    let _ = state.response.send(Err(ResourceTransportFailure::Shape));
+                    return Err(ResourceTransportFailure::Shape);
+                }
+                // Accepted invocations must terminate with a terminal Event
+                // followed by CALL_COMPLETED. Raw CALL_FAILED is pre-accept
+                // only, so notify the waiting caller before rejecting it.
+                (Some(_), _) => {
+                    let _ = state.response.send(Err(ResourceTransportFailure::Shape));
+                    return Err(ResourceTransportFailure::Shape);
+                }
             };
             let _ = state.response.send(result);
         }
         ServerFrame::CallCancelled { stream: 1 } => {
             let state = root.take().expect("root state checked above");
+            if state.invocation.is_some() {
+                // Accepted invocations must publish InvocationCancelled as a
+                // terminal Event and then CALL_COMPLETED. Raw CALL_CANCELLED
+                // is pre-accept only, so do not expose a public cancellation.
+                let _ = state.response.send(Err(ResourceTransportFailure::Shape));
+                return Err(ResourceTransportFailure::Shape);
+            }
+            if state.invocation.is_none() && !state.records.is_empty() {
+                let _ = state.response.send(Err(ResourceTransportFailure::Shape));
+                return Err(ResourceTransportFailure::Shape);
+            }
             let _ = state
                 .response
                 .send(Err(ResourceTransportFailure::Cancelled));
@@ -3247,6 +3317,32 @@ fn reconstruct_shared_root_result(
 ) -> Result<SealedInvocationResult, ResourceTransportFailure> {
     let events = orna_protocol::InvocationEventBatch::new(records)
         .map_err(|_| ResourceTransportFailure::Shape)?;
+    let Some(first) = events.records().first() else {
+        return Err(ResourceTransportFailure::Shape);
+    };
+    if !matches!(first.event().body(), InvocationEventBody::Started { .. }) {
+        return Err(ResourceTransportFailure::Shape);
+    }
+    let mut started_seen = false;
+    let mut terminal_seen = false;
+    for record in events.records() {
+        if matches!(record.event().body(), InvocationEventBody::Started { .. }) {
+            if started_seen {
+                return Err(ResourceTransportFailure::Shape);
+            }
+            started_seen = true;
+        }
+        let terminal = matches!(
+            record.event().body(),
+            InvocationEventBody::Completed { .. }
+                | InvocationEventBody::Failed(_)
+                | InvocationEventBody::Cancelled { .. }
+        );
+        if terminal_seen {
+            return Err(ResourceTransportFailure::Shape);
+        }
+        terminal_seen = terminal;
+    }
     let Some(last) = events.records().last() else {
         return Err(ResourceTransportFailure::Shape);
     };
@@ -3476,14 +3572,8 @@ where
                         .ok_or(ResourceTransportFailure::Shape)?,
                 },
             };
-            let _ = send_shared_resource_completion(
-                state,
-                Ok(outcome),
-                stream,
-                active,
-                registry,
-            )
-            .await?;
+            let _ = send_shared_resource_completion(state, Ok(outcome), stream, active, registry)
+                .await?;
             return Ok(false);
         }
         ResourceServerFrame::Failed(value) => {
@@ -4486,7 +4576,8 @@ fn installed_cli_resolved_type(
     if application.type_definition_by_id(type_id).is_some() {
         return resolved_type;
     }
-    let Some(value_type) = standard.and_then(|snapshot| snapshot.catalogue().value_type_by_id(type_id))
+    let Some(value_type) =
+        standard.and_then(|snapshot| snapshot.catalogue().value_type_by_id(type_id))
     else {
         return resolved_type;
     };
@@ -4593,24 +4684,7 @@ async fn host_invoke(
             "the local invoke connection could not authenticate".to_owned(),
         ));
     }
-    let result = broker.invoke(retained).await.map_err(|error| match error {
-        ResourceTransportFailure::Cancelled => InstalledInvokeError::new(
-            InstalledInvokeErrorKind::Cancelled,
-            "invocation cancelled".to_owned(),
-        ),
-        ResourceTransportFailure::Shape => InstalledInvokeError::new(
-            InstalledInvokeErrorKind::Internal,
-            "the local invoke connection returned an invalid frame".to_owned(),
-        ),
-        ResourceTransportFailure::RootSealedDispatchInternal => InstalledInvokeError::new(
-            InstalledInvokeErrorKind::Internal,
-            "sealed dispatch failed".to_owned(),
-        ),
-        ResourceTransportFailure::Transport => InstalledInvokeError::new(
-            InstalledInvokeErrorKind::Internal,
-            "the local invoke connection failed".to_owned(),
-        ),
-    });
+    let result = broker.invoke(retained).await;
     broker.shutdown().await;
     if tokio::time::timeout(RESOURCE_FRAME_TIMEOUT, &mut server_task)
         .await
@@ -4619,7 +4693,34 @@ async fn host_invoke(
         server_task.abort();
         let _ = server_task.await;
     }
-    let result = result?;
+    if matches!(
+        result.as_ref(),
+        Err(ResourceTransportFailure::RootPreflightDenied)
+    ) {
+        writeln!(stderr, "orna: invoke: invocation denied").map_err(presentation_error)?;
+        return Ok(InstalledInvokeOutcome::Denied);
+    }
+    let result = result.map_err(|error| match error {
+        ResourceTransportFailure::Cancelled => InstalledInvokeError::new(
+            InstalledInvokeErrorKind::Cancelled,
+            "invocation cancelled".to_owned(),
+        ),
+        ResourceTransportFailure::Shape => InstalledInvokeError::new(
+            InstalledInvokeErrorKind::Internal,
+            "the local invoke connection returned an invalid frame".to_owned(),
+        ),
+        ResourceTransportFailure::RootPreflightDenied => {
+            unreachable!("preflight denial handled before sealed result mapping")
+        }
+        ResourceTransportFailure::RootSealedDispatchInternal => InstalledInvokeError::new(
+            InstalledInvokeErrorKind::Internal,
+            "sealed dispatch failed".to_owned(),
+        ),
+        ResourceTransportFailure::Transport => InstalledInvokeError::new(
+            InstalledInvokeErrorKind::Internal,
+            "the local invoke connection failed".to_owned(),
+        ),
+    })?;
 
     render_result(&result, request.no_progress, stdout, stderr, &mut |value| {
         encode_constructed_value(&active, &registry, value).map_err(|_| {
@@ -4691,10 +4792,7 @@ fn resolve_target<'a>(
     }
 }
 
-fn invocation_argument_order(
-    left: &InvocationArgument,
-    right: &InvocationArgument,
-) -> Ordering {
+fn invocation_argument_order(left: &InvocationArgument, right: &InvocationArgument) -> Ordering {
     use orna_core::invocation::InvocationParameterSelector;
 
     match (left.selector(), right.selector()) {
@@ -4715,7 +4813,9 @@ fn invocation_argument_order(
     }
 }
 
-fn canonicalise_invocation_arguments(mut arguments: Vec<InvocationArgument>) -> Vec<InvocationArgument> {
+fn canonicalise_invocation_arguments(
+    mut arguments: Vec<InvocationArgument>,
+) -> Vec<InvocationArgument> {
     arguments.sort_by(invocation_argument_order);
     arguments
 }
@@ -5222,8 +5322,11 @@ fn render_explain_final_sink(
         return "deferred until sealed presenter selection".to_owned();
     }
     match return_type {
-        FunctionReturn::Single(ResolvedType::Value(type_id)) => match select_runtime_sink(*type_id) {
-            Some(orna_runtime_tty::Sink::Document) => "tty document sink (opaque result)".to_owned(),
+        FunctionReturn::Single(ResolvedType::Value(type_id)) => match select_runtime_sink(*type_id)
+        {
+            Some(orna_runtime_tty::Sink::Document) => {
+                "tty document sink (opaque result)".to_owned()
+            }
             Some(orna_runtime_tty::Sink::ByteStream) => {
                 "tty byte-stream sink (opaque result)".to_owned()
             }
@@ -5466,9 +5569,8 @@ mod tests {
         canonical_hash::{catalogue_digest, source_bundle_digest, source_revision_record_digest},
         catalogue::{
             CatalogueSnapshot, FunctionDomain, FunctionReturn, FunctionSecurity,
-            FunctionVolatility,
-            ParameterDefinition, SchemaDefinition, ValueTypeDefinition, ValueTypeMutability,
-            ValueTypePersistence,
+            FunctionVolatility, ParameterDefinition, SchemaDefinition, ValueTypeDefinition,
+            ValueTypeMutability, ValueTypePersistence,
         },
         inspect::{InspectSnapshotEpoch, InspectSnapshotOptions, InspectSnapshotSummary},
         invocation::{
@@ -5483,8 +5585,10 @@ mod tests {
         value::RuntimeValue,
     };
     use orna_protocol::{
-        InvocationEventBatch, InvocationEventRecord, ResourceAccepted, ResourceCompleted,
-        ResourceCancelled, ResourceFailed, ResourceValues, decode_resource_client_frame, encode_resource_server_frame,
+        EventRecord, InvocationEventBatch, InvocationEventRecord, ResourceAccepted,
+        ResourceCancelled, ResourceCompleted, ResourceFailed, ResourceValues,
+        decode_resource_client_frame, encode_constructed_server_frame,
+        encode_resource_server_frame,
     };
     use orna_standard::{
         STD_UI_TYPE_ID, retained_standard_library_snapshot, verify_standard_library_snapshot,
@@ -5581,10 +5685,9 @@ mod tests {
                 .expect("queue accepts its configured capacity");
         }
 
-        tokio::time::timeout(
-            Duration::from_millis(100),
-            async { signal_broker_resource_cleanup(sender) },
-        )
+        tokio::time::timeout(Duration::from_millis(100), async {
+            signal_broker_resource_cleanup(sender)
+        })
         .await
         .expect("cleanup signal must not wait for a receiver");
 
@@ -5864,24 +5967,27 @@ mod tests {
         let mut tombstones = BrokerResourceTombstones::new();
         let mut root = None;
         let mut terminal_completions = Vec::new();
-        let make_state =
-            |request: ResourceRequest,
-             completion: Sender<Result<ResourceTransportOutcome, ResourceTransportFailure>>| {
-                let mut protocol = ResourceProtocolConnection::new();
-                protocol.open(request.clone()).expect("resource request opens");
-                BrokerResourceState {
-                    request,
-                    expected_type: ResolvedType::Scalar(StandardScalar::Integer),
-                    resource_kind: ProtocolResourceKind::Single,
-                    protocol,
-                    completion,
-                    accepted: false,
-                    accepted_nested_invocation_id: None,
-                    scalar_value: None,
-                    cancellation_requested: false,
-                    stream_values_seen: false,
-                }
-            };
+        let make_state = |request: ResourceRequest,
+                          completion: Sender<
+            Result<ResourceTransportOutcome, ResourceTransportFailure>,
+        >| {
+            let mut protocol = ResourceProtocolConnection::new();
+            protocol
+                .open(request.clone())
+                .expect("resource request opens");
+            BrokerResourceState {
+                request,
+                expected_type: ResolvedType::Scalar(StandardScalar::Integer),
+                resource_kind: ProtocolResourceKind::Single,
+                protocol,
+                completion,
+                accepted: false,
+                accepted_nested_invocation_id: None,
+                scalar_value: None,
+                cancellation_requested: false,
+                stream_values_seen: false,
+            }
+        };
 
         for stream_id in 1..=(BROKER_RESOURCE_TOMBSTONE_CAPACITY as u64 + 1) {
             let request = transport_test_request(active.pair(), stream_id);
@@ -6050,6 +6156,180 @@ mod tests {
         assert!(matches!(result, SealedInvocationResult::Completed { .. }));
     }
 
+    async fn assert_accepted_event_batch_is_shape(frame: ServerFrame, invocation: InvocationId) {
+        let (active, registry) = transport_test_context();
+        let bytes = encode_constructed_server_frame(&active, &registry, &frame)
+            .expect("encoded invalid accepted EventBatch");
+        let (response, _receiver) = tokio::sync::oneshot::channel();
+        let mut root = Some(BrokerRootState {
+            invocation: Some(invocation),
+            records: Vec::new(),
+            response,
+        });
+        let mut resources = BTreeMap::new();
+        let mut tombstones = BrokerResourceTombstones::new();
+        let (_reader, mut writer) = tokio::io::duplex(128);
+
+        assert!(matches!(
+            handle_shared_broker_frame(
+                BrokerWireFrame {
+                    resource: false,
+                    bytes,
+                },
+                &mut writer,
+                &active,
+                &registry,
+                &mut root,
+                &mut resources,
+                None,
+                &mut tombstones,
+            )
+            .await,
+            Err(ResourceTransportFailure::Shape)
+        ));
+        assert!(root.is_some());
+    }
+
+    #[tokio::test]
+    async fn shared_broker_rejects_first_non_started_event() {
+        let invocation = InvocationId::new();
+        let value = InvokeEvent::new(
+            invocation,
+            0,
+            InvocationEventBody::value_batch(
+                None,
+                [InvokeValue::new(RuntimeValue::Integer(7)).expect("integer value")],
+            )
+            .expect("value batch body"),
+        )
+        .expect("value event");
+        assert_accepted_event_batch_is_shape(
+            ServerFrame::EventBatch {
+                stream: 1,
+                channel: Channel::ResultValues,
+                events: vec![EventRecord {
+                    sequence: 1,
+                    event: Event::Value(RuntimeValue::InvokeEvent(value)),
+                }],
+            },
+            invocation,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn shared_broker_rejects_duplicate_started_event_batch() {
+        let invocation = InvocationId::new();
+        let started = |sequence| {
+            InvokeEvent::new(
+                invocation,
+                sequence,
+                InvocationEventBody::Started {
+                    visible_principal: None,
+                },
+            )
+            .expect("started event")
+        };
+        assert_accepted_event_batch_is_shape(
+            ServerFrame::EventBatch {
+                stream: 1,
+                channel: Channel::ResultValues,
+                events: vec![
+                    EventRecord {
+                        sequence: 1,
+                        event: Event::Value(RuntimeValue::InvokeEvent(started(0))),
+                    },
+                    EventRecord {
+                        sequence: 2,
+                        event: Event::Value(RuntimeValue::InvokeEvent(started(1))),
+                    },
+                ],
+            },
+            invocation,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn shared_broker_rejects_terminal_followup_in_same_event_batch() {
+        let (active, registry) = transport_test_context();
+        let invocation = InvocationId::new();
+        let started = InvokeEvent::new(
+            invocation,
+            0,
+            InvocationEventBody::Started {
+                visible_principal: None,
+            },
+        )
+        .expect("started event");
+        let completed = InvokeEvent::new(
+            invocation,
+            1,
+            InvocationEventBody::Completed {
+                duration_nanoseconds: 0,
+            },
+        )
+        .expect("completed event");
+        let value = InvokeEvent::new(
+            invocation,
+            2,
+            InvocationEventBody::value_batch(
+                None,
+                [InvokeValue::new(RuntimeValue::Integer(7)).expect("integer value")],
+            )
+            .expect("value batch body"),
+        )
+        .expect("value event");
+        let frame = ServerFrame::EventBatch {
+            stream: 1,
+            channel: Channel::ResultValues,
+            events: vec![
+                EventRecord {
+                    sequence: 1,
+                    event: Event::Value(RuntimeValue::InvokeEvent(started)),
+                },
+                EventRecord {
+                    sequence: 2,
+                    event: Event::Value(RuntimeValue::InvokeEvent(completed)),
+                },
+                EventRecord {
+                    sequence: 3,
+                    event: Event::Value(RuntimeValue::InvokeEvent(value)),
+                },
+            ],
+        };
+        let bytes = encode_constructed_server_frame(&active, &registry, &frame)
+            .expect("encoded terminal followup batch");
+        let (response, _receiver) = tokio::sync::oneshot::channel();
+        let mut root = Some(BrokerRootState {
+            invocation: Some(invocation),
+            records: Vec::new(),
+            response,
+        });
+        let mut resources = BTreeMap::new();
+        let mut tombstones = BrokerResourceTombstones::new();
+        let (_reader, mut writer) = tokio::io::duplex(128);
+
+        assert!(matches!(
+            handle_shared_broker_frame(
+                BrokerWireFrame {
+                    resource: false,
+                    bytes,
+                },
+                &mut writer,
+                &active,
+                &registry,
+                &mut root,
+                &mut resources,
+                None,
+                &mut tombstones,
+            )
+            .await,
+            Err(ResourceTransportFailure::Shape)
+        ));
+        assert!(root.is_some());
+    }
+
     #[tokio::test]
     async fn shared_broker_rejects_root_events_before_acceptance() {
         let (active, registry) = transport_test_context();
@@ -6093,6 +6373,339 @@ mod tests {
                 &mut tombstones,
             )
             .await,
+            Err(ResourceTransportFailure::Shape)
+        ));
+    }
+
+    #[tokio::test]
+    async fn shared_broker_maps_preflight_denial_without_invocation() {
+        let (active, registry) = transport_test_context();
+        let frame = ServerFrame::CallFailed {
+            stream: 1,
+            failure: CallFailure::ExecuteDenied,
+        };
+        let bytes = encode_constructed_server_frame(&active, &registry, &frame)
+            .expect("encoded preflight denial");
+        let (response, receiver) = tokio::sync::oneshot::channel();
+        let mut root = Some(BrokerRootState {
+            invocation: None,
+            records: Vec::new(),
+            response,
+        });
+        let mut resources = BTreeMap::new();
+        let mut tombstones = BrokerResourceTombstones::new();
+        let (_reader, mut writer) = tokio::io::duplex(128);
+
+        handle_shared_broker_frame(
+            BrokerWireFrame {
+                resource: false,
+                bytes,
+            },
+            &mut writer,
+            &active,
+            &registry,
+            &mut root,
+            &mut resources,
+            None,
+            &mut tombstones,
+        )
+        .await
+        .expect("preflight denial is a valid terminal root frame");
+
+        assert!(root.is_none());
+        assert!(matches!(
+            receiver.await,
+            Ok(Err(ResourceTransportFailure::RootPreflightDenied))
+        ));
+    }
+
+    #[tokio::test]
+    async fn shared_broker_maps_preflight_internal_failure_without_invocation() {
+        let (active, registry) = transport_test_context();
+        let frame = ServerFrame::CallFailed {
+            stream: 1,
+            failure: CallFailure::InternalFailure,
+        };
+        let bytes = encode_constructed_server_frame(&active, &registry, &frame)
+            .expect("encoded preflight internal failure");
+        let (response, receiver) = tokio::sync::oneshot::channel();
+        let mut root = Some(BrokerRootState {
+            invocation: None,
+            records: Vec::new(),
+            response,
+        });
+        let mut resources = BTreeMap::new();
+        let mut tombstones = BrokerResourceTombstones::new();
+        let (_reader, mut writer) = tokio::io::duplex(128);
+
+        handle_shared_broker_frame(
+            BrokerWireFrame {
+                resource: false,
+                bytes,
+            },
+            &mut writer,
+            &active,
+            &registry,
+            &mut root,
+            &mut resources,
+            None,
+            &mut tombstones,
+        )
+        .await
+        .expect("preflight internal failure is a valid terminal root frame");
+
+        assert!(root.is_none());
+        assert!(matches!(
+            receiver.await,
+            Ok(Err(ResourceTransportFailure::RootSealedDispatchInternal))
+        ));
+    }
+
+    #[tokio::test]
+    async fn shared_broker_maps_preaccept_cancellation_without_invocation() {
+        let (active, registry) = transport_test_context();
+        let frame = ServerFrame::CallCancelled { stream: 1 };
+        let bytes = encode_constructed_server_frame(&active, &registry, &frame)
+            .expect("encoded pre-accept cancellation");
+        let (response, receiver) = tokio::sync::oneshot::channel();
+        let mut root = Some(BrokerRootState {
+            invocation: None,
+            records: Vec::new(),
+            response,
+        });
+        let mut resources = BTreeMap::new();
+        let mut tombstones = BrokerResourceTombstones::new();
+        let (_reader, mut writer) = tokio::io::duplex(128);
+
+        handle_shared_broker_frame(
+            BrokerWireFrame {
+                resource: false,
+                bytes,
+            },
+            &mut writer,
+            &active,
+            &registry,
+            &mut root,
+            &mut resources,
+            None,
+            &mut tombstones,
+        )
+        .await
+        .expect("pre-accept cancellation is a valid terminal root frame");
+
+        assert!(root.is_none());
+        assert!(matches!(
+            receiver.await,
+            Ok(Err(ResourceTransportFailure::Cancelled))
+        ));
+    }
+
+    async fn assert_accepted_root_frame_is_shape(frame: ServerFrame) {
+        let (active, registry) = transport_test_context();
+        let bytes = encode_constructed_server_frame(&active, &registry, &frame)
+            .expect("encoded accepted root frame");
+        let invocation = InvocationId::from_bytes([0x52; 16]);
+        let (response, receiver) = tokio::sync::oneshot::channel();
+        let mut root = Some(BrokerRootState {
+            invocation: Some(invocation),
+            records: Vec::new(),
+            response,
+        });
+        let mut resources = BTreeMap::new();
+        let mut tombstones = BrokerResourceTombstones::new();
+        let (_reader, mut writer) = tokio::io::duplex(128);
+
+        assert!(matches!(
+            handle_shared_broker_frame(
+                BrokerWireFrame {
+                    resource: false,
+                    bytes,
+                },
+                &mut writer,
+                &active,
+                &registry,
+                &mut root,
+                &mut resources,
+                None,
+                &mut tombstones,
+            )
+            .await,
+            Err(ResourceTransportFailure::Shape)
+        ));
+        assert!(root.is_none());
+        assert!(matches!(
+            receiver.await,
+            Ok(Err(ResourceTransportFailure::Shape))
+        ));
+    }
+    async fn assert_invalid_preaccept_root_frame_is_shape(
+        frame: ServerFrame,
+        records: Vec<InvocationEventRecord>,
+    ) {
+        let (active, registry) = transport_test_context();
+        let bytes = encode_constructed_server_frame(&active, &registry, &frame)
+            .expect("encoded invalid pre-accept root frame");
+        let (response, receiver) = tokio::sync::oneshot::channel();
+        let mut root = Some(BrokerRootState {
+            invocation: None,
+            records,
+            response,
+        });
+        let mut resources = BTreeMap::new();
+        let mut tombstones = BrokerResourceTombstones::new();
+        let (_reader, mut writer) = tokio::io::duplex(128);
+
+        assert!(matches!(
+            handle_shared_broker_frame(
+                BrokerWireFrame {
+                    resource: false,
+                    bytes,
+                },
+                &mut writer,
+                &active,
+                &registry,
+                &mut root,
+                &mut resources,
+                None,
+                &mut tombstones,
+            )
+            .await,
+            Err(ResourceTransportFailure::Shape)
+        ));
+        assert!(root.is_none());
+        assert!(matches!(
+            receiver.await,
+            Ok(Err(ResourceTransportFailure::Shape))
+        ));
+    }
+
+    #[tokio::test]
+    async fn shared_broker_rejects_accepted_call_failed_as_shape() {
+        assert_accepted_root_frame_is_shape(ServerFrame::CallFailed {
+            stream: 1,
+            failure: CallFailure::ExecuteDenied,
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn shared_broker_rejects_accepted_call_cancelled_as_shape() {
+        assert_accepted_root_frame_is_shape(ServerFrame::CallCancelled { stream: 1 }).await;
+    }
+
+    #[tokio::test]
+    async fn shared_broker_rejects_accepted_completion_without_events_as_shape() {
+        assert_accepted_root_frame_is_shape(ServerFrame::CallCompleted { stream: 1 }).await;
+    }
+    #[tokio::test]
+    async fn shared_broker_notifies_invalid_preaccept_call_failed() {
+        assert_invalid_preaccept_root_frame_is_shape(
+            ServerFrame::CallFailed {
+                stream: 1,
+                failure: CallFailure::TargetUnavailable,
+            },
+            Vec::new(),
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn shared_broker_notifies_invalid_preaccept_call_cancelled() {
+        assert_invalid_preaccept_root_frame_is_shape(
+            ServerFrame::CallCancelled { stream: 1 },
+            echo_events().records().to_vec(),
+        )
+        .await;
+    }
+
+    #[test]
+    fn shared_broker_rejects_root_result_without_started_event() {
+        let invocation = InvocationId::new();
+        let value = InvokeEvent::new(
+            invocation,
+            0,
+            InvocationEventBody::value_batch(
+                None,
+                [InvokeValue::new(RuntimeValue::Integer(1)).expect("integer value")],
+            )
+            .expect("value batch body"),
+        )
+        .expect("value event");
+        let completed = InvokeEvent::new(
+            invocation,
+            1,
+            InvocationEventBody::Completed {
+                duration_nanoseconds: 0,
+            },
+        )
+        .expect("completed event");
+
+        assert!(matches!(
+            reconstruct_shared_root_result(
+                invocation,
+                vec![
+                    InvocationEventRecord::new(1, value),
+                    InvocationEventRecord::new(2, completed),
+                ],
+            ),
+            Err(ResourceTransportFailure::Shape)
+        ));
+    }
+
+    #[test]
+    fn shared_broker_rejects_repeated_started_event() {
+        let invocation = InvocationId::new();
+        let started = |sequence| {
+            InvokeEvent::new(
+                invocation,
+                sequence,
+                InvocationEventBody::Started {
+                    visible_principal: None,
+                },
+            )
+            .expect("started event")
+        };
+        let completed = InvokeEvent::new(
+            invocation,
+            2,
+            InvocationEventBody::Completed {
+                duration_nanoseconds: 0,
+            },
+        )
+        .expect("completed event");
+
+        assert!(matches!(
+            reconstruct_shared_root_result(
+                invocation,
+                vec![
+                    InvocationEventRecord::new(1, started(0)),
+                    InvocationEventRecord::new(2, started(1)),
+                    InvocationEventRecord::new(3, completed),
+                ],
+            ),
+            Err(ResourceTransportFailure::Shape)
+        ));
+    }
+
+    #[test]
+    fn shared_broker_rejects_root_events_after_terminal_event() {
+        let events = echo_events();
+        let invocation = events.records()[0].event().invocation_id();
+        let late_value = InvokeEvent::new(
+            invocation,
+            3,
+            InvocationEventBody::value_batch(
+                None,
+                [InvokeValue::new(RuntimeValue::Integer(99)).expect("integer value")],
+            )
+            .expect("value batch body"),
+        )
+        .expect("late value event");
+        let mut records = events.records().to_vec();
+        records.push(InvocationEventRecord::new(4, late_value));
+
+        assert!(matches!(
+            reconstruct_shared_root_result(invocation, records),
             Err(ResourceTransportFailure::Shape)
         ));
     }
@@ -6205,7 +6818,9 @@ mod tests {
         let (active, registry) = transport_test_context();
         let request = transport_test_request(active.pair(), 1);
         let mut protocol = ResourceProtocolConnection::new();
-        protocol.open(request.clone()).expect("resource request opens");
+        protocol
+            .open(request.clone())
+            .expect("resource request opens");
         let (completion, _completions) = mpsc::channel(1);
         let mut state = BrokerResourceState {
             request: request.clone(),
@@ -6245,7 +6860,9 @@ mod tests {
         let request = transport_test_request(active.pair(), 1);
         let nested_invocation_id = InvocationId::from_bytes([0x40; 16]);
         let mut protocol = ResourceProtocolConnection::new();
-        protocol.open(request.clone()).expect("resource request opens");
+        protocol
+            .open(request.clone())
+            .expect("resource request opens");
         let (completion, _completions) = mpsc::channel(1);
         let mut state = BrokerResourceState {
             request: request.clone(),
@@ -6260,23 +6877,28 @@ mod tests {
             stream_values_seen: false,
         };
         let (_reader, mut writer) = tokio::io::duplex(128);
-        assert!(handle_shared_resource_frame(
-            &mut state,
-            ResourceServerFrame::Accepted(ResourceAccepted {
-                stream_id: request.stream_id,
-                request_id: request.request_id,
-                nested_invocation_id,
-                target_revision: request.target_revision,
-                resource_kind: request.resource_kind,
-            }),
-            &mut writer,
-            &active,
-            &registry,
-        )
-        .await
-        .expect("resource acceptance applies"));
+        assert!(
+            handle_shared_resource_frame(
+                &mut state,
+                ResourceServerFrame::Accepted(ResourceAccepted {
+                    stream_id: request.stream_id,
+                    request_id: request.request_id,
+                    nested_invocation_id,
+                    target_revision: request.target_revision,
+                    resource_kind: request.resource_kind,
+                }),
+                &mut writer,
+                &active,
+                &registry,
+            )
+            .await
+            .expect("resource acceptance applies")
+        );
         assert!(state.accepted);
-        assert_eq!(state.accepted_nested_invocation_id, Some(nested_invocation_id));
+        assert_eq!(
+            state.accepted_nested_invocation_id,
+            Some(nested_invocation_id)
+        );
     }
 
     #[tokio::test]
@@ -6286,7 +6908,9 @@ mod tests {
         request.resource_kind = ProtocolResourceKind::Stream;
         let nested_invocation_id = InvocationId::from_bytes([0x41; 16]);
         let mut protocol = ResourceProtocolConnection::new();
-        protocol.open(request.clone()).expect("resource request opens");
+        protocol
+            .open(request.clone())
+            .expect("resource request opens");
         let (completion, mut completions) = mpsc::channel(1);
         let mut state = BrokerResourceState {
             request: request.clone(),
@@ -6345,7 +6969,9 @@ mod tests {
         let request = transport_test_request(active.pair(), 1);
         let nested_invocation_id = InvocationId::from_bytes([0x42; 16]);
         let mut protocol = ResourceProtocolConnection::new();
-        protocol.open(request.clone()).expect("resource request opens");
+        protocol
+            .open(request.clone())
+            .expect("resource request opens");
         let (completion, mut completions) = mpsc::channel(1);
         let mut state = BrokerResourceState {
             request: request.clone(),
@@ -6414,7 +7040,9 @@ mod tests {
             .expect("encoded resource value")
             .len() as u32;
         let mut protocol = ResourceProtocolConnection::new();
-        protocol.open(request.clone()).expect("resource request opens");
+        protocol
+            .open(request.clone())
+            .expect("resource request opens");
         protocol
             .receive(ResourceClientFrame::Cancel(ResourceCancel {
                 stream_id: request.stream_id,
@@ -6436,34 +7064,38 @@ mod tests {
             stream_values_seen: false,
         };
         let (_reader, mut writer) = tokio::io::duplex(128);
-        assert!(handle_shared_resource_frame(
-            &mut state,
-            ResourceServerFrame::Accepted(accepted),
-            &mut writer,
-            &active,
-            &registry,
-        )
-        .await
-        .expect("late acceptance is drained"));
+        assert!(
+            handle_shared_resource_frame(
+                &mut state,
+                ResourceServerFrame::Accepted(accepted),
+                &mut writer,
+                &active,
+                &registry,
+            )
+            .await
+            .expect("late acceptance is drained")
+        );
         assert!(!state.accepted);
         assert_eq!(state.accepted_nested_invocation_id, None);
 
-        assert!(handle_shared_resource_frame(
-            &mut state,
-            ResourceServerFrame::Values(ResourceValues {
-                stream_id: request.stream_id,
-                request_id: request.request_id,
-                batch_sequence: 0,
-                item_count: 1,
-                byte_count,
-                values: vec![value],
-            }),
-            &mut writer,
-            &active,
-            &registry,
-        )
-        .await
-        .expect("late values are drained"));
+        assert!(
+            handle_shared_resource_frame(
+                &mut state,
+                ResourceServerFrame::Values(ResourceValues {
+                    stream_id: request.stream_id,
+                    request_id: request.request_id,
+                    batch_sequence: 0,
+                    item_count: 1,
+                    byte_count,
+                    values: vec![value],
+                }),
+                &mut writer,
+                &active,
+                &registry,
+            )
+            .await
+            .expect("late values are drained")
+        );
         let keep = handle_shared_resource_frame(
             &mut state,
             ResourceServerFrame::Completed(ResourceCompleted {
@@ -6753,7 +7385,9 @@ mod tests {
         let mut request = transport_test_request(active.pair(), 1);
         request.resource_kind = ProtocolResourceKind::Stream;
         let mut protocol = ResourceProtocolConnection::new();
-        protocol.open(request.clone()).expect("resource request opens");
+        protocol
+            .open(request.clone())
+            .expect("resource request opens");
         let (completion, _completions) = mpsc::channel(1);
         let mut state = BrokerResourceState {
             request: request.clone(),
@@ -6792,7 +7426,9 @@ mod tests {
         let (active, registry) = transport_test_context();
         let request = transport_test_request(active.pair(), 1);
         let mut protocol = ResourceProtocolConnection::new();
-        protocol.open(request.clone()).expect("resource request opens");
+        protocol
+            .open(request.clone())
+            .expect("resource request opens");
         protocol
             .receive(ResourceClientFrame::Cancel(ResourceCancel {
                 stream_id: request.stream_id,
@@ -6841,7 +7477,9 @@ mod tests {
         let (sender, receiver) = mpsc::channel(2);
         let producer = thread::spawn(move || {
             sender
-                .blocking_send(Ok(ResourceTransportOutcome::StreamValues(vec![RuntimeValue::Integer(1)])))
+                .blocking_send(Ok(ResourceTransportOutcome::StreamValues(vec![
+                    RuntimeValue::Integer(1),
+                ])))
                 .expect("stream batch reaches cancellation waiter");
             sender
                 .blocking_send(Ok(ResourceTransportOutcome::Cancelled {
@@ -6849,8 +7487,9 @@ mod tests {
                 }))
                 .expect("terminal cancellation reaches cancellation waiter");
         });
-        let (result, waiter) = InstalledClientResourceExecutor::wait_for_cancelled_transport(receiver)
-            .expect("cancellation waiter returns a terminal result");
+        let (result, waiter) =
+            InstalledClientResourceExecutor::wait_for_cancelled_transport(receiver)
+                .expect("cancellation waiter returns a terminal result");
         assert!(waiter.is_none());
         assert!(matches!(
             result,
@@ -7544,9 +8183,8 @@ mod tests {
             Vec::new(),
         )
         .expect("empty application catalogue");
-        let definition = value_typed_definition(ResolvedType::value(
-            orna_standard::INTEGER_TYPE_ID,
-        ));
+        let definition =
+            value_typed_definition(ResolvedType::value(orna_standard::INTEGER_TYPE_ID));
         let bound = bind_installed_cli_arguments(
             &application,
             Some(&standard),
@@ -7707,9 +8345,7 @@ mod tests {
     #[test]
     fn inspector_snapshot_row_rejects_zero_value_batch_count() {
         let target = InvocationId::from_bytes([0x17; 16]);
-        let epoch = InspectEpochId::from_bytes([
-            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 7,
-        ]);
+        let epoch = InspectEpochId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 7]);
         let mut row = super::row(INSPECT_SNAPSHOT_ROW_TAG, 0);
         row.extend_from_slice(&epoch.to_bytes());
         row.extend_from_slice(&target.to_bytes());
@@ -7769,30 +8405,21 @@ mod tests {
         let descendant = InvocationId::from_bytes([0x33; 16]);
         let mut checked = Vec::new();
 
-        let result = reject_recursive_inspect_target(
-            root,
-            root,
-            parent,
-            |observer, target| {
-                checked.push(observer);
-                async move { Ok(observer == target) }
-            },
-        )
+        let result = reject_recursive_inspect_target(root, root, parent, |observer, target| {
+            checked.push(observer);
+            async move { Ok(observer == target) }
+        })
         .await;
         assert_eq!(result, Err("inspect.recursion".to_owned()));
         assert_eq!(checked, vec![root]);
 
         checked.clear();
-        let result = reject_recursive_inspect_target(
-            descendant,
-            root,
-            parent,
-            |observer, target| {
+        let result =
+            reject_recursive_inspect_target(descendant, root, parent, |observer, target| {
                 checked.push(observer);
                 async move { Ok(observer == parent && target == descendant) }
-            },
-        )
-        .await;
+            })
+            .await;
         assert_eq!(result, Err("inspect.recursion".to_owned()));
         assert_eq!(checked, vec![root, parent]);
 
@@ -7835,50 +8462,24 @@ mod tests {
         )
         .expect("snapshot envelope");
         assert_eq!(
-            validate_inspect_projection_binding(
-                Some(target),
-                &envelope,
-                epoch,
-                target,
-                pair,
-            ),
+            validate_inspect_projection_binding(Some(target), &envelope, epoch, target, pair,),
             Ok(())
         );
         assert_eq!(
-            validate_inspect_projection_binding(
-                Some(other_target),
-                &envelope,
-                epoch,
-                target,
-                pair,
-            ),
+            validate_inspect_projection_binding(Some(other_target), &envelope, epoch, target, pair,),
             Err("inspect.epoch_mismatch".to_owned()),
         );
         let mut wrong_epoch_bytes = [0; 16];
         wrong_epoch_bytes[15] = 0x34;
         let wrong_epoch = InspectEpochId::from_bytes(wrong_epoch_bytes);
         assert_eq!(
-            validate_inspect_projection_binding(
-                Some(target),
-                &envelope,
-                wrong_epoch,
-                target,
-                pair,
-            ),
+            validate_inspect_projection_binding(Some(target), &envelope, wrong_epoch, target, pair,),
             Err("inspect.epoch_mismatch".to_owned()),
         );
-        let wrong_pair = RevisionPair::new(
-            SourceRevisionId::from_bytes([0x66; 16]),
-            pair.catalogue(),
-        );
+        let wrong_pair =
+            RevisionPair::new(SourceRevisionId::from_bytes([0x66; 16]), pair.catalogue());
         assert_eq!(
-            validate_inspect_projection_binding(
-                Some(target),
-                &envelope,
-                epoch,
-                target,
-                wrong_pair,
-            ),
+            validate_inspect_projection_binding(Some(target), &envelope, epoch, target, wrong_pair,),
             Err("inspect.epoch_mismatch".to_owned()),
         );
     }
@@ -8345,10 +8946,8 @@ mod tests {
             .expect("persistent transport connection");
         let (completion_sender, _completion_receiver) = mpsc::channel(1);
         let (_control_sender, controls) = mpsc::unbounded_channel();
-        let expected_nested_invocation_id = InvocationId::from_bytes([
-            0x30 + request.stream_id as u8;
-            16
-        ]);
+        let expected_nested_invocation_id =
+            InvocationId::from_bytes([0x30 + request.stream_id as u8; 16]);
         let run = runtime
             .block_on(run_resource_transport(
                 stream,

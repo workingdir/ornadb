@@ -816,22 +816,21 @@ pub(crate) async fn serve_local_raw_stream_with_broker(
     .await
 }
 
- /// Serves an installed resource socket with explicit request provenance.
- ///
- /// The public raw socket entry point fails closed because an unbound socket
- /// has no trusted client evaluator. This hidden seam exists for integration
- /// tests that register each request before they send protocol frames.
- #[doc(hidden)]
- #[cfg(feature = "test-hooks")]
- pub async fn serve_local_raw_stream_with_resource_authorizer(
-     kernel: PostgresKernel,
-     stream: StandardUnixStream,
-     resources: LocalRawSocketResources,
-     authorizer: RawResourceRequestAuthorizer,
- ) -> Result<(), LocalRawSocketError> {
-     serve_local_raw_stream_with_broker(kernel, stream, resources, Some(authorizer.broker())).await
- }
-
+/// Serves an installed resource socket with explicit request provenance.
+///
+/// The public raw socket entry point fails closed because an unbound socket
+/// has no trusted client evaluator. This hidden seam exists for integration
+/// tests that register each request before they send protocol frames.
+#[doc(hidden)]
+#[cfg(feature = "test-hooks")]
+pub async fn serve_local_raw_stream_with_resource_authorizer(
+    kernel: PostgresKernel,
+    stream: StandardUnixStream,
+    resources: LocalRawSocketResources,
+    authorizer: RawResourceRequestAuthorizer,
+) -> Result<(), LocalRawSocketError> {
+    serve_local_raw_stream_with_broker(kernel, stream, resources, Some(authorizer.broker())).await
+}
 
 pub(super) async fn serve_local_raw_stream_until_shutdown(
     kernel: PostgresKernel,
@@ -1415,15 +1414,13 @@ impl DispatchService for RawDispatchService {
                     let mut state = ClientStateStore::new();
                     let mut capability_audit_appended = false;
                     let mut resource_executor = match resource_broker {
-                        Some(broker) => {
-                            InstalledClientResourceExecutor::new_with_broker(
-                                worker_kernel,
-                                worker_session,
-                                worker_active,
-                                broker,
-                                cancellation.clone(),
-                            )
-                        }
+                        Some(broker) => InstalledClientResourceExecutor::new_with_broker(
+                            worker_kernel,
+                            worker_session,
+                            worker_active,
+                            broker,
+                            cancellation.clone(),
+                        ),
                         None => InstalledClientResourceExecutor::new(
                             worker_kernel,
                             worker_session,
@@ -1849,11 +1846,9 @@ fn schedule_resource_pulls(
         if completion.producer_waiting_bytes.is_some() && credit.item_available == 0 {
             continue;
         }
-        let Some(credit) = resource_producer_credit(
-            accepted,
-            credit.item_available,
-            credit.byte_available,
-        ) else {
+        let Some(credit) =
+            resource_producer_credit(accepted, credit.item_available, credit.byte_available)
+        else {
             continue;
         };
         let producer = pending
@@ -1898,16 +1893,20 @@ fn resource_producer_credit(
     item_available: u64,
     byte_available: u64,
 ) -> Option<ResourceCredit> {
-    if matches!(accepted.resource_kind, AuthenticatedServerResourceKind::Stream)
-        && (item_available == 0 || byte_available == 0)
+    if matches!(
+        accepted.resource_kind,
+        AuthenticatedServerResourceKind::Stream
+    ) && (item_available == 0 || byte_available == 0)
     {
         return Some(ResourceCredit {
             item_count: item_available.min(1),
             byte_count: byte_available,
         });
     }
-    if matches!(accepted.resource_kind, AuthenticatedServerResourceKind::Single)
-        && (item_available == 0 || byte_available == 0)
+    if matches!(
+        accepted.resource_kind,
+        AuthenticatedServerResourceKind::Single
+    ) && (item_available == 0 || byte_available == 0)
     {
         // A scalar terminal pull is an internal EOF probe. It carries no
         // value credit when either client window is exhausted; the producer
@@ -2245,29 +2244,26 @@ async fn drive_versioned_authenticated_stream_until_shutdown<D: DispatchService>
             let _ = handle.await;
         });
     }
-    let resource_shutdown_completed = timeout(
-        RESOURCE_PRODUCER_SHUTDOWN_TIMEOUT,
-        async {
-            while !resource_shutdown.is_empty() {
-                tokio::select! {
-                    joined = resource_shutdown.join_next() => {
-                        let _ = joined;
-                    }
-                    completion = resource_completion_receiver.recv() => {
-                        let Some((stream_id, completion)) = completion else {
-                            continue;
-                        };
-                        if completion.producer.is_some() {
-                            if let Some(producer) = completion.producer.as_ref() {
-                                producer.cancel();
-                            }
-                            resource_pending.insert(stream_id, completion);
+    let resource_shutdown_completed = timeout(RESOURCE_PRODUCER_SHUTDOWN_TIMEOUT, async {
+        while !resource_shutdown.is_empty() {
+            tokio::select! {
+                joined = resource_shutdown.join_next() => {
+                    let _ = joined;
+                }
+                completion = resource_completion_receiver.recv() => {
+                    let Some((stream_id, completion)) = completion else {
+                        continue;
+                    };
+                    if completion.producer.is_some() {
+                        if let Some(producer) = completion.producer.as_ref() {
+                            producer.cancel();
                         }
+                        resource_pending.insert(stream_id, completion);
                     }
                 }
             }
-        },
-    )
+        }
+    })
     .await
     .is_ok();
     if !resource_shutdown_completed {
@@ -2275,14 +2271,11 @@ async fn drive_versioned_authenticated_stream_until_shutdown<D: DispatchService>
             abort_handle.abort();
         }
         resource_shutdown.abort_all();
-        let _ = timeout(
-            RESOURCE_PRODUCER_SHUTDOWN_TIMEOUT,
-            async {
-                while let Some(joined) = resource_shutdown.join_next().await {
-                    let _ = joined;
-                }
-            },
-        )
+        let _ = timeout(RESOURCE_PRODUCER_SHUTDOWN_TIMEOUT, async {
+            while let Some(joined) = resource_shutdown.join_next().await {
+                let _ = joined;
+            }
+        })
         .await;
     }
     drain_resource_completions(
@@ -2302,41 +2295,32 @@ async fn drive_versioned_authenticated_stream_until_shutdown<D: DispatchService>
     }
     // Every scheduled cleanup is joined before the connection returns; timeout
     // then aborts and drains it.
-    let producer_shutdown_completed = timeout(
-        RESOURCE_PRODUCER_SHUTDOWN_TIMEOUT,
-        async {
-            while let Some(joined) = producer_shutdown.join_next().await {
-                let _ = joined;
-            }
-        },
-    )
+    let producer_shutdown_completed = timeout(RESOURCE_PRODUCER_SHUTDOWN_TIMEOUT, async {
+        while let Some(joined) = producer_shutdown.join_next().await {
+            let _ = joined;
+        }
+    })
     .await
     .is_ok();
     if !producer_shutdown_completed {
         producer_shutdown.abort_all();
-        let _ = timeout(
-            RESOURCE_PRODUCER_SHUTDOWN_TIMEOUT,
-            async {
-                while let Some(joined) = producer_shutdown.join_next().await {
-                    let _ = joined;
-                }
-            },
-        )
+        let _ = timeout(RESOURCE_PRODUCER_SHUTDOWN_TIMEOUT, async {
+            while let Some(joined) = producer_shutdown.join_next().await {
+                let _ = joined;
+            }
+        })
         .await;
     }
     resource_pending.clear();
     drop(resource_guards);
     let mut drain_failure = None;
-    let dispatch_shutdown_completed = timeout(
-        DISPATCH_SHUTDOWN_TIMEOUT,
-        async {
-            while let Some(completion) = tasks.join_next().await {
-                if let Err(source) = completion {
-                    drain_failure.get_or_insert(LocalRawSocketError::DispatchTask { source });
-                }
+    let dispatch_shutdown_completed = timeout(DISPATCH_SHUTDOWN_TIMEOUT, async {
+        while let Some(completion) = tasks.join_next().await {
+            if let Err(source) = completion {
+                drain_failure.get_or_insert(LocalRawSocketError::DispatchTask { source });
             }
-        },
-    )
+        }
+    })
     .await
     .is_ok();
     if !dispatch_shutdown_completed {
@@ -3200,7 +3184,8 @@ async fn read_header_before<R: AsyncRead + Unpin>(
                     filled,
                     deadline,
                     Instant::now(),
-                ) => {
+                ) =>
+            {
                 // A live resource may be waiting indefinitely for client credit.
                 // Once a frame has started, the fresh deadline below bounds the
                 // remainder and prevents an incomplete frame from pinning a task.
@@ -3449,13 +3434,15 @@ mod tests {
             .receive(ResourceClientFrame::Request(request.clone()))
             .expect("scalar request opens");
         connection
-            .apply(ResourceServerFrame::Accepted(orna_protocol::ResourceAccepted {
-                stream_id: scalar.stream_id,
-                request_id: scalar.request_id,
-                nested_invocation_id: scalar.nested_invocation_id,
-                target_revision: scalar.target_revision,
-                resource_kind: ResourceKind::Single,
-            }))
+            .apply(ResourceServerFrame::Accepted(
+                orna_protocol::ResourceAccepted {
+                    stream_id: scalar.stream_id,
+                    request_id: scalar.request_id,
+                    nested_invocation_id: scalar.nested_invocation_id,
+                    target_revision: scalar.target_revision,
+                    resource_kind: ResourceKind::Single,
+                },
+            ))
             .expect("scalar request accepts");
         connection
             .apply(ResourceServerFrame::Values(orna_protocol::ResourceValues {
@@ -3557,13 +3544,15 @@ mod tests {
             .receive(ResourceClientFrame::Request(request.clone()))
             .expect("resource request opens");
         connection
-            .apply(ResourceServerFrame::Accepted(orna_protocol::ResourceAccepted {
-                stream_id: request.stream_id,
-                request_id: request.request_id,
-                nested_invocation_id: InvocationId::from_bytes([0x21; 16]),
-                target_revision: request.target_revision,
-                resource_kind: ResourceKind::Single,
-            }))
+            .apply(ResourceServerFrame::Accepted(
+                orna_protocol::ResourceAccepted {
+                    stream_id: request.stream_id,
+                    request_id: request.request_id,
+                    nested_invocation_id: InvocationId::from_bytes([0x21; 16]),
+                    target_revision: request.target_revision,
+                    resource_kind: ResourceKind::Single,
+                },
+            ))
             .expect("resource request accepts");
         let before = connection
             .resource_credit(request.stream_id, request.request_id)
@@ -4038,10 +4027,9 @@ mod tests {
 
     #[test]
     fn resource_completion_channel_is_bounded_by_live_resource_limit() {
-        let (sender, mut receiver) =
-            mpsc::channel::<(u64, ResourceDispatchCompletion)>(
-                RESOURCE_COMPLETION_CHANNEL_CAPACITY,
-            );
+        let (sender, mut receiver) = mpsc::channel::<(u64, ResourceDispatchCompletion)>(
+            RESOURCE_COMPLETION_CHANNEL_CAPACITY,
+        );
         assert_eq!(sender.max_capacity(), RESOURCE_COMPLETION_CHANNEL_CAPACITY);
         for stream_id in 0..RESOURCE_COMPLETION_CHANNEL_CAPACITY as u64 {
             sender
@@ -4068,7 +4056,9 @@ mod tests {
             Err(mpsc::error::TrySendError::Full(_))
         ));
         for _ in 0..RESOURCE_COMPLETION_CHANNEL_CAPACITY {
-            receiver.try_recv().expect("bounded completions remain queued");
+            receiver
+                .try_recv()
+                .expect("bounded completions remain queued");
         }
     }
 
@@ -4213,7 +4203,9 @@ mod tests {
         let (server, _client) = UnixStream::pair().unwrap();
         let (_reader, mut writer) = server.into_split();
         let (completion_sender, mut completion_receiver) =
-            mpsc::channel::<(u64, ResourceDispatchCompletion)>(RESOURCE_COMPLETION_CHANNEL_CAPACITY);
+            mpsc::channel::<(u64, ResourceDispatchCompletion)>(
+                RESOURCE_COMPLETION_CHANNEL_CAPACITY,
+            );
         let resources = LocalRawSocketResources::new();
         let (_shutdown_sender, mut shutdown) = watch::channel(false);
         let mut pending = BTreeMap::from([(
@@ -4387,7 +4379,9 @@ mod tests {
         let (server, mut client) = UnixStream::pair().unwrap();
         let (_reader, mut writer) = server.into_split();
         let (completion_sender, mut completion_receiver) =
-            mpsc::channel::<(u64, ResourceDispatchCompletion)>(RESOURCE_COMPLETION_CHANNEL_CAPACITY);
+            mpsc::channel::<(u64, ResourceDispatchCompletion)>(
+                RESOURCE_COMPLETION_CHANNEL_CAPACITY,
+            );
         let mut connection = ResourceProtocolConnection::new();
         connection
             .receive(ResourceClientFrame::Request(request.clone()))
@@ -4879,7 +4873,9 @@ mod tests {
         let (server, _client) = UnixStream::pair().unwrap();
         let (_reader, mut writer) = server.into_split();
         let (completion_sender, mut completion_receiver) =
-            mpsc::channel::<(u64, ResourceDispatchCompletion)>(RESOURCE_COMPLETION_CHANNEL_CAPACITY);
+            mpsc::channel::<(u64, ResourceDispatchCompletion)>(
+                RESOURCE_COMPLETION_CHANNEL_CAPACITY,
+            );
         let mut connection = ResourceProtocolConnection::new();
         let mut pending = BTreeMap::new();
         let mut cancelled = BTreeMap::new();
@@ -4982,7 +4978,9 @@ mod tests {
         let (server, mut client) = UnixStream::pair().unwrap();
         let (_reader, mut writer) = server.into_split();
         let (completion_sender, mut completion_receiver) =
-            mpsc::channel::<(u64, ResourceDispatchCompletion)>(RESOURCE_COMPLETION_CHANNEL_CAPACITY);
+            mpsc::channel::<(u64, ResourceDispatchCompletion)>(
+                RESOURCE_COMPLETION_CHANNEL_CAPACITY,
+            );
         let mut connection = ResourceProtocolConnection::new();
         let mut pending = BTreeMap::new();
         let mut cancelled = BTreeMap::new();
