@@ -263,9 +263,17 @@ fn classify_token(
         SyntaxKind::Word => {
             let text = token.text();
             if is_keyword(text) {
-                tokens.push(HighlightToken::new(start, end, HighlightKind::Keyword));
-                if role.is_none() && keyword_sets_role(text) {
-                    *role = keyword_role(text);
+                // A lexer keyword can still be a qualified-name component.
+                // The parser accepts keyword-shaped identifiers after a dot,
+                // so preserve the semantic role proven by that context rather
+                // than unconditionally treating the token as control syntax.
+                if let Some(kind) = qualified_keyword_kind(children, index, role) {
+                    tokens.push(HighlightToken::new(start, end, kind));
+                } else {
+                    tokens.push(HighlightToken::new(start, end, HighlightKind::Keyword));
+                    if role.is_none() && keyword_sets_role(text) {
+                        *role = keyword_role(text);
+                    }
                 }
             } else if is_scalar_type(text) {
                 tokens.push(HighlightToken::new(start, end, HighlightKind::TypeName));
@@ -304,6 +312,33 @@ fn classify_token(
         )),
         // The lexer never emits node kinds as tokens.
         _ => {}
+    }
+}
+
+/// Classifies a keyword-shaped component of a qualified name.
+///
+/// A dot is sufficient grammar context to prove that a word is a name, even
+/// when its spelling is also a language keyword. Intermediate components are
+/// namespaces; the final component is a property (or a callable when followed
+/// by `(`) unless the enclosing walker supplied a more specific role.
+fn qualified_keyword_kind(
+    children: &[NodeOrToken<SyntaxNode<OrnaLanguage>, SyntaxToken<OrnaLanguage>>],
+    index: usize,
+    role: &mut Option<NameRole>,
+) -> Option<HighlightKind> {
+    let previous = previous_significant_kind(children, index);
+    let next = next_significant_kind(children, index + 1);
+    if next == Some(SyntaxKind::Dot) {
+        Some(HighlightKind::NamespaceName)
+    } else if previous == Some(SyntaxKind::Dot) {
+        let fallback = if next == Some(SyntaxKind::LeftParenthesis) {
+            HighlightKind::FunctionName
+        } else {
+            HighlightKind::PropertyName
+        };
+        Some(role.take().map_or(fallback, NameRole::kind))
+    } else {
+        None
     }
 }
 
@@ -892,6 +927,33 @@ mod tests {
         assert_eq!(kind_at(source, "title"), HighlightKind::VariableName);
         assert_eq!(kind_at(source, "=>"), HighlightKind::Operator);
         assert_eq!(kind_at(source, "'Studio'"), HighlightKind::StringLiteral);
+    }
+
+    #[test]
+    fn classifies_keyword_shaped_client_call_components_by_role() {
+        let source = "CREATE CLIENT FUNCTION action_fixture.entry() RETURNS std.Action AS std.action.call();";
+        assert_eq!(kind_at(source, "action"), HighlightKind::NamespaceName);
+        assert_eq!(kind_at(source, "call"), HighlightKind::FunctionName);
+    }
+
+    #[test]
+    fn classifies_keyword_shaped_client_property_components_by_role() {
+        let source = "CREATE CLIENT FUNCTION inspector_app.entry() RETURNS std.Action AS std.inspect.snapshot;";
+        assert_eq!(kind_at(source, "inspect"), HighlightKind::NamespaceName);
+        assert_eq!(kind_at(source, "snapshot"), HighlightKind::PropertyName);
+
+        let keyword_final = "CREATE CLIENT FUNCTION inspector_app.keyword_path() RETURNS std.Action AS std.inspect;";
+        assert_eq!(
+            kind_at(keyword_final, "inspect"),
+            HighlightKind::PropertyName
+        );
+    }
+
+    #[test]
+    fn preserves_control_keywords_outside_qualified_names() {
+        let source = "CREATE CLIENT FUNCTION entry() RETURNS BOOL AS CALL; INSPECT;";
+        assert_eq!(kind_at(source, "CALL"), HighlightKind::Keyword);
+        assert_eq!(kind_at(source, "INSPECT"), HighlightKind::Keyword);
     }
 
     #[test]

@@ -2,10 +2,7 @@
 
 use std::{error::Error, fmt};
 
-use crate::{
-    InspectEpochId, InvocationId, PrincipalId,
-    revision::RevisionPair,
-};
+use crate::{InspectEpochId, InvocationId, PrincipalId, revision::RevisionPair};
 
 /// The versions of the eight Inspector projections captured by an epoch.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -196,7 +193,10 @@ pub enum InspectLifecycleError {
     /// The actual and expected bindings belong to different principals.
     PrincipalMismatch,
     /// The actual and expected bindings captured different revisions.
-    RevisionMismatch { expected: RevisionPair, actual: RevisionPair },
+    RevisionMismatch {
+        expected: RevisionPair,
+        actual: RevisionPair,
+    },
     /// The epoch identities or projection versions differ.
     EpochMismatch,
     /// A supplied freeze token is not the exact live token.
@@ -399,14 +399,8 @@ mod tests {
                 InspectLifecycleError::EpochMismatch,
                 "inspect.epoch_mismatch",
             ),
-            (
-                InspectLifecycleError::TokenMismatch,
-                "inspect.stale_epoch",
-            ),
-            (
-                InspectLifecycleError::NotFrozen,
-                "inspect.stale_epoch",
-            ),
+            (InspectLifecycleError::TokenMismatch, "inspect.stale_epoch"),
+            (InspectLifecycleError::NotFrozen, "inspect.stale_epoch"),
             (InspectLifecycleError::Cancelled, "inspect.cancelled"),
             (InspectLifecycleError::Closed, "inspect.closed"),
         ];

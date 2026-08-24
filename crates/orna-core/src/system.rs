@@ -413,8 +413,7 @@ const SYS_SECURITY_REVOKE_PRIVILEGE_FUNCTION_NAME_PARTS: &[&str] =
 const SYS_SECURITY_CAN_EXECUTE_FUNCTION_NAME_PARTS: &[&str] = &["sys", "security", "can_execute"];
 const SYS_SECURITY_HAS_PRIVILEGE_FUNCTION_NAME_PARTS: &[&str] =
     &["sys", "security", "has_privilege"];
-const SYS_STATE_LOAD_USER_STATE_FUNCTION_NAME_PARTS: &[&str] =
-    &["sys", "state", "load_user_state"];
+const SYS_STATE_LOAD_USER_STATE_FUNCTION_NAME_PARTS: &[&str] = &["sys", "state", "load_user_state"];
 const SYS_STATE_WRITE_USER_STATE_FUNCTION_NAME_PARTS: &[&str] =
     &["sys", "state", "write_user_state"];
 
@@ -1276,10 +1275,7 @@ mod tests {
         ));
         let load_user_state = SYSTEM_FUNCTIONS[24];
         assert_eq!(load_user_state.kind(), SystemFunctionKind::State);
-        assert_eq!(
-            load_user_state.id(),
-            SYS_STATE_LOAD_USER_STATE_FUNCTION_ID
-        );
+        assert_eq!(load_user_state.id(), SYS_STATE_LOAD_USER_STATE_FUNCTION_ID);
         assert!(parts_equal(
             load_user_state.name_parts(),
             &["sys", "state", "load_user_state"]
