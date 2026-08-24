@@ -44,10 +44,10 @@ use orna_standard::registered_opaque_codecs;
 use tokio_postgres::{IsolationLevel, Row, Transaction, types::FromSqlOwned};
 
 use crate::{
-    PostgresKernel, PostgresKernelError, bootstrap::require_current_migrations,
-    is_sealed_inspect_type_id, security::{
-        append_security_audit_event, recover_security_snapshot_for_active,
-    },
+    PostgresKernel, PostgresKernelError,
+    bootstrap::require_current_migrations,
+    is_sealed_inspect_type_id,
+    security::{append_security_audit_event, recover_security_snapshot_for_active},
     security_admin::inspect_privileges_for_session,
     server_runtime::configure_and_recover,
 };
@@ -167,7 +167,6 @@ impl AuthenticatedInspectSnapshot {
 }
 
 impl PostgresKernel {
-
     /// Appends one protected INSPECT denial before returning it to the caller.
     ///
     /// The audit transaction is deliberately separate from read-only inspection
@@ -193,11 +192,7 @@ impl PostgresKernel {
             require_current_migrations(&transaction).await?;
             append_security_audit_event(
                 &transaction,
-                SecurityAuditDecision::inspect_denied(
-                    authenticated_session,
-                    epoch_owner,
-                    reason,
-                ),
+                SecurityAuditDecision::inspect_denied(authenticated_session, epoch_owner, reason),
             )
             .await?;
             transaction
@@ -234,8 +229,8 @@ impl PostgresKernel {
             require_current_migrations(&transaction).await?;
             let active = configure_and_recover(&transaction).await?;
             let security = recover_security_snapshot_for_active(&transaction, &active).await?;
-            let bound_session = rebind_inspect_session(self, &security, authenticated_session)
-                .await?;
+            let bound_session =
+                rebind_inspect_session(self, &security, authenticated_session).await?;
             let mut granted = vec![InspectPrivilege::OwnInvocation];
             granted.extend(inspect_privileges_for_session(&security, &bound_session));
             let registry = inspect_value_registry(&active)?;
@@ -308,8 +303,8 @@ impl PostgresKernel {
             require_current_migrations(&transaction).await?;
             let active = configure_and_recover(&transaction).await?;
             let security = recover_security_snapshot_for_active(&transaction, &active).await?;
-            let bound_session = rebind_inspect_session(self, &security, authenticated_session)
-                .await?;
+            let bound_session =
+                rebind_inspect_session(self, &security, authenticated_session).await?;
             let granted = inspect_privileges_for_session(&security, &bound_session);
             let row = transaction
                 .query_opt(
@@ -377,8 +372,8 @@ impl PostgresKernel {
             require_current_migrations(&transaction).await?;
             let active = configure_and_recover(&transaction).await?;
             let security = recover_security_snapshot_for_active(&transaction, &active).await?;
-            let bound_session = rebind_inspect_session(self, &security, authenticated_session)
-                .await?;
+            let bound_session =
+                rebind_inspect_session(self, &security, authenticated_session).await?;
             let granted = inspect_privileges_for_session(&security, &bound_session);
             let row = transaction
                 .query_opt(
@@ -446,8 +441,8 @@ impl PostgresKernel {
             require_current_migrations(&transaction).await?;
             let active = configure_and_recover(&transaction).await?;
             let security = recover_security_snapshot_for_active(&transaction, &active).await?;
-            let bound_session = rebind_inspect_session(self, &security, authenticated_session)
-                .await?;
+            let bound_session =
+                rebind_inspect_session(self, &security, authenticated_session).await?;
             transaction
                 .commit()
                 .await
@@ -568,7 +563,8 @@ impl PostgresKernel {
         if requested == InspectPrivilege::Values {
             return Ok(snapshot.epoch.state_cells().to_vec());
         }
-        Ok(snapshot.epoch
+        Ok(snapshot
+            .epoch
             .state_cells()
             .iter()
             .map(|row| {
@@ -1136,7 +1132,6 @@ fn build_inspect_epoch(
 ) -> Result<InspectSnapshotEpoch, PostgresKernelError> {
     let mut value_count = 0_u64;
     let mut schema = None;
-    let mut duration_nanoseconds = 0_u64;
     for record in events.records() {
         match record.event().body() {
             InvocationEventBody::ValueBatch {
@@ -1146,38 +1141,39 @@ fn build_inspect_epoch(
                 value_count = values.len() as u64;
                 schema = batch_schema.clone();
             }
-            InvocationEventBody::Completed {
-                duration_nanoseconds: duration,
-            } => duration_nanoseconds = *duration,
             InvocationEventBody::Started { .. }
+            | InvocationEventBody::Completed { .. }
             | InvocationEventBody::Diagnostic(_)
             | InvocationEventBody::Failed(_)
             | InvocationEventBody::Cancelled { .. }
             | _ => {}
         }
     }
+    let (phase, duration_nanoseconds) = inspect_epoch_metadata(outcome, events);
     let result = if value_count == 0 {
         InspectResultSummary::NoValues
     } else {
         InspectResultSummary::ValueBatch { value_count }
     };
-    let summary = InspectSnapshotSummary::new(
-        events.records().len() as u64,
-        result,
-        Some(duration_nanoseconds),
-    )
-    .map_err(PostgresKernelError::Inspect)?;
+    let summary =
+        InspectSnapshotSummary::new(events.records().len() as u64, result, duration_nanoseconds)
+            .map_err(PostgresKernelError::Inspect)?;
     let node = InvocationNodeRow::new(
         invocation,
         None,
         InspectInvocationNodeKind::Root,
-        InspectInvocationPhase::Completed,
+        phase,
         root_target,
         0,
     )
     .map_err(PostgresKernelError::Inspect)?;
-    let call = CallRow::new(invocation, schema, value_count, duration_nanoseconds)
-        .map_err(PostgresKernelError::Inspect)?;
+    let call = CallRow::new(
+        invocation,
+        schema,
+        value_count,
+        duration_nanoseconds.unwrap_or(0),
+    )
+    .map_err(PostgresKernelError::Inspect)?;
     let runtime_bindings = runtime_bindings_from_offer(client_offer)?;
     InspectSnapshotEpoch::new(
         InspectEpochId::new(),
@@ -1200,6 +1196,36 @@ fn build_inspect_epoch(
         security_decisions,
     )
     .map_err(PostgresKernelError::Inspect)
+}
+
+/// Derives the closed root phase and duration from the outcome and events.
+///
+/// A duration is meaningful only for an allowed invocation with a completed
+/// event. `CallRow` receives the closed zero sentinel when no duration exists
+/// because its accepted carrier field is non-optional.
+fn inspect_epoch_metadata(
+    outcome: InspectOutcomeKind,
+    events: &InvocationEventBatch,
+) -> (InspectInvocationPhase, Option<u64>) {
+    match outcome {
+        InspectOutcomeKind::Allowed => events
+            .records()
+            .iter()
+            .rev()
+            .find_map(|record| match record.event().body() {
+                InvocationEventBody::Completed {
+                    duration_nanoseconds,
+                } => Some((
+                    InspectInvocationPhase::Completed,
+                    Some(*duration_nanoseconds),
+                )),
+                _ => None,
+            })
+            .unwrap_or((InspectInvocationPhase::Executing, None)),
+        InspectOutcomeKind::Denied => (InspectInvocationPhase::Started, None),
+        InspectOutcomeKind::Failed => (InspectInvocationPhase::Failed, None),
+        InspectOutcomeKind::Cancelled => (InspectInvocationPhase::Cancelled, None),
+    }
 }
 
 /// Builds the closed runtime-binding rows from one client offer.
@@ -1690,7 +1716,7 @@ async fn require_inspect_epoch_access(
                 .append_inspect_denial_audit(authenticated_session, Some(owner), reason)
                 .await?;
             Err(PostgresKernelError::InspectDenied { reason })
-        },
+        }
     }
 }
 
@@ -1713,7 +1739,7 @@ async fn require_inspect_privilege(
                 .append_inspect_denial_audit(&snapshot.session, Some(snapshot.owner()), reason)
                 .await?;
             Err(PostgresKernelError::InspectDenied { reason })
-        },
+        }
     }
 }
 
@@ -2778,6 +2804,55 @@ mod tests {
             reader
                 .take_count("row count", 2, MAX_PERSISTED_COLLECTION_ITEMS)
                 .is_err()
+        );
+    }
+
+    fn metadata_events(body: InvocationEventBody) -> InvocationEventBatch {
+        let event =
+            orna_core::invocation::InvokeEvent::new(InvocationId::from_bytes([0x11; 16]), 0, body)
+                .expect("event body must be valid");
+        InvocationEventBatch::new(vec![orna_protocol::InvocationEventRecord::new(1, event)])
+            .expect("event batch must be valid")
+    }
+
+    #[test]
+    fn allowed_completed_event_supplies_duration_and_completed_phase() {
+        let events = metadata_events(InvocationEventBody::Completed {
+            duration_nanoseconds: 42,
+        });
+        assert_eq!(
+            inspect_epoch_metadata(InspectOutcomeKind::Allowed, &events),
+            (InspectInvocationPhase::Completed, Some(42))
+        );
+    }
+
+    #[test]
+    fn allowed_without_completed_event_is_executing_without_duration() {
+        let events = metadata_events(InvocationEventBody::Started {
+            visible_principal: None,
+        });
+        assert_eq!(
+            inspect_epoch_metadata(InspectOutcomeKind::Allowed, &events),
+            (InspectInvocationPhase::Executing, None)
+        );
+    }
+
+    #[test]
+    fn closed_non_completed_outcomes_never_claim_duration() {
+        let events = metadata_events(InvocationEventBody::Completed {
+            duration_nanoseconds: 42,
+        });
+        assert_eq!(
+            inspect_epoch_metadata(InspectOutcomeKind::Denied, &events),
+            (InspectInvocationPhase::Started, None)
+        );
+        assert_eq!(
+            inspect_epoch_metadata(InspectOutcomeKind::Failed, &events),
+            (InspectInvocationPhase::Failed, None)
+        );
+        assert_eq!(
+            inspect_epoch_metadata(InspectOutcomeKind::Cancelled, &events),
+            (InspectInvocationPhase::Cancelled, None)
         );
     }
 
