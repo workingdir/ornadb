@@ -3247,8 +3247,8 @@ fn retained_standard_library_v2_snapshot_from_source(
 /// codecs for `std.terminal.Document` and `std.io.ByteStream` (work ADR
 /// 0058); the accepted `orna.std/4` snapshot additionally binds the
 /// `ORNA-UI/1 ` length-prefixed canonical UI-value codec for `std.ui.UI` (work ADR 0062);
-/// the accepted V6 snapshot additionally binds the bounded raw-byte action
-/// codec (ADR 0079).
+/// the accepted V6 snapshot additionally binds the structurally checked
+/// `ORNA-ACTION/1 ` action descriptor codec (ADR 0079).
 pub fn registered_opaque_codecs(
     standard: &VerifiedStandardLibrarySnapshot,
 ) -> Result<OpaqueCodecRegistry, RegisteredOpaqueCodecsError> {
@@ -3297,7 +3297,7 @@ pub fn registered_opaque_codecs(
             JSON_MAGIC,
         )
         .map_err(|source| RegisteredOpaqueCodecsError::Registry { source })?;
-        let action = OpaqueCodecRegistration::length_prefixed_bytes(
+        let action = OpaqueCodecRegistration::length_prefixed_action(
             STD_ACTION_TYPE_ID,
             semantic_name("std.action.action", ["std", "action", "action"])
                 .map_err(|source| RegisteredOpaqueCodecsError::Manifest { source })?,
@@ -4086,7 +4086,9 @@ mod tests {
             StandardLibraryDigestVersion, StandardLibrarySnapshot, StoredSourceRevision,
             StoredSourceUnit,
         },
-        value::{OpaqueValue, OpaqueValueError},
+        value::{
+            MAX_OPAQUE_CODEC_ACTION_ARGUMENTS, OpaqueValue, OpaqueValueError,
+        },
     };
 
     use super::{
@@ -8315,7 +8317,7 @@ EXPORT TYPE std.ui.UI AS std.UI;
     }
 
     #[test]
-    fn v6_action_codec_accepts_bounded_length_prefixed_bytes() {
+    fn v6_action_codec_rejects_malformed_descriptor_structure() {
         let verified = super::verify_standard_library_v6_snapshot(
             super::retained_standard_library_v6_snapshot()
                 .expect("the retained V6 action source is valid"),
@@ -8324,12 +8326,103 @@ EXPORT TYPE std.ui.UI AS std.UI;
         let registry = super::registered_opaque_codecs(&verified)
             .expect("the V6 opaque codecs register");
         let active = empty_version_two_active_revision(&verified);
-        let mut payload = Vec::from(super::ACTION_MAGIC.as_bytes());
-        payload.extend_from_slice(&3_u32.to_be_bytes());
-        payload.extend_from_slice(&[0xa5, 0x00, 0xff]);
-        let value = OpaqueValue::new(&active, &registry, super::STD_ACTION_TYPE_ID, &payload)
-            .expect("the framed action payload is accepted");
-        assert_eq!(value.canonical_payload(), payload.as_slice());
+
+        let frame = |tag: u8, value: &[u8]| {
+            let mut encoded = b"ORV3".to_vec();
+            encoded.push(tag);
+            encoded.extend_from_slice(&super::INTEGER_TYPE_ID.to_bytes());
+            encoded.extend_from_slice(&(value.len() as u32).to_be_bytes());
+            encoded.extend_from_slice(value);
+            encoded
+        };
+        let descriptor_payload = |domain: u8, arguments: &[([u8; 16], Vec<u8>)]| {
+            let mut body = vec![domain];
+            for _ in 0..5 {
+                body.extend_from_slice(&[0x11; 16]);
+            }
+            body.extend_from_slice(&(arguments.len() as u32).to_be_bytes());
+            for (parameter, value) in arguments {
+                body.extend_from_slice(parameter);
+                body.extend_from_slice(&(value.len() as u32).to_be_bytes());
+                body.extend_from_slice(value);
+            }
+            let mut payload = Vec::from(super::ACTION_MAGIC.as_bytes());
+            payload.extend_from_slice(&(body.len() as u32).to_be_bytes());
+            payload.extend_from_slice(&body);
+            payload
+        };
+        let integer = frame(0x03, &7_i32.to_be_bytes());
+        let valid = descriptor_payload(1, &vec![([1; 16], integer.clone())]);
+        let accepted = OpaqueValue::new(&active, &registry, super::STD_ACTION_TYPE_ID, &valid)
+            .expect("a canonical action descriptor is accepted");
+        assert_eq!(accepted.canonical_payload(), valid.as_slice());
+
+        let mut arbitrary = Vec::from(super::ACTION_MAGIC.as_bytes());
+        arbitrary.extend_from_slice(&3_u32.to_be_bytes());
+        arbitrary.extend_from_slice(&[0xa5, 0x00, 0xff]);
+        assert!(matches!(
+            OpaqueValue::new(&active, &registry, super::STD_ACTION_TYPE_ID, arbitrary),
+            Err(OpaqueValueError::InvalidActionFrame { .. })
+        ));
+
+        let mut invalid_domain = valid.clone();
+        invalid_domain[super::ACTION_MAGIC.len() + 4] = 0;
+        let mut oversized_count = valid.clone();
+        let count_offset = super::ACTION_MAGIC.len() + 4 + 1 + (16 * 5);
+        oversized_count[count_offset..count_offset + 4]
+            .copy_from_slice(
+                &u32::try_from(MAX_OPAQUE_CODEC_ACTION_ARGUMENTS + 1)
+                    .expect("the action argument limit fits in u32")
+                    .to_be_bytes(),
+            );
+        let mut bad_marker = valid.clone();
+        let frame_offset = count_offset + 4 + 16 + 4;
+        bad_marker[frame_offset..frame_offset + 4].copy_from_slice(b"ORV2");
+        let bad_boolean = descriptor_payload(1, &vec![([1; 16], frame(0x02, &[2]))]);
+        let mut trailing = valid.clone();
+        trailing.push(0xaa);
+        let body_length_offset = super::ACTION_MAGIC.len();
+        let body_length = u32::from_be_bytes(
+            trailing[body_length_offset..body_length_offset + 4]
+                .try_into()
+                .expect("the action body length is four bytes"),
+        );
+        trailing[body_length_offset..body_length_offset + 4]
+            .copy_from_slice(&(body_length + 1).to_be_bytes());
+
+        let unsorted = descriptor_payload(
+            1,
+            &vec![([2; 16], integer.clone()), ([1; 16], integer.clone())],
+        );
+        let repeated = descriptor_payload(
+            1,
+            &vec![([1; 16], integer.clone()), ([1; 16], integer.clone())],
+        );
+        let mut duplicate_record_body = 2_u32.to_be_bytes().to_vec();
+        for _ in 0..2 {
+            duplicate_record_body.extend_from_slice(&[0x44; 16]);
+            duplicate_record_body.extend_from_slice(&(integer.len() as u32).to_be_bytes());
+            duplicate_record_body.extend_from_slice(&integer);
+        }
+        let duplicate_record = descriptor_payload(
+            1,
+            &vec![([1; 16], frame(0x0b, &duplicate_record_body))],
+        );
+        for malformed in [
+            invalid_domain,
+            oversized_count,
+            bad_marker,
+            bad_boolean,
+            trailing,
+            unsorted,
+            repeated,
+            duplicate_record,
+        ] {
+            assert!(matches!(
+                OpaqueValue::new(&active, &registry, super::STD_ACTION_TYPE_ID, malformed),
+                Err(OpaqueValueError::InvalidActionFrame { .. })
+            ));
+        }
     }
 
     #[test]
@@ -8598,10 +8691,10 @@ EXPORT TYPE std.ui.UI AS std.UI;
             })
         );
         assert_eq!(
-            OpaqueValue::new(&v6_active, &v6_registry, STD_ACTION_TYPE_ID, &action_payload)
-                .expect("the V6 action codec is registered")
-                .canonical_payload(),
-            action_payload.as_slice()
+            OpaqueValue::new(&v6_active, &v6_registry, STD_ACTION_TYPE_ID, &action_payload),
+            Err(OpaqueValueError::InvalidActionFrame {
+                opaque_type: STD_ACTION_TYPE_ID,
+            })
         );
     }
 
