@@ -7792,16 +7792,14 @@ fn check_client_functions(
                 };
                 let expected_type = match descriptor.as_ref() {
                     Some(descriptor) => {
-                        let Some(resolved) = resolve_application_type_with_named_standard(
+                        let resolved = resolve_application_type_with_named_standard(
                             descriptor,
                             submitted_ids,
                             input.logical_path,
                             diagnostics,
                             standard,
                             true,
-                        ) else {
-                            return None;
-                        };
+                        )?;
                         Some(ClientExpressionType {
                             semantic_type: resolved.semantic_type,
                             standard_value_type: resolved.standard_value_type,
@@ -7909,18 +7907,14 @@ fn check_client_functions(
                         };
                         let expected_type = match descriptor.as_ref() {
                             Some(descriptor) => {
-                                let Some(resolved) =
-                                    resolve_application_type_with_named_standard(
-                                        descriptor,
-                                        submitted_ids,
-                                        input.logical_path,
-                                        diagnostics,
-                                        standard,
-                                        true,
-                                    )
-                                else {
-                                    return None;
-                                };
+                                let resolved = resolve_application_type_with_named_standard(
+                                    descriptor,
+                                    submitted_ids,
+                                    input.logical_path,
+                                    diagnostics,
+                                    standard,
+                                    true,
+                                )?;
                                 Some(ClientExpressionType {
                                     semantic_type: resolved.semantic_type,
                                     standard_value_type: resolved.standard_value_type,
@@ -8233,18 +8227,14 @@ fn check_client_functions(
                         };
                         let expected_type = match descriptor.as_ref() {
                             Some(descriptor) => {
-                                let Some(resolved) =
-                                    resolve_application_type_with_named_standard(
-                                        descriptor,
-                                        submitted_ids,
-                                        input.logical_path,
-                                        diagnostics,
-                                        standard,
-                                        true,
-                                    )
-                                else {
-                                    return None;
-                                };
+                                let resolved = resolve_application_type_with_named_standard(
+                                    descriptor,
+                                    submitted_ids,
+                                    input.logical_path,
+                                    diagnostics,
+                                    standard,
+                                    true,
+                                )?;
                                 Some(ClientExpressionType {
                                     semantic_type: resolved.semantic_type,
                                     standard_value_type: resolved.standard_value_type,
