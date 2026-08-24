@@ -7999,6 +7999,67 @@ mod tests {
     }
 
     #[test]
+    fn resource_values_reject_truncated_value_length_without_mutating_connection() {
+        let active = empty_active_revision();
+        let registry = test_registry();
+        let value = RuntimeValue::Integer(7);
+        let value_bytes = encode_constructed_value(&active, &registry, &value).unwrap();
+        let mut request = resource_request_fixture();
+        request.resource_kind = ResourceKind::Stream;
+        request.item_window = 2;
+        request.byte_window = (value_bytes.len() * 2) as u64;
+        let mut unrelated = request.clone();
+        unrelated.stream_id = 2;
+        unrelated.request_id = InvocationId::from_bytes([0x13; 16]);
+
+        let mut connection = ResourceProtocolConnection::new();
+        connection.open(request.clone()).unwrap();
+        connection.open(unrelated.clone()).unwrap();
+        for (stream_id, request_id) in [
+            (request.stream_id, request.request_id),
+            (unrelated.stream_id, unrelated.request_id),
+        ] {
+            connection
+                .apply(ResourceServerFrame::Accepted(ResourceAccepted {
+                    stream_id,
+                    request_id,
+                    nested_invocation_id: InvocationId::from_bytes([0x55 + stream_id as u8; 16]),
+                    target_revision: request.target_revision,
+                    resource_kind: ResourceKind::Stream,
+                }))
+                .unwrap();
+        }
+
+        let values = ResourceValues {
+            stream_id: request.stream_id,
+            request_id: request.request_id,
+            target_revision: request.target_revision,
+            batch_sequence: 0,
+            item_count: 1,
+            byte_count: value_bytes.len() as u32,
+            values: vec![value],
+        };
+        let mut encoded = encode_resource_values(&active, &registry, &values).unwrap();
+        let value_length_offset = RESOURCE_HEADER_LENGTH + 8 + 16 + 32 + 8 + 4 + 4;
+        encoded[value_length_offset..value_length_offset + 4]
+            .copy_from_slice(&(value_bytes.len() as u32 + 1).to_be_bytes());
+        let before = connection.clone();
+
+        assert_eq!(
+            decode_resource_server_frame(&active, &registry, &encoded),
+            Err(FrameCodecError::ResourceMalformedPayload)
+        );
+        assert_eq!(connection, before);
+        assert_eq!(
+            connection.resource_credit(unrelated.stream_id, unrelated.request_id),
+            Ok(ResourceCredit {
+                item_available: unrelated.item_window,
+                byte_available: unrelated.byte_window,
+            })
+        );
+    }
+
+    #[test]
     fn resource_values_reject_declared_payload_bound_before_encoding_values() {
         let active = empty_active_revision();
         let registry = test_registry();
