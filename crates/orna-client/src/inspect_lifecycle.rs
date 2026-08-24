@@ -198,7 +198,10 @@ mod tests {
         assert!(lifecycle.is_frozen());
         assert_eq!(lifecycle.resume(token), Ok(()));
         assert!(lifecycle.is_active());
-        assert_eq!(lifecycle.resume(token), Err(InspectLifecycleError::NotFrozen));
+        assert_eq!(
+            lifecycle.resume(token),
+            Err(InspectLifecycleError::NotFrozen)
+        );
     }
 
     #[test]
@@ -208,7 +211,10 @@ mod tests {
         let wrong_token = InspectFreezeToken::issue(binding(1));
 
         assert_ne!(token, wrong_token);
-        assert_eq!(lifecycle.freeze(), Err(InspectLifecycleError::TokenMismatch));
+        assert_eq!(
+            lifecycle.freeze(),
+            Err(InspectLifecycleError::TokenMismatch)
+        );
         assert_eq!(
             lifecycle.resume(wrong_token),
             Err(InspectLifecycleError::TokenMismatch)
@@ -337,10 +343,7 @@ mod tests {
             lifecycle.replace_epoch(binding(2)),
             Err(InspectLifecycleError::Cancelled)
         );
-        assert_eq!(
-            lifecycle.freeze(),
-            Err(InspectLifecycleError::Cancelled)
-        );
+        assert_eq!(lifecycle.freeze(), Err(InspectLifecycleError::Cancelled));
     }
 
     #[test]

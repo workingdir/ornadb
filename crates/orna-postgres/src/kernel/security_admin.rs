@@ -33,7 +33,7 @@ use orna_core::{
         SYS_SECURITY_CREATE_PRINCIPAL_FUNCTION_ID, SYS_SECURITY_CREATE_ROLE_FUNCTION_ID,
         SYS_SECURITY_DISABLE_PRINCIPAL_FUNCTION_ID, SYS_SECURITY_GRANT_PRIVILEGE_FUNCTION_ID,
         SYS_SECURITY_GRANT_ROLE_FUNCTION_ID, SYS_SECURITY_REVOKE_PRIVILEGE_FUNCTION_ID,
-        SYS_SECURITY_REVOKE_ROLE_FUNCTION_ID,
+        SYS_SECURITY_REVOKE_ROLE_FUNCTION_ID, system_function_by_id,
     },
 };
 use tokio_postgres::{IsolationLevel, Transaction};
@@ -473,8 +473,43 @@ impl SecurityAdminMutation {
                 }
                 Ok(self)
             }
+            Self::GrantRole { member, .. } => {
+                if member == CATALOGUE_HEALTH_SERVICE_PRINCIPAL_ID {
+                    return Err(admin_invariant(
+                        "_orna_kernel.security_role_memberships",
+                        "grant_role",
+                        "the reserved catalogue health service identity cannot become a role member",
+                    ));
+                }
+                Ok(self)
+            }
+            Self::GrantPrivilege {
+                grantee,
+                class,
+                object,
+                ..
+            } => {
+                validate_privilege_grant_input(
+                    snapshot,
+                    grantee,
+                    class,
+                    object,
+                    "grant_privilege",
+                )?;
+                if grantee == CATALOGUE_HEALTH_SERVICE_PRINCIPAL_ID {
+                    return Err(admin_invariant(
+                        "_orna_kernel.security_privilege_grants",
+                        "grant_privilege",
+                        "the reserved catalogue health service identity cannot receive privilege grants",
+                    ));
+                }
+                Ok(self)
+            }
             Self::RevokePrivilege {
-                grantee, object, ..
+                grantee,
+                class,
+                object,
+                ..
             } => {
                 if !snapshot
                     .principals()
@@ -486,17 +521,13 @@ impl SecurityAdminMutation {
                         "the privilege grantee must exist",
                     ));
                 }
-                if let Some(object) = object
-                    && !snapshot
-                        .function_targets()
-                        .any(|candidate| candidate.function() == object)
-                {
-                    return Err(admin_invariant(
-                        "_orna_kernel.security_privilege_grants",
-                        "revoke_privilege",
-                        "the privilege grant object must exist",
-                    ));
-                }
+                validate_privilege_grant_input(
+                    snapshot,
+                    grantee,
+                    class,
+                    object,
+                    "revoke_privilege",
+                )?;
                 Ok(self)
             }
             _ => Ok(self),
@@ -927,6 +958,46 @@ fn privilege_classes_for_principal(
         .collect()
 }
 
+fn validate_privilege_grant_input(
+    snapshot: &SecuritySnapshot,
+    grantee: PrincipalId,
+    class: PrivilegeClass,
+    object: Option<FunctionId>,
+    operation: &'static str,
+) -> Result<(), PostgresKernelError> {
+    PrivilegeGrant::new(grantee, class, object).map_err(|error| {
+        admin_invariant(
+            "_orna_kernel.security_privilege_grants",
+            operation,
+            match error {
+                orna_core::security::PrivilegeGrantError::EmptyGrantee => {
+                    "the privilege grantee must not be the empty identity"
+                }
+                orna_core::security::PrivilegeGrantError::EmptyObject => {
+                    "the privilege grant object must not be the empty identity"
+                }
+                orna_core::security::PrivilegeGrantError::SecurityAdminObject => {
+                    "the security_admin privilege grant must be class-wide"
+                }
+            },
+        )
+    })?;
+
+    if let Some(object) = object
+        && !snapshot
+            .function_targets()
+            .any(|candidate| candidate.function() == object)
+        && system_function_by_id(object).is_none()
+    {
+        return Err(admin_invariant(
+            "_orna_kernel.security_privilege_grants",
+            operation,
+            "the privilege grant object must exist",
+        ));
+    }
+    Ok(())
+}
+
 fn admin_invariant(
     relation: &'static str,
     operation: &str,
@@ -936,5 +1007,256 @@ fn admin_invariant(
         relation,
         record: operation.to_owned(),
         rule,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use orna_core::{
+        CatalogueRevisionId, FunctionId, PrincipalId, SourceRevisionId,
+        inspect::InspectPrivilege,
+        revision::RevisionPair,
+        security::{
+            CATALOGUE_HEALTH_SERVICE_PRINCIPAL_ID, Principal, PrincipalKind, PrincipalStatus,
+            PrivilegeClass, PrivilegeGrant, RoleMembership, SecuritySnapshot,
+        },
+        system::{
+            SYS_INSPECT_SECURITY_DECISIONS_FUNCTION_ID, SYS_SECURITY_GRANT_PRIVILEGE_FUNCTION_ID,
+        },
+    };
+
+    use super::{PostgresKernelError, SecurityAdminMutation, rebuild_candidate};
+
+    const USER: PrincipalId = PrincipalId::from_bytes([0x91; 16]);
+    const ROLE: PrincipalId = PrincipalId::from_bytes([0x95; 16]);
+    const UNKNOWN_OBJECT: FunctionId = FunctionId::from_bytes([0x92; 16]);
+    const REVISION: RevisionPair = RevisionPair::new(
+        SourceRevisionId::from_bytes([0x93; 16]),
+        CatalogueRevisionId::from_bytes([0x94; 16]),
+    );
+
+    fn snapshot() -> SecuritySnapshot {
+        SecuritySnapshot::new_with_function_targets_local_peer_credentials_and_privilege_grants(
+            REVISION,
+            vec![],
+            vec![Principal::new(
+                USER,
+                PrincipalKind::User,
+                PrincipalStatus::Active,
+            )],
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+        )
+        .expect("the focused security-admin snapshot should be valid")
+    }
+
+    fn snapshot_with_reserved_service() -> SecuritySnapshot {
+        SecuritySnapshot::new_with_function_targets_local_peer_credentials_and_privilege_grants(
+            REVISION,
+            vec![],
+            vec![
+                Principal::new(USER, PrincipalKind::User, PrincipalStatus::Active),
+                Principal::new(
+                    CATALOGUE_HEALTH_SERVICE_PRINCIPAL_ID,
+                    PrincipalKind::Service,
+                    PrincipalStatus::Active,
+                ),
+            ],
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+        )
+        .expect("the reserved service security-admin snapshot should be valid")
+    }
+
+    fn rebuilt_with_grants(
+        current: &SecuritySnapshot,
+        grants: Vec<PrivilegeGrant>,
+    ) -> SecuritySnapshot {
+        rebuild_candidate(
+            current,
+            current.principals().collect(),
+            current.memberships().collect(),
+            grants,
+        )
+        .expect("the candidate privilege grants should rebuild")
+    }
+
+    #[test]
+    fn security_admin_sealed_object_grants_round_trip_and_unknown_objects_fail_closed() {
+        let current = snapshot();
+        let execute = PrivilegeGrant::new(
+            USER,
+            PrivilegeClass::Execute,
+            Some(SYS_SECURITY_GRANT_PRIVILEGE_FUNCTION_ID),
+        )
+        .expect("the sealed security admin target has a valid identity");
+        let inspect = PrivilegeGrant::new(
+            USER,
+            PrivilegeClass::Inspect(InspectPrivilege::Values),
+            Some(SYS_INSPECT_SECURITY_DECISIONS_FUNCTION_ID),
+        )
+        .expect("the sealed inspect target has a valid identity");
+
+        SecurityAdminMutation::GrantPrivilege {
+            grantee: USER,
+            class: execute.class(),
+            object: execute.object(),
+        }
+        .validate(&current)
+        .expect("sealed EXECUTE object should pass admin validation");
+        SecurityAdminMutation::GrantPrivilege {
+            grantee: USER,
+            class: inspect.class(),
+            object: inspect.object(),
+        }
+        .validate(&current)
+        .expect("sealed INSPECT object should pass admin validation");
+
+        let granted = rebuilt_with_grants(&current, vec![execute, inspect]);
+        assert_eq!(
+            granted
+                .privilege_grants()
+                .find(|grant| grant.class() == PrivilegeClass::Execute)
+                .and_then(|grant| grant.object()),
+            Some(SYS_SECURITY_GRANT_PRIVILEGE_FUNCTION_ID)
+        );
+        assert_eq!(
+            granted
+                .privilege_grants()
+                .find(|grant| matches!(grant.class(), PrivilegeClass::Inspect(_)))
+                .and_then(|grant| grant.object()),
+            Some(SYS_INSPECT_SECURITY_DECISIONS_FUNCTION_ID)
+        );
+
+        SecurityAdminMutation::RevokePrivilege {
+            grantee: USER,
+            class: execute.class(),
+            object: execute.object(),
+        }
+        .validate(&granted)
+        .expect("sealed EXECUTE object should pass revoke validation");
+        let revoked = rebuilt_with_grants(
+            &granted,
+            granted
+                .privilege_grants()
+                .filter(|grant| *grant != execute)
+                .collect(),
+        );
+        assert!(!revoked.privilege_grants().any(|grant| grant == execute));
+        assert!(revoked.privilege_grants().any(|grant| grant == inspect));
+
+        for mutation in [
+            SecurityAdminMutation::GrantPrivilege {
+                grantee: USER,
+                class: PrivilegeClass::Execute,
+                object: Some(UNKNOWN_OBJECT),
+            },
+            SecurityAdminMutation::RevokePrivilege {
+                grantee: USER,
+                class: PrivilegeClass::Inspect(InspectPrivilege::Values),
+                object: Some(UNKNOWN_OBJECT),
+            },
+        ] {
+            assert!(matches!(
+                mutation.validate(&granted),
+                Err(PostgresKernelError::DurableInvariant {
+                    relation: "_orna_kernel.security_privilege_grants",
+                    record,
+                    rule: "the privilege grant object must exist",
+                }) if record == "grant_privilege" || record == "revoke_privilege"
+            ));
+        }
+
+        let malformed = SecurityAdminMutation::RevokePrivilege {
+            grantee: USER,
+            class: PrivilegeClass::Execute,
+            object: Some(FunctionId::from_bytes([0; 16])),
+        };
+        assert!(matches!(
+            malformed.validate(&granted),
+            Err(PostgresKernelError::DurableInvariant {
+                relation: "_orna_kernel.security_privilege_grants",
+                record,
+                rule: "the privilege grant object must not be the empty identity",
+            }) if record == "revoke_privilege"
+        ));
+    }
+
+    #[test]
+    fn reserved_catalogue_health_service_identity_rejects_privilege_grants() {
+        let current = snapshot();
+        let attempts = [
+            (PrivilegeClass::SecurityAdmin, None),
+            (PrivilegeClass::Execute, None),
+            (
+                PrivilegeClass::Execute,
+                Some(SYS_SECURITY_GRANT_PRIVILEGE_FUNCTION_ID),
+            ),
+            (PrivilegeClass::Inspect(InspectPrivilege::Values), None),
+            (
+                PrivilegeClass::Inspect(InspectPrivilege::Values),
+                Some(SYS_INSPECT_SECURITY_DECISIONS_FUNCTION_ID),
+            ),
+        ];
+
+        for (class, object) in attempts {
+            let grant = PrivilegeGrant::new(CATALOGUE_HEALTH_SERVICE_PRINCIPAL_ID, class, object)
+                .expect("reserved identity grant test input should be structurally valid");
+            assert!(matches!(
+                SecurityAdminMutation::GrantPrivilege {
+                    grantee: grant.grantee(),
+                    class: grant.class(),
+                    object: grant.object(),
+                }
+                .validate(&current),
+                Err(PostgresKernelError::DurableInvariant {
+                    relation: "_orna_kernel.security_privilege_grants",
+                    record,
+                    rule: "the reserved catalogue health service identity cannot receive privilege grants",
+                }) if record == "grant_privilege"
+            ));
+        }
+    }
+
+    #[test]
+    fn reserved_catalogue_health_service_identity_revoke_remains_available_for_cleanup() {
+        let current = snapshot_with_reserved_service();
+        let revoked = PrivilegeGrant::new(
+            CATALOGUE_HEALTH_SERVICE_PRINCIPAL_ID,
+            PrivilegeClass::Execute,
+            None,
+        )
+        .expect("reserved identity revoke test input should be structurally valid");
+
+        SecurityAdminMutation::RevokePrivilege {
+            grantee: revoked.grantee(),
+            class: revoked.class(),
+            object: revoked.object(),
+        }
+        .validate(&current)
+        .expect("reserved identity privilege revoke should remain available for cleanup");
+    }
+
+    #[test]
+    fn reserved_catalogue_health_service_identity_rejects_role_membership() {
+        let current = snapshot();
+        let membership = RoleMembership::new(ROLE, CATALOGUE_HEALTH_SERVICE_PRINCIPAL_ID);
+
+        assert!(matches!(
+            SecurityAdminMutation::GrantRole {
+                role: membership.role(),
+                member: membership.member(),
+            }
+            .validate(&current),
+            Err(PostgresKernelError::DurableInvariant {
+                relation: "_orna_kernel.security_role_memberships",
+                record,
+                rule: "the reserved catalogue health service identity cannot become a role member",
+            }) if record == "grant_role"
+        ));
     }
 }

@@ -1041,6 +1041,21 @@ impl ProtocolConnection {
         self.streams.len()
     }
 
+    /// Returns the current `RESULT_VALUES` byte credit for a live stream.
+    ///
+    /// This read-only inspection does not mutate connection state or consume
+    /// credit. The returned value is the stream's current result-value window.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConnectionError::UnknownStream`] when `stream` is not live.
+    pub fn result_credit(&self, stream: u64) -> Result<u64, ConnectionError> {
+        self.streams
+            .get(&stream)
+            .map(|state| state.windows[channel_index(Channel::ResultValues)])
+            .ok_or(ConnectionError::UnknownStream { stream })
+    }
+
     /// Receives one validated client frame and returns at most one adapter action.
     ///
     /// # Errors
@@ -5028,6 +5043,7 @@ mod tests {
         invocation::{
             InvocationCallerContext, InvocationCallerKind, InvocationClientOffer,
             InvocationEventBody, InvocationTarget, InvocationTracePolicy, InvokeRequestInput,
+            InvokeValue,
         },
         revision::{ActiveDatabaseRevision, RevisionPair, StoredSourceRevision},
         value::EnumValue,
@@ -5374,9 +5390,18 @@ mod tests {
             },
         )
         .unwrap();
-        let completed = InvokeEvent::new(
+        let value_batch = InvokeEvent::new(
             invocation,
             1,
+            InvocationEventBody::ValueBatch {
+                schema: None,
+                values: vec![InvokeValue::new(RuntimeValue::Integer(7)).unwrap()],
+            },
+        )
+        .unwrap();
+        let completed = InvokeEvent::new(
+            invocation,
+            2,
             InvocationEventBody::Completed {
                 duration_nanoseconds: 11,
             },
@@ -5384,7 +5409,8 @@ mod tests {
         .unwrap();
         let events = InvocationEventBatch::new(vec![
             InvocationEventRecord::new(1, started),
-            InvocationEventRecord::new(2, completed),
+            InvocationEventRecord::new(2, value_batch),
+            InvocationEventRecord::new(3, completed),
         ])
         .unwrap();
         let mut connection = ProtocolConnection::new();
@@ -5410,7 +5436,7 @@ mod tests {
                 .receive_constructed(
                     &active,
                     &registry,
-                    ClientFrame::CallArgumentsComplete { stream: 1 },
+                    ClientFrame::CallArgumentsComplete { stream: 1 }
                 )
                 .unwrap(),
             Some(ClientAction::InvokeDispatch { .. })
@@ -5421,16 +5447,34 @@ mod tests {
                 &registry,
                 ServerAction::Accepted {
                     stream: 1,
-                    invocation,
-                },
+                    invocation
+                }
             ),
             Ok(ServerFrame::CallAccepted {
                 stream: 1,
                 invocation
             })
         );
+
         let mut cancellation_connection = connection.clone();
+        let started_only = InvocationEventBatch::new(vec![events.records()[0].clone()]).unwrap();
         let mut queued_cancellation_connection = connection.clone();
+        queued_cancellation_connection
+            .receive(ClientFrame::CallCancel { stream: 1 })
+            .unwrap();
+        let queued_required = match queued_cancellation_connection.apply_constructed(
+            &active,
+            &registry,
+            ServerAction::InvokeCancelled { stream: 1 },
+        ) {
+            Err(ConnectionError::InsufficientCredit {
+                stream: 1,
+                channel: Channel::ResultValues,
+                available: 0,
+                required,
+            }) if required > 0 => required,
+            result => panic!("queued cancellation batch should require credit: {result:?}"),
+        };
         queued_cancellation_connection
             .receive_constructed(
                 &active,
@@ -5438,12 +5482,9 @@ mod tests {
                 ClientFrame::WindowUpdate {
                     stream: 1,
                     channel: Channel::ResultValues,
-                    credit: MAX_CHANNEL_WINDOW,
+                    credit: queued_required,
                 },
             )
-            .unwrap();
-        queued_cancellation_connection
-            .receive(ClientFrame::CallCancel { stream: 1 })
             .unwrap();
         let queued_cancelled = queued_cancellation_connection
             .apply_constructed(
@@ -5452,55 +5493,30 @@ mod tests {
                 ServerAction::InvokeCancelled { stream: 1 },
             )
             .unwrap();
-        assert!(matches!(
-            &queued_cancelled,
-            ServerFrame::EventBatch { events, .. }
-                if events.len() == 2
-                    && matches!(
-                        &events[0].event,
-                        Event::Value(RuntimeValue::InvokeEvent(event))
-                            if event.kind() == InvocationEventKind::InvocationStarted
-                                && event.sequence() == 0
-                    )
-                    && matches!(
-                        &events[1].event,
-                        Event::Value(RuntimeValue::InvokeEvent(event))
-                            if event.kind() == InvocationEventKind::InvocationCancelled
-                                && event.sequence() == 1
-                    )
-        ));
+        assert!(
+            matches!(&queued_cancelled, ServerFrame::EventBatch { events, .. } if events.len() == 2 && matches!(&events[0].event, Event::Value(RuntimeValue::InvokeEvent(event)) if event.kind() == InvocationEventKind::InvocationStarted && event.sequence() == 0) && matches!(&events[1].event, Event::Value(RuntimeValue::InvokeEvent(event)) if event.kind() == InvocationEventKind::InvocationCancelled && event.sequence() == 1))
+        );
         assert_eq!(
             queued_cancellation_connection.apply(ServerAction::Completed { stream: 1 }),
             Ok(ServerFrame::CallCompleted { stream: 1 })
         );
-        assert!(matches!(
-            connection.apply_constructed(
-                &active,
-                &registry,
-                ServerAction::InvokeEvents {
-                    stream: 1,
-                    events: events.clone(),
-                },
-            ),
+
+        let normal_required = match connection.apply_constructed(
+            &active,
+            &registry,
+            ServerAction::InvokeEvents {
+                stream: 1,
+                events: events.clone(),
+            },
+        ) {
             Err(ConnectionError::InsufficientCredit {
                 stream: 1,
                 channel: Channel::ResultValues,
                 available: 0,
                 required,
-            }) if required > 0
-        ));
-        assert_eq!(
-            connection.receive_constructed(
-                &active,
-                &registry,
-                ClientFrame::WindowUpdate {
-                    stream: 1,
-                    channel: Channel::ResultBytes,
-                    credit: 1,
-                },
-            ),
-            Err(ConnectionError::WrongState { stream: 1 })
-        );
+            }) if required > 0 => required,
+            result => panic!("completed terminal batch should require credit: {result:?}"),
+        };
         connection
             .receive_constructed(
                 &active,
@@ -5508,7 +5524,7 @@ mod tests {
                 ClientFrame::WindowUpdate {
                     stream: 1,
                     channel: Channel::ResultValues,
-                    credit: MAX_CHANNEL_WINDOW,
+                    credit: normal_required,
                 },
             )
             .unwrap();
@@ -5522,13 +5538,46 @@ mod tests {
                 },
             )
             .unwrap();
+        assert!(matches!(&frame, ServerFrame::EventBatch { .. }));
+        assert_eq!(
+            connection.receive_constructed(
+                &active,
+                &registry,
+                ClientFrame::WindowUpdate {
+                    stream: 1,
+                    channel: Channel::ResultBytes,
+                    credit: 1
+                }
+            ),
+            Err(ConnectionError::WrongState { stream: 1 })
+        );
         let encoded = encode_constructed_server_frame(&active, &registry, &frame).unwrap();
         assert_eq!(encoded[4], EVENT_BATCH_TAG);
         assert_eq!(
             decode_constructed_invocation_event_frame(&active, &registry, &encoded),
             Ok(frame)
         );
+        assert_eq!(
+            connection.apply(ServerAction::Completed { stream: 1 }),
+            Ok(ServerFrame::CallCompleted { stream: 1 })
+        );
 
+        let started_required = match cancellation_connection.apply_constructed(
+            &active,
+            &registry,
+            ServerAction::InvokeEvents {
+                stream: 1,
+                events: started_only.clone(),
+            },
+        ) {
+            Err(ConnectionError::InsufficientCredit {
+                stream: 1,
+                channel: Channel::ResultValues,
+                available: 0,
+                required,
+            }) if required > 0 => required,
+            result => panic!("started event batch should require credit: {result:?}"),
+        };
         cancellation_connection
             .receive_constructed(
                 &active,
@@ -5536,11 +5585,10 @@ mod tests {
                 ClientFrame::WindowUpdate {
                     stream: 1,
                     channel: Channel::ResultValues,
-                    credit: MAX_CHANNEL_WINDOW,
+                    credit: started_required,
                 },
             )
             .unwrap();
-        let started_only = InvocationEventBatch::new(vec![events.records()[0].clone()]).unwrap();
         cancellation_connection
             .apply_constructed(
                 &active,
@@ -5551,13 +5599,38 @@ mod tests {
                 },
             )
             .unwrap();
+        assert_eq!(cancellation_connection.result_credit(1), Ok(0));
         assert!(matches!(
             cancellation_connection.receive(ClientFrame::CallCancel { stream: 1 }),
             Ok(Some(ClientAction::Cancel {
                 stream: 1,
-                invocation: Some(_),
+                invocation: Some(_)
             }))
         ));
+        let cancelled_required = match cancellation_connection.apply_constructed(
+            &active,
+            &registry,
+            ServerAction::InvokeCancelled { stream: 1 },
+        ) {
+            Err(ConnectionError::InsufficientCredit {
+                stream: 1,
+                channel: Channel::ResultValues,
+                available: 0,
+                required,
+            }) if required > 0 => required,
+            result => panic!("post-start cancellation batch should require credit: {result:?}"),
+        };
+        cancellation_connection
+            .receive_constructed(
+                &active,
+                &registry,
+                ClientFrame::WindowUpdate {
+                    stream: 1,
+                    channel: Channel::ResultValues,
+                    credit: cancelled_required,
+                },
+            )
+            .unwrap();
         let cancelled = cancellation_connection
             .apply_constructed(
                 &active,
@@ -5565,24 +5638,11 @@ mod tests {
                 ServerAction::InvokeCancelled { stream: 1 },
             )
             .unwrap();
-        assert!(matches!(
-            &cancelled,
-            ServerFrame::EventBatch { events, .. }
-                if matches!(
-                    &events[0].event,
-                    Event::Value(RuntimeValue::InvokeEvent(event))
-                        if event.kind() == InvocationEventKind::InvocationCancelled
-                            && event.sequence() == 1
-                )
-        ));
+        assert!(
+            matches!(&cancelled, ServerFrame::EventBatch { events, .. } if matches!(&events[0].event, Event::Value(RuntimeValue::InvokeEvent(event)) if event.kind() == InvocationEventKind::InvocationCancelled && event.sequence() == 1))
+        );
         assert_eq!(
             cancellation_connection.apply(ServerAction::Completed { stream: 1 }),
-            Ok(ServerFrame::CallCompleted { stream: 1 })
-        );
-
-        assert_eq!(
-            connection
-                .apply_constructed(&active, &registry, ServerAction::Completed { stream: 1 },),
             Ok(ServerFrame::CallCompleted { stream: 1 })
         );
     }
@@ -6546,6 +6606,34 @@ mod tests {
                 channel: Channel::ResultValues,
                 events: vec![EventRecord { sequence: 2, event }],
             })
+        );
+    }
+
+    #[test]
+    fn result_credit_reports_live_window_without_mutating_state() {
+        let mut connection = ProtocolConnection::new();
+        connection
+            .receive(ClientFrame::CallRawStart {
+                stream: 1,
+                function: FunctionId::from_bytes([0x11; 16]),
+            })
+            .unwrap();
+
+        assert_eq!(connection.result_credit(1), Ok(0));
+        connection
+            .receive(ClientFrame::WindowUpdate {
+                stream: 1,
+                channel: Channel::ResultValues,
+                credit: 42,
+            })
+            .unwrap();
+        assert_eq!(connection.result_credit(1), Ok(42));
+        let after_update = connection.clone();
+        assert_eq!(connection.result_credit(1), Ok(42));
+        assert_eq!(connection, after_update);
+        assert_eq!(
+            connection.result_credit(99),
+            Err(ConnectionError::UnknownStream { stream: 99 })
         );
     }
 

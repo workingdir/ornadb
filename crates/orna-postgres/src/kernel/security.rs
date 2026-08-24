@@ -182,9 +182,13 @@ use orna_core::{
     state::UserStateCell,
     system::{
         SYS_INVOKE_FUNCTION_ID, SYS_SECURITY_ACTIVE_ROLES_FUNCTION_ID,
-        SYS_SECURITY_EFFECTIVE_PRINCIPAL_FUNCTION_ID, SYS_SECURITY_PRINCIPAL_TYPE_ID,
-        SYS_SECURITY_SESSION_PRINCIPAL_FUNCTION_ID, SystemFunctionDefinition, SystemFunctionKind,
-        system_function_by_id, system_function_by_name,
+        SYS_SECURITY_CREATE_PRINCIPAL_FUNCTION_ID, SYS_SECURITY_CREATE_ROLE_FUNCTION_ID,
+        SYS_SECURITY_DISABLE_PRINCIPAL_FUNCTION_ID, SYS_SECURITY_EFFECTIVE_PRINCIPAL_FUNCTION_ID,
+        SYS_SECURITY_GRANT_PRIVILEGE_FUNCTION_ID, SYS_SECURITY_GRANT_ROLE_FUNCTION_ID,
+        SYS_SECURITY_PRINCIPAL_TYPE_ID, SYS_SECURITY_REVOKE_PRIVILEGE_FUNCTION_ID,
+        SYS_SECURITY_REVOKE_ROLE_FUNCTION_ID, SYS_SECURITY_SESSION_PRINCIPAL_FUNCTION_ID,
+        SystemFunctionDefinition, SystemFunctionKind, system_function_by_id,
+        system_function_by_name,
     },
     types::TypeDescriptor,
     value::{FunctionArgument, OpaqueCodecRegistry, RecordValue, RuntimeType, RuntimeValue},
@@ -704,10 +708,12 @@ impl std::fmt::Debug for SealedInvocationPreflight {
 
 /// The closed result of one accepted continuation after its start Event.
 #[doc(hidden)]
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Debug)]
 pub enum SealedInvocationExecution {
     /// A normal sealed invocation result (including redacted failures).
     Result(SealedInvocationResult),
+    /// A bounded SERVER stream whose values are pulled by the raw adapter.
+    ServerStream(AuthenticatedServerResourceProducer),
     /// Cancellation won before new evaluator/target work began.
     Cancelled { invocation: InvocationId },
 }
@@ -1167,6 +1173,46 @@ impl SealedInvocationOperation {
                 },
             ));
         }
+        if let SealedInvocationPreparedOutcome::Allowed {
+            target: PreparedSealedTarget::Application { definition },
+            authorisation,
+            ..
+        } = &self.outcome
+            && definition.domain() == FunctionDomain::Server
+            && matches!(
+                definition.return_type(),
+                FunctionReturn::Stream(_) | FunctionReturn::Rows(_)
+            )
+        {
+            let arguments = match bind_sealed_invoke_arguments(definition, self.decoded.arguments())
+            {
+                Ok(arguments) => arguments,
+                Err(_) => {
+                    return Ok(SealedInvocationExecution::Result(sealed_failure_result(
+                        self.invocation,
+                        SealedInvocationFailureClass::Bind,
+                    )?));
+                }
+            };
+            let producer = start_sealed_server_stream_producer(
+                self.kernel.clone(),
+                self.active.clone(),
+                self.security.clone(),
+                authorisation.clone(),
+                arguments,
+                self.invocation,
+                cancellation.clone(),
+            )
+            .await;
+            return match producer {
+                Ok(producer) => Ok(SealedInvocationExecution::ServerStream(producer)),
+                Err(failure) => Ok(SealedInvocationExecution::Result(sealed_failure_result(
+                    self.invocation,
+                    failure,
+                )?)),
+            };
+        }
+
         let result = self
             .kernel
             .dispatch_sealed_sys_invoke_with_resource_executor_and_state_internal(
@@ -3463,13 +3509,14 @@ impl PostgresKernel {
             if !grants.contains(&requested_grant) {
                 grants.push(requested_grant);
             }
-            let candidate = SecuritySnapshot::new_with_function_targets_and_local_peer_credentials(
+            let candidate = SecuritySnapshot::new_with_function_targets_local_peer_credentials_and_privilege_grants(
                 active.pair(),
                 current.function_targets().collect(),
                 current.principals().collect(),
                 current.memberships().collect(),
                 grants,
                 current.local_peer_credentials().collect(),
+                current.privilege_grants().collect(),
             )
             .map_err(PostgresKernelError::SecuritySnapshot)?;
             require_complete_function_set(&active, &candidate)?;
@@ -4704,6 +4751,179 @@ async fn execute_sealed_server_target(
         .await
         .map_err(|_| SealedInvocationFailureClass::Internal)?;
     Ok(values)
+}
+
+async fn run_sealed_server_stream_producer(
+    kernel: PostgresKernel,
+    active: ActiveDatabaseRevision,
+    security: SecuritySnapshot,
+    authorisation: AuthorisedInvocation,
+    arguments: Vec<FunctionArgument>,
+    invocation: InvocationId,
+    cancellation: ResourceCancellation,
+    mut commands: tokio::sync::mpsc::Receiver<ResourceProducerCommand>,
+    ready: tokio::sync::oneshot::Sender<Result<(), SealedInvocationFailureClass>>,
+) {
+    let mut database_session = match kernel.open().await {
+        Ok(session) => session,
+        Err(_) => {
+            let _ = ready.send(Err(SealedInvocationFailureClass::Internal));
+            return;
+        }
+    };
+    let transaction = match database_session
+        .client
+        .build_transaction()
+        .isolation_level(IsolationLevel::RepeatableRead)
+        .start()
+        .await
+    {
+        Ok(transaction) => transaction,
+        Err(_) => {
+            let _ = ready.send(Err(SealedInvocationFailureClass::Internal));
+            return;
+        }
+    };
+    let validation = async {
+        require_current_migrations(&transaction).await?;
+        lock_active_revision(&transaction, active.pair()).await?;
+        let execution_active = configure_and_recover(&transaction).await?;
+        if execution_active.pair() != active.pair() {
+            return Err(PostgresKernelError::SecurityRevisionMismatch {
+                expected: active.pair(),
+                active: execution_active.pair(),
+            });
+        }
+        let execution_security =
+            recover_security_snapshot_for_active(&transaction, &execution_active).await?;
+        if !security_snapshots_match(&execution_security, &security) {
+            return Err(PostgresKernelError::SecurityFunctionSetMismatch);
+        }
+        Ok::<_, PostgresKernelError>(())
+    }
+    .await;
+    if validation.is_err() {
+        let _ = transaction.rollback().await;
+        let _ = ready.send(Err(SealedInvocationFailureClass::Internal));
+        let _ = database_session.shutdown().await;
+        return;
+    }
+    if cancellation.is_requested() {
+        let _ = transaction.rollback().await;
+        let _ = ready.send(Err(SealedInvocationFailureClass::Internal));
+        let _ = database_session.shutdown().await;
+        return;
+    }
+    if ready.send(Ok(())).is_err() {
+        let _ = transaction.rollback().await;
+        let _ = database_session.shutdown().await;
+        return;
+    }
+
+    let stream_result = run_authenticated_server_resource_stream(
+        &transaction,
+        &active,
+        &authorisation,
+        &arguments,
+        &mut commands,
+        &cancellation,
+    )
+    .await;
+    let stream_result = match stream_result {
+        Ok(result) => result,
+        Err(error) => match wait_for_resource_producer_pull_or_cancel(&mut commands, &cancellation)
+            .await
+        {
+            Some(pull) => ResourceProducerExit::Failed(ResourceProducerFailed {
+                response: Some(pull.response),
+                error,
+            }),
+            None => ResourceProducerExit::Cancelled(ResourceProducerCancelled { response: None }),
+        },
+    };
+    match stream_result {
+        ResourceProducerExit::Completed(ResourceProducerCompleted {
+            response,
+            final_batch_sequence: _,
+            total_items: _,
+            total_bytes: _,
+        }) => {
+            let commit = transaction.commit().await;
+            if commit.is_ok() {
+                let _ = response.send(Ok(AuthenticatedServerResourceEvent::Completed {
+                    final_batch_sequence: 0,
+                    total_items: 0,
+                    total_bytes: 0,
+                }));
+            } else {
+                let _ = response.send(Err(PostgresKernelError::DurableInvariant {
+                    relation: "sealed invocation producer",
+                    record: invocation.canonical(),
+                    rule: "sealed server stream transaction commit failed",
+                }));
+            }
+        }
+        ResourceProducerExit::Cancelled(ResourceProducerCancelled { response }) => {
+            let _ = transaction.rollback().await;
+            if let Some(response) = response {
+                let _ = response.send(Ok(AuthenticatedServerResourceEvent::Cancelled));
+            }
+        }
+        ResourceProducerExit::Failed(ResourceProducerFailed { response, error }) => {
+            let _ = transaction.rollback().await;
+            if let Some(response) = response {
+                let failure = if classify_sealed_server_error(&error)
+                    == SealedInvocationFailureClass::Target
+                {
+                    CallFailure::TargetUnavailable
+                } else {
+                    CallFailure::InternalFailure
+                };
+                let _ = response.send(Ok(AuthenticatedServerResourceEvent::Failed { failure }));
+            }
+        }
+    }
+    let _ = database_session.shutdown().await;
+}
+
+async fn start_sealed_server_stream_producer(
+    kernel: PostgresKernel,
+    active: ActiveDatabaseRevision,
+    security: SecuritySnapshot,
+    authorisation: AuthorisedInvocation,
+    arguments: Vec<FunctionArgument>,
+    invocation: InvocationId,
+    cancellation: ResourceCancellation,
+) -> Result<AuthenticatedServerResourceProducer, SealedInvocationFailureClass> {
+    let target_revision = active.pair();
+    let (commands, receiver) = tokio::sync::mpsc::channel(1);
+    let (ready, ready_receiver) = tokio::sync::oneshot::channel();
+    tokio::spawn(run_sealed_server_stream_producer(
+        kernel,
+        active,
+        security,
+        authorisation,
+        arguments,
+        invocation,
+        cancellation.clone(),
+        receiver,
+        ready,
+    ));
+    match ready_receiver.await {
+        Ok(Ok(())) => Ok(AuthenticatedServerResourceProducer {
+            accepted: AuthenticatedServerResourceAccepted {
+                stream_id: 0,
+                request_id: invocation,
+                nested_invocation_id: invocation,
+                target_revision,
+                resource_kind: AuthenticatedServerResourceKind::Stream,
+            },
+            commands,
+            cancellation,
+        }),
+        Ok(Err(failure)) => Err(failure),
+        Err(_) => Err(SealedInvocationFailureClass::Internal),
+    }
 }
 
 async fn execute_sealed_server_after_audit(
@@ -6951,6 +7171,7 @@ async fn load_local_peer_credentials(
 async fn load_security_audit_events(
     transaction: &Transaction<'_>,
 ) -> Result<Vec<SecurityAuditEvent>, PostgresKernelError> {
+    require_security_audit_relation_columns(transaction).await?;
     let events = transaction
         .query(
             "SELECT sequence, event_id, recorded_at, event_kind, outcome,
@@ -7652,9 +7873,60 @@ async fn require_invocation_audit_relation_columns(
     Ok(())
 }
 
+async fn require_security_audit_relation_columns(
+    transaction: &Transaction<'_>,
+) -> Result<(), PostgresKernelError> {
+    let rows = transaction
+        .query(
+            "SELECT attribute.attname
+             FROM pg_catalog.pg_attribute AS attribute
+             JOIN pg_catalog.pg_class AS class ON class.oid = attribute.attrelid
+             JOIN pg_catalog.pg_namespace AS namespace ON namespace.oid = class.relnamespace
+             WHERE namespace.nspname = '_orna_kernel'
+               AND class.relname = 'security_audit_events'
+               AND attribute.attnum > 0
+               AND NOT attribute.attisdropped
+             ORDER BY attribute.attnum",
+            &[],
+        )
+        .await
+        .map_err(PostgresKernelError::Database)?;
+    let names = rows
+        .iter()
+        .map(|row| audit_column(row, "relation", "attname"))
+        .collect::<Result<Vec<String>, _>>()?;
+    let expected = [
+        "sequence",
+        "event_id",
+        "recorded_at",
+        "event_kind",
+        "outcome",
+        "session_principal_id",
+        "effective_principal_id",
+        "authorising_principal_id",
+        "function_id",
+        "source_revision_id",
+        "catalogue_revision_id",
+        "denial_reason",
+    ];
+    if names != expected {
+        return Err(audit_invariant(
+            "relation",
+            "security audit relation has unsupported disclosure-bearing columns",
+        ));
+    }
+    Ok(())
+}
+
 fn decode_security_audit_event(row: &Row) -> Result<SecurityAuditEvent, PostgresKernelError> {
     let sequence: i64 = audit_column(row, "selected row", "sequence")?;
     let record = sequence.to_string();
+    if sequence <= 0 {
+        return Err(audit_invariant(
+            &record,
+            "generated security audit sequence must be positive",
+        ));
+    }
     let id = SecurityAuditEventId::from_bytes(audit_id(row, &record, "event_id")?);
     let recorded_at: SystemTime = audit_column(row, &record, "recorded_at")?;
     let kind: String = audit_column(row, &record, "event_kind")?;
@@ -7924,6 +8196,12 @@ fn decode_security_audit_event(row: &Row) -> Result<SecurityAuditEvent, Postgres
                 )?,
                 &record,
             )?;
+            let target = require_audit_value(
+                function,
+                &record,
+                "security-admin audit requires the sealed target identity",
+            )?;
+            require_security_admin_audit_target(target, operation, &record)?;
             SecurityAuditDecision::recover_security_admin_allowed(
                 require_audit_value(
                     session_principal,
@@ -7931,11 +8209,7 @@ fn decode_security_audit_event(row: &Row) -> Result<SecurityAuditEvent, Postgres
                     "allowed security-admin audit requires a session principal",
                 )?,
                 operation,
-                require_audit_value(
-                    function,
-                    &record,
-                    "security-admin audit requires the sealed target identity",
-                )?,
+                target,
             )
         }
         ("security_admin", "denied")
@@ -7953,6 +8227,12 @@ fn decode_security_audit_event(row: &Row) -> Result<SecurityAuditEvent, Postgres
                 )?,
                 &record,
             )?;
+            let target = require_audit_value(
+                function,
+                &record,
+                "security-admin audit requires the sealed target identity",
+            )?;
+            require_security_admin_audit_target(target, operation, &record)?;
             SecurityAuditDecision::recover_security_admin_denied(
                 require_audit_value(
                     session_principal,
@@ -7960,11 +8240,7 @@ fn decode_security_audit_event(row: &Row) -> Result<SecurityAuditEvent, Postgres
                     "denied security-admin audit requires a session principal",
                 )?,
                 operation,
-                require_audit_value(
-                    function,
-                    &record,
-                    "security-admin audit requires the sealed target identity",
-                )?,
+                target,
                 reason,
             )
         }
@@ -8442,6 +8718,46 @@ fn decode_security_admin_audit_denial(
         ));
     }
     Ok((operation, reason))
+}
+
+fn require_security_admin_audit_target(
+    target: FunctionId,
+    operation: SecurityAdminAuditOperation,
+    record: &str,
+) -> Result<(), PostgresKernelError> {
+    let Some(definition) = system_function_by_id(target) else {
+        return Err(audit_invariant(
+            record,
+            "security-admin audit target must be a sealed SecurityAdmin function",
+        ));
+    };
+    if definition.kind() != SystemFunctionKind::SecurityAdmin {
+        return Err(audit_invariant(
+            record,
+            "security-admin audit target must be a sealed SecurityAdmin function",
+        ));
+    }
+    if security_admin_audit_target_for_operation(operation) != target {
+        return Err(audit_invariant(
+            record,
+            "security-admin audit target must match operation",
+        ));
+    }
+    Ok(())
+}
+
+const fn security_admin_audit_target_for_operation(
+    operation: SecurityAdminAuditOperation,
+) -> FunctionId {
+    match operation {
+        SecurityAdminAuditOperation::CreatePrincipal => SYS_SECURITY_CREATE_PRINCIPAL_FUNCTION_ID,
+        SecurityAdminAuditOperation::DisablePrincipal => SYS_SECURITY_DISABLE_PRINCIPAL_FUNCTION_ID,
+        SecurityAdminAuditOperation::CreateRole => SYS_SECURITY_CREATE_ROLE_FUNCTION_ID,
+        SecurityAdminAuditOperation::GrantRole => SYS_SECURITY_GRANT_ROLE_FUNCTION_ID,
+        SecurityAdminAuditOperation::RevokeRole => SYS_SECURITY_REVOKE_ROLE_FUNCTION_ID,
+        SecurityAdminAuditOperation::GrantPrivilege => SYS_SECURITY_GRANT_PRIVILEGE_FUNCTION_ID,
+        SecurityAdminAuditOperation::RevokePrivilege => SYS_SECURITY_REVOKE_PRIVILEGE_FUNCTION_ID,
+    }
 }
 
 fn encode_security_admin_audit_denied_detail_value(
@@ -9591,6 +9907,42 @@ mod tests {
             denied.denial(),
             Some(SecurityAuditDenial::SecurityAdmin(reason))
         );
+    }
+
+    #[test]
+    fn security_admin_audit_target_binding_rejects_tampering() {
+        let operation = SecurityAdminAuditOperation::GrantPrivilege;
+        require_security_admin_audit_target(
+            SYS_SECURITY_GRANT_PRIVILEGE_FUNCTION_ID,
+            operation,
+            "66",
+        )
+        .expect("the matching sealed SecurityAdmin target must recover");
+
+        assert!(matches!(
+            require_security_admin_audit_target(
+                SYS_SECURITY_CREATE_PRINCIPAL_FUNCTION_ID,
+                operation,
+                "67",
+            ),
+            Err(PostgresKernelError::DurableInvariant {
+                relation: "_orna_kernel.security_audit_events",
+                ref record,
+                rule: "security-admin audit target must match operation",
+            }) if record == "67"
+        ));
+        assert!(matches!(
+            require_security_admin_audit_target(
+                SYS_SECURITY_SESSION_PRINCIPAL_FUNCTION_ID,
+                operation,
+                "68",
+            ),
+            Err(PostgresKernelError::DurableInvariant {
+                relation: "_orna_kernel.security_audit_events",
+                ref record,
+                rule: "security-admin audit target must be a sealed SecurityAdmin function",
+            }) if record == "68"
+        ));
     }
 
     #[test]

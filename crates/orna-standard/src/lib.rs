@@ -8240,10 +8240,40 @@ EXPORT TYPE std.ui.UI AS std.UI;
             "V4 must be the append-only child of the retained V3 source revision"
         );
         assert_eq!(
+            upgrade.verified_standard_snapshot().source().bundle(),
+            super::STANDARD_SOURCE_V4_BUNDLE_ID,
+            "V4 must retain its reserved source-bundle identity"
+        );
+        assert_eq!(
+            upgrade.verified_standard_snapshot().source().id(),
+            super::STANDARD_SOURCE_V4_REVISION_ID,
+            "V4 must retain its reserved source-revision identity"
+        );
+        assert_eq!(
+            upgrade.verified_standard_snapshot().digest(),
+            super::ACCEPTED_V4_STANDARD_LIBRARY_DIGEST,
+            "V4 must retain the accepted standard-library digest"
+        );
+        assert_eq!(
+            &upgrade.verified_standard_snapshot().source().units()[..3],
+            version_three.source().units(),
+            "V4 must retain every V3 source unit byte-for-byte"
+        );
+        assert_eq!(
             upgrade.verified_standard_snapshot().source().units().len(),
             4
         );
         assert_eq!(upgrade.verified_standard_snapshot().executables().len(), 1);
+        assert_eq!(
+            upgrade.verified_standard_snapshot().catalogue().functions(),
+            version_three.catalogue().functions(),
+            "V4 must retain the V3 standard function definitions"
+        );
+        assert_eq!(
+            upgrade.verified_standard_snapshot().executables(),
+            version_three.executables(),
+            "V4 must retain the V3 executable snapshot"
+        );
         let checked_executable = upgrade
             .checked_standard_library()
             .checked_executable()
@@ -8271,6 +8301,15 @@ EXPORT TYPE std.ui.UI AS std.UI;
                 .standard()
                 .map(|snapshot| snapshot.revision()),
             Some(super::STANDARD_LIBRARY_V4_REVISION_ID)
+        );
+        assert_eq!(
+            upgrade
+                .application_revision()
+                .catalogue_hash_context()
+                .standard()
+                .map(|snapshot| snapshot.digest()),
+            Some(upgrade.verified_standard_snapshot().digest()),
+            "the V4 application caller must pin the upgraded standard digest"
         );
         assert_eq!(
             upgrade
@@ -8428,6 +8467,56 @@ EXPORT TYPE std.ui.UI AS std.UI;
         );
         let verified = upgrade.verified_standard_snapshot();
         assert_eq!(
+            verified.source().units(),
+            version_five.source().units(),
+            "the V5 upgrade must retain the expected standard source units"
+        );
+        assert_eq!(
+            verified.origins(),
+            version_five.origins(),
+            "the V5 upgrade must retain the expected source origins"
+        );
+        assert_eq!(
+            &verified.origins()[..version_four.origins().len()],
+            version_four.origins(),
+            "V5 must retain every V4 source origin byte-for-byte"
+        );
+        assert_eq!(
+            verified.catalogue().schemas(),
+            version_five.catalogue().schemas(),
+            "the V5 upgrade must retain the expected standard schemas"
+        );
+        assert_eq!(
+            verified.catalogue().object_types(),
+            version_five.catalogue().object_types(),
+            "the V5 upgrade must retain the expected object types"
+        );
+        assert_eq!(
+            verified.catalogue().enum_types(),
+            version_five.catalogue().enum_types(),
+            "the V5 upgrade must retain the expected enum types"
+        );
+        assert_eq!(
+            verified.catalogue().record_value_types(),
+            version_five.catalogue().record_value_types(),
+            "the V5 upgrade must retain the expected record value types"
+        );
+        assert_eq!(
+            verified.catalogue().value_types(),
+            version_five.catalogue().value_types(),
+            "the V5 upgrade must retain the expected standard value types"
+        );
+        assert_eq!(
+            verified.catalogue().type_bindings(),
+            version_five.catalogue().type_bindings(),
+            "the V5 upgrade must retain the expected standard type bindings"
+        );
+        assert_eq!(
+            verified.catalogue().functions(),
+            version_five.catalogue().functions(),
+            "the V5 upgrade must retain the expected standard functions"
+        );
+        assert_eq!(
             verified.catalogue().revision(),
             super::STANDARD_CATALOGUE_V5_REVISION_ID
         );
@@ -8499,6 +8588,29 @@ EXPORT TYPE std.ui.UI AS std.UI;
                 .application_revision()
                 .catalogue_hash_context()
                 .standard()
+                .map(|snapshot| snapshot.digest()),
+            Some(verified.digest()),
+            "the V5 application caller must pin the expected standard digest"
+        );
+        let expected_catalogue_hash = catalogue_digest_with_context(
+            upgrade.application_revision().catalogue_hash_context(),
+            upgrade.application_revision().candidate(),
+            upgrade.application_revision().new_function_revisions(),
+            upgrade.application_revision().expressions(),
+            upgrade.application_revision().origins(),
+            upgrade.application_revision().references(),
+        )
+        .expect("the V5 application catalogue hash recomputes");
+        assert_eq!(
+            upgrade.application_revision().catalogue_hash(),
+            expected_catalogue_hash,
+            "the V5 application catalogue hash must cover the retained standard context"
+        );
+        assert_eq!(
+            upgrade
+                .application_revision()
+                .catalogue_hash_context()
+                .standard()
                 .map(|snapshot| snapshot.digest_version()),
             Some(StandardLibraryDigestVersion::Version2)
         );
@@ -8540,6 +8652,11 @@ EXPORT TYPE std.ui.UI AS std.UI;
                 .expect("the retained V5 standard source is valid"),
         )
         .expect("the retained V5 standard source verifies");
+        let version_six = super::verify_standard_library_v6_snapshot(
+            super::retained_standard_library_v6_snapshot()
+                .expect("the retained V6 standard source is valid"),
+        )
+        .expect("the retained V6 standard source verifies");
         orna_compiler::check_standard_library_source(&version_five)
             .unwrap_or_else(|error| panic!("the V5 source must check: {error:?}"));
         let active = empty_version_two_active_revision(&version_five);
@@ -8547,6 +8664,56 @@ EXPORT TYPE std.ui.UI AS std.UI;
             .unwrap_or_else(|error| panic!("the V5-to-V6 upgrade must prepare: {error:?}"));
 
         let verified = upgrade.verified_standard_snapshot();
+        assert_eq!(
+            verified.source().units(),
+            version_six.source().units(),
+            "the V6 upgrade must retain the expected standard source units"
+        );
+        assert_eq!(
+            verified.origins(),
+            version_six.origins(),
+            "the V6 upgrade must retain the expected source origins"
+        );
+        assert_eq!(
+            &verified.origins()[..version_five.origins().len()],
+            version_five.origins(),
+            "V6 must retain every V5 source origin byte-for-byte"
+        );
+        assert_eq!(
+            verified.catalogue().schemas(),
+            version_six.catalogue().schemas(),
+            "the V6 upgrade must retain the expected standard schemas"
+        );
+        assert_eq!(
+            verified.catalogue().object_types(),
+            version_six.catalogue().object_types(),
+            "the V6 upgrade must retain the expected object types"
+        );
+        assert_eq!(
+            verified.catalogue().enum_types(),
+            version_six.catalogue().enum_types(),
+            "the V6 upgrade must retain the expected enum types"
+        );
+        assert_eq!(
+            verified.catalogue().record_value_types(),
+            version_six.catalogue().record_value_types(),
+            "the V6 upgrade must retain the expected record value types"
+        );
+        assert_eq!(
+            verified.catalogue().value_types(),
+            version_six.catalogue().value_types(),
+            "the V6 upgrade must retain the expected standard value types"
+        );
+        assert_eq!(
+            verified.catalogue().type_bindings(),
+            version_six.catalogue().type_bindings(),
+            "the V6 upgrade must retain the expected standard type bindings"
+        );
+        assert_eq!(
+            verified.catalogue().functions(),
+            version_six.catalogue().functions(),
+            "the V6 upgrade must retain the expected standard functions"
+        );
         assert_eq!(verified.revision(), super::STANDARD_LIBRARY_V6_REVISION_ID);
         assert_eq!(
             verified.catalogue().revision(),
@@ -8558,6 +8725,26 @@ EXPORT TYPE std.ui.UI AS std.UI;
             Some(super::STANDARD_SOURCE_V5_REVISION_ID),
             "V6 must be the append-only child of the retained V5 source revision"
         );
+        assert_eq!(
+            verified.source().bundle(),
+            super::STANDARD_SOURCE_V6_BUNDLE_ID,
+            "V6 must retain its reserved source-bundle identity"
+        );
+        assert_eq!(
+            verified.source().id(),
+            super::STANDARD_SOURCE_V6_REVISION_ID,
+            "V6 must retain its reserved source-revision identity"
+        );
+        assert_eq!(
+            verified.digest(),
+            super::ACCEPTED_V6_STANDARD_LIBRARY_DIGEST,
+            "V6 must retain the accepted standard-library digest"
+        );
+        assert_eq!(
+            &verified.source().units()[..5],
+            version_five.source().units(),
+            "V6 must retain every V5 source unit byte-for-byte"
+        );
         assert_eq!(verified.source().units().len(), 6);
         assert_eq!(
             verified.source().units()[5].id(),
@@ -8568,6 +8755,16 @@ EXPORT TYPE std.ui.UI AS std.UI;
             super::STD_ACTION_SOURCE_LOGICAL_PATH
         );
         assert_eq!(verified.executables().len(), 2);
+        assert_eq!(
+            verified.catalogue().functions(),
+            version_five.catalogue().functions(),
+            "V6 must retain the V5 standard function definitions"
+        );
+        assert_eq!(
+            verified.executables(),
+            version_five.executables(),
+            "V6 must retain the V5 executable snapshot"
+        );
 
         assert_eq!(
             upgrade.application_revision().expected_base(),
@@ -8592,6 +8789,29 @@ EXPORT TYPE std.ui.UI AS std.UI;
         assert_eq!(
             checked_executable.revision_id(),
             super::STD_INVOKE_ECHO_FUNCTION_REVISION_ID
+        );
+        assert_eq!(
+            upgrade
+                .application_revision()
+                .catalogue_hash_context()
+                .standard()
+                .map(|snapshot| snapshot.digest()),
+            Some(verified.digest()),
+            "the V6 application caller must pin the upgraded standard digest"
+        );
+        let expected_catalogue_hash = catalogue_digest_with_context(
+            upgrade.application_revision().catalogue_hash_context(),
+            upgrade.application_revision().candidate(),
+            upgrade.application_revision().new_function_revisions(),
+            upgrade.application_revision().expressions(),
+            upgrade.application_revision().origins(),
+            upgrade.application_revision().references(),
+        )
+        .expect("the V6 application catalogue hash recomputes");
+        assert_eq!(
+            upgrade.application_revision().catalogue_hash(),
+            expected_catalogue_hash,
+            "the V6 application catalogue hash must cover the retained standard context"
         );
     }
 

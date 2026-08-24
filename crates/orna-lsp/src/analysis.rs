@@ -649,6 +649,45 @@ fn field_declaration_span(parse: &Parse, selected_span: &SourceSpan) -> Option<S
         })
 }
 
+/// Resolves only the final name token in an accepted object-field rename.
+///
+/// The ALTER statement is transition evidence, not a declaration. Its new
+/// name still denotes the final object field, while the old name remains
+/// intentionally unresolved.
+fn renamed_object_field_at<'a>(
+    parse: &'a Parse,
+    selected_span: &SourceSpan,
+) -> Option<FieldInfo<'a>> {
+    parse.field_renames().iter().find_map(|rename| {
+        if !name_part_matches_span(&rename.new_field_name, selected_span) {
+            return None;
+        }
+        let declaration = parse
+            .object_types()
+            .iter()
+            .find(|declaration| qualified_names_match(&declaration.name, &rename.type_name))?;
+        let field = declaration.fields.iter().find(|field| {
+            identifier_spelling_matches(&field.name.text, &rename.new_field_name.text)
+        })?;
+        Some(object_field_info(field))
+    })
+}
+
+fn renamed_object_field_declaration_span(
+    parse: &Parse,
+    selected_span: &SourceSpan,
+) -> Option<SourceSpan> {
+    renamed_object_field_at(parse, selected_span).map(|field| field.name.span.clone())
+}
+
+fn renamed_object_field_at_byte<'a>(parse: &'a Parse, byte: usize) -> Option<FieldInfo<'a>> {
+    parse.field_renames().iter().find_map(|rename| {
+        (byte >= rename.new_field_name.span.start && byte < rename.new_field_name.span.end)
+            .then(|| renamed_object_field_at(parse, &rename.new_field_name.span))
+            .flatten()
+    })
+}
+
 #[derive(Clone, Copy)]
 enum ClientExpressionPart<'a> {
     ParameterRoot(&'a orna_syntax::NamePart),
@@ -1380,10 +1419,12 @@ fn field_reference_declaration_span(
     highlighted: &[orna_syntax::HighlightToken],
     selected_span: &SourceSpan,
 ) -> Option<SourceSpan> {
-    client_field_declaration_span(parse, selected_span).or_else(|| {
-        sql_column_at(parse, selected_span.start, text, highlighted)
-            .map(|field| field.name.span.clone())
-    })
+    client_field_declaration_span(parse, selected_span)
+        .or_else(|| renamed_object_field_declaration_span(parse, selected_span))
+        .or_else(|| {
+            sql_column_at(parse, selected_span.start, text, highlighted)
+                .map(|field| field.name.span.clone())
+        })
 }
 
 fn property_declaration_span(
@@ -1818,6 +1859,9 @@ pub struct ParameterInfo<'a> {
 
 /// Returns the object or record field whose name covers one byte offset.
 pub fn field_at(parse: &Parse, byte: usize) -> Option<FieldInfo<'_>> {
+    if let Some(field) = renamed_object_field_at_byte(parse, byte) {
+        return Some(field);
+    }
     for declaration in parse.object_types() {
         for field in &declaration.fields {
             if byte >= field.name.span.start && byte < field.name.span.end {

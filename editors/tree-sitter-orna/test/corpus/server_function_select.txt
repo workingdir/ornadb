@@ -20,7 +20,7 @@ AS
     FROM tasks.task t
     WHERE t.completed = FALSE
       AND t.due_at < p_before
-    ORDER BY t.due_at;
+    ORDER BY t.due_at ASC, t.title DESC;
 
 ---
 
@@ -206,19 +206,37 @@ AS
                             (identifier))))))))))
           (kw_order)
           (kw_by)
-          (expression
-            (logical_expression
-              (comparison_expression
-                (additive_expression
-                  (multiplicative_expression
-                    (unary_expression
-                      (postfix_expression
-                        (primary_expression
-                          (qualified_name
+          (ordering_expression
+            expression: (expression
+              (logical_expression
+                (comparison_expression
+                  (additive_expression
+                    (multiplicative_expression
+                      (unary_expression
+                        (postfix_expression
+                          (primary_expression
                             (qualified_name
-                              (identifier))
-                            (dot)
-                            (identifier)))))))))))))
+                              (qualified_name
+                                (identifier))
+                              (dot)
+                              (identifier))))))))))
+            (kw_asc))
+          (comma)
+          (ordering_expression
+            expression: (expression
+              (logical_expression
+                (comparison_expression
+                  (additive_expression
+                    (multiplicative_expression
+                      (unary_expression
+                        (postfix_expression
+                          (primary_expression
+                            (qualified_name
+                              (qualified_name
+                                (identifier))
+                              (dot)
+                              (identifier))))))))))
+            (kw_desc)))))
     (semicolon)))
 
 ====================
@@ -307,4 +325,3 @@ AS SELECT DISTINCT entry.marker FROM predicate_test.entry entry WHERE entry.visi
                             (dot)
                             (identifier)))))))))))))
     (semicolon)))
-
