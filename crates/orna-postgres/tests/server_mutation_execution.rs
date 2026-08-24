@@ -2519,7 +2519,9 @@ where
             let runtime = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
-                .map_err(|error| failure(format!("{name} live runtime could not start: {error}")))?;
+                .map_err(|error| {
+                    failure(format!("{name} live runtime could not start: {error}"))
+                })?;
             runtime.block_on(test())
         })
         .map_err(|error| failure(format!("{name} live thread could not start: {error}")))?;
@@ -2541,7 +2543,6 @@ fn authenticated_raw_insert_is_denied_then_granted_and_audited() -> TestResult<(
 
 #[cfg(feature = "test-hooks")]
 async fn authenticated_raw_insert_is_denied_then_granted_and_audited_inner() -> TestResult<()> {
-
     with_test_database(|database| async move {
         let kernel: PostgresKernel = database.connection_string().parse()?;
         kernel.bootstrap().await?;
@@ -3086,8 +3087,8 @@ fn authenticated_raw_argument_pair_binds_two_active_parameters_and_audits() -> T
 }
 
 #[cfg(feature = "test-hooks")]
-async fn authenticated_raw_argument_pair_binds_two_active_parameters_and_audits_inner(
-) -> TestResult<()> {
+async fn authenticated_raw_argument_pair_binds_two_active_parameters_and_audits_inner()
+-> TestResult<()> {
     with_test_database(|database| async move {
         let kernel: PostgresKernel = database.connection_string().parse()?;
         kernel.bootstrap().await?;
@@ -3557,8 +3558,8 @@ fn authenticated_raw_reference_value_update_binds_by_parameter_id_and_audits() -
 }
 
 #[cfg(feature = "test-hooks")]
-async fn authenticated_raw_reference_value_update_binds_by_parameter_id_and_audits_inner(
-) -> TestResult<()> {
+async fn authenticated_raw_reference_value_update_binds_by_parameter_id_and_audits_inner()
+-> TestResult<()> {
     with_test_database(|database| async move {
         let kernel: PostgresKernel = database.connection_string().parse()?;
         kernel.bootstrap().await?;
@@ -4171,7 +4172,8 @@ async fn authenticated_raw_reference_mutation_authority_and_selection_inner() ->
 #[cfg(feature = "test-hooks")]
 #[test]
 #[ignore = "requires the Compose PostgreSQL development service"]
-fn authenticated_raw_reference_update_rejects_non_literal_assignment_after_audit() -> TestResult<()> {
+fn authenticated_raw_reference_update_rejects_non_literal_assignment_after_audit() -> TestResult<()>
+{
     run_large_stack_live_test(
         "authenticated-raw-reference-non-literal-live",
         authenticated_raw_reference_update_rejects_non_literal_assignment_after_audit_inner,
@@ -4179,8 +4181,8 @@ fn authenticated_raw_reference_update_rejects_non_literal_assignment_after_audit
 }
 
 #[cfg(feature = "test-hooks")]
-async fn authenticated_raw_reference_update_rejects_non_literal_assignment_after_audit_inner(
-) -> TestResult<()> {
+async fn authenticated_raw_reference_update_rejects_non_literal_assignment_after_audit_inner()
+-> TestResult<()> {
     with_test_database(|database| async move {
         let kernel: PostgresKernel = database.connection_string().parse()?;
         kernel.bootstrap().await?;
@@ -4328,8 +4330,8 @@ async fn authenticated_raw_reference_update_rejects_non_literal_assignment_after
 #[cfg(feature = "test-hooks")]
 #[test]
 #[ignore = "requires the Compose PostgreSQL development service"]
-fn authenticated_raw_reference_update_database_failure_rolls_back_rows_and_retains_audit(
-) -> TestResult<()> {
+fn authenticated_raw_reference_update_database_failure_rolls_back_rows_and_retains_audit()
+-> TestResult<()> {
     run_large_stack_live_test(
         "authenticated-raw-reference-database-failure-live",
         authenticated_raw_reference_update_database_failure_rolls_back_rows_and_retains_audit_inner,
@@ -4337,8 +4339,8 @@ fn authenticated_raw_reference_update_database_failure_rolls_back_rows_and_retai
 }
 
 #[cfg(feature = "test-hooks")]
-async fn authenticated_raw_reference_update_database_failure_rolls_back_rows_and_retains_audit_inner(
-) -> TestResult<()> {
+async fn authenticated_raw_reference_update_database_failure_rolls_back_rows_and_retains_audit_inner()
+-> TestResult<()> {
     with_test_database(|database| async move {
         let kernel: PostgresKernel = database.connection_string().parse()?;
         kernel.bootstrap().await?;
@@ -7086,8 +7088,8 @@ fn require_raw_reference_insert_conflict(
 #[cfg(feature = "test-hooks")]
 #[test]
 #[ignore = "requires the Compose PostgreSQL development service"]
-fn authenticated_raw_reference_insert_is_denied_then_granted_transactional_and_unique(
-) -> TestResult<()> {
+fn authenticated_raw_reference_insert_is_denied_then_granted_transactional_and_unique()
+-> TestResult<()> {
     run_large_stack_live_test(
         "authenticated-raw-reference-insert-live",
         authenticated_raw_reference_insert_is_denied_then_granted_transactional_and_unique_inner,
@@ -7095,8 +7097,8 @@ fn authenticated_raw_reference_insert_is_denied_then_granted_transactional_and_u
 }
 
 #[cfg(feature = "test-hooks")]
-async fn authenticated_raw_reference_insert_is_denied_then_granted_transactional_and_unique_inner(
-) -> TestResult<()> {
+async fn authenticated_raw_reference_insert_is_denied_then_granted_transactional_and_unique_inner()
+-> TestResult<()> {
     with_test_database(|database| async move {
         let kernel: PostgresKernel = database.connection_string().parse()?;
         kernel.bootstrap().await?;
@@ -7843,7 +7845,8 @@ fn require_raw_scalar_target_unavailable(
 #[cfg(feature = "test-hooks")]
 #[test]
 #[ignore = "requires the Compose PostgreSQL development service"]
-fn authenticated_raw_scalar_insert_binds_exact_parameters_and_stores_exact_values() -> TestResult<()> {
+fn authenticated_raw_scalar_insert_binds_exact_parameters_and_stores_exact_values() -> TestResult<()>
+{
     run_large_stack_live_test(
         "authenticated-raw-scalar-insert-live",
         authenticated_raw_scalar_insert_binds_exact_parameters_and_stores_exact_values_inner,
@@ -7851,8 +7854,8 @@ fn authenticated_raw_scalar_insert_binds_exact_parameters_and_stores_exact_value
 }
 
 #[cfg(feature = "test-hooks")]
-async fn authenticated_raw_scalar_insert_binds_exact_parameters_and_stores_exact_values_inner(
-) -> TestResult<()> {
+async fn authenticated_raw_scalar_insert_binds_exact_parameters_and_stores_exact_values_inner()
+-> TestResult<()> {
     with_test_database(|database| async move {
         let kernel: PostgresKernel = database.connection_string().parse()?;
         kernel.bootstrap().await?;

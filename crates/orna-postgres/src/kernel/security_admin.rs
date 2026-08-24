@@ -145,6 +145,9 @@ impl PostgresKernel {
             if matches!(class, PrivilegeClass::Inspect(_)) && object.is_some() {
                 return Ok(authorise_privilege(principal, class, object, &[]));
             }
+            if matches!(class, PrivilegeClass::SecurityAdmin) && object.is_some() {
+                return Ok(authorise_privilege(principal, class, object, &[]));
+            }
             Ok(authorise_privilege(
                 principal,
                 class,
@@ -181,10 +184,9 @@ impl PostgresKernel {
             require_current_migrations(&transaction).await?;
             let active = configure_and_recover(&transaction).await?;
             let security = recover_security_snapshot_for_active(&transaction, &active).await?;
-            let bound_session = match security.bind_authenticated_session(
-                session.principal(),
-                session.active_roles().to_vec(),
-            ) {
+            let bound_session = match security
+                .bind_authenticated_session(session.principal(), session.active_roles().to_vec())
+            {
                 Ok(bound_session) => bound_session,
                 Err(_) => {
                     return Err(PostgresKernelError::SecurityAdminDenied {
@@ -389,8 +391,9 @@ impl SecurityAdminMutation {
     }
 
     /// Applies the closed input-level checks the snapshot constructor cannot
-    /// express: roles only through `create_role`, and the reserved catalogue
-    /// health service identity is never administrable.
+    /// express: roles only through `create_role`, revoke targets must resolve
+    /// to existing principals/functions, and the reserved catalogue health
+    /// service identity is never administrable.
     fn validate(self, snapshot: &SecuritySnapshot) -> Result<Self, PostgresKernelError> {
         match self {
             Self::CreatePrincipal { principal, kind } => {
@@ -436,6 +439,62 @@ impl SecurityAdminMutation {
                         "_orna_kernel.security_principals",
                         "disable_principal",
                         "the principal to disable must exist",
+                    ));
+                }
+                Ok(self)
+            }
+            Self::RevokeRole { role, member } => {
+                let role_principal = snapshot
+                    .principals()
+                    .find(|candidate| candidate.id() == role)
+                    .ok_or_else(|| {
+                        admin_invariant(
+                            "_orna_kernel.security_principals",
+                            "revoke_role",
+                            "the role to revoke must exist",
+                        )
+                    })?;
+                if role_principal.kind() != PrincipalKind::Role {
+                    return Err(admin_invariant(
+                        "_orna_kernel.security_principals",
+                        "revoke_role",
+                        "the role target must identify a role",
+                    ));
+                }
+                if !snapshot
+                    .principals()
+                    .any(|candidate| candidate.id() == member)
+                {
+                    return Err(admin_invariant(
+                        "_orna_kernel.security_principals",
+                        "revoke_role",
+                        "the role member to revoke must exist",
+                    ));
+                }
+                Ok(self)
+            }
+            Self::RevokePrivilege {
+                grantee, object, ..
+            } => {
+                if !snapshot
+                    .principals()
+                    .any(|candidate| candidate.id() == grantee)
+                {
+                    return Err(admin_invariant(
+                        "_orna_kernel.security_principals",
+                        "revoke_privilege",
+                        "the privilege grantee must exist",
+                    ));
+                }
+                if let Some(object) = object
+                    && !snapshot
+                        .function_targets()
+                        .any(|candidate| candidate.function() == object)
+                {
+                    return Err(admin_invariant(
+                        "_orna_kernel.security_privilege_grants",
+                        "revoke_privilege",
+                        "the privilege grant object must exist",
                     ));
                 }
                 Ok(self)
@@ -587,6 +646,9 @@ impl SecurityAdminMutation {
                             orna_core::security::PrivilegeGrantError::EmptyObject => {
                                 "the privilege grant object must not be the empty identity"
                             }
+                            orna_core::security::PrivilegeGrantError::SecurityAdminObject => {
+                                "the security_admin privilege grant must be class-wide"
+                            }
                         },
                     )
                 })?;
@@ -635,6 +697,9 @@ impl SecurityAdminMutation {
                             }
                             orna_core::security::PrivilegeGrantError::EmptyObject => {
                                 "the privilege grant object must not be the empty identity"
+                            }
+                            orna_core::security::PrivilegeGrantError::SecurityAdminObject => {
+                                "the security_admin privilege grant must be class-wide"
                             }
                         },
                     )
@@ -697,10 +762,9 @@ async fn run_security_admin_mutation(
         let active = configure_and_recover(&transaction).await?;
         lock_active_revision(&transaction, active.pair()).await?;
         let current = recover_security_snapshot_for_active(&transaction, &active).await?;
-        let bound_session = match current.bind_authenticated_session(
-            session.principal(),
-            session.active_roles().to_vec(),
-        ) {
+        let bound_session = match current
+            .bind_authenticated_session(session.principal(), session.active_roles().to_vec())
+        {
             Ok(bound_session) => bound_session,
             Err(_) => {
                 let reason = PrivilegeDenial::MissingPrivilege {

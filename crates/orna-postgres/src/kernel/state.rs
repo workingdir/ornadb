@@ -151,20 +151,12 @@ pub(crate) async fn load_user_state_in_transaction(
             .map(FunctionId::from_bytes)?;
         let instance_key: String =
             state_column(row, "function_instance_key", "USER state instance identity")?;
-        if !state_instance_is_requested(
-            instances,
-            &requested_instances,
-            function,
-            &instance_key,
-        ) {
+        if !state_instance_is_requested(instances, &requested_instances, function, &instance_key) {
             continue;
         }
         let cell = decode_state_cell(row, active, registry)?;
-        let declared_type = active_user_state_slot_type(
-            active,
-            cell.key().function(),
-            cell.key().state_slot(),
-        )?;
+        let declared_type =
+            active_user_state_slot_type(active, cell.key().function(), cell.key().state_slot())?;
         require_declared_user_state_type(
             cell.key().without_principal(),
             declared_type,
@@ -454,9 +446,11 @@ fn reject_duplicate_user_state_keys(
     for change in changes {
         let key = change.key_without_principal();
         if !keys.insert(key.clone()) {
-            return Err(PostgresKernelError::UserState(UserStateError::InvalidChange {
-                reason: format!("USER state write batch contains duplicate key {key}"),
-            }));
+            return Err(PostgresKernelError::UserState(
+                UserStateError::InvalidChange {
+                    reason: format!("USER state write batch contains duplicate key {key}"),
+                },
+            ));
         }
     }
     Ok(())
@@ -933,15 +927,8 @@ mod tests {
         value: i64,
     ) -> UserStateCell {
         UserStateCell::new(
-            UserStateKey::new(
-                principal,
-                ROOT,
-                String::new(),
-                FUNCTION,
-                instance_key,
-                SLOT,
-            )
-            .expect("test key is valid"),
+            UserStateKey::new(principal, ROOT, String::new(), FUNCTION, instance_key, SLOT)
+                .expect("test key is valid"),
             RuntimeValue::BigInt(value),
             INTEGER,
             revision,
@@ -1189,10 +1176,16 @@ mod tests {
         let named_cell = cell_for_instance(PRINCIPAL, "named".to_owned(), 1, 2);
 
         assert!(state_instance_is_requested(
-            &[], &requests, default_cell.key().function(), default_cell.key().instance_key()
+            &[],
+            &requests,
+            default_cell.key().function(),
+            default_cell.key().instance_key()
         ));
         assert!(!state_instance_is_requested(
-            &[], &requests, named_cell.key().function(), named_cell.key().instance_key()
+            &[],
+            &requests,
+            named_cell.key().function(),
+            named_cell.key().instance_key()
         ));
     }
 
@@ -1232,11 +1225,15 @@ mod tests {
         assert_eq!(pending.len(), 0);
         assert_eq!(results.len(), 2);
         assert!(results.iter().all(|result| {
-            result.outcome() == UserStateWriteOutcome::Conflict {
-                current_revision: 3
-            }
+            result.outcome()
+                == UserStateWriteOutcome::Conflict {
+                    current_revision: 3,
+                }
         }));
-        assert_eq!(current_cells.get(&default_key), Some(&Some(original_default)));
+        assert_eq!(
+            current_cells.get(&default_key),
+            Some(&Some(original_default))
+        );
         assert_eq!(current_cells.get(&named_key), Some(&Some(original_named)));
     }
 

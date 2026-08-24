@@ -11,35 +11,46 @@ use orna_artifact::client_plan::{
     ClientExpressionNode, OPAQUE_FORMAT_VERSION, OpaqueClientPlan, ProceduralClientPlan,
     ResourceClientPlan,
 };
-use orna_client::{
-    ClientExecutionError, ClientResourceCompletion, ClientResourceExecutor,
-    capability::{
-        LocalCapabilityArgumentSource, LocalCapabilityDeclaration, LocalCapabilityGrant,
-        LocalCapabilityGrantSet, LocalCapabilityName, LocalCapabilityScope,
-    },
-    ClientResourceRequest, evaluate_client_function,
-    evaluate_client_function_with_arguments,
-    evaluate_client_function_with_arguments_and_executor,
-    evaluate_client_function_with_grants,
-};
-#[cfg(feature = "test-hooks")]
-use orna_client::{ClientResource, ClientResourceInvocationContext, ClientResourceKey};
 #[cfg(feature = "test-hooks")]
 use orna_client::ClientInspectError;
 #[cfg(feature = "test-hooks")]
 use orna_client::{
-    evaluate_client_function_with_state_and_grants_and_arguments_and_executor_with_parent_invocation,
     ClientActionError, ClientActionOutcome, ClientActionState, ClientExternalContractRequest,
     ClientInspectRequest, ClientResourceStatus, ClientStateStore, complete_client_action,
-    decode_action_payload, trigger_client_action,
+    decode_action_payload,
+    evaluate_client_function_with_state_and_grants_and_arguments_and_executor_with_parent_invocation,
+    trigger_client_action,
 };
-use orna_compiler::{
-    CheckedStandardLibrary, CheckedTypeId, STD_INVOKE_ECHO_FUNCTION_ID, STD_INVOKE_ECHO_FUNCTION_REVISION_ID,
-    STD_INVOKE_ECHO_PARAMETER_ID, StandardApplicationCheckContext, check,
-    check_standard_application, check_standard_library_source, prepare, prepare_standard_application,
+use orna_client::{
+    ClientExecutionError, ClientResourceCompletion, ClientResourceExecutor, ClientResourceRequest,
+    capability::{
+        LocalCapabilityArgumentSource, LocalCapabilityDeclaration, LocalCapabilityGrant,
+        LocalCapabilityGrantSet, LocalCapabilityName, LocalCapabilityScope,
+    },
+    evaluate_client_function, evaluate_client_function_with_arguments,
+    evaluate_client_function_with_arguments_and_executor, evaluate_client_function_with_grants,
 };
 #[cfg(feature = "test-hooks")]
+use orna_client::{ClientResource, ClientResourceInvocationContext, ClientResourceKey};
+use orna_compiler::{
+    CheckedStandardLibrary, CheckedTypeId, STD_INVOKE_ECHO_FUNCTION_ID,
+    STD_INVOKE_ECHO_FUNCTION_REVISION_ID, STD_INVOKE_ECHO_PARAMETER_ID,
+    StandardApplicationCheckContext, check, check_standard_application,
+    check_standard_library_source, prepare, prepare_standard_application,
+};
+#[cfg(feature = "test-hooks")]
+use orna_core::inspect_carrier::{InspectCarrierEnvelope, InspectCarrierKind};
+#[cfg(feature = "test-hooks")]
 use orna_core::revision::Sha256Digest;
+#[cfg(feature = "test-hooks")]
+use orna_core::system::{
+    SYS_INSPECT_CALLS_TYPE_ID, SYS_INSPECT_INVOCATION_NODES_TYPE_ID,
+    SYS_INSPECT_PRESENTATION_CANDIDATES_TYPE_ID, SYS_INSPECT_RESOURCES_TYPE_ID,
+    SYS_INSPECT_RUNTIME_BINDINGS_TYPE_ID, SYS_INSPECT_SECURITY_DECISIONS_TYPE_ID,
+    SYS_INSPECT_SNAPSHOT_TYPE_ID, SYS_INSPECT_STATE_CELLS_TYPE_ID, SYS_INSPECT_UI_NODES_TYPE_ID,
+};
+#[cfg(feature = "test-hooks")]
+use orna_core::value::OpaqueCodecRegistry;
 use orna_core::{
     CallSiteId, CatalogueRevisionId, FunctionId, FunctionRevisionId, InvocationId, ObjectId,
     ParameterId, PrincipalId, SourceBundleId, SourceRevisionId, SourceUnitId, TypeId,
@@ -60,11 +71,12 @@ use orna_core::{
     },
     invocation_binding::CliArgumentInput,
     revision::{
-        ActiveDatabaseRevision, ActiveDatabaseRevisionInput, ActiveRevisionContent, CatalogueHashContext, DefinitionIdentity, DefinitionReference,
-        DefinitionReferenceKind, DefinitionReferenceTarget, DeployableRevision,
-        DeployableRevisionContent, DeployableRevisionInput, ExecutableArtifact,
-        ExecutableArtifactKind, FunctionRevisionRecord, FunctionSemanticHashVersion, RevisionPair,
-        StoredSourceRevision, StoredSourceUnit, VerifiedStandardLibrarySnapshot,
+        ActiveDatabaseRevision, ActiveDatabaseRevisionInput, ActiveRevisionContent,
+        CatalogueHashContext, DefinitionIdentity, DefinitionReference, DefinitionReferenceKind,
+        DefinitionReferenceTarget, DeployableRevision, DeployableRevisionContent,
+        DeployableRevisionInput, ExecutableArtifact, ExecutableArtifactKind,
+        FunctionRevisionRecord, FunctionSemanticHashVersion, RevisionPair, StoredSourceRevision,
+        StoredSourceUnit, VerifiedStandardLibrarySnapshot,
     },
     security::{
         AuthenticatedSession, ExecuteDecision, ExecuteDenial, ExecuteGrant, InvocationTarget,
@@ -77,39 +89,30 @@ use orna_core::{
     types::{ResolvedType, TypeDescriptor},
     value::{EnumValue, FunctionArgument, OpaqueValue, RecordValue, RuntimeValue},
 };
-#[cfg(feature = "test-hooks")]
-use orna_core::inspect_carrier::{InspectCarrierEnvelope, InspectCarrierKind};
-#[cfg(feature = "test-hooks")]
-use orna_core::system::{
-    SYS_INSPECT_CALLS_TYPE_ID, SYS_INSPECT_INVOCATION_NODES_TYPE_ID,
-    SYS_INSPECT_PRESENTATION_CANDIDATES_TYPE_ID, SYS_INSPECT_RESOURCES_TYPE_ID,
-    SYS_INSPECT_RUNTIME_BINDINGS_TYPE_ID, SYS_INSPECT_SECURITY_DECISIONS_TYPE_ID,
-    SYS_INSPECT_SNAPSHOT_TYPE_ID, SYS_INSPECT_STATE_CELLS_TYPE_ID, SYS_INSPECT_UI_NODES_TYPE_ID,
-};
-#[cfg(feature = "test-hooks")]
-use orna_core::value::OpaqueCodecRegistry;
 use orna_postgres::{
     AuthenticatedRawCallResult, AuthenticatedServerResourceResult, PostgresKernel,
-    ResourceCancellation,
-    PostgresKernelError, SealedInvocationResult, ServerInsertError, ServerMutationError,
-    ServerUpdateError,
+    PostgresKernelError, ResourceCancellation, SealedInvocationResult, ServerInsertError,
+    ServerMutationError, ServerUpdateError,
 };
 use orna_protocol::{
-    CallFailure, Channel, ClientFrame, ConnectionError, Event, MAX_RESOURCE_WINDOW, ProtocolConnection,
-    RawCall, ResourceArgument, ResourceKind, ResourceRequest, ServerAction, ServerFrame,
-    decode_active_server_frame, decode_constructed_invocation_event_frame,
-    decode_constructed_server_frame, decode_invocation_event_batch,
-    decode_registered_server_frame, decode_server_frame, encode_active_client_frame,
-    encode_active_server_frame, encode_client_frame, encode_constructed_client_frame,
-    encode_constructed_value, encode_invocation_event_batch, encode_invoke_request,
-    encode_registered_client_frame,
+    CallFailure, Channel, ClientFrame, ConnectionError, Event, MAX_RESOURCE_WINDOW,
+    ProtocolConnection, RawCall, ResourceArgument, ResourceKind, ResourceRequest, ServerAction,
+    ServerFrame, decode_active_server_frame, decode_constructed_invocation_event_frame,
+    decode_constructed_server_frame, decode_invocation_event_batch, decode_registered_server_frame,
+    decode_server_frame, encode_active_client_frame, encode_active_server_frame,
+    encode_client_frame, encode_constructed_client_frame, encode_constructed_value,
+    encode_invocation_event_batch, encode_invoke_request, encode_registered_client_frame,
 };
 #[cfg(feature = "test-hooks")]
 use orna_protocol::{
     ResourceCancel, ResourceCancellationCode, ResourceClientFrame, ResourceServerFrame,
-    decode_resource_client_frame,
-    ResourceWindowUpdate, decode_resource_server_frame, encode_resource_client_frame,
-    encode_resource_server_frame,
+    ResourceWindowUpdate, decode_resource_client_frame, decode_resource_server_frame,
+    encode_resource_client_frame, encode_resource_server_frame,
+};
+#[cfg(feature = "test-hooks")]
+use orna_server::{
+    InstalledClientResourceExecutor, RawResourceRequestAuthorizer,
+    serve_local_raw_stream_with_resource_authorizer,
 };
 use orna_server::{
     InstalledInvokeError, InstalledInvokeErrorKind, InstalledInvokeOutcome, InstalledInvokeRequest,
@@ -117,18 +120,14 @@ use orna_server::{
     OpenStandardDatabaseError, RawClientDispatch, open_standard_database, run_invoke_with_kernel,
     serve_local_raw_stream,
 };
-#[cfg(feature = "test-hooks")]
-use orna_server::{
-    InstalledClientResourceExecutor, RawResourceRequestAuthorizer,
-    serve_local_raw_stream_with_resource_authorizer,
-};
 use orna_standard::{
-    BOOLEAN_TYPE_ID, BYTE_STREAM_MAGIC, STD_ACTION_TYPE_ID, JSON_MAGIC, OPAQUE_TOKEN_TYPE_ID,
-    STANDARD_LIBRARY_V3_REVISION_ID, STANDARD_LIBRARY_V5_REVISION_ID, STD_IO_BYTE_STREAM_TYPE_ID,
-    STD_JSON_ENCODE_FUNCTION_ID, STD_JSON_ENCODE_FUNCTION_REVISION_ID, STD_JSON_ENCODE_PARAMETER_ID,
-    STD_JSON_VALUE_TYPE_ID, STD_TERMINAL_DOCUMENT_TYPE_ID, registered_opaque_codecs,
-    retained_standard_library_snapshot, retained_standard_library_v2_snapshot,
-    retained_standard_library_v3_snapshot, retained_standard_library_v6_snapshot, verify_standard_library_snapshot,
+    BOOLEAN_TYPE_ID, BYTE_STREAM_MAGIC, JSON_MAGIC, OPAQUE_TOKEN_TYPE_ID,
+    STANDARD_LIBRARY_V3_REVISION_ID, STANDARD_LIBRARY_V5_REVISION_ID, STD_ACTION_TYPE_ID,
+    STD_IO_BYTE_STREAM_TYPE_ID, STD_JSON_ENCODE_FUNCTION_ID, STD_JSON_ENCODE_FUNCTION_REVISION_ID,
+    STD_JSON_ENCODE_PARAMETER_ID, STD_JSON_VALUE_TYPE_ID, STD_TERMINAL_DOCUMENT_TYPE_ID,
+    registered_opaque_codecs, retained_standard_library_snapshot,
+    retained_standard_library_v2_snapshot, retained_standard_library_v3_snapshot,
+    retained_standard_library_v6_snapshot, verify_standard_library_snapshot,
     verify_standard_library_v2_snapshot, verify_standard_library_v3_snapshot,
     verify_standard_library_v6_snapshot,
 };
@@ -166,11 +165,7 @@ impl RecordingInstalledResourceExecutor {
     ) -> Self {
         Self {
             inner: InstalledClientResourceExecutor::new_with_stream_and_resource_authorizer(
-                kernel,
-                session,
-                active,
-                stream,
-                authorizer,
+                kernel, session, active, stream, authorizer,
             ),
             execute_count: 0,
             inspect_count: 0,
@@ -199,6 +194,9 @@ impl ClientResourceExecutor for RecordingInstalledResourceExecutor {
 
     fn cancel(&mut self, request: ClientResourceRequest) -> ClientResourceCompletion {
         self.inner.cancel(request)
+    }
+    fn abandon(&mut self, request: ClientResourceRequest) -> Result<(), String> {
+        self.inner.abandon(request)
     }
 
     fn inspect(&mut self, request: ClientInspectRequest) -> Result<RuntimeValue, String> {
@@ -291,22 +289,21 @@ const RAW_CLIENT_FUNCTION_SOURCE: &str = "CREATE SCHEMA app;\n\
     SECURITY INVOKER TRANSACTION READ ONLY VOLATILITY STABLE\n\
     AS SELECT assignment.marker FROM app.assignment assignment;\n\
     CREATE CLIENT FUNCTION app.enabled() RETURNS BOOLEAN RETURN TRUE;\n";
-const RAW_EXPRESSION_CLIENT_FUNCTION_SOURCE: &str = include_str!("fixtures/expression_client_dogfood.orna");
-const RAW_ACTION_SERVER_SOURCE: &str = "CREATE SCHEMA action_fixture;\n";
-const RAW_ACTION_CLIENT_SOURCE: &str = "CREATE CLIENT FUNCTION action_fixture.call(p_value INTEGER)\n\
-    RETURNS std.Action\n\
-    AS std.action.call(\n\
-      target => std.invoke.echo,\n\
-      arguments => std.call.args(p_value => p_value)\n\
-    );\n\
-    CREATE CLIENT FUNCTION action_fixture.local(p_value INTEGER)\n\
-    RETURNS INTEGER AS p_value;\n\
-    CREATE CLIENT FUNCTION action_fixture.call_local(p_value INTEGER)\n\
-    RETURNS std.Action\n\
-    AS std.action.call(\n\
-      target => action_fixture.local,\n\
-      arguments => std.call.args(p_value => p_value)\n\
-    );\n";
+const RAW_EXPRESSION_CLIENT_FUNCTION_SOURCE: &str =
+    include_str!("fixtures/expression_client_dogfood.orna");
+const RAW_ACTION_SOURCE: &str = include_str!("fixtures/action_dogfood.orna");
+#[cfg(feature = "test-hooks")]
+const RAW_ACTION_CLIENT_MARKER: &str = "CREATE CLIENT FUNCTION action_fixture.call";
+#[cfg(feature = "test-hooks")]
+fn action_source_parts() -> TestResult<(&'static str, &'static str)> {
+    let client_start = RAW_ACTION_SOURCE
+        .find(RAW_ACTION_CLIENT_MARKER)
+        .ok_or_else(|| failure("action fixture is missing its CLIENT source marker"))?;
+    let server_source = RAW_ACTION_SOURCE[..client_start]
+        .strip_suffix('\n')
+        .ok_or_else(|| failure("action fixture is missing the server/client source separator"))?;
+    Ok((server_source, &RAW_ACTION_SOURCE[client_start..]))
+}
 const RAW_EXTERNAL_CAPABILITY_SOURCE: &str = "CREATE SCHEMA cap;\n\
     CREATE EXTERNAL CLIENT FUNCTION cap.read() RETURNS TEXT\n\
     RUNTIME CONTRACT 'std.fs.read@1'\n\
@@ -591,10 +588,11 @@ fn dispatches_raw_client_calls_through_security_audit_and_evaluation() -> TestRe
             let runtime = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
-                .map_err(|error| failure(format!("raw CLIENT live runtime could not start: {error}")))?;
-            runtime.block_on(
-                dispatches_raw_client_calls_through_security_audit_and_evaluation_inner(),
-            )
+                .map_err(|error| {
+                    failure(format!("raw CLIENT live runtime could not start: {error}"))
+                })?;
+            runtime
+                .block_on(dispatches_raw_client_calls_through_security_audit_and_evaluation_inner())
         })
         .map_err(|error| failure(format!("raw CLIENT live thread could not start: {error}")))?;
     match handle.join() {
@@ -603,7 +601,8 @@ fn dispatches_raw_client_calls_through_security_audit_and_evaluation() -> TestRe
     }
 }
 
-async fn dispatches_raw_client_calls_through_security_audit_and_evaluation_inner() -> TestResult<()> {
+async fn dispatches_raw_client_calls_through_security_audit_and_evaluation_inner() -> TestResult<()>
+{
     with_test_database(|database| async move {
         let kernel = kernel(&database)?;
         let (active, standard_upgrade, client_function, server_function) =
@@ -1294,10 +1293,19 @@ fn proves_standard_invocation_dogfooding_through_sealed_sys_invoke() -> TestResu
             let runtime = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
-                .map_err(|error| failure(format!("standard invocation live runtime could not start: {error}")))?;
-            runtime.block_on(proves_standard_invocation_dogfooding_through_sealed_sys_invoke_inner())
+                .map_err(|error| {
+                    failure(format!(
+                        "standard invocation live runtime could not start: {error}"
+                    ))
+                })?;
+            runtime
+                .block_on(proves_standard_invocation_dogfooding_through_sealed_sys_invoke_inner())
         })
-        .map_err(|error| failure(format!("standard invocation live thread could not start: {error}")))?;
+        .map_err(|error| {
+            failure(format!(
+                "standard invocation live thread could not start: {error}"
+            ))
+        })?;
     match handle.join() {
         Ok(result) => result,
         Err(_) => Err(failure("standard invocation live thread panicked")),
@@ -2170,7 +2178,8 @@ async fn proves_installed_orna_invoke_end_to_end_against_postgres() -> TestResul
 #[cfg(feature = "test-hooks")]
 #[tokio::test]
 #[ignore = "requires the Compose PostgreSQL development service"]
-async fn proves_scalar_client_resource_pending_continues_through_installed_evaluator() -> TestResult<()> {
+async fn proves_scalar_client_resource_pending_continues_through_installed_evaluator()
+-> TestResult<()> {
     const CONNECTION_PROTOCOL_MAJOR: u16 = 5;
 
     with_test_database(|database| async move {
@@ -2195,8 +2204,9 @@ async fn proves_scalar_client_resource_pending_continues_through_installed_evalu
             .standard()
             .cloned()
             .ok_or_else(|| failure("scalar resource fixture has no checked standard source"))?;
-        let standard = check_standard_library_source(&standard_source)
-            .map_err(|error| failure(format!("installed standard source check failed: {error:?}")))?;
+        let standard = check_standard_library_source(&standard_source).map_err(|error| {
+            failure(format!("installed standard source check failed: {error:?}"))
+        })?;
         let (active, client, target, _call_site) =
             install_scalar_resource_client_fixture(&kernel, &active, &standard).await?;
         let mut function_targets = active
@@ -2267,7 +2277,9 @@ async fn proves_scalar_client_resource_pending_continues_through_installed_evalu
         });
         let dispatch = finish_session(dispatch, connection, "scalar pending socket cleanup")?;
         let SealedInvocationResult::Completed { events, .. } = dispatch else {
-            return Err(failure("scalar pending resource did not complete the sealed invocation"));
+            return Err(failure(
+                "scalar pending resource did not complete the sealed invocation",
+            ));
         };
         let records = events.records();
         require(
@@ -2277,12 +2289,17 @@ async fn proves_scalar_client_resource_pending_continues_through_installed_evalu
                 && records[2].event().kind() == InvocationEventKind::InvocationCompleted,
             "scalar pending resource did not retain the completed invocation event sequence",
         )?;
-        let InvocationEventBody::ValueBatch { schema: None, values } = records[1].event().body() else {
-            return Err(failure("scalar pending resource completion did not carry a plain typed batch"));
+        let InvocationEventBody::ValueBatch {
+            schema: None,
+            values,
+        } = records[1].event().body()
+        else {
+            return Err(failure(
+                "scalar pending resource completion did not carry a plain typed batch",
+            ));
         };
         require(
-            values.len() == 1
-                && values[0].value() == &RuntimeValue::Integer(43),
+            values.len() == 1 && values[0].value() == &RuntimeValue::Integer(43),
             "scalar pending resource completion was not typed INTEGER",
         )?;
         require(
@@ -2837,19 +2854,26 @@ async fn proves_server_action_resource_trigger_through_authenticated_executor() 
         kernel.bootstrap().await?;
         let empty = kernel.recover().await?;
         let version_five = install_v5_standard(&kernel, &empty, &database).await?;
-        let upgrade_v6 = orna_standard::prepare_standard_upgrade_v5_to_v6(&version_five)
-            .map_err(|error| failure(format!("prepare V5-to-V6 standard upgrade failed: {error:?}")))?;
+        let upgrade_v6 =
+            orna_standard::prepare_standard_upgrade_v5_to_v6(&version_five).map_err(|error| {
+                failure(format!(
+                    "prepare V5-to-V6 standard upgrade failed: {error:?}"
+                ))
+            })?;
         let active = kernel
             .apply_standard_upgrade(&upgrade_v6)
             .await
-            .map_err(|error| failure(format!("apply V5-to-V6 standard upgrade failed: {error:?}")))?;
+            .map_err(|error| {
+                failure(format!("apply V5-to-V6 standard upgrade failed: {error:?}"))
+            })?;
         let standard_source = active
             .catalogue_hash_context()
             .standard()
             .cloned()
             .ok_or_else(|| failure("action fixture has no checked standard source"))?;
-        let standard = check_standard_library_source(&standard_source)
-            .map_err(|error| failure(format!("installed standard source check failed: {error:?}")))?;
+        let standard = check_standard_library_source(&standard_source).map_err(|error| {
+            failure(format!("installed standard source check failed: {error:?}"))
+        })?;
         let (
             active,
             client,
@@ -2867,19 +2891,15 @@ async fn proves_server_action_resource_trigger_through_authenticated_executor() 
             .iter()
             .map(|function| SecurityFunctionTarget::application(function.id()))
             .collect::<Vec<_>>();
-        function_targets.extend(
-            standard
-                .verified_snapshot()
-                .executables()
-                .iter()
-                .map(|executable| {
-                    SecurityFunctionTarget::verified_standard(
-                        executable.function(),
-                        standard.verified_snapshot().revision(),
-                        executable.revision().id(),
-                    )
-                }),
-        );
+        function_targets.extend(standard.verified_snapshot().executables().iter().map(
+            |executable| {
+                SecurityFunctionTarget::verified_standard(
+                    executable.function(),
+                    standard.verified_snapshot().revision(),
+                    executable.revision().id(),
+                )
+            },
+        ));
         let security = SecuritySnapshot::new_with_function_targets_and_local_peer_credentials(
             active.pair(),
             function_targets,
@@ -2899,46 +2919,43 @@ async fn proves_server_action_resource_trigger_through_authenticated_executor() 
         )?;
         let security = kernel.replace_security_snapshot(&security).await?;
         let session = kernel.authenticate_local_peer(uid).await?;
-        let authorisation = match security.authorise_execute(
-            &session,
-            InvocationTarget::new(client, active.pair()),
-        ) {
+        let authorisation = match security
+            .authorise_execute(&session, InvocationTarget::new(client, active.pair()))
+        {
             ExecuteDecision::Allowed(authorisation) => authorisation,
             ExecuteDecision::Denied(denial) => {
-                return Err(failure(format!("installed action grant was denied: {denial:?}")))
+                return Err(failure(format!(
+                    "installed action grant was denied: {denial:?}"
+                )));
             }
         };
-        let argument = FunctionArgument::new(
-            client_parameter,
-            RuntimeValue::Integer(43),
-        )?;
+        let argument = FunctionArgument::new(client_parameter, RuntimeValue::Integer(43))?;
         let result = evaluate_client_function_with_arguments(
             &active,
             &authorisation,
             std::slice::from_ref(&argument),
         )?;
-        let local_authorisation = match security.authorise_execute(
-            &session,
-            InvocationTarget::new(local_client, active.pair()),
-        ) {
+        let local_authorisation = match security
+            .authorise_execute(&session, InvocationTarget::new(local_client, active.pair()))
+        {
             ExecuteDecision::Allowed(authorisation) => authorisation,
             ExecuteDecision::Denied(denial) => {
                 return Err(failure(format!(
                     "installed local action grant was denied: {denial:?}"
-                )))
+                )));
             }
         };
-        let local_argument = FunctionArgument::new(
-            local_client_parameter,
-            RuntimeValue::Integer(43),
-        )?;
+        let local_argument =
+            FunctionArgument::new(local_client_parameter, RuntimeValue::Integer(43))?;
         let local_result = evaluate_client_function_with_arguments(
             &active,
             &local_authorisation,
             std::slice::from_ref(&local_argument),
         )?;
         let RuntimeValue::Opaque(action) = result.value() else {
-            return Err(failure("action CLIENT function did not return an opaque action value"));
+            return Err(failure(
+                "action CLIENT function did not return an opaque action value",
+            ));
         };
         let descriptor = decode_action_payload(&active, action.canonical_payload())?;
         require(
@@ -2995,14 +3012,14 @@ async fn proves_server_action_resource_trigger_through_authenticated_executor() 
             &mut state,
             &mut executor,
         );
-        let action_result = finish_pending_client_action(
-            &active,
-            &mut action_state,
-            &mut executor,
-            action_result,
-        )
-        .await
-        .map_err(|error| failure(format!("installed action resource completion failed: {error:?}")));
+        let action_result =
+            finish_pending_client_action(&active, &mut action_state, &mut executor, action_result)
+                .await
+                .map_err(|error| {
+                    failure(format!(
+                        "installed action resource completion failed: {error:?}"
+                    ))
+                });
         drop(executor);
         let connection = connection.await.map_err(Into::into).and_then(|result| {
             result.map_err(|error| -> Box<dyn Error + Send + Sync> { Box::new(error) })
@@ -3091,26 +3108,36 @@ async fn proves_server_action_resource_trigger_through_authenticated_executor() 
 #[cfg(feature = "test-hooks")]
 #[tokio::test]
 #[ignore = "requires the Compose PostgreSQL development service"]
-async fn proves_server_action_denial_stays_inside_authenticated_resource_trigger() -> TestResult<()> {
+async fn proves_server_action_denial_stays_inside_authenticated_resource_trigger() -> TestResult<()>
+{
     with_test_database(|database| async move {
         let uid = nix::unistd::geteuid().as_raw();
         let kernel = kernel(&database)?;
         kernel.bootstrap().await?;
         let empty = kernel.recover().await?;
         let version_five = install_v5_standard(&kernel, &empty, &database).await?;
-        let upgrade_v6 = orna_standard::prepare_standard_upgrade_v5_to_v6(&version_five)
-            .map_err(|error| failure(format!("prepare V5-to-V6 standard upgrade failed: {error:?}")))?;
+        let upgrade_v6 =
+            orna_standard::prepare_standard_upgrade_v5_to_v6(&version_five).map_err(|error| {
+                failure(format!(
+                    "prepare V5-to-V6 standard upgrade failed: {error:?}"
+                ))
+            })?;
         let active = kernel
             .apply_standard_upgrade(&upgrade_v6)
             .await
-            .map_err(|error| failure(format!("apply V5-to-V6 standard upgrade failed: {error:?}")))?;
+            .map_err(|error| {
+                failure(format!("apply V5-to-V6 standard upgrade failed: {error:?}"))
+            })?;
         let standard_source = active
             .catalogue_hash_context()
             .standard()
             .cloned()
             .ok_or_else(|| failure("action denial fixture has no checked standard source"))?;
-        let standard = check_standard_library_source(&standard_source)
-            .map_err(|error| failure(format!("action denial standard source check failed: {error:?}")))?;
+        let standard = check_standard_library_source(&standard_source).map_err(|error| {
+            failure(format!(
+                "action denial standard source check failed: {error:?}"
+            ))
+        })?;
         let (active, client, target, client_parameter, target_parameter, _, _, _, _) =
             install_action_client_fixture(&kernel, &active, &standard).await?;
         let mut function_targets = active
@@ -3119,19 +3146,15 @@ async fn proves_server_action_denial_stays_inside_authenticated_resource_trigger
             .iter()
             .map(|function| SecurityFunctionTarget::application(function.id()))
             .collect::<Vec<_>>();
-        function_targets.extend(
-            standard
-                .verified_snapshot()
-                .executables()
-                .iter()
-                .map(|executable| {
-                    SecurityFunctionTarget::verified_standard(
-                        executable.function(),
-                        standard.verified_snapshot().revision(),
-                        executable.revision().id(),
-                    )
-                }),
-        );
+        function_targets.extend(standard.verified_snapshot().executables().iter().map(
+            |executable| {
+                SecurityFunctionTarget::verified_standard(
+                    executable.function(),
+                    standard.verified_snapshot().revision(),
+                    executable.revision().id(),
+                )
+            },
+        ));
         let security = SecuritySnapshot::new_with_function_targets_and_local_peer_credentials(
             active.pair(),
             function_targets,
@@ -3146,28 +3169,26 @@ async fn proves_server_action_denial_stays_inside_authenticated_resource_trigger
         )?;
         let security = kernel.replace_security_snapshot(&security).await?;
         let session = kernel.authenticate_local_peer(uid).await?;
-        let authorisation = match security.authorise_execute(
-            &session,
-            InvocationTarget::new(client, active.pair()),
-        ) {
+        let authorisation = match security
+            .authorise_execute(&session, InvocationTarget::new(client, active.pair()))
+        {
             ExecuteDecision::Allowed(authorisation) => authorisation,
             ExecuteDecision::Denied(denial) => {
                 return Err(failure(format!(
                     "action denial client grant was denied: {denial:?}"
-                )))
+                )));
             }
         };
-        let argument = FunctionArgument::new(
-            client_parameter,
-            RuntimeValue::Integer(43),
-        )?;
+        let argument = FunctionArgument::new(client_parameter, RuntimeValue::Integer(43))?;
         let result = evaluate_client_function_with_arguments(
             &active,
             &authorisation,
             std::slice::from_ref(&argument),
         )?;
         let RuntimeValue::Opaque(action) = result.value() else {
-            return Err(failure("action denial CLIENT function did not return an opaque action value"));
+            return Err(failure(
+                "action denial CLIENT function did not return an opaque action value",
+            ));
         };
         let descriptor = decode_action_payload(&active, action.canonical_payload())?;
         require(
@@ -3211,14 +3232,14 @@ async fn proves_server_action_denial_stays_inside_authenticated_resource_trigger
             &mut state,
             &mut executor,
         );
-        let action_result = finish_pending_client_action(
-            &active,
-            &mut action_state,
-            &mut executor,
-            action_result,
-        )
-        .await
-        .map_err(|error| failure(format!("installed action resource completion failed: {error:?}")));
+        let action_result =
+            finish_pending_client_action(&active, &mut action_state, &mut executor, action_result)
+                .await
+                .map_err(|error| {
+                    failure(format!(
+                        "installed action resource completion failed: {error:?}"
+                    ))
+                });
         drop(executor);
         let connection = connection.await.map_err(Into::into).and_then(|result| {
             result.map_err(|error| -> Box<dyn Error + Send + Sync> { Box::new(error) })
@@ -3257,8 +3278,8 @@ async fn proves_server_action_denial_stays_inside_authenticated_resource_trigger
                         && decision.effective_principal().is_none()
                         && decision.authorising_principal().is_none()
                 }),
-                "denied SERVER action did not append one redacted EXECUTE denial",
-            )?;
+            "denied SERVER action did not append one redacted EXECUTE denial",
+        )?;
         let invocation_rows_after = invocation_audit_rows(&database).await?;
         require(
             invocation_rows_after.len() == invocation_rows_before.len() + 1
@@ -3419,9 +3440,10 @@ async fn proves_v5_json_value_and_encode_through_installed_sealed_invoke() -> Te
         kernel.bootstrap().await?;
         let empty = kernel.recover().await?;
         let active = install_v5_standard(&kernel, &empty, &database).await?;
-        let standard = active.catalogue_hash_context().standard().ok_or_else(|| {
-            failure("the V5 install did not pin a verified standard snapshot")
-        })?;
+        let standard = active
+            .catalogue_hash_context()
+            .standard()
+            .ok_or_else(|| failure("the V5 install did not pin a verified standard snapshot"))?;
         require(
             standard.revision() == STANDARD_LIBRARY_V5_REVISION_ID
                 && standard
@@ -3451,12 +3473,8 @@ async fn proves_v5_json_value_and_encode_through_installed_sealed_invoke() -> Te
                 .to_be_bytes(),
         );
         json_payload.extend_from_slice(body);
-        let json_value = OpaqueValue::new(
-            &active,
-            &registry,
-            STD_JSON_VALUE_TYPE_ID,
-            &json_payload,
-        )?;
+        let json_value =
+            OpaqueValue::new(&active, &registry, STD_JSON_VALUE_TYPE_ID, &json_payload)?;
         require(
             json_value.canonical_payload() == json_payload.as_slice(),
             "the V5 JSON codec did not retain the canonical value payload",
@@ -3494,7 +3512,10 @@ async fn proves_v5_json_value_and_encode_through_installed_sealed_invoke() -> Te
                 PrincipalStatus::Active,
             )],
             vec![],
-            vec![ExecuteGrant::new(RAW_CLIENT_USER, STD_JSON_ENCODE_FUNCTION_ID)],
+            vec![ExecuteGrant::new(
+                RAW_CLIENT_USER,
+                STD_JSON_ENCODE_FUNCTION_ID,
+            )],
             vec![LocalPeerCredential::new(uid, RAW_CLIENT_USER)],
         )?;
         kernel.replace_security_snapshot(&security).await?;
@@ -4201,7 +4222,11 @@ fn raw_identity_selected_server_read_authorises_binds_and_redacts() -> TestResul
             let runtime = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
-                .map_err(|error| failure(format!("raw identity live runtime could not start: {error}")))?;
+                .map_err(|error| {
+                    failure(format!(
+                        "raw identity live runtime could not start: {error}"
+                    ))
+                })?;
             runtime.block_on(raw_identity_selected_server_read_authorises_binds_and_redacts_inner())
         })
         .map_err(|error| failure(format!("raw identity live thread could not start: {error}")))?;
@@ -4814,10 +4839,18 @@ fn server_raw_reference_mutation_authority_selection_and_audit() -> TestResult<(
             let runtime = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
-                .map_err(|error| failure(format!("raw reference mutation live runtime could not start: {error}")))?;
+                .map_err(|error| {
+                    failure(format!(
+                        "raw reference mutation live runtime could not start: {error}"
+                    ))
+                })?;
             runtime.block_on(server_raw_reference_mutation_authority_selection_and_audit_inner())
         })
-        .map_err(|error| failure(format!("raw reference mutation live thread could not start: {error}")))?;
+        .map_err(|error| {
+            failure(format!(
+                "raw reference mutation live thread could not start: {error}"
+            ))
+        })?;
     match handle.join() {
         Ok(result) => result,
         Err(_) => Err(failure("raw reference mutation live thread panicked")),
@@ -5710,20 +5743,23 @@ async fn server_raw_integer_dispatch_denies_then_grants_and_audits_exact_values(
 
 #[tokio::test]
 #[ignore = "requires the Compose PostgreSQL development service"]
-async fn authenticated_stream_resource_dispatches_allowed_and_denied_with_redacted_audit() -> TestResult<()> {
+async fn authenticated_stream_resource_dispatches_allowed_and_denied_with_redacted_audit()
+-> TestResult<()> {
     const RESOURCE_VALUE: &str = "resource-value";
     with_test_database(|database| async move {
         let kernel = kernel(&database)?;
-        let (
-            active,
-            standard_upgrade,
-            _client_function,
-            _server_function,
-        ) = install_raw_client_fixture(&kernel).await?;
+        let (active, standard_upgrade, _client_function, _server_function) =
+            install_raw_client_fixture(&kernel).await?;
         let (active, _resource_client, target, parameter, call_site) =
-            install_stream_resource_client_fixture(&kernel, &active, standard_upgrade.checked_standard_library())
-                .await
-                .map_err(|error| failure(format!("install stream resource fixture failed: {error:?}")))?;
+            install_stream_resource_client_fixture(
+                &kernel,
+                &active,
+                standard_upgrade.checked_standard_library(),
+            )
+            .await
+            .map_err(|error| {
+                failure(format!("install stream resource fixture failed: {error:?}"))
+            })?;
         let create = active
             .catalogue()
             .functions()
@@ -5736,14 +5772,18 @@ async fn authenticated_stream_resource_dispatches_allowed_and_denied_with_redact
             .function_by_id(create)
             .ok_or_else(|| failure("resource_fixture.create is absent from the active catalogue"))?
             .parameter_by_name("p_marker")
-            .ok_or_else(|| failure("resource_fixture.create.p_marker is absent from the active catalogue"))?
+            .ok_or_else(|| {
+                failure("resource_fixture.create.p_marker is absent from the active catalogue")
+            })?
             .id();
         let sequence_parameter = active
             .catalogue()
             .function_by_id(create)
             .ok_or_else(|| failure("resource_fixture.create is absent from the active catalogue"))?
             .parameter_by_name("p_sequence")
-            .ok_or_else(|| failure("resource_fixture.create.p_sequence is absent from the active catalogue"))?
+            .ok_or_else(|| {
+                failure("resource_fixture.create.p_sequence is absent from the active catalogue")
+            })?
             .id();
         kernel
             .execute_server_insert(
@@ -5757,7 +5797,11 @@ async fn authenticated_stream_resource_dispatches_allowed_and_denied_with_redact
                 ],
             )
             .await
-            .map_err(|error| failure(format!("insert stream resource fixture row failed: {error:?}")))?;
+            .map_err(|error| {
+                failure(format!(
+                    "insert stream resource fixture row failed: {error:?}"
+                ))
+            })?;
         let principal = Principal::new(
             RAW_CLIENT_USER,
             PrincipalKind::User,
@@ -5818,11 +5862,26 @@ async fn authenticated_stream_resource_dispatches_allowed_and_denied_with_redact
                 resource_kind,
                 values,
             } => {
-                require(stream_id == request.stream_id, "stream resource changed stream identity")?;
-                require(request_id == request.request_id, "stream resource changed request identity")?;
-                require(target_revision == active.pair(), "stream resource changed active revision")?;
-                require(resource_kind == ResourceKind::Stream, "stream resource changed result kind")?;
-                require(values == [RuntimeValue::Text(RESOURCE_VALUE.into())], "stream resource returned the wrong text")?;
+                require(
+                    stream_id == request.stream_id,
+                    "stream resource changed stream identity",
+                )?;
+                require(
+                    request_id == request.request_id,
+                    "stream resource changed request identity",
+                )?;
+                require(
+                    target_revision == active.pair(),
+                    "stream resource changed active revision",
+                )?;
+                require(
+                    resource_kind == ResourceKind::Stream,
+                    "stream resource changed result kind",
+                )?;
+                require(
+                    values == [RuntimeValue::Text(RESOURCE_VALUE.into())],
+                    "stream resource returned the wrong text",
+                )?;
                 require(
                     nested_invocation_id != InvocationId::from_bytes([0; 16])
                         && nested_invocation_id != request.request_id
@@ -5831,8 +5890,13 @@ async fn authenticated_stream_resource_dispatches_allowed_and_denied_with_redact
                 )?;
                 nested_invocation_id
             }
-            AuthenticatedServerResourceResult::Failed { failure: call_failure, .. } => {
-                return Err(failure(format!("stream resource unexpectedly failed: {call_failure:?}")));
+            AuthenticatedServerResourceResult::Failed {
+                failure: call_failure,
+                ..
+            } => {
+                return Err(failure(format!(
+                    "stream resource unexpectedly failed: {call_failure:?}"
+                )));
             }
         };
         let duplicate = kernel
@@ -5852,9 +5916,7 @@ async fn authenticated_stream_resource_dispatches_allowed_and_denied_with_redact
             request_id: InvocationId::new(),
             ..request.clone()
         };
-        let denied = kernel
-            .replace_security_snapshot(&snapshot(vec![]))
-            .await?;
+        let denied = kernel.replace_security_snapshot(&snapshot(vec![])).await?;
         let denied_session = denied.bind_authenticated_session(RAW_CLIENT_USER, vec![])?;
         let failed = kernel
             .dispatch_authenticated_server_resource(&denied_session, &denied_request)
@@ -5869,20 +5931,23 @@ async fn authenticated_stream_resource_dispatches_allowed_and_denied_with_redact
             "stream resource without its EXECUTE grant was not denied",
         )?;
 
-
         let audits = kernel.recover_security_audit_events().await?;
         require(
             audits.len() == 2
                 && audits[0].decision().kind() == SecurityAuditKind::Execute
                 && audits[0].decision().outcome() == SecurityAuditOutcome::Allowed
-                && audits[0].decision().target() == Some(InvocationTarget::new(target, active.pair()))
+                && audits[0].decision().target()
+                    == Some(InvocationTarget::new(target, active.pair()))
                 && audits[0].decision().effective_principal() == Some(RAW_CLIENT_USER)
                 && audits[0].decision().authorising_principal() == Some(RAW_CLIENT_USER)
                 && audits[1].decision().kind() == SecurityAuditKind::Execute
                 && audits[1].decision().outcome() == SecurityAuditOutcome::Denied
-                && audits[1].decision().target() == Some(InvocationTarget::new(target, active.pair()))
+                && audits[1].decision().target()
+                    == Some(InvocationTarget::new(target, active.pair()))
                 && audits[1].decision().denial()
-                    == Some(SecurityAuditDenial::Execute(ExecuteDenial::MissingExecuteGrant))
+                    == Some(SecurityAuditDenial::Execute(
+                        ExecuteDenial::MissingExecuteGrant,
+                    ))
                 && audits[1].decision().effective_principal().is_none()
                 && audits[1].decision().authorising_principal().is_none(),
             "stream resource audit evidence exposed an unredacted decision",
@@ -6578,7 +6643,10 @@ async fn direct_scalar_resource_holds_active_revision_lock_through_execution() -
         let changed_source = SourceBundle::new(active.source().units().iter().enumerate().map(
             |(ordinal, unit)| {
                 let content = if ordinal == last_ordinal {
-                    format!("{}\n-- direct scalar resource lock interleave", unit.content())
+                    format!(
+                        "{}\n-- direct scalar resource lock interleave",
+                        unit.content()
+                    )
                 } else {
                     unit.content().to_owned()
                 };
@@ -6615,7 +6683,9 @@ async fn direct_scalar_resource_holds_active_revision_lock_through_execution() -
         });
         timeout(Duration::from_secs(5), reached.wait())
             .await
-            .map_err(|_| failure("direct scalar resource dispatch did not reach validation barrier"))?;
+            .map_err(|_| {
+                failure("direct scalar resource dispatch did not reach validation barrier")
+            })?;
 
         let waiter = database.open().await?;
         let apply_kernel = kernel.clone();
@@ -6653,15 +6723,14 @@ async fn direct_scalar_resource_holds_active_revision_lock_through_execution() -
         let dispatched = timeout(Duration::from_secs(5), dispatch)
             .await
             .map_err(|_| failure("direct scalar resource dispatch did not resume"))?;
-        let dispatched = dispatched.map_err(|error| {
-            failure(format!("direct scalar resource task failed: {error}"))
-        })?;
+        let dispatched = dispatched
+            .map_err(|error| failure(format!("direct scalar resource task failed: {error}")))?;
         let dispatched = dispatched?;
         let applied = timeout(Duration::from_secs(5), &mut apply)
             .await
             .map_err(|_| failure("source-only apply did not resume after resource completion"))?;
-        let applied = applied
-            .map_err(|error| failure(format!("source-only apply task failed: {error}")))?;
+        let applied =
+            applied.map_err(|error| failure(format!("source-only apply task failed: {error}")))?;
         let applied = applied?;
         waiter.shutdown().await?;
 
@@ -6710,7 +6779,8 @@ async fn direct_scalar_resource_holds_active_revision_lock_through_execution() -
 #[ignore = "requires the Compose PostgreSQL development service"]
 async fn installed_executor_reclaims_transport_after_terminal_cancellation() -> TestResult<()> {
     with_test_database(|database| async move {
-        let kernel = open_standard_database(kernel(&database)?).await
+        let kernel = open_standard_database(kernel(&database)?)
+            .await
             .map_err(|error| failure(format!("open standard database failed: {error:?}")))?;
         let active = kernel
             .recover()
@@ -6720,9 +6790,13 @@ async fn installed_executor_reclaims_transport_after_terminal_cancellation() -> 
             .catalogue_hash_context()
             .standard()
             .cloned()
-            .ok_or_else(|| failure("executor cancellation fixture has no checked standard source"))?;
-        let checked_standard = check_standard_library_source(&standard_source)
-            .map_err(|error| failure(format!("installed standard source check failed: {error:?}")))?;
+            .ok_or_else(|| {
+                failure("executor cancellation fixture has no checked standard source")
+            })?;
+        let checked_standard =
+            check_standard_library_source(&standard_source).map_err(|error| {
+                failure(format!("installed standard source check failed: {error:?}"))
+            })?;
         let (active, _client, target, parameter, call_site) =
             install_stream_resource_client_fixture(&kernel, &active, &checked_standard).await?;
         let expected_type = match active
@@ -6732,7 +6806,11 @@ async fn installed_executor_reclaims_transport_after_terminal_cancellation() -> 
             .return_type()
         {
             FunctionReturn::Stream(expected_type) => *expected_type,
-            _ => return Err(failure("executor cancellation fixture target is not a stream")),
+            _ => {
+                return Err(failure(
+                    "executor cancellation fixture target is not a stream",
+                ));
+            }
         };
         let arguments = vec![FunctionArgument::new(
             parameter,
@@ -6756,7 +6834,8 @@ async fn installed_executor_reclaims_transport_after_terminal_cancellation() -> 
             context.clone(),
             arguments.clone(),
         )?;
-        let replacement = resource.begin_stream_request_with_context(&active, context, arguments)?;
+        let replacement =
+            resource.begin_stream_request_with_context(&active, context, arguments)?;
         let security = SecuritySnapshot::new_with_local_peer_credentials(
             active.pair(),
             vec![],
@@ -6788,7 +6867,9 @@ async fn installed_executor_reclaims_transport_after_terminal_cancellation() -> 
                 hello == *b"ORNA\x01\x00\x00\x05\x00\x00\x00\x00",
                 "executor cancellation fixture received an invalid handshake",
             )?;
-            server.write_all(b"ORNA\x81\x00\x00\x05\x00\x00\x00\x00").await?;
+            server
+                .write_all(b"ORNA\x81\x00\x00\x05\x00\x00\x00\x00")
+                .await?;
             let ResourceClientFrame::Request(first_wire) = read_resource_client_frame_from_socket(
                 &mut server,
                 &server_active,
@@ -6797,7 +6878,9 @@ async fn installed_executor_reclaims_transport_after_terminal_cancellation() -> 
             .await
             .map_err(|error| failure(format!("first request read failed: {error}")))?
             else {
-                return Err(failure("executor cancellation fixture did not receive its first request"));
+                return Err(failure(
+                    "executor cancellation fixture did not receive its first request",
+                ));
             };
             require(
                 first_wire.stream_id == 1,
@@ -6827,7 +6910,9 @@ async fn installed_executor_reclaims_transport_after_terminal_cancellation() -> 
             .await
             .map_err(|error| failure(format!("cancel read failed: {error}")))?
             else {
-                return Err(failure("executor cancellation fixture did not receive cancel"));
+                return Err(failure(
+                    "executor cancellation fixture did not receive cancel",
+                ));
             };
             require(
                 cancel.stream_id == first_wire.stream_id
@@ -6846,15 +6931,18 @@ async fn installed_executor_reclaims_transport_after_terminal_cancellation() -> 
                 }),
             )
             .await?;
-            let ResourceClientFrame::Request(replacement_wire) = read_resource_client_frame_from_socket(
-                &mut server,
-                &server_active,
-                &server_registry,
-            )
-            .await
-            .map_err(|error| failure(format!("replacement request read failed: {error}")))?
+            let ResourceClientFrame::Request(replacement_wire) =
+                read_resource_client_frame_from_socket(
+                    &mut server,
+                    &server_active,
+                    &server_registry,
+                )
+                .await
+                .map_err(|error| failure(format!("replacement request read failed: {error}")))?
             else {
-                return Err(failure("executor cancellation fixture did not receive replacement request"));
+                return Err(failure(
+                    "executor cancellation fixture did not receive replacement request",
+                ));
             };
             require(
                 replacement_wire.stream_id == 2,
@@ -6887,14 +6975,13 @@ async fn installed_executor_reclaims_transport_after_terminal_cancellation() -> 
             .await?;
             Ok::<(), Box<dyn Error + Send + Sync>>(())
         });
-        let mut executor = InstalledClientResourceExecutor::new_with_stream(
-            kernel,
-            session,
-            active,
-            client,
-        );
+        let mut executor =
+            InstalledClientResourceExecutor::new_with_stream(kernel, session, active, client);
         require(
-            matches!(executor.execute(first.clone()), ClientResourceCompletion::Pending { .. }),
+            matches!(
+                executor.execute(first.clone()),
+                ClientResourceCompletion::Pending { .. }
+            ),
             "first executor resource did not become pending",
         )?;
         tokio::time::timeout(Duration::from_secs(5), accepted_receiver)
@@ -6912,7 +6999,10 @@ async fn installed_executor_reclaims_transport_after_terminal_cancellation() -> 
             "terminal resource cancellation did not complete as cancelled",
         )?;
         require(
-            matches!(executor.execute(replacement), ClientResourceCompletion::Pending { .. }),
+            matches!(
+                executor.execute(replacement),
+                ClientResourceCompletion::Pending { .. }
+            ),
             "executor rejected a replacement after terminal cancellation",
         )?;
         let server_result = tokio::time::timeout(Duration::from_secs(5), server_task)
@@ -6931,7 +7021,10 @@ async fn installed_executor_reclaims_transport_after_terminal_cancellation() -> 
         .await
         .map_err(|_| failure("replacement polling timed out"))?;
         require(
-            matches!(replacement_completion, ClientResourceCompletion::StreamCompleted { .. }),
+            matches!(
+                replacement_completion,
+                ClientResourceCompletion::StreamCompleted { .. }
+            ),
             "replacement resource did not complete after terminal cancellation reclaimed transport",
         )
     })
@@ -6941,7 +7034,8 @@ async fn installed_executor_reclaims_transport_after_terminal_cancellation() -> 
 #[cfg(feature = "test-hooks")]
 #[tokio::test]
 #[ignore = "requires the Compose PostgreSQL development service"]
-async fn installed_resource_socket_delivers_values_and_enforces_windows_and_grants() -> TestResult<()> {
+async fn installed_resource_socket_delivers_values_and_enforces_windows_and_grants()
+-> TestResult<()> {
     with_test_database(|database| async move {
         let kernel = open_standard_database(kernel(&database)?)
             .await
@@ -11681,9 +11775,11 @@ async fn read_resource_server_frame_from_socket(
     active: &ActiveDatabaseRevision,
     registry: &OpaqueCodecRegistry,
 ) -> TestResult<ResourceServerFrame> {
-    Ok(read_resource_server_frame_with_encoded(stream, active, registry)
-        .await?
-        .1)
+    Ok(
+        read_resource_server_frame_with_encoded(stream, active, registry)
+            .await?
+            .1,
+    )
 }
 
 #[cfg(feature = "test-hooks")]
@@ -11698,7 +11794,6 @@ async fn send_resource_client_frame_to_socket(
     Ok(())
 }
 
-
 #[cfg(feature = "test-hooks")]
 fn exact_resource_value_bytes(
     active: &ActiveDatabaseRevision,
@@ -11706,13 +11801,17 @@ fn exact_resource_value_bytes(
     frame: &ResourceServerFrame,
 ) -> TestResult<usize> {
     let ResourceServerFrame::Values(mut values) = frame.clone() else {
-        return Err(failure("exact resource byte accounting requires a values frame"));
+        return Err(failure(
+            "exact resource byte accounting requires a values frame",
+        ));
     };
     values.byte_count = 0;
     match encode_resource_server_frame(active, registry, &ResourceServerFrame::Values(values)) {
         Err(orna_protocol::FrameCodecError::ResourceByteCountMismatch { actual, .. }) => Ok(actual),
         Ok(_) => Err(failure("resource values encoder accepted zero byte credit")),
-        Err(error) => Err(failure(format!("resource values byte accounting failed: {error:?}"))),
+        Err(error) => Err(failure(format!(
+            "resource values byte accounting failed: {error:?}"
+        ))),
     }
 }
 
@@ -11847,10 +11946,20 @@ async fn install_scalar_resource_client_fixture(
     kernel: &PostgresKernel,
     active: &orna_core::revision::ActiveDatabaseRevision,
     standard: &CheckedStandardLibrary,
-) -> TestResult<(orna_core::revision::ActiveDatabaseRevision, FunctionId, FunctionId, CallSiteId)> {
-    let append_source = |active: &orna_core::revision::ActiveDatabaseRevision, body: &str| -> TestResult<SourceBundle> {
+) -> TestResult<(
+    orna_core::revision::ActiveDatabaseRevision,
+    FunctionId,
+    FunctionId,
+    CallSiteId,
+)> {
+    let append_source = |active: &orna_core::revision::ActiveDatabaseRevision,
+                         body: &str|
+     -> TestResult<SourceBundle> {
         if active.source().units().is_empty() {
-            return Ok(SourceBundle::new([SourceUnit::new("resource_fixture.sql", body.to_owned())])?);
+            return Ok(SourceBundle::new([SourceUnit::new(
+                "resource_fixture.sql",
+                body.to_owned(),
+            )])?);
         }
         let last_ordinal = active
             .source()
@@ -11858,16 +11967,21 @@ async fn install_scalar_resource_client_fixture(
             .len()
             .checked_sub(1)
             .ok_or_else(|| failure("scalar resource fixture has no retained source unit"))?;
-        Ok(SourceBundle::new(active.source().units().iter().enumerate().map(
-            |(ordinal, unit)| {
-                let content = if ordinal == last_ordinal {
-                    format!("{}\n{}", unit.content(), body)
-                } else {
-                    unit.content().to_owned()
-                };
-                SourceUnit::new(unit.logical_path(), content)
-            },
-        ))?)
+        Ok(SourceBundle::new(
+            active
+                .source()
+                .units()
+                .iter()
+                .enumerate()
+                .map(|(ordinal, unit)| {
+                    let content = if ordinal == last_ordinal {
+                        format!("{}\n{}", unit.content(), body)
+                    } else {
+                        unit.content().to_owned()
+                    };
+                    SourceUnit::new(unit.logical_path(), content)
+                }),
+        )?)
     };
     let client_context = StandardApplicationCheckContext::try_new(active.catalogue(), standard)?;
     let client_source = append_source(active, RAW_SCALAR_RESOURCE_CLIENT_SOURCE)?;
@@ -11915,10 +12029,14 @@ async fn install_scalar_resource_client_fixture(
         .ok_or_else(|| failure("scalar CLIENT resource fixture is missing its revision"))?;
     let plan = ResourceClientPlan::decode(revision.artifact().payload())?;
     let ClientExpressionNode::Await { expression } = plan.expression() else {
-        return Err(failure("scalar CLIENT resource plan is not an awaited resource"));
+        return Err(failure(
+            "scalar CLIENT resource plan is not an awaited resource",
+        ));
     };
     let ClientExpressionNode::Resource { operation } = expression.as_ref() else {
-        return Err(failure("scalar CLIENT resource plan is not a resource operation"));
+        return Err(failure(
+            "scalar CLIENT resource plan is not a resource operation",
+        ));
     };
     if !(operation.kind() == orna_artifact::client_plan::ResourceKind::Scalar
         && operation.target() == target
@@ -11944,10 +12062,20 @@ async fn install_procedural_resource_client_fixture(
     kernel: &PostgresKernel,
     active: &orna_core::revision::ActiveDatabaseRevision,
     standard: &CheckedStandardLibrary,
-) -> TestResult<(orna_core::revision::ActiveDatabaseRevision, FunctionId, FunctionId, ParameterId)> {
-    let append_source = |active: &orna_core::revision::ActiveDatabaseRevision, body: &str| -> TestResult<SourceBundle> {
+) -> TestResult<(
+    orna_core::revision::ActiveDatabaseRevision,
+    FunctionId,
+    FunctionId,
+    ParameterId,
+)> {
+    let append_source = |active: &orna_core::revision::ActiveDatabaseRevision,
+                         body: &str|
+     -> TestResult<SourceBundle> {
         if active.source().units().is_empty() {
-            return Ok(SourceBundle::new([SourceUnit::new("resource_fixture.sql", body.to_owned())])?);
+            return Ok(SourceBundle::new([SourceUnit::new(
+                "resource_fixture.sql",
+                body.to_owned(),
+            )])?);
         }
         let last_ordinal = active
             .source()
@@ -11955,16 +12083,21 @@ async fn install_procedural_resource_client_fixture(
             .len()
             .checked_sub(1)
             .ok_or_else(|| failure("procedural resource fixture has no retained source unit"))?;
-        Ok(SourceBundle::new(active.source().units().iter().enumerate().map(
-            |(ordinal, unit)| {
-                let content = if ordinal == last_ordinal {
-                    format!("{}\n{}", unit.content(), body)
-                } else {
-                    unit.content().to_owned()
-                };
-                SourceUnit::new(unit.logical_path(), content)
-            },
-        ))?)
+        Ok(SourceBundle::new(
+            active
+                .source()
+                .units()
+                .iter()
+                .enumerate()
+                .map(|(ordinal, unit)| {
+                    let content = if ordinal == last_ordinal {
+                        format!("{}\n{}", unit.content(), body)
+                    } else {
+                        unit.content().to_owned()
+                    };
+                    SourceUnit::new(unit.logical_path(), content)
+                }),
+        )?)
     };
     let context = StandardApplicationCheckContext::try_new(active.catalogue(), standard)?;
     let server_source = append_source(active, RAW_PROCEDURAL_RESOURCE_SERVER_SOURCE)?;
@@ -12035,13 +12168,17 @@ async fn install_procedural_resource_client_fixture(
         "procedural CLIENT artifact did not retain one resource LET",
     )?;
     let ClientExpressionNode::Resource { operation } = plan.statements()[0].expression() else {
-        return Err(failure("procedural CLIENT LET did not retain a resource operation"));
+        return Err(failure(
+            "procedural CLIENT LET did not retain a resource operation",
+        ));
     };
     let ClientExpressionNode::Await { expression } = plan.return_expression() else {
         return Err(failure("procedural CLIENT return did not retain AWAIT"));
     };
     let ClientExpressionNode::LocalRead { local } = expression.as_ref() else {
-        return Err(failure("procedural CLIENT AWAIT did not retain the resource local read"));
+        return Err(failure(
+            "procedural CLIENT AWAIT did not retain the resource local read",
+        ));
     };
     require(
         *local == plan.locals()[0].local_id(),
@@ -12075,9 +12212,14 @@ async fn install_stream_resource_client_fixture(
     ParameterId,
     CallSiteId,
 )> {
-    let append_source = |active: &orna_core::revision::ActiveDatabaseRevision, body: &str| -> TestResult<SourceBundle> {
+    let append_source = |active: &orna_core::revision::ActiveDatabaseRevision,
+                         body: &str|
+     -> TestResult<SourceBundle> {
         if active.source().units().is_empty() {
-            return Ok(SourceBundle::new([SourceUnit::new("resource_fixture.sql", body.to_owned())])?);
+            return Ok(SourceBundle::new([SourceUnit::new(
+                "resource_fixture.sql",
+                body.to_owned(),
+            )])?);
         }
         let last_ordinal = active
             .source()
@@ -12085,16 +12227,21 @@ async fn install_stream_resource_client_fixture(
             .len()
             .checked_sub(1)
             .ok_or_else(|| failure("stream resource fixture has no retained source unit"))?;
-        Ok(SourceBundle::new(active.source().units().iter().enumerate().map(
-            |(ordinal, unit)| {
-                let content = if ordinal == last_ordinal {
-                    format!("{}\n{}", unit.content(), body)
-                } else {
-                    unit.content().to_owned()
-                };
-                SourceUnit::new(unit.logical_path(), content)
-            },
-        ))?)
+        Ok(SourceBundle::new(
+            active
+                .source()
+                .units()
+                .iter()
+                .enumerate()
+                .map(|(ordinal, unit)| {
+                    let content = if ordinal == last_ordinal {
+                        format!("{}\n{}", unit.content(), body)
+                    } else {
+                        unit.content().to_owned()
+                    };
+                    SourceUnit::new(unit.logical_path(), content)
+                }),
+        )?)
     };
     let server_context = StandardApplicationCheckContext::try_new(active.catalogue(), standard)?;
     let server_source = append_source(active, RAW_STREAM_RESOURCE_SERVER_SOURCE)?;
@@ -12118,7 +12265,9 @@ async fn install_stream_resource_client_fixture(
     if !client_report.diagnostics().is_empty() {
         let target_present = active
             .catalogue()
-            .function_by_name(&QualifiedSemanticName::new(["resource_fixture", "resource"]).unwrap())
+            .function_by_name(
+                &QualifiedSemanticName::new(["resource_fixture", "resource"]).unwrap(),
+            )
             .is_some();
         return Err(failure(format!(
             "stream CLIENT resource fixture did not compile: target_present={target_present}, units={:?}, diagnostics={:?}",
@@ -12172,10 +12321,14 @@ async fn install_stream_resource_client_fixture(
         .ok_or_else(|| failure("stream CLIENT resource fixture is missing its revision"))?;
     let plan = ResourceClientPlan::decode(revision.artifact().payload())?;
     let ClientExpressionNode::Await { expression } = plan.expression() else {
-        return Err(failure("stream CLIENT resource plan is not an awaited resource"));
+        return Err(failure(
+            "stream CLIENT resource plan is not an awaited resource",
+        ));
     };
     let ClientExpressionNode::Resource { operation } = expression.as_ref() else {
-        return Err(failure("stream CLIENT resource plan is not a resource operation"));
+        return Err(failure(
+            "stream CLIENT resource plan is not a resource operation",
+        ));
     };
     require(
         operation.kind() == orna_artifact::client_plan::ResourceKind::Stream
@@ -12262,9 +12415,14 @@ async fn install_action_client_fixture(
     ParameterId,
     ParameterId,
 )> {
-    let append_source = |active: &orna_core::revision::ActiveDatabaseRevision, body: &str| -> TestResult<SourceBundle> {
+    let append_source = |active: &orna_core::revision::ActiveDatabaseRevision,
+                         body: &str|
+     -> TestResult<SourceBundle> {
         if active.source().units().is_empty() {
-            return Ok(SourceBundle::new([SourceUnit::new("action_fixture.orna", body.to_owned())])?);
+            return Ok(SourceBundle::new([SourceUnit::new(
+                "action_fixture.orna",
+                body.to_owned(),
+            )])?);
         }
         let last_ordinal = active
             .source()
@@ -12272,18 +12430,24 @@ async fn install_action_client_fixture(
             .len()
             .checked_sub(1)
             .ok_or_else(|| failure("action fixture has no retained source unit"))?;
-        Ok(SourceBundle::new(active.source().units().iter().enumerate().map(
-            |(ordinal, unit)| {
-                let content = if ordinal == last_ordinal {
-                    format!("{}\n{}", unit.content(), body)
-                } else {
-                    unit.content().to_owned()
-                };
-                SourceUnit::new(unit.logical_path(), content)
-            },
-        ))?)
+        Ok(SourceBundle::new(
+            active
+                .source()
+                .units()
+                .iter()
+                .enumerate()
+                .map(|(ordinal, unit)| {
+                    let content = if ordinal == last_ordinal {
+                        format!("{}\n{}", unit.content(), body)
+                    } else {
+                        unit.content().to_owned()
+                    };
+                    SourceUnit::new(unit.logical_path(), content)
+                }),
+        )?)
     };
-    let server_source = append_source(active, RAW_ACTION_SERVER_SOURCE)?;
+    let (server_source_body, client_source_body) = action_source_parts()?;
+    let server_source = append_source(active, server_source_body)?;
     let server_context = StandardApplicationCheckContext::try_new(active.catalogue(), standard)?;
     let server_report = check_standard_application(&server_source, &server_context);
     if !server_report.diagnostics().is_empty() {
@@ -12299,7 +12463,7 @@ async fn install_action_client_fixture(
             active,
         )?)
         .await?;
-    let client_source = append_source(&active, RAW_ACTION_CLIENT_SOURCE)?;
+    let client_source = append_source(&active, client_source_body)?;
     let client_context = StandardApplicationCheckContext::try_new(active.catalogue(), standard)?;
     let client_report = check_standard_application(&client_source, &client_context);
     if !client_report.diagnostics().is_empty() {
@@ -12370,7 +12534,6 @@ async fn install_action_client_fixture(
         local_target_parameter,
     ))
 }
-
 
 async fn install_external_capability_fixture(
     kernel: &PostgresKernel,
@@ -13421,11 +13584,7 @@ fn offline_empty_version_two_active(
         None,
         vec![source_unit],
         bundle_hash,
-        source_revision_record_digest(
-            SourceBundleId::from_bytes([0x42; 16]),
-            None,
-            bundle_hash,
-        )?,
+        source_revision_record_digest(SourceBundleId::from_bytes([0x42; 16]), None, bundle_hash)?,
     )?;
     let catalogue = CatalogueSnapshot::new_with_types(
         CatalogueRevisionId::from_bytes([0x44; 16]),
@@ -13435,14 +13594,7 @@ fn offline_empty_version_two_active(
         Vec::new(),
     )?;
     let context = CatalogueHashContext::version_two(standard.clone());
-    let catalogue_hash = catalogue_digest_with_context(
-        &context,
-        &catalogue,
-        &[],
-        &[],
-        &[],
-        &[],
-    )?;
+    let catalogue_hash = catalogue_digest_with_context(&context, &catalogue, &[], &[], &[], &[])?;
     Ok(ActiveDatabaseRevision::new_with_catalogue_hash_context(
         ActiveDatabaseRevisionInput::new(
             RevisionPair::new(source.id(), catalogue.revision()),
@@ -13632,15 +13784,14 @@ fn checks_accepted_expression_client_fixture_offline() -> TestResult<()> {
         ],
     )?;
     let session = security.bind_authenticated_session(RAW_CLIENT_USER, vec![])?;
-    let composed_authorisation = match security.authorise_execute(
-        &session,
-        InvocationTarget::new(composed_id, active.pair()),
-    ) {
+    let composed_authorisation = match security
+        .authorise_execute(&session, InvocationTarget::new(composed_id, active.pair()))
+    {
         ExecuteDecision::Allowed(authorisation) => authorisation,
         ExecuteDecision::Denied(reason) => {
             return Err(failure(format!(
                 "offline expression CLIENT composed authorisation was denied: {reason:?}"
-            )))
+            )));
         }
     };
     let composed_result = evaluate_client_function(&active, &composed_authorisation)?;
@@ -13648,15 +13799,14 @@ fn checks_accepted_expression_client_fixture_offline() -> TestResult<()> {
         composed_result.value() == &RuntimeValue::Text("hello world".to_owned()),
         "offline expression CLIENT composed evaluation returned the wrong value",
     )?;
-    let literal_authorisation = match security.authorise_execute(
-        &session,
-        InvocationTarget::new(literal_id, active.pair()),
-    ) {
+    let literal_authorisation = match security
+        .authorise_execute(&session, InvocationTarget::new(literal_id, active.pair()))
+    {
         ExecuteDecision::Allowed(authorisation) => authorisation,
         ExecuteDecision::Denied(reason) => {
             return Err(failure(format!(
                 "offline expression CLIENT literal authorisation was denied: {reason:?}"
-            )))
+            )));
         }
     };
     let literal_result = evaluate_client_function(&active, &literal_authorisation)?;
@@ -13669,15 +13819,14 @@ fn checks_accepted_expression_client_fixture_offline() -> TestResult<()> {
             && literal_result.context().pair() == active.pair(),
         "offline expression CLIENT literal result retained the wrong invocation context",
     )?;
-    let external_authorisation = match security.authorise_execute(
-        &session,
-        InvocationTarget::new(external_id, active.pair()),
-    ) {
+    let external_authorisation = match security
+        .authorise_execute(&session, InvocationTarget::new(external_id, active.pair()))
+    {
         ExecuteDecision::Allowed(authorisation) => authorisation,
         ExecuteDecision::Denied(reason) => {
             return Err(failure(format!(
                 "offline external CLIENT authorisation was denied: {reason:?}"
-            )))
+            )));
         }
     };
     let external_error = evaluate_client_function(&active, &external_authorisation)
@@ -13691,7 +13840,6 @@ fn checks_accepted_expression_client_fixture_offline() -> TestResult<()> {
         "offline external CLIENT evaluation did not fail closed on expr.runtime@1",
     )
 }
-
 
 #[test]
 fn checks_and_prepares_server_function_dogfood_fixture_offline() -> TestResult<()> {
@@ -13748,7 +13896,6 @@ fn checks_and_prepares_server_function_dogfood_fixture_offline() -> TestResult<(
     )
 }
 
-
 #[test]
 fn checks_accepted_action_fixture_offline() -> TestResult<()> {
     let snapshot = verify_standard_library_v6_snapshot(retained_standard_library_v6_snapshot()?)?;
@@ -13761,11 +13908,14 @@ fn checks_accepted_action_fixture_offline() -> TestResult<()> {
     let context = StandardApplicationCheckContext::try_new(&catalogue, &standard)?;
     let source = SourceBundle::new([SourceUnit::new(
         "fixtures/action_dogfood.orna",
-        format!("{RAW_ACTION_SERVER_SOURCE}\n{RAW_ACTION_CLIENT_SOURCE}"),
+        RAW_ACTION_SOURCE.to_owned(),
     )])?;
     let report = check_standard_application(&source, &context);
     if !report.diagnostics().is_empty() {
-        return Err(failure(format!("accepted V6 action fixture did not check: {:?}", report.diagnostics())));
+        return Err(failure(format!(
+            "accepted V6 action fixture did not check: {:?}",
+            report.diagnostics()
+        )));
     }
     let checked = report
         .checked_bundle()
@@ -13777,7 +13927,9 @@ fn checks_accepted_action_fixture_offline() -> TestResult<()> {
     let call_local = checked
         .client_functions()
         .find(|function| function.name().parts() == ["action_fixture", "call_local"])
-        .ok_or_else(|| failure("accepted V6 action fixture is missing action_fixture.call_local"))?;
+        .ok_or_else(|| {
+            failure("accepted V6 action fixture is missing action_fixture.call_local")
+        })?;
     if !(matches!(call.return_type().named_type(), Some(CheckedTypeId::Existing(type_id)) if type_id == STD_ACTION_TYPE_ID)
         && matches!(call_local.return_type().named_type(), Some(CheckedTypeId::Existing(type_id)) if type_id == STD_ACTION_TYPE_ID))
     {
@@ -14079,13 +14231,12 @@ async fn proves_installed_server_function_dogfood_source_through_orna_invoke() -
     .await
 }
 
-
-
 /// Proves the accepted Boolean expression CLIENT form survives the
 /// user-facing source/check/install/grant/invoke path.
 #[tokio::test]
 #[ignore = "requires the Compose PostgreSQL development service"]
-async fn proves_installed_client_boolean_expression_dogfood_source_through_orna_invoke() -> TestResult<()> {
+async fn proves_installed_client_boolean_expression_dogfood_source_through_orna_invoke()
+-> TestResult<()> {
     with_test_database(|database| async move {
         let uid = nix::unistd::geteuid().as_raw();
         let kernel = kernel(&database)?;
@@ -14120,7 +14271,9 @@ async fn proves_installed_client_boolean_expression_dogfood_source_through_orna_
             .functions()
             .iter()
             .find(|function| function.name().parts() == ["client_dogfood", "enabled"])
-            .ok_or_else(|| failure("the installed CLIENT dogfood source is missing client_dogfood.enabled"))?
+            .ok_or_else(|| {
+                failure("the installed CLIENT dogfood source is missing client_dogfood.enabled")
+            })?
             .id();
         let mut function_targets = active
             .catalogue()
@@ -14158,11 +14311,8 @@ async fn proves_installed_client_boolean_expression_dogfood_source_through_orna_
             .map(orna_standard::registered_opaque_codecs)
             .transpose()?
             .ok_or_else(|| failure("the Boolean CLIENT fixture has no standard context"))?;
-        let mut expected = encode_constructed_value(
-            &active,
-            &registry,
-            &RuntimeValue::Boolean(true),
-        )?;
+        let mut expected =
+            encode_constructed_value(&active, &registry, &RuntimeValue::Boolean(true))?;
         expected.push(b'\n');
         let (outcome, stdout, stderr) = installed_invoke_run(
             &database,
@@ -14195,8 +14345,7 @@ async fn proves_installed_client_boolean_expression_dogfood_source_through_orna_
 }
 
 #[cfg(feature = "test-hooks")]
-const RAW_ORDINARY_INSPECTOR_SOURCE: &str =
-    include_str!("fixtures/client_inspector_dogfood.orna");
+const RAW_ORDINARY_INSPECTOR_SOURCE: &str = include_str!("fixtures/client_inspector_dogfood.orna");
 
 #[cfg(feature = "test-hooks")]
 #[tokio::test]

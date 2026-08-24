@@ -13,7 +13,10 @@ use std::{
     collections::BTreeMap,
     fs,
     io::{self, Read},
-    os::unix::{ffi::OsStringExt, fs::{FileTypeExt, MetadataExt, PermissionsExt, symlink}},
+    os::unix::{
+        ffi::OsStringExt,
+        fs::{FileTypeExt, MetadataExt, PermissionsExt, symlink},
+    },
     path::{Path, PathBuf},
     process::{Child, Command, Output, Stdio},
     sync::atomic::{AtomicU64, Ordering},
@@ -209,7 +212,10 @@ fn runs_as_the_orna_account() -> bool {
 
 fn assert_read_failure(output: &Output, expected_stderr: &[u8]) {
     assert_eq!(output.status.code(), Some(1), "status: {output:?}");
-    assert!(output.stdout.is_empty(), "source diff must emit no stdout: {output:?}");
+    assert!(
+        output.stdout.is_empty(),
+        "source diff must emit no stdout: {output:?}"
+    );
     assert_eq!(output.stderr, expected_stderr);
 }
 

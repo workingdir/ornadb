@@ -3,6 +3,11 @@ use std::collections::{BTreeMap, BTreeSet, HashSet};
 #[path = "recovery/functions.rs"]
 mod functions;
 
+#[cfg(feature = "test-hooks")]
+use orna_core::canonical_hash::{
+    verify_standard_library_snapshot as verify_structural_standard_library_snapshot,
+    verify_standard_library_v2_snapshot as verify_structural_standard_library_v2_snapshot,
+};
 use orna_core::{
     CatalogueRevisionId, ExpressionId, FieldId, FunctionId, FunctionRevisionId, ParameterId,
     SchemaId, SourceBundleId, SourceRevisionId, SourceUnitId, StandardLibraryRevisionId,
@@ -31,29 +36,25 @@ use orna_core::{
     system::SYS_INSPECT_INVOCATION_TYPE_ID,
     types::{ResolvedType, StandardScalar, TypeDescriptor},
 };
-#[cfg(feature = "test-hooks")]
-use orna_core::canonical_hash::{
-    verify_standard_library_snapshot as verify_structural_standard_library_snapshot,
-    verify_standard_library_v2_snapshot as verify_structural_standard_library_v2_snapshot,
-};
 
 use orna_standard::{
-    STANDARD_LIBRARY_REVISION_ID, STANDARD_LIBRARY_V2_REVISION_ID,
-    STANDARD_LIBRARY_V3_REVISION_ID, STANDARD_LIBRARY_V4_REVISION_ID,
-    STANDARD_LIBRARY_V5_REVISION_ID, STANDARD_LIBRARY_V6_REVISION_ID,
-    verify_standard_library_snapshot, verify_standard_library_v2_snapshot,
-    verify_standard_library_v3_snapshot, verify_standard_library_v4_snapshot,
-    verify_standard_library_v5_snapshot, verify_standard_library_v6_snapshot,
+    STANDARD_LIBRARY_REVISION_ID, STANDARD_LIBRARY_V2_REVISION_ID, STANDARD_LIBRARY_V3_REVISION_ID,
+    STANDARD_LIBRARY_V4_REVISION_ID, STANDARD_LIBRARY_V5_REVISION_ID,
+    STANDARD_LIBRARY_V6_REVISION_ID, verify_standard_library_snapshot,
+    verify_standard_library_v2_snapshot, verify_standard_library_v3_snapshot,
+    verify_standard_library_v4_snapshot, verify_standard_library_v5_snapshot,
+    verify_standard_library_v6_snapshot,
 };
 use tokio_postgres::{Client, IsolationLevel, Row, Transaction};
 
 use crate::{
-    PostgresKernel, PostgresKernelError, is_sealed_inspect_type_id,
+    PostgresKernel, PostgresKernelError,
     bootstrap::require_current_migrations,
     decode::{
         DurableRecord, digest_bytes, exact_enum, identity_bytes, optional_identity_bytes,
         u32_from_i64, u64_from_i64,
     },
+    is_sealed_inspect_type_id,
     physical::{establish_trusted_search_path, verify_physical_catalogue},
 };
 
@@ -342,13 +343,17 @@ async fn load_active_revision_pair(
         .map_err(PostgresKernelError::Database)?;
     let record = DurableRecord::new(ACTIVE_RELATION, "singleton=true");
     if rows.len() != 1 {
-        return Err(record.invariant(
-            "exactly one active source and catalogue revision pair must exist",
-        ));
+        return Err(
+            record.invariant("exactly one active source and catalogue revision pair must exist")
+        );
     }
 
     let row = &rows[0];
-    if !record.column::<bool>(row, "singleton", "active revision singleton flag must be true")? {
+    if !record.column::<bool>(
+        row,
+        "singleton",
+        "active revision singleton flag must be true",
+    )? {
         return Err(record.invariant("active revision singleton flag must be true"));
     }
     let source = SourceRevisionId::from_bytes(identity_bytes(
@@ -385,9 +390,8 @@ fn decode_revision_pair_row(
         "source_exists",
         "catalogue source join must identify a source row",
     )? {
-        return Err(catalogue_record.invariant(
-            "each catalogue revision must have a matching source revision",
-        ));
+        return Err(catalogue_record
+            .invariant("each catalogue revision must have a matching source revision"));
     }
     decode_revision_pair_values(
         source_record.column(
@@ -472,9 +476,7 @@ fn validate_revision_pair_listing(
         let catalogue_record =
             DurableRecord::new(CATALOGUE_REVISION_RELATION, catalogue.canonical());
         if by_catalogue.insert(catalogue, *entry).is_some() {
-            return Err(catalogue_record.invariant(
-                "catalogue revision identities must be unique",
-            ));
+            return Err(catalogue_record.invariant("catalogue revision identities must be unique"));
         }
         if !source_ids.insert(entry.source_revision_id()) {
             return Err(DurableRecord::new(
@@ -567,9 +569,8 @@ fn validate_revision_pair_listing(
     }
 
     if entries.iter().filter(|entry| entry.is_active()).count() != 1 {
-        return Err(DurableRecord::new(ACTIVE_RELATION, "singleton=true").invariant(
-            "exactly one listed revision pair must match the active marker",
-        ));
+        return Err(DurableRecord::new(ACTIVE_RELATION, "singleton=true")
+            .invariant("exactly one listed revision pair must match the active marker"));
     }
     Ok(())
 }
@@ -1140,11 +1141,13 @@ pub(crate) async fn load_verified_standard_library(
             )
             .map_err(PostgresKernelError::RevisionInvariant)?
         }
-        _ => return Err(DurableRecord::new(
-            "_orna_kernel.standard_library_revisions",
-            header.revision.canonical(),
-        )
-        .invariant("standard library digest version is unsupported")),
+        _ => {
+            return Err(DurableRecord::new(
+                "_orna_kernel.standard_library_revisions",
+                header.revision.canonical(),
+            )
+            .invariant("standard library digest version is unsupported"));
+        }
     };
     #[cfg(feature = "test-hooks")]
     {
@@ -1826,8 +1829,14 @@ fn decode_standard_function_return(
         "return_value_type_id",
         "standard function return value type identity must be null or exact bytes",
     )?;
-    let resolved =
-        decode_standard_resolved_type(kind, scalar, value_type, Some(value_type_ids), true, record)?;
+    let resolved = decode_standard_resolved_type(
+        kind,
+        scalar,
+        value_type,
+        Some(value_type_ids),
+        true,
+        record,
+    )?;
     Ok(FunctionReturn::Single(resolved))
 }
 
@@ -2000,8 +2009,14 @@ fn decode_standard_parameter(
         "value_type_id",
         "standard parameter value type identity must be null or exact bytes",
     )?;
-    let resolved =
-        decode_standard_resolved_type(kind, scalar, value_type, Some(value_type_ids), false, &record)?;
+    let resolved = decode_standard_resolved_type(
+        kind,
+        scalar,
+        value_type,
+        Some(value_type_ids),
+        false,
+        &record,
+    )?;
     let origin = decode_origin(
         row,
         &record,
@@ -4898,7 +4913,6 @@ mod tests {
     use orna_core::{
         CatalogueRevisionId, FieldId, SchemaId, SourceBundleId, SourceRevisionId, SourceUnitId,
         StandardLibraryRevisionId, TypeId,
-        system::SYS_INSPECT_INVOCATION_TYPE_ID,
         canonical_hash::{
             catalogue_digest, source_bundle_digest, source_revision_record_digest,
             source_unit_content_digest,
@@ -4911,6 +4925,7 @@ mod tests {
             CatalogueHashContext, CatalogueHashVersion, DefinitionIdentity, DefinitionOrigin,
             RevisionPair, SourceOrigin, StoredSourceUnit,
         },
+        system::SYS_INSPECT_INVOCATION_TYPE_ID,
         types::{ResolvedType, StandardScalar, TypeDescriptor},
     };
 
@@ -4918,19 +4933,20 @@ mod tests {
 
     use super::{
         ACTIVE_RELATION, CATALOGUE_REVISION_RELATION, LegacyResolvedTypeTupleMember,
-        RecordValueFieldTypeTuple, RecoveredCatalogueSemantics, SOURCE_REVISION_RELATION,
-        RecoveredFunctionState, RecoveredRecordValueField, RecoveredRecordValueType,
-        RecoveredRevisionHeader, RecoveredSchema, ResolvedTypeTuple, assemble_catalogue_semantics,
-        assemble_revision, decode_catalogue_hash_version, decode_legacy_resolved_type_tuple,
-        decode_legacy_resolved_type_tuple_kind, decode_record_value_field_descriptor,
-        decode_resolved_type_tuple, decode_revision_pair_values, decode_standard_binding_target,
+        RecordValueFieldTypeTuple, RecoveredCatalogueSemantics, RecoveredFunctionState,
+        RecoveredRecordValueField, RecoveredRecordValueType, RecoveredRevisionHeader,
+        RecoveredSchema, ResolvedTypeTuple, RevisionPairHistoryEntry, SOURCE_REVISION_RELATION,
+        assemble_catalogue_semantics, assemble_revision, decode_catalogue_hash_version,
+        decode_legacy_resolved_type_tuple, decode_legacy_resolved_type_tuple_kind,
+        decode_record_value_field_descriptor, decode_resolved_type_tuple,
+        decode_revision_pair_values, decode_standard_binding_target,
         recovered_standard_value_definition, validate_function_type,
         validate_revision_pair_listing, verify_recovered_standard_snapshot,
-        RevisionPairHistoryEntry,
     };
 
     #[test]
-    fn recovered_standard_verifier_dispatches_all_retained_revisions_and_rejects_crossed_identity() {
+    fn recovered_standard_verifier_dispatches_all_retained_revisions_and_rejects_crossed_identity()
+    {
         let retained = [
             orna_standard::retained_standard_library_snapshot().expect("retained V1 standard"),
             orna_standard::retained_standard_library_v2_snapshot().expect("retained V2 standard"),
@@ -4946,8 +4962,8 @@ mod tests {
             assert_eq!(verified.revision(), revision);
         }
 
-        let v3 = orna_standard::retained_standard_library_v3_snapshot()
-            .expect("retained V3 standard");
+        let v3 =
+            orna_standard::retained_standard_library_v3_snapshot().expect("retained V3 standard");
         let crossed = orna_core::revision::StandardLibrarySnapshot::new_with_executables(
             orna_standard::STANDARD_LIBRARY_V2_REVISION_ID,
             v3.digest_version(),
@@ -4968,8 +4984,7 @@ mod tests {
             })
         ));
 
-        let v1 = orna_standard::retained_standard_library_snapshot()
-            .expect("retained V1 standard");
+        let v1 = orna_standard::retained_standard_library_snapshot().expect("retained V1 standard");
         let unknown = orna_core::revision::StandardLibrarySnapshot::new(
             StandardLibraryRevisionId::from_bytes([0xee; 16]),
             v1.digest_version(),
@@ -5068,46 +5083,54 @@ mod tests {
             Some(CatalogueRevisionId::from_bytes([3; 16]))
         );
 
-        assert!(decode_revision_pair_values(
-            vec![2; 15],
-            None,
-            vec![4; 16],
-            None,
-            active,
-            &source_record,
-            &catalogue_record,
-        )
-        .is_err());
-        assert!(decode_revision_pair_values(
-            vec![2; 16],
-            Some(vec![3; 17]),
-            vec![4; 16],
-            None,
-            active,
-            &source_record,
-            &catalogue_record,
-        )
-        .is_err());
-        assert!(decode_revision_pair_values(
-            vec![2; 16],
-            None,
-            vec![4; 16],
-            Some(vec![3; 16]),
-            active,
-            &source_record,
-            &catalogue_record,
-        )
-        .is_err());
-        assert!(decode_revision_pair_values(
-            vec![2; 16],
-            Some(vec![3; 16]),
-            vec![4; 16],
-            None,
-            active,
-            &source_record,
-            &catalogue_record,
-        )
-        .is_err());
+        assert!(
+            decode_revision_pair_values(
+                vec![2; 15],
+                None,
+                vec![4; 16],
+                None,
+                active,
+                &source_record,
+                &catalogue_record,
+            )
+            .is_err()
+        );
+        assert!(
+            decode_revision_pair_values(
+                vec![2; 16],
+                Some(vec![3; 17]),
+                vec![4; 16],
+                None,
+                active,
+                &source_record,
+                &catalogue_record,
+            )
+            .is_err()
+        );
+        assert!(
+            decode_revision_pair_values(
+                vec![2; 16],
+                None,
+                vec![4; 16],
+                Some(vec![3; 16]),
+                active,
+                &source_record,
+                &catalogue_record,
+            )
+            .is_err()
+        );
+        assert!(
+            decode_revision_pair_values(
+                vec![2; 16],
+                Some(vec![3; 16]),
+                vec![4; 16],
+                None,
+                active,
+                &source_record,
+                &catalogue_record,
+            )
+            .is_err()
+        );
     }
 
     #[test]

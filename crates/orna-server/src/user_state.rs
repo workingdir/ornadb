@@ -262,10 +262,7 @@ pub struct AuthenticatedClientStateAdapter<'a> {
 
 impl<'a> AuthenticatedClientStateAdapter<'a> {
     /// Creates an adapter for one authenticated kernel session.
-    pub const fn new(
-        kernel: &'a PostgresKernel,
-        session: &'a AuthenticatedSession,
-    ) -> Self {
+    pub const fn new(kernel: &'a PostgresKernel, session: &'a AuthenticatedSession) -> Self {
         Self { kernel, session }
     }
 

@@ -6,7 +6,10 @@
 use std::{collections::BTreeMap, error::Error, fmt, sync::OnceLock};
 
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
-use futures_util::{TryStreamExt, future::{Either, select}};
+use futures_util::{
+    TryStreamExt,
+    future::{Either, select},
+};
 use orna_artifact::server_csv_encode::{self, CsvEncodePlan, CsvEncodePlanError};
 use orna_artifact::server_json_encode::{self, JsonEncodePlan, JsonEncodePlanError};
 use orna_artifact::server_parameter_echo::{self, ServerParameterEcho, ServerParameterEchoError};
@@ -29,8 +32,8 @@ use orna_core::{
     presenter::{OutputResolutionError, PresenterEntry, PresenterRegistry},
     revision::{
         ActiveDatabaseRevision, CatalogueHashContext, DefinitionReferenceKind,
-        DefinitionReferenceTarget, ExecutableArtifact, ExecutableArtifactKind, StandardExecutable,
-        FunctionRevisionRecord, RevisionPair, Sha256Digest, SourceOrigin,
+        DefinitionReferenceTarget, ExecutableArtifact, ExecutableArtifactKind,
+        FunctionRevisionRecord, RevisionPair, Sha256Digest, SourceOrigin, StandardExecutable,
     },
     security::{AuthorisedInvocation, InvocationTarget},
     types::{ResolvedType, StandardScalar},
@@ -52,9 +55,9 @@ use tokio_postgres::{
 };
 
 use super::security::{
-    AuthenticatedServerResourceEvent, ResourceCancellation, ResourceProducerCommand,
-    ResourceProducerCompleted, ResourceProducerCancelled, ResourceProducerFailed, ResourceProducerPull,
-    ResourceProducerExit,
+    AuthenticatedServerResourceEvent, ResourceCancellation, ResourceProducerCancelled,
+    ResourceProducerCommand, ResourceProducerCompleted, ResourceProducerExit,
+    ResourceProducerFailed, ResourceProducerPull,
 };
 use crate::{
     PostgresKernel, PostgresKernelError,
@@ -1407,7 +1410,8 @@ async fn execute_active_transaction(
     context: ServerSelectContext,
     arguments: &[FunctionArgument],
 ) -> Result<ServerSelectResult, PostgresKernelError> {
-    let prepared = prepare_active_transaction(transaction, active, function, context, arguments).await?;
+    let prepared =
+        prepare_active_transaction(transaction, active, function, context, arguments).await?;
     let rows = stream_rows(
         transaction,
         &prepared.statement,
@@ -1459,8 +1463,13 @@ pub(crate) async fn run_authenticated_server_resource_stream(
                 function: target.function(),
             })
         })?;
-    let context = ServerSelectContext::new(active.pair(), target.function(), function.current_revision());
-    let prepared = prepare_active_transaction(transaction, active, function, context, arguments).await?;
+    let context = ServerSelectContext::new(
+        active.pair(),
+        target.function(),
+        function.current_revision(),
+    );
+    let prepared =
+        prepare_active_transaction(transaction, active, function, context, arguments).await?;
     let parameters = prepared
         .binds
         .iter()
@@ -1487,14 +1496,23 @@ pub(crate) async fn run_authenticated_server_resource_stream(
         futures_util::pin_mut!(cancelled, received);
         let command = match select(cancelled, received).await {
             Either::Left(((), _received)) => {
-                return Ok(ResourceProducerExit::Cancelled(ResourceProducerCancelled { response: None }));
+                return Ok(ResourceProducerExit::Cancelled(ResourceProducerCancelled {
+                    response: None,
+                }));
             }
             Either::Right((command, _cancelled)) => command,
         };
-        let Some(ResourceProducerCommand::Pull(ResourceProducerPull { credit, response })) = command else {
-            return Ok(ResourceProducerExit::Cancelled(ResourceProducerCancelled { response: None }));
+        let Some(ResourceProducerCommand::Pull(ResourceProducerPull { credit, response })) =
+            command
+        else {
+            return Ok(ResourceProducerExit::Cancelled(ResourceProducerCancelled {
+                response: None,
+            }));
         };
-        let scalar = matches!(prepared.cardinality, ResultCardinality::ExactlyOne | ResultCardinality::AtMostOne);
+        let scalar = matches!(
+            prepared.cardinality,
+            ResultCardinality::ExactlyOne | ResultCardinality::AtMostOne
+        );
         if (credit.item_count == 0 && rows_seen == 0)
             || (credit.byte_count == 0 && !scalar && rows_seen == 0)
         {
@@ -1507,7 +1525,9 @@ pub(crate) async fn run_authenticated_server_resource_stream(
             }));
         }
         if cancellation.is_requested() {
-            return Ok(ResourceProducerExit::Cancelled(ResourceProducerCancelled { response: Some(response) }));
+            return Ok(ResourceProducerExit::Cancelled(ResourceProducerCancelled {
+                response: Some(response),
+            }));
         }
 
         let (value, byte_count) = if let Some(value) = pending.take() {
@@ -1518,14 +1538,18 @@ pub(crate) async fn run_authenticated_server_resource_stream(
             futures_util::pin_mut!(cancelled, next_row);
             let row = match select(cancelled, next_row).await {
                 Either::Left(((), _next_row)) => {
-                    return Ok(ResourceProducerExit::Cancelled(ResourceProducerCancelled { response: Some(response) }));
+                    return Ok(ResourceProducerExit::Cancelled(ResourceProducerCancelled {
+                        response: Some(response),
+                    }));
                 }
                 Either::Right((row, _cancelled)) => match row {
                     Ok(row) => row,
-                    Err(error) => return Ok(ResourceProducerExit::Failed(ResourceProducerFailed {
-                        response: Some(response),
-                        error: PostgresKernelError::Database(error),
-                    })),
+                    Err(error) => {
+                        return Ok(ResourceProducerExit::Failed(ResourceProducerFailed {
+                            response: Some(response),
+                            error: PostgresKernelError::Database(error),
+                        }));
+                    }
                 },
             };
             let Some(row) = row else {
@@ -1556,15 +1580,21 @@ pub(crate) async fn run_authenticated_server_resource_stream(
             }
             cells = match cells.checked_add(prepared.columns.len()) {
                 Some(cells) => cells,
-                None => return Ok(ResourceProducerExit::Failed(ResourceProducerFailed {
-                    response: Some(response),
-                    error: server_error(ServerSelectError::CellLimit { maximum: CELL_LIMIT }),
-                })),
+                None => {
+                    return Ok(ResourceProducerExit::Failed(ResourceProducerFailed {
+                        response: Some(response),
+                        error: server_error(ServerSelectError::CellLimit {
+                            maximum: CELL_LIMIT,
+                        }),
+                    }));
+                }
             };
             if cells > CELL_LIMIT {
                 return Ok(ResourceProducerExit::Failed(ResourceProducerFailed {
                     response: Some(response),
-                    error: server_error(ServerSelectError::CellLimit { maximum: CELL_LIMIT }),
+                    error: server_error(ServerSelectError::CellLimit {
+                        maximum: CELL_LIMIT,
+                    }),
                 }));
             }
             let decoded = (|| -> Result<(RuntimeValue, u64), PostgresKernelError> {
@@ -1613,7 +1643,9 @@ pub(crate) async fn run_authenticated_server_resource_stream(
                     })
                 })?;
                 let byte_count = u64::try_from(encoded.len()).map_err(|_| {
-                    server_error(ServerSelectError::PayloadLimit { maximum: PAYLOAD_LIMIT })
+                    server_error(ServerSelectError::PayloadLimit {
+                        maximum: PAYLOAD_LIMIT,
+                    })
                 })?;
                 Ok((value, byte_count))
             })();
@@ -1646,9 +1678,8 @@ pub(crate) async fn run_authenticated_server_resource_stream(
                         }));
                     }
                     Ok(Some(_)) => {
-                        if let Err(error) = prepared
-                            .cardinality
-                            .validate(rows_seen.saturating_add(1))
+                        if let Err(error) =
+                            prepared.cardinality.validate(rows_seen.saturating_add(1))
                         {
                             return Ok(ResourceProducerExit::Failed(ResourceProducerFailed {
                                 response: Some(response),
@@ -1669,7 +1700,9 @@ pub(crate) async fn run_authenticated_server_resource_stream(
                 }))
                 .is_err()
             {
-                return Ok(ResourceProducerExit::Cancelled(ResourceProducerCancelled { response: None }));
+                return Ok(ResourceProducerExit::Cancelled(ResourceProducerCancelled {
+                    response: None,
+                }));
             }
             continue;
         }
@@ -1681,26 +1714,36 @@ pub(crate) async fn run_authenticated_server_resource_stream(
                 }))
                 .is_err()
             {
-                return Ok(ResourceProducerExit::Cancelled(ResourceProducerCancelled { response: None }));
+                return Ok(ResourceProducerExit::Cancelled(ResourceProducerCancelled {
+                    response: None,
+                }));
             }
             continue;
         }
         if cancellation.is_requested() {
-            return Ok(ResourceProducerExit::Cancelled(ResourceProducerCancelled { response: Some(response) }));
+            return Ok(ResourceProducerExit::Cancelled(ResourceProducerCancelled {
+                response: Some(response),
+            }));
         }
         total_items = match total_items.checked_add(1) {
             Some(total_items) => total_items,
-            None => return Ok(ResourceProducerExit::Failed(ResourceProducerFailed {
-                response: Some(response),
-                error: server_error(ServerSelectError::RowLimit { maximum: ROW_LIMIT }),
-            })),
+            None => {
+                return Ok(ResourceProducerExit::Failed(ResourceProducerFailed {
+                    response: Some(response),
+                    error: server_error(ServerSelectError::RowLimit { maximum: ROW_LIMIT }),
+                }));
+            }
         };
         total_bytes = match total_bytes.checked_add(byte_count) {
             Some(total_bytes) => total_bytes,
-            None => return Ok(ResourceProducerExit::Failed(ResourceProducerFailed {
-                response: Some(response),
-                error: server_error(ServerSelectError::PayloadLimit { maximum: PAYLOAD_LIMIT }),
-            })),
+            None => {
+                return Ok(ResourceProducerExit::Failed(ResourceProducerFailed {
+                    response: Some(response),
+                    error: server_error(ServerSelectError::PayloadLimit {
+                        maximum: PAYLOAD_LIMIT,
+                    }),
+                }));
+            }
         };
         let event = AuthenticatedServerResourceEvent::Values {
             batch_sequence,
@@ -1711,13 +1754,17 @@ pub(crate) async fn run_authenticated_server_resource_stream(
         final_batch_sequence = batch_sequence;
         batch_sequence = match batch_sequence.checked_add(1) {
             Some(batch_sequence) => batch_sequence,
-            None => return Ok(ResourceProducerExit::Failed(ResourceProducerFailed {
-                response: Some(response),
-                error: server_error(ServerSelectError::RowLimit { maximum: ROW_LIMIT }),
-            })),
+            None => {
+                return Ok(ResourceProducerExit::Failed(ResourceProducerFailed {
+                    response: Some(response),
+                    error: server_error(ServerSelectError::RowLimit { maximum: ROW_LIMIT }),
+                }));
+            }
         };
         if response.send(Ok(event)).is_err() {
-            return Ok(ResourceProducerExit::Cancelled(ResourceProducerCancelled { response: None }));
+            return Ok(ResourceProducerExit::Cancelled(ResourceProducerCancelled {
+                response: None,
+            }));
         }
     }
 }
@@ -1743,20 +1790,21 @@ pub(crate) async fn run_authenticated_standard_resource_stream(
             active: active.pair(),
         }));
     }
-    let standard = active
-        .catalogue_hash_context()
-        .standard()
-        .ok_or_else(|| server_error(ServerSelectError::FunctionNotActive {
+    let standard = active.catalogue_hash_context().standard().ok_or_else(|| {
+        server_error(ServerSelectError::FunctionNotActive {
             pair: active.pair(),
             function: target.function(),
-        }))?;
+        })
+    })?;
     let function = standard
         .catalogue()
         .function_by_id(target.function())
-        .ok_or_else(|| server_error(ServerSelectError::FunctionNotActive {
-            pair: active.pair(),
-            function: target.function(),
-        }))?;
+        .ok_or_else(|| {
+            server_error(ServerSelectError::FunctionNotActive {
+                pair: active.pair(),
+                function: target.function(),
+            })
+        })?;
     if executable.function() != target.function()
         || executable.revision().function() != target.function()
         || executable.revision().id() != function.current_revision()
@@ -1793,13 +1841,14 @@ pub(crate) async fn run_authenticated_standard_resource_stream(
             }
             Either::Right((command, _cancelled)) => command,
         };
-        let Some(ResourceProducerCommand::Pull(ResourceProducerPull { credit, response })) = command else {
+        let Some(ResourceProducerCommand::Pull(ResourceProducerPull { credit, response })) =
+            command
+        else {
             return Ok(ResourceProducerExit::Cancelled(ResourceProducerCancelled {
                 response: None,
             }));
         };
-        if credit.item_count == 0 && !emitted
-        {
+        if credit.item_count == 0 && !emitted {
             return Ok(ResourceProducerExit::Failed(ResourceProducerFailed {
                 response: Some(response),
                 error: server_error(ServerSelectError::Argument {
@@ -1851,7 +1900,6 @@ pub(crate) async fn run_authenticated_standard_resource_stream(
         }));
     }
 }
-
 
 /// Adapts one scalar or stream SERVER signature to the internal one-column
 /// result model.
@@ -5082,9 +5130,11 @@ impl ResultCardinality {
         match self {
             Self::BoundedMany => Ok(()),
             Self::AtMostOne => validate_identity_selected_cardinality(row_count),
-            Self::ExactlyOne if row_count > 1 => Err(server_error(ServerSelectError::Cardinality {
-                rule: "a scalar SERVER SELECT returned more than one row",
-            })),
+            Self::ExactlyOne if row_count > 1 => {
+                Err(server_error(ServerSelectError::Cardinality {
+                    rule: "a scalar SERVER SELECT returned more than one row",
+                }))
+            }
             Self::ExactlyOne => Ok(()),
         }
     }
@@ -5564,7 +5614,6 @@ mod tests {
         )
         .expect("the retained V5 standard source verifies")
     }
-
 
     /// Builds the active revision the presenter tests execute against: an
     /// application catalogue holding one object type, one enum type, and one
@@ -6296,7 +6345,10 @@ mod tests {
         };
         assert_eq!(columns.len(), 1);
         assert_eq!(columns[0].name(), "value");
-        assert_eq!(columns[0].resolved_type(), ResolvedType::scalar(StandardScalar::Integer));
+        assert_eq!(
+            columns[0].resolved_type(),
+            ResolvedType::scalar(StandardScalar::Integer)
+        );
 
         let (catalogue, _, _, _) = catalogue();
         let context = CatalogueHashContext::version_one();
@@ -6392,11 +6444,15 @@ mod tests {
         );
         assert!(matches!(
             ResultCardinality::ExactlyOne.validate(2),
-            Err(PostgresKernelError::ServerSelect(ServerSelectError::Cardinality { .. }))
+            Err(PostgresKernelError::ServerSelect(
+                ServerSelectError::Cardinality { .. }
+            ))
         ));
         assert!(matches!(
             ResultCardinality::ExactlyOne.finish(0),
-            Err(PostgresKernelError::ServerSelect(ServerSelectError::Cardinality { .. }))
+            Err(PostgresKernelError::ServerSelect(
+                ServerSelectError::Cardinality { .. }
+            ))
         ));
     }
 
@@ -10418,8 +10474,7 @@ mod tests {
             "value\n\"a\nb\"\n",
         );
         assert_eq!(
-            render_csv_document(&active, &carriage_and_newline)
-                .expect("CR/LF are valid CSV data"),
+            render_csv_document(&active, &carriage_and_newline).expect("CR/LF are valid CSV data"),
             "value\n\"a\r\nb\"\n",
         );
 

@@ -263,14 +263,14 @@ fn runs_as_the_orna_account() -> bool {
         && nix::unistd::getegid() == orna.gid
 }
 
-fn require_read_rejection(output: &Output, path: &Path) {
+fn require_read_rejection(output: &Output) {
     assert_eq!(output.status.code(), Some(1), "status: {output:?}");
     assert!(
         output.stdout.is_empty(),
         "rejected source apply must emit no standard output, got {:?}",
         output.stdout
     );
-    let expected = format!("orna: could not read source file: {}\n", path.display());
+    let expected = "orna: could not read source file\n";
     assert_eq!(
         output.stderr,
         expected.as_bytes(),
@@ -406,19 +406,15 @@ fn missing_and_non_regular_sources_fail_closed() {
 
     require_read_rejection(
         &run_source_apply(directory.path(), &missing).expect("bounded missing source"),
-        &missing,
     );
     require_read_rejection(
         &run_source_apply(directory.path(), &as_directory).expect("bounded directory source"),
-        &as_directory,
     );
     require_read_rejection(
-        &run_source_apply(directory.path(), &dangling).expect("bounded symlink source"),
-        &dangling,
+        &run_source_apply(directory.path(), &dangling).expect("bounded dangling source"),
     );
     require_read_rejection(
         &run_source_apply(directory.path(), &fifo).expect("bounded fifo source"),
-        &fifo,
     );
 
     let after = snapshot(directory.path()).expect("snapshot scratch after invocations");
@@ -440,10 +436,7 @@ fn invalid_utf8_source_fails_closed() {
         output.stdout.is_empty(),
         "invalid UTF-8 must emit no standard output"
     );
-    let expected = format!(
-        "orna: source file is not valid UTF-8: {}\n",
-        invalid.display()
-    );
+    let expected = "orna: source file is not valid UTF-8\n";
     assert_eq!(
         output.stderr,
         expected.as_bytes(),

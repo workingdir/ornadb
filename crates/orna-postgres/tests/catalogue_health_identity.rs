@@ -7,11 +7,13 @@ use orna_core::{
     CatalogueRevisionId, FunctionId, SourceRevisionId,
     revision::{ActiveDatabaseRevision, DeployableRevision, RevisionPair},
     security::{
-        CATALOGUE_HEALTH_FUNCTION_ID, CATALOGUE_HEALTH_SERVICE_PRINCIPAL_ID, ExecuteGrant,
-        InvocationTarget, LocalPeerCredential, Principal, PrincipalKind, PrincipalStatus,
-        SecurityAuditKind, SecurityAuditOutcome, SecuritySnapshot,
+        CATALOGUE_HEALTH_FUNCTION_ID, CATALOGUE_HEALTH_SERVICE_PRINCIPAL_ID, ExecuteDenial,
+        ExecuteGrant, InvocationTarget, LocalPeerCredential, Principal, PrincipalKind,
+        PrincipalStatus, SecurityAuditDenial, SecurityAuditKind, SecurityAuditOutcome,
+        SecuritySnapshot,
     },
     source::{SourceBundle, SourceUnit},
+    system::SYS_SECURITY_CREATE_PRINCIPAL_FUNCTION_ID,
     value::RuntimeValue,
 };
 use orna_postgres::{AuthenticatedRawCallResult, PostgresKernel, PostgresKernelError};
@@ -144,6 +146,58 @@ async fn installs_and_preserves_the_exact_catalogue_health_identity() -> TestRes
             credential_count == 0,
             "failed recovery identity setup repaired the protected credential",
         )
+    })
+    .await
+}
+
+#[tokio::test]
+#[ignore = "requires the Compose PostgreSQL development service"]
+async fn raw_dispatch_rejects_deferred_system_identity_before_allowed_audit() -> TestResult<()> {
+    with_test_database(|database| async move {
+        let kernel: PostgresKernel = database.connection_string().parse()?;
+        kernel.bootstrap().await?;
+        let empty = kernel.recover().await?;
+        let upgrade = orna_standard::prepare_standard_upgrade(&empty)?;
+        let active = kernel.apply_standard_upgrade(&upgrade).await?;
+        kernel.install_catalogue_health_service(SERVICE_UID).await?;
+        let session = kernel.authenticate_local_peer(SERVICE_UID).await?;
+
+        let deferred = SYS_SECURITY_CREATE_PRINCIPAL_FUNCTION_ID;
+        let denied = kernel
+            .dispatch_authenticated_raw_call(&session, deferred)
+            .await
+            .expect_err("a deferred system identity must not enter raw dispatch");
+        require(
+            matches!(
+                denied,
+                PostgresKernelError::RawExecuteDenied {
+                    pair,
+                    function,
+                    reason: ExecuteDenial::UnknownFunction,
+                } if pair == active.pair() && function == deferred
+            ),
+            "deferred system raw dispatch returned the wrong public denial",
+        )?;
+
+        let execute = kernel
+            .recover_security_audit_events()
+            .await?
+            .into_iter()
+            .filter(|event| event.decision().kind() == SecurityAuditKind::Execute)
+            .collect::<Vec<_>>();
+        require(
+            execute.len() == 1
+                && execute[0].decision().outcome() == SecurityAuditOutcome::Denied
+                && execute[0].decision().target()
+                    == Some(InvocationTarget::new(deferred, active.pair()))
+                && matches!(
+                    execute[0].decision().denial(),
+                    Some(SecurityAuditDenial::Execute(ExecuteDenial::UnknownFunction))
+                ),
+            "deferred system raw dispatch appended allowed EXECUTE evidence",
+        )?;
+
+        Ok(())
     })
     .await
 }

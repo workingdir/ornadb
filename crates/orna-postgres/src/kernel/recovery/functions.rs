@@ -30,11 +30,12 @@ use tokio_postgres::{Row, Transaction};
 use orna_core::types::StandardScalar;
 
 use crate::{
-    PostgresKernelError, is_sealed_inspect_type_id,
+    PostgresKernelError,
     decode::{
         DurableRecord, digest_bytes, exact_enum, identity_bytes, optional_identity_bytes,
         u32_from_i64, u64_from_i64,
     },
+    is_sealed_inspect_type_id,
 };
 
 use super::{
@@ -587,14 +588,12 @@ fn decode_function(
         "single" => {
             return Err(record.invariant("SINGLE functions must not have ROWS return columns"));
         }
-        "stream" if recovered_returns.is_empty() => {
-            FunctionReturn::Stream(decode_type_columns(
-                row,
-                &record,
-                LegacyResolvedTypeTupleMember::StreamReturn,
-                catalogue_hash_context,
-            )?)
-        }
+        "stream" if recovered_returns.is_empty() => FunctionReturn::Stream(decode_type_columns(
+            row,
+            &record,
+            LegacyResolvedTypeTupleMember::StreamReturn,
+            catalogue_hash_context,
+        )?),
         "stream" => {
             return Err(record.invariant("STREAM functions must not have ROWS return columns"));
         }
