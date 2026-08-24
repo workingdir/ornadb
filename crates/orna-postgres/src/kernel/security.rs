@@ -2589,7 +2589,14 @@ impl PostgresKernel {
                                                     ));
                                                 };
                                                 if resource.request_id() != Some(completion.request_id()) {
-                                                    continue;
+                                                    return Err(PostgresKernelError::ClientExecution(
+                                                        ClientExecutionError::ResourceEvaluation {
+                                                            context,
+                                                            source: ClientResourceExecutionError::Failed(
+                                                                "resource.executor.invalid_completion".to_owned(),
+                                                            ),
+                                                        },
+                                                    ));
                                                 }
                                                 if matches!(completion, ClientResourceCompletion::Pending { .. }) {
                                                     return Err(PostgresKernelError::ClientExecution(
@@ -7313,6 +7320,23 @@ async fn recover_resource_audit_events(
         let _: SystemTime = resource_audit_column(row, &record, "recorded_at")?;
         let _: [u8; 16] = resource_audit_id(row, &record, "event_id")?;
         let request_id = InvocationId::from_bytes(resource_audit_id(row, &record, "request_id")?);
+        let request_id_bytes = request_id.to_bytes().to_vec();
+        let reservation = transaction
+            .query_opt(
+                "SELECT request_id
+                 FROM _orna_kernel.resource_request_history
+                 WHERE request_id = $1",
+                &[&request_id_bytes],
+            )
+            .await
+            .map_err(PostgresKernelError::Database)?;
+        if reservation.is_none() {
+            return Err(PostgresKernelError::DurableInvariant {
+                relation: "_orna_kernel.resource_request_history",
+                record: request_id.canonical(),
+                rule: "accepted resource producer must retain its reservation",
+            });
+        }
         let nested =
             InvocationId::from_bytes(resource_audit_id(row, &record, "nested_invocation_id")?);
         let _: [u8; 16] = resource_audit_id(row, &record, "parent_invocation_id")?;
@@ -7432,7 +7456,6 @@ async fn recover_resource_audit_events(
             )
             .await?;
         }
-        let _ = request_id;
     }
     Ok(())
 }
