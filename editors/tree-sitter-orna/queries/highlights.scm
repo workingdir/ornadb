@@ -70,6 +70,14 @@
 (table_column_definition name: (identifier) @property)
 (record_field name: (identifier) @property)
 (update_statement column: (identifier) @property)
+(alter_type_statement
+    old_name: (_) @property
+    new_name: (_) @property)
+
+; CLIENT parameter and field reads
+(client_parameter_read) @parameter
+(client_field_path parameter: (_) @parameter)
+(client_field_path field: (_) @property)
 
 (let_declaration name: (identifier) @variable)
 (let_statement name: (identifier) @variable)

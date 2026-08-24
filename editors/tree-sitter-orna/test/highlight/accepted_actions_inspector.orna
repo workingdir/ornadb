@@ -1,0 +1,41 @@
+CREATE CLIENT FUNCTION action_fixture.call(p_value INTEGER)
+RETURNS std.Action
+AS std.action.call(
+-- ^^^ function
+    target => std.invoke.echo,
+--                ^^^^^^ property
+--                       ^^^^ property
+    arguments => std.call.args(p_value => p_value)
+--               ^^^^^^^^^^^^^ function
+--                                        ^^^^^^^ parameter
+);
+
+CREATE EXTERNAL CLIENT FUNCTION inspector_app.inspector_renderer(
+--                                           ^^^^^^^^^^^^^^^^^^^ function
+    p_snapshot sys.inspect.snapshot,
+--  ^^^^^^^^^^ parameter
+    p_invocation_nodes sys.inspect.invocation_nodes,
+--  ^^^^^^^^^^^^^^^^^^ parameter
+    p_calls sys.inspect.calls,
+    p_resources sys.inspect.resources,
+    p_state_cells sys.inspect.state_cells,
+    p_ui_nodes sys.inspect.ui_nodes,
+    p_presentation_candidates sys.inspect.presentation_candidates,
+    p_runtime_bindings sys.inspect.runtime_bindings,
+    p_security_decisions sys.inspect.security_decisions
+) RETURNS std.ui.UI
+RUNTIME CONTRACT 'std.inspect.render@1';
+
+CREATE CLIENT FUNCTION inspector_app.inspector(p_target REF sys.inspect.invocation)
+--                                   ^^^^^^^^^ function
+--                                             ^^^^^^^^ parameter
+RETURNS std.ui.UI IS
+LET snapshot sys.inspect.snapshot := sys.inspect.snapshot(p_target => p_target);
+--  ^^^^^^^^ variable
+--                                   ^^^^^^^^^^^^^^^^^^^^ function
+--                                                                    ^^^^^^^^ parameter
+BEGIN
+    RETURN inspector_app.inspector_renderer(p_snapshot => snapshot);
+--                       ^^^^^^^^^^^^^^^^^^^ function
+--                                                        ^^^^^^^^ parameter
+END;

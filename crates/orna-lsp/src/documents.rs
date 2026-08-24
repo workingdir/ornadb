@@ -100,7 +100,11 @@ impl<'text> PositionMapper<'text> {
             if character == 0 {
                 return line_start + index;
             }
-            character = character.saturating_sub(current.len_utf16());
+            let width = current.len_utf16();
+            if character <= width {
+                return line_start + index + current.len_utf8();
+            }
+            character -= width;
         }
         line_end
     }
@@ -145,6 +149,191 @@ fn utf16_len(text: &str) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn positions_count_non_ascii_text_in_utf16_code_units() {
+        let text = "aé😀b";
+        let mapper = PositionMapper::new(text);
+
+        assert_eq!(
+            mapper.position(0),
+            Position {
+                line: 0,
+                character: 0
+            }
+        );
+        assert_eq!(
+            mapper.position(1),
+            Position {
+                line: 0,
+                character: 1
+            }
+        );
+        assert_eq!(
+            mapper.position(3),
+            Position {
+                line: 0,
+                character: 2
+            }
+        );
+        assert_eq!(
+            mapper.position(7),
+            Position {
+                line: 0,
+                character: 4
+            }
+        );
+    }
+
+    #[test]
+    fn ranges_map_multibyte_boundaries_to_exact_utf16_positions() {
+        let text = "aé😀b";
+        let mapper = PositionMapper::new(text);
+        let span = SourceSpan {
+            start: "a".len(),
+            end: "aé😀".len(),
+        };
+
+        assert_eq!(
+            mapper.range(&span),
+            Range {
+                start: Position {
+                    line: 0,
+                    character: 1,
+                },
+                end: Position {
+                    line: 0,
+                    character: 4,
+                },
+            }
+        );
+        assert_eq!(
+            mapper.byte_offset(Position {
+                line: 0,
+                character: 1,
+            }),
+            1,
+        );
+        assert_eq!(
+            mapper.byte_offset(Position {
+                line: 0,
+                character: 4,
+            }),
+            "aé😀".len(),
+        );
+    }
+
+    #[test]
+    fn byte_offsets_respect_surrogate_pair_boundaries() {
+        let text = "a😀b";
+        let mapper = PositionMapper::new(text);
+
+        assert_eq!(
+            mapper.byte_offset(Position {
+                line: 0,
+                character: 0
+            }),
+            0
+        );
+        assert_eq!(
+            mapper.byte_offset(Position {
+                line: 0,
+                character: 1
+            }),
+            1
+        );
+        assert_eq!(
+            mapper.byte_offset(Position {
+                line: 0,
+                character: 3
+            }),
+            5
+        );
+        assert_eq!(
+            mapper.byte_offset(Position {
+                line: 0,
+                character: 4
+            }),
+            6
+        );
+    }
+
+    #[test]
+    fn crlf_positions_and_offsets_exclude_carriage_returns() {
+        let text = "first\r\nsecond\r\n";
+        let mapper = PositionMapper::new(text);
+
+        assert_eq!(
+            mapper.position(5),
+            Position {
+                line: 0,
+                character: 5
+            }
+        );
+        assert_eq!(
+            mapper.position(7),
+            Position {
+                line: 1,
+                character: 0
+            }
+        );
+        assert_eq!(
+            mapper.position(13),
+            Position {
+                line: 1,
+                character: 6
+            }
+        );
+        assert_eq!(
+            mapper.position(text.len()),
+            Position {
+                line: 2,
+                character: 0
+            }
+        );
+        assert_eq!(
+            mapper.byte_offset(Position {
+                line: 0,
+                character: 5
+            }),
+            5
+        );
+        assert_eq!(
+            mapper.byte_offset(Position {
+                line: 1,
+                character: 6
+            }),
+            13
+        );
+        assert_eq!(
+            mapper.byte_offset(Position {
+                line: 2,
+                character: 0
+            }),
+            15
+        );
+    }
+
+    #[test]
+    fn positions_and_offsets_clamp_to_document_boundaries() {
+        let text = "one\ntwo";
+        let mapper = PositionMapper::new(text);
+
+        assert_eq!(
+            mapper.position(usize::MAX),
+            Position {
+                line: 1,
+                character: 3
+            }
+        );
+        assert_eq!(
+            mapper.byte_offset(Position {
+                line: u32::MAX,
+                character: u32::MAX
+            }),
+            text.len()
+        );
+    }
 
     #[test]
     fn segments_advance_across_multiline_tokens() {

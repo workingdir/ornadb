@@ -181,6 +181,92 @@ def check_accepted_corpus_manifest(
     return accepted_names, len(corpus_names)
 
 
+
+def check_accepted_corpus_results(
+    summary: object,
+    accepted_names: Sequence[str],
+) -> bool:
+    """Require the Tree-sitter summary to contain exactly the passed manifest cases."""
+    if not isinstance(summary, dict):
+        log("accepted corpus test returned a non-object JSON summary", error=True)
+        return False
+
+    parse_results = summary.get("parse_results")
+    if not isinstance(parse_results, list):
+        log("accepted corpus test JSON summary has no parse_results array", error=True)
+        return False
+
+    executed_names: list[str] = []
+    failed_results: list[tuple[str, str]] = []
+
+    def collect_results(results: list[object], path: str) -> bool:
+        for index, result in enumerate(results):
+            result_path = f"{path}[{index}]"
+            if not isinstance(result, dict):
+                log(
+                    f"accepted corpus test JSON summary has malformed result at {result_path}",
+                    error=True,
+                )
+                return False
+            name = result.get("name")
+            if not isinstance(name, str) or not name:
+                log(
+                    f"accepted corpus test JSON summary has malformed name at {result_path}",
+                    error=True,
+                )
+                return False
+            if "children" in result:
+                children = result["children"]
+                if not isinstance(children, list) or not collect_results(
+                    children, f"{result_path}.children"
+                ):
+                    return False
+                continue
+
+            outcome = result.get("outcome")
+            if not isinstance(outcome, str):
+                log(
+                    f"accepted corpus test JSON summary has malformed parse outcome at "
+                    f"{result_path} ({name!r})",
+                    error=True,
+                )
+                return False
+            executed_names.append(name)
+            if outcome != "Passed":
+                failed_results.append((name, outcome))
+        return True
+
+    if not collect_results(parse_results, "parse_results"):
+        return False
+
+    expected_names = set(accepted_names)
+    executed_name_set = set(executed_names)
+    missing = [name for name in accepted_names if name not in executed_name_set]
+    unexpected = [name for name in executed_names if name not in expected_names]
+    duplicate_names = sorted(
+        name for name in executed_name_set if executed_names.count(name) > 1
+    )
+    if missing or unexpected or duplicate_names:
+        details: list[str] = []
+        if missing:
+            details.append("missing " + ", ".join(repr(name) for name in missing))
+        if unexpected:
+            details.append("unexpected " + ", ".join(repr(name) for name in unexpected))
+        if duplicate_names:
+            details.append(
+                "duplicate " + ", ".join(repr(name) for name in duplicate_names)
+            )
+        log("accepted corpus execution did not match manifest: " + "; ".join(details), error=True)
+        return False
+
+    if failed_results:
+        details = ", ".join(f"{name!r} ({outcome})" for name, outcome in failed_results)
+        log(f"accepted corpus cases did not pass: {details}", error=True)
+        return False
+
+    return True
+
+
 def checked_in_editor_json_files(repository: Path) -> list[Path] | None:
     """Return tracked editor JSON files, excluding local dependency trees."""
     try:
@@ -274,6 +360,105 @@ def check_generated_artefacts(
     return True
 
 
+def check_highlight_fixture(
+    tree_sitter: str,
+    tree_sitter_directory: Path,
+    repository: Path,
+    fixture_name: str,
+    expected_assertions: int,
+) -> bool:
+    """Run one checked-in highlight fixture and validate its assertion count."""
+    highlights_path = tree_sitter_directory / "queries" / "highlights.scm"
+    fixture_path = tree_sitter_directory / "test" / "highlight" / fixture_name
+    for path in (highlights_path, fixture_path):
+        if not path.is_file():
+            log(
+                f"required highlight fixture is missing: {display_path(path, repository)}",
+                error=True,
+            )
+            return False
+
+    log(f"checking highlight captures in {fixture_name}")
+    result = run_command(
+        [
+            tree_sitter,
+            "test",
+            "--file-name",
+            fixture_name,
+            "--json-summary",
+        ],
+        cwd=tree_sitter_directory,
+        label=f"tree-sitter {fixture_name} highlight test",
+    )
+    if result is None or result.returncode != 0:
+        status = (
+            "could not start" if result is None else f"exited with status {result.returncode}"
+        )
+        log(f"highlight test failed for {fixture_name} ({status})", error=True)
+        return False
+
+    try:
+        summary = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        log(f"highlight test returned invalid JSON for {fixture_name}: {exc}", error=True)
+        return False
+
+    highlight_results = summary.get("highlight_results") if isinstance(summary, dict) else None
+    if not isinstance(highlight_results, list):
+        log(f"highlight test returned no result list for {fixture_name}", error=True)
+        return False
+    matching = [
+        result
+        for result in highlight_results
+        if isinstance(result, dict) and result.get("name") == fixture_name
+    ]
+    if len(matching) != 1:
+        log(
+            f"highlight test did not execute exactly one {fixture_name!r} fixture",
+            error=True,
+        )
+        return False
+
+    outcome = matching[0].get("outcome")
+    if (
+        not isinstance(outcome, dict)
+        or not isinstance(outcome.get("AssertionPassed"), dict)
+        or outcome["AssertionPassed"].get("assertion_count") != expected_assertions
+    ):
+        log(
+            f"highlight assertions did not pass for {fixture_name} "
+            f"(expected {expected_assertions})",
+            error=True,
+        )
+        return False
+    log(f"highlight assertions passed for {fixture_name}")
+    return True
+
+
+def check_alter_rename_highlights(
+    tree_sitter: str,
+    tree_sitter_directory: Path,
+    repository: Path,
+) -> bool:
+    """Run accepted ALTER and CLIENT action/Inspector highlight fixtures."""
+    return (
+        check_highlight_fixture(
+            tree_sitter,
+            tree_sitter_directory,
+            repository,
+            "alter_type_rename.orna",
+            4,
+        )
+        and check_highlight_fixture(
+            tree_sitter,
+            tree_sitter_directory,
+            repository,
+            "accepted_actions_inspector.orna",
+            15,
+        )
+    )
+
+
 def check_tree_sitter_package(tree_sitter_directory: Path, repository: Path) -> bool:
     """Validate the grammar's source-only npm package boundary."""
     package_path = tree_sitter_directory / "package.json"
@@ -358,6 +543,221 @@ def check_textmate_grammar(grammar_path: Path, repository: Path) -> bool:
     log(f"validated TextMate grammar {display_path(grammar_path, repository)}")
     return True
 
+
+
+
+def check_neovim_integration(neovim_directory: Path, repository: Path) -> bool:
+    """Validate the checked-in Neovim filetype and native/legacy LSP setup."""
+    primary_path = neovim_directory / "lua" / "orna" / "init.lua"
+    lua_paths = [primary_path] if primary_path.is_file() else sorted(neovim_directory.rglob("*.lua"))
+    if not lua_paths:
+        log(
+            "required Neovim integration is missing: "
+            f"{display_path(primary_path, repository)} or an equivalent Lua source",
+            error=True,
+        )
+        return False
+
+    sources: list[str] = []
+    for path in lua_paths:
+        try:
+            sources.append(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError) as exc:
+            log(f"could not read Neovim integration {display_path(path, repository)}: {exc}", error=True)
+            return False
+    source = "\n".join(sources)
+
+    requirements = (
+        (
+            "the .orna extension map",
+            r"vim\.filetype\.add\s*\(\s*\{\s*extension\s*=\s*\{\s*orna\s*=\s*[\"']orna[\"']\s*\}",
+        ),
+        (
+            "the default orna-lsp command",
+            r"defaults\s*=\s*\{(?s:.*?)cmd\s*=\s*\{\s*[\"']orna-lsp[\"']\s*\}",
+        ),
+        (
+            "the native orna filetype",
+            r"vim\.lsp\.config\s*\(\s*[\"']orna[\"'](?s:.*?)filetypes\s*=\s*\{\s*[\"']orna[\"']\s*\}",
+        ),
+        (
+            "the native vim.lsp.enable(\"orna\") call",
+            r"vim\.lsp\.enable\s*\(\s*[\"']orna[\"']\s*\)",
+        ),
+        (
+            "the legacy orna filetype",
+            r"nvim_create_autocmd\s*\(\s*[\"']FileType[\"'](?s:.*?)pattern\s*=\s*[\"']orna[\"']",
+        ),
+        (
+            "the legacy native client fallback",
+            r"vim\.lsp\.start_client\s*\(",
+        ),
+    )
+    for description, pattern in requirements:
+        if re.search(pattern, source) is None:
+            log(
+                f"Neovim integration is missing {description}: "
+                f"{display_path(primary_path, repository)}",
+                error=True,
+            )
+            return False
+
+    log(f"validated Neovim integration {display_path(primary_path, repository)}")
+    return True
+
+
+def check_vim_filetype_detection(ftdetect_path: Path, repository: Path) -> bool:
+    """Validate Vim's accepted .orna filetype detection autocmd."""
+    try:
+        source = ftdetect_path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        log(f"could not read Vim filetype detection {display_path(ftdetect_path, repository)}: {exc}", error=True)
+        return False
+
+    pattern = r"(?m)^\s*(?:au|autocmd)\s+BufRead,BufNewFile\s+\*\.orna\s+setfiletype\s+orna\s*$"
+    if re.search(pattern, source) is None:
+        log(
+            "Vim filetype detection must map *.orna on BufRead and BufNewFile "
+            f"to filetype orna: {display_path(ftdetect_path, repository)}",
+            error=True,
+        )
+        return False
+
+    log(f"validated Vim filetype detection {display_path(ftdetect_path, repository)}")
+    return True
+
+
+def check_vscode_package(package_path: Path, repository: Path) -> bool:
+    """Validate the accepted VS Code package metadata contract."""
+    try:
+        with package_path.open(encoding="utf-8") as stream:
+            package = json.load(stream)
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        log(f"invalid VS Code package metadata {display_path(package_path, repository)}: {exc}", error=True)
+        return False
+
+    if not isinstance(package, dict) or package.get("main") != "./extension.js":
+        log(
+            f"VS Code package metadata must set main to ./extension.js: {display_path(package_path, repository)}",
+            error=True,
+        )
+        return False
+
+    activation_events = package.get("activationEvents")
+    if not isinstance(activation_events, list) or "onLanguage:orna" not in activation_events:
+        log(
+            "VS Code package metadata must activate onLanguage:orna: "
+            f"{display_path(package_path, repository)}",
+            error=True,
+        )
+        return False
+
+    contributes = package.get("contributes")
+    if not isinstance(contributes, dict):
+        log(
+            f"VS Code package metadata must define contributes: {display_path(package_path, repository)}",
+            error=True,
+        )
+        return False
+
+    languages = contributes.get("languages")
+    orna_language = next(
+        (entry for entry in languages if isinstance(entry, dict) and entry.get("id") == "orna"),
+        None,
+    ) if isinstance(languages, list) else None
+    if not isinstance(orna_language, dict):
+        log(
+            f"VS Code package metadata must define the orna language contribution: {display_path(package_path, repository)}",
+            error=True,
+        )
+        return False
+    if not isinstance(orna_language.get("extensions"), list) or ".orna" not in orna_language["extensions"]:
+        log(
+            "VS Code language contribution must map the .orna extension: "
+            f"{display_path(package_path, repository)}",
+            error=True,
+        )
+        return False
+    if orna_language.get("configuration") != "./language-configuration.json":
+        log(
+            "VS Code language contribution must use ./language-configuration.json: "
+            f"{display_path(package_path, repository)}",
+            error=True,
+        )
+        return False
+
+    grammars = contributes.get("grammars")
+    orna_grammar = next(
+        (entry for entry in grammars if isinstance(entry, dict) and entry.get("language") == "orna"),
+        None,
+    ) if isinstance(grammars, list) else None
+    if not isinstance(orna_grammar, dict):
+        log(
+            f"VS Code package metadata must define the orna grammar: {display_path(package_path, repository)}",
+            error=True,
+        )
+        return False
+    if orna_grammar.get("scopeName") != "source.orna":
+        log(
+            "VS Code grammar contribution must use scopeName source.orna: "
+            f"{display_path(package_path, repository)}",
+            error=True,
+        )
+        return False
+    if orna_grammar.get("path") != "./syntaxes/orna.tmLanguage.json":
+        log(
+            "VS Code grammar contribution must point to ./syntaxes/orna.tmLanguage.json: "
+            f"{display_path(package_path, repository)}",
+            error=True,
+        )
+        return False
+
+    configuration = contributes.get("configuration")
+    properties = configuration.get("properties") if isinstance(configuration, dict) else None
+    lsp_path = properties.get("orna.lsp.path") if isinstance(properties, dict) else None
+    if not isinstance(lsp_path, dict) or lsp_path.get("type") != "string":
+        log(
+            "VS Code package metadata must define string config orna.lsp.path: "
+            f"{display_path(package_path, repository)}",
+            error=True,
+        )
+        return False
+    if lsp_path.get("default") != "orna-lsp":
+        log(
+            "VS Code config orna.lsp.path must default to orna-lsp: "
+            f"{display_path(package_path, repository)}",
+            error=True,
+        )
+        return False
+
+    log(f"validated VS Code package metadata {display_path(package_path, repository)}")
+    return True
+
+
+def check_vscode_extension(extension_path: Path, repository: Path) -> bool:
+    """Validate the VS Code extension's static selector and server-path strings."""
+    try:
+        source = extension_path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        log(f"could not read VS Code extension {display_path(extension_path, repository)}: {exc}", error=True)
+        return False
+
+    requirements = (
+        ("getConfiguration(\"orna\")", r"getConfiguration\s*\(\s*[\"']orna[\"']\s*\)"),
+        ("the orna.lsp.path lookup", r"\.get\s*\(\s*[\"']lsp\.path[\"']\s*\)"),
+        ("the orna-lsp fallback command", r"configuredPath\s*\|\|\s*[\"']orna-lsp[\"']"),
+        ("the orna document selector", r"documentSelector\s*:\s*\[\s*\{\s*language\s*:\s*[\"']orna[\"']\s*\}\s*\]"),
+    )
+    for description, pattern in requirements:
+        if re.search(pattern, source) is None:
+            log(
+                f"VS Code extension is missing {description}: {display_path(extension_path, repository)}",
+                error=True,
+            )
+            return False
+
+    log(f"validated VS Code extension static contract {display_path(extension_path, repository)}")
+    return True
 
 
 def tree_sitter_keywords(grammar_path: Path, repository: Path) -> set[str] | None:
@@ -694,6 +1094,37 @@ def check_emacs_integration(
     return True
 
 
+
+def check_zed_highlights(zed_directory: Path, repository: Path) -> bool:
+    """Require Zed's conventional highlights path and accepted ALTER captures."""
+    highlights_path = zed_directory / "languages" / "orna" / "highlights.scm"
+    try:
+        highlights = highlights_path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        log(
+            f"could not read Zed highlights {display_path(highlights_path, repository)}: {exc}",
+            error=True,
+        )
+        return False
+
+    required_captures = (
+        "(alter_type_statement",
+        "old_name: (_) @property",
+        "new_name: (_) @property",
+    )
+    missing = [capture for capture in required_captures if capture not in highlights]
+    if missing:
+        log(
+            "Zed highlights are missing accepted ALTER captures: "
+            + ", ".join(repr(capture) for capture in missing),
+            error=True,
+        )
+        return False
+
+    log(f"validated Zed highlights {display_path(highlights_path, repository)}")
+    return True
+
+
 def check_zed_extension(
     cargo: str,
     zed_directory: Path,
@@ -746,6 +1177,10 @@ def main() -> int:
     helix_configuration = repository / "editors" / "helix" / "languages.toml"
     emacs_integration = repository / "editors" / "emacs" / "orna-eglot.el"
     vim_syntax = repository / "editors" / "vim" / "syntax" / "orna.vim"
+    neovim_directory = repository / "editors" / "neovim"
+    vim_ftdetect = repository / "editors" / "vim" / "ftdetect" / "orna.vim"
+    vscode_package = repository / "editors" / "vscode" / "package.json"
+    vscode_extension = repository / "editors" / "vscode" / "extension.js"
 
 
     tree_sitter = shutil.which("tree-sitter")
@@ -792,8 +1227,18 @@ def main() -> int:
     emacs_check = check_emacs_integration(emacs, emacs_integration, repository)
     if emacs_check is False:
         return 1
+    if not check_neovim_integration(neovim_directory, repository):
+        return 1
+    if not check_vim_filetype_detection(vim_ftdetect, repository):
+        return 1
+    if not check_vscode_package(vscode_package, repository):
+        return 1
+    if not check_vscode_extension(vscode_extension, repository):
+        return 1
 
 
+    if not check_zed_highlights(zed_directory, repository):
+        return 1
     if not check_zed_extension(cargo, zed_directory, repository):
         return 1
     if not check_lsp_protocol(cargo, repository):
@@ -828,7 +1273,7 @@ def main() -> int:
     accepted_regex = "^(?:" + "|".join(re.escape(name) for name in accepted_case_names) + ")$"
     log(f"running tree-sitter accepted corpus ({len(accepted_case_names)} cases)")
     corpus_result = run_command(
-        [tree_sitter, "test", "--include", accepted_regex],
+        [tree_sitter, "test", "--include", accepted_regex, "--json-summary"],
         cwd=tree_sitter_directory,
         label="tree-sitter accepted corpus",
     )
@@ -840,7 +1285,18 @@ def main() -> int:
         )
         log(f"tree-sitter accepted corpus failed ({status})", error=True)
         return 1
+    try:
+        corpus_summary = json.loads(corpus_result.stdout)
+    except json.JSONDecodeError as exc:
+        log(f"accepted corpus test returned invalid JSON: {exc}", error=True)
+        return 1
+    if not check_accepted_corpus_results(corpus_summary, accepted_case_names):
+        return 1
     log(f"accepted corpus evidence passed: {len(accepted_case_names)} cases")
+    if not check_alter_rename_highlights(
+        tree_sitter, tree_sitter_directory, repository
+    ):
+        return 1
     remaining_corpus_cases = corpus_case_count - len(accepted_case_names)
     log(
         f"remaining corpus cases: {remaining_corpus_cases} proposal/deferred grammar coverage; "
@@ -897,6 +1353,10 @@ def main() -> int:
     json_files = checked_in_editor_json_files(repository)
     if json_files is None:
         return 1
+    textmate_grammars = (
+        repository / "editors" / "textmate" / "orna.tmLanguage.json",
+        repository / "editors" / "vscode" / "syntaxes" / "orna.tmLanguage.json",
+    )
     for path in json_files:
         relative_path = display_path(path, repository)
         log(f"validating JSON {relative_path}")
@@ -907,11 +1367,20 @@ def main() -> int:
             log(f"invalid JSON in {relative_path}: {exc}", error=True)
             return 1
     log(f"validated {len(json_files)} editor JSON files")
-
-    textmate_grammars = (
-        repository / "editors" / "textmate" / "orna.tmLanguage.json",
-        repository / "editors" / "vscode" / "syntaxes" / "orna.tmLanguage.json",
+    if not filecmp.cmp(*textmate_grammars, shallow=False):
+        log(
+            "TextMate grammar differs between "
+            f"{display_path(textmate_grammars[0], repository)} and "
+            f"{display_path(textmate_grammars[1], repository)}",
+            error=True,
+        )
+        return 1
+    log(
+        "canonical TextMate grammar matches VS Code bundle: "
+        f"{display_path(textmate_grammars[0], repository)} == "
+        f"{display_path(textmate_grammars[1], repository)}"
     )
+
     for grammar_path in textmate_grammars:
         if not check_textmate_grammar(grammar_path, repository):
             return 1
@@ -954,6 +1423,7 @@ def main() -> int:
         log("editor tooling gate completed; optional Emacs runtime check was unavailable")
     else:
         log("editor tooling gate passed")
+    log("Neovim/Vim runtime checks unavailable in this dependency-light gate; static integration contracts were validated")
     return 0
 
 

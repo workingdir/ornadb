@@ -11,13 +11,13 @@ use lsp_types::{
 };
 use orna_compiler::{CompilerDiagnostic, check_new_application, check_standard_library_source};
 use orna_core::source::{SourceBundle, SourceUnit};
-use orna_standard::{retained_standard_library_snapshot, verify_standard_library_snapshot};
+use orna_standard::{retained_standard_library_v6_snapshot, verify_standard_library_v6_snapshot};
 use orna_syntax::FunctionReturnType;
 use orna_syntax::{
     ClientExpression, ClientFunctionDeclaration, EnumTypeDeclaration, HighlightKind,
     ObjectTypeDeclaration, OpaqueValueTypeDeclaration, Parse, PrimitiveValueTypeDeclaration,
     QualifiedName, RecordValueTypeDeclaration, SchemaDeclaration, ServerFunctionDeclaration,
-    SourceSpan, TypeSpecification,
+    SourceSlice, SourceSpan, StandardLargeObjectKind, TypeSpecification,
 };
 
 use crate::documents::{Document, PositionMapper};
@@ -33,9 +33,10 @@ impl StandardLibrary {
     /// This runs once per server process. The checked library is immutable
     /// and safe to reuse for every document.
     pub fn load() -> Result<Self, String> {
-        let snapshot = retained_standard_library_snapshot().map_err(|error| error.to_string())?;
+        let snapshot =
+            retained_standard_library_v6_snapshot().map_err(|error| error.to_string())?;
         let verified =
-            verify_standard_library_snapshot(snapshot).map_err(|error| error.to_string())?;
+            verify_standard_library_v6_snapshot(snapshot).map_err(|error| error.to_string())?;
         let checked =
             check_standard_library_source(&verified).map_err(|error| error.to_string())?;
         Ok(Self { checked })
@@ -803,17 +804,116 @@ fn type_owner_name(specification: &TypeSpecification) -> Option<QualifiedName> {
     }
 }
 
-fn type_owner_name_from_source(source: &str) -> Option<QualifiedName> {
-    let wrapped =
-        format!("CREATE SERVER FUNCTION __orna_lsp_type_owner() RETURNS {source} AS SELECT TRUE;");
+fn source_contains_unquoted_comment(source: &str) -> bool {
+    let bytes = source.as_bytes();
+    let mut index = 0;
+    let mut quoted = false;
+    while index < bytes.len() {
+        if quoted {
+            if bytes[index] == b'"' {
+                if bytes.get(index + 1) == Some(&b'"') {
+                    index += 2;
+                    continue;
+                }
+                quoted = false;
+            }
+            index += 1;
+            continue;
+        }
+        if bytes[index] == b'"' {
+            quoted = true;
+            index += 1;
+            continue;
+        }
+        if index + 2 <= bytes.len()
+            && (&bytes[index..index + 2] == b"/*" || &bytes[index..index + 2] == b"--")
+        {
+            return true;
+        }
+        index += 1;
+    }
+    false
+}
+
+const TYPE_SOURCE_PREFIX: &str = "CREATE SERVER FUNCTION __orna_lsp_type_owner(p BOOLEAN) RETURNS ";
+
+fn type_specification_from_source(source: &str) -> Option<TypeSpecification> {
+    if source_contains_unquoted_comment(source) {
+        return None;
+    }
+    let wrapped = format!("{TYPE_SOURCE_PREFIX}{source} AS SELECT p;");
     let parsed = orna_syntax::parse(&wrapped);
     parsed
         .server_functions()
         .first()
         .and_then(|declaration| match &declaration.return_type {
-            FunctionReturnType::Single(specification) => type_owner_name(specification),
+            FunctionReturnType::Single(specification) => Some(specification.clone()),
             FunctionReturnType::Rows { .. } | FunctionReturnType::Stream { .. } => None,
         })
+}
+
+fn rebase_span(span: &mut SourceSpan, source_start: usize) {
+    let width = span.end - span.start;
+    span.start = span.start - TYPE_SOURCE_PREFIX.len() + source_start;
+    span.end = span.start + width;
+}
+
+fn rebase_qualified_name(name: &mut QualifiedName, source_start: usize) {
+    rebase_span(&mut name.span, source_start);
+    for part in &mut name.parts {
+        rebase_span(&mut part.span, source_start);
+    }
+}
+
+fn rebase_type_specification(specification: &mut TypeSpecification, source_start: usize) {
+    match specification {
+        TypeSpecification::Named(name) => rebase_qualified_name(name, source_start),
+        TypeSpecification::StandardLargeObject { source, .. } => {
+            rebase_span(&mut source.span, source_start)
+        }
+        TypeSpecification::Reference { target, span, .. }
+        | TypeSpecification::List {
+            element: target,
+            span,
+        }
+        | TypeSpecification::Set {
+            element: target,
+            span,
+        }
+        | TypeSpecification::Option {
+            value: target,
+            span,
+            ..
+        }
+        | TypeSpecification::Stream {
+            element: target,
+            span,
+        } => {
+            rebase_span(span, source_start);
+            rebase_type_specification(target, source_start);
+        }
+        TypeSpecification::Map {
+            key, value, span, ..
+        } => {
+            rebase_span(span, source_start);
+            rebase_type_specification(key, source_start);
+            rebase_type_specification(value, source_start);
+        }
+    }
+}
+
+fn type_specification_from_slice(source: &SourceSlice) -> Option<TypeSpecification> {
+    let mut specification = type_specification_from_source(&source.text)?;
+    rebase_type_specification(&mut specification, source.span.start);
+    Some(specification)
+}
+
+fn type_owner_name_from_source(source: &str) -> Option<QualifiedName> {
+    // The compiler's CLIENT local type resolver only strips whitespace.
+    if source_contains_unquoted_comment(source) {
+        return None;
+    }
+    type_specification_from_source(source).and_then(|specification| type_owner_name(&specification))
 }
 
 struct ClientRootBinding {
@@ -927,6 +1027,126 @@ fn field_on_object_or_record<'a>(
         .iter()
         .find(|field| identifier_spelling_matches(&field.name.text, field_name))?;
     Some(record_field_info(field))
+}
+
+fn client_parameter_info<'a>(
+    declaration: &'a ClientFunctionDeclaration,
+    root: &orna_syntax::NamePart,
+    kind: ClientExpressionPart<'_>,
+) -> Option<ParameterInfo<'a>> {
+    let find_parameter = || {
+        declaration
+            .parameters
+            .iter()
+            .find(|parameter| name_part_matches_text(&parameter.name, &root.text))
+            .map(|parameter| ParameterInfo {
+                name: &parameter.name,
+                type_specification: &parameter.type_specification,
+                default_text: parameter
+                    .default_expression
+                    .as_ref()
+                    .map(|default| default.text.as_str()),
+                documentation: parameter.documentation.as_ref().map(strip_quotes),
+            })
+    };
+    let find_state = || {
+        declaration
+            .body
+            .as_state_block()
+            .and_then(|block| {
+                block.states.iter().find(|state| {
+                    name_part_matches_text(&state.name, &root.text)
+                        && state.span.end <= root.span.start
+                })
+            })
+            .map(|state| ParameterInfo {
+                name: &state.name,
+                type_specification: &state.type_specification,
+                default_text: None,
+                documentation: None,
+            })
+    };
+    let visible_local = || {
+        declaration.body.as_state_block().is_some_and(|block| {
+        block.locals.iter().any(|local| name_part_matches_text(&local.name, &root.text) && local.span.end <= root.span.start)
+            || block.statements.iter().any(|statement| matches!(statement, orna_syntax::ClientProceduralStatement::Let(local) if name_part_matches_text(&local.name, &root.text) && local.span.end <= root.span.start))
+    })
+    };
+    match kind {
+        ClientExpressionPart::ParameterRoot(_) => {
+            if visible_local() {
+                None
+            } else {
+                find_parameter().or_else(find_state)
+            }
+        }
+        ClientExpressionPart::LocalRoot(_) => find_state(),
+        ClientExpressionPart::FieldRoot(_) => find_parameter().or_else(find_state),
+        ClientExpressionPart::FieldMember { .. } | ClientExpressionPart::CallArgumentLabel => None,
+    }
+}
+
+fn client_local_hover(
+    declaration: &ClientFunctionDeclaration,
+    root: &orna_syntax::NamePart,
+    text: &str,
+    doc_link: Option<&str>,
+) -> Option<Hover> {
+    let block = declaration.body.as_state_block()?;
+    let mut source: Option<(&orna_syntax::NamePart, &SourceSlice)> = None;
+    for local in &block.locals {
+        if name_part_matches_text(&local.name, &root.text) && local.span.end <= root.span.start {
+            if source.is_some() {
+                return None;
+            }
+            source = Some((&local.name, &local.type_source));
+        }
+    }
+    for statement in &block.statements {
+        let orna_syntax::ClientProceduralStatement::Let(local) = statement else {
+            continue;
+        };
+        if name_part_matches_text(&local.name, &root.text) && local.span.end <= root.span.start {
+            let Some(type_source) = local.type_source.as_ref() else {
+                continue;
+            };
+            if source.is_some() {
+                return None;
+            }
+            source = Some((&local.name, type_source));
+        }
+    }
+    let (name, type_source) = source?;
+    let specification = type_specification_from_slice(type_source)?;
+    let parameter = ParameterInfo {
+        name,
+        type_specification: &specification,
+        default_text: None,
+        documentation: None,
+    };
+    Some(crate::hover::parameter_hover(&parameter, text, doc_link))
+}
+
+fn client_field_info_at<'a>(parse: &'a Parse, selected_span: &SourceSpan) -> Option<FieldInfo<'a>> {
+    let (declaration, part) = client_expression_part_in_parse(parse, selected_span)?;
+    let ClientExpressionPart::FieldMember {
+        root,
+        members,
+        index,
+    } = part
+    else {
+        return None;
+    };
+    let mut owner =
+        client_root_binding(declaration, root, ClientExpressionPart::FieldRoot(root))?.owner?;
+    for (member_index, member) in members.iter().take(index + 1).enumerate() {
+        let field = field_on_object_or_record(parse, &owner, &member.text)?;
+        if member_index == index {
+            return Some(field);
+        }
+        owner = type_owner_name(field.type_specification)?;
+    }
+    None
 }
 
 fn client_field_declaration_span(parse: &Parse, selected_span: &SourceSpan) -> Option<SourceSpan> {
@@ -1692,6 +1912,185 @@ fn on_delete_text(policy: orna_syntax::OnDeletePolicy) -> &'static str {
     }
 }
 
+/// Finds a canonical multi-word scalar type containing one source byte.
+///
+/// `Parse::highlight` deliberately emits one type-name token per word in a
+/// `CHARACTER LARGE OBJECT` or `BINARY LARGE OBJECT` phrase.  Hovering one of
+/// those tokens must nevertheless resolve the AST's complete type span, while
+/// ordinary words with the same spelling remain ordinary words outside a type
+/// specification.
+fn standard_large_object_at(
+    parse: &Parse,
+    byte: usize,
+) -> Option<(&SourceSpan, StandardLargeObjectKind)> {
+    fn in_source(
+        source: &orna_syntax::SourceSlice,
+        byte: usize,
+    ) -> Option<(&SourceSpan, StandardLargeObjectKind)> {
+        if source.span.start > byte || byte >= source.span.end {
+            return None;
+        }
+        let mut words = Vec::new();
+        let mut offset = 0;
+        while offset < source.text.len() {
+            let rest = &source.text[offset..];
+            if rest.starts_with("--") || rest.starts_with("/*") {
+                return None;
+            }
+            let character = rest.chars().next()?;
+            if character.is_ascii_whitespace() {
+                offset += character.len_utf8();
+                continue;
+            }
+            if character.is_ascii_alphabetic() {
+                let start = offset;
+                offset += character.len_utf8();
+                while offset < source.text.len() {
+                    let next = source.text[offset..].chars().next()?;
+                    if next.is_ascii_alphanumeric() {
+                        offset += next.len_utf8();
+                    } else {
+                        break;
+                    }
+                }
+                words.push(source.text[start..offset].to_ascii_uppercase());
+                continue;
+            }
+            return None;
+        }
+        let kind = match words.as_slice() {
+            [character, large, object]
+                if character == "CHARACTER" && large == "LARGE" && object == "OBJECT" =>
+            {
+                StandardLargeObjectKind::Character
+            }
+            [binary, large, object]
+                if binary == "BINARY" && large == "LARGE" && object == "OBJECT" =>
+            {
+                StandardLargeObjectKind::Binary
+            }
+            _ => return None,
+        };
+        Some((&source.span, kind))
+    }
+
+    fn in_spec(
+        specification: &TypeSpecification,
+        byte: usize,
+    ) -> Option<(&SourceSpan, StandardLargeObjectKind)> {
+        match specification {
+            TypeSpecification::StandardLargeObject { kind, source }
+                if source.span.start <= byte && byte < source.span.end =>
+            {
+                Some((&source.span, *kind))
+            }
+            TypeSpecification::Reference { target, .. }
+            | TypeSpecification::List {
+                element: target, ..
+            }
+            | TypeSpecification::Set {
+                element: target, ..
+            }
+            | TypeSpecification::Option { value: target, .. }
+            | TypeSpecification::Stream {
+                element: target, ..
+            } => in_spec(target, byte),
+            TypeSpecification::Map { key, value, .. } => {
+                in_spec(key, byte).or_else(|| in_spec(value, byte))
+            }
+            TypeSpecification::Named(_) | TypeSpecification::StandardLargeObject { .. } => None,
+        }
+    }
+
+    fn in_return_type(
+        return_type: &FunctionReturnType,
+        byte: usize,
+    ) -> Option<(&SourceSpan, StandardLargeObjectKind)> {
+        match return_type {
+            FunctionReturnType::Single(specification) => in_spec(specification, byte),
+            FunctionReturnType::Stream { element, .. } => in_spec(element, byte),
+            FunctionReturnType::Rows { columns, .. } => columns
+                .iter()
+                .find_map(|column| in_spec(&column.type_specification, byte)),
+        }
+    }
+
+    for object_type in parse.object_types() {
+        if let Some(found) = object_type
+            .fields
+            .iter()
+            .find_map(|field| in_spec(&field.type_specification, byte))
+        {
+            return Some(found);
+        }
+    }
+    for value_type in parse.record_value_types() {
+        if let Some(found) = value_type
+            .fields
+            .iter()
+            .find_map(|field| in_spec(&field.type_specification, byte))
+        {
+            return Some(found);
+        }
+    }
+    for function in parse.server_functions() {
+        if let Some(found) = function
+            .parameters
+            .iter()
+            .find_map(|parameter| in_spec(&parameter.type_specification, byte))
+            .or_else(|| in_return_type(&function.return_type, byte))
+        {
+            return Some(found);
+        }
+    }
+    for function in parse.client_functions() {
+        if let Some(found) = function
+            .parameters
+            .iter()
+            .find_map(|parameter| in_spec(&parameter.type_specification, byte))
+            .or_else(|| in_return_type(&function.return_type, byte))
+        {
+            return Some(found);
+        }
+        if let orna_syntax::ClientFunctionBody::StateBlock(body) = &function.body {
+            if let Some(found) = body
+                .states
+                .iter()
+                .find_map(|state| in_spec(&state.type_specification, byte))
+            {
+                return Some(found);
+            }
+            if let Some(found) = body
+                .locals
+                .iter()
+                .find_map(|local| in_source(&local.type_source, byte))
+            {
+                return Some(found);
+            }
+            for statement in &body.statements {
+                if let orna_syntax::ClientProceduralStatement::Let(statement) = statement {
+                    if let Some(source) = statement.type_source.as_ref() {
+                        if let Some(found) = in_source(source, byte) {
+                            return Some(found);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+fn standard_large_object_reference(
+    kind: StandardLargeObjectKind,
+) -> Option<&'static crate::reference::ScalarReference> {
+    let canonical_name = match kind {
+        StandardLargeObjectKind::Character => "CHARACTER_LARGE_OBJECT",
+        StandardLargeObjectKind::Binary => "BINARY_LARGE_OBJECT",
+    };
+    crate::reference::scalar_reference(canonical_name)
+}
+
 /// Returns the hover content for the token at one position.
 pub fn hover(
     document: &Document,
@@ -1704,6 +2103,12 @@ pub fn hover(
     let highlighted = parse.highlight();
     let (name, kind, span) = token_at(&document.text, &highlighted, byte)?;
     let doc_link = crate::hover::spec_doc_link(&document.uri);
+    if let Some((type_span, large_object_kind)) = standard_large_object_at(parse, byte) {
+        let reference = standard_large_object_reference(large_object_kind)?;
+        let mut hover = crate::hover::scalar_hover(reference, doc_link.as_deref());
+        hover.range = Some(mapper.range(type_span));
+        return Some(hover);
+    }
     let mut hover = match kind {
         HighlightKind::Keyword => crate::reference::keyword_reference(&name)
             .map(|reference| crate::hover::keyword_hover(reference, doc_link.as_deref())),
@@ -1722,17 +2127,62 @@ pub fn hover(
                     &document.text,
                     doc_link.as_deref(),
                 ))
-            } else if let Some(declaration) = declaration_at(parse, &name) {
-                Some(crate::hover::declaration_hover(
-                    declaration,
-                    &document.text,
-                    doc_link.as_deref(),
-                ))
+            } else if let Some((declaration, part)) = client_expression_part_in_parse(parse, &span)
+            {
+                match part {
+                    ClientExpressionPart::FieldMember { .. } => client_field_info_at(parse, &span)
+                        .map(|field| {
+                            crate::hover::field_hover(&field, &document.text, doc_link.as_deref())
+                        }),
+                    ClientExpressionPart::ParameterRoot(root) => {
+                        client_parameter_info(declaration, root, part).map(|parameter| {
+                            crate::hover::parameter_hover(
+                                &parameter,
+                                &document.text,
+                                doc_link.as_deref(),
+                            )
+                        })
+                    }
+                    ClientExpressionPart::LocalRoot(root) => {
+                        client_parameter_info(declaration, root, part)
+                            .map(|parameter| {
+                                crate::hover::parameter_hover(
+                                    &parameter,
+                                    &document.text,
+                                    doc_link.as_deref(),
+                                )
+                            })
+                            .or_else(|| {
+                                client_local_hover(
+                                    declaration,
+                                    root,
+                                    &document.text,
+                                    doc_link.as_deref(),
+                                )
+                            })
+                    }
+                    ClientExpressionPart::FieldRoot(root) => {
+                        client_parameter_info(declaration, root, part).map(|parameter| {
+                            crate::hover::parameter_hover(
+                                &parameter,
+                                &document.text,
+                                doc_link.as_deref(),
+                            )
+                        })
+                    }
+                    ClientExpressionPart::CallArgumentLabel => None,
+                }
             } else if let Some(field) = sql_column_at(parse, byte, &document.text, &highlighted) {
                 // A column reference inside a SQL body resolves to the field
                 // of the body's target object type.
                 Some(crate::hover::field_hover(
                     &field,
+                    &document.text,
+                    doc_link.as_deref(),
+                ))
+            } else if let Some(declaration) = declaration_at(parse, &name) {
+                Some(crate::hover::declaration_hover(
+                    declaration,
                     &document.text,
                     doc_link.as_deref(),
                 ))
@@ -1993,9 +2443,23 @@ pub fn completion(parse: &Parse, standard: Option<&StandardLibrary>) -> Vec<Comp
 
 #[cfg(test)]
 mod tests {
-    use super::{completion, declaration_at, references};
+    use super::{completion, declaration_at, hover, references, type_owner_name_from_source};
     use crate::documents::{Document, PositionMapper};
-    use lsp_types::Position;
+    use lsp_types::{Hover, HoverContents, Position, Range};
+
+    fn hover_at(text: &str, byte: usize) -> Option<Hover> {
+        let document = Document::new("file:///hover.orna".parse().unwrap(), text.to_owned(), 1);
+        let parse = orna_syntax::parse(text);
+        let mapper = PositionMapper::new(text);
+        hover(&document, &parse, None, mapper.position(byte), &mapper)
+    }
+
+    fn hover_markdown(hover: &Hover) -> &str {
+        match &hover.contents {
+            HoverContents::Markup(markup) => &markup.value,
+            other => panic!("expected markdown hover, got {other:?}"),
+        }
+    }
 
     #[test]
     fn completion_includes_canonical_scalar_type_spellings() {
@@ -2015,6 +2479,227 @@ mod tests {
                 labels.iter().any(|label| label == expected),
                 "missing {expected}"
             );
+        }
+    }
+
+    #[test]
+    fn hover_multiword_scalars_cover_the_complete_type_span() {
+        let text = "CREATE TYPE files.document AS OBJECT (body CHARACTER LARGE OBJECT, data BINARY LARGE OBJECT);";
+        let mapper = PositionMapper::new(text);
+        for (spelling, canonical) in [
+            ("CHARACTER LARGE OBJECT", "CHARACTER_LARGE_OBJECT"),
+            ("BINARY LARGE OBJECT", "BINARY_LARGE_OBJECT"),
+        ] {
+            let start = text.find(spelling).expect("scalar spelling");
+            let end = start + spelling.len();
+            for byte in [start, start + "LARGE".len(), end - 1] {
+                let result = hover_at(text, byte).expect("scalar hover");
+                assert_eq!(
+                    result.range,
+                    Some(mapper.range(&orna_syntax::SourceSpan { start, end })),
+                    "hover range for {spelling} at byte {byte}",
+                );
+                assert!(
+                    hover_markdown(&result).contains(canonical)
+                        && hover_markdown(&result).contains("standard type"),
+                    "hover content for {spelling}: {}",
+                    hover_markdown(&result),
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn hover_multiword_scalars_respect_utf16_positions_and_context() {
+        let text = "CREATE TYPE files.document AS OBJECT (\"😀body\" CHARACTER LARGE OBJECT, data BINARY LARGE OBJECT);";
+        let mapper = PositionMapper::new(text);
+        let character_start = text
+            .find("CHARACTER LARGE OBJECT")
+            .expect("character scalar");
+        let character_end = character_start + "CHARACTER LARGE OBJECT".len();
+        let start_position = mapper.position(character_start);
+        assert_eq!(
+            start_position.character as usize,
+            text[..character_start].encode_utf16().count(),
+            "scalar start uses UTF-16 code units",
+        );
+        let scalar_hover = hover_at(text, character_start).expect("scalar hover");
+        assert_eq!(
+            scalar_hover.range,
+            Some(Range {
+                start: Position {
+                    line: 0,
+                    character: 47,
+                },
+                end: Position {
+                    line: 0,
+                    character: 69,
+                },
+            }),
+            "hover range uses UTF-16 units after the quoted emoji name",
+        );
+        assert!(hover_at(text, character_end - 1).is_some());
+        assert!(hover_at(text, character_end).is_none());
+
+        let generic_text = "CREATE TYPE files.document AS OBJECT (LARGE BOOLEAN, value OBJECT);";
+        for word in ["LARGE", "OBJECT"] {
+            let byte = generic_text.rfind(word).expect("generic word");
+            if let Some(result) = hover_at(generic_text, byte) {
+                assert!(
+                    !hover_markdown(&result).contains("standard type"),
+                    "generic word {word} incorrectly resolved as scalar: {}",
+                    hover_markdown(&result),
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn hover_client_local_type_sources_cover_complete_multiword_ranges() {
+        let text = concat!(
+            "CREATE CLIENT FUNCTION files.document() RETURNS TEXT IS\n",
+            "    LET body CHARACTER LARGE OBJECT := \x27body\x27;\n",
+            "BEGIN\n",
+            "    LET data BINARY LARGE OBJECT := body;\n",
+            "    RETURN body;\n",
+            "END;",
+        );
+        for (spelling, canonical) in [
+            ("CHARACTER LARGE OBJECT", "CHARACTER_LARGE_OBJECT"),
+            ("BINARY LARGE OBJECT", "BINARY_LARGE_OBJECT"),
+        ] {
+            let mapper = PositionMapper::new(text);
+            let start = text.find(spelling).expect("local scalar spelling");
+            let end = start + spelling.len();
+            for byte in [start, start + "LARGE".len(), end - 1] {
+                let result = hover_at(text, byte).expect("local scalar hover");
+                assert_eq!(
+                    result.range,
+                    Some(mapper.range(&orna_syntax::SourceSpan { start, end })),
+                    "hover range for {spelling} at byte {byte}",
+                );
+                assert!(
+                    hover_markdown(&result).contains(canonical)
+                        && hover_markdown(&result).contains("standard type"),
+                    "hover content for {spelling}: {}",
+                    hover_markdown(&result),
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn hover_client_procedural_local_use_resolves_type() {
+        let text = concat!(
+            "CREATE CLIENT FUNCTION files.document() RETURNS BOOLEAN IS\n",
+            "    LET body BOOLEAN := TRUE;\n",
+            "BEGIN\n",
+            "    RETURN body;\n",
+            "END;",
+        );
+        let byte = text.rfind("body").expect("local use");
+        let result = hover_at(text, byte).expect("procedural local hover");
+        let markdown = hover_markdown(&result);
+        assert!(
+            markdown.starts_with("**parameter**"),
+            "local hover kind: {markdown}"
+        );
+        assert!(markdown.contains("BOOLEAN"), "local hover type: {markdown}");
+    }
+
+    #[test]
+    fn hover_client_local_type_sources_reject_comment_separators() {
+        let text = concat!(
+            "CREATE CLIENT FUNCTION files.document() RETURNS TEXT IS\n",
+            "    LET body CHARACTER /* kept */ LARGE OBJECT := \x27body\x27;\n",
+            "    LET data BINARY /* kept */ LARGE OBJECT := body;\n",
+            "    LET invalid CHARACTERLARGEOBJECT := body;\n",
+            "BEGIN\n",
+            "    RETURN body;\n",
+            "END;",
+        );
+
+        for (spelling, canonical) in [
+            (
+                "CHARACTER /* kept */ LARGE OBJECT",
+                "CHARACTER_LARGE_OBJECT",
+            ),
+            ("BINARY /* kept */ LARGE OBJECT", "BINARY_LARGE_OBJECT"),
+        ] {
+            let start = text.find(spelling).expect("commented scalar spelling");
+            let end = start + spelling.len();
+            let words = [
+                spelling
+                    .split_ascii_whitespace()
+                    .next()
+                    .expect("first scalar word"),
+                "LARGE",
+                "OBJECT",
+            ];
+            for word in words {
+                let byte = text[start..end]
+                    .find(word)
+                    .map(|offset| start + offset)
+                    .expect("commented scalar word");
+                let result = hover_at(text, byte);
+                let has_standard_hover = result.as_ref().is_some_and(|hover| {
+                    hover_markdown(hover).contains(canonical)
+                        && hover_markdown(hover).contains("standard type")
+                });
+                let description = result
+                    .as_ref()
+                    .map(|hover| hover_markdown(hover).to_owned());
+                assert!(
+                    !has_standard_hover,
+                    "commented local must not acquire standard scalar hover for {spelling}: {description:?}",
+                );
+            }
+        }
+
+        let invalid = text
+            .find("CHARACTERLARGEOBJECT")
+            .expect("invalid scalar spelling");
+        assert!(
+            !hover_at(text, invalid)
+                .is_some_and(|hover| { hover_markdown(&hover).contains("CHARACTER_LARGE_OBJECT") })
+        );
+    }
+
+    #[test]
+    fn quoted_local_type_owner_allows_comment_markers_inside_identifier() {
+        let owner = type_owner_name_from_source("REF owners.\"foo--bar\"")
+            .expect("quoted owner type source");
+        assert_eq!(
+            owner.parts.last().map(|part| part.text.as_str()),
+            Some("\"foo--bar\"")
+        );
+    }
+
+    #[test]
+    fn hover_client_local_initializers_and_assignments_do_not_resolve_as_scalars() {
+        let text = concat!(
+            "CREATE CLIENT FUNCTION files.document() RETURNS TEXT IS\n",
+            "    LET body CHARACTER LARGE OBJECT := std.large.object();\n",
+            "BEGIN\n",
+            "    LET data BINARY LARGE OBJECT := body;\n",
+            "    data := std.binary.large.object();\n",
+            "    RETURN body;\n",
+            "END;",
+        );
+
+        for occurrence in ["std.large.object", "std.binary.large.object"] {
+            let start = text.find(occurrence).expect("non-type occurrence");
+            for word in occurrence.split(".") {
+                let byte = text[start..]
+                    .find(word)
+                    .map(|offset| start + offset)
+                    .expect("occurrence word");
+                let result = hover_at(text, byte);
+                assert!(!result.is_some_and(|hover| {
+                    hover_markdown(&hover).contains("CHARACTER_LARGE_OBJECT")
+                        || hover_markdown(&hover).contains("BINARY_LARGE_OBJECT")
+                }));
+            }
         }
     }
 

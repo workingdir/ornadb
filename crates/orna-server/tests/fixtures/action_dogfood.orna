@@ -1,0 +1,16 @@
+CREATE SCHEMA action_fixture;
+
+CREATE CLIENT FUNCTION action_fixture.call(p_value INTEGER)
+    RETURNS std.Action
+    AS std.action.call(
+      target => std.invoke.echo,
+      arguments => std.call.args(p_value => p_value)
+    );
+    CREATE CLIENT FUNCTION action_fixture.local(p_value INTEGER)
+    RETURNS INTEGER AS p_value;
+    CREATE CLIENT FUNCTION action_fixture.call_local(p_value INTEGER)
+    RETURNS std.Action
+    AS std.action.call(
+      target => action_fixture.local,
+      arguments => std.call.args(p_value => p_value)
+    );

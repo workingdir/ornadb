@@ -1,0 +1,713 @@
+====================
+accepted CLIENT action call
+====================
+
+CREATE SCHEMA action_fixture;
+
+CREATE CLIENT FUNCTION action_fixture.call(p_value INTEGER)
+RETURNS std.Action
+AS std.action.call(
+    target => std.invoke.echo,
+    arguments => std.call.args(p_value => p_value)
+);
+
+---
+
+(source_file
+  (create_schema_statement
+    (kw_create)
+    (kw_schema)
+    name: (qualified_name
+      (identifier))
+    (semicolon))
+  (create_client_function_statement
+    (kw_create)
+    (kw_client)
+    (kw_function)
+    name: (qualified_name
+      (qualified_name
+        (identifier))
+      (dot)
+      (kw_call))
+    parameters: (parameter_list
+      (lparen)
+      (parameter_definition
+        name: (identifier)
+        type: (type_spec
+          (scalar_type
+            (kw_integer))))
+      (rparen))
+    (kw_returns)
+    returns: (return_type_spec
+      (type_spec
+        (qualified_name
+          (qualified_name
+            (identifier))
+          (dot)
+          (identifier))))
+    body: (client_expression_body
+      (kw_as)
+      expression: (client_expression
+        (client_primary_expression
+          (client_call_expression
+            callee: (client_call_callee
+              (identifier)
+              (dot)
+              (identifier)
+              (dot)
+              (kw_call))
+            (lparen)
+            (client_argument_list
+              (client_argument
+                name: (identifier)
+                (arrow_operator)
+                value: (client_expression
+                  (client_primary_expression
+                    (client_field_path
+                      parameter: (identifier)
+                      (dot)
+                      field: (identifier)
+                      (dot)
+                      field: (identifier)))))
+              (comma)
+              (client_argument
+                name: (identifier)
+                (arrow_operator)
+                value: (client_expression
+                  (client_primary_expression
+                    (client_call_expression
+                      callee: (client_call_callee
+                        (identifier)
+                        (dot)
+                        (kw_call)
+                        (dot)
+                        (identifier))
+                      (lparen)
+                      (client_argument_list
+                        (client_argument
+                          name: (identifier)
+                          (arrow_operator)
+                          value: (client_expression
+                            (client_primary_expression
+                              (client_parameter_read
+                                (identifier))))))
+                      (rparen))))))
+            (rparen)))))
+    (semicolon)))
+
+====================
+accepted CLIENT Inspector fixture
+====================
+CREATE SCHEMA inspector_app;
+
+CREATE EXTERNAL CLIENT FUNCTION inspector_app.inspector_renderer(
+    p_snapshot sys.inspect.snapshot,
+    p_invocation_nodes sys.inspect.invocation_nodes,
+    p_calls sys.inspect.calls,
+    p_resources sys.inspect.resources,
+    p_state_cells sys.inspect.state_cells,
+    p_ui_nodes sys.inspect.ui_nodes,
+    p_presentation_candidates sys.inspect.presentation_candidates,
+    p_runtime_bindings sys.inspect.runtime_bindings,
+    p_security_decisions sys.inspect.security_decisions
+) RETURNS std.ui.UI
+RUNTIME CONTRACT 'std.inspect.render@1';
+
+CREATE CLIENT FUNCTION inspector_app.inspector(p_target REF sys.inspect.invocation)
+RETURNS std.ui.UI IS
+LET snapshot sys.inspect.snapshot := sys.inspect.snapshot(p_target => p_target);
+LET invocation_nodes sys.inspect.invocation_nodes :=
+    sys.inspect.invocation_nodes(p_snapshot => snapshot);
+LET calls sys.inspect.calls := sys.inspect.calls(p_snapshot => snapshot);
+LET resources sys.inspect.resources :=
+    sys.inspect.resources(p_snapshot => snapshot);
+LET state_cells sys.inspect.state_cells :=
+    sys.inspect.state_cells(p_snapshot => snapshot);
+LET ui_nodes sys.inspect.ui_nodes := sys.inspect.ui_nodes(p_snapshot => snapshot);
+LET presentation_candidates sys.inspect.presentation_candidates :=
+    sys.inspect.presentation_candidates(p_snapshot => snapshot);
+LET runtime_bindings sys.inspect.runtime_bindings :=
+    sys.inspect.runtime_bindings(p_snapshot => snapshot);
+LET security_decisions sys.inspect.security_decisions :=
+    sys.inspect.security_decisions(p_snapshot => snapshot);
+BEGIN
+    RETURN inspector_app.inspector_renderer(
+        p_snapshot => snapshot,
+        p_invocation_nodes => invocation_nodes,
+        p_calls => calls,
+        p_resources => resources,
+        p_state_cells => state_cells,
+        p_ui_nodes => ui_nodes,
+        p_presentation_candidates => presentation_candidates,
+        p_runtime_bindings => runtime_bindings,
+        p_security_decisions => security_decisions
+    );
+END;
+
+---
+
+(source_file
+  (create_schema_statement
+    (kw_create)
+    (kw_schema)
+    (qualified_name
+      (identifier))
+    (semicolon))
+  (create_external_client_function_statement
+    (kw_create)
+    (kw_external)
+    (kw_client)
+    (kw_function)
+    (qualified_name
+      (qualified_name
+        (identifier))
+      (dot)
+      (identifier))
+    (parameter_list
+      (lparen)
+      (parameter_definition
+        (identifier)
+        (type_spec
+          (qualified_name
+            (qualified_name
+              (qualified_name
+                (identifier))
+              (dot)
+              (kw_inspect))
+            (dot)
+            (identifier))))
+      (comma)
+      (parameter_definition
+        (identifier)
+        (type_spec
+          (qualified_name
+            (qualified_name
+              (qualified_name
+                (identifier))
+              (dot)
+              (kw_inspect))
+            (dot)
+            (identifier))))
+      (comma)
+      (parameter_definition
+        (identifier)
+        (type_spec
+          (qualified_name
+            (qualified_name
+              (qualified_name
+                (identifier))
+              (dot)
+              (kw_inspect))
+            (dot)
+            (identifier))))
+      (comma)
+      (parameter_definition
+        (identifier)
+        (type_spec
+          (qualified_name
+            (qualified_name
+              (qualified_name
+                (identifier))
+              (dot)
+              (kw_inspect))
+            (dot)
+            (identifier))))
+      (comma)
+      (parameter_definition
+        (identifier)
+        (type_spec
+          (qualified_name
+            (qualified_name
+              (qualified_name
+                (identifier))
+              (dot)
+              (kw_inspect))
+            (dot)
+            (identifier))))
+      (comma)
+      (parameter_definition
+        (identifier)
+        (type_spec
+          (qualified_name
+            (qualified_name
+              (qualified_name
+                (identifier))
+              (dot)
+              (kw_inspect))
+            (dot)
+            (identifier))))
+      (comma)
+      (parameter_definition
+        (identifier)
+        (type_spec
+          (qualified_name
+            (qualified_name
+              (qualified_name
+                (identifier))
+              (dot)
+              (kw_inspect))
+            (dot)
+            (identifier))))
+      (comma)
+      (parameter_definition
+        (identifier)
+        (type_spec
+          (qualified_name
+            (qualified_name
+              (qualified_name
+                (identifier))
+              (dot)
+              (kw_inspect))
+            (dot)
+            (identifier))))
+      (comma)
+      (parameter_definition
+        (identifier)
+        (type_spec
+          (qualified_name
+            (qualified_name
+              (qualified_name
+                (identifier))
+              (dot)
+              (kw_inspect))
+            (dot)
+            (identifier))))
+      (rparen))
+    (kw_returns)
+    (return_type_spec
+      (type_spec
+        (qualified_name
+          (qualified_name
+            (qualified_name
+              (identifier))
+            (dot)
+            (identifier))
+          (dot)
+          (identifier))))
+    (kw_runtime)
+    (kw_contract)
+    (string_literal)
+    (semicolon))
+  (create_client_function_statement
+    (kw_create)
+    (kw_client)
+    (kw_function)
+    (qualified_name
+      (qualified_name
+        (identifier))
+      (dot)
+      (identifier))
+    (parameter_list
+      (lparen)
+      (parameter_definition
+        (identifier)
+        (type_spec
+          (kw_ref)
+          (type_spec
+            (qualified_name
+              (qualified_name
+                (qualified_name
+                  (identifier))
+                (dot)
+                (kw_inspect))
+              (dot)
+              (identifier)))))
+      (rparen))
+    (kw_returns)
+    (return_type_spec
+      (type_spec
+        (qualified_name
+          (qualified_name
+            (qualified_name
+              (identifier))
+            (dot)
+            (identifier))
+          (dot)
+          (identifier))))
+    (client_procedural_body
+      (client_no_state_body
+        (kw_is)
+        (client_local_declaration
+          (kw_let)
+          (identifier)
+          (type_spec
+            (qualified_name
+              (qualified_name
+                (qualified_name
+                  (identifier))
+                (dot)
+                (kw_inspect))
+              (dot)
+              (identifier)))
+          (assignment_operator)
+          (client_expression
+            (client_primary_expression
+              (client_call_expression
+                (client_call_callee
+                  (identifier)
+                  (dot)
+                  (kw_inspect)
+                  (dot)
+                  (identifier))
+                (lparen)
+                (client_argument_list
+                  (client_argument
+                    (identifier)
+                    (arrow_operator)
+                    (client_expression
+                      (client_primary_expression
+                        (client_parameter_read
+                          (identifier))))))
+                (rparen))))
+          (semicolon))
+        (client_local_declaration
+          (kw_let)
+          (identifier)
+          (type_spec
+            (qualified_name
+              (qualified_name
+                (qualified_name
+                  (identifier))
+                (dot)
+                (kw_inspect))
+              (dot)
+              (identifier)))
+          (assignment_operator)
+          (client_expression
+            (client_primary_expression
+              (client_call_expression
+                (client_call_callee
+                  (identifier)
+                  (dot)
+                  (kw_inspect)
+                  (dot)
+                  (identifier))
+                (lparen)
+                (client_argument_list
+                  (client_argument
+                    (identifier)
+                    (arrow_operator)
+                    (client_expression
+                      (client_primary_expression
+                        (client_parameter_read
+                          (identifier))))))
+                (rparen))))
+          (semicolon))
+        (client_local_declaration
+          (kw_let)
+          (identifier)
+          (type_spec
+            (qualified_name
+              (qualified_name
+                (qualified_name
+                  (identifier))
+                (dot)
+                (kw_inspect))
+              (dot)
+              (identifier)))
+          (assignment_operator)
+          (client_expression
+            (client_primary_expression
+              (client_call_expression
+                (client_call_callee
+                  (identifier)
+                  (dot)
+                  (kw_inspect)
+                  (dot)
+                  (identifier))
+                (lparen)
+                (client_argument_list
+                  (client_argument
+                    (identifier)
+                    (arrow_operator)
+                    (client_expression
+                      (client_primary_expression
+                        (client_parameter_read
+                          (identifier))))))
+                (rparen))))
+          (semicolon))
+        (client_local_declaration
+          (kw_let)
+          (identifier)
+          (type_spec
+            (qualified_name
+              (qualified_name
+                (qualified_name
+                  (identifier))
+                (dot)
+                (kw_inspect))
+              (dot)
+              (identifier)))
+          (assignment_operator)
+          (client_expression
+            (client_primary_expression
+              (client_call_expression
+                (client_call_callee
+                  (identifier)
+                  (dot)
+                  (kw_inspect)
+                  (dot)
+                  (identifier))
+                (lparen)
+                (client_argument_list
+                  (client_argument
+                    (identifier)
+                    (arrow_operator)
+                    (client_expression
+                      (client_primary_expression
+                        (client_parameter_read
+                          (identifier))))))
+                (rparen))))
+          (semicolon))
+        (client_local_declaration
+          (kw_let)
+          (identifier)
+          (type_spec
+            (qualified_name
+              (qualified_name
+                (qualified_name
+                  (identifier))
+                (dot)
+                (kw_inspect))
+              (dot)
+              (identifier)))
+          (assignment_operator)
+          (client_expression
+            (client_primary_expression
+              (client_call_expression
+                (client_call_callee
+                  (identifier)
+                  (dot)
+                  (kw_inspect)
+                  (dot)
+                  (identifier))
+                (lparen)
+                (client_argument_list
+                  (client_argument
+                    (identifier)
+                    (arrow_operator)
+                    (client_expression
+                      (client_primary_expression
+                        (client_parameter_read
+                          (identifier))))))
+                (rparen))))
+          (semicolon))
+        (client_local_declaration
+          (kw_let)
+          (identifier)
+          (type_spec
+            (qualified_name
+              (qualified_name
+                (qualified_name
+                  (identifier))
+                (dot)
+                (kw_inspect))
+              (dot)
+              (identifier)))
+          (assignment_operator)
+          (client_expression
+            (client_primary_expression
+              (client_call_expression
+                (client_call_callee
+                  (identifier)
+                  (dot)
+                  (kw_inspect)
+                  (dot)
+                  (identifier))
+                (lparen)
+                (client_argument_list
+                  (client_argument
+                    (identifier)
+                    (arrow_operator)
+                    (client_expression
+                      (client_primary_expression
+                        (client_parameter_read
+                          (identifier))))))
+                (rparen))))
+          (semicolon))
+        (client_local_declaration
+          (kw_let)
+          (identifier)
+          (type_spec
+            (qualified_name
+              (qualified_name
+                (qualified_name
+                  (identifier))
+                (dot)
+                (kw_inspect))
+              (dot)
+              (identifier)))
+          (assignment_operator)
+          (client_expression
+            (client_primary_expression
+              (client_call_expression
+                (client_call_callee
+                  (identifier)
+                  (dot)
+                  (kw_inspect)
+                  (dot)
+                  (identifier))
+                (lparen)
+                (client_argument_list
+                  (client_argument
+                    (identifier)
+                    (arrow_operator)
+                    (client_expression
+                      (client_primary_expression
+                        (client_parameter_read
+                          (identifier))))))
+                (rparen))))
+          (semicolon))
+        (client_local_declaration
+          (kw_let)
+          (identifier)
+          (type_spec
+            (qualified_name
+              (qualified_name
+                (qualified_name
+                  (identifier))
+                (dot)
+                (kw_inspect))
+              (dot)
+              (identifier)))
+          (assignment_operator)
+          (client_expression
+            (client_primary_expression
+              (client_call_expression
+                (client_call_callee
+                  (identifier)
+                  (dot)
+                  (kw_inspect)
+                  (dot)
+                  (identifier))
+                (lparen)
+                (client_argument_list
+                  (client_argument
+                    (identifier)
+                    (arrow_operator)
+                    (client_expression
+                      (client_primary_expression
+                        (client_parameter_read
+                          (identifier))))))
+                (rparen))))
+          (semicolon))
+        (client_local_declaration
+          (kw_let)
+          (identifier)
+          (type_spec
+            (qualified_name
+              (qualified_name
+                (qualified_name
+                  (identifier))
+                (dot)
+                (kw_inspect))
+              (dot)
+              (identifier)))
+          (assignment_operator)
+          (client_expression
+            (client_primary_expression
+              (client_call_expression
+                (client_call_callee
+                  (identifier)
+                  (dot)
+                  (kw_inspect)
+                  (dot)
+                  (identifier))
+                (lparen)
+                (client_argument_list
+                  (client_argument
+                    (identifier)
+                    (arrow_operator)
+                    (client_expression
+                      (client_primary_expression
+                        (client_parameter_read
+                          (identifier))))))
+                (rparen))))
+          (semicolon))
+        (kw_begin)
+        (client_return_statement
+          (kw_return)
+          (client_expression
+            (client_primary_expression
+              (client_call_expression
+                (client_call_callee
+                  (identifier)
+                  (dot)
+                  (identifier))
+                (lparen)
+                (client_argument_list
+                  (client_argument
+                    (identifier)
+                    (arrow_operator)
+                    (client_expression
+                      (client_primary_expression
+                        (client_parameter_read
+                          (identifier)))))
+                  (comma)
+                  (client_argument
+                    (identifier)
+                    (arrow_operator)
+                    (client_expression
+                      (client_primary_expression
+                        (client_parameter_read
+                          (identifier)))))
+                  (comma)
+                  (client_argument
+                    (identifier)
+                    (arrow_operator)
+                    (client_expression
+                      (client_primary_expression
+                        (client_parameter_read
+                          (identifier)))))
+                  (comma)
+                  (client_argument
+                    (identifier)
+                    (arrow_operator)
+                    (client_expression
+                      (client_primary_expression
+                        (client_parameter_read
+                          (identifier)))))
+                  (comma)
+                  (client_argument
+                    (identifier)
+                    (arrow_operator)
+                    (client_expression
+                      (client_primary_expression
+                        (client_parameter_read
+                          (identifier)))))
+                  (comma)
+                  (client_argument
+                    (identifier)
+                    (arrow_operator)
+                    (client_expression
+                      (client_primary_expression
+                        (client_parameter_read
+                          (identifier)))))
+                  (comma)
+                  (client_argument
+                    (identifier)
+                    (arrow_operator)
+                    (client_expression
+                      (client_primary_expression
+                        (client_parameter_read
+                          (identifier)))))
+                  (comma)
+                  (client_argument
+                    (identifier)
+                    (arrow_operator)
+                    (client_expression
+                      (client_primary_expression
+                        (client_parameter_read
+                          (identifier)))))
+                  (comma)
+                  (client_argument
+                    (identifier)
+                    (arrow_operator)
+                    (client_expression
+                      (client_primary_expression
+                        (client_parameter_read
+                          (identifier))))))
+                (rparen))))
+          (semicolon))
+        (kw_end)))
+    (semicolon)))
