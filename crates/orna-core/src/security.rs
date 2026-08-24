@@ -2007,7 +2007,12 @@ impl SecuritySnapshot {
                 .iter()
                 .filter(|membership| membership.member == member)
             {
-                if reached.insert(membership.role) {
+                if self
+                    .principals
+                    .get(&membership.role)
+                    .is_some_and(|role| role.status == PrincipalStatus::Active)
+                    && reached.insert(membership.role)
+                {
                     pending.push(membership.role);
                 }
             }
@@ -2566,6 +2571,32 @@ mod tests {
             panic!("selected nested roles should grant execution");
         };
         assert_eq!(evidence.authorising_principal(), ROLE);
+    }
+
+    #[test]
+    fn disabled_intermediary_role_does_not_reach_nested_active_role() {
+        let role_a = ROLE;
+        let role_b = OTHER_PRINCIPAL;
+        let snapshot = SecuritySnapshot::new(
+            REVISION,
+            vec![FUNCTION],
+            vec![
+                active(USER, PrincipalKind::User),
+                Principal::new(role_a, PrincipalKind::Role, PrincipalStatus::Disabled),
+                active(role_b, PrincipalKind::Role),
+            ],
+            vec![
+                RoleMembership::new(role_a, USER),
+                RoleMembership::new(role_b, role_a),
+            ],
+            vec![ExecuteGrant::new(role_b, FUNCTION)],
+        )
+        .expect("disabled intermediary role remains valid catalogue state");
+
+        assert_eq!(
+            snapshot.bind_authenticated_session(USER, vec![role_b]),
+            Err(SessionBindingError::UnreachableActiveRole)
+        );
     }
 
     #[test]
