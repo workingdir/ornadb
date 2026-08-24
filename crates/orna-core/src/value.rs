@@ -9,11 +9,11 @@ use std::{cmp::Ordering, collections::HashSet, error::Error, fmt};
 
 use crate::{
     FieldId, ObjectId, ParameterId, TypeId,
-    inspect_carrier::InspectCarrierEnvelope,
     catalogue::{
         CatalogueSnapshot, QualifiedSemanticName, ValueTypeKind, ValueTypeMutability,
         ValueTypePersistence,
     },
+    inspect_carrier::InspectCarrierEnvelope,
     revision::{
         ActiveDatabaseRevision, RecordValueFieldDescriptorClass, VerifiedStandardLibrarySnapshot,
         classify_record_value_field_descriptor,
@@ -27,17 +27,19 @@ use crate::{
         SYS_INSPECT_RESOURCES_REPRESENTATION_CONTRACT, SYS_INSPECT_RESOURCES_TYPE_ID,
         SYS_INSPECT_RESOURCES_TYPE_NAME, SYS_INSPECT_RUNTIME_BINDINGS_REPRESENTATION_CONTRACT,
         SYS_INSPECT_RUNTIME_BINDINGS_TYPE_ID, SYS_INSPECT_RUNTIME_BINDINGS_TYPE_NAME,
-        SYS_INSPECT_SECURITY_DECISIONS_REPRESENTATION_CONTRACT, SYS_INSPECT_SECURITY_DECISIONS_TYPE_ID,
-        SYS_INSPECT_SECURITY_DECISIONS_TYPE_NAME, SYS_INSPECT_SNAPSHOT_REPRESENTATION_CONTRACT,
-        SYS_INSPECT_SNAPSHOT_TYPE_ID, SYS_INSPECT_SNAPSHOT_TYPE_NAME,
-        SYS_INSPECT_STATE_CELLS_REPRESENTATION_CONTRACT, SYS_INSPECT_STATE_CELLS_TYPE_ID,
-        SYS_INSPECT_STATE_CELLS_TYPE_NAME, SYS_INSPECT_UI_NODES_REPRESENTATION_CONTRACT,
-        SYS_INSPECT_UI_NODES_TYPE_ID, SYS_INSPECT_UI_NODES_TYPE_NAME,
+        SYS_INSPECT_SECURITY_DECISIONS_REPRESENTATION_CONTRACT,
+        SYS_INSPECT_SECURITY_DECISIONS_TYPE_ID, SYS_INSPECT_SECURITY_DECISIONS_TYPE_NAME,
+        SYS_INSPECT_SNAPSHOT_REPRESENTATION_CONTRACT, SYS_INSPECT_SNAPSHOT_TYPE_ID,
+        SYS_INSPECT_SNAPSHOT_TYPE_NAME, SYS_INSPECT_STATE_CELLS_REPRESENTATION_CONTRACT,
+        SYS_INSPECT_STATE_CELLS_TYPE_ID, SYS_INSPECT_STATE_CELLS_TYPE_NAME,
+        SYS_INSPECT_UI_NODES_REPRESENTATION_CONTRACT, SYS_INSPECT_UI_NODES_TYPE_ID,
+        SYS_INSPECT_UI_NODES_TYPE_NAME,
     },
     types::{ResolvedType, StandardScalar, TypeDescriptor, TypeDescriptorKind},
 };
 
-const MAX_OPAQUE_CODEC_PAYLOAD_LENGTH: usize = 16 * 1024 * 1024;
+/// The maximum payload length accepted by every registered opaque codec.
+pub const MAX_OPAQUE_CODEC_PAYLOAD_LENGTH: usize = 16 * 1024 * 1024;
 
 /// The largest number of argument frames accepted by the generic action
 /// descriptor codec. The semantic target and parameter checks remain in the
@@ -48,8 +50,7 @@ const ACTION_DOMAIN_CLIENT: u8 = 1;
 const ACTION_DOMAIN_SERVER: u8 = 2;
 const ACTION_IDENTITY_BYTES: usize = 16;
 const ACTION_IDENTITY_FIELDS: usize = 5;
-const ACTION_BODY_PREFIX_BYTES: usize =
-    1 + (ACTION_IDENTITY_FIELDS * ACTION_IDENTITY_BYTES) + 4;
+const ACTION_BODY_PREFIX_BYTES: usize = 1 + (ACTION_IDENTITY_FIELDS * ACTION_IDENTITY_BYTES) + 4;
 const ORV3_HEADER_BYTES: usize = 25;
 const ORV3_MARKER: &[u8; 4] = b"ORV3";
 
@@ -363,8 +364,8 @@ impl fmt::Display for CollectionValueError {
                 formatter.write_str("set contains a duplicate element")
             }
         }
-        }
     }
+}
 
 impl Error for CollectionValueError {}
 
@@ -571,7 +572,6 @@ impl RuntimeValue {
             node_count,
         }))
     }
-
 
     /// Creates one checked immutable canonically ordered `MAP` value.
     pub fn map(
@@ -872,12 +872,10 @@ fn preflight_collection_descriptor(
             }
             result
         }
-        TypeDescriptorKind::Stream(_) => {
-            Err(CollectionValueError::UnsupportedDescriptor {
-                path: collection_value_path(path),
-                descriptor: descriptor.clone(),
-            })
-        }
+        TypeDescriptorKind::Stream(_) => Err(CollectionValueError::UnsupportedDescriptor {
+            path: collection_value_path(path),
+            descriptor: descriptor.clone(),
+        }),
     }
 }
 
@@ -1082,11 +1080,9 @@ fn validate_collection_runtime_value(
             }
             Ok(())
         }
-        TypeDescriptorKind::Stream(_) => {
-            Err(CollectionValueError::InactiveValue {
-                path: collection_value_path(path),
-            })
-        }
+        TypeDescriptorKind::Stream(_) => Err(CollectionValueError::InactiveValue {
+            path: collection_value_path(path),
+        }),
     }
 }
 
@@ -1320,15 +1316,12 @@ impl OpaqueCodecRegistration {
         let magic = magic.into();
         let representation_contract = representation_contract.into();
         validate_codec_magic(opaque_type, &magic)?;
-        let contract = if is_terminal_document_codec(
-            &semantic_name,
-            &representation_contract,
-            &magic,
-        ) {
-            OpaquePayloadContract::TerminalDocument { magic }
-        } else {
-            OpaquePayloadContract::LengthPrefixedUtf8 { magic }
-        };
+        let contract =
+            if is_terminal_document_codec(&semantic_name, &representation_contract, &magic) {
+                OpaquePayloadContract::TerminalDocument { magic }
+            } else {
+                OpaquePayloadContract::LengthPrefixedUtf8 { magic }
+            };
         Ok(Self {
             opaque_type,
             semantic_name,
@@ -1430,11 +1423,11 @@ fn is_terminal_document_codec(
 ) -> bool {
     magic == "ORNA-TERMINAL-DOCUMENT/1 "
         && representation_contract == "orna.std.value.terminal-document@1"
-        && semantic_name.parts().iter().map(String::as_str).eq([
-            "std",
-            "terminal",
-            "document",
-        ])
+        && semantic_name
+            .parts()
+            .iter()
+            .map(String::as_str)
+            .eq(["std", "terminal", "document"])
 }
 
 /// Identifies the accepted standard UI codec without changing the generic
@@ -1614,8 +1607,7 @@ fn canonical_json_body(
             .try_into()
             .expect("the length prefix is exactly four bytes"),
     ) as usize;
-    if body_length > MAX_OPAQUE_CODEC_PAYLOAD_LENGTH
-        || payload.len() != prefix_length + body_length
+    if body_length > MAX_OPAQUE_CODEC_PAYLOAD_LENGTH || payload.len() != prefix_length + body_length
     {
         return Err(OpaqueValueError::InvalidFrameLength { opaque_type });
     }
@@ -1729,8 +1721,7 @@ fn validate_ui_value(
                 {
                     return invalid_ui_value(opaque_type);
                 }
-                let Some(slots) = object.get("slots").and_then(serde_json::Value::as_object)
-                else {
+                let Some(slots) = object.get("slots").and_then(serde_json::Value::as_object) else {
                     return invalid_ui_value(opaque_type);
                 };
                 for children in slots.values() {
@@ -1814,11 +1805,12 @@ fn valid_ui_source_origin(value: &serde_json::Value) -> bool {
     let Some(object) = value.as_object() else {
         return value.is_null();
     };
-    object.keys().all(|key| {
-        matches!(key.as_str(), "source_unit_id" | "start" | "end")
-    }) && object
-        .get("source_unit_id")
-        .is_none_or(serde_json::Value::is_string)
+    object
+        .keys()
+        .all(|key| matches!(key.as_str(), "source_unit_id" | "start" | "end"))
+        && object
+            .get("source_unit_id")
+            .is_none_or(serde_json::Value::is_string)
         && object
             .get("start")
             .is_none_or(|value| value.as_i64().is_some())
@@ -1849,20 +1841,18 @@ fn validate_terminal_document(
             .try_into()
             .expect("the length prefix is exactly four bytes"),
     ) as usize;
-    if body_length > MAX_OPAQUE_CODEC_PAYLOAD_LENGTH
-        || payload.len() != prefix_length + body_length
+    if body_length > MAX_OPAQUE_CODEC_PAYLOAD_LENGTH || payload.len() != prefix_length + body_length
     {
         return Err(OpaqueValueError::InvalidFrameLength { opaque_type });
     }
     let body = &payload[prefix_length..];
-    let text = std::str::from_utf8(body)
-        .map_err(|_| OpaqueValueError::InvalidUtf8Body { opaque_type })?;
+    let text =
+        std::str::from_utf8(body).map_err(|_| OpaqueValueError::InvalidUtf8Body { opaque_type })?;
     if !body.ends_with(b"\n") || text.chars().any(is_document_control) {
         return Err(OpaqueValueError::InvalidDocumentBody { opaque_type });
     }
     Ok(())
 }
-
 
 /// Validates `MAGIC <len:u32 be> <utf-8 bytes>` with exactly `len` body bytes.
 fn validate_length_prefixed_utf8(
@@ -1886,8 +1876,7 @@ fn validate_length_prefixed_utf8(
             .try_into()
             .expect("the length prefix is exactly four bytes"),
     ) as usize;
-    if body_length > MAX_OPAQUE_CODEC_PAYLOAD_LENGTH
-        || payload.len() != prefix_length + body_length
+    if body_length > MAX_OPAQUE_CODEC_PAYLOAD_LENGTH || payload.len() != prefix_length + body_length
     {
         return Err(OpaqueValueError::InvalidFrameLength { opaque_type });
     }
@@ -1975,9 +1964,7 @@ fn validate_action_frame(
         let frame_end = frame_start
             .checked_add(frame_length)
             .ok_or(OpaqueValueError::InvalidActionFrame { opaque_type })?;
-        if frame_end > body.len()
-            || validate_orv3_frame(&body[frame_start..frame_end]).is_err()
-        {
+        if frame_end > body.len() || validate_orv3_frame(&body[frame_start..frame_end]).is_err() {
             return Err(OpaqueValueError::InvalidActionFrame { opaque_type });
         }
         offset = frame_end;
@@ -2021,7 +2008,8 @@ fn validate_orv3_frame(encoded: &[u8]) -> Result<(), ()> {
             0x03 if body.len() == 4 => {}
             0x04 if body.len() == 8 => {}
             0x05 if body.len() == 8 => {
-                let bits = u64::from_be_bytes(body.try_into().expect("float payload is eight bytes"));
+                let bits =
+                    u64::from_be_bytes(body.try_into().expect("float payload is eight bytes"));
                 let value = f64::from_bits(bits);
                 if bits == (-0.0_f64).to_bits() || !value.is_finite() {
                     return Err(());
@@ -2039,6 +2027,9 @@ fn validate_orv3_frame(encoded: &[u8]) -> Result<(), ()> {
                         .try_into()
                         .expect("the record field count is exactly four bytes"),
                 ) as usize;
+                if field_count >= MAX_RUNTIME_VALUE_NODES {
+                    return Err(());
+                }
                 let minimum = field_count
                     .checked_mul(ACTION_IDENTITY_BYTES + 4 + ORV3_HEADER_BYTES)
                     .and_then(|length| 4usize.checked_add(length))
@@ -2049,9 +2040,10 @@ fn validate_orv3_frame(encoded: &[u8]) -> Result<(), ()> {
                 let mut cursor = 4usize;
                 let mut field_identities: HashSet<[u8; ACTION_IDENTITY_BYTES]> = HashSet::new();
                 for _ in 0..field_count {
-                    let length_start = cursor
-                        .checked_add(ACTION_IDENTITY_BYTES)
-                        .ok_or(())?;
+                    let length_start = cursor.checked_add(ACTION_IDENTITY_BYTES).ok_or(())?;
+                    if length_start > body.len() {
+                        return Err(());
+                    }
                     let field_identity: [u8; ACTION_IDENTITY_BYTES] = body[cursor..length_start]
                         .try_into()
                         .expect("the record field identity is sixteen bytes");
@@ -2106,8 +2098,7 @@ fn validate_length_prefixed_bytes(
             .try_into()
             .expect("the length prefix is exactly four bytes"),
     ) as usize;
-    if body_length > MAX_OPAQUE_CODEC_PAYLOAD_LENGTH
-        || payload.len() != prefix_length + body_length
+    if body_length > MAX_OPAQUE_CODEC_PAYLOAD_LENGTH || payload.len() != prefix_length + body_length
     {
         return Err(OpaqueValueError::InvalidFrameLength { opaque_type });
     }
@@ -2252,9 +2243,8 @@ impl OpaqueValue {
         }
 
         let payload = payload.as_ref();
-        let envelope = InspectCarrierEnvelope::decode(payload).map_err(|_| {
-            OpaqueValueError::InvalidInspectCarrierEnvelope { opaque_type }
-        })?;
+        let envelope = InspectCarrierEnvelope::decode(payload)
+            .map_err(|_| OpaqueValueError::InvalidInspectCarrierEnvelope { opaque_type })?;
         if envelope.carrier_kind().type_id() != opaque_type {
             return Err(OpaqueValueError::InspectCarrierTypeMismatch { opaque_type });
         }
@@ -7408,7 +7398,6 @@ mod tests {
                     opaque_type: OPAQUE_TYPE,
                 }
             );
-
         }
         assert!(
             OpaqueCodecRegistration::length_prefixed_utf8(
@@ -7477,12 +7466,7 @@ mod tests {
         missing_final_newline.extend_from_slice(&5_u32.to_be_bytes());
         missing_final_newline.extend_from_slice(b"hello");
         assert_eq!(
-            OpaqueValue::new(
-                &active,
-                &registry,
-                DOCUMENT_TYPE,
-                &missing_final_newline
-            ),
+            OpaqueValue::new(&active, &registry, DOCUMENT_TYPE, &missing_final_newline),
             Err(OpaqueValueError::InvalidDocumentBody {
                 opaque_type: DOCUMENT_TYPE,
             })
@@ -7644,9 +7628,8 @@ mod tests {
             payload.extend_from_slice(body);
             payload
         };
-        let reject = |payload: &[u8]| {
-            OpaqueValue::new(&active, &registry, JSON_TYPE, payload).unwrap_err()
-        };
+        let reject =
+            |payload: &[u8]| OpaqueValue::new(&active, &registry, JSON_TYPE, payload).unwrap_err();
 
         assert_eq!(
             reject(b"WRONG-JSON-VALUE/1 \0\0\0\0null"),
@@ -7701,9 +7684,11 @@ mod tests {
         }
 
         let mut oversized = Vec::from(JSON_MAGIC.as_bytes());
-        oversized.extend_from_slice(&u32::try_from(MAX_OPAQUE_CODEC_PAYLOAD_LENGTH + 1)
-            .unwrap()
-            .to_be_bytes());
+        oversized.extend_from_slice(
+            &u32::try_from(MAX_OPAQUE_CODEC_PAYLOAD_LENGTH + 1)
+                .unwrap()
+                .to_be_bytes(),
+        );
         assert_eq!(
             reject(&oversized),
             OpaqueValueError::InvalidFrameLength {
@@ -8566,8 +8551,9 @@ mod tests {
         let active = active_record_revision();
         let row = inspect_orv5_integer_row(1);
         let payload = inspect_carrier_payload(&active, 1, &[row.as_slice()]);
-        let snapshot = OpaqueValue::new_inspect_carrier(&active, SYS_INSPECT_SNAPSHOT_TYPE_ID, &payload)
-            .expect("the fixed snapshot carrier must construct");
+        let snapshot =
+            OpaqueValue::new_inspect_carrier(&active, SYS_INSPECT_SNAPSHOT_TYPE_ID, &payload)
+                .expect("the fixed snapshot carrier must construct");
         assert_eq!(snapshot.opaque_type(), SYS_INSPECT_SNAPSHOT_TYPE_ID);
 
         for opaque_type in [
@@ -8616,5 +8602,4 @@ mod tests {
             })
         );
     }
-
 }
