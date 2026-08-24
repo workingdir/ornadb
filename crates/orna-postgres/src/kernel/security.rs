@@ -7654,20 +7654,19 @@ fn validate_invocation_audit_evidence(
 ///
 /// The audited `RevisionPair` stays the durable standard pin: an `application`
 /// authority row must resolve the function and its pinned executable revision
-/// in that historical application catalogue, and a `standard` authority row
-/// must resolve the audited function and its executable revision exactly once
-/// in the exact verified standard snapshot pinned by that historical catalogue
-/// revision. An absent authority row, mismatched revision pair, wrong standard
-/// pin, absent or duplicate standard executable, or a row whose class cannot
-/// resolve fails closed.
+/// in that historical application catalogue, a `standard` authority row must
+/// resolve the audited function and its executable revision exactly once in the
+/// exact verified standard snapshot pinned by that historical catalogue
+/// revision, and a `system` authority row must identify an admitted sealed
+/// security identity with the identity repeated as its function revision and no
+/// standard-library pin. An absent authority row, mismatched revision pair,
+/// wrong standard pin, absent or duplicate standard executable, or a row whose
+/// class cannot resolve fails closed.
 async fn require_invocation_audit_target(
     transaction: &Transaction<'_>,
     target: InvocationTarget,
     record: &str,
 ) -> Result<(), PostgresKernelError> {
-    if system_function_by_id(target.function()).is_some_and(is_admitted_security_identity) {
-        return Ok(());
-    }
     let function = target.function().to_bytes().to_vec();
     let source = target.revision().source().to_bytes().to_vec();
     let catalogue = target.revision().catalogue().to_bytes().to_vec();
@@ -7728,6 +7727,29 @@ async fn require_invocation_audit_target(
                 )
             })?;
     match class.as_str() {
+        "system" => {
+            let admitted = system_function_by_id(target.function())
+                .is_some_and(is_admitted_security_identity);
+            let standard_revision: Option<Vec<u8>> = row
+                .try_get("pinned_standard_library_revision_id")
+                .map_err(|source| {
+                    row_decode(
+                        relation,
+                        record.to_owned(),
+                        "pinned_standard_library_revision_id",
+                        source,
+                    )
+                })?;
+            if !admitted
+                || pinned_revision != function
+                || standard_revision.is_some()
+            {
+                return Err(invocation_audit_invariant(
+                    record,
+                    "target function and pinned revision must exist together",
+                ));
+            }
+        }
         "application" => {
             let current: Option<Vec<u8>> = row
                 .try_get("catalogue_current_function_revision_id")
