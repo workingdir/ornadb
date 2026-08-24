@@ -64,8 +64,8 @@ use orna_artifact::{
     server_json_encode::{self, JsonEncodePlan},
 };
 use orna_core::{
-    CallSiteId, ExpressionId, FunctionId, FunctionRevisionId, ParameterId, SchemaId, StateSlotId,
-    TypeId,
+    CallSiteId, ExpressionId, FunctionId, FunctionRevisionId, ParameterId, SchemaId, SourceUnitId,
+    StateSlotId, TypeId,
     canonical_hash::{
         artifact_payload_digest, function_declaration_digest, function_semantic_digest_with_version,
     },
@@ -756,6 +756,20 @@ fn standard_types_catalogue(
 ) -> Result<CatalogueSnapshot, StandardLibraryCheckError> {
     scope_standard_catalogue(catalogue, &[STD_INVOKE_SCHEMA_ID], &[])
 }
+fn check_standard_source_units(
+    source_units: &[StoredSourceUnit],
+    expected: &[(SourceUnitId, &str, u32)],
+) -> Result<(), StandardLibraryCheckError> {
+    if source_units.len() != expected.len()
+        || source_units.iter().zip(expected).any(|(unit, (id, path, ordinal))| {
+            unit.id() != *id || unit.logical_path() != *path || unit.ordinal() != *ordinal
+        })
+    {
+        return Err(StandardLibraryCheckError::SourceMismatch);
+    }
+    Ok(())
+}
+
 /// Checks one retained V5 JSON standard source bundle.
 fn check_standard_library_source_v5(
     snapshot: &VerifiedStandardLibrarySnapshot,
@@ -779,22 +793,47 @@ fn check_standard_library_source_v5(
 fn check_standard_library_source_v6(
     snapshot: &VerifiedStandardLibrarySnapshot,
 ) -> Result<CheckedStandardLibrary, StandardLibraryCheckError> {
-    let source_units = snapshot.source().units();
+    let (families, checked_executable) = check_standard_library_source_v6_parts(
+        snapshot.source().units(),
+        snapshot.catalogue(),
+        snapshot.origins(),
+        snapshot.executables(),
+    )?;
+    Ok(CheckedStandardLibrary {
+        verified_snapshot: snapshot.clone(),
+        schemas: families.schemas,
+        value_types: families.value_types,
+        type_bindings: families.type_bindings,
+        checked_executable: Some(checked_executable),
+    })
+}
+
+fn check_standard_library_source_v6_parts(
+    source_units: &[StoredSourceUnit],
+    catalogue: &CatalogueSnapshot,
+    origins: &[DefinitionOrigin],
+    executables: &[StandardExecutable],
+) -> Result<(StandardSourceFamilies, CheckedStandardExecutable), StandardLibraryCheckError> {
     let [types_unit, invoke_unit, output_unit, ui_unit, json_unit, action_unit] = source_units else {
         return Err(StandardLibraryCheckError::SourceUnitCount {
             actual: source_units.len(),
         });
     };
-    if action_unit.id() != STD_ACTION_SOURCE_UNIT_ID
-        || action_unit.logical_path() != "std/action.orna"
-        || action_unit.ordinal() != 5
-    {
-        return Err(StandardLibraryCheckError::SourceMismatch);
-    }
+    check_standard_source_units(
+        source_units,
+        &[
+            (STD_TYPES_SOURCE_UNIT_ID, "std/types.orna", 0),
+            (STD_INVOKE_SOURCE_UNIT_ID, "std/invoke.orna", 1),
+            (STD_OUTPUT_SOURCE_UNIT_ID, "std/output.orna", 2),
+            (STD_UI_SOURCE_UNIT_ID, "std/ui.orna", 3),
+            (STD_JSON_SOURCE_UNIT_ID, "std/json.orna", 4),
+            (STD_ACTION_SOURCE_UNIT_ID, "std/action.orna", 5),
+        ],
+    )?;
 
-    let mut v5_origins = Vec::with_capacity(snapshot.origins().len());
+    let mut v5_origins = Vec::with_capacity(origins.len());
     let mut action_origins = Vec::new();
-    for origin in snapshot.origins() {
+    for origin in origins {
         if origin.source().source_unit() == STD_ACTION_SOURCE_UNIT_ID {
             action_origins.push(origin.clone());
         } else {
@@ -809,9 +848,9 @@ fn check_standard_library_source_v6(
             ui_unit.clone(),
             json_unit.clone(),
         ],
-        snapshot.catalogue(),
+        catalogue,
         &v5_origins,
-        snapshot.executables(),
+        executables,
     )?;
     let bundle = SourceBundle::new([SourceUnit::new(
         action_unit.logical_path(),
@@ -828,18 +867,12 @@ fn check_standard_library_source_v6(
         return Err(StandardLibraryCheckError::SourceMismatch);
     };
     let action_families =
-        reconcile_standard_action_unit(action_unit, parsed_action, snapshot.catalogue(), &action_origins)?;
+        reconcile_standard_action_unit(action_unit, parsed_action, catalogue, &action_origins)?;
     families.schemas.extend(action_families.schemas);
     families.value_types.extend(action_families.value_types);
     families.type_bindings.extend(action_families.type_bindings);
 
-    Ok(CheckedStandardLibrary {
-        verified_snapshot: snapshot.clone(),
-        schemas: families.schemas,
-        value_types: families.value_types,
-        type_bindings: families.type_bindings,
-        checked_executable: Some(checked_executable),
-    })
+    Ok((families, checked_executable))
 }
 
 fn check_standard_library_source_v5_parts(
@@ -853,12 +886,16 @@ fn check_standard_library_source_v5_parts(
             actual: source_units.len(),
         });
     };
-    if json_unit.id() != STD_JSON_SOURCE_UNIT_ID
-        || json_unit.logical_path() != "std/json.orna"
-        || json_unit.ordinal() != 4
-    {
-        return Err(StandardLibraryCheckError::SourceMismatch);
-    }
+    check_standard_source_units(
+        source_units,
+        &[
+            (STD_TYPES_SOURCE_UNIT_ID, "std/types.orna", 0),
+            (STD_INVOKE_SOURCE_UNIT_ID, "std/invoke.orna", 1),
+            (STD_OUTPUT_SOURCE_UNIT_ID, "std/output.orna", 2),
+            (STD_UI_SOURCE_UNIT_ID, "std/ui.orna", 3),
+            (STD_JSON_SOURCE_UNIT_ID, "std/json.orna", 4),
+        ],
+    )?;
     let bundle = SourceBundle::new([
         SourceUnit::new(types_unit.logical_path(), types_unit.content()),
         SourceUnit::new(invoke_unit.logical_path(), invoke_unit.content()),
@@ -11341,12 +11378,13 @@ mod tests {
         CheckedStandardTerminalPresentTable, CheckedStateDefault, CheckedTypeId,
         CheckedTypeUseKind, CheckedValueTypeUse, CheckedClientReturnShape, ClientExpressionResultShape, ClientExpressionType, ConstantValue, DiagnosticCode,
         IdentityAssignments, NewApplicationCheckError, STANDARD_LIBRARY_V3_REVISION_ID,
-        STANDARD_LIBRARY_V4_REVISION_ID, STD_ACTION_CONTRACT, STD_ACTION_TYPE_ID,
+        STANDARD_LIBRARY_V4_REVISION_ID, STD_ACTION_CONTRACT, STD_ACTION_SOURCE_UNIT_ID,
+        STD_ACTION_SCHEMA_ID, STD_ACTION_TYPE_ID,
         STD_DATA_ROWS_TYPE_ID, STD_DATA_SCHEMA_ID, STD_INTEGER_TYPE_ID,
         STD_INVOKE_ECHO_FUNCTION_ID, STD_INVOKE_ECHO_FUNCTION_REVISION_ID,
         STD_INVOKE_ECHO_PARAMETER_ID, STD_INVOKE_ECHO_REVISION_NUMBER, STD_INVOKE_SCHEMA_ID,
         STD_INVOKE_SOURCE_UNIT_ID, STD_IO_BYTE_STREAM_TYPE_ID, STD_IO_SCHEMA_ID,
-        STD_JSON_ENCODE_FUNCTION_ID, STD_JSON_ENCODE_FUNCTION_REVISION_ID,
+        STD_JSON_CONTRACT, STD_JSON_ENCODE_FUNCTION_ID, STD_JSON_ENCODE_FUNCTION_REVISION_ID,
         STD_JSON_ENCODE_PARAMETER_ID, STD_JSON_SCHEMA_ID, STD_JSON_VALUE_TYPE_ID,
         STD_OUTPUT_SOURCE_UNIT_ID, STD_TERMINAL_DOCUMENT_TYPE_ID,
         STD_TERMINAL_PRESENT_TABLE_FUNCTION_ID, STD_TERMINAL_PRESENT_TABLE_FUNCTION_REVISION_ID,
@@ -11357,7 +11395,8 @@ mod tests {
         check_new_application_with_catalogue, check_standard_application,
         check_standard_json_encode, check_standard_library_source,
         check_standard_library_source_v2_parts, check_standard_library_source_v3_parts,
-        check_standard_library_source_v4_parts, check_standard_parameter_echo,
+        check_standard_library_source_v4_parts, check_standard_library_source_v5_parts,
+        check_standard_library_source_v6_parts, check_standard_parameter_echo,
         client_resource_stream_type_is_supported,
         check_standard_terminal_present_table,
         checked_standard_library_with_contract_overrides_for_test,
@@ -25506,6 +25545,275 @@ mod tests {
             ),
             "wrong ui export binding",
         );
+    }
+
+    const STANDARD_V5_JSON_SOURCE: &str = include_str!("../../../stdlib/std/json.orna");
+    const STANDARD_V6_ACTION_SOURCE: &str = include_str!("../../../stdlib/std/action.orna");
+
+    fn standard_v5_catalogue() -> CatalogueSnapshot {
+        let base = standard_v4_catalogue(true);
+        let mut schemas = base.schemas().to_vec();
+        schemas.push(SchemaDefinition::new(
+            STD_JSON_SCHEMA_ID,
+            QualifiedSemanticName::new(["std", "json"]).unwrap(),
+        ));
+        let mut value_types = base.value_types().to_vec();
+        value_types.push(ValueTypeDefinition::opaque(
+            STD_JSON_VALUE_TYPE_ID,
+            QualifiedSemanticName::new(["std", "json", "value"]).unwrap(),
+            STD_JSON_CONTRACT,
+        ));
+        let mut type_bindings = base.type_bindings().to_vec();
+        type_bindings.push(
+            TypeBinding::qualified(
+                QualifiedSemanticName::new(["std", "jsonvalue"]).unwrap(),
+                STD_JSON_VALUE_TYPE_ID,
+            )
+            .unwrap(),
+        );
+        let mut functions = base.functions().to_vec();
+        functions.push(FunctionDefinition::new(
+            STD_JSON_ENCODE_FUNCTION_ID,
+            QualifiedSemanticName::new(["std", "json", "encode"]).unwrap(),
+            FunctionDomain::Server,
+            vec![ParameterDefinition::new(
+                STD_JSON_ENCODE_PARAMETER_ID,
+                "p_value",
+                0,
+                ResolvedType::Named(STD_JSON_VALUE_TYPE_ID),
+                None,
+            )],
+            FunctionReturn::Single(ResolvedType::Named(STD_IO_BYTE_STREAM_TYPE_ID)),
+            STD_JSON_ENCODE_FUNCTION_REVISION_ID,
+            FunctionSecurity::Invoker,
+            Some(FunctionTransaction::ReadOnly),
+            FunctionVolatility::Stable,
+        ));
+        CatalogueSnapshot::new_with_functions_and_types(
+            base.revision(),
+            schemas,
+            vec![],
+            value_types,
+            type_bindings,
+            functions,
+        )
+        .unwrap()
+    }
+
+    fn standard_v5_json_origins(catalogue: &CatalogueSnapshot) -> Vec<DefinitionOrigin> {
+        let report = parse_bundle(
+            &SourceBundle::new([SourceUnit::new("std/json.orna", STANDARD_V5_JSON_SOURCE)]).unwrap(),
+        );
+        assert!(report.diagnostics().is_empty(), "{:?}", report.diagnostics());
+        let parsed = &report.units()[0];
+        let binding = catalogue
+            .type_binding_by_name(&TypeLookupName::qualified(
+                QualifiedSemanticName::new(["std", "jsonvalue"]).unwrap(),
+            ))
+            .unwrap();
+        let origin = |identity: DefinitionIdentity, span: &SourceSpan| {
+            DefinitionOrigin::new(
+                identity,
+                SourceOrigin::new(
+                    super::STD_JSON_SOURCE_UNIT_ID,
+                    u32::try_from(span.start).unwrap(),
+                    u32::try_from(span.end).unwrap(),
+                )
+                .unwrap(),
+            )
+        };
+        let schema = &parsed.parsed().schemas()[0];
+        let value_type = &parsed.parsed().opaque_value_types()[0];
+        let export = &parsed.parsed().type_exports()[0];
+        let function = &parsed.parsed().server_functions()[0];
+        vec![
+            origin(DefinitionIdentity::Schema(STD_JSON_SCHEMA_ID), &schema.span),
+            origin(DefinitionIdentity::ValueType(STD_JSON_VALUE_TYPE_ID), &value_type.span),
+            origin(DefinitionIdentity::TypeBinding(binding.id()), &export.span),
+            origin(DefinitionIdentity::Function(STD_JSON_ENCODE_FUNCTION_ID), &function.span),
+            origin(
+                DefinitionIdentity::Parameter {
+                    owner: STD_JSON_ENCODE_FUNCTION_ID,
+                    parameter: STD_JSON_ENCODE_PARAMETER_ID,
+                },
+                &function.parameters[0].span,
+            ),
+        ]
+    }
+
+    fn standard_v5_parts() -> (
+        Vec<StoredSourceUnit>,
+        CatalogueSnapshot,
+        Vec<DefinitionOrigin>,
+        Vec<StandardExecutable>,
+    ) {
+        let (types_unit, invoke_unit, output_unit, ui_unit) = standard_v4_units();
+        let catalogue = standard_v5_catalogue();
+        let parsed_types = parsed_standard_unit(STANDARD_V2_TYPES_SOURCE);
+        let mut origins = standard_v2_types_origins(&catalogue, &parsed_types);
+        origins.extend(standard_v2_invoke_origins(STD_INVOKE_SOURCE));
+        origins.extend(standard_v3_output_origins(&catalogue, STANDARD_V3_OUTPUT_SOURCE));
+        origins.extend(standard_v4_ui_origins(&catalogue, STANDARD_V4_UI_SOURCE));
+        let json_origins = standard_v5_json_origins(&catalogue);
+        origins.extend(json_origins.iter().cloned());
+        let json_unit = stored_v2_unit(
+            super::STD_JSON_SOURCE_UNIT_ID,
+            4,
+            "std/json.orna",
+            STANDARD_V5_JSON_SOURCE,
+        );
+        let json_function = parsed_standard_unit(STANDARD_V5_JSON_SOURCE)
+            .parsed()
+            .server_functions()[0]
+            .clone();
+        let json_executable = expected_standard_json_executable(
+            &json_function,
+            &catalogue,
+            &json_origins,
+            &json_unit,
+        )
+        .unwrap();
+        let executable = standard_v2_executable(&catalogue, &origins);
+        (
+            vec![types_unit, invoke_unit, output_unit, ui_unit, json_unit],
+            catalogue,
+            origins,
+            vec![executable, json_executable],
+        )
+    }
+
+    fn check_v5_parts(
+        units: Vec<StoredSourceUnit>,
+        catalogue: &CatalogueSnapshot,
+        origins: &[DefinitionOrigin],
+        executables: &[StandardExecutable],
+    ) -> Result<(StandardSourceFamilies, CheckedStandardExecutable), StandardLibraryCheckError> {
+        check_standard_library_source_v5_parts(&units, catalogue, origins, executables)
+    }
+
+    fn standard_v6_catalogue() -> CatalogueSnapshot {
+        let base = standard_v5_catalogue();
+        let mut schemas = base.schemas().to_vec();
+        schemas.push(SchemaDefinition::new(
+            STD_ACTION_SCHEMA_ID,
+            QualifiedSemanticName::new(["std", "action"]).unwrap(),
+        ));
+        let mut value_types = base.value_types().to_vec();
+        value_types.push(ValueTypeDefinition::opaque(
+            STD_ACTION_TYPE_ID,
+            QualifiedSemanticName::new(["std", "action", "action"]).unwrap(),
+            STD_ACTION_CONTRACT,
+        ));
+        let mut type_bindings = base.type_bindings().to_vec();
+        type_bindings.push(
+            TypeBinding::qualified(
+                QualifiedSemanticName::new(["std", "action"]).unwrap(),
+                STD_ACTION_TYPE_ID,
+            )
+            .unwrap(),
+        );
+        CatalogueSnapshot::new_with_functions_and_types(
+            base.revision(),
+            schemas,
+            vec![],
+            value_types,
+            type_bindings,
+            base.functions().to_vec(),
+        )
+        .unwrap()
+    }
+
+    fn standard_v6_action_origins(catalogue: &CatalogueSnapshot) -> Vec<DefinitionOrigin> {
+        let report = parse_bundle(
+            &SourceBundle::new([SourceUnit::new("std/action.orna", STANDARD_V6_ACTION_SOURCE)]).unwrap(),
+        );
+        assert!(report.diagnostics().is_empty(), "{:?}", report.diagnostics());
+        let parsed = &report.units()[0];
+        let binding = catalogue
+            .type_binding_by_name(&TypeLookupName::qualified(
+                QualifiedSemanticName::new(["std", "action"]).unwrap(),
+            ))
+            .unwrap();
+        let origin = |identity: DefinitionIdentity, span: &SourceSpan| {
+            DefinitionOrigin::new(
+                identity,
+                SourceOrigin::new(
+                    STD_ACTION_SOURCE_UNIT_ID,
+                    u32::try_from(span.start).unwrap(),
+                    u32::try_from(span.end).unwrap(),
+                )
+                .unwrap(),
+            )
+        };
+        let schema = &parsed.parsed().schemas()[0];
+        let value_type = &parsed.parsed().opaque_value_types()[0];
+        let export = &parsed.parsed().type_exports()[0];
+        vec![
+            origin(DefinitionIdentity::Schema(STD_ACTION_SCHEMA_ID), &schema.span),
+            origin(DefinitionIdentity::ValueType(STD_ACTION_TYPE_ID), &value_type.span),
+            origin(DefinitionIdentity::TypeBinding(binding.id()), &export.span),
+        ]
+    }
+
+    fn standard_v6_parts() -> (
+        Vec<StoredSourceUnit>,
+        CatalogueSnapshot,
+        Vec<DefinitionOrigin>,
+        Vec<StandardExecutable>,
+    ) {
+        let (v5_units, _, v5_origins, executables) = standard_v5_parts();
+        let catalogue = standard_v6_catalogue();
+        let mut origins = v5_origins;
+        origins.extend(standard_v6_action_origins(&catalogue));
+        let action_unit = stored_v2_unit(
+            STD_ACTION_SOURCE_UNIT_ID,
+            5,
+            "std/action.orna",
+            STANDARD_V6_ACTION_SOURCE,
+        );
+        (
+            v5_units.into_iter().chain([action_unit]).collect(),
+            catalogue,
+            origins,
+            executables,
+        )
+    }
+
+    fn check_v6_parts(
+        units: Vec<StoredSourceUnit>,
+        catalogue: &CatalogueSnapshot,
+        origins: &[DefinitionOrigin],
+        executables: &[StandardExecutable],
+    ) -> Result<(StandardSourceFamilies, CheckedStandardExecutable), StandardLibraryCheckError> {
+        check_standard_library_source_v6_parts(&units, catalogue, origins, executables)
+    }
+
+    #[test]
+    fn rejects_v5_when_a_retained_v4_unit_path_or_ordinal_is_tampered() {
+        let (units, catalogue, origins, executables) = standard_v5_parts();
+        for (label, replacement) in [
+            ("path", stored_v2_unit(STD_OUTPUT_SOURCE_UNIT_ID, 2, "std/other.orna", STANDARD_V3_OUTPUT_SOURCE)),
+            ("ordinal", stored_v2_unit(STD_OUTPUT_SOURCE_UNIT_ID, 9, "std/output.orna", STANDARD_V3_OUTPUT_SOURCE)),
+        ] {
+            let mut tampered = units.clone();
+            tampered[2] = replacement;
+            let error = check_v5_parts(tampered, &catalogue, &origins, &executables).unwrap_err();
+            assert!(matches!(error, StandardLibraryCheckError::SourceMismatch), "{label}: {error}");
+        }
+    }
+
+    #[test]
+    fn rejects_v6_when_a_retained_v4_unit_path_or_ordinal_is_tampered() {
+        let (units, catalogue, origins, executables) = standard_v6_parts();
+        for (label, replacement) in [
+            ("path", stored_v2_unit(STD_OUTPUT_SOURCE_UNIT_ID, 2, "std/other.orna", STANDARD_V3_OUTPUT_SOURCE)),
+            ("ordinal", stored_v2_unit(STD_OUTPUT_SOURCE_UNIT_ID, 9, "std/output.orna", STANDARD_V3_OUTPUT_SOURCE)),
+        ] {
+            let mut tampered = units.clone();
+            tampered[2] = replacement;
+            let error = check_v6_parts(tampered, &catalogue, &origins, &executables).unwrap_err();
+            assert!(matches!(error, StandardLibraryCheckError::SourceMismatch), "{label}: {error}");
+        }
     }
 
     #[test]
