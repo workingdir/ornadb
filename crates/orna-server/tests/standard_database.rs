@@ -13694,6 +13694,62 @@ fn checks_accepted_expression_client_fixture_offline() -> TestResult<()> {
 
 
 #[test]
+fn checks_and_prepares_server_function_dogfood_fixture_offline() -> TestResult<()> {
+    let snapshot = verify_standard_library_v2_snapshot(retained_standard_library_v2_snapshot()?)?;
+    let standard = check_standard_library_source(&snapshot)?;
+    let base = offline_empty_version_two_active(standard.verified_snapshot())?;
+    let context = StandardApplicationCheckContext::try_new(base.catalogue(), &standard)?;
+    let source = SourceBundle::new([SourceUnit::new(
+        "fixtures/server_function_dogfood.orna",
+        include_str!("fixtures/server_function_dogfood.orna"),
+    )])?;
+    let report = check_standard_application(&source, &context);
+    if !report.diagnostics().is_empty() {
+        return Err(failure(format!(
+            "accepted SERVER dogfood fixture did not check: {:?}",
+            report.diagnostics(),
+        )));
+    }
+    let checked = report
+        .checked_bundle()
+        .ok_or_else(|| failure("accepted SERVER dogfood fixture produced no checked bundle"))?;
+    require(
+        checked.server_functions().len() == 4,
+        "accepted SERVER dogfood fixture produced an unexpected function count",
+    )?;
+    for name in ["read", "distinct_values", "read_item", "update"] {
+        require(
+            checked
+                .server_functions()
+                .any(|function| function.name().parts() == ["dogfood", name]),
+            "accepted SERVER dogfood fixture is missing a declared function",
+        )?;
+    }
+
+    let prepared = prepare_standard_application(&report, base.pair(), &base)?;
+    require(
+        prepared.expected_base() == base.pair(),
+        "prepared SERVER dogfood fixture retained the wrong expected base pair",
+    )?;
+    let expected_candidate_pair =
+        RevisionPair::new(prepared.source().id(), prepared.candidate().revision());
+    require(
+        prepared.candidate_pair() == expected_candidate_pair,
+        "prepared SERVER dogfood fixture produced the wrong candidate pair",
+    )?;
+    require(
+        prepared.candidate_pair() != base.pair(),
+        "prepared SERVER dogfood fixture did not advance the revision pair",
+    )?;
+    let active = offline_active_from_prepared(&prepared)?;
+    require(
+        active.pair() == expected_candidate_pair,
+        "prepared SERVER dogfood fixture could not become the expected active pair",
+    )
+}
+
+
+#[test]
 fn checks_accepted_action_fixture_offline() -> TestResult<()> {
     let snapshot = verify_standard_library_v6_snapshot(retained_standard_library_v6_snapshot()?)?;
     let standard = check_standard_library_source(&snapshot)?;
