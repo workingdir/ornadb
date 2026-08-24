@@ -20,8 +20,8 @@ use orna_compiler::{
     prepare_standard_application,
 };
 use orna_core::{
-    CatalogueRevisionId, ExpressionId, FieldId, FunctionId, FunctionRevisionId, ParameterId,
-    PrincipalId, SchemaId, SourceBundleId, SourceRevisionId, SourceUnitId, TypeId,
+    CatalogueRevisionId, ExpressionId, FieldId, FunctionId, FunctionRevisionId, InvocationId,
+    ParameterId, PrincipalId, SchemaId, SourceBundleId, SourceRevisionId, SourceUnitId, TypeId,
     canonical_hash::{
         CanonicalHashError, artifact_payload_digest, catalogue_digest,
         catalogue_digest_with_context, function_declaration_digest, function_semantic_digest,
@@ -2577,6 +2577,86 @@ async fn recovers_closed_capability_audit_history_and_rejects_unredacted_tamper(
             session.shutdown().await,
             "capability audit tamper retention checks",
         )?;
+        require_no_session_leaks(&database).await
+    })
+    .await
+}
+
+#[tokio::test]
+#[ignore = "requires the Compose PostgreSQL development service"]
+async fn recovery_rejects_resource_audit_without_its_durable_request_reservation() -> TestResult<()>
+{
+    const ORPHAN_REQUEST_ID: [u8; 16] = [0x90; 16];
+    const REQUEST_ID: [u8; 16] = [0x91; 16];
+    const NESTED_INVOCATION_ID: [u8; 16] = [0x92; 16];
+    const PARENT_INVOCATION_ID: [u8; 16] = [0x93; 16];
+    const CALL_SITE_ID: [u8; 16] = [0x94; 16];
+    const SESSION_PRINCIPAL_ID: [u8; 16] = [0x95; 16];
+    const RESOURCE_EVENT_ID: [u8; 16] = [0x96; 16];
+    const INVOCATION_EVENT_ID: [u8; 16] = [0x97; 16];
+
+    with_test_database(|database| async move {
+        let kernel_instance = kernel(&database)?;
+        kernel_instance.bootstrap().await?;
+
+        run_batch(
+            &database,
+            &format!(
+                "INSERT INTO _orna_kernel.resource_request_history (request_id)
+                 VALUES ({orphan_request}), ({request});
+                 INSERT INTO _orna_kernel.invocation_audit_events
+                     (event_id, invocation_id, outcome, session_principal_id)
+                 VALUES ({invocation_event}, {nested_invocation}, 'denied', {session_principal});
+                 INSERT INTO _orna_kernel.resource_audit_events
+                     (event_id, request_id, nested_invocation_id, parent_invocation_id,
+                      call_site_id, session_principal_id, decision_outcome, terminal_outcome)
+                 VALUES ({resource_event}, {request}, {nested_invocation}, {parent_invocation},
+                         {call_site}, {session_principal}, 'denied', 'failed');",
+                orphan_request = bytea_literal(ORPHAN_REQUEST_ID),
+                request = bytea_literal(REQUEST_ID),
+                invocation_event = bytea_literal(INVOCATION_EVENT_ID),
+                nested_invocation = bytea_literal(NESTED_INVOCATION_ID),
+                session_principal = bytea_literal(SESSION_PRINCIPAL_ID),
+                resource_event = bytea_literal(RESOURCE_EVENT_ID),
+                parent_invocation = bytea_literal(PARENT_INVOCATION_ID),
+                call_site = bytea_literal(CALL_SITE_ID),
+            ),
+        )
+        .await?;
+
+        kernel_instance.recover().await?;
+
+        run_single_row_statement(
+            &database,
+            &format!(
+                "DELETE FROM _orna_kernel.resource_request_history WHERE request_id = {}",
+                bytea_literal(REQUEST_ID),
+            ),
+        )
+        .await?;
+        let request = InvocationId::from_bytes(REQUEST_ID);
+        let error = recovery_error(&database).await?;
+        require(
+            matches!(
+                error,
+                PostgresKernelError::DurableInvariant {
+                    relation: "_orna_kernel.resource_request_history",
+                    record,
+                    rule: "accepted resource producer must retain its reservation",
+                } if record == request.canonical()
+            ),
+            "missing resource request reservation returned the wrong recovery invariant",
+        )?;
+
+        run_single_row_statement(
+            &database,
+            &format!(
+                "INSERT INTO _orna_kernel.resource_request_history (request_id) VALUES ({})",
+                bytea_literal(REQUEST_ID),
+            ),
+        )
+        .await?;
+        kernel_instance.recover().await?;
         require_no_session_leaks(&database).await
     })
     .await
