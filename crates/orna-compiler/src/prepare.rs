@@ -7298,6 +7298,157 @@ impl<'a> CandidateBuilder<'a> {
     }
 
 
+    fn client_call_reference_sequence(
+        &self,
+        body: &ValidatedClientBody,
+    ) -> Result<Vec<(CheckedFunctionId, SourceLocation)>, PrepareError> {
+        let mut calls = Vec::new();
+        match body {
+            ValidatedClientBody::BooleanLiteral(_)
+            | ValidatedClientBody::ExternalContract(_) => {}
+            ValidatedClientBody::Expression(expression) => {
+                self.append_client_expression_call_references(expression, &mut calls)?;
+            }
+            ValidatedClientBody::Procedural {
+                statements,
+                return_expression,
+                ..
+            } => {
+                for statement in statements {
+                    self.append_client_expression_call_references(
+                        statement.expression(),
+                        &mut calls,
+                    )?;
+                }
+                self.append_client_expression_call_references(return_expression, &mut calls)?;
+            }
+            ValidatedClientBody::StateBlock {
+                return_expression,
+                states,
+            } => {
+                for state in states {
+                    if let CheckedStateDefault::Expression(expression) = state.default() {
+                        self.append_client_expression_call_references(expression, &mut calls)?;
+                    }
+                }
+                self.append_client_expression_call_references(return_expression, &mut calls)?;
+            }
+        }
+        Ok(calls)
+    }
+
+    fn append_client_operation_call_references(
+        &self,
+        arguments: &[(CheckedParameterId, CheckedClientExpression)],
+        calls: &mut Vec<(CheckedFunctionId, SourceLocation)>,
+    ) -> Result<(), PrepareError> {
+        let mut ordered = arguments
+            .iter()
+            .map(|(parameter, expression)| {
+                Ok((self.identities.parameter(*parameter)?, expression))
+            })
+            .collect::<Result<Vec<_>, PrepareError>>()?;
+        ordered.sort_by_key(|(parameter, _)| *parameter);
+        for (_, expression) in ordered {
+            self.append_client_expression_call_references(expression, calls)?;
+        }
+        Ok(())
+    }
+
+    fn append_client_expression_call_references(
+        &self,
+        expression: &CheckedClientExpression,
+        calls: &mut Vec<(CheckedFunctionId, SourceLocation)>,
+    ) -> Result<(), PrepareError> {
+        match expression {
+            CheckedClientExpression::Call {
+                function,
+                arguments,
+                location,
+            } => {
+                for (_, argument) in arguments {
+                    self.append_client_expression_call_references(argument, calls)?;
+                }
+                calls.push((*function, location.clone()));
+            }
+            CheckedClientExpression::Await { expression, .. } => {
+                self.append_client_expression_call_references(expression, calls)?;
+            }
+            CheckedClientExpression::Resource { operation } => {
+                self.append_client_operation_call_references(operation.arguments(), calls)?;
+                calls.push((operation.target(), operation.location().clone()));
+            }
+            CheckedClientExpression::Action { operation } => {
+                self.append_client_operation_call_references(operation.arguments(), calls)?;
+                calls.push((operation.target(), operation.location().clone()));
+            }
+            CheckedClientExpression::Inspect { operation } => match operation {
+                CheckedInspectOperation::Snapshot { target, options, .. } => {
+                    self.append_client_expression_call_references(target, calls)?;
+                    if let Some(options) = options {
+                        self.append_client_expression_call_references(options, calls)?;
+                    }
+                }
+                CheckedInspectOperation::Projection { snapshot, .. } => {
+                    self.append_client_expression_call_references(snapshot, calls)?;
+                }
+            },
+            CheckedClientExpression::Concat { left, right, .. } => {
+                self.append_client_expression_call_references(left, calls)?;
+                self.append_client_expression_call_references(right, calls)?;
+            }
+            CheckedClientExpression::String { .. }
+            | CheckedClientExpression::Integer { .. }
+            | CheckedClientExpression::Boolean { .. }
+            | CheckedClientExpression::ParameterRead { .. }
+            | CheckedClientExpression::LocalRead { .. }
+            | CheckedClientExpression::FieldPath { .. } => {}
+        }
+        Ok(())
+    }
+
+    fn reorder_client_call_references(
+        &self,
+        validated: &ValidatedClient,
+        remaining_references: &mut Vec<&crate::CheckedDefinitionReference>,
+    ) -> Result<(), PrepareError> {
+        let sequence = self.client_call_reference_sequence(&validated.body)?;
+        let call_slots = remaining_references
+            .iter()
+            .enumerate()
+            .filter_map(|(index, reference)| {
+                (reference.kind() == DefinitionReferenceKind::FunctionCall).then_some(index)
+            })
+            .collect::<Vec<_>>();
+        if call_slots.len() != sequence.len() {
+            return Err(PrepareError::InvalidCheckedBundle {
+                reason: "checked CLIENT function-call references do not match artifact calls",
+            });
+        }
+
+        let mut used_slots = HashSet::with_capacity(call_slots.len());
+        let mut ordered_references = Vec::with_capacity(sequence.len());
+        for (target, location) in sequence {
+            let expected_target = CheckedDefinitionReferenceTarget::Function(target);
+            let Some(slot) = call_slots.iter().copied().find(|slot| {
+                !used_slots.contains(slot)
+                    && remaining_references[*slot].target() == expected_target
+                    && remaining_references[*slot].location() == &location
+            }) else {
+                return Err(PrepareError::InvalidCheckedBundle {
+                    reason: "checked CLIENT artifact call has no exact definition reference",
+                });
+            };
+            used_slots.insert(slot);
+            ordered_references.push(remaining_references[slot]);
+        }
+
+        for (slot, reference) in call_slots.into_iter().zip(ordered_references) {
+            remaining_references[slot] = reference;
+        }
+        Ok(())
+    }
+
     fn client_function_references(
         &self,
         function: FunctionId,
@@ -7387,6 +7538,7 @@ impl<'a> CandidateBuilder<'a> {
                 self.source.origin(&validated.return_location)?,
             ));
         }
+        self.reorder_client_call_references(validated, &mut remaining_references)?;
         for reference in remaining_references {
             let ordinal = u32::try_from(references.len()).map_err(|_| {
                 PrepareError::ReferenceCountExceedsU32 {
