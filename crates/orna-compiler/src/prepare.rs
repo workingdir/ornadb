@@ -13905,6 +13905,25 @@ EXPORT TYPE std.CHARACTER_LARGE_OBJECT TO PRELUDE AS TEXT;
             report.diagnostics()
         );
 
+        let checked_call_site = {
+            let checked = report.preparation_view().unwrap().checked();
+            let client = checked
+                .client_functions()
+                .iter()
+                .find(|function| function.name().parts() == ["stream_fixture", "read"])
+                .unwrap();
+            let CheckedClientFunctionBody::Expression { expression } = client.body() else {
+                panic!("stream resource client must use an expression body");
+            };
+            let CheckedClientExpression::Await { expression, .. } = expression else {
+                panic!("stream resource client must await its resource");
+            };
+            let CheckedClientExpression::Resource { operation } = expression.as_ref() else {
+                panic!("stream resource client must retain its resource operation");
+            };
+            operation.call_site()
+        };
+
         let prepared = prepare_standard_application(&report, active.pair(), &active).unwrap();
         let target = prepared
             .candidate()
@@ -13935,6 +13954,7 @@ EXPORT TYPE std.CHARACTER_LARGE_OBJECT TO PRELUDE AS TEXT;
         assert_eq!(artifact.target(), target.id());
         assert_eq!(artifact.target_revision(), prepared.candidate_pair());
         assert_eq!(artifact.result_type(), text_type_id);
+        assert_eq!(artifact.call_site(), checked_call_site);
         assert_ne!(artifact.call_site().to_bytes(), [0; 16]);
         assert!(artifact.arguments().is_empty());
     }
