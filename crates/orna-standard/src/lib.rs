@@ -8322,6 +8322,35 @@ EXPORT TYPE std.ui.UI AS std.UI;
     }
 
     #[test]
+    fn v3_to_v4_upgrade_rejects_non_v3_parents_before_child_work() {
+        let v2 = super::verify_standard_library_v2_snapshot(
+            super::retained_standard_library_v2_snapshot()
+                .expect("the retained V2 standard source is valid"),
+        )
+        .expect("the retained V2 standard source verifies");
+        let v4 = super::verify_standard_library_v4_snapshot(
+            super::retained_standard_library_v4_snapshot()
+                .expect("the retained V4 standard source is valid"),
+        )
+        .expect("the retained V4 standard source verifies");
+
+        for (standard, revision) in [
+            (&v2, super::STANDARD_LIBRARY_V2_REVISION_ID),
+            (&v4, super::STANDARD_LIBRARY_V4_REVISION_ID),
+        ] {
+            let active = empty_version_two_active_revision(standard);
+            let error = super::prepare_standard_upgrade_v3_to_v4(&active)
+                .expect_err("a non-V3 parent must not enter the V3-to-V4 path");
+            assert!(matches!(
+                error,
+                super::StandardUpgradeError::Prepare {
+                    source: orna_compiler::PrepareStandardUpgradeError::StandardLibraryAlreadyInstalled { revision: actual }
+                } if actual == revision
+            ));
+        }
+    }
+
+    #[test]
     fn retains_and_verifies_v5_json_standard_snapshot() {
         let snapshot = super::retained_standard_library_v5_snapshot()
             .expect("the retained V5 source is valid");
