@@ -720,7 +720,7 @@ fn escape_message(message: &str) -> String {
 fn read_source_bundle(path: &str) -> Result<SourceBundle, InstalledSourceDiffError> {
     let mut file = fs::OpenOptions::new()
         .read(true)
-        .custom_flags(nix::libc::O_NONBLOCK)
+        .custom_flags(nix::libc::O_NONBLOCK | nix::libc::O_NOFOLLOW)
         .open(path)
         .map_err(|source| InstalledSourceDiffError::SourceRead {
             path: path.to_owned(),
@@ -788,7 +788,7 @@ fn map_recovery_error(source: PostgresKernelError) -> InstalledSourceDiffError {
 mod tests {
     use super::{
         FunctionRevisionChange, changed_function_revisions, digest_hex, render_change,
-        render_function_revision_change,
+        render_function_revision_change, read_source_bundle, InstalledSourceDiffError,
     };
     use orna_core::{
         CatalogueRevisionId, FieldId, FunctionId, FunctionRevisionId, SchemaId, SourceUnitId,
@@ -1273,5 +1273,29 @@ mod tests {
             super::escape_message("\\\0\u{001B}\u{2028}\u{2029}\n\r\t"),
             r"\\\u{0000}\u{001B}\u{2028}\u{2029}\n\r\t"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_symlink_source_paths_before_reading_target() {
+        use std::{fs, os::unix::fs::symlink};
+
+        let root = std::env::temp_dir();
+        let stem = format!("orna-source-diff-symlink-{}", std::process::id());
+        let target = root.join(format!("{stem}-target"));
+        let link = root.join(format!("{stem}-link"));
+        let _ = fs::remove_file(&target);
+        let _ = fs::remove_file(&link);
+        fs::write(&target, "").unwrap();
+        symlink(&target, &link).unwrap();
+
+        let result = read_source_bundle(link.to_str().unwrap());
+
+        assert!(matches!(
+            result,
+            Err(InstalledSourceDiffError::SourceRead { .. })
+        ));
+        fs::remove_file(target).unwrap();
+        fs::remove_file(link).unwrap();
     }
 }
