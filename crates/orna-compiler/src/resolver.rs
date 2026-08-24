@@ -27525,6 +27525,153 @@ mod tests {
     }
 
     #[test]
+    fn accepts_resource_constructor_positional_arguments_before_canonical_id_sorting() {
+        let integer = ResolvedType::Scalar(StandardScalar::Integer);
+        let text = ResolvedType::Scalar(StandardScalar::CharacterLargeObject);
+        let server_target_id = FunctionId::from_bytes([0x91; 16]);
+        let number_parameter_id = ParameterId::from_bytes([0x93; 16]);
+        let text_parameter_id = ParameterId::from_bytes([0x92; 16]);
+        let base = catalogue(
+            vec![schema(0x94, &["tasks"])],
+            Vec::new(),
+            vec![FunctionDefinition::new(
+                server_target_id,
+                QualifiedSemanticName::new(["tasks", "find"]).unwrap(),
+                FunctionDomain::Server,
+                vec![
+                    parameter(0x93, "p_number", 0, integer),
+                    parameter(0x92, "p_text", 1, text),
+                ],
+                FunctionReturn::Single(integer),
+                FunctionRevisionId::from_bytes([0x95; 16]),
+                FunctionSecurity::Invoker,
+                Some(FunctionTransaction::ReadOnly),
+                FunctionVolatility::Stable,
+            )],
+        );
+        let verified = verified_standard_v2_snapshot();
+        let standard = check_standard_library_source(&verified).unwrap();
+        let unit = StoredSourceUnit::new(
+            SourceUnitId::from_bytes([0x96; 16]),
+            0,
+            "application.orna",
+            "",
+            source_unit_content_digest("").unwrap(),
+        )
+        .unwrap();
+        let bundle_hash = source_bundle_digest(std::slice::from_ref(&unit)).unwrap();
+        let source = StoredSourceRevision::new(
+            SourceBundleId::from_bytes([0x97; 16]),
+            SourceRevisionId::from_bytes([0x98; 16]),
+            None,
+            vec![unit],
+            bundle_hash,
+            source_revision_record_digest(
+                SourceBundleId::from_bytes([0x97; 16]),
+                None,
+                bundle_hash,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let hash_context = CatalogueHashContext::version_two(verified.clone());
+        let catalogue_hash =
+            catalogue_digest_with_context(&hash_context, &base, &[], &[], &[], &[]).unwrap();
+        let active = ActiveDatabaseRevision::new_with_catalogue_hash_context(
+            ActiveDatabaseRevisionInput::new(
+                RevisionPair::new(source.id(), base.revision()),
+                source,
+                base,
+                catalogue_hash,
+                ActiveRevisionContent::new(Vec::new(), Vec::new(), Vec::new(), Vec::new()),
+            ),
+            hash_context,
+        )
+        .unwrap();
+        let context =
+            StandardApplicationCheckContext::try_new(active.catalogue(), &standard).unwrap();
+        let source = "CREATE SCHEMA ui; CREATE CLIENT FUNCTION ui.find() RETURNS INTEGER IS BEGIN RETURN AWAIT std.data.resource(target => tasks.find, arguments => std.call.args(7, p_text => 'ok')); END;";
+        let report =
+            check_standard_application(&bundle([("resource-positional.orna", source)]), &context);
+        assert!(
+            report.diagnostics().is_empty(),
+            "{:#?}",
+            report.diagnostics()
+        );
+
+        let checked = report.preparation_view().unwrap().checked();
+        let function = checked
+            .client_functions()
+            .iter()
+            .find(|function| function.name().to_string() == "ui.find")
+            .unwrap();
+        let CheckedClientFunctionBody::Expression { expression } = function.body() else {
+            panic!("resource body must be an expression");
+        };
+        let CheckedClientExpression::Await { expression, .. } = expression else {
+            panic!("resource body must await the resource");
+        };
+        let CheckedClientExpression::Resource { operation } = expression.as_ref() else {
+            panic!("await operand must be a resource");
+        };
+        assert_eq!(
+            operation.target(),
+            super::CheckedFunctionId::Existing(server_target_id)
+        );
+        assert_eq!(
+            operation.result_type(),
+            SemanticType::Scalar(StandardScalar::Integer)
+        );
+        assert_eq!(operation.standard_result_type(), Some(STD_INTEGER_TYPE_ID));
+
+        let prepared = prepare_standard_application(&report, active.pair(), &active).unwrap();
+        let client = prepared
+            .candidate()
+            .functions()
+            .iter()
+            .find(|function| function.name().to_string() == "ui.find")
+            .unwrap();
+        let revision = prepared
+            .current_function_revisions()
+            .unwrap()
+            .iter()
+            .find(|revision| revision.function() == client.id())
+            .unwrap();
+        let plan =
+            orna_artifact::client_plan::ResourceClientPlan::decode(revision.artifact().payload())
+                .unwrap();
+        let orna_artifact::client_plan::ClientExpressionNode::Await { expression } =
+            plan.expression()
+        else {
+            panic!("prepared resource plan must await the resource");
+        };
+        let orna_artifact::client_plan::ClientExpressionNode::Resource { operation } =
+            expression.as_ref()
+        else {
+            panic!("prepared resource plan must contain a resource operation");
+        };
+        assert_eq!(operation.kind(), orna_artifact::client_plan::ResourceKind::Scalar);
+        assert_eq!(operation.target(), server_target_id);
+        assert_eq!(operation.target_revision(), prepared.candidate_pair());
+        assert_eq!(operation.result_type(), STD_INTEGER_TYPE_ID);
+        assert_eq!(
+            operation.arguments(),
+            &[
+                (
+                    text_parameter_id,
+                    orna_artifact::client_plan::ClientExpressionNode::String {
+                        value: "ok".to_owned(),
+                    },
+                ),
+                (
+                    number_parameter_id,
+                    orna_artifact::client_plan::ClientExpressionNode::Integer { value: 7 },
+                ),
+            ]
+        );
+    }
+
+    #[test]
     fn rejects_resource_constructor_duplicate_missing_and_client_targets() {
         let integer = ResolvedType::Scalar(StandardScalar::Integer);
         let server_target_id = FunctionId::from_bytes([0x84; 16]);
