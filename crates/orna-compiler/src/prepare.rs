@@ -8277,7 +8277,7 @@ mod tests {
         },
     };
     use orna_core::{
-        canonical_hash::verify_standard_library_snapshot,
+        canonical_hash::{calculate_standard_library_digest, verify_standard_library_snapshot},
         catalogue::{
             CatalogueSnapshot, FieldDefinition, FunctionDefinition, FunctionDomain, FunctionReturn,
             FunctionSecurity, FunctionTransaction, FunctionVolatility, ObjectTypeDefinition,
@@ -8775,6 +8775,135 @@ mod tests {
                     0x1e, 0xc8, 0x68, 0x08, 0x22, 0x02, 0xb2, 0x96, 0x91, 0x42, 0x2a, 0xd9, 0x1a,
                     0x29, 0x64, 0x9c, 0x72, 0x0e, 0x83,
                 ]),
+            )
+            .unwrap(),
+        )
+        .unwrap()
+    }
+
+    fn resource_standard() -> VerifiedStandardLibrarySnapshot {
+        const SOURCE: &str = r#"CREATE SCHEMA std;
+CREATE SCHEMA std.types;
+CREATE TYPE std.types.CHARACTER_LARGE_OBJECT AS VALUE PRIMITIVE
+    KERNEL CONTRACT 'orna.kernel.value.character-large-object@1'
+    IMMUTABLE
+    PERSISTABLE;
+EXPORT TYPE std.types.CHARACTER_LARGE_OBJECT AS std.CHARACTER_LARGE_OBJECT;
+EXPORT TYPE std.CHARACTER_LARGE_OBJECT TO PRELUDE AS CHARACTER LARGE OBJECT;
+EXPORT TYPE std.CHARACTER_LARGE_OBJECT TO PRELUDE AS TEXT;
+"#;
+        let unit_id = SourceUnitId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
+        let text_id = TypeId::from_bytes([4; 16]);
+        let text = ValueTypeDefinition::primitive(
+            text_id,
+            semantic_name(&["std", "types", "character_large_object"]),
+            ValueTypeMutability::Immutable,
+            ValueTypePersistence::Persistable,
+            "orna.kernel.value.character-large-object@1",
+        );
+        let qualified_text = TypeBinding::qualified(
+            semantic_name(&["std", "character_large_object"]),
+            text_id,
+        )
+        .unwrap();
+        let prelude_character_large_object = TypeBinding::prelude(
+            PreludeTypeName::new(["character", "large", "object"]).unwrap(),
+            text_id,
+        )
+        .unwrap();
+        let prelude_text =
+            TypeBinding::prelude(PreludeTypeName::new(["text"]).unwrap(), text_id).unwrap();
+        let origin = |identity, statement: &str| {
+            let start = SOURCE.find(statement).unwrap();
+            DefinitionOrigin::new(
+                identity,
+                SourceOrigin::new(
+                    unit_id,
+                    u32::try_from(start).unwrap(),
+                    u32::try_from(start + statement.len()).unwrap(),
+                )
+                .unwrap(),
+            )
+        };
+        let origins = vec![
+            origin(
+                DefinitionIdentity::Schema(SchemaId::from_bytes([1; 16])),
+                "CREATE SCHEMA std;",
+            ),
+            origin(
+                DefinitionIdentity::Schema(SchemaId::from_bytes([2; 16])),
+                "CREATE SCHEMA std.types;",
+            ),
+            origin(
+                DefinitionIdentity::ValueType(text_id),
+                "CREATE TYPE std.types.CHARACTER_LARGE_OBJECT AS VALUE PRIMITIVE\n    KERNEL CONTRACT 'orna.kernel.value.character-large-object@1'\n    IMMUTABLE\n    PERSISTABLE;",
+            ),
+            origin(
+                DefinitionIdentity::TypeBinding(qualified_text.id()),
+                "EXPORT TYPE std.types.CHARACTER_LARGE_OBJECT AS std.CHARACTER_LARGE_OBJECT;",
+            ),
+            origin(
+                DefinitionIdentity::TypeBinding(prelude_character_large_object.id()),
+                "EXPORT TYPE std.CHARACTER_LARGE_OBJECT TO PRELUDE AS CHARACTER LARGE OBJECT;",
+            ),
+            origin(
+                DefinitionIdentity::TypeBinding(prelude_text.id()),
+                "EXPORT TYPE std.CHARACTER_LARGE_OBJECT TO PRELUDE AS TEXT;",
+            ),
+        ];
+        let unit = StoredSourceUnit::new(
+            unit_id,
+            0,
+            "std/types.orna",
+            SOURCE,
+            source_unit_content_digest(SOURCE).unwrap(),
+        )
+        .unwrap();
+        let bundle_hash = source_bundle_digest(std::slice::from_ref(&unit)).unwrap();
+        let source = StoredSourceRevision::new(
+            SourceBundleId::from_bytes([5; 16]),
+            SourceRevisionId::from_bytes([6; 16]),
+            None,
+            vec![unit],
+            bundle_hash,
+            source_revision_record_digest(SourceBundleId::from_bytes([5; 16]), None, bundle_hash)
+                .unwrap(),
+        )
+        .unwrap();
+        let catalogue = CatalogueSnapshot::new_with_types(
+            CatalogueRevisionId::from_bytes([8; 16]),
+            vec![
+                SchemaDefinition::new(SchemaId::from_bytes([1; 16]), semantic_name(&["std"])),
+                SchemaDefinition::new(
+                    SchemaId::from_bytes([2; 16]),
+                    semantic_name(&["std", "types"]),
+                ),
+            ],
+            Vec::new(),
+            vec![text],
+            vec![qualified_text, prelude_character_large_object, prelude_text],
+        )
+        .unwrap();
+        let provisional = StandardLibrarySnapshot::new(
+            StandardLibraryRevisionId::from_bytes([7; 16]),
+            StandardLibraryDigestVersion::Version1,
+            source.clone(),
+            "orna.language/1",
+            catalogue.clone(),
+            origins.clone(),
+            Sha256Digest::from_bytes([0; 32]),
+        )
+        .unwrap();
+        let digest = calculate_standard_library_digest(&provisional).unwrap();
+        verify_standard_library_snapshot(
+            StandardLibrarySnapshot::new(
+                provisional.revision(),
+                provisional.digest_version(),
+                source,
+                provisional.language_version(),
+                catalogue,
+                origins,
+                digest,
             )
             .unwrap(),
         )
@@ -13750,6 +13879,64 @@ mod tests {
             plan.expression(),
             &ClientExpressionNode::Boolean { value: true },
         );
+    }
+
+    #[test]
+    fn standard_stream_resource_preparation_materialises_durable_operation_artifact() {
+        let verified = resource_standard();
+        let text_type_id = verified
+            .catalogue()
+            .value_type_by_name(&semantic_name(&["std", "types", "character_large_object"]))
+            .unwrap()
+            .id();
+        let standard = check_standard_library_source(&verified).unwrap();
+        let active = empty_standard_application_active(&verified);
+        let context =
+            StandardApplicationCheckContext::try_new(active.catalogue(), &standard).unwrap();
+        let bundle = SourceBundle::new([SourceUnit::new(
+            "fixtures/stream_resource_dogfood.orna",
+            include_str!("../../orna-server/tests/fixtures/stream_resource_dogfood.orna"),
+        )])
+        .unwrap();
+        let report = check_standard_application(&bundle, &context);
+        assert!(
+            report.diagnostics().is_empty(),
+            "accepted stream resource fixture did not check: {:?}",
+            report.diagnostics()
+        );
+
+        let prepared = prepare_standard_application(&report, active.pair(), &active).unwrap();
+        let target = prepared
+            .candidate()
+            .functions()
+            .iter()
+            .find(|function| function.name().parts() == ["stream_fixture", "events"])
+            .unwrap();
+        let client = prepared
+            .candidate()
+            .functions()
+            .iter()
+            .find(|function| function.name().parts() == ["stream_fixture", "read"])
+            .unwrap();
+        let revision = prepared
+            .new_function_revisions()
+            .iter()
+            .find(|revision| revision.function() == client.id())
+            .unwrap();
+        assert_eq!(revision.artifact().version(), CLIENT_PLAN_RESOURCE_VERSION);
+        let plan = ResourceClientPlan::decode(revision.artifact().payload()).unwrap();
+        let ClientExpressionNode::Await { expression } = plan.expression() else {
+            panic!("prepared stream resource plan must keep AWAIT at the return expression");
+        };
+        let ClientExpressionNode::Resource { operation: artifact } = expression.as_ref() else {
+            panic!("prepared stream resource plan must contain a resource operation under AWAIT");
+        };
+        assert_eq!(artifact.kind(), orna_artifact::client_plan::ResourceKind::Stream);
+        assert_eq!(artifact.target(), target.id());
+        assert_eq!(artifact.target_revision(), prepared.candidate_pair());
+        assert_eq!(artifact.result_type(), text_type_id);
+        assert_ne!(artifact.call_site().to_bytes(), [0; 16]);
+        assert!(artifact.arguments().is_empty());
     }
 
     #[test]
