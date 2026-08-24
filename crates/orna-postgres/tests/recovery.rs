@@ -2594,29 +2594,59 @@ async fn recovery_rejects_resource_audit_without_its_durable_request_reservation
     const SESSION_PRINCIPAL_ID: [u8; 16] = [0x95; 16];
     const RESOURCE_EVENT_ID: [u8; 16] = [0x96; 16];
     const INVOCATION_EVENT_ID: [u8; 16] = [0x97; 16];
+    const SECURITY_EVENT_ID: [u8; 16] = [0x98; 16];
 
     with_test_database(|database| async move {
         let kernel_instance = kernel(&database)?;
         kernel_instance.bootstrap().await?;
+        let fixture = install_function_revision(&database).await?;
+        let active = kernel_instance.recover().await?;
+        let target_function = fixture
+            .catalogue
+            .functions()
+            .iter()
+            .find(|function| function.name().to_string() == "café.volatile_single")
+            .ok_or_else(|| failure("function fixture is missing café.volatile_single"))?
+            .id();
+        let target_revision = active.pair();
 
         run_batch(
             &database,
             &format!(
                 "INSERT INTO _orna_kernel.resource_request_history (request_id)
                  VALUES ({orphan_request}), ({request});
+                 INSERT INTO _orna_kernel.security_audit_events
+                     (event_id, event_kind, outcome, session_principal_id,
+                      effective_principal_id, authorising_principal_id, function_id,
+                      source_revision_id, catalogue_revision_id)
+                 VALUES ({security_event}, 'execute', 'allowed', {session_principal},
+                         {session_principal}, {session_principal}, {target_function},
+                         {source_revision}, {catalogue_revision});
                  INSERT INTO _orna_kernel.invocation_audit_events
-                     (event_id, invocation_id, outcome, session_principal_id)
-                 VALUES ({invocation_event}, {nested_invocation}, 'denied', {session_principal});
+                     (event_id, invocation_id, outcome, session_principal_id,
+                      effective_principal_id, authorising_principal_id, function_id,
+                      source_revision_id, catalogue_revision_id, security_audit_event_id)
+                 VALUES ({invocation_event}, {nested_invocation}, 'allowed', {session_principal},
+                         {session_principal}, {session_principal}, {target_function},
+                         {source_revision}, {catalogue_revision}, {security_event});
                  INSERT INTO _orna_kernel.resource_audit_events
                      (event_id, request_id, nested_invocation_id, parent_invocation_id,
-                      call_site_id, session_principal_id, decision_outcome, terminal_outcome)
+                      call_site_id, target_function_id, source_revision_id,
+                      catalogue_revision_id, session_principal_id, decision_outcome,
+                      terminal_outcome, item_count, byte_count)
                  VALUES ({resource_event}, {request}, {nested_invocation}, {parent_invocation},
-                         {call_site}, {session_principal}, 'denied', 'failed');",
+                         {call_site}, {target_function}, {source_revision},
+                         {catalogue_revision}, {session_principal}, 'allowed',
+                         'completed', 1, 1);",
                 orphan_request = bytea_literal(ORPHAN_REQUEST_ID),
                 request = bytea_literal(REQUEST_ID),
+                security_event = bytea_literal(SECURITY_EVENT_ID),
+                session_principal = bytea_literal(SESSION_PRINCIPAL_ID),
+                target_function = bytea_literal(target_function.to_bytes()),
+                source_revision = bytea_literal(target_revision.source().to_bytes()),
+                catalogue_revision = bytea_literal(target_revision.catalogue().to_bytes()),
                 invocation_event = bytea_literal(INVOCATION_EVENT_ID),
                 nested_invocation = bytea_literal(NESTED_INVOCATION_ID),
-                session_principal = bytea_literal(SESSION_PRINCIPAL_ID),
                 resource_event = bytea_literal(RESOURCE_EVENT_ID),
                 parent_invocation = bytea_literal(PARENT_INVOCATION_ID),
                 call_site = bytea_literal(CALL_SITE_ID),
@@ -2626,7 +2656,7 @@ async fn recovery_rejects_resource_audit_without_its_durable_request_reservation
 
         kernel_instance.recover().await?;
 
-        run_single_row_statement(
+        run_batch(
             &database,
             &format!(
                 "DELETE FROM _orna_kernel.resource_request_history WHERE request_id = {}",
@@ -2648,7 +2678,44 @@ async fn recovery_rejects_resource_audit_without_its_durable_request_reservation
             "missing resource request reservation returned the wrong recovery invariant",
         )?;
 
-        run_single_row_statement(
+        let session = database.open().await?;
+        let retention = async {
+            let row = session
+                .client()
+                .query_one(
+                    &format!(
+                        "SELECT
+                             (SELECT count(*) FROM _orna_kernel.resource_audit_events
+                               WHERE request_id = {request_id}) AS resource_count,
+                             (SELECT count(*) FROM _orna_kernel.invocation_audit_events
+                               WHERE invocation_id = {nested_invocation}) AS invocation_count,
+                             (SELECT count(*) FROM _orna_kernel.resource_request_history
+                               WHERE request_id = {request_id}) AS reservation_count,
+                             (SELECT count(*) FROM _orna_kernel.resource_request_history
+                               WHERE request_id = {orphan_request}) AS orphan_count",
+                        request_id = bytea_literal(REQUEST_ID),
+                        nested_invocation = bytea_literal(NESTED_INVOCATION_ID),
+                        orphan_request = bytea_literal(ORPHAN_REQUEST_ID),
+                    ),
+                    &[],
+                )
+                .await?;
+            let resource_count: i64 = row.try_get("resource_count")?;
+            let invocation_count: i64 = row.try_get("invocation_count")?;
+            let reservation_count: i64 = row.try_get("reservation_count")?;
+            let orphan_count: i64 = row.try_get("orphan_count")?;
+            require(
+                resource_count == 1
+                    && invocation_count == 1
+                    && reservation_count == 0
+                    && orphan_count == 1,
+                "failed resource recovery repaired audit or history rows",
+            )
+        }
+        .await;
+        finish_session(retention, session.shutdown().await, "resource recovery retention")?;
+
+        run_batch(
             &database,
             &format!(
                 "INSERT INTO _orna_kernel.resource_request_history (request_id) VALUES ({})",
