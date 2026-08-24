@@ -1,0 +1,95 @@
+====================
+accepted client fixture stays in the editor grammar contract
+====================
+
+CREATE SCHEMA accepted_client;
+
+CREATE CLIENT FUNCTION accepted_client.enabled()
+RETURNS BOOLEAN
+AS TRUE;
+
+CREATE CLIENT FUNCTION accepted_client.stateful()
+RETURNS BOOLEAN
+IS
+    STATE ready BOOLEAN SCOPE LOCAL DEFAULT TRUE;
+BEGIN
+    RETURN TRUE;
+END;
+
+---
+
+(source_file
+  (create_schema_statement
+    (kw_create)
+    (kw_schema)
+    name: (qualified_name
+      (identifier))
+    (semicolon))
+  (create_client_function_statement
+    (kw_create)
+    (kw_client)
+    (kw_function)
+    name: (qualified_name
+      (qualified_name
+        (identifier))
+      (dot)
+      (identifier))
+    parameters: (parameter_list
+      (lparen)
+      (rparen))
+    (kw_returns)
+    returns: (return_type_spec
+      (type_spec
+        (scalar_type
+          (kw_boolean))))
+    body: (client_expression_body
+      (kw_as)
+      expression: (client_expression
+        (client_primary_expression
+          (boolean_literal
+            (kw_true)))))
+    (semicolon))
+  (create_client_function_statement
+    (kw_create)
+    (kw_client)
+    (kw_function)
+    name: (qualified_name
+      (qualified_name
+        (identifier))
+      (dot)
+      (identifier))
+    parameters: (parameter_list
+      (lparen)
+      (rparen))
+    (kw_returns)
+    returns: (return_type_spec
+      (type_spec
+        (scalar_type
+          (kw_boolean))))
+    body: (client_procedural_body
+      (client_state_body
+        (kw_is)
+        (client_state_declaration
+          (kw_state)
+          name: (identifier)
+          type: (type_spec
+            (scalar_type
+              (kw_boolean)))
+          (kw_scope)
+          (kw_local)
+          (kw_default)
+          default: (client_expression
+            (client_primary_expression
+              (boolean_literal
+                (kw_true))))
+          (semicolon))
+        (kw_begin)
+        (client_state_return_statement
+          (kw_return)
+          expression: (client_expression
+            (client_primary_expression
+              (boolean_literal
+                (kw_true))))
+          (semicolon))
+        (kw_end)))
+    (semicolon)))
