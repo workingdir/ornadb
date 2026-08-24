@@ -2490,6 +2490,19 @@ fn validate_procedural_model(plan: &ProceduralClientPlan) -> Result<(), ClientPl
             ClientLocalKind::Value | ClientLocalKind::Resource(_) => {}
         }
         match (target.kind, statement.expression()) {
+            (ClientLocalKind::Value, ClientExpressionNode::LocalRead { local }) => {
+                let source = locals
+                    .iter()
+                    .find(|candidate| candidate.local == *local)
+                    .ok_or(ClientPlanError::UnknownProceduralLocal(*local))?;
+                if source.type_id != target.type_id {
+                    return Err(ClientPlanError::ProceduralLocalTypeMismatch {
+                        local: target.local,
+                        expected: target.type_id,
+                        actual: source.type_id,
+                    });
+                }
+            }
             (ClientLocalKind::Resource(_), ClientExpressionNode::Resource { operation })
                 if operation.result_type() != target.type_id =>
             {
@@ -6097,6 +6110,38 @@ mod tests {
                     local: target_local,
                 }),
             },
+        );
+
+        assert_eq!(
+            plan.encode(),
+            Err(ClientPlanError::ProceduralLocalTypeMismatch {
+                local: target_local,
+                expected,
+                actual,
+            })
+        );
+    }
+
+    #[test]
+    fn procedural_plan_rejects_value_local_copy_type_mismatch() {
+        let target_local = LocalId::from_bytes([0x9f; 16]);
+        let source_local = LocalId::from_bytes([0xa0; 16]);
+        let expected = TypeId::from_bytes([0xa1; 16]);
+        let actual = TypeId::from_bytes([0xa2; 16]);
+        let plan = ProceduralClientPlan::new(
+            vec![
+                ClientLocal::new(target_local, expected, ClientLocalKind::Value),
+                ClientLocal::new(source_local, actual, ClientLocalKind::Value),
+            ],
+            vec![
+                ClientStatement::let_(target_local, ClientExpressionNode::Boolean { value: true }),
+                ClientStatement::let_(source_local, ClientExpressionNode::Boolean { value: false }),
+                ClientStatement::assignment(
+                    target_local,
+                    ClientExpressionNode::LocalRead { local: source_local },
+                ),
+            ],
+            ClientExpressionNode::LocalRead { local: target_local },
         );
 
         assert_eq!(
