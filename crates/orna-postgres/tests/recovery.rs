@@ -1331,10 +1331,18 @@ fn persists_recovers_revokes_and_disables_execute_authority() -> TestResult<()> 
             let runtime = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
-                .map_err(|error| failure(format!("security recovery live runtime could not start: {error}")))?;
+                .map_err(|error| {
+                    failure(format!(
+                        "security recovery live runtime could not start: {error}"
+                    ))
+                })?;
             runtime.block_on(persists_recovers_revokes_and_disables_execute_authority_inner())
         })
-        .map_err(|error| failure(format!("security recovery live thread could not start: {error}")))?;
+        .map_err(|error| {
+            failure(format!(
+                "security recovery live thread could not start: {error}"
+            ))
+        })?;
     match handle.join() {
         Ok(result) => result,
         Err(_) => Err(failure("security recovery live thread panicked")),
@@ -2280,7 +2288,8 @@ async fn recovers_security_admin_audit_with_exact_redacted_shape() -> TestResult
                 && allowed.session_principal() == Some(ADMIN)
                 && allowed.security_admin_operation()
                     == Some(SecurityAdminAuditOperation::CreatePrincipal)
-                && allowed.security_admin_target() == Some(SYS_SECURITY_CREATE_PRINCIPAL_FUNCTION_ID)
+                && allowed.security_admin_target()
+                    == Some(SYS_SECURITY_CREATE_PRINCIPAL_FUNCTION_ID)
                 && allowed.security_admin_denial().is_none()
                 && allowed.effective_principal().is_none()
                 && allowed.authorising_principal().is_none()
@@ -2294,7 +2303,8 @@ async fn recovers_security_admin_audit_with_exact_redacted_shape() -> TestResult
                 && denied.session_principal() == Some(USER)
                 && denied.security_admin_operation()
                     == Some(SecurityAdminAuditOperation::CreatePrincipal)
-                && denied.security_admin_target() == Some(SYS_SECURITY_CREATE_PRINCIPAL_FUNCTION_ID)
+                && denied.security_admin_target()
+                    == Some(SYS_SECURITY_CREATE_PRINCIPAL_FUNCTION_ID)
                 && denied.security_admin_denial()
                     == Some(PrivilegeDenial::MissingPrivilege {
                         requested: PrivilegeClass::SecurityAdmin,
@@ -2317,7 +2327,10 @@ async fn recovers_security_admin_audit_with_exact_redacted_shape() -> TestResult
                 &[],
             )
             .await?;
-        require(rows.len() == 2, "durable SecurityAdmin audit row count changed")?;
+        require(
+            rows.len() == 2,
+            "durable SecurityAdmin audit row count changed",
+        )?;
         for (row, principal, detail) in [
             (&rows[0], ADMIN, "security_admin:create_principal"),
             (
@@ -2353,7 +2366,11 @@ async fn recovers_security_admin_audit_with_exact_redacted_shape() -> TestResult
                 "durable SecurityAdmin audit row contains an unexpected payload",
             )?;
         }
-        finish_session(Ok(()), session.shutdown().await, "security-admin audit redaction")?;
+        finish_session(
+            Ok(()),
+            session.shutdown().await,
+            "security-admin audit redaction",
+        )?;
         require_no_session_leaks(&database).await
     })
     .await

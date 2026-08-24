@@ -16,15 +16,9 @@ mod support;
 #[path = "../../orna-postgres/tests/support/mod.rs"]
 mod postgres_test_support;
 
-use orna_core::{
-    FunctionId, PrincipalId,
-    security::{
-        ExecuteGrant, LocalPeerCredential, Principal, PrincipalKind, PrincipalStatus,
-        PrivilegeClass, PrivilegeDecision, PrivilegeDenial, PrivilegeGrant, RoleMembership,
-        SecurityAdminAuditOperation, SecurityAuditKind, SecurityAuditOutcome, SecurityFunctionTarget,
-        SecuritySnapshot,
-    },
-    source::{SourceBundle, SourceUnit},
+use orna_compiler::{
+    STD_INVOKE_ECHO_FUNCTION_ID, STD_INVOKE_ECHO_FUNCTION_REVISION_ID,
+    StandardApplicationCheckContext, check_standard_application, prepare_standard_application,
 };
 use orna_core::inspect::InspectPrivilege;
 use orna_core::system::{
@@ -32,14 +26,20 @@ use orna_core::system::{
     SYS_SECURITY_DISABLE_PRINCIPAL_FUNCTION_ID, SYS_SECURITY_GRANT_PRIVILEGE_FUNCTION_ID,
     SYS_SECURITY_GRANT_ROLE_FUNCTION_ID,
 };
-use orna_compiler::{
-    STD_INVOKE_ECHO_FUNCTION_ID, STD_INVOKE_ECHO_FUNCTION_REVISION_ID,
-    StandardApplicationCheckContext, check_standard_application, prepare_standard_application,
+use orna_core::{
+    FunctionId, PrincipalId,
+    security::{
+        ExecuteGrant, LocalPeerCredential, Principal, PrincipalKind, PrincipalStatus,
+        PrivilegeClass, PrivilegeDecision, PrivilegeDenial, PrivilegeGrant, RoleMembership,
+        SecurityAdminAuditOperation, SecurityAuditKind, SecurityAuditOutcome,
+        SecurityFunctionTarget, SecuritySnapshot,
+    },
+    source::{SourceBundle, SourceUnit},
 };
 use orna_postgres::{PostgresKernel, PostgresKernelError};
 use orna_server::{
-    InstalledSecurityAdminError, InstalledSecurityAdminOperation,
-    InstalledSecurityAdminOutcome, InstalledSecurityAdminRequest, run_security_admin_with_kernel,
+    InstalledSecurityAdminError, InstalledSecurityAdminOperation, InstalledSecurityAdminOutcome,
+    InstalledSecurityAdminRequest, run_security_admin_with_kernel,
 };
 use postgres_test_support::{TestDatabase, TestResult, failure, with_test_database};
 
@@ -76,7 +76,10 @@ fn kernel(database: &TestDatabase) -> PostgresKernel {
 /// created through the admin surface, exactly like the postgres-side proof.
 async fn install_admin_snapshot(database: &TestDatabase) -> TestResult<FunctionId> {
     let kernel = kernel(database);
-    kernel.bootstrap().await.map_err(|error| failure(format!("bootstrap failed: {error}")))?;
+    kernel
+        .bootstrap()
+        .await
+        .map_err(|error| failure(format!("bootstrap failed: {error}")))?;
     let active = kernel
         .recover()
         .await
@@ -92,9 +95,10 @@ async fn install_admin_snapshot(database: &TestDatabase) -> TestResult<FunctionI
         .recover()
         .await
         .map_err(|error| failure(format!("post-upgrade recover failed: {error}")))?;
-    let standard = active.catalogue_hash_context().standard().ok_or_else(|| {
-        failure("the standard snapshot is pinned by the V1-to-V2 upgrade")
-    })?;
+    let standard = active
+        .catalogue_hash_context()
+        .standard()
+        .ok_or_else(|| failure("the standard snapshot is pinned by the V1-to-V2 upgrade"))?;
 
     // One real application function, checked against the pinned standard.
     let bundle = SourceBundle::new([SourceUnit::new("main.orna", APPLICATION_SOURCE)])
@@ -109,12 +113,16 @@ async fn install_admin_snapshot(database: &TestDatabase) -> TestResult<FunctionI
     );
     require(
         report.diagnostics().is_empty(),
-        format!("application source did not compile: {:?}", report.diagnostics()),
+        format!(
+            "application source did not compile: {:?}",
+            report.diagnostics()
+        ),
     )?;
     let applied = kernel
-        .apply(&prepare_standard_application(&report, active.pair(), &active).map_err(
-            |error| failure(format!("application prepare failed: {error}")),
-        )?)
+        .apply(
+            &prepare_standard_application(&report, active.pair(), &active)
+                .map_err(|error| failure(format!("application prepare failed: {error}")))?,
+        )
         .await
         .map_err(|error| failure(format!("application apply failed: {error}")))?;
     let application_function = applied
@@ -126,26 +134,33 @@ async fn install_admin_snapshot(database: &TestDatabase) -> TestResult<FunctionI
         .id();
 
     let uid = nix::unistd::geteuid().as_raw();
-    let security = SecuritySnapshot::new_with_function_targets_local_peer_credentials_and_privilege_grants(
-        applied.pair(),
-        vec![
-            SecurityFunctionTarget::verified_standard(
-                STD_INVOKE_ECHO_FUNCTION_ID,
-                standard.revision(),
-                STD_INVOKE_ECHO_FUNCTION_REVISION_ID,
-            ),
-            SecurityFunctionTarget::application(application_function),
-        ],
-        vec![Principal::new(ADMIN_PRINCIPAL, PrincipalKind::User, PrincipalStatus::Active)],
-        vec![],
-        // The direct execute grant gives the bare can_execute check one
-        // genuinely allowed path; the role path below is a privilege class.
-        vec![ExecuteGrant::new(ADMIN_PRINCIPAL, application_function)],
-        vec![LocalPeerCredential::new(uid, ADMIN_PRINCIPAL)],
-        vec![PrivilegeGrant::new(ADMIN_PRINCIPAL, PrivilegeClass::SecurityAdmin, None)
-            .map_err(|error| failure(format!("admin grant failed: {error}")))?],
-    )
-    .map_err(|error| failure(format!("security snapshot failed: {error}")))?;
+    let security =
+        SecuritySnapshot::new_with_function_targets_local_peer_credentials_and_privilege_grants(
+            applied.pair(),
+            vec![
+                SecurityFunctionTarget::verified_standard(
+                    STD_INVOKE_ECHO_FUNCTION_ID,
+                    standard.revision(),
+                    STD_INVOKE_ECHO_FUNCTION_REVISION_ID,
+                ),
+                SecurityFunctionTarget::application(application_function),
+            ],
+            vec![Principal::new(
+                ADMIN_PRINCIPAL,
+                PrincipalKind::User,
+                PrincipalStatus::Active,
+            )],
+            vec![],
+            // The direct execute grant gives the bare can_execute check one
+            // genuinely allowed path; the role path below is a privilege class.
+            vec![ExecuteGrant::new(ADMIN_PRINCIPAL, application_function)],
+            vec![LocalPeerCredential::new(uid, ADMIN_PRINCIPAL)],
+            vec![
+                PrivilegeGrant::new(ADMIN_PRINCIPAL, PrivilegeClass::SecurityAdmin, None)
+                    .map_err(|error| failure(format!("admin grant failed: {error}")))?,
+            ],
+        )
+        .map_err(|error| failure(format!("security snapshot failed: {error}")))?;
     kernel
         .replace_security_snapshot(&security)
         .await
@@ -266,19 +281,19 @@ async fn proves_installed_security_admin_end_to_end() -> TestResult<()> {
 
         // whoami: the local peer authenticates to the admin principal and the
         // identity read renders the canonical principal.
-        let (outcome, stdout) = admin_run(
-            &database,
-            InstalledSecurityAdminOperation::SessionPrincipal,
-        )
-        .await?;
+        let (outcome, stdout) =
+            admin_run(&database, InstalledSecurityAdminOperation::SessionPrincipal).await?;
         require(
             outcome == Ok(InstalledSecurityAdminOutcome::Completed),
             "the identity read must complete",
         )?;
-        let text = String::from_utf8(stdout)
-            .map_err(|_| failure("the identity stdout was not UTF-8"))?;
+        let text =
+            String::from_utf8(stdout).map_err(|_| failure("the identity stdout was not UTF-8"))?;
         require(
-            text.contains(&format!("\"principal\":\"{}\"", ADMIN_PRINCIPAL.canonical())),
+            text.contains(&format!(
+                "\"principal\":\"{}\"",
+                ADMIN_PRINCIPAL.canonical()
+            )),
             "whoami did not render the admin principal: {text}",
         )?;
         // list_grants: the protected read exposes only the admin's direct
@@ -447,20 +462,16 @@ async fn proves_installed_security_admin_end_to_end() -> TestResult<()> {
             .await
             .map_err(|error| failure(format!("post-mutation security recover failed: {error}")))?;
         require(
-            snapshot
-                .principals()
-                .any(|principal| {
-                    principal.id() == SECOND_PRINCIPAL
-                        && principal.status() == PrincipalStatus::Disabled
-                }),
+            snapshot.principals().any(|principal| {
+                principal.id() == SECOND_PRINCIPAL
+                    && principal.status() == PrincipalStatus::Disabled
+            }),
             "disable_principal did not persist the disabled principal state",
         )?;
         require(
-            snapshot
-                .memberships()
-                .any(|membership| {
-                    membership == RoleMembership::new(ROLE_PRINCIPAL, SECOND_PRINCIPAL)
-                }),
+            snapshot.memberships().any(|membership| {
+                membership == RoleMembership::new(ROLE_PRINCIPAL, SECOND_PRINCIPAL)
+            }),
             "grant_role did not persist the role membership",
         )?;
         require(
@@ -606,10 +617,8 @@ async fn proves_installed_security_admin_end_to_end() -> TestResult<()> {
             let event_kind: String = row.try_get("event_kind")?;
             let outcome: String = row.try_get("outcome")?;
             let session_principal: Vec<u8> = row.try_get("session_principal_id")?;
-            let effective_principal: Option<Vec<u8>> =
-                row.try_get("effective_principal_id")?;
-            let authorising_principal: Option<Vec<u8>> =
-                row.try_get("authorising_principal_id")?;
+            let effective_principal: Option<Vec<u8>> = row.try_get("effective_principal_id")?;
+            let authorising_principal: Option<Vec<u8>> = row.try_get("authorising_principal_id")?;
             let function: Vec<u8> = row.try_get("function_id")?;
             let source_revision: Option<Vec<u8>> = row.try_get("source_revision_id")?;
             let catalogue_revision: Option<Vec<u8>> = row.try_get("catalogue_revision_id")?;
@@ -650,7 +659,11 @@ async fn proves_installed_security_admin_end_to_end() -> TestResult<()> {
         kernel(&database)
             .replace_security_snapshot(&without_security_admin)
             .await
-            .map_err(|error| failure(format!("security-admin removal snapshot replace failed: {error}")))?;
+            .map_err(|error| {
+                failure(format!(
+                    "security-admin removal snapshot replace failed: {error}"
+                ))
+            })?;
 
         let denied = kernel(&database)
             .grant_role(&stale_session, ROLE_PRINCIPAL, ADMIN_PRINCIPAL)
@@ -672,9 +685,9 @@ async fn proves_installed_security_admin_end_to_end() -> TestResult<()> {
             .await
             .map_err(|error| failure(format!("post-denial security recover failed: {error}")))?;
         require(
-            !after_denied
-                .memberships()
-                .any(|membership| membership == RoleMembership::new(ROLE_PRINCIPAL, ADMIN_PRINCIPAL)),
+            !after_denied.memberships().any(|membership| {
+                membership == RoleMembership::new(ROLE_PRINCIPAL, ADMIN_PRINCIPAL)
+            }),
             "stale admin mutation added the target role membership",
         )?;
 
