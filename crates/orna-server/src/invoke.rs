@@ -29,6 +29,7 @@ use std::{
     collections::BTreeMap,
     error::Error,
     fmt,
+    future::Future,
     io::{self, IsTerminal, Write},
     os::unix::net::UnixStream as StandardUnixStream,
     thread,
@@ -79,14 +80,15 @@ use orna_postgres::{
     PostgresKernel, PostgresKernelError, ResourceCancellation, ResourceCredit, SealedInvocationResult,
 };
 use orna_protocol::{
-    CallFailure, Channel, ClientFrame, Event, InvocationEventRecord, MAX_CHANNEL_WINDOW,
+    CallFailure, Channel, ClientFrame, Event, EventRecord, InvocationEventRecord, MAX_CHANNEL_WINDOW,
     MAX_FRAME_PAYLOAD_LENGTH, MAX_RESOURCE_WINDOW, ProtocolConnection, ResourceArgument,
     ResourceCancel, ResourceCancellationCode, ResourceClientFrame,
     ResourceKind as ProtocolResourceKind, ResourceProtocolConnection, ResourceRequest,
     ResourceServerFrame, ResourceWindowUpdate, ServerFrame,
     decode_constructed_invocation_event_frame, decode_constructed_server_frame,
     decode_constructed_value, decode_resource_server_frame, encode_constructed_client_frame,
-    encode_constructed_value, encode_invoke_request, encode_resource_client_frame,
+    encode_constructed_server_frame, encode_constructed_value, encode_invoke_request,
+    encode_resource_client_frame,
 };
 use orna_standard::{
     BINARY_LARGE_OBJECT_TYPE_ID, STD_IO_BYTE_STREAM_TYPE_ID, STD_TERMINAL_DOCUMENT_TYPE_ID,
@@ -1079,6 +1081,20 @@ async fn run_installed_external_contract(
     }
     let target_invocation_id =
         target_invocation_id.ok_or_else(|| "inspect.malformed_carrier".to_owned())?;
+    // Carrier target IDs identify the observed invocation only; observer anchors
+    // come from the trusted CLIENT execution context.
+    reject_recursive_inspect_target(
+        target_invocation_id,
+        request.observer_root_invocation_id(),
+        request.observer_parent_invocation_id(),
+        |observer, target| async move {
+            kernel
+                .inspect_target_is_recursive(observer, target)
+                .await
+                .map_err(inspect_kernel_error_code)
+        },
+    )
+    .await?;
     let Some(snapshot) = kernel
         .load_inspect_snapshot(session, server_epoch)
         .await
@@ -1134,6 +1150,25 @@ async fn run_installed_external_contract(
     OpaqueValue::new(active, &registry, STD_UI_TYPE_ID, payload)
         .map(RuntimeValue::Opaque)
         .map_err(|_| "inspect.projection_failed".to_owned())
+}
+
+async fn reject_recursive_inspect_target<F, Fut>(
+    target: InvocationId,
+    observer_root: InvocationId,
+    observer_parent: InvocationId,
+    mut is_recursive: F,
+) -> Result<(), String>
+where
+    F: FnMut(InvocationId, InvocationId) -> Fut,
+    Fut: Future<Output = Result<bool, String>>,
+{
+    if is_recursive(observer_root, target).await? {
+        return Err("inspect.recursion".to_owned());
+    }
+    if observer_parent != observer_root && is_recursive(observer_parent, target).await? {
+        return Err("inspect.recursion".to_owned());
+    }
+    Ok(())
 }
 
 fn map_inspect_carrier_error(error: OpaqueValueError) -> String {
@@ -3123,20 +3158,24 @@ where
         ServerFrame::CallAccepted {
             stream: 1,
             invocation,
-        } => state.invocation = Some(invocation),
+        } => {
+            if state.invocation.replace(invocation).is_some() {
+                return Err(ResourceTransportFailure::Shape);
+            }
+        }
         ServerFrame::EventBatch {
             stream: 1,
             channel: Channel::ResultValues,
             events,
         } => {
+            let Some(invocation) = state.invocation else {
+                return Err(ResourceTransportFailure::Shape);
+            };
             for record in events {
                 let Event::Value(RuntimeValue::InvokeEvent(event)) = record.event else {
                     return Err(ResourceTransportFailure::Shape);
                 };
-                if state
-                    .invocation
-                    .is_some_and(|invocation| event.invocation_id() != invocation)
-                {
+                if event.invocation_id() != invocation {
                     return Err(ResourceTransportFailure::Shape);
                 }
                 if state.records.is_empty() && (record.sequence != 1 || event.sequence() != 0) {
@@ -3155,9 +3194,9 @@ where
         }
         ServerFrame::CallCompleted { stream: 1 } => {
             let state = root.take().expect("root state checked above");
-            let invocation = state
-                .invocation
-                .unwrap_or_else(orna_core::InvocationId::new);
+            let Some(invocation) = state.invocation else {
+                return Err(ResourceTransportFailure::Shape);
+            };
             if state.records.is_empty() {
                 let _ = state
                     .response
@@ -6011,6 +6050,53 @@ mod tests {
         assert!(matches!(result, SealedInvocationResult::Completed { .. }));
     }
 
+    #[tokio::test]
+    async fn shared_broker_rejects_root_events_before_acceptance() {
+        let (active, registry) = transport_test_context();
+        let events = echo_events();
+        let frame = ServerFrame::EventBatch {
+            stream: 1,
+            channel: Channel::ResultValues,
+            events: events
+                .records()
+                .iter()
+                .map(|record| EventRecord {
+                    sequence: record.outer_sequence(),
+                    event: Event::Value(RuntimeValue::InvokeEvent(record.event().clone())),
+                })
+                .collect(),
+        };
+        let bytes = encode_constructed_server_frame(&active, &registry, &frame)
+            .expect("encoded root event batch");
+        let (response, _receiver) = tokio::sync::oneshot::channel();
+        let mut root = Some(BrokerRootState {
+            invocation: None,
+            records: Vec::new(),
+            response,
+        });
+        let mut resources = BTreeMap::new();
+        let mut tombstones = BrokerResourceTombstones::new();
+        let (_reader, mut writer) = tokio::io::duplex(128);
+
+        assert!(matches!(
+            handle_shared_broker_frame(
+                BrokerWireFrame {
+                    resource: false,
+                    bytes,
+                },
+                &mut writer,
+                &active,
+                &registry,
+                &mut root,
+                &mut resources,
+                None,
+                &mut tombstones,
+            )
+            .await,
+            Err(ResourceTransportFailure::Shape)
+        ));
+    }
+
     #[test]
     fn shared_broker_reconstructs_failed_root_events() {
         let invocation = InvocationId::new();
@@ -7674,6 +7760,55 @@ mod tests {
             require_inspect_target_provenance(Some(target), target),
             Ok(())
         );
+    }
+
+    #[tokio::test]
+    async fn inspector_render_recursion_checks_root_parent_and_non_recursive_targets() {
+        let root = InvocationId::from_bytes([0x31; 16]);
+        let parent = InvocationId::from_bytes([0x32; 16]);
+        let descendant = InvocationId::from_bytes([0x33; 16]);
+        let mut checked = Vec::new();
+
+        let result = reject_recursive_inspect_target(
+            root,
+            root,
+            parent,
+            |observer, target| {
+                checked.push(observer);
+                async move { Ok(observer == target) }
+            },
+        )
+        .await;
+        assert_eq!(result, Err("inspect.recursion".to_owned()));
+        assert_eq!(checked, vec![root]);
+
+        checked.clear();
+        let result = reject_recursive_inspect_target(
+            descendant,
+            root,
+            parent,
+            |observer, target| {
+                checked.push(observer);
+                async move { Ok(observer == parent && target == descendant) }
+            },
+        )
+        .await;
+        assert_eq!(result, Err("inspect.recursion".to_owned()));
+        assert_eq!(checked, vec![root, parent]);
+
+        checked.clear();
+        let result = reject_recursive_inspect_target(
+            InvocationId::from_bytes([0x34; 16]),
+            root,
+            root,
+            |observer, _target| {
+                checked.push(observer);
+                async { Ok(false) }
+            },
+        )
+        .await;
+        assert_eq!(result, Ok(()));
+        assert_eq!(checked, vec![root]);
     }
 
     #[test]
