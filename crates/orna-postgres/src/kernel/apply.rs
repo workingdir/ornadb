@@ -2,6 +2,11 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 
+use orna_core::security::{CATALOGUE_HEALTH_SERVICE_PRINCIPAL_ID, SecurityAuditDecision};
+use orna_core::system::{
+    SYS_SECURITY_ACTIVE_ROLES_FUNCTION_ID, SYS_SECURITY_EFFECTIVE_PRINCIPAL_FUNCTION_ID,
+    SYS_SECURITY_SESSION_PRINCIPAL_FUNCTION_ID, system_function_by_id,
+};
 use orna_core::{
     CatalogueRevisionId, ExpressionId, FieldId, FunctionId, FunctionRevisionId, ParameterId,
     SchemaId, SourceBundleId, SourceRevisionId, StandardLibraryRevisionId, TypeBindingId, TypeId,
@@ -29,16 +34,12 @@ use orna_standard::{
     STANDARD_SOURCE_REVISION_ID, StandardUpgrade, StandardUpgradeIdentity,
     retained_standard_library_snapshot, verify_standard_library_snapshot,
 };
-use orna_core::security::{CATALOGUE_HEALTH_SERVICE_PRINCIPAL_ID, SecurityAuditDecision};
-use orna_core::system::{
-    SYS_SECURITY_ACTIVE_ROLES_FUNCTION_ID, SYS_SECURITY_EFFECTIVE_PRINCIPAL_FUNCTION_ID,
-    SYS_SECURITY_SESSION_PRINCIPAL_FUNCTION_ID, system_function_by_id,
-};
 use tokio_postgres::{Client, IsolationLevel, Transaction};
 
 use crate::{
-    PostgresKernel, PostgresKernelError, is_sealed_inspect_type_id,
+    PostgresKernel, PostgresKernelError,
     decode::{DurableRecord, identity_bytes},
+    is_sealed_inspect_type_id,
     physical::{establish_trusted_search_path, install_physical_plan},
     recovery::recover_active_revision,
     security::{append_security_audit_event, is_admitted_security_identity},
@@ -219,7 +220,9 @@ async fn apply_standard_upgrade_client(
 ) -> Result<ActiveDatabaseRevision, PostgresKernelError> {
     let transaction = client
         .build_transaction()
-        .isolation_level(IsolationLevel::RepeatableRead)
+        // Security writers serialize on active_revision without changing its tuple;
+        // ReadCommitted refreshes grant visibility after this transaction waits for that lock.
+        .isolation_level(IsolationLevel::ReadCommitted)
         .read_only(false)
         .start()
         .await
@@ -254,6 +257,7 @@ async fn apply_transaction(
         ));
     }
     validate_candidate_preflight(&active, candidate)?;
+    validate_durable_grant_targets(transaction, candidate).await?;
 
     let materialized = materialize(candidate, &active)?;
     verify_candidate_hashes(candidate, &materialized)?;
@@ -298,6 +302,7 @@ async fn apply_standard_upgrade_transaction(
             "standard upgrade candidate must select the supplied standard snapshot",
         ));
     }
+    validate_durable_grant_targets(transaction, candidate).await?;
     scan_reserved_standard_identities(transaction, &active, standard).await?;
     persist_retained_v1_standard_parent(transaction, standard).await?;
 
@@ -457,6 +462,92 @@ fn validate_candidate_preflight(
     )?;
     validate_persistable_catalogue(candidate)
         .map_err(PostgresKernelError::CandidateRevisionInvariant)
+}
+
+async fn validate_durable_grant_targets(
+    transaction: &Transaction<'_>,
+    candidate: &DeployableRevision,
+) -> Result<(), PostgresKernelError> {
+    const EXECUTE_RELATION: &str = "_orna_kernel.security_execute_grants";
+    const PRIVILEGE_RELATION: &str = "_orna_kernel.security_privilege_grants";
+    let execute_rows = transaction
+        .query(
+            "SELECT function_id
+             FROM _orna_kernel.security_execute_grants
+             ORDER BY grantee_id, function_id",
+            &[],
+        )
+        .await
+        .map_err(PostgresKernelError::Database)?;
+    for row in &execute_rows {
+        let record = DurableRecord::new(EXECUTE_RELATION, "candidate");
+        let function = FunctionId::from_bytes(identity_bytes(
+            record.column(
+                row,
+                "function_id",
+                "durable EXECUTE grant target identity is not exactly 16 bytes",
+            )?,
+            &record,
+            "durable EXECUTE grant target identity is not exactly 16 bytes",
+        )?);
+        if !candidate_retains_function_target(candidate, function) {
+            return Err(PostgresKernelError::DurableInvariant {
+                relation: EXECUTE_RELATION,
+                record: "candidate".to_owned(),
+                rule: "candidate source must retain every durable EXECUTE grant target",
+            });
+        }
+    }
+
+    let privilege_rows = transaction
+        .query(
+            "SELECT object_id
+             FROM _orna_kernel.security_privilege_grants
+             ORDER BY grantee_id, privilege_class, object_id",
+            &[],
+        )
+        .await
+        .map_err(PostgresKernelError::Database)?;
+    for row in &privilege_rows {
+        let record = DurableRecord::new(PRIVILEGE_RELATION, "candidate");
+        let object: Vec<u8> = record.column(
+            row,
+            "object_id",
+            "durable privilege grant object identity must be empty or exactly 16 bytes",
+        )?;
+        if object.is_empty() {
+            continue;
+        }
+        let function = FunctionId::from_bytes(identity_bytes(
+            object,
+            &record,
+            "durable privilege grant object identity must be empty or exactly 16 bytes",
+        )?);
+        if !candidate_retains_privilege_target(candidate, function) {
+            return Err(PostgresKernelError::DurableInvariant {
+                relation: PRIVILEGE_RELATION,
+                record: "candidate".to_owned(),
+                rule: "candidate source must retain every durable privilege grant object target",
+            });
+        }
+    }
+    Ok(())
+}
+
+fn candidate_retains_function_target(candidate: &DeployableRevision, function: FunctionId) -> bool {
+    candidate.candidate().function_by_id(function).is_some()
+        || candidate
+            .catalogue_hash_context()
+            .standard()
+            .is_some_and(|standard| standard.catalogue().function_by_id(function).is_some())
+}
+
+fn candidate_retains_privilege_target(
+    candidate: &DeployableRevision,
+    function: FunctionId,
+) -> bool {
+    candidate_retains_function_target(candidate, function)
+        || system_function_by_id(function).is_some()
 }
 
 fn standard_context_mismatch(
@@ -1327,7 +1418,11 @@ fn validate_postgres_encodings(
         let _ = function_transaction(function.transaction())?;
         let _ = function_volatility(function.volatility());
         for parameter in function.parameters() {
-            let _ = encoder.function_type_columns(function.domain(), parameter.resolved_type(), false)?;
+            let _ = encoder.function_type_columns(
+                function.domain(),
+                parameter.resolved_type(),
+                false,
+            )?;
         }
         match function.return_type() {
             FunctionReturn::Single(resolved) => {
@@ -1698,11 +1793,14 @@ fn validate_standard_executable_facts(
                         "version-two standard library snapshot must carry each catalogue function exactly once",
                     ));
                 }
-                let function = catalogue
-                    .function_by_id(executable.function())
-                    .ok_or_else(|| {
-                        invariant("standard executable function must exist in the standard catalogue")
-                    })?;
+                let function =
+                    catalogue
+                        .function_by_id(executable.function())
+                        .ok_or_else(|| {
+                            invariant(
+                                "standard executable function must exist in the standard catalogue",
+                            )
+                        })?;
                 if function.current_revision() != executable.revision().id() {
                     return Err(invariant(
                         "standard catalogue function and executable current revision must agree",
@@ -2551,7 +2649,11 @@ async fn persist_functions(
                 standard_library_revision,
                 enum_type,
                 record_type,
-            } = encoder.function_type_columns(function.domain(), parameter.resolved_type(), false)?;
+            } = encoder.function_type_columns(
+                function.domain(),
+                parameter.resolved_type(),
+                false,
+            )?;
             let origin = origin(
                 candidate.origins(),
                 DefinitionIdentity::Parameter {
@@ -3189,10 +3291,7 @@ impl<'a> CandidateEncoder<'a> {
         allow_void: bool,
     ) -> Result<TypeColumns, PostgresKernelError> {
         let mut columns = self.type_columns(value, allow_void)?;
-        if columns
-            .value_type
-            .is_some_and(is_sealed_inspect_type_id)
-        {
+        if columns.value_type.is_some_and(is_sealed_inspect_type_id) {
             columns.standard_library_revision = None;
         }
         Ok(columns)
