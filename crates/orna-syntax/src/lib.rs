@@ -4976,6 +4976,56 @@ mod tests {
     }
 
     #[test]
+    fn parses_canonical_accepted_dogfood_fixtures_losslessly() {
+        let fixtures = [
+            (
+                "client_function_dogfood.orna",
+                include_str!("../../orna-server/tests/fixtures/client_function_dogfood.orna"),
+            ),
+            (
+                "scalar_resource_dogfood.orna",
+                include_str!("../../orna-server/tests/fixtures/scalar_resource_dogfood.orna"),
+            ),
+            (
+                "stream_resource_dogfood.orna",
+                include_str!("../../orna-server/tests/fixtures/stream_resource_dogfood.orna"),
+            ),
+            (
+                "action_dogfood.orna",
+                include_str!("../../orna-server/tests/fixtures/action_dogfood.orna"),
+            ),
+            (
+                "client_inspector_dogfood.orna",
+                include_str!("../../orna-server/tests/fixtures/client_inspector_dogfood.orna"),
+            ),
+            (
+                "expression_client_dogfood.orna",
+                include_str!("../../orna-server/tests/fixtures/expression_client_dogfood.orna"),
+            ),
+            (
+                "server_function_dogfood.orna",
+                include_str!("../../orna-server/tests/fixtures/server_function_dogfood.orna"),
+            ),
+            (
+                "client_local_assignment_dogfood.orna",
+                include_str!(
+                    "../../orna-server/tests/fixtures/client_local_assignment_dogfood.orna"
+                ),
+            ),
+        ];
+
+        for (name, source) in fixtures {
+            let parsed = parse(source);
+            assert!(
+                parsed.diagnostics().is_empty(),
+                "{name}: {:?}",
+                parsed.diagnostics()
+            );
+            assert_eq!(parsed.syntax().text(), source, "{name}");
+        }
+    }
+
+    #[test]
     fn parses_accepted_client_fixture_losslessly_with_expression_and_state_bodies() {
         let source = include_str!("../testdata/accepted-client.orna");
         let parsed = parse(source);
@@ -5297,6 +5347,208 @@ mod tests {
         assert_eq!(root.text, "p_item");
         assert_eq!(members.len(), 1);
         assert_eq!(members[0].text, "code");
+    }
+
+    #[test]
+    fn parses_client_action_call_with_named_target_arguments_and_exact_spans() {
+        let source = "CREATE CLIENT FUNCTION app.owner() RETURNS std.Action AS\n\
+            std.action.call(\n\
+                target => std.invoke.echo,\n\
+                arguments => std.call.args(p_value => app.first())\n\
+            );";
+        let parsed = parse(source);
+
+        assert!(
+            parsed.diagnostics().is_empty(),
+            "{:?}",
+            parsed.diagnostics()
+        );
+        let ClientFunctionBody::Expression { expression } = &parsed.client_functions()[0].body
+        else {
+            panic!("expected an expression body");
+        };
+        let ClientExpression::Call {
+            callee,
+            arguments,
+            span,
+        } = expression
+        else {
+            panic!("expected std.action.call expression");
+        };
+
+        let action_start = source.find("std.action.call").expect("action callee");
+        let action_end = source.rfind(')').expect("action closing parenthesis") + 1;
+        assert_eq!(
+            callee
+                .parts
+                .iter()
+                .map(|part| part.text.as_str())
+                .collect::<Vec<_>>(),
+            ["std", "action", "call"]
+        );
+        assert_eq!(
+            callee.span,
+            SourceSpan {
+                start: action_start,
+                end: action_start + "std.action.call".len(),
+            }
+        );
+        assert_eq!(
+            span,
+            &SourceSpan {
+                start: action_start,
+                end: action_end
+            }
+        );
+        assert_eq!(arguments.len(), 2);
+
+        let target_start = source.find("target").expect("target argument");
+        let target_value_start = source.find("std.invoke.echo").expect("target value");
+        let target_argument = &arguments[0];
+        let target_name = target_argument.name.as_ref().expect("named target");
+        assert_eq!(target_name.text, "target");
+        assert_eq!(
+            target_name.span,
+            SourceSpan {
+                start: target_start,
+                end: target_start + "target".len(),
+            }
+        );
+        assert_eq!(
+            target_argument.span,
+            SourceSpan {
+                start: target_start,
+                end: target_value_start + "std.invoke.echo".len(),
+            }
+        );
+        let ClientExpression::FieldPath {
+            root,
+            members,
+            span: target_span,
+        } = &target_argument.value
+        else {
+            panic!("expected a qualified target");
+        };
+        assert_eq!(target_span.start, target_value_start);
+        assert_eq!(
+            target_span.end,
+            target_value_start + "std.invoke.echo".len()
+        );
+        assert_eq!(root.text, "std");
+        assert_eq!(
+            members
+                .iter()
+                .map(|member| member.text.as_str())
+                .collect::<Vec<_>>(),
+            ["invoke", "echo"]
+        );
+
+        let arguments_start = source.find("arguments").expect("arguments argument");
+        let nested_start = source
+            .find("std.call.args")
+            .expect("nested arguments callee");
+        let nested_end = source[nested_start..]
+            .find("))")
+            .expect("nested arguments closing parenthesis")
+            + nested_start
+            + 2;
+        let arguments_argument = &arguments[1];
+        let arguments_name = arguments_argument.name.as_ref().expect("named arguments");
+        assert_eq!(arguments_name.text, "arguments");
+        assert_eq!(
+            arguments_name.span,
+            SourceSpan {
+                start: arguments_start,
+                end: arguments_start + "arguments".len(),
+            }
+        );
+        assert_eq!(
+            arguments_argument.span,
+            SourceSpan {
+                start: arguments_start,
+                end: nested_end,
+            }
+        );
+        let ClientExpression::Call {
+            callee: nested_callee,
+            arguments: nested_arguments,
+            span: nested_span,
+        } = &arguments_argument.value
+        else {
+            panic!("expected std.call.args expression");
+        };
+        assert_eq!(
+            nested_callee
+                .parts
+                .iter()
+                .map(|part| part.text.as_str())
+                .collect::<Vec<_>>(),
+            ["std", "call", "args"]
+        );
+        assert_eq!(
+            nested_callee.span,
+            SourceSpan {
+                start: nested_start,
+                end: nested_start + "std.call.args".len(),
+            }
+        );
+        assert_eq!(
+            nested_span,
+            &SourceSpan {
+                start: nested_start,
+                end: nested_end
+            }
+        );
+        assert_eq!(nested_arguments.len(), 1);
+
+        let pair_start = source
+            .find("p_value => app.first()")
+            .expect("nested argument");
+        let pair_value_start = pair_start + "p_value => ".len();
+        let pair_value_end = pair_start + "p_value => app.first()".len();
+        let nested_argument = &nested_arguments[0];
+        let nested_name = nested_argument
+            .name
+            .as_ref()
+            .expect("named nested argument");
+        assert_eq!(nested_name.text, "p_value");
+        assert_eq!(
+            nested_name.span,
+            SourceSpan {
+                start: pair_start,
+                end: pair_start + "p_value".len(),
+            }
+        );
+        assert_eq!(
+            nested_argument.span,
+            SourceSpan {
+                start: pair_start,
+                end: pair_value_end,
+            }
+        );
+        let ClientExpression::Call {
+            callee: target_call_callee,
+            span: target_call_span,
+            ..
+        } = &nested_argument.value
+        else {
+            panic!("expected nested target argument call");
+        };
+        assert_eq!(
+            target_call_callee
+                .parts
+                .iter()
+                .map(|part| part.text.as_str())
+                .collect::<Vec<_>>(),
+            ["app", "first"]
+        );
+        assert_eq!(
+            target_call_span,
+            &SourceSpan {
+                start: pair_value_start,
+                end: pair_value_end,
+            }
+        );
     }
 
     #[test]
