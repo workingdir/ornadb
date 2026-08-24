@@ -1,0 +1,18 @@
+alter type rename to / add field / drop field
+alter function rename
+drop statements
+CLIENT procedural blocks reject SQL statements
+external client function
+client function with short return boolean bodies
+client return call and field path
+server expression calls, named arguments, operators
+list, map and record literals, lambda
+procedural body with declarations
+top-level insert statement
+create value record type
+create opaque value type
+create primitive value type
+export type
+create user and role
+grant role and grant privilege
+revoke privilege

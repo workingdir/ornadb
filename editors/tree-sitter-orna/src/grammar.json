@@ -2751,7 +2751,7 @@
                   "members": [
                     {
                       "type": "SYMBOL",
-                      "name": "expression"
+                      "name": "ordering_expression"
                     },
                     {
                       "type": "REPEAT",
@@ -2764,12 +2764,46 @@
                           },
                           {
                             "type": "SYMBOL",
-                            "name": "expression"
+                            "name": "ordering_expression"
                           }
                         ]
                       }
                     }
                   ]
+                }
+              ]
+            },
+            {
+              "type": "BLANK"
+            }
+          ]
+        }
+      ]
+    },
+    "ordering_expression": {
+      "type": "SEQ",
+      "members": [
+        {
+          "type": "FIELD",
+          "name": "expression",
+          "content": {
+            "type": "SYMBOL",
+            "name": "expression"
+          }
+        },
+        {
+          "type": "CHOICE",
+          "members": [
+            {
+              "type": "CHOICE",
+              "members": [
+                {
+                  "type": "SYMBOL",
+                  "name": "kw_asc"
+                },
+                {
+                  "type": "SYMBOL",
+                  "name": "kw_desc"
                 }
               ]
             },
@@ -5646,6 +5680,14 @@
           },
           {
             "type": "SYMBOL",
+            "name": "kw_asc"
+          },
+          {
+            "type": "SYMBOL",
+            "name": "kw_desc"
+          },
+          {
+            "type": "SYMBOL",
             "name": "kw_values"
           },
           {
@@ -7647,6 +7689,30 @@
         "content": {
           "type": "PATTERN",
           "value": "by",
+          "flags": "i"
+        }
+      }
+    },
+    "kw_asc": {
+      "type": "TOKEN",
+      "content": {
+        "type": "PREC",
+        "value": 100,
+        "content": {
+          "type": "PATTERN",
+          "value": "asc",
+          "flags": "i"
+        }
+      }
+    },
+    "kw_desc": {
+      "type": "TOKEN",
+      "content": {
+        "type": "PREC",
+        "value": 100,
+        "content": {
+          "type": "PATTERN",
+          "value": "desc",
           "flags": "i"
         }
       }

@@ -140,7 +140,7 @@ impl PostgresKernel {
     ) -> Result<ActiveDatabaseRevision, PostgresKernelError> {
         let mut session = self.open().await?;
         let apply_result = apply_client(&mut session.client, candidate, true).await;
-        let shutdown_result = session.shutdown().await;
+        let shutdown_result = session.shutdown_for_source_apply().await;
         match (apply_result, shutdown_result) {
             (Ok(active), Ok(())) => Ok(active),
             (Err(error), _) | (Ok(_), Err(error)) => Err(error),

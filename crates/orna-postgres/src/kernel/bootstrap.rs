@@ -10,7 +10,7 @@ use orna_core::{
 use sha2::{Digest, Sha256};
 use tokio_postgres::{Client, Row, Transaction};
 
-use crate::{PostgresKernel, PostgresKernelError};
+use crate::{PostgresKernel, PostgresKernelError, recovery::recover_active_revision};
 
 struct Migration {
     version: i64,
@@ -835,7 +835,15 @@ async fn load_or_seed_active_revision(
         .await
         .map_err(PostgresKernelError::Database)?;
     if let Some(row) = active {
-        return active_from_row(&row);
+        let active = active_from_row(&row)?;
+        let recovered = recover_active_revision(transaction).await?;
+        let pair = recovered.pair();
+        if pair.source() != active.source || pair.catalogue() != active.catalogue {
+            return Err(PostgresKernelError::CatalogueInvariant(
+                "recovered active revision does not match the active revision pointer",
+            ));
+        }
+        return Ok(active);
     }
 
     let counts = transaction
@@ -1369,5 +1377,122 @@ mod tests {
 
         assert_eq!(first, second);
         assert_eq!(kernel.bootstrap().await.expect("restart succeeds"), first);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires the Compose PostgreSQL development service"]
+    async fn bootstrap_rejects_tampered_current_catalogue_hash_without_mutation() {
+        let connection_string = std::env::var("ORNA_TEST_POSTGRES_URL")
+            .expect("ORNA_TEST_POSTGRES_URL must identify the test kernel");
+        let kernel = PostgresKernel::from_str(&connection_string).expect("config parses");
+        let active = kernel
+            .bootstrap()
+            .await
+            .expect("initial bootstrap succeeds");
+        let catalogue_id = active.catalogue().to_bytes().to_vec();
+
+        let mut session = kernel.open().await.expect("snapshot session opens");
+        let active_before = session
+            .client
+            .query_one(
+                "SELECT source_revision_id, catalogue_revision_id
+                 FROM _orna_kernel.active_revision
+                 WHERE singleton = true",
+                &[],
+            )
+            .await
+            .expect("active pointer is readable");
+        let active_before = (
+            active_before.get::<_, Vec<u8>>(0),
+            active_before.get::<_, Vec<u8>>(1),
+        );
+        let migrations_before: Vec<(i64, Vec<u8>)> = session
+            .client
+            .query(
+                "SELECT version, checksum
+                 FROM _orna_kernel.schema_migrations
+                 ORDER BY version",
+                &[],
+            )
+            .await
+            .expect("migration state is readable")
+            .into_iter()
+            .map(|row| (row.get::<_, i64>(0), row.get::<_, Vec<u8>>(1)))
+            .collect();
+        let original_hash: Vec<u8> = session
+            .client
+            .query_one(
+                "SELECT content_hash
+                 FROM _orna_kernel.catalogue_revisions
+                 WHERE id = $1",
+                &[&catalogue_id],
+            )
+            .await
+            .expect("active catalogue hash is readable")
+            .get(0);
+        let updated = session
+            .client
+            .execute(
+                "UPDATE _orna_kernel.catalogue_revisions
+                 SET content_hash = decode(repeat('00', 32), 'hex')
+                 WHERE id = $1",
+                &[&catalogue_id],
+            )
+            .await
+            .expect("catalogue hash tamper succeeds");
+        assert_eq!(updated, 1);
+        session.shutdown().await.expect("tamper session shuts down");
+
+        assert!(
+            kernel.bootstrap().await.is_err(),
+            "bootstrap must fail closed when the current catalogue hash is tampered"
+        );
+
+        let mut verification = kernel.open().await.expect("verification session opens");
+        let active_after = verification
+            .client
+            .query_one(
+                "SELECT source_revision_id, catalogue_revision_id
+                 FROM _orna_kernel.active_revision
+                 WHERE singleton = true",
+                &[],
+            )
+            .await
+            .expect("active pointer remains readable");
+        let active_after = (
+            active_after.get::<_, Vec<u8>>(0),
+            active_after.get::<_, Vec<u8>>(1),
+        );
+        let migrations_after: Vec<(i64, Vec<u8>)> = verification
+            .client
+            .query(
+                "SELECT version, checksum
+                 FROM _orna_kernel.schema_migrations
+                 ORDER BY version",
+                &[],
+            )
+            .await
+            .expect("migration state remains readable")
+            .into_iter()
+            .map(|row| (row.get::<_, i64>(0), row.get::<_, Vec<u8>>(1)))
+            .collect();
+        assert_eq!(active_after, active_before);
+        assert_eq!(migrations_after, migrations_before);
+
+        let restored = verification
+            .client
+            .execute(
+                "UPDATE _orna_kernel.catalogue_revisions
+                 SET content_hash = $1
+                 WHERE id = $2",
+                &[&original_hash, &catalogue_id],
+            )
+            .await
+            .expect("catalogue hash restoration succeeds");
+        assert_eq!(restored, 1);
+        verification
+            .shutdown()
+            .await
+            .expect("verification session shuts down");
     }
 }

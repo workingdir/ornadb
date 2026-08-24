@@ -2408,6 +2408,53 @@ mod tests {
     }
 
     #[test]
+    fn snapshot_distinguishes_object_and_record_value_definitions_in_shared_namespace() {
+        let person_id = TypeId::from_bytes([10; 16]);
+        let person = object(10, &["geometry", "person"], vec![]);
+        let shape_id = TypeId::from_bytes([11; 16]);
+        let shape = ObjectTypeDefinition::new(
+            shape_id,
+            name(&["geometry", "shape"]),
+            vec![FieldDefinition::new(
+                FieldId::from_bytes([12; 16]), "person", 0,
+                ResolvedType::reference(person_id), false, true, None,
+                Some(OnDeleteAction::Restrict),
+            )],
+        );
+        let point_id = TypeId::from_bytes([13; 16]);
+        let point = record(13, &["geometry", "point"], vec![record_field(14, "x", 0)]);
+        let catalogue = CatalogueSnapshot::new_with_record_value_types(
+            CatalogueRevisionId::from_bytes([7; 16]),
+            vec![schema(1, &["geometry"])], vec![person, shape], vec![], vec![],
+            vec![point], vec![],
+        ).unwrap();
+
+        let object_definition = catalogue
+            .type_definition_by_name(&TypeLookupName::qualified(name(&["geometry", "shape"])))
+            .unwrap();
+        assert_eq!(object_definition.id(), shape_id);
+        assert_eq!(object_definition.kind(), TypeDefinitionKind::Object);
+        assert!(object_definition.as_object().is_some());
+        assert!(object_definition.as_record_value().is_none());
+        assert_eq!(
+            object_definition.as_object().unwrap().field_by_name("person").unwrap().resolved_type(),
+            ResolvedType::reference(person_id)
+        );
+
+        let record_definition = catalogue
+            .type_definition_by_name(&TypeLookupName::qualified(name(&["geometry", "point"])))
+            .unwrap();
+        assert_eq!(record_definition.id(), point_id);
+        assert_eq!(record_definition.kind(), TypeDefinitionKind::Value);
+        assert!(record_definition.as_object().is_none());
+        let record_definition = record_definition.as_record_value().unwrap();
+        assert_eq!(
+            record_definition.field_by_name("x").unwrap().descriptor(),
+            &TypeDescriptor::named(TypeId::from_bytes([89; 16]))
+        );
+    }
+
+    #[test]
     fn snapshot_rejects_invalid_record_value_type_members() {
         let build = |record_value_type| {
             CatalogueSnapshot::new_with_record_value_types(

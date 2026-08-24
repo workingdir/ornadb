@@ -34,7 +34,7 @@ const KEYWORDS = [
     'boolean', 'bool', 'integer', 'int', 'bigint', 'float', 'decimal',
     'character', 'large', 'text', 'binary', 'bytes', 'uuid',
     'date', 'time', 'timestamp', 'duration', 'void', 'distinct', 'order',
-    'by', 'values', 'returning', 'into', 'where',
+    'by', 'asc', 'desc', 'values', 'returning', 'into', 'where',
 ];
 
 // Build one named, case-insensitive token rule per keyword. `token` is the
@@ -602,8 +602,11 @@ module.exports = grammar({
                         seq($.kw_from, field('table', $.qualified_name), optional($.alias)),
                     ),
                     optional(seq($.kw_where, field('condition', $.expression))),
-                    optional(seq($.kw_order, $.kw_by, sep1($.expression, $.comma))),
+                    optional(seq($.kw_order, $.kw_by, sep1($.ordering_expression, $.comma))),
                 ),
+
+            ordering_expression: ($) =>
+                seq(field('expression', $.expression), optional(choice($.kw_asc, $.kw_desc))),
 
             insert_statement: ($) =>
                 seq(
