@@ -378,7 +378,7 @@ pub enum ClientActionError {
     RevisionMismatch,
     TargetMismatch,
     ResultTypeMismatch,
-    Arguments(ClientResourceError),
+    Arguments(Box<ClientResourceError>),
     Pending,
     StaleCompletion,
     Executor(String),
@@ -526,7 +526,7 @@ impl ClientResourceFailure {
 }
 /// Errors that leave a CLIENT resource unchanged.
 #[non_exhaustive]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ClientResourceError {
     /// The generation counter cannot advance safely.
     GenerationExhausted,
@@ -581,9 +581,9 @@ pub enum ClientResourceError {
     /// The completion belongs to a different resource identity.
     RequestKeyMismatch {
         /// The key owned by the resource.
-        expected: ClientResourceKey,
+        expected: Box<ClientResourceKey>,
         /// The key carried by the completion.
-        actual: ClientResourceKey,
+        actual: Box<ClientResourceKey>,
     },
     /// The completion belongs to a different request instance.
     RequestIdMismatch {
@@ -1856,8 +1856,8 @@ impl ClientResource {
     fn require_key(&self, actual: ClientResourceKey) -> Result<(), ClientResourceError> {
         if actual != self.key {
             return Err(ClientResourceError::RequestKeyMismatch {
-                expected: self.key,
-                actual,
+                expected: Box::new(self.key),
+                actual: Box::new(actual),
             });
         }
         Ok(())
@@ -5289,18 +5289,18 @@ fn validate_action_arguments(
     let resolved_target = resolve_action_target(active, descriptor)?;
     let definition = resolved_target.definition;
     if descriptor.arguments.len() != definition.parameters().len() {
-        return Err(ClientActionError::Arguments(
+        return Err(ClientActionError::Arguments(Box::new(
             ClientResourceError::TypeMismatch,
-        ));
+        )));
     }
     let mut previous = None;
     for argument in &descriptor.arguments {
         if previous.is_some_and(|value| argument.parameter() <= value) {
-            return Err(ClientActionError::Arguments(
+            return Err(ClientActionError::Arguments(Box::new(
                 ClientResourceError::DuplicateArgument {
                     parameter: argument.parameter(),
                 },
-            ));
+            )));
         }
         previous = Some(argument.parameter());
         let Some(parameter) = definition
@@ -5308,16 +5308,16 @@ fn validate_action_arguments(
             .iter()
             .find(|candidate| candidate.id() == argument.parameter())
         else {
-            return Err(ClientActionError::Arguments(
+            return Err(ClientActionError::Arguments(Box::new(
                 ClientResourceError::UnknownArgument {
                     parameter: argument.parameter(),
                 },
-            ));
+            )));
         };
         if !runtime_value_matches(active, argument.value(), parameter.resolved_type()) {
-            return Err(ClientActionError::Arguments(
+            return Err(ClientActionError::Arguments(Box::new(
                 ClientResourceError::TypeMismatch,
-            ));
+            )));
         }
     }
     Ok(descriptor.arguments.clone())
@@ -5537,7 +5537,7 @@ fn trigger_client_action_with_lineage(
     let values = validate_action_arguments(active, &descriptor)?;
     let target = resolve_action_target(active, &descriptor)?.target;
     let digest = ClientResourceKey::canonical_arguments_digest(active, &values)
-        .map_err(ClientActionError::Arguments)?;
+        .map_err(|error| ClientActionError::Arguments(Box::new(error)))?;
     if !client_action_target_is_provenance_safe(active, *parent, descriptor.target) {
         return Err(ClientActionError::TargetMismatch);
     }
@@ -5581,7 +5581,7 @@ fn trigger_client_action_with_lineage(
                     ),
                     values,
                 )
-                .map_err(ClientActionError::Arguments)?;
+                .map_err(|error| ClientActionError::Arguments(Box::new(error)))?;
             action_state.stage_invocation(request.request_id());
             action_state.stage_request(request.clone());
             action_state.set_resource(resource);
@@ -5622,7 +5622,7 @@ fn trigger_client_action_with_lineage(
                     ),
                     values,
                 )
-                .map_err(ClientActionError::Arguments)?;
+                .map_err(|error| ClientActionError::Arguments(Box::new(error)))?;
             action_state.stage_invocation(request.request_id());
             action_state.stage_request(request.clone());
             action_state.set_resource(resource);
@@ -8743,6 +8743,20 @@ mod tests {
     }
 
     #[test]
+    fn client_action_argument_error_preserves_display_and_equality() {
+        let resource_error = super::ClientResourceError::DuplicateArgument {
+            parameter: ParameterId::from_bytes([0x7b; 16]),
+        };
+        let action_error = super::ClientActionError::Arguments(Box::new(resource_error.clone()));
+
+        assert_eq!(action_error.to_string(), resource_error.to_string());
+        assert_eq!(
+            action_error,
+            super::ClientActionError::Arguments(Box::new(resource_error)),
+        );
+    }
+
+    #[test]
     fn client_resource_rejects_completion_with_mismatched_request_key() {
         let (active, function, pair, _) = version_one_active(true);
         let key = super::ClientResourceKey::new(
@@ -8769,12 +8783,22 @@ mod tests {
         };
         let before = resource.clone();
 
+        let error = resource
+            .apply_completion(&active, completion)
+            .expect_err("the completion key must be rejected");
         assert_eq!(
-            resource.apply_completion(&active, completion),
-            Err(super::ClientResourceError::RequestKeyMismatch {
-                expected: key,
-                actual: wrong_key,
-            })
+            error,
+            super::ClientResourceError::RequestKeyMismatch {
+                expected: Box::new(key),
+                actual: Box::new(wrong_key),
+            }
+        );
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "CLIENT resource completion uses key {:?}, expected {:?}",
+                wrong_key, key,
+            ),
         );
         assert_eq!(resource, before);
     }
