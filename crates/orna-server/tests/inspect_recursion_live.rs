@@ -12,17 +12,18 @@
 mod postgres_test_support;
 
 use orna_client::{
-    capability::LocalCapabilityGrantSet,
-    evaluate_client_function_with_state_and_grants_and_arguments_and_executor_with_parent_invocation,
     ClientExecutionError, ClientExternalContractRequest, ClientInspectError, ClientInspectRequest,
     ClientResourceCompletion, ClientResourceExecutor, ClientResourceRequest, ClientStateStore,
+    capability::LocalCapabilityGrantSet,
+    evaluate_client_function_with_state_and_grants_and_arguments_and_executor_with_parent_invocation,
 };
 use orna_compiler::{
-    check, check_standard_application, prepare, prepare_standard_application,
-    StandardApplicationCheckContext, STD_INVOKE_ECHO_FUNCTION_ID,
-    STD_INVOKE_ECHO_FUNCTION_REVISION_ID, STD_INVOKE_ECHO_PARAMETER_ID,
+    STD_INVOKE_ECHO_FUNCTION_ID, STD_INVOKE_ECHO_FUNCTION_REVISION_ID,
+    STD_INVOKE_ECHO_PARAMETER_ID, StandardApplicationCheckContext, check,
+    check_standard_application, prepare, prepare_standard_application,
 };
 use orna_core::{
+    FunctionId, InvocationId, ObjectId, PrincipalId,
     invocation::{
         InvocationArgument, InvocationCallerContext, InvocationCallerKind, InvocationClientOffer,
         InvocationParameterSelector, InvocationTarget as InvocationRequestTarget,
@@ -36,12 +37,11 @@ use orna_core::{
     source::{SourceBundle, SourceUnit},
     system::SYS_INSPECT_INVOCATION_TYPE_ID,
     value::{FunctionArgument, RuntimeValue},
-    FunctionId, InvocationId, ObjectId, PrincipalId,
 };
 use orna_postgres::{PostgresKernel, SealedInvocationResult};
 use orna_protocol::encode_invoke_request;
 use orna_server::InstalledClientResourceExecutor;
-use postgres_test_support::{failure, with_test_database, TestDatabase, TestResult};
+use postgres_test_support::{TestDatabase, TestResult, failure, with_test_database};
 
 const CONNECTION_PROTOCOL_MAJOR: u16 = 5;
 const PROOF_USER: PrincipalId = PrincipalId::from_bytes([0x91; 16]);
@@ -234,6 +234,9 @@ impl ClientResourceExecutor for RecordingExecutor {
     fn cancel(&mut self, request: ClientResourceRequest) -> ClientResourceCompletion {
         self.inner.cancel(request)
     }
+    fn abandon(&mut self, request: ClientResourceRequest) -> Result<(), String> {
+        self.inner.abandon(request)
+    }
 
     fn cancel_pending(&mut self) -> Option<ClientResourceCompletion> {
         self.inner.cancel_pending()
@@ -299,8 +302,8 @@ async fn evaluate_inspector(
 
 #[tokio::test]
 #[ignore = "requires the Compose PostgreSQL development service"]
-async fn rejects_installed_inspector_self_and_descendant_recursion_without_execution_or_ui(
-) -> TestResult<()> {
+async fn rejects_installed_inspector_self_and_descendant_recursion_without_execution_or_ui()
+-> TestResult<()> {
     with_test_database(|database| async move {
         let active = install_fixture(&database).await?;
         let kernel = kernel(&database);

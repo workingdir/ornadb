@@ -311,7 +311,9 @@ fn proves_installed_inspect_end_to_end() -> TestResult<()> {
             let runtime = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
-                .map_err(|error| failure(format!("Inspector live runtime could not start: {error}")))?;
+                .map_err(|error| {
+                    failure(format!("Inspector live runtime could not start: {error}"))
+                })?;
             runtime.block_on(proves_installed_inspect_end_to_end_inner())
         })
         .map_err(|error| failure(format!("Inspector live thread could not start: {error}")))?;
@@ -814,7 +816,6 @@ async fn rejects_an_owned_epoch_for_a_different_requested_invocation() -> TestRe
     })
     .await
 }
-
 
 /// An active principal may inspect its own invocation, but must not discover
 /// or load an epoch owned by another principal. The installed runner must also
