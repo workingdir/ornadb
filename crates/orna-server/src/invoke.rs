@@ -514,17 +514,22 @@ struct PendingBrokerResource {
 }
 
 struct DetachedResourceTransport {
-    control: UnboundedSender<ResourceTransportControl>,
+    /// Retained while a detached worker can still receive shutdown controls.
+    request: ClientResourceRequest,
+    control: Option<UnboundedSender<ResourceTransportControl>>,
     worker: thread::JoinHandle<()>,
     waiter: Option<thread::JoinHandle<()>>,
+    completion: Option<std::sync::mpsc::Receiver<CancellationWaitOutcome>>,
     transport_return: std::sync::Arc<std::sync::Mutex<Option<ResourceTransportSource>>>,
 }
 
 struct DetachedBrokerResource {
     control: SharedInvokeBroker,
     stream_id: u64,
-    request_id: orna_core::InvocationId,
+    request: ClientResourceRequest,
     waiter: Option<thread::JoinHandle<()>>,
+    completion: Option<std::sync::mpsc::Receiver<CancellationWaitOutcome>>,
+    abandoned: bool,
 }
 
 enum CancellationWaitOutcome {
@@ -541,12 +546,13 @@ impl CancellationWaiter {
     fn start(
         receiver: Receiver<Result<ResourceTransportOutcome, ResourceTransportFailure>>,
     ) -> Result<Self, Receiver<Result<ResourceTransportOutcome, ResourceTransportFailure>>> {
-        let (sender, completion) = std::sync::mpsc::sync_channel(1);
+        let (sender, completion) = std::sync::mpsc::sync_channel(2);
         let receiver_slot = std::sync::Arc::new(std::sync::Mutex::new(Some(receiver)));
         let thread_receiver_slot = std::sync::Arc::clone(&receiver_slot);
         let thread = match thread::Builder::new()
             .name("orna-resource-cancel-waiter".to_owned())
             .spawn(move || {
+                let timeout_sender = sender.clone();
                 let mut receiver = thread_receiver_slot
                     .lock()
                     .expect("resource cancellation receiver lock")
@@ -557,7 +563,7 @@ impl CancellationWaiter {
                     .build()
                 {
                     Ok(runtime) => runtime.block_on(async move {
-                        let receive_terminal = async move {
+                        let receive_terminal = async {
                             loop {
                                 match receiver.recv().await {
                                     Some(Ok(ResourceTransportOutcome::StreamValues(_))) => {}
@@ -572,9 +578,25 @@ impl CancellationWaiter {
                                 }
                             }
                         };
-                        tokio::time::timeout(RESOURCE_FRAME_TIMEOUT, receive_terminal)
-                            .await
-                            .unwrap_or(CancellationWaitOutcome::TimedOut)
+                        match tokio::time::timeout(RESOURCE_FRAME_TIMEOUT, receive_terminal).await {
+                            Ok(outcome) => outcome,
+                            Err(_) => {
+                                let _ = timeout_sender.send(CancellationWaitOutcome::TimedOut);
+                                loop {
+                                    match receiver.recv().await {
+                                        Some(Ok(ResourceTransportOutcome::StreamValues(_))) => {}
+                                        Some(result) => {
+                                            break CancellationWaitOutcome::Terminal(result);
+                                        }
+                                        None => {
+                                            break CancellationWaitOutcome::Terminal(Err(
+                                                ResourceTransportFailure::Transport,
+                                            ));
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     }),
                     Err(_) => {
                         CancellationWaitOutcome::Terminal(Err(ResourceTransportFailure::Transport))
@@ -599,14 +621,20 @@ impl CancellationWaiter {
     ) -> (
         Option<CancellationWaitOutcome>,
         Option<thread::JoinHandle<()>>,
+        Option<std::sync::mpsc::Receiver<CancellationWaitOutcome>>,
     ) {
         let Self { completion, thread } = self;
         match completion.recv_timeout(RESOURCE_FRAME_TIMEOUT + Duration::from_secs(1)) {
+            Ok(CancellationWaitOutcome::TimedOut) => (
+                Some(CancellationWaitOutcome::TimedOut),
+                Some(thread),
+                Some(completion),
+            ),
             Ok(outcome) => {
                 let _ = thread.join();
-                (Some(outcome), None)
+                (Some(outcome), None, None)
             }
-            Err(_) => (None, Some(thread)),
+            Err(_) => (None, Some(thread), Some(completion)),
         }
     }
 }
@@ -635,19 +663,25 @@ impl ResourceTransportSource {
         }
     }
 
+    /// Returns whether a worker-owned source can be reused after it returns.
+    ///
+    /// An injected source whose worker reset the stream has no usable
+    /// connection left. Do not put that source back into the executor: doing
+    /// so would make the next request fail through the normal pending path
+    /// while presenting a transport that cannot actually be opened.
+    fn can_restore(&self) -> bool {
+        match self {
+            // Authenticated sources open a fresh connection for each request.
+            Self::Authenticated(_) => true,
+            Self::Injected(InjectedResourceTransport::Stream(transport)) => {
+                transport.stream.is_some()
+            }
+        }
+    }
+
     fn take_connection(
         &mut self,
     ) -> Result<(StandardUnixStream, bool, ResourceProtocolConnection), ()> {
-        if self.persistent().stream.is_none() {
-            match self {
-                Self::Authenticated(_) => return Err(()),
-                Self::Injected(InjectedResourceTransport::Stream(transport)) => {
-                    if transport.stream.is_none() {
-                        return Err(());
-                    }
-                }
-            }
-        }
         let transport = self.persistent();
         let stream = transport.stream.take().ok_or(())?;
         let handshake_complete = transport.handshake_complete;
@@ -862,13 +896,82 @@ impl InstalledClientResourceExecutor {
                 .broker_pending
                 .take()
                 .expect("broker pending checked above");
+            self.discard_raw_resource_request(pending.stream_id);
             return Some(map_resource_transport_completion(pending.request, result));
         }
+    }
+
+    fn poll_detached(&mut self) -> Option<ClientResourceCompletion> {
+        for index in 0..self.detached.len() {
+            let result = self.detached[index]
+                .completion
+                .as_ref()
+                .map(|completion| completion.try_recv());
+            let Some(result) = result else {
+                continue;
+            };
+            let outcome = match result {
+                Ok(CancellationWaitOutcome::Terminal(outcome)) => outcome,
+                Ok(CancellationWaitOutcome::TimedOut) => continue,
+                Err(std::sync::mpsc::TryRecvError::Empty) => continue,
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    Err(ResourceTransportFailure::Transport)
+                }
+            };
+            let mut detached = self.detached.remove(index);
+            if let Some(waiter) = detached.waiter.take() {
+                let _ = waiter.join();
+            }
+            let _ = detached.worker.join();
+            self.restore_transport(&detached.transport_return);
+            return Some(map_resource_transport_completion(detached.request, outcome));
+        }
+
+        let Some(mut detached) = self.detached_broker.take() else {
+            return None;
+        };
+        let result = detached
+            .completion
+            .as_ref()
+            .map(|completion| completion.try_recv());
+        let Some(result) = result else {
+            self.detached_broker = Some(detached);
+            return None;
+        };
+        let outcome = match result {
+            Ok(CancellationWaitOutcome::Terminal(outcome)) => outcome,
+            Ok(CancellationWaitOutcome::TimedOut) | Err(std::sync::mpsc::TryRecvError::Empty) => {
+                self.detached_broker = Some(detached);
+                return None;
+            }
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                Err(ResourceTransportFailure::Transport)
+            }
+        };
+        if let Some(waiter) = detached.waiter.take() {
+            let _ = waiter.join();
+        }
+        self.discard_raw_resource_request(detached.stream_id);
+        if !detached.abandoned {
+            let _ = detached
+                .control
+                .commands
+                .send(BrokerCommand::AbandonResource {
+                    stream_id: detached.stream_id,
+                    request_id: detached.request.request_id(),
+                    reason: ResourceCancellationCode::RuntimeShutdown,
+                });
+        }
+        Some(map_resource_transport_completion(detached.request, outcome))
     }
 
     fn reap_detached(&mut self) {
         let detached = std::mem::take(&mut self.detached);
         for mut resource in detached {
+            if resource.completion.is_some() {
+                self.detached.push(resource);
+                continue;
+            }
             let waiter_finished = resource
                 .waiter
                 .as_ref()
@@ -879,18 +982,16 @@ impl InstalledClientResourceExecutor {
                     let _ = waiter.join();
                 }
                 let _ = resource.worker.join();
-                if self.transport.is_none() {
-                    self.transport = resource
-                        .transport_return
-                        .lock()
-                        .expect("resource transport return lock")
-                        .take();
-                }
+                self.restore_transport(&resource.transport_return);
             } else {
                 self.detached.push(resource);
             }
         }
         if let Some(mut resource) = self.detached_broker.take() {
+            if resource.completion.is_some() {
+                self.detached_broker = Some(resource);
+                return;
+            }
             let waiter_finished = resource
                 .waiter
                 .as_ref()
@@ -900,14 +1001,21 @@ impl InstalledClientResourceExecutor {
                 if let Some(waiter) = resource.waiter.take() {
                     let _ = waiter.join();
                 }
-                let _ = resource
-                    .control
-                    .commands
-                    .send(BrokerCommand::AbandonResource {
-                        stream_id: resource.stream_id,
-                        request_id: resource.request_id,
-                        reason: ResourceCancellationCode::RuntimeShutdown,
-                    });
+                if !resource.abandoned {
+                    let result = resource
+                        .control
+                        .commands
+                        .send(BrokerCommand::AbandonResource {
+                            stream_id: resource.stream_id,
+                            request_id: resource.request.request_id(),
+                            reason: ResourceCancellationCode::RuntimeShutdown,
+                        });
+                    if result.is_err() {
+                        self.detached_broker = Some(resource);
+                    } else {
+                        resource.abandoned = true;
+                    }
+                }
             } else {
                 self.detached_broker = Some(resource);
             }
@@ -922,10 +1030,30 @@ impl InstalledClientResourceExecutor {
         (
             Option<CancellationWaitOutcome>,
             Option<thread::JoinHandle<()>>,
+            Option<std::sync::mpsc::Receiver<CancellationWaitOutcome>>,
         ),
         Receiver<Result<ResourceTransportOutcome, ResourceTransportFailure>>,
     > {
         Ok(CancellationWaiter::start(receiver)?.wait())
+    }
+
+    fn restore_transport(
+        &mut self,
+        transport_return: &std::sync::Arc<std::sync::Mutex<Option<ResourceTransportSource>>>,
+    ) {
+        if self.transport.is_some() {
+            return;
+        }
+        let Some(transport) = transport_return
+            .lock()
+            .expect("resource transport return lock")
+            .take()
+        else {
+            return;
+        };
+        if transport.can_restore() {
+            self.transport = Some(transport);
+        }
     }
 }
 
@@ -2051,6 +2179,15 @@ fn encode_security_decisions(
         .collect()
 }
 
+fn same_resource_request_identity(
+    expected: &ClientResourceRequest,
+    actual: &ClientResourceRequest,
+) -> bool {
+    expected.request_id() == actual.request_id()
+        && expected.key() == actual.key()
+        && expected.generation() == actual.generation()
+}
+
 impl ClientResourceExecutor for InstalledClientResourceExecutor {
     fn inspect(&mut self, request: ClientInspectRequest) -> Result<RuntimeValue, String> {
         let (Some(kernel), Some(session)) =
@@ -2334,6 +2471,9 @@ impl ClientResourceExecutor for InstalledClientResourceExecutor {
     }
 
     fn poll(&mut self) -> Option<ClientResourceCompletion> {
+        if let Some(completion) = self.poll_detached() {
+            return Some(completion);
+        }
         if self.broker_pending.is_some() {
             return self.poll_broker();
         }
@@ -2370,11 +2510,7 @@ impl ClientResourceExecutor for InstalledClientResourceExecutor {
                 .expect("pending resource transport was checked above");
             self.discard_raw_resource_request(pending.stream_id);
             let _ = pending.worker.join();
-            self.transport = pending
-                .transport_return
-                .lock()
-                .expect("resource transport return lock")
-                .take();
+            self.restore_transport(&pending.transport_return);
             return Some(map_resource_transport_completion(pending.request, result));
         }
     }
@@ -2391,10 +2527,7 @@ impl ClientResourceExecutor for InstalledClientResourceExecutor {
 
     fn cancel(&mut self, request: ClientResourceRequest) -> ClientResourceCompletion {
         if let Some(mut pending) = self.broker_pending.take() {
-            if pending.request.request_id() != request.request_id()
-                || pending.request.key() != request.key()
-                || pending.request.generation() != request.generation()
-            {
+            if !same_resource_request_identity(&pending.request, &request) {
                 self.broker_pending = Some(pending);
                 return request.failed(SERVER_RESOURCE_INTERNAL_CODE.to_owned());
             }
@@ -2429,10 +2562,10 @@ impl ClientResourceExecutor for InstalledClientResourceExecutor {
                 Err(receiver) => {
                     pending.receiver = receiver;
                     self.broker_pending = Some(pending);
-                    return request.failed(SERVER_RESOURCE_INTERNAL_CODE.to_owned());
+                    return request.pending();
                 }
             };
-            let (outcome, waiter_thread) = waiter;
+            let (outcome, waiter_thread, completion) = waiter;
             self.discard_raw_resource_request(pending.stream_id);
             return match outcome {
                 Some(CancellationWaitOutcome::Terminal(result)) => {
@@ -2447,38 +2580,49 @@ impl ClientResourceExecutor for InstalledClientResourceExecutor {
                     map_resource_transport_completion(pending.request, result)
                 }
                 Some(CancellationWaitOutcome::TimedOut) => {
-                    let _ = pending
-                        .control
-                        .commands
-                        .send(BrokerCommand::AbandonResource {
-                            stream_id: pending.stream_id,
-                            request_id: pending.request.request_id(),
-                            reason: ResourceCancellationCode::RuntimeShutdown,
-                        });
-                    pending
-                        .request
-                        .failed(SERVER_RESOURCE_INTERNAL_CODE.to_owned())
+                    self.detached_broker = Some(DetachedBrokerResource {
+                        control: pending.control,
+                        stream_id: pending.stream_id,
+                        request: pending.request.clone(),
+                        waiter: waiter_thread,
+                        completion,
+                        abandoned: false,
+                    });
+                    pending.request.pending()
                 }
                 None => {
                     self.detached_broker = Some(DetachedBrokerResource {
                         control: pending.control,
                         stream_id: pending.stream_id,
-                        request_id: pending.request.request_id(),
+                        request: pending.request.clone(),
                         waiter: waiter_thread,
+                        completion,
+                        abandoned: false,
                     });
-                    pending
-                        .request
-                        .failed(SERVER_RESOURCE_INTERNAL_CODE.to_owned())
+                    pending.request.pending()
                 }
             };
+        }
+        if let Some(detached) = self.detached_broker.as_ref() {
+            if same_resource_request_identity(&detached.request, &request) {
+                return request.pending();
+            }
+            return request.failed(SERVER_RESOURCE_INTERNAL_CODE.to_owned());
+        }
+        if !self.detached.is_empty() {
+            if self
+                .detached
+                .iter()
+                .any(|detached| same_resource_request_identity(&detached.request, &request))
+            {
+                return request.pending();
+            }
+            return request.failed(SERVER_RESOURCE_INTERNAL_CODE.to_owned());
         }
         let Some(mut pending) = self.pending.take() else {
             return request.failed(SERVER_RESOURCE_INTERNAL_CODE.to_owned());
         };
-        if pending.request.request_id() != request.request_id()
-            || pending.request.key() != request.key()
-            || pending.request.generation() != request.generation()
-        {
+        if !same_resource_request_identity(&pending.request, &request) {
             self.pending = Some(pending);
             return request.failed(SERVER_RESOURCE_INTERNAL_CODE.to_owned());
         }
@@ -2489,22 +2633,14 @@ impl ClientResourceExecutor for InstalledClientResourceExecutor {
                     Ok(result @ Ok(_)) | Ok(result @ Err(_)) => {
                         self.discard_raw_resource_request(pending.stream_id);
                         let _ = pending.worker.join();
-                        self.transport = pending
-                            .transport_return
-                            .lock()
-                            .expect("resource transport return lock")
-                            .take();
+                        self.restore_transport(&pending.transport_return);
                         return map_resource_transport_completion(pending.request, result);
                     }
                     Err(TryRecvError::Empty) => break,
                     Err(TryRecvError::Disconnected) => {
                         self.discard_raw_resource_request(pending.stream_id);
                         let _ = pending.worker.join();
-                        self.transport = pending
-                            .transport_return
-                            .lock()
-                            .expect("resource transport return lock")
-                            .take();
+                        self.restore_transport(&pending.transport_return);
                         return map_resource_transport_completion(
                             pending.request,
                             Err(ResourceTransportFailure::Transport),
@@ -2522,34 +2658,121 @@ impl ClientResourceExecutor for InstalledClientResourceExecutor {
             Err(receiver) => {
                 pending.receiver = receiver;
                 self.pending = Some(pending);
-                return request.failed(SERVER_RESOURCE_INTERNAL_CODE.to_owned());
+                return request.pending();
             }
         };
-        let (outcome, waiter_thread) = waiter;
+        let (outcome, waiter_thread, completion) = waiter;
         self.discard_raw_resource_request(pending.stream_id);
         match outcome {
             Some(CancellationWaitOutcome::Terminal(result)) => {
                 let _ = pending.worker.join();
-                self.transport = pending
-                    .transport_return
-                    .lock()
-                    .expect("resource transport return lock")
-                    .take();
+                self.restore_transport(&pending.transport_return);
                 map_resource_transport_completion(pending.request, result)
             }
             Some(CancellationWaitOutcome::TimedOut) | None => {
                 let _ = pending.control.send(ResourceTransportControl::Shutdown);
                 self.detached.push(DetachedResourceTransport {
-                    control: pending.control,
+                    request: pending.request.clone(),
+                    control: Some(pending.control),
                     worker: pending.worker,
                     waiter: waiter_thread,
+                    completion,
                     transport_return: pending.transport_return,
                 });
-                pending
-                    .request
-                    .failed(SERVER_RESOURCE_INTERNAL_CODE.to_owned())
+                pending.request.pending()
             }
         }
+    }
+
+    fn abandon(&mut self, request: ClientResourceRequest) -> Result<(), String> {
+        if let Some(pending) = self.broker_pending.take() {
+            if !same_resource_request_identity(&pending.request, &request) {
+                self.broker_pending = Some(pending);
+                return Err("resource executor request mismatch".to_owned());
+            }
+            let cancel_result = pending
+                .control
+                .commands
+                .send(BrokerCommand::CancelResource {
+                    stream_id: pending.stream_id,
+                    request_id: pending.request.request_id(),
+                    reason: ResourceCancellationCode::ClientRequested,
+                });
+            let abandon_result = pending
+                .control
+                .commands
+                .send(BrokerCommand::AbandonResource {
+                    stream_id: pending.stream_id,
+                    request_id: pending.request.request_id(),
+                    reason: ResourceCancellationCode::RuntimeShutdown,
+                });
+            if cancel_result.is_err() || abandon_result.is_err() {
+                self.broker_pending = Some(pending);
+                return Err("resource executor broker unavailable".to_owned());
+            }
+            self.discard_raw_resource_request(pending.stream_id);
+            return Ok(());
+        }
+
+        if let Some(detached) = self
+            .detached
+            .iter_mut()
+            .find(|candidate| same_resource_request_identity(&candidate.request, &request))
+        {
+            detached.completion = None;
+            if let Some(control) = detached.control.take() {
+                let _ = control.send(ResourceTransportControl::Shutdown);
+            }
+            return Ok(());
+        }
+        if let Some(detached) = self.detached_broker.as_mut() {
+            if !same_resource_request_identity(&detached.request, &request) {
+                return Err("resource executor request mismatch".to_owned());
+            }
+            if !detached.abandoned {
+                let result = detached
+                    .control
+                    .commands
+                    .send(BrokerCommand::AbandonResource {
+                        stream_id: detached.stream_id,
+                        request_id: detached.request.request_id(),
+                        reason: ResourceCancellationCode::RuntimeShutdown,
+                    });
+                if result.is_err() {
+                    return Err("resource executor broker unavailable".to_owned());
+                }
+                detached.completion = None;
+                detached.abandoned = true;
+            } else {
+                detached.completion = None;
+            }
+            return Ok(());
+        }
+        if !self.detached.is_empty() {
+            return Err("resource executor request mismatch".to_owned());
+        }
+
+        let Some(pending) = self.pending.take() else {
+            return Ok(());
+        };
+        if !same_resource_request_identity(&pending.request, &request) {
+            self.pending = Some(pending);
+            return Err("resource executor request mismatch".to_owned());
+        }
+        self.discard_raw_resource_request(pending.stream_id);
+        let _ = pending.control.send(ResourceTransportControl::Shutdown);
+        drop(pending.receiver);
+        self.detached.push(DetachedResourceTransport {
+            request: pending.request,
+            // `Shutdown` was already sent. Drop the sender so a late terminal
+            // frame cannot leave the worker waiting for another control.
+            control: None,
+            worker: pending.worker,
+            waiter: None,
+            completion: None,
+            transport_return: pending.transport_return,
+        });
+        Ok(())
     }
 }
 impl Drop for InstalledClientResourceExecutor {
@@ -2579,7 +2802,9 @@ impl Drop for InstalledClientResourceExecutor {
             drop(pending.receiver);
         }
         for detached in self.detached.drain(..) {
-            let _ = detached.control.send(ResourceTransportControl::Shutdown);
+            if let Some(control) = detached.control {
+                let _ = control.send(ResourceTransportControl::Shutdown);
+            }
         }
         if let Some(detached) = self.detached_broker.take() {
             let _ = detached
@@ -2587,7 +2812,7 @@ impl Drop for InstalledClientResourceExecutor {
                 .commands
                 .send(BrokerCommand::AbandonResource {
                     stream_id: detached.stream_id,
-                    request_id: detached.request_id,
+                    request_id: detached.request.request_id(),
                     reason: ResourceCancellationCode::RuntimeShutdown,
                 });
         }
@@ -3037,12 +3262,15 @@ where
             request_id,
             reason,
         } => {
-            let Some(mut state) = resources.remove(&stream_id) else {
+            let Some(state) = resources.get(&stream_id) else {
                 return Ok(());
             };
             if state.request.request_id != request_id {
                 return Err(ResourceTransportFailure::Shape);
             }
+            let mut state = resources
+                .remove(&stream_id)
+                .expect("broker resource checked above");
             if !state.cancellation_requested {
                 let cancel = ResourceClientFrame::Cancel(ResourceCancel {
                     stream_id,
@@ -5563,9 +5791,12 @@ fn map_host_error(error: EmbeddedHostError) -> InstalledInvokeError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use orna_client::{
+        ClientResourceInvocationContext, ClientResourceKey, ClientResourceRequest, ClientStateStore,
+    };
     use orna_core::{
-        CatalogueRevisionId, FunctionId, InvocationId, ParameterId, PrincipalId, SchemaId,
-        SecurityAuditEventId, SourceBundleId, SourceRevisionId,
+        CallSiteId, CatalogueRevisionId, FunctionId, InvocationId, ParameterId, PrincipalId,
+        SchemaId, SecurityAuditEventId, SourceBundleId, SourceRevisionId,
         canonical_hash::{catalogue_digest, source_bundle_digest, source_revision_record_digest},
         catalogue::{
             CatalogueSnapshot, FunctionDomain, FunctionReturn, FunctionSecurity,
@@ -5579,10 +5810,11 @@ mod tests {
         },
         revision::{
             ActiveDatabaseRevisionInput, ActiveRevisionContent, CatalogueHashContext, RevisionPair,
-            StoredSourceRevision,
+            Sha256Digest, StoredSourceRevision,
         },
-        types::StandardScalar,
-        value::RuntimeValue,
+        security::InvocationTarget as ClientInvocationTarget,
+        types::{ResolvedType, StandardScalar},
+        value::{FunctionArgument, RuntimeValue},
     };
     use orna_protocol::{
         EventRecord, InvocationEventBatch, InvocationEventRecord, ResourceAccepted,
@@ -7487,10 +7719,11 @@ mod tests {
                 }))
                 .expect("terminal cancellation reaches cancellation waiter");
         });
-        let (result, waiter) =
+        let (result, waiter, completion) =
             InstalledClientResourceExecutor::wait_for_cancelled_transport(receiver)
                 .expect("cancellation waiter returns a terminal result");
         assert!(waiter.is_none());
+        assert!(completion.is_none());
         assert!(matches!(
             result,
             Some(CancellationWaitOutcome::Terminal(Ok(
@@ -8760,21 +8993,24 @@ mod tests {
             Vec::new(),
         )
         .expect("empty catalogue");
-        let active = ActiveDatabaseRevision::new(
-            RevisionPair::new(source.id(), catalogue.revision()),
-            source,
-            catalogue.clone(),
-            catalogue_digest(&catalogue, &[], &[], &[], &[]).expect("catalogue digest"),
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-        )
-        .expect("active revision");
-        let standard = verify_standard_library_snapshot(
-            retained_standard_library_snapshot().expect("retained standard snapshot"),
+        let standard = orna_standard::verify_standard_library_v6_snapshot(
+            orna_standard::retained_standard_library_v6_snapshot()
+                .expect("retained standard snapshot"),
         )
         .expect("verified standard snapshot");
+        let catalogue_hash =
+            catalogue_digest(&catalogue, &[], &[], &[], &[]).expect("catalogue digest");
+        let active = ActiveDatabaseRevision::new_with_catalogue_hash_context(
+            ActiveDatabaseRevisionInput::new(
+                RevisionPair::new(source.id(), catalogue.revision()),
+                source,
+                catalogue,
+                catalogue_hash,
+                ActiveRevisionContent::new(Vec::new(), Vec::new(), Vec::new(), Vec::new()),
+            ),
+            CatalogueHashContext::version_two(standard.clone()),
+        )
+        .expect("active revision");
         let registry = registered_opaque_codecs(&standard).expect("standard codecs");
         (active, registry)
     }
@@ -8795,6 +9031,50 @@ mod tests {
             item_window: 1,
             byte_window: MAX_RESOURCE_WINDOW,
         }
+    }
+
+    fn installed_client_test_request(
+        active: &ActiveDatabaseRevision,
+        state: &mut ClientStateStore,
+        invocation_seed: u8,
+    ) -> ClientResourceRequest {
+        let standard = active
+            .catalogue_hash_context()
+            .standard()
+            .expect("transport fixture pins the verified standard snapshot");
+        let target = ClientInvocationTarget::verified_standard(
+            orna_standard::STD_INVOKE_ECHO_FUNCTION_ID,
+            active.pair(),
+            standard.revision(),
+            orna_standard::STD_INVOKE_ECHO_FUNCTION_REVISION_ID,
+        );
+        let argument = FunctionArgument::new(
+            orna_standard::STD_INVOKE_ECHO_PARAMETER_ID,
+            RuntimeValue::Integer(7),
+        )
+        .expect("resource argument");
+        let digest =
+            ClientResourceKey::canonical_arguments_digest(active, std::slice::from_ref(&argument))
+                .expect("resource argument digest");
+        let key = ClientResourceKey::new(
+            target,
+            PrincipalId::from_bytes([0x91; 16]),
+            digest,
+            Sha256Digest::from_bytes([0x92; 32]),
+        );
+        state
+            .get_or_create_resource(key, ResolvedType::Scalar(StandardScalar::Integer))
+            .begin_request_with_context(
+                active,
+                ClientResourceInvocationContext::new(
+                    InvocationId::from_bytes([invocation_seed; 16]),
+                    CallSiteId::from_bytes([invocation_seed.wrapping_add(1); 16]),
+                    String::new(),
+                    String::new(),
+                ),
+                vec![argument],
+            )
+            .expect("client resource request")
     }
 
     fn read_resource_test_frame(stream: &mut StandardUnixStream) -> Vec<u8> {
@@ -9023,6 +9303,650 @@ mod tests {
             } if actual == nested_invocation_id
         ));
         peer_thread.join().expect("resource peer");
+    }
+
+    #[test]
+    fn installed_executor_abandon_closes_raw_controls_after_late_values() {
+        let (active, registry) = transport_test_context();
+        let standard = active
+            .catalogue_hash_context()
+            .standard()
+            .expect("transport fixture pins the verified standard snapshot");
+        let target = ClientInvocationTarget::verified_standard(
+            orna_standard::STD_INVOKE_ECHO_FUNCTION_ID,
+            active.pair(),
+            standard.revision(),
+            orna_standard::STD_INVOKE_ECHO_FUNCTION_REVISION_ID,
+        );
+        let argument = FunctionArgument::new(
+            orna_standard::STD_INVOKE_ECHO_PARAMETER_ID,
+            RuntimeValue::Integer(7),
+        )
+        .unwrap();
+        let digest =
+            ClientResourceKey::canonical_arguments_digest(&active, std::slice::from_ref(&argument))
+                .unwrap();
+        let key = ClientResourceKey::new(
+            target,
+            PrincipalId::from_bytes([0x91; 16]),
+            digest,
+            Sha256Digest::from_bytes([0x92; 32]),
+        );
+        let mut state = ClientStateStore::new();
+        let request = state
+            .get_or_create_resource(key, ResolvedType::Scalar(StandardScalar::Integer))
+            .begin_request_with_context(
+                &active,
+                ClientResourceInvocationContext::new(
+                    InvocationId::from_bytes([0x93; 16]),
+                    CallSiteId::from_bytes([0x94; 16]),
+                    String::new(),
+                    String::new(),
+                ),
+                vec![argument],
+            )
+            .unwrap();
+        let (peer, client) = StandardUnixStream::pair().expect("resource socket pair");
+        let (accepted_sender, accepted_receiver) = std::sync::mpsc::sync_channel(0);
+        let (late_sender, late_receiver) = std::sync::mpsc::sync_channel(0);
+        let (release_sender, release_receiver) = std::sync::mpsc::sync_channel(0);
+        let peer_active = active.clone();
+        let peer_registry = registry.clone();
+        let request_id = request.request_id();
+        let peer_thread = thread::spawn(move || {
+            let mut peer = peer;
+            peer.set_read_timeout(Some(Duration::from_secs(5)))
+                .expect("peer read timeout");
+            let mut hello = [0_u8; CONSTRUCTED_CLIENT_HELLO.len()];
+            peer.read_exact(&mut hello).expect("constructed hello");
+            assert_eq!(hello, CONSTRUCTED_CLIENT_HELLO);
+            peer.write_all(&CONSTRUCTED_SERVER_ACK)
+                .expect("constructed acknowledgement");
+            let encoded = read_resource_test_frame(&mut peer);
+            let ResourceClientFrame::Request(protocol_request) =
+                decode_resource_client_frame(&peer_active, &peer_registry, &encoded)
+                    .expect("client resource request")
+            else {
+                panic!("the client sent a non-request resource frame");
+            };
+            assert_eq!(protocol_request.request_id, request_id);
+            let accepted = ResourceServerFrame::Accepted(ResourceAccepted {
+                stream_id: protocol_request.stream_id,
+                request_id,
+                nested_invocation_id: InvocationId::from_bytes([0x95; 16]),
+                target_revision: protocol_request.target_revision,
+                resource_kind: protocol_request.resource_kind,
+            });
+            let encoded = encode_resource_server_frame(&peer_active, &peer_registry, &accepted)
+                .expect("encoded resource acceptance");
+            peer.write_all(&encoded).expect("resource acceptance");
+            accepted_sender.send(()).expect("accepted signal");
+
+            let encoded = read_resource_test_frame(&mut peer);
+            let ResourceClientFrame::Cancel(cancel) =
+                decode_resource_client_frame(&peer_active, &peer_registry, &encoded)
+                    .expect("client resource cancellation")
+            else {
+                panic!("the client sent a non-cancellation resource frame");
+            };
+            assert_eq!(cancel.request_id, request_id);
+            let value = RuntimeValue::Integer(7);
+            let late_values = ResourceServerFrame::Values(ResourceValues {
+                stream_id: protocol_request.stream_id,
+                request_id,
+                batch_sequence: 0,
+                item_count: 1,
+                byte_count: encode_constructed_value(&peer_active, &peer_registry, &value)
+                    .expect("encoded late value")
+                    .len() as u32,
+                values: vec![value],
+            });
+            let encoded = encode_resource_server_frame(&peer_active, &peer_registry, &late_values)
+                .expect("encoded late values");
+            let late_write = peer.write_all(&encoded);
+            late_sender
+                .send(late_write)
+                .expect("late values write signal");
+            release_receiver.recv().expect("release peer");
+        });
+        let mut executor = InstalledClientResourceExecutor {
+            active: active.clone(),
+            inspect_kernel: None,
+            inspect_session: None,
+            next_stream_id: 1,
+            broker: None,
+            raw_resource_authorizer: None,
+            transport: Some(ResourceTransportSource::Injected(
+                InjectedResourceTransport::Stream(PersistentResourceTransport {
+                    stream: Some(client),
+                    handshake_complete: false,
+                    protocol: ResourceProtocolConnection::new(),
+                    server_task: None,
+                }),
+            )),
+            pending: None,
+            broker_pending: None,
+            detached: Vec::new(),
+            detached_broker: None,
+            cancellation: ResourceCancellation::new(),
+        };
+
+        assert!(matches!(
+            executor.execute(request.clone()),
+            ClientResourceCompletion::Pending { .. }
+        ));
+        assert!(
+            accepted_receiver
+                .recv_timeout(Duration::from_secs(1))
+                .is_ok(),
+            "resource request was not accepted before abandon",
+        );
+        assert_eq!(executor.abandon(request), Ok(()));
+        let late_result = late_receiver.recv_timeout(Duration::from_secs(1));
+        let deadline = std::time::Instant::now() + Duration::from_secs(1);
+        let worker_finished = loop {
+            if executor
+                .detached
+                .first()
+                .is_some_and(|resource| resource.worker.is_finished())
+            {
+                break true;
+            }
+            if std::time::Instant::now() >= deadline {
+                break false;
+            }
+            thread::yield_now();
+        };
+        release_sender.send(()).expect("release peer");
+        peer_thread.join().expect("resource peer");
+        assert!(late_result.is_ok(), "late values did not reach the worker");
+        assert!(
+            worker_finished,
+            "direct abandon must close controls after late values"
+        );
+        executor.reap_detached();
+        assert!(executor.detached.is_empty());
+        assert!(executor.transport.is_none());
+        assert!(executor.poll().is_none());
+    }
+
+    #[test]
+    fn detached_raw_poll_publishes_terminal_after_timeout_marker() {
+        let (active, _registry) = transport_test_context();
+        let mut state = ClientStateStore::new();
+        let request = installed_client_test_request(&active, &mut state, 0x91);
+        let (sender, completion) = std::sync::mpsc::sync_channel(2);
+        sender
+            .send(CancellationWaitOutcome::TimedOut)
+            .expect("timeout marker");
+        let worker = thread::spawn(|| {});
+        let mut executor = InstalledClientResourceExecutor {
+            active,
+            inspect_kernel: None,
+            inspect_session: None,
+            next_stream_id: 1,
+            broker: None,
+            raw_resource_authorizer: None,
+            transport: None,
+            pending: None,
+            broker_pending: None,
+            detached: vec![DetachedResourceTransport {
+                request: request.clone(),
+                control: None,
+                worker,
+                waiter: None,
+                completion: Some(completion),
+                transport_return: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            }],
+            detached_broker: None,
+            cancellation: ResourceCancellation::new(),
+        };
+
+        assert!(executor.poll().is_none());
+        sender
+            .send(CancellationWaitOutcome::Terminal(Ok(
+                ResourceTransportOutcome::Cancelled {
+                    nested_invocation_id: None,
+                },
+            )))
+            .expect("delayed cancellation terminal");
+        assert!(matches!(
+            executor.poll(),
+            Some(ClientResourceCompletion::Cancelled { .. })
+        ));
+        assert!(executor.detached.is_empty());
+    }
+
+    #[test]
+    fn detached_broker_poll_publishes_terminal_after_timeout_marker() {
+        let (active, _registry) = transport_test_context();
+        let mut state = ClientStateStore::new();
+        let request = installed_client_test_request(&active, &mut state, 0x92);
+        let (broker, _commands) = SharedInvokeBroker::pending();
+        let (sender, completion) = std::sync::mpsc::sync_channel(2);
+        sender
+            .send(CancellationWaitOutcome::TimedOut)
+            .expect("timeout marker");
+        let mut executor = InstalledClientResourceExecutor {
+            active,
+            inspect_kernel: None,
+            inspect_session: None,
+            next_stream_id: 1,
+            broker: Some(broker.clone()),
+            raw_resource_authorizer: None,
+            transport: None,
+            pending: None,
+            broker_pending: None,
+            detached: Vec::new(),
+            detached_broker: Some(DetachedBrokerResource {
+                control: broker,
+                stream_id: 1,
+                request: request.clone(),
+                waiter: None,
+                completion: Some(completion),
+                abandoned: false,
+            }),
+            cancellation: ResourceCancellation::new(),
+        };
+
+        assert!(executor.poll().is_none());
+        sender
+            .send(CancellationWaitOutcome::Terminal(Ok(
+                ResourceTransportOutcome::Cancelled {
+                    nested_invocation_id: None,
+                },
+            )))
+            .expect("delayed cancellation terminal");
+        assert!(matches!(
+            executor.poll(),
+            Some(ClientResourceCompletion::Cancelled { .. })
+        ));
+        assert!(executor.detached_broker.is_none());
+    }
+
+    #[test]
+    fn detached_broker_abandon_suppresses_delayed_terminal() {
+        let (active, _registry) = transport_test_context();
+        let mut state = ClientStateStore::new();
+        let request = installed_client_test_request(&active, &mut state, 0x92);
+        let (broker, mut commands) = SharedInvokeBroker::pending();
+        let (sender, completion) = std::sync::mpsc::sync_channel(2);
+        sender
+            .send(CancellationWaitOutcome::TimedOut)
+            .expect("timeout marker");
+        let mut executor = InstalledClientResourceExecutor {
+            active,
+            inspect_kernel: None,
+            inspect_session: None,
+            next_stream_id: 1,
+            broker: Some(broker.clone()),
+            raw_resource_authorizer: None,
+            transport: None,
+            pending: None,
+            broker_pending: None,
+            detached: Vec::new(),
+            detached_broker: Some(DetachedBrokerResource {
+                control: broker,
+                stream_id: 1,
+                request: request.clone(),
+                waiter: None,
+                completion: Some(completion),
+                abandoned: false,
+            }),
+            cancellation: ResourceCancellation::new(),
+        };
+
+        assert!(executor.poll().is_none());
+        assert_eq!(executor.abandon(request.clone()), Ok(()));
+        assert!(matches!(
+            commands.try_recv(),
+            Ok(BrokerCommand::AbandonResource { stream_id: 1, .. })
+        ));
+        assert!(
+            sender
+                .send(CancellationWaitOutcome::Terminal(Ok(
+                    ResourceTransportOutcome::Cancelled {
+                        nested_invocation_id: None,
+                    },
+                )))
+                .is_err(),
+            "abandon must drop the detached completion channel",
+        );
+        assert!(executor.poll().is_none());
+        executor.reap_detached();
+        assert!(executor.detached_broker.is_none());
+    }
+
+    #[test]
+    fn installed_executor_detached_raw_abandon_requires_exact_identity() {
+        let (active, _registry) = transport_test_context();
+        let mut state = ClientStateStore::new();
+        let request = installed_client_test_request(&active, &mut state, 0x93);
+        let mismatched_request = installed_client_test_request(&active, &mut state, 0x96);
+        let (control, mut controls) = mpsc::unbounded_channel();
+        let (finished_sender, finished_receiver) = std::sync::mpsc::sync_channel(0);
+        let worker = thread::spawn(move || {
+            assert!(matches!(
+                controls.blocking_recv(),
+                Some(ResourceTransportControl::Shutdown)
+            ));
+            finished_sender.send(()).expect("worker completion signal");
+        });
+        let mut executor = InstalledClientResourceExecutor {
+            active,
+            inspect_kernel: None,
+            inspect_session: None,
+            next_stream_id: 1,
+            broker: None,
+            raw_resource_authorizer: None,
+            transport: None,
+            pending: None,
+            broker_pending: None,
+            detached: vec![DetachedResourceTransport {
+                request: request.clone(),
+                control: Some(control),
+                worker,
+                waiter: None,
+                completion: None,
+                transport_return: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            }],
+            detached_broker: None,
+            cancellation: ResourceCancellation::new(),
+        };
+
+        assert_eq!(
+            executor.abandon(mismatched_request),
+            Err("resource executor request mismatch".to_owned())
+        );
+        assert!(
+            executor
+                .detached
+                .first()
+                .is_some_and(|resource| { resource.control.is_some() })
+        );
+
+        assert_eq!(executor.abandon(request), Ok(()));
+        assert!(
+            executor
+                .detached
+                .first()
+                .is_some_and(|resource| { resource.control.is_none() })
+        );
+        finished_receiver
+            .recv_timeout(Duration::from_secs(1))
+            .expect("detached raw worker did not receive shutdown");
+        let deadline = std::time::Instant::now() + Duration::from_secs(1);
+        while !executor.detached.is_empty() && std::time::Instant::now() < deadline {
+            executor.reap_detached();
+            if !executor.detached.is_empty() {
+                thread::yield_now();
+            }
+        }
+        assert!(executor.detached.is_empty());
+    }
+
+    #[test]
+    fn installed_executor_detached_broker_abandon_requires_exact_identity() {
+        let (active, _registry) = transport_test_context();
+        let mut state = ClientStateStore::new();
+        let request = installed_client_test_request(&active, &mut state, 0xa3);
+        let mismatched_request = installed_client_test_request(&active, &mut state, 0xa6);
+        let (broker, mut commands) = SharedInvokeBroker::pending();
+        let mut executor = InstalledClientResourceExecutor {
+            active,
+            inspect_kernel: None,
+            inspect_session: None,
+            next_stream_id: 1,
+            broker: Some(broker.clone()),
+            raw_resource_authorizer: None,
+            transport: None,
+            pending: None,
+            broker_pending: None,
+            detached: Vec::new(),
+            detached_broker: Some(DetachedBrokerResource {
+                control: broker,
+                stream_id: 1,
+                request: request.clone(),
+                waiter: None,
+                completion: None,
+                abandoned: false,
+            }),
+            cancellation: ResourceCancellation::new(),
+        };
+
+        assert_eq!(
+            executor.abandon(mismatched_request),
+            Err("resource executor request mismatch".to_owned())
+        );
+        assert!(
+            executor
+                .detached_broker
+                .as_ref()
+                .is_some_and(|resource| !resource.abandoned)
+        );
+        assert!(commands.try_recv().is_err());
+
+        assert_eq!(executor.abandon(request.clone()), Ok(()));
+        assert!(
+            executor
+                .detached_broker
+                .as_ref()
+                .is_some_and(|resource| resource.abandoned)
+        );
+        assert!(matches!(
+            commands.try_recv(),
+            Ok(BrokerCommand::AbandonResource {
+                stream_id: 1,
+                request_id,
+                reason: ResourceCancellationCode::RuntimeShutdown,
+            }) if request_id == request.request_id()
+        ));
+        executor.reap_detached();
+        assert!(executor.detached_broker.is_none());
+    }
+
+    #[test]
+    fn installed_executor_broker_abandon_retains_pending_on_closed_channel() {
+        let (active, _registry) = transport_test_context();
+        let mut state = ClientStateStore::new();
+        let request = installed_client_test_request(&active, &mut state, 0xa9);
+        let (broker, commands) = SharedInvokeBroker::pending();
+        drop(commands);
+        let (_sender, receiver) = mpsc::channel(1);
+        let mut executor = InstalledClientResourceExecutor {
+            active,
+            inspect_kernel: None,
+            inspect_session: None,
+            next_stream_id: 1,
+            broker: Some(broker.clone()),
+            raw_resource_authorizer: None,
+            transport: None,
+            pending: None,
+            broker_pending: Some(PendingBrokerResource {
+                request: request.clone(),
+                receiver,
+                control: broker,
+                stream_id: 1,
+                cancel_requested: false,
+            }),
+            detached: Vec::new(),
+            detached_broker: None,
+            cancellation: ResourceCancellation::new(),
+        };
+
+        assert_eq!(
+            executor.abandon(request.clone()),
+            Err("resource executor broker unavailable".to_owned())
+        );
+        assert!(
+            executor.broker_pending.as_ref().is_some_and(|pending| {
+                same_resource_request_identity(&pending.request, &request)
+            }),
+            "closed broker must retain the exact pending request",
+        );
+    }
+
+    #[test]
+    fn installed_executor_detached_raw_cancel_requires_exact_identity() {
+        let (active, _registry) = transport_test_context();
+        let mut state = ClientStateStore::new();
+        let request = installed_client_test_request(&active, &mut state, 0xb3);
+        let mismatched_request = installed_client_test_request(&active, &mut state, 0xb6);
+        let (control, _controls) = mpsc::unbounded_channel();
+        let worker = thread::spawn(|| {});
+        let mut executor = InstalledClientResourceExecutor {
+            active,
+            inspect_kernel: None,
+            inspect_session: None,
+            next_stream_id: 1,
+            broker: None,
+            raw_resource_authorizer: None,
+            transport: None,
+            pending: None,
+            broker_pending: None,
+            detached: vec![DetachedResourceTransport {
+                request: request.clone(),
+                control: Some(control),
+                worker,
+                waiter: None,
+                completion: None,
+                transport_return: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            }],
+            detached_broker: None,
+            cancellation: ResourceCancellation::new(),
+        };
+
+        assert!(matches!(
+            executor.cancel(mismatched_request),
+            ClientResourceCompletion::Failed {
+                code,
+                ..
+            } if code == SERVER_RESOURCE_INTERNAL_CODE
+        ));
+        assert_eq!(executor.detached.len(), 1);
+        assert!(matches!(
+            executor.cancel(request.clone()),
+            ClientResourceCompletion::Pending {
+                request_id,
+                key,
+                generation,
+            } if request_id == request.request_id()
+                && key == request.key()
+                && generation == request.generation()
+        ));
+        assert_eq!(executor.detached.len(), 1);
+    }
+
+    #[test]
+    fn installed_executor_detached_broker_cancel_requires_exact_identity() {
+        let (active, _registry) = transport_test_context();
+        let mut state = ClientStateStore::new();
+        let request = installed_client_test_request(&active, &mut state, 0xc3);
+        let mismatched_request = installed_client_test_request(&active, &mut state, 0xc6);
+        let (broker, _commands) = SharedInvokeBroker::pending();
+        let mut executor = InstalledClientResourceExecutor {
+            active,
+            inspect_kernel: None,
+            inspect_session: None,
+            next_stream_id: 1,
+            broker: Some(broker.clone()),
+            raw_resource_authorizer: None,
+            transport: None,
+            pending: None,
+            broker_pending: None,
+            detached: Vec::new(),
+            detached_broker: Some(DetachedBrokerResource {
+                control: broker,
+                stream_id: 1,
+                request: request.clone(),
+                waiter: None,
+                completion: None,
+                abandoned: false,
+            }),
+            cancellation: ResourceCancellation::new(),
+        };
+
+        assert!(matches!(
+            executor.cancel(mismatched_request),
+            ClientResourceCompletion::Failed {
+                code,
+                ..
+            } if code == SERVER_RESOURCE_INTERNAL_CODE
+        ));
+        assert!(executor.detached_broker.is_some());
+        assert!(matches!(
+            executor.cancel(request.clone()),
+            ClientResourceCompletion::Pending {
+                request_id,
+                key,
+                generation,
+            } if request_id == request.request_id()
+                && key == request.key()
+                && generation == request.generation()
+        ));
+        assert!(executor.detached_broker.is_some());
+    }
+
+    #[test]
+    fn reap_detached_drops_reset_injected_transport() {
+        let (active, _registry) = transport_test_context();
+        let mut state = ClientStateStore::new();
+        let request = installed_client_test_request(&active, &mut state, 0xd3);
+        let transport_return = std::sync::Arc::new(std::sync::Mutex::new(Some(
+            ResourceTransportSource::Injected(InjectedResourceTransport::Stream(
+                PersistentResourceTransport {
+                    stream: None,
+                    handshake_complete: false,
+                    protocol: ResourceProtocolConnection::new(),
+                    server_task: None,
+                },
+            )),
+        )));
+        let worker = thread::spawn(|| {});
+        let mut executor = InstalledClientResourceExecutor {
+            active,
+            inspect_kernel: None,
+            inspect_session: None,
+            next_stream_id: 1,
+            broker: None,
+            raw_resource_authorizer: None,
+            transport: None,
+            pending: None,
+            broker_pending: None,
+            detached: vec![DetachedResourceTransport {
+                request: request.clone(),
+                control: None,
+                worker,
+                waiter: None,
+                completion: None,
+                transport_return: transport_return.clone(),
+            }],
+            detached_broker: None,
+            cancellation: ResourceCancellation::new(),
+        };
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(1);
+        while !executor.detached.is_empty() && std::time::Instant::now() < deadline {
+            executor.reap_detached();
+            if !executor.detached.is_empty() {
+                thread::yield_now();
+            }
+        }
+        assert!(executor.detached.is_empty());
+        assert!(executor.transport.is_none());
+        assert!(
+            transport_return
+                .lock()
+                .expect("transport return lock")
+                .is_none()
+        );
+        assert!(matches!(
+            executor.execute(request),
+            ClientResourceCompletion::Failed {
+                code,
+                ..
+            } if code == SERVER_RESOURCE_INTERNAL_CODE
+        ));
     }
 
     #[test]

@@ -395,6 +395,17 @@ pub enum ClientActionError {
     Pending,
     StaleCompletion,
     Executor(String),
+    /// The executor still owns a nested resource request after cancellation
+    /// could not complete synchronously.
+    ///
+    /// The caller owns the retained resource in `ClientStateStore` and can use
+    /// this identity to match a later executor completion or release attempt.
+    ExecutorPending {
+        code: String,
+        request_id: InvocationId,
+        key: ClientResourceKey,
+        generation: ClientResourceGeneration,
+    },
     Evaluation(String),
 }
 impl fmt::Display for ClientActionError {
@@ -412,6 +423,12 @@ impl fmt::Display for ClientActionError {
             Self::Pending => f.write_str("the CLIENT action remains pending"),
             Self::StaleCompletion => f.write_str("the CLIENT action completion is stale"),
             Self::Executor(m) => write!(f, "the CLIENT action executor failed: {m}"),
+            Self::ExecutorPending { code, .. } => {
+                write!(
+                    f,
+                    "the CLIENT action executor retains a pending resource: {code}"
+                )
+            }
             Self::Evaluation(m) => write!(f, "the CLIENT action target failed evaluation: {m}"),
         }
     }
@@ -550,6 +567,8 @@ pub enum ClientResourceError {
         /// The generation supplied by the executor.
         actual: ClientResourceGeneration,
     },
+    /// The executor could not release a pending request.
+    Executor(String),
     /// The operation is not valid while the resource has this status.
     InvalidTransition {
         /// The current resource status.
@@ -626,6 +645,9 @@ impl fmt::Display for ClientResourceError {
                 actual.value(),
                 expected.value(),
             ),
+            Self::Executor(message) => {
+                write!(formatter, "CLIENT resource executor failed: {message}")
+            }
             Self::InvalidTransition { status } => {
                 write!(
                     formatter,
@@ -960,6 +982,45 @@ pub enum ClientResourceCompletion {
     },
 }
 impl ClientResourceCompletion {
+    /// Returns the complete request identity carried by this completion.
+    fn identity(&self) -> (InvocationId, ClientResourceKey, ClientResourceGeneration) {
+        match self {
+            Self::Ready {
+                request_id,
+                key,
+                generation,
+                ..
+            }
+            | Self::StreamValues {
+                request_id,
+                key,
+                generation,
+                ..
+            }
+            | Self::StreamCompleted {
+                request_id,
+                key,
+                generation,
+            }
+            | Self::Pending {
+                request_id,
+                key,
+                generation,
+            }
+            | Self::Failed {
+                request_id,
+                key,
+                generation,
+                ..
+            }
+            | Self::Cancelled {
+                request_id,
+                key,
+                generation,
+            } => (*request_id, *key, *generation),
+        }
+    }
+
     /// Returns the request identity that produced this completion.
     pub const fn request_id(&self) -> InvocationId {
         match self {
@@ -970,6 +1031,14 @@ impl ClientResourceCompletion {
             | Self::Failed { request_id, .. }
             | Self::Cancelled { request_id, .. } => *request_id,
         }
+    }
+
+    /// Returns whether this completion belongs to the supplied request.
+    fn matches_request(&self, request: &ClientResourceRequest) -> bool {
+        let (request_id, key, generation) = self.identity();
+        request_id == request.request_id()
+            && key == request.key()
+            && generation == request.generation()
     }
 }
 
@@ -1292,12 +1361,22 @@ pub trait ClientResourceExecutor {
     fn poll(&mut self) -> Option<ClientResourceCompletion> {
         None
     }
-    /// Cancels one live request and returns its terminal completion.
+    /// Requests cancellation of one live request.
     ///
-    /// The default completes the local lifecycle. A transport-backed executor
-    /// can override this method to send its protocol cancellation control.
+    /// The default reports `Pending` because a generic executor cannot prove
+    /// that it released executor-owned work. An executor that can complete
+    /// cancellation must override this method and return the terminal
+    /// completion only after it has removed the request from its ownership.
     fn cancel(&mut self, request: ClientResourceRequest) -> ClientResourceCompletion {
-        request.cancelled()
+        request.pending()
+    }
+    /// Releases one request after its owner chooses a local terminal outcome.
+    ///
+    /// Implementations must remove transport ownership and must not expose a
+    /// later completion through [`Self::poll`]. The default fails closed because
+    /// a generic executor cannot prove that it released a pending request.
+    fn abandon(&mut self, _request: ClientResourceRequest) -> Result<(), String> {
+        Err("resource executor cannot abandon a pending request".to_owned())
     }
     /// Cancels the active transport request, when one is pending.
     ///
@@ -1371,6 +1450,9 @@ where
             Ok(value) => request.ready(value),
             Err(code) => request.failed(code),
         }
+    }
+    fn cancel(&mut self, request: ClientResourceRequest) -> ClientResourceCompletion {
+        request.cancelled()
     }
 
     fn inspect(&mut self, request: ClientInspectRequest) -> Result<RuntimeValue, String> {
@@ -1612,73 +1694,29 @@ impl ClientResource {
         active: &ActiveDatabaseRevision,
         completion: ClientResourceCompletion,
     ) -> Result<(), ClientResourceError> {
+        self.validate_completion_identity(&completion)?;
         match completion {
             ClientResourceCompletion::Ready {
-                request_id,
-                key,
-                generation,
-                value,
+                generation, value, ..
             } => {
-                self.require_generation(generation)?;
-                self.require_request_id(request_id)?;
-                self.require_key(key)?;
                 if self.kind != ResourceKind::Scalar {
                     return Err(ClientResourceError::TypeMismatch);
                 }
                 self.publish_ready(active, generation, value)
             }
             ClientResourceCompletion::StreamValues {
-                request_id,
-                key,
-                generation,
-                values,
-            } => {
-                self.require_generation(generation)?;
-                self.require_request_id(request_id)?;
-                self.require_key(key)?;
-                self.append_stream_values(active, generation, values)
-            }
-            ClientResourceCompletion::StreamCompleted {
-                request_id,
-                key,
-                generation,
-            } => {
-                self.require_generation(generation)?;
-                self.require_request_id(request_id)?;
-                self.require_key(key)?;
+                generation, values, ..
+            } => self.append_stream_values(active, generation, values),
+            ClientResourceCompletion::StreamCompleted { generation, .. } => {
                 self.complete_stream(active, generation)
             }
-            ClientResourceCompletion::Cancelled {
-                request_id,
-                key,
-                generation,
-            } => {
-                self.require_generation(generation)?;
-                self.require_request_id(request_id)?;
-                self.require_key(key)?;
-                self.cancel(generation)
-            }
-            ClientResourceCompletion::Pending {
-                request_id,
-                key,
-                generation,
-            } => {
-                self.require_generation(generation)?;
-                self.require_request_id(request_id)?;
-                self.require_key(key)?;
+            ClientResourceCompletion::Cancelled { generation, .. } => self.cancel(generation),
+            ClientResourceCompletion::Pending { generation, .. } => {
                 self.require_loading(generation)
             }
             ClientResourceCompletion::Failed {
-                request_id,
-                key,
-                generation,
-                code,
-            } => {
-                self.require_generation(generation)?;
-                self.require_request_id(request_id)?;
-                self.require_key(key)?;
-                self.publish_failure(generation, code)
-            }
+                generation, code, ..
+            } => self.publish_failure(generation, code),
         }
     }
 
@@ -1889,16 +1927,30 @@ impl ClientResource {
     /// Asks the owning executor to cancel the active request before local
     /// invalidation makes its generation stale.
     ///
-    /// The returned executor completion is intentionally discarded: the
-    /// invalidation itself is the local linearisation point, so every
-    /// completion for the old generation must be rejected as stale.
+    /// A pending cancellation does not release executor ownership. In that
+    /// case the executor must explicitly abandon the request before local
+    /// invalidation can advance the generation. If abandonment fails, this
+    /// method leaves the resource unchanged and returns the executor error.
+    /// The returned executor completion is otherwise intentionally discarded:
+    /// invalidation is the local linearisation point, so every completion for
+    /// the old generation must be rejected as stale.
     pub fn invalidate_with_executor(
         &mut self,
         executor: &mut dyn ClientResourceExecutor,
     ) -> Result<(), ClientResourceError> {
+        // Check the next generation before releasing executor ownership. If
+        // the counter is exhausted, the resource must remain unchanged.
+        self.next_generation()?;
         if let Some(request) = self.active_request() {
-            let _ = executor.cancel(request);
+            let cancellation = executor.cancel(request.clone());
+            self.validate_completion_identity(&cancellation)?;
+            if matches!(cancellation, ClientResourceCompletion::Pending { .. }) {
+                if let Err(message) = executor.abandon(request) {
+                    return Err(ClientResourceError::Executor(message));
+                }
+            }
         }
+
         self.invalidate()
     }
 
@@ -1933,6 +1985,16 @@ impl ClientResource {
                 .ok_or(ClientResourceError::GenerationExhausted)?,
         );
         Ok(self.generation)
+    }
+
+    fn validate_completion_identity(
+        &self,
+        completion: &ClientResourceCompletion,
+    ) -> Result<(), ClientResourceError> {
+        let (request_id, key, generation) = completion.identity();
+        self.require_generation(generation)?;
+        self.require_request_id(request_id)?;
+        self.require_key(key)
     }
 
     fn require_generation(
@@ -2620,6 +2682,11 @@ impl ClientStateStore {
     /// Returns mutable access to one cached resource.
     pub fn resource_mut(&mut self, key: ClientResourceKey) -> Option<&mut ClientResource> {
         self.resources.get_mut(&key)
+    }
+    /// Retains a resource whose executor ownership was handed back to the
+    /// caller after a nested action failure.
+    fn retain_resource(&mut self, resource: ClientResource) {
+        self.resources.insert(resource.key(), resource);
     }
 
     /// Returns the existing resource, or creates one with its first declared type.
@@ -6002,36 +6069,92 @@ fn client_action_target_is_provenance_safe(
 /// Adapts nested CLIENT resource execution to the terminal action contract.
 ///
 /// A nested resource has no independent action completion surface. If its
-/// executor reports `Pending`, cancel the request and return that terminal
-/// cancellation rather than retaining a pending outer action.
+/// executor reports `Pending`, the adapter cannot create a local cancellation:
+/// the remote executor may still publish a committed terminal result. It
+/// retains the request for the caller instead.
 struct ClientActionNestedExecutor<'a> {
     inner: &'a mut dyn ClientResourceExecutor,
+    pending_request: Option<ClientResourceRequest>,
+}
+
+impl ClientActionNestedExecutor<'_> {
+    fn release_failed(&self) -> bool {
+        self.pending_request.is_some()
+    }
+
+    fn pending_request_identity(
+        &self,
+    ) -> Option<(InvocationId, ClientResourceKey, ClientResourceGeneration)> {
+        self.pending_request
+            .as_ref()
+            .map(|request| (request.request_id(), request.key(), request.generation()))
+    }
+
+    fn pending_matches(&self, request: &ClientResourceRequest) -> bool {
+        self.pending_request.as_ref().is_none_or(|pending| {
+            pending.request_id() == request.request_id()
+                && pending.key() == request.key()
+                && pending.generation() == request.generation()
+        })
+    }
 }
 
 impl ClientResourceExecutor for ClientActionNestedExecutor<'_> {
     fn execute(&mut self, request: ClientResourceRequest) -> ClientResourceCompletion {
+        if !self.pending_matches(&request) {
+            return request.failed(ACTION_FAILURE_CODE.to_owned());
+        }
         let completion = self.inner.execute(request.clone());
+        if !completion.matches_request(&request) {
+            // A mismatched child result cannot prove that the original
+            // request was released. Retain the original until explicit
+            // abandonment.
+            self.pending_request = Some(request.clone());
+            return request.pending();
+        }
+
         if matches!(completion, ClientResourceCompletion::Pending { .. }) {
-            let cancellation = self.inner.cancel(request.clone());
-            if matches!(cancellation, ClientResourceCompletion::Pending { .. }) {
-                // A nested action has no resumable continuation or retained
-                // resource owner. Terminalise local cancellation so the outer
-                // action cannot fail while dropping the nested request owner.
-                return request.cancelled();
-            }
-            return cancellation;
+            return self.cancel(request);
         }
         completion
     }
 
-    fn cancel(&mut self, request: ClientResourceRequest) -> ClientResourceCompletion {
-        self.inner.cancel(request)
+    fn abandon(&mut self, request: ClientResourceRequest) -> Result<(), String> {
+        if !self.pending_matches(&request) {
+            return Err("resource executor request mismatch".to_owned());
+        }
+        match self.inner.abandon(request.clone()) {
+            Ok(()) => {
+                if self.pending_request.is_some() {
+                    self.pending_request = None;
+                }
+                Ok(())
+            }
+            Err(error) => Err(error),
+        }
     }
 
-    fn inspect(
-        &mut self,
-        request: ClientInspectRequest,
-    ) -> Result<RuntimeValue, String> {
+    fn cancel(&mut self, request: ClientResourceRequest) -> ClientResourceCompletion {
+        if !self.pending_matches(&request) {
+            return request.failed(ACTION_FAILURE_CODE.to_owned());
+        }
+        let completion = self.inner.cancel(request.clone());
+        if !completion.matches_request(&request) {
+            // A mismatched child result cannot prove that the original
+            // request was released. Retain the original until explicit
+            // abandonment.
+            self.pending_request = Some(request.clone());
+            return request.pending();
+        }
+        if matches!(completion, ClientResourceCompletion::Pending { .. }) {
+            self.pending_request = Some(request);
+        } else if self.pending_request.is_some() {
+            self.pending_request = None;
+        }
+        completion
+    }
+
+    fn inspect(&mut self, request: ClientInspectRequest) -> Result<RuntimeValue, String> {
         self.inner.inspect(request)
     }
 
@@ -6170,7 +6293,10 @@ fn trigger_client_action_with_lineage(
 
             let mut staged = state.clone();
             staged.set_security_context_digest(security_context_digest(authorisation));
-            let mut nested_executor = ClientActionNestedExecutor { inner: executor };
+            let mut nested_executor = ClientActionNestedExecutor {
+                inner: executor,
+                pending_request: None,
+            };
             let mut nested = Some(&mut nested_executor as &mut dyn ClientResourceExecutor);
             let result = evaluate_function(
                 active,
@@ -6188,10 +6314,57 @@ fn trigger_client_action_with_lineage(
                 lineage.with_current(request.request_id()),
                 &mut nested,
             );
+            if nested_executor.release_failed() {
+                let changed_resources: Vec<_> = staged
+                    .resources
+                    .iter()
+                    .filter_map(|(candidate_key, resource)| {
+                        let replacement_cancelled =
+                            state.resources.get(candidate_key).is_some_and(|previous| {
+                                previous.status() == ClientResourceStatus::Loading
+                                    && resource.status() == ClientResourceStatus::Idle
+                                    && resource.generation().value() > previous.generation().value()
+                            });
+                        let pending_resource = nested_executor
+                            .pending_request_identity()
+                            .is_some_and(|(_, pending_key, pending_generation)| {
+                                resource.key() == pending_key
+                                    && resource.generation() == pending_generation
+                                    && resource.status() == ClientResourceStatus::Loading
+                            });
+                        (pending_resource || replacement_cancelled)
+                            .then_some((*candidate_key, resource.clone()))
+                    })
+                    .collect();
+                for (_, resource) in changed_resources {
+                    state.retain_resource(resource);
+                }
+                if let Some((request_id, key, generation)) =
+                    nested_executor.pending_request_identity()
+                {
+                    action_state.clear();
+                    return Err(ClientActionError::ExecutorPending {
+                        code: ACTION_FAILURE_CODE.to_owned(),
+                        request_id,
+                        key,
+                        generation,
+                    });
+                }
+                // The child request remains owned by the executor, but no
+                // retained resource can safely consume it until the caller
+                // resumes the handoff. Do not retain the synthetic outer
+                // request.
+                action_state.clear();
+                return Err(ClientActionError::Executor(ACTION_FAILURE_CODE.to_owned()));
+            }
             let completion = match result {
                 Ok((_, value)) => request.ready(value),
                 Err(ClientExecutionError::ResourceEvaluation {
                     source: ClientResourceExecutionError::Cancelled,
+                    ..
+                }) => request.cancelled(),
+                Err(ClientExecutionError::ResourceEvaluation {
+                    source: ClientResourceExecutionError::Pending { .. },
                     ..
                 }) => request.cancelled(),
                 Err(_) => request.failed(ACTION_FAILURE_CODE.to_owned()),
@@ -8468,9 +8641,16 @@ mod tests {
     struct RecordingActionExecutor {
         executed: Vec<ClientResourceRequest>,
         cancelled: Vec<ClientResourceRequest>,
+        abandoned: Vec<ClientResourceRequest>,
+        pending: Option<ClientResourceRequest>,
+        late: Option<ClientResourceCompletion>,
+        late_dropped: usize,
         result: Option<RuntimeValue>,
+        pending_identity: Option<ClientResourceRequest>,
         cancel_pending: bool,
+        cancel_identity: Option<ClientResourceRequest>,
         cancel_value: Option<RuntimeValue>,
+        abandon_failure: bool,
     }
 
     impl RecordingActionExecutor {
@@ -8485,9 +8665,23 @@ mod tests {
             self.cancel_pending = true;
             self
         }
+        fn with_pending_identity(mut self, request: ClientResourceRequest) -> Self {
+            self.pending_identity = Some(request);
+            self
+        }
+
+        fn with_cancel_pending_identity(mut self, request: ClientResourceRequest) -> Self {
+            self.cancel_pending = true;
+            self.cancel_identity = Some(request);
+            self
+        }
 
         fn with_cancel_value(mut self, value: RuntimeValue) -> Self {
             self.cancel_value = Some(value);
+            self
+        }
+        fn with_abandon_failure(mut self) -> Self {
+            self.abandon_failure = true;
             self
         }
     }
@@ -8495,21 +8689,55 @@ mod tests {
     impl ClientResourceExecutor for RecordingActionExecutor {
         fn execute(&mut self, request: ClientResourceRequest) -> ClientResourceCompletion {
             self.executed.push(request.clone());
+            if self.pending.is_some() {
+                return request.failed("resource.executor.busy".to_owned());
+            }
             match self.result.clone() {
                 Some(value) => request.ready(value),
-                None => request.pending(),
+                None => {
+                    self.pending = Some(request.clone());
+                    self.pending_identity.take().unwrap_or(request).pending()
+                }
             }
         }
 
         fn cancel(&mut self, request: ClientResourceRequest) -> ClientResourceCompletion {
             self.cancelled.push(request.clone());
             if self.cancel_pending {
-                request.pending()
-            } else if let Some(value) = self.cancel_value.clone() {
+                return self.cancel_identity.take().unwrap_or(request).pending();
+            }
+            self.pending = self
+                .pending
+                .take()
+                .filter(|pending| pending.request_id() != request.request_id());
+            if let Some(value) = self.cancel_value.clone() {
                 request.ready(value)
             } else {
                 request.cancelled()
             }
+        }
+
+        fn abandon(&mut self, request: ClientResourceRequest) -> Result<(), String> {
+            self.abandoned.push(request.clone());
+            if self.abandon_failure {
+                return Err("resource executor cannot abandon a pending request".to_owned());
+            }
+            let Some(pending) = self.pending.take() else {
+                return Ok(());
+            };
+            if pending.request_id() != request.request_id() {
+                self.pending = Some(pending);
+                return Err("resource executor request mismatch".to_owned());
+            }
+            self.late = Some(request.ready(RuntimeValue::Text("late".to_owned())));
+            Ok(())
+        }
+
+        fn poll(&mut self) -> Option<ClientResourceCompletion> {
+            if self.late.take().is_some() {
+                self.late_dropped += 1;
+            }
+            None
         }
     }
 
@@ -8526,6 +8754,9 @@ mod tests {
     impl ClientResourceExecutor for CancelledActionExecutor {
         fn execute(&mut self, request: ClientResourceRequest) -> ClientResourceCompletion {
             self.request = Some(request.clone());
+            request.cancelled()
+        }
+        fn cancel(&mut self, request: ClientResourceRequest) -> ClientResourceCompletion {
             request.cancelled()
         }
     }
@@ -8588,6 +8819,9 @@ mod tests {
     impl ClientResourceExecutor for StreamBatchTestExecutor {
         fn execute(&mut self, request: ClientResourceRequest) -> ClientResourceCompletion {
             request.stream_values(vec![RuntimeValue::Boolean(self.value)])
+        }
+        fn cancel(&mut self, request: ClientResourceRequest) -> ClientResourceCompletion {
+            request.cancelled()
         }
     }
 
@@ -8719,6 +8953,7 @@ mod tests {
         );
         let mut nested = super::ClientActionNestedExecutor {
             inner: &mut nested_provider,
+            pending_request: None,
         };
         assert_eq!(
             nested.external_contract(request),
@@ -8726,8 +8961,7 @@ mod tests {
             "nested CLIENT actions must retain external-contract providers",
         );
 
-        let mut forwarding_slot: Option<&mut dyn super::ClientResourceExecutor> =
-            Some(&mut nested);
+        let mut forwarding_slot: Option<&mut dyn super::ClientResourceExecutor> = Some(&mut nested);
         assert_eq!(
             super::evaluate_external_contract(
                 "app.other@1",
@@ -8750,13 +8984,14 @@ mod tests {
             super::evaluate_external_contract(
                 "app.other@1",
                 context,
-            super::ObserverLineage::compatibility(context),
-            &[],
+                super::ObserverLineage::compatibility(context),
+                &[],
                 &mut failing_slot,
             ),
             Err(super::ClientExecutionError::ExternalContract { identity, .. })
                 if identity == "app.other@1"
         ));
+
         let mut default_executor =
             super::DeterministicClientResourceExecutor::new(|_: &super::ClientResourceRequest| {
                 Ok::<_, String>(RuntimeValue::Boolean(false))
@@ -8773,16 +9008,17 @@ mod tests {
             ),
             Err(super::ClientExecutionError::Inspect {
                 context,
-                source: super::ClientInspectError::Failed("inspect.runtime_unavailable".to_owned(),),
+                source: super::ClientInspectError::Failed("inspect.runtime_unavailable".to_owned()),
             }),
         );
+
         let mut absent: Option<&mut dyn super::ClientResourceExecutor> = None;
         assert!(matches!(
             super::evaluate_external_contract(
                 "app.other@1",
                 context,
-            super::ObserverLineage::compatibility(context),
-            &[],
+                super::ObserverLineage::compatibility(context),
+                &[],
                 &mut absent,
             ),
             Err(super::ClientExecutionError::ExternalContract { identity, .. })
@@ -8798,7 +9034,7 @@ mod tests {
             ),
             Err(super::ClientExecutionError::Inspect {
                 context,
-                source: super::ClientInspectError::Failed("inspect.runtime_unavailable".to_owned(),),
+                source: super::ClientInspectError::Failed("inspect.runtime_unavailable".to_owned()),
             }),
         );
     }
@@ -9376,6 +9612,7 @@ mod tests {
             });
         let mut nested = super::ClientActionNestedExecutor {
             inner: &mut executor,
+            pending_request: None,
         };
         assert_eq!(
             nested.inspect(request),
@@ -10062,6 +10299,27 @@ mod tests {
             ClientResourceCompletion::Ready { .. }
         ));
         assert_eq!(immediate.poll(), None);
+    }
+    #[test]
+    fn default_executor_cancel_keeps_pending_ownership() {
+        let (active, function, pair, _) = version_one_active(true);
+        let principal = PrincipalId::from_bytes([0x7a; 16]);
+        let digest = ClientResourceKey::canonical_arguments_digest(&active, &[]).unwrap();
+        let key = ClientResourceKey::new(
+            InvocationTarget::new(function, pair),
+            principal,
+            digest,
+            Sha256Digest::from_bytes([0x23; 32]),
+        );
+        let mut resource =
+            super::ClientResource::new(key, ResolvedType::Scalar(StandardScalar::Boolean));
+        let request = resource.begin_request(&active, vec![]).unwrap();
+        let mut executor = PollingTestExecutor {
+            pending: Some(request.clone()),
+        };
+
+        assert_eq!(executor.cancel(request.clone()), request.clone().pending());
+        assert_eq!(executor.pending, Some(request));
     }
 
     #[test]
@@ -10993,13 +11251,18 @@ mod tests {
             .begin_request(&active, vec![argument])
             .unwrap();
         let late_completion = request.clone().ready(RuntimeValue::Integer(42));
-        let mut executor = RecordingActionExecutor::new(None);
+        let mut executor = RecordingActionExecutor::new(None).with_cancel_pending();
+        executor.pending = Some(request.clone());
 
         assert_eq!(
             state.invalidate_resource_with_executor(key, &mut executor),
             Ok(true),
         );
         assert_eq!(executor.cancelled, vec![request.clone()]);
+        assert_eq!(executor.abandoned, vec![request.clone()]);
+        assert!(executor.pending.is_none());
+        assert_eq!(executor.poll(), None);
+        assert_eq!(executor.late_dropped, 1);
         assert_eq!(
             state
                 .resource(key)
@@ -11017,6 +11280,120 @@ mod tests {
                 actual: request.generation(),
             }),
         );
+    }
+
+    #[test]
+    fn resource_invalidation_preflights_generation_before_releasing_request() {
+        let (active, _, pair, _) = version_two_client_call_active();
+        let standard = active
+            .catalogue_hash_context()
+            .standard()
+            .expect("version-two fixture pins the verified standard snapshot");
+        let target = InvocationTarget::verified_standard(
+            orna_standard::STD_INVOKE_ECHO_FUNCTION_ID,
+            pair,
+            standard.revision(),
+            orna_standard::STD_INVOKE_ECHO_FUNCTION_REVISION_ID,
+        );
+        let argument = FunctionArgument::new(
+            orna_standard::STD_INVOKE_ECHO_PARAMETER_ID,
+            RuntimeValue::Integer(42),
+        )
+        .unwrap();
+        let digest =
+            ClientResourceKey::canonical_arguments_digest(&active, std::slice::from_ref(&argument))
+                .unwrap();
+        let key = ClientResourceKey::new(
+            target,
+            PrincipalId::from_bytes([0x7a; 16]),
+            digest,
+            Sha256Digest::from_bytes([0xc4; 32]),
+        );
+        let mut state = ClientStateStore::new();
+        let request = {
+            let resource =
+                state.get_or_create_resource(key, ResolvedType::Scalar(StandardScalar::Integer));
+            resource.generation = super::ClientResourceGeneration(u64::MAX - 1);
+            resource.begin_request(&active, vec![argument]).unwrap()
+        };
+        let mut executor = RecordingActionExecutor::new(None).with_cancel_pending();
+        executor.pending = Some(request.clone());
+
+        assert_eq!(
+            state.invalidate_resource_with_executor(key, &mut executor),
+            Err(super::ClientResourceError::GenerationExhausted),
+        );
+        assert!(executor.cancelled.is_empty());
+        assert!(executor.abandoned.is_empty());
+        assert_eq!(executor.pending.as_ref(), Some(&request));
+        let resource = state
+            .resource(key)
+            .expect("exhausted resource remains cached");
+        assert_eq!(resource.status(), super::ClientResourceStatus::Loading);
+        assert_eq!(
+            resource.generation(),
+            super::ClientResourceGeneration(u64::MAX)
+        );
+        assert_eq!(resource.active_request(), Some(request));
+    }
+
+    #[test]
+    fn resource_invalidation_retains_owned_request_when_abandon_fails() {
+        let (active, _, pair, _) = version_two_client_call_active();
+        let standard = active
+            .catalogue_hash_context()
+            .standard()
+            .expect("version-two fixture pins the verified standard snapshot");
+        let target = InvocationTarget::verified_standard(
+            orna_standard::STD_INVOKE_ECHO_FUNCTION_ID,
+            pair,
+            standard.revision(),
+            orna_standard::STD_INVOKE_ECHO_FUNCTION_REVISION_ID,
+        );
+        let argument = FunctionArgument::new(
+            orna_standard::STD_INVOKE_ECHO_PARAMETER_ID,
+            RuntimeValue::Integer(42),
+        )
+        .unwrap();
+        let digest =
+            ClientResourceKey::canonical_arguments_digest(&active, std::slice::from_ref(&argument))
+                .unwrap();
+        let key = ClientResourceKey::new(
+            target,
+            PrincipalId::from_bytes([0x7a; 16]),
+            digest,
+            Sha256Digest::from_bytes([0xc3; 32]),
+        );
+        let mut state = ClientStateStore::new();
+        let request = state
+            .get_or_create_resource(key, ResolvedType::Scalar(StandardScalar::Integer))
+            .begin_request(&active, vec![argument])
+            .unwrap();
+        let before = state
+            .resource(key)
+            .expect("pending resource remains cached")
+            .clone();
+        let mut executor = RecordingActionExecutor::new(None)
+            .with_cancel_pending()
+            .with_abandon_failure();
+        executor.pending = Some(request.clone());
+
+        assert_eq!(
+            state.invalidate_resource_with_executor(key, &mut executor),
+            Err(super::ClientResourceError::Executor(
+                "resource executor cannot abandon a pending request".to_owned(),
+            )),
+        );
+        assert_eq!(executor.cancelled, vec![request.clone()]);
+        assert_eq!(executor.abandoned, vec![request.clone()]);
+        assert_eq!(executor.pending.as_ref(), Some(&request));
+        let resource = state
+            .resource(key)
+            .expect("failed invalidation retains the resource");
+        assert_eq!(resource, &before);
+        assert_eq!(resource.status(), super::ClientResourceStatus::Loading);
+        assert_eq!(resource.generation(), request.generation());
+        assert_eq!(resource.request_id(), Some(request.request_id()));
     }
 
     #[test]
@@ -11082,6 +11459,88 @@ mod tests {
         assert_eq!(
             state.resource(key_b).map(super::ClientResource::status),
             Some(super::ClientResourceStatus::Idle),
+        );
+    }
+
+    #[test]
+    fn replacing_resource_key_retains_nested_request_when_abandon_fails() {
+        let (active, _, pair, _) = version_two_client_call_active();
+        let standard = active
+            .catalogue_hash_context()
+            .standard()
+            .expect("version-two fixture pins the verified standard snapshot");
+        let target = InvocationTarget::verified_standard(
+            orna_standard::STD_INVOKE_ECHO_FUNCTION_ID,
+            pair,
+            standard.revision(),
+            orna_standard::STD_INVOKE_ECHO_FUNCTION_REVISION_ID,
+        );
+        let argument = FunctionArgument::new(
+            orna_standard::STD_INVOKE_ECHO_PARAMETER_ID,
+            RuntimeValue::Integer(42),
+        )
+        .unwrap();
+        let digest =
+            ClientResourceKey::canonical_arguments_digest(&active, std::slice::from_ref(&argument))
+                .unwrap();
+        let key_a = ClientResourceKey::new(
+            target,
+            PrincipalId::from_bytes([0x7a; 16]),
+            digest,
+            Sha256Digest::from_bytes([0xe4; 32]),
+        );
+        let key_b = ClientResourceKey::new(
+            target,
+            PrincipalId::from_bytes([0x7a; 16]),
+            digest,
+            Sha256Digest::from_bytes([0xe5; 32]),
+        );
+        let mut state = ClientStateStore::new();
+        let request = state
+            .get_or_create_resource(key_a, ResolvedType::Scalar(StandardScalar::Integer))
+            .begin_request(&active, vec![argument])
+            .unwrap();
+        let mut executor = RecordingActionExecutor::new(None)
+            .with_cancel_pending()
+            .with_abandon_failure();
+        executor.pending = Some(request.clone());
+        let pending_identity = (request.request_id(), request.key(), request.generation());
+        let mut nested = super::ClientActionNestedExecutor {
+            inner: &mut executor,
+            pending_request: None,
+        };
+
+        let result = state.get_or_create_resource_with_executor(
+            key_b,
+            ResolvedType::Scalar(StandardScalar::Integer),
+            &mut nested,
+        );
+
+        assert!(matches!(
+            result,
+            Err(super::ClientResourceError::Executor(message))
+                if message == "resource executor cannot abandon a pending request"
+        ));
+        let mut mismatch_state = ClientStateStore::new();
+        let mismatched_request = mismatch_state
+            .get_or_create_resource(key_b, ResolvedType::Scalar(StandardScalar::Integer))
+            .begin_request(&active, request.arguments().to_vec())
+            .unwrap();
+        assert_eq!(
+            nested.abandon(mismatched_request),
+            Err("resource executor request mismatch".to_owned()),
+        );
+        assert_eq!(nested.pending_request_identity(), Some(pending_identity));
+        assert!(nested.release_failed());
+        assert_eq!(nested.pending_request_identity(), Some(pending_identity));
+        drop(nested);
+        assert_eq!(executor.cancelled, vec![request.clone()]);
+        assert_eq!(executor.abandoned, vec![request.clone()]);
+        assert_eq!(executor.pending.as_ref(), Some(&request));
+        assert!(state.resource(key_b).is_none());
+        assert_eq!(
+            state.resource(key_a).map(super::ClientResource::status),
+            Some(super::ClientResourceStatus::Loading),
         );
     }
 
@@ -18424,6 +18883,337 @@ CREATE CLIENT FUNCTION app.owner() RETURNS INTEGER IS
     }
 
     #[test]
+    fn nested_action_pending_cancel_retains_pending_request() {
+        let (active, function, pair, _) = version_one_active(true);
+        let principal = PrincipalId::from_bytes([0x7b; 16]);
+        let digest = ClientResourceKey::canonical_arguments_digest(&active, &[]).unwrap();
+        let key = ClientResourceKey::new(
+            InvocationTarget::new(function, pair),
+            principal,
+            digest,
+            active.catalogue_hash(),
+        );
+        let mut resource = ClientResource::new(key, ResolvedType::Scalar(StandardScalar::Boolean));
+        let request = resource.begin_request(&active, vec![]).unwrap();
+        let mut executor = RecordingActionExecutor::new(None).with_cancel_pending();
+        let mut nested = super::ClientActionNestedExecutor {
+            inner: &mut executor,
+            pending_request: None,
+        };
+
+        assert_eq!(
+            nested.execute(request.clone()),
+            request.clone().pending(),
+            "a pending cancellation must not create a local terminal completion",
+        );
+        assert!(nested.release_failed());
+        assert_eq!(executor.cancelled, vec![request.clone()]);
+        assert!(executor.abandoned.is_empty());
+        assert_eq!(executor.pending, Some(request));
+    }
+    #[test]
+    fn nested_executor_rejects_mismatched_completion_identity() {
+        let (active, function, pair, _) = version_one_active(true);
+        let digest = ClientResourceKey::canonical_arguments_digest(&active, &[]).unwrap();
+        let key = ClientResourceKey::new(
+            InvocationTarget::new(function, pair),
+            PrincipalId::from_bytes([0x7d; 16]),
+            digest,
+            active.catalogue_hash(),
+        );
+        let mut resource = ClientResource::new(key, ResolvedType::Scalar(StandardScalar::Boolean));
+        let request = resource.begin_request(&active, vec![]).unwrap();
+        let mut wrong_resource =
+            ClientResource::new(key, ResolvedType::Scalar(StandardScalar::Boolean));
+        let wrong_request = wrong_resource.begin_request(&active, vec![]).unwrap();
+        assert_ne!(request.request_id(), wrong_request.request_id());
+
+        let identity = (request.request_id(), request.key(), request.generation());
+        let mut execute_executor =
+            RecordingActionExecutor::new(None).with_pending_identity(wrong_request.clone());
+        let mut nested = super::ClientActionNestedExecutor {
+            inner: &mut execute_executor,
+            pending_request: None,
+        };
+        assert_eq!(nested.execute(request.clone()), request.clone().pending());
+        assert_eq!(nested.pending_request_identity(), Some(identity));
+        drop(nested);
+        assert_eq!(
+            execute_executor.cancelled,
+            Vec::<ClientResourceRequest>::new()
+        );
+        assert_eq!(execute_executor.pending, Some(request.clone()));
+
+        let mut cancel_executor =
+            RecordingActionExecutor::new(None).with_cancel_pending_identity(wrong_request);
+        let mut nested = super::ClientActionNestedExecutor {
+            inner: &mut cancel_executor,
+            pending_request: Some(request.clone()),
+        };
+        assert_eq!(nested.cancel(request.clone()), request.clone().pending());
+        assert_eq!(nested.pending_request_identity(), Some(identity));
+        drop(nested);
+        assert_eq!(cancel_executor.cancelled, vec![request]);
+    }
+
+    #[test]
+    fn nested_abandon_mismatch_preserves_inner_request_without_local_marker() {
+        let (active, function, pair, _) = version_one_active(true);
+        let digest = ClientResourceKey::canonical_arguments_digest(&active, &[]).unwrap();
+        let key = ClientResourceKey::new(
+            InvocationTarget::new(function, pair),
+            PrincipalId::from_bytes([0x7c; 16]),
+            digest,
+            active.catalogue_hash(),
+        );
+        let mut state_a = ClientStateStore::new();
+        let request_a = state_a
+            .get_or_create_resource(key, ResolvedType::Scalar(StandardScalar::Boolean))
+            .begin_request(&active, Vec::new())
+            .unwrap();
+        let mut state_b = ClientStateStore::new();
+        let request_b = state_b
+            .get_or_create_resource(key, ResolvedType::Scalar(StandardScalar::Boolean))
+            .begin_request(&active, Vec::new())
+            .unwrap();
+        assert_ne!(request_a.request_id(), request_b.request_id());
+
+        let mut executor = RecordingActionExecutor::new(None);
+        executor.pending = Some(request_a.clone());
+        let mut nested = super::ClientActionNestedExecutor {
+            inner: &mut executor,
+            pending_request: None,
+        };
+
+        assert_eq!(
+            nested.abandon(request_b.clone()),
+            Err("resource executor request mismatch".to_owned()),
+        );
+        assert_eq!(nested.pending_request_identity(), None);
+
+        nested
+            .abandon(request_a.clone())
+            .expect("the retained child request remains addressable");
+        drop(nested);
+        assert_eq!(executor.pending, None);
+        assert_eq!(executor.abandoned, vec![request_b, request_a]);
+    }
+
+    #[test]
+    fn nested_action_pending_cancel_retains_replacements_and_exact_child() {
+        let (active, parent_function, target, pair, revision, parameter) =
+            version_six_client_action_provenance_active();
+        let auth = authorise(pair, parent_function);
+        let parent = ClientExecutionContext {
+            pair,
+            function: parent_function,
+            function_revision: revision,
+            parent_invocation_id: InvocationId::from_bytes([0xfa; 16]),
+            observer_lineage: None,
+        };
+        let argument =
+            FunctionArgument::new(parameter, RuntimeValue::Text("/tmp/action".to_owned())).unwrap();
+        let action = action_value(
+            &active,
+            ActionTargetDomain::Client,
+            target,
+            pair,
+            CallSiteId::from_bytes([0xe5; 16]),
+            vec![argument],
+            orna_standard::CHARACTER_LARGE_OBJECT_TYPE_ID,
+        );
+        let mut state = ClientStateStore::default();
+        let resource_parameter = ParameterId::from_bytes([0xd3; 16]);
+        let nested_argument = FunctionArgument::new(
+            resource_parameter,
+            RuntimeValue::Text("/tmp/action".to_owned()),
+        )
+        .unwrap();
+        let nested_digest = ClientResourceKey::canonical_arguments_digest(
+            &active,
+            std::slice::from_ref(&nested_argument),
+        )
+        .unwrap();
+        let resource_target = InvocationTarget::new(FunctionId::from_bytes([0xd1; 16]), pair);
+        let replacement_a = ClientResourceKey::new(
+            resource_target,
+            auth.session_principal(),
+            nested_digest,
+            Sha256Digest::from_bytes([0xa1; 32]),
+        );
+        let replacement_b = ClientResourceKey::new(
+            resource_target,
+            auth.session_principal(),
+            nested_digest,
+            Sha256Digest::from_bytes([0xa2; 32]),
+        );
+        for replacement in [replacement_a, replacement_b] {
+            state
+                .get_or_create_resource(
+                    replacement,
+                    ResolvedType::Value(orna_standard::CHARACTER_LARGE_OBJECT_TYPE_ID),
+                )
+                .begin_loading()
+                .unwrap();
+        }
+        assert_eq!(
+            state.resource(replacement_a).map(ClientResource::status),
+            Some(ClientResourceStatus::Loading),
+        );
+        assert_eq!(
+            state.resource(replacement_b).map(ClientResource::status),
+            Some(ClientResourceStatus::Loading),
+        );
+        let grants = capability::LocalCapabilityGrantSet::from_grants([
+            capability::LocalCapabilityGrant::new(
+                capability::LocalCapabilityName::StdFsRead,
+                capability::LocalCapabilityScope::path("/tmp/action").unwrap(),
+            )
+            .unwrap(),
+        ])
+        .unwrap();
+        let mut action_state = ClientActionState::default();
+        let mut executor = RecordingActionExecutor::new(None).with_cancel_pending();
+
+        let error = trigger_client_action(
+            &active,
+            &action,
+            &auth,
+            &parent,
+            &mut action_state,
+            &[],
+            &grants,
+            &mut state,
+            &mut executor,
+        )
+        .expect_err("pending child cancellation must retain the child request");
+        let (request_id, child_key, generation) = match error {
+            ClientActionError::ExecutorPending {
+                request_id,
+                key,
+                generation,
+                ..
+            } => (request_id, key, generation),
+            other => panic!("unexpected nested release error: {other:?}"),
+        };
+        assert_eq!(action_state.status(), ClientResourceStatus::Idle);
+        assert_eq!(action_state.invocation_id(), None);
+        assert_eq!(action_state.generation(), None);
+        assert_eq!(executor.executed.len(), 1);
+        assert_eq!(executor.cancelled, executor.executed);
+        assert!(executor.abandoned.is_empty());
+        let pending = executor
+            .pending
+            .clone()
+            .expect("the executor retains the exact child request");
+        assert_eq!(pending.request_id(), request_id);
+        assert_eq!(pending.key(), child_key);
+        assert_eq!(pending.key().target(), resource_target);
+        assert_eq!(pending.generation(), generation);
+        assert_ne!(child_key, replacement_a);
+        assert_ne!(child_key, replacement_b);
+        assert_eq!(
+            state
+                .resource(replacement_a)
+                .expect("first replacement remains cached")
+                .status(),
+            ClientResourceStatus::Idle,
+        );
+        assert_eq!(
+            state
+                .resource(replacement_b)
+                .expect("second replacement remains cached")
+                .status(),
+            ClientResourceStatus::Idle,
+        );
+        assert_eq!(
+            state
+                .resource(child_key)
+                .expect("pending child remains cached")
+                .status(),
+            ClientResourceStatus::Loading,
+        );
+    }
+
+    #[test]
+    fn nested_action_malformed_child_pending_cancel_retains_exact_identity() {
+        let (active, parent_function, target, pair, revision, parameter) =
+            version_six_client_action_provenance_active();
+        let auth = authorise(pair, parent_function);
+        let parent = ClientExecutionContext {
+            pair,
+            function: parent_function,
+            function_revision: revision,
+            parent_invocation_id: InvocationId::from_bytes([0xfb; 16]),
+            observer_lineage: None,
+        };
+        let argument =
+            FunctionArgument::new(parameter, RuntimeValue::Text("/tmp/action".to_owned())).unwrap();
+        let action = action_value(
+            &active,
+            ActionTargetDomain::Client,
+            target,
+            pair,
+            CallSiteId::from_bytes([0xe6; 16]),
+            vec![argument],
+            orna_standard::CHARACTER_LARGE_OBJECT_TYPE_ID,
+        );
+        let mut state = ClientStateStore::default();
+        let grants = capability::LocalCapabilityGrantSet::from_grants([
+            capability::LocalCapabilityGrant::new(
+                capability::LocalCapabilityName::StdFsRead,
+                capability::LocalCapabilityScope::path("/tmp/action").unwrap(),
+            )
+            .unwrap(),
+        ])
+        .unwrap();
+        let mut action_state = ClientActionState::default();
+        let mut executor =
+            RecordingActionExecutor::new(Some(RuntimeValue::Integer(7))).with_cancel_pending();
+
+        let error = trigger_client_action(
+            &active,
+            &action,
+            &auth,
+            &parent,
+            &mut action_state,
+            &[],
+            &grants,
+            &mut state,
+            &mut executor,
+        )
+        .expect_err("malformed child completion must remain pending");
+        let (request_id, child_key, generation) = match error {
+            ClientActionError::ExecutorPending {
+                request_id,
+                key,
+                generation,
+                ..
+            } => (request_id, key, generation),
+            other => panic!("unexpected malformed child error: {other:?}"),
+        };
+
+        assert_eq!(action_state.status(), ClientResourceStatus::Idle);
+        assert_eq!(executor.executed.len(), 1);
+        assert_eq!(executor.cancelled, executor.executed);
+        assert!(executor.abandoned.is_empty());
+        let request = executor
+            .executed
+            .first()
+            .expect("child request was submitted");
+        assert_eq!(request.request_id(), request_id);
+        assert_eq!(request.key(), child_key);
+        assert_eq!(request.generation(), generation);
+        assert_eq!(
+            state
+                .resource(child_key)
+                .expect("malformed child remains cached")
+                .status(),
+            ClientResourceStatus::Loading,
+        );
+    }
+
+    #[test]
     fn action_local_resource_pending_is_cancelled_and_reports_cancelled_with_fresh_parent() {
         let (active, parent_function, target, pair, revision, parameter) =
             version_six_client_action_provenance_active();
@@ -18455,7 +19245,7 @@ CREATE CLIENT FUNCTION app.owner() RETURNS INTEGER IS
         )
         .unwrap();
         let grants = capability::LocalCapabilityGrantSet::from_grants([grant]).unwrap();
-        let mut executor = RecordingActionExecutor::new(None).with_cancel_pending();
+        let mut executor = RecordingActionExecutor::new(None);
 
         for previous_parent in [None, Some(enclosing_parent)] {
             assert_eq!(
@@ -18474,9 +19264,12 @@ CREATE CLIENT FUNCTION app.owner() RETURNS INTEGER IS
             );
             assert_eq!(action_state.status(), ClientResourceStatus::Idle);
             assert_eq!(executor.cancelled.len(), executor.executed.len());
-            let request = executor.executed.last().unwrap();
-            let cancelled = executor.cancelled.last().unwrap();
+            assert!(executor.abandoned.is_empty());
+            let request = executor.executed.last().unwrap().clone();
+            let cancelled = executor.cancelled.last().unwrap().clone();
             assert_eq!(request, cancelled);
+            assert!(executor.poll().is_none());
+            assert!(executor.pending.is_none());
             let nested_parent = request
                 .invocation_context()
                 .expect("nested resource carries invocation provenance")
@@ -18487,6 +19280,190 @@ CREATE CLIENT FUNCTION app.owner() RETURNS INTEGER IS
             }
             assert!(state.resource(request.key()).is_none());
         }
+    }
+
+    #[test]
+    fn nested_action_with_loading_resource_reports_cancelled_without_dispatch() {
+        let (active, parent_function, target, pair, revision, parameter) =
+            version_six_client_action_provenance_active();
+        let auth = authorise(pair, parent_function);
+        let parent = ClientExecutionContext {
+            pair,
+            function: parent_function,
+            function_revision: revision,
+            parent_invocation_id: InvocationId::from_bytes([0xf8; 16]),
+            observer_lineage: None,
+        };
+        let argument =
+            FunctionArgument::new(parameter, RuntimeValue::Text("/tmp/action".to_owned())).unwrap();
+        let action = action_value(
+            &active,
+            ActionTargetDomain::Client,
+            target,
+            pair,
+            CallSiteId::from_bytes([0xe3; 16]),
+            vec![argument],
+            orna_standard::CHARACTER_LARGE_OBJECT_TYPE_ID,
+        );
+        let mut state = ClientStateStore::default();
+        let resource_parameter = ParameterId::from_bytes([0xd3; 16]);
+        let nested_argument = FunctionArgument::new(
+            resource_parameter,
+            RuntimeValue::Text("/tmp/action".to_owned()),
+        )
+        .unwrap();
+        let nested_digest = ClientResourceKey::canonical_arguments_digest(
+            &active,
+            std::slice::from_ref(&nested_argument),
+        )
+        .unwrap();
+        let nested_key = ClientResourceKey::new(
+            InvocationTarget::new(FunctionId::from_bytes([0xd1; 16]), pair),
+            auth.session_principal(),
+            nested_digest,
+            super::resource_invalidation_identity(
+                active.catalogue_hash(),
+                state.context().data_invalidation_token(),
+                super::security_context_digest(&auth),
+            ),
+        );
+        state
+            .get_or_create_resource(
+                nested_key,
+                ResolvedType::Value(orna_standard::CHARACTER_LARGE_OBJECT_TYPE_ID),
+            )
+            .begin_request(&active, vec![nested_argument])
+            .unwrap();
+        let mut action_state = ClientActionState::default();
+        let mut executor =
+            RecordingActionExecutor::new(Some(RuntimeValue::Text("unexpected".to_owned())));
+
+        assert_eq!(
+            trigger_client_action(
+                &active,
+                &action,
+                &auth,
+                &parent,
+                &mut action_state,
+                &[],
+                &capability::LocalCapabilityGrantSet::from_grants([
+                    capability::LocalCapabilityGrant::new(
+                        capability::LocalCapabilityName::StdFsRead,
+                        capability::LocalCapabilityScope::path("/tmp/action").unwrap(),
+                    )
+                    .unwrap(),
+                ])
+                .unwrap(),
+                &mut state,
+                &mut executor,
+            ),
+            Ok(ClientActionOutcome::Cancelled),
+        );
+        assert_eq!(action_state.status(), ClientResourceStatus::Idle);
+        assert!(executor.executed.is_empty());
+        assert_eq!(
+            state
+                .resource(nested_key)
+                .expect("pre-existing nested resource remains cached")
+                .status(),
+            ClientResourceStatus::Loading,
+        );
+    }
+
+    #[test]
+    fn nested_action_pending_cancel_clears_outer_action_state() {
+        let (active, parent_function, target, pair, revision, parameter) =
+            version_six_client_action_provenance_active();
+        let auth = authorise(pair, parent_function);
+        let parent = ClientExecutionContext {
+            pair,
+            function: parent_function,
+            function_revision: revision,
+            parent_invocation_id: InvocationId::from_bytes([0xf9; 16]),
+            observer_lineage: None,
+        };
+        let argument =
+            FunctionArgument::new(parameter, RuntimeValue::Text("/tmp/action".to_owned())).unwrap();
+        let action = action_value(
+            &active,
+            ActionTargetDomain::Client,
+            target,
+            pair,
+            CallSiteId::from_bytes([0xe4; 16]),
+            vec![argument],
+            orna_standard::CHARACTER_LARGE_OBJECT_TYPE_ID,
+        );
+        let mut state = ClientStateStore::default();
+        let mut action_state = ClientActionState::default();
+        let grants = capability::LocalCapabilityGrantSet::from_grants([
+            capability::LocalCapabilityGrant::new(
+                capability::LocalCapabilityName::StdFsRead,
+                capability::LocalCapabilityScope::path("/tmp/action").unwrap(),
+            )
+            .unwrap(),
+        ])
+        .unwrap();
+        let mut executor = RecordingActionExecutor::new(None).with_cancel_pending();
+
+        let error = trigger_client_action(
+            &active,
+            &action,
+            &auth,
+            &parent,
+            &mut action_state,
+            &[],
+            &grants,
+            &mut state,
+            &mut executor,
+        )
+        .expect_err("nested pending cancellation must be reported");
+        let (request_id, key, generation) = match error {
+            ClientActionError::ExecutorPending {
+                request_id,
+                key,
+                generation,
+                ..
+            } => (request_id, key, generation),
+            other => panic!("unexpected nested release error: {other:?}"),
+        };
+        assert_eq!(action_state.status(), ClientResourceStatus::Idle);
+        assert_eq!(action_state.invocation_id(), None);
+        assert_eq!(action_state.generation(), None);
+        assert_eq!(executor.executed.len(), 1);
+        assert_eq!(executor.cancelled, executor.executed);
+        assert!(executor.abandoned.is_empty());
+        let pending = executor
+            .pending
+            .clone()
+            .expect("failed release retains child request");
+        assert_eq!(pending.request_id(), request_id);
+        assert_eq!(pending.key(), key);
+        assert_eq!(pending.generation(), generation);
+        assert_eq!(
+            state
+                .resource(key)
+                .expect("failed release retains child resource")
+                .status(),
+            ClientResourceStatus::Loading,
+        );
+
+        executor
+            .abandon(pending)
+            .expect("caller can release the retained child request");
+        assert!(executor.poll().is_none());
+        assert_eq!(executor.late_dropped, 1);
+        state
+            .resource_mut(key)
+            .expect("retained child remains addressable")
+            .cancel(generation)
+            .expect("caller can terminalise the retained child");
+        assert_eq!(
+            state
+                .resource(key)
+                .expect("retained child remains cached")
+                .status(),
+            ClientResourceStatus::Cancelled,
+        );
     }
 
     #[test]
