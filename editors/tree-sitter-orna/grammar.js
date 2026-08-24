@@ -1000,7 +1000,7 @@ module.exports = grammar({
 
             identifier: ($) => choice($.quoted_identifier, $._unquoted_identifier),
 
-            _unquoted_identifier: ($) => /[a-zA-Z_][a-zA-Z0-9_]*/,
+            _unquoted_identifier: ($) => /[\p{Alphabetic}_][\p{Alphabetic}\p{N}_]*/,
 
             quoted_identifier: ($) => token(seq('"', repeat(choice(/[^"]/, '""')), '"')),
 
