@@ -1,17 +1,17 @@
 use std::time::{Duration, SystemTime};
 
 use orna_core::{
+    CatalogueRevisionId, FunctionId, InspectEpochId, InvocationId, PrincipalId, SourceRevisionId,
+    StateSlotId, TypeId,
     inspect::{
         InspectClassifier, InspectError, InspectOutcomeKind, InspectPrivilege,
         InspectResultSummary, InspectSnapshotEpoch, InspectSnapshotOptions, InspectSnapshotSummary,
         StateCellRow,
     },
     invocation::InvokeValue,
-    security::{authorise_inspect, InspectDecision, InspectDenial, InspectEpochScope},
+    security::{InspectDecision, InspectDenial, InspectEpochScope, authorise_inspect},
     state::UserStateKeyWithoutPrincipal,
     value::RuntimeValue,
-    CatalogueRevisionId, FunctionId, InspectEpochId, InvocationId, PrincipalId, SourceRevisionId,
-    StateSlotId, TypeId,
 };
 
 const SESSION: PrincipalId = PrincipalId::from_bytes([0x11; 16]);

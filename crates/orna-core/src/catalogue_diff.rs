@@ -13,12 +13,12 @@
 //! database; callers recover the two snapshots and render the report.
 
 use crate::{
+    FieldId, FunctionId, ParameterId, SchemaId, TypeId,
     catalogue::{
         CatalogueSnapshot, FieldDefinition, FunctionDefinition, ObjectTypeDefinition,
         ParameterDefinition, RecordValueFieldDefinition, RecordValueTypeDefinition,
         ValueTypeDefinition,
     },
-    FieldId, FunctionId, ParameterId, SchemaId, TypeId,
 };
 
 /// What happened to one catalogue definition between two catalogues.
@@ -629,7 +629,7 @@ fn diff_enum_types(
                         name: qualified(definition.name()),
                     });
                 }
-            },
+            }
             None => diff.push(SemanticChange::EnumTypeAdded {
                 id: definition.id(),
                 name: qualified(definition.name()),
@@ -801,8 +801,8 @@ mod tests {
         ValueTypeDefinition, ValueTypeMutability, ValueTypePersistence,
     };
     use crate::{
-        types::{ResolvedType, StandardScalar, TypeDescriptor},
         CatalogueRevisionId, ExpressionId, FunctionRevisionId,
+        types::{ResolvedType, StandardScalar, TypeDescriptor},
     };
 
     fn name(parts: &[&str]) -> QualifiedSemanticName {
@@ -1814,22 +1814,25 @@ mod tests {
     fn record_value_type_diff_reports_identity_and_field_changes() {
         let base = record_snapshot(
             vec![schema(1, &["app"])],
-            vec![enum_type(2, &["app", "text"]), enum_type(3, &["app", "number"])],
+            vec![
+                enum_type(2, &["app", "text"]),
+                enum_type(3, &["app", "number"]),
+            ],
             vec![
                 record_value_type(
                     10,
                     &["app", "point"],
-                    vec![
-                        record_field(11, "x", 0, 2),
-                        record_field(12, "y", 1, 2),
-                    ],
+                    vec![record_field(11, "x", 0, 2), record_field(12, "y", 1, 2)],
                 ),
                 record_value_type(13, &["app", "legacy"], vec![record_field(14, "x", 0, 2)]),
             ],
         );
         let candidate = record_snapshot(
             vec![schema(1, &["app"])],
-            vec![enum_type(2, &["app", "text"]), enum_type(3, &["app", "number"])],
+            vec![
+                enum_type(2, &["app", "text"]),
+                enum_type(3, &["app", "number"]),
+            ],
             vec![
                 record_value_type(
                     10,
@@ -1888,5 +1891,4 @@ mod tests {
             ]
         );
     }
-
 }

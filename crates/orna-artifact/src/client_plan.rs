@@ -452,7 +452,10 @@ impl InspectOperationNode {
     }
 
     pub fn projection(projection: InspectProjection, snapshot: ClientExpressionNode) -> Self {
-        Self::Projection { projection, snapshot: Box::new(snapshot) }
+        Self::Projection {
+            projection,
+            snapshot: Box::new(snapshot),
+        }
     }
 
     pub const fn target(&self) -> Option<&ClientExpressionNode> {
@@ -1298,10 +1301,7 @@ impl ExpressionClientPlan {
             &mut count,
             version == INSPECT_FORMAT_VERSION,
         )?;
-        validate_external_contract_placement(
-            &expression,
-            version == EXPRESSION_FORMAT_VERSION,
-        )?;
+        validate_external_contract_placement(&expression, version == EXPRESSION_FORMAT_VERSION)?;
         reader.require_finished()?;
         if version == INSPECT_FORMAT_VERSION && !expression_contains_inspect(&expression) {
             return Err(ClientPlanError::InvalidInspectPlan);
@@ -1793,7 +1793,9 @@ impl CapabilityClientPlan {
             PROCEDURAL_FORMAT_VERSION => {
                 InnerClientPlan::Procedural(ProceduralClientPlan::decode(inner_payload)?)
             }
-            ACTION_FORMAT_VERSION => InnerClientPlan::Action(ActionClientPlan::decode(inner_payload)?),
+            ACTION_FORMAT_VERSION => {
+                InnerClientPlan::Action(ActionClientPlan::decode(inner_payload)?)
+            }
             version => return Err(ClientPlanError::UnsupportedInnerVersion(version)),
         };
         let actual_inner_plan_version = inner_plan.format_version();
@@ -1887,16 +1889,36 @@ fn expression_contains_inspect(node: &ClientExpressionNode) -> bool {
             InspectOperationNode::Snapshot { .. } | InspectOperationNode::Projection { .. } => true,
         },
         ClientExpressionNode::Await { expression } => expression_contains_inspect(expression),
-        ClientExpressionNode::Resource { operation } => operation.arguments().iter().any(|(_, value)| expression_contains_inspect(value)),
-        ClientExpressionNode::Action { operation } => operation.arguments().iter().any(|(_, value)| expression_contains_inspect(value)),
-        ClientExpressionNode::Call { arguments, .. } => arguments.iter().any(|(_, value)| expression_contains_inspect(value)),
-        ClientExpressionNode::Concat { left, right } => expression_contains_inspect(left) || expression_contains_inspect(right),
-        ClientExpressionNode::String { .. } | ClientExpressionNode::Integer { .. } | ClientExpressionNode::Boolean { .. } | ClientExpressionNode::ParameterRead { .. } | ClientExpressionNode::LocalRead { .. } | ClientExpressionNode::FieldPath { .. } | ClientExpressionNode::ExternalContract { .. } => false,
+        ClientExpressionNode::Resource { operation } => operation
+            .arguments()
+            .iter()
+            .any(|(_, value)| expression_contains_inspect(value)),
+        ClientExpressionNode::Action { operation } => operation
+            .arguments()
+            .iter()
+            .any(|(_, value)| expression_contains_inspect(value)),
+        ClientExpressionNode::Call { arguments, .. } => arguments
+            .iter()
+            .any(|(_, value)| expression_contains_inspect(value)),
+        ClientExpressionNode::Concat { left, right } => {
+            expression_contains_inspect(left) || expression_contains_inspect(right)
+        }
+        ClientExpressionNode::String { .. }
+        | ClientExpressionNode::Integer { .. }
+        | ClientExpressionNode::Boolean { .. }
+        | ClientExpressionNode::ParameterRead { .. }
+        | ClientExpressionNode::LocalRead { .. }
+        | ClientExpressionNode::FieldPath { .. }
+        | ClientExpressionNode::ExternalContract { .. } => false,
     }
 }
 
 fn validate_external_contract_identity(identity: &str) -> Result<(), ClientPlanError> {
-    let invalid = || Err(ClientPlanError::InvalidExpressionNode(NODE_EXTERNAL_CONTRACT));
+    let invalid = || {
+        Err(ClientPlanError::InvalidExpressionNode(
+            NODE_EXTERNAL_CONTRACT,
+        ))
+    };
 
     let Some((name, revision)) = identity.rsplit_once('@') else {
         return invalid();
@@ -1947,7 +1969,9 @@ fn validate_external_contract_placement_inner(
             if allow_root {
                 Ok(())
             } else {
-                Err(ClientPlanError::InvalidExpressionNode(NODE_EXTERNAL_CONTRACT))
+                Err(ClientPlanError::InvalidExpressionNode(
+                    NODE_EXTERNAL_CONTRACT,
+                ))
             }
         }
         ClientExpressionNode::Await { expression } => {
@@ -1964,7 +1988,12 @@ fn validate_external_contract_placement_inner(
                 InspectOperationNode::Snapshot { target, options } => {
                     validate_external_contract_placement_inner(target, false, depth + 1, count)?;
                     if let Some(options) = options {
-                        validate_external_contract_placement_inner(options, false, depth + 1, count)?;
+                        validate_external_contract_placement_inner(
+                            options,
+                            false,
+                            depth + 1,
+                            count,
+                        )?;
                     }
                 }
                 InspectOperationNode::Projection { snapshot, .. } => {
@@ -2041,7 +2070,14 @@ fn encode_expression_node(
 ) -> Result<(), ClientPlanError> {
     let mut resource_count = 0;
     encode_expression_node_with_resources(
-        node, writer, depth, count, false, false, false, &mut resource_count,
+        node,
+        writer,
+        depth,
+        count,
+        false,
+        false,
+        false,
+        &mut resource_count,
     )
 }
 
@@ -2054,7 +2090,14 @@ fn encode_expression_node_with_inspect(
 ) -> Result<(), ClientPlanError> {
     let mut resource_count = 0;
     encode_expression_node_with_resources(
-        node, writer, depth, count, false, false, allow_inspect, &mut resource_count,
+        node,
+        writer,
+        depth,
+        count,
+        false,
+        false,
+        allow_inspect,
+        &mut resource_count,
     )
 }
 
@@ -2118,17 +2161,36 @@ fn encode_expression_node_with_resources(
                 InspectOperationNode::Snapshot { target, options } => {
                     writer.push(INSPECT_OPERATION_SNAPSHOT);
                     encode_expression_node_with_resources(
-                        target, writer, depth + 1, count, allow_resources, allow_local, allow_inspect, resource_count,
+                        target,
+                        writer,
+                        depth + 1,
+                        count,
+                        allow_resources,
+                        allow_local,
+                        allow_inspect,
+                        resource_count,
                     )?;
                     match options {
                         None => writer.push(0),
                         Some(_) => return Err(ClientPlanError::UnsupportedInspectOptions),
                     }
                 }
-                InspectOperationNode::Projection { projection, snapshot } => {
+                InspectOperationNode::Projection {
+                    projection,
+                    snapshot,
+                } => {
                     writer.push(INSPECT_OPERATION_PROJECTION);
                     writer.push(projection.tag());
-                    encode_expression_node_with_resources(snapshot, writer, depth + 1, count, allow_resources, allow_local, allow_inspect, resource_count)?;
+                    encode_expression_node_with_resources(
+                        snapshot,
+                        writer,
+                        depth + 1,
+                        count,
+                        allow_resources,
+                        allow_local,
+                        allow_inspect,
+                        resource_count,
+                    )?;
                 }
             }
         }
@@ -2294,6 +2356,17 @@ fn encode_resource_operation(
 
 fn encode_action_plan(plan: &ActionClientPlan) -> Result<Vec<u8>, ClientPlanError> {
     let operation = &plan.operation;
+    for identity in [
+        operation.target.to_bytes(),
+        operation.target_revision.source().to_bytes(),
+        operation.target_revision.catalogue().to_bytes(),
+        operation.call_site.to_bytes(),
+        operation.result_type.to_bytes(),
+    ] {
+        if identity == [0; 16] {
+            return Err(ClientPlanError::InvalidActionIdentity);
+        }
+    }
     validate_action_arguments(&operation.arguments)?;
     let mut bytes = Vec::new();
     bytes.extend_from_slice(&MAGIC);
@@ -2314,43 +2387,64 @@ fn encode_action_plan(plan: &ActionClientPlan) -> Result<Vec<u8>, ClientPlanErro
     }
     bytes.extend_from_slice(&writer.finish());
     if bytes.len() > MAX_ARTIFACT_BYTES {
-        return Err(ClientPlanError::ArtifactSizeLimit { size: bytes.len(), maximum: MAX_ARTIFACT_BYTES });
+        return Err(ClientPlanError::ArtifactSizeLimit {
+            size: bytes.len(),
+            maximum: MAX_ARTIFACT_BYTES,
+        });
     }
     Ok(bytes)
 }
 
 fn decode_action_plan(bytes: &[u8]) -> Result<ActionClientPlan, ClientPlanError> {
     if bytes.len() > MAX_ARTIFACT_BYTES {
-        return Err(ClientPlanError::ArtifactSizeLimit { size: bytes.len(), maximum: MAX_ARTIFACT_BYTES });
+        return Err(ClientPlanError::ArtifactSizeLimit {
+            size: bytes.len(),
+            maximum: MAX_ARTIFACT_BYTES,
+        });
     }
     let mut reader = Reader::new(bytes);
-    if reader.array::<8>()? != MAGIC { return Err(ClientPlanError::InvalidMagic); }
+    if reader.array::<8>()? != MAGIC {
+        return Err(ClientPlanError::InvalidMagic);
+    }
     let version = reader.u32()?;
-    if version != ACTION_FORMAT_VERSION { return Err(ClientPlanError::UnsupportedVersion(version)); }
+    if version != ACTION_FORMAT_VERSION {
+        return Err(ClientPlanError::UnsupportedVersion(version));
+    }
     let operation = reader.u8()?;
-    if operation != RETURN_ACTION_OPERATION { return Err(ClientPlanError::InvalidOperation(operation)); }
+    if operation != RETURN_ACTION_OPERATION {
+        return Err(ClientPlanError::InvalidOperation(operation));
+    }
     let domain = match reader.u8()? {
         1 => ActionTargetDomain::Client,
         2 => ActionTargetDomain::Server,
         tag => return Err(ClientPlanError::InvalidActionDomain(tag)),
     };
-    let target = FunctionId::from_bytes(reader.array()?);
-    let target_revision = RevisionPair::new(SourceRevisionId::from_bytes(reader.array()?), CatalogueRevisionId::from_bytes(reader.array()?));
-    let call_site = CallSiteId::from_bytes(reader.array()?);
-    let result_type = TypeId::from_bytes(reader.array()?);
+    let target = FunctionId::from_bytes(read_action_identity(&mut reader)?);
+    let target_revision = RevisionPair::new(
+        SourceRevisionId::from_bytes(read_action_identity(&mut reader)?),
+        CatalogueRevisionId::from_bytes(read_action_identity(&mut reader)?),
+    );
+    let call_site = CallSiteId::from_bytes(read_action_identity(&mut reader)?);
+    let result_type = TypeId::from_bytes(read_action_identity(&mut reader)?);
     let argument_count = reader.u32()? as usize;
     if argument_count > MAX_ACTION_ARGUMENTS {
-        return Err(ClientPlanError::ActionArgumentLimitExceeded { limit: MAX_ACTION_ARGUMENTS });
+        return Err(ClientPlanError::ActionArgumentLimitExceeded {
+            limit: MAX_ACTION_ARGUMENTS,
+        });
     }
     let mut arguments = Vec::with_capacity(argument_count);
     let mut previous = None;
     let mut expression_count = 0;
     for _ in 0..argument_count {
-        let parameter = ParameterId::from_bytes(reader.array()?);
+        let parameter = ParameterId::from_bytes(read_action_identity(&mut reader)?);
         if let Some(previous) = previous {
             match parameter.cmp(&previous) {
-                std::cmp::Ordering::Less => return Err(ClientPlanError::NonCanonicalActionArgumentOrder),
-                std::cmp::Ordering::Equal => return Err(ClientPlanError::DuplicateActionArgument(parameter)),
+                std::cmp::Ordering::Less => {
+                    return Err(ClientPlanError::NonCanonicalActionArgumentOrder);
+                }
+                std::cmp::Ordering::Equal => {
+                    return Err(ClientPlanError::DuplicateActionArgument(parameter));
+                }
                 std::cmp::Ordering::Greater => {}
             }
         }
@@ -2360,21 +2454,47 @@ fn decode_action_plan(bytes: &[u8]) -> Result<ActionClientPlan, ClientPlanError>
         arguments.push((parameter, value));
     }
     reader.require_finished()?;
-    Ok(ActionClientPlan::new(ActionOperationNode::new(domain, target, target_revision, call_site, arguments, result_type)))
+    Ok(ActionClientPlan::new(ActionOperationNode::new(
+        domain,
+        target,
+        target_revision,
+        call_site,
+        arguments,
+        result_type,
+    )))
+}
+
+fn read_action_identity(reader: &mut Reader<'_>) -> Result<[u8; 16], ClientPlanError> {
+    let identity = reader.array()?;
+    if identity == [0; 16] {
+        return Err(ClientPlanError::InvalidActionIdentity);
+    }
+    Ok(identity)
 }
 
 fn validate_action_arguments(
     arguments: &[(ParameterId, ClientExpressionNode)],
 ) -> Result<(), ClientPlanError> {
     if arguments.len() > MAX_ACTION_ARGUMENTS {
-        return Err(ClientPlanError::ActionArgumentLimitExceeded { limit: MAX_ACTION_ARGUMENTS });
+        return Err(ClientPlanError::ActionArgumentLimitExceeded {
+            limit: MAX_ACTION_ARGUMENTS,
+        });
+    }
+    for (parameter, _) in arguments {
+        if parameter.to_bytes() == [0; 16] {
+            return Err(ClientPlanError::InvalidActionIdentity);
+        }
     }
     let mut previous = None;
     for (parameter, _) in arguments {
         if let Some(previous) = previous {
             match parameter.cmp(&previous) {
-                std::cmp::Ordering::Less => return Err(ClientPlanError::NonCanonicalActionArgumentOrder),
-                std::cmp::Ordering::Equal => return Err(ClientPlanError::DuplicateActionArgument(*parameter)),
+                std::cmp::Ordering::Less => {
+                    return Err(ClientPlanError::NonCanonicalActionArgumentOrder);
+                }
+                std::cmp::Ordering::Equal => {
+                    return Err(ClientPlanError::DuplicateActionArgument(*parameter));
+                }
                 std::cmp::Ordering::Greater => {}
             }
         }
@@ -2471,7 +2591,9 @@ fn validate_procedural_model(plan: &ProceduralClientPlan) -> Result<(), ClientPl
                 },
                 _ => None,
             };
-            if let Some(actual) = awaited_type && actual != target.type_id {
+            if let Some(actual) = awaited_type
+                && actual != target.type_id
+            {
                 return Err(ClientPlanError::ProceduralLocalTypeMismatch {
                     local: target.local,
                     expected: target.type_id,
@@ -2785,7 +2907,15 @@ fn decode_expression_node_with_inspect(
     allow_inspect: bool,
 ) -> Result<ClientExpressionNode, ClientPlanError> {
     let mut resource_count = 0;
-    decode_expression_node_with_resources(reader, depth, count, false, false, allow_inspect, &mut resource_count)
+    decode_expression_node_with_resources(
+        reader,
+        depth,
+        count,
+        false,
+        false,
+        allow_inspect,
+        &mut resource_count,
+    )
 }
 
 fn decode_expression_node_with_resources(
@@ -2842,7 +2972,15 @@ fn decode_expression_node_with_resources(
             }
             let operation = match reader.u8()? {
                 INSPECT_OPERATION_SNAPSHOT => InspectOperationNode::Snapshot {
-                    target: Box::new(decode_expression_node_with_resources(reader, depth + 1, count, allow_resources, allow_local, allow_inspect, resource_count)?),
+                    target: Box::new(decode_expression_node_with_resources(
+                        reader,
+                        depth + 1,
+                        count,
+                        allow_resources,
+                        allow_local,
+                        allow_inspect,
+                        resource_count,
+                    )?),
                     options: match reader.u8()? {
                         0 => None,
                         1 => return Err(ClientPlanError::UnsupportedInspectOptions),
@@ -2853,7 +2991,15 @@ fn decode_expression_node_with_resources(
                     let projection = InspectProjection::from_tag(reader.u8()?)?;
                     InspectOperationNode::Projection {
                         projection,
-                        snapshot: Box::new(decode_expression_node_with_resources(reader, depth + 1, count, allow_resources, allow_local, allow_inspect, resource_count)?),
+                        snapshot: Box::new(decode_expression_node_with_resources(
+                            reader,
+                            depth + 1,
+                            count,
+                            allow_resources,
+                            allow_local,
+                            allow_inspect,
+                            resource_count,
+                        )?),
                     }
                 }
                 tag => return Err(ClientPlanError::InvalidInspectOperation(tag)),
@@ -3079,6 +3225,8 @@ pub enum ClientPlanError {
     },
     /// An action operation uses an unknown CLIENT/SERVER domain tag.
     InvalidActionDomain(u8),
+    /// An action operation carries an empty stable identity.
+    InvalidActionIdentity,
     /// An action operation exceeds its argument limit.
     ActionArgumentLimitExceeded {
         /// The exceeded limit.
@@ -3246,15 +3394,22 @@ impl fmt::Display for ClientPlanError {
                 write!(formatter, "invalid client-plan expression node tag {tag}")
             }
             Self::InvalidInspectOperation(tag) => {
-                write!(formatter, "invalid client-plan Inspector operation tag {tag}")
+                write!(
+                    formatter,
+                    "invalid client-plan Inspector operation tag {tag}"
+                )
             }
-            Self::UnsupportedInspectOptions => {
-                formatter.write_str("typed client-plan Inspector snapshot options are unsupported in v1")
-            }
+            Self::UnsupportedInspectOptions => formatter
+                .write_str("typed client-plan Inspector snapshot options are unsupported in v1"),
             Self::InvalidInspectProjection(tag) => {
-                write!(formatter, "invalid client-plan Inspector projection tag {tag}")
+                write!(
+                    formatter,
+                    "invalid client-plan Inspector projection tag {tag}"
+                )
             }
-            Self::InvalidInspectPlan => formatter.write_str("version-nine client plan contains no Inspector node"),
+            Self::InvalidInspectPlan => {
+                formatter.write_str("version-nine client plan contains no Inspector node")
+            }
             Self::ExpressionDepthExceeded => {
                 formatter.write_str("client-plan expression tree exceeds the depth cap")
             }
@@ -3268,12 +3423,18 @@ impl fmt::Display for ClientPlanError {
             Self::InvalidActionDomain(tag) => {
                 write!(formatter, "invalid client-plan action domain tag {tag}")
             }
+            Self::InvalidActionIdentity => {
+                formatter.write_str("invalid client-plan action identity")
+            }
             Self::ActionArgumentLimitExceeded { limit } => write!(
                 formatter,
                 "client-plan action argument count exceeds the limit {limit}"
             ),
             Self::DuplicateActionArgument(parameter) => {
-                write!(formatter, "duplicate client-plan action argument {parameter}")
+                write!(
+                    formatter,
+                    "duplicate client-plan action argument {parameter}"
+                )
             }
             Self::NonCanonicalActionArgumentOrder => formatter
                 .write_str("client-plan action arguments are not in canonical ParameterId order"),
@@ -3335,14 +3496,20 @@ impl fmt::Display for ClientPlanError {
                 "client-plan resource local {local} must be awaited before use as a value"
             ),
             Self::DuplicateProceduralLet(local) => {
-                write!(formatter, "duplicate LET for client-plan procedural local {local}")
+                write!(
+                    formatter,
+                    "duplicate LET for client-plan procedural local {local}"
+                )
             }
             Self::ProceduralAssignmentBeforeLet(local) => write!(
                 formatter,
                 "client-plan procedural assignment targets local {local} before LET"
             ),
             Self::MissingProceduralLet(local) => {
-                write!(formatter, "client-plan procedural local {local} has no LET statement")
+                write!(
+                    formatter,
+                    "client-plan procedural local {local} has no LET statement"
+                )
             }
             Self::InvalidAwaitOperand(local) => write!(
                 formatter,
@@ -3824,7 +3991,12 @@ mod tests {
 
     #[test]
     fn external_contract_identity_accepts_quoted_identifier_segments() {
-        for identity in ["app.\"window\"@1", "\"window\"@2", "app.\"with\"\"quote\"@3", "app.\"display name\"@4"] {
+        for identity in [
+            "app.\"window\"@1",
+            "\"window\"@2",
+            "app.\"with\"\"quote\"@3",
+            "app.\"display name\"@4",
+        ] {
             let plan = ExpressionClientPlan::new(ClientExpressionNode::ExternalContract {
                 identity: identity.to_owned(),
             });
@@ -3863,7 +4035,9 @@ mod tests {
             });
             assert_eq!(
                 plan.encode(),
-                Err(ClientPlanError::InvalidExpressionNode(NODE_EXTERNAL_CONTRACT)),
+                Err(ClientPlanError::InvalidExpressionNode(
+                    NODE_EXTERNAL_CONTRACT
+                )),
                 "identity {identity:?} must be rejected"
             );
         }
@@ -3871,11 +4045,17 @@ mod tests {
 
     #[test]
     fn external_contract_identity_rejects_malformed_encoded_payloads() {
-        for identity in [b"std..ui@1".as_slice(), b"std.ui@0".as_slice(), b"std.ui@-1".as_slice()] {
+        for identity in [
+            b"std..ui@1".as_slice(),
+            b"std.ui@0".as_slice(),
+            b"std.ui@-1".as_slice(),
+        ] {
             let bytes = encoded_external_contract_bytes(identity);
             assert_eq!(
                 ExpressionClientPlan::decode(&bytes),
-                Err(ClientPlanError::InvalidExpressionNode(NODE_EXTERNAL_CONTRACT)),
+                Err(ClientPlanError::InvalidExpressionNode(
+                    NODE_EXTERNAL_CONTRACT
+                )),
                 "encoded identity {identity:?} must be rejected"
             );
         }
@@ -3883,7 +4063,9 @@ mod tests {
         let bytes = encoded_external_contract_bytes(&[b's', b't', b'd', b'.', 0xff, b'@', b'1']);
         assert_eq!(
             ExpressionClientPlan::decode(&bytes),
-            Err(ClientPlanError::InvalidExpressionNode(NODE_EXTERNAL_CONTRACT))
+            Err(ClientPlanError::InvalidExpressionNode(
+                NODE_EXTERNAL_CONTRACT
+            ))
         );
     }
 
@@ -3947,11 +4129,15 @@ mod tests {
         for (root, node) in [(NODE_CALL, nested_call), (NODE_CONCAT, nested_concat)] {
             assert_eq!(
                 ExpressionClientPlan::new(node).encode(),
-                Err(ClientPlanError::InvalidExpressionNode(NODE_EXTERNAL_CONTRACT))
+                Err(ClientPlanError::InvalidExpressionNode(
+                    NODE_EXTERNAL_CONTRACT
+                ))
             );
             assert_eq!(
                 ExpressionClientPlan::decode(&encoded_nested_external_contract_bytes(root)),
-                Err(ClientPlanError::InvalidExpressionNode(NODE_EXTERNAL_CONTRACT))
+                Err(ClientPlanError::InvalidExpressionNode(
+                    NODE_EXTERNAL_CONTRACT
+                ))
             );
         }
     }
@@ -3971,7 +4157,9 @@ mod tests {
         );
         assert_eq!(
             plan.encode(),
-            Err(ClientPlanError::InvalidExpressionNode(NODE_EXTERNAL_CONTRACT))
+            Err(ClientPlanError::InvalidExpressionNode(
+                NODE_EXTERNAL_CONTRACT
+            ))
         );
 
         let identity = b"std.ui.window@1";
@@ -3989,7 +4177,9 @@ mod tests {
         bytes.push(STATE_DEFAULT_UNSET);
         assert_eq!(
             StateClientPlan::decode(&bytes),
-            Err(ClientPlanError::InvalidExpressionNode(NODE_EXTERNAL_CONTRACT))
+            Err(ClientPlanError::InvalidExpressionNode(
+                NODE_EXTERNAL_CONTRACT
+            ))
         );
     }
 
@@ -4030,10 +4220,7 @@ mod tests {
             )],
         );
 
-        assert_eq!(
-            plan.encode(),
-            Err(ClientPlanError::ExpressionDepthExceeded)
-        );
+        assert_eq!(plan.encode(), Err(ClientPlanError::ExpressionDepthExceeded));
     }
 
     #[test]
@@ -4350,7 +4537,10 @@ mod tests {
                 parameter: ParameterId::from_bytes([0x32; 16]),
             }),
         });
-        assert_eq!(ExpressionClientPlan::decode(&plan.encode().unwrap()), Ok(plan));
+        assert_eq!(
+            ExpressionClientPlan::decode(&plan.encode().unwrap()),
+            Ok(plan)
+        );
     }
 
     #[test]
@@ -4388,10 +4578,7 @@ mod tests {
             ExpressionClientPlan::decode(&trailing),
             Err(ClientPlanError::TrailingBytes)
         );
-        assert_eq!(
-            ExpressionClientPlan::decode(&encoded),
-            Ok(plan.clone())
-        );
+        assert_eq!(ExpressionClientPlan::decode(&encoded), Ok(plan.clone()));
         assert_eq!(
             ClientPlan::decode(&encoded),
             Err(ClientPlanError::UnsupportedVersion(INSPECT_FORMAT_VERSION))
@@ -5756,7 +5943,9 @@ mod tests {
         let local = LocalId::from_bytes([0x76; 16]);
         let parameter = ParameterId::from_bytes([0x77; 16]);
         let snapshot = ClientExpressionNode::Inspect {
-            operation: InspectOperationNode::snapshot(ClientExpressionNode::ParameterRead { parameter }),
+            operation: InspectOperationNode::snapshot(ClientExpressionNode::ParameterRead {
+                parameter,
+            }),
         };
         let plan = ProceduralClientPlan::new(
             vec![ClientLocal::new(
@@ -5775,7 +5964,6 @@ mod tests {
         let encoded = plan.encode().expect("procedural Inspector plan encodes");
         assert_eq!(ProceduralClientPlan::decode(&encoded), Ok(plan));
     }
-
 
     #[test]
     fn procedural_plan_rejects_forward_local_reads_at_encode_and_decode_boundaries() {
@@ -6102,7 +6290,9 @@ mod tests {
                 ClientStatement::let_(source_local, resource(0x9f, actual)),
                 ClientStatement::assignment(
                     target_local,
-                    ClientExpressionNode::LocalRead { local: source_local },
+                    ClientExpressionNode::LocalRead {
+                        local: source_local,
+                    },
                 ),
             ],
             ClientExpressionNode::Await {
@@ -6138,10 +6328,14 @@ mod tests {
                 ClientStatement::let_(source_local, ClientExpressionNode::Boolean { value: false }),
                 ClientStatement::assignment(
                     target_local,
-                    ClientExpressionNode::LocalRead { local: source_local },
+                    ClientExpressionNode::LocalRead {
+                        local: source_local,
+                    },
                 ),
             ],
-            ClientExpressionNode::LocalRead { local: target_local },
+            ClientExpressionNode::LocalRead {
+                local: target_local,
+            },
         );
 
         assert_eq!(
@@ -6249,17 +6443,110 @@ mod tests {
         assert_eq!(decoded, plan);
         assert_eq!(decoded.format_version(), ACTION_FORMAT_VERSION);
         assert_eq!(decoded.operation().domain(), ActionTargetDomain::Server);
-        assert_eq!(decoded.operation().target(), FunctionId::from_bytes([0x21; 16]));
-        assert_eq!(decoded.operation().target_function(), FunctionId::from_bytes([0x21; 16]));
-        assert_eq!(decoded.operation().target_revision(), RevisionPair::new(
-            SourceRevisionId::from_bytes([0x41; 16]),
-            CatalogueRevisionId::from_bytes([0x42; 16]),
-        ));
-        assert_eq!(decoded.operation().call_site(), CallSiteId::from_bytes([0x43; 16]));
-        assert_eq!(decoded.operation().call_site_id(), CallSiteId::from_bytes([0x43; 16]));
+        assert_eq!(
+            decoded.operation().target(),
+            FunctionId::from_bytes([0x21; 16])
+        );
+        assert_eq!(
+            decoded.operation().target_function(),
+            FunctionId::from_bytes([0x21; 16])
+        );
+        assert_eq!(
+            decoded.operation().target_revision(),
+            RevisionPair::new(
+                SourceRevisionId::from_bytes([0x41; 16]),
+                CatalogueRevisionId::from_bytes([0x42; 16]),
+            )
+        );
+        assert_eq!(
+            decoded.operation().call_site(),
+            CallSiteId::from_bytes([0x43; 16])
+        );
+        assert_eq!(
+            decoded.operation().call_site_id(),
+            CallSiteId::from_bytes([0x43; 16])
+        );
         assert_eq!(decoded.operation().arguments().len(), 1);
-        assert_eq!(decoded.operation().result_type(), TypeId::from_bytes([0x44; 16]));
-        assert_eq!(decoded.operation().declared_result_type(), TypeId::from_bytes([0x44; 16]));
+        assert_eq!(
+            decoded.operation().result_type(),
+            TypeId::from_bytes([0x44; 16])
+        );
+        assert_eq!(
+            decoded.operation().declared_result_type(),
+            TypeId::from_bytes([0x44; 16])
+        );
+    }
+
+    #[test]
+    fn action_plan_encode_rejects_zero_identity_fields() {
+        let make = |target, source, catalogue, call_site, result_type, parameter| {
+            ActionClientPlan::new(ActionOperationNode::new(
+                ActionTargetDomain::Server,
+                FunctionId::from_bytes(target),
+                RevisionPair::new(
+                    SourceRevisionId::from_bytes(source),
+                    CatalogueRevisionId::from_bytes(catalogue),
+                ),
+                CallSiteId::from_bytes(call_site),
+                vec![(
+                    ParameterId::from_bytes(parameter),
+                    ClientExpressionNode::String {
+                        value: "owner".to_owned(),
+                    },
+                )],
+                TypeId::from_bytes(result_type),
+            ))
+        };
+        let cases = [
+            (
+                [0; 16], [0x41; 16], [0x42; 16], [0x43; 16], [0x44; 16], [0x31; 16],
+            ),
+            (
+                [0x21; 16], [0; 16], [0x42; 16], [0x43; 16], [0x44; 16], [0x31; 16],
+            ),
+            (
+                [0x21; 16], [0x41; 16], [0; 16], [0x43; 16], [0x44; 16], [0x31; 16],
+            ),
+            (
+                [0x21; 16], [0x41; 16], [0x42; 16], [0; 16], [0x44; 16], [0x31; 16],
+            ),
+            (
+                [0x21; 16], [0x41; 16], [0x42; 16], [0x43; 16], [0; 16], [0x31; 16],
+            ),
+            (
+                [0x21; 16], [0x41; 16], [0x42; 16], [0x43; 16], [0x44; 16], [0; 16],
+            ),
+        ];
+        for (target, source, catalogue, call_site, result_type, parameter) in cases {
+            assert_eq!(
+                make(target, source, catalogue, call_site, result_type, parameter).encode(),
+                Err(ClientPlanError::InvalidActionIdentity),
+            );
+        }
+    }
+
+    #[test]
+    fn action_plan_decode_rejects_zero_identity_fields() {
+        let encoded = action_plan().encode().expect("the action plan encodes");
+        let body_offset = 8 + 4 + 1;
+        let identity_offsets = [1, 17, 33, 49, 65];
+        for relative_offset in identity_offsets {
+            let mut corrupted = encoded.clone();
+            corrupted[body_offset + relative_offset..body_offset + relative_offset + 16].fill(0);
+            assert_eq!(
+                ActionClientPlan::decode(&corrupted),
+                Err(ClientPlanError::InvalidActionIdentity),
+                "identity field at offset {relative_offset} must be rejected"
+            );
+        }
+
+        let mut corrupted_parameter = encoded;
+        let parameter_offset = body_offset + 1 + (16 * 5) + 4;
+        corrupted_parameter[parameter_offset..parameter_offset + 16].fill(0);
+        assert_eq!(
+            ActionClientPlan::decode(&corrupted_parameter),
+            Err(ClientPlanError::InvalidActionIdentity)
+        );
     }
 
     #[test]
@@ -6271,19 +6558,31 @@ mod tests {
 
         let mut invalid_domain = encoded.clone();
         invalid_domain[13] = 3;
-        assert_eq!(ActionClientPlan::decode(&invalid_domain), Err(ClientPlanError::InvalidActionDomain(3)));
+        assert_eq!(
+            ActionClientPlan::decode(&invalid_domain),
+            Err(ClientPlanError::InvalidActionDomain(3))
+        );
 
         let mut trailing = encoded.clone();
         trailing.push(0);
-        assert_eq!(ActionClientPlan::decode(&trailing), Err(ClientPlanError::TrailingBytes));
+        assert_eq!(
+            ActionClientPlan::decode(&trailing),
+            Err(ClientPlanError::TrailingBytes)
+        );
 
         let mut truncated = encoded.clone();
         truncated.pop();
-        assert_eq!(ActionClientPlan::decode(&truncated), Err(ClientPlanError::Truncated));
+        assert_eq!(
+            ActionClientPlan::decode(&truncated),
+            Err(ClientPlanError::Truncated)
+        );
 
         let mut invalid_node = encoded;
         invalid_node[expression_tag_offset] = 0xff;
-        assert_eq!(ActionClientPlan::decode(&invalid_node), Err(ClientPlanError::InvalidExpressionNode(0xff)));
+        assert_eq!(
+            ActionClientPlan::decode(&invalid_node),
+            Err(ClientPlanError::InvalidExpressionNode(0xff))
+        );
 
         let nested = ActionClientPlan::new(ActionOperationNode::new(
             ActionTargetDomain::Client,
@@ -6301,10 +6600,17 @@ mod tests {
             )],
             TypeId::from_bytes([0x56; 16]),
         ));
-        assert_eq!(nested.encode(), Err(ClientPlanError::InvalidExpressionNode(NODE_ACTION)));
-        assert_eq!(ExpressionClientPlan::new(ClientExpressionNode::Action {
-            operation: action_plan().operation().clone(),
-        }).encode(), Err(ClientPlanError::InvalidExpressionNode(NODE_ACTION)));
+        assert_eq!(
+            nested.encode(),
+            Err(ClientPlanError::InvalidExpressionNode(NODE_ACTION))
+        );
+        assert_eq!(
+            ExpressionClientPlan::new(ClientExpressionNode::Action {
+                operation: action_plan().operation().clone(),
+            })
+            .encode(),
+            Err(ClientPlanError::InvalidExpressionNode(NODE_ACTION))
+        );
     }
 
     #[test]
@@ -6315,53 +6621,85 @@ mod tests {
         let unsorted = ActionClientPlan::new(ActionOperationNode::new(
             ActionTargetDomain::Client,
             FunctionId::from_bytes([0x61; 16]),
-            RevisionPair::new(SourceRevisionId::from_bytes([0x62; 16]), CatalogueRevisionId::from_bytes([0x63; 16])),
+            RevisionPair::new(
+                SourceRevisionId::from_bytes([0x62; 16]),
+                CatalogueRevisionId::from_bytes([0x63; 16]),
+            ),
             CallSiteId::from_bytes([0x64; 16]),
             vec![(second, value.clone()), (first, value.clone())],
             TypeId::from_bytes([0x65; 16]),
         ));
-        assert_eq!(unsorted.encode(), Err(ClientPlanError::NonCanonicalActionArgumentOrder));
+        assert_eq!(
+            unsorted.encode(),
+            Err(ClientPlanError::NonCanonicalActionArgumentOrder)
+        );
 
         let duplicate = ActionClientPlan::new(ActionOperationNode::new(
             ActionTargetDomain::Client,
             FunctionId::from_bytes([0x61; 16]),
-            RevisionPair::new(SourceRevisionId::from_bytes([0x62; 16]), CatalogueRevisionId::from_bytes([0x63; 16])),
+            RevisionPair::new(
+                SourceRevisionId::from_bytes([0x62; 16]),
+                CatalogueRevisionId::from_bytes([0x63; 16]),
+            ),
             CallSiteId::from_bytes([0x64; 16]),
             vec![(first, value.clone()), (first, value)],
             TypeId::from_bytes([0x65; 16]),
         ));
-        assert_eq!(duplicate.encode(), Err(ClientPlanError::DuplicateActionArgument(first)));
+        assert_eq!(
+            duplicate.encode(),
+            Err(ClientPlanError::DuplicateActionArgument(first))
+        );
 
         let oversized = ActionClientPlan::new(ActionOperationNode::new(
             ActionTargetDomain::Client,
             FunctionId::from_bytes([0x66; 16]),
-            RevisionPair::new(SourceRevisionId::from_bytes([0x67; 16]), CatalogueRevisionId::from_bytes([0x68; 16])),
+            RevisionPair::new(
+                SourceRevisionId::from_bytes([0x67; 16]),
+                CatalogueRevisionId::from_bytes([0x68; 16]),
+            ),
             CallSiteId::from_bytes([0x69; 16]),
-            (0..=MAX_ACTION_ARGUMENTS).map(|index| (
-                ParameterId::from_bytes([index as u8; 16]),
-                ClientExpressionNode::Boolean { value: false },
-            )).collect(),
+            (0..=MAX_ACTION_ARGUMENTS)
+                .map(|index| {
+                    (
+                        ParameterId::from_bytes([index as u8; 16]),
+                        ClientExpressionNode::Boolean { value: false },
+                    )
+                })
+                .collect(),
             TypeId::from_bytes([0x6a; 16]),
         ));
-        assert_eq!(oversized.encode(), Err(ClientPlanError::ActionArgumentLimitExceeded { limit: MAX_ACTION_ARGUMENTS }));
+        assert_eq!(
+            oversized.encode(),
+            Err(ClientPlanError::ActionArgumentLimitExceeded {
+                limit: MAX_ACTION_ARGUMENTS
+            })
+        );
 
         let mut crafted = action_plan().encode().expect("the action plan encodes");
         let count_offset = 8 + 4 + 1 + 1 + 16 * 5;
-        crafted[count_offset..count_offset + 4].copy_from_slice(&((MAX_ACTION_ARGUMENTS + 1) as u32).to_be_bytes());
-        assert_eq!(ActionClientPlan::decode(&crafted), Err(ClientPlanError::ActionArgumentLimitExceeded { limit: MAX_ACTION_ARGUMENTS }));
+        crafted[count_offset..count_offset + 4]
+            .copy_from_slice(&((MAX_ACTION_ARGUMENTS + 1) as u32).to_be_bytes());
+        assert_eq!(
+            ActionClientPlan::decode(&crafted),
+            Err(ClientPlanError::ActionArgumentLimitExceeded {
+                limit: MAX_ACTION_ARGUMENTS
+            })
+        );
     }
 
     #[test]
     fn capability_plan_accepts_version_eight_action_inner_plan() {
         let inner = InnerClientPlan::Action(action_plan());
-        let plan = CapabilityClientPlan::new(inner.clone(), vec![CapabilityRequirement::new(
-            "std.action.trigger",
-            CapabilityArgumentSource::Parameter("p_action".to_owned()),
-        )]);
+        let plan = CapabilityClientPlan::new(
+            inner.clone(),
+            vec![CapabilityRequirement::new(
+                "std.action.trigger",
+                CapabilityArgumentSource::Parameter("p_action".to_owned()),
+            )],
+        );
         let bytes = plan.encode().expect("the capability plan encodes");
         let decoded = CapabilityClientPlan::decode(&bytes).expect("the capability plan decodes");
         assert_eq!(decoded.inner_plan_version(), ACTION_FORMAT_VERSION);
         assert_eq!(decoded.inner_plan(), &inner);
     }
-
 }

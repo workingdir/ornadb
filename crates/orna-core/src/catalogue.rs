@@ -3470,7 +3470,9 @@ mod tests {
         assert_eq!(columns.len(), 2);
         assert_eq!(columns[0].name(), "title");
         assert_eq!(columns[0].ordinal(), 0);
-        let stream = catalogue.function_by_id(FunctionId::from_bytes([13; 16])).unwrap();
+        let stream = catalogue
+            .function_by_id(FunctionId::from_bytes([13; 16]))
+            .unwrap();
         assert_eq!(
             stream.return_type(),
             &FunctionReturn::Stream(ResolvedType::scalar(StandardScalar::Integer))

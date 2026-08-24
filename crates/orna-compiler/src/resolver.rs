@@ -12037,6 +12037,205 @@ mod tests {
     }
 
     #[test]
+    fn lowers_ordinary_client_call_with_canonical_target_identities_and_reference() {
+        let integer = ResolvedType::Scalar(StandardScalar::Integer);
+        let target_id = FunctionId::from_bytes([0x61; 16]);
+        let target_first_parameter_id = ParameterId::from_bytes([0x62; 16]);
+        let target_second_parameter_id = ParameterId::from_bytes([0x63; 16]);
+        let base = catalogue(
+            vec![schema(1, &["tasks"])],
+            Vec::new(),
+            vec![FunctionDefinition::new(
+                target_id,
+                QualifiedSemanticName::new(["tasks", "add"]).unwrap(),
+                FunctionDomain::Client,
+                vec![
+                    parameter(0x62, "p_first", 0, integer),
+                    parameter(0x63, "p_second", 1, integer),
+                ],
+                FunctionReturn::Single(integer),
+                FunctionRevisionId::from_bytes([0x64; 16]),
+                FunctionSecurity::Invoker,
+                None,
+                FunctionVolatility::Immutable,
+            )],
+        );
+        let source = "CREATE SCHEMA ui; CREATE CLIENT FUNCTION ui.call(p_input INTEGER) RETURNS INTEGER AS tasks.add(p_first => p_input, p_second => 7);";
+        let report = check(&bundle([("client-call.orna", source)]), &base);
+        assert_eq!(report.diagnostics(), &[], "{:?}", report.diagnostics());
+
+        let function = report
+            .checked_bundle()
+            .unwrap()
+            .client_functions()
+            .iter()
+            .next()
+            .unwrap();
+        let caller_parameter_id = function.parameters()[0].id();
+        let CheckedClientFunctionBody::Expression { expression } = function.body() else {
+            panic!("ordinary CLIENT call body was not an expression");
+        };
+        let CheckedClientExpression::Call {
+            function: checked_target_id,
+            arguments,
+            location,
+        } = expression
+        else {
+            panic!("ordinary CLIENT call did not lower to a call expression");
+        };
+        assert_eq!(
+            *checked_target_id,
+            super::CheckedFunctionId::Existing(target_id)
+        );
+        assert_eq!(
+            arguments
+                .iter()
+                .map(|(parameter, _)| *parameter)
+                .collect::<Vec<_>>(),
+            vec![
+                super::CheckedParameterId::Existing(target_first_parameter_id),
+                super::CheckedParameterId::Existing(target_second_parameter_id),
+            ]
+        );
+        assert!(matches!(
+            &arguments[0].1,
+            CheckedClientExpression::ParameterRead { parameter, .. }
+                if *parameter == caller_parameter_id
+        ));
+        assert!(matches!(
+            &arguments[1].1,
+            CheckedClientExpression::Integer { value: 7, .. }
+        ));
+
+        let call_start = source.find("tasks.add").unwrap();
+        let call_text = "tasks.add(p_first => p_input, p_second => 7)";
+        assert_eq!(location.logical_path(), "client-call.orna");
+        assert_eq!(location.span().start(), call_start);
+        assert_eq!(location.span().end(), call_start + call_text.len());
+
+        let call_references = function
+            .references()
+            .iter()
+            .filter(|reference| reference.kind() == DefinitionReferenceKind::FunctionCall)
+            .collect::<Vec<_>>();
+        assert_eq!(call_references.len(), 1);
+        let call_reference = call_references[0];
+        assert_eq!(
+            call_reference.target(),
+            CheckedDefinitionReferenceTarget::Function(super::CheckedFunctionId::Existing(
+                target_id,
+            ))
+        );
+        assert_eq!(call_reference.location().logical_path(), "client-call.orna");
+        assert_eq!(call_reference.location().span().start(), call_start);
+        assert_eq!(
+            call_reference.location().span().end(),
+            call_start + call_text.len()
+        );
+    }
+
+    #[test]
+    fn lowers_client_ref_field_path_concat_with_stable_identities_and_spans() {
+        let source = "CREATE SCHEMA app; CREATE TYPE app.item AS OBJECT (title TEXT); CREATE CLIENT FUNCTION app.render(p_item REF app.item) RETURNS TEXT AS p_item.title || '!' || '?';";
+        let report = check(
+            &bundle([("client-field-concat.orna", source)]),
+            &empty_catalogue(),
+        );
+        assert_eq!(report.diagnostics(), &[], "{:?}", report.diagnostics());
+
+        let checked = report.checked_bundle().unwrap();
+        let object = &checked.object_types()[0];
+        let field_id = object.fields()[0].id();
+        let function = checked.client_functions().iter().next().unwrap();
+        let parameter_id = function.parameters()[0].id();
+        let CheckedClientFunctionBody::Expression { expression } = function.body() else {
+            panic!("CLIENT field concat body was not an expression");
+        };
+        let CheckedClientExpression::Concat {
+            left,
+            right,
+            location,
+        } = expression
+        else {
+            panic!("CLIENT field concat did not lower to a concat expression");
+        };
+        let CheckedClientExpression::Concat {
+            left: first_field,
+            right: first_string,
+            location: first_location,
+        } = left.as_ref()
+        else {
+            panic!("left-associative concat left operand was not a concat");
+        };
+        let CheckedClientExpression::FieldPath {
+            root,
+            fields,
+            location: field_location,
+        } = first_field.as_ref()
+        else {
+            panic!("left-associative concat root was not a field path");
+        };
+        assert_eq!(*root, parameter_id);
+        assert_eq!(fields, &vec![field_id]);
+        let CheckedClientExpression::String {
+            value,
+            location: string_location,
+        } = first_string.as_ref()
+        else {
+            panic!("first concat right operand was not a string literal");
+        };
+        assert_eq!(value, "!");
+        let CheckedClientExpression::String {
+            value: final_value,
+            location: final_string_location,
+        } = right.as_ref()
+        else {
+            panic!("final concat operand was not a string literal");
+        };
+        assert_eq!(final_value, "?");
+
+        let concat_start = source.find("p_item.title || '!' || '?'").unwrap();
+        let field_start = source.find("p_item.title").unwrap();
+        let string_start = source.find("'!'").unwrap();
+        let final_string_start = source.find("'?' ".trim_end()).unwrap();
+        assert_eq!(location.logical_path(), "client-field-concat.orna");
+        assert_eq!(location.span().start(), concat_start);
+        assert_eq!(location.span().end(), final_string_start + 3);
+        assert_eq!(first_location.span().start(), field_start);
+        assert_eq!(first_location.span().end(), string_start + 3);
+        assert_eq!(field_location.span().start(), field_start);
+        assert_eq!(
+            field_location.span().end(),
+            field_start + "p_item.title".len()
+        );
+        assert_eq!(string_location.span().start(), string_start);
+        assert_eq!(string_location.span().end(), string_start + 3);
+        assert_eq!(final_string_location.span().start(), final_string_start);
+        assert_eq!(final_string_location.span().end(), final_string_start + 3);
+
+        let non_text = "CREATE SCHEMA app; CREATE TYPE app.item AS OBJECT (title INTEGER); CREATE CLIENT FUNCTION app.render(p_item REF app.item) RETURNS INTEGER AS p_item.title || 1;";
+        let rejected = check(
+            &bundle([("client-field-concat-rejected.orna", non_text)]),
+            &empty_catalogue(),
+        );
+        assert_eq!(rejected.diagnostics().len(), 1);
+        assert_eq!(
+            rejected.diagnostics()[0].code(),
+            DiagnosticCode::TypeMismatch
+        );
+        let rejected_start = non_text.find("p_item.title || 1").unwrap();
+        assert_eq!(
+            rejected.diagnostics()[0].location().span().start(),
+            rejected_start
+        );
+        assert_eq!(
+            rejected.diagnostics()[0].location().span().end(),
+            rejected_start + "p_item.title || 1".len()
+        );
+        assert!(rejected.checked_bundle().is_none());
+    }
+
+    #[test]
     fn accepts_ordinary_inspector_structural_default_without_options() {
         let source = "CREATE SCHEMA devtools; CREATE CLIENT FUNCTION devtools.inspect(p_target REF sys.inspect.invocation) RETURNS sys.inspect.snapshot IS BEGIN RETURN sys.inspect.snapshot(p_target => p_target); END;";
         let report = check(&bundle([("inspector.orna", source)]), &empty_catalogue());

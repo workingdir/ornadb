@@ -1927,6 +1927,16 @@ fn validate_action_frame(
     if !matches!(body[0], ACTION_DOMAIN_CLIENT | ACTION_DOMAIN_SERVER) {
         return Err(OpaqueValueError::InvalidActionFrame { opaque_type });
     }
+    for identity_index in 0..ACTION_IDENTITY_FIELDS {
+        let identity_start = 1 + (identity_index * ACTION_IDENTITY_BYTES);
+        let identity_end = identity_start + ACTION_IDENTITY_BYTES;
+        if body[identity_start..identity_end]
+            .iter()
+            .all(|byte| *byte == 0)
+        {
+            return Err(OpaqueValueError::InvalidActionFrame { opaque_type });
+        }
+    }
 
     let mut offset = ACTION_BODY_PREFIX_BYTES;
     let argument_count = u32::from_be_bytes(
@@ -1950,6 +1960,9 @@ fn validate_action_frame(
             return Err(OpaqueValueError::InvalidActionFrame { opaque_type });
         }
         let parameter = &body[offset..parameter_end];
+        if parameter.iter().all(|byte| *byte == 0) {
+            return Err(OpaqueValueError::InvalidActionFrame { opaque_type });
+        }
         if previous_parameter.is_some_and(|previous| previous >= parameter) {
             return Err(OpaqueValueError::InvalidActionFrame { opaque_type });
         }
@@ -7278,6 +7291,39 @@ mod tests {
                 canonical_payload: vec![0; 16],
             }
         );
+    }
+
+    #[test]
+    fn action_frame_rejects_zero_target_revision_call_site_result_and_parameter_identities() {
+        let mut integer = b"ORV3".to_vec();
+        integer.push(0x03);
+        integer.extend_from_slice(&[0x12; 16]);
+        integer.extend_from_slice(&4_u32.to_be_bytes());
+        integer.extend_from_slice(&7_i32.to_be_bytes());
+
+        let mut body = vec![ACTION_DOMAIN_CLIENT];
+        for byte in 0x21..=0x25 {
+            body.extend_from_slice(&[byte; ACTION_IDENTITY_BYTES]);
+        }
+        body.extend_from_slice(&1_u32.to_be_bytes());
+        body.extend_from_slice(&[0x31; ACTION_IDENTITY_BYTES]);
+        body.extend_from_slice(&(integer.len() as u32).to_be_bytes());
+        body.extend_from_slice(&integer);
+        let mut payload = b"ORNA-ACTION/1 ".to_vec();
+        payload.extend_from_slice(&(body.len() as u32).to_be_bytes());
+        payload.extend_from_slice(&body);
+
+        validate_action_frame(OPAQUE_TYPE, b"ORNA-ACTION/1 ", &payload)
+            .expect("valid action identities are accepted");
+        for offset in [1, 17, 33, 49, 65, 85] {
+            let mut corrupted = payload.clone();
+            let body_offset = b"ORNA-ACTION/1 ".len() + 4;
+            corrupted[body_offset + offset..body_offset + offset + ACTION_IDENTITY_BYTES].fill(0);
+            assert!(matches!(
+                validate_action_frame(OPAQUE_TYPE, b"ORNA-ACTION/1 ", &corrupted),
+                Err(OpaqueValueError::InvalidActionFrame { .. })
+            ));
+        }
     }
 
     #[test]

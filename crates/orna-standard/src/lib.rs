@@ -1789,9 +1789,9 @@ pub fn prepare_standard_upgrade_v1_to_v2(
 /// Prepares the append-only `orna.std/2` to `orna.std/3` standard upgrade
 /// (work ADR 0059).
 ///
-/// This is the only path that selects `orna.std/3`. It fails closed when the
-/// active revision pins any standard other than `orna.std/2` (an
-/// already-installed V3 or a wrong V1 base). It retains and verifies the
+/// This is the only path that selects `orna.std/3`. It fails closed unless
+/// the active revision pins exactly `orna.std/2` (an absent parent or a wrong
+/// installed revision). It retains and verifies the
 /// immutable `orna.std/2` parent snapshot before it prepares V3: V3 is the
 /// append-only child, so the parent must be present and coherent; the
 /// PostgreSQL apply path persists the parent alongside the child in the same
@@ -1802,15 +1802,7 @@ pub fn prepare_standard_upgrade_v1_to_v2(
 pub fn prepare_standard_upgrade_v2_to_v3(
     active: &ActiveDatabaseRevision,
 ) -> Result<StandardUpgrade, StandardUpgradeError> {
-    if let Some(installed) = active.catalogue_hash_context().standard()
-        && installed.revision() != STANDARD_LIBRARY_V2_REVISION_ID
-    {
-        return Err(StandardUpgradeError::Prepare {
-            source: PrepareStandardUpgradeError::StandardLibraryAlreadyInstalled {
-                revision: installed.revision(),
-            },
-        });
-    }
+    require_standard_upgrade_parent(active, STANDARD_LIBRARY_V2_REVISION_ID)?;
 
     let version_two = retained_standard_library_v2_snapshot()
         .map_err(|source| StandardUpgradeError::StandardLibrary { source })?;
@@ -1829,9 +1821,9 @@ pub fn prepare_standard_upgrade_v2_to_v3(
 /// Prepares the append-only `orna.std/3` to `orna.std/4` standard upgrade
 /// (work ADR 0062).
 ///
-/// This is the only path that selects `orna.std/4`. It fails closed when the
-/// active revision pins any standard other than `orna.std/3` (an
-/// already-installed V4 or a wrong V1/V2 base). It retains and verifies the
+/// This is the only path that selects `orna.std/4`. It fails closed unless
+/// the active revision pins exactly `orna.std/3` (an absent parent or a wrong
+/// installed revision). It retains and verifies the
 /// immutable `orna.std/3` parent snapshot before it prepares V4: V4 is the
 /// append-only child, so the parent must be present and coherent; the
 /// PostgreSQL apply path persists the parent alongside the child in the same
@@ -1842,15 +1834,7 @@ pub fn prepare_standard_upgrade_v2_to_v3(
 pub fn prepare_standard_upgrade_v3_to_v4(
     active: &ActiveDatabaseRevision,
 ) -> Result<StandardUpgrade, StandardUpgradeError> {
-    if let Some(installed) = active.catalogue_hash_context().standard()
-        && installed.revision() != STANDARD_LIBRARY_V3_REVISION_ID
-    {
-        return Err(StandardUpgradeError::Prepare {
-            source: PrepareStandardUpgradeError::StandardLibraryAlreadyInstalled {
-                revision: installed.revision(),
-            },
-        });
-    }
+    require_standard_upgrade_parent(active, STANDARD_LIBRARY_V3_REVISION_ID)?;
 
     let version_three = retained_standard_library_v3_snapshot()
         .map_err(|source| StandardUpgradeError::StandardLibrary { source })?;
@@ -1867,19 +1851,13 @@ pub fn prepare_standard_upgrade_v3_to_v4(
 }
 
 /// Prepares the append-only `orna.std/4` to `orna.std/5` standard upgrade
-/// (ADR 0075). The retained V4 parent is verified before the V5 child.
+/// (ADR 0075). It fails closed unless `orna.std/4` is the installed parent;
+/// the retained V4 parent is verified before the V5 child.
 pub fn prepare_standard_upgrade_v4_to_v5(
     active: &ActiveDatabaseRevision,
 ) -> Result<StandardUpgrade, StandardUpgradeError> {
-    if let Some(installed) = active.catalogue_hash_context().standard()
-        && installed.revision() != STANDARD_LIBRARY_V4_REVISION_ID
-    {
-        return Err(StandardUpgradeError::Prepare {
-            source: PrepareStandardUpgradeError::StandardLibraryAlreadyInstalled {
-                revision: installed.revision(),
-            },
-        });
-    }
+    require_standard_upgrade_parent(active, STANDARD_LIBRARY_V4_REVISION_ID)?;
+
     let version_four = retained_standard_library_v4_snapshot()
         .map_err(|source| StandardUpgradeError::StandardLibrary { source })?;
     verify_standard_library_v4_snapshot(version_four)
@@ -1894,19 +1872,13 @@ pub fn prepare_standard_upgrade_v4_to_v5(
 }
 
 /// Prepares the append-only `orna.std/5` to `orna.std/6` standard upgrade
-/// (ADR 0079). The retained V5 parent is verified before the V6 child.
+/// (ADR 0079). It fails closed unless `orna.std/5` is the installed parent;
+/// the retained V5 parent is verified before the V6 child.
 pub fn prepare_standard_upgrade_v5_to_v6(
     active: &ActiveDatabaseRevision,
 ) -> Result<StandardUpgrade, StandardUpgradeError> {
-    if let Some(installed) = active.catalogue_hash_context().standard()
-        && installed.revision() != STANDARD_LIBRARY_V5_REVISION_ID
-    {
-        return Err(StandardUpgradeError::Prepare {
-            source: PrepareStandardUpgradeError::StandardLibraryAlreadyInstalled {
-                revision: installed.revision(),
-            },
-        });
-    }
+    require_standard_upgrade_parent(active, STANDARD_LIBRARY_V5_REVISION_ID)?;
+
     let version_five = retained_standard_library_v5_snapshot()
         .map_err(|source| StandardUpgradeError::StandardLibrary { source })?;
     verify_standard_library_v5_snapshot(version_five)
@@ -1918,6 +1890,23 @@ pub fn prepare_standard_upgrade_v5_to_v6(
         check_standard_library_source,
         prepare_checked_standard_upgrade,
     )
+}
+
+fn require_standard_upgrade_parent(
+    active: &ActiveDatabaseRevision,
+    expected: StandardLibraryRevisionId,
+) -> Result<(), StandardUpgradeError> {
+    match active.catalogue_hash_context().standard() {
+        Some(installed) if installed.revision() == expected => Ok(()),
+        Some(installed) => Err(StandardUpgradeError::Prepare {
+            source: PrepareStandardUpgradeError::StandardLibraryAlreadyInstalled {
+                revision: installed.revision(),
+            },
+        }),
+        None => Err(StandardUpgradeError::StandardLibrary {
+            source: StandardLibraryError::Unavailable,
+        }),
+    }
 }
 
 fn prepare_standard_upgrade_with<Retain, Verify, Check, Prepare>(
@@ -3657,7 +3646,8 @@ fn reconcile_retained_source_with_unit(
         .iter()
         .zip(catalogue.value_types())
     {
-        if !matches_qualified_name(&declaration.name, definition.name())
+        if definition.kind() != ValueTypeKind::Primitive
+            || !matches_qualified_name(&declaration.name, definition.name())
             || decode_sql_string_literal(&declaration.kernel_contract.text).as_deref()
                 != Some(definition.representation_contract())
             || source_persistence(declaration.persistence) != definition.persistence()
@@ -4077,9 +4067,10 @@ mod tests {
     use std::{cell::Cell, error::Error as _};
 
     use orna_core::catalogue::{
-        CatalogueSnapshotError, PreludeTypeName, PreludeTypeNameError, QualifiedSemanticName,
-        SemanticNameError, TypeBindingError, TypeBindingKind, TypeLookupName, ValueTypeKind,
-        ValueTypeMutability, ValueTypePersistence,
+        CatalogueSnapshot, CatalogueSnapshotError, PreludeTypeName, PreludeTypeNameError,
+        QualifiedSemanticName, SemanticNameError, TypeBindingError, TypeBindingKind,
+        TypeLookupName, ValueTypeDefinition, ValueTypeKind, ValueTypeMutability,
+        ValueTypePersistence,
     };
     use orna_core::revision::DefinitionIdentity;
     use orna_core::system::{
@@ -4102,7 +4093,6 @@ mod tests {
             function_semantic_digest_with_version, source_bundle_digest,
             source_revision_record_digest, source_unit_content_digest, standard_library_digest,
         },
-        catalogue::CatalogueSnapshot,
         revision::{
             ActiveDatabaseRevision, ActiveDatabaseRevisionInput, ActiveRevisionContent,
             CatalogueHashContext, DefinitionReferenceKind, DefinitionReferenceTarget,
@@ -4743,6 +4733,42 @@ EXPORT TYPE std.types.OPAQUE_TOKEN AS std.OPAQUE_TOKEN;
                 Err(super::StandardLibraryError::RetainedSourceMismatch)
             ));
         }
+    }
+
+    #[test]
+    fn retained_source_rejects_a_catalogue_value_kind_mismatch() {
+        // Work ADR 0016 requires each standard scalar source declaration to
+        // reconcile with a primitive catalogue value definition, not merely a
+        // matching name, contract, and persistence policy.
+        let manifest = super::standard_library_manifest().expect("the manifest is valid");
+        let mut value_types = manifest.catalogue().value_types().to_vec();
+        let void_index = value_types
+            .iter()
+            .position(|definition| definition.id() == super::VOID_TYPE_ID)
+            .expect("the VOID definition is retained");
+        let void = &value_types[void_index];
+        let void_id = void.id();
+        let void_name = void.name().clone();
+        let void_contract = void.representation_contract().to_owned();
+        value_types[void_index] = ValueTypeDefinition::opaque(void_id, void_name, void_contract);
+        let catalogue = CatalogueSnapshot::new_with_types(
+            manifest.catalogue().revision(),
+            manifest.catalogue().schemas().to_vec(),
+            Vec::new(),
+            value_types,
+            manifest.catalogue().type_bindings().to_vec(),
+        )
+        .expect("the kind-tampered catalogue remains structurally valid");
+        let tampered_manifest = super::StandardLibraryManifest { catalogue };
+
+        assert!(matches!(
+            super::reconcile_retained_source_with_unit(
+                EXPECTED_RETAINED_STANDARD_SOURCE,
+                &tampered_manifest,
+                super::STANDARD_SOURCE_UNIT_ID,
+            ),
+            Err(super::StandardLibraryError::RetainedSourceMismatch)
+        ));
     }
 
     #[test]
@@ -8013,8 +8039,12 @@ EXPORT TYPE std.ui.UI AS std.UI;
     }
 
     #[test]
-    fn prepares_the_v2_to_v3_standard_upgrade_from_an_empty_active_revision() {
-        let active = empty_active_revision();
+    fn prepares_the_v2_to_v3_standard_upgrade_from_an_empty_v2_active_revision() {
+        let version_two = verify_standard_library_v2_snapshot(
+            retained_standard_library_v2_snapshot().expect("the retained V2 source is valid"),
+        )
+        .expect("the retained V2 standard source verifies");
+        let active = empty_version_two_active_revision(&version_two);
 
         let upgrade = prepare_standard_upgrade_v2_to_v3(&active)
             .expect("the V2-to-V3 standard upgrade prepares");
@@ -8060,6 +8090,47 @@ EXPORT TYPE std.ui.UI AS std.UI;
                 .map(|snapshot| snapshot.digest_version()),
             Some(StandardLibraryDigestVersion::Version2)
         );
+    }
+
+    #[test]
+    fn append_only_standard_upgrades_require_an_installed_parent() {
+        let active = empty_active_revision();
+        let expected_error = "the standard library is not installed";
+
+        for (label, result) in [
+            (
+                "V2-to-V3",
+                super::prepare_standard_upgrade_v2_to_v3(&active),
+            ),
+            (
+                "V3-to-V4",
+                super::prepare_standard_upgrade_v3_to_v4(&active),
+            ),
+            (
+                "V4-to-V5",
+                super::prepare_standard_upgrade_v4_to_v5(&active),
+            ),
+            (
+                "V5-to-V6",
+                super::prepare_standard_upgrade_v5_to_v6(&active),
+            ),
+        ] {
+            let error = result.expect_err("an append-only upgrade must require its parent");
+            assert!(
+                matches!(
+                    &error,
+                    StandardUpgradeError::StandardLibrary {
+                        source: StandardLibraryError::Unavailable,
+                    }
+                ),
+                "{label} returned the wrong missing-parent error: {error:?}"
+            );
+            assert_eq!(error.to_string(), expected_error, "{label} display");
+            assert_eq!(
+                error.source().map(ToString::to_string),
+                Some(expected_error.to_owned()),
+            );
+        }
     }
 
     #[test]
@@ -8132,6 +8203,82 @@ EXPORT TYPE std.ui.UI AS std.UI;
                 .standard()
                 .map(|snapshot| snapshot.revision()),
             Some(STANDARD_LIBRARY_V3_REVISION_ID)
+        );
+    }
+
+    #[test]
+    fn prepares_the_v3_to_v4_standard_upgrade_from_an_empty_v3_active_revision() {
+        let version_three = super::verify_standard_library_v3_snapshot(
+            super::retained_standard_library_v3_snapshot()
+                .expect("the retained V3 standard source is valid"),
+        )
+        .expect("the retained V3 standard source verifies");
+        let version_four = super::verify_standard_library_v4_snapshot(
+            super::retained_standard_library_v4_snapshot()
+                .expect("the retained V4 standard source is valid"),
+        )
+        .expect("the retained V4 standard source verifies");
+        orna_compiler::check_standard_library_source(&version_four)
+            .unwrap_or_else(|error| panic!("the V4 source must check: {error:?}"));
+
+        let active = empty_version_two_active_revision(&version_three);
+        let upgrade = super::prepare_standard_upgrade_v3_to_v4(&active)
+            .unwrap_or_else(|error| panic!("the V3-to-V4 upgrade must prepare: {error:?}"));
+
+        assert_eq!(
+            upgrade.verified_standard_snapshot().revision(),
+            super::STANDARD_LIBRARY_V4_REVISION_ID
+        );
+        assert_eq!(
+            upgrade.verified_standard_snapshot().catalogue().revision(),
+            super::STANDARD_CATALOGUE_V4_REVISION_ID,
+            "V4 must carry the accepted standard catalogue revision"
+        );
+        assert_eq!(
+            upgrade.verified_standard_snapshot().source().parent(),
+            Some(super::STANDARD_SOURCE_V3_REVISION_ID),
+            "V4 must be the append-only child of the retained V3 source revision"
+        );
+        assert_eq!(
+            upgrade.verified_standard_snapshot().source().units().len(),
+            4
+        );
+        assert_eq!(upgrade.verified_standard_snapshot().executables().len(), 1);
+        let checked_executable = upgrade
+            .checked_standard_library()
+            .checked_executable()
+            .expect("the V4 upgrade retains the checked echo executable");
+        assert_eq!(
+            checked_executable.function_id(),
+            super::STD_INVOKE_ECHO_FUNCTION_ID
+        );
+        assert_eq!(
+            checked_executable.parameter_id(),
+            super::STD_INVOKE_ECHO_PARAMETER_ID
+        );
+        assert_eq!(
+            checked_executable.revision_id(),
+            super::STD_INVOKE_ECHO_FUNCTION_REVISION_ID
+        );
+        assert_eq!(
+            upgrade.application_revision().expected_base(),
+            active.pair()
+        );
+        assert_eq!(
+            upgrade
+                .application_revision()
+                .catalogue_hash_context()
+                .standard()
+                .map(|snapshot| snapshot.revision()),
+            Some(super::STANDARD_LIBRARY_V4_REVISION_ID)
+        );
+        assert_eq!(
+            upgrade
+                .application_revision()
+                .catalogue_hash_context()
+                .standard()
+                .map(|snapshot| snapshot.digest_version()),
+            Some(StandardLibraryDigestVersion::Version2)
         );
     }
 
@@ -8279,6 +8426,53 @@ EXPORT TYPE std.ui.UI AS std.UI;
             upgrade.verified_standard_snapshot().revision(),
             super::STANDARD_LIBRARY_V5_REVISION_ID
         );
+        let verified = upgrade.verified_standard_snapshot();
+        assert_eq!(
+            verified.catalogue().revision(),
+            super::STANDARD_CATALOGUE_V5_REVISION_ID
+        );
+        assert_eq!(
+            verified.source().bundle(),
+            super::STANDARD_SOURCE_V5_BUNDLE_ID
+        );
+        assert_eq!(
+            verified.source().id(),
+            super::STANDARD_SOURCE_V5_REVISION_ID
+        );
+        assert_eq!(
+            verified.source().parent(),
+            Some(super::STANDARD_SOURCE_V4_REVISION_ID)
+        );
+        assert_eq!(
+            verified.source().bundle_hash(),
+            super::ACCEPTED_V5_SOURCE_BUNDLE_DIGEST
+        );
+        assert_eq!(
+            verified.source().revision_hash(),
+            super::ACCEPTED_V5_SOURCE_REVISION_DIGEST
+        );
+        assert_eq!(verified.source().units().len(), 5);
+        assert_eq!(
+            &verified.source().units()[..4],
+            version_four.source().units()
+        );
+        assert_eq!(
+            verified.source().units()[4].id(),
+            super::STD_JSON_SOURCE_UNIT_ID
+        );
+        assert_eq!(verified.source().units()[4].ordinal(), 4);
+        assert_eq!(
+            verified.source().units()[4].logical_path(),
+            super::STD_JSON_SOURCE_LOGICAL_PATH
+        );
+        assert_eq!(
+            verified.source().units()[4].content(),
+            super::RETAINED_STANDARD_JSON_SOURCE
+        );
+        assert_eq!(
+            verified.digest(),
+            super::ACCEPTED_V5_STANDARD_LIBRARY_DIGEST
+        );
         assert_eq!(upgrade.verified_standard_snapshot().executables().len(), 2);
         assert_eq!(
             upgrade
@@ -8288,7 +8482,119 @@ EXPORT TYPE std.ui.UI AS std.UI;
                 .function_id(),
             super::STD_INVOKE_ECHO_FUNCTION_ID
         );
+        assert_eq!(
+            upgrade.application_revision().expected_base(),
+            active.pair()
+        );
+        assert_eq!(
+            upgrade
+                .application_revision()
+                .catalogue_hash_context()
+                .standard()
+                .map(|snapshot| snapshot.revision()),
+            Some(super::STANDARD_LIBRARY_V5_REVISION_ID)
+        );
+        assert_eq!(
+            upgrade
+                .application_revision()
+                .catalogue_hash_context()
+                .standard()
+                .map(|snapshot| snapshot.digest_version()),
+            Some(StandardLibraryDigestVersion::Version2)
+        );
     }
+
+    #[test]
+    fn v4_to_v5_upgrade_rejects_non_v4_parents_before_child_work() {
+        let v3 = super::verify_standard_library_v3_snapshot(
+            super::retained_standard_library_v3_snapshot()
+                .expect("the retained V3 standard source is valid"),
+        )
+        .expect("the retained V3 standard source verifies");
+        let v5 = super::verify_standard_library_v5_snapshot(
+            super::retained_standard_library_v5_snapshot()
+                .expect("the retained V5 standard source is valid"),
+        )
+        .expect("the retained V5 standard source verifies");
+
+        for (standard, revision) in [
+            (&v3, super::STANDARD_LIBRARY_V3_REVISION_ID),
+            (&v5, super::STANDARD_LIBRARY_V5_REVISION_ID),
+        ] {
+            let active = empty_version_two_active_revision(standard);
+            let error = super::prepare_standard_upgrade_v4_to_v5(&active)
+                .expect_err("a non-V4 parent must not enter the V4-to-V5 path");
+            assert!(matches!(
+                error,
+                super::StandardUpgradeError::Prepare {
+                    source: orna_compiler::PrepareStandardUpgradeError::StandardLibraryAlreadyInstalled { revision: actual }
+                } if actual == revision
+            ));
+        }
+    }
+
+    #[test]
+    fn prepares_the_v5_to_v6_standard_upgrade_from_an_empty_v5_active_revision() {
+        let version_five = super::verify_standard_library_v5_snapshot(
+            super::retained_standard_library_v5_snapshot()
+                .expect("the retained V5 standard source is valid"),
+        )
+        .expect("the retained V5 standard source verifies");
+        orna_compiler::check_standard_library_source(&version_five)
+            .unwrap_or_else(|error| panic!("the V5 source must check: {error:?}"));
+        let active = empty_version_two_active_revision(&version_five);
+        let upgrade = super::prepare_standard_upgrade_v5_to_v6(&active)
+            .unwrap_or_else(|error| panic!("the V5-to-V6 upgrade must prepare: {error:?}"));
+
+        let verified = upgrade.verified_standard_snapshot();
+        assert_eq!(verified.revision(), super::STANDARD_LIBRARY_V6_REVISION_ID);
+        assert_eq!(
+            verified.catalogue().revision(),
+            super::STANDARD_CATALOGUE_V6_REVISION_ID,
+            "V6 must carry the accepted standard catalogue revision"
+        );
+        assert_eq!(
+            verified.source().parent(),
+            Some(super::STANDARD_SOURCE_V5_REVISION_ID),
+            "V6 must be the append-only child of the retained V5 source revision"
+        );
+        assert_eq!(verified.source().units().len(), 6);
+        assert_eq!(
+            verified.source().units()[5].id(),
+            super::STD_ACTION_SOURCE_UNIT_ID
+        );
+        assert_eq!(
+            verified.source().units()[5].logical_path(),
+            super::STD_ACTION_SOURCE_LOGICAL_PATH
+        );
+        assert_eq!(verified.executables().len(), 2);
+
+        assert_eq!(
+            upgrade.application_revision().expected_base(),
+            active.pair()
+        );
+        let checked = upgrade.checked_standard_library();
+        assert_eq!(
+            checked.verified_snapshot().catalogue().revision(),
+            super::STANDARD_CATALOGUE_V6_REVISION_ID
+        );
+        let checked_executable = checked
+            .checked_executable()
+            .expect("the V6 upgrade retains the checked echo executable");
+        assert_eq!(
+            checked_executable.function_id(),
+            super::STD_INVOKE_ECHO_FUNCTION_ID
+        );
+        assert_eq!(
+            checked_executable.parameter_id(),
+            super::STD_INVOKE_ECHO_PARAMETER_ID
+        );
+        assert_eq!(
+            checked_executable.revision_id(),
+            super::STD_INVOKE_ECHO_FUNCTION_REVISION_ID
+        );
+    }
+
     #[test]
     fn v5_to_v6_upgrade_rejects_a_non_v5_parent_before_child_work() {
         let v4 = super::verify_standard_library_v4_snapshot(
@@ -8584,6 +8890,7 @@ EXPORT TYPE std.ui.UI AS std.UI;
         assert_eq!(v6.catalogue().value_types().len(), 19);
         assert_eq!(v6.catalogue().type_bindings().len(), 36);
         assert_eq!(v6.catalogue().functions(), v5.catalogue().functions());
+        assert_eq!(v6.executables(), v5.executables());
         assert_eq!(v6.origins().len(), 67);
 
         let action_schema = v6

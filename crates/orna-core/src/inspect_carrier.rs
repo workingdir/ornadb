@@ -869,11 +869,20 @@ pub enum InspectCarrierError {
     UnknownProjectionTag(u8),
     Truncated,
     TrailingBytes,
-    RowCountExceeded { actual: usize, maximum: usize },
-    RowTooLarge { actual: usize, maximum: usize },
+    RowCountExceeded {
+        actual: usize,
+        maximum: usize,
+    },
+    RowTooLarge {
+        actual: usize,
+        maximum: usize,
+    },
     NonCanonicalRowOrder,
     InvalidRow(InspectRowError),
-    EnvelopeTooLarge { actual: usize, maximum: usize },
+    EnvelopeTooLarge {
+        actual: usize,
+        maximum: usize,
+    },
     InvalidTargetInvocation,
     TargetInvocationMismatch {
         expected: InvocationId,
@@ -1224,8 +1233,8 @@ mod tests {
         .expect("record fields are valid")
         .encode()
         .expect("valid record carrier encodes");
-        let second_identity = 66 + ORV5_HEADER_BYTES + 4 + RECORD_FIELD_HEADER_BYTES
-            + integer_row(1).len();
+        let second_identity =
+            66 + ORV5_HEADER_BYTES + 4 + RECORD_FIELD_HEADER_BYTES + integer_row(1).len();
 
         let mut duplicate_wire = valid.clone();
         duplicate_wire[second_identity..second_identity + 16].copy_from_slice(&[1; 16]);
@@ -1306,12 +1315,8 @@ mod tests {
     fn target_bound_provenance_round_trips_in_memory_and_rejects_mismatch() {
         let target = InvocationId::from_bytes([0x33; 16]);
         let other_target = InvocationId::from_bytes([0x44; 16]);
-        let provenance = InspectCarrierProvenance::trusted_for_target(
-            9,
-            target,
-            source(),
-            catalogue(),
-        );
+        let provenance =
+            InspectCarrierProvenance::trusted_for_target(9, target, source(), catalogue());
         let carrier = InspectCarrierEnvelope::new_with_target(
             InspectCarrierKind::Snapshot,
             target,
@@ -1339,11 +1344,14 @@ mod tests {
         // The @1 wire envelope intentionally has no target/client-epoch
         // fields. Decoding preserves server epoch and revision evidence but
         // cannot claim a target binding that was not encoded.
-        let decoded = InspectCarrierEnvelope::decode(&carrier.encode().expect("encode"))
-            .expect("decode");
+        let decoded =
+            InspectCarrierEnvelope::decode(&carrier.encode().expect("encode")).expect("decode");
         assert_eq!(decoded.server_epoch_id(), carrier.server_epoch_id());
         assert_eq!(decoded.source_revision_id(), carrier.source_revision_id());
-        assert_eq!(decoded.catalogue_revision_id(), carrier.catalogue_revision_id());
+        assert_eq!(
+            decoded.catalogue_revision_id(),
+            carrier.catalogue_revision_id()
+        );
         assert_eq!(decoded.target_invocation_id(), None);
     }
 
@@ -1365,12 +1373,8 @@ mod tests {
             Err(InspectCarrierError::InvalidTargetInvocation)
         );
 
-        let bound_zero = InspectCarrierProvenance::trusted_for_target(
-            9,
-            zero,
-            source(),
-            catalogue(),
-        );
+        let bound_zero =
+            InspectCarrierProvenance::trusted_for_target(9, zero, source(), catalogue());
         assert_eq!(
             InspectCarrierEnvelope::new_with_provenance(
                 InspectCarrierKind::Snapshot,
