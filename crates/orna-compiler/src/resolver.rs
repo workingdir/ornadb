@@ -42,13 +42,11 @@ pub use model::{
 };
 pub(crate) use model::{
     CheckedActionOperation, CheckedClientExpression, CheckedClientFunctionBody, CheckedClientLocal,
-    CheckedInspectOperation, CheckedInspectProjection,
-    CheckedClientReturnShape,
-    CheckedClientLocalKind, CheckedClientStateSlot, CheckedClientStatement, CheckedFieldRename,
+    CheckedClientLocalKind, CheckedClientReturnShape, CheckedClientStateSlot,
+    CheckedClientStatement, CheckedFieldRename, CheckedInspectOperation, CheckedInspectProjection,
     CheckedResourceOperation, CheckedServerFunctionBody, CheckedServerFunctionReturn,
-    CheckedStateDefault, CheckedStateScope,
-    CheckedStateSlotId, QueryCatalogue, QueryField, QueryObjectType, ResolutionCatalogue,
-    STD_ACTION_CONTRACT, STD_JSON_CONTRACT, STD_UI_CONTRACT,
+    CheckedStateDefault, CheckedStateScope, CheckedStateSlotId, QueryCatalogue, QueryField,
+    QueryObjectType, ResolutionCatalogue, STD_ACTION_CONTRACT, STD_JSON_CONTRACT, STD_UI_CONTRACT,
 };
 use model::{CheckedEnumType, CheckedRecordValueField, CheckedRecordValueType};
 
@@ -90,13 +88,13 @@ use orna_core::{
 };
 use orna_syntax::{
     CapabilitySpecification, ClientExpression, ClientFunctionDeclaration, FieldRenameDeclaration,
-    FunctionReturnType, FunctionSecurity as SyntaxFunctionSecurity, NamePart,
+    FunctionReturnType, FunctionSecurity as SyntaxFunctionSecurity,
     FunctionTransaction as SyntaxFunctionTransaction,
-    FunctionVolatility as SyntaxFunctionVolatility, ObjectTypeDeclaration, OnDeletePolicy,
-    PrimitiveValueTypePersistence, QualifiedName, RecordValueTypeDeclaration, SelectQuantifier,
-    ServerFunctionBody, ServerFunctionDeclaration, SourceSlice, SourceSpan,
-    StandardLargeObjectKind, StateDefault, StateScope, TypeExportTarget, TypeSpecification,
-    OptionTypeSpelling,
+    FunctionVolatility as SyntaxFunctionVolatility, NamePart, ObjectTypeDeclaration,
+    OnDeletePolicy, OptionTypeSpelling, PrimitiveValueTypePersistence, QualifiedName,
+    RecordValueTypeDeclaration, SelectQuantifier, ServerFunctionBody, ServerFunctionDeclaration,
+    SourceSlice, SourceSpan, StandardLargeObjectKind, StateDefault, StateScope, TypeExportTarget,
+    TypeSpecification,
 };
 
 use crate::mutation::{
@@ -401,9 +399,8 @@ pub fn check_standard_library_source(
     }
 }
 
-const STANDARD_SOURCE_UNIT_ID: SourceUnitId = SourceUnitId::from_bytes([
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1,
-]);
+const STANDARD_SOURCE_UNIT_ID: SourceUnitId =
+    SourceUnitId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
 
 fn check_standard_library_source_v1_identity(
     stored_unit: &StoredSourceUnit,
@@ -778,9 +775,12 @@ fn check_standard_source_units(
     expected: &[(SourceUnitId, &str, u32)],
 ) -> Result<(), StandardLibraryCheckError> {
     if source_units.len() != expected.len()
-        || source_units.iter().zip(expected).any(|(unit, (id, path, ordinal))| {
-            unit.id() != *id || unit.logical_path() != *path || unit.ordinal() != *ordinal
-        })
+        || source_units
+            .iter()
+            .zip(expected)
+            .any(|(unit, (id, path, ordinal))| {
+                unit.id() != *id || unit.logical_path() != *path || unit.ordinal() != *ordinal
+            })
     {
         return Err(StandardLibraryCheckError::SourceMismatch);
     }
@@ -831,7 +831,15 @@ fn check_standard_library_source_v6_parts(
     origins: &[DefinitionOrigin],
     executables: &[StandardExecutable],
 ) -> Result<(StandardSourceFamilies, CheckedStandardExecutable), StandardLibraryCheckError> {
-    let [types_unit, invoke_unit, output_unit, ui_unit, json_unit, action_unit] = source_units else {
+    let [
+        types_unit,
+        invoke_unit,
+        output_unit,
+        ui_unit,
+        json_unit,
+        action_unit,
+    ] = source_units
+    else {
         return Err(StandardLibraryCheckError::SourceUnitCount {
             actual: source_units.len(),
         });
@@ -4435,8 +4443,7 @@ fn resolve_client_function_inputs<'a>(
                     true,
                 )
             }
-            FunctionReturnType::Rows { span, .. }
-            | FunctionReturnType::Stream { span, .. } => {
+            FunctionReturnType::Rows { span, .. } | FunctionReturnType::Stream { span, .. } => {
                 diagnostics.push(diagnostic(
                     DiagnosticCode::TypeMismatch,
                     if expression_body {
@@ -4459,7 +4466,9 @@ fn resolve_client_function_inputs<'a>(
         };
         let result_shape = match &declaration.return_type {
             FunctionReturnType::Stream { .. } => ClientExpressionResultShape::OptionalList,
-            FunctionReturnType::Single(_) | FunctionReturnType::Rows { .. } => ClientExpressionResultShape::Value,
+            FunctionReturnType::Single(_) | FunctionReturnType::Rows { .. } => {
+                ClientExpressionResultShape::Value
+            }
         };
         let return_shape = match result_shape {
             ClientExpressionResultShape::Value => CheckedClientReturnShape::Single,
@@ -4470,8 +4479,9 @@ fn resolve_client_function_inputs<'a>(
         {
             let span = match &declaration.return_type {
                 FunctionReturnType::Single(specification) => specification.span(),
-                FunctionReturnType::Rows { span, .. }
-                | FunctionReturnType::Stream { span, .. } => span,
+                FunctionReturnType::Rows { span, .. } | FunctionReturnType::Stream { span, .. } => {
+                    span
+                }
             };
             diagnostics.push(diagnostic(
                 DiagnosticCode::TypeMismatch,
@@ -4494,8 +4504,9 @@ fn resolve_client_function_inputs<'a>(
         {
             let span = match &declaration.return_type {
                 FunctionReturnType::Single(specification) => specification.span(),
-                FunctionReturnType::Rows { span, .. }
-                | FunctionReturnType::Stream { span, .. } => span,
+                FunctionReturnType::Rows { span, .. } | FunctionReturnType::Stream { span, .. } => {
+                    span
+                }
             };
             diagnostics.push(diagnostic(
                 DiagnosticCode::TypeMismatch,
@@ -4965,7 +4976,9 @@ fn client_expression_contains_await_or_resource(
             .iter()
             .any(|(_, argument)| client_expression_contains_await_or_resource(argument, locals)),
         CheckedClientExpression::Inspect { operation } => match operation {
-            CheckedInspectOperation::Snapshot { target, options, .. } => {
+            CheckedInspectOperation::Snapshot {
+                target, options, ..
+            } => {
                 client_expression_contains_await_or_resource(target, locals)
                     || options.as_deref().is_some_and(|options| {
                         client_expression_contains_await_or_resource(options, locals)
@@ -5008,8 +5021,7 @@ fn client_expression_contains_inspect(expression: &CheckedClientExpression) -> b
             .iter()
             .any(|(_, argument)| client_expression_contains_inspect(argument)),
         CheckedClientExpression::Concat { left, right, .. } => {
-            client_expression_contains_inspect(left)
-                || client_expression_contains_inspect(right)
+            client_expression_contains_inspect(left) || client_expression_contains_inspect(right)
         }
         CheckedClientExpression::String { .. }
         | CheckedClientExpression::Integer { .. }
@@ -5019,7 +5031,6 @@ fn client_expression_contains_inspect(expression: &CheckedClientExpression) -> b
         | CheckedClientExpression::FieldPath { .. } => false,
     }
 }
-
 
 fn client_expression_contains_action(expression: &ClientExpression) -> bool {
     let action_name =
@@ -5052,15 +5063,15 @@ fn action_target_parameters(
     parameters
         .iter()
         .map(|parameter| {
-        Some(ClientExpressionParameter {
-            id: parameter.id,
-            name: parameter.name.clone(),
+            Some(ClientExpressionParameter {
+                id: parameter.id,
+                name: parameter.name.clone(),
                 expression_type: ClientExpressionType {
                     semantic_type: parameter.semantic_type,
                     standard_value_type: parameter.standard_value_type,
                     result_shape: ClientExpressionResultShape::Value,
                 },
-        })
+            })
         })
         .collect()
 }
@@ -5285,12 +5296,8 @@ fn client_action_targets(
             },
         );
     }
-    let standard_functions = standard.map(|standard| {
-        standard
-            .verified_snapshot()
-            .catalogue()
-            .functions()
-    });
+    let standard_functions =
+        standard.map(|standard| standard.verified_snapshot().catalogue().functions());
     // Keep application precedence so a target name resolves to one catalogue identity.
     for functions in [Some(base.functions()), standard_functions] {
         let Some(functions) = functions else {
@@ -5374,7 +5381,6 @@ fn client_resource_call_site_id(
             .expect("digest has 16-byte prefix"),
     )
 }
-
 
 /// Returns whether a STREAM item can be materialised as the runtime
 /// canonical `OPTION<LIST<T>>` resource value.
@@ -5487,18 +5493,15 @@ fn client_resource_targets(
             },
         );
     }
-    let standard_functions = standard.map(|standard| {
-        standard
-            .verified_snapshot()
-            .catalogue()
-            .functions()
-    });
+    let standard_functions =
+        standard.map(|standard| standard.verified_snapshot().catalogue().functions());
     for functions in [Some(base.functions()), standard_functions] {
         let Some(functions) = functions else {
             continue;
         };
         for function in functions {
-            if function.domain() != FunctionDomain::Server || targets.contains_key(function.name()) {
+            if function.domain() != FunctionDomain::Server || targets.contains_key(function.name())
+            {
                 continue;
             }
             let (kind, result_type) = match function.return_type() {
@@ -5571,7 +5574,10 @@ fn client_expression_type_is_evaluable(
                 | StandardScalar::BinaryLargeObject
         ),
         SemanticType::Named(CheckedTypeId::Existing(type_id))
-            if is_sealed_inspect_type_id(type_id) || type_id == STD_UI_TYPE_ID => true,
+            if is_sealed_inspect_type_id(type_id) || type_id == STD_UI_TYPE_ID =>
+        {
+            true
+        }
         SemanticType::Named(CheckedTypeId::Existing(type_id)) => standard
             .and_then(|standard| {
                 standard
@@ -6025,7 +6031,7 @@ fn check_action_constructor(
             }
             "arguments" if arguments_expression.is_none() => {
                 arguments_expression = Some(&argument.value);
-        }
+            }
             "target" | "arguments" => {
                 diagnostics.push(diagnostic(
                     DiagnosticCode::DuplicateDefinition,
@@ -6094,7 +6100,7 @@ fn check_action_constructor(
             format!("std.action.call target {target_name} does not return one durable value")
         } else {
             format!("unknown std.action.call target {target_name}")
-    };
+        };
         diagnostics.push(diagnostic(
             DiagnosticCode::UnknownQualifiedName,
             message,
@@ -6128,11 +6134,9 @@ fn check_action_constructor(
         ));
         return None;
     }
-    if target
-        .parameters
-        .iter()
-        .any(|parameter| !action_argument_type_is_orv3_encodable(parameter.expression_type, base, standard))
-    {
+    if target.parameters.iter().any(|parameter| {
+        !action_argument_type_is_orv3_encodable(parameter.expression_type, base, standard)
+    }) {
         diagnostics.push(diagnostic(
             DiagnosticCode::TypeMismatch,
             format!(
@@ -6371,7 +6375,10 @@ fn check_inspect_call(
             if bound[index] {
                 diagnostics.push(diagnostic(
                     DiagnosticCode::DuplicateDefinition,
-                    format!("duplicate argument for sys.inspect.snapshot parameter {}", if index == 0 { "p_target" } else { "p_options" }),
+                    format!(
+                        "duplicate argument for sys.inspect.snapshot parameter {}",
+                        if index == 0 { "p_target" } else { "p_options" }
+                    ),
                     input.logical_path,
                     &argument.span,
                 ));
@@ -6480,8 +6487,7 @@ fn check_inspect_call(
             && signature.result_type() == Some(orna_core::system::SYS_INSPECT_SNAPSHOT_TYPE_ID)
     } else {
         signature.parameter_count() == 1
-            && signature.parameter_type(0)
-                == Some(orna_core::system::SYS_INSPECT_SNAPSHOT_TYPE_ID)
+            && signature.parameter_type(0) == Some(orna_core::system::SYS_INSPECT_SNAPSHOT_TYPE_ID)
             && signature.result_type().is_some()
     };
     if !valid_signature {
@@ -6501,7 +6507,9 @@ fn check_inspect_call(
             }
             CheckedInspectProjection::Calls => orna_core::system::SYS_INSPECT_CALLS_TYPE_ID,
             CheckedInspectProjection::Resources => orna_core::system::SYS_INSPECT_RESOURCES_TYPE_ID,
-            CheckedInspectProjection::StateCells => orna_core::system::SYS_INSPECT_STATE_CELLS_TYPE_ID,
+            CheckedInspectProjection::StateCells => {
+                orna_core::system::SYS_INSPECT_STATE_CELLS_TYPE_ID
+            }
             CheckedInspectProjection::UiNodes => orna_core::system::SYS_INSPECT_UI_NODES_TYPE_ID,
             CheckedInspectProjection::PresentationCandidates => {
                 orna_core::system::SYS_INSPECT_PRESENTATION_CANDIDATES_TYPE_ID
@@ -6587,10 +6595,12 @@ fn check_client_expression(
             let resource_kind = match &checked_resource {
                 CheckedClientExpression::Resource { operation } => Some(operation.kind()),
                 CheckedClientExpression::LocalRead { .. } => match expression.as_ref() {
-                    ClientExpression::LocalRead { local } => locals.get(&semantic_part(local)).and_then(|binding| match binding.kind {
-                        CheckedClientLocalKind::Resource(kind) => Some(kind),
-                        CheckedClientLocalKind::Value => None,
-                    }),
+                    ClientExpression::LocalRead { local } => locals
+                        .get(&semantic_part(local))
+                        .and_then(|binding| match binding.kind {
+                            CheckedClientLocalKind::Resource(kind) => Some(kind),
+                            CheckedClientLocalKind::Value => None,
+                        }),
                     _ => None,
                 },
                 _ => None,
@@ -6600,7 +6610,10 @@ fn check_client_expression(
             } else {
                 ClientExpressionResultShape::Value
             };
-            let result_type = ClientExpressionType { result_shape, ..result_type };
+            let result_type = ClientExpressionType {
+                result_shape,
+                ..result_type
+            };
             Some((
                 CheckedClientExpression::Await {
                     expression: Box::new(checked_resource),
@@ -6950,7 +6963,9 @@ fn check_client_expression(
             if target.return_type.result_shape == ClientExpressionResultShape::OptionalList {
                 diagnostics.push(diagnostic(
                     DiagnosticCode::TypeMismatch,
-                    format!("CLIENT STREAM function {name} cannot be used as an expression operand"),
+                    format!(
+                        "CLIENT STREAM function {name} cannot be used as an expression operand"
+                    ),
                     input.logical_path,
                     span,
                 ));
@@ -7066,8 +7081,17 @@ fn check_client_expression(
 fn client_local_resource_family(source: &SourceSlice) -> Option<ResourceKind> {
     let mut parser = ClientResourceTypeParser::new(&source.text, source.span.start);
     let outer = parser.parse_qualified_name_parts()?;
-    if outer.len() != 3 || !outer[0].text.eq_ignore_ascii_case("std") || !outer[1].text.eq_ignore_ascii_case("data") { return None; }
-    match outer[2].text.to_ascii_lowercase().as_str() { "resource" => Some(ResourceKind::Scalar), "streamresource" => Some(ResourceKind::Stream), _ => None }
+    if outer.len() != 3
+        || !outer[0].text.eq_ignore_ascii_case("std")
+        || !outer[1].text.eq_ignore_ascii_case("data")
+    {
+        return None;
+    }
+    match outer[2].text.to_ascii_lowercase().as_str() {
+        "resource" => Some(ResourceKind::Scalar),
+        "streamresource" => Some(ResourceKind::Stream),
+        _ => None,
+    }
 }
 
 /// Parses a CLIENT resource declaration and returns its family plus inner descriptor.
@@ -7406,7 +7430,6 @@ impl<'a> ClientResourceTypeParser<'a> {
     }
 }
 
-
 fn client_type_specification_from_source(source: &SourceSlice) -> Option<TypeSpecification> {
     let text = source.text.trim();
     let normalized: String = text
@@ -7501,21 +7524,17 @@ fn validate_registered_client_external_contract(
     if parameters.len() != INSPECT_RENDER_CARRIER_SIGNATURE.len() {
         diagnostics.push(diagnostic(
             DiagnosticCode::TypeMismatch,
-            format!(
-                "{INSPECT_RENDER_CONTRACT} requires exactly nine ordered carrier parameters"
-            ),
+            format!("{INSPECT_RENDER_CONTRACT} requires exactly nine ordered carrier parameters"),
             logical_path,
             declaration_span,
         ));
         return false;
     }
-    for (parameter, (expected_name, expected_id, _)) in parameters
-        .iter()
-        .zip(INSPECT_RENDER_CARRIER_SIGNATURE)
+    for (parameter, (expected_name, expected_id, _)) in
+        parameters.iter().zip(INSPECT_RENDER_CARRIER_SIGNATURE)
     {
         if parameter.name != expected_name
-            || parameter.semantic_type
-                != SemanticType::Named(CheckedTypeId::Existing(expected_id))
+            || parameter.semantic_type != SemanticType::Named(CheckedTypeId::Existing(expected_id))
         {
             diagnostics.push(diagnostic(
                 DiagnosticCode::TypeMismatch,
@@ -7530,8 +7549,7 @@ fn validate_registered_client_external_contract(
         }
     }
     if result_shape != ClientExpressionResultShape::Value
-        || return_type.semantic_type
-            != SemanticType::Named(CheckedTypeId::Existing(STD_UI_TYPE_ID))
+        || return_type.semantic_type != SemanticType::Named(CheckedTypeId::Existing(STD_UI_TYPE_ID))
     {
         diagnostics.push(diagnostic(
             DiagnosticCode::TypeMismatch,
@@ -8733,28 +8751,24 @@ fn resolve_server_function_return(
                 location: location(logical_path, specification.span()),
             }
         }),
-        FunctionReturnType::Stream { element, span } => resolve_application_type(
-            element,
-            submitted_ids,
-            logical_path,
-            diagnostics,
-            standard,
-        )
-        .map(|resolved| {
-            record_standard_type_use(
-                uses,
-                standard,
-                CheckedTypeUseKind::Return { owner, ordinal: 0 },
-                resolved,
-                type_use_location(element, logical_path),
-            );
-            ResolvedServerFunctionReturn::Stream {
-                semantic_type: resolved.semantic_type,
-                standard_value_type: resolved.standard_value_type,
-                location: location(logical_path, span),
-                reference_location: reference_location(element, logical_path),
-            }
-        }),
+        FunctionReturnType::Stream { element, span } => {
+            resolve_application_type(element, submitted_ids, logical_path, diagnostics, standard)
+                .map(|resolved| {
+                    record_standard_type_use(
+                        uses,
+                        standard,
+                        CheckedTypeUseKind::Return { owner, ordinal: 0 },
+                        resolved,
+                        type_use_location(element, logical_path),
+                    );
+                    ResolvedServerFunctionReturn::Stream {
+                        semantic_type: resolved.semantic_type,
+                        standard_value_type: resolved.standard_value_type,
+                        location: location(logical_path, span),
+                        reference_location: reference_location(element, logical_path),
+                    }
+                })
+        }
         FunctionReturnType::Rows { columns, span } => {
             if columns.is_empty() {
                 diagnostics.push(diagnostic(
@@ -9578,9 +9592,7 @@ fn query_return_matches(
             }
             matches_return
         }
-        ResolvedServerFunctionReturn::Stream {
-            semantic_type, ..
-        } => {
+        ResolvedServerFunctionReturn::Stream { semantic_type, .. } => {
             if projections.len() != 1 {
                 diagnostics.push(DiagnosticCode::semantic(
                     DiagnosticCode::TypeMismatch,
@@ -10292,18 +10304,42 @@ enum SubmittedType {
 
 fn sealed_inspect_type_id(name: &QualifiedSemanticName) -> Option<TypeId> {
     match name.to_string().as_str() {
-        orna_core::system::SYS_INSPECT_INVOCATION_TYPE_NAME => Some(orna_core::system::SYS_INSPECT_INVOCATION_TYPE_ID),
-        orna_core::system::SYS_INSPECT_SNAPSHOT_TYPE_NAME => Some(orna_core::system::SYS_INSPECT_SNAPSHOT_TYPE_ID),
-        orna_core::system::SYS_INSPECT_SNAPSHOT_OPTIONS_TYPE_NAME => Some(orna_core::system::SYS_INSPECT_SNAPSHOT_OPTIONS_TYPE_ID),
-        orna_core::system::SYS_INSPECT_TRACE_EVENT_TYPE_NAME => Some(orna_core::system::SYS_INSPECT_TRACE_EVENT_TYPE_ID),
-        orna_core::system::SYS_INSPECT_INVOCATION_NODES_TYPE_NAME => Some(orna_core::system::SYS_INSPECT_INVOCATION_NODES_TYPE_ID),
-        orna_core::system::SYS_INSPECT_CALLS_TYPE_NAME => Some(orna_core::system::SYS_INSPECT_CALLS_TYPE_ID),
-        orna_core::system::SYS_INSPECT_RESOURCES_TYPE_NAME => Some(orna_core::system::SYS_INSPECT_RESOURCES_TYPE_ID),
-        orna_core::system::SYS_INSPECT_STATE_CELLS_TYPE_NAME => Some(orna_core::system::SYS_INSPECT_STATE_CELLS_TYPE_ID),
-        orna_core::system::SYS_INSPECT_UI_NODES_TYPE_NAME => Some(orna_core::system::SYS_INSPECT_UI_NODES_TYPE_ID),
-        orna_core::system::SYS_INSPECT_PRESENTATION_CANDIDATES_TYPE_NAME => Some(orna_core::system::SYS_INSPECT_PRESENTATION_CANDIDATES_TYPE_ID),
-        orna_core::system::SYS_INSPECT_RUNTIME_BINDINGS_TYPE_NAME => Some(orna_core::system::SYS_INSPECT_RUNTIME_BINDINGS_TYPE_ID),
-        orna_core::system::SYS_INSPECT_SECURITY_DECISIONS_TYPE_NAME => Some(orna_core::system::SYS_INSPECT_SECURITY_DECISIONS_TYPE_ID),
+        orna_core::system::SYS_INSPECT_INVOCATION_TYPE_NAME => {
+            Some(orna_core::system::SYS_INSPECT_INVOCATION_TYPE_ID)
+        }
+        orna_core::system::SYS_INSPECT_SNAPSHOT_TYPE_NAME => {
+            Some(orna_core::system::SYS_INSPECT_SNAPSHOT_TYPE_ID)
+        }
+        orna_core::system::SYS_INSPECT_SNAPSHOT_OPTIONS_TYPE_NAME => {
+            Some(orna_core::system::SYS_INSPECT_SNAPSHOT_OPTIONS_TYPE_ID)
+        }
+        orna_core::system::SYS_INSPECT_TRACE_EVENT_TYPE_NAME => {
+            Some(orna_core::system::SYS_INSPECT_TRACE_EVENT_TYPE_ID)
+        }
+        orna_core::system::SYS_INSPECT_INVOCATION_NODES_TYPE_NAME => {
+            Some(orna_core::system::SYS_INSPECT_INVOCATION_NODES_TYPE_ID)
+        }
+        orna_core::system::SYS_INSPECT_CALLS_TYPE_NAME => {
+            Some(orna_core::system::SYS_INSPECT_CALLS_TYPE_ID)
+        }
+        orna_core::system::SYS_INSPECT_RESOURCES_TYPE_NAME => {
+            Some(orna_core::system::SYS_INSPECT_RESOURCES_TYPE_ID)
+        }
+        orna_core::system::SYS_INSPECT_STATE_CELLS_TYPE_NAME => {
+            Some(orna_core::system::SYS_INSPECT_STATE_CELLS_TYPE_ID)
+        }
+        orna_core::system::SYS_INSPECT_UI_NODES_TYPE_NAME => {
+            Some(orna_core::system::SYS_INSPECT_UI_NODES_TYPE_ID)
+        }
+        orna_core::system::SYS_INSPECT_PRESENTATION_CANDIDATES_TYPE_NAME => {
+            Some(orna_core::system::SYS_INSPECT_PRESENTATION_CANDIDATES_TYPE_ID)
+        }
+        orna_core::system::SYS_INSPECT_RUNTIME_BINDINGS_TYPE_NAME => {
+            Some(orna_core::system::SYS_INSPECT_RUNTIME_BINDINGS_TYPE_ID)
+        }
+        orna_core::system::SYS_INSPECT_SECURITY_DECISIONS_TYPE_NAME => {
+            Some(orna_core::system::SYS_INSPECT_SECURITY_DECISIONS_TYPE_ID)
+        }
         _ => None,
     }
 }
@@ -10451,9 +10487,7 @@ fn resolve_application_type_with_named_standard(
                 return None;
             };
             let target_name = semantic_name(target);
-            if allow_standard_named
-                && let Some(type_id) = sealed_inspect_type_id(&target_name)
-            {
+            if allow_standard_named && let Some(type_id) = sealed_inspect_type_id(&target_name) {
                 if type_id == orna_core::system::SYS_INSPECT_INVOCATION_TYPE_ID {
                     return Some(ResolvedApplicationType {
                         semantic_type: SemanticType::Reference {
@@ -11328,11 +11362,10 @@ fn diagnostic(
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        CheckedClientExpression, CheckedClientFunctionBody, ClientResourceTypeParser,
-    };
+    use super::{CheckedClientExpression, CheckedClientFunctionBody, ClientResourceTypeParser};
     use std::{cell::Cell, error::Error};
 
+    use crate::relational::ExpressionKind;
     use orna_artifact::server_mutation_plan::{
         MutationExpressionKind as ServerMutationExpressionKind, RECORD_INSERT_FORMAT_VERSION,
         RecordFieldExpressionKind as ServerRecordFieldExpressionKind, ServerMutationPlan,
@@ -11369,7 +11402,6 @@ mod tests {
         source::{SourceBundle, SourceUnit},
         types::{ResolvedType, StandardScalar},
     };
-    use crate::relational::ExpressionKind;
     use orna_syntax::{
         FunctionSecurity as SyntaxFunctionSecurity,
         FunctionTransaction as SyntaxFunctionTransaction,
@@ -11378,18 +11410,18 @@ mod tests {
     };
 
     use super::{
-        CheckAssignments, CheckedApplicationTypeUse, CheckedDefinitionReferenceTarget,
-        CheckedStandardExecutable, CheckedStandardJsonEncode, CheckedStandardParameterEcho,
-        CheckedStandardTerminalPresentTable, CheckedStateDefault, CheckedTypeId,
-        CheckedTypeUseKind, CheckedValueTypeUse, CheckedClientReturnShape, ClientExpressionResultShape, ClientExpressionType, ConstantValue, DiagnosticCode,
-        IdentityAssignments, NewApplicationCheckError, STANDARD_LIBRARY_V3_REVISION_ID,
-        STANDARD_LIBRARY_V4_REVISION_ID, STD_ACTION_CONTRACT, STD_ACTION_SOURCE_UNIT_ID,
-        STD_ACTION_SCHEMA_ID, STD_ACTION_TYPE_ID,
+        CheckAssignments, CheckedApplicationTypeUse, CheckedClientReturnShape,
+        CheckedDefinitionReferenceTarget, CheckedStandardExecutable, CheckedStandardJsonEncode,
+        CheckedStandardParameterEcho, CheckedStandardTerminalPresentTable, CheckedStateDefault,
+        CheckedTypeId, CheckedTypeUseKind, CheckedValueTypeUse, ClientExpressionResultShape,
+        ClientExpressionType, ConstantValue, DiagnosticCode, IdentityAssignments,
+        NewApplicationCheckError, STANDARD_LIBRARY_V3_REVISION_ID, STANDARD_LIBRARY_V4_REVISION_ID,
+        STD_ACTION_CONTRACT, STD_ACTION_SCHEMA_ID, STD_ACTION_SOURCE_UNIT_ID, STD_ACTION_TYPE_ID,
         STD_DATA_ROWS_TYPE_ID, STD_DATA_SCHEMA_ID, STD_INTEGER_TYPE_ID,
         STD_INVOKE_ECHO_FUNCTION_ID, STD_INVOKE_ECHO_FUNCTION_REVISION_ID,
         STD_INVOKE_ECHO_PARAMETER_ID, STD_INVOKE_ECHO_REVISION_NUMBER, STD_INVOKE_SCHEMA_ID,
-        STD_INVOKE_SOURCE_UNIT_ID, STD_IO_BYTE_STREAM_TYPE_ID, STD_IO_SCHEMA_ID,
-        STD_JSON_CONTRACT, STD_JSON_ENCODE_FUNCTION_ID, STD_JSON_ENCODE_FUNCTION_REVISION_ID,
+        STD_INVOKE_SOURCE_UNIT_ID, STD_IO_BYTE_STREAM_TYPE_ID, STD_IO_SCHEMA_ID, STD_JSON_CONTRACT,
+        STD_JSON_ENCODE_FUNCTION_ID, STD_JSON_ENCODE_FUNCTION_REVISION_ID,
         STD_JSON_ENCODE_PARAMETER_ID, STD_JSON_SCHEMA_ID, STD_JSON_SOURCE_UNIT_ID,
         STD_JSON_VALUE_TYPE_ID, STD_OUTPUT_SOURCE_UNIT_ID, STD_TERMINAL_DOCUMENT_TYPE_ID,
         STD_TERMINAL_PRESENT_TABLE_FUNCTION_ID, STD_TERMINAL_PRESENT_TABLE_FUNCTION_REVISION_ID,
@@ -11400,16 +11432,14 @@ mod tests {
         check_new_application_with_catalogue, check_standard_application,
         check_standard_json_encode, check_standard_library_source,
         check_standard_library_source_v1_identity, check_standard_library_source_v2_parts,
-        check_standard_library_source_v3_parts,
-        check_standard_library_source_v4_parts, check_standard_library_source_v5_parts,
-        check_standard_library_source_v6_parts, check_standard_parameter_echo,
-        client_resource_stream_type_is_supported,
-        check_standard_terminal_present_table,
+        check_standard_library_source_v3_parts, check_standard_library_source_v4_parts,
+        check_standard_library_source_v5_parts, check_standard_library_source_v6_parts,
+        check_standard_parameter_echo, check_standard_terminal_present_table,
         checked_standard_library_with_contract_overrides_for_test,
-        expected_standard_json_executable, location, reconcile_standard_executable,
-        reconcile_standard_json_executable, reconcile_standard_source, sort_standard_type_uses,
-        supports_record_value_scalar, unquoted_prelude_name, unquoted_semantic_name,
-        validate_client_capability,
+        client_resource_stream_type_is_supported, expected_standard_json_executable, location,
+        reconcile_standard_executable, reconcile_standard_json_executable,
+        reconcile_standard_source, sort_standard_type_uses, supports_record_value_scalar,
+        unquoted_prelude_name, unquoted_semantic_name, validate_client_capability,
     };
     use crate::mutation::{MutationExpressionKind, MutationRecordFieldExpressionKind};
     use crate::{
@@ -11418,7 +11448,8 @@ mod tests {
     };
 
     const STANDARD_SOURCE: &str = "CREATE SCHEMA std;CREATE SCHEMA std.types;CREATE TYPE std.types.BOOLEAN AS VALUE PRIMITIVE KERNEL CONTRACT 'orna.kernel.value.boolean@1' IMMUTABLE PERSISTABLE;EXPORT TYPE std.types.BOOLEAN AS std.BOOLEAN;EXPORT TYPE std.BOOLEAN TO PRELUDE AS BOOLEAN;";
-    const STANDARD_SOURCE_UNIT_ID: SourceUnitId = SourceUnitId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
+    const STANDARD_SOURCE_UNIT_ID: SourceUnitId =
+        SourceUnitId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
     const TWO_TYPE_STANDARD_SOURCE: &str = "CREATE SCHEMA std.types;CREATE SCHEMA std;CREATE TYPE std.types.INTEGER AS VALUE PRIMITIVE KERNEL CONTRACT 'int@1' IMMUTABLE TRANSIENT;CREATE TYPE std.types.BOOLEAN AS VALUE PRIMITIVE KERNEL CONTRACT 'boolean@1' IMMUTABLE PERSISTABLE;EXPORT TYPE std.INTEGER TO PRELUDE AS INTEGER;EXPORT TYPE std.types.INTEGER AS std.INTEGER;EXPORT TYPE std.BOOLEAN TO PRELUDE AS BOOLEAN;EXPORT TYPE std.types.BOOLEAN AS std.BOOLEAN;";
     const LEGACY_CANONICAL_SCALAR_SPELLINGS: [&str; 13] = [
         "BOOLEAN",
@@ -11976,7 +12007,11 @@ mod tests {
     fn accepts_the_ordinary_inspector_signature_and_nested_projection_calls() {
         let source = "CREATE SCHEMA devtools; CREATE CLIENT FUNCTION devtools.inspect(p_target REF sys.inspect.invocation) RETURNS sys.inspect.snapshot IS BEGIN RETURN sys.inspect.snapshot(p_target => p_target); END; CREATE CLIENT FUNCTION devtools.project(p_target REF sys.inspect.invocation) RETURNS sys.inspect.calls IS BEGIN RETURN sys.inspect.calls(p_snapshot => sys.inspect.snapshot(p_target => p_target)); END;";
         let report = check(&bundle([("inspector.orna", source)]), &empty_catalogue());
-        assert!(report.diagnostics().is_empty(), "{:?}", report.diagnostics());
+        assert!(
+            report.diagnostics().is_empty(),
+            "{:?}",
+            report.diagnostics()
+        );
         let checked = report.checked_bundle().unwrap();
         let clients = checked.client_functions();
         assert_eq!(clients.len(), 2);
@@ -12005,15 +12040,24 @@ mod tests {
     fn accepts_ordinary_inspector_structural_default_without_options() {
         let source = "CREATE SCHEMA devtools; CREATE CLIENT FUNCTION devtools.inspect(p_target REF sys.inspect.invocation) RETURNS sys.inspect.snapshot IS BEGIN RETURN sys.inspect.snapshot(p_target => p_target); END;";
         let report = check(&bundle([("inspector.orna", source)]), &empty_catalogue());
-        assert!(report.diagnostics().is_empty(), "{:?}", report.diagnostics());
+        assert!(
+            report.diagnostics().is_empty(),
+            "{:?}",
+            report.diagnostics()
+        );
         let checked = report.checked_bundle().unwrap();
-        let CheckedClientFunctionBody::Expression { expression } = checked.client_functions()[0].body() else {
+        let CheckedClientFunctionBody::Expression { expression } =
+            checked.client_functions()[0].body()
+        else {
             panic!("ordinary Inspector body was not an expression");
         };
         let CheckedClientExpression::Inspect { operation } = expression else {
             panic!("ordinary Inspector body was not an inspect operation");
         };
-        assert!(matches!(operation, super::CheckedInspectOperation::Snapshot { options: None, .. }));
+        assert!(matches!(
+            operation,
+            super::CheckedInspectOperation::Snapshot { options: None, .. }
+        ));
     }
 
     #[test]
@@ -12025,14 +12069,24 @@ mod tests {
         ];
         for source in cases {
             let report = check(&bundle([("inspector.orna", source)]), &empty_catalogue());
-            assert!(!report.diagnostics().is_empty(), "source unexpectedly accepted: {source}");
+            assert!(
+                !report.diagnostics().is_empty(),
+                "source unexpectedly accepted: {source}"
+            );
             assert_no_checked_bundle(&report);
         }
 
         let supplied_options = "CREATE SCHEMA devtools; CREATE CLIENT FUNCTION devtools.bad(p_target REF sys.inspect.invocation, p_options sys.inspect.snapshot_options) RETURNS sys.inspect.snapshot IS BEGIN RETURN sys.inspect.snapshot(p_target => p_target, p_options => p_options); END;";
-        let report = check(&bundle([("inspector.orna", supplied_options)]), &empty_catalogue());
+        let report = check(
+            &bundle([("inspector.orna", supplied_options)]),
+            &empty_catalogue(),
+        );
         assert_eq!(
-            report.diagnostics().iter().map(|diagnostic| diagnostic.message()).collect::<Vec<_>>(),
+            report
+                .diagnostics()
+                .iter()
+                .map(|diagnostic| diagnostic.message())
+                .collect::<Vec<_>>(),
             vec!["sys.inspect.snapshot options are not supported in Inspector v1"],
         );
         assert_no_checked_bundle(&report);
@@ -12040,11 +12094,9 @@ mod tests {
 
     #[test]
     fn enforces_explicit_return_for_ui_expression_bodies() {
-        let standard =
-            check_standard_library_source(&verified_standard_v4_snapshot()).unwrap();
+        let standard = check_standard_library_source(&verified_standard_v4_snapshot()).unwrap();
         let application = empty_catalogue();
-        let context =
-            StandardApplicationCheckContext::try_new(&application, &standard).unwrap();
+        let context = StandardApplicationCheckContext::try_new(&application, &standard).unwrap();
 
         let short = check_standard_application(
             &bundle([(
@@ -12089,11 +12141,9 @@ mod tests {
 
     #[test]
     fn accepts_generic_inspect_render_contract_exact_signature() {
-        let standard =
-            check_standard_library_source(&verified_standard_v4_snapshot()).unwrap();
+        let standard = check_standard_library_source(&verified_standard_v4_snapshot()).unwrap();
         let application = empty_catalogue();
-        let context =
-            StandardApplicationCheckContext::try_new(&application, &standard).unwrap();
+        let context = StandardApplicationCheckContext::try_new(&application, &standard).unwrap();
         let source = "CREATE SCHEMA app; CREATE EXTERNAL CLIENT FUNCTION app.inspector_renderer(
             p_snapshot sys.inspect.snapshot,
             p_invocation_nodes sys.inspect.invocation_nodes,
@@ -12105,20 +12155,24 @@ mod tests {
             p_runtime_bindings sys.inspect.runtime_bindings,
             p_security_decisions sys.inspect.security_decisions
         ) RETURNS std.ui.UI RUNTIME CONTRACT 'std.inspect.render@1';";
-        let report = check_standard_application(&bundle([("inspect-render.orna", source)]), &context);
+        let report =
+            check_standard_application(&bundle([("inspect-render.orna", source)]), &context);
         assert_eq!(report.diagnostics(), &[], "{:?}", report.diagnostics());
-        let function = report.checked_bundle().unwrap().client_functions().next().unwrap();
+        let function = report
+            .checked_bundle()
+            .unwrap()
+            .client_functions()
+            .next()
+            .unwrap();
         assert_eq!(function.name().to_string(), "app.inspector_renderer");
         assert_eq!(function.parameters().count(), 9);
     }
 
     #[test]
     fn rejects_historical_inspector_shell_contract_before_provider_dispatch() {
-        let standard =
-            check_standard_library_source(&verified_standard_v4_snapshot()).unwrap();
+        let standard = check_standard_library_source(&verified_standard_v4_snapshot()).unwrap();
         let application = empty_catalogue();
-        let context =
-            StandardApplicationCheckContext::try_new(&application, &standard).unwrap();
+        let context = StandardApplicationCheckContext::try_new(&application, &standard).unwrap();
         let source = "CREATE SCHEMA app; CREATE EXTERNAL CLIENT FUNCTION app.inspector_renderer(
             p_snapshot sys.inspect.snapshot,
             p_invocation_nodes sys.inspect.invocation_nodes,
@@ -12130,7 +12184,8 @@ mod tests {
             p_runtime_bindings sys.inspect.runtime_bindings,
             p_security_decisions sys.inspect.security_decisions
         ) RETURNS std.ui.UI RUNTIME CONTRACT 'devtools.inspector_shell@1';";
-        let report = check_standard_application(&bundle([("inspect-render.orna", source)]), &context);
+        let report =
+            check_standard_application(&bundle([("inspect-render.orna", source)]), &context);
         assert_eq!(report.diagnostics().len(), 1);
         assert_eq!(
             report.diagnostics()[0].code(),
@@ -12145,11 +12200,9 @@ mod tests {
 
     #[test]
     fn accepts_procedural_inspector_with_pre_begin_value_locals() {
-        let standard =
-            check_standard_library_source(&verified_standard_v4_snapshot()).unwrap();
+        let standard = check_standard_library_source(&verified_standard_v4_snapshot()).unwrap();
         let application = empty_catalogue();
-        let context =
-            StandardApplicationCheckContext::try_new(&application, &standard).unwrap();
+        let context = StandardApplicationCheckContext::try_new(&application, &standard).unwrap();
         let source = r#"CREATE SCHEMA inspector_app; CREATE SCHEMA app;
             CREATE EXTERNAL CLIENT FUNCTION app.inspector_renderer(
                 p_snapshot sys.inspect.snapshot,
@@ -12212,12 +12265,17 @@ mod tests {
         assert_eq!(locals.len(), 9);
         assert_eq!(statements.len(), 9);
         assert_eq!(
-            locals.iter().map(|local| local.ordinal()).collect::<Vec<_>>(),
+            locals
+                .iter()
+                .map(|local| local.ordinal())
+                .collect::<Vec<_>>(),
             (0..9).collect::<Vec<_>>()
         );
-        assert!(locals
-            .iter()
-            .all(|local| local.kind() == super::CheckedClientLocalKind::Value));
+        assert!(
+            locals
+                .iter()
+                .all(|local| local.kind() == super::CheckedClientLocalKind::Value)
+        );
         assert_eq!(
             statements
                 .iter()
@@ -12254,11 +12312,9 @@ mod tests {
 
     #[test]
     fn rejects_wrong_version_or_malformed_inspect_render_contracts() {
-        let standard =
-            check_standard_library_source(&verified_standard_v4_snapshot()).unwrap();
+        let standard = check_standard_library_source(&verified_standard_v4_snapshot()).unwrap();
         let application = empty_catalogue();
-        let context =
-            StandardApplicationCheckContext::try_new(&application, &standard).unwrap();
+        let context = StandardApplicationCheckContext::try_new(&application, &standard).unwrap();
         let cases = [
             "CREATE SCHEMA app; CREATE EXTERNAL CLIENT FUNCTION app.inspector_renderer(p_snapshot sys.inspect.snapshot, p_invocation_nodes sys.inspect.invocation_nodes, p_calls sys.inspect.calls, p_resources sys.inspect.resources, p_state_cells sys.inspect.state_cells, p_ui_nodes sys.inspect.ui_nodes, p_presentation_candidates sys.inspect.presentation_candidates, p_runtime_bindings sys.inspect.runtime_bindings) RETURNS std.ui.UI RUNTIME CONTRACT 'std.inspect.render@1';",
             "CREATE SCHEMA app; CREATE EXTERNAL CLIENT FUNCTION app.inspector_renderer(p_snapshot sys.inspect.snapshot, p_invocation_nodes sys.inspect.invocation_nodes, p_calls sys.inspect.resources, p_resources sys.inspect.resources, p_state_cells sys.inspect.state_cells, p_ui_nodes sys.inspect.ui_nodes, p_presentation_candidates sys.inspect.presentation_candidates, p_runtime_bindings sys.inspect.runtime_bindings, p_security_decisions sys.inspect.security_decisions) RETURNS std.ui.UI RUNTIME CONTRACT 'std.inspect.render@1';",
@@ -12381,6 +12437,47 @@ mod tests {
         );
         assert!(fields.iter().all(|field| field.id().is_provisional()));
         assert_eq!(checked.uses().len(), 2);
+    }
+
+    #[test]
+    fn checked_bundle_preserves_object_enum_and_record_value_categories_together() {
+        let snapshot = verified_standard_library_for_relational_test();
+        let standard = check_standard_library_source(&snapshot).unwrap();
+        let source = bundle([(
+            "categories.orna",
+            "CREATE SCHEMA app;\n\
+                CREATE TYPE app.phase AS ENUM ('new', 'done');\n\
+                CREATE TYPE app.status AS VALUE (phase app.phase) IMMUTABLE PERSISTABLE;\n\
+                CREATE TYPE app.item AS OBJECT (status app.status NOT NULL, phase app.phase NOT NULL);",
+        )]);
+        let report = check_new_application(&source, &standard).unwrap();
+
+        assert_eq!(report.diagnostics(), &[]);
+        let checked = report.checked_bundle().unwrap();
+        let object = checked.object_types().next().unwrap();
+        assert_eq!(checked.object_types().count(), 1);
+        assert_eq!(object.name().to_string(), "app.item");
+
+        let enum_types = checked.inner.enum_types().collect::<Vec<_>>();
+        assert_eq!(enum_types.len(), 1);
+        let (enum_id, enum_name, labels, _) = enum_types[0];
+        assert_eq!(enum_name.to_string(), "app.phase");
+        assert_eq!(labels, &["new".to_owned(), "done".to_owned()]);
+
+        let record = checked.record_value_types().next().unwrap();
+        assert_eq!(checked.record_value_types().count(), 1);
+        assert_eq!(record.name().to_string(), "app.status");
+        assert_ne!(object.id(), enum_id);
+        assert_ne!(object.id(), record.id());
+        assert_ne!(enum_id, record.id());
+
+        let object_fields = object.fields().collect::<Vec<_>>();
+        assert_eq!(object_fields.len(), 2);
+        assert_eq!(
+            object_fields[0].resolved_type().named_type(),
+            Some(record.id())
+        );
+        assert_eq!(object_fields[1].resolved_type().named_type(), Some(enum_id));
     }
 
     #[test]
@@ -14135,7 +14232,7 @@ mod tests {
         .unwrap();
         let standard =
             check_standard_library_source(&verified_standard_library_with_action_for_test())
-        .unwrap();
+                .unwrap();
         let context = StandardApplicationCheckContext::try_new(&base, &standard).unwrap();
         let source = "CREATE SCHEMA ui; CREATE CLIENT FUNCTION ui.run(p_value INTEGER) RETURNS std.Action AS std.action.call(target => tasks.run, arguments => std.call.args(p_value => p_value));";
         let report = check_standard_application(&bundle([("action.orna", source)]), &context);
@@ -14210,13 +14307,7 @@ mod tests {
                         integer,
                         None,
                     ),
-                    ParameterDefinition::new(
-                        resource_low_parameter_id,
-                        "p_low",
-                        1,
-                        integer,
-                        None,
-                    ),
+                    ParameterDefinition::new(resource_low_parameter_id, "p_low", 1, integer, None),
                 ],
                 FunctionReturn::Single(integer),
                 FunctionRevisionId::from_bytes([0x75; 16]),
@@ -14279,20 +14370,8 @@ mod tests {
                 QualifiedSemanticName::new(["tasks", "run"]).unwrap(),
                 FunctionDomain::Client,
                 vec![
-                    ParameterDefinition::new(
-                        action_high_parameter_id,
-                        "p_high",
-                        0,
-                        integer,
-                        None,
-                    ),
-                    ParameterDefinition::new(
-                        action_low_parameter_id,
-                        "p_low",
-                        1,
-                        integer,
-                        None,
-                    ),
+                    ParameterDefinition::new(action_high_parameter_id, "p_high", 0, integer, None),
+                    ParameterDefinition::new(action_low_parameter_id, "p_low", 1, integer, None),
                 ],
                 FunctionReturn::Single(integer),
                 FunctionRevisionId::from_bytes([0x7b; 16]),
@@ -14305,8 +14384,8 @@ mod tests {
         let standard =
             check_standard_library_source(&verified_standard_library_with_action_for_test())
                 .unwrap();
-        let action_context = StandardApplicationCheckContext::try_new(&action_base, &standard)
-            .unwrap();
+        let action_context =
+            StandardApplicationCheckContext::try_new(&action_base, &standard).unwrap();
         let action_source = "CREATE SCHEMA ui; CREATE CLIENT FUNCTION ui.run() RETURNS std.Action AS std.action.call(target => tasks.run, arguments => std.call.args(p_low => 7, p_high => 8));";
         let action_report = check_standard_application(
             &bundle([("action-argument-order.orna", action_source)]),
@@ -14376,12 +14455,7 @@ mod tests {
             STATE ready INTEGER; \
             BEGIN RETURN std.action.call(target => tasks.run, arguments => std.call.args()); END;";
         let report = check_standard_application(&bundle([("state-action.orna", source)]), &context);
-        assert_eq!(
-            report.diagnostics().len(),
-            1,
-            "{:?}",
-            report.diagnostics()
-        );
+        assert_eq!(report.diagnostics().len(), 1, "{:?}", report.diagnostics());
         assert_eq!(
             report.diagnostics()[0].code(),
             DiagnosticCode::DomainIncompatible,
@@ -14432,8 +14506,13 @@ mod tests {
                 .unwrap();
         let context = StandardApplicationCheckContext::try_new(&base, &standard).unwrap();
         let source = "CREATE SCHEMA ui; CREATE CLIENT FUNCTION ui.run(p_value INTEGER) RETURNS std.Action AS std.action.call(target => tasks.rebuild, arguments => std.call.args(p_value => p_value));";
-        let report = check_standard_application(&bundle([("action-server.orna", source)]), &context);
-        assert!(report.diagnostics().is_empty(), "{:?}", report.diagnostics());
+        let report =
+            check_standard_application(&bundle([("action-server.orna", source)]), &context);
+        assert!(
+            report.diagnostics().is_empty(),
+            "{:?}",
+            report.diagnostics()
+        );
 
         let function = report
             .preparation_view()
@@ -14454,7 +14533,10 @@ mod tests {
             operation.target_domain(),
             orna_artifact::client_plan::ActionTargetDomain::Server
         );
-        assert_eq!(operation.target(), super::CheckedFunctionId::Existing(target_id));
+        assert_eq!(
+            operation.target(),
+            super::CheckedFunctionId::Existing(target_id)
+        );
         assert_eq!(operation.arguments().len(), 1);
         assert_eq!(
             operation.arguments()[0].0,
@@ -14519,7 +14601,8 @@ mod tests {
             std.action.call(target => ui.stream, arguments => std.call.args()); \
             CREATE CLIENT FUNCTION ui.rows_action() RETURNS std.Action AS \
             std.action.call(target => tasks.rows, arguments => std.call.args());";
-        let report = check_standard_application(&bundle([("action-shapes.orna", source)]), &context);
+        let report =
+            check_standard_application(&bundle([("action-shapes.orna", source)]), &context);
         let messages = report
             .diagnostics()
             .iter()
@@ -14568,8 +14651,13 @@ mod tests {
                 .unwrap();
         let context = StandardApplicationCheckContext::try_new(&base, &standard).unwrap();
         let source = "CREATE SCHEMA ui; CREATE CLIENT FUNCTION ui.run() RETURNS std.Action AS std.action.call(target => tasks.run, arguments => std.call.args());";
-        let report = check_standard_application(&bundle([("action-transient.orna", source)]), &context);
-        assert!(report.diagnostics().is_empty(), "{:?}", report.diagnostics());
+        let report =
+            check_standard_application(&bundle([("action-transient.orna", source)]), &context);
+        assert!(
+            report.diagnostics().is_empty(),
+            "{:?}",
+            report.diagnostics()
+        );
         let function = report
             .preparation_view()
             .unwrap()
@@ -14584,8 +14672,14 @@ mod tests {
         let super::CheckedClientExpression::Action { operation } = expression else {
             panic!("expected std.action.call to lower to an action operation");
         };
-        assert_eq!(operation.target(), super::CheckedFunctionId::Existing(target_id));
-        assert_eq!(operation.result_type(), super::SemanticType::Named(super::CheckedTypeId::Existing(STD_ACTION_TYPE_ID)));
+        assert_eq!(
+            operation.target(),
+            super::CheckedFunctionId::Existing(target_id)
+        );
+        assert_eq!(
+            operation.result_type(),
+            super::SemanticType::Named(super::CheckedTypeId::Existing(STD_ACTION_TYPE_ID))
+        );
         assert_eq!(operation.standard_result_type(), Some(STD_ACTION_TYPE_ID));
     }
 
@@ -14603,7 +14697,11 @@ mod tests {
             CREATE CLIENT FUNCTION app.run(p_phase app.phase, p_status app.status) RETURNS std.Action AS \
                 std.action.call(target => app.target, arguments => std.call.args(p_phase => p_phase, p_status => p_status));";
         let report = check_standard_application(&bundle([("action-orv3.orna", source)]), &context);
-        assert!(report.diagnostics().is_empty(), "{:?}", report.diagnostics());
+        assert!(
+            report.diagnostics().is_empty(),
+            "{:?}",
+            report.diagnostics()
+        );
         let function = report
             .preparation_view()
             .unwrap()
@@ -14648,21 +14746,21 @@ mod tests {
             Vec::new(),
             vec![
                 FunctionDefinition::new(
-                target_id,
-                QualifiedSemanticName::new(["tasks", "run"]).unwrap(),
-                FunctionDomain::Client,
-                vec![ParameterDefinition::new(
-                    target_parameter_id,
-                    "p_value",
-                    0,
+                    target_id,
+                    QualifiedSemanticName::new(["tasks", "run"]).unwrap(),
+                    FunctionDomain::Client,
+                    vec![ParameterDefinition::new(
+                        target_parameter_id,
+                        "p_value",
+                        0,
                         argument_type,
-                    None,
-                )],
+                        None,
+                    )],
                     FunctionReturn::Single(argument_type),
-                FunctionRevisionId::from_bytes([0x65; 16]),
-                FunctionSecurity::Invoker,
-                None,
-                FunctionVolatility::Immutable,
+                    FunctionRevisionId::from_bytes([0x65; 16]),
+                    FunctionSecurity::Invoker,
+                    None,
+                    FunctionVolatility::Immutable,
                 ),
                 FunctionDefinition::new(
                     target_bad_id,
@@ -14674,7 +14772,7 @@ mod tests {
                         0,
                         action_type,
                         None,
-            )],
+                    )],
                     FunctionReturn::Single(argument_type),
                     FunctionRevisionId::from_bytes([0x68; 16]),
                     FunctionSecurity::Invoker,
@@ -14697,7 +14795,7 @@ mod tests {
         .unwrap();
         let standard =
             check_standard_library_source(&verified_standard_library_with_action_for_test())
-        .unwrap();
+                .unwrap();
         let context = StandardApplicationCheckContext::try_new(&base, &standard).unwrap();
         let cases = [
             (
@@ -15066,10 +15164,16 @@ mod tests {
             CREATE CLIENT FUNCTION app.forward() RETURNS STREAM<BOOLEAN> IS BEGIN RETURN app.events(); END;";
         let report = check_standard_application(&bundle([("stream-call.orna", source)]), &context);
 
-        assert!(report.diagnostics().iter().any(|diagnostic| {
-            diagnostic.code() == DiagnosticCode::TypeMismatch
-                && diagnostic.message().contains("CLIENT STREAM function app.events")
-        }), "{:?}", report.diagnostics());
+        assert!(
+            report.diagnostics().iter().any(|diagnostic| {
+                diagnostic.code() == DiagnosticCode::TypeMismatch
+                    && diagnostic
+                        .message()
+                        .contains("CLIENT STREAM function app.events")
+            }),
+            "{:?}",
+            report.diagnostics()
+        );
     }
 
     #[test]
@@ -15082,17 +15186,22 @@ mod tests {
         let source = "CREATE SCHEMA app; \
             CREATE EXTERNAL CLIENT FUNCTION app.events() RETURNS STREAM<BOOLEAN> \
             RUNTIME CONTRACT 'app.events@1';";
-        let report = check_standard_application(&bundle([("stream-client.orna", source)]), &context);
+        let report =
+            check_standard_application(&bundle([("stream-client.orna", source)]), &context);
 
-        assert!(report.diagnostics().is_empty(), "{:?}", report.diagnostics());
+        assert!(
+            report.diagnostics().is_empty(),
+            "{:?}",
+            report.diagnostics()
+        );
         let view = report.preparation_view().unwrap();
         let checked = view.checked();
         let function = &checked.client_functions()[0];
+        assert_eq!(function.return_shape(), CheckedClientReturnShape::Stream,);
         assert_eq!(
-            function.return_shape(),
-            CheckedClientReturnShape::Stream,
+            function.return_type(),
+            SemanticType::scalar(StandardScalar::Boolean)
         );
-        assert_eq!(function.return_type(), SemanticType::scalar(StandardScalar::Boolean));
         assert_eq!(view.uses().len(), 1);
         assert_eq!(
             view.uses()[0].kind(),
@@ -15102,9 +15211,7 @@ mod tests {
             },
         );
         assert_eq!(
-            view.uses()[0]
-                .value()
-                .map(CheckedValueTypeUse::type_id),
+            view.uses()[0].value().map(CheckedValueTypeUse::type_id),
             Some(TypeId::from_bytes([3; 16])),
         );
     }
@@ -20239,7 +20346,11 @@ mod tests {
             CREATE SERVER FUNCTION tasks.events() RETURNS STREAM<TEXT> \
             AS SELECT t.title FROM tasks.task t;";
         let report = check(&bundle([("stream.orna", source)]), &empty_catalogue());
-        assert!(report.diagnostics().is_empty(), "{:?}", report.diagnostics());
+        assert!(
+            report.diagnostics().is_empty(),
+            "{:?}",
+            report.diagnostics()
+        );
         let function = &report.checked_bundle().unwrap().server_functions()[0];
         let super::CheckedServerFunctionReturn::Stream {
             semantic_type,
@@ -20264,8 +20375,15 @@ mod tests {
             AS SELECT t.title FROM tasks.task t; \
             CREATE SCHEMA ui; CREATE CLIENT FUNCTION ui.read() RETURNS STREAM<TEXT> IS \
             BEGIN RETURN AWAIT std.data.stream_resource(target => tasks.events, arguments => std.call.args()); END;";
-        let report = check(&bundle([("stream-resource.orna", source)]), &empty_catalogue());
-        assert!(report.diagnostics().is_empty(), "{:?}", report.diagnostics());
+        let report = check(
+            &bundle([("stream-resource.orna", source)]),
+            &empty_catalogue(),
+        );
+        assert!(
+            report.diagnostics().is_empty(),
+            "{:?}",
+            report.diagnostics()
+        );
         let client = &report.checked_bundle().unwrap().client_functions()[0];
         let super::CheckedClientFunctionBody::Expression {
             expression: return_expression,
@@ -20297,8 +20415,15 @@ mod tests {
             CREATE SCHEMA ui; CREATE CLIENT FUNCTION ui.read() RETURNS STREAM<TEXT> IS \
             LET rows std.data.StreamResource<TEXT> := std.data.stream_resource(target => tasks.events, arguments => std.call.args()); \
             BEGIN RETURN AWAIT rows; END;";
-        let report = check(&bundle([("stream-await-valid.orna", valid)]), &empty_catalogue());
-        assert!(report.diagnostics().is_empty(), "{:?}", report.diagnostics());
+        let report = check(
+            &bundle([("stream-await-valid.orna", valid)]),
+            &empty_catalogue(),
+        );
+        assert!(
+            report.diagnostics().is_empty(),
+            "{:?}",
+            report.diagnostics()
+        );
 
         let invalid_return = "CREATE SCHEMA tasks; CREATE TYPE tasks.task AS OBJECT (title TEXT); \
             CREATE SERVER FUNCTION tasks.events() RETURNS STREAM<TEXT> \
@@ -20306,7 +20431,10 @@ mod tests {
             CREATE SCHEMA ui; CREATE CLIENT FUNCTION ui.read() RETURNS TEXT IS \
             LET rows std.data.StreamResource<TEXT> := std.data.stream_resource(target => tasks.events, arguments => std.call.args()); \
             BEGIN RETURN AWAIT rows; END;";
-        let report = check(&bundle([("stream-await-return.orna", invalid_return)]), &empty_catalogue());
+        let report = check(
+            &bundle([("stream-await-return.orna", invalid_return)]),
+            &empty_catalogue(),
+        );
         assert_eq!(report.diagnostics().len(), 1, "{:?}", report.diagnostics());
         assert_eq!(report.diagnostics()[0].code(), DiagnosticCode::TypeMismatch);
 
@@ -20316,7 +20444,10 @@ mod tests {
             CREATE SCHEMA ui; CREATE CLIENT FUNCTION ui.read() RETURNS STREAM<TEXT> IS \
             LET rows TEXT := std.data.stream_resource(target => tasks.events, arguments => std.call.args()); \
             BEGIN RETURN AWAIT rows; END;";
-        let report = check(&bundle([("stream-await-assignment.orna", invalid_assignment)]), &empty_catalogue());
+        let report = check(
+            &bundle([("stream-await-assignment.orna", invalid_assignment)]),
+            &empty_catalogue(),
+        );
         assert_eq!(report.diagnostics().len(), 1, "{:?}", report.diagnostics());
         assert_eq!(report.diagnostics()[0].code(), DiagnosticCode::TypeMismatch);
     }
@@ -20504,12 +20635,19 @@ mod tests {
 
         let in_range = "CREATE SCHEMA examples; CREATE CLIENT FUNCTION examples.value() RETURNS INTEGER AS 2147483647;";
         let report = check(&bundle([("client.orna", in_range)]), &empty_catalogue());
-        assert!(report.diagnostics().is_empty(), "{:?}", report.diagnostics());
+        assert!(
+            report.diagnostics().is_empty(),
+            "{:?}",
+            report.diagnostics()
+        );
         let function = &report.checked_bundle().unwrap().client_functions()[0];
         assert!(matches!(
             function.body(),
             CheckedClientFunctionBody::Expression {
-                expression: CheckedClientExpression::Integer { value: 2_147_483_647, .. }
+                expression: CheckedClientExpression::Integer {
+                    value: 2_147_483_647,
+                    ..
+                }
             }
         ));
     }
@@ -20670,23 +20808,46 @@ mod tests {
         assert!(matches!(states[5].default(), CheckedStateDefault::Unset));
 
         let sealed_session = "CREATE SCHEMA examples; CREATE CLIENT FUNCTION examples.state() RETURNS BOOLEAN IS STATE snapshot sys.inspect.snapshot SCOPE SESSION; BEGIN RETURN TRUE; END;";
-        let report = check(&bundle([("client.orna", sealed_session)]), &empty_catalogue());
+        let report = check(
+            &bundle([("client.orna", sealed_session)]),
+            &empty_catalogue(),
+        );
         assert_eq!(report.diagnostics().len(), 1);
-        assert_eq!(report.diagnostics()[0].code(), DiagnosticCode::DomainIncompatible);
-        assert!(report.diagnostics()[0].message().contains("sealed sys.inspect carriers are transient"));
+        assert_eq!(
+            report.diagnostics()[0].code(),
+            DiagnosticCode::DomainIncompatible
+        );
+        assert!(
+            report.diagnostics()[0]
+                .message()
+                .contains("sealed sys.inspect carriers are transient")
+        );
 
         let sealed_user = "CREATE SCHEMA examples; CREATE CLIENT FUNCTION examples.state() RETURNS BOOLEAN IS STATE snapshot_options sys.inspect.snapshot_options SCOPE USER; BEGIN RETURN TRUE; END;";
 
-
         let report = check(&bundle([("client.orna", sealed_user)]), &empty_catalogue());
         assert_eq!(report.diagnostics().len(), 1);
-        assert_eq!(report.diagnostics()[0].code(), DiagnosticCode::DomainIncompatible);
-        assert!(report.diagnostics()[0].message().contains("sealed sys.inspect carriers are transient"));
+        assert_eq!(
+            report.diagnostics()[0].code(),
+            DiagnosticCode::DomainIncompatible
+        );
+        assert!(
+            report.diagnostics()[0]
+                .message()
+                .contains("sealed sys.inspect carriers are transient")
+        );
         let sealed_local = "CREATE SCHEMA examples; CREATE CLIENT FUNCTION examples.state() RETURNS BOOLEAN IS STATE snapshot sys.inspect.snapshot SCOPE LOCAL; BEGIN RETURN TRUE; END;";
         let report = check(&bundle([("client.orna", sealed_local)]), &empty_catalogue());
         assert_eq!(report.diagnostics().len(), 1);
-        assert_eq!(report.diagnostics()[0].code(), DiagnosticCode::DomainIncompatible);
-        assert!(report.diagnostics()[0].message().contains("sealed sys.inspect carriers are transient"));
+        assert_eq!(
+            report.diagnostics()[0].code(),
+            DiagnosticCode::DomainIncompatible
+        );
+        assert!(
+            report.diagnostics()[0]
+                .message()
+                .contains("sealed sys.inspect carriers are transient")
+        );
 
         let duplicate = "CREATE SCHEMA examples; CREATE CLIENT FUNCTION examples.state() RETURNS TEXT IS \
             STATE value TEXT; STATE value INTEGER; BEGIN RETURN 'ready'; END;";
@@ -20767,9 +20928,15 @@ mod tests {
         ];
 
         for (source, message) in cases {
-            let report = check(&bundle([("inspector-state.orna", source)]), &empty_catalogue());
+            let report = check(
+                &bundle([("inspector-state.orna", source)]),
+                &empty_catalogue(),
+            );
             assert_eq!(report.diagnostics().len(), 1, "{:?}", report.diagnostics());
-            assert_eq!(report.diagnostics()[0].code(), DiagnosticCode::DomainIncompatible);
+            assert_eq!(
+                report.diagnostics()[0].code(),
+                DiagnosticCode::DomainIncompatible
+            );
             assert_eq!(report.diagnostics()[0].message(), message);
             assert_no_checked_bundle(&report);
         }
@@ -20972,7 +21139,8 @@ mod tests {
         let source = "CREATE SCHEMA ui; CREATE CLIENT FUNCTION ui.run() RETURNS std.Action IS \
             LET rows std.data.Resource<INTEGER> := std.data.resource(target => tasks.find, arguments => std.call.args()); \
             BEGIN RETURN std.action.call(target => tasks.run, arguments => std.call.args(p_value => rows)); END;";
-        let report = check_standard_application(&bundle([("action-resource.orna", source)]), &context);
+        let report =
+            check_standard_application(&bundle([("action-resource.orna", source)]), &context);
         assert_eq!(report.diagnostics().len(), 1, "{:?}", report.diagnostics());
         assert_eq!(report.diagnostics()[0].code(), DiagnosticCode::TypeMismatch);
         assert_eq!(
@@ -20986,7 +21154,10 @@ mod tests {
     fn rejects_bare_as_and_state_return_await_but_accepts_procedural_await() {
         let base = CatalogueSnapshot::new_with_functions(
             CatalogueRevisionId::from_bytes([0x51; 16]),
-            vec![SchemaDefinition::new(SchemaId::from_bytes([0x52; 16]), QualifiedSemanticName::new(["tasks"]).unwrap())],
+            vec![SchemaDefinition::new(
+                SchemaId::from_bytes([0x52; 16]),
+                QualifiedSemanticName::new(["tasks"]).unwrap(),
+            )],
             Vec::new(),
             vec![FunctionDefinition::new(
                 FunctionId::from_bytes([0x53; 16]),
@@ -20999,7 +21170,8 @@ mod tests {
                 Some(FunctionTransaction::ReadOnly),
                 FunctionVolatility::Stable,
             )],
-        ).unwrap();
+        )
+        .unwrap();
         let source = "CREATE SCHEMA ui; CREATE CLIENT FUNCTION ui.bare() RETURNS TEXT AS \
             AWAIT std.data.resource(target => tasks.find, arguments => std.call.args()); \
             CREATE CLIENT FUNCTION ui.procedural() RETURNS TEXT IS \
@@ -21008,23 +21180,35 @@ mod tests {
             CREATE CLIENT FUNCTION ui.stateful() RETURNS TEXT IS \
             STATE value TEXT; BEGIN RETURN AWAIT std.data.resource(target => tasks.find, arguments => std.call.args()); END;";
         let report = check(&bundle([("await-positions.orna", source)]), &base);
-        assert!(report.diagnostics().iter().any(|diagnostic| {
-            diagnostic.code() == DiagnosticCode::DomainIncompatible && diagnostic.message().contains("AWAIT is only valid")
-        }), "{:?}", report.diagnostics());
+        assert!(
+            report.diagnostics().iter().any(|diagnostic| {
+                diagnostic.code() == DiagnosticCode::DomainIncompatible
+                    && diagnostic.message().contains("AWAIT is only valid")
+            }),
+            "{:?}",
+            report.diagnostics()
+        );
         assert_no_checked_bundle(&report);
 
         let procedural = "CREATE SCHEMA ui; CREATE CLIENT FUNCTION ui.procedural() RETURNS TEXT IS \
             LET value TEXT := AWAIT std.data.resource(target => tasks.find, arguments => std.call.args()); \
             BEGIN value := AWAIT std.data.resource(target => tasks.find, arguments => std.call.args()); RETURN value; END;";
         let report = check(&bundle([("await-procedural.orna", procedural)]), &base);
-        assert!(report.diagnostics().is_empty(), "{:?}", report.diagnostics());
+        assert!(
+            report.diagnostics().is_empty(),
+            "{:?}",
+            report.diagnostics()
+        );
     }
 
     #[test]
     fn rejects_scalar_and_stream_resource_descriptor_mismatches() {
         let base = CatalogueSnapshot::new_with_functions(
             CatalogueRevisionId::from_bytes([0x61; 16]),
-            vec![SchemaDefinition::new(SchemaId::from_bytes([0x62; 16]), QualifiedSemanticName::new(["tasks"]).unwrap())],
+            vec![SchemaDefinition::new(
+                SchemaId::from_bytes([0x62; 16]),
+                QualifiedSemanticName::new(["tasks"]).unwrap(),
+            )],
             Vec::new(),
             vec![
                 FunctionDefinition::new(
@@ -21032,7 +21216,9 @@ mod tests {
                     QualifiedSemanticName::new(["tasks", "find"]).unwrap(),
                     FunctionDomain::Server,
                     Vec::new(),
-                    FunctionReturn::Single(ResolvedType::Scalar(StandardScalar::CharacterLargeObject)),
+                    FunctionReturn::Single(ResolvedType::Scalar(
+                        StandardScalar::CharacterLargeObject,
+                    )),
                     FunctionRevisionId::from_bytes([0x64; 16]),
                     FunctionSecurity::Invoker,
                     Some(FunctionTransaction::ReadOnly),
@@ -21043,24 +21229,31 @@ mod tests {
                     QualifiedSemanticName::new(["tasks", "events"]).unwrap(),
                     FunctionDomain::Server,
                     Vec::new(),
-                    FunctionReturn::Stream(ResolvedType::Scalar(StandardScalar::CharacterLargeObject)),
+                    FunctionReturn::Stream(ResolvedType::Scalar(
+                        StandardScalar::CharacterLargeObject,
+                    )),
                     FunctionRevisionId::from_bytes([0x66; 16]),
                     FunctionSecurity::Invoker,
                     Some(FunctionTransaction::ReadOnly),
                     FunctionVolatility::Stable,
                 ),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let source = "CREATE SCHEMA ui; CREATE CLIENT FUNCTION ui.scalar() RETURNS TEXT IS \
             LET value std.data.Resource<INTEGER> := std.data.resource(target => tasks.find, arguments => std.call.args()); \
             BEGIN RETURN AWAIT value; END; \
             CREATE CLIENT FUNCTION ui.stream() RETURNS STREAM<TEXT> IS \
             LET rows std.data.StreamResource<INTEGER> := std.data.stream_resource(target => tasks.events, arguments => std.call.args()); \
             BEGIN RETURN AWAIT rows; END;";
-        let report = check(&bundle([("resource-descriptor-mismatch.orna", source)]), &base);
+        let report = check(
+            &bundle([("resource-descriptor-mismatch.orna", source)]),
+            &base,
+        );
         assert_eq!(report.diagnostics().len(), 2, "{:?}", report.diagnostics());
         assert!(report.diagnostics().iter().all(|diagnostic| {
-            diagnostic.code() == DiagnosticCode::TypeMismatch && diagnostic.message().contains("descriptor does not match")
+            diagnostic.code() == DiagnosticCode::TypeMismatch
+                && diagnostic.message().contains("descriptor does not match")
         }));
         assert_no_checked_bundle(&report);
     }
@@ -21070,10 +21263,15 @@ mod tests {
         let source = "CREATE SCHEMA examples; CREATE CLIENT FUNCTION examples.mixed() RETURNS BOOLEAN IS \
             STATE value TEXT; LET other TEXT := 'x'; BEGIN RETURN TRUE; END;";
         let report = check(&bundle([("state-shape.orna", source)]), &empty_catalogue());
-        assert!(report.diagnostics().iter().any(|diagnostic| {
-            diagnostic.code() == DiagnosticCode::UnexpectedToken
-                && diagnostic.message() == "CLIENT state blocks cannot contain pre-BEGIN LET locals"
-        }), "{:?}", report.diagnostics());
+        assert!(
+            report.diagnostics().iter().any(|diagnostic| {
+                diagnostic.code() == DiagnosticCode::UnexpectedToken
+                    && diagnostic.message()
+                        == "CLIENT state blocks cannot contain pre-BEGIN LET locals"
+            }),
+            "{:?}",
+            report.diagnostics()
+        );
         assert_no_checked_bundle(&report);
     }
 
@@ -21081,10 +21279,15 @@ mod tests {
     fn rejects_state_blocks_mixed_with_procedural_declarations() {
         let source = "CREATE SCHEMA examples; CREATE CLIENT FUNCTION examples.mixed() RETURNS BOOLEAN IS STATE value TEXT; BEGIN LET other := 'x'; RETURN TRUE; END;";
         let report = check(&bundle([("client.orna", source)]), &empty_catalogue());
-        assert!(report.diagnostics().iter().any(|diagnostic| {
-            diagnostic.code() == DiagnosticCode::UnexpectedToken
-                && diagnostic.message() == "CLIENT state blocks accept only a single RETURN statement"
-        }), "{:?}", report.diagnostics());
+        assert!(
+            report.diagnostics().iter().any(|diagnostic| {
+                diagnostic.code() == DiagnosticCode::UnexpectedToken
+                    && diagnostic.message()
+                        == "CLIENT state blocks accept only a single RETURN statement"
+            }),
+            "{:?}",
+            report.diagnostics()
+        );
         assert_no_checked_bundle(&report);
     }
 
@@ -23499,7 +23702,11 @@ mod tests {
         let stored = &verified.source().units()[0];
 
         for (label, id, logical_path) in [
-            ("stable source-unit id", SourceUnitId::from_bytes([0x55; 16]), stored.logical_path()),
+            (
+                "stable source-unit id",
+                SourceUnitId::from_bytes([0x55; 16]),
+                stored.logical_path(),
+            ),
             ("logical path", stored.id(), "std/renamed.orna"),
         ] {
             let mutated = verified_v1_with_source_unit_identity(&verified, id, logical_path, 0);
@@ -25895,9 +26102,14 @@ mod tests {
 
     fn standard_v5_json_origins(catalogue: &CatalogueSnapshot) -> Vec<DefinitionOrigin> {
         let report = parse_bundle(
-            &SourceBundle::new([SourceUnit::new("std/json.orna", STANDARD_V5_JSON_SOURCE)]).unwrap(),
+            &SourceBundle::new([SourceUnit::new("std/json.orna", STANDARD_V5_JSON_SOURCE)])
+                .unwrap(),
         );
-        assert!(report.diagnostics().is_empty(), "{:?}", report.diagnostics());
+        assert!(
+            report.diagnostics().is_empty(),
+            "{:?}",
+            report.diagnostics()
+        );
         let parsed = &report.units()[0];
         let binding = catalogue
             .type_binding_by_name(&TypeLookupName::qualified(
@@ -25921,9 +26133,15 @@ mod tests {
         let function = &parsed.parsed().server_functions()[0];
         vec![
             origin(DefinitionIdentity::Schema(STD_JSON_SCHEMA_ID), &schema.span),
-            origin(DefinitionIdentity::ValueType(STD_JSON_VALUE_TYPE_ID), &value_type.span),
+            origin(
+                DefinitionIdentity::ValueType(STD_JSON_VALUE_TYPE_ID),
+                &value_type.span,
+            ),
             origin(DefinitionIdentity::TypeBinding(binding.id()), &export.span),
-            origin(DefinitionIdentity::Function(STD_JSON_ENCODE_FUNCTION_ID), &function.span),
+            origin(
+                DefinitionIdentity::Function(STD_JSON_ENCODE_FUNCTION_ID),
+                &function.span,
+            ),
             origin(
                 DefinitionIdentity::Parameter {
                     owner: STD_JSON_ENCODE_FUNCTION_ID,
@@ -25945,7 +26163,10 @@ mod tests {
         let parsed_types = parsed_standard_unit(STANDARD_V2_TYPES_SOURCE);
         let mut origins = standard_v2_types_origins(&catalogue, &parsed_types);
         origins.extend(standard_v2_invoke_origins(STD_INVOKE_SOURCE));
-        origins.extend(standard_v3_output_origins(&catalogue, STANDARD_V3_OUTPUT_SOURCE));
+        origins.extend(standard_v3_output_origins(
+            &catalogue,
+            STANDARD_V3_OUTPUT_SOURCE,
+        ));
         origins.extend(standard_v4_ui_origins(&catalogue, STANDARD_V4_UI_SOURCE));
         let json_origins = standard_v5_json_origins(&catalogue);
         origins.extend(json_origins.iter().cloned());
@@ -25980,7 +26201,8 @@ mod tests {
         catalogue: &CatalogueSnapshot,
         origins: &[DefinitionOrigin],
         executables: &[StandardExecutable],
-    ) -> Result<(StandardSourceFamilies, CheckedStandardExecutable), StandardLibraryCheckError> {
+    ) -> Result<(StandardSourceFamilies, CheckedStandardExecutable), StandardLibraryCheckError>
+    {
         check_standard_library_source_v5_parts(&units, catalogue, origins, executables)
     }
 
@@ -26018,9 +26240,17 @@ mod tests {
 
     fn standard_v6_action_origins(catalogue: &CatalogueSnapshot) -> Vec<DefinitionOrigin> {
         let report = parse_bundle(
-            &SourceBundle::new([SourceUnit::new("std/action.orna", STANDARD_V6_ACTION_SOURCE)]).unwrap(),
+            &SourceBundle::new([SourceUnit::new(
+                "std/action.orna",
+                STANDARD_V6_ACTION_SOURCE,
+            )])
+            .unwrap(),
         );
-        assert!(report.diagnostics().is_empty(), "{:?}", report.diagnostics());
+        assert!(
+            report.diagnostics().is_empty(),
+            "{:?}",
+            report.diagnostics()
+        );
         let parsed = &report.units()[0];
         let binding = catalogue
             .type_binding_by_name(&TypeLookupName::qualified(
@@ -26042,8 +26272,14 @@ mod tests {
         let value_type = &parsed.parsed().opaque_value_types()[0];
         let export = &parsed.parsed().type_exports()[0];
         vec![
-            origin(DefinitionIdentity::Schema(STD_ACTION_SCHEMA_ID), &schema.span),
-            origin(DefinitionIdentity::ValueType(STD_ACTION_TYPE_ID), &value_type.span),
+            origin(
+                DefinitionIdentity::Schema(STD_ACTION_SCHEMA_ID),
+                &schema.span,
+            ),
+            origin(
+                DefinitionIdentity::ValueType(STD_ACTION_TYPE_ID),
+                &value_type.span,
+            ),
             origin(DefinitionIdentity::TypeBinding(binding.id()), &export.span),
         ]
     }
@@ -26077,7 +26313,8 @@ mod tests {
         catalogue: &CatalogueSnapshot,
         origins: &[DefinitionOrigin],
         executables: &[StandardExecutable],
-    ) -> Result<(StandardSourceFamilies, CheckedStandardExecutable), StandardLibraryCheckError> {
+    ) -> Result<(StandardSourceFamilies, CheckedStandardExecutable), StandardLibraryCheckError>
+    {
         check_standard_library_source_v6_parts(&units, catalogue, origins, executables)
     }
 
@@ -26159,12 +26396,7 @@ mod tests {
         );
         let rejects_source = |source: &str, label: &str| {
             let mut tampered = units.clone();
-            tampered[4] = stored_v2_unit(
-                STD_JSON_SOURCE_UNIT_ID,
-                4,
-                "std/json.orna",
-                source,
-            );
+            tampered[4] = stored_v2_unit(STD_JSON_SOURCE_UNIT_ID, 4, "std/json.orna", source);
             let error = check_v5_parts(tampered, &catalogue, &origins, &executables).unwrap_err();
             assert!(
                 matches!(error, StandardLibraryCheckError::SourceMismatch),
@@ -26173,10 +26405,7 @@ mod tests {
         };
 
         rejects_source(
-            &STANDARD_V5_JSON_SOURCE.replace(
-                "CREATE SCHEMA std.json;",
-                "CREATE SCHEMA std.jason;",
-            ),
+            &STANDARD_V5_JSON_SOURCE.replace("CREATE SCHEMA std.json;", "CREATE SCHEMA std.jason;"),
             "wrong JSON schema",
         );
         rejects_source(
@@ -26187,10 +26416,7 @@ mod tests {
             "wrong JSON opaque type name",
         );
         rejects_source(
-            &STANDARD_V5_JSON_SOURCE.replace(
-                "orna.std.value.json@1",
-                "orna.std.value.token@1",
-            ),
+            &STANDARD_V5_JSON_SOURCE.replace("orna.std.value.json@1", "orna.std.value.token@1"),
             "wrong JSON kernel contract",
         );
         rejects_source(
@@ -26322,12 +26548,7 @@ mod tests {
         );
         let rejects_source = |source: &str, label: &str| {
             let mut tampered = units.clone();
-            tampered[5] = stored_v2_unit(
-                STD_ACTION_SOURCE_UNIT_ID,
-                5,
-                "std/action.orna",
-                source,
-            );
+            tampered[5] = stored_v2_unit(STD_ACTION_SOURCE_UNIT_ID, 5, "std/action.orna", source);
             let error = check_v6_parts(tampered, &catalogue, &origins, &executables).unwrap_err();
             assert!(
                 matches!(error, StandardLibraryCheckError::SourceMismatch),
@@ -26336,10 +26557,8 @@ mod tests {
         };
 
         rejects_source(
-            &STANDARD_V6_ACTION_SOURCE.replace(
-                "CREATE SCHEMA std.action;",
-                "CREATE SCHEMA std.acted;",
-            ),
+            &STANDARD_V6_ACTION_SOURCE
+                .replace("CREATE SCHEMA std.action;", "CREATE SCHEMA std.acted;"),
             "wrong action schema",
         );
         rejects_source(
@@ -26423,12 +26642,7 @@ mod tests {
             ),
         ] {
             let mut tampered = units.clone();
-            tampered[5] = stored_v2_unit(
-                STD_ACTION_SOURCE_UNIT_ID,
-                5,
-                "std/action.orna",
-                &source,
-            );
+            tampered[5] = stored_v2_unit(STD_ACTION_SOURCE_UNIT_ID, 5, "std/action.orna", &source);
             let error = check_v6_parts(tampered, &catalogue, &origins, &executables).unwrap_err();
             let StandardLibraryCheckError::Diagnostics { diagnostics } = error else {
                 panic!("{label}: expected parser diagnostics");
@@ -26474,15 +26688,8 @@ mod tests {
         )
         .unwrap();
         let hash_context = CatalogueHashContext::version_two(verified.clone());
-        let catalogue_hash = catalogue_digest_with_context(
-            &hash_context,
-            &catalogue,
-            &[],
-            &[],
-            &[],
-            &[],
-        )
-        .unwrap();
+        let catalogue_hash =
+            catalogue_digest_with_context(&hash_context, &catalogue, &[], &[], &[], &[]).unwrap();
         let active = ActiveDatabaseRevision::new_with_catalogue_hash_context(
             ActiveDatabaseRevisionInput::new(
                 RevisionPair::new(source.id(), catalogue.revision()),
@@ -26494,11 +26701,15 @@ mod tests {
             hash_context,
         )
         .unwrap();
-        let context = StandardApplicationCheckContext::try_new(active.catalogue(), &standard)
-            .unwrap();
+        let context =
+            StandardApplicationCheckContext::try_new(active.catalogue(), &standard).unwrap();
         let source = "CREATE SCHEMA scalar_fixture; CREATE CLIENT FUNCTION scalar_fixture.call() RETURNS INTEGER IS BEGIN RETURN AWAIT std.data.resource(target => std.invoke.echo, arguments => std.call.args(p_value => 43)); END;";
         let report = check_standard_application(&bundle([("resource.orna", source)]), &context);
-        assert!(report.diagnostics().is_empty(), "{:?}", report.diagnostics());
+        assert!(
+            report.diagnostics().is_empty(),
+            "{:?}",
+            report.diagnostics()
+        );
         let checked = report.preparation_view().unwrap().checked();
         let function = checked
             .client_functions()
@@ -26537,15 +26748,16 @@ mod tests {
             .iter()
             .find(|revision| revision.function() == client.id())
             .unwrap();
-        let plan = orna_artifact::client_plan::ResourceClientPlan::decode(
-            revision.artifact().payload(),
-        )
-        .unwrap();
-        let orna_artifact::client_plan::ClientExpressionNode::Await { expression } = plan.expression()
+        let plan =
+            orna_artifact::client_plan::ResourceClientPlan::decode(revision.artifact().payload())
+                .unwrap();
+        let orna_artifact::client_plan::ClientExpressionNode::Await { expression } =
+            plan.expression()
         else {
             panic!("prepared resource plan must await the resource");
         };
-        let orna_artifact::client_plan::ClientExpressionNode::Resource { operation } = expression.as_ref()
+        let orna_artifact::client_plan::ClientExpressionNode::Resource { operation } =
+            expression.as_ref()
         else {
             panic!("prepared resource plan must contain a resource operation");
         };

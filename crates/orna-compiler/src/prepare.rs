@@ -11,12 +11,12 @@ use orna_artifact::{
     client_plan::{
         ACTION_FORMAT_VERSION as CLIENT_PLAN_ACTION_VERSION, ActionClientPlan, ActionOperationNode,
         CAPABILITY_FORMAT_VERSION as CLIENT_PLAN_CAPABILITY_VERSION, CapabilityArgumentSource,
-        CapabilityClientPlan, CapabilityRequirement, ClientExpressionNode, InspectOperationNode,
-        InspectProjection, ClientLocal,
+        CapabilityClientPlan, CapabilityRequirement, ClientExpressionNode, ClientLocal,
         ClientLocalKind, ClientPlan, ClientStatement,
         EXPRESSION_FORMAT_VERSION as CLIENT_PLAN_EXPRESSION_VERSION, ExpressionClientPlan,
         FORMAT_IDENTITY as CLIENT_PLAN_FORMAT, FORMAT_VERSION as CLIENT_PLAN_VERSION,
-        InnerClientPlan, LANGUAGE_VERSION_IDENTITY as CLIENT_PLAN_LANGUAGE_VERSION,
+        InnerClientPlan, InspectOperationNode, InspectProjection,
+        LANGUAGE_VERSION_IDENTITY as CLIENT_PLAN_LANGUAGE_VERSION,
         PROCEDURAL_FORMAT_VERSION as CLIENT_PLAN_PROCEDURAL_VERSION, ProceduralClientPlan,
         RESOURCE_FORMAT_VERSION as CLIENT_PLAN_RESOURCE_VERSION, ResourceClientPlan,
         ResourceOperationNode, STATE_FORMAT_VERSION as CLIENT_PLAN_STATE_VERSION, StateClientPlan,
@@ -87,11 +87,11 @@ use crate::{
     relational::{supports_server_select_distinct, supports_server_select_equality},
     resolver::{
         CheckedActionOperation, CheckedClientExpression, CheckedClientFunctionBody,
-        CheckedClientLocal, CheckedClientLocalKind, CheckedClientReturnShape, CheckedInspectOperation,
-        CheckedInspectProjection,
-        CheckedClientStateSlot, CheckedClientStatement,
-        CheckedFieldRename, CheckedResourceOperation, CheckedStateDefault, CheckedStateScope,
-        UNIQUE_FIELD_MESSAGE, durable_state_slot_id, supports_unique_text_or_required_reference,
+        CheckedClientLocal, CheckedClientLocalKind, CheckedClientReturnShape,
+        CheckedClientStateSlot, CheckedClientStatement, CheckedFieldRename,
+        CheckedInspectOperation, CheckedInspectProjection, CheckedResourceOperation,
+        CheckedStateDefault, CheckedStateScope, UNIQUE_FIELD_MESSAGE, durable_state_slot_id,
+        supports_unique_text_or_required_reference,
     },
 };
 
@@ -2216,9 +2216,7 @@ fn query_planning_function(function: &FunctionDefinition) -> FunctionDefinition 
         function.domain(),
         function.parameters().to_vec(),
         FunctionReturn::Rows(vec![FunctionReturnColumnDefinition::new(
-            "value",
-            0,
-            *element,
+            "value", 0, *element,
         )]),
         function.current_revision(),
         function.security(),
@@ -4320,7 +4318,9 @@ fn client_expression_locations<'a>(
         CheckedClientExpression::Inspect { operation } => {
             locations.push(operation.location());
             match operation {
-                CheckedInspectOperation::Snapshot { target, options, .. } => {
+                CheckedInspectOperation::Snapshot {
+                    target, options, ..
+                } => {
                     client_expression_locations(target, locations);
                     if let Some(options) = options {
                         client_expression_locations(options, locations);
@@ -5726,11 +5726,17 @@ fn client_expression_contains_action(expression: &CheckedClientExpression) -> bo
             .iter()
             .any(|(_, value)| client_expression_contains_action(value)),
         CheckedClientExpression::Inspect { operation } => match operation {
-            CheckedInspectOperation::Snapshot { target, options, .. } => {
+            CheckedInspectOperation::Snapshot {
+                target, options, ..
+            } => {
                 client_expression_contains_action(target)
-                    || options.as_deref().is_some_and(client_expression_contains_action)
+                    || options
+                        .as_deref()
+                        .is_some_and(client_expression_contains_action)
             }
-            CheckedInspectOperation::Projection { snapshot, .. } => client_expression_contains_action(snapshot),
+            CheckedInspectOperation::Projection { snapshot, .. } => {
+                client_expression_contains_action(snapshot)
+            }
         },
         CheckedClientExpression::Call { arguments, .. } => arguments
             .iter()
@@ -5765,8 +5771,7 @@ fn client_expression_contains_inspect(expression: &CheckedClientExpression) -> b
             .iter()
             .any(|(_, value)| client_expression_contains_inspect(value)),
         CheckedClientExpression::Concat { left, right, .. } => {
-            client_expression_contains_inspect(left)
-                || client_expression_contains_inspect(right)
+            client_expression_contains_inspect(left) || client_expression_contains_inspect(right)
         }
         CheckedClientExpression::String { .. }
         | CheckedClientExpression::Integer { .. }
@@ -5783,11 +5788,17 @@ fn client_expression_contains_resource(expression: &CheckedClientExpression) -> 
         | CheckedClientExpression::Resource { .. }
         | CheckedClientExpression::Action { .. } => true,
         CheckedClientExpression::Inspect { operation } => match operation {
-            CheckedInspectOperation::Snapshot { target, options, .. } => {
+            CheckedInspectOperation::Snapshot {
+                target, options, ..
+            } => {
                 client_expression_contains_resource(target)
-                    || options.as_deref().is_some_and(client_expression_contains_resource)
+                    || options
+                        .as_deref()
+                        .is_some_and(client_expression_contains_resource)
             }
-            CheckedInspectOperation::Projection { snapshot, .. } => client_expression_contains_resource(snapshot),
+            CheckedInspectOperation::Projection { snapshot, .. } => {
+                client_expression_contains_resource(snapshot)
+            }
         },
         CheckedClientExpression::Call { arguments, .. } => arguments
             .iter()
@@ -6866,12 +6877,7 @@ impl<'a> CandidateBuilder<'a> {
                         .iter()
                         .enumerate()
                         .map(|(ordinal, state)| {
-                            self.client_state_slot(
-                                state,
-                                function_id,
-                                validated.id,
-                                ordinal as u32,
-                            )
+                            self.client_state_slot(state, function_id, validated.id, ordinal as u32)
                         })
                         .collect::<Result<Vec<_>, PrepareError>>()?;
                     let plan = StateClientPlan::new(expression, slots);
@@ -7031,7 +7037,9 @@ impl<'a> CandidateBuilder<'a> {
             },
             CheckedClientExpression::Inspect { operation } => {
                 let operation = match operation {
-                    CheckedInspectOperation::Snapshot { target, options, .. } => {
+                    CheckedInspectOperation::Snapshot {
+                        target, options, ..
+                    } => {
                         if options.is_some() {
                             return Err(PrepareError::InvalidCheckedBundle {
                                 reason: "checked Inspector snapshot options are unsupported in Inspector v1",
@@ -7047,14 +7055,22 @@ impl<'a> CandidateBuilder<'a> {
                         ..
                     } => {
                         let projection = match projection {
-                            CheckedInspectProjection::InvocationNodes => InspectProjection::InvocationNodes,
+                            CheckedInspectProjection::InvocationNodes => {
+                                InspectProjection::InvocationNodes
+                            }
                             CheckedInspectProjection::Calls => InspectProjection::Calls,
                             CheckedInspectProjection::Resources => InspectProjection::Resources,
                             CheckedInspectProjection::StateCells => InspectProjection::StateCells,
                             CheckedInspectProjection::UiNodes => InspectProjection::UiNodes,
-                            CheckedInspectProjection::PresentationCandidates => InspectProjection::PresentationCandidates,
-                            CheckedInspectProjection::RuntimeBindings => InspectProjection::RuntimeBindings,
-                            CheckedInspectProjection::SecurityDecisions => InspectProjection::SecurityDecisions,
+                            CheckedInspectProjection::PresentationCandidates => {
+                                InspectProjection::PresentationCandidates
+                            }
+                            CheckedInspectProjection::RuntimeBindings => {
+                                InspectProjection::RuntimeBindings
+                            }
+                            CheckedInspectProjection::SecurityDecisions => {
+                                InspectProjection::SecurityDecisions
+                            }
                         };
                         InspectOperationNode::Projection {
                             projection,
@@ -7259,12 +7275,16 @@ impl<'a> CandidateBuilder<'a> {
                 .catalogue()
                 .function_by_id(target)
                 .is_some_and(|candidate| candidate.domain() == FunctionDomain::Server)
-            || self.active.catalogue_hash_context().standard().is_some_and(|standard| {
-                standard
-                    .catalogue()
-                    .function_by_id(target)
-                    .is_some_and(|candidate| candidate.domain() == FunctionDomain::Server)
-            });
+            || self
+                .active
+                .catalogue_hash_context()
+                .standard()
+                .is_some_and(|standard| {
+                    standard
+                        .catalogue()
+                        .function_by_id(target)
+                        .is_some_and(|candidate| candidate.domain() == FunctionDomain::Server)
+                });
         if !target_is_server {
             return Err(PrepareError::InvalidCheckedBundle {
                 reason: "checked CLIENT resource target is not a SERVER function",
@@ -7297,15 +7317,13 @@ impl<'a> CandidateBuilder<'a> {
         self.identities.type_id(id)
     }
 
-
     fn client_call_reference_sequence(
         &self,
         body: &ValidatedClientBody,
     ) -> Result<Vec<(CheckedFunctionId, SourceLocation)>, PrepareError> {
         let mut calls = Vec::new();
         match body {
-            ValidatedClientBody::BooleanLiteral(_)
-            | ValidatedClientBody::ExternalContract(_) => {}
+            ValidatedClientBody::BooleanLiteral(_) | ValidatedClientBody::ExternalContract(_) => {}
             ValidatedClientBody::Expression(expression) => {
                 self.append_client_expression_call_references(expression, &mut calls)?;
             }
@@ -7344,9 +7362,7 @@ impl<'a> CandidateBuilder<'a> {
     ) -> Result<(), PrepareError> {
         let mut ordered = arguments
             .iter()
-            .map(|(parameter, expression)| {
-                Ok((self.identities.parameter(*parameter)?, expression))
-            })
+            .map(|(parameter, expression)| Ok((self.identities.parameter(*parameter)?, expression)))
             .collect::<Result<Vec<_>, PrepareError>>()?;
         ordered.sort_by_key(|(parameter, _)| *parameter);
         for (_, expression) in ordered {
@@ -7383,7 +7399,9 @@ impl<'a> CandidateBuilder<'a> {
                 calls.push((operation.target(), operation.location().clone()));
             }
             CheckedClientExpression::Inspect { operation } => match operation {
-                CheckedInspectOperation::Snapshot { target, options, .. } => {
+                CheckedInspectOperation::Snapshot {
+                    target, options, ..
+                } => {
                     self.append_client_expression_call_references(target, calls)?;
                     if let Some(options) = options {
                         self.append_client_expression_call_references(options, calls)?;
@@ -7769,7 +7787,9 @@ impl<'a> CandidateBuilder<'a> {
                 {
                     Ok(CandidateResolvedType::StandardOpaqueValue(type_id))
                 } else {
-                    Ok(CandidateResolvedType::Named(self.client_named_type_id(target)?))
+                    Ok(CandidateResolvedType::Named(
+                        self.client_named_type_id(target)?,
+                    ))
                 }
             }
             (SemanticType::Reference { target }, EvidenceTarget::ObjectReference(evidence))
@@ -8751,9 +8771,9 @@ mod tests {
                 catalogue,
                 origins,
                 Sha256Digest::from_bytes([
-                    0x10, 0x61, 0xb8, 0x16, 0x88, 0x39, 0xaa, 0x50, 0x60, 0xbd, 0x4e, 0x5a, 0xef, 0x1e,
-                    0xc8, 0x68, 0x08, 0x22, 0x02, 0xb2, 0x96, 0x91, 0x42, 0x2a, 0xd9, 0x1a, 0x29,
-                    0x64, 0x9c, 0x72, 0x0e, 0x83,
+                    0x10, 0x61, 0xb8, 0x16, 0x88, 0x39, 0xaa, 0x50, 0x60, 0xbd, 0x4e, 0x5a, 0xef,
+                    0x1e, 0xc8, 0x68, 0x08, 0x22, 0x02, 0xb2, 0x96, 0x91, 0x42, 0x2a, 0xd9, 0x1a,
+                    0x29, 0x64, 0x9c, 0x72, 0x0e, 0x83,
                 ]),
             )
             .unwrap(),
@@ -13757,7 +13777,6 @@ mod tests {
         );
     }
 
-
     #[test]
     fn standard_client_state_plan_uses_resolved_slot_type_and_default() {
         let verified = invocation_carrier_standard();
@@ -13831,15 +13850,17 @@ mod tests {
             BEGIN RETURN TRUE; END;";
         let bundle = SourceBundle::new([SourceUnit::new("application.orna", source)]).unwrap();
         let report = check_standard_application(&bundle, &context);
-        assert!(report.diagnostics().is_empty(), "{:?}", report.diagnostics());
+        assert!(
+            report.diagnostics().is_empty(),
+            "{:?}",
+            report.diagnostics()
+        );
         let state_index = report
             .checked_bundle()
             .unwrap()
             .uses()
             .iter()
-            .position(|type_use| {
-                matches!(type_use.kind(), crate::CheckedTypeUseKind::State { .. })
-            })
+            .position(|type_use| matches!(type_use.kind(), crate::CheckedTypeUseKind::State { .. }))
             .unwrap();
         let state_kind = report.checked_bundle().unwrap().uses()[state_index].kind();
         let crate::CheckedTypeUseKind::State { owner, ordinal } = state_kind else {

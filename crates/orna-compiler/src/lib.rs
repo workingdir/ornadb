@@ -37,7 +37,9 @@ pub use resolver::{
     CheckedStandardTerminalPresentTable, CheckedStandardTypeBinding, CheckedStandardTypeReference,
     CheckedStandardValueType, CheckedTypeId, CheckedTypeUseKind, CheckedValueTypeUse,
     ConstantValue, NewApplicationCheckError, ProvisionalExpressionId, ProvisionalFieldId,
-    STD_ACTION_SCHEMA_ID, STD_ACTION_SOURCE_UNIT_ID, STD_ACTION_TYPE_ID, STD_CSV_ENCODE_FUNCTION_ID,
+    STANDARD_LIBRARY_V3_REVISION_ID, STANDARD_LIBRARY_V4_REVISION_ID,
+    STANDARD_LIBRARY_V5_REVISION_ID, STANDARD_LIBRARY_V6_REVISION_ID, STD_ACTION_SCHEMA_ID,
+    STD_ACTION_SOURCE_UNIT_ID, STD_ACTION_TYPE_ID, STD_CSV_ENCODE_FUNCTION_ID,
     STD_CSV_ENCODE_FUNCTION_REVISION_ID, STD_CSV_ENCODE_PARAMETER_ID, STD_DATA_ROWS_TYPE_ID,
     STD_DATA_SCHEMA_ID, STD_INTEGER_TYPE_ID, STD_INVOKE_ECHO_FUNCTION_ID,
     STD_INVOKE_ECHO_FUNCTION_REVISION_ID, STD_INVOKE_ECHO_PARAMETER_ID,
@@ -48,10 +50,7 @@ pub use resolver::{
     STD_TERMINAL_DOCUMENT_TYPE_ID, STD_TERMINAL_PRESENT_TABLE_FUNCTION_ID,
     STD_TERMINAL_PRESENT_TABLE_FUNCTION_REVISION_ID, STD_TERMINAL_PRESENT_TABLE_PARAMETER_ID,
     STD_TERMINAL_SCHEMA_ID, STD_TYPES_SOURCE_UNIT_ID, STD_UI_SCHEMA_ID, STD_UI_SOURCE_UNIT_ID,
-    STD_UI_TYPE_ID, SemanticType,
-    STANDARD_LIBRARY_V3_REVISION_ID, STANDARD_LIBRARY_V4_REVISION_ID,
-    STANDARD_LIBRARY_V5_REVISION_ID, STANDARD_LIBRARY_V6_REVISION_ID,
-    StandardApplicationCheckContext, StandardApplicationCheckReport,
+    STD_UI_TYPE_ID, SemanticType, StandardApplicationCheckContext, StandardApplicationCheckReport,
     StandardApplicationContextError, StandardLibraryCheckError, check, check_new_application,
     check_standard_application, check_standard_json_encode, check_standard_library_source,
     check_standard_parameter_echo, check_standard_terminal_present_table,
@@ -359,14 +358,15 @@ mod tests {
     };
 
     const SUCCESS_STANDARD_DIGEST: [u8; 32] = [
-        0x10, 0x61, 0xb8, 0x16, 0x88, 0x39, 0xaa, 0x50, 0x60, 0xbd, 0x4e, 0x5a, 0xef, 0x1e,
-        0xc8, 0x68, 0x08, 0x22, 0x02, 0xb2, 0x96, 0x91, 0x42, 0x2a, 0xd9, 0x1a, 0x29, 0x64,
-        0x9c, 0x72, 0x0e, 0x83,
+        0x10, 0x61, 0xb8, 0x16, 0x88, 0x39, 0xaa, 0x50, 0x60, 0xbd, 0x4e, 0x5a, 0xef, 0x1e, 0xc8,
+        0x68, 0x08, 0x22, 0x02, 0xb2, 0x96, 0x91, 0x42, 0x2a, 0xd9, 0x1a, 0x29, 0x64, 0x9c, 0x72,
+        0x0e, 0x83,
     ];
 
     const NON_STD_SCHEMA_STANDARD_DIGEST: [u8; 32] = [
-        0x2f, 0x79, 0x81, 0x75, 0x91, 0xcc, 0xdc, 0x83, 0x54, 0xea, 0xfc, 0x6c, 0x7a, 0x59, 0xb2, 0x4f,
-        0x12, 0x36, 0x60, 0xae, 0x7f, 0x65, 0xc2, 0x76, 0x8c, 0x5b, 0x0d, 0x9a, 0xcf, 0x94, 0x35, 0x49,
+        0x2f, 0x79, 0x81, 0x75, 0x91, 0xcc, 0xdc, 0x83, 0x54, 0xea, 0xfc, 0x6c, 0x7a, 0x59, 0xb2,
+        0x4f, 0x12, 0x36, 0x60, 0xae, 0x7f, 0x65, 0xc2, 0x76, 0x8c, 0x5b, 0x0d, 0x9a, 0xcf, 0x94,
+        0x35, 0x49,
     ];
 
     const CANONICAL_STANDARD_SOURCE: &str = include_str!("../../../stdlib/std/types.orna");
@@ -4734,17 +4734,17 @@ mod tests {
     #[test]
     fn returns_parser_diagnostics_before_reconciliation() {
         const SOURCE: &str = "CREATE SCHEMA std.;CREATE SCHEMA ;CREATE SCHEMA std;";
-        let parsed = parse_bundle(
-            &SourceBundle::new([SourceUnit::new("std/types.orna", SOURCE)]).unwrap(),
-        );
+        let parsed =
+            parse_bundle(&SourceBundle::new([SourceUnit::new("std/types.orna", SOURCE)]).unwrap());
         assert_eq!(parsed.units()[0].parsed().schemas().len(), 1);
         assert_eq!(parsed.diagnostics().len(), 2);
 
         let snapshot = verified_empty_catalogue_fixture(
             &[("std/types.orna", SOURCE)],
             [
-                0xe8, 0x6d, 0xd0, 0x09, 0x63, 0x3e, 0xa6, 0x94, 0xf3, 0x7d, 0xe5, 0xd6, 0xcc, 0x97, 0x34, 0xc8,
-                0x4f, 0x9a, 0x72, 0xb8, 0x0b, 0x4e, 0xbb, 0x3f, 0x96, 0x03, 0x5d, 0xf8, 0x40, 0x7a, 0x22, 0x60,
+                0xe8, 0x6d, 0xd0, 0x09, 0x63, 0x3e, 0xa6, 0x94, 0xf3, 0x7d, 0xe5, 0xd6, 0xcc, 0x97,
+                0x34, 0xc8, 0x4f, 0x9a, 0x72, 0xb8, 0x0b, 0x4e, 0xbb, 0x3f, 0x96, 0x03, 0x5d, 0xf8,
+                0x40, 0x7a, 0x22, 0x60,
             ],
         );
 
@@ -5223,7 +5223,12 @@ mod tests {
         .unwrap();
         let origins = vec![DefinitionOrigin::new(
             DefinitionIdentity::Schema(schema_id),
-            SourceOrigin::new(SourceUnitId::from_bytes(CANONICAL_RESERVED_ID), 0, SOURCE.len() as u32).unwrap(),
+            SourceOrigin::new(
+                SourceUnitId::from_bytes(CANONICAL_RESERVED_ID),
+                0,
+                SOURCE.len() as u32,
+            )
+            .unwrap(),
         )];
         let snapshot = StandardLibrarySnapshot::new(
             StandardLibraryRevisionId::from_bytes([95; 16]),
@@ -5411,7 +5416,12 @@ mod tests {
     }
 
     fn source_origin(byte_start: u32, byte_end: u32) -> SourceOrigin {
-        SourceOrigin::new(SourceUnitId::from_bytes(CANONICAL_RESERVED_ID), byte_start, byte_end).unwrap()
+        SourceOrigin::new(
+            SourceUnitId::from_bytes(CANONICAL_RESERVED_ID),
+            byte_start,
+            byte_end,
+        )
+        .unwrap()
     }
 
     fn verified_empty_catalogue_fixture(
