@@ -656,7 +656,7 @@ fn validate_constructed_payload(
         return Err(InspectRowError::TruncatedConstructedDescriptor);
     }
     let mut cursor = 0;
-    let descriptor = parse_descriptor(&payload[2..descriptor_end], &mut cursor, depth + 1)?;
+    let descriptor = parse_descriptor(&payload[2..descriptor_end], &mut cursor, depth)?;
     if cursor != descriptor_length {
         return Err(InspectRowError::TrailingConstructedDescriptor);
     }
@@ -1020,6 +1020,29 @@ mod tests {
             payload.extend_from_slice(&nested);
         }
         row(0x0b, [0; 16], &payload)
+    }
+
+    fn option_descriptor_row(depth: usize) -> Vec<u8> {
+        let mut descriptor = vec![0x04; depth];
+        descriptor.push(0x00);
+        descriptor.extend_from_slice(&[0; 16]);
+        let mut payload = Vec::with_capacity(2 + descriptor.len() + 1);
+        payload.extend_from_slice(&(descriptor.len() as u16).to_be_bytes());
+        payload.extend_from_slice(&descriptor);
+        payload.push(0);
+        row(0x0d, [0; 16], &payload)
+    }
+
+    #[test]
+    fn constructed_descriptor_depth_matches_orv5_boundary() {
+        assert_eq!(
+            validate_orv5_row_frame(&option_descriptor_row(MAX_CONSTRUCTED_DEPTH)),
+            Ok(())
+        );
+        assert_eq!(
+            validate_orv5_row_frame(&option_descriptor_row(MAX_CONSTRUCTED_DEPTH + 1)),
+            Err(InspectRowError::ConstructedDepthExceeded)
+        );
     }
 
     #[test]
