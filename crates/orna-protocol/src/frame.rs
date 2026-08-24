@@ -1984,6 +1984,22 @@ impl ResourceProtocolConnection {
         if !(state.accepted && matches!(state.phase, ResourcePhase::Live)) {
             return Err(ResourceConnectionError::WrongState { stream_id: frame.stream_id });
         }
+        if frame.values.len() > MAX_RESOURCE_BATCH_ITEMS {
+            return Err(ResourceConnectionError::InvalidFrame {
+                source: FrameCodecError::TooManyResourceEntries {
+                    actual: frame.values.len(),
+                    maximum: MAX_RESOURCE_BATCH_ITEMS,
+                },
+            });
+        }
+        if u64::from(frame.byte_count) > MAX_FRAME_PAYLOAD_LENGTH as u64 {
+            return Err(ResourceConnectionError::InvalidFrame {
+                source: FrameCodecError::PayloadTooLarge {
+                    actual: frame.byte_count as usize,
+                    maximum: MAX_FRAME_PAYLOAD_LENGTH,
+                },
+            });
+        }
         if frame.values.iter().any(|value| invocation_carrier_type_id(value).is_some()) {
             let carrier = frame.values.iter().find_map(invocation_carrier_type_id).expect("carrier checked");
             return Err(ResourceConnectionError::InvalidFrame { source: FrameCodecError::InvocationCarrierNotAccepted { carrier } });
@@ -7534,6 +7550,64 @@ mod tests {
             Ok(None)
         );
         assert_eq!(connection.live_resources(), 1);
+    }
+
+    #[test]
+    fn resource_connection_apply_rejects_unbounded_direct_batch_metadata() {
+        let request_id = InvocationId::from_bytes([0x45; 16]);
+        let mut request = resource_request_fixture();
+        request.request_id = request_id;
+        request.resource_kind = ResourceKind::Stream;
+        request.item_window = MAX_RESOURCE_WINDOW;
+        request.byte_window = MAX_RESOURCE_WINDOW;
+        let mut connection = ResourceProtocolConnection::new();
+        connection.open(request.clone()).unwrap();
+        connection
+            .apply(ResourceServerFrame::Accepted(ResourceAccepted {
+                stream_id: request.stream_id,
+                request_id,
+                nested_invocation_id: InvocationId::from_bytes([0x46; 16]),
+                target_revision: request.target_revision,
+                resource_kind: ResourceKind::Stream,
+            }))
+            .unwrap();
+
+        let before = connection.clone();
+        assert_eq!(
+            connection.apply(ResourceServerFrame::Values(ResourceValues {
+                stream_id: request.stream_id,
+                request_id,
+                batch_sequence: 0,
+                item_count: (MAX_RESOURCE_BATCH_ITEMS + 1) as u32,
+                byte_count: 1,
+                values: vec![RuntimeValue::Integer(7); MAX_RESOURCE_BATCH_ITEMS + 1],
+            })),
+            Err(ResourceConnectionError::InvalidFrame {
+                source: FrameCodecError::TooManyResourceEntries {
+                    actual: MAX_RESOURCE_BATCH_ITEMS + 1,
+                    maximum: MAX_RESOURCE_BATCH_ITEMS,
+                },
+            })
+        );
+        assert_eq!(connection, before);
+
+        assert_eq!(
+            connection.apply(ResourceServerFrame::Values(ResourceValues {
+                stream_id: request.stream_id,
+                request_id,
+                batch_sequence: 0,
+                item_count: 1,
+                byte_count: (MAX_FRAME_PAYLOAD_LENGTH + 1) as u32,
+                values: vec![RuntimeValue::Integer(7)],
+            })),
+            Err(ResourceConnectionError::InvalidFrame {
+                source: FrameCodecError::PayloadTooLarge {
+                    actual: MAX_FRAME_PAYLOAD_LENGTH + 1,
+                    maximum: MAX_FRAME_PAYLOAD_LENGTH,
+                },
+            })
+        );
+        assert_eq!(connection, before);
     }
 
     #[test]
