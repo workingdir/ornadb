@@ -25,3 +25,4 @@ string escapes and quoted identifiers
 create enum type
 create object type with field modifiers
 canonical scalar type spellings and alias boundaries
+unicode unquoted identifiers
