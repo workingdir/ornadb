@@ -37,3 +37,8 @@ RETURNS ROWS (value INTEGER)
 AS SELECT t.value FROM order_fixture.row t ORDER BY t.value ASC, t.value DESC;
 --                                                       ^^^ keyword
 --                                                                  ^^^^ keyword
+
+CREATE SERVER FUNCTION update_fixture.rows()
+RETURNS ROWS (value INTEGER)
+AS UPDATE update_fixture.row SET value = 1 RETURNING value;
+--                             ^^^ keyword
