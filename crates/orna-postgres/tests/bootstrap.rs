@@ -403,7 +403,6 @@ fn without_later_relations(snapshot: &CatalogueSurfaceSnapshot) -> CatalogueSurf
     }
 }
 
-
 #[derive(Debug, Eq, PartialEq)]
 struct TargetForeignKeySnapshot(Vec<(String, String, String, bool, bool)>);
 
@@ -629,7 +628,9 @@ fn source_apply_principal_binding_is_the_registered_version_thirty_eight() -> Te
     )?;
     require(
         sql.contains("event_kind <> 'source_apply'")
-            && sql.contains("session_principal_id = decode('00000000000000000000000000000001', 'hex')"),
+            && sql.contains(
+                "session_principal_id = decode('00000000000000000000000000000001', 'hex')",
+            ),
         "source apply principal binding migration does not bind the fixed service principal",
     )
 }
@@ -3276,63 +3277,15 @@ async fn inspect_resource_audit_schema(client: &Client) -> TestResult<()> {
                 None,
             ),
             ("request_id", "bytea", "bytea", "NO", Some("")),
-            (
-                "nested_invocation_id",
-                "bytea",
-                "bytea",
-                "NO",
-                Some(""),
-            ),
-            (
-                "parent_invocation_id",
-                "bytea",
-                "bytea",
-                "NO",
-                Some(""),
-            ),
+            ("nested_invocation_id", "bytea", "bytea", "NO", Some("")),
+            ("parent_invocation_id", "bytea", "bytea", "NO", Some("")),
             ("call_site_id", "bytea", "bytea", "NO", Some("")),
-            (
-                "target_function_id",
-                "bytea",
-                "bytea",
-                "YES",
-                Some(""),
-            ),
-            (
-                "source_revision_id",
-                "bytea",
-                "bytea",
-                "YES",
-                Some(""),
-            ),
-            (
-                "catalogue_revision_id",
-                "bytea",
-                "bytea",
-                "YES",
-                Some(""),
-            ),
-            (
-                "session_principal_id",
-                "bytea",
-                "bytea",
-                "NO",
-                Some(""),
-            ),
-            (
-                "decision_outcome",
-                "text",
-                "text",
-                "NO",
-                Some(""),
-            ),
-            (
-                "terminal_outcome",
-                "text",
-                "text",
-                "NO",
-                Some(""),
-            ),
+            ("target_function_id", "bytea", "bytea", "YES", Some("")),
+            ("source_revision_id", "bytea", "bytea", "YES", Some("")),
+            ("catalogue_revision_id", "bytea", "bytea", "YES", Some("")),
+            ("session_principal_id", "bytea", "bytea", "NO", Some("")),
+            ("decision_outcome", "text", "text", "NO", Some("")),
+            ("terminal_outcome", "text", "text", "NO", Some("")),
             ("item_count", "bigint", "int8", "YES", Some("")),
             ("byte_count", "bigint", "int8", "YES", Some("")),
         ],
@@ -3340,14 +3293,8 @@ async fn inspect_resource_audit_schema(client: &Client) -> TestResult<()> {
     .await?;
 
     for (constraint, expected) in [
-        (
-            "resource_audit_events_pkey",
-            "PRIMARY KEY (sequence)",
-        ),
-        (
-            "resource_audit_events_event_id_key",
-            "UNIQUE (event_id)",
-        ),
+        ("resource_audit_events_pkey", "PRIMARY KEY (sequence)"),
+        ("resource_audit_events_event_id_key", "UNIQUE (event_id)"),
         (
             "resource_audit_events_request_id_key",
             "UNIQUE (request_id)",
@@ -3408,14 +3355,8 @@ async fn inspect_resource_audit_schema(client: &Client) -> TestResult<()> {
             "resource_audit_events_terminal_outcome_check",
             "terminal_outcome = ANY",
         ),
-        (
-            "resource_audit_events_counts_check",
-            "item_count >= 0",
-        ),
-        (
-            "resource_audit_events_counts_check",
-            "byte_count >= 0",
-        ),
+        ("resource_audit_events_counts_check", "item_count >= 0"),
+        ("resource_audit_events_counts_check", "byte_count >= 0"),
         (
             "resource_audit_events_target_fk",
             "FOREIGN KEY (catalogue_revision_id, target_function_id) REFERENCES _orna_kernel.invocation_target_authorities(catalogue_revision_id, function_id)",
@@ -3443,8 +3384,7 @@ async fn inspect_resource_audit_schema(client: &Client) -> TestResult<()> {
         )
         .await?;
     require(
-        value::<String>(&identity, 0)? == "YES"
-            && value::<String>(&identity, 1)? == "ALWAYS",
+        value::<String>(&identity, 0)? == "YES" && value::<String>(&identity, 1)? == "ALWAYS",
         "resource audit sequence is not an always-generated identity",
     )?;
     require_count(
@@ -3894,23 +3834,21 @@ async fn inspect_resolved_value_storage(
             false,
         ),
     ] {
-        if let Some((value_type_column, standard_revision_column, require_shape)) =
-            match constraint {
-                "catalogue_function_parameters_check"
-                | "catalogue_function_parameters_value_pin_check" => Some((
-                    "value_type_id",
-                    "value_standard_library_revision_id",
-                    constraint == "catalogue_function_parameters_check",
-                )),
-                "catalogue_functions_check1"
-                | "catalogue_functions_return_value_pin_check" => Some((
-                    "return_value_type_id",
-                    "return_standard_library_revision_id",
-                    constraint == "catalogue_functions_check1",
-                )),
-                _ => None,
-            }
+        if let Some((value_type_column, standard_revision_column, require_shape)) = match constraint
         {
+            "catalogue_function_parameters_check"
+            | "catalogue_function_parameters_value_pin_check" => Some((
+                "value_type_id",
+                "value_standard_library_revision_id",
+                constraint == "catalogue_function_parameters_check",
+            )),
+            "catalogue_functions_check1" | "catalogue_functions_return_value_pin_check" => Some((
+                "return_value_type_id",
+                "return_standard_library_revision_id",
+                constraint == "catalogue_functions_check1",
+            )),
+            _ => None,
+        } {
             inspect_sealed_value_type_constraint(
                 client,
                 table,
@@ -3981,7 +3919,6 @@ async fn inspect_sealed_value_type_constraint(
             "{table} constraint {constraint} has an incomplete sealed value-type contract: {definition:?}"
         ),
     )
-
 }
 
 fn exact_resolved_type_constraint_definition(constraint: &str) -> Option<&'static str> {
@@ -3991,8 +3928,7 @@ fn exact_resolved_type_constraint_definition(constraint: &str) -> Option<&'stati
         | "catalogue_function_return_columns_type_kind_check" => {
             "CHECK ((type_kind = ANY (ARRAY['scalar'::text, 'named'::text, 'reference'::text, 'value'::text, 'enum'::text, 'record'::text])))"
         }
-        "catalogue_fields_check"
-        | "catalogue_function_return_columns_check" => {
+        "catalogue_fields_check" | "catalogue_function_return_columns_check" => {
             "CHECK ((((type_kind = 'scalar'::text) AND (scalar_type IS NOT NULL) AND (target_type_id IS NULL) AND (value_type_id IS NULL) AND (value_standard_library_revision_id IS NULL) AND (enum_type_id IS NULL) AND (record_type_id IS NULL)) OR ((type_kind = ANY (ARRAY['named'::text, 'reference'::text])) AND (scalar_type IS NULL) AND (target_type_id IS NOT NULL) AND (value_type_id IS NULL) AND (value_standard_library_revision_id IS NULL) AND (enum_type_id IS NULL) AND (record_type_id IS NULL)) OR ((type_kind = 'value'::text) AND (scalar_type IS NULL) AND (target_type_id IS NULL) AND (value_type_id IS NOT NULL) AND (value_standard_library_revision_id IS NOT NULL) AND (enum_type_id IS NULL) AND (record_type_id IS NULL)) OR ((type_kind = 'enum'::text) AND (scalar_type IS NULL) AND (target_type_id IS NULL) AND (value_type_id IS NULL) AND (value_standard_library_revision_id IS NULL) AND (enum_type_id IS NOT NULL) AND (record_type_id IS NULL)) OR ((type_kind = 'record'::text) AND (scalar_type IS NULL) AND (target_type_id IS NULL) AND (value_type_id IS NULL) AND (value_standard_library_revision_id IS NULL) AND (enum_type_id IS NULL) AND (record_type_id IS NOT NULL))))"
         }
         "catalogue_functions_return_type_kind_check" => {
@@ -5763,8 +5699,10 @@ async fn inspect_definition_references(client: &Client) -> TestResult<()> {
             && target_std_lib_rev_shape.contains("target_standard_library_revision_id IS NULL")
             && target_std_lib_rev_shape.contains("target_definition_id <> ALL")
             && target_std_lib_rev_shape.contains("target_definition_id = ANY")
-            && target_std_lib_rev_shape.contains("decode('000000000000000000000000000000f3'::text, 'hex'::text)")
-            && target_std_lib_rev_shape.contains("decode('000000000000000000000000000000ff'::text, 'hex'::text)"),
+            && target_std_lib_rev_shape
+                .contains("decode('000000000000000000000000000000f3'::text, 'hex'::text)")
+            && target_std_lib_rev_shape
+                .contains("decode('000000000000000000000000000000ff'::text, 'hex'::text)"),
         format!(
             "definition_references sealed value-type shape is not closed: {target_std_lib_rev_shape:?}"
         ),

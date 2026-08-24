@@ -28,9 +28,8 @@ use orna_postgres::{PostgresKernel, PostgresKernelError};
 use orna_standard::StandardLibraryError;
 
 use crate::{
-    EmbeddedHostError,
-    inspect_ready_embedded_host,
-    source_apply::{select_accepted_standard, StandardSelectionError},
+    EmbeddedHostError, inspect_ready_embedded_host,
+    source_apply::{StandardSelectionError, select_accepted_standard},
 };
 
 /// The closed result of one installed read-only source diff.
@@ -496,7 +495,11 @@ fn render_change(
             let _ = write!(line, "! value type {name} persistence [{}]", id.canonical());
         }
         SemanticChange::ValueTypeRepresentationChanged { id, name } => {
-            let _ = write!(line, "! value type {name} representation [{}]", id.canonical());
+            let _ = write!(
+                line,
+                "! value type {name} representation [{}]",
+                id.canonical()
+            );
         }
         SemanticChange::RecordValueTypeAdded { id, name } => {
             let _ = write!(line, "+ record value type {name} [{}]", id.canonical());
@@ -505,7 +508,11 @@ fn render_change(
             let _ = write!(line, "- record value type {name} [{}]", id.canonical());
         }
         SemanticChange::RecordValueTypeRenamed { id, from, to } => {
-            let _ = write!(line, "~ record value type {from} -> {to} [{}]", id.canonical());
+            let _ = write!(
+                line,
+                "~ record value type {from} -> {to} [{}]",
+                id.canonical()
+            );
         }
         SemanticChange::FieldAdded { owner, name, id } => {
             let owner = field_owner_name(candidate, *owner);
@@ -516,10 +523,17 @@ fn render_change(
             let _ = write!(line, "- field {owner}.{name} [{}]", id.canonical());
         }
         SemanticChange::FieldRenamed {
-            owner, id, from, to,
+            owner,
+            id,
+            from,
+            to,
         } => {
             let owner = field_owner_name(candidate, *owner);
-            let _ = write!(line, "~ field {owner}.{from} -> {owner}.{to} [{}]", id.canonical());
+            let _ = write!(
+                line,
+                "~ field {owner}.{from} -> {owner}.{to} [{}]",
+                id.canonical()
+            );
         }
         SemanticChange::EnumTypeAdded { id, name } => {
             let _ = write!(line, "+ enum type {name} [{}]", id.canonical());
@@ -554,16 +568,27 @@ fn render_change(
             let _ = write!(line, "- parameter {owner}.{name} [{}]", id.canonical());
         }
         SemanticChange::ParameterRenamed {
-            owner, id, from, to,
+            owner,
+            id,
+            from,
+            to,
         } => {
             let owner = candidate
                 .function_by_id(*owner)
                 .map(|definition| qualified(definition.name()))
                 .unwrap_or_else(|| owner.canonical());
-            let _ = write!(line, "~ parameter {owner}.{from} -> {owner}.{to} [{}]", id.canonical());
+            let _ = write!(
+                line,
+                "~ parameter {owner}.{from} -> {owner}.{to} [{}]",
+                id.canonical()
+            );
         }
         SemanticChange::ParameterOrdinalChanged {
-            owner, id, name, from, to,
+            owner,
+            id,
+            name,
+            from,
+            to,
         } => {
             let owner = candidate
                 .function_by_id(*owner)
@@ -585,15 +610,27 @@ fn render_change(
         }
         SemanticChange::FieldNullabilityChanged { owner, name, id } => {
             let owner = field_owner_name(candidate, *owner);
-            let _ = write!(line, "! field {owner}.{name} nullability [{}]", id.canonical());
+            let _ = write!(
+                line,
+                "! field {owner}.{name} nullability [{}]",
+                id.canonical()
+            );
         }
         SemanticChange::FieldUniquenessChanged { owner, name, id } => {
             let owner = field_owner_name(candidate, *owner);
-            let _ = write!(line, "! field {owner}.{name} uniqueness [{}]", id.canonical());
+            let _ = write!(
+                line,
+                "! field {owner}.{name} uniqueness [{}]",
+                id.canonical()
+            );
         }
         SemanticChange::FieldConstraintChanged { owner, name, id } => {
             let owner = field_owner_name(candidate, *owner);
-            let _ = write!(line, "! field {owner}.{name} default/on-delete [{}]", id.canonical());
+            let _ = write!(
+                line,
+                "! field {owner}.{name} default/on-delete [{}]",
+                id.canonical()
+            );
         }
         SemanticChange::EnumLabelsChanged { id, name } => {
             let _ = write!(line, "! enum type {name} labels [{}]", id.canonical());
@@ -625,7 +662,11 @@ fn render_change(
                 .function_by_id(*owner)
                 .map(|definition| qualified(definition.name()))
                 .unwrap_or_else(|| owner.canonical());
-            let _ = write!(line, "! parameter {owner}.{name} default [{}]", id.canonical());
+            let _ = write!(
+                line,
+                "! parameter {owner}.{name} default [{}]",
+                id.canonical()
+            );
         }
         change @ _ => {
             let _ = write!(line, "! unsupported change ({})", change.category());
@@ -783,13 +824,12 @@ fn map_recovery_error(source: PostgresKernelError) -> InstalledSourceDiffError {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::{
-        FunctionRevisionChange, changed_function_revisions, digest_hex, render_change,
-        render_function_revision_change, read_source_bundle, run_installed_source_diff,
-        InstalledSourceDiffError,
+        FunctionRevisionChange, InstalledSourceDiffError, changed_function_revisions, digest_hex,
+        read_source_bundle, render_change, render_function_revision_change,
+        run_installed_source_diff,
     };
     use orna_core::{
         CatalogueRevisionId, FieldId, FunctionId, FunctionRevisionId, SchemaId, SourceUnitId,
@@ -1154,26 +1194,14 @@ mod tests {
                 "! value type app.currency representation [{}]",
                 value_id.canonical()
             ),
-            format!(
-                "+ record value type app.point [{}]",
-                record_id.canonical()
-            ),
-            format!(
-                "- record value type app.point [{}]",
-                record_id.canonical()
-            ),
+            format!("+ record value type app.point [{}]", record_id.canonical()),
+            format!("- record value type app.point [{}]", record_id.canonical()),
             format!(
                 "~ record value type app.point -> app.coordinate [{}]",
                 record_id.canonical()
             ),
-            format!(
-                "+ field app.point.longitude [{}]",
-                field_id.canonical()
-            ),
-            format!(
-                "- field app.point.longitude [{}]",
-                field_id.canonical()
-            ),
+            format!("+ field app.point.longitude [{}]", field_id.canonical()),
+            format!("- field app.point.longitude [{}]", field_id.canonical()),
             format!(
                 "~ field app.point.longitude -> app.point.east [{}]",
                 field_id.canonical()
@@ -1204,10 +1232,7 @@ mod tests {
                 "~ enum type app.stage -> app.phase [{}]",
                 enum_id.canonical()
             ),
-            format!(
-                "! enum type app.phase labels [{}]",
-                enum_id.canonical()
-            ),
+            format!("! enum type app.phase labels [{}]", enum_id.canonical()),
             format!("+ function app.read [{}]", function_id.canonical()),
             format!("- function app.read [{}]", function_id.canonical()),
             format!(
@@ -1218,14 +1243,8 @@ mod tests {
                 "! function app.load return type [{}]",
                 function_id.canonical()
             ),
-            format!(
-                "! function app.load domain [{}]",
-                function_id.canonical()
-            ),
-            format!(
-                "! function app.load security [{}]",
-                function_id.canonical()
-            ),
+            format!("! function app.load domain [{}]", function_id.canonical()),
+            format!("! function app.load security [{}]", function_id.canonical()),
             format!(
                 "! function app.load transaction [{}]",
                 function_id.canonical()

@@ -65,8 +65,7 @@ impl ResourceCancellation {
                 .state
                 .lock()
                 .expect("resource cancellation state is not poisoned"),
-            RESOURCE_CANCELLATION_REQUESTED
-                | RESOURCE_CANCELLATION_ACCEPTANCE_CANCEL_REQUESTED
+            RESOURCE_CANCELLATION_REQUESTED | RESOURCE_CANCELLATION_ACCEPTANCE_CANCEL_REQUESTED
         )
     }
 
@@ -148,6 +147,7 @@ impl ResourceCancellation {
     }
 }
 
+use orna_artifact::client_plan::{CAPABILITY_FORMAT_VERSION, CapabilityClientPlan, ResourceKind};
 use orna_client::{
     ClientExecutionError, ClientExecutionResult, ClientResourceCompletion,
     ClientResourceExecutionError, ClientResourceExecutor, ClientStateContext, ClientStateStore,
@@ -156,7 +156,6 @@ use orna_client::{
     evaluate_client_function_with_grants as evaluate_authorised_client_function,
     evaluate_client_function_with_grants_and_arguments as evaluate_authorised_client_function_with_arguments,
 };
-use orna_artifact::client_plan::{CAPABILITY_FORMAT_VERSION, CapabilityClientPlan, ResourceKind};
 use orna_core::{
     CatalogueRevisionId, FunctionId, FunctionRevisionId, InspectEpochId, InvocationAuditEventId,
     InvocationId, ObjectId, PrincipalId, SecurityAuditEventId, SourceRevisionId,
@@ -169,10 +168,7 @@ use orna_core::{
         InvocationTarget as InvocationRequestTarget, InvokeEvent, InvokeValue,
         ProtectedInvocationDecision, decide_protected_invocation,
     },
-    revision::{
-        ActiveDatabaseRevision, CatalogueHashContext, RevisionPair, StandardExecutable,
-    },
-    state::UserStateCell,
+    revision::{ActiveDatabaseRevision, CatalogueHashContext, RevisionPair, StandardExecutable},
     security::{
         AuthenticatedSession, AuthorisedInvocation, CATALOGUE_HEALTH_FUNCTION_ID,
         CATALOGUE_HEALTH_SERVICE_PRINCIPAL_ID, ExecuteDecision, ExecuteDenial, ExecuteGrant,
@@ -183,6 +179,7 @@ use orna_core::{
         SecurityAuditOutcome, SecurityFunctionTarget, SecuritySnapshot, SessionBindingError,
         TargetClass, UserStateAuditOperation,
     },
+    state::UserStateCell,
     system::{
         SYS_INVOKE_FUNCTION_ID, SYS_SECURITY_ACTIVE_ROLES_FUNCTION_ID,
         SYS_SECURITY_EFFECTIVE_PRINCIPAL_FUNCTION_ID, SYS_SECURITY_PRINCIPAL_TYPE_ID,
@@ -198,7 +195,7 @@ use orna_protocol::{
     decode_retained_invoke_request, encode_active_value,
 };
 use orna_standard::{
-    registered_opaque_codecs, STD_INVOKE_ECHO_FUNCTION_ID, STD_JSON_ENCODE_FUNCTION_ID,
+    STD_INVOKE_ECHO_FUNCTION_ID, STD_JSON_ENCODE_FUNCTION_ID, registered_opaque_codecs,
 };
 use tokio_postgres::{IsolationLevel, Row, Transaction, types::FromSqlOwned};
 
@@ -207,14 +204,15 @@ use super::PostgresSession;
 use crate::{
     PostgresKernel, PostgresKernelError, RawServerTargetError,
     bootstrap::require_current_migrations,
+    physical::establish_trusted_search_path,
     recovery::{load_verified_standard_library, recover_active_revision},
-    state::load_user_state_in_transaction,
     server_execution::{
         SealedPresentationError, ServerSelectError, ServerSelectResult,
         execute_authorised_raw_server_select, execute_authorised_server_select,
         execute_standard_json_encode, execute_standard_parameter_echo,
         present_sealed_standard_output, raw_identity_selected_server_select_target_is_selected,
-        raw_server_target_is_unavailable, raw_unique_text_selected_server_select_target_is_selected,
+        raw_server_target_is_unavailable,
+        raw_unique_text_selected_server_select_target_is_selected,
         run_authenticated_server_resource_stream, run_authenticated_standard_resource_stream,
     },
     server_mutation_execution::{
@@ -226,6 +224,7 @@ use crate::{
         raw_server_update_target_is_unavailable,
     },
     server_runtime::{configure_and_recover, runtime_types_match},
+    state::load_user_state_in_transaction,
 };
 
 /// The owned value result of one authenticated raw call.
@@ -306,7 +305,10 @@ impl ResourceCredit {
             && byte_count != 0
             && item_count <= MAX_RESOURCE_CREDIT
             && byte_count <= MAX_RESOURCE_CREDIT)
-            .then_some(Self { item_count, byte_count })
+            .then_some(Self {
+                item_count,
+                byte_count,
+            })
     }
 }
 
@@ -372,18 +374,23 @@ impl AuthenticatedServerResourceProducer {
     ) -> Result<AuthenticatedServerResourceEvent, PostgresKernelError> {
         let (response, receiver) = tokio::sync::oneshot::channel();
         self.commands
-            .send(ResourceProducerCommand::Pull(ResourceProducerPull { credit, response }))
+            .send(ResourceProducerCommand::Pull(ResourceProducerPull {
+                credit,
+                response,
+            }))
             .await
             .map_err(|_| PostgresKernelError::DurableInvariant {
                 relation: "resource producer",
                 record: self.accepted.request_id.canonical(),
                 rule: "producer task terminated before pull response",
             })?;
-        receiver.await.map_err(|_| PostgresKernelError::DurableInvariant {
-            relation: "resource producer",
-            record: self.accepted.request_id.canonical(),
-            rule: "producer task dropped pull response",
-        })?
+        receiver
+            .await
+            .map_err(|_| PostgresKernelError::DurableInvariant {
+                relation: "resource producer",
+                record: self.accepted.request_id.canonical(),
+                rule: "producer task dropped pull response",
+            })?
     }
 
     /// Requests cancellation and reports whether this call won the race.
@@ -454,7 +461,8 @@ pub(crate) enum ResourceProducerCommand {
 #[derive(Debug)]
 pub(crate) struct ResourceProducerPull {
     pub(crate) credit: ResourceCredit,
-    pub(crate) response: tokio::sync::oneshot::Sender<Result<AuthenticatedServerResourceEvent, PostgresKernelError>>,
+    pub(crate) response:
+        tokio::sync::oneshot::Sender<Result<AuthenticatedServerResourceEvent, PostgresKernelError>>,
 }
 
 /// The task exit used to finalize audit and transaction state.
@@ -465,18 +473,23 @@ pub(crate) enum ResourceProducerExit {
 }
 
 pub(crate) struct ResourceProducerCompleted {
-    pub(crate) response: tokio::sync::oneshot::Sender<Result<AuthenticatedServerResourceEvent, PostgresKernelError>>,
+    pub(crate) response:
+        tokio::sync::oneshot::Sender<Result<AuthenticatedServerResourceEvent, PostgresKernelError>>,
     pub(crate) final_batch_sequence: u64,
     pub(crate) total_items: u64,
     pub(crate) total_bytes: u64,
 }
 
 pub(crate) struct ResourceProducerCancelled {
-    pub(crate) response: Option<tokio::sync::oneshot::Sender<Result<AuthenticatedServerResourceEvent, PostgresKernelError>>>,
+    pub(crate) response: Option<
+        tokio::sync::oneshot::Sender<Result<AuthenticatedServerResourceEvent, PostgresKernelError>>,
+    >,
 }
 
 pub(crate) struct ResourceProducerFailed {
-    pub(crate) response: Option<tokio::sync::oneshot::Sender<Result<AuthenticatedServerResourceEvent, PostgresKernelError>>>,
+    pub(crate) response: Option<
+        tokio::sync::oneshot::Sender<Result<AuthenticatedServerResourceEvent, PostgresKernelError>>,
+    >,
     pub(crate) error: PostgresKernelError,
 }
 
@@ -1174,8 +1187,14 @@ impl SealedInvocationOperation {
             .await;
         match result {
             Ok(result) => Ok(SealedInvocationExecution::Result(result)),
-            Err(PostgresKernelError::ClientExecution(ClientExecutionError::ResourceEvaluation { source: ClientResourceExecutionError::Cancelled, .. })) =>
-                Ok(SealedInvocationExecution::Cancelled { invocation: self.invocation }),
+            Err(PostgresKernelError::ClientExecution(
+                ClientExecutionError::ResourceEvaluation {
+                    source: ClientResourceExecutionError::Cancelled,
+                    ..
+                },
+            )) => Ok(SealedInvocationExecution::Cancelled {
+                invocation: self.invocation,
+            }),
             Err(error) => Err(error),
         }
     }
@@ -1291,14 +1310,23 @@ impl PostgresKernel {
             pause_after_raw_dispatch_recovery(test_barrier.as_ref()).await;
             let target = InvocationTarget::new(function, active.pair());
 
-            let decision = if system_function_by_id(function).is_some() {
-                security.authorise_system_function(authenticated_session, target)
-            } else if active.catalogue().function_by_id(function).is_none() {
-                // A verified-standard target can enter only through the sealed
-                // invocation boundary. Raw dispatch has no standard target path.
-                ExecuteDecision::Denied(ExecuteDenial::UnknownFunction)
-            } else {
-                security.authorise_execute(authenticated_session, target)
+            let decision = match system_function_by_id(function) {
+                // Catalogue health is the one separately admitted raw system
+                // entry. Other registry entries may enter raw dispatch only
+                // when their sealed security identity is admitted.
+                Some(_) if function == CATALOGUE_HEALTH_FUNCTION_ID => {
+                    security.authorise_catalogue_health(authenticated_session, target)
+                }
+                Some(definition) if is_admitted_security_identity(definition) => {
+                    security.authorise_system_function(authenticated_session, target)
+                }
+                Some(_) => ExecuteDecision::Denied(ExecuteDenial::UnknownFunction),
+                None if active.catalogue().function_by_id(function).is_none() => {
+                    // A verified-standard target can enter only through the sealed
+                    // invocation boundary. Raw dispatch has no standard target path.
+                    ExecuteDecision::Denied(ExecuteDenial::UnknownFunction)
+                }
+                None => security.authorise_execute(authenticated_session, target),
             };
             let execution = match decision {
                 ExecuteDecision::Denied(reason) => {
@@ -1930,8 +1958,10 @@ impl PostgresKernel {
             Ok(Some(result))
         }
         .await;
-        let result =
-            finish_authenticated_server_select_session(operation, database_session.shutdown().await);
+        let result = finish_authenticated_server_select_session(
+            operation,
+            database_session.shutdown().await,
+        );
         match result {
             Ok(Some(result)) => Ok(Some(result)),
             Ok(None) => {
@@ -2083,11 +2113,13 @@ impl PostgresKernel {
             .await;
         });
         let mut start_guard = ResourceProducerStartGuard::new(cancellation.clone());
-        match ready_receiver.await.map_err(|_| PostgresKernelError::DurableInvariant {
-            relation: "resource producer",
-            record: request_id.canonical(),
-            rule: "producer task terminated before acceptance",
-        })?? {
+        match ready_receiver
+            .await
+            .map_err(|_| PostgresKernelError::DurableInvariant {
+                relation: "resource producer",
+                record: request_id.canonical(),
+                rule: "producer task terminated before acceptance",
+            })?? {
             ResourceProducerReady::Accepted(accepted) => {
                 start_guard.disarm();
                 Ok(AuthenticatedServerResourceStart::Accepted(
@@ -2098,7 +2130,11 @@ impl PostgresKernel {
                     },
                 ))
             }
-            ResourceProducerReady::Failed { stream_id, request_id, failure } => {
+            ResourceProducerReady::Failed {
+                stream_id,
+                request_id,
+                failure,
+            } => {
                 start_guard.disarm();
                 Ok(AuthenticatedServerResourceStart::Failed {
                     stream_id,
@@ -3155,34 +3191,33 @@ impl PostgresKernel {
             let active = recover_active_revision(&transaction).await?;
             let security = recover_security_snapshot_for_active(&transaction, &active).await?;
             let target = InvocationTarget::new(function, active.pair());
-            let (decision, execution) = match security
-                .authorise_execute(authenticated_session, target)
-            {
-                ExecuteDecision::Allowed(authorisation) => {
-                    let decision = SecurityAuditDecision::execute_allowed(&authorisation);
-                    let execution = evaluate_authorised_client_function(
-                        &active,
-                        &authorisation,
-                        &[],
-                        &self.capability_grants,
-                    )
-                    .map_err(PostgresKernelError::ClientExecution);
-                    (decision, execution)
-                }
-                ExecuteDecision::Denied(reason) => {
-                    let decision = SecurityAuditDecision::execute_denied(
-                        authenticated_session,
-                        target,
-                        reason,
-                    );
-                    let execution = Err(PostgresKernelError::ClientExecuteDenied {
-                        pair: active.pair(),
-                        function,
-                        reason,
-                    });
-                    (decision, execution)
-                }
-            };
+            let (decision, execution) =
+                match security.authorise_execute(authenticated_session, target) {
+                    ExecuteDecision::Allowed(authorisation) => {
+                        let decision = SecurityAuditDecision::execute_allowed(&authorisation);
+                        let execution = evaluate_authorised_client_function(
+                            &active,
+                            &authorisation,
+                            &[],
+                            &self.capability_grants,
+                        )
+                        .map_err(PostgresKernelError::ClientExecution);
+                        (decision, execution)
+                    }
+                    ExecuteDecision::Denied(reason) => {
+                        let decision = SecurityAuditDecision::execute_denied(
+                            authenticated_session,
+                            target,
+                            reason,
+                        );
+                        let execution = Err(PostgresKernelError::ClientExecuteDenied {
+                            pair: active.pair(),
+                            function,
+                            reason,
+                        });
+                        (decision, execution)
+                    }
+                };
             append_security_audit_event(&transaction, decision).await?;
             append_client_capability_audit(
                 &transaction,
@@ -3240,6 +3275,7 @@ impl PostgresKernel {
                 .start()
                 .await
                 .map_err(PostgresKernelError::Database)?;
+            establish_trusted_search_path(&transaction).await?;
             require_current_migrations(&transaction).await?;
             let events = load_security_audit_events(&transaction).await?;
             transaction
@@ -3490,7 +3526,6 @@ impl PostgresKernel {
     }
 }
 
-
 async fn wait_for_resource_producer_pull_or_cancel(
     commands: &mut tokio::sync::mpsc::Receiver<ResourceProducerCommand>,
     cancellation: &ResourceCancellation,
@@ -3500,9 +3535,10 @@ async fn wait_for_resource_producer_pull_or_cancel(
     futures_util::pin_mut!(cancelled, received);
     match futures_util::future::select(cancelled, received).await {
         futures_util::future::Either::Left(((), _received)) => None,
-        futures_util::future::Either::Right((Some(ResourceProducerCommand::Pull(pull)), _cancelled)) => {
-            Some(pull)
-        }
+        futures_util::future::Either::Right((
+            Some(ResourceProducerCommand::Pull(pull)),
+            _cancelled,
+        )) => Some(pull),
         futures_util::future::Either::Right((None, _cancelled)) => None,
     }
 }
@@ -3556,7 +3592,6 @@ async fn commit_accepted_resource_cancelled_audit(
     )
     .await
 }
-
 
 async fn commit_post_acceptance_resource_error_audit(
     kernel: &PostgresKernel,
@@ -3696,20 +3731,21 @@ async fn finalize_reserved_resource_request(
         let acceptance_committed = if lifecycle.acceptance_committed {
             true
         } else if lifecycle.acceptance_commit_attempted {
-            let invocation = lifecycle.invocation.ok_or_else(|| {
-                PostgresKernelError::DurableInvariant {
-                    relation: "resource producer",
-                    record: request.request_id.canonical(),
-                    rule: "attempted acceptance commit must retain its invocation identity",
-                }
-            })?;
-            let target = lifecycle.target.ok_or_else(|| {
-                PostgresKernelError::DurableInvariant {
+            let invocation =
+                lifecycle
+                    .invocation
+                    .ok_or_else(|| PostgresKernelError::DurableInvariant {
+                        relation: "resource producer",
+                        record: request.request_id.canonical(),
+                        rule: "attempted acceptance commit must retain its invocation identity",
+                    })?;
+            let target = lifecycle
+                .target
+                .ok_or_else(|| PostgresKernelError::DurableInvariant {
                     relation: "resource producer",
                     record: request.request_id.canonical(),
                     rule: "attempted acceptance commit must retain its target identity",
-                }
-            })?;
+                })?;
             let invocation_id = invocation.to_bytes().to_vec();
             let row = transaction
                 .query_opt(
@@ -3728,18 +3764,24 @@ async fn finalize_reserved_resource_request(
             match row {
                 None => false,
                 Some(row) => {
-                    let outcome: String =
-                        row.try_get("outcome").map_err(PostgresKernelError::Database)?;
-                    let session_principal_id: Vec<u8> =
-                        row.try_get("session_principal_id").map_err(PostgresKernelError::Database)?;
-                    let function_id: Option<Vec<u8>> =
-                        row.try_get("function_id").map_err(PostgresKernelError::Database)?;
-                    let source_revision_id: Option<Vec<u8>> =
-                        row.try_get("source_revision_id").map_err(PostgresKernelError::Database)?;
-                    let catalogue_revision_id: Option<Vec<u8>> =
-                        row.try_get("catalogue_revision_id").map_err(PostgresKernelError::Database)?;
-                    let security_audit_event_id: Option<Vec<u8>> =
-                        row.try_get("security_audit_event_id").map_err(PostgresKernelError::Database)?;
+                    let outcome: String = row
+                        .try_get("outcome")
+                        .map_err(PostgresKernelError::Database)?;
+                    let session_principal_id: Vec<u8> = row
+                        .try_get("session_principal_id")
+                        .map_err(PostgresKernelError::Database)?;
+                    let function_id: Option<Vec<u8>> = row
+                        .try_get("function_id")
+                        .map_err(PostgresKernelError::Database)?;
+                    let source_revision_id: Option<Vec<u8>> = row
+                        .try_get("source_revision_id")
+                        .map_err(PostgresKernelError::Database)?;
+                    let catalogue_revision_id: Option<Vec<u8>> = row
+                        .try_get("catalogue_revision_id")
+                        .map_err(PostgresKernelError::Database)?;
+                    let security_audit_event_id: Option<Vec<u8>> = row
+                        .try_get("security_audit_event_id")
+                        .map_err(PostgresKernelError::Database)?;
                     let accepted_identity_matches = outcome == "allowed"
                         && session_principal_id
                             == authenticated_session.principal().to_bytes().to_vec()
@@ -3763,33 +3805,32 @@ async fn finalize_reserved_resource_request(
             false
         };
         let invocation = if acceptance_committed {
-            lifecycle.invocation.ok_or_else(|| PostgresKernelError::DurableInvariant {
-                relation: "resource producer",
-                record: request.request_id.canonical(),
-                rule: "accepted resource producer must retain its invocation identity",
-            })?
+            lifecycle
+                .invocation
+                .ok_or_else(|| PostgresKernelError::DurableInvariant {
+                    relation: "resource producer",
+                    record: request.request_id.canonical(),
+                    rule: "accepted resource producer must retain its invocation identity",
+                })?
         } else {
             lifecycle.invocation.unwrap_or_else(InvocationId::new)
         };
         let (decision, target) = if acceptance_committed {
-            let target = lifecycle.target.ok_or_else(|| PostgresKernelError::DurableInvariant {
-                relation: "resource producer",
-                record: request.request_id.canonical(),
-                rule: "accepted resource producer must retain its target identity",
-            })?;
+            let target = lifecycle
+                .target
+                .ok_or_else(|| PostgresKernelError::DurableInvariant {
+                    relation: "resource producer",
+                    record: request.request_id.canonical(),
+                    rule: "accepted resource producer must retain its target identity",
+                })?;
             (SecurityAuditOutcome::Allowed, Some(target))
         } else {
-            append_unresolved_invocation_audit(
-                &transaction,
-                authenticated_session,
-                invocation,
-            )
-            .await?;
+            append_unresolved_invocation_audit(&transaction, authenticated_session, invocation)
+                .await?;
             (SecurityAuditOutcome::Denied, None)
         };
         let finalizer_commit_started = cancellation.try_begin_commit();
-        let terminal_commit_started =
-            finalizer_commit_started || lifecycle.terminal_commit_started;
+        let terminal_commit_started = finalizer_commit_started || lifecycle.terminal_commit_started;
         let cancellation_won =
             lifecycle.cancelled || (!terminal_commit_started && cancellation.is_requested());
         let terminal = if cancellation_won {
@@ -3829,9 +3870,7 @@ async fn run_authenticated_server_resource_producer_task(
     cancellation: ResourceCancellation,
     failure_stage: ResourceProducerFailureStage,
     commands: tokio::sync::mpsc::Receiver<ResourceProducerCommand>,
-    ready_sender: tokio::sync::oneshot::Sender<
-        Result<ResourceProducerReady, PostgresKernelError>,
-    >,
+    ready_sender: tokio::sync::oneshot::Sender<Result<ResourceProducerReady, PostgresKernelError>>,
 ) -> Result<(), PostgresKernelError> {
     let mut lifecycle = ResourceProducerLifecycle::default();
     let mut ready_sender = Some(ready_sender);
@@ -3940,7 +3979,8 @@ async fn run_authenticated_server_resource_producer_task_body(
     let mut failure = None;
 
     if request.target_revision != active.pair() {
-        append_unresolved_invocation_audit(&transaction, &authenticated_session, invocation).await?;
+        append_unresolved_invocation_audit(&transaction, &authenticated_session, invocation)
+            .await?;
         failure = Some(CallFailure::TargetUnavailable);
     } else {
         let entry_target = InvocationTarget::new(SYS_INVOKE_FUNCTION_ID, active.pair());
@@ -4069,14 +4109,18 @@ async fn run_authenticated_server_resource_producer_task_body(
         return operation;
     }
 
-    let authorisation = authorisation.ok_or_else(|| sealed_target_invariant(
-        &active,
-        "accepted resource producer must retain authorisation evidence",
-    ))?;
-    let bound_arguments = bound_arguments.ok_or_else(|| sealed_target_invariant(
-        &active,
-        "accepted resource producer must retain bound arguments",
-    ))?;
+    let authorisation = authorisation.ok_or_else(|| {
+        sealed_target_invariant(
+            &active,
+            "accepted resource producer must retain authorisation evidence",
+        )
+    })?;
+    let bound_arguments = bound_arguments.ok_or_else(|| {
+        sealed_target_invariant(
+            &active,
+            "accepted resource producer must retain bound arguments",
+        )
+    })?;
     // The accepted identity is externally visible, so commit its allowed
     // security/invocation/resource evidence before publishing Accepted. A
     // cancellation that already won before this boundary must not expose an
@@ -4247,7 +4291,10 @@ async fn run_authenticated_server_resource_producer_task_body(
     send_resource_producer_ready(ready_sender, Ok(ResourceProducerReady::Accepted(accepted)));
     if failure_stage == ResourceProducerFailureStage::PostAcceptance {
         transaction
-            .query_one("SELECT no_such_post_acceptance_resource_producer_column", &[])
+            .query_one(
+                "SELECT no_such_post_acceptance_resource_producer_column",
+                &[],
+            )
             .await
             .map_err(PostgresKernelError::Database)?;
     }
@@ -4278,14 +4325,14 @@ async fn run_authenticated_server_resource_producer_task_body(
     };
     let stream_result = match stream_result {
         Ok(result) => result,
-        Err(error) => match wait_for_resource_producer_pull_or_cancel(&mut commands, &cancellation).await {
+        Err(error) => match wait_for_resource_producer_pull_or_cancel(&mut commands, &cancellation)
+            .await
+        {
             Some(pull) => ResourceProducerExit::Failed(ResourceProducerFailed {
                 response: Some(pull.response),
                 error,
             }),
-            None => ResourceProducerExit::Cancelled(ResourceProducerCancelled {
-                response: None,
-            }),
+            None => ResourceProducerExit::Cancelled(ResourceProducerCancelled { response: None }),
         },
     };
     let mut terminal_error = None;
@@ -4352,7 +4399,10 @@ async fn run_authenticated_server_resource_producer_task_body(
             }
             if failure_stage == ResourceProducerFailureStage::PostAcceptanceCancelledExitAudit {
                 transaction
-                    .query_one("SELECT no_such_post_acceptance_cancelled_exit_audit_column", &[])
+                    .query_one(
+                        "SELECT no_such_post_acceptance_cancelled_exit_audit_column",
+                        &[],
+                    )
                     .await
                     .map_err(PostgresKernelError::Database)?;
             }
@@ -4386,7 +4436,10 @@ async fn run_authenticated_server_resource_producer_task_body(
             } else {
                 match &error {
                     PostgresKernelError::ServerSelect(source)
-                        if raw_server_target_is_unavailable(source) => CallFailure::TargetUnavailable,
+                        if raw_server_target_is_unavailable(source) =>
+                    {
+                        CallFailure::TargetUnavailable
+                    }
                     _ => CallFailure::InternalFailure,
                 }
             };
@@ -4425,7 +4478,8 @@ async fn run_authenticated_server_resource_producer_task_body(
             if let Some(response) = response {
                 match operation {
                     Ok(()) if commit_started => {
-                        let _ = response.send(Ok(AuthenticatedServerResourceEvent::Failed { failure }));
+                        let _ =
+                            response.send(Ok(AuthenticatedServerResourceEvent::Failed { failure }));
                     }
                     Ok(()) => {
                         let _ = response.send(Ok(AuthenticatedServerResourceEvent::Cancelled));
@@ -4548,7 +4602,6 @@ fn classify_sealed_server_error(error: &PostgresKernelError) -> SealedInvocation
     }
 }
 
-
 async fn execute_sealed_server_target(
     transaction: &mut Transaction<'_>,
     active: &ActiveDatabaseRevision,
@@ -4614,33 +4667,33 @@ async fn execute_sealed_server_target(
                 }
             }
         }
-        None => match execute_authorised_server_select(
-            &savepoint,
-            active,
-            authorisation,
-            arguments,
-        )
-        .await
-        {
-            Ok(server) => resource_values_from_server_result(kind, server),
-            Err(error) => {
-                let class = classify_sealed_server_error(&error);
-                if savepoint.rollback().await.is_err() {
-                    return Err(SealedInvocationFailureClass::Internal);
+        None => {
+            match execute_authorised_server_select(&savepoint, active, authorisation, arguments)
+                .await
+            {
+                Ok(server) => resource_values_from_server_result(kind, server),
+                Err(error) => {
+                    let class = classify_sealed_server_error(&error);
+                    if savepoint.rollback().await.is_err() {
+                        return Err(SealedInvocationFailureClass::Internal);
+                    }
+                    return Err(class);
                 }
-                return Err(class);
             }
-        },
+        }
     };
-    let Some(values) = values.filter(|values| {
-        values.len() == 1 || kind == ProtocolResourceKind::Stream
-    }) else {
+    let Some(values) =
+        values.filter(|values| values.len() == 1 || kind == ProtocolResourceKind::Stream)
+    else {
         if savepoint.rollback().await.is_err() {
             return Err(SealedInvocationFailureClass::Internal);
         }
         return Err(SealedInvocationFailureClass::Target);
     };
-    if values.iter().any(|value| !resource_result_value_is_supported(value)) {
+    if values
+        .iter()
+        .any(|value| !resource_result_value_is_supported(value))
+    {
         if savepoint.rollback().await.is_err() {
             return Err(SealedInvocationFailureClass::Internal);
         }
@@ -4909,12 +4962,10 @@ async fn append_client_capability_audit<T>(
     execution: &Result<T, PostgresKernelError>,
 ) -> Result<(), PostgresKernelError> {
     match execution {
-        Err(PostgresKernelError::ClientExecution(
-            ClientExecutionError::CapabilityDenied {
-                context,
-                capability,
-            },
-        )) => {
+        Err(PostgresKernelError::ClientExecution(ClientExecutionError::CapabilityDenied {
+            context,
+            capability,
+        })) => {
             let decision = SecurityAuditDecision::capability_denied(
                 authenticated_session,
                 InvocationTarget::new(context.function(), active.pair()),
@@ -5524,16 +5575,24 @@ pub(crate) async fn append_resource_audit_event(
 ) -> Result<(), PostgresKernelError> {
     validate_resource_state_context(request)?;
     let item_count = item_count
-        .map(|count| i64::try_from(count).map_err(|_| resource_audit_invariant(
-            &request.request_id.canonical(),
-            "resource item count must fit a signed 64-bit database count",
-        )))
+        .map(|count| {
+            i64::try_from(count).map_err(|_| {
+                resource_audit_invariant(
+                    &request.request_id.canonical(),
+                    "resource item count must fit a signed 64-bit database count",
+                )
+            })
+        })
         .transpose()?;
     let byte_count = byte_count
-        .map(|count| i64::try_from(count).map_err(|_| resource_audit_invariant(
-            &request.request_id.canonical(),
-            "resource byte count must fit a signed 64-bit database count",
-        )))
+        .map(|count| {
+            i64::try_from(count).map_err(|_| {
+                resource_audit_invariant(
+                    &request.request_id.canonical(),
+                    "resource byte count must fit a signed 64-bit database count",
+                )
+            })
+        })
         .transpose()?;
     let event_id = InvocationAuditEventId::new();
     let event_id_bytes = event_id.to_bytes().to_vec();
@@ -5543,11 +5602,13 @@ pub(crate) async fn append_resource_audit_event(
     let call_site_id = request.call_site_id.to_bytes().to_vec();
     let session_principal = authenticated_session.principal().to_bytes().to_vec();
     let (target_function, source_revision, catalogue_revision) = target
-        .map(|target| (
-            Some(target.function().to_bytes().to_vec()),
-            Some(target.revision().source().to_bytes().to_vec()),
-            Some(target.revision().catalogue().to_bytes().to_vec()),
-        ))
+        .map(|target| {
+            (
+                Some(target.function().to_bytes().to_vec()),
+                Some(target.revision().source().to_bytes().to_vec()),
+                Some(target.revision().catalogue().to_bytes().to_vec()),
+            )
+        })
         .unwrap_or((None, None, None));
     let decision = encode_resource_audit_decision(decision);
     let terminal = encode_resource_audit_terminal(terminal);
@@ -5595,9 +5656,7 @@ fn encode_resource_audit_terminal(terminal: ResourceAuditTerminalOutcome) -> &'s
     }
 }
 
-fn validate_resource_state_context(
-    request: &ResourceRequest,
-) -> Result<(), PostgresKernelError> {
+fn validate_resource_state_context(request: &ResourceRequest) -> Result<(), PostgresKernelError> {
     ClientStateContext::new(
         request.target_function_id,
         request.state_profile.clone(),
@@ -5934,9 +5993,7 @@ fn sealed_completed_events_from_values(
     if !values.is_empty() {
         let values = values
             .into_iter()
-            .map(|value| {
-                InvokeValue::new(value).map_err(PostgresKernelError::InvocationCarrier)
-            })
+            .map(|value| InvokeValue::new(value).map_err(PostgresKernelError::InvocationCarrier))
             .collect::<Result<Vec<_>, _>>()?;
         let batch = InvokeEvent::new(
             invocation,
@@ -6830,13 +6887,25 @@ pub(crate) async fn load_privilege_grants(
                     })?;
             Some(FunctionId::from_bytes(function))
         };
-        grants.push(PrivilegeGrant::new(grantee, class, object).map_err(|_| {
-            PostgresKernelError::DurableInvariant {
-                relation: RELATION,
-                record: grantee.canonical(),
-                rule: "security privilege grant must carry a non-empty grantee",
-            }
-        })?);
+        grants.push(
+            PrivilegeGrant::new(grantee, class, object).map_err(|error| {
+                PostgresKernelError::DurableInvariant {
+                    relation: RELATION,
+                    record: grantee.canonical(),
+                    rule: match error {
+                        orna_core::security::PrivilegeGrantError::EmptyGrantee => {
+                            "security privilege grant must carry a non-empty grantee"
+                        }
+                        orna_core::security::PrivilegeGrantError::EmptyObject => {
+                            "security privilege grant object identity must be non-empty"
+                        }
+                        orna_core::security::PrivilegeGrantError::SecurityAdminObject => {
+                            "security_admin privilege grant must be class-wide"
+                        }
+                    },
+                }
+            })?,
+        );
     }
     Ok(grants)
 }
@@ -7005,11 +7074,8 @@ async fn recover_resource_audit_events(
         let _: SystemTime = resource_audit_column(row, &record, "recorded_at")?;
         let _: [u8; 16] = resource_audit_id(row, &record, "event_id")?;
         let request_id = InvocationId::from_bytes(resource_audit_id(row, &record, "request_id")?);
-        let nested = InvocationId::from_bytes(resource_audit_id(
-            row,
-            &record,
-            "nested_invocation_id",
-        )?);
+        let nested =
+            InvocationId::from_bytes(resource_audit_id(row, &record, "nested_invocation_id")?);
         let _: [u8; 16] = resource_audit_id(row, &record, "parent_invocation_id")?;
         let _: [u8; 16] = resource_audit_id(row, &record, "call_site_id")?;
         let target_function = resource_audit_optional_id(row, &record, "target_function_id")?
@@ -7018,21 +7084,24 @@ async fn recover_resource_audit_events(
             .map(SourceRevisionId::from_bytes);
         let catalogue = resource_audit_optional_id(row, &record, "catalogue_revision_id")?
             .map(CatalogueRevisionId::from_bytes);
-        if (target_function.is_some(), source.is_some(), catalogue.is_some())
-            != (true, true, true)
-            && (target_function.is_some(), source.is_some(), catalogue.is_some())
-                != (false, false, false)
+        if (
+            target_function.is_some(),
+            source.is_some(),
+            catalogue.is_some(),
+        ) != (true, true, true)
+            && (
+                target_function.is_some(),
+                source.is_some(),
+                catalogue.is_some(),
+            ) != (false, false, false)
         {
             return Err(resource_audit_invariant(
                 &record,
                 "target and pinned revision evidence must be present together",
             ));
         }
-        let session_principal = PrincipalId::from_bytes(resource_audit_id(
-            row,
-            &record,
-            "session_principal_id",
-        )?);
+        let session_principal =
+            PrincipalId::from_bytes(resource_audit_id(row, &record, "session_principal_id")?);
         let decision: String = resource_audit_column(row, &record, "decision_outcome")?;
         let terminal: String = resource_audit_column(row, &record, "terminal_outcome")?;
         if !matches!(decision.as_str(), "allowed" | "denied") {
@@ -7083,11 +7152,7 @@ async fn recover_resource_audit_events(
                     "nested resource invocation audit evidence is missing",
                 )
             })?;
-        let invocation_outcome: String = resource_audit_column(
-            &invocation,
-            &record,
-            "outcome",
-        )?;
+        let invocation_outcome: String = resource_audit_column(&invocation, &record, "outcome")?;
         let expected_invocation_outcome = decision.as_str();
         if invocation_outcome != expected_invocation_outcome {
             return Err(resource_audit_invariant(
@@ -7095,11 +7160,8 @@ async fn recover_resource_audit_events(
                 "nested invocation outcome does not match resource decision",
             ));
         }
-        let invocation_session: Vec<u8> = resource_audit_column(
-            &invocation,
-            &record,
-            "session_principal_id",
-        )?;
+        let invocation_session: Vec<u8> =
+            resource_audit_column(&invocation, &record, "session_principal_id")?;
         if invocation_session != session_principal.to_bytes() {
             return Err(resource_audit_invariant(
                 &record,
@@ -7109,21 +7171,12 @@ async fn recover_resource_audit_events(
         if let (Some(function), Some(source), Some(catalogue)) =
             (target_function, source, catalogue)
         {
-            let invocation_function: Option<Vec<u8>> = resource_audit_column(
-                &invocation,
-                &record,
-                "function_id",
-            )?;
-            let invocation_source: Option<Vec<u8>> = resource_audit_column(
-                &invocation,
-                &record,
-                "source_revision_id",
-            )?;
-            let invocation_catalogue: Option<Vec<u8>> = resource_audit_column(
-                &invocation,
-                &record,
-                "catalogue_revision_id",
-            )?;
+            let invocation_function: Option<Vec<u8>> =
+                resource_audit_column(&invocation, &record, "function_id")?;
+            let invocation_source: Option<Vec<u8>> =
+                resource_audit_column(&invocation, &record, "source_revision_id")?;
+            let invocation_catalogue: Option<Vec<u8>> =
+                resource_audit_column(&invocation, &record, "catalogue_revision_id")?;
             if invocation_function.as_deref() != Some(function.to_bytes().as_slice())
                 || invocation_source.as_deref() != Some(source.to_bytes().as_slice())
                 || invocation_catalogue.as_deref() != Some(catalogue.to_bytes().as_slice())
@@ -7168,11 +7221,21 @@ async fn require_resource_audit_relation_columns(
         .map(|row| resource_audit_column(row, "relation", "attname"))
         .collect::<Result<Vec<String>, _>>()?;
     let expected = [
-        "sequence", "event_id", "recorded_at", "request_id",
-        "nested_invocation_id", "parent_invocation_id", "call_site_id",
-        "target_function_id", "source_revision_id", "catalogue_revision_id",
-        "session_principal_id", "decision_outcome", "terminal_outcome",
-        "item_count", "byte_count",
+        "sequence",
+        "event_id",
+        "recorded_at",
+        "request_id",
+        "nested_invocation_id",
+        "parent_invocation_id",
+        "call_site_id",
+        "target_function_id",
+        "source_revision_id",
+        "catalogue_revision_id",
+        "session_principal_id",
+        "decision_outcome",
+        "terminal_outcome",
+        "item_count",
+        "byte_count",
     ];
     if names != expected {
         return Err(resource_audit_invariant(
@@ -7192,7 +7255,10 @@ fn resource_audit_optional_id(
     bytes
         .map(|bytes| {
             bytes.try_into().map_err(|_| {
-                resource_audit_invariant(record, "resource audit identity must be exactly sixteen bytes")
+                resource_audit_invariant(
+                    record,
+                    "resource audit identity must be exactly sixteen bytes",
+                )
             })
         })
         .transpose()
@@ -7205,7 +7271,10 @@ fn resource_audit_id(
 ) -> Result<[u8; 16], PostgresKernelError> {
     let bytes: Vec<u8> = resource_audit_column(row, record, column)?;
     bytes.try_into().map_err(|_| {
-        resource_audit_invariant(record, "resource audit identity must be exactly sixteen bytes")
+        resource_audit_invariant(
+            record,
+            "resource audit identity must be exactly sixteen bytes",
+        )
     })
 }
 
@@ -7214,13 +7283,14 @@ fn resource_audit_column<T: FromSqlOwned>(
     record: &str,
     column: &'static str,
 ) -> Result<T, PostgresKernelError> {
-    row.try_get(column).map_err(|source| PostgresKernelError::RowDecode {
-        relation: "_orna_kernel.resource_audit_events",
-        record: record.to_owned(),
-        column,
-        rule: "resource audit column must use its exact PostgreSQL type",
-        source,
-    })
+    row.try_get(column)
+        .map_err(|source| PostgresKernelError::RowDecode {
+            relation: "_orna_kernel.resource_audit_events",
+            record: record.to_owned(),
+            column,
+            rule: "resource audit column must use its exact PostgreSQL type",
+            source,
+        })
 }
 
 fn decode_invocation_audit_decision(
@@ -8065,10 +8135,7 @@ fn encode_source_apply_audit_detail() -> &'static str {
     "source_apply:committed"
 }
 
-fn decode_source_apply_audit_detail(
-    value: &str,
-    record: &str,
-) -> Result<(), PostgresKernelError> {
+fn decode_source_apply_audit_detail(value: &str, record: &str) -> Result<(), PostgresKernelError> {
     if value == encode_source_apply_audit_detail() {
         Ok(())
     } else {
@@ -8610,8 +8677,10 @@ mod tests {
     #[test]
     fn resource_target_shape_matches_protocol_kind() {
         use orna_core::{
-            catalogue::{FunctionReturn, FunctionSecurity, FunctionTransaction, FunctionVolatility,
-                FunctionReturnColumnDefinition, QualifiedSemanticName},
+            catalogue::{
+                FunctionReturn, FunctionReturnColumnDefinition, FunctionSecurity,
+                FunctionTransaction, FunctionVolatility, QualifiedSemanticName,
+            },
             types::{ResolvedType, StandardScalar},
         };
 
@@ -8729,7 +8798,10 @@ mod tests {
                 )
                 .expect("second column is valid"),
             ],
-            [ResultRow::new([RuntimeValue::Integer(1), RuntimeValue::Integer(2)])],
+            [ResultRow::new([
+                RuntimeValue::Integer(1),
+                RuntimeValue::Integer(2),
+            ])],
         )
         .expect("two-column result rows are valid");
         let result = ServerSelectResult::new(
@@ -8745,8 +8817,10 @@ mod tests {
     #[test]
     fn resource_arguments_require_canonical_complete_typed_set() {
         use orna_core::{
-            catalogue::{FunctionSecurity, FunctionTransaction, FunctionVolatility,
-                ParameterDefinition, QualifiedSemanticName},
+            catalogue::{
+                FunctionSecurity, FunctionTransaction, FunctionVolatility, ParameterDefinition,
+                QualifiedSemanticName,
+            },
             types::{ResolvedType, StandardScalar},
         };
 
@@ -8779,39 +8853,56 @@ mod tests {
             FunctionVolatility::Stable,
         );
         let canonical = vec![
-            ResourceArgument { parameter: first, value: RuntimeValue::Integer(7) },
-            ResourceArgument { parameter: second, value: RuntimeValue::Boolean(true) },
+            ResourceArgument {
+                parameter: first,
+                value: RuntimeValue::Integer(7),
+            },
+            ResourceArgument {
+                parameter: second,
+                value: RuntimeValue::Boolean(true),
+            },
         ];
-        assert!(bind_authenticated_resource_arguments(
-            &CatalogueHashContext::version_one(),
-            &function,
-            &canonical,
-        )
-        .is_some());
+        assert!(
+            bind_authenticated_resource_arguments(
+                &CatalogueHashContext::version_one(),
+                &function,
+                &canonical,
+            )
+            .is_some()
+        );
 
         let wrong_order = vec![canonical[1].clone(), canonical[0].clone()];
-        assert!(bind_authenticated_resource_arguments(
-            &CatalogueHashContext::version_one(),
-            &function,
-            &wrong_order,
-        )
-        .is_none());
+        assert!(
+            bind_authenticated_resource_arguments(
+                &CatalogueHashContext::version_one(),
+                &function,
+                &wrong_order,
+            )
+            .is_none()
+        );
         let wrong_type = vec![
-            ResourceArgument { parameter: first, value: RuntimeValue::Boolean(true) },
+            ResourceArgument {
+                parameter: first,
+                value: RuntimeValue::Boolean(true),
+            },
             canonical[1].clone(),
         ];
-        assert!(bind_authenticated_resource_arguments(
-            &CatalogueHashContext::version_one(),
-            &function,
-            &wrong_type,
-        )
-        .is_none());
-        assert!(bind_authenticated_resource_arguments(
-            &CatalogueHashContext::version_one(),
-            &function,
-            &canonical[..1],
-        )
-        .is_none());
+        assert!(
+            bind_authenticated_resource_arguments(
+                &CatalogueHashContext::version_one(),
+                &function,
+                &wrong_type,
+            )
+            .is_none()
+        );
+        assert!(
+            bind_authenticated_resource_arguments(
+                &CatalogueHashContext::version_one(),
+                &function,
+                &canonical[..1],
+            )
+            .is_none()
+        );
     }
 
     #[test]
@@ -9040,12 +9131,11 @@ mod tests {
             SourceRevisionId::from_bytes([0x71; 16]),
             CatalogueRevisionId::from_bytes([0x72; 16]),
         );
-        let target = PostgresKernelError::ServerUpdate(
-            crate::ServerUpdateError::FunctionNotActive {
+        let target =
+            PostgresKernelError::ServerUpdate(crate::ServerUpdateError::FunctionNotActive {
                 pair,
                 function: RAW_CALL_FUNCTION,
-            },
-        );
+            });
         assert_eq!(
             classify_sealed_server_error(&target),
             SealedInvocationFailureClass::Target
@@ -9625,11 +9715,8 @@ mod tests {
     #[test]
     fn sealed_failure_events_are_redacted_and_closed() {
         let invocation = InvocationId::from_bytes([0x71; 16]);
-        let events = sealed_failure_events(
-            invocation,
-            SealedInvocationFailureClass::Target,
-        )
-        .expect("the failure events are valid");
+        let events = sealed_failure_events(invocation, SealedInvocationFailureClass::Target)
+            .expect("the failure events are valid");
         assert_eq!(events.records().len(), 2);
         assert!(matches!(
             events.records()[0].event().body(),
@@ -9779,10 +9866,8 @@ mod tests {
             ExecuteDecision::Allowed(_)
         ));
         assert_eq!(
-            standard_security.authorise_execute(
-                &session,
-                InvocationTarget::new(standard_function, pair),
-            ),
+            standard_security
+                .authorise_execute(&session, InvocationTarget::new(standard_function, pair),),
             ExecuteDecision::Denied(ExecuteDenial::UnknownFunction)
         );
     }
