@@ -43,7 +43,7 @@ fn legend_index(kind: HighlightKind) -> Option<usize> {
 
 /// Returns the delta-encoded semantic tokens for one document.
 ///
-/// When `range` is present, only tokens that start inside the range are
+/// When `range` is present, only token segments that intersect the range are
 /// included, matching the `textDocument/semanticTokens/range` contract.
 pub fn semantic_tokens(
     parse: &Parse,
@@ -61,15 +61,18 @@ pub fn semantic_tokens(
             start: token.range.start,
             end: token.range.end,
         };
-        if let Some(range) = range {
-            let start = mapper.position(span.start);
-            if start < range.start || start > range.end {
-                continue;
-            }
-        }
         for (position, length) in mapper.segments(&span) {
             if length == 0 {
                 continue;
+            }
+            if let Some(range) = range {
+                let segment_end = lsp_types::Position {
+                    line: position.line,
+                    character: position.character.saturating_add(length),
+                };
+                if segment_end <= range.start || position >= range.end {
+                    continue;
+                }
             }
             let line = position.line;
             let start = position.character;

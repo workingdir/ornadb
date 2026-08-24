@@ -699,6 +699,7 @@ pub const KEYWORDS: &[&str] = &[
     "ORDER",
     "OUTER",
     "PERSISTABLE",
+    "PRELUDE",
     "PRIMITIVE",
     "READ",
     "REF",
@@ -789,6 +790,12 @@ mod tests {
         let source = "CREATE SCHEMA tasks;";
         assert_eq!(kind_at(source, "CREATE"), HighlightKind::Keyword);
         assert_eq!(kind_at(source, "SCHEMA"), HighlightKind::Keyword);
+    }
+
+    #[test]
+    fn classifies_prelude_export_modifier_as_keyword() {
+        let source = "EXPORT TYPE app.value TO PRELUDE AS X;";
+        assert_eq!(kind_at(source, "PRELUDE"), HighlightKind::Keyword);
     }
 
     #[test]

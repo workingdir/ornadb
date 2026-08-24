@@ -583,5 +583,59 @@ fn serves_hover_definition_and_references() {
         );
     }
 
+    // Use the schema declaration for the includeDeclaration check because
+    // declaration lookup covers top-level declarations.
+    let references_without_declaration = client.request(
+        "textDocument/references",
+        json!({
+            "textDocument": { "uri": uri },
+            "position": { "line": 0, "character": 15 },
+            "context": { "includeDeclaration": false },
+        }),
+    );
+    let references_without_declaration = references_without_declaration
+        .as_array()
+        .expect("references without declaration");
+    assert!(
+        references_without_declaration
+            .iter()
+            .all(|reference| reference["range"]["start"]["line"] != 0),
+        "schema declaration was not omitted: {references_without_declaration:?}"
+    );
+
+    client.shutdown();
+}
+
+#[test]
+fn semantic_token_range_includes_intersecting_multiline_comment_segments() {
+    let mut client = Client::spawn();
+    initialize(&mut client);
+    let uri = "file:///test/semantic-range.orna";
+    let source = "/* first line\nsecond line\nthird line */\n";
+    open_document(&mut client, uri, source, 1);
+    let _ = client.read_notification("textDocument/publishDiagnostics");
+
+    let tokens = client.request(
+        "textDocument/semanticTokens/range",
+        json!({
+            "textDocument": { "uri": uri },
+            "range": {
+                "start": { "line": 1, "character": 0 },
+                "end": { "line": 2, "character": 0 },
+            },
+        }),
+    );
+    let data = tokens["data"].as_array().expect("semantic token data");
+    assert_eq!(
+        data.len(),
+        5,
+        "only the multiline comment segment intersecting the range is returned: {data:?}"
+    );
+    assert_eq!(data[0], json!(1), "segment starts on the requested line");
+    assert_eq!(data[1], json!(0), "segment starts at the requested line start");
+    assert_eq!(data[2], json!(11), "segment covers the ASCII line contents");
+    assert_eq!(data[3], json!(8), "segment is a comment token");
+    assert_eq!(data[4], json!(0), "comment has no modifiers");
+
     client.shutdown();
 }

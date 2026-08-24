@@ -297,7 +297,13 @@ fn request_references(
         return Ok(serde_json::Value::Null);
     };
     let (parse, mapper) = parse_document(document);
-    let locations = analysis::references(document, &parse, position, &mapper);
+    let locations = analysis::references(
+        document,
+        &parse,
+        position,
+        &mapper,
+        params.context.include_declaration,
+    );
     Ok(serde_json::to_value(locations)?)
 }
 

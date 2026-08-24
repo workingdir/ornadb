@@ -13,12 +13,10 @@ CLIENT procedural blocks reject IF statements
 closed CLIENT calls, named arguments, concatenation
 CLIENT expression bodies reject AWAIT
 expression literals and qualified names
-server expression calls, named arguments, operators
 line and block comments
 server function with select body
 server function with rows return and select distinct
 server function with insert body
-top-level insert statement
 server function with update body
 server function with delete body
 create schema
