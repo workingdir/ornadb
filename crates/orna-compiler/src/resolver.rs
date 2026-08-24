@@ -401,6 +401,22 @@ pub fn check_standard_library_source(
     }
 }
 
+const STANDARD_SOURCE_UNIT_ID: SourceUnitId = SourceUnitId::from_bytes([
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1,
+]);
+
+fn check_standard_library_source_v1_identity(
+    stored_unit: &StoredSourceUnit,
+) -> Result<(), StandardLibraryCheckError> {
+    if stored_unit.id() != STANDARD_SOURCE_UNIT_ID
+        || stored_unit.logical_path() != "std/types.orna"
+        || stored_unit.ordinal() != 0
+    {
+        return Err(StandardLibraryCheckError::SourceMismatch);
+    }
+    Ok(())
+}
+
 /// Checks one retained version-1 type-only standard source unit.
 ///
 /// This is the original `orna.std/1` contract: exactly one source unit, no
@@ -414,6 +430,7 @@ fn check_standard_library_source_v1(
             actual: source_units.len(),
         });
     };
+    check_standard_library_source_v1_identity(stored_unit)?;
 
     let bundle = SourceBundle::new([SourceUnit::new(
         stored_unit.logical_path(),
@@ -11394,7 +11411,8 @@ mod tests {
         StandardLibraryCheckError, StandardSourceFamilies, check, check_new_application,
         check_new_application_with_catalogue, check_standard_application,
         check_standard_json_encode, check_standard_library_source,
-        check_standard_library_source_v2_parts, check_standard_library_source_v3_parts,
+        check_standard_library_source_v1_identity, check_standard_library_source_v2_parts,
+        check_standard_library_source_v3_parts,
         check_standard_library_source_v4_parts, check_standard_library_source_v5_parts,
         check_standard_library_source_v6_parts, check_standard_parameter_echo,
         client_resource_stream_type_is_supported,
@@ -11412,6 +11430,7 @@ mod tests {
     };
 
     const STANDARD_SOURCE: &str = "CREATE SCHEMA std;CREATE SCHEMA std.types;CREATE TYPE std.types.BOOLEAN AS VALUE PRIMITIVE KERNEL CONTRACT 'orna.kernel.value.boolean@1' IMMUTABLE PERSISTABLE;EXPORT TYPE std.types.BOOLEAN AS std.BOOLEAN;EXPORT TYPE std.BOOLEAN TO PRELUDE AS BOOLEAN;";
+    const STANDARD_SOURCE_UNIT_ID: SourceUnitId = SourceUnitId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
     const TWO_TYPE_STANDARD_SOURCE: &str = "CREATE SCHEMA std.types;CREATE SCHEMA std;CREATE TYPE std.types.INTEGER AS VALUE PRIMITIVE KERNEL CONTRACT 'int@1' IMMUTABLE TRANSIENT;CREATE TYPE std.types.BOOLEAN AS VALUE PRIMITIVE KERNEL CONTRACT 'boolean@1' IMMUTABLE PERSISTABLE;EXPORT TYPE std.INTEGER TO PRELUDE AS INTEGER;EXPORT TYPE std.types.INTEGER AS std.INTEGER;EXPORT TYPE std.BOOLEAN TO PRELUDE AS BOOLEAN;EXPORT TYPE std.types.BOOLEAN AS std.BOOLEAN;";
     const LEGACY_CANONICAL_SCALAR_SPELLINGS: [&str; 13] = [
         "BOOLEAN",
@@ -13497,7 +13516,7 @@ mod tests {
         Vec<DefinitionOrigin>,
     ) {
         let stored_unit = StoredSourceUnit::new(
-            SourceUnitId::from_bytes([4; 16]),
+            STANDARD_SOURCE_UNIT_ID,
             0,
             "std/types.orna",
             source,
@@ -13574,7 +13593,7 @@ mod tests {
         Vec<DefinitionOrigin>,
     ) {
         let stored_unit = StoredSourceUnit::new(
-            SourceUnitId::from_bytes([4; 16]),
+            STANDARD_SOURCE_UNIT_ID,
             0,
             "std/types.orna",
             source,
@@ -13614,7 +13633,7 @@ mod tests {
     ) -> DefinitionOrigin {
         DefinitionOrigin::new(
             identity,
-            SourceOrigin::new(SourceUnitId::from_bytes([4; 16]), byte_start, byte_end).unwrap(),
+            SourceOrigin::new(STANDARD_SOURCE_UNIT_ID, byte_start, byte_end).unwrap(),
         )
     }
 
@@ -13748,7 +13767,7 @@ mod tests {
         digest: [u8; 32],
     ) -> orna_core::revision::VerifiedStandardLibrarySnapshot {
         let source_unit = StoredSourceUnit::new(
-            SourceUnitId::from_bytes([4; 16]),
+            STANDARD_SOURCE_UNIT_ID,
             0,
             "std/types.orna",
             STANDARD_SOURCE,
@@ -13822,6 +13841,17 @@ mod tests {
         )
         .unwrap();
 
+        let digest = calculate_standard_library_digest(&snapshot).unwrap();
+        let snapshot = StandardLibrarySnapshot::new(
+            snapshot.revision(),
+            snapshot.digest_version(),
+            snapshot.source().clone(),
+            snapshot.language_version(),
+            snapshot.catalogue().clone(),
+            snapshot.origins().to_vec(),
+            digest,
+        )
+        .unwrap();
         verify_standard_library_snapshot(snapshot).unwrap()
     }
 
@@ -13830,7 +13860,7 @@ mod tests {
         const SOURCE: &str = "CREATE SCHEMA std;CREATE TYPE std.BOOLEAN AS VALUE PRIMITIVE KERNEL CONTRACT 'orna.kernel.value.boolean@1' IMMUTABLE PERSISTABLE;CREATE TYPE std.TOKEN AS VALUE OPAQUE KERNEL CONTRACT 'std.token@1' IMMUTABLE TRANSIENT;";
         let parsed = parsed_standard_unit(SOURCE);
         let source_unit = StoredSourceUnit::new(
-            SourceUnitId::from_bytes([0x31; 16]),
+            STANDARD_SOURCE_UNIT_ID,
             0,
             "std/types.orna",
             SOURCE,
@@ -13875,7 +13905,7 @@ mod tests {
             vec![],
         )
         .unwrap();
-        let source_unit = SourceUnitId::from_bytes([0x31; 16]);
+        let source_unit = STANDARD_SOURCE_UNIT_ID;
         let origins = vec![
             DefinitionOrigin::new(
                 DefinitionIdentity::Schema(SchemaId::from_bytes([0x37; 16])),
@@ -13905,19 +13935,26 @@ mod tests {
                 .unwrap(),
             ),
         ];
+        let snapshot = StandardLibrarySnapshot::new(
+            StandardLibraryRevisionId::from_bytes([0x38; 16]),
+            StandardLibraryDigestVersion::Version1,
+            source,
+            "orna.language/1",
+            catalogue,
+            origins,
+            Sha256Digest::from_bytes([0; 32]),
+        )
+        .unwrap();
+        let digest = calculate_standard_library_digest(&snapshot).unwrap();
         verify_standard_library_snapshot(
             StandardLibrarySnapshot::new(
-                StandardLibraryRevisionId::from_bytes([0x38; 16]),
-                StandardLibraryDigestVersion::Version1,
-                source,
-                "orna.language/1",
-                catalogue,
-                origins,
-                Sha256Digest::from_bytes([
-                    0x68, 0x7c, 0xa1, 0x50, 0xba, 0x69, 0x05, 0x01, 0x95, 0x14, 0xb8, 0xc3, 0xa9,
-                    0xb3, 0xa7, 0x0c, 0x36, 0x66, 0x8a, 0xe1, 0xd9, 0x12, 0xe9, 0x1d, 0xc3, 0xce,
-                    0x68, 0xab, 0x86, 0x22, 0xa4, 0x11,
-                ]),
+                snapshot.revision(),
+                snapshot.digest_version(),
+                snapshot.source().clone(),
+                snapshot.language_version(),
+                snapshot.catalogue().clone(),
+                snapshot.origins().to_vec(),
+                digest,
             )
             .unwrap(),
         )
@@ -13928,7 +13965,7 @@ mod tests {
     -> orna_core::revision::VerifiedStandardLibrarySnapshot {
         const SOURCE: &str = "CREATE SCHEMA std;CREATE SCHEMA std.types;CREATE SCHEMA std.action;CREATE TYPE std.types.INTEGER AS VALUE PRIMITIVE KERNEL CONTRACT 'orna.kernel.value.integer@1' IMMUTABLE PERSISTABLE;CREATE TYPE std.action.Action AS VALUE OPAQUE KERNEL CONTRACT 'orna.std.value.action@1' IMMUTABLE TRANSIENT;EXPORT TYPE std.types.INTEGER AS std.INTEGER;EXPORT TYPE std.action.Action AS std.Action;EXPORT TYPE std.INTEGER TO PRELUDE AS INTEGER;";
         let parsed = parsed_standard_unit(SOURCE);
-        let source_unit_id = SourceUnitId::from_bytes([0x41; 16]);
+        let source_unit_id = STANDARD_SOURCE_UNIT_ID;
         let source_unit = StoredSourceUnit::new(
             source_unit_id,
             0,
@@ -16319,7 +16356,7 @@ mod tests {
         Vec<DefinitionOrigin>,
     ) {
         let stored_unit = StoredSourceUnit::new(
-            SourceUnitId::from_bytes([4; 16]),
+            STANDARD_SOURCE_UNIT_ID,
             0,
             "std/types.orna",
             source,
@@ -16443,7 +16480,7 @@ mod tests {
         DefinitionOrigin::new(
             identity,
             SourceOrigin::new(
-                SourceUnitId::from_bytes([4; 16]),
+                STANDARD_SOURCE_UNIT_ID,
                 u32::try_from(span.start).unwrap(),
                 u32::try_from(span.end).unwrap(),
             )
@@ -23306,6 +23343,115 @@ mod tests {
         assert_eq!(checked.schemas().len(), 2);
         assert_eq!(checked.value_types().len(), 1);
         assert_eq!(checked.type_bindings().len(), 2);
+    }
+
+    #[test]
+    fn rejects_v1_source_unit_identity_mutations() {
+        let verified = verified_standard_library_for_relational_test();
+        assert!(check_standard_library_source(&verified).is_ok());
+        let stored = &verified.source().units()[0];
+
+        for (label, id, logical_path) in [
+            ("stable source-unit id", SourceUnitId::from_bytes([0x55; 16]), stored.logical_path()),
+            ("logical path", stored.id(), "std/renamed.orna"),
+        ] {
+            let mutated = verified_v1_with_source_unit_identity(&verified, id, logical_path, 0);
+            let error = check_standard_library_source(&mutated).unwrap_err();
+            assert!(
+                matches!(error, StandardLibraryCheckError::SourceMismatch),
+                "{label}: unexpected rejection: {error}"
+            );
+        }
+
+        let ordinal = StoredSourceUnit::new(
+            STANDARD_SOURCE_UNIT_ID,
+            1,
+            stored.logical_path(),
+            stored.content(),
+            stored.content_hash(),
+        )
+        .unwrap();
+        assert!(matches!(
+            check_standard_library_source_v1_identity(&ordinal),
+            Err(StandardLibraryCheckError::SourceMismatch)
+        ));
+    }
+
+    fn verified_v1_with_source_unit_identity(
+        verified: &VerifiedStandardLibrarySnapshot,
+        id: SourceUnitId,
+        logical_path: &str,
+        ordinal: u32,
+    ) -> VerifiedStandardLibrarySnapshot {
+        let stored = &verified.source().units()[0];
+        let unit = StoredSourceUnit::new(
+            id,
+            ordinal,
+            logical_path,
+            stored.content(),
+            stored.content_hash(),
+        )
+        .unwrap();
+        let bundle_hash = source_bundle_digest(std::slice::from_ref(&unit)).unwrap();
+        let source = StoredSourceRevision::new(
+            verified.source().bundle(),
+            verified.source().id(),
+            verified.source().parent(),
+            vec![unit],
+            bundle_hash,
+            source_revision_record_digest(
+                verified.source().bundle(),
+                verified.source().parent(),
+                bundle_hash,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let origins = verified
+            .origins()
+            .iter()
+            .map(|origin| {
+                let source_origin = origin.source();
+                let source_unit = if source_origin.source_unit() == stored.id() {
+                    id
+                } else {
+                    source_origin.source_unit()
+                };
+                DefinitionOrigin::new(
+                    origin.identity(),
+                    SourceOrigin::new(
+                        source_unit,
+                        source_origin.byte_start(),
+                        source_origin.byte_end(),
+                    )
+                    .unwrap(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let provisional = StandardLibrarySnapshot::new(
+            verified.revision(),
+            verified.digest_version(),
+            source,
+            verified.language_version(),
+            verified.catalogue().clone(),
+            origins,
+            Sha256Digest::from_bytes([0; 32]),
+        )
+        .unwrap();
+        let digest = calculate_standard_library_digest(&provisional).unwrap();
+        verify_standard_library_snapshot(
+            StandardLibrarySnapshot::new(
+                provisional.revision(),
+                provisional.digest_version(),
+                provisional.source().clone(),
+                provisional.language_version(),
+                provisional.catalogue().clone(),
+                provisional.origins().to_vec(),
+                digest,
+            )
+            .unwrap(),
+        )
+        .unwrap()
     }
 
     #[test]
