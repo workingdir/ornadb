@@ -43,7 +43,8 @@ It needs no running database, no network, and no filesystem writes.
    highlighting with zero extra grammar files.
 2. **A tree-sitter grammar.** `editors/tree-sitter-orna/` covers the
    current language surface with corpus tests and standard highlight
-   captures. Neovim, Helix, Zed, and Emacs use it natively.
+   captures. Neovim, Helix, and Zed use it natively; the Emacs package
+   provides a font-lock fallback instead of tree-sitter wiring.
 3. **A TextMate grammar.** `editors/textmate/orna.tmLanguage.json`
    covers VS Code and Sublime without any extension.
 
@@ -52,9 +53,14 @@ It needs no running database, no network, and no filesystem writes.
 - `editors/vscode/` is a plain-JavaScript extension with no build step.
   It launches `orna-lsp` (configurable via `orna.lsp.path`), bundles the
   TextMate grammar, and declares language configuration.
-- `editors/neovim/`, `editors/vim/`, `editors/helix/`, `editors/zed/`,
-  and `editors/emacs/` provide native configs or plugins that wire the
-  same `orna-lsp` binary and `tree-sitter-orna` grammar.
+- `editors/neovim/` provides filetype detection and native LSP setup;
+  tree-sitter parser installation is a separate editor step.
+- `editors/vim/` provides static syntax and filetype detection, with optional
+  LSP setup through an external vim-lsp or coc.nvim client.
+- `editors/helix/` and `editors/zed/` register the `orna-lsp` binary and
+  `tree-sitter-orna` grammar.
+- `editors/emacs/` provides font-lock syntax and Eglot setup for `orna-lsp`;
+  it does not wire the tree-sitter grammar.
 
 ### The classifier stays in `orna-syntax`
 
@@ -94,8 +100,10 @@ is.
   JSON-RPC client and asserts the initialize handshake, pushed and pulled
   diagnostics, semantic tokens, document symbols, hover, definition,
   completion, and clean shutdown.
-- `tree-sitter test` runs the grammar corpus; `tree-sitter parse`
-  reports zero error nodes on every spec example and system-test
-  fixture.
+- `tree-sitter test` runs the accepted corpus cases named by
+  `test/accepted-corpus.txt`; the tooling gate also runs `tree-sitter parse`
+  over executable `.orna` fixtures under `work/crates/` and `work/stdlib/`.
+  Canonical `spec/examples/` files are proposal/deferred material and are
+  explicitly excluded from accepted-contract parse evidence.
 - All JSON grammar files are validated with `python3 -m json.tool`; the
   VS Code extension passes `node --check`.
