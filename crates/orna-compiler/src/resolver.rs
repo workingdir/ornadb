@@ -11390,8 +11390,8 @@ mod tests {
         STD_INVOKE_ECHO_PARAMETER_ID, STD_INVOKE_ECHO_REVISION_NUMBER, STD_INVOKE_SCHEMA_ID,
         STD_INVOKE_SOURCE_UNIT_ID, STD_IO_BYTE_STREAM_TYPE_ID, STD_IO_SCHEMA_ID,
         STD_JSON_CONTRACT, STD_JSON_ENCODE_FUNCTION_ID, STD_JSON_ENCODE_FUNCTION_REVISION_ID,
-        STD_JSON_ENCODE_PARAMETER_ID, STD_JSON_SCHEMA_ID, STD_JSON_VALUE_TYPE_ID,
-        STD_OUTPUT_SOURCE_UNIT_ID, STD_TERMINAL_DOCUMENT_TYPE_ID,
+        STD_JSON_ENCODE_PARAMETER_ID, STD_JSON_SCHEMA_ID, STD_JSON_SOURCE_UNIT_ID,
+        STD_JSON_VALUE_TYPE_ID, STD_OUTPUT_SOURCE_UNIT_ID, STD_TERMINAL_DOCUMENT_TYPE_ID,
         STD_TERMINAL_PRESENT_TABLE_FUNCTION_ID, STD_TERMINAL_PRESENT_TABLE_FUNCTION_REVISION_ID,
         STD_TERMINAL_PRESENT_TABLE_PARAMETER_ID, STD_TERMINAL_SCHEMA_ID, STD_TYPES_SOURCE_UNIT_ID,
         STD_UI_CONTRACT, STD_UI_SCHEMA_ID, STD_UI_SOURCE_UNIT_ID, STD_UI_TYPE_ID, SemanticType,
@@ -26096,6 +26096,96 @@ mod tests {
     }
 
     #[test]
+    fn rejects_v5_when_the_json_unit_declaration_or_identity_is_tampered() {
+        let (units, catalogue, origins, executables) = standard_v5_parts();
+        let rejects_source = |source: &str, label: &str| {
+            let mut tampered = units.clone();
+            tampered[4] = stored_v2_unit(
+                STD_JSON_SOURCE_UNIT_ID,
+                4,
+                "std/json.orna",
+                source,
+            );
+            let error = check_v5_parts(tampered, &catalogue, &origins, &executables).unwrap_err();
+            assert!(
+                matches!(error, StandardLibraryCheckError::SourceMismatch),
+                "{label}: {error}"
+            );
+        };
+
+        rejects_source(
+            &STANDARD_V5_JSON_SOURCE.replace(
+                "CREATE SCHEMA std.json;",
+                "CREATE SCHEMA std.jason;",
+            ),
+            "wrong JSON schema",
+        );
+        rejects_source(
+            &STANDARD_V5_JSON_SOURCE.replace(
+                "CREATE TYPE std.json.Value AS VALUE",
+                "CREATE TYPE std.json.Token AS VALUE",
+            ),
+            "wrong JSON opaque type name",
+        );
+        rejects_source(
+            &STANDARD_V5_JSON_SOURCE.replace(
+                "orna.std.value.json@1",
+                "orna.std.value.token@1",
+            ),
+            "wrong JSON kernel contract",
+        );
+        rejects_source(
+            &STANDARD_V5_JSON_SOURCE.replace(
+                "EXPORT TYPE std.json.Value AS std.JsonValue;",
+                "EXPORT TYPE std.json.Value AS std.JsonToken;",
+            ),
+            "wrong JSON export",
+        );
+        rejects_source(
+            &format!("-- tampered\n{STANDARD_V5_JSON_SOURCE}"),
+            "changed JSON source content",
+        );
+
+        for (label, replacement) in [
+            (
+                "wrong JSON source-unit identity",
+                stored_v2_unit(
+                    SourceUnitId::from_bytes([0x9a; 16]),
+                    4,
+                    "std/json.orna",
+                    STANDARD_V5_JSON_SOURCE,
+                ),
+            ),
+            (
+                "wrong JSON source-unit ordinal",
+                stored_v2_unit(
+                    STD_JSON_SOURCE_UNIT_ID,
+                    6,
+                    "std/json.orna",
+                    STANDARD_V5_JSON_SOURCE,
+                ),
+            ),
+            (
+                "wrong JSON source-unit path",
+                stored_v2_unit(
+                    STD_JSON_SOURCE_UNIT_ID,
+                    4,
+                    "std/document.orna",
+                    STANDARD_V5_JSON_SOURCE,
+                ),
+            ),
+        ] {
+            let mut tampered = units.clone();
+            tampered[4] = replacement;
+            let error = check_v5_parts(tampered, &catalogue, &origins, &executables).unwrap_err();
+            assert!(
+                matches!(error, StandardLibraryCheckError::SourceMismatch),
+                "{label}: {error}"
+            );
+        }
+    }
+
+    #[test]
     fn rejects_v6_when_a_retained_v4_unit_path_or_ordinal_is_tampered() {
         let (units, catalogue, origins, executables) = standard_v6_parts();
         for (label, replacement) in [
@@ -26106,6 +26196,127 @@ mod tests {
             tampered[2] = replacement;
             let error = check_v6_parts(tampered, &catalogue, &origins, &executables).unwrap_err();
             assert!(matches!(error, StandardLibraryCheckError::SourceMismatch), "{label}: {error}");
+        }
+    }
+
+    #[test]
+    fn rejects_v6_when_the_action_unit_declaration_or_identity_is_tampered() {
+        let (units, catalogue, origins, executables) = standard_v6_parts();
+        let rejects_source = |source: &str, label: &str| {
+            let mut tampered = units.clone();
+            tampered[5] = stored_v2_unit(
+                STD_ACTION_SOURCE_UNIT_ID,
+                5,
+                "std/action.orna",
+                source,
+            );
+            let error = check_v6_parts(tampered, &catalogue, &origins, &executables).unwrap_err();
+            assert!(
+                matches!(error, StandardLibraryCheckError::SourceMismatch),
+                "{label}: {error}"
+            );
+        };
+
+        rejects_source(
+            &STANDARD_V6_ACTION_SOURCE.replace(
+                "CREATE SCHEMA std.action;",
+                "CREATE SCHEMA std.acted;",
+            ),
+            "wrong action schema",
+        );
+        rejects_source(
+            &STANDARD_V6_ACTION_SOURCE.replace(
+                "CREATE TYPE std.action.Action AS VALUE",
+                "CREATE TYPE std.action.Command AS VALUE",
+            ),
+            "wrong action opaque type name",
+        );
+        rejects_source(
+            &STANDARD_V6_ACTION_SOURCE.replace(
+                "KERNEL CONTRACT 'orna.std.value.action@1'",
+                "KERNEL CONTRACT 'orna.std.value.command@1'",
+            ),
+            "wrong action kernel contract",
+        );
+        rejects_source(
+            &STANDARD_V6_ACTION_SOURCE.replace(
+                "EXPORT TYPE std.action.Action AS std.Action;",
+                "EXPORT TYPE std.action.Action AS std.Command;",
+            ),
+            "wrong action export",
+        );
+        rejects_source(
+            &STANDARD_V6_ACTION_SOURCE.replace("OPAQUE", "PRIMITIVE"),
+            "wrong action value kind",
+        );
+        rejects_source(
+            &format!("-- tampered\n{STANDARD_V6_ACTION_SOURCE}"),
+            "changed action source content",
+        );
+
+        for (label, replacement) in [
+            (
+                "wrong action source-unit identity",
+                stored_v2_unit(
+                    SourceUnitId::from_bytes([0x9b; 16]),
+                    5,
+                    "std/action.orna",
+                    STANDARD_V6_ACTION_SOURCE,
+                ),
+            ),
+            (
+                "wrong action source-unit ordinal",
+                stored_v2_unit(
+                    STD_ACTION_SOURCE_UNIT_ID,
+                    7,
+                    "std/action.orna",
+                    STANDARD_V6_ACTION_SOURCE,
+                ),
+            ),
+            (
+                "wrong action source-unit path",
+                stored_v2_unit(
+                    STD_ACTION_SOURCE_UNIT_ID,
+                    5,
+                    "std/command.orna",
+                    STANDARD_V6_ACTION_SOURCE,
+                ),
+            ),
+        ] {
+            let mut tampered = units.clone();
+            tampered[5] = replacement;
+            let error = check_v6_parts(tampered, &catalogue, &origins, &executables).unwrap_err();
+            assert!(
+                matches!(error, StandardLibraryCheckError::SourceMismatch),
+                "{label}: {error}"
+            );
+        }
+
+        for (label, source, message) in [
+            (
+                "wrong action mutability",
+                STANDARD_V6_ACTION_SOURCE.replace("IMMUTABLE", "MUTABLE"),
+                "expected IMMUTABLE after opaque codec contract",
+            ),
+            (
+                "wrong action persistence",
+                STANDARD_V6_ACTION_SOURCE.replace("TRANSIENT", "PERSISTABLE"),
+                "expected TRANSIENT after IMMUTABLE",
+            ),
+        ] {
+            let mut tampered = units.clone();
+            tampered[5] = stored_v2_unit(
+                STD_ACTION_SOURCE_UNIT_ID,
+                5,
+                "std/action.orna",
+                &source,
+            );
+            let error = check_v6_parts(tampered, &catalogue, &origins, &executables).unwrap_err();
+            let StandardLibraryCheckError::Diagnostics { diagnostics } = error else {
+                panic!("{label}: expected parser diagnostics");
+            };
+            assert_eq!(diagnostics.len(), 1, "{label}: {diagnostics:?}");
+            assert_eq!(diagnostics[0].message(), message, "{label}");
         }
     }
 
