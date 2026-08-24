@@ -1,6 +1,7 @@
 #![cfg(unix)]
 
 use orna_core::{
+    CatalogueRevisionId, SourceBundleId, SourceRevisionId,
     canonical_hash::{
         catalogue_digest_with_context, source_bundle_digest, source_revision_record_digest,
     },
@@ -21,25 +22,24 @@ use orna_core::{
         SecurityFunctionTarget, SecuritySnapshot,
     },
     value::{OpaqueValue, OpaqueValueError, RuntimeValue},
-    CatalogueRevisionId, SourceBundleId, SourceRevisionId,
 };
 use orna_postgres::{PostgresKernel, SealedInvocationResult};
 use orna_protocol::encode_invoke_request;
 use orna_standard::{
+    BYTE_STREAM_MAGIC, JSON_MAGIC, STANDARD_LIBRARY_V5_REVISION_ID, STD_INVOKE_ECHO_FUNCTION_ID,
+    STD_INVOKE_ECHO_FUNCTION_REVISION_ID, STD_IO_BYTE_STREAM_TYPE_ID, STD_JSON_ENCODE_FUNCTION_ID,
+    STD_JSON_ENCODE_FUNCTION_REVISION_ID, STD_JSON_ENCODE_PARAMETER_ID, STD_JSON_VALUE_TYPE_ID,
     registered_opaque_codecs, retained_standard_library_snapshot,
     retained_standard_library_v2_snapshot, retained_standard_library_v3_snapshot,
     retained_standard_library_v5_snapshot, verify_standard_library_snapshot,
     verify_standard_library_v2_snapshot, verify_standard_library_v3_snapshot,
-    verify_standard_library_v5_snapshot, BYTE_STREAM_MAGIC, JSON_MAGIC,
-    STANDARD_LIBRARY_V5_REVISION_ID, STD_INVOKE_ECHO_FUNCTION_ID,
-    STD_INVOKE_ECHO_FUNCTION_REVISION_ID, STD_IO_BYTE_STREAM_TYPE_ID, STD_JSON_ENCODE_FUNCTION_ID,
-    STD_JSON_ENCODE_FUNCTION_REVISION_ID, STD_JSON_ENCODE_PARAMETER_ID, STD_JSON_VALUE_TYPE_ID,
+    verify_standard_library_v5_snapshot,
 };
 
 #[path = "../../orna-postgres/tests/support/mod.rs"]
 mod postgres_test_support;
 
-use postgres_test_support::{failure, with_test_database, TestDatabase, TestResult};
+use postgres_test_support::{TestDatabase, TestResult, failure, with_test_database};
 
 const JSON_USER: orna_core::PrincipalId = orna_core::PrincipalId::from_bytes([0x7a; 16]);
 

@@ -1736,13 +1736,10 @@ mod tests {
             None,
         )
         .expect("cancelled detail fixture must validate");
-        let record = trace_record(&cancelled_with_detail, &stub_hex(), false)
-            .expect("record must render");
+        let record =
+            trace_record(&cancelled_with_detail, &stub_hex(), false).expect("record must render");
         assert_eq!(record["kind"], "cancelled");
-        assert_eq!(
-            record["payload"]["reason"],
-            "inspect.projection_failed"
-        );
+        assert_eq!(record["payload"]["reason"], "inspect.projection_failed");
     }
 
     /// Type descriptors render stable closed nested labels.
