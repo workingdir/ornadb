@@ -7,6 +7,7 @@ import filecmp
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
@@ -29,31 +30,8 @@ GENERATED_ARTEFACTS = (
     "src/tree_sitter/array.h",
     "src/tree_sitter/parser.h",
 )
-PROPOSAL_ONLY_SPEC_EXAMPLES = frozenset(
-    {
-        # The canonical bundle is illustrative proposal material. Classify proposal-only
-        # examples separately, while parsing each grammar-compatible one below.
-        "01_people_tasks.orna",
-        "02_server_functions.orna",
-        "03_client_ui.orna",
-        "04_studio_shell.orna",
-        "05_security_admin.orna",
-        "06_inspector.orna",
-        "07_jsonrpc_gateway.orna",
-        "08_mcp_gateway.orna",
-        "09_presenters.orna",
-        "10_launch_entries.orna",
-    }
-)
-
-NON_PARSEABLE_SPEC_EXAMPLES = frozenset(
-    {
-        # These proposal examples use syntax outside the accepted tree-sitter grammar.
-        "03_client_ui.orna",
-        "04_studio_shell.orna",
-        "05_security_admin.orna",
-    }
-)
+ACCEPTED_CORPUS_MANIFEST_NAME = "test/accepted-corpus.txt"
+CORPUS_CASE_DELIMITER = "=" * 20
 
 
 
@@ -102,6 +80,105 @@ def sorted_orna_files(directory: Path) -> list[Path]:
         (path for path in directory.rglob("*.orna") if path.is_file()),
         key=lambda path: path.as_posix(),
     )
+
+
+def read_corpus_case_names(corpus_directory: Path, repository: Path) -> list[str] | None:
+    """Read exact tree-sitter corpus case names, failing closed on malformed headers."""
+    case_names: list[str] = []
+    seen_case_names: set[str] = set()
+    for corpus_path in sorted(corpus_directory.glob("*.txt"), key=lambda path: path.as_posix()):
+        try:
+            lines = corpus_path.read_text(encoding="utf-8").splitlines()
+        except (OSError, UnicodeDecodeError) as exc:
+            log(
+                f"could not read corpus {display_path(corpus_path, repository)}: {exc}",
+                error=True,
+            )
+            return None
+        index = 0
+        while index < len(lines):
+            if lines[index] != CORPUS_CASE_DELIMITER:
+                index += 1
+                continue
+            if (
+                index + 2 >= len(lines)
+                or not lines[index + 1]
+                or lines[index + 2] != CORPUS_CASE_DELIMITER
+            ):
+                log(
+                    f"malformed corpus case header in {display_path(corpus_path, repository)} "
+                    f"near line {index + 1}",
+                    error=True,
+                )
+                return None
+            case_name = lines[index + 1]
+            if case_name in seen_case_names:
+                log(f"duplicate corpus case name: {case_name!r}", error=True)
+                return None
+            seen_case_names.add(case_name)
+            case_names.append(case_name)
+            index += 3
+
+    if not case_names:
+        log("accepted corpus check found no corpus cases", error=True)
+        return None
+    return case_names
+
+
+def check_accepted_corpus_manifest(
+    manifest_path: Path,
+    corpus_directory: Path,
+    repository: Path,
+) -> tuple[list[str], int] | None:
+    """Validate the accepted corpus manifest and return names plus total corpus count."""
+    try:
+        manifest_lines = manifest_path.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeDecodeError) as exc:
+        log(
+            f"could not read accepted corpus manifest {display_path(manifest_path, repository)}: {exc}",
+            error=True,
+        )
+        return None
+
+    if not manifest_lines:
+        log(
+            f"accepted corpus manifest is empty: {display_path(manifest_path, repository)}",
+            error=True,
+        )
+        return None
+
+    accepted_names: list[str] = []
+    seen: set[str] = set()
+    for line_number, name in enumerate(manifest_lines, start=1):
+        if not name or name != name.strip():
+            log(
+                f"malformed accepted corpus manifest entry at line {line_number}: {name!r}",
+                error=True,
+            )
+            return None
+        if name in seen:
+            log(f"duplicate accepted corpus manifest entry: {name!r}", error=True)
+            return None
+        seen.add(name)
+        accepted_names.append(name)
+
+    corpus_names = read_corpus_case_names(corpus_directory, repository)
+    if corpus_names is None:
+        return None
+    missing = [name for name in accepted_names if name not in corpus_names]
+    if missing:
+        log(
+            "accepted corpus manifest names are missing from the corpus: "
+            + ", ".join(repr(name) for name in missing),
+            error=True,
+        )
+        return None
+
+    log(
+        f"accepted corpus manifest validated: {len(accepted_names)} cases "
+        "(accepted-contract evidence)"
+    )
+    return accepted_names, len(corpus_names)
 
 
 def checked_in_editor_json_files(repository: Path) -> list[Path] | None:
@@ -221,6 +298,66 @@ def check_tree_sitter_package(tree_sitter_directory: Path, repository: Path) -> 
         )
         return False
     return True
+
+
+def check_textmate_grammar(grammar_path: Path, repository: Path) -> bool:
+    """Validate the TextMate grammar shape and its local repository references."""
+    try:
+        with grammar_path.open(encoding="utf-8") as stream:
+            grammar = json.load(stream)
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        log(f"invalid TextMate grammar {display_path(grammar_path, repository)}: {exc}", error=True)
+        return False
+
+    if not isinstance(grammar, dict) or grammar.get("scopeName") != "source.orna":
+        log(
+            f"TextMate grammar {display_path(grammar_path, repository)} must declare scopeName source.orna",
+            error=True,
+        )
+        return False
+
+    patterns = grammar.get("patterns")
+    repository_entries = grammar.get("repository")
+    if not isinstance(patterns, list) or not patterns:
+        log(
+            f"TextMate grammar {display_path(grammar_path, repository)} must define non-empty patterns",
+            error=True,
+        )
+        return False
+    if not isinstance(repository_entries, dict) or not repository_entries:
+        log(
+            f"TextMate grammar {display_path(grammar_path, repository)} must define a non-empty repository",
+            error=True,
+        )
+        return False
+
+    includes: set[str] = set()
+
+    def collect_includes(value: object) -> None:
+        if isinstance(value, dict):
+            include = value.get("include")
+            if isinstance(include, str) and include.startswith("#"):
+                includes.add(include[1:])
+            for child in value.values():
+                collect_includes(child)
+        elif isinstance(value, list):
+            for child in value:
+                collect_includes(child)
+
+    collect_includes(grammar.get("patterns"))
+    collect_includes(grammar.get("repository"))
+    missing = sorted(name for name in includes if name not in repository_entries)
+    if missing:
+        log(
+            f"TextMate grammar {display_path(grammar_path, repository)} has dangling local includes: "
+            f"{', '.join(f'#{name}' for name in missing)}",
+            error=True,
+        )
+        return False
+
+    log(f"validated TextMate grammar {display_path(grammar_path, repository)}")
+    return True
+
 
 def check_helix_configuration(configuration_path: Path, repository: Path) -> bool:
     """Validate the checked-in Helix language, server, and grammar entries."""
@@ -473,11 +610,21 @@ def main() -> int:
             )
             return 1
 
-    log("running tree-sitter test in editors/tree-sitter-orna")
+    manifest_path = tree_sitter_directory / ACCEPTED_CORPUS_MANIFEST_NAME
+    manifest_result = check_accepted_corpus_manifest(
+        manifest_path,
+        tree_sitter_directory / "test" / "corpus",
+        repository,
+    )
+    if manifest_result is None:
+        return 1
+    accepted_case_names, corpus_case_count = manifest_result
+    accepted_regex = "^(?:" + "|".join(re.escape(name) for name in accepted_case_names) + ")$"
+    log(f"running tree-sitter accepted corpus ({len(accepted_case_names)} cases)")
     corpus_result = run_command(
-        [tree_sitter, "test"],
+        [tree_sitter, "test", "--include", accepted_regex],
         cwd=tree_sitter_directory,
-        label="tree-sitter test",
+        label="tree-sitter accepted corpus",
     )
     if corpus_result is None or corpus_result.returncode != 0:
         status = (
@@ -485,35 +632,29 @@ def main() -> int:
             if corpus_result is None
             else f"exited with status {corpus_result.returncode}"
         )
-        log(f"tree-sitter test failed ({status})", error=True)
+        log(f"tree-sitter accepted corpus failed ({status})", error=True)
         return 1
-    log("tree-sitter test passed")
+    log(f"accepted corpus evidence passed: {len(accepted_case_names)} cases")
+    remaining_corpus_cases = corpus_case_count - len(accepted_case_names)
+    log(
+        f"remaining corpus cases: {remaining_corpus_cases} proposal/deferred grammar coverage; "
+        "not accepted-contract evidence"
+    )
 
     parse_paths: list[Path] = []
     if spec_examples.is_dir():
         canonical_paths = sorted_orna_files(spec_examples)
-        grammar_compatible_paths = [
-            path
-            for path in canonical_paths
-            if path.relative_to(spec_examples).as_posix() not in NON_PARSEABLE_SPEC_EXAMPLES
-        ]
+        log(
+            f"canonical spec examples: {len(canonical_paths)} proposal/deferred .orna files "
+            "excluded from accepted-contract parse evidence"
+        )
         for path in canonical_paths:
-            relative_path = path.relative_to(spec_examples).as_posix()
-            if relative_path in NON_PARSEABLE_SPEC_EXAMPLES:
-                log(
-                    f"skipping non-parseable proposal example: {display_path(path, repository)}"
-                )
-            elif relative_path in PROPOSAL_ONLY_SPEC_EXAMPLES:
-                log(
-                    f"including proposal-only example in grammar-compatible tree-sitter parse: "
-                    f"{display_path(path, repository)}"
-                )
-        log(f"canonical examples: {len(grammar_compatible_paths)} grammar-compatible .orna files")
-        # Tree-sitter coverage includes proposal examples that use accepted syntax,
-        # but does not claim coverage for proposal syntax outside the grammar.
-        parse_paths.extend(grammar_compatible_paths)
+            log(
+                f"excluding canonical proposal/deferred example from accepted-contract parse: "
+                f"{display_path(path, repository)}"
+            )
     else:
-        log("canonical examples: ../spec/examples is absent; skipping")
+        log("canonical spec examples: ../spec/examples is absent; skipping")
 
     for directory in required_fixture_roots:
         fixture_paths = sorted_orna_files(directory)
@@ -560,6 +701,14 @@ def main() -> int:
             log(f"invalid JSON in {relative_path}: {exc}", error=True)
             return 1
     log(f"validated {len(json_files)} editor JSON files")
+
+    textmate_grammars = (
+        repository / "editors" / "textmate" / "orna.tmLanguage.json",
+        repository / "editors" / "vscode" / "syntaxes" / "orna.tmLanguage.json",
+    )
+    for grammar_path in textmate_grammars:
+        if not check_textmate_grammar(grammar_path, repository):
+            return 1
 
     extension = repository / "editors" / "vscode" / "extension.js"
     if not extension.is_file():

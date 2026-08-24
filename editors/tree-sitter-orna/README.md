@@ -29,7 +29,7 @@ This requires the `tree-sitter-cli` (see `package.json`).
 ```sh
 npm install          # installs tree-sitter-cli
 tree-sitter generate # rebuild the parser if grammar.js changed
-tree-sitter test     # run the corpus tests in test/corpus/
+tree-sitter test     # run the full corpus, including proposal/deferred cases
 ```
 
 To check that a file parses without error:
@@ -38,10 +38,12 @@ To check that a file parses without error:
 tree-sitter parse path/to/file.orna
 ```
 
-The grammar is expected to produce zero `ERROR` nodes on every executable
-`.orna` file under `crates/` and `stdlib/`. The proposal-only UI examples
-`03_client_ui.orna`, `04_studio_shell.orna`, and `05_security_admin.orna` use
-deferred language surfaces and are excluded from this gate.
+The focused editor tooling gate reads `test/accepted-corpus.txt` and runs only
+those named corpus cases as accepted-contract evidence. Remaining corpus cases
+are proposal/deferred grammar coverage and are not accepted-contract evidence.
+The gate also parses every executable `.orna` file under `crates/` and `stdlib/`;
+canonical `spec/examples/` files remain proposal material and are excluded from
+that accepted-contract parse check.
 
 
 ## Editor setup
