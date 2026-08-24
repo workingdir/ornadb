@@ -8113,6 +8113,65 @@ async fn proves_sealed_security_identity_invocation_and_audit() -> TestResult<()
                 },
             )?;
         }
+
+        // Recovery accepts the persisted sealed system invocation targets before
+        // tampering, then fails closed when an authority binding no longer
+        // identifies the admitted sealed system target. Restoring the binding
+        // must return the same durable history to an accepted recovery path.
+        kernel.recover().await?;
+        let database_session = database.open().await?;
+        let changed = database_session
+            .client()
+            .execute(
+                "UPDATE _orna_kernel.invocation_target_authorities
+                 SET target_class = 'application'
+                 WHERE catalogue_revision_id = $1
+                   AND function_id = $2",
+                &[
+                    &pair.catalogue().to_bytes().to_vec(),
+                    &SYS_SECURITY_SESSION_PRINCIPAL_FUNCTION_ID.to_bytes().to_vec(),
+                ],
+            )
+            .await?;
+        require(
+            changed == 1,
+            "sealed system authority tamper changed the wrong row count",
+        )?;
+        database_session.shutdown().await?;
+
+        let error = recovery_error(&database).await?;
+        require(
+            matches!(
+                error,
+                PostgresKernelError::DurableInvariant {
+                    relation: "_orna_kernel.invocation_audit_events",
+                    rule: "target function and pinned revision must exist together",
+                    ..
+                }
+            ),
+            "sealed system authority tamper did not fail with the exact durable invariant",
+        )?;
+
+        let database_session = database.open().await?;
+        let changed = database_session
+            .client()
+            .execute(
+                "UPDATE _orna_kernel.invocation_target_authorities
+                 SET target_class = 'system'
+                 WHERE catalogue_revision_id = $1
+                   AND function_id = $2",
+                &[
+                    &pair.catalogue().to_bytes().to_vec(),
+                    &SYS_SECURITY_SESSION_PRINCIPAL_FUNCTION_ID.to_bytes().to_vec(),
+                ],
+            )
+            .await?;
+        require(
+            changed == 1,
+            "sealed system authority restore changed the wrong row count",
+        )?;
+        database_session.shutdown().await?;
+        kernel.recover().await?;
         Ok(())
     })
     .await
