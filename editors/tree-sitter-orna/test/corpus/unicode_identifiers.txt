@@ -1,0 +1,48 @@
+====================
+unicode unquoted identifiers
+====================
+
+CREATE SCHEMA ͅ_Ⅰ²;
+CREATE SERVER FUNCTION ͅ_Ⅰ².Ⅰ²ͅ() RETURNS TEXT AS SELECT 1;
+
+---
+(source_file
+  (create_schema_statement
+    (kw_create)
+    (kw_schema)
+    name: (qualified_name
+      (identifier))
+    (semicolon))
+  (create_server_function_statement
+    (kw_create)
+    (kw_server)
+    (kw_function)
+    name: (qualified_name
+      (qualified_name
+        (identifier))
+      (dot)
+      (identifier))
+    parameters: (parameter_list
+      (lparen)
+      (rparen))
+    (kw_returns)
+    returns: (return_type_spec
+      (type_spec
+        (scalar_type
+          (kw_text))))
+    body: (function_body
+      (kw_as)
+      (sql_body
+        (select_statement
+          (kw_select)
+          (expression
+            (logical_expression
+              (comparison_expression
+                (additive_expression
+                  (multiplicative_expression
+                    (unary_expression
+                      (postfix_expression
+                        (primary_expression
+                          (literal
+                            (number)))))))))))))
+    (semicolon)))
