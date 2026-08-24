@@ -1795,6 +1795,15 @@ fn decode_snapshot_row_payload(
         .ok_or_else(|| "inspect.malformed_carrier".to_owned())?;
     offset += 1;
     if result == 1 {
+        let value_count = row
+            .get(offset..)
+            .and_then(|bytes| bytes.get(..8))
+            .and_then(|bytes| bytes.try_into().ok())
+            .map(u64::from_be_bytes)
+            .ok_or_else(|| "inspect.malformed_carrier".to_owned())?;
+        if value_count == 0 {
+            return Err("inspect.malformed_carrier".to_owned());
+        }
         offset += 8;
     } else if result != 0 {
         return Err("inspect.malformed_carrier".to_owned());
@@ -7606,6 +7615,47 @@ mod tests {
         assert_eq!(
             inspect_snapshot_request_target(&target),
             Err("inspect.invalid_target".to_owned()),
+        );
+    }
+
+    #[test]
+    fn inspector_snapshot_row_rejects_zero_value_batch_count() {
+        let target = InvocationId::from_bytes([0x17; 16]);
+        let epoch = InspectEpochId::from_bytes([
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 7,
+        ]);
+        let mut row = super::row(INSPECT_SNAPSHOT_ROW_TAG, 0);
+        row.extend_from_slice(&epoch.to_bytes());
+        row.extend_from_slice(&target.to_bytes());
+        row.extend_from_slice(&[0x18; 16]);
+        row.push(1);
+        row.extend_from_slice(&0_u64.to_be_bytes());
+        row.push(1);
+        row.extend_from_slice(&0_u64.to_be_bytes());
+        row.push(0);
+
+        assert_eq!(row.len(), 76);
+        let mut no_values = row.clone();
+        no_values[66] = 0;
+        no_values.truncate(68);
+        assert_eq!(no_values.len(), 68);
+        assert_eq!(
+            super::decode_snapshot_row_payload(&no_values, 7),
+            Ok((epoch, target))
+        );
+        assert_eq!(
+            super::decode_snapshot_row_payload(&row, 7),
+            Err("inspect.malformed_carrier".to_owned())
+        );
+        row[67..75].copy_from_slice(&1_u64.to_be_bytes());
+        assert_eq!(
+            super::decode_snapshot_row_payload(&row, 7),
+            Ok((epoch, target))
+        );
+        row.push(0x19);
+        assert_eq!(
+            super::decode_snapshot_row_payload(&row, 7),
+            Err("inspect.malformed_carrier".to_owned())
         );
     }
 
