@@ -20987,6 +20987,11 @@ mod tests {
         let function = &report.checked_bundle().unwrap().client_functions()[0];
         assert_eq!(function.parameters().len(), 1);
         assert_eq!(function.capabilities().len(), 1);
+        assert_eq!(function.capabilities()[0].name(), "std.net.connect");
+        assert_eq!(
+            function.capabilities()[0].argument(),
+            &super::CheckedClientCapabilityArgument::Parameter("p_host".to_owned())
+        );
         assert!(matches!(
             function.body(),
             CheckedClientFunctionBody::ExternalContract { identity, .. }
