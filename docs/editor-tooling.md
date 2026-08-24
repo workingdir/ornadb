@@ -6,8 +6,9 @@ OrnaDB ships three layers of editor support for `.orna` files:
    client. It reuses the offline Orna compiler, so it needs no running
    database and never writes to disk.
 2. **`tree-sitter-orna`** — a tree-sitter grammar with corpus tests and
-   standard highlight captures, for editors that consume grammars
-   natively (Neovim, Helix, Zed, Emacs).
+   standard highlight captures, consumed natively by Neovim, Helix, and Zed.
+   Emacs uses the package's font-lock fallback; its Eglot integration does
+   not wire tree-sitter.
 3. **A TextMate grammar** plus small per-editor integration packages,
    for editors that use static grammars (VS Code, Sublime Text).
 
