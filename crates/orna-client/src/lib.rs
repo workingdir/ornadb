@@ -23331,6 +23331,94 @@ mod runtime_conformance {
     }
 
     #[test]
+    fn destroying_a_surface_retires_all_owned_handles_and_suppresses_stale_work() {
+        let session = FixtureSession::new();
+        let surface = session.create_surface(b"Owned handle retirement");
+        let node_alias = next_unreserved_alias_handle();
+        let action_alias = next_unreserved_alias_handle();
+        let operations = [
+            mount(node_alias, 0, view(b"root")),
+            bind_action(
+                node_alias,
+                view(b"submit"),
+                action_alias,
+                view(b"std.json.Value"),
+            ),
+        ];
+        assert_eq!(
+            session.apply(surface, &batch(1, &operations)),
+            StatusCode::Ok
+        );
+        let (node, action) = session.node_and_action(surface);
+        let (model, request) = session.start_model_request(surface);
+        let context = (&*session.client as *const ClientContext).cast_mut().cast();
+
+        assert_eq!(session.destroy_surface(surface), StatusCode::Ok);
+        let after_destroy = session.callback_log();
+        assert_eq!(
+            after_destroy.failures,
+            vec![(request, StatusCode::Cancelled)]
+        );
+
+        let stale_node_event = RuntimeEvent {
+            kind: EventKind::FocusChanged,
+            as_: RuntimeEventArgs {
+                action: ActionEvent {
+                    surface,
+                    node,
+                    action: 0,
+                    payload: empty_value(),
+                },
+            },
+        };
+        assert_eq!(
+            unsafe { client_emit_runtime_event(context, session.runtime, &stale_node_event) }.code,
+            StatusCode::NotFound
+        );
+
+        let mut metadata = OwnedBytes {
+            data: ptr::null_mut(),
+            len: 0,
+            owner: ptr::null_mut(),
+            release: release_owned,
+        };
+        assert_eq!(
+            unsafe { client_read_action_metadata(context, action, &mut metadata) }.code,
+            StatusCode::NotFound
+        );
+        assert!(metadata.data.is_null());
+        assert_eq!(metadata.len, 0);
+
+        let stale_model_event = RuntimeEvent {
+            kind: EventKind::ModelRangeRequest,
+            as_: RuntimeEventArgs {
+                range_request: ModelRangeRequest {
+                    request,
+                    model,
+                    start: 0,
+                    count: 1,
+                    sort_filter_token: view(b"fixture"),
+                },
+            },
+        };
+        assert_eq!(
+            unsafe { client_emit_runtime_event(context, session.runtime, &stale_model_event) }.code,
+            StatusCode::NotFound
+        );
+        assert_eq!(session.apply_model_rows(request), StatusCode::NotFound);
+        assert_eq!(session.cancel_request(request), StatusCode::NotFound);
+        assert_eq!(
+            unsafe { client_complete_model_request(context, request, empty_value()) }.code,
+            StatusCode::NotFound
+        );
+        assert_eq!(session.capture_result(surface), Err(StatusCode::NotFound));
+        assert_eq!(session.callback_log(), after_destroy);
+
+        assert_eq!(session.shutdown(), StatusCode::Ok);
+        assert!(session.callback_log().terminal);
+    }
+
+    #[test]
     fn cancellation_wins_late_completion_and_shutdown_is_terminal() {
         let session = FixtureSession::new();
         let surface = session.create_surface(b"Shutdown");
