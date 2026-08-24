@@ -309,7 +309,7 @@ where
     // consumed before the command word so `orna --runtime tty invoke ...`
     // works. A missing value or an unknown family is a usage error (`None`).
     // The override is threaded into the invoke command below. Source
-    // commands reject it per their accepted command contracts. Unknown leading
+    // source and server commands reject it per their accepted command contracts. Unknown leading
     // flags still fall to `_ => None`.
     let runtime = if args
         .peek()
@@ -336,6 +336,9 @@ where
                 Some(value) if value == OsStr::new("upgrade") => Command::Upgrade,
                 _ => return None,
             };
+            if runtime.is_some() {
+                return None;
+            }
             args.next().is_none().then_some(command)
         }
         Some(value) if value == OsStr::new("source") => {
@@ -1075,6 +1078,35 @@ mod tests {
         assert_eq!(
             parse_command(arguments(&["orna", "source", "apply", "app.orna"])),
             Some(Command::SourceApply("app.orna".to_owned()))
+        );
+    }
+
+    #[test]
+    fn rejects_global_runtime_override_on_server_run() {
+        assert_eq!(
+            parse_command(arguments(&["orna", "--runtime", "tty", "server", "run"])),
+            None,
+            "runtime override must be rejected for server run"
+        );
+    }
+
+    #[test]
+    fn rejects_global_runtime_override_on_server_upgrade() {
+        assert_eq!(
+            parse_command(arguments(&["orna", "--runtime", "tty", "server", "upgrade"])),
+            None,
+            "runtime override must be rejected for server upgrade"
+        );
+    }
+
+    #[test]
+    fn rejects_global_runtime_override_on_server_backend_shell() {
+        assert_eq!(
+            parse_command(arguments(&[
+                "orna", "--runtime", "tty", "server", "backend-shell",
+            ])),
+            None,
+            "runtime override must be rejected for server backend-shell"
         );
     }
 
