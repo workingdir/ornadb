@@ -9300,6 +9300,34 @@ EXPORT TYPE std.ui.UI AS std.UI;
     }
 
     #[test]
+    fn v5_json_codec_rejects_non_canonical_body_bytes() {
+        let verified = super::verify_standard_library_v5_snapshot(
+            super::retained_standard_library_v5_snapshot()
+                .expect("the retained V5 standard source is valid"),
+        )
+        .expect("the retained V5 standard source verifies");
+        let registry =
+            super::registered_opaque_codecs(&verified).expect("the V5 opaque codecs register");
+        let active = empty_version_two_active_revision(&verified);
+
+        let body = br#"{"a": 1}"#;
+        let mut payload = Vec::from(JSON_MAGIC.as_bytes());
+        payload.extend_from_slice(
+            &u32::try_from(body.len())
+                .expect("the canonical JSON body length fits in the frame")
+                .to_be_bytes(),
+        );
+        payload.extend_from_slice(body);
+
+        assert_eq!(
+            OpaqueValue::new(&active, &registry, STD_JSON_VALUE_TYPE_ID, payload),
+            Err(OpaqueValueError::InvalidJsonBody {
+                opaque_type: STD_JSON_VALUE_TYPE_ID,
+            })
+        );
+    }
+
+    #[test]
     fn inspect_carrier_registry_is_fixed_and_deterministic() {
         let expected = [
             (
