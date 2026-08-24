@@ -7,10 +7,11 @@ mod support;
 mod postgres_test_support;
 
 use orna_compiler::{
-    check, prepare, STD_INVOKE_ECHO_FUNCTION_ID, STD_INVOKE_ECHO_FUNCTION_REVISION_ID,
-    STD_INVOKE_ECHO_PARAMETER_ID,
+    STD_INVOKE_ECHO_FUNCTION_ID, STD_INVOKE_ECHO_FUNCTION_REVISION_ID,
+    STD_INVOKE_ECHO_PARAMETER_ID, check, prepare,
 };
 use orna_core::{
+    InvocationId, PrincipalId, StandardLibraryRevisionId,
     invocation::{
         InvocationArgument, InvocationCallerContext, InvocationCallerKind, InvocationClientOffer,
         InvocationParameterSelector, InvocationTarget as InvocationRequestTarget,
@@ -23,12 +24,11 @@ use orna_core::{
     },
     source::{SourceBundle, SourceUnit},
     value::RuntimeValue,
-    InvocationId, PrincipalId, StandardLibraryRevisionId,
 };
 use orna_postgres::{PostgresKernel, PostgresKernelError, SealedInvocationResult};
 use orna_protocol::encode_invoke_request;
 use orna_standard::registered_opaque_codecs;
-use postgres_test_support::{failure, with_test_database, TestDatabase, TestResult};
+use postgres_test_support::{TestDatabase, TestResult, failure, with_test_database};
 
 const PROOF_USER: PrincipalId = PrincipalId::from_bytes([0x71; 16]);
 const PROOF_ROLE: PrincipalId = PrincipalId::from_bytes([0x72; 16]);

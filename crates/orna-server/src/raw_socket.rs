@@ -28,10 +28,10 @@ use orna_core::{
     InvocationId,
     catalogue::CatalogueSnapshot,
     invocation::{
-        InvocationEventBody, InvocationFailure, InvocationFailurePhase, InvocationRetryability,
-        InvokeEvent,
+        InvocationEventBody, InvocationEventKind, InvocationFailure, InvocationFailurePhase,
+        InvocationRetryability, InvokeEvent,
     },
-    revision::ActiveDatabaseRevision,
+    revision::{ActiveDatabaseRevision, RevisionPair},
     security::AuthenticatedSession,
     value::OpaqueCodecRegistry,
 };
@@ -1066,11 +1066,34 @@ fn dispatch_completion_has_claimed_terminal(completion: &DispatchCompletion) -> 
     let mut terminal = false;
     for action in &completion.actions {
         match action {
-            ServerAction::Completed { .. } | ServerAction::Failed { .. } => terminal = true,
+            // A clean completion and expected raw-call failures remain
+            // replaceable until their terminal frame is delivered. Only an
+            // operational failure is protected by the raw-call boundary.
+            ServerAction::Failed {
+                failure: CallFailure::InternalFailure,
+                ..
+            } => terminal = true,
+            // A sealed invocation terminal Event is already the result of its
+            // protected commit. It must not be replaced by a queued cancel,
+            // even though its unwindowed CALL_COMPLETED frame is still queued.
+            ServerAction::InvokeEvents { events, .. }
+                if events.records().iter().any(|record| {
+                    matches!(
+                        record.event().kind(),
+                        InvocationEventKind::InvocationCompleted
+                            | InvocationEventKind::InvocationFailed
+                            | InvocationEventKind::InvocationCancelled
+                    )
+                }) =>
+            {
+                terminal = true
+            }
             ServerAction::Cancelled { .. } | ServerAction::InvokeCancelled { .. } => return false,
             ServerAction::Accepted { .. }
             | ServerAction::Events { .. }
-            | ServerAction::InvokeEvents { .. } => {}
+            | ServerAction::InvokeEvents { .. }
+            | ServerAction::Completed { .. }
+            | ServerAction::Failed { .. } => {}
         }
     }
     terminal
@@ -1098,7 +1121,16 @@ fn merge_dispatch_completion(
             existing.worker_completed = true;
             if completion.terminal_claimed && !existing.terminal_delivered {
                 existing.terminal_claimed = true;
-                existing.actions = completion.actions;
+                let started = existing
+                    .start_gate
+                    .is_some()
+                    .then(|| existing.actions.front().cloned())
+                    .flatten();
+                existing.actions.clear();
+                if let Some(started) = started {
+                    existing.actions.push_back(started);
+                }
+                existing.actions.extend(completion.actions);
                 existing.cancellation = completion.cancellation;
                 if existing._guards.is_none() {
                     existing._guards = completion._guards;
@@ -1115,7 +1147,10 @@ fn merge_dispatch_completion(
         }
         existing.worker_completed = true;
         existing.terminal_claimed |= completion.terminal_claimed;
-        if cancellation_requested || cancelled.remove(&stream_id) {
+        let cancelled_before_completion = cancelled.remove(&stream_id);
+        if !completion.terminal_claimed
+            && (cancellation_requested || cancelled_before_completion)
+        {
             queue_cancellation_actions(existing, stream_id);
             return;
         }
@@ -1132,7 +1167,7 @@ fn merge_dispatch_completion(
         // If it is gone, its cancellation terminal has already been sent.
         return;
     }
-    if cancelled.remove(&stream_id) {
+    if cancelled.remove(&stream_id) && !completion.terminal_claimed {
         completion.actions = cancellation_actions(stream_id, completion.cancellation.clone());
     }
     pending.insert(stream_id, completion);
@@ -1575,6 +1610,7 @@ impl DispatchService for RawDispatchService {
                         orna_protocol::ResourceFailed {
                             stream_id,
                             request_id,
+                            target_revision: request.target_revision,
                             failure,
                         },
                     )]),
@@ -1612,6 +1648,7 @@ fn resource_completion_actions(
         }) => VecDeque::from([ResourceServerFrame::Failed(orna_protocol::ResourceFailed {
             stream_id,
             request_id,
+            target_revision: request.target_revision,
             failure,
         })]),
         Ok(orna_postgres::AuthenticatedServerResourceResult::Completed {
@@ -1639,6 +1676,7 @@ fn resource_completion_actions(
                 actions.push_back(ResourceServerFrame::Values(orna_protocol::ResourceValues {
                     stream_id,
                     request_id,
+                    target_revision,
                     batch_sequence,
                     item_count: 1,
                     byte_count: match resource_value_byte_count(version, &value) {
@@ -1660,6 +1698,7 @@ fn resource_completion_actions(
                 orna_protocol::ResourceCompleted {
                     stream_id,
                     request_id,
+                    target_revision,
                     final_batch_sequence,
                     total_items: actions
                         .iter()
@@ -1725,6 +1764,7 @@ fn resource_event_completion(
         actions: VecDeque::from([ResourceServerFrame::Failed(orna_protocol::ResourceFailed {
             stream_id: accepted.stream_id,
             request_id: accepted.request_id,
+            target_revision: accepted.target_revision,
             failure: CallFailure::InternalFailure,
         })]),
         producer: Some(producer),
@@ -1751,6 +1791,7 @@ fn resource_event_completion(
                     orna_protocol::ResourceValues {
                         stream_id: accepted.stream_id,
                         request_id: accepted.request_id,
+                        target_revision: accepted.target_revision,
                         batch_sequence,
                         item_count,
                         byte_count,
@@ -1770,6 +1811,7 @@ fn resource_event_completion(
                 orna_protocol::ResourceCompleted {
                     stream_id: accepted.stream_id,
                     request_id: accepted.request_id,
+                    target_revision: accepted.target_revision,
                     final_batch_sequence,
                     total_items,
                 },
@@ -1783,6 +1825,7 @@ fn resource_event_completion(
                     orna_protocol::ResourceFailed {
                         stream_id: accepted.stream_id,
                         request_id: accepted.request_id,
+                        target_revision: accepted.target_revision,
                         failure: reason,
                     },
                 )]),
@@ -1795,6 +1838,7 @@ fn resource_event_completion(
                 orna_protocol::ResourceCancelled {
                     stream_id: accepted.stream_id,
                     request_id: accepted.request_id,
+                    target_revision: accepted.target_revision,
                     reason: orna_protocol::ResourceCancellationCode::ServerRequested,
                 },
             )]),
@@ -1950,6 +1994,7 @@ fn resource_internal_failure(request: &ResourceRequest) -> VecDeque<ResourceServ
     VecDeque::from([ResourceServerFrame::Failed(orna_protocol::ResourceFailed {
         stream_id: request.stream_id,
         request_id: request.request_id,
+        target_revision: request.target_revision,
         failure: CallFailure::InternalFailure,
     })])
 }
@@ -2027,7 +2072,8 @@ async fn drive_versioned_authenticated_stream_until_shutdown<D: DispatchService>
     let mut cancelled = BTreeSet::<u64>::new();
     let mut cancelled_pending = BTreeSet::<u64>::new();
     let mut pending = BTreeMap::<u64, DispatchCompletion>::new();
-    let mut resource_cancelled = BTreeMap::<u64, orna_protocol::ResourceCancel>::new();
+    let mut resource_cancelled =
+        BTreeMap::<u64, (orna_protocol::ResourceCancel, RevisionPair)>::new();
     let mut resource_pending = BTreeMap::<u64, ResourceDispatchCompletion>::new();
     let mut resource_tasks = BTreeMap::<u64, ResourceTask>::new();
     let mut resource_requests = BTreeMap::<u64, ResourceRequest>::new();
@@ -2342,7 +2388,7 @@ async fn drive_versioned_authenticated_stream_until_shutdown<D: DispatchService>
 fn drain_resource_completions(
     completion_receiver: &mut mpsc::Receiver<(u64, ResourceDispatchCompletion)>,
     pending: &mut BTreeMap<u64, ResourceDispatchCompletion>,
-    cancelled: &mut BTreeMap<u64, orna_protocol::ResourceCancel>,
+    cancelled: &mut BTreeMap<u64, (orna_protocol::ResourceCancel, RevisionPair)>,
     tasks: &mut BTreeMap<u64, ResourceTask>,
 ) -> BTreeSet<u64> {
     let mut completed = BTreeSet::new();
@@ -2361,17 +2407,17 @@ fn store_resource_completion(
     stream_id: u64,
     mut completion: ResourceDispatchCompletion,
     pending: &mut BTreeMap<u64, ResourceDispatchCompletion>,
-    cancelled: &mut BTreeMap<u64, orna_protocol::ResourceCancel>,
+    cancelled: &mut BTreeMap<u64, (orna_protocol::ResourceCancel, RevisionPair)>,
 ) -> bool {
     let mut producer = completion.producer.take();
-    if let Some(cancel) = cancelled.remove(&stream_id) {
+    if let Some((cancel, target_revision)) = cancelled.remove(&stream_id) {
         let pending_is_terminal = pending
             .get(&stream_id)
             .is_some_and(|completion| completion.actions.iter().any(resource_action_is_terminal));
         if !pending_is_terminal {
             pending.insert(
                 stream_id,
-                cancelled_resource_completion(cancel, producer.take()),
+                cancelled_resource_completion(cancel, target_revision, producer.take()),
             );
             return true;
         }
@@ -2387,6 +2433,7 @@ fn store_resource_completion(
 
 fn cancelled_resource_completion(
     cancel: orna_protocol::ResourceCancel,
+    target_revision: RevisionPair,
     producer: Option<AuthenticatedServerResourceProducer>,
 ) -> ResourceDispatchCompletion {
     ResourceDispatchCompletion {
@@ -2394,6 +2441,7 @@ fn cancelled_resource_completion(
             orna_protocol::ResourceCancelled {
                 stream_id: cancel.stream_id,
                 request_id: cancel.request_id,
+                target_revision,
                 reason: cancel.reason,
             },
         )]),
@@ -2431,7 +2479,7 @@ async fn handle_resource_frame<D: DispatchService>(
     resources: &LocalRawSocketResources,
     connection: &mut ResourceProtocolConnection,
     pending: &mut BTreeMap<u64, ResourceDispatchCompletion>,
-    cancelled: &mut BTreeMap<u64, orna_protocol::ResourceCancel>,
+    cancelled: &mut BTreeMap<u64, (orna_protocol::ResourceCancel, RevisionPair)>,
     tasks: &mut BTreeMap<u64, ResourceTask>,
     producer_shutdown: &mut JoinSet<()>,
     requests: &mut BTreeMap<u64, ResourceRequest>,
@@ -2573,14 +2621,30 @@ async fn handle_resource_frame<D: DispatchService>(
         if tasks.get(&cancel.stream_id).is_some_and(|task| task.active) {
             // Let the late completion consume this marker and synthesize the
             // cancellation response exactly once.
-            cancelled.insert(cancel.stream_id, cancel);
+            cancelled.insert(
+                cancel.stream_id,
+                (
+                    cancel,
+                    requests
+                        .get(&cancel.stream_id)
+                        .expect("cancelled resource request retained")
+                        .target_revision,
+                ),
+            );
         } else {
             // The completion was already drained before cancellation won, so
             // there is no later producer event that needs a marker. Keep the
             // task guards until the terminal cancellation frame is flushed.
             pending.insert(
                 cancel.stream_id,
-                cancelled_resource_completion(cancel, None),
+                cancelled_resource_completion(
+                    cancel,
+                    requests
+                        .get(&cancel.stream_id)
+                        .expect("cancelled resource request retained")
+                        .target_revision,
+                    None,
+                ),
             );
         }
     }
@@ -2971,7 +3035,25 @@ async fn flush_pending(
                 ServerAction::Completed { .. }
                     | ServerAction::Failed { .. }
                     | ServerAction::Cancelled { .. }
+                    | ServerAction::InvokeCancelled { .. }
+            ) || matches!(
+                &action,
+                ServerAction::InvokeEvents { events, .. }
+                    if events.records().iter().any(|record| {
+                        matches!(
+                            record.event().kind(),
+                            InvocationEventKind::InvocationCompleted
+                                | InvocationEventKind::InvocationFailed
+                                | InvocationEventKind::InvocationCancelled
+                        )
+                    })
             );
+            let worker_completed = pending
+                .get(&stream_id)
+                .is_some_and(|completion| completion.worker_completed);
+            if terminal_action && !worker_completed {
+                break;
+            }
             let frame = match version.apply(connection, action) {
                 Ok(frame) => frame,
                 Err(ConnectionError::InsufficientCredit { .. }) => break,
@@ -3448,6 +3530,7 @@ mod tests {
             .apply(ResourceServerFrame::Values(orna_protocol::ResourceValues {
                 stream_id: scalar.stream_id,
                 request_id: scalar.request_id,
+                target_revision: request.target_revision,
                 batch_sequence: 0,
                 item_count: 1,
                 byte_count: 1,
@@ -3562,6 +3645,7 @@ mod tests {
             ResourceServerFrame::Values(orna_protocol::ResourceValues {
                 stream_id: request.stream_id,
                 request_id: request.request_id,
+                target_revision: request.target_revision,
                 batch_sequence: 0,
                 item_count: 1,
                 byte_count: 0,
@@ -3618,6 +3702,7 @@ mod tests {
             actions.push_back(ResourceServerFrame::Values(orna_protocol::ResourceValues {
                 stream_id: request.stream_id,
                 request_id: request.request_id,
+                target_revision: request.target_revision,
                 batch_sequence: batch_sequence as u64,
                 item_count: 1,
                 byte_count: resource_value_byte_count(version, &value)
@@ -3629,6 +3714,7 @@ mod tests {
             orna_protocol::ResourceCompleted {
                 stream_id: request.stream_id,
                 request_id: request.request_id,
+                target_revision: request.target_revision,
                 final_batch_sequence,
                 total_items,
             },
@@ -5406,8 +5492,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn queued_terminal_completion_is_not_replaced_by_cancel() {
-        let dispatcher = TestDispatch::new(vec![ServerAction::Completed { stream: 1 }]);
+    async fn queued_value_and_completion_are_replaced_by_cancel_without_credit() {
+        let dispatcher = TestDispatch::new(vec![
+            ServerAction::Events {
+                stream: 1,
+                events: vec![Event::Value(RuntimeValue::Boolean(true))],
+            },
+            ServerAction::Completed { stream: 1 },
+        ]);
         let version = RawProtocolVersion::One;
         let mut connection = ProtocolConnection::new();
         assert!(
@@ -5441,7 +5533,7 @@ mod tests {
             )
             .expect("accepted frame applies");
 
-        let (server, _client) = UnixStream::pair().expect("socket pair");
+        let (server, mut client) = UnixStream::pair().expect("socket pair");
         let (_reader, mut writer) = server.into_split();
         let mut pending = BTreeMap::from([(
             1,
@@ -5460,7 +5552,13 @@ mod tests {
         merge_dispatch_completion(
             1,
             DispatchCompletion {
-                actions: VecDeque::from([ServerAction::Completed { stream: 1 }]),
+                actions: VecDeque::from([
+                    ServerAction::Events {
+                        stream: 1,
+                        events: vec![Event::Value(RuntimeValue::Boolean(true))],
+                    },
+                    ServerAction::Completed { stream: 1 },
+                ]),
                 cancellation: ServerAction::Cancelled { stream: 1 },
                 cancellation_token: None,
                 start_gate: None,
@@ -5474,7 +5572,7 @@ mod tests {
             &mut BTreeSet::new(),
             &mut BTreeSet::new(),
         );
-        assert!(pending.get(&1).expect("merged completion").terminal_claimed);
+        assert!(!pending.get(&1).expect("merged completion").terminal_claimed);
         let mut retained_payload = BTreeMap::new();
         let mut cancelled = BTreeSet::new();
         let mut cancelled_pending = BTreeSet::new();
@@ -5506,9 +5604,316 @@ mod tests {
         );
         assert_eq!(
             pending.get(&1).expect("pending completion remains").actions,
-            VecDeque::from([ServerAction::Completed { stream: 1 }]),
+            VecDeque::from([ServerAction::Cancelled { stream: 1 }]),
         );
-        assert!(!dispatcher.cancelled.load(Ordering::SeqCst));
+        assert!(dispatcher.cancelled.load(Ordering::SeqCst));
+
+        assert!(
+            flush_pending(
+                &version,
+                &mut connection,
+                &mut pending,
+                &mut writer,
+                &mut shutdown,
+            )
+            .await
+            .expect("cancelled completion flushes")
+        );
+        assert_eq!(
+            read_server_frame(&mut client).await,
+            ServerFrame::CallCancelled { stream: 1 }
+        );
+        assert!(
+            timeout(Duration::from_millis(25), read_server_frame(&mut client))
+                .await
+                .is_err(),
+            "queued value or completion escaped cancellation"
+        );
+    }
+    #[test]
+    fn pre_start_internal_failure_wins_over_cancel_marker() {
+        let mut pending = BTreeMap::new();
+        let mut cancelled = BTreeSet::from([1]);
+
+        merge_dispatch_completion(
+            1,
+            DispatchCompletion {
+                actions: VecDeque::from([ServerAction::Failed {
+                    stream: 1,
+                    failure: CallFailure::InternalFailure,
+                }]),
+                cancellation: ServerAction::Cancelled { stream: 1 },
+                cancellation_token: None,
+                start_gate: None,
+                start_delivered: false,
+                terminal_delivered: false,
+                terminal_claimed: false,
+                worker_completed: false,
+                _guards: None,
+            },
+            &mut pending,
+            &mut cancelled,
+            &mut BTreeSet::new(),
+        );
+
+        let completion = pending.get(&1).expect("pre-start completion remains");
+        assert_eq!(
+            completion.actions,
+            VecDeque::from([ServerAction::Failed {
+                stream: 1,
+                failure: CallFailure::InternalFailure,
+            }]),
+        );
+        assert!(completion.terminal_claimed);
+        assert!(cancelled.is_empty());
+    }
+
+    #[test]
+    fn pre_start_invoke_terminal_keeps_started_event_before_result() {
+        let invocation = InvocationId::from_bytes([0x43; 16]);
+        let started = InvokeEvent::new(
+            invocation,
+            0,
+            InvocationEventBody::Started {
+                visible_principal: None,
+            },
+        )
+        .expect("started invocation event");
+        let started_events = InvocationEventBatch::new(vec![InvocationEventRecord::new(
+            1, started,
+        )])
+        .expect("started invocation event batch");
+        let terminal = InvokeEvent::new(
+            invocation,
+            1,
+            InvocationEventBody::Completed {
+                duration_nanoseconds: 1,
+            },
+        )
+        .expect("terminal invocation event");
+        let terminal_events = InvocationEventBatch::new(vec![InvocationEventRecord::new(
+            1, terminal,
+        )])
+        .expect("terminal invocation event batch");
+        let (start_gate, _start_receiver) = oneshot::channel();
+        let mut pending = BTreeMap::from([(
+            1,
+            DispatchCompletion {
+                actions: VecDeque::from([ServerAction::InvokeEvents {
+                    stream: 1,
+                    events: started_events,
+                }]),
+                cancellation: ServerAction::InvokeCancelled { stream: 1 },
+                cancellation_token: None,
+                start_gate: Some(start_gate),
+                start_delivered: false,
+                terminal_delivered: false,
+                terminal_claimed: false,
+                worker_completed: false,
+                _guards: None,
+            },
+        )]);
+        queue_cancellation_actions(pending.get_mut(&1).expect("pending invocation"), 1);
+        let mut cancelled_pending = BTreeSet::from([1]);
+
+        merge_dispatch_completion(
+            1,
+            DispatchCompletion {
+                actions: VecDeque::from([
+                    ServerAction::InvokeEvents {
+                        stream: 1,
+                        events: terminal_events,
+                    },
+                    ServerAction::Completed { stream: 1 },
+                ]),
+                cancellation: ServerAction::InvokeCancelled { stream: 1 },
+                cancellation_token: None,
+                start_gate: None,
+                start_delivered: false,
+                terminal_delivered: false,
+                terminal_claimed: false,
+                worker_completed: false,
+                _guards: None,
+            },
+            &mut pending,
+            &mut BTreeSet::new(),
+            &mut cancelled_pending,
+        );
+
+        let completion = pending.get(&1).expect("pending invocation remains");
+        assert_eq!(completion.actions.len(), 3);
+        assert!(matches!(
+            completion.actions.front(),
+            Some(ServerAction::InvokeEvents { events, .. })
+                if events.records()[0].event().kind() == InvocationEventKind::InvocationStarted
+        ));
+        assert!(matches!(
+            completion.actions.get(1),
+            Some(ServerAction::InvokeEvents { events, .. })
+                if events.records()[0].event().kind() == InvocationEventKind::InvocationCompleted
+        ));
+        assert!(matches!(
+            completion.actions.get(2),
+            Some(ServerAction::Completed { stream: 1 })
+        ));
+        assert!(completion.terminal_claimed);
+        assert!(cancelled_pending.is_empty());
+    }
+
+    #[tokio::test]
+    async fn sealed_cancel_terminal_waits_for_worker_completion() {
+        let version = RawProtocolVersion::One;
+        let mut connection = ProtocolConnection::new();
+        let mut pending = BTreeMap::from([(
+            1,
+            DispatchCompletion {
+                actions: VecDeque::from([ServerAction::InvokeCancelled { stream: 1 }]),
+                cancellation: ServerAction::InvokeCancelled { stream: 1 },
+                cancellation_token: None,
+                start_gate: None,
+                start_delivered: true,
+                terminal_delivered: false,
+                terminal_claimed: false,
+                worker_completed: false,
+                _guards: None,
+            },
+        )]);
+        let (server, _client) = UnixStream::pair().expect("socket pair");
+        let (_reader, mut writer) = server.into_split();
+        let (_shutdown_sender, mut shutdown) = watch::channel(false);
+
+        assert!(
+            flush_pending(
+                &version,
+                &mut connection,
+                &mut pending,
+                &mut writer,
+                &mut shutdown,
+            )
+            .await
+            .expect("pending cancellation flushes without an error")
+        );
+
+        let completion = pending.get(&1).expect("cancellation remains queued");
+        assert!(matches!(
+            completion.actions.front(),
+            Some(ServerAction::InvokeCancelled { stream: 1 })
+        ));
+        assert!(!completion.worker_completed);
+        assert!(!completion.terminal_delivered);
+    }
+
+    #[test]
+    fn queued_internal_failure_is_not_replaced_by_cancel() {
+        let mut pending = BTreeMap::from([(
+            1,
+            DispatchCompletion {
+                actions: VecDeque::new(),
+                cancellation: ServerAction::Cancelled { stream: 1 },
+                cancellation_token: None,
+                start_gate: None,
+                start_delivered: true,
+                terminal_delivered: false,
+                terminal_claimed: false,
+                worker_completed: false,
+                _guards: None,
+            },
+        )]);
+        let mut cancelled = BTreeSet::new();
+        let mut cancelled_pending = BTreeSet::from([1]);
+
+        merge_dispatch_completion(
+            1,
+            DispatchCompletion {
+                actions: VecDeque::from([ServerAction::Failed {
+                    stream: 1,
+                    failure: CallFailure::InternalFailure,
+                }]),
+                cancellation: ServerAction::Cancelled { stream: 1 },
+                cancellation_token: None,
+                start_gate: None,
+                start_delivered: true,
+                terminal_delivered: false,
+                terminal_claimed: false,
+                worker_completed: false,
+                _guards: None,
+            },
+            &mut pending,
+            &mut cancelled,
+            &mut cancelled_pending,
+        );
+
+        let completion = pending.get(&1).expect("pending completion remains");
+        assert_eq!(
+            completion.actions,
+            VecDeque::from([ServerAction::Failed {
+                stream: 1,
+                failure: CallFailure::InternalFailure,
+            }]),
+        );
+        assert!(completion.terminal_claimed);
+        assert!(cancelled_pending.is_empty());
+    }
+
+    #[test]
+    fn queued_terminal_invoke_events_are_not_replaced_by_cancel() {
+        let invocation = InvocationId::from_bytes([0x42; 16]);
+        let event = InvokeEvent::new(
+            invocation,
+            2,
+            InvocationEventBody::Completed {
+                duration_nanoseconds: 1,
+            },
+        )
+        .expect("terminal invocation event");
+        let events = InvocationEventBatch::new(vec![InvocationEventRecord::new(1, event)])
+            .expect("terminal invocation event batch");
+        let mut pending = BTreeMap::from([(
+            1,
+            DispatchCompletion {
+                actions: VecDeque::new(),
+                cancellation: ServerAction::InvokeCancelled { stream: 1 },
+                cancellation_token: None,
+                start_gate: None,
+                start_delivered: true,
+                terminal_delivered: false,
+                terminal_claimed: false,
+                worker_completed: false,
+                _guards: None,
+            },
+        )]);
+        let mut cancelled = BTreeSet::new();
+        let mut cancelled_pending = BTreeSet::from([1]);
+
+        merge_dispatch_completion(
+            1,
+            DispatchCompletion {
+                actions: VecDeque::from([
+                    ServerAction::InvokeEvents { stream: 1, events },
+                    ServerAction::Completed { stream: 1 },
+                ]),
+                cancellation: ServerAction::InvokeCancelled { stream: 1 },
+                cancellation_token: None,
+                start_gate: None,
+                start_delivered: true,
+                terminal_delivered: false,
+                terminal_claimed: false,
+                worker_completed: false,
+                _guards: None,
+            },
+            &mut pending,
+            &mut cancelled,
+            &mut cancelled_pending,
+        );
+
+        let completion = pending.get(&1).expect("pending completion remains");
+        assert!(matches!(
+            completion.actions.front(),
+            Some(ServerAction::InvokeEvents { .. })
+        ));
+        assert!(completion.terminal_claimed);
+        assert!(cancelled_pending.is_empty());
+        assert!(cancelled.is_empty());
     }
 
     #[tokio::test]
