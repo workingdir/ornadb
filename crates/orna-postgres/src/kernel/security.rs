@@ -9065,6 +9065,59 @@ mod tests {
     const RAW_CALL_PARAMETER: ParameterId = ParameterId::from_bytes([0x62; 16]);
 
     #[test]
+    fn principal_kind_decoder_round_trips_closed_vocabulary() {
+        for (expected, stored) in [
+            (PrincipalKind::User, "user"),
+            (PrincipalKind::Role, "role"),
+            (PrincipalKind::Service, "service"),
+        ] {
+            assert_eq!(encode_principal_kind(expected), stored);
+            assert_eq!(
+                decode_principal_kind(stored.to_owned())
+                    .expect("closed principal kind must decode"),
+                expected
+            );
+        }
+
+        for stored in ["other", "User", "ROLE", "Service"] {
+            assert!(matches!(
+                decode_principal_kind(stored.to_owned()),
+                Err(PostgresKernelError::DurableInvariant {
+                    relation: "_orna_kernel.security_principals",
+                    ref record,
+                    rule: "principal kind must be user, role, or service",
+                }) if record == stored
+            ));
+        }
+    }
+
+    #[test]
+    fn principal_status_decoder_round_trips_closed_vocabulary() {
+        for (expected, stored) in [
+            (PrincipalStatus::Active, "active"),
+            (PrincipalStatus::Disabled, "disabled"),
+        ] {
+            assert_eq!(encode_principal_status(expected), stored);
+            assert_eq!(
+                decode_principal_status(stored.to_owned())
+                    .expect("closed principal status must decode"),
+                expected
+            );
+        }
+
+        for stored in ["other", "Active", "DISABLED"] {
+            assert!(matches!(
+                decode_principal_status(stored.to_owned()),
+                Err(PostgresKernelError::DurableInvariant {
+                    relation: "_orna_kernel.security_principals",
+                    ref record,
+                    rule: "principal status must be active or disabled",
+                }) if record == stored
+            ));
+        }
+    }
+
+    #[test]
     fn resource_target_shape_matches_protocol_kind() {
         use orna_core::{
             catalogue::{
