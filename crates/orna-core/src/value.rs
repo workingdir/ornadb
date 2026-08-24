@@ -7110,7 +7110,7 @@ mod tests {
             br#"{"children":[{"kind":"not-a-ui-kind"}],"kind":"fragment"}"#.as_slice(),
         ] {
             assert_eq!(
-                OpaqueValue::new(&active, &registry, UI_TYPE, &frame(body)),
+                OpaqueValue::new(&active, &registry, UI_TYPE, frame(body)),
                 Err(OpaqueValueError::InvalidJsonBody { opaque_type: UI_TYPE })
             );
         }
@@ -7119,7 +7119,7 @@ mod tests {
             deep = serde_json::json!({"children": [deep], "kind": "fragment"});
         }
         let deep_body = serde_json::to_vec(&deep).unwrap();
-        let deep_value = OpaqueValue::new(&active, &registry, UI_TYPE, &frame(&deep_body))
+        let deep_value = OpaqueValue::new(&active, &registry, UI_TYPE, frame(&deep_body))
             .expect("schema-valid UI values do not have an arbitrary depth limit");
         assert_eq!(deep_value.canonical_payload(), frame(&deep_body));
     }
