@@ -75,17 +75,17 @@ use orna_core::{
     },
     security::{
         CATALOGUE_HEALTH_SERVICE_PRINCIPAL_ID, ExecuteDecision, ExecuteDenial, ExecuteGrant,
-        InvocationTarget, Principal, PrincipalKind,
-        PrincipalStatus, PrivilegeClass, PrivilegeDecision, PrivilegeDenial, PrivilegeGrant,
-        RoleMembership, SecurityAdminAuditOperation, SecurityAuditKind, SecurityAuditOutcome,
+        InvocationTarget, Principal, PrincipalKind, PrincipalStatus, PrivilegeClass,
+        PrivilegeDecision, PrivilegeDenial, PrivilegeGrant, RoleMembership,
+        SecurityAdminAuditOperation, SecurityAuditKind, SecurityAuditOutcome,
         SecurityFunctionTarget, SecuritySnapshot, UserStateAuditOperation,
     },
+    state::{UserStateChange, UserStateWriteOutcome},
     system::{
         SYS_SECURITY_ACTIVE_ROLES_FUNCTION_ID, SYS_SECURITY_CREATE_PRINCIPAL_FUNCTION_ID,
         SYS_SECURITY_EFFECTIVE_PRINCIPAL_FUNCTION_ID, SYS_SECURITY_PRINCIPAL_TYPE_ID,
         SYS_SECURITY_SESSION_PRINCIPAL_FUNCTION_ID,
     },
-    state::{UserStateChange, UserStateWriteOutcome},
 };
 use orna_postgres::{PostgresKernel, PostgresKernelError, SealedInvocationResult};
 use orna_protocol::{
@@ -118,6 +118,9 @@ const BASIC_SOURCE_ONLY_EDIT: &str = "-- source-only formatting edit\n\
     CREATE TYPE app.widget AS OBJECT ( name TEXT NOT NULL, active BOOL NOT NULL );\n\
     CREATE SERVER FUNCTION app.list_widgets() RETURNS ROWS (name TEXT)\n\
     AS SELECT widget.name FROM app.widget widget WHERE widget.active = FALSE;\n";
+
+const BASIC_SOURCE_WITHOUT_FUNCTION: &str = "CREATE SCHEMA app;\n\
+    CREATE TYPE app.widget AS OBJECT (name TEXT NOT NULL, active BOOL NOT NULL);\n";
 
 const BASIC_CHANGED_SOURCE: &str = "CREATE SCHEMA app;\n\
     CREATE TYPE app.widget AS OBJECT (name TEXT NOT NULL, active BOOL NOT NULL);\n\
@@ -306,6 +309,331 @@ async fn applies_source_apply_and_records_one_protected_audit_event() -> TestRes
 
 #[tokio::test]
 #[ignore = "requires the Compose PostgreSQL development service"]
+async fn source_apply_rejects_removing_durable_execute_grant_target() -> TestResult<()> {
+    const GRANTEE: PrincipalId = PrincipalId::from_bytes([0x71; 16]);
+
+    with_test_database(|database| async move {
+        let kernel = kernel(&database)?;
+        kernel.bootstrap().await?;
+        let empty = kernel.recover().await?;
+        let initial_candidate = candidate(BASIC_SOURCE, &empty)?;
+        let active = kernel.apply(&initial_candidate).await?;
+        let function = active
+            .catalogue()
+            .functions()
+            .iter()
+            .find(|definition| definition.name().parts() == ["app", "list_widgets"])
+            .ok_or_else(|| failure("execute-grant fixture omitted app.list_widgets"))?
+            .id();
+        let grant = ExecuteGrant::new(GRANTEE, function);
+        let security = SecuritySnapshot::new_with_function_targets_local_peer_credentials_and_privilege_grants(
+            active.pair(),
+            vec![SecurityFunctionTarget::application(function)],
+            vec![Principal::new(GRANTEE, PrincipalKind::User, PrincipalStatus::Active)],
+            vec![],
+            vec![grant],
+            vec![],
+            vec![],
+        )?;
+        kernel.replace_security_snapshot(&security).await?;
+
+        let omission = candidate(BASIC_SOURCE_WITHOUT_FUNCTION, &active)?;
+        let error = kernel
+            .apply_source_apply(&omission)
+            .await
+            .expect_err("source apply must reject removal of a durable EXECUTE target");
+        require(
+            matches!(
+                error,
+                PostgresKernelError::DurableInvariant {
+                    relation: "_orna_kernel.security_execute_grants",
+                    rule: "candidate source must retain every durable EXECUTE grant target",
+                    ..
+                }
+            ),
+            "source apply returned the wrong durable EXECUTE target rejection",
+        )?;
+
+        let recovered = kernel.recover().await?;
+        require(
+            same_recovered(&active, &recovered),
+            "rejected source apply changed the active revision",
+        )?;
+        let recovered_security = kernel.recover_security_snapshot().await?;
+        require(
+            recovered_security.execute_grants().collect::<Vec<_>>() == [grant]
+                && recovered_security.privilege_grants().next().is_none(),
+            "rejected source apply changed the durable EXECUTE grant state",
+        )?;
+        require_no_candidate_residue(&database, &omission, &active).await
+    })
+    .await
+}
+
+#[tokio::test]
+#[ignore = "requires the Compose PostgreSQL development service"]
+async fn source_apply_rejects_removing_durable_privilege_grant_object_target() -> TestResult<()> {
+    const GRANTEE: PrincipalId = PrincipalId::from_bytes([0x72; 16]);
+
+    with_test_database(|database| async move {
+        let kernel = kernel(&database)?;
+        kernel.bootstrap().await?;
+        let empty = kernel.recover().await?;
+        let initial_candidate = candidate(BASIC_SOURCE, &empty)?;
+        let active = kernel.apply(&initial_candidate).await?;
+        let function = active
+            .catalogue()
+            .functions()
+            .iter()
+            .find(|definition| definition.name().parts() == ["app", "list_widgets"])
+            .ok_or_else(|| failure("privilege-grant fixture omitted app.list_widgets"))?
+            .id();
+        let grant = PrivilegeGrant::new(GRANTEE, PrivilegeClass::Execute, Some(function))?;
+        let security = SecuritySnapshot::new_with_function_targets_local_peer_credentials_and_privilege_grants(
+            active.pair(),
+            vec![SecurityFunctionTarget::application(function)],
+            vec![Principal::new(GRANTEE, PrincipalKind::User, PrincipalStatus::Active)],
+            vec![],
+            vec![],
+            vec![],
+            vec![grant],
+        )?;
+        kernel.replace_security_snapshot(&security).await?;
+
+        let omission = candidate(BASIC_SOURCE_WITHOUT_FUNCTION, &active)?;
+        let error = kernel
+            .apply_source_apply(&omission)
+            .await
+            .expect_err("source apply must reject removal of a durable privilege object target");
+        require(
+            matches!(
+                error,
+                PostgresKernelError::DurableInvariant {
+                    relation: "_orna_kernel.security_privilege_grants",
+                    rule: "candidate source must retain every durable privilege grant object target",
+                    ..
+                }
+            ),
+            "source apply returned the wrong durable privilege target rejection",
+        )?;
+
+        let recovered = kernel.recover().await?;
+        require(
+            same_recovered(&active, &recovered),
+            "rejected source apply changed the active revision",
+        )?;
+        let recovered_security = kernel.recover_security_snapshot().await?;
+        require(
+            recovered_security.execute_grants().next().is_none()
+                && recovered_security.privilege_grants().collect::<Vec<_>>() == [grant],
+            "rejected source apply changed the durable privilege grant state",
+        )?;
+        require_no_candidate_residue(&database, &omission, &active).await
+    })
+    .await
+}
+
+#[tokio::test]
+#[cfg(feature = "test-hooks")]
+#[ignore = "requires the Compose PostgreSQL development service"]
+async fn standard_upgrade_rejects_removing_durable_execute_grant_target() -> TestResult<()> {
+    const GRANTEE: PrincipalId = PrincipalId::from_bytes([0x73; 16]);
+
+    with_test_database(|database| async move {
+        let kernel = kernel(&database)?;
+        kernel.bootstrap().await?;
+        let empty = kernel.recover().await?;
+        let active = kernel.apply(&candidate(BASIC_SOURCE, &empty)?).await?;
+        let function = active
+            .catalogue()
+            .functions()
+            .iter()
+            .find(|definition| definition.name().parts() == ["app", "list_widgets"])
+            .ok_or_else(|| failure("standard-upgrade fixture omitted app.list_widgets"))?
+            .id();
+        let grant = ExecuteGrant::new(GRANTEE, function);
+        let security = SecuritySnapshot::new_with_function_targets_local_peer_credentials_and_privilege_grants(
+            active.pair(),
+            vec![SecurityFunctionTarget::application(function)],
+            vec![Principal::new(GRANTEE, PrincipalKind::User, PrincipalStatus::Active)],
+            vec![],
+            vec![grant],
+            vec![],
+            vec![],
+        )?;
+        kernel.replace_security_snapshot(&security).await?;
+
+        let standard = verified_empty_non_golden_standard()?;
+        let omission = standard_context_candidate(active.pair())?;
+        let error = kernel
+            .apply_test_standard_upgrade(&omission, &standard)
+            .await
+            .expect_err("standard upgrade must reject removal of a durable EXECUTE target");
+        require(
+            matches!(
+                error,
+                PostgresKernelError::DurableInvariant {
+                    relation: "_orna_kernel.security_execute_grants",
+                    rule: "candidate source must retain every durable EXECUTE grant target",
+                    ..
+                }
+            ),
+            "standard upgrade returned the wrong durable EXECUTE target rejection",
+        )?;
+
+        let recovered = kernel.recover().await?;
+        require(
+            same_recovered(&active, &recovered),
+            "rejected standard upgrade changed the active revision",
+        )?;
+        let recovered_security = kernel.recover_security_snapshot().await?;
+        require(
+            recovered_security.execute_grants().collect::<Vec<_>>() == [grant],
+            "rejected standard upgrade changed the durable EXECUTE grant state",
+        )?;
+        require_no_candidate_residue(&database, &omission, &active).await
+    })
+    .await
+}
+
+#[tokio::test]
+#[cfg(feature = "test-hooks")]
+#[ignore = "requires the Compose PostgreSQL development service"]
+async fn standard_upgrade_refreshes_grants_after_waiting_for_active_revision_lock() -> TestResult<()>
+{
+    const GRANTEE: PrincipalId = PrincipalId::from_bytes([0x74; 16]);
+
+    with_test_database(|database| async move {
+        let kernel = kernel(&database)?;
+        kernel.bootstrap().await?;
+        let empty = kernel.recover().await?;
+        let active = kernel.apply(&candidate(BASIC_SOURCE, &empty)?).await?;
+        let function = active
+            .catalogue()
+            .functions()
+            .iter()
+            .find(|definition| definition.name().parts() == ["app", "list_widgets"])
+            .ok_or_else(|| failure("standard-upgrade race fixture omitted app.list_widgets"))?
+            .id();
+        let standard = verified_empty_non_golden_standard()?;
+        let omission = standard_context_candidate(active.pair())?;
+
+        // Hold the same singleton row lock that standard upgrades acquire, then
+        // commit a durable grant while the upgrade is waiting. ReadCommitted
+        // must take the grant-validation snapshot after that wait.
+        let writer = database.open().await?;
+        writer
+            .client()
+            .batch_execute("BEGIN")
+            .await
+            .map_err(|error| failure(format!("beginning grant writer failed: {error}")))?;
+        writer
+            .client()
+            .query_one(
+                "SELECT singleton
+                 FROM _orna_kernel.active_revision
+                 WHERE singleton = true
+                 FOR UPDATE",
+                &[],
+            )
+            .await?;
+        let grantee = GRANTEE.to_bytes().to_vec();
+        let function_bytes = function.to_bytes().to_vec();
+        writer
+            .client()
+            .execute(
+                "INSERT INTO _orna_kernel.security_principals (id, kind, status)
+                 VALUES ($1, 'user', 'active')",
+                &[&grantee],
+            )
+            .await?;
+        writer
+            .client()
+            .execute(
+                "INSERT INTO _orna_kernel.security_execute_grants (grantee_id, function_id)
+                 VALUES ($1, $2)",
+                &[&grantee, &function_bytes],
+            )
+            .await?;
+
+        let upgrade_task = tokio::spawn({
+            let kernel = kernel.clone();
+            async move {
+                kernel
+                    .apply_test_standard_upgrade(&omission, &standard)
+                    .await
+            }
+        });
+
+        let observer = database.open().await?;
+        let mut waiting = false;
+        for _ in 0..500 {
+            let row = observer
+                .client()
+                .query_one(
+                    "SELECT EXISTS (
+                         SELECT 1
+                         FROM pg_catalog.pg_stat_activity
+                         WHERE datname = pg_catalog.current_database()
+                           AND pid <> pg_catalog.pg_backend_pid()
+                           AND wait_event_type = 'Lock'
+                           AND query LIKE '%_orna_kernel.active_revision%'
+                     )",
+                    &[],
+                )
+                .await?;
+            if row.get::<_, bool>(0) {
+                waiting = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        observer.shutdown().await?;
+        if !waiting {
+            upgrade_task.abort();
+            writer.client().batch_execute("ROLLBACK").await?;
+            writer.shutdown().await?;
+            return Err(failure(
+                "standard upgrade did not reach the active-revision lock wait",
+            ));
+        }
+
+        writer.client().batch_execute("COMMIT").await?;
+        writer.shutdown().await?;
+        let error = upgrade_task
+            .await
+            .map_err(|error| failure(format!("standard-upgrade task failed: {error}")))?
+            .expect_err("standard upgrade must reject a grant committed after its lock wait");
+        require(
+            matches!(
+                error,
+                PostgresKernelError::DurableInvariant {
+                    relation: "_orna_kernel.security_execute_grants",
+                    rule: "candidate source must retain every durable EXECUTE grant target",
+                    ..
+                }
+            ),
+            "standard upgrade returned the wrong post-wait durable grant rejection",
+        )?;
+
+        let recovered = kernel.recover().await?;
+        require(
+            same_recovered(&active, &recovered),
+            "rejected post-wait standard upgrade changed the active revision",
+        )?;
+        let grants = kernel.recover_security_snapshot().await?;
+        require(
+            grants
+                .execute_grants()
+                .any(|grant| grant.function() == function),
+            "committed durable EXECUTE grant disappeared after rejected upgrade",
+        )
+    })
+    .await
+}
+
+#[tokio::test]
+#[ignore = "requires the Compose PostgreSQL development service"]
 async fn lists_revision_pairs_with_parent_links_and_active_candidate() -> TestResult<()> {
     with_test_database(|database| async move {
         let kernel = kernel(&database)?;
@@ -344,7 +672,8 @@ async fn lists_revision_pairs_with_parent_links_and_active_candidate() -> TestRe
         let base_entry = entries
             .iter()
             .find(|entry| {
-                RevisionPair::new(entry.source_revision_id(), entry.catalogue_revision_id()) == base_pair
+                RevisionPair::new(entry.source_revision_id(), entry.catalogue_revision_id())
+                    == base_pair
             })
             .ok_or_else(|| failure("revision pair history did not contain the bootstrap pair"))?;
         require(
@@ -355,7 +684,8 @@ async fn lists_revision_pairs_with_parent_links_and_active_candidate() -> TestRe
         let candidate_entry = entries
             .iter()
             .find(|entry| {
-                RevisionPair::new(entry.source_revision_id(), entry.catalogue_revision_id()) == candidate_pair
+                RevisionPair::new(entry.source_revision_id(), entry.catalogue_revision_id())
+                    == candidate_pair
             })
             .ok_or_else(|| failure("revision pair history did not contain the candidate pair"))?;
         require(
@@ -363,7 +693,10 @@ async fn lists_revision_pairs_with_parent_links_and_active_candidate() -> TestRe
                 && candidate_entry.catalogue_parent_revision_id() == Some(base_pair.catalogue()),
             "candidate revision pair did not retain the bootstrap pair as both parents",
         )?;
-        let active_entries = entries.iter().filter(|entry| entry.is_active()).collect::<Vec<_>>();
+        let active_entries = entries
+            .iter()
+            .filter(|entry| entry.is_active())
+            .collect::<Vec<_>>();
         require(
             active_entries.len() == 1
                 && RevisionPair::new(
@@ -475,13 +808,11 @@ async fn source_apply_audit_rejects_a_wrong_principal() -> TestResult<()> {
             .expect_err("source apply audit row with a wrong principal must be rejected");
         session.shutdown().await?;
 
-        let database_error = error
-            .as_db_error()
-            .ok_or_else(|| {
-                failure(format!(
-                    "wrong-principal update was not a database error: {error}"
-                ))
-            })?;
+        let database_error = error.as_db_error().ok_or_else(|| {
+            failure(format!(
+                "wrong-principal update was not a database error: {error}"
+            ))
+        })?;
         require(
             database_error.code().code() == "23514"
                 && database_error.constraint()
@@ -6514,7 +6845,6 @@ async fn install_v3_standard_chain(database: &TestDatabase) -> TestResult<V3Stan
     })
 }
 
-
 fn user_state_plan_candidate(
     active: &ActiveDatabaseRevision,
     upgrade: &orna_standard::StandardUpgrade,
@@ -6582,18 +6912,34 @@ fn user_state_plan_candidate(
         revision.language_version(),
         artifact,
     )
-    .map_err(|error| failure(format!("USER state function revision rebuild failed: {error}")))?
+    .map_err(|error| {
+        failure(format!(
+            "USER state function revision rebuild failed: {error}"
+        ))
+    })?
     .with_semantic_hash_version(revision.semantic_hash_version());
     let new_revisions = candidate
         .new_function_revisions()
         .iter()
-        .map(|item| if item.function() == function { replacement.clone() } else { item.clone() })
+        .map(|item| {
+            if item.function() == function {
+                replacement.clone()
+            } else {
+                item.clone()
+            }
+        })
         .collect::<Vec<_>>();
     let current_revisions = candidate
         .current_function_revisions()
         .ok_or_else(|| failure("V3 application candidate omitted current function revisions"))?
         .iter()
-        .map(|item| if item.function() == function { replacement.clone() } else { item.clone() })
+        .map(|item| {
+            if item.function() == function {
+                replacement.clone()
+            } else {
+                item.clone()
+            }
+        })
         .collect::<Vec<_>>();
     let catalogue_hash = catalogue_digest_with_context(
         candidate.catalogue_hash_context(),
@@ -6646,7 +6992,11 @@ async fn proves_public_user_state_profiles_and_atomic_conflict_batch() -> TestRe
         let security = SecuritySnapshot::new_with_function_targets(
             active.pair(),
             recovered_security.function_targets().collect(),
-            vec![Principal::new(V3_PROOF_CLIENT_USER, PrincipalKind::User, PrincipalStatus::Active)],
+            vec![Principal::new(
+                V3_PROOF_CLIENT_USER,
+                PrincipalKind::User,
+                PrincipalStatus::Active,
+            )],
             vec![],
             vec![],
         )?;
@@ -6654,16 +7004,30 @@ async fn proves_public_user_state_profiles_and_atomic_conflict_batch() -> TestRe
         let session = security.bind_authenticated_session(V3_PROOF_CLIENT_USER, vec![])?;
 
         let default_change = UserStateChange::new(
-            function, String::new(), function, String::new(), slot, None,
-            RuntimeValue::Boolean(true), value_type,
+            function,
+            String::new(),
+            function,
+            String::new(),
+            slot,
+            None,
+            RuntimeValue::Boolean(true),
+            value_type,
         )?;
         let named_change = UserStateChange::new(
-            function, "blue".to_owned(), function, String::new(), slot, None,
-            RuntimeValue::Boolean(false), value_type,
+            function,
+            "blue".to_owned(),
+            function,
+            String::new(),
+            slot,
+            None,
+            RuntimeValue::Boolean(false),
+            value_type,
         )?;
         let default_key = default_change.key_without_principal();
         let named_key = named_change.key_without_principal();
-        let seeded = kernel.write_user_state(&session, &[default_change, named_change]).await?;
+        let seeded = kernel
+            .write_user_state(&session, &[default_change, named_change])
+            .await?;
         require(
             seeded.len() == 2
                 && seeded[0].key() == &default_key
@@ -6785,8 +7149,14 @@ async fn proves_public_user_state_profiles_and_atomic_conflict_batch() -> TestRe
             conflicts.len() == 2
                 && conflicts[0].key() == &stale_default_key
                 && conflicts[1].key() == &fresh_named_key
-                && conflicts[0].outcome() == UserStateWriteOutcome::Conflict { current_revision: 2 }
-                && conflicts[1].outcome() == UserStateWriteOutcome::Conflict { current_revision: 1 },
+                && conflicts[0].outcome()
+                    == UserStateWriteOutcome::Conflict {
+                        current_revision: 2,
+                    }
+                && conflicts[1].outcome()
+                    == UserStateWriteOutcome::Conflict {
+                        current_revision: 1,
+                    },
             "mixed USER state conflict did not return exact ordered per-key results",
         )?;
         let audits_after_conflict = kernel.recover_security_audit_events().await?;
@@ -6824,7 +7194,8 @@ async fn proves_public_user_state_profiles_and_atomic_conflict_batch() -> TestRe
             "mixed USER state conflict changed persisted cells",
         )?;
         Ok(())
-    }).await
+    })
+    .await
 }
 
 #[tokio::test]
