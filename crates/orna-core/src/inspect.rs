@@ -1533,6 +1533,18 @@ mod tests {
         );
     }
 
+    #[test]
+    fn public_inspect_error_codes_normalize_all_legacy_aliases() {
+        assert_eq!(
+            stable_inspect_error_code("inspect.invalid_snapshot"),
+            "inspect.malformed_carrier"
+        );
+        assert_eq!(
+            stable_inspect_error_code("inspect.epoch_unavailable"),
+            "inspect.stale_epoch"
+        );
+    }
+
     fn invocation_id(byte: u8) -> InvocationId {
         InvocationId::from_bytes([byte; 16])
     }
