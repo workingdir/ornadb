@@ -1045,12 +1045,14 @@ fn validate_resolved_type_slots(
             )?;
         }
         match function.return_type() {
-            FunctionReturn::Single(resolved_type) | FunctionReturn::Stream(resolved_type) => validate_resolved_type_slot(
-                context,
-                DefinitionIdentity::Function(function.id()),
-                *resolved_type,
-                function_accepts_opaque_client_return(function),
-            )?,
+            FunctionReturn::Single(resolved_type) | FunctionReturn::Stream(resolved_type) => {
+                validate_resolved_type_slot(
+                    context,
+                    DefinitionIdentity::Function(function.id()),
+                    *resolved_type,
+                    function_accepts_opaque_client_return(function),
+                )?
+            }
             FunctionReturn::Rows(columns) => {
                 for column in columns {
                     validate_resolved_type_slot(

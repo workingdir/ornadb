@@ -1514,7 +1514,10 @@ mod tests {
 
     #[test]
     fn public_inspect_error_codes_normalize_aliases_and_redact_details() {
-        assert_eq!(stable_inspect_error_code("inspect.denied"), "inspect.denied");
+        assert_eq!(
+            stable_inspect_error_code("inspect.denied"),
+            "inspect.denied"
+        );
         assert_eq!(
             stable_inspect_error_code("inspect.revision_mismatch"),
             "inspect.epoch_mismatch"

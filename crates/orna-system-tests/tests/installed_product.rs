@@ -2266,8 +2266,8 @@ fn installed_source_diff_renders_semantic_changes_without_apply() {
         unchanged.stderr.is_empty(),
         "unchanged source diff must keep standard error empty"
     );
-    let text = std::str::from_utf8(&unchanged.stdout)
-        .expect("unchanged source diff output must be UTF-8");
+    let text =
+        std::str::from_utf8(&unchanged.stdout).expect("unchanged source diff output must be UTF-8");
     assert!(
         text.contains("no semantic changes"),
         "the active revision must remain unchanged after source diff, got {text:?}"

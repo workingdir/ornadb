@@ -1344,13 +1344,12 @@ mod tests {
     use crate::parser::SyntaxKind;
 
     use super::{
-        ClientExpression, ClientFunctionBody,
-        ClientProceduralStatement, FunctionReturnType, FunctionSecurity,
-        FunctionTransaction, FunctionVolatility, InsertValue, MutationValue, NullOrdering,
-        OnDeletePolicy, OptionTypeSpelling, OrderingDirection, PrimitiveValueTypePersistence,
-        QueryExpression, RecordConstructorFieldValue, SelectQuantifier, ServerFunctionBody,
-        SourceSpan, StandardLargeObjectKind, StateDefault, StateScope, TypeExportTarget,
-        TypeSpecification, parse,
+        ClientExpression, ClientFunctionBody, ClientProceduralStatement, FunctionReturnType,
+        FunctionSecurity, FunctionTransaction, FunctionVolatility, InsertValue, MutationValue,
+        NullOrdering, OnDeletePolicy, OptionTypeSpelling, OrderingDirection,
+        PrimitiveValueTypePersistence, QueryExpression, RecordConstructorFieldValue,
+        SelectQuantifier, ServerFunctionBody, SourceSpan, StandardLargeObjectKind, StateDefault,
+        StateScope, TypeExportTarget, TypeSpecification, parse,
     };
 
     #[test]
@@ -2775,10 +2774,15 @@ mod tests {
 
         assert!(parsed.diagnostics().is_empty());
         assert_eq!(parsed.syntax().text(), source);
-        let FunctionReturnType::Stream { element, span } = &parsed.server_functions()[0].return_type else {
+        let FunctionReturnType::Stream { element, span } =
+            &parsed.server_functions()[0].return_type
+        else {
             panic!("events must return a stream");
         };
-        assert_eq!(&source[span.start..span.end], "STREAM< /* kept */ REF tasks.event >");
+        assert_eq!(
+            &source[span.start..span.end],
+            "STREAM< /* kept */ REF tasks.event >"
+        );
         assert_reference_type(element, "tasks", "event", "");
     }
 
@@ -2797,7 +2801,12 @@ mod tests {
             assert_eq!(parsed.syntax().text(), source, "{written_type}");
             assert!(parsed.server_functions().is_empty(), "{written_type}");
             assert_eq!(parsed.schemas().len(), 1, "{written_type}");
-            assert_eq!(parsed.diagnostics().len(), 1, "{written_type}: {:?}", parsed.diagnostics());
+            assert_eq!(
+                parsed.diagnostics().len(),
+                1,
+                "{written_type}: {:?}",
+                parsed.diagnostics()
+            );
             assert_eq!(parsed.diagnostics()[0].message, expected, "{written_type}");
         }
     }
@@ -4943,7 +4952,11 @@ mod tests {
             CREATE CLIENT FUNCTION examples.text() RETURNS TEXT RETURN 'ready';";
         let parsed = parse(source);
 
-        assert!(parsed.diagnostics().is_empty(), "{:?}", parsed.diagnostics());
+        assert!(
+            parsed.diagnostics().is_empty(),
+            "{:?}",
+            parsed.diagnostics()
+        );
         assert_eq!(parsed.client_functions().len(), 2);
         let ui = &parsed.client_functions()[0];
         let ClientFunctionBody::ReturnExpression { expression } = &ui.body else {
@@ -4967,7 +4980,11 @@ mod tests {
         let source = include_str!("../testdata/accepted-client.orna");
         let parsed = parse(source);
 
-        assert!(parsed.diagnostics().is_empty(), "{:?}", parsed.diagnostics());
+        assert!(
+            parsed.diagnostics().is_empty(),
+            "{:?}",
+            parsed.diagnostics()
+        );
         assert_eq!(parsed.syntax().text(), source);
         assert_eq!(parsed.schemas().len(), 1);
         assert_eq!(parsed.schemas()[0].name.parts[0].text, "accepted_client");
@@ -5291,7 +5308,11 @@ mod tests {
             );";
         let parsed = parse(source);
 
-        assert!(parsed.diagnostics().is_empty(), "{:?}", parsed.diagnostics());
+        assert!(
+            parsed.diagnostics().is_empty(),
+            "{:?}",
+            parsed.diagnostics()
+        );
         assert_eq!(parsed.syntax().text(), source);
         assert_eq!(
             parsed
@@ -5322,15 +5343,185 @@ mod tests {
                 end: expected_end,
             }
         );
-        let ClientExpression::Call { callee, .. } = awaited.as_ref() else {
-            panic!("expected AWAIT to wrap a call expression");
+        let resource_start = source.find("std.data.resource").expect("resource callee");
+        let resource_end = source.rfind(')').expect("resource closing parenthesis") + 1;
+        let ClientExpression::Call {
+            callee: resource_callee,
+            arguments: resource_arguments,
+            span: resource_span,
+        } = awaited.as_ref()
+        else {
+            panic!("expected AWAIT to wrap a resource call expression");
         };
         assert_eq!(
-            callee.parts.iter().map(|part| part.text.as_str()).collect::<Vec<_>>(),
+            resource_span,
+            &SourceSpan {
+                start: resource_start,
+                end: resource_end,
+            }
+        );
+        assert_eq!(
+            resource_callee.span,
+            SourceSpan {
+                start: resource_start,
+                end: resource_start + "std.data.resource".len(),
+            }
+        );
+        assert_eq!(
+            resource_callee
+                .parts
+                .iter()
+                .map(|part| part.text.as_str())
+                .collect::<Vec<_>>(),
             ["std", "data", "resource"]
         );
-    }
 
+        let target_start = source.find("target").expect("target argument");
+        let target_name = resource_arguments[0]
+            .name
+            .as_ref()
+            .expect("named target argument");
+        assert_eq!(target_name.text, "target");
+        assert_eq!(
+            target_name.span,
+            SourceSpan {
+                start: target_start,
+                end: target_start + "target".len(),
+            }
+        );
+        let target_value_start = source.find("tasks.get").expect("resource target");
+        assert_eq!(
+            resource_arguments[0].span,
+            SourceSpan {
+                start: target_start,
+                end: target_value_start + "tasks.get".len(),
+            }
+        );
+        let ClientExpression::FieldPath {
+            root: target_root,
+            members: target_members,
+            span: target_span,
+        } = &resource_arguments[0].value
+        else {
+            panic!("expected a qualified target name");
+        };
+        assert_eq!(
+            target_span,
+            &SourceSpan {
+                start: target_value_start,
+                end: target_value_start + "tasks.get".len(),
+            }
+        );
+        assert_eq!(target_root.text, "tasks");
+        assert_eq!(
+            target_root.span,
+            SourceSpan {
+                start: target_value_start,
+                end: target_value_start + "tasks".len(),
+            }
+        );
+        assert_eq!(target_members.len(), 1);
+        assert_eq!(target_members[0].text, "get");
+        assert_eq!(
+            target_members[0].span,
+            SourceSpan {
+                start: target_value_start + "tasks.".len(),
+                end: target_value_start + "tasks.get".len(),
+            }
+        );
+
+        let arguments_start = source.find("arguments").expect("arguments argument");
+        let arguments_name = resource_arguments[1]
+            .name
+            .as_ref()
+            .expect("named arguments argument");
+        assert_eq!(arguments_name.text, "arguments");
+        assert_eq!(
+            arguments_name.span,
+            SourceSpan {
+                start: arguments_start,
+                end: arguments_start + "arguments".len(),
+            }
+        );
+        let nested_start = source.find("std.call.args").expect("arguments call");
+        let nested_end = source[nested_start..]
+            .find(')')
+            .expect("arguments closing parenthesis")
+            + nested_start
+            + 1;
+        assert_eq!(
+            resource_arguments[1].span,
+            SourceSpan {
+                start: arguments_start,
+                end: nested_end,
+            }
+        );
+        let ClientExpression::Call {
+            callee: arguments_callee,
+            arguments: nested_arguments,
+            span: arguments_span,
+        } = &resource_arguments[1].value
+        else {
+            panic!("expected std.call.args expression");
+        };
+        assert_eq!(
+            arguments_span,
+            &SourceSpan {
+                start: nested_start,
+                end: nested_end,
+            }
+        );
+        assert_eq!(
+            arguments_callee.span,
+            SourceSpan {
+                start: nested_start,
+                end: nested_start + "std.call.args".len(),
+            }
+        );
+        assert_eq!(
+            arguments_callee
+                .parts
+                .iter()
+                .map(|part| part.text.as_str())
+                .collect::<Vec<_>>(),
+            ["std", "call", "args"]
+        );
+        assert_eq!(nested_arguments.len(), 1);
+
+        let nested_argument = &nested_arguments[0];
+        let pair_start = source
+            .find("p_value => p_value")
+            .expect("nested named argument");
+        let pair_value_start = pair_start + "p_value => ".len();
+        let pair_value_end = pair_start + "p_value => p_value".len();
+        let pair_name = nested_argument.name.as_ref().expect("nested argument name");
+        assert_eq!(pair_name.text, "p_value");
+        assert_eq!(
+            pair_name.span,
+            SourceSpan {
+                start: pair_start,
+                end: pair_start + "p_value".len(),
+            }
+        );
+        assert_eq!(
+            nested_argument.span,
+            SourceSpan {
+                start: pair_start,
+                end: pair_value_end,
+            }
+        );
+        let ClientExpression::ParameterRead { parameter } = &nested_argument.value else {
+            panic!("expected the nested argument value to read p_value");
+        };
+        assert_eq!(parameter.text, "p_value");
+        assert_eq!(
+            parameter.span,
+            SourceSpan {
+                start: pair_value_start,
+                end: pair_value_end,
+            }
+        );
+    }
     #[test]
     fn parses_nested_client_await_expressions_in_state_positions() {
         let source = "CREATE CLIENT FUNCTION examples.awaited() RETURNS TEXT IS\n\
@@ -5340,7 +5531,11 @@ mod tests {
         END;";
         let parsed = parse(source);
 
-        assert!(parsed.diagnostics().is_empty(), "{:?}", parsed.diagnostics());
+        assert!(
+            parsed.diagnostics().is_empty(),
+            "{:?}",
+            parsed.diagnostics()
+        );
         assert_eq!(parsed.syntax().text(), source);
         assert_eq!(
             parsed
@@ -5358,8 +5553,7 @@ mod tests {
             panic!("expected a default expression");
         };
         let ClientExpression::Await {
-            expression: nested,
-            ..
+            expression: nested, ..
         } = default
         else {
             panic!("expected an outer AWAIT in the state default");
@@ -5385,7 +5579,11 @@ mod tests {
             END;";
         let parsed = parse(source);
 
-        assert!(parsed.diagnostics().is_empty(), "{:?}", parsed.diagnostics());
+        assert!(
+            parsed.diagnostics().is_empty(),
+            "{:?}",
+            parsed.diagnostics()
+        );
         assert_eq!(parsed.syntax().text(), source);
         assert_eq!(
             parsed
@@ -5420,7 +5618,11 @@ mod tests {
             panic!("expected a resource constructor call");
         };
         assert_eq!(
-            callee.parts.iter().map(|part| part.text.as_str()).collect::<Vec<_>>(),
+            callee
+                .parts
+                .iter()
+                .map(|part| part.text.as_str())
+                .collect::<Vec<_>>(),
             ["std", "data", "resource"]
         );
         let Some(ClientExpression::Await { expression, .. }) = block.return_expression.as_ref()
@@ -5443,7 +5645,11 @@ mod tests {
             END;";
         let parsed = parse(source);
 
-        assert!(parsed.diagnostics().is_empty(), "{:?}", parsed.diagnostics());
+        assert!(
+            parsed.diagnostics().is_empty(),
+            "{:?}",
+            parsed.diagnostics()
+        );
         assert_eq!(parsed.syntax().text(), source);
         let ClientFunctionBody::StateBlock(block) = &parsed.client_functions()[0].body else {
             panic!("expected a procedural CLIENT block");
@@ -5456,7 +5662,10 @@ mod tests {
         };
         assert_eq!(let_statement.name.text, "x");
         assert_eq!(
-            let_statement.type_source.as_ref().map(|source| source.text.as_str()),
+            let_statement
+                .type_source
+                .as_ref()
+                .map(|source| source.text.as_str()),
             Some("std.data.Resource<INTEGER>")
         );
         assert!(matches!(
@@ -5488,9 +5697,8 @@ mod tests {
     #[test]
     fn reports_malformed_client_await_operands_without_widening_expression_syntax() {
         for expression in ["AWAIT;", "AWAIT (value);", "AWAIT AWAIT;"] {
-            let source = format!(
-                "CREATE CLIENT FUNCTION examples.awaited() RETURNS TEXT AS {expression}"
-            );
+            let source =
+                format!("CREATE CLIENT FUNCTION examples.awaited() RETURNS TEXT AS {expression}");
             let parsed = parse(&source);
 
             assert_eq!(parsed.syntax().text(), source);
@@ -5505,7 +5713,6 @@ mod tests {
             );
         }
     }
-
 
     #[test]
     fn rejects_client_expression_trailing_dots() {
@@ -5841,11 +6048,7 @@ mod tests {
             // The diagnostic names the offending keyword token, which is
             // the first word of the marker.
             let token = marker.split_whitespace().next().expect("marker token");
-            assert_eq!(
-                diagnostic.span.end,
-                start + token.len(),
-                "source: {source}"
-            );
+            assert_eq!(diagnostic.span.end, start + token.len(), "source: {source}");
         }
     }
 

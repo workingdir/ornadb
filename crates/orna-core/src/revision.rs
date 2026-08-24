@@ -2267,12 +2267,14 @@ fn validate_resolved_type_slots(
                     )?;
                 }
             }
-            FunctionReturn::Single(resolved_type) | FunctionReturn::Stream(resolved_type) => validate_resolved_type_slot(
-                context,
-                DefinitionIdentity::Function(function.id()),
-                *resolved_type,
-                function_accepts_opaque_client_return(function),
-            )?,
+            FunctionReturn::Single(resolved_type) | FunctionReturn::Stream(resolved_type) => {
+                validate_resolved_type_slot(
+                    context,
+                    DefinitionIdentity::Function(function.id()),
+                    *resolved_type,
+                    function_accepts_opaque_client_return(function),
+                )?
+            }
         }
     }
 
@@ -8868,12 +8870,13 @@ mod tests {
         );
         assert_eq!(
             validate_resolved_type_slots(&standard_context(), &catalogue,),
-            Err(RevisionInvariantError::ResolvedValueTypeNotInPinnedStandard {
-                identity: DefinitionIdentity::Function(FunctionId::from_bytes(id::<82>())),
-                value_type: stream_value,
-            })
+            Err(
+                RevisionInvariantError::ResolvedValueTypeNotInPinnedStandard {
+                    identity: DefinitionIdentity::Function(FunctionId::from_bytes(id::<82>())),
+                    value_type: stream_value,
+                }
+            )
         );
-
 
         let rows_value = TypeId::from_bytes(id::<94>());
         let catalogue = resolved_type_slots_catalogue(
@@ -9412,7 +9415,8 @@ mod tests {
                 vec![],
                 vec![revision],
                 sparse_references,
-            ).unwrap_err(),
+            )
+            .unwrap_err(),
             RevisionInvariantError::ReferenceOrdinalOutOfSequence {
                 revision: FunctionRevisionId::from_bytes(id::<11>()),
                 expected: 1,
@@ -9440,7 +9444,8 @@ mod tests {
                 vec![],
                 vec![revision],
                 vec![leading_sparse_reference],
-            ).unwrap_err(),
+            )
+            .unwrap_err(),
             RevisionInvariantError::ReferenceOrdinalOutOfSequence {
                 revision: FunctionRevisionId::from_bytes(id::<11>()),
                 expected: 0,
@@ -9562,17 +9567,19 @@ mod tests {
             ),
         ];
 
-        assert!(ActiveDatabaseRevision::new(
-            RevisionPair::new(source.id(), catalogue.revision()),
-            source,
-            catalogue,
-            digest::<98>(),
-            vec![],
-            vec![revision_a, revision_b],
-            origins,
-            references,
-        )
-        .is_ok());
+        assert!(
+            ActiveDatabaseRevision::new(
+                RevisionPair::new(source.id(), catalogue.revision()),
+                source,
+                catalogue,
+                digest::<98>(),
+                vec![],
+                vec![revision_a, revision_b],
+                origins,
+                references,
+            )
+            .is_ok()
+        );
     }
 
     #[test]
