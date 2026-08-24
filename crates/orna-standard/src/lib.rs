@@ -6749,6 +6749,17 @@ CREATE TYPE std.ui.UI AS VALUE
 EXPORT TYPE std.ui.UI AS std.UI;
 "#;
 
+    const EXPECTED_RETAINED_ACTION_SOURCE: &str = r#"CREATE SCHEMA std.action;
+
+CREATE TYPE std.action.Action AS VALUE
+    OPAQUE
+    KERNEL CONTRACT 'orna.std.value.action@1'
+    IMMUTABLE
+    TRANSIENT;
+
+EXPORT TYPE std.action.Action AS std.Action;
+"#;
+
     fn tampered_v4_snapshot(
         types: &str,
         invoke: &str,
@@ -8892,6 +8903,144 @@ EXPORT TYPE std.ui.UI AS std.UI;
             .expect("the retained V6 action source verifies");
         assert_eq!(verified.revision(), super::STANDARD_LIBRARY_V6_REVISION_ID);
         assert!(super::registered_opaque_codecs(&verified).is_ok());
+    }
+
+    #[test]
+    fn v6_action_source_has_the_exact_literal_bytes_and_parse() {
+        let snapshot = super::retained_standard_library_v6_snapshot()
+            .expect("the retained V6 action source is valid");
+        let action = snapshot.source().units()[5].content();
+
+        assert_eq!(action, super::RETAINED_STANDARD_ACTION_SOURCE);
+        assert_eq!(action, EXPECTED_RETAINED_ACTION_SOURCE);
+        assert_eq!(action.len(), 198);
+        assert!(action.is_ascii());
+        assert!(!action.as_bytes().starts_with(&[0xef, 0xbb, 0xbf]));
+        assert!(!action.contains('\r'));
+        assert!(action.ends_with('\n'));
+        assert!(!action[..action.len() - 1].ends_with('\n'));
+        assert_eq!(action.matches(';').count(), 3);
+
+        let parsed = orna_syntax::parse(action);
+        assert!(parsed.diagnostics().is_empty());
+        assert_eq!(parsed.syntax().text(), action);
+        assert_eq!(parsed.schemas().len(), 1);
+        assert!(super::matches_qualified_name(
+            &parsed.schemas()[0].name,
+            &QualifiedSemanticName::new(["std", "action"])
+                .expect("the fixed action schema name is valid"),
+        ));
+        assert_eq!(parsed.opaque_value_types().len(), 1);
+        let action_type = &parsed.opaque_value_types()[0];
+        assert!(super::matches_qualified_name(
+            &action_type.name,
+            &QualifiedSemanticName::new(["std", "action", "Action"])
+                .expect("the fixed action type name is valid"),
+        ));
+        assert_eq!(
+            super::decode_sql_string_literal(&action_type.kernel_contract.text).as_deref(),
+            Some(STD_ACTION_CONTRACT),
+        );
+        assert_eq!(parsed.type_exports().len(), 1);
+        let action_binding = snapshot
+            .catalogue()
+            .type_bindings()
+            .iter()
+            .find(|binding| binding.target() == STD_ACTION_TYPE_ID)
+            .expect("the V6 action export is retained");
+        assert!(super::matches_qualified_export(
+            &parsed.type_exports()[0],
+            &QualifiedSemanticName::new(["std", "action", "Action"])
+                .expect("the fixed action type name is valid"),
+            STD_ACTION_TYPE_ID,
+            action_binding,
+        ));
+        assert!(parsed.object_types().is_empty());
+        assert!(parsed.field_renames().is_empty());
+        assert!(parsed.primitive_value_types().is_empty());
+        assert!(parsed.record_value_types().is_empty());
+        assert!(parsed.enum_types().is_empty());
+        assert!(parsed.server_functions().is_empty());
+        assert!(parsed.client_functions().is_empty());
+    }
+
+    #[test]
+    fn v6_action_origins_cover_the_exact_declaration_ranges() {
+        let snapshot = super::retained_standard_library_v6_snapshot()
+            .expect("the retained V6 action source is valid");
+        let action = snapshot.source().units()[5].content();
+        let action_origins = snapshot
+            .origins()
+            .iter()
+            .filter(|origin| origin.source().source_unit() == STD_ACTION_SOURCE_UNIT_ID)
+            .collect::<Vec<_>>();
+        assert_eq!(action_origins.len(), 3);
+
+        let schema_origin = |id: orna_core::SchemaId| {
+            action_origins
+                .iter()
+                .find(|origin| origin.identity() == DefinitionIdentity::Schema(id))
+                .expect("the schema origin is retained")
+                .source()
+        };
+        let type_origin = |id: orna_core::TypeId| {
+            action_origins
+                .iter()
+                .find(|origin| origin.identity() == DefinitionIdentity::ValueType(id))
+                .expect("the type origin is retained")
+                .source()
+        };
+        let binding_origin = |id: orna_core::TypeBindingId| {
+            action_origins
+                .iter()
+                .find(|origin| origin.identity() == DefinitionIdentity::TypeBinding(id))
+                .expect("the binding origin is retained")
+                .source()
+        };
+
+        let schema = schema_origin(STD_ACTION_SCHEMA_ID);
+        assert_eq!(schema.byte_start(), 0);
+        assert_eq!(schema.byte_end(), "CREATE SCHEMA std.action;".len() as u32);
+        assert_eq!(
+            &action[schema.byte_start() as usize..schema.byte_end() as usize],
+            "CREATE SCHEMA std.action;",
+        );
+
+        let type_origin = type_origin(STD_ACTION_TYPE_ID);
+        let type_start = action
+            .find("CREATE TYPE std.action.Action")
+            .expect("the action type is retained");
+        let type_end = action
+            .find("TRANSIENT;")
+            .expect("the action type is retained")
+            + "TRANSIENT;".len();
+        assert_eq!(type_origin.byte_start(), type_start as u32);
+        assert_eq!(type_origin.byte_end(), type_end as u32);
+        assert_eq!(
+            &action[type_origin.byte_start() as usize..type_origin.byte_end() as usize],
+            &action[type_start..type_end],
+        );
+
+        let action_binding_id = snapshot
+            .catalogue()
+            .type_bindings()
+            .iter()
+            .find(|binding| binding.target() == STD_ACTION_TYPE_ID)
+            .expect("the V6 action export is retained")
+            .id();
+        let binding_origin = binding_origin(action_binding_id);
+        let binding_start = action
+            .find("EXPORT TYPE std.action.Action AS std.Action;")
+            .expect("the action export is retained");
+        assert_eq!(binding_origin.byte_start(), binding_start as u32);
+        assert_eq!(
+            binding_origin.byte_end(),
+            (binding_start + "EXPORT TYPE std.action.Action AS std.Action;".len()) as u32,
+        );
+        assert_eq!(
+            &action[binding_origin.byte_start() as usize..binding_origin.byte_end() as usize],
+            "EXPORT TYPE std.action.Action AS std.Action;",
+        );
     }
 
     #[test]
