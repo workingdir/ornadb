@@ -56,7 +56,7 @@ CONFIGURE_FLAGS := \
 
 help:
 	@printf '%s\n' \
-		'PostgreSQL embedded-engine build' \
+		'PostgreSQL embedded-engine build; Docker-isolated build/verifier summary, not fresh native Debian 12 host proof for ADR 0019' \
 		'' \
 		'  make -C postgresql verify-inputs' \
 		'  make -C postgresql prepare-source TARGET_ROOT=<absolute-repo-target-path>' \
@@ -323,7 +323,7 @@ lifecycle: archives
 		chown --reference=/proof/output /proof/tmp/lifecycle-probe; \
 		chmod 0500 /proof/tmp/lifecycle-probe; \
 		rm -rf -- /proof/lifecycle'; \
-	printf '%s\n' "[postgresql] linked lifecycle passed below $${target_root}/output"
+	printf '%s\n' "[postgresql] Docker-isolated build/verifier summary passed below $${target_root}/output; not fresh native Debian 12 host proof for ADR 0019"
 
 verify-lifecycle:
 	@target_root='$(TARGET_ROOT)'; \
@@ -342,11 +342,11 @@ verify-lifecycle:
 	done < <(find "$${one}/output" -maxdepth 1 -type f -printf '%f\n' | LC_ALL=C sort); \
 	cmp "$${one}/tmp/lifecycle-probe" "$${two}/tmp/lifecycle-probe"; \
 	python3 "$(MANIFEST_BUILDER)" "$(REPOSITORY_ROOT)" "$${one}" "$(IMAGE)"; \
-	printf '%s\n' "[postgresql] linked lifecycle reproduced twice below $${target_root}"
+	printf '%s\n' "[postgresql] Docker-isolated build/verifier summary reproduced twice below $${target_root}; not fresh native Debian 12 host proof for ADR 0019"
 
 manifest: lifecycle
 	@python3 "$(MANIFEST_BUILDER)" "$(REPOSITORY_ROOT)" "$(TARGET_ROOT)" "$(IMAGE)"
-	@printf '%s\n' "[postgresql] recorded build evidence below $(TARGET_ROOT)/output"
+	@printf '%s\n' "[postgresql] recorded Docker-isolated build/verifier summary below $(TARGET_ROOT)/output; not fresh native Debian 12 host proof for ADR 0019"
 
 update-source:
 	@reference='$(POSTGRESQL_REF)'; \

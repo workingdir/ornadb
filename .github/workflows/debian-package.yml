@@ -1,4 +1,4 @@
-name: Debian one-executable package
+name: Debian package Docker-isolated build/verifier summary (not fresh native Debian 12 host proof for ADR 0019)
 
 on:
   push:
@@ -39,7 +39,7 @@ permissions:
 
 jobs:
   package:
-    name: Build and prove the Debian package
+    name: Build Debian package and collect Docker-isolated build/verifier summary (not fresh native Debian 12 host proof for ADR 0019)
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     steps:
@@ -66,19 +66,19 @@ jobs:
           package_relative="target/debian-package/${source}_${version}_${architecture}.deb"
           printf 'path=%s/%s\n' "${GITHUB_WORKSPACE}" "${package_relative}" >>"${GITHUB_OUTPUT}"
           printf 'relative_path=%s\n' "${package_relative}" >>"${GITHUB_OUTPUT}"
-      - name: Prove package transaction exclusion
+      - name: Collect Docker-isolated package transaction summary (not fresh native Debian 12 host proof for ADR 0019)
         env:
           ORNA_DEBIAN_PACKAGE: "${{ steps.package.outputs.path }}"
         run: >-
           crates/orna-system-tests/scenarios/debian-package.sh
           "${ORNA_DEBIAN_PACKAGE}"
-      - name: Prove the installed one-executable lifecycle
+      - name: Collect Docker-isolated installed build/verifier summary (not fresh native Debian 12 host proof for ADR 0019)
         env:
           ORNA_DEBIAN_PACKAGE: "${{ steps.package.outputs.path }}"
         run: >-
           crates/orna-system-tests/scenarios/debian-clean-machine.sh
           "${ORNA_DEBIAN_PACKAGE}"
-      - name: Prove the installed Orna data path
+      - name: Run Docker-isolated installed product test (not fresh native Debian 12 host proof for ADR 0019)
         env:
           ORNA_SYSTEM_TEST_DEBIAN_PACKAGE: "${{ steps.package.outputs.path }}"
         run: >-
@@ -87,7 +87,7 @@ jobs:
       - name: Upload the reproduced package and manifests
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: orna-debian-one-executable
+          name: orna-debian-one-executable-build-verifier-summary-docker-isolated-not-native-debian12-host-proof-adr0019
           path: |
             ${{ steps.package.outputs.relative_path }}
             target/debian-package/payload/usr/share/orna/distribution-manifest.toml

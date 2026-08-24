@@ -196,5 +196,5 @@ require_installed
 [[ -f /var/lib/orna/instances/retained-test-data ]] ||
     fail 'post-purge reinstall replaced instance data'
 
-printf '%s\n' '[package-test] package transaction exclusion passed'
+printf '%s\n' '[package-test] Docker-isolated Debian container package transaction proof passed; not fresh native Debian 12 host proof for ADR 0019'
 TEST
