@@ -195,11 +195,11 @@ pub enum InstalledSourceApplyError {
 impl fmt::Display for InstalledSourceApplyError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::SourceRead { path, .. } => {
-                write!(formatter, "orna: could not read source file: {path}")
+            Self::SourceRead { .. } => {
+                formatter.write_str("orna: could not read source file")
             }
-            Self::SourceUtf8 { path } => {
-                write!(formatter, "orna: source file is not valid UTF-8: {path}")
+            Self::SourceUtf8 { .. } => {
+                formatter.write_str("orna: source file is not valid UTF-8")
             }
             Self::SourceBundle { .. } => {
                 formatter.write_str("orna: source apply received an invalid source path")
@@ -696,6 +696,23 @@ mod tests {
             installed.source().revision_hash()
         );
         assert_eq!(selected.digest(), installed.digest());
+    }
+
+    #[test]
+    fn source_input_errors_do_not_expose_submitted_paths() {
+        let source_read = InstalledSourceApplyError::SourceRead {
+            path: "/private/source.orna".to_owned(),
+            source: None,
+        };
+        assert_eq!(source_read.to_string(), "orna: could not read source file");
+
+        let source_utf8 = InstalledSourceApplyError::SourceUtf8 {
+            path: "/private/source.orna".to_owned(),
+        };
+        assert_eq!(
+            source_utf8.to_string(),
+            "orna: source file is not valid UTF-8",
+        );
     }
 
     #[test]
