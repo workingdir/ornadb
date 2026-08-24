@@ -129,8 +129,8 @@ contract:
   Local evidence is
   `crates/orna-compiler/src/resolver.rs::tests::sorts_resource_and_action_arguments_by_checked_parameter_id`.
 - commit `ba20fda` now proves private headless runtime teardown retires owned
-  node, action, and operation handles, cancels owned requests once, and rejects
-  stale work. Local evidence is
+  node, action, model, and request handles, cancels owned requests once, and
+  rejects stale work. Local evidence is
   `crates/orna-client/src/lib.rs::runtime_conformance::destroying_a_surface_retires_all_owned_handles_and_suppresses_stale_work`
   (the focused runtime-conformance run passed 39 tests); this is not production
   runtime-ABI evidence.
@@ -139,9 +139,9 @@ contract:
   Local evidence is
   `crates/orna-server/tests/standard_database.rs::checks_and_prepares_server_function_dogfood_fixture_offline`;
   PostgreSQL installation and invocation remain Compose-gated.
-- commit `8af410c` adds a focused source-apply recovery-mismatch mapping
-  regression; local source-apply fail-closed coverage now includes the exact
-  post-apply candidate-hash reproduction guard.
+- commit `8af410c` adds a focused source-apply error mapping regression; the
+  existing `CatalogueInvariant` marker maps to `RecoveryMismatch`. It does not
+  claim to execute post-apply recovery or prove candidate-hash reproduction.
 - commit `64d9603` covers both retained legacy Inspector public error-code
   aliases; the accepted Inspector boundary still has no populated projection
   or graphical-runtime claim.
@@ -154,7 +154,7 @@ development service. No local Compose result is claimed. The source-apply
 audit, rollback, tamper, and retained-listing integration tests are likewise
 present but Compose-gated. Local evidence covers compilation, migration
 registry checks, codec checks, and focused in-memory validators only.
-The four commits above add local compiler, private-fixture, and offline
+The six commits above add local compiler, private-fixture, and offline
 SERVER-dogfood evidence only; they do not upgrade any Compose or host-gated
 proof, or broaden the accepted boundary.
 The fresh network-disabled Debian 12 host proof and the same-major PostgreSQL
