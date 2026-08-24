@@ -2106,6 +2106,12 @@ impl SecuritySnapshot {
         session: &AuthenticatedSession,
         target: InvocationTarget,
     ) -> ExecuteDecision {
+        if target.class.is_some()
+            || target.standard_revision.is_some()
+            || target.executable_revision.is_some()
+        {
+            return ExecuteDecision::Denied(ExecuteDenial::UnknownFunction);
+        }
         if system_function_by_id(target.function).is_none() {
             return ExecuteDecision::Denied(ExecuteDenial::UnknownFunction);
         }
@@ -2635,6 +2641,57 @@ mod tests {
         assert_eq!(
             snapshot.authorise_execute(&session, InvocationTarget::new(FUNCTION, REVISION)),
             ExecuteDecision::Denied(ExecuteDenial::MissingExecuteGrant)
+        );
+    }
+
+    #[test]
+    fn sealed_system_target_accepts_classless_unpinned_shape() {
+        let snapshot = SecuritySnapshot::new(
+            REVISION,
+            vec![FUNCTION],
+            vec![active(USER, PrincipalKind::User)],
+            vec![],
+            vec![],
+        )
+        .expect("valid authenticated snapshot");
+        let session = snapshot
+            .bind_authenticated_session(USER, vec![])
+            .expect("active session should bind");
+        let target = InvocationTarget::new(crate::system::SYS_INVOKE_FUNCTION_ID, REVISION);
+
+        assert_eq!(target.class(), None);
+        assert_eq!(target.standard_revision(), None);
+        assert_eq!(target.executable_revision(), None);
+        assert!(matches!(
+            snapshot.authorise_system_function(&session, target),
+            ExecuteDecision::Allowed(_)
+        ));
+    }
+
+    #[test]
+    fn sealed_system_target_rejects_forged_class_and_revision_pins() {
+        let snapshot = SecuritySnapshot::new(
+            REVISION,
+            vec![FUNCTION],
+            vec![active(USER, PrincipalKind::User)],
+            vec![],
+            vec![],
+        )
+        .expect("valid authenticated snapshot");
+        let session = snapshot
+            .bind_authenticated_session(USER, vec![])
+            .expect("active session should bind");
+        let forged = InvocationTarget {
+            function: crate::system::SYS_INVOKE_FUNCTION_ID,
+            revision: REVISION,
+            class: Some(TargetClass::Application),
+            standard_revision: Some(OTHER_STANDARD_REVISION),
+            executable_revision: Some(OTHER_STD_EXECUTABLE),
+        };
+
+        assert_eq!(
+            snapshot.authorise_system_function(&session, forged),
+            ExecuteDecision::Denied(ExecuteDenial::UnknownFunction)
         );
     }
 
