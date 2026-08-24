@@ -5924,13 +5924,7 @@ fn check_resource_constructor(
         ));
         return None;
     }
-    checked_arguments.sort_by_key(|(parameter, _)| {
-        target
-            .parameters
-            .iter()
-            .position(|candidate| candidate.id == *parameter)
-            .expect("bound resource parameter belongs to target")
-    });
+    checked_arguments.sort_by_key(|(parameter, _)| *parameter);
     let operation_location = location(input.logical_path, span);
     let call_site = client_resource_call_site_id(&operation_location, &input.name);
     references.push(CheckedDefinitionReference {
@@ -6262,13 +6256,7 @@ fn check_action_constructor(
         ));
         return None;
     }
-    checked_arguments.sort_by_key(|(parameter, _)| {
-        target
-            .parameters
-            .iter()
-            .position(|candidate| candidate.id == *parameter)
-            .expect("bound action parameter belongs to target")
-    });
+    checked_arguments.sort_by_key(|(parameter, _)| *parameter);
     let operation_location = location(input.logical_path, span);
     references.push(CheckedDefinitionReference {
         target: CheckedDefinitionReferenceTarget::Function(target.id),
@@ -14195,6 +14183,165 @@ mod tests {
             super::SemanticType::Scalar(StandardScalar::Integer)
         );
         assert_eq!(operation.standard_result_type(), Some(integer_type_id));
+    }
+
+    #[test]
+    fn sorts_resource_and_action_arguments_by_checked_parameter_id() {
+        let integer = ResolvedType::Scalar(StandardScalar::Integer);
+        let resource_target_id = FunctionId::from_bytes([0x71; 16]);
+        let resource_high_parameter_id = ParameterId::from_bytes([0x72; 16]);
+        let resource_low_parameter_id = ParameterId::from_bytes([0x70; 16]);
+        let resource_base = CatalogueSnapshot::new_with_functions(
+            CatalogueRevisionId::from_bytes([0x73; 16]),
+            vec![SchemaDefinition::new(
+                SchemaId::from_bytes([0x74; 16]),
+                QualifiedSemanticName::new(["tasks"]).unwrap(),
+            )],
+            Vec::new(),
+            vec![FunctionDefinition::new(
+                resource_target_id,
+                QualifiedSemanticName::new(["tasks", "find"]).unwrap(),
+                FunctionDomain::Server,
+                vec![
+                    ParameterDefinition::new(
+                        resource_high_parameter_id,
+                        "p_high",
+                        0,
+                        integer,
+                        None,
+                    ),
+                    ParameterDefinition::new(
+                        resource_low_parameter_id,
+                        "p_low",
+                        1,
+                        integer,
+                        None,
+                    ),
+                ],
+                FunctionReturn::Single(integer),
+                FunctionRevisionId::from_bytes([0x75; 16]),
+                FunctionSecurity::Invoker,
+                None,
+                FunctionVolatility::Immutable,
+            )],
+        )
+        .unwrap();
+        let resource_source = "CREATE SCHEMA ui; CREATE CLIENT FUNCTION ui.run() RETURNS INTEGER IS BEGIN RETURN AWAIT std.data.resource(target => tasks.find, arguments => std.call.args(p_low => 7, p_high => 8)); END;";
+        let resource_report = check(
+            &bundle([("resource-argument-order.orna", resource_source)]),
+            &resource_base,
+        );
+        assert!(
+            resource_report.diagnostics().is_empty(),
+            "{:?}",
+            resource_report.diagnostics()
+        );
+        let resource_function = resource_report
+            .checked_bundle()
+            .unwrap()
+            .client_functions()
+            .iter()
+            .find(|function| function.name().to_string() == "ui.run")
+            .unwrap();
+        let CheckedClientFunctionBody::Expression { expression } = resource_function.body() else {
+            panic!("resource body must be an expression");
+        };
+        let CheckedClientExpression::Await { expression, .. } = expression else {
+            panic!("resource body must await the resource");
+        };
+        let CheckedClientExpression::Resource { operation } = expression.as_ref() else {
+            panic!("await operand must be a resource");
+        };
+        assert_eq!(
+            operation
+                .arguments()
+                .iter()
+                .map(|(parameter, _)| *parameter)
+                .collect::<Vec<_>>(),
+            vec![
+                super::CheckedParameterId::Existing(resource_low_parameter_id),
+                super::CheckedParameterId::Existing(resource_high_parameter_id),
+            ]
+        );
+
+        let action_target_id = FunctionId::from_bytes([0x76; 16]);
+        let action_high_parameter_id = ParameterId::from_bytes([0x78; 16]);
+        let action_low_parameter_id = ParameterId::from_bytes([0x77; 16]);
+        let action_base = CatalogueSnapshot::new_with_functions(
+            CatalogueRevisionId::from_bytes([0x79; 16]),
+            vec![SchemaDefinition::new(
+                SchemaId::from_bytes([0x7a; 16]),
+                QualifiedSemanticName::new(["tasks"]).unwrap(),
+            )],
+            Vec::new(),
+            vec![FunctionDefinition::new(
+                action_target_id,
+                QualifiedSemanticName::new(["tasks", "run"]).unwrap(),
+                FunctionDomain::Client,
+                vec![
+                    ParameterDefinition::new(
+                        action_high_parameter_id,
+                        "p_high",
+                        0,
+                        integer,
+                        None,
+                    ),
+                    ParameterDefinition::new(
+                        action_low_parameter_id,
+                        "p_low",
+                        1,
+                        integer,
+                        None,
+                    ),
+                ],
+                FunctionReturn::Single(integer),
+                FunctionRevisionId::from_bytes([0x7b; 16]),
+                FunctionSecurity::Invoker,
+                None,
+                FunctionVolatility::Immutable,
+            )],
+        )
+        .unwrap();
+        let standard =
+            check_standard_library_source(&verified_standard_library_with_action_for_test())
+                .unwrap();
+        let action_context = StandardApplicationCheckContext::try_new(&action_base, &standard)
+            .unwrap();
+        let action_source = "CREATE SCHEMA ui; CREATE CLIENT FUNCTION ui.run() RETURNS std.Action AS std.action.call(target => tasks.run, arguments => std.call.args(p_low => 7, p_high => 8));";
+        let action_report = check_standard_application(
+            &bundle([("action-argument-order.orna", action_source)]),
+            &action_context,
+        );
+        assert!(
+            action_report.diagnostics().is_empty(),
+            "{:?}",
+            action_report.diagnostics()
+        );
+        let action_function = action_report
+            .preparation_view()
+            .unwrap()
+            .checked()
+            .client_functions()
+            .iter()
+            .find(|function| function.name().to_string() == "ui.run")
+            .unwrap();
+        let CheckedClientFunctionBody::Expression { expression } = action_function.body() else {
+            panic!("action body must be an expression");
+        };
+        let CheckedClientExpression::Action { operation } = expression else {
+            panic!("action body must be an action");
+        };
+        assert_eq!(
+            operation
+                .arguments()
+                .iter()
+                .map(|(parameter, _)| *parameter)
+                .collect::<Vec<_>>(),
+            vec![
+                super::CheckedParameterId::Existing(action_low_parameter_id),
+                super::CheckedParameterId::Existing(action_high_parameter_id),
+            ]
+        );
     }
 
     #[test]
