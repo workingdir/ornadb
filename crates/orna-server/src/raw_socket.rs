@@ -6654,7 +6654,7 @@ mod tests {
             dispatcher.clone(),
             test_session(),
             server,
-            resources,
+            resources.clone(),
         ));
 
         let frames = [
@@ -6682,7 +6682,14 @@ mod tests {
         assert!(
             dispatcher
                 .first_poll_saw_cancellation
-                .load(Ordering::SeqCst)
+                .load(Ordering::SeqCst),
+            "buffered CALL_CANCEL must be observed before the first finish poll"
+        );
+        assert!(
+            timeout(Duration::from_millis(25), read_server_frame(&mut client))
+                .await
+                .is_err(),
+            "finished clean actions must remain discarded after CALL_CANCELLED"
         );
 
         client.shutdown().await.expect("client shutdown");
@@ -6690,6 +6697,11 @@ mod tests {
             .await
             .expect("connection task")
             .expect("clean EOF");
+        assert_eq!(resources.payload.available_permits(), SHARED_PAYLOAD_BYTES);
+        assert_eq!(
+            resources.kernel_operations.available_permits(),
+            KERNEL_OPERATION_LIMIT
+        );
     }
 
     #[tokio::test]
