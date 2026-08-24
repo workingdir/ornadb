@@ -875,16 +875,16 @@ fn client_root_binding(
     };
     match kind {
         ClientExpressionPart::LocalRoot(_) => find_local(),
-        ClientExpressionPart::ParameterRoot(_) => declaration
-            .parameters
-            .iter()
-            .find(|parameter| name_part_matches_text(&parameter.name, &root.text))
-            .map(|parameter| ClientRootBinding {
-                declaration_span: parameter.name.span.clone(),
-                owner: type_owner_name(&parameter.type_specification),
-            })
-            .or_else(find_state)
-            .or_else(find_local),
+        ClientExpressionPart::ParameterRoot(_) => find_local().or_else(find_state).or_else(|| {
+            declaration
+                .parameters
+                .iter()
+                .find(|parameter| name_part_matches_text(&parameter.name, &root.text))
+                .map(|parameter| ClientRootBinding {
+                    declaration_span: parameter.name.span.clone(),
+                    owner: type_owner_name(&parameter.type_specification),
+                })
+        }),
         // The compiler's FieldPath grammar starts from a parameter. Keep
         // that precedence when a local happens to share its name.
         ClientExpressionPart::FieldRoot(_) => declaration
@@ -2314,6 +2314,41 @@ mod tests {
         );
         assert_eq!(references.len(), 1);
         assert_eq!(references[0].range.start, mapper.position(second_use));
+    }
+
+    #[test]
+    fn client_pre_begin_local_shadows_parameter_in_navigation() {
+        let text = "CREATE CLIENT FUNCTION shadowed(p BOOLEAN) RETURNS BOOLEAN IS
+\
+              LET p BOOLEAN := TRUE;
+\
+              LET q BOOLEAN := p;
+\
+              BEGIN RETURN q; END;
+";
+        let document = Document::new(
+            "file:///client-shadowing.orna".parse().unwrap(),
+            text.to_owned(),
+            1,
+        );
+        let parse = orna_syntax::parse(text);
+        let mapper = PositionMapper::new(text);
+        let local_definition = text.find("LET p").expect("local declaration") + "LET ".len();
+        let local_use = text.rfind(":= p").expect("local initializer") + ":= ".len();
+
+        let definition = super::definition(&document, &parse, mapper.position(local_use), &mapper)
+            .expect("local shadow definition");
+        assert_eq!(definition.range.start, mapper.position(local_definition));
+
+        let references = references(
+            &document,
+            &parse,
+            mapper.position(local_use),
+            &mapper,
+            false,
+        );
+        assert_eq!(references.len(), 1);
+        assert_eq!(references[0].range.start, mapper.position(local_use));
     }
 
     #[test]
