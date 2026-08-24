@@ -6,14 +6,14 @@
 //! by a future adapter without changing the contract.
 
 use orna_core::{
-    inspect::{InspectProjection, INSPECT_RENDER_CARRIER_SIGNATURE},
+    CatalogueRevisionId, InvocationId, PrincipalId, SourceRevisionId,
+    inspect::{INSPECT_RENDER_CARRIER_SIGNATURE, InspectProjection},
     inspect_carrier::{
         InspectCarrierEnvelope, InspectCarrierError, InspectCarrierKind, InspectCarrierProvenance,
         InspectRowError,
     },
     inspect_lifecycle::{InspectEpochBinding, InspectLifecycleError, InspectProjectionVersions},
     revision::RevisionPair,
-    CatalogueRevisionId, InvocationId, PrincipalId, SourceRevisionId,
 };
 use orna_server::InstalledInspectProjection;
 

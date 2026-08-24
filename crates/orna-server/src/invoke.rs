@@ -1213,11 +1213,27 @@ async fn run_installed_external_contract(
     let target_invocation_id =
         target_invocation_id.ok_or_else(|| "inspect.malformed_carrier".to_owned())?;
     // Carrier target IDs identify the observed invocation only; observer anchors
-    // come from the trusted CLIENT execution context.
-    reject_recursive_inspect_target(
-        target_invocation_id,
+    // come from the trusted CLIENT execution context. Authenticate and validate
+    // the epoch before querying protected lineage: otherwise a denied target
+    // could be distinguished by whether it is recursive.
+    let observer_lineage = [
         request.observer_root_invocation_id(),
         request.observer_parent_invocation_id(),
+    ];
+    authorize_inspect_target_before_recursion(
+        || async {
+            let Some(snapshot) = kernel
+                .load_inspect_snapshot(session, server_epoch)
+                .await
+                .map_err(inspect_kernel_error_code)?
+            else {
+                return Err(INSPECT_DENIED_CODE.to_owned());
+            };
+            validate_epoch(&snapshot, target_invocation_id, active.pair())?;
+            Ok(())
+        },
+        target_invocation_id,
+        &observer_lineage,
         |observer, target| async move {
             kernel
                 .inspect_target_is_recursive(observer, target)
@@ -1226,14 +1242,6 @@ async fn run_installed_external_contract(
         },
     )
     .await?;
-    let Some(snapshot) = kernel
-        .load_inspect_snapshot(session, server_epoch)
-        .await
-        .map_err(inspect_kernel_error_code)?
-    else {
-        return Err(INSPECT_DENIED_CODE.to_owned());
-    };
-    validate_epoch(&snapshot, target_invocation_id, active.pair())?;
     let client_epoch_id = request.context().client_epoch_id().invocation_id();
     let body = serde_json::to_vec(&serde_json::json!({
         "kind": "node",
@@ -1298,6 +1306,40 @@ where
     Ok(())
 }
 
+async fn reject_recursive_inspect_lineage_target<F, Fut>(
+    target: InvocationId,
+    observer_lineage: &[InvocationId],
+    mut is_recursive: F,
+) -> Result<(), String>
+where
+    F: FnMut(InvocationId, InvocationId) -> Fut,
+    Fut: Future<Output = Result<bool, String>>,
+{
+    for observer in observer_lineage {
+        if is_recursive(*observer, target).await? {
+            return Err("inspect.recursion".to_owned());
+        }
+    }
+    Ok(())
+}
+
+async fn authorize_inspect_target_before_recursion<T, A, AFut, F, Fut>(
+    authorize: A,
+    target: InvocationId,
+    observer_lineage: &[InvocationId],
+    is_recursive: F,
+) -> Result<T, String>
+where
+    A: FnOnce() -> AFut,
+    AFut: Future<Output = Result<T, String>>,
+    F: FnMut(InvocationId, InvocationId) -> Fut,
+    Fut: Future<Output = Result<bool, String>>,
+{
+    let authorized = authorize().await?;
+    reject_recursive_inspect_lineage_target(target, observer_lineage, is_recursive).await?;
+    Ok(authorized)
+}
+
 fn map_inspect_carrier_error(error: OpaqueValueError) -> String {
     match error {
         OpaqueValueError::UnregisteredType { .. } => "inspect.unknown_carrier".to_owned(),
@@ -1332,30 +1374,38 @@ async fn run_installed_inspect(
             }
             let invocation = inspect_snapshot_request_target(target)?;
             require_inspect_target_provenance(request.target_invocation_id(), invocation)?;
-            for anchor in request.observer_lineage() {
-                if kernel
-                    .inspect_target_is_recursive(*anchor, invocation)
-                    .await
-                    .map_err(inspect_kernel_error_code)?
-                {
-                    return Err("inspect.recursion".to_owned());
-                }
-            }
-            let Some(epoch_id) = kernel
-                .find_latest_inspect_epoch(&session, invocation)
-                .await
-                .map_err(inspect_kernel_error_code)?
-            else {
-                return Err(INSPECT_DENIED_CODE.to_owned());
-            };
-            let Some(loaded_snapshot) = kernel
-                .load_inspect_snapshot(&session, epoch_id)
-                .await
-                .map_err(inspect_kernel_error_code)?
-            else {
-                return Err(INSPECT_DENIED_CODE.to_owned());
-            };
-            validate_epoch(&loaded_snapshot, invocation, active.pair())?;
+            let loaded_snapshot = authorize_inspect_target_before_recursion(
+                || async {
+                    let Some(epoch_id) = kernel
+                        .find_latest_inspect_epoch(&session, invocation)
+                        .await
+                        .map_err(inspect_kernel_error_code)?
+                    else {
+                        return Err(INSPECT_DENIED_CODE.to_owned());
+                    };
+                    let Some(loaded_snapshot) = kernel
+                        .load_inspect_snapshot(&session, epoch_id)
+                        .await
+                        .map_err(inspect_kernel_error_code)?
+                    else {
+                        return Err(INSPECT_DENIED_CODE.to_owned());
+                    };
+                    validate_epoch(&loaded_snapshot, invocation, active.pair())?;
+                    Ok(loaded_snapshot)
+                },
+                invocation,
+                request.observer_lineage(),
+                |observer, target| {
+                    let kernel = kernel.clone();
+                    async move {
+                        kernel
+                            .inspect_target_is_recursive(observer, target)
+                            .await
+                            .map_err(inspect_kernel_error_code)
+                    }
+                },
+            )
+            .await?;
             let payload = make_inspect_carrier(
                 &active,
                 &registry,
@@ -1407,30 +1457,38 @@ async fn run_installed_inspect(
                 target_invocation,
                 active.pair(),
             )?;
-            for anchor in request.observer_lineage() {
-                if kernel
-                    .inspect_target_is_recursive(*anchor, target_invocation)
-                    .await
-                    .map_err(inspect_kernel_error_code)?
-                {
-                    return Err("inspect.recursion".to_owned());
-                }
-            }
-            let Some(_) = kernel
-                .find_inspect_epoch(&session, epoch_id)
-                .await
-                .map_err(inspect_kernel_error_code)?
-            else {
-                return Err(INSPECT_DENIED_CODE.to_owned());
-            };
-            let Some(loaded_snapshot) = kernel
-                .load_inspect_snapshot(&session, epoch_id)
-                .await
-                .map_err(inspect_kernel_error_code)?
-            else {
-                return Err(INSPECT_DENIED_CODE.to_owned());
-            };
-            validate_epoch(&loaded_snapshot, target_invocation, active.pair())?;
+            let loaded_snapshot = authorize_inspect_target_before_recursion(
+                || async {
+                    let Some(_) = kernel
+                        .find_inspect_epoch(&session, epoch_id)
+                        .await
+                        .map_err(inspect_kernel_error_code)?
+                    else {
+                        return Err(INSPECT_DENIED_CODE.to_owned());
+                    };
+                    let Some(loaded_snapshot) = kernel
+                        .load_inspect_snapshot(&session, epoch_id)
+                        .await
+                        .map_err(inspect_kernel_error_code)?
+                    else {
+                        return Err(INSPECT_DENIED_CODE.to_owned());
+                    };
+                    validate_epoch(&loaded_snapshot, target_invocation, active.pair())?;
+                    Ok(loaded_snapshot)
+                },
+                target_invocation,
+                request.observer_lineage(),
+                |observer, target| {
+                    let kernel = kernel.clone();
+                    async move {
+                        kernel
+                            .inspect_target_is_recursive(observer, target)
+                            .await
+                            .map_err(inspect_kernel_error_code)
+                    }
+                },
+            )
+            .await?;
             let privilege = InspectPrivilege::OwnInvocation;
             let granted = [InspectPrivilege::OwnInvocation];
             let values_granted = inspect_classifier_granted(&granted, InspectPrivilege::Values);
@@ -1887,14 +1945,15 @@ fn decode_enriched_inspect_row_target(
     if payload[89] != 1 || payload[90] > 4 {
         return Err("inspect.malformed_carrier".to_owned());
     }
-    Ok((
-        epoch,
-        InvocationId::from_bytes(
-            payload[25..41]
-                .try_into()
-                .map_err(|_| "inspect.malformed_carrier".to_owned())?,
-        ),
-    ))
+    let target = InvocationId::from_bytes(
+        payload[25..41]
+            .try_into()
+            .map_err(|_| "inspect.malformed_carrier".to_owned())?,
+    );
+    if target.to_bytes() == [0; 16] {
+        return Err("inspect.invalid_target".to_owned());
+    }
+    Ok((epoch, target))
 }
 
 fn decode_snapshot_row_epoch(
@@ -2263,6 +2322,9 @@ impl ClientResourceExecutor for InstalledClientResourceExecutor {
     }
 
     fn execute(&mut self, request: ClientResourceRequest) -> ClientResourceCompletion {
+        if self.cancellation.is_requested() {
+            return request.cancelled();
+        }
         self.reap_detached();
         if self.pending.is_some()
             || self.broker_pending.is_some()
@@ -6008,6 +6070,7 @@ mod tests {
         let values = ResourceValues {
             stream_id: request.stream_id,
             request_id: request.request_id,
+            target_revision: active.pair(),
             batch_sequence: 0,
             item_count: 1,
             byte_count,
@@ -6016,6 +6079,7 @@ mod tests {
         let completed = ResourceCompleted {
             stream_id: request.stream_id,
             request_id: request.request_id,
+            target_revision: active.pair(),
             final_batch_sequence: 0,
             total_items: 1,
         };
@@ -6109,6 +6173,7 @@ mod tests {
             &registry,
             &ResourceServerFrame::Completed(ResourceCompleted {
                 request_id: InvocationId::from_bytes([0xaa; 16]),
+                target_revision: active.pair(),
                 ..completed
             }),
         )
@@ -6138,6 +6203,7 @@ mod tests {
             &ResourceServerFrame::Failed(ResourceFailed {
                 stream_id: unknown_request.stream_id,
                 request_id: unknown_request.request_id,
+                target_revision: active.pair(),
                 failure: CallFailure::ExecuteDenied,
             }),
         )
@@ -6232,6 +6298,7 @@ mod tests {
                 &ResourceServerFrame::Failed(ResourceFailed {
                     stream_id,
                     request_id: request.request_id,
+                    target_revision: active.pair(),
                     failure: CallFailure::ExecuteDenied,
                 }),
             )
@@ -6270,6 +6337,7 @@ mod tests {
             &ResourceServerFrame::Failed(ResourceFailed {
                 stream_id: 1,
                 request_id: InvocationId::from_bytes([1; 16]),
+                target_revision: active.pair(),
                 failure: CallFailure::ExecuteDenied,
             }),
         )
@@ -6305,6 +6373,7 @@ mod tests {
         let values = ResourceValues {
             stream_id: current_stream_id,
             request_id: current_request.request_id,
+            target_revision: active.pair(),
             batch_sequence: 0,
             item_count: 1,
             byte_count,
@@ -6313,6 +6382,7 @@ mod tests {
         let completed = ResourceCompleted {
             stream_id: current_stream_id,
             request_id: current_request.request_id,
+            target_revision: active.pair(),
             final_batch_sequence: 0,
             total_items: 1,
         };
@@ -6356,6 +6426,7 @@ mod tests {
             &ResourceServerFrame::Failed(ResourceFailed {
                 stream_id: future_stream_id,
                 request_id: future_request.request_id,
+                target_revision: active.pair(),
                 failure: CallFailure::ExecuteDenied,
             }),
         )
@@ -7177,6 +7248,7 @@ mod tests {
             ResourceServerFrame::Completed(ResourceCompleted {
                 stream_id: request.stream_id,
                 request_id: request.request_id,
+                target_revision: active.pair(),
                 final_batch_sequence: 0,
                 total_items: 0,
             }),
@@ -7238,6 +7310,7 @@ mod tests {
             ResourceServerFrame::Cancelled(ResourceCancelled {
                 stream_id: request.stream_id,
                 request_id: request.request_id,
+                target_revision: active.pair(),
                 reason: ResourceCancellationCode::ParentInvocationCancelled,
             }),
             &mut writer,
@@ -7316,6 +7389,7 @@ mod tests {
                 ResourceServerFrame::Values(ResourceValues {
                     stream_id: request.stream_id,
                     request_id: request.request_id,
+                    target_revision: active.pair(),
                     batch_sequence: 0,
                     item_count: 1,
                     byte_count,
@@ -7333,6 +7407,7 @@ mod tests {
             ResourceServerFrame::Completed(ResourceCompleted {
                 stream_id: request.stream_id,
                 request_id: request.request_id,
+                target_revision: active.pair(),
                 final_batch_sequence: 0,
                 total_items: 1,
             }),
@@ -7394,6 +7469,7 @@ mod tests {
             ResourceServerFrame::Failed(ResourceFailed {
                 stream_id: request.stream_id,
                 request_id: request.request_id,
+                target_revision: active.pair(),
                 failure: CallFailure::ExecuteDenied,
             }),
             &mut writer,
@@ -7431,6 +7507,7 @@ mod tests {
         let values = ResourceValues {
             stream_id: request.stream_id,
             request_id: request.request_id,
+            target_revision: active.pair(),
             batch_sequence: 0,
             item_count: 1,
             byte_count,
@@ -7480,6 +7557,7 @@ mod tests {
             ResourceServerFrame::Completed(ResourceCompleted {
                 stream_id: request.stream_id,
                 request_id: request.request_id,
+                target_revision: active.pair(),
                 final_batch_sequence: 0,
                 total_items: 1,
             }),
@@ -7543,6 +7621,7 @@ mod tests {
             ResourceServerFrame::Completed(ResourceCompleted {
                 stream_id: request.stream_id,
                 request_id: request.request_id,
+                target_revision: active.pair(),
                 final_batch_sequence: 0,
                 total_items: 1,
             }),
@@ -7593,6 +7672,7 @@ mod tests {
             ResourceServerFrame::Failed(ResourceFailed {
                 stream_id: request.stream_id,
                 request_id: request.request_id,
+                target_revision: active.pair(),
                 failure: CallFailure::ExecuteDenied,
             }),
             &mut writer,
@@ -7687,6 +7767,7 @@ mod tests {
             ResourceServerFrame::Cancelled(ResourceCancelled {
                 stream_id: request.stream_id,
                 request_id: request.request_id,
+                target_revision: active.pair(),
                 reason: ResourceCancellationCode::ParentInvocationCancelled,
             }),
             &mut writer,
@@ -7916,6 +7997,82 @@ mod tests {
         frame.extend_from_slice(&(body.len() as u32).to_be_bytes());
         frame.extend_from_slice(body);
         frame
+    }
+
+    #[test]
+    fn opaque_terminal_values_render_through_event_stream_to_clean_channels() {
+        let (active, registry) = transport_test_context();
+        let document_body = b"name | status\nalice | ready\n";
+        let byte_stream_body = br#"{"ok":true}"#;
+        let document = RuntimeValue::Opaque(
+            OpaqueValue::new(
+                &active,
+                &registry,
+                STD_TERMINAL_DOCUMENT_TYPE_ID,
+                document_frame(document_body),
+            )
+            .expect("registered document codec accepts the payload"),
+        );
+        let byte_stream = RuntimeValue::Opaque(
+            OpaqueValue::new(
+                &active,
+                &registry,
+                STD_IO_BYTE_STREAM_TYPE_ID,
+                byte_stream_frame(b"application/json", byte_stream_body),
+            )
+            .expect("registered byte-stream codec accepts the payload"),
+        );
+        let invocation = InvocationId::from_bytes([0x72; 16]);
+        let started = InvokeEvent::new(
+            invocation,
+            0,
+            InvocationEventBody::Started {
+                visible_principal: None,
+            },
+        )
+        .expect("started event");
+        let values = InvokeEvent::new(
+            invocation,
+            1,
+            InvocationEventBody::value_batch(
+                None,
+                [
+                    InvokeValue::new(document).expect("document value"),
+                    InvokeValue::new(byte_stream).expect("byte-stream value"),
+                ],
+            )
+            .expect("value batch body"),
+        )
+        .expect("values event");
+        let completed = InvokeEvent::new(
+            invocation,
+            2,
+            InvocationEventBody::Completed {
+                duration_nanoseconds: 7,
+            },
+        )
+        .expect("completed event");
+        let events = InvocationEventBatch::new(vec![
+            InvocationEventRecord::new(1, started),
+            InvocationEventRecord::new(2, values),
+            InvocationEventRecord::new(3, completed),
+        ])
+        .expect("event batch");
+
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let outcome = render_event_stream(&events, false, &mut stdout, &mut stderr, &mut encoder)
+            .expect("rendering succeeds");
+
+        assert_eq!(outcome, InstalledInvokeOutcome::Completed);
+        assert_eq!(
+            stdout,
+            [document_body.as_slice(), byte_stream_body.as_slice()].concat()
+        );
+        assert_eq!(
+            stderr,
+            b"orna: invoke: invocation started\norna: invoke: invocation completed in 7ns\n"
+        );
     }
 
     #[test]
@@ -8615,6 +8772,34 @@ mod tests {
     }
 
     #[test]
+    fn inspector_enriched_row_rejects_zero_target() {
+        let (active, registry) = inspect_test_context();
+        let epoch = InspectEpochId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 7]);
+        let mut payload = super::row(InspectCarrierKind::SecurityDecisions.tag(), 0);
+        super::id(&mut payload, &epoch.to_bytes());
+        super::id(&mut payload, &[0; 16]);
+        super::id(&mut payload, &[0x11; 16]);
+        super::id(&mut payload, &active.pair().source().to_bytes());
+        super::id(&mut payload, &active.pair().catalogue().to_bytes());
+        payload.push(1);
+        payload.push(0);
+        payload.extend_from_slice(&[4, 1, 0, 2]);
+
+        let encoded = super::encode_inspect_row(&active, &registry, payload)
+            .expect("canonical enriched Inspector row");
+        assert_eq!(
+            super::decode_enriched_inspect_row_target(
+                &active,
+                &registry,
+                &encoded,
+                InspectCarrierKind::SecurityDecisions,
+                7,
+            ),
+            Err("inspect.invalid_target".to_owned())
+        );
+    }
+
+    #[test]
     fn inspector_projection_requires_target_provenance() {
         let target = InvocationId::from_bytes([0x11; 16]);
         assert_eq!(
@@ -8669,6 +8854,31 @@ mod tests {
         .await;
         assert_eq!(result, Ok(()));
         assert_eq!(checked, vec![root]);
+    }
+
+    #[tokio::test]
+    async fn inspector_denied_recursive_target_does_not_query_lineage() {
+        let target = InvocationId::from_bytes([0x35; 16]);
+        let observer = InvocationId::from_bytes([0x36; 16]);
+        let observer_lineage = [observer];
+        let mut checked = Vec::new();
+
+        let result: Result<(), String> = authorize_inspect_target_before_recursion(
+            || async { Err("inspect.denied".to_owned()) },
+            target,
+            &observer_lineage,
+            |ancestor, candidate| {
+                checked.push((ancestor, candidate));
+                async move { Ok(true) }
+            },
+        )
+        .await;
+
+        assert_eq!(result, Err("inspect.denied".to_owned()));
+        assert!(
+            checked.is_empty(),
+            "denied targets must not be classified for recursion"
+        );
     }
 
     #[test]
@@ -9133,6 +9343,7 @@ mod tests {
                 ResourceServerFrame::Values(ResourceValues {
                     stream_id: request.stream_id,
                     request_id: request.request_id,
+                    target_revision: active.pair(),
                     batch_sequence: 0,
                     item_count: 1,
                     byte_count,
@@ -9141,6 +9352,7 @@ mod tests {
                 ResourceServerFrame::Completed(ResourceCompleted {
                     stream_id: request.stream_id,
                     request_id: request.request_id,
+                    target_revision: active.pair(),
                     final_batch_sequence: 0,
                     total_items: 1,
                 }),
@@ -9200,12 +9412,14 @@ mod tests {
             SocketTerminal::Completed => ResourceServerFrame::Completed(ResourceCompleted {
                 stream_id: request.stream_id,
                 request_id: request.request_id,
+                target_revision: active.pair(),
                 final_batch_sequence: 0,
                 total_items: 0,
             }),
             SocketTerminal::Failed(failure) => ResourceServerFrame::Failed(ResourceFailed {
                 stream_id: request.stream_id,
                 request_id: request.request_id,
+                target_revision: active.pair(),
                 failure,
             }),
         };
@@ -9394,6 +9608,7 @@ mod tests {
             let late_values = ResourceServerFrame::Values(ResourceValues {
                 stream_id: protocol_request.stream_id,
                 request_id,
+                target_revision: protocol_request.target_revision,
                 batch_sequence: 0,
                 item_count: 1,
                 byte_count: encode_constructed_value(&peer_active, &peer_registry, &value)
@@ -9468,6 +9683,64 @@ mod tests {
         assert!(executor.detached.is_empty());
         assert!(executor.transport.is_none());
         assert!(executor.poll().is_none());
+    }
+
+    #[test]
+    fn installed_executor_cancelled_before_execute_does_not_dispatch() {
+        let (active, _registry) = transport_test_context();
+        let mut state = ClientStateStore::new();
+        let request = installed_client_test_request(&active, &mut state, 0x97);
+        let (broker, mut commands) = SharedInvokeBroker::pending();
+        let (_peer, client) = StandardUnixStream::pair().expect("resource socket pair");
+        let cancellation = ResourceCancellation::new();
+        assert!(cancellation.request_cancel());
+        let mut executor = InstalledClientResourceExecutor {
+            active,
+            inspect_kernel: None,
+            inspect_session: None,
+            next_stream_id: 1,
+            broker: Some(broker.clone()),
+            raw_resource_authorizer: None,
+            transport: Some(ResourceTransportSource::Injected(
+                InjectedResourceTransport::Stream(PersistentResourceTransport {
+                    stream: Some(client),
+                    handshake_complete: false,
+                    protocol: ResourceProtocolConnection::new(),
+                    server_task: None,
+                }),
+            )),
+            pending: None,
+            broker_pending: None,
+            detached: Vec::new(),
+            detached_broker: None,
+            cancellation,
+        };
+
+        assert!(matches!(
+            executor.execute(request.clone()),
+            ClientResourceCompletion::Cancelled {
+                request_id,
+                key,
+                generation,
+            } if request_id == request.request_id()
+                && key == request.key()
+                && generation == request.generation()
+        ));
+        assert_eq!(executor.next_stream_id, 1);
+        assert!(executor.transport.is_some());
+        assert!(executor.broker_pending.is_none());
+        assert!(
+            commands.try_recv().is_err(),
+            "cancelled request was dispatched"
+        );
+        assert!(
+            broker
+                .resource_expectations
+                .lock()
+                .expect(BROKER_RESOURCE_EXPECTATION_LOCK)
+                .is_empty(),
+            "cancelled request was registered with the broker"
+        );
     }
 
     #[test]
