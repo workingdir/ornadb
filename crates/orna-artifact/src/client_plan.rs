@@ -2471,14 +2471,12 @@ fn validate_procedural_model(plan: &ProceduralClientPlan) -> Result<(), ClientPl
                 },
                 _ => None,
             };
-            if let Some(actual) = awaited_type {
-                if actual != target.type_id {
-                    return Err(ClientPlanError::ProceduralLocalTypeMismatch {
-                        local: target.local,
-                        expected: target.type_id,
-                        actual,
-                    });
-                }
+            if let Some(actual) = awaited_type && actual != target.type_id {
+                return Err(ClientPlanError::ProceduralLocalTypeMismatch {
+                    local: target.local,
+                    expected: target.type_id,
+                    actual,
+                });
             }
         }
         let expression_kind = procedural_resource_kind(statement.expression(), &locals);
