@@ -22025,6 +22025,47 @@ mod runtime_conformance {
         );
     }
     #[test]
+    fn direct_destroy_before_shutdown_keeps_fixture_runtime_registered() {
+        let session = FixtureSession::new();
+        let runtime = session.runtime;
+
+        unsafe { (FIXTURE_API.destroy)(runtime) };
+
+        let guard = global().lock().unwrap_or_else(|error| error.into_inner());
+        assert_eq!(guard.runtime.as_ref().map(|state| state.handle), Some(runtime));
+        assert_eq!(session.client.runtime.load(Ordering::SeqCst), runtime);
+    }
+
+    #[test]
+    fn direct_destroy_from_non_owner_thread_keeps_fixture_runtime_registered() {
+        let session = FixtureSession::new();
+        let runtime = session.runtime;
+
+        thread::spawn(move || unsafe { (FIXTURE_API.destroy)(runtime) })
+            .join()
+            .expect("non-owner destroy call should join");
+
+        let guard = global().lock().unwrap_or_else(|error| error.into_inner());
+        assert_eq!(guard.runtime.as_ref().map(|state| state.handle), Some(runtime));
+        assert_eq!(session.client.runtime.load(Ordering::SeqCst), runtime);
+    }
+
+    #[test]
+    fn owner_destroy_after_shutdown_clears_global_runtime_and_client_handle() {
+        let session = FixtureSession::new();
+        let runtime = session.runtime;
+
+        assert_eq!(session.shutdown(), StatusCode::Ok);
+        assert_eq!(session.client.runtime.load(Ordering::SeqCst), runtime);
+
+        unsafe { (FIXTURE_API.destroy)(runtime) };
+
+        let guard = global().lock().unwrap_or_else(|error| error.into_inner());
+        assert!(guard.runtime.is_none());
+        assert_eq!(session.client.runtime.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
     fn status_messages_have_stable_codes_and_reject_unstructured_text() {
         let codes = [
             StatusCode::Ok,
