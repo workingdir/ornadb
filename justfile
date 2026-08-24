@@ -1,6 +1,6 @@
 default: check
 
-# Run the full local quality gate used by continuous integration.
+# Run the default local fmt/build/lint/non-ignored test gate; CI also runs separate editor-tooling and Compose kernel gates.
 check: fmt build lint test
 
 # Verify formatting without changing source files.
@@ -15,7 +15,7 @@ build:
 lint:
     cargo clippy --workspace --all-targets -- -D warnings
 
-# Run the complete workspace test suite.
+# Run workspace tests excluding #[ignore] tests.
 test:
     cargo test --workspace --all-targets
 
