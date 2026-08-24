@@ -8677,7 +8677,7 @@ mod tests {
     fn invocation_carrier_standard() -> VerifiedStandardLibrarySnapshot {
         const SOURCE: &str = "CREATE SCHEMA std;CREATE SCHEMA std.types;CREATE TYPE std.types.BOOLEAN AS VALUE PRIMITIVE KERNEL CONTRACT 'orna.kernel.value.boolean@1' IMMUTABLE PERSISTABLE;EXPORT TYPE std.types.BOOLEAN AS std.BOOLEAN;EXPORT TYPE std.BOOLEAN TO PRELUDE AS BOOLEAN;";
         let unit = StoredSourceUnit::new(
-            SourceUnitId::from_bytes([4; 16]),
+            SourceUnitId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]),
             0,
             "std/types.orna",
             SOURCE,
@@ -8751,9 +8751,9 @@ mod tests {
                 catalogue,
                 origins,
                 Sha256Digest::from_bytes([
-                    0x72, 0x4b, 0x41, 0xcf, 0x68, 0x5c, 0x93, 0xa8, 0xc9, 0x8d, 0xf9, 0x3d, 0x96,
-                    0x77, 0x98, 0x98, 0x12, 0x34, 0xc0, 0x98, 0xf6, 0xc1, 0x00, 0xfa, 0x57, 0xe9,
-                    0xac, 0x00, 0xdd, 0x03, 0xfb, 0x6d,
+                    0x10, 0x61, 0xb8, 0x16, 0x88, 0x39, 0xaa, 0x50, 0x60, 0xbd, 0x4e, 0x5a, 0xef, 0x1e,
+                    0xc8, 0x68, 0x08, 0x22, 0x02, 0xb2, 0x96, 0x91, 0x42, 0x2a, 0xd9, 0x1a, 0x29,
+                    0x64, 0x9c, 0x72, 0x0e, 0x83,
                 ]),
             )
             .unwrap(),
