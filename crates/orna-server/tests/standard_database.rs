@@ -3844,7 +3844,7 @@ async fn finish_pending_client_action(
             }
             sleep(Duration::from_millis(10)).await;
         };
-        result = complete_client_action(active, action_state, completion);
+        result = complete_client_action(active, action_state, completion, executor);
     }
 }
 
