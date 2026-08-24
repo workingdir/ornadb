@@ -4753,6 +4753,18 @@ async fn execute_sealed_server_target(
     Ok(values)
 }
 
+fn sealed_server_stream_completed_event(
+    final_batch_sequence: u64,
+    total_items: u64,
+    total_bytes: u64,
+) -> AuthenticatedServerResourceEvent {
+    AuthenticatedServerResourceEvent::Completed {
+        final_batch_sequence,
+        total_items,
+        total_bytes,
+    }
+}
+
 async fn run_sealed_server_stream_producer(
     kernel: PostgresKernel,
     active: ActiveDatabaseRevision,
@@ -4844,17 +4856,17 @@ async fn run_sealed_server_stream_producer(
     match stream_result {
         ResourceProducerExit::Completed(ResourceProducerCompleted {
             response,
-            final_batch_sequence: _,
-            total_items: _,
-            total_bytes: _,
+            final_batch_sequence,
+            total_items,
+            total_bytes,
         }) => {
             let commit = transaction.commit().await;
             if commit.is_ok() {
-                let _ = response.send(Ok(AuthenticatedServerResourceEvent::Completed {
-                    final_batch_sequence: 0,
-                    total_items: 0,
-                    total_bytes: 0,
-                }));
+                let _ = response.send(Ok(sealed_server_stream_completed_event(
+                    final_batch_sequence,
+                    total_items,
+                    total_bytes,
+                )));
             } else {
                 let _ = response.send(Err(PostgresKernelError::DurableInvariant {
                     relation: "sealed invocation producer",
@@ -10299,4 +10311,16 @@ mod tests {
         cancellation.commit_finished();
         assert!(!cancellation.try_begin_commit());
     }
+    #[test]
+    fn sealed_server_stream_completion_preserves_batch_metadata() {
+        assert_eq!(
+            sealed_server_stream_completed_event(17, 23, 41),
+            AuthenticatedServerResourceEvent::Completed {
+                final_batch_sequence: 17,
+                total_items: 23,
+                total_bytes: 41,
+            },
+        );
+    }
+
 }
