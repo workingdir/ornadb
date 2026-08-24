@@ -6012,13 +6012,34 @@ impl ClientResourceExecutor for ClientActionNestedExecutor<'_> {
     fn execute(&mut self, request: ClientResourceRequest) -> ClientResourceCompletion {
         let completion = self.inner.execute(request.clone());
         if matches!(completion, ClientResourceCompletion::Pending { .. }) {
-            return self.inner.cancel(request);
+            let cancellation = self.inner.cancel(request.clone());
+            if matches!(cancellation, ClientResourceCompletion::Pending { .. }) {
+                // A nested action has no resumable continuation or retained
+                // resource owner. Terminalise local cancellation so the outer
+                // action cannot fail while dropping the nested request owner.
+                return request.cancelled();
+            }
+            return cancellation;
         }
         completion
     }
 
     fn cancel(&mut self, request: ClientResourceRequest) -> ClientResourceCompletion {
         self.inner.cancel(request)
+    }
+
+    fn inspect(
+        &mut self,
+        request: ClientInspectRequest,
+    ) -> Result<RuntimeValue, String> {
+        self.inner.inspect(request)
+    }
+
+    fn external_contract(
+        &mut self,
+        request: ClientExternalContractRequest,
+    ) -> Result<RuntimeValue, String> {
+        self.inner.external_contract(request)
     }
 }
 
@@ -8682,6 +8703,43 @@ mod tests {
             ),
             Ok(RuntimeValue::Boolean(false)),
         );
+
+        let mut nested_provider =
+            super::DeterministicClientResourceExecutor::new(|_: &super::ClientResourceRequest| {
+                Ok::<_, String>(RuntimeValue::Boolean(false))
+            })
+            .with_external_contract(|request| {
+                assert_eq!(request.identity(), "app.other@1");
+                Ok(RuntimeValue::Boolean(true))
+            });
+        let request = super::ClientExternalContractRequest::new(
+            context,
+            "app.other@1",
+            vec![(parameter, RuntimeValue::Boolean(true))],
+        );
+        let mut nested = super::ClientActionNestedExecutor {
+            inner: &mut nested_provider,
+        };
+        assert_eq!(
+            nested.external_contract(request),
+            Ok(RuntimeValue::Boolean(true)),
+            "nested CLIENT actions must retain external-contract providers",
+        );
+
+        let mut forwarding_slot: Option<&mut dyn super::ClientResourceExecutor> =
+            Some(&mut nested);
+        assert_eq!(
+            super::evaluate_external_contract(
+                "app.other@1",
+                context,
+                super::ObserverLineage::compatibility(context),
+                &[(parameter, RuntimeValue::Boolean(true))],
+                &mut forwarding_slot,
+            ),
+            Ok(RuntimeValue::Boolean(true)),
+        );
+
+        drop(forwarding_slot);
         let mut failing =
             super::DeterministicClientResourceExecutor::new(|_: &super::ClientResourceRequest| {
                 Ok::<_, String>(RuntimeValue::Boolean(false))
@@ -9316,7 +9374,14 @@ mod tests {
                 ));
                 Ok(RuntimeValue::Boolean(false))
             });
-        assert_eq!(executor.inspect(request), Ok(RuntimeValue::Boolean(false)));
+        let mut nested = super::ClientActionNestedExecutor {
+            inner: &mut executor,
+        };
+        assert_eq!(
+            nested.inspect(request),
+            Ok(RuntimeValue::Boolean(false)),
+            "nested CLIENT actions must retain Inspector providers",
+        );
     }
 
     #[test]
@@ -18390,7 +18455,7 @@ CREATE CLIENT FUNCTION app.owner() RETURNS INTEGER IS
         )
         .unwrap();
         let grants = capability::LocalCapabilityGrantSet::from_grants([grant]).unwrap();
-        let mut executor = RecordingActionExecutor::new(None);
+        let mut executor = RecordingActionExecutor::new(None).with_cancel_pending();
 
         for previous_parent in [None, Some(enclosing_parent)] {
             assert_eq!(
