@@ -13799,13 +13799,16 @@ CREATE CLIENT FUNCTION app.owner() RETURNS INTEGER IS
                 candidate.source_origin(),
             )
         });
-        assert_references_rule(
-            evaluate_client_function(
-                &active_from_prepared_with_references(&prepared, wrong_ordinal),
-                function,
-            ),
-            function,
-        );
+        let error = active_from_prepared_with_references_result(&prepared, wrong_ordinal)
+            .unwrap_err();
+        assert!(matches!(
+            error.downcast_ref::<RevisionInvariantError>(),
+            Some(RevisionInvariantError::ReferenceOrdinalOutOfSequence {
+                expected: 0,
+                actual: 1,
+                ..
+            })
+        ));
 
         let mut wrong_target = active.references().to_vec();
         replace_reference(&mut wrong_target, function, |candidate| {
@@ -14481,22 +14484,30 @@ CREATE CLIENT FUNCTION app.owner() RETURNS INTEGER IS
         active_from_prepared_with_current_revisions(prepared, references, |revision| {
             semantic_hash_version_for(revision, semantic_hash_version)
         })
+        .unwrap()
+    }
+
+    fn active_from_prepared_with_references_result(
+        prepared: &DeployableRevision,
+        references: Vec<DefinitionReference>,
+    ) -> Result<ActiveDatabaseRevision, Box<dyn std::error::Error>> {
+        active_from_prepared_with_current_revisions(prepared, references, |revision| {
+            revision.semantic_hash_version()
+        })
     }
 
     fn active_from_prepared_with_references(
         prepared: &DeployableRevision,
         references: Vec<DefinitionReference>,
     ) -> ActiveDatabaseRevision {
-        active_from_prepared_with_current_revisions(prepared, references, |revision| {
-            revision.semantic_hash_version()
-        })
+        active_from_prepared_with_references_result(prepared, references).unwrap()
     }
 
     fn active_from_prepared_with_current_revisions(
         prepared: &DeployableRevision,
         references: Vec<DefinitionReference>,
         semantic_hash_version: impl Fn(&FunctionRevisionRecord) -> FunctionSemanticHashVersion,
-    ) -> ActiveDatabaseRevision {
+    ) -> Result<ActiveDatabaseRevision, Box<dyn std::error::Error>> {
         let current_function_revisions = prepared
             .current_function_revisions()
             .unwrap()
@@ -14519,22 +14530,22 @@ CREATE CLIENT FUNCTION app.owner() RETURNS INTEGER IS
                     revision.artifact(),
                     prepared.expressions(),
                     &function_references,
+                )?;
+                Ok::<_, Box<dyn std::error::Error>>(
+                    FunctionRevisionRecord::new(
+                        revision.function(),
+                        revision.id(),
+                        revision.revision_number(),
+                        revision.declaration_origin(),
+                        revision.declaration_content_hash(),
+                        semantic_hash,
+                        revision.language_version(),
+                        revision.artifact().clone(),
+                    )?
+                    .with_semantic_hash_version(version),
                 )
-                .unwrap();
-                FunctionRevisionRecord::new(
-                    revision.function(),
-                    revision.id(),
-                    revision.revision_number(),
-                    revision.declaration_origin(),
-                    revision.declaration_content_hash(),
-                    semantic_hash,
-                    revision.language_version(),
-                    revision.artifact().clone(),
-                )
-                .unwrap()
-                .with_semantic_hash_version(version)
             })
-            .collect::<Vec<_>>();
+            .collect::<Result<Vec<_>, _>>()?;
         let context = prepared.catalogue_hash_context().clone();
         let catalogue_hash = catalogue_digest_with_context(
             &context,
@@ -14543,9 +14554,8 @@ CREATE CLIENT FUNCTION app.owner() RETURNS INTEGER IS
             prepared.expressions(),
             prepared.origins(),
             &references,
-        )
-        .unwrap();
-        ActiveDatabaseRevision::new_with_catalogue_hash_context(
+        )?;
+        Ok(ActiveDatabaseRevision::new_with_catalogue_hash_context(
             ActiveDatabaseRevisionInput::new(
                 prepared.candidate_pair(),
                 prepared.source().clone(),
@@ -14559,8 +14569,7 @@ CREATE CLIENT FUNCTION app.owner() RETURNS INTEGER IS
                 ),
             ),
             context,
-        )
-        .unwrap()
+        )?)
     }
 
     fn active_with_extra_reference(
