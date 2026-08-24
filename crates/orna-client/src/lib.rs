@@ -2,7 +2,7 @@
 
 use orna_protocol::{
     ClientFrame, decode_active_value, decode_constructed_value, encode_active_client_frame,
-    encode_active_value,
+    encode_active_value, MAX_RESOURCE_BATCH_ITEMS, MAX_RESOURCE_TOTAL_ITEMS,
 };
 use sha2::{Digest, Sha256};
 use std::{
@@ -54,6 +54,11 @@ use orna_core::{
     types::{ResolvedType, StandardScalar, TypeDescriptor, TypeDescriptorKind},
     value::{ConstructedValueKind, FunctionArgument, OpaqueValue, OpaqueValueError, RuntimeValue},
 };
+/// The largest number of queued stream items retained by one CLIENT resource.
+/// This matches the largest single completion batch, keeping one broker-sized
+/// batch available while requiring consumption before another batch is retained.
+const MAX_RESOURCE_QUEUED_ITEMS: u64 = MAX_RESOURCE_BATCH_ITEMS as u64;
+
 use orna_standard::{
     ACTION_MAGIC, BINARY_LARGE_OBJECT_TYPE_ID, RegisteredOpaqueCodecsError, STD_ACTION_TYPE_ID,
     STD_UI_TYPE_ID, registered_opaque_codecs,
@@ -951,6 +956,19 @@ pub enum ClientResourceCompletion {
     },
 
 }
+impl ClientResourceCompletion {
+    /// Returns the request identity that produced this completion.
+    pub const fn request_id(&self) -> InvocationId {
+        match self {
+            Self::Ready { request_id, .. }
+            | Self::StreamValues { request_id, .. }
+            | Self::StreamCompleted { request_id, .. }
+            | Self::Pending { request_id, .. }
+            | Self::Failed { request_id, .. }
+            | Self::Cancelled { request_id, .. } => *request_id,
+        }
+    }
+}
 
 /// One sealed Inspector operation evaluated by the local CLIENT runtime.
 ///
@@ -1383,6 +1401,8 @@ pub struct ClientResource {
     value: Option<RuntimeValue>,
     failure: Option<ClientResourceFailure>,
     stream_batches: VecDeque<Vec<RuntimeValue>>,
+    stream_queued_items: u64,
+    stream_total_items: u64,
     stream_complete: bool,
 }
 
@@ -1414,6 +1434,8 @@ impl ClientResource {
             value: None,
             failure: None,
             stream_batches: VecDeque::new(),
+            stream_queued_items: 0,
+            stream_total_items: 0,
             stream_complete: false,
         }
     }
@@ -1672,6 +1694,19 @@ impl ClientResource {
             return Err(ClientResourceError::TypeMismatch);
         }
         self.require_loading(generation)?;
+        if values.len() > MAX_RESOURCE_BATCH_ITEMS {
+            return Err(ClientResourceError::TypeMismatch);
+        }
+        let total_items = self
+            .stream_total_items
+            .checked_add(values.len() as u64)
+            .filter(|total| *total <= MAX_RESOURCE_TOTAL_ITEMS)
+            .ok_or(ClientResourceError::TypeMismatch)?;
+        let queued_items = self
+            .stream_queued_items
+            .checked_add(values.len() as u64)
+            .filter(|total| *total <= MAX_RESOURCE_QUEUED_ITEMS)
+            .ok_or(ClientResourceError::TypeMismatch)?;
         self.validate_stream_item_type(active)?;
         if values
             .iter()
@@ -1680,6 +1715,8 @@ impl ClientResource {
             return Err(ClientResourceError::TypeMismatch);
         }
         self.stream_batches.push_back(values);
+        self.stream_queued_items = queued_items;
+        self.stream_total_items = total_items;
         Ok(())
     }
 
@@ -1739,7 +1776,13 @@ impl ClientResource {
             .map_err(|_| ClientResourceError::TypeMismatch)?;
         let option_descriptor = TypeDescriptor::option(list_descriptor.clone())
             .map_err(|_| ClientResourceError::TypeMismatch)?;
-        if let Some(values) = self.stream_batches.pop_front() {
+        if let Some(values) = self.stream_batches.front() {
+            let queued_items = self
+                .stream_queued_items
+                .checked_sub(values.len() as u64)
+                .ok_or(ClientResourceError::TypeMismatch)?;
+            let values = self.stream_batches.pop_front().expect("stream batch was checked");
+            self.stream_queued_items = queued_items;
             let list = RuntimeValue::list(active, list_descriptor, values)
                 .map_err(|_| ClientResourceError::TypeMismatch)?;
             let value = RuntimeValue::option(active, option_descriptor, Some(list))
@@ -1816,6 +1859,8 @@ impl ClientResource {
         self.value = None;
         self.failure = None;
         self.stream_batches.clear();
+        self.stream_queued_items = 0;
+        self.stream_total_items = 0;
         self.stream_complete = false;
     }
 
@@ -3727,10 +3772,50 @@ fn evaluate_client_function_in_state_context_with_executor(
                     // fails. The caller can inspect the redacted failure or
                     // cancellation and decide whether to retry or invalidate.
                     for (key, resource) in &staged.resources {
+                        let replacement_cancelled = state.resources.get(key).is_some_and(
+                            |previous| {
+                                previous.status() == ClientResourceStatus::Loading
+                                    && resource.status() == ClientResourceStatus::Idle
+                                    && resource.generation().value() > previous.generation().value()
+                            },
+                        );
                         if matches!(
                             resource.status(),
                             ClientResourceStatus::Failed | ClientResourceStatus::Cancelled
-                        ) {
+                        ) || replacement_cancelled {
+                            state.resources.insert(*key, resource.clone());
+                        }
+                    }
+                }
+                ClientExecutionError::ResourceEvaluation {
+                    source: ClientResourceExecutionError::Invalid(_),
+                    ..
+                } => {
+                    // A malformed same-generation completion is returned as
+                    // Invalid after the exact request is offered to the executor
+                    // for cancellation. If cancellation is non-terminal or
+                    // malformed, retain the changed Loading resource so the
+                    // executor-owned request is not stranded in the staged clone.
+                    for (key, resource) in &staged.resources {
+                        let replacement_cancelled = state.resources.get(key).is_some_and(
+                            |previous| {
+                                previous.status() == ClientResourceStatus::Loading
+                                    && resource.status() == ClientResourceStatus::Idle
+                                    && resource.generation().value() > previous.generation().value()
+                            },
+                        );
+                        let changed_identity = state.resources.get(key).is_none_or(|previous| {
+                            previous.status() != resource.status()
+                                || previous.generation() != resource.generation()
+                                || previous.request_id() != resource.request_id()
+                        });
+                        let terminal_changed = matches!(
+                            resource.status(),
+                            ClientResourceStatus::Failed | ClientResourceStatus::Cancelled
+                        ) && changed_identity;
+                        let loading_owned = resource.status() == ClientResourceStatus::Loading
+                            && changed_identity;
+                        if terminal_changed || loading_owned || replacement_cancelled {
                             state.resources.insert(*key, resource.clone());
                         }
                     }
@@ -4977,10 +5062,63 @@ fn evaluate_resource_expression(
             evaluated,
         )
         .map_err(|source| evaluate_resource_error(context, ClientResourceExecutionError::Invalid(source)))?;
-    let completion = executor.execute(request);
-    resource.apply_completion(active, completion).map_err(|source| {
-        evaluate_resource_error(context, ClientResourceExecutionError::Invalid(source))
-    })?;
+    let completion = executor.execute(request.clone());
+    let completion_request_id = completion.request_id();
+    let (completion_key, completion_generation) = match &completion {
+        ClientResourceCompletion::Ready { key, generation, .. }
+        | ClientResourceCompletion::StreamValues { key, generation, .. }
+        | ClientResourceCompletion::StreamCompleted { key, generation, .. }
+        | ClientResourceCompletion::Pending { key, generation, .. }
+        | ClientResourceCompletion::Failed { key, generation, .. }
+        | ClientResourceCompletion::Cancelled { key, generation, .. } => (*key, *generation),
+    };
+    let same_generation = completion_key == request.key()
+        && completion_generation == request.generation();
+    let same_request = completion_request_id == request.request_id();
+    if let Err(source) = resource.apply_completion(active, completion) {
+        if same_generation && same_request {
+            let cancellation = executor.cancel(request.clone());
+            match resource.apply_completion(active, cancellation) {
+                Ok(()) => match resource.status() {
+                    ClientResourceStatus::Ready if resource.kind() == ResourceKind::Stream => {
+                        return read_stream_resource_value(active, resource, context);
+                    }
+                    ClientResourceStatus::Ready => {
+                        return resource.value().cloned().ok_or_else(|| {
+                            evaluate_resource_error(
+                                context,
+                                ClientResourceExecutionError::Invalid(
+                                    ClientResourceError::TypeMismatch,
+                                ),
+                            )
+                        });
+                    }
+                    ClientResourceStatus::Failed => {
+                        let code = resource
+                            .failure()
+                            .map(|failure| failure.code().to_owned())
+                            .unwrap_or_else(|| "resource.failed".to_owned());
+                        return Err(evaluate_resource_error(
+                            context,
+                            ClientResourceExecutionError::Failed(code),
+                        ));
+                    }
+                    ClientResourceStatus::Cancelled => {
+                        return Err(evaluate_resource_error(
+                            context,
+                            ClientResourceExecutionError::Cancelled,
+                        ));
+                    }
+                    ClientResourceStatus::Loading | ClientResourceStatus::Idle => {}
+                },
+                Err(_) => {}
+            }
+        }
+        return Err(evaluate_resource_error(
+            context,
+            ClientResourceExecutionError::Invalid(source),
+        ));
+    }
     if resource.kind() == ResourceKind::Stream {
         return read_stream_resource_value(active, resource, context);
     }
@@ -5387,7 +5525,19 @@ pub fn complete_client_action(
     active: &ActiveDatabaseRevision,
     action_state: &mut ClientActionState,
     completion: ClientResourceCompletion,
+    executor: &mut dyn ClientResourceExecutor,
 ) -> Result<ClientActionOutcome, ClientActionError> {
+    complete_client_action_inner(active, action_state, completion, executor, true)
+}
+
+fn complete_client_action_inner(
+    active: &ActiveDatabaseRevision,
+    action_state: &mut ClientActionState,
+    completion: ClientResourceCompletion,
+    executor: &mut dyn ClientResourceExecutor,
+    cancel_on_invalid: bool,
+) -> Result<ClientActionOutcome, ClientActionError> {
+    let completion_request_id = completion.request_id();
     let (completion_key, completion_generation) = match &completion {
         ClientResourceCompletion::Ready { key, generation, .. }
         | ClientResourceCompletion::StreamValues { key, generation, .. }
@@ -5396,21 +5546,74 @@ pub fn complete_client_action(
         | ClientResourceCompletion::Failed { key, generation, .. }
         | ClientResourceCompletion::Cancelled { key, generation, .. } => (*key, *generation),
     };
-    let Some(resource) = action_state.resource_mut() else {
+    let Some(resource) = action_state.resource.as_ref() else {
         return if action_state.is_stale(completion_generation) {
             Err(ClientActionError::StaleCompletion)
         } else {
             Err(ClientActionError::Executor(ACTION_FAILURE_CODE.to_owned()))
         };
     };
-    if completion_generation != resource.generation() || completion_key != resource.key() {
+    if completion_generation != resource.generation()
+        || completion_key != resource.key()
+        || resource.request_id() != Some(completion_request_id)
+    {
         return Err(ClientActionError::StaleCompletion);
     }
-    if resource.apply_completion(active, completion).is_err() {
+    let apply_result = action_state
+        .resource_mut()
+        .expect("action resource was checked above")
+        .apply_completion(active, completion);
+    if apply_result.is_err() {
+        // A same-generation malformed completion must not strand the request
+        // owned by the executor. Generation and key mismatches remain stale
+        // and do not cancel a newer or unrelated request. A completion returned
+        // by an explicit cancellation has already traversed that path once. If
+        // the cancellation is itself pending or malformed, retain Loading state
+        // so the caller can poll without losing executor ownership.
+        if cancel_on_invalid {
+            let cancel_request = action_state
+                .resource
+                .as_ref()
+                .and_then(|resource| resource.active_request());
+            if let Some(request) = cancel_request {
+                let cancellation = executor.cancel(request);
+                match action_state
+                    .resource_mut()
+                    .expect("action resource remains after malformed completion")
+                    .apply_completion(active, cancellation)
+                {
+                    Ok(()) => {
+                        let status = action_state
+                            .resource
+                            .as_ref()
+                            .expect("action resource remains after cancellation")
+                            .status();
+                        if status == ClientResourceStatus::Loading {
+                            return Err(ClientActionError::Pending);
+                        }
+                        let outcome = match status {
+                            ClientResourceStatus::Ready => ClientActionOutcome::Completed,
+                            ClientResourceStatus::Failed => redacted_action_failure(),
+                            ClientResourceStatus::Cancelled => ClientActionOutcome::Cancelled,
+                            ClientResourceStatus::Idle | ClientResourceStatus::Loading => unreachable!(),
+                        };
+                        action_state.clear();
+                        return Ok(outcome);
+                    }
+                    Err(_) => return Err(ClientActionError::Pending),
+                }
+            }
+        } else {
+            return Err(ClientActionError::Pending);
+        }
         action_state.clear();
         return Ok(redacted_action_failure());
     }
-    let status = resource.status();
+    let status = action_state
+        .resource
+        .as_ref()
+        .expect("action resource remains after completion")
+        .status();
     if status == ClientResourceStatus::Loading { return Err(ClientActionError::Pending); }
     let outcome = match status {
         ClientResourceStatus::Ready => ClientActionOutcome::Completed,
@@ -5441,7 +5644,7 @@ pub fn cancel_client_action_with_executor(
         return Err(ClientActionError::Executor(ACTION_FAILURE_CODE.to_owned()));
     };
     let completion = executor.cancel(request);
-    complete_client_action(active, action_state, completion)
+    complete_client_action_inner(active, action_state, completion, executor, false)
 }
 
 pub fn trigger_client_action(
@@ -5586,7 +5789,7 @@ fn trigger_client_action_with_lineage(
             action_state.stage_request(request.clone());
             action_state.set_resource(resource);
             let completion = executor.execute(request);
-            complete_client_action(active, action_state, completion)
+            complete_client_action(active, action_state, completion, executor)
         }
         ActionTargetDomain::Client => {
             let key = ClientResourceKey::new(
@@ -5655,7 +5858,7 @@ fn trigger_client_action_with_lineage(
                 }) => request.cancelled(),
                 Err(_) => request.failed(ACTION_FAILURE_CODE.to_owned()),
             };
-            let outcome = complete_client_action(active, action_state, completion)?;
+            let outcome = complete_client_action(active, action_state, completion, &mut nested_executor)?;
             if outcome == ClientActionOutcome::Completed {
                 *state = staged;
             }
@@ -7679,11 +7882,23 @@ mod tests {
         executed: Vec<ClientResourceRequest>,
         cancelled: Vec<ClientResourceRequest>,
         result: Option<RuntimeValue>,
+        cancel_pending: bool,
+        cancel_value: Option<RuntimeValue>,
     }
 
     impl RecordingActionExecutor {
         fn new(result: Option<RuntimeValue>) -> Self {
             Self { result, ..Self::default() }
+        }
+
+        fn with_cancel_pending(mut self) -> Self {
+            self.cancel_pending = true;
+            self
+        }
+
+        fn with_cancel_value(mut self, value: RuntimeValue) -> Self {
+            self.cancel_value = Some(value);
+            self
         }
     }
 
@@ -7698,7 +7913,13 @@ mod tests {
 
         fn cancel(&mut self, request: ClientResourceRequest) -> ClientResourceCompletion {
             self.cancelled.push(request.clone());
-            request.cancelled()
+            if self.cancel_pending {
+                request.pending()
+            } else if let Some(value) = self.cancel_value.clone() {
+                request.ready(value)
+            } else {
+                request.cancelled()
+            }
         }
     }
 
@@ -7716,6 +7937,39 @@ mod tests {
         fn execute(&mut self, request: ClientResourceRequest) -> ClientResourceCompletion {
             self.request = Some(request.clone());
             request.cancelled()
+        }
+    }
+
+    #[derive(Default)]
+    struct MalformedResourceExecutor {
+        executed: Option<ClientResourceRequest>,
+        cancelled: Vec<ClientResourceRequest>,
+        cancel_ready: bool,
+        stale_request_id: bool,
+    }
+
+    impl ClientResourceExecutor for MalformedResourceExecutor {
+        fn execute(&mut self, request: ClientResourceRequest) -> ClientResourceCompletion {
+            self.executed = Some(request.clone());
+            if self.stale_request_id {
+                ClientResourceCompletion::Ready {
+                    request_id: InvocationId::from_bytes([0xff; 16]),
+                    key: request.key(),
+                    generation: request.generation(),
+                    value: RuntimeValue::Integer(7),
+                }
+            } else {
+                request.ready(RuntimeValue::Integer(7))
+            }
+        }
+
+        fn cancel(&mut self, request: ClientResourceRequest) -> ClientResourceCompletion {
+            self.cancelled.push(request.clone());
+            if self.cancel_ready {
+                request.ready(RuntimeValue::Text("cancelled-ready".to_owned()))
+            } else {
+                request.cancelled()
+            }
         }
     }
 
@@ -9211,6 +9465,112 @@ fn client_stream_rejects_scalar_ready_completion() {
     assert_eq!(resource.status(), super::ClientResourceStatus::Loading);
     assert_eq!(resource.value(), None);
     assert!(!resource.stream_complete());
+}
+
+#[test]
+fn client_stream_rejects_oversized_batches_and_totals_before_queueing() {
+    let (active, function, pair, _) = version_two_server_stream_active();
+    let key = super::ClientResourceKey::new(
+        InvocationTarget::new(function, pair),
+        PrincipalId::from_bytes([0x7a; 16]),
+        ClientResourceKey::canonical_arguments_digest(&active, &[]).unwrap(),
+        Sha256Digest::from_bytes([0x23; 32]),
+    );
+    let mut resource = ClientResource::new_stream(
+        key,
+        ResolvedType::Value(orna_standard::BOOLEAN_TYPE_ID),
+    );
+    let request = resource.begin_stream_request(&active, Vec::new()).unwrap();
+
+    let oversized_batch = vec![
+        RuntimeValue::Boolean(true);
+        super::MAX_RESOURCE_BATCH_ITEMS + 1
+    ];
+    assert_eq!(
+        resource.apply_completion(
+            &active,
+            request.clone().stream_values(oversized_batch),
+        ),
+        Err(super::ClientResourceError::TypeMismatch),
+    );
+    assert!(resource.stream_batches.is_empty());
+    assert_eq!(resource.stream_total_items, 0);
+
+    resource.stream_total_items = super::MAX_RESOURCE_TOTAL_ITEMS;
+    assert_eq!(
+        resource.apply_completion(
+            &active,
+            request.stream_values(vec![RuntimeValue::Boolean(true)]),
+        ),
+        Err(super::ClientResourceError::TypeMismatch),
+    );
+    assert!(resource.stream_batches.is_empty());
+    assert_eq!(resource.status(), super::ClientResourceStatus::Loading);
+}
+
+#[test]
+fn client_stream_queue_overflow_preserves_existing_batches() {
+    let (active, function, pair, _) = version_two_server_stream_active();
+    let key = super::ClientResourceKey::new(
+        InvocationTarget::new(function, pair),
+        PrincipalId::from_bytes([0x7a; 16]),
+        ClientResourceKey::canonical_arguments_digest(&active, &[]).unwrap(),
+        Sha256Digest::from_bytes([0x24; 32]),
+    );
+    let mut resource = ClientResource::new_stream(
+        key,
+        ResolvedType::Value(orna_standard::BOOLEAN_TYPE_ID),
+    );
+    let request = resource.begin_stream_request(&active, Vec::new()).unwrap();
+    let batch = vec![RuntimeValue::Boolean(true); super::MAX_RESOURCE_BATCH_ITEMS];
+    resource
+        .apply_completion(&active, request.clone().stream_values(batch))
+        .unwrap();
+    let before = resource.clone();
+
+    assert_eq!(
+        resource.apply_completion(
+            &active,
+            request.stream_values(vec![RuntimeValue::Boolean(false)]),
+        ),
+        Err(super::ClientResourceError::TypeMismatch),
+    );
+    assert_eq!(resource, before);
+}
+
+#[test]
+fn client_stream_queue_dequeue_releases_capacity() {
+    let (active, function, pair, _) = version_two_server_stream_active();
+    let key = super::ClientResourceKey::new(
+        InvocationTarget::new(function, pair),
+        PrincipalId::from_bytes([0x7a; 16]),
+        ClientResourceKey::canonical_arguments_digest(&active, &[]).unwrap(),
+        Sha256Digest::from_bytes([0x25; 32]),
+    );
+    let mut resource = ClientResource::new_stream(
+        key,
+        ResolvedType::Value(orna_standard::BOOLEAN_TYPE_ID),
+    );
+    let request = resource.begin_stream_request(&active, Vec::new()).unwrap();
+    for _ in 0..super::MAX_RESOURCE_BATCH_ITEMS {
+        resource
+            .apply_completion(
+                &active,
+                request.clone().stream_values(vec![RuntimeValue::Boolean(true)]),
+            )
+            .unwrap();
+    }
+    assert_eq!(resource.stream_queued_items, super::MAX_RESOURCE_QUEUED_ITEMS);
+    resource.take_stream_value(&active).unwrap().unwrap();
+    assert_eq!(resource.stream_queued_items, super::MAX_RESOURCE_QUEUED_ITEMS - 1);
+
+    resource
+        .apply_completion(
+            &active,
+            request.stream_values(vec![RuntimeValue::Boolean(false)]),
+        )
+        .unwrap();
+    assert_eq!(resource.stream_queued_items, super::MAX_RESOURCE_QUEUED_ITEMS);
 }
 
 #[test]
@@ -11499,6 +11859,155 @@ fn client_stream_cancellation_clears_batches_and_rejects_stale_completions() {
     }
 
 
+
+    #[test]
+    fn malformed_resource_completion_cancels_executor_and_persists_terminal_state() {
+        let (active, function, pair, _, parameter) = version_six_client_resource_action_active();
+        let grant = capability::LocalCapabilityGrant::new(
+            capability::LocalCapabilityName::StdFsRead,
+            capability::LocalCapabilityScope::path("/tmp").unwrap(),
+        )
+        .unwrap();
+        let grants = capability::LocalCapabilityGrantSet::from_grants([grant]).unwrap();
+        let argument = FunctionArgument::new(
+            parameter,
+            RuntimeValue::Text("/tmp/malformed".to_owned()),
+        )
+        .unwrap();
+        let mut state = ClientStateStore::new();
+        let mut executor = MalformedResourceExecutor::default();
+
+        let error = super::evaluate_client_function_with_state_and_grants_and_arguments_and_executor_with_parent_invocation(
+            &active,
+            &authorise(pair, function),
+            std::slice::from_ref(&argument),
+            &[],
+            &grants,
+            &mut state,
+            InvocationId::from_bytes([0x94; 16]),
+            &mut executor,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            super::ClientExecutionError::ResourceEvaluation {
+                source: super::ClientResourceExecutionError::Cancelled,
+                ..
+            }
+        ));
+
+        let request = executor
+            .executed
+            .clone()
+            .expect("malformed executor received a resource request");
+        assert_eq!(executor.cancelled, vec![request.clone()]);
+        let mut resource = state
+            .resource(request.key())
+            .expect("cancelled resource remains in caller state")
+            .clone();
+        assert_eq!(resource.status(), ClientResourceStatus::Cancelled);
+        assert_eq!(resource.generation(), request.generation());
+        assert!(matches!(
+            resource.apply_completion(
+                &active,
+                request.ready(RuntimeValue::Text("late".to_owned())),
+            ),
+            Err(super::ClientResourceError::InvalidTransition {
+                status: ClientResourceStatus::Cancelled,
+            })
+        ));
+    }
+
+    #[test]
+    fn mismatched_request_id_completion_does_not_cancel_request() {
+        let (active, function, pair, _, parameter) = version_six_client_resource_action_active();
+        let grant = capability::LocalCapabilityGrant::new(
+            capability::LocalCapabilityName::StdFsRead,
+            capability::LocalCapabilityScope::path("/tmp").unwrap(),
+        )
+        .unwrap();
+        let grants = capability::LocalCapabilityGrantSet::from_grants([grant]).unwrap();
+        let argument = FunctionArgument::new(
+            parameter,
+            RuntimeValue::Text("/tmp/stale-request".to_owned()),
+        )
+        .unwrap();
+        let mut state = ClientStateStore::new();
+        let mut executor = MalformedResourceExecutor {
+            stale_request_id: true,
+            ..MalformedResourceExecutor::default()
+        };
+
+        let error = super::evaluate_client_function_with_state_and_grants_and_arguments_and_executor_with_parent_invocation(
+            &active,
+            &authorise(pair, function),
+            std::slice::from_ref(&argument),
+            &[],
+            &grants,
+            &mut state,
+            InvocationId::from_bytes([0x96; 16]),
+            &mut executor,
+        )
+        .expect_err("a mismatched request ID must not cancel the active request");
+        let request = executor
+            .executed
+            .clone()
+            .expect("executor received a resource request");
+        assert!(executor.cancelled.is_empty());
+        assert!(matches!(
+            error,
+            super::ClientExecutionError::ResourceEvaluation {
+                source: super::ClientResourceExecutionError::Invalid(_),
+                ..
+            }
+        ));
+        let resource = state
+            .resource(request.key())
+            .expect("the active request remains in caller state");
+        assert_eq!(resource.status(), ClientResourceStatus::Loading);
+        assert_eq!(resource.generation(), request.generation());
+        assert_eq!(resource.request_id(), Some(request.request_id()));
+    }
+
+    #[test]
+    fn malformed_resource_completion_returns_terminal_cancel_result() {
+        let (active, function, pair, _, parameter) = version_six_client_resource_action_active();
+        let grant = capability::LocalCapabilityGrant::new(
+            capability::LocalCapabilityName::StdFsRead,
+            capability::LocalCapabilityScope::path("/tmp").unwrap(),
+        )
+        .unwrap();
+        let grants = capability::LocalCapabilityGrantSet::from_grants([grant]).unwrap();
+        let argument = FunctionArgument::new(
+            parameter,
+            RuntimeValue::Text("/tmp/malformed-ready".to_owned()),
+        )
+        .unwrap();
+        let mut state = ClientStateStore::new();
+        let mut executor = MalformedResourceExecutor {
+            cancel_ready: true,
+            ..MalformedResourceExecutor::default()
+        };
+
+        let result = super::evaluate_client_function_with_state_and_grants_and_arguments_and_executor_with_parent_invocation(
+            &active,
+            &authorise(pair, function),
+            std::slice::from_ref(&argument),
+            &[],
+            &grants,
+            &mut state,
+            InvocationId::from_bytes([0x95; 16]),
+            &mut executor,
+        )
+        .expect("valid terminal cancellation completion wins over malformed execute result");
+        assert_eq!(result.value(), &RuntimeValue::Text("cancelled-ready".to_owned()));
+        let request = executor
+            .executed
+            .clone()
+            .expect("malformed executor received a resource request");
+        assert_eq!(executor.cancelled, vec![request.clone()]);
+        assert_eq!(state.resource(request.key()).map(ClientResource::status), Some(ClientResourceStatus::Ready));
+    }
 
     #[test]
     fn procedural_scalar_resource_local_await_without_executor_fails_closed() {
@@ -16712,6 +17221,79 @@ CREATE CLIENT FUNCTION app.owner() RETURNS INTEGER IS
     }
 
     #[test]
+    fn action_trigger_after_terminal_completion_allocates_fresh_request_identity() {
+        let (active, parent_function, pair, parent_revision, _parameter) =
+            version_six_client_resource_action_active();
+        let target = FunctionId::from_bytes([0xd1; 16]);
+        let auth = authorise(pair, parent_function);
+        let parent = ClientExecutionContext {
+            pair,
+            function: parent_function,
+            function_revision: parent_revision,
+            parent_invocation_id: InvocationId::from_bytes([0x01; 16]),
+            observer_lineage: None,
+        };
+        let argument = FunctionArgument::new(
+            ParameterId::from_bytes([0xd3; 16]),
+            RuntimeValue::Text("/tmp/action".to_owned()),
+        )
+        .unwrap();
+        let action = action_value(
+            &active,
+            ActionTargetDomain::Server,
+            target,
+            pair,
+            CallSiteId::from_bytes([0xff; 16]),
+            vec![argument],
+            orna_standard::CHARACTER_LARGE_OBJECT_TYPE_ID,
+        );
+        let mut state = ClientStateStore::default();
+        let mut action_state = ClientActionState::default();
+        let mut executor = RecordingActionExecutor::new(Some(RuntimeValue::Text(
+            "completed".to_owned(),
+        )));
+
+        assert_eq!(
+            trigger_client_action(
+                &active,
+                &action,
+                &auth,
+                &parent,
+                &mut action_state,
+                &[],
+                &capability::LocalCapabilityGrantSet::default(),
+                &mut state,
+                &mut executor,
+            ),
+            Ok(ClientActionOutcome::Completed),
+        );
+        let first_request = executor.executed[0].clone();
+        assert_eq!(action_state.status(), ClientResourceStatus::Idle);
+        assert_eq!(action_state.invocation_id(), None);
+        assert_eq!(action_state.generation(), None);
+
+        assert_eq!(
+            trigger_client_action(
+                &active,
+                &action,
+                &auth,
+                &parent,
+                &mut action_state,
+                &[],
+                &capability::LocalCapabilityGrantSet::default(),
+                &mut state,
+                &mut executor,
+            ),
+            Ok(ClientActionOutcome::Completed),
+        );
+        assert_eq!(executor.executed.len(), 2);
+        let second_request = executor.executed[1].clone();
+        assert_ne!(first_request.request_id(), second_request.request_id());
+        assert!(second_request.generation().value() > first_request.generation().value());
+        assert_eq!(action_state.status(), ClientResourceStatus::Idle);
+    }
+
+    #[test]
     fn action_trigger_redacts_executor_failure() {
         let (active, parent_function, pair, parent_revision, _parameter) =
             version_six_client_resource_action_active();
@@ -16819,10 +17401,11 @@ CREATE CLIENT FUNCTION app.owner() RETURNS INTEGER IS
         let request_id = request.request_id();
         let mut action_state = ClientActionState::default();
         action_state.set_resource(resource);
-        assert_eq!(complete_client_action(&active, &mut action_state, request.pending()), Err(ClientActionError::Pending));
+        let mut executor = RecordingActionExecutor::new(None);
+        assert_eq!(complete_client_action(&active, &mut action_state, request.pending(), &mut executor), Err(ClientActionError::Pending));
         assert_eq!(action_state.generation(), Some(generation));
         let failed = ClientResourceCompletion::Failed { request_id, key, generation, code: "secret.internal.detail".to_owned() };
-        assert_eq!(complete_client_action(&active, &mut action_state, failed), Ok(ClientActionOutcome::Failed { code: ACTION_FAILURE_CODE.to_owned() }));
+        assert_eq!(complete_client_action(&active, &mut action_state, failed, &mut executor), Ok(ClientActionOutcome::Failed { code: ACTION_FAILURE_CODE.to_owned() }));
         assert_eq!(action_state.status(), ClientResourceStatus::Idle);
     }
 
@@ -16858,7 +17441,7 @@ CREATE CLIENT FUNCTION app.owner() RETURNS INTEGER IS
         );
         assert_eq!(action_state.status(), ClientResourceStatus::Idle);
         assert_eq!(
-            complete_client_action(&active, &mut action_state, request.ready(RuntimeValue::Boolean(true))),
+            complete_client_action(&active, &mut action_state, request.ready(RuntimeValue::Boolean(true)), &mut executor),
             Err(ClientActionError::StaleCompletion),
         );
         assert_eq!(action_state.generation(), None);
@@ -16896,7 +17479,7 @@ CREATE CLIENT FUNCTION app.owner() RETURNS INTEGER IS
         );
     }
     #[test]
-    fn action_current_generation_malformed_completion_fails_and_clears_but_stale_stays_stale() {
+    fn action_current_generation_mismatched_request_is_stale_but_same_request_malformed_completion_cancels() {
         let (active, function, pair, _) = version_one_active(true);
         let principal = PrincipalId::from_bytes([0x7a; 16]);
         let digest = ClientResourceKey::canonical_arguments_digest(&active, &[]).unwrap();
@@ -16918,6 +17501,7 @@ CREATE CLIENT FUNCTION app.owner() RETURNS INTEGER IS
         let generation = request.generation();
         let mut stale_state = ClientActionState::default();
         stale_state.set_resource(resource);
+        let mut stale_executor = RecordingActionExecutor::new(None);
         assert_eq!(
             complete_client_action(
                 &active,
@@ -16928,10 +17512,28 @@ CREATE CLIENT FUNCTION app.owner() RETURNS INTEGER IS
                     generation,
                     value: RuntimeValue::Boolean(true),
                 },
+                &mut stale_executor,
             ),
             Err(ClientActionError::StaleCompletion),
         );
         assert_eq!(stale_state.status(), ClientResourceStatus::Loading);
+        assert!(stale_executor.cancelled.is_empty());
+        assert_eq!(
+            complete_client_action(
+                &active,
+                &mut stale_state,
+                ClientResourceCompletion::Ready {
+                    request_id: request.request_id(),
+                    key,
+                    generation,
+                    value: RuntimeValue::Integer(1),
+                },
+                &mut stale_executor,
+            ),
+            Ok(ClientActionOutcome::Cancelled),
+        );
+        assert_eq!(stale_state.status(), ClientResourceStatus::Idle);
+        assert_eq!(stale_executor.cancelled, vec![request]);
 
         for malformed_kind in [0_u8, 1_u8] {
             let mut resource = ClientResource::new(key, ResolvedType::Scalar(StandardScalar::Boolean));
@@ -16954,13 +17556,50 @@ CREATE CLIENT FUNCTION app.owner() RETURNS INTEGER IS
             };
             let mut action_state = ClientActionState::default();
             action_state.set_resource(resource);
+            action_state.stage_request(request.clone());
+            let mut executor = RecordingActionExecutor::new(None);
             assert_eq!(
-                complete_client_action(&active, &mut action_state, completion),
-                Ok(ClientActionOutcome::Failed {
-                    code: ACTION_FAILURE_CODE.to_owned(),
-                }),
+                complete_client_action(&active, &mut action_state, completion, &mut executor),
+                Ok(ClientActionOutcome::Cancelled),
             );
             assert_eq!(action_state.status(), ClientResourceStatus::Idle);
+            assert_eq!(executor.cancelled, vec![request]);
+        }
+    }
+
+    #[test]
+    fn action_uncertain_cancel_retains_loading_request() {
+        let (active, function, pair, _) = version_one_active(true);
+        let principal = PrincipalId::from_bytes([0x7a; 16]);
+        let digest = ClientResourceKey::canonical_arguments_digest(&active, &[]).unwrap();
+        let key = ClientResourceKey::new(
+            InvocationTarget::new(function, pair),
+            principal,
+            digest,
+            active.catalogue_hash(),
+        );
+
+        for malformed_cancel in [false, true] {
+            let mut resource = ClientResource::new(key, ResolvedType::Scalar(StandardScalar::Boolean));
+            let request = resource.begin_request(&active, vec![]).unwrap();
+            let generation = request.generation();
+            let mut action_state = ClientActionState::default();
+            action_state.set_resource(resource);
+            action_state.stage_request(request.clone());
+            let mut executor = if malformed_cancel {
+                RecordingActionExecutor::new(None).with_cancel_value(RuntimeValue::Integer(7))
+            } else {
+                RecordingActionExecutor::new(None).with_cancel_pending()
+            };
+            let malformed = request.clone().ready(RuntimeValue::Integer(1));
+
+            assert_eq!(
+                complete_client_action(&active, &mut action_state, malformed, &mut executor),
+                Err(ClientActionError::Pending),
+            );
+            assert_eq!(action_state.status(), ClientResourceStatus::Loading);
+            assert_eq!(action_state.generation(), Some(generation));
+            assert_eq!(executor.cancelled, vec![request]);
         }
     }
 
