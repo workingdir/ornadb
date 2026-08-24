@@ -3123,8 +3123,15 @@ pub fn encode_resource_values(
             maximum: MAX_RESOURCE_BATCH_ITEMS,
         });
     }
+    if u64::from(frame.byte_count) > MAX_FRAME_PAYLOAD_LENGTH as u64 {
+        return Err(FrameCodecError::PayloadTooLarge {
+            actual: frame.byte_count as usize,
+            maximum: MAX_FRAME_PAYLOAD_LENGTH,
+        });
+    }
     let mut encoded_values = Vec::with_capacity(frame.values.len());
     let mut byte_count = 0usize;
+    let mut payload_length: usize = 8 + 16 + 8 + 4 + 4;
     for value in &frame.values {
         require_resource_value(value)?;
         let encoded = FrameVersion::Constructed(active, registry)
@@ -3136,6 +3143,19 @@ pub fn encode_resource_values(
                 actual: usize::MAX,
             },
         )?;
+        payload_length = payload_length
+            .checked_add(4)
+            .and_then(|length| length.checked_add(encoded.len()))
+            .ok_or(FrameCodecError::PayloadTooLarge {
+                actual: usize::MAX,
+                maximum: MAX_FRAME_PAYLOAD_LENGTH,
+            })?;
+        if payload_length > MAX_FRAME_PAYLOAD_LENGTH {
+            return Err(FrameCodecError::PayloadTooLarge {
+                actual: payload_length,
+                maximum: MAX_FRAME_PAYLOAD_LENGTH,
+            });
+        }
         encoded_values.push(encoded);
     }
     let item_count = u32::try_from(frame.values.len()).map_err(|_| {
@@ -7342,6 +7362,28 @@ mod tests {
             .copy_from_slice(&u32::try_from(MAX_FRAME_PAYLOAD_LENGTH + 1).unwrap().to_be_bytes());
         assert_eq!(
             decode_resource_values(&active, &registry, &oversized_bytes),
+            Err(FrameCodecError::PayloadTooLarge {
+                actual: MAX_FRAME_PAYLOAD_LENGTH + 1,
+                maximum: MAX_FRAME_PAYLOAD_LENGTH,
+            })
+        );
+    }
+
+    #[test]
+    fn resource_values_reject_declared_payload_bound_before_encoding_values() {
+        let active = empty_active_revision();
+        let registry = test_registry();
+        let frame = ResourceValues {
+            stream_id: 1,
+            request_id: InvocationId::from_bytes([0x12; 16]),
+            batch_sequence: 0,
+            item_count: 1,
+            byte_count: (MAX_FRAME_PAYLOAD_LENGTH + 1) as u32,
+            values: vec![RuntimeValue::Integer(7)],
+        };
+
+        assert_eq!(
+            encode_resource_values(&active, &registry, &frame),
             Err(FrameCodecError::PayloadTooLarge {
                 actual: MAX_FRAME_PAYLOAD_LENGTH + 1,
                 maximum: MAX_FRAME_PAYLOAD_LENGTH,
