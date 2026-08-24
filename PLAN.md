@@ -145,6 +145,24 @@ contract:
 - commit `64d9603` covers both retained legacy Inspector public error-code
   aliases; the accepted Inspector boundary still has no populated projection
   or graphical-runtime claim.
+- Current CLIENT lifecycle evidence includes bounded stream queue rollback and
+  dequeue capacity release (`crates/orna-client/src/lib.rs::client_stream_queue_overflow_preserves_existing_batches`
+  and `crates/orna-client/src/lib.rs::client_stream_queue_dequeue_releases_capacity`),
+  sequential terminal action re-trigger identity and repeated-pending rejection
+  (`action_trigger_after_terminal_completion_allocates_fresh_request_identity`
+  and `action_trigger_rejects_repeated_pending_server_request_without_mutating_generation`),
+  nested replacement retention and exact child identity
+  (`replacing_resource_key_retains_nested_request_when_abandon_fails`,
+  `nested_action_pending_cancel_retains_replacements_and_exact_child`,
+  `nested_action_malformed_child_pending_cancel_retains_exact_identity`, and
+  `nested_executor_rejects_mismatched_completion_identity`), and generation
+  exhaustion preflight (`resource_invalidation_preflights_generation_before_releasing_request`).
+  Commit `538769d` adds the corresponding client and installed raw/broker
+  transport ownership hardening. Focused client/server suites, workspace
+  compilation/tests, source-apply boundary tests, and editor tooling passed;
+  detached transport restoration remains conditional on source reusability.
+  Stream-action execution, Compose proofs, clean-host proof, and proposal-level
+  runtime/Inspector/gateway surfaces remain deferred.
 
 The accepted slices have focused proof in the repository. The resource,
 transport, action, and Inspector slices have local parser/compiler/codec/
@@ -154,9 +172,10 @@ development service. No local Compose result is claimed. The source-apply
 audit, rollback, tamper, and retained-listing integration tests are likewise
 present but Compose-gated. Local evidence covers compilation, migration
 registry checks, codec checks, and focused in-memory validators only.
-The six commits above add local compiler, private-fixture, and offline
-SERVER-dogfood evidence only; they do not upgrade any Compose or host-gated
-proof, or broaden the accepted boundary.
+The commits above add local compiler, private-fixture, offline SERVER-dogfood,
+and CLIENT lifecycle evidence only; they do not upgrade any Compose or
+host-gated proof, or broaden the accepted boundary. No proposal-level
+implementation should start without the contract gate below.
 The fresh network-disabled Debian 12 host proof and the same-major PostgreSQL
 predecessor transition remain separate blockers. No proposal-level
 implementation should start without the contract gate below.
