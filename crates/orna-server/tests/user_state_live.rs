@@ -21,9 +21,7 @@ mod postgres_test_support;
 use std::collections::BTreeMap;
 
 use orna_artifact::client_plan::{StateClientPlan, StateScope};
-use orna_client::{
-    ClientStateContext, ClientStateKey, ClientStateStore, ClientUserStateError,
-};
+use orna_client::{ClientStateContext, ClientStateKey, ClientStateStore, ClientUserStateError};
 use orna_compiler::{
     StandardApplicationCheckContext, check_standard_application, prepare_standard_application,
 };
@@ -110,10 +108,7 @@ async fn install_standard(database: &TestDatabase) -> TestResult<(FunctionId, St
         active.catalogue(),
         upgrade.checked_standard_library(),
     )?;
-    let source = SourceBundle::new([SourceUnit::new(
-        "user-state.orna",
-        RAW_USER_STATE_SOURCE,
-    )])?;
+    let source = SourceBundle::new([SourceUnit::new("user-state.orna", RAW_USER_STATE_SOURCE)])?;
     let report = check_standard_application(&source, &context);
     require(
         report.diagnostics().is_empty(),
@@ -141,9 +136,8 @@ async fn install_standard(database: &TestDatabase) -> TestResult<(FunctionId, St
         .iter()
         .find(|revision| revision.function() == function)
         .ok_or_else(|| failure("USER state fixture is missing its CLIENT revision"))?;
-    let plan = StateClientPlan::decode(revision.artifact().payload()).map_err(|error| {
-        failure(format!("USER state fixture plan did not decode: {error}"))
-    })?;
+    let plan = StateClientPlan::decode(revision.artifact().payload())
+        .map_err(|error| failure(format!("USER state fixture plan did not decode: {error}")))?;
     let slot = plan
         .slots()
         .iter()
@@ -332,7 +326,8 @@ async fn proves_user_state_end_to_end() -> TestResult<()> {
             write_two == Ok(InstalledUserStateOutcome::Completed),
             "the matching-revision write must complete",
         )?;
-        let (load_two, load_two_stdout) = load_cells(&database, state_function, state_function, "").await?;
+        let (load_two, load_two_stdout) =
+            load_cells(&database, state_function, state_function, "").await?;
         require(
             load_two == InstalledUserStateOutcome::Completed,
             "the second load must complete",
@@ -420,7 +415,8 @@ async fn proves_user_state_end_to_end() -> TestResult<()> {
 
         // Remap the local peer to principal B; its load sees no cells.
         map_peer(&database, PRINCIPAL_B).await?;
-        let (isolation, isolation_stdout) = load_cells(&database, state_function, state_function, "").await?;
+        let (isolation, isolation_stdout) =
+            load_cells(&database, state_function, state_function, "").await?;
         require(
             isolation == InstalledUserStateOutcome::Completed,
             "the isolated load must complete",
@@ -432,7 +428,8 @@ async fn proves_user_state_end_to_end() -> TestResult<()> {
 
         // A fresh kernel reopen preserves the cells for principal A.
         map_peer(&database, PRINCIPAL_A).await?;
-        let (reopen, reopen_stdout) = load_cells(&database, state_function, state_function, "").await?;
+        let (reopen, reopen_stdout) =
+            load_cells(&database, state_function, state_function, "").await?;
         require(
             reopen == InstalledUserStateOutcome::Completed,
             "the reopen load must complete",
@@ -471,12 +468,9 @@ async fn proves_authenticated_client_state_adapter_lifecycle() -> TestResult<()>
         let session = kernel
             .authenticate_local_peer(nix::unistd::geteuid().as_raw())
             .await?;
-        let context = ClientStateContext::new(
-            state_function,
-            "adapter-profile".to_owned(),
-            String::new(),
-        )
-        .map_err(|error| failure(error.to_string()))?;
+        let context =
+            ClientStateContext::new(state_function, "adapter-profile".to_owned(), String::new())
+                .map_err(|error| failure(error.to_string()))?;
         let expected_types = BTreeMap::from([((state_function, state_slot), INTEGER_TYPE_ID)]);
         let initial_change = UserStateChange::new(
             state_function,
@@ -488,9 +482,7 @@ async fn proves_authenticated_client_state_adapter_lifecycle() -> TestResult<()>
             RuntimeValue::Integer(7),
             INTEGER_TYPE_ID,
         )?;
-        let initial_results = kernel
-            .write_user_state(&session, &[initial_change])
-            .await?;
+        let initial_results = kernel.write_user_state(&session, &[initial_change]).await?;
         require(
             matches!(
                 initial_results.first().map(|result| result.outcome()),

@@ -20,15 +20,15 @@ use orna_core::{
 };
 use orna_postgres::{PostgresKernel, PostgresKernelError};
 use orna_standard::{
-    retained_standard_library_snapshot, retained_standard_library_v2_snapshot,
-    retained_standard_library_v3_snapshot, retained_standard_library_v4_snapshot,
-    retained_standard_library_v5_snapshot, retained_standard_library_v6_snapshot,
-    verify_standard_library_snapshot, verify_standard_library_v2_snapshot,
-    verify_standard_library_v3_snapshot, verify_standard_library_v4_snapshot,
-    verify_standard_library_v5_snapshot, verify_standard_library_v6_snapshot,
-    StandardLibraryError, STANDARD_LIBRARY_REVISION_ID, STANDARD_LIBRARY_V2_REVISION_ID,
-    STANDARD_LIBRARY_V3_REVISION_ID, STANDARD_LIBRARY_V4_REVISION_ID, STANDARD_LIBRARY_V5_REVISION_ID,
-    STANDARD_LIBRARY_V6_REVISION_ID,
+    STANDARD_LIBRARY_REVISION_ID, STANDARD_LIBRARY_V2_REVISION_ID, STANDARD_LIBRARY_V3_REVISION_ID,
+    STANDARD_LIBRARY_V4_REVISION_ID, STANDARD_LIBRARY_V5_REVISION_ID,
+    STANDARD_LIBRARY_V6_REVISION_ID, StandardLibraryError, retained_standard_library_snapshot,
+    retained_standard_library_v2_snapshot, retained_standard_library_v3_snapshot,
+    retained_standard_library_v4_snapshot, retained_standard_library_v5_snapshot,
+    retained_standard_library_v6_snapshot, verify_standard_library_snapshot,
+    verify_standard_library_v2_snapshot, verify_standard_library_v3_snapshot,
+    verify_standard_library_v4_snapshot, verify_standard_library_v5_snapshot,
+    verify_standard_library_v6_snapshot,
 };
 use serde::Serialize;
 
@@ -195,12 +195,8 @@ pub enum InstalledSourceApplyError {
 impl fmt::Display for InstalledSourceApplyError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::SourceRead { .. } => {
-                formatter.write_str("orna: could not read source file")
-            }
-            Self::SourceUtf8 { .. } => {
-                formatter.write_str("orna: source file is not valid UTF-8")
-            }
+            Self::SourceRead { .. } => formatter.write_str("orna: could not read source file"),
+            Self::SourceUtf8 { .. } => formatter.write_str("orna: source file is not valid UTF-8"),
             Self::SourceBundle { .. } => {
                 formatter.write_str("orna: source apply received an invalid source path")
             }
@@ -320,7 +316,9 @@ async fn apply_source_bundle(
         .standard()
         .ok_or(InstalledSourceApplyError::ActiveStandardMismatch)?;
     let accepted = select_accepted_standard(installed).map_err(|error| match error {
-        StandardSelectionError::UnknownRevision => InstalledSourceApplyError::ActiveStandardMismatch,
+        StandardSelectionError::UnknownRevision => {
+            InstalledSourceApplyError::ActiveStandardMismatch
+        }
         StandardSelectionError::Verification(source) => {
             InstalledSourceApplyError::StandardLibrary { source }
         }
@@ -451,22 +449,23 @@ pub(super) enum StandardSelectionError {
 pub(super) fn select_accepted_standard(
     installed: &VerifiedStandardLibrarySnapshot,
 ) -> Result<VerifiedStandardLibrarySnapshot, StandardSelectionError> {
-    let accepted = match installed.revision() {
-        STANDARD_LIBRARY_REVISION_ID => {
-            retained_standard_library_snapshot().and_then(verify_standard_library_snapshot)
-        }
-        STANDARD_LIBRARY_V2_REVISION_ID => retained_standard_library_v2_snapshot()
-            .and_then(verify_standard_library_v2_snapshot),
-        STANDARD_LIBRARY_V3_REVISION_ID => retained_standard_library_v3_snapshot()
-            .and_then(verify_standard_library_v3_snapshot),
-        STANDARD_LIBRARY_V4_REVISION_ID => retained_standard_library_v4_snapshot()
-            .and_then(verify_standard_library_v4_snapshot),
-        STANDARD_LIBRARY_V5_REVISION_ID => retained_standard_library_v5_snapshot()
-            .and_then(verify_standard_library_v5_snapshot),
-        STANDARD_LIBRARY_V6_REVISION_ID => retained_standard_library_v6_snapshot()
-            .and_then(verify_standard_library_v6_snapshot),
-        _ => return Err(StandardSelectionError::UnknownRevision),
-    };
+    let accepted =
+        match installed.revision() {
+            STANDARD_LIBRARY_REVISION_ID => {
+                retained_standard_library_snapshot().and_then(verify_standard_library_snapshot)
+            }
+            STANDARD_LIBRARY_V2_REVISION_ID => retained_standard_library_v2_snapshot()
+                .and_then(verify_standard_library_v2_snapshot),
+            STANDARD_LIBRARY_V3_REVISION_ID => retained_standard_library_v3_snapshot()
+                .and_then(verify_standard_library_v3_snapshot),
+            STANDARD_LIBRARY_V4_REVISION_ID => retained_standard_library_v4_snapshot()
+                .and_then(verify_standard_library_v4_snapshot),
+            STANDARD_LIBRARY_V5_REVISION_ID => retained_standard_library_v5_snapshot()
+                .and_then(verify_standard_library_v5_snapshot),
+            STANDARD_LIBRARY_V6_REVISION_ID => retained_standard_library_v6_snapshot()
+                .and_then(verify_standard_library_v6_snapshot),
+            _ => return Err(StandardSelectionError::UnknownRevision),
+        };
 
     accepted.map_err(StandardSelectionError::Verification)
 }
@@ -699,20 +698,35 @@ mod tests {
     }
 
     #[test]
-    fn source_input_errors_do_not_expose_submitted_paths() {
+    fn source_input_errors_redact_paths_and_source_bytes() {
         let source_read = InstalledSourceApplyError::SourceRead {
-            path: "/private/source.orna".to_owned(),
-            source: None,
+            path: "/private/secret-source-bytes.orna".to_owned(),
+            source: Some(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "secret source bytes",
+            )),
         };
         assert_eq!(source_read.to_string(), "orna: could not read source file");
+        assert!(
+            !source_read
+                .to_string()
+                .contains("/private/secret-source-bytes.orna")
+        );
+        assert!(!source_read.to_string().contains("secret source bytes"));
 
         let source_utf8 = InstalledSourceApplyError::SourceUtf8 {
-            path: "/private/source.orna".to_owned(),
+            path: "/private/secret-source-bytes.orna".to_owned(),
         };
         assert_eq!(
             source_utf8.to_string(),
-            "orna: source file is not valid UTF-8",
+            "orna: source file is not valid UTF-8"
         );
+        assert!(
+            !source_utf8
+                .to_string()
+                .contains("/private/secret-source-bytes.orna")
+        );
+        assert!(!source_utf8.to_string().contains("secret source bytes"));
     }
 
     #[test]
@@ -775,10 +789,7 @@ mod tests {
             "post-apply recovery must exactly reproduce the candidate hashes",
         ));
 
-        assert!(matches!(
-            error,
-            InstalledSourceApplyError::RecoveryMismatch
-        ));
+        assert!(matches!(error, InstalledSourceApplyError::RecoveryMismatch));
     }
 
     #[test]

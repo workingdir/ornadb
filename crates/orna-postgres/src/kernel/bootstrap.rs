@@ -1017,10 +1017,7 @@ mod tests {
         assert_eq!(MIGRATIONS[25].name, "user state audit decisions");
         assert_eq!(MIGRATIONS[26].name, "inspect snapshots and trace");
         assert_eq!(MIGRATIONS[27].name, "security admin privilege grants");
-        assert_eq!(
-            MIGRATIONS[28].name,
-            "sealed system invocation authorities"
-        );
+        assert_eq!(MIGRATIONS[28].name, "sealed system invocation authorities");
         assert_eq!(
             MIGRATIONS[29].name,
             "active roles system invocation authority"
@@ -1067,7 +1064,11 @@ mod tests {
         assert_eq!(migration.version, 37);
         assert_eq!(migration.name, "source apply audit");
         assert!(migration.sql.contains("event_kind = 'source_apply'"));
-        assert!(migration.sql.contains("denial_reason = 'source_apply:committed'"));
+        assert!(
+            migration
+                .sql
+                .contains("denial_reason = 'source_apply:committed'")
+        );
         assert!(migration.sql.contains("source_revision_id IS NOT NULL"));
         assert!(migration.sql.contains("catalogue_revision_id IS NOT NULL"));
     }
@@ -1084,24 +1085,36 @@ mod tests {
         assert!(migration.sql.contains(
             "DROP CONSTRAINT catalogue_functions_catalogue_revision_id_return_target_ty_fkey"
         ));
-        assert!(migration.sql.contains(
-            "ADD COLUMN target_type_id_fk bytea\n        GENERATED ALWAYS AS"
-        ));
-        assert!(migration.sql.contains(
-            "ADD COLUMN return_target_type_id_fk bytea\n        GENERATED ALWAYS AS"
-        ));
-        assert!(migration.sql.contains(
-            "FOREIGN KEY (catalogue_revision_id, target_type_id_fk)"
-        ));
-        assert!(migration.sql.contains(
-            "FOREIGN KEY (catalogue_revision_id, return_target_type_id_fk)"
-        ));
-        assert!(migration.sql.contains(
-            "target_type_id = decode('000000000000000000000000000000f3', 'hex')"
-        ));
-        assert!(migration.sql.contains(
-            "return_target_type_id = decode('000000000000000000000000000000f3', 'hex')"
-        ));
+        assert!(
+            migration
+                .sql
+                .contains("ADD COLUMN target_type_id_fk bytea\n        GENERATED ALWAYS AS")
+        );
+        assert!(
+            migration
+                .sql
+                .contains("ADD COLUMN return_target_type_id_fk bytea\n        GENERATED ALWAYS AS")
+        );
+        assert!(
+            migration
+                .sql
+                .contains("FOREIGN KEY (catalogue_revision_id, target_type_id_fk)")
+        );
+        assert!(
+            migration
+                .sql
+                .contains("FOREIGN KEY (catalogue_revision_id, return_target_type_id_fk)")
+        );
+        assert!(
+            migration
+                .sql
+                .contains("target_type_id = decode('000000000000000000000000000000f3', 'hex')")
+        );
+        assert!(
+            migration.sql.contains(
+                "return_target_type_id = decode('000000000000000000000000000000f3', 'hex')"
+            )
+        );
         assert!(!migration.sql.to_ascii_lowercase().contains("plpgsql"));
         assert!(!migration.sql.contains("CREATE CONSTRAINT TRIGGER"));
         assert!(!migration.sql.contains("FOR KEY SHARE"));

@@ -2408,6 +2408,99 @@ async fn same_base_concurrent_apply_has_one_winner_and_no_loser_residue() -> Tes
 
 #[tokio::test]
 #[ignore = "requires the Compose PostgreSQL development service"]
+async fn same_base_concurrent_source_apply_has_one_winner_one_audit_and_no_loser_residue()
+-> TestResult<()> {
+    with_test_database(|database| async move {
+        let kernel = kernel(&database)?;
+        kernel.bootstrap().await?;
+        let empty = kernel.recover().await?;
+        let left = candidate(RACE_LEFT_SOURCE, &empty)?;
+        let right = candidate(RACE_RIGHT_SOURCE, &empty)?;
+        install_race_pause_trigger(&database).await?;
+        let coordinator = database.open().await?;
+        coordinator
+            .client()
+            .query_one("SELECT pg_advisory_lock($1)", &[&RACE_LOCK_KEY])
+            .await?;
+        let left_kernel = named_kernel(&database, "orna-source-apply-race-a")?;
+        let left_for_task = left.clone();
+        let left_task = tokio::spawn(async move {
+            left_kernel.apply_source_apply(&left_for_task).await
+        });
+        wait_for_advisory_wait(&database, "orna-source-apply-race-a").await?;
+        let right_kernel = named_kernel(&database, "orna-source-apply-race-b")?;
+        let right_for_task = right.clone();
+        let right_task = tokio::spawn(async move {
+            right_kernel.apply_source_apply(&right_for_task).await
+        });
+        wait_for_active_lock_block(
+            &database,
+            "orna-source-apply-race-a",
+            "orna-source-apply-race-b",
+        )
+        .await?;
+        coordinator
+            .client()
+            .query_one("SELECT pg_advisory_unlock($1)", &[&RACE_LOCK_KEY])
+            .await?;
+        coordinator.shutdown().await?;
+        let left_result = wait_for_apply_task(left_task, "left source apply").await?;
+        let right_result = wait_for_apply_task(right_task, "right source apply").await?;
+        let (winner, winner_candidate, loser_candidate) = match (left_result, right_result) {
+            (
+                Ok(winner),
+                Err(PostgresKernelError::ExpectedBaseMismatch { expected, active }),
+            ) if expected == empty.pair() && active == left.candidate_pair() => {
+                (winner, &left, &right)
+            }
+            (
+                Err(PostgresKernelError::ExpectedBaseMismatch { expected, active }),
+                Ok(winner),
+            ) if expected == empty.pair() && active == right.candidate_pair() => {
+                (winner, &right, &left)
+            }
+            (left, right) => {
+                return Err(failure(format!(
+                    "same-base source-apply race must have one success and one typed stale failure; left={left:?} right={right:?}"
+                )));
+            }
+        };
+
+        let recovered = kernel.recover().await?;
+        require_recovered_new_candidate(winner_candidate, &winner)?;
+        require_recovered_new_candidate(winner_candidate, &recovered)?;
+        require(
+            recovered.pair() == winner_candidate.candidate_pair(),
+            "same-base source-apply race recovered a revision other than the winning candidate",
+        )?;
+        require_no_candidate_residue(&database, loser_candidate, &empty).await?;
+
+        let reopened = PostgresKernel::from_str(&database.connection_string())?;
+        reopened.recover().await?;
+        let events = reopened.recover_security_audit_events().await?;
+        let source_apply_events = events
+            .iter()
+            .filter(|event| event.decision().kind() == SecurityAuditKind::SourceApply)
+            .collect::<Vec<_>>();
+        require(
+            source_apply_events.len() == 1,
+            "same-base source-apply race did not record exactly one protected SourceApply event",
+        )?;
+        let decision = source_apply_events[0].decision();
+        require(
+            decision.outcome() == SecurityAuditOutcome::Allowed
+                && decision.session_principal() == Some(CATALOGUE_HEALTH_SERVICE_PRINCIPAL_ID)
+                && decision.source_apply_candidate() == Some(winner_candidate.candidate_pair())
+                && decision.target().is_none()
+                && decision.denial().is_none(),
+            "same-base source-apply race audit detail did not match the winning candidate",
+        )
+    })
+    .await
+}
+
+#[tokio::test]
+#[ignore = "requires the Compose PostgreSQL development service"]
 async fn every_apply_failure_point_rolls_back_to_the_exact_base() -> TestResult<()> {
     for point in FailurePoint::ALL {
         with_test_database(|database| async move {
@@ -8447,6 +8540,7 @@ async fn proves_security_admin_identity_checks_mutations_and_audit() -> TestResu
     const NEW_USER: PrincipalId = PrincipalId::from_bytes([0x64; 16]);
     const OTHER: PrincipalId = PrincipalId::from_bytes([0x65; 16]);
     const UNKNOWN: PrincipalId = PrincipalId::from_bytes([0x66; 16]);
+    const UNKNOWN_FUNCTION: FunctionId = FunctionId::from_bytes([0x67; 16]);
 
     with_test_database(|database| async move {
         let kernel = kernel(&database)?;
@@ -8544,6 +8638,15 @@ async fn proves_security_admin_identity_checks_mutations_and_audit() -> TestResu
                 }),
             "has_privilege did not deny an unprivileged user",
         )?;
+        require(
+            kernel
+                .has_privilege(ADMIN, PrivilegeClass::SecurityAdmin, Some(function))
+                .await?
+                == PrivilegeDecision::Denied(PrivilegeDenial::MissingPrivilege {
+                    requested: PrivilegeClass::SecurityAdmin,
+                }),
+            "has_privilege did not close SecurityAdmin object scope",
+        )?;
 
         // The enforcement gate denies a session without the SecurityAdmin
         // class and still records the closed denied audit decision.
@@ -8581,6 +8684,27 @@ async fn proves_security_admin_identity_checks_mutations_and_audit() -> TestResu
                 .any(|membership| membership.role() == ROLE && membership.member() == NEW_USER),
             "grant_role did not persist the membership",
         )?;
+        let scoped_security_admin = kernel
+            .grant_privilege(
+                &admin_session,
+                NEW_USER,
+                PrivilegeClass::SecurityAdmin,
+                Some(function),
+            )
+            .await
+            .expect_err("object-scoped SecurityAdmin must be rejected");
+        require(
+            matches!(
+                scoped_security_admin,
+                PostgresKernelError::DurableInvariant {
+                    relation: "_orna_kernel.security_privilege_grants",
+                    record,
+                    rule: "the security_admin privilege grant must be class-wide",
+                } if record == "grant_privilege"
+            ),
+            "grant_privilege did not reject object-scoped SecurityAdmin",
+        )?;
+
         let after_privilege = kernel
             .grant_privilege(
                 &admin_session,
@@ -8655,6 +8779,74 @@ async fn proves_security_admin_identity_checks_mutations_and_audit() -> TestResu
                 .privilege_grants()
                 .any(|grant| grant.grantee() == NEW_USER),
             "revoke_privilege did not remove the grant",
+        )?;
+
+        // Unknown revoke targets fail before the durable DELETE and do not
+        // append an allowed mutation audit.
+        let unknown_role = kernel
+            .revoke_role(&admin_session, UNKNOWN, NEW_USER)
+            .await
+            .expect_err("revoking an unknown role must fail");
+        require(
+            matches!(
+                unknown_role,
+                PostgresKernelError::DurableInvariant {
+                    relation: "_orna_kernel.security_principals",
+                    record,
+                    rule: "the role to revoke must exist",
+                } if record == "revoke_role"
+            ),
+            "revoke_role accepted an unknown role target",
+        )?;
+        let unknown_member = kernel
+            .revoke_role(&admin_session, ROLE, UNKNOWN)
+            .await
+            .expect_err("revoking an unknown role member must fail");
+        require(
+            matches!(
+                unknown_member,
+                PostgresKernelError::DurableInvariant {
+                    relation: "_orna_kernel.security_principals",
+                    record,
+                    rule: "the role member to revoke must exist",
+                } if record == "revoke_role"
+            ),
+            "revoke_role accepted an unknown member target",
+        )?;
+        let unknown_grantee = kernel
+            .revoke_privilege(&admin_session, UNKNOWN, PrivilegeClass::SecurityAdmin, None)
+            .await
+            .expect_err("revoking an unknown privilege grantee must fail");
+        require(
+            matches!(
+                unknown_grantee,
+                PostgresKernelError::DurableInvariant {
+                    relation: "_orna_kernel.security_principals",
+                    record,
+                    rule: "the privilege grantee must exist",
+                } if record == "revoke_privilege"
+            ),
+            "revoke_privilege accepted an unknown grantee target",
+        )?;
+        let unknown_object = kernel
+            .revoke_privilege(
+                &admin_session,
+                ADMIN,
+                PrivilegeClass::Execute,
+                Some(UNKNOWN_FUNCTION),
+            )
+            .await
+            .expect_err("revoking an unknown privilege object must fail");
+        require(
+            matches!(
+                unknown_object,
+                PostgresKernelError::DurableInvariant {
+                    relation: "_orna_kernel.security_privilege_grants",
+                    record,
+                    rule: "the privilege grant object must exist",
+                } if record == "revoke_privilege"
+            ),
+            "revoke_privilege accepted an unknown object target",
         )?;
 
         // The audit rows carry the closed security_admin kind for both

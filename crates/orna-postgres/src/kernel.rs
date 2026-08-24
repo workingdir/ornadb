@@ -31,8 +31,7 @@ use tokio_postgres::{Client, Config, NoTls};
 /// identities. The `f7` security-principal identity is deliberately excluded.
 pub(crate) fn is_sealed_inspect_type_id(type_id: orna_core::TypeId) -> bool {
     let bytes = type_id.to_bytes();
-    bytes[..15].iter().all(|byte| *byte == 0)
-        && matches!(bytes[15], 0xf3..=0xf6 | 0xf8..=0xff)
+    bytes[..15].iter().all(|byte| *byte == 0) && matches!(bytes[15], 0xf3..=0xf6 | 0xf8..=0xff)
 }
 
 #[path = "kernel/apply.rs"]
@@ -65,8 +64,8 @@ pub(crate) mod storage;
 pub use apply::StandardContextIdentity;
 pub use bootstrap::ActiveRevision;
 pub use inspect::AuthenticatedInspectSnapshot;
-pub use recovery::RevisionPairHistoryEntry;
 pub use orna_core::inspect::InspectSnapshotEpoch;
+pub use recovery::RevisionPairHistoryEntry;
 pub use security::{
     AuthenticatedRawCallResult, AuthenticatedServerResourceAccepted,
     AuthenticatedServerResourceEvent, AuthenticatedServerResourceKind,
