@@ -788,7 +788,8 @@ fn map_recovery_error(source: PostgresKernelError) -> InstalledSourceDiffError {
 mod tests {
     use super::{
         FunctionRevisionChange, changed_function_revisions, digest_hex, render_change,
-        render_function_revision_change, read_source_bundle, InstalledSourceDiffError,
+        render_function_revision_change, read_source_bundle, run_installed_source_diff,
+        InstalledSourceDiffError,
     };
     use orna_core::{
         CatalogueRevisionId, FieldId, FunctionId, FunctionRevisionId, SchemaId, SourceUnitId,
@@ -1273,6 +1274,57 @@ mod tests {
             super::escape_message("\\\0\u{001B}\u{2028}\u{2029}\n\r\t"),
             r"\\\u{0000}\u{001B}\u{2028}\u{2029}\n\r\t"
         );
+    }
+
+    #[test]
+    fn rejects_invalid_utf8_at_the_diff_entry_boundary_without_mutating_target() {
+        use std::fs;
+
+        let root = std::env::temp_dir();
+        let stem = format!("orna-source-diff-invalid-utf8-{}", std::process::id());
+        let source = root.join(format!("{stem}-source"));
+        let target = root.join(format!("{stem}-target"));
+        let _ = fs::remove_file(&source);
+        let _ = fs::remove_file(&target);
+        fs::write(&source, [0xff, 0xfe, 0xfd]).unwrap();
+        fs::write(&target, b"target sentinel").unwrap();
+        let target_before = fs::read(&target).unwrap();
+
+        let result = run_installed_source_diff(source.to_str().unwrap());
+
+        assert!(matches!(
+            result,
+            Err(InstalledSourceDiffError::SourceUtf8 { path }) if path == source.to_str().unwrap()
+        ));
+        assert_eq!(fs::read(&target).unwrap(), target_before);
+        assert_eq!(fs::read(&source).unwrap(), [0xff, 0xfe, 0xfd]);
+        fs::remove_file(source).unwrap();
+        fs::remove_file(target).unwrap();
+    }
+
+    #[test]
+    fn rejects_directory_at_the_diff_entry_boundary_without_mutating_contents() {
+        use std::fs;
+
+        let root = std::env::temp_dir();
+        let stem = format!("orna-source-diff-directory-{}", std::process::id());
+        let source = root.join(stem);
+        let marker = source.join("marker");
+        let _ = fs::remove_dir_all(&source);
+        fs::create_dir(&source).unwrap();
+        fs::write(&marker, b"directory sentinel").unwrap();
+        let marker_before = fs::read(&marker).unwrap();
+
+        let result = run_installed_source_diff(source.to_str().unwrap());
+
+        assert!(matches!(
+            result,
+            Err(InstalledSourceDiffError::SourceRead { path, source: None })
+                if path == source.to_str().unwrap()
+        ));
+        assert!(source.is_dir());
+        assert_eq!(fs::read(&marker).unwrap(), marker_before);
+        fs::remove_dir_all(source).unwrap();
     }
 
     #[cfg(unix)]
