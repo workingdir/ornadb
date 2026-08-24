@@ -13842,6 +13842,120 @@ fn checks_accepted_expression_client_fixture_offline() -> TestResult<()> {
 }
 
 #[test]
+fn checks_and_evaluates_accepted_client_local_assignment_fixture_offline() -> TestResult<()> {
+    let snapshot = verify_standard_library_v2_snapshot(retained_standard_library_v2_snapshot()?)?;
+    let standard = check_standard_library_source(&snapshot)?;
+    let base = offline_empty_version_two_active(standard.verified_snapshot())?;
+    let context = StandardApplicationCheckContext::try_new(base.catalogue(), &standard)?;
+    let source = SourceBundle::new([SourceUnit::new(
+        "fixtures/client_local_assignment_dogfood.orna",
+        include_str!("fixtures/client_local_assignment_dogfood.orna"),
+    )])?;
+    let report = check_standard_application(&source, &context);
+    if !report.diagnostics().is_empty() {
+        return Err(failure(format!(
+            "accepted CLIENT local assignment fixture did not check: {:?}",
+            report.diagnostics(),
+        )));
+    }
+    let prepared = prepare_standard_application(&report, base.pair(), &base)?;
+    let active = offline_active_from_prepared(&prepared)?;
+    let checked = report.checked_bundle().ok_or_else(|| {
+        failure("accepted CLIENT local assignment fixture produced no checked bundle")
+    })?;
+    let function = checked
+        .client_functions()
+        .find(|function| function.name().parts() == ["local_assignment_fixture", "assigned"])
+        .ok_or_else(|| failure("accepted CLIENT local assignment fixture is missing assigned"))?;
+    let function_id = active
+        .catalogue()
+        .functions()
+        .iter()
+        .find(|candidate| candidate.name() == function.name())
+        .map(FunctionDefinition::id)
+        .ok_or_else(|| {
+            failure("prepared CLIENT local assignment fixture is missing its function definition")
+        })?;
+    let revision = active
+        .function_revisions()
+        .iter()
+        .find(|revision| revision.function() == function_id)
+        .ok_or_else(|| {
+            failure("prepared CLIENT local assignment fixture is missing its function revision")
+        })?;
+    let plan = ProceduralClientPlan::decode(revision.artifact().payload())?;
+    require(
+        plan.format_version() == 7
+            && plan.locals().len() == 1
+            && plan.locals()[0].type_id() == orna_standard::INTEGER_TYPE_ID
+            && plan.statements().len() == 2,
+        "CLIENT local assignment artifact did not retain version-seven LET and assignment",
+    )?;
+    let local = plan.locals()[0].local_id();
+    require(
+        matches!(
+            &plan.statements()[0],
+            orna_artifact::client_plan::ClientStatement::Let {
+                local: statement_local,
+                ..
+            } if *statement_local == local
+        ),
+        "CLIENT local assignment artifact did not retain the typed LET",
+    )?;
+    require(
+        matches!(
+            &plan.statements()[1],
+            orna_artifact::client_plan::ClientStatement::Assignment {
+                local: statement_local,
+                ..
+            } if *statement_local == local
+        ),
+        "CLIENT local assignment artifact did not retain the plain assignment",
+    )?;
+    require(
+        matches!(
+            plan.return_expression(),
+            ClientExpressionNode::LocalRead { local: return_local } if *return_local == local
+        ),
+        "CLIENT local assignment artifact did not return the assigned local",
+    )?;
+
+    let functions = active
+        .catalogue()
+        .functions()
+        .iter()
+        .map(FunctionDefinition::id)
+        .collect::<Vec<_>>();
+    let security = SecuritySnapshot::new(
+        active.pair(),
+        functions,
+        vec![Principal::new(
+            RAW_CLIENT_USER,
+            PrincipalKind::User,
+            PrincipalStatus::Active,
+        )],
+        vec![],
+        vec![ExecuteGrant::new(RAW_CLIENT_USER, function_id)],
+    )?;
+    let session = security.bind_authenticated_session(RAW_CLIENT_USER, vec![])?;
+    let authorisation = match security
+        .authorise_execute(&session, InvocationTarget::new(function_id, active.pair()))
+    {
+        ExecuteDecision::Allowed(authorisation) => authorisation,
+        ExecuteDecision::Denied(reason) => {
+            return Err(failure(format!(
+                "offline CLIENT local assignment authorisation was denied: {reason:?}"
+            )));
+        }
+    };
+    let result = evaluate_client_function(&active, &authorisation)?;
+    require(
+        result.value() == &RuntimeValue::Integer(42),
+        "offline CLIENT local assignment evaluation returned the wrong value",
+    )
+}
+
+#[test]
 fn checks_and_prepares_server_function_dogfood_fixture_offline() -> TestResult<()> {
     let snapshot = verify_standard_library_v2_snapshot(retained_standard_library_v2_snapshot()?)?;
     let standard = check_standard_library_source(&snapshot)?;
@@ -14346,6 +14460,33 @@ async fn proves_installed_client_boolean_expression_dogfood_source_through_orna_
 
 #[cfg(feature = "test-hooks")]
 const RAW_ORDINARY_INSPECTOR_SOURCE: &str = include_str!("fixtures/client_inspector_dogfood.orna");
+#[cfg(feature = "test-hooks")]
+const RAW_FORGED_INSPECTOR_SOURCE: &str = r#"
+CREATE CLIENT FUNCTION inspector_app.forged_renderer(
+    p_snapshot sys.inspect.snapshot,
+    p_invocation_nodes sys.inspect.invocation_nodes,
+    p_calls sys.inspect.calls,
+    p_resources sys.inspect.resources,
+    p_state_cells sys.inspect.state_cells,
+    p_ui_nodes sys.inspect.ui_nodes,
+    p_presentation_candidates sys.inspect.presentation_candidates,
+    p_runtime_bindings sys.inspect.runtime_bindings,
+    p_security_decisions sys.inspect.security_decisions
+) RETURNS std.ui.UI IS
+BEGIN
+    RETURN inspector_app.inspector_renderer(
+        p_snapshot => p_snapshot,
+        p_invocation_nodes => p_invocation_nodes,
+        p_calls => p_calls,
+        p_resources => p_resources,
+        p_state_cells => p_state_cells,
+        p_ui_nodes => p_ui_nodes,
+        p_presentation_candidates => p_presentation_candidates,
+        p_runtime_bindings => p_runtime_bindings,
+        p_security_decisions => p_security_decisions
+    );
+END;
+"#;
 
 #[cfg(feature = "test-hooks")]
 #[tokio::test]
@@ -14369,7 +14510,7 @@ async fn proves_ordinary_client_inspector_through_installed_evaluator() -> TestR
         let source = SourceBundle::new(active.source().units().iter().enumerate().map(
             |(ordinal, unit)| {
                 let content = if ordinal == last_ordinal {
-                    format!("{}\n{}", unit.content(), RAW_ORDINARY_INSPECTOR_SOURCE)
+                    format!("{}\n{}\n{}", unit.content(), RAW_ORDINARY_INSPECTOR_SOURCE, RAW_FORGED_INSPECTOR_SOURCE)
                 } else {
                     unit.content().to_owned()
                 };
@@ -14428,6 +14569,18 @@ async fn proves_ordinary_client_inspector_through_installed_evaluator() -> TestR
                     }),
             "installed Inspector renderer parameters did not retain sealed value identities",
         )?;
+        let forged_renderer = active
+            .catalogue()
+            .functions()
+            .iter()
+            .find(|function| function.name().parts() == ["inspector_app", "forged_renderer"])
+            .ok_or_else(|| failure("installed forged Inspector renderer function is missing"))?;
+        let forged_renderer_id = forged_renderer.id();
+        let forged_renderer_parameter_ids = forged_renderer
+            .parameters()
+            .iter()
+            .map(|parameter| parameter.id())
+            .collect::<Vec<_>>();
 
         let inspector = active
             .catalogue()
@@ -14472,6 +14625,7 @@ async fn proves_ordinary_client_inspector_through_installed_evaluator() -> TestR
             vec![],
             vec![
                 ExecuteGrant::new(RAW_CLIENT_USER, inspector),
+                ExecuteGrant::new(RAW_CLIENT_USER, forged_renderer_id),
                 ExecuteGrant::new(RAW_CLIENT_USER, target.id()),
             ],
             vec![LocalPeerCredential::new(uid, RAW_CLIENT_USER)],
@@ -14703,6 +14857,53 @@ async fn proves_ordinary_client_inspector_through_installed_evaluator() -> TestR
         )?;
 
         let first_carriers = executor.completed_values.clone();
+        let forged_arguments = forged_renderer_parameter_ids
+            .iter()
+            .zip(first_carriers.iter())
+            .map(|(parameter, (_, value))| FunctionArgument::new(*parameter, value.clone()))
+            .collect::<Result<Vec<_>, _>>()?;
+        let forged_authorisation = match security.authorise_execute(
+            &session,
+            InvocationTarget::new(forged_renderer_id, active.pair()),
+        ) {
+            ExecuteDecision::Allowed(authorisation) => authorisation,
+            ExecuteDecision::Denied(denial) => {
+                return Err(failure(format!(
+                    "forged Inspector renderer grant was denied: {denial:?}"
+                )))
+            }
+        };
+        let mut forged_state = ClientStateStore::new();
+        let forged_result =
+            evaluate_client_function_with_state_and_grants_and_arguments_and_executor_with_parent_invocation(
+                &active,
+                &forged_authorisation,
+                &forged_arguments,
+                &[],
+                &grants,
+                &mut forged_state,
+                deterministic_parent,
+                &mut executor,
+            )?;
+        require(
+            matches!(forged_result.value(), RuntimeValue::Opaque(value) if value.opaque_type() == orna_standard::STD_UI_TYPE_ID),
+            "normal same-signature renderer did not retain the accepted external UI path",
+        )?;
+        let forged_contract_arguments = forged_renderer_parameter_ids
+            .iter()
+            .zip(first_carriers.iter())
+            .map(|(parameter, (_, value))| (*parameter, value.clone()))
+            .collect::<Vec<_>>();
+        let forged_request = ClientExternalContractRequest::new(
+            *forged_result.context(),
+            INSPECT_RENDER_CONTRACT,
+            forged_contract_arguments,
+        );
+        require(
+            executor.inner.external_contract(forged_request)
+                == Err("inspect.malformed_carrier".to_owned()),
+            "normal same-signature renderer context obtained ORNA-UI from valid carriers",
+        )?;
         let mut second_executor = RecordingInstalledResourceExecutor {
             inner: InstalledClientResourceExecutor::new(kernel.clone(), session, active.clone()),
             execute_count: 0,

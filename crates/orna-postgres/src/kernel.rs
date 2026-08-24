@@ -196,6 +196,15 @@ impl PostgresSession {
             .map_err(PostgresKernelError::DriverTask)?
             .map_err(PostgresKernelError::Database)
     }
+
+    async fn shutdown_for_source_apply(self) -> Result<(), PostgresKernelError> {
+        match self.shutdown().await {
+            Err(PostgresKernelError::Database(error)) => {
+                Err(PostgresKernelError::SessionClose(error))
+            }
+            result => result,
+        }
+    }
 }
 
 /// A failure to configure or communicate with the private PostgreSQL kernel.
@@ -205,8 +214,12 @@ pub enum PostgresKernelError {
     Configuration(tokio_postgres::Error),
     /// PostgreSQL rejected or failed a connection or query.
     Database(tokio_postgres::Error),
+    /// PostgreSQL rejected or failed an operation after recovery opened its session.
+    RecoveryDatabase(tokio_postgres::Error),
     /// The asynchronous PostgreSQL connection driver terminated abnormally.
     DriverTask(JoinError),
+    /// PostgreSQL reported a failure while the connection session was closing.
+    SessionClose(tokio_postgres::Error),
     /// A recorded schema migration does not match this binary.
     MigrationMismatch {
         /// The incompatible migration version.
@@ -367,11 +380,17 @@ impl fmt::Display for PostgresKernelError {
             Self::Database(error) => {
                 write!(formatter, "private PostgreSQL kernel failure: {error}")
             }
+            Self::RecoveryDatabase(error) => {
+                write!(formatter, "private PostgreSQL kernel failure: {error}")
+            }
             Self::DriverTask(error) => {
                 write!(
                     formatter,
                     "private PostgreSQL connection task failed: {error}"
                 )
+            }
+            Self::SessionClose(error) => {
+                write!(formatter, "private PostgreSQL kernel failure: {error}")
             }
             Self::MigrationMismatch { version } => {
                 write!(
@@ -506,10 +525,22 @@ impl fmt::Display for PostgresKernelError {
     }
 }
 
+fn map_recovery_client_error(error: PostgresKernelError) -> PostgresKernelError {
+    match error {
+        PostgresKernelError::Database(error) => PostgresKernelError::RecoveryDatabase(error),
+        error => error,
+    }
+}
+
 impl Error for PostgresKernelError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
-            Self::Configuration(error) | Self::Database(error) => Some(error),
+            Self::Configuration(error)
+            | Self::Database(error)
+            | Self::RecoveryDatabase(error)
+            | Self::SessionClose(error) => {
+                Some(error)
+            },
             Self::DriverTask(error) => Some(error),
             Self::CanonicalHash(error) => Some(error),
             Self::RevisionInvariant(error) => Some(error),
@@ -563,7 +594,10 @@ mod tests {
         security::{ExecuteDenial, LocalPeerAuthenticationError},
     };
 
-    use super::{PostgresKernel, PostgresKernelError, RawServerTargetError, ServerSelectError};
+    use super::{
+        PostgresKernel, PostgresKernelError, RawServerTargetError, ServerSelectError,
+        map_recovery_client_error,
+    };
 
     #[test]
     fn parses_connection_parameters_without_connecting() {
@@ -580,6 +614,23 @@ mod tests {
             .expect("invalid port must fail");
 
         assert!(matches!(error, PostgresKernelError::Configuration(_)));
+    }
+
+    #[test]
+    fn recovery_classification_only_relabels_database_errors() {
+        let database = "port=invalid"
+            .parse::<tokio_postgres::Config>()
+            .expect_err("invalid port must produce a PostgreSQL error");
+        assert!(matches!(
+            map_recovery_client_error(PostgresKernelError::Database(database)),
+            PostgresKernelError::RecoveryDatabase(_)
+        ));
+
+        let invariant = PostgresKernelError::CatalogueInvariant("recovery invariant");
+        assert!(matches!(
+            map_recovery_client_error(invariant),
+            PostgresKernelError::CatalogueInvariant("recovery invariant")
+        ));
     }
 
     #[test]

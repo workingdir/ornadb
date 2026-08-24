@@ -17,8 +17,8 @@
 //! version: u32 big-endian = 2
 //! operation: u8 = 2
 //! type: TypeId[16]
-//! payload length: u32 big-endian = 16
-//! canonical payload[16]
+//! payload length: u32 big-endian
+//! canonical payload[payload length]
 //! ```
 //!
 //! Version 3 (work ADR 0068) returns one closed CLIENT expression tree:
@@ -214,7 +214,9 @@ const RESOURCE_KIND_STREAM: u8 = 2;
 const NODE_AWAIT: u8 = 9;
 const NODE_RESOURCE: u8 = 10;
 const ENCODED_LENGTH: usize = MAGIC.len() + size_of::<u32>() + 2;
+#[cfg(test)]
 const OPAQUE_PAYLOAD_LENGTH: usize = 16;
+#[cfg(test)]
 const OPAQUE_ENCODED_LENGTH: usize =
     MAGIC.len() + size_of::<u32>() + 1 + 16 + size_of::<u32>() + OPAQUE_PAYLOAD_LENGTH;
 
@@ -253,21 +255,18 @@ pub struct ClientPlan {
 }
 
 /// A checked version-2 CLIENT plan that returns one registered opaque value.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct OpaqueClientPlan {
     opaque_type: TypeId,
-    canonical_payload: [u8; OPAQUE_PAYLOAD_LENGTH],
+    canonical_payload: Vec<u8>,
 }
 
 impl OpaqueClientPlan {
     /// Creates a checked plan from one nominal type and complete canonical payload.
-    pub const fn return_opaque(
-        opaque_type: TypeId,
-        canonical_payload: [u8; OPAQUE_PAYLOAD_LENGTH],
-    ) -> Self {
+    pub fn return_opaque<P: Into<Vec<u8>>>(opaque_type: TypeId, canonical_payload: P) -> Self {
         Self {
             opaque_type,
-            canonical_payload,
+            canonical_payload: canonical_payload.into(),
         }
     }
 
@@ -282,20 +281,20 @@ impl OpaqueClientPlan {
     }
 
     /// Returns the complete canonical opaque payload.
-    pub const fn canonical_payload(&self) -> &[u8; OPAQUE_PAYLOAD_LENGTH] {
+    pub fn canonical_payload(&self) -> &[u8] {
         &self.canonical_payload
     }
 
     /// Encodes this plan into its exact version-2 bytes.
     pub fn encode(&self) -> Vec<u8> {
-        let mut bytes = Vec::with_capacity(OPAQUE_ENCODED_LENGTH);
+        let fixed_length = MAGIC.len() + size_of::<u32>() + 1 + 16 + size_of::<u32>();
+        let mut bytes = Vec::with_capacity(fixed_length + self.canonical_payload.len());
         bytes.extend_from_slice(&MAGIC);
         bytes.extend_from_slice(&OPAQUE_FORMAT_VERSION.to_be_bytes());
         bytes.push(RETURN_OPAQUE_OPERATION);
         bytes.extend_from_slice(&self.opaque_type.to_bytes());
-        bytes.extend_from_slice(&(OPAQUE_PAYLOAD_LENGTH as u32).to_be_bytes());
+        bytes.extend_from_slice(&(self.canonical_payload.len() as u32).to_be_bytes());
         bytes.extend_from_slice(&self.canonical_payload);
-        debug_assert_eq!(bytes.len(), OPAQUE_ENCODED_LENGTH);
         bytes
     }
 
@@ -315,12 +314,12 @@ impl OpaqueClientPlan {
         }
         let opaque_type = TypeId::from_bytes(reader.array()?);
         let payload_length = reader.u32()?;
-        if payload_length != OPAQUE_PAYLOAD_LENGTH as u32 {
+        if payload_length as usize > MAX_ARTIFACT_BYTES {
             return Err(ClientPlanError::InvalidOpaquePayloadLength {
                 actual: payload_length,
             });
         }
-        let canonical_payload = reader.array()?;
+        let canonical_payload = reader.bytes(payload_length as usize)?.to_vec();
         reader.require_finished()?;
         Ok(Self::return_opaque(opaque_type, canonical_payload))
     }
@@ -2324,6 +2323,15 @@ fn encode_resource_operation(
             limit: MAX_RESOURCE_OPERATIONS,
         });
     }
+    for identity in [
+        operation.target.to_bytes(),
+        operation.target_revision.source().to_bytes(),
+        operation.target_revision.catalogue().to_bytes(),
+        operation.call_site.to_bytes(),
+        operation.result_type.to_bytes(),
+    ] {
+        validate_resource_identity(identity)?;
+    }
     validate_resource_arguments(&operation.arguments)?;
     writer.push(NODE_RESOURCE);
     writer.push(operation.kind.tag());
@@ -2516,6 +2524,7 @@ fn validate_resource_arguments(
     }
     let mut previous = None;
     for (parameter, _) in arguments {
+        validate_resource_identity(parameter.to_bytes())?;
         if let Some(previous) = previous {
             match parameter.cmp(&previous) {
                 std::cmp::Ordering::Less => {
@@ -3138,12 +3147,12 @@ fn decode_resource_operation(
         RESOURCE_KIND_STREAM => ResourceKind::Stream,
         tag => return Err(ClientPlanError::InvalidResourceKind(tag)),
     };
-    let target = FunctionId::from_bytes(reader.array()?);
+    let target = FunctionId::from_bytes(read_resource_identity(reader)?);
     let target_revision = RevisionPair::new(
-        SourceRevisionId::from_bytes(reader.array()?),
-        CatalogueRevisionId::from_bytes(reader.array()?),
+        SourceRevisionId::from_bytes(read_resource_identity(reader)?),
+        CatalogueRevisionId::from_bytes(read_resource_identity(reader)?),
     );
-    let call_site = CallSiteId::from_bytes(reader.array()?);
+    let call_site = CallSiteId::from_bytes(read_resource_identity(reader)?);
     let argument_count = reader.u32()? as usize;
     if argument_count > MAX_RESOURCE_ARGUMENTS {
         return Err(ClientPlanError::ResourceArgumentLimitExceeded {
@@ -3153,7 +3162,7 @@ fn decode_resource_operation(
     let mut arguments = Vec::with_capacity(argument_count);
     let mut previous = None;
     for _ in 0..argument_count {
-        let parameter = ParameterId::from_bytes(reader.array()?);
+        let parameter = ParameterId::from_bytes(read_resource_identity(reader)?);
         if let Some(previous) = previous {
             match parameter.cmp(&previous) {
                 std::cmp::Ordering::Less => {
@@ -3177,7 +3186,7 @@ fn decode_resource_operation(
         )?;
         arguments.push((parameter, value));
     }
-    let result_type = TypeId::from_bytes(reader.array()?);
+    let result_type = TypeId::from_bytes(read_resource_identity(reader)?);
     Ok(ResourceOperationNode::new(
         kind,
         target,
@@ -3187,6 +3196,19 @@ fn decode_resource_operation(
         result_type,
     ))
 }
+fn validate_resource_identity(identity: [u8; 16]) -> Result<(), ClientPlanError> {
+    if identity == [0; 16] {
+        return Err(ClientPlanError::InvalidResourceIdentity);
+    }
+    Ok(())
+}
+
+fn read_resource_identity(reader: &mut Reader<'_>) -> Result<[u8; 16], ClientPlanError> {
+    let identity = reader.array()?;
+    validate_resource_identity(identity)?;
+    Ok(identity)
+}
+
 /// An error returned for an invalid or unsupported client-plan artefact.
 #[non_exhaustive]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -3199,7 +3221,7 @@ pub enum ClientPlanError {
     InvalidOperation(u8),
     /// The Boolean payload is not zero or one.
     InvalidBoolean(u8),
-    /// A version-2 opaque payload length is not exactly sixteen bytes.
+    /// A version-2 opaque payload length exceeds the client-plan size bound.
     InvalidOpaquePayloadLength {
         /// The non-canonical length from the artefact.
         actual: u32,
@@ -3238,6 +3260,8 @@ pub enum ClientPlanError {
     NonCanonicalActionArgumentOrder,
     /// A resource operation uses an unknown scalar/stream tag.
     InvalidResourceKind(u8),
+    /// A resource operation or argument carries an empty stable identity.
+    InvalidResourceIdentity,
     /// A version-6 plan contains no resource operation nodes.
     InvalidResourceOperationCount {
         /// The non-canonical count from the artefact.
@@ -3440,6 +3464,9 @@ impl fmt::Display for ClientPlanError {
                 .write_str("client-plan action arguments are not in canonical ParameterId order"),
             Self::InvalidResourceKind(tag) => {
                 write!(formatter, "invalid client-plan resource kind tag {tag}")
+            }
+            Self::InvalidResourceIdentity => {
+                formatter.write_str("invalid client-plan resource identity")
             }
             Self::InvalidResourceOperationCount { actual } => write!(
                 formatter,
@@ -3686,10 +3713,20 @@ mod tests {
 
         assert_eq!(expected.len(), 49);
         assert_eq!(plan.encode(), expected);
-        assert_eq!(OpaqueClientPlan::decode(&expected), Ok(plan));
+        assert_eq!(OpaqueClientPlan::decode(&expected), Ok(plan.clone()));
         assert_eq!(plan.format_version(), OPAQUE_FORMAT_VERSION);
         assert_eq!(plan.opaque_type(), OPAQUE_TYPE);
         assert_eq!(plan.canonical_payload(), &OPAQUE_PAYLOAD);
+    }
+
+    #[test]
+    fn opaque_plan_round_trips_variable_length_payload() {
+        let payload = (0..32).collect::<Vec<u8>>();
+        let plan = OpaqueClientPlan::return_opaque(OPAQUE_TYPE, payload.clone());
+        let encoded = plan.encode();
+
+        assert_eq!(&encoded[29..33], &(payload.len() as u32).to_be_bytes());
+        assert_eq!(OpaqueClientPlan::decode(&encoded), Ok(plan));
     }
 
     #[test]
@@ -3723,10 +3760,12 @@ mod tests {
             Err(ClientPlanError::InvalidOperation(RETURN_BOOLEAN_OPERATION))
         );
         let mut wrong_length = encoded.clone();
-        wrong_length[29..33].copy_from_slice(&15_u32.to_be_bytes());
+        wrong_length[29..33].copy_from_slice(&((MAX_ARTIFACT_BYTES as u32) + 1).to_be_bytes());
         assert_eq!(
             OpaqueClientPlan::decode(&wrong_length),
-            Err(ClientPlanError::InvalidOpaquePayloadLength { actual: 15 })
+            Err(ClientPlanError::InvalidOpaquePayloadLength {
+                actual: (MAX_ARTIFACT_BYTES as u32) + 1,
+            })
         );
         let mut trailing = encoded;
         trailing.push(0);
@@ -4578,7 +4617,7 @@ mod tests {
             ExpressionClientPlan::decode(&trailing),
             Err(ClientPlanError::TrailingBytes)
         );
-        assert_eq!(ExpressionClientPlan::decode(&encoded), Ok(plan.clone()));
+        assert_eq!(ExpressionClientPlan::decode(&encoded), Ok(plan));
         assert_eq!(
             ClientPlan::decode(&encoded),
             Err(ClientPlanError::UnsupportedVersion(INSPECT_FORMAT_VERSION))
@@ -5673,6 +5712,136 @@ mod tests {
     }
 
     #[test]
+    fn resource_plan_round_trips_scalar_identity_and_argument_shape() {
+        let target = FunctionId::from_bytes([0x61; 16]);
+        let source_revision = SourceRevisionId::from_bytes([0x62; 16]);
+        let catalogue_revision = CatalogueRevisionId::from_bytes([0x63; 16]);
+        let call_site = CallSiteId::from_bytes([0x64; 16]);
+        let first_parameter = ParameterId::from_bytes([0x65; 16]);
+        let second_parameter = ParameterId::from_bytes([0x66; 16]);
+        let result_type = TypeId::from_bytes([0x67; 16]);
+        let arguments = vec![
+            (
+                first_parameter,
+                ClientExpressionNode::String {
+                    value: "owner".to_owned(),
+                },
+            ),
+            (
+                second_parameter,
+                ClientExpressionNode::ParameterRead {
+                    parameter: ParameterId::from_bytes([0x68; 16]),
+                },
+            ),
+        ];
+        let plan = ResourceClientPlan::new(ClientExpressionNode::Await {
+            expression: Box::new(ClientExpressionNode::Resource {
+                operation: ResourceOperationNode::new(
+                    ResourceKind::Scalar,
+                    target,
+                    RevisionPair::new(source_revision, catalogue_revision),
+                    call_site,
+                    arguments.clone(),
+                    result_type,
+                ),
+            }),
+        });
+
+        let decoded = ResourceClientPlan::decode(&plan.encode().expect("plan encodes"))
+            .expect("plan decodes");
+        let ClientExpressionNode::Await { expression } = decoded.expression() else {
+            panic!("resource plan root must be await");
+        };
+        let ClientExpressionNode::Resource { operation } = expression.as_ref() else {
+            panic!("await operand must be a resource");
+        };
+        assert_eq!(operation.kind(), ResourceKind::Scalar);
+        assert_eq!(operation.target(), target);
+        assert_eq!(operation.target_revision().source(), source_revision);
+        assert_eq!(operation.target_revision().catalogue(), catalogue_revision);
+        assert_eq!(operation.call_site_id(), call_site);
+        assert_eq!(operation.arguments(), arguments.as_slice());
+        assert_eq!(operation.declared_result_type(), result_type);
+    }
+
+    #[test]
+    fn resource_plan_encode_rejects_zero_identity_fields() {
+        let make = |target, source, catalogue, call_site, result_type, parameter| {
+            ResourceClientPlan::new(ClientExpressionNode::Await {
+                expression: Box::new(ClientExpressionNode::Resource {
+                    operation: ResourceOperationNode::new(
+                        ResourceKind::Scalar,
+                        FunctionId::from_bytes(target),
+                        RevisionPair::new(
+                            SourceRevisionId::from_bytes(source),
+                            CatalogueRevisionId::from_bytes(catalogue),
+                        ),
+                        CallSiteId::from_bytes(call_site),
+                        vec![(
+                            ParameterId::from_bytes(parameter),
+                            ClientExpressionNode::Boolean { value: true },
+                        )],
+                        TypeId::from_bytes(result_type),
+                    ),
+                }),
+            })
+        };
+        let cases = [
+            (
+                [0; 16], [0x22; 16], [0x23; 16], [0x24; 16], [0x25; 16], [0x31; 16],
+            ),
+            (
+                [0x21; 16], [0; 16], [0x23; 16], [0x24; 16], [0x25; 16], [0x31; 16],
+            ),
+            (
+                [0x21; 16], [0x22; 16], [0; 16], [0x24; 16], [0x25; 16], [0x31; 16],
+            ),
+            (
+                [0x21; 16], [0x22; 16], [0x23; 16], [0; 16], [0x25; 16], [0x31; 16],
+            ),
+            (
+                [0x21; 16], [0x22; 16], [0x23; 16], [0x24; 16], [0; 16], [0x31; 16],
+            ),
+            (
+                [0x21; 16], [0x22; 16], [0x23; 16], [0x24; 16], [0x25; 16], [0; 16],
+            ),
+        ];
+        for (target, source, catalogue, call_site, result_type, parameter) in cases {
+            assert_eq!(
+                make(target, source, catalogue, call_site, result_type, parameter).encode(),
+                Err(ClientPlanError::InvalidResourceIdentity),
+            );
+        }
+    }
+
+    #[test]
+    fn resource_plan_decode_rejects_zero_identity_fields() {
+        let encoded = resource_plan().encode().expect("the resource plan encodes");
+        let body_offset = 8 + 4 + 1;
+        let identity_offsets = [3, 19, 35, 51, 122];
+        for relative_offset in identity_offsets {
+            let mut corrupted = encoded.clone();
+            corrupted[body_offset + relative_offset..body_offset + relative_offset + 16].fill(0);
+            assert_eq!(
+                ResourceClientPlan::decode(&corrupted),
+                Err(ClientPlanError::InvalidResourceIdentity),
+                "identity field at offset {relative_offset} must be rejected"
+            );
+        }
+
+        let first_parameter_offset = body_offset + 3 + (16 * 4) + 4;
+        for parameter_offset in [first_parameter_offset, first_parameter_offset + 16 + 17] {
+            let mut corrupted = encoded.clone();
+            corrupted[parameter_offset..parameter_offset + 16].fill(0);
+            assert_eq!(
+                ResourceClientPlan::decode(&corrupted),
+                Err(ClientPlanError::InvalidResourceIdentity),
+                "argument identity at offset {parameter_offset} must be rejected"
+            );
+        }
+    }
+
+    #[test]
     fn resource_plan_rejects_invalid_await_placement() {
         let mut await_non_resource = Vec::new();
         await_non_resource.extend_from_slice(&MAGIC);
@@ -5938,6 +6107,199 @@ mod tests {
             &InnerClientPlan::Procedural(plan)
         );
     }
+    #[test]
+    fn procedural_plan_round_trips_stream_resource_awaits_in_let_assignment_and_return() {
+        let resource_local = LocalId::from_bytes([0x79; 16]);
+        let value_local = LocalId::from_bytes([0x7a; 16]);
+        let result_type = TypeId::from_bytes([0x7b; 16]);
+        let operation = || {
+            ClientExpressionNode::Resource {
+                operation: ResourceOperationNode::new(
+                    ResourceKind::Stream,
+                    FunctionId::from_bytes([0x7c; 16]),
+                    RevisionPair::new(
+                        SourceRevisionId::from_bytes([0x7d; 16]),
+                        CatalogueRevisionId::from_bytes([0x7e; 16]),
+                    ),
+                    CallSiteId::from_bytes([0x7f; 16]),
+                    vec![(
+                        ParameterId::from_bytes([0x80; 16]),
+                        ClientExpressionNode::Boolean { value: true },
+                    )],
+                    result_type,
+                ),
+            }
+        };
+        let plan = ProceduralClientPlan::new(
+            vec![
+                ClientLocal::new(
+                    resource_local,
+                    result_type,
+                    ClientLocalKind::Resource(ResourceKind::Stream),
+                ),
+                ClientLocal::new(value_local, result_type, ClientLocalKind::Value),
+            ],
+            vec![
+                ClientStatement::let_(resource_local, operation()),
+                ClientStatement::let_(
+                    value_local,
+                    ClientExpressionNode::Await {
+                        expression: Box::new(operation()),
+                    },
+                ),
+                ClientStatement::assignment(
+                    value_local,
+                    ClientExpressionNode::Await {
+                        expression: Box::new(ClientExpressionNode::LocalRead {
+                            local: resource_local,
+                        }),
+                    },
+                ),
+            ],
+            ClientExpressionNode::Await {
+                expression: Box::new(ClientExpressionNode::LocalRead {
+                    local: resource_local,
+                }),
+            },
+        );
+
+        let encoded = plan.encode().expect("stream procedural plan encodes");
+        assert_eq!(ProceduralClientPlan::decode(&encoded), Ok(plan));
+    }
+
+    #[test]
+    fn procedural_plan_rejects_resource_local_kind_mismatch_at_encode_and_decode_boundaries() {
+        let local = LocalId::from_bytes([0x81; 16]);
+        let result_type = TypeId::from_bytes([0x82; 16]);
+        let resource = ClientExpressionNode::Resource {
+            operation: ResourceOperationNode::new(
+                ResourceKind::Scalar,
+                FunctionId::from_bytes([0x83; 16]),
+                RevisionPair::new(
+                    SourceRevisionId::from_bytes([0x84; 16]),
+                    CatalogueRevisionId::from_bytes([0x85; 16]),
+                ),
+                CallSiteId::from_bytes([0x86; 16]),
+                Vec::new(),
+                result_type,
+            ),
+        };
+        let plan = ProceduralClientPlan::new(
+            vec![ClientLocal::new(
+                local,
+                result_type,
+                ClientLocalKind::Resource(ResourceKind::Stream),
+            )],
+            vec![ClientStatement::let_(local, resource)],
+            ClientExpressionNode::Await {
+                expression: Box::new(ClientExpressionNode::LocalRead { local }),
+            },
+        );
+        assert_eq!(
+            plan.encode(),
+            Err(ClientPlanError::ProceduralLocalKindMismatch(local))
+        );
+
+        let valid = ProceduralClientPlan::new(
+            vec![ClientLocal::new(
+                local,
+                result_type,
+                ClientLocalKind::Resource(ResourceKind::Scalar),
+            )],
+            vec![ClientStatement::let_(
+                local,
+                ClientExpressionNode::Resource {
+                    operation: ResourceOperationNode::new(
+                        ResourceKind::Scalar,
+                        FunctionId::from_bytes([0x83; 16]),
+                        RevisionPair::new(
+                            SourceRevisionId::from_bytes([0x84; 16]),
+                            CatalogueRevisionId::from_bytes([0x85; 16]),
+                        ),
+                        CallSiteId::from_bytes([0x86; 16]),
+                        Vec::new(),
+                        result_type,
+                    ),
+                },
+            )],
+            ClientExpressionNode::Await {
+                expression: Box::new(ClientExpressionNode::LocalRead { local }),
+            },
+        );
+        let mut malformed = valid.encode().expect("valid procedural plan encodes");
+        let local_kind_offset = 13 + 4 + 16 + 16;
+        malformed[local_kind_offset] = LOCAL_KIND_RESOURCE_STREAM;
+        assert_eq!(
+            ProceduralClientPlan::decode(&malformed),
+            Err(ClientPlanError::ProceduralLocalKindMismatch(local))
+        );
+    }
+
+    #[test]
+    fn procedural_plan_rejects_nested_resource_and_await_placements() {
+        let value_local = LocalId::from_bytes([0x87; 16]);
+        let result_type = TypeId::from_bytes([0x88; 16]);
+        let resource = ClientExpressionNode::Resource {
+            operation: ResourceOperationNode::new(
+                ResourceKind::Scalar,
+                FunctionId::from_bytes([0x89; 16]),
+                RevisionPair::new(
+                    SourceRevisionId::from_bytes([0x8a; 16]),
+                    CatalogueRevisionId::from_bytes([0x8b; 16]),
+                ),
+                CallSiteId::from_bytes([0x8c; 16]),
+                Vec::new(),
+                result_type,
+            ),
+        };
+        let nested_resource = ProceduralClientPlan::new(
+            vec![ClientLocal::new(
+                value_local,
+                result_type,
+                ClientLocalKind::Value,
+            )],
+            vec![ClientStatement::let_(
+                value_local,
+                ClientExpressionNode::Call {
+                    function: FunctionId::from_bytes([0x8d; 16]),
+                    arguments: vec![(
+                        ParameterId::from_bytes([0x8e; 16]),
+                        resource.clone(),
+                    )],
+                },
+            )],
+            ClientExpressionNode::Boolean { value: true },
+        );
+        assert_eq!(
+            nested_resource.encode(),
+            Err(ClientPlanError::InvalidExpressionNode(NODE_RESOURCE))
+        );
+
+        let nested_await = ProceduralClientPlan::new(
+            vec![ClientLocal::new(
+                value_local,
+                result_type,
+                ClientLocalKind::Value,
+            )],
+            vec![ClientStatement::let_(
+                value_local,
+                ClientExpressionNode::Concat {
+                    left: Box::new(ClientExpressionNode::Await {
+                        expression: Box::new(resource),
+                    }),
+                    right: Box::new(ClientExpressionNode::String {
+                        value: "suffix".to_owned(),
+                    }),
+                },
+            )],
+            ClientExpressionNode::Boolean { value: true },
+        );
+        assert_eq!(
+            nested_await.encode(),
+            Err(ClientPlanError::InvalidExpressionNode(NODE_AWAIT))
+        );
+    }
+
     #[test]
     fn procedural_plan_round_trips_inspector_operations() {
         let local = LocalId::from_bytes([0x76; 16]);

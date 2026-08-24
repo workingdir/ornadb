@@ -1,0 +1,9 @@
+CREATE SCHEMA local_assignment_fixture;
+
+CREATE CLIENT FUNCTION local_assignment_fixture.assigned()
+RETURNS INTEGER IS
+    LET value INTEGER := 41;
+BEGIN
+    value := 42;
+    RETURN value;
+END;

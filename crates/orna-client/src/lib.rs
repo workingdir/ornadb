@@ -1,8 +1,8 @@
 //! Local evaluation for closed CLIENT functions.
 
 use orna_protocol::{
-    ClientFrame, MAX_RESOURCE_BATCH_ITEMS, MAX_RESOURCE_TOTAL_ITEMS, decode_active_value,
-    decode_constructed_value, encode_active_client_frame, encode_active_value,
+    ClientFrame, MAX_RESOURCE_ARGUMENTS, MAX_RESOURCE_BATCH_ITEMS, MAX_RESOURCE_TOTAL_ITEMS,
+    decode_active_value, decode_constructed_value, encode_active_client_frame, encode_active_value,
 };
 use sha2::{Digest, Sha256};
 use std::{
@@ -52,7 +52,10 @@ use orna_core::{
         SYS_INSPECT_UI_NODES_TYPE_ID,
     },
     types::{ResolvedType, StandardScalar, TypeDescriptor, TypeDescriptorKind},
-    value::{ConstructedValueKind, FunctionArgument, OpaqueValue, OpaqueValueError, RuntimeValue},
+    value::{
+        ConstructedValueKind, FunctionArgument, OpaqueValue, OpaqueValueError, RuntimeType,
+        RuntimeValue,
+    },
 };
 /// The largest number of queued stream items retained by one CLIENT resource.
 /// This matches the largest single completion batch, keeping one broker-sized
@@ -588,6 +591,11 @@ pub enum ClientResourceError {
     },
     /// An argument value could not be encoded by the active ORV3 codec.
     ArgumentEncoding,
+    /// A resource request contains more arguments than the transport accepts.
+    ResourceArgumentLimitExceeded {
+        /// The maximum number of arguments accepted by one request.
+        limit: usize,
+    },
     /// One parameter identity occurred more than once in a request.
     DuplicateArgument {
         /// The repeated parameter identity.
@@ -666,6 +674,10 @@ impl fmt::Display for ClientResourceError {
             ),
             Self::ArgumentEncoding => formatter
                 .write_str("CLIENT resource argument cannot be encoded by the active codec"),
+            Self::ResourceArgumentLimitExceeded { limit } => write!(
+                formatter,
+                "CLIENT resource argument count exceeds the limit {limit}"
+            ),
             Self::DuplicateArgument { parameter } => {
                 write!(
                     formatter,
@@ -1120,6 +1132,10 @@ pub struct ClientInspectRequest {
 
 impl ClientInspectRequest {
     /// Creates a request bound to one CLIENT execution context.
+    ///
+    /// Snapshot operations derive their target from the operation. Projection
+    /// callers must use [`Self::projection`] so the decoded snapshot target is
+    /// carried into lifecycle binding instead of being silently omitted.
     pub fn new(context: ClientExecutionContext, operation: ClientInspectOperation) -> Self {
         let target_invocation_id = operation.target().and_then(inspect_invocation_target);
         Self::with_provenance(
@@ -1129,6 +1145,33 @@ impl ClientInspectRequest {
             None,
             ObserverLineage::compatibility(context),
         )
+    }
+
+    /// Creates a checked projection request from a snapshot and its target.
+    ///
+    /// Projection operations do not repeat the target reference in their
+    /// operation payload. Callers must therefore carry the invocation identity
+    /// proven when the snapshot was captured. A zero identity is rejected
+    /// before the request can enter a lifecycle session; the session performs
+    /// the remaining epoch and revision binding checks.
+    pub fn projection(
+        context: ClientExecutionContext,
+        projection: InspectProjection,
+        snapshot: RuntimeValue,
+        target_invocation_id: InvocationId,
+    ) -> Result<Self, ClientInspectError> {
+        if target_invocation_id.to_bytes() == [0; 16] {
+            return Err(ClientInspectError::InvalidTarget);
+        }
+        Ok(Self::with_target_invocation(
+            context,
+            ClientInspectOperation::Projection {
+                projection,
+                snapshot,
+            },
+            target_invocation_id,
+            ObserverLineage::compatibility(context),
+        ))
     }
 
     /// Creates a request with a target identity recovered from canonical snapshot evidence.
@@ -1710,13 +1753,20 @@ impl ClientResource {
             ClientResourceCompletion::StreamCompleted { generation, .. } => {
                 self.complete_stream(active, generation)
             }
-            ClientResourceCompletion::Cancelled { generation, .. } => self.cancel(generation),
+            ClientResourceCompletion::Cancelled { generation, .. } => {
+                self.validate_active_identity(active)?;
+                self.cancel(generation)
+            }
             ClientResourceCompletion::Pending { generation, .. } => {
+                self.validate_active_identity(active)?;
                 self.require_loading(generation)
             }
             ClientResourceCompletion::Failed {
                 generation, code, ..
-            } => self.publish_failure(generation, code),
+            } => {
+                self.validate_active_identity(active)?;
+                self.publish_failure(generation, code)
+            }
         }
     }
 
@@ -1766,6 +1816,20 @@ impl ClientResource {
         generation: ClientResourceGeneration,
         values: Vec<RuntimeValue>,
     ) -> Result<(), ClientResourceError> {
+        let (total_items, queued_items) =
+            self.validate_stream_values(active, generation, &values)?;
+        self.stream_batches.push_back(values);
+        self.stream_queued_items = queued_items;
+        self.stream_total_items = total_items;
+        Ok(())
+    }
+
+    fn validate_stream_values(
+        &self,
+        active: &ActiveDatabaseRevision,
+        generation: ClientResourceGeneration,
+        values: &[RuntimeValue],
+    ) -> Result<(u64, u64), ClientResourceError> {
         if self.kind != ResourceKind::Stream || values.is_empty() {
             return Err(ClientResourceError::TypeMismatch);
         }
@@ -1790,10 +1854,7 @@ impl ClientResource {
         {
             return Err(ClientResourceError::TypeMismatch);
         }
-        self.stream_batches.push_back(values);
-        self.stream_queued_items = queued_items;
-        self.stream_total_items = total_items;
-        Ok(())
+        Ok((total_items, queued_items))
     }
 
     fn complete_stream(
@@ -1927,31 +1988,182 @@ impl ClientResource {
     /// Asks the owning executor to cancel the active request before local
     /// invalidation makes its generation stale.
     ///
-    /// A pending cancellation does not release executor ownership. In that
-    /// case the executor must explicitly abandon the request before local
-    /// invalidation can advance the generation. If abandonment fails, this
-    /// method leaves the resource unchanged and returns the executor error.
-    /// The returned executor completion is otherwise intentionally discarded:
-    /// invalidation is the local linearisation point, so every completion for
-    /// the old generation must be rejected as stale.
+    /// A terminal completion committed before cancellation wins: matching
+    /// `READY`, `FAILED`, or `STREAM_COMPLETED` results are applied and the
+    /// resource remains terminal at its current generation. A non-terminal
+    /// cancellation (`PENDING` or `STREAM_VALUES`) does not release executor
+    /// ownership; the executor must explicitly abandon that request before
+    /// local invalidation can advance the generation. If abandonment fails,
+    /// this method leaves the resource
+    /// unchanged and returns the executor error.
     pub fn invalidate_with_executor(
         &mut self,
+        active: &ActiveDatabaseRevision,
         executor: &mut dyn ClientResourceExecutor,
     ) -> Result<(), ClientResourceError> {
         // Check the next generation before releasing executor ownership. If
         // the counter is exhausted, the resource must remain unchanged.
         self.next_generation()?;
         if let Some(request) = self.active_request() {
+            // The active revision is local knowledge. Validate it before
+            // asking the executor to consume ownership; a mismatch must leave
+            // both the loading resource and its pending request intact.
+            self.validate_owned_request(&request)?;
+            self.validate_active_identity(active)?;
             let cancellation = executor.cancel(request.clone());
-            self.validate_completion_identity(&cancellation)?;
-            if matches!(cancellation, ClientResourceCompletion::Pending { .. }) {
+            let cancellation_matches_request = cancellation.matches_request(&request);
+            let terminal = matches!(
+                cancellation,
+                ClientResourceCompletion::Ready { .. }
+                    | ClientResourceCompletion::Failed { .. }
+                    | ClientResourceCompletion::StreamCompleted { .. },
+            );
+            let requires_abandon = matches!(
+                cancellation,
+                ClientResourceCompletion::Pending { .. }
+                    | ClientResourceCompletion::StreamValues { .. },
+            );
+            if requires_abandon {
+                // Validate without publishing a non-terminal completion. If
+                // abandonment fails, the owned request and local resource
+                // remain unchanged so the caller can retry safely.
+                self.validate_cancellation_completion(active, &cancellation)?;
                 if let Err(message) = executor.abandon(request) {
                     return Err(ClientResourceError::Executor(message));
+                }
+            } else {
+                // Cancellation completions use the same identity, active
+                // revision, target, declared type, runtime value, and
+                // stream-item checks as ordinary executor completions. A
+                // malformed terminal response with matching request identity
+                // transitions to an explicit safe state after the executor
+                // has consumed it; mismatched identity retains ownership.
+                if let Err(error) = self.apply_completion(active, cancellation) {
+                    if cancellation_matches_request {
+                        self.mark_executor_released_cancelled();
+                    }
+                    return Err(error);
+                }
+                if terminal {
+                    return Ok(());
                 }
             }
         }
 
         self.invalidate()
+    }
+
+    /// Releases a loading request whose pinned revision is stale relative to
+    /// the active revision that selected a replacement key.
+    ///
+    /// This is deliberately separate from [`Self::invalidate_with_executor`]:
+    /// the current active catalogue cannot validate a completion for the old
+    /// pinned target. Request identity and completion shape remain fail-closed;
+    /// only active-revision membership checks are omitted for this cleanup.
+    fn invalidate_stale_replacement_with_executor(
+        &mut self,
+        executor: &mut dyn ClientResourceExecutor,
+    ) -> Result<(), ClientResourceError> {
+        // Check the next generation before releasing executor ownership. If
+        // the counter is exhausted, the resource must remain unchanged.
+        self.next_generation()?;
+        let Some(request) = self.active_request() else {
+            return self.invalidate();
+        };
+        // The old key cannot be checked against the new active revision, but
+        // its request identity, target, kind, and expected type are still
+        // locally known. Reject those mismatches before consuming ownership.
+        self.validate_owned_request(&request)?;
+        let cancellation = executor.cancel(request.clone());
+        if let Err(error) = self.validate_stale_replacement_cancellation(&cancellation) {
+            if cancellation.matches_request(&request)
+                && matches!(
+                    cancellation,
+                    ClientResourceCompletion::Ready { .. }
+                        | ClientResourceCompletion::Failed { .. }
+                        | ClientResourceCompletion::StreamCompleted { .. }
+                        | ClientResourceCompletion::Cancelled { .. },
+                )
+            {
+                self.mark_executor_released_cancelled();
+            }
+            return Err(error);
+        }
+        if matches!(
+            cancellation,
+            ClientResourceCompletion::Pending { .. }
+                | ClientResourceCompletion::StreamValues { .. }
+        ) {
+            if let Err(message) = executor.abandon(request) {
+                return Err(ClientResourceError::Executor(message));
+            }
+        }
+        // Every valid completion for a stale replacement is discarded. The
+        // old key must become idle with a fresh generation; terminal-wins is
+        // only meaningful while the key's pinned revision is still active.
+        self.invalidate()
+    }
+
+    fn validate_stale_replacement_cancellation(
+        &self,
+        completion: &ClientResourceCompletion,
+    ) -> Result<(), ClientResourceError> {
+        self.validate_completion_identity(completion)?;
+        match completion {
+            ClientResourceCompletion::Ready {
+                generation, value, ..
+            } => {
+                self.require_loading(*generation)?;
+                if self.kind != ResourceKind::Scalar
+                    || !stale_replacement_value_matches(value, self.expected_type)
+                {
+                    return Err(ClientResourceError::TypeMismatch);
+                }
+            }
+            ClientResourceCompletion::Failed {
+                generation, code, ..
+            } => {
+                self.require_loading(*generation)?;
+                if code.is_empty() || code.contains('\0') {
+                    return Err(ClientResourceError::InvalidFailureCode);
+                }
+            }
+            ClientResourceCompletion::StreamCompleted { generation, .. } => {
+                self.require_loading(*generation)?;
+                if self.kind != ResourceKind::Stream {
+                    return Err(ClientResourceError::TypeMismatch);
+                }
+            }
+            ClientResourceCompletion::Cancelled { generation, .. }
+            | ClientResourceCompletion::Pending { generation, .. } => {
+                self.require_loading(*generation)?;
+            }
+            ClientResourceCompletion::StreamValues {
+                generation, values, ..
+            } => {
+                self.require_loading(*generation)?;
+                if self.kind != ResourceKind::Stream
+                    || values.is_empty()
+                    || values.len() > MAX_RESOURCE_BATCH_ITEMS
+                    || self
+                        .stream_total_items
+                        .checked_add(values.len() as u64)
+                        .filter(|total| *total <= MAX_RESOURCE_TOTAL_ITEMS)
+                        .is_none()
+                    || self
+                        .stream_queued_items
+                        .checked_add(values.len() as u64)
+                        .filter(|total| *total <= MAX_RESOURCE_QUEUED_ITEMS)
+                        .is_none()
+                    || values
+                        .iter()
+                        .any(|value| !stale_replacement_value_matches(value, self.expected_type))
+                {
+                    return Err(ClientResourceError::TypeMismatch);
+                }
+            }
+        }
+        Ok(())
     }
 
     fn clear_result(&mut self) {
@@ -1967,6 +2179,15 @@ impl ClientResource {
         self.active_request
             .as_ref()
             .map(|request| request.0.clone())
+    }
+
+    fn mark_executor_released_cancelled(&mut self) {
+        // Match the ordinary cancellation transition: retain the generation
+        // and request identity for late-completion rejection, but drop the
+        // executor-owned request itself.
+        self.status = ClientResourceStatus::Cancelled;
+        self.active_request = None;
+        self.clear_result();
     }
 
     fn next_generation(&self) -> Result<ClientResourceGeneration, ClientResourceError> {
@@ -1995,6 +2216,75 @@ impl ClientResource {
         self.require_generation(generation)?;
         self.require_request_id(request_id)?;
         self.require_key(key)
+    }
+
+    fn validate_owned_request(
+        &self,
+        request: &ClientResourceRequest,
+    ) -> Result<(), ClientResourceError> {
+        self.require_generation(request.generation())?;
+        self.require_request_id(request.request_id())?;
+        self.require_key(request.key())?;
+        self.require_loading(request.generation())?;
+        if request.target() != self.key.target() {
+            return Err(ClientResourceError::TargetMismatch {
+                expected: self.key.target(),
+            });
+        }
+        if request.kind() != self.kind || request.expected_type() != self.expected_type {
+            return Err(ClientResourceError::TypeMismatch);
+        }
+        Ok(())
+    }
+
+    fn validate_cancellation_completion(
+        &self,
+        active: &ActiveDatabaseRevision,
+        completion: &ClientResourceCompletion,
+    ) -> Result<(), ClientResourceError> {
+        self.validate_completion_identity(completion)?;
+        match completion {
+            ClientResourceCompletion::Pending { generation, .. } => {
+                self.validate_active_identity(active)?;
+                self.require_loading(*generation)
+            }
+            ClientResourceCompletion::StreamValues {
+                generation, values, ..
+            } => {
+                self.validate_active_identity(active)?;
+                self.validate_stream_values(active, *generation, values)
+                    .map(|_| ())
+            }
+            _ => Err(ClientResourceError::InvalidTransition {
+                status: self.status,
+            }),
+        }
+    }
+
+    fn validate_active_identity(
+        &self,
+        active: &ActiveDatabaseRevision,
+    ) -> Result<(), ClientResourceError> {
+        if active.pair() != self.key.target().revision() {
+            return Err(ClientResourceError::RevisionMismatch {
+                expected: self.key.target().revision(),
+                actual: active.pair(),
+            });
+        }
+        if !active_supports_invocation_target(active, self.key.target()) {
+            return Err(ClientResourceError::TargetMismatch {
+                expected: self.key.target(),
+            });
+        }
+        if !active_resource_result_type_matches(
+            active,
+            self.key.target(),
+            self.kind,
+            self.expected_type,
+        ) {
+            return Err(ClientResourceError::TypeMismatch);
+        }
+        Ok(())
     }
 
     fn require_generation(
@@ -2049,6 +2339,40 @@ impl ClientResource {
         Ok(())
     }
 }
+fn stale_replacement_value_matches(value: &RuntimeValue, expected: ResolvedType) -> bool {
+    // Typed NULL retains its declared type.  Do not normalize a primitive
+    // value type to its legacy scalar before checking NULL: a NULL carrying
+    // `Value(BOOLEAN)` is valid for that exact value type, while a NULL
+    // carrying `Scalar(Boolean)` is not the same declaration.
+    if let RuntimeValue::Null(null) = value {
+        return null.resolved_type() == expected;
+    }
+    let expected = match expected {
+        ResolvedType::Value(type_id) if type_id == orna_standard::BOOLEAN_TYPE_ID => {
+            ResolvedType::Scalar(StandardScalar::Boolean)
+        }
+        ResolvedType::Value(type_id) if type_id == orna_standard::INTEGER_TYPE_ID => {
+            ResolvedType::Scalar(StandardScalar::Integer)
+        }
+        ResolvedType::Value(type_id) if type_id == orna_standard::BIGINT_TYPE_ID => {
+            ResolvedType::Scalar(StandardScalar::BigInt)
+        }
+        ResolvedType::Value(type_id) if type_id == orna_standard::FLOAT_TYPE_ID => {
+            ResolvedType::Scalar(StandardScalar::Float)
+        }
+        ResolvedType::Value(type_id)
+            if type_id == orna_standard::CHARACTER_LARGE_OBJECT_TYPE_ID =>
+        {
+            ResolvedType::Scalar(StandardScalar::CharacterLargeObject)
+        }
+        ResolvedType::Value(type_id) if type_id == orna_standard::BINARY_LARGE_OBJECT_TYPE_ID => {
+            ResolvedType::Scalar(StandardScalar::BinaryLargeObject)
+        }
+        expected => expected,
+    };
+    value.runtime_type() == RuntimeType::Flat(expected)
+}
+
 fn stream_item_descriptor(expected: ResolvedType) -> Option<TypeDescriptor> {
     match expected {
         ResolvedType::Scalar(scalar) => {
@@ -2116,6 +2440,11 @@ fn supported_stream_item_descriptor(
 fn canonical_resource_arguments(
     arguments: &[FunctionArgument],
 ) -> Result<Vec<FunctionArgument>, ClientResourceError> {
+    if arguments.len() > MAX_RESOURCE_ARGUMENTS {
+        return Err(ClientResourceError::ResourceArgumentLimitExceeded {
+            limit: MAX_RESOURCE_ARGUMENTS,
+        });
+    }
     let mut arguments = arguments.to_vec();
     arguments.sort_by_key(FunctionArgument::parameter);
     for pair in arguments.windows(2) {
@@ -2738,20 +3067,21 @@ impl ClientStateStore {
     /// Invalidates one cached resource and asks the owning executor to cancel
     /// its active request before the local generation changes.
     ///
-    /// The executor owns the submitted request. The resource retains only a
-    /// cancellation descriptor, and any completion returned by the hook is
-    /// deliberately discarded because the invalidation makes that generation
-    /// stale. This keeps cancellation in the owning runtime rather than in
-    /// stale-completion handling.
+    /// A terminal completion returned before cancellation wins and remains
+    /// published at the current generation. A non-terminal completion is
+    /// validated and abandoned before invalidation can advance the generation.
+    /// This keeps cancellation in the owning runtime while preserving terminal
+    /// ordering.
     pub fn invalidate_resource_with_executor(
         &mut self,
+        active: &ActiveDatabaseRevision,
         key: ClientResourceKey,
         executor: &mut dyn ClientResourceExecutor,
     ) -> Result<bool, ClientResourceError> {
         let Some(resource) = self.resources.get_mut(&key) else {
             return Ok(false);
         };
-        resource.invalidate_with_executor(executor)?;
+        resource.invalidate_with_executor(active, executor)?;
         Ok(true)
     }
 
@@ -2764,6 +3094,7 @@ impl ClientStateStore {
     /// previous executor-owned request running.
     pub fn get_or_create_resource_with_kind_and_executor(
         &mut self,
+        active: &ActiveDatabaseRevision,
         key: ClientResourceKey,
         kind: ResourceKind,
         expected_type: ResolvedType,
@@ -2780,7 +3111,15 @@ impl ClientStateStore {
             })
             .collect();
         for replacement in replacements {
-            self.invalidate_resource_with_executor(replacement, executor)?;
+            if replacement.target().revision() == active.pair() {
+                self.invalidate_resource_with_executor(active, replacement, executor)?;
+            } else {
+                let resource = self
+                    .resources
+                    .get_mut(&replacement)
+                    .expect("replacement key was collected from the resource cache");
+                resource.invalidate_stale_replacement_with_executor(executor)?;
+            }
         }
         Ok(self.get_or_create_resource_with_kind(key, kind, expected_type))
     }
@@ -2789,11 +3128,13 @@ impl ClientStateStore {
     /// replacement path.
     pub fn get_or_create_resource_with_executor(
         &mut self,
+        active: &ActiveDatabaseRevision,
         key: ClientResourceKey,
         expected_type: ResolvedType,
         executor: &mut dyn ClientResourceExecutor,
     ) -> Result<&mut ClientResource, ClientResourceError> {
         self.get_or_create_resource_with_kind_and_executor(
+            active,
             key,
             ResourceKind::Scalar,
             expected_type,
@@ -3045,6 +3386,9 @@ impl ClientStateStore {
                 }
             }
         }
+        if let Some(error) = first_conflict {
+            return Err(error);
+        }
         for (key, revision) in staged_writes {
             let local = self
                 .user
@@ -3052,9 +3396,6 @@ impl ClientStateStore {
                 .expect("USER state key was validated above");
             local.revision = Some(revision);
             local.dirty = false;
-        }
-        if let Some(error) = first_conflict {
-            return Err(error);
         }
         Ok(())
     }
@@ -3814,6 +4155,25 @@ pub fn evaluate_client_function_with_state_and_grants_and_arguments_and_executor
     )
 }
 
+fn same_revision_terminal_replacement(
+    active: &ActiveDatabaseRevision,
+    state: &ClientStateStore,
+    key: &ClientResourceKey,
+    resource: &ClientResource,
+) -> bool {
+    let Some(previous) = state.resources.get(key) else {
+        return false;
+    };
+    previous.status() == ClientResourceStatus::Loading
+        && previous.key().target().revision() == active.pair()
+        && resource.key().target().revision() == active.pair()
+        && resource.generation() == previous.generation()
+        && matches!(
+            resource.status(),
+            ClientResourceStatus::Ready | ClientResourceStatus::Failed
+        )
+}
+
 fn evaluate_client_function_in_state_context_with_executor(
     active: &ActiveDatabaseRevision,
     authorisation: &AuthorisedInvocation,
@@ -3860,8 +4220,8 @@ fn evaluate_client_function_in_state_context_with_executor(
                     source: ClientResourceExecutionError::Pending { key, generation },
                     ..
                 } => {
-                    // Persist the pending resource and any matching generation
-                    // that was cancelled while replacing its local identity.
+                    // Persist the pending resource and any same-revision
+                    // replacement state committed while cancelling its old generation.
                     let changed_resources: Vec<_> = staged
                         .resources
                         .iter()
@@ -3873,10 +4233,16 @@ fn evaluate_client_function_in_state_context_with_executor(
                                         && resource.generation().value()
                                             > previous.generation().value()
                                 });
+                            let replacement_terminal = same_revision_terminal_replacement(
+                                active,
+                                state,
+                                candidate_key,
+                                resource,
+                            );
                             let pending_resource = resource.key() == *key
                                 && resource.generation() == *generation
                                 && resource.status() == ClientResourceStatus::Loading;
-                            (pending_resource || replacement_cancelled)
+                            (pending_resource || replacement_cancelled || replacement_terminal)
                                 .then_some((*candidate_key, resource.clone()))
                         })
                         .collect();
@@ -3900,10 +4266,13 @@ fn evaluate_client_function_in_state_context_with_executor(
                                     && resource.status() == ClientResourceStatus::Idle
                                     && resource.generation().value() > previous.generation().value()
                             });
+                        let replacement_terminal =
+                            same_revision_terminal_replacement(active, state, key, resource);
                         if matches!(
                             resource.status(),
                             ClientResourceStatus::Failed | ClientResourceStatus::Cancelled
                         ) || replacement_cancelled
+                            || replacement_terminal
                         {
                             state.resources.insert(*key, resource.clone());
                         }
@@ -3916,8 +4285,8 @@ fn evaluate_client_function_in_state_context_with_executor(
                     // A malformed same-generation completion is returned as
                     // Invalid after the exact request is offered to the executor
                     // for cancellation. If cancellation is non-terminal or
-                    // malformed, retain the changed Loading resource so the
-                    // executor-owned request is not stranded in the staged clone.
+                    // malformed, retain changed resource state so the executor-owned
+                    // request is not stranded in the staged clone.
                     for (key, resource) in &staged.resources {
                         let replacement_cancelled =
                             state.resources.get(key).is_some_and(|previous| {
@@ -3925,6 +4294,8 @@ fn evaluate_client_function_in_state_context_with_executor(
                                     && resource.status() == ClientResourceStatus::Idle
                                     && resource.generation().value() > previous.generation().value()
                             });
+                        let replacement_terminal =
+                            same_revision_terminal_replacement(active, state, key, resource);
                         let changed_identity = state.resources.get(key).is_none_or(|previous| {
                             previous.status() != resource.status()
                                 || previous.generation() != resource.generation()
@@ -3936,12 +4307,33 @@ fn evaluate_client_function_in_state_context_with_executor(
                         ) && changed_identity;
                         let loading_owned =
                             resource.status() == ClientResourceStatus::Loading && changed_identity;
-                        if terminal_changed || loading_owned || replacement_cancelled {
+                        if terminal_changed
+                            || loading_owned
+                            || replacement_cancelled
+                            || replacement_terminal
+                        {
                             state.resources.insert(*key, resource.clone());
                         }
                     }
                 }
-                _ => {}
+                _ => {
+                    // A later expression, state, Inspector, or external
+                    // failure still commits any terminal result that won't
+                    // be visible after this staged evaluation is dropped.
+                    for (key, resource) in &staged.resources {
+                        let replacement_cancelled =
+                            state.resources.get(key).is_some_and(|previous| {
+                                previous.status() == ClientResourceStatus::Loading
+                                    && resource.status() == ClientResourceStatus::Idle
+                                    && resource.generation().value() > previous.generation().value()
+                            });
+                        let replacement_terminal =
+                            same_revision_terminal_replacement(active, state, key, resource);
+                        if replacement_cancelled || replacement_terminal {
+                            state.resources.insert(*key, resource.clone());
+                        }
+                    }
+                }
             }
             return Err(error);
         }
@@ -5326,6 +5718,7 @@ fn evaluate_resource_expression(
     let resource = if let Some(executor) = executor.as_deref_mut() {
         state
             .get_or_create_resource_with_kind_and_executor(
+                active,
                 key,
                 operation.kind(),
                 expected_type,
@@ -5600,6 +5993,17 @@ pub fn encode_action_payload(
     active: &ActiveDatabaseRevision,
     descriptor: &ClientActionDescriptor,
 ) -> Result<Vec<u8>, ClientActionError> {
+    for identity in [
+        descriptor.target.to_bytes(),
+        descriptor.target_revision.source().to_bytes(),
+        descriptor.target_revision.catalogue().to_bytes(),
+        descriptor.call_site.to_bytes(),
+        descriptor.result_type.to_bytes(),
+    ] {
+        if identity == [0; 16] {
+            return Err(action_payload_error("invalid action identity"));
+        }
+    }
     for pair in descriptor.arguments.windows(2) {
         if pair[0].parameter() >= pair[1].parameter() {
             return Err(action_payload_error(
@@ -5609,6 +6013,11 @@ pub fn encode_action_payload(
     }
     if descriptor.arguments.len() > orna_artifact::client_plan::MAX_ACTION_ARGUMENTS {
         return Err(action_payload_error("too many action arguments"));
+    }
+    for argument in &descriptor.arguments {
+        if argument.parameter().to_bytes() == [0; 16] {
+            return Err(action_payload_error("invalid action identity"));
+        }
     }
     let mut body = Vec::new();
     body.push(match descriptor.domain {
@@ -5683,6 +6092,16 @@ fn action_take<'a>(
     Ok(value)
 }
 
+fn action_identity_bytes(body: &[u8], offset: &mut usize) -> Result<[u8; 16], ClientActionError> {
+    let identity = action_take(body, offset, 16)?
+        .try_into()
+        .expect("action identities are exactly sixteen bytes");
+    if identity == [0; 16] {
+        return Err(action_payload_error("invalid action identity"));
+    }
+    Ok(identity)
+}
+
 pub fn decode_action_payload(
     active: &ActiveDatabaseRevision,
     payload: &[u8],
@@ -5707,19 +6126,16 @@ pub fn decode_action_payload(
         2 => ActionTargetDomain::Server,
         _ => return Err(action_payload_error("unknown action domain")),
     };
-    let target = FunctionId::from_bytes(action_take(body, &mut offset, 16)?.try_into().unwrap());
-    let source = orna_core::SourceRevisionId::from_bytes(
-        action_take(body, &mut offset, 16)?.try_into().unwrap(),
-    );
-    let catalogue = orna_core::CatalogueRevisionId::from_bytes(
-        action_take(body, &mut offset, 16)?.try_into().unwrap(),
-    );
+    let target = FunctionId::from_bytes(action_identity_bytes(body, &mut offset)?);
+    let source = orna_core::SourceRevisionId::from_bytes(action_identity_bytes(body, &mut offset)?);
+    let catalogue =
+        orna_core::CatalogueRevisionId::from_bytes(action_identity_bytes(body, &mut offset)?);
     let target_revision = RevisionPair::new(source, catalogue);
     if target_revision != active.pair() {
         return Err(ClientActionError::RevisionMismatch);
     }
-    let call_site = CallSiteId::from_bytes(action_take(body, &mut offset, 16)?.try_into().unwrap());
-    let result_type = TypeId::from_bytes(action_take(body, &mut offset, 16)?.try_into().unwrap());
+    let call_site = CallSiteId::from_bytes(action_identity_bytes(body, &mut offset)?);
+    let result_type = TypeId::from_bytes(action_identity_bytes(body, &mut offset)?);
     let count = u32::from_be_bytes(action_take(body, &mut offset, 4)?.try_into().unwrap()) as usize;
     if count > orna_artifact::client_plan::MAX_ACTION_ARGUMENTS {
         return Err(action_payload_error("too many action arguments"));
@@ -5727,8 +6143,7 @@ pub fn decode_action_payload(
     let mut arguments = Vec::with_capacity(count);
     let mut previous = None;
     for _ in 0..count {
-        let parameter =
-            ParameterId::from_bytes(action_take(body, &mut offset, 16)?.try_into().unwrap());
+        let parameter = ParameterId::from_bytes(action_identity_bytes(body, &mut offset)?);
         if previous.is_some_and(|value| parameter <= value) {
             return Err(action_payload_error("action arguments are not canonical"));
         }
@@ -5929,6 +6344,10 @@ fn complete_client_action_inner(
     {
         return Err(ClientActionError::StaleCompletion);
     }
+    let completion_is_non_terminal = matches!(
+        &completion,
+        ClientResourceCompletion::Pending { .. } | ClientResourceCompletion::StreamValues { .. }
+    );
     let apply_result = action_state
         .resource_mut()
         .expect("action resource was checked above")
@@ -5936,10 +6355,10 @@ fn complete_client_action_inner(
     if apply_result.is_err() {
         // A same-generation malformed completion must not strand the request
         // owned by the executor. Generation and key mismatches remain stale
-        // and do not cancel a newer or unrelated request. A completion returned
-        // by an explicit cancellation has already traversed that path once. If
-        // the cancellation is itself pending or malformed, retain Loading state
-        // so the caller can poll without losing executor ownership.
+        // and do not cancel a newer or unrelated request. A valid pending
+        // cancellation retains Loading state because the executor still owns
+        // the request; a malformed terminal cancellation is treated as
+        // consumed and moves the resource to the explicit Cancelled state.
         if cancel_on_invalid {
             let cancel_request = action_state
                 .resource
@@ -5947,6 +6366,11 @@ fn complete_client_action_inner(
                 .and_then(|resource| resource.active_request());
             if let Some(request) = cancel_request {
                 let cancellation = executor.cancel(request);
+                let cancellation_is_non_terminal = matches!(
+                    &cancellation,
+                    ClientResourceCompletion::Pending { .. }
+                        | ClientResourceCompletion::StreamValues { .. }
+                );
                 match action_state
                     .resource_mut()
                     .expect("action resource remains after malformed completion")
@@ -5972,11 +6396,34 @@ fn complete_client_action_inner(
                         action_state.clear();
                         return Ok(outcome);
                     }
-                    Err(_) => return Err(ClientActionError::Pending),
+                    Err(error) => {
+                        if matches!(
+                            error,
+                            ClientResourceError::StaleGeneration { .. }
+                                | ClientResourceError::RequestKeyMismatch { .. }
+                                | ClientResourceError::RequestIdMismatch { .. }
+                        ) {
+                            return Err(ClientActionError::StaleCompletion);
+                        }
+                        if cancellation_is_non_terminal {
+                            return Err(ClientActionError::Pending);
+                        }
+                        action_state
+                            .resource_mut()
+                            .expect("action resource remains after consumed cancellation")
+                            .mark_executor_released_cancelled();
+                        return Err(ClientActionError::Executor(ACTION_FAILURE_CODE.to_owned()));
+                    }
                 }
             }
-        } else {
+        } else if completion_is_non_terminal {
             return Err(ClientActionError::Pending);
+        } else {
+            action_state
+                .resource_mut()
+                .expect("action resource remains after consumed cancellation")
+                .mark_executor_released_cancelled();
+            return Err(ClientActionError::Executor(ACTION_FAILURE_CODE.to_owned()));
         }
         action_state.clear();
         return Ok(redacted_action_failure());
@@ -6116,6 +6563,12 @@ impl ClientResourceExecutor for ClientActionNestedExecutor<'_> {
         if matches!(completion, ClientResourceCompletion::Pending { .. }) {
             return self.cancel(request);
         }
+        if matches!(completion, ClientResourceCompletion::StreamValues { .. }) {
+            // A nested action has no poll surface of its own. Retain the
+            // executor-owned request until a later terminal completion or
+            // explicit abandonment arrives.
+            self.pending_request = Some(request);
+        }
         completion
     }
 
@@ -6146,7 +6599,11 @@ impl ClientResourceExecutor for ClientActionNestedExecutor<'_> {
             self.pending_request = Some(request.clone());
             return request.pending();
         }
-        if matches!(completion, ClientResourceCompletion::Pending { .. }) {
+        if matches!(
+            completion,
+            ClientResourceCompletion::Pending { .. }
+                | ClientResourceCompletion::StreamValues { .. },
+        ) {
             self.pending_request = Some(request);
         } else if self.pending_request.is_some() {
             self.pending_request = None;
@@ -6325,6 +6782,13 @@ fn trigger_client_action_with_lineage(
                                     && resource.status() == ClientResourceStatus::Idle
                                     && resource.generation().value() > previous.generation().value()
                             });
+                        let replacement_terminal =
+                            same_revision_terminal_replacement(
+                                active,
+                                state,
+                                candidate_key,
+                                resource,
+                            );
                         let pending_resource = nested_executor
                             .pending_request_identity()
                             .is_some_and(|(_, pending_key, pending_generation)| {
@@ -6332,7 +6796,7 @@ fn trigger_client_action_with_lineage(
                                     && resource.generation() == pending_generation
                                     && resource.status() == ClientResourceStatus::Loading
                             });
-                        (pending_resource || replacement_cancelled)
+                        (pending_resource || replacement_cancelled || replacement_terminal)
                             .then_some((*candidate_key, resource.clone()))
                     })
                     .collect();
@@ -6357,6 +6821,7 @@ fn trigger_client_action_with_lineage(
                 action_state.clear();
                 return Err(ClientActionError::Executor(ACTION_FAILURE_CODE.to_owned()));
             }
+            let result_is_err = result.is_err();
             let completion = match result {
                 Ok((_, value)) => request.ready(value),
                 Err(ClientExecutionError::ResourceEvaluation {
@@ -6369,6 +6834,21 @@ fn trigger_client_action_with_lineage(
                 }) => request.cancelled(),
                 Err(_) => request.failed(ACTION_FAILURE_CODE.to_owned()),
             };
+            if result_is_err {
+                for (key, resource) in &staged.resources {
+                    let replacement_cancelled =
+                        state.resources.get(key).is_some_and(|previous| {
+                            previous.status() == ClientResourceStatus::Loading
+                                && resource.status() == ClientResourceStatus::Idle
+                                && resource.generation().value() > previous.generation().value()
+                        });
+                    let replacement_terminal =
+                        same_revision_terminal_replacement(active, state, key, resource);
+                    if replacement_cancelled || replacement_terminal {
+                        state.retain_resource(resource.clone());
+                    }
+                }
+            }
             let outcome =
                 complete_client_action(active, action_state, completion, &mut nested_executor)?;
             if outcome == ClientActionOutcome::Completed {
@@ -8647,8 +9127,11 @@ mod tests {
         late_dropped: usize,
         result: Option<RuntimeValue>,
         pending_identity: Option<ClientResourceRequest>,
+        execute_stream_values: bool,
         cancel_pending: bool,
+        cancel_stream_values: bool,
         cancel_identity: Option<ClientResourceRequest>,
+        cancel_terminal_identity: Option<ClientResourceRequest>,
         cancel_value: Option<RuntimeValue>,
         abandon_failure: bool,
     }
@@ -8661,8 +9144,16 @@ mod tests {
             }
         }
 
+        fn with_execute_stream_values(mut self) -> Self {
+            self.execute_stream_values = true;
+            self
+        }
         fn with_cancel_pending(mut self) -> Self {
             self.cancel_pending = true;
+            self
+        }
+        fn with_cancel_stream_values(mut self) -> Self {
+            self.cancel_stream_values = true;
             self
         }
         fn with_pending_identity(mut self, request: ClientResourceRequest) -> Self {
@@ -8673,6 +9164,11 @@ mod tests {
         fn with_cancel_pending_identity(mut self, request: ClientResourceRequest) -> Self {
             self.cancel_pending = true;
             self.cancel_identity = Some(request);
+            self
+        }
+
+        fn with_cancel_terminal_identity(mut self, request: ClientResourceRequest) -> Self {
+            self.cancel_terminal_identity = Some(request);
             self
         }
 
@@ -8692,6 +9188,10 @@ mod tests {
             if self.pending.is_some() {
                 return request.failed("resource.executor.busy".to_owned());
             }
+            if self.execute_stream_values {
+                self.pending = Some(request.clone());
+                return request.stream_values(vec![RuntimeValue::Boolean(true)]);
+            }
             match self.result.clone() {
                 Some(value) => request.ready(value),
                 None => {
@@ -8703,8 +9203,14 @@ mod tests {
 
         fn cancel(&mut self, request: ClientResourceRequest) -> ClientResourceCompletion {
             self.cancelled.push(request.clone());
+            if let Some(identity) = self.cancel_terminal_identity.take() {
+                return identity.cancelled();
+            }
             if self.cancel_pending {
                 return self.cancel_identity.take().unwrap_or(request).pending();
+            }
+            if self.cancel_stream_values {
+                return request.stream_values(vec![RuntimeValue::Boolean(true)]);
             }
             self.pending = self
                 .pending
@@ -8738,6 +9244,58 @@ mod tests {
                 self.late_dropped += 1;
             }
             None
+        }
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum ReplacementEvaluationOutcome {
+        Pending,
+        Failed,
+        Invalid,
+        Expression,
+    }
+
+    struct ReplacementTerminalExecutor {
+        outcome: ReplacementEvaluationOutcome,
+        executed: Vec<ClientResourceRequest>,
+        cancelled: Vec<ClientResourceRequest>,
+    }
+
+    impl ReplacementTerminalExecutor {
+        fn new(outcome: ReplacementEvaluationOutcome) -> Self {
+            Self {
+                outcome,
+                executed: Vec::new(),
+                cancelled: Vec::new(),
+            }
+        }
+    }
+
+    impl ClientResourceExecutor for ReplacementTerminalExecutor {
+        fn execute(&mut self, request: ClientResourceRequest) -> ClientResourceCompletion {
+            self.executed.push(request.clone());
+            if self.executed.len() == 1 {
+                return request.pending();
+            }
+            match self.outcome {
+                ReplacementEvaluationOutcome::Pending => request.pending(),
+                ReplacementEvaluationOutcome::Failed => {
+                    request.failed("replacement.failure".to_owned())
+                }
+                ReplacementEvaluationOutcome::Invalid => request.ready(RuntimeValue::Integer(7)),
+                ReplacementEvaluationOutcome::Expression => {
+                    request.ready(RuntimeValue::Text("replacement-expression".to_owned()))
+                }
+            }
+        }
+
+        fn cancel(&mut self, request: ClientResourceRequest) -> ClientResourceCompletion {
+            self.cancelled.push(request.clone());
+            if self.cancelled.len() == 1 {
+                request.ready(RuntimeValue::Text("old-terminal".to_owned()))
+            } else {
+                request.pending()
+            }
         }
     }
 
@@ -8806,9 +9364,16 @@ mod tests {
         }
 
         fn poll(&mut self) -> Option<ClientResourceCompletion> {
-            self.pending
-                .take()
-                .map(|request| request.ready(RuntimeValue::Boolean(true)))
+            self.pending.take().map(|request| {
+                let value = match request.expected_type() {
+                    ResolvedType::Scalar(StandardScalar::CharacterLargeObject)
+                    | ResolvedType::Value(orna_standard::CHARACTER_LARGE_OBJECT_TYPE_ID) => {
+                        RuntimeValue::Text("polled".to_owned())
+                    }
+                    _ => RuntimeValue::Boolean(true),
+                };
+                request.ready(value)
+            })
         }
     }
 
@@ -10129,6 +10694,66 @@ mod tests {
     }
 
     #[test]
+    fn client_resource_rejects_terminal_completion_after_active_revision_changes() {
+        let (active, function, pair, _) = version_one_active(true);
+        let changed_pair = RevisionPair::new(
+            SourceRevisionId::from_bytes([0x7d; 16]),
+            CatalogueRevisionId::from_bytes([0x7e; 16]),
+        );
+        let changed_active = active_with_revision_pair(&active, changed_pair);
+        let arguments_digest =
+            super::ClientResourceKey::canonical_arguments_digest(&active, &[]).unwrap();
+        let key = super::ClientResourceKey::new(
+            InvocationTarget::new(function, pair),
+            PrincipalId::from_bytes([0x7a; 16]),
+            arguments_digest,
+            Sha256Digest::from_bytes([0x52; 32]),
+        );
+
+        let mut pending_resource =
+            super::ClientResource::new(key, ResolvedType::Scalar(StandardScalar::Boolean));
+        let pending_request = pending_resource.begin_request(&active, Vec::new()).unwrap();
+        let before_pending = pending_resource.clone();
+        assert_eq!(
+            pending_resource.apply_completion(&changed_active, pending_request.pending()),
+            Err(super::ClientResourceError::RevisionMismatch {
+                expected: pair,
+                actual: changed_pair,
+            }),
+        );
+        assert_eq!(pending_resource, before_pending);
+
+        let mut failed_resource =
+            super::ClientResource::new(key, ResolvedType::Scalar(StandardScalar::Boolean));
+        let failed_request = failed_resource.begin_request(&active, Vec::new()).unwrap();
+        let before_failed = failed_resource.clone();
+        assert_eq!(
+            failed_resource
+                .apply_completion(&changed_active, failed_request.failed("stale".to_owned()),),
+            Err(super::ClientResourceError::RevisionMismatch {
+                expected: pair,
+                actual: changed_pair,
+            }),
+        );
+        assert_eq!(failed_resource, before_failed);
+
+        let mut cancelled_resource =
+            super::ClientResource::new(key, ResolvedType::Scalar(StandardScalar::Boolean));
+        let cancelled_request = cancelled_resource
+            .begin_request(&active, Vec::new())
+            .unwrap();
+        let before_cancelled = cancelled_resource.clone();
+        assert_eq!(
+            cancelled_resource.apply_completion(&changed_active, cancelled_request.cancelled()),
+            Err(super::ClientResourceError::RevisionMismatch {
+                expected: pair,
+                actual: changed_pair,
+            }),
+        );
+        assert_eq!(cancelled_resource, before_cancelled);
+    }
+
+    #[test]
     fn client_resource_executor_validates_arguments_and_applies_completion() {
         let (active, function, pair, _) = version_one_active_with_shape(
             FunctionDomain::Client,
@@ -10211,6 +10836,45 @@ mod tests {
             resource.failure().map(super::ClientResourceFailure::code),
             Some("resource.denied"),
         );
+    }
+
+    #[test]
+    fn client_resource_rejects_over_limit_arguments_before_cloning_or_hashing() {
+        let (active, function, pair, _) = version_one_active(true);
+        let arguments = (0..=super::MAX_RESOURCE_ARGUMENTS)
+            .map(|index| {
+                let mut bytes = [0_u8; 16];
+                bytes[14..].copy_from_slice(&(index as u16).to_be_bytes());
+                FunctionArgument::new(
+                    ParameterId::from_bytes(bytes),
+                    RuntimeValue::Boolean(index % 2 == 0),
+                )
+                .unwrap()
+            })
+            .collect::<Vec<_>>();
+        let expected_error = super::ClientResourceError::ResourceArgumentLimitExceeded {
+            limit: super::MAX_RESOURCE_ARGUMENTS,
+        };
+
+        assert_eq!(
+            super::ClientResourceKey::canonical_arguments_digest(&active, &arguments),
+            Err(expected_error.clone()),
+        );
+
+        let key = super::ClientResourceKey::new(
+            InvocationTarget::new(function, pair),
+            PrincipalId::from_bytes([0x7a; 16]),
+            Sha256Digest::from_bytes([0x61; 32]),
+            Sha256Digest::from_bytes([0x62; 32]),
+        );
+        let mut resource =
+            super::ClientResource::new(key, ResolvedType::Scalar(StandardScalar::Boolean));
+        assert_eq!(
+            resource.begin_request(&active, arguments),
+            Err(expected_error)
+        );
+        assert_eq!(resource.status(), super::ClientResourceStatus::Idle);
+        assert_eq!(resource.generation().value(), 0);
     }
 
     #[test]
@@ -11255,7 +11919,7 @@ mod tests {
         executor.pending = Some(request.clone());
 
         assert_eq!(
-            state.invalidate_resource_with_executor(key, &mut executor),
+            state.invalidate_resource_with_executor(&active, key, &mut executor),
             Ok(true),
         );
         assert_eq!(executor.cancelled, vec![request.clone()]);
@@ -11279,6 +11943,563 @@ mod tests {
                 expected: super::ClientResourceGeneration(2),
                 actual: request.generation(),
             }),
+        );
+    }
+
+    #[test]
+    fn resource_stream_invalidation_abandons_nonterminal_values_before_invalidation() {
+        let (active, function, pair, _) = version_two_server_stream_active();
+        let key = ClientResourceKey::new(
+            InvocationTarget::new(function, pair),
+            PrincipalId::from_bytes([0x7a; 16]),
+            ClientResourceKey::canonical_arguments_digest(&active, &[]).unwrap(),
+            Sha256Digest::from_bytes([0xc7; 32]),
+        );
+        let mut state = ClientStateStore::new();
+        let request = state
+            .get_or_create_resource_with_kind(
+                key,
+                ResourceKind::Stream,
+                ResolvedType::Value(orna_standard::BOOLEAN_TYPE_ID),
+            )
+            .begin_stream_request(&active, Vec::new())
+            .unwrap();
+        let mut executor = RecordingActionExecutor::new(None).with_cancel_stream_values();
+        executor.pending = Some(request.clone());
+
+        assert_eq!(
+            state.invalidate_resource_with_executor(&active, key, &mut executor),
+            Ok(true),
+        );
+        assert_eq!(executor.cancelled, vec![request.clone()]);
+        assert_eq!(executor.abandoned, vec![request.clone()]);
+        assert!(executor.pending.is_none());
+        assert_eq!(executor.poll(), None);
+        assert_eq!(executor.late_dropped, 1);
+        let resource = state
+            .resource(key)
+            .expect("invalidated stream resource remains cached");
+        assert_eq!(resource.status(), ClientResourceStatus::Idle);
+        assert_eq!(
+            resource.generation().value(),
+            request.generation().value() + 1
+        );
+        assert_eq!(resource.request_id(), None);
+    }
+
+    #[test]
+    fn resource_stream_invalidation_keeps_state_when_abandon_fails() {
+        let (active, function, pair, _) = version_two_server_stream_active();
+        let key = ClientResourceKey::new(
+            InvocationTarget::new(function, pair),
+            PrincipalId::from_bytes([0x7a; 16]),
+            ClientResourceKey::canonical_arguments_digest(&active, &[]).unwrap(),
+            Sha256Digest::from_bytes([0xc8; 32]),
+        );
+        let mut state = ClientStateStore::new();
+        let request = state
+            .get_or_create_resource_with_kind(
+                key,
+                ResourceKind::Stream,
+                ResolvedType::Value(orna_standard::BOOLEAN_TYPE_ID),
+            )
+            .begin_stream_request(&active, Vec::new())
+            .unwrap();
+        let before = state
+            .resource(key)
+            .expect("pending stream resource remains cached")
+            .clone();
+        let mut executor = RecordingActionExecutor::new(None)
+            .with_cancel_stream_values()
+            .with_abandon_failure();
+        executor.pending = Some(request.clone());
+
+        assert_eq!(
+            state.invalidate_resource_with_executor(&active, key, &mut executor),
+            Err(super::ClientResourceError::Executor(
+                "resource executor cannot abandon a pending request".to_owned(),
+            )),
+        );
+        assert_eq!(executor.cancelled, vec![request.clone()]);
+        assert_eq!(executor.abandoned, vec![request.clone()]);
+        assert_eq!(executor.pending.as_ref(), Some(&request));
+        assert_eq!(state.resource(key), Some(&before));
+    }
+
+    #[test]
+    fn resource_invalidation_keeps_terminal_ready_completion() {
+        let (active, _, pair, _) = version_two_client_call_active();
+        let standard = active
+            .catalogue_hash_context()
+            .standard()
+            .expect("version-two fixture pins the verified standard snapshot");
+        let target = InvocationTarget::verified_standard(
+            orna_standard::STD_INVOKE_ECHO_FUNCTION_ID,
+            pair,
+            standard.revision(),
+            orna_standard::STD_INVOKE_ECHO_FUNCTION_REVISION_ID,
+        );
+        let argument = FunctionArgument::new(
+            orna_standard::STD_INVOKE_ECHO_PARAMETER_ID,
+            RuntimeValue::Integer(42),
+        )
+        .unwrap();
+        let digest =
+            ClientResourceKey::canonical_arguments_digest(&active, std::slice::from_ref(&argument))
+                .unwrap();
+        let key = ClientResourceKey::new(
+            target,
+            PrincipalId::from_bytes([0x7a; 16]),
+            digest,
+            Sha256Digest::from_bytes([0xc5; 32]),
+        );
+        let mut state = ClientStateStore::new();
+        let request = state
+            .get_or_create_resource(key, ResolvedType::Scalar(StandardScalar::Integer))
+            .begin_request(&active, vec![argument])
+            .unwrap();
+        let mut executor =
+            RecordingActionExecutor::new(None).with_cancel_value(RuntimeValue::Integer(99));
+        executor.pending = Some(request.clone());
+
+        assert_eq!(
+            state.invalidate_resource_with_executor(&active, key, &mut executor),
+            Ok(true),
+        );
+        assert_eq!(executor.cancelled, vec![request.clone()]);
+        assert!(executor.abandoned.is_empty());
+        assert!(executor.pending.is_none());
+        let resource = state
+            .resource(key)
+            .expect("terminal resource remains cached");
+        assert_eq!(resource.status(), super::ClientResourceStatus::Ready);
+        assert_eq!(resource.generation(), request.generation());
+        assert_eq!(resource.value(), Some(&RuntimeValue::Integer(99)));
+        assert_eq!(resource.failure(), None);
+    }
+
+    #[test]
+    fn resource_invalidation_rejects_wrong_typed_terminal_cancellation() {
+        let (active, _, pair, _) = version_two_client_call_active();
+        let standard = active
+            .catalogue_hash_context()
+            .standard()
+            .expect("version-two fixture pins the verified standard snapshot");
+        let target = InvocationTarget::verified_standard(
+            orna_standard::STD_INVOKE_ECHO_FUNCTION_ID,
+            pair,
+            standard.revision(),
+            orna_standard::STD_INVOKE_ECHO_FUNCTION_REVISION_ID,
+        );
+        let argument = FunctionArgument::new(
+            orna_standard::STD_INVOKE_ECHO_PARAMETER_ID,
+            RuntimeValue::Integer(42),
+        )
+        .unwrap();
+        let digest =
+            ClientResourceKey::canonical_arguments_digest(&active, std::slice::from_ref(&argument))
+                .unwrap();
+        let key = ClientResourceKey::new(
+            target,
+            PrincipalId::from_bytes([0x7a; 16]),
+            digest,
+            Sha256Digest::from_bytes([0xc6; 32]),
+        );
+        let mut state = ClientStateStore::new();
+        let request = state
+            .get_or_create_resource(key, ResolvedType::Scalar(StandardScalar::Integer))
+            .begin_request(&active, vec![argument])
+            .unwrap();
+        let mut executor = RecordingActionExecutor::new(None)
+            .with_cancel_value(RuntimeValue::Text("wrong cancellation type".to_owned()));
+        executor.pending = Some(request.clone());
+
+        assert_eq!(
+            state.invalidate_resource_with_executor(&active, key, &mut executor),
+            Err(super::ClientResourceError::TypeMismatch),
+        );
+        assert_eq!(executor.cancelled, vec![request.clone()]);
+        // A malformed terminal cancellation consumed the executor request, so
+        // the resource must not remain Loading without an owner.
+        assert!(executor.pending.is_none());
+        let resource = state
+            .resource(key)
+            .expect("malformed cancellation leaves a safe resource state");
+        assert_eq!(resource.status(), super::ClientResourceStatus::Cancelled);
+        assert_eq!(resource.generation(), request.generation());
+        assert_eq!(resource.request_id(), Some(request.request_id()));
+        assert_eq!(resource.active_request(), None);
+        assert_eq!(resource.value(), None);
+        assert_eq!(resource.failure(), None);
+    }
+
+    #[test]
+    fn resource_invalidation_rejects_mismatched_terminal_cancellation_without_losing_owner() {
+        let (active, _, pair, _) = version_two_client_call_active();
+        let standard = active
+            .catalogue_hash_context()
+            .standard()
+            .expect("version-two fixture pins the verified standard snapshot");
+        let target = InvocationTarget::verified_standard(
+            orna_standard::STD_INVOKE_ECHO_FUNCTION_ID,
+            pair,
+            standard.revision(),
+            orna_standard::STD_INVOKE_ECHO_FUNCTION_REVISION_ID,
+        );
+        let argument = FunctionArgument::new(
+            orna_standard::STD_INVOKE_ECHO_PARAMETER_ID,
+            RuntimeValue::Integer(42),
+        )
+        .unwrap();
+        let digest =
+            ClientResourceKey::canonical_arguments_digest(&active, std::slice::from_ref(&argument))
+                .unwrap();
+        let key = ClientResourceKey::new(
+            target,
+            PrincipalId::from_bytes([0x7a; 16]),
+            digest,
+            Sha256Digest::from_bytes([0xd1; 32]),
+        );
+        let mut state = ClientStateStore::new();
+        let request = state
+            .get_or_create_resource(key, ResolvedType::Scalar(StandardScalar::Integer))
+            .begin_request(&active, vec![argument])
+            .unwrap();
+        let mut mismatched = request.clone();
+        mismatched.request_id = InvocationId::from_bytes([0xfd; 16]);
+        let mut executor =
+            RecordingActionExecutor::new(None).with_cancel_terminal_identity(mismatched);
+        executor.pending = Some(request.clone());
+
+        assert_eq!(
+            state.invalidate_resource_with_executor(&active, key, &mut executor),
+            Err(super::ClientResourceError::RequestIdMismatch {
+                expected: request.request_id(),
+                actual: InvocationId::from_bytes([0xfd; 16]),
+            }),
+        );
+        assert_eq!(executor.cancelled, vec![request.clone()]);
+        assert_eq!(executor.pending.as_ref(), Some(&request));
+        let resource = state
+            .resource(key)
+            .expect("mismatched cancellation leaves the resource cached");
+        assert_eq!(resource.status(), ClientResourceStatus::Loading);
+        assert_eq!(resource.generation(), request.generation());
+        assert_eq!(resource.request_id(), Some(request.request_id()));
+        assert_eq!(resource.active_request(), Some(request));
+    }
+
+    #[test]
+    fn resource_invalidation_rejects_active_mismatch_before_consuming_request() {
+        let (active, function, pair, _) = version_one_active(true);
+        let changed_pair = RevisionPair::new(
+            SourceRevisionId::from_bytes([0x93; 16]),
+            CatalogueRevisionId::from_bytes([0x94; 16]),
+        );
+        let changed_active = active_with_revision_pair(&active, changed_pair);
+        let key = ClientResourceKey::new(
+            InvocationTarget::new(function, pair),
+            PrincipalId::from_bytes([0x7a; 16]),
+            ClientResourceKey::canonical_arguments_digest(&active, &[]).unwrap(),
+            Sha256Digest::from_bytes([0xc9; 32]),
+        );
+        let mut state = ClientStateStore::new();
+        let request = state
+            .get_or_create_resource(key, ResolvedType::Scalar(StandardScalar::Boolean))
+            .begin_request(&active, Vec::new())
+            .unwrap();
+        let mut executor = RecordingActionExecutor::new(None);
+        executor.pending = Some(request.clone());
+
+        assert_eq!(
+            state.invalidate_resource_with_executor(&changed_active, key, &mut executor),
+            Err(super::ClientResourceError::RevisionMismatch {
+                expected: pair,
+                actual: changed_pair,
+            }),
+        );
+        assert!(executor.cancelled.is_empty());
+        assert_eq!(executor.pending.as_ref(), Some(&request));
+        let resource = state
+            .resource(key)
+            .expect("mismatched resource remains cached");
+        assert_eq!(resource.status(), ClientResourceStatus::Loading);
+        assert_eq!(resource.generation(), request.generation());
+        assert_eq!(resource.request_id(), Some(request.request_id()));
+        assert_eq!(resource.active_request(), Some(request));
+    }
+
+    #[test]
+    fn stale_replacement_rejects_local_request_mismatch_before_cancel() {
+        let (active, function, pair, _) = version_one_active(true);
+        let changed_pair = RevisionPair::new(
+            SourceRevisionId::from_bytes([0x95; 16]),
+            CatalogueRevisionId::from_bytes([0x96; 16]),
+        );
+        let changed_active = active_with_revision_pair(&active, changed_pair);
+        let principal = PrincipalId::from_bytes([0x7a; 16]);
+        let digest = ClientResourceKey::canonical_arguments_digest(&active, &[]).unwrap();
+        let old_key = ClientResourceKey::new(
+            InvocationTarget::new(function, pair),
+            principal,
+            digest,
+            Sha256Digest::from_bytes([0xca; 32]),
+        );
+        let new_key = ClientResourceKey::new(
+            InvocationTarget::new(function, changed_pair),
+            principal,
+            digest,
+            Sha256Digest::from_bytes([0xcb; 32]),
+        );
+        let mut state = ClientStateStore::new();
+        let request = state
+            .get_or_create_resource(old_key, ResolvedType::Scalar(StandardScalar::Boolean))
+            .begin_request(&active, Vec::new())
+            .unwrap();
+        state
+            .resource_mut(old_key)
+            .expect("stale resource remains cached")
+            .expected_type = ResolvedType::Scalar(StandardScalar::Integer);
+        let mut executor = RecordingActionExecutor::new(None);
+        executor.pending = Some(request.clone());
+
+        assert_eq!(
+            state.get_or_create_resource_with_executor(
+                &changed_active,
+                new_key,
+                ResolvedType::Scalar(StandardScalar::Boolean),
+                &mut executor,
+            ),
+            Err(super::ClientResourceError::TypeMismatch),
+        );
+        assert!(executor.cancelled.is_empty());
+        assert_eq!(executor.pending.as_ref(), Some(&request));
+        assert!(state.resource(new_key).is_none());
+        let resource = state
+            .resource(old_key)
+            .expect("stale resource remains cached");
+        assert_eq!(resource.status(), ClientResourceStatus::Loading);
+        assert_eq!(resource.request_id(), Some(request.request_id()));
+        assert_eq!(resource.active_request(), Some(request));
+    }
+
+    #[test]
+    fn stale_replacement_rejects_mismatched_pending_without_losing_owner() {
+        let (active, function, pair, _) = version_one_active(true);
+        let changed_pair = RevisionPair::new(
+            SourceRevisionId::from_bytes([0x99; 16]),
+            CatalogueRevisionId::from_bytes([0x9a; 16]),
+        );
+        let changed_active = active_with_revision_pair(&active, changed_pair);
+        let principal = PrincipalId::from_bytes([0x7a; 16]);
+        let digest = ClientResourceKey::canonical_arguments_digest(&active, &[]).unwrap();
+        let old_key = ClientResourceKey::new(
+            InvocationTarget::new(function, pair),
+            principal,
+            digest,
+            Sha256Digest::from_bytes([0xce; 32]),
+        );
+        let new_key = ClientResourceKey::new(
+            InvocationTarget::new(function, changed_pair),
+            principal,
+            digest,
+            Sha256Digest::from_bytes([0xcf; 32]),
+        );
+        let mut state = ClientStateStore::new();
+        let request = state
+            .get_or_create_resource(old_key, ResolvedType::Scalar(StandardScalar::Boolean))
+            .begin_request(&active, Vec::new())
+            .unwrap();
+        let mut mismatched = request.clone();
+        mismatched.request_id = InvocationId::from_bytes([0xfe; 16]);
+        let mut executor =
+            RecordingActionExecutor::new(None).with_cancel_pending_identity(mismatched);
+        executor.pending = Some(request.clone());
+
+        assert_eq!(
+            state.get_or_create_resource_with_executor(
+                &changed_active,
+                new_key,
+                ResolvedType::Scalar(StandardScalar::Boolean),
+                &mut executor,
+            ),
+            Err(super::ClientResourceError::RequestIdMismatch {
+                expected: request.request_id(),
+                actual: InvocationId::from_bytes([0xfe; 16]),
+            }),
+        );
+        assert_eq!(executor.cancelled, vec![request.clone()]);
+        assert_eq!(executor.pending.as_ref(), Some(&request));
+        assert!(state.resource(new_key).is_none());
+        let resource = state
+            .resource(old_key)
+            .expect("stale resource remains cached");
+        assert_eq!(resource.status(), ClientResourceStatus::Loading);
+        assert_eq!(resource.request_id(), Some(request.request_id()));
+        assert_eq!(resource.active_request(), Some(request));
+    }
+
+    #[test]
+    fn stale_replacement_rejects_mismatched_terminal_cancellation_without_losing_owner() {
+        let (active, function, pair, _) = version_one_active(true);
+        let changed_pair = RevisionPair::new(
+            SourceRevisionId::from_bytes([0xda; 16]),
+            CatalogueRevisionId::from_bytes([0xdb; 16]),
+        );
+        let changed_active = active_with_revision_pair(&active, changed_pair);
+        let principal = PrincipalId::from_bytes([0x7a; 16]);
+        let digest = ClientResourceKey::canonical_arguments_digest(&active, &[]).unwrap();
+        let old_key = ClientResourceKey::new(
+            InvocationTarget::new(function, pair),
+            principal,
+            digest,
+            Sha256Digest::from_bytes([0xdc; 32]),
+        );
+        let new_key = ClientResourceKey::new(
+            InvocationTarget::new(function, changed_pair),
+            principal,
+            digest,
+            Sha256Digest::from_bytes([0xdd; 32]),
+        );
+        let mut state = ClientStateStore::new();
+        let request = state
+            .get_or_create_resource(old_key, ResolvedType::Scalar(StandardScalar::Boolean))
+            .begin_request(&active, Vec::new())
+            .unwrap();
+        let mut mismatched = request.clone();
+        mismatched.key = new_key;
+        let mut executor =
+            RecordingActionExecutor::new(None).with_cancel_terminal_identity(mismatched);
+        executor.pending = Some(request.clone());
+
+        assert_eq!(
+            state.get_or_create_resource_with_executor(
+                &changed_active,
+                new_key,
+                ResolvedType::Scalar(StandardScalar::Boolean),
+                &mut executor,
+            ),
+            Err(super::ClientResourceError::RequestKeyMismatch {
+                expected: Box::new(old_key),
+                actual: Box::new(new_key),
+            }),
+        );
+        assert_eq!(executor.cancelled, vec![request.clone()]);
+        assert_eq!(executor.pending.as_ref(), Some(&request));
+        assert!(state.resource(new_key).is_none());
+        let resource = state
+            .resource(old_key)
+            .expect("mismatched cancellation leaves the stale resource cached");
+        assert_eq!(resource.status(), ClientResourceStatus::Loading);
+        assert_eq!(resource.generation(), request.generation());
+        assert_eq!(resource.request_id(), Some(request.request_id()));
+        assert_eq!(resource.active_request(), Some(request));
+    }
+
+    #[test]
+    fn stale_replacement_malformed_terminal_cancellation_is_safe() {
+        let (active, function, pair, _) = version_one_active(true);
+        let changed_pair = RevisionPair::new(
+            SourceRevisionId::from_bytes([0x97; 16]),
+            CatalogueRevisionId::from_bytes([0x98; 16]),
+        );
+        let changed_active = active_with_revision_pair(&active, changed_pair);
+        let principal = PrincipalId::from_bytes([0x7a; 16]);
+        let digest = ClientResourceKey::canonical_arguments_digest(&active, &[]).unwrap();
+        let old_key = ClientResourceKey::new(
+            InvocationTarget::new(function, pair),
+            principal,
+            digest,
+            Sha256Digest::from_bytes([0xcc; 32]),
+        );
+        let new_key = ClientResourceKey::new(
+            InvocationTarget::new(function, changed_pair),
+            principal,
+            digest,
+            Sha256Digest::from_bytes([0xcd; 32]),
+        );
+        let mut state = ClientStateStore::new();
+        let request = state
+            .get_or_create_resource(old_key, ResolvedType::Scalar(StandardScalar::Boolean))
+            .begin_request(&active, Vec::new())
+            .unwrap();
+        let mut executor =
+            RecordingActionExecutor::new(None).with_cancel_value(RuntimeValue::Integer(7));
+        executor.pending = Some(request.clone());
+
+        assert_eq!(
+            state.get_or_create_resource_with_executor(
+                &changed_active,
+                new_key,
+                ResolvedType::Scalar(StandardScalar::Boolean),
+                &mut executor,
+            ),
+            Err(super::ClientResourceError::TypeMismatch),
+        );
+        assert_eq!(executor.cancelled, vec![request.clone()]);
+        assert!(executor.pending.is_none());
+        assert!(state.resource(new_key).is_none());
+        let resource = state
+            .resource(old_key)
+            .expect("stale resource remains cached");
+        assert_eq!(resource.status(), ClientResourceStatus::Cancelled);
+        assert_eq!(resource.generation(), request.generation());
+        assert_eq!(resource.request_id(), Some(request.request_id()));
+        assert_eq!(resource.active_request(), None);
+    }
+
+    #[test]
+    fn stale_replacement_accepts_typed_null_for_primitive_value_type() {
+        let (active, _function, pair, _, _parameter) = version_six_client_resource_action_active();
+        let changed_pair = RevisionPair::new(
+            SourceRevisionId::from_bytes([0xa7; 16]),
+            CatalogueRevisionId::from_bytes([0xa8; 16]),
+        );
+        let changed_active = active_with_revision_pair(&active, changed_pair);
+        let principal = PrincipalId::from_bytes([0x7a; 16]);
+        let argument = FunctionArgument::new(
+            ParameterId::from_bytes([0xd3; 16]),
+            RuntimeValue::Text("/tmp/typed-null".to_owned()),
+        )
+        .unwrap();
+        let digest =
+            ClientResourceKey::canonical_arguments_digest(&active, std::slice::from_ref(&argument))
+                .unwrap();
+        let target_function = FunctionId::from_bytes([0xd1; 16]);
+        let old_key = ClientResourceKey::new(
+            InvocationTarget::new(target_function, pair),
+            principal,
+            digest,
+            Sha256Digest::from_bytes([0xa9; 32]),
+        );
+        let new_key = ClientResourceKey::new(
+            InvocationTarget::new(target_function, changed_pair),
+            principal,
+            digest,
+            Sha256Digest::from_bytes([0xaa; 32]),
+        );
+        let expected = ResolvedType::Value(orna_standard::CHARACTER_LARGE_OBJECT_TYPE_ID);
+        let mut state = ClientStateStore::new();
+        let request = state
+            .get_or_create_resource(old_key, expected)
+            .begin_request(&active, vec![argument])
+            .unwrap();
+        let mut executor = RecordingActionExecutor::new(None)
+            .with_cancel_value(RuntimeValue::null(expected).unwrap());
+        executor.pending = Some(request.clone());
+
+        state
+            .get_or_create_resource_with_executor(&changed_active, new_key, expected, &mut executor)
+            .unwrap();
+
+        assert_eq!(executor.cancelled, vec![request]);
+        assert_eq!(
+            state.resource(old_key).map(ClientResource::status),
+            Some(ClientResourceStatus::Idle),
+        );
+        assert_eq!(
+            state.resource(new_key).map(ClientResource::status),
+            Some(ClientResourceStatus::Idle),
         );
     }
 
@@ -11320,7 +12541,7 @@ mod tests {
         executor.pending = Some(request.clone());
 
         assert_eq!(
-            state.invalidate_resource_with_executor(key, &mut executor),
+            state.invalidate_resource_with_executor(&active, key, &mut executor),
             Err(super::ClientResourceError::GenerationExhausted),
         );
         assert!(executor.cancelled.is_empty());
@@ -11379,7 +12600,7 @@ mod tests {
         executor.pending = Some(request.clone());
 
         assert_eq!(
-            state.invalidate_resource_with_executor(key, &mut executor),
+            state.invalidate_resource_with_executor(&active, key, &mut executor),
             Err(super::ClientResourceError::Executor(
                 "resource executor cannot abandon a pending request".to_owned(),
             )),
@@ -11438,6 +12659,7 @@ mod tests {
 
         state
             .get_or_create_resource_with_executor(
+                &active,
                 key_b,
                 ResolvedType::Scalar(StandardScalar::Integer),
                 &mut executor,
@@ -11459,6 +12681,128 @@ mod tests {
         assert_eq!(
             state.resource(key_b).map(super::ClientResource::status),
             Some(super::ClientResourceStatus::Idle),
+        );
+    }
+
+    #[test]
+    fn replacing_same_revision_keeps_terminal_executor_completion() {
+        let (active, _, pair, _) = version_two_client_call_active();
+        let standard = active
+            .catalogue_hash_context()
+            .standard()
+            .expect("version-two fixture pins the verified standard snapshot");
+        let target = InvocationTarget::verified_standard(
+            orna_standard::STD_INVOKE_ECHO_FUNCTION_ID,
+            pair,
+            standard.revision(),
+            orna_standard::STD_INVOKE_ECHO_FUNCTION_REVISION_ID,
+        );
+        let argument = FunctionArgument::new(
+            orna_standard::STD_INVOKE_ECHO_PARAMETER_ID,
+            RuntimeValue::Integer(42),
+        )
+        .unwrap();
+        let digest =
+            ClientResourceKey::canonical_arguments_digest(&active, std::slice::from_ref(&argument))
+                .unwrap();
+        let old_key = ClientResourceKey::new(
+            target,
+            PrincipalId::from_bytes([0x7a; 16]),
+            digest,
+            Sha256Digest::from_bytes([0xe8; 32]),
+        );
+        let new_key = ClientResourceKey::new(
+            target,
+            PrincipalId::from_bytes([0x7a; 16]),
+            digest,
+            Sha256Digest::from_bytes([0xe9; 32]),
+        );
+        let mut state = ClientStateStore::new();
+        let request = state
+            .get_or_create_resource(old_key, ResolvedType::Scalar(StandardScalar::Integer))
+            .begin_request(&active, vec![argument])
+            .unwrap();
+        let mut executor =
+            RecordingActionExecutor::new(None).with_cancel_value(RuntimeValue::Integer(99));
+        executor.pending = Some(request.clone());
+
+        state
+            .get_or_create_resource_with_executor(
+                &active,
+                new_key,
+                ResolvedType::Scalar(StandardScalar::Integer),
+                &mut executor,
+            )
+            .unwrap();
+
+        let old_resource = state.resource(old_key).expect("old key remains cached");
+        assert_eq!(old_resource.status(), ClientResourceStatus::Ready);
+        assert_eq!(old_resource.value(), Some(&RuntimeValue::Integer(99)));
+        assert_eq!(old_resource.generation(), request.generation());
+        assert_eq!(
+            state.resource(new_key).map(ClientResource::status),
+            Some(ClientResourceStatus::Idle),
+        );
+    }
+
+    #[test]
+    fn replacing_resource_key_across_revision_releases_old_executor_request() {
+        let (active, function, pair, _) = version_one_active(true);
+        let changed_pair = RevisionPair::new(
+            SourceRevisionId::from_bytes([0x91; 16]),
+            CatalogueRevisionId::from_bytes([0x92; 16]),
+        );
+        let changed_active = active_with_revision_pair(&active, changed_pair);
+        let principal = PrincipalId::from_bytes([0x7a; 16]);
+        let digest = ClientResourceKey::canonical_arguments_digest(&active, &[]).unwrap();
+        let old_key = ClientResourceKey::new(
+            InvocationTarget::new(function, pair),
+            principal,
+            digest,
+            Sha256Digest::from_bytes([0xe6; 32]),
+        );
+        let new_key = ClientResourceKey::new(
+            InvocationTarget::new(function, changed_pair),
+            principal,
+            digest,
+            Sha256Digest::from_bytes([0xe7; 32]),
+        );
+        let mut state = ClientStateStore::new();
+        let request = state
+            .get_or_create_resource(old_key, ResolvedType::Scalar(StandardScalar::Boolean))
+            .begin_request(&active, Vec::new())
+            .unwrap();
+        let mut executor = RecordingActionExecutor::new(None).with_cancel_pending();
+        executor.pending = Some(request.clone());
+
+        state
+            .get_or_create_resource_with_executor(
+                &changed_active,
+                new_key,
+                ResolvedType::Scalar(StandardScalar::Boolean),
+                &mut executor,
+            )
+            .unwrap();
+
+        assert_eq!(executor.cancelled, vec![request.clone()]);
+        assert_eq!(executor.abandoned, vec![request.clone()]);
+        assert!(executor.pending.is_none());
+        assert_eq!(executor.poll(), None);
+        assert_eq!(executor.late_dropped, 1);
+        assert!(matches!(
+            state
+                .resource_mut(old_key)
+                .expect("old key remains cached")
+                .apply_completion(&changed_active, request.ready(RuntimeValue::Boolean(true))),
+            Err(super::ClientResourceError::StaleGeneration { .. }),
+        ));
+        assert_eq!(
+            state.resource(old_key).map(ClientResource::status),
+            Some(ClientResourceStatus::Idle),
+        );
+        assert_eq!(
+            state.resource(new_key).map(ClientResource::status),
+            Some(ClientResourceStatus::Idle),
         );
     }
 
@@ -11511,6 +12855,7 @@ mod tests {
         };
 
         let result = state.get_or_create_resource_with_executor(
+            &active,
             key_b,
             ResolvedType::Scalar(StandardScalar::Integer),
             &mut nested,
@@ -12068,8 +13413,7 @@ mod tests {
     }
 
     #[test]
-    fn client_user_state_write_results_leave_all_cells_unchanged_when_a_later_revision_is_invalid()
-    {
+    fn client_user_state_write_results_are_atomic_for_invalid_revision_or_conflict() {
         let root_function = FunctionId::from_bytes([0x41; 16]);
         let function = FunctionId::from_bytes([0x42; 16]);
         let value_type = orna_standard::CHARACTER_LARGE_OBJECT_TYPE_ID;
@@ -12185,13 +13529,7 @@ mod tests {
                 current: 15,
             } if key == second_client_key
         ));
-        let first_after_mixed = state.user().get(&first_client_key).unwrap();
-        assert_eq!(first_after_mixed.revision(), Some(8));
-        assert!(!first_after_mixed.is_dirty());
-        let second_after_mixed = state.user().get(&second_client_key).unwrap();
-        assert_eq!(second_after_mixed.revision(), Some(11));
-        assert!(second_after_mixed.is_dirty());
-        let after_mixed = state.user().clone();
+        assert_eq!(state.user(), &before);
 
         let duplicate_changes = vec![changes[1].clone(), changes[1].clone()];
         let duplicate_results = vec![
@@ -12212,7 +13550,7 @@ mod tests {
             duplicate_error,
             super::ClientUserStateError::DuplicateKey(key) if key == super::ClientStateKey::from_user_change(&changes[1])
         ));
-        assert_eq!(state.user(), &after_mixed);
+        assert_eq!(state.user(), &before);
     }
 
     #[test]
@@ -12496,6 +13834,48 @@ mod tests {
             super::ClientResourceError::MissingArgument { parameter }
                 if parameter == ParameterId::from_bytes([0xd3; 16])
         ));
+    }
+
+    #[test]
+    fn resource_request_rejects_unknown_target_arguments_before_loading() {
+        let text_type = orna_standard::CHARACTER_LARGE_OBJECT_TYPE_ID;
+        let pair = RevisionPair::new(
+            SourceRevisionId::from_bytes([3; 16]),
+            CatalogueRevisionId::from_bytes([4; 16]),
+        );
+        let payload = orna_artifact::client_plan::CapabilityClientPlan::new(
+            orna_artifact::client_plan::InnerClientPlan::Boolean(
+                orna_artifact::client_plan::ClientPlan::return_boolean(false),
+            ),
+            vec![orna_artifact::client_plan::CapabilityRequirement::new(
+                "std.fs.read",
+                orna_artifact::client_plan::CapabilityArgumentSource::Text("/tmp".to_owned()),
+            )],
+        )
+        .encode()
+        .unwrap();
+        let (active, _, _, _, _) = version_five_expression_active_with_parameter(payload);
+        let digest = super::ClientResourceKey::canonical_arguments_digest(&active, &[]).unwrap();
+        let key = super::ClientResourceKey::new(
+            InvocationTarget::new(FunctionId::from_bytes([0xd1; 16]), pair),
+            PrincipalId::from_bytes([0x71; 16]),
+            digest,
+            active.catalogue_hash(),
+        );
+        let mut resource = super::ClientResource::new(key, ResolvedType::Value(text_type));
+        let parameter = ParameterId::from_bytes([0xde; 16]);
+        let argument =
+            FunctionArgument::new(parameter, RuntimeValue::Text("/tmp".to_owned())).unwrap();
+
+        let error = resource.begin_request(&active, vec![argument]).unwrap_err();
+
+        assert!(matches!(
+            error,
+            super::ClientResourceError::UnknownArgument { parameter: actual }
+                if actual == parameter
+        ));
+        assert_eq!(resource.status(), super::ClientResourceStatus::Idle);
+        assert_eq!(resource.generation().value(), 0);
     }
 
     #[test]
@@ -13119,6 +14499,416 @@ mod tests {
         );
         assert_eq!(cancelled_resource.status(), ClientResourceStatus::Cancelled);
         assert_eq!(cancelled_resource.failure(), None);
+    }
+
+    #[test]
+    fn same_revision_terminal_replacement_persists_when_new_evaluation_fails() {
+        let (active, function, pair, _, parameter) = version_six_client_resource_action_active();
+        let grant = capability::LocalCapabilityGrant::new(
+            capability::LocalCapabilityName::StdFsRead,
+            capability::LocalCapabilityScope::path("/tmp").unwrap(),
+        )
+        .unwrap();
+        let grants = capability::LocalCapabilityGrantSet::from_grants([grant]).unwrap();
+        let argument =
+            FunctionArgument::new(parameter, RuntimeValue::Text("/tmp/replacement".to_owned()))
+                .unwrap();
+        let context = |token| {
+            super::ClientStateContext::new_with_data_invalidation_token(
+                function,
+                "profile".to_owned(),
+                "instance".to_owned(),
+                Sha256Digest::from_bytes([token; 32]),
+            )
+            .unwrap()
+        };
+
+        for outcome in [
+            ReplacementEvaluationOutcome::Pending,
+            ReplacementEvaluationOutcome::Failed,
+            ReplacementEvaluationOutcome::Invalid,
+        ] {
+            let mut state = ClientStateStore::new();
+            let mut executor = ReplacementTerminalExecutor::new(outcome);
+            let first_error = super::evaluate_client_function_in_state_context_with_grants_and_arguments_and_executor_with_parent_invocation(
+                &active,
+                &authorise(pair, function),
+                &context(0xa1),
+                std::slice::from_ref(&argument),
+                &[],
+                &grants,
+                &mut state,
+                InvocationId::from_bytes([0xb1; 16]),
+                &mut executor,
+            )
+            .unwrap_err();
+            let old_key = match first_error {
+                super::ClientExecutionError::ResourceEvaluation {
+                    source: super::ClientResourceExecutionError::Pending { key, .. },
+                    ..
+                } => key,
+                other => panic!("expected first resource request to remain pending, got {other:?}"),
+            };
+            assert_eq!(
+                state.resource(old_key).map(ClientResource::status),
+                Some(ClientResourceStatus::Loading),
+            );
+
+            let second_error = super::evaluate_client_function_in_state_context_with_grants_and_arguments_and_executor_with_parent_invocation(
+                &active,
+                &authorise(pair, function),
+                &context(0xa2),
+                std::slice::from_ref(&argument),
+                &[],
+                &grants,
+                &mut state,
+                InvocationId::from_bytes([0xb2; 16]),
+                &mut executor,
+            )
+            .unwrap_err();
+            match (outcome, second_error) {
+                (
+                    ReplacementEvaluationOutcome::Pending,
+                    super::ClientExecutionError::ResourceEvaluation {
+                        source: super::ClientResourceExecutionError::Pending { .. },
+                        ..
+                    },
+                )
+                | (
+                    ReplacementEvaluationOutcome::Failed,
+                    super::ClientExecutionError::ResourceEvaluation {
+                        source: super::ClientResourceExecutionError::Failed(_),
+                        ..
+                    },
+                )
+                | (
+                    ReplacementEvaluationOutcome::Invalid,
+                    super::ClientExecutionError::ResourceEvaluation {
+                        source: super::ClientResourceExecutionError::Invalid(_),
+                        ..
+                    },
+                ) => {}
+                (ReplacementEvaluationOutcome::Expression, _) => {
+                    unreachable!("expression outcome is covered by the dedicated regression")
+                }
+                (outcome, error) => {
+                    panic!("unexpected replacement evaluation result for {outcome:?}: {error:?}")
+                }
+            }
+
+            let new_key = executor
+                .executed
+                .get(1)
+                .expect("replacement request was submitted")
+                .key();
+            assert_ne!(old_key, new_key);
+            assert_eq!(executor.cancelled[0].key(), old_key);
+            let old_resource = state
+                .resource(old_key)
+                .expect("same-revision terminal replacement remains cached");
+            assert_eq!(old_resource.status(), ClientResourceStatus::Ready);
+            assert_eq!(
+                old_resource.value(),
+                Some(&RuntimeValue::Text("old-terminal".to_owned())),
+            );
+            match outcome {
+                ReplacementEvaluationOutcome::Pending => assert_eq!(
+                    state.resource(new_key).map(ClientResource::status),
+                    Some(ClientResourceStatus::Loading),
+                ),
+                ReplacementEvaluationOutcome::Failed => assert_eq!(
+                    state.resource(new_key).map(ClientResource::status),
+                    Some(ClientResourceStatus::Failed),
+                ),
+                ReplacementEvaluationOutcome::Invalid => assert_eq!(
+                    state.resource(new_key).map(ClientResource::status),
+                    Some(ClientResourceStatus::Loading),
+                ),
+                ReplacementEvaluationOutcome::Expression => {
+                    unreachable!("expression outcome is covered by the dedicated regression")
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn same_revision_terminal_replacement_persists_when_later_expression_fails() {
+        let pair = RevisionPair::new(
+            SourceRevisionId::from_bytes([3; 16]),
+            CatalogueRevisionId::from_bytes([4; 16]),
+        );
+        let operation = orna_artifact::client_plan::ResourceOperationNode::new(
+            orna_artifact::client_plan::ResourceKind::Scalar,
+            FunctionId::from_bytes([0xd1; 16]),
+            pair,
+            CallSiteId::from_bytes([0xe1; 16]),
+            vec![(
+                ParameterId::from_bytes([0xd3; 16]),
+                orna_artifact::client_plan::ClientExpressionNode::ParameterRead {
+                    parameter: ParameterId::from_bytes([0xb1; 16]),
+                },
+            )],
+            orna_standard::CHARACTER_LARGE_OBJECT_TYPE_ID,
+        );
+        let local = LocalId::from_bytes([0xf1; 16]);
+        let return_expression = orna_artifact::client_plan::ClientExpressionNode::Concat {
+            left: Box::new(orna_artifact::client_plan::ClientExpressionNode::LocalRead { local }),
+            right: Box::new(orna_artifact::client_plan::ClientExpressionNode::Integer { value: 7 }),
+        };
+        let plan = orna_artifact::client_plan::ProceduralClientPlan::new(
+            vec![orna_artifact::client_plan::ClientLocal::new(
+                local,
+                orna_standard::CHARACTER_LARGE_OBJECT_TYPE_ID,
+                orna_artifact::client_plan::ClientLocalKind::Value,
+            )],
+            vec![orna_artifact::client_plan::ClientStatement::let_(
+                local,
+                orna_artifact::client_plan::ClientExpressionNode::Await {
+                    expression: Box::new(
+                        orna_artifact::client_plan::ClientExpressionNode::Resource { operation },
+                    ),
+                },
+            )],
+            return_expression,
+        );
+        let payload = orna_artifact::client_plan::CapabilityClientPlan::new(
+            orna_artifact::client_plan::InnerClientPlan::Procedural(plan),
+            vec![orna_artifact::client_plan::CapabilityRequirement::new(
+                "std.fs.read",
+                orna_artifact::client_plan::CapabilityArgumentSource::Parameter(
+                    "p_path".to_owned(),
+                ),
+            )],
+        )
+        .encode()
+        .unwrap();
+        let (active, function, pair, _, parameter) =
+            version_five_expression_active_with_parameter(payload);
+        let grant = capability::LocalCapabilityGrant::new(
+            capability::LocalCapabilityName::StdFsRead,
+            capability::LocalCapabilityScope::path("/tmp").unwrap(),
+        )
+        .unwrap();
+        let grants = capability::LocalCapabilityGrantSet::from_grants([grant]).unwrap();
+        let argument =
+            FunctionArgument::new(parameter, RuntimeValue::Text("/tmp/later-error".to_owned()))
+                .unwrap();
+        let context = |token| {
+            super::ClientStateContext::new_with_data_invalidation_token(
+                function,
+                "profile".to_owned(),
+                "instance".to_owned(),
+                Sha256Digest::from_bytes([token; 32]),
+            )
+            .unwrap()
+        };
+        let mut state = ClientStateStore::new();
+        let mut executor =
+            ReplacementTerminalExecutor::new(ReplacementEvaluationOutcome::Expression);
+        let first_error = super::evaluate_client_function_in_state_context_with_grants_and_arguments_and_executor_with_parent_invocation(
+            &active,
+            &authorise(pair, function),
+            &context(0xa3),
+            std::slice::from_ref(&argument),
+            &[],
+            &grants,
+            &mut state,
+            InvocationId::from_bytes([0xb3; 16]),
+            &mut executor,
+        )
+        .unwrap_err();
+        let old_key = match first_error {
+            super::ClientExecutionError::ResourceEvaluation {
+                source: super::ClientResourceExecutionError::Pending { key, .. },
+                ..
+            } => key,
+            other => panic!("expected first resource request to remain pending, got {other:?}"),
+        };
+
+        let second_error = super::evaluate_client_function_in_state_context_with_grants_and_arguments_and_executor_with_parent_invocation(
+            &active,
+            &authorise(pair, function),
+            &context(0xa4),
+            std::slice::from_ref(&argument),
+            &[],
+            &grants,
+            &mut state,
+            InvocationId::from_bytes([0xb4; 16]),
+            &mut executor,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            second_error,
+            super::ClientExecutionError::ExpressionEvaluation {
+                source: super::ClientExpressionError::TypeMismatch,
+                ..
+            }
+        ));
+        let new_key = executor
+            .executed
+            .get(1)
+            .expect("replacement request was submitted")
+            .key();
+        assert_ne!(old_key, new_key);
+        assert_eq!(executor.cancelled[0].key(), old_key);
+        let old_resource = state
+            .resource(old_key)
+            .expect("same-revision terminal replacement remains cached");
+        assert_eq!(old_resource.status(), ClientResourceStatus::Ready);
+        assert_eq!(
+            old_resource.value(),
+            Some(&RuntimeValue::Text("old-terminal".to_owned())),
+        );
+        assert!(
+            state.resource(new_key).is_none(),
+            "failed outer expression must not publish its replacement resource"
+        );
+    }
+
+    #[test]
+    fn stale_revision_replacement_persists_when_later_expression_fails() {
+        let old_pair = RevisionPair::new(
+            SourceRevisionId::from_bytes([3; 16]),
+            CatalogueRevisionId::from_bytes([4; 16]),
+        );
+        let new_pair = RevisionPair::new(
+            SourceRevisionId::from_bytes([5; 16]),
+            CatalogueRevisionId::from_bytes([6; 16]),
+        );
+        let payload = |pair| {
+            let operation = orna_artifact::client_plan::ResourceOperationNode::new(
+                orna_artifact::client_plan::ResourceKind::Scalar,
+                FunctionId::from_bytes([0xd1; 16]),
+                pair,
+                CallSiteId::from_bytes([0xe1; 16]),
+                vec![(
+                    ParameterId::from_bytes([0xd3; 16]),
+                    orna_artifact::client_plan::ClientExpressionNode::ParameterRead {
+                        parameter: ParameterId::from_bytes([0xb1; 16]),
+                    },
+                )],
+                orna_standard::CHARACTER_LARGE_OBJECT_TYPE_ID,
+            );
+            let local = LocalId::from_bytes([0xf1; 16]);
+            let plan = orna_artifact::client_plan::ProceduralClientPlan::new(
+                vec![orna_artifact::client_plan::ClientLocal::new(
+                    local,
+                    orna_standard::CHARACTER_LARGE_OBJECT_TYPE_ID,
+                    orna_artifact::client_plan::ClientLocalKind::Value,
+                )],
+                vec![orna_artifact::client_plan::ClientStatement::let_(
+                    local,
+                    orna_artifact::client_plan::ClientExpressionNode::Await {
+                        expression: Box::new(
+                            orna_artifact::client_plan::ClientExpressionNode::Resource { operation },
+                        ),
+                    },
+                )],
+                orna_artifact::client_plan::ClientExpressionNode::Concat {
+                    left: Box::new(
+                        orna_artifact::client_plan::ClientExpressionNode::LocalRead { local },
+                    ),
+                    right: Box::new(orna_artifact::client_plan::ClientExpressionNode::Integer { value: 7 }),
+                },
+            );
+            orna_artifact::client_plan::CapabilityClientPlan::new(
+                orna_artifact::client_plan::InnerClientPlan::Procedural(plan),
+                vec![orna_artifact::client_plan::CapabilityRequirement::new(
+                    "std.fs.read",
+                    orna_artifact::client_plan::CapabilityArgumentSource::Parameter(
+                        "p_path".to_owned(),
+                    ),
+                )],
+            )
+            .encode()
+            .unwrap()
+        };
+        let (old_active, function, _, _, parameter) =
+            version_five_expression_active_with_parameter(payload(old_pair));
+        let (new_base, _, _, _, _) =
+            version_five_expression_active_with_parameter(payload(new_pair));
+        let new_active = active_with_revision_pair(&new_base, new_pair);
+        let grants = capability::LocalCapabilityGrantSet::from_grants([
+            capability::LocalCapabilityGrant::new(
+                capability::LocalCapabilityName::StdFsRead,
+                capability::LocalCapabilityScope::path("/tmp").unwrap(),
+            )
+            .unwrap(),
+        ])
+        .unwrap();
+        let argument =
+            FunctionArgument::new(parameter, RuntimeValue::Text("/tmp/stale-replacement".to_owned()))
+                .unwrap();
+        let context = |token| {
+            super::ClientStateContext::new_with_data_invalidation_token(
+                function,
+                "profile".to_owned(),
+                "instance".to_owned(),
+                Sha256Digest::from_bytes([token; 32]),
+            )
+            .unwrap()
+        };
+        let mut state = ClientStateStore::new();
+        let mut executor =
+            ReplacementTerminalExecutor::new(ReplacementEvaluationOutcome::Expression);
+        let first_error = super::evaluate_client_function_in_state_context_with_grants_and_arguments_and_executor_with_parent_invocation(
+            &old_active,
+            &authorise(old_pair, function),
+            &context(0xa5),
+            std::slice::from_ref(&argument),
+            &[],
+            &grants,
+            &mut state,
+            InvocationId::from_bytes([0xb5; 16]),
+            &mut executor,
+        )
+        .unwrap_err();
+        let (old_key, old_generation) = match first_error {
+            super::ClientExecutionError::ResourceEvaluation {
+                source: super::ClientResourceExecutionError::Pending { key, generation },
+                ..
+            } => (key, generation),
+            other => panic!("expected first resource request to remain pending, got {other:?}"),
+        };
+        let old_request = executor.executed.first().expect("old request was submitted").clone();
+        assert_eq!(old_request.key(), old_key);
+        assert_eq!(old_request.generation(), old_generation);
+
+        let second_error = super::evaluate_client_function_in_state_context_with_grants_and_arguments_and_executor_with_parent_invocation(
+            &new_active,
+            &authorise(new_pair, function),
+            &context(0xa6),
+            std::slice::from_ref(&argument),
+            &[],
+            &grants,
+            &mut state,
+            InvocationId::from_bytes([0xb6; 16]),
+            &mut executor,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            second_error,
+            super::ClientExecutionError::ExpressionEvaluation {
+                source: super::ClientExpressionError::TypeMismatch,
+                ..
+            }
+        ));
+        let new_key = executor
+            .executed
+            .get(1)
+            .expect("replacement request was submitted")
+            .key();
+        assert_ne!(old_key, new_key);
+        assert_eq!(executor.cancelled, vec![old_request]);
+        let old_resource = state
+            .resource(old_key)
+            .expect("stale replacement remains cached");
+        assert_eq!(old_resource.status(), ClientResourceStatus::Idle);
+        assert_eq!(old_resource.value(), None);
+        assert_eq!(old_resource.failure(), None);
+        assert_eq!(old_resource.request_id(), None);
+        assert!(old_resource.generation().value() > old_generation.value());
+        assert!(state.resource(new_key).is_none());
     }
 
     #[test]
@@ -15321,6 +17111,35 @@ CREATE CLIENT FUNCTION app.owner() RETURNS INTEGER IS
     }
 
     #[test]
+    fn evaluates_a_registered_opaque_ui_client_result() {
+        let body = br#"{"kind":"empty"}"#;
+        let mut payload = Vec::from(b"ORNA-UI/1 ".as_slice());
+        payload.extend_from_slice(&(body.len() as u32).to_be_bytes());
+        payload.extend_from_slice(body);
+        let plan = orna_artifact::client_plan::OpaqueClientPlan::return_opaque(
+            orna_standard::STD_UI_TYPE_ID,
+            payload.clone(),
+        )
+        .encode();
+        let (active, function, _, _) = version_two_active_with_artifact(
+            standard_v6(),
+            orna_standard::STD_UI_TYPE_ID,
+            DefinitionReferenceTarget::ValueType(orna_standard::STD_UI_TYPE_ID),
+            DefinitionReferenceKind::NamedType,
+            orna_artifact::client_plan::OPAQUE_FORMAT_VERSION,
+            plan,
+        );
+
+        let result = evaluate_client_function(&active, function).unwrap();
+
+        let RuntimeValue::Opaque(value) = result.value() else {
+            panic!("opaque UI plan must produce one opaque value");
+        };
+        assert_eq!(value.opaque_type(), orna_standard::STD_UI_TYPE_ID);
+        assert_eq!(value.canonical_payload(), payload);
+    }
+
+    #[test]
     fn opaque_client_result_rejects_plan_type_and_structure_before_value_creation() {
         let payload = [0x5a; 16];
         let wrong_type = TypeId::from_bytes([0xa7; 16]);
@@ -17276,6 +19095,54 @@ CREATE CLIENT FUNCTION app.owner() RETURNS INTEGER IS
 
         (active, function_id, pair, function_revision_id)
     }
+    fn active_with_revision_pair(
+        active: &ActiveDatabaseRevision,
+        pair: RevisionPair,
+    ) -> ActiveDatabaseRevision {
+        let source = StoredSourceRevision::new(
+            active.source().bundle(),
+            pair.source(),
+            active.source().parent(),
+            active.source().units().to_vec(),
+            active.source().bundle_hash(),
+            active.source().revision_hash(),
+        )
+        .unwrap();
+        let catalogue = CatalogueSnapshot::new_with_functions(
+            pair.catalogue(),
+            active.catalogue().schemas().to_vec(),
+            active.catalogue().object_types().to_vec(),
+            active.catalogue().functions().to_vec(),
+        )
+        .unwrap();
+
+        let catalogue_hash = catalogue_digest_with_context(
+            active.catalogue_hash_context(),
+            &catalogue,
+            active.function_revisions(),
+            active.expressions(),
+            active.origins(),
+            active.references(),
+        )
+        .unwrap();
+
+        ActiveDatabaseRevision::new_with_catalogue_hash_context(
+            ActiveDatabaseRevisionInput::new(
+                pair,
+                source,
+                catalogue,
+                catalogue_hash,
+                ActiveRevisionContent::new(
+                    active.expressions().to_vec(),
+                    active.function_revisions().to_vec(),
+                    active.origins().to_vec(),
+                    active.references().to_vec(),
+                ),
+            ),
+            active.catalogue_hash_context().clone(),
+        )
+        .unwrap()
+    }
 
     fn version_one_active_with_artifact(
         artifact: ExecutableArtifact,
@@ -18359,6 +20226,129 @@ CREATE CLIENT FUNCTION app.owner() RETURNS INTEGER IS
     }
 
     #[test]
+    fn action_payload_encode_rejects_zero_identity_fields() {
+        let (active, target, pair, _) = version_two_value_active(
+            orna_standard::INTEGER_TYPE_ID,
+            orna_standard::INTEGER_TYPE_ID,
+        );
+        let make = |target, source, catalogue, call_site, result_type, parameter| {
+            ClientActionDescriptor::new(
+                ActionTargetDomain::Client,
+                FunctionId::from_bytes(target),
+                RevisionPair::new(
+                    SourceRevisionId::from_bytes(source),
+                    CatalogueRevisionId::from_bytes(catalogue),
+                ),
+                CallSiteId::from_bytes(call_site),
+                vec![
+                    FunctionArgument::new(
+                        ParameterId::from_bytes(parameter),
+                        RuntimeValue::Integer(7),
+                    )
+                    .unwrap(),
+                ],
+                TypeId::from_bytes(result_type),
+            )
+        };
+        let cases = [
+            (
+                [0; 16],
+                pair.source().to_bytes(),
+                pair.catalogue().to_bytes(),
+                [0x82; 16],
+                [0x44; 16],
+                [0x83; 16],
+            ),
+            (
+                target.to_bytes(),
+                [0; 16],
+                pair.catalogue().to_bytes(),
+                [0x82; 16],
+                [0x44; 16],
+                [0x83; 16],
+            ),
+            (
+                target.to_bytes(),
+                pair.source().to_bytes(),
+                [0; 16],
+                [0x82; 16],
+                [0x44; 16],
+                [0x83; 16],
+            ),
+            (
+                target.to_bytes(),
+                pair.source().to_bytes(),
+                pair.catalogue().to_bytes(),
+                [0; 16],
+                [0x44; 16],
+                [0x83; 16],
+            ),
+            (
+                target.to_bytes(),
+                pair.source().to_bytes(),
+                pair.catalogue().to_bytes(),
+                [0x82; 16],
+                [0; 16],
+                [0x83; 16],
+            ),
+            (
+                target.to_bytes(),
+                pair.source().to_bytes(),
+                pair.catalogue().to_bytes(),
+                [0x82; 16],
+                [0x44; 16],
+                [0; 16],
+            ),
+        ];
+        for (target, source, catalogue, call_site, result_type, parameter) in cases {
+            assert_eq!(
+                encode_action_payload(
+                    &active,
+                    &make(target, source, catalogue, call_site, result_type, parameter)
+                ),
+                Err(ClientActionError::InvalidPayload(
+                    "invalid action identity".to_owned()
+                )),
+            );
+        }
+    }
+
+    #[test]
+    fn action_payload_decode_rejects_zero_identity_fields_before_descriptor_construction() {
+        let (active, target, pair, _) = version_two_value_active(
+            orna_standard::INTEGER_TYPE_ID,
+            orna_standard::INTEGER_TYPE_ID,
+        );
+        let descriptor = ClientActionDescriptor::new(
+            ActionTargetDomain::Client,
+            target,
+            pair,
+            CallSiteId::from_bytes([0x82; 16]),
+            vec![
+                FunctionArgument::new(
+                    ParameterId::from_bytes([0x83; 16]),
+                    RuntimeValue::Integer(7),
+                )
+                .unwrap(),
+            ],
+            orna_standard::INTEGER_TYPE_ID,
+        );
+        let payload = encode_action_payload(&active, &descriptor).unwrap();
+        let body_offset = super::ACTION_MAGIC.len() + 4;
+        for relative_offset in [1, 17, 33, 49, 65, 85] {
+            let mut corrupted = payload.clone();
+            corrupted[body_offset + relative_offset..body_offset + relative_offset + 16].fill(0);
+            assert_eq!(
+                decode_action_payload(&active, &corrupted),
+                Err(ClientActionError::InvalidPayload(
+                    "invalid action identity".to_owned()
+                )),
+                "identity field at offset {relative_offset} must be rejected"
+            );
+        }
+    }
+
+    #[test]
     fn action_payload_encodes_multiple_arguments_in_parameter_order_and_round_trips() {
         let (active, target, pair, _) = version_two_value_active(
             orna_standard::INTEGER_TYPE_ID,
@@ -18856,30 +20846,56 @@ CREATE CLIENT FUNCTION app.owner() RETURNS INTEGER IS
             digest,
             active.catalogue_hash(),
         );
+        let mut resource = ClientResource::new(key, ResolvedType::Scalar(StandardScalar::Boolean));
+        let request = resource.begin_request(&active, vec![]).unwrap();
+        let generation = request.generation();
+        let mut action_state = ClientActionState::default();
+        action_state.set_resource(resource);
+        action_state.stage_request(request.clone());
+        let mut executor = RecordingActionExecutor::new(None).with_cancel_pending();
+        executor.pending = Some(request.clone());
+        let malformed = request.clone().ready(RuntimeValue::Integer(1));
 
-        for malformed_cancel in [false, true] {
-            let mut resource =
-                ClientResource::new(key, ResolvedType::Scalar(StandardScalar::Boolean));
-            let request = resource.begin_request(&active, vec![]).unwrap();
-            let generation = request.generation();
-            let mut action_state = ClientActionState::default();
-            action_state.set_resource(resource);
-            action_state.stage_request(request.clone());
-            let mut executor = if malformed_cancel {
-                RecordingActionExecutor::new(None).with_cancel_value(RuntimeValue::Integer(7))
-            } else {
-                RecordingActionExecutor::new(None).with_cancel_pending()
-            };
-            let malformed = request.clone().ready(RuntimeValue::Integer(1));
+        assert_eq!(
+            complete_client_action(&active, &mut action_state, malformed, &mut executor),
+            Err(ClientActionError::Pending),
+        );
+        assert_eq!(action_state.status(), ClientResourceStatus::Loading);
+        assert_eq!(action_state.generation(), Some(generation));
+        assert_eq!(executor.cancelled, vec![request.clone()]);
+        assert_eq!(executor.pending, Some(request));
+    }
 
-            assert_eq!(
-                complete_client_action(&active, &mut action_state, malformed, &mut executor),
-                Err(ClientActionError::Pending),
-            );
-            assert_eq!(action_state.status(), ClientResourceStatus::Loading);
-            assert_eq!(action_state.generation(), Some(generation));
-            assert_eq!(executor.cancelled, vec![request]);
-        }
+    #[test]
+    fn action_malformed_terminal_cancellation_marks_released_request_cancelled() {
+        let (active, function, pair, _) = version_one_active(true);
+        let principal = PrincipalId::from_bytes([0x7a; 16]);
+        let digest = ClientResourceKey::canonical_arguments_digest(&active, &[]).unwrap();
+        let key = ClientResourceKey::new(
+            InvocationTarget::new(function, pair),
+            principal,
+            digest,
+            active.catalogue_hash(),
+        );
+        let mut resource = ClientResource::new(key, ResolvedType::Scalar(StandardScalar::Boolean));
+        let request = resource.begin_request(&active, vec![]).unwrap();
+        let generation = request.generation();
+        let mut action_state = ClientActionState::default();
+        action_state.set_resource(resource);
+        action_state.stage_request(request.clone());
+        let mut executor =
+            RecordingActionExecutor::new(None).with_cancel_value(RuntimeValue::Integer(7));
+        executor.pending = Some(request.clone());
+        let malformed = request.clone().ready(RuntimeValue::Integer(1));
+
+        assert_eq!(
+            complete_client_action(&active, &mut action_state, malformed, &mut executor),
+            Err(ClientActionError::Executor(ACTION_FAILURE_CODE.to_owned())),
+        );
+        assert_eq!(action_state.status(), ClientResourceStatus::Cancelled);
+        assert_eq!(action_state.generation(), Some(generation));
+        assert_eq!(executor.cancelled, vec![request]);
+        assert!(executor.pending.is_none());
     }
 
     #[test]
@@ -18911,6 +20927,57 @@ CREATE CLIENT FUNCTION app.owner() RETURNS INTEGER IS
         assert!(executor.abandoned.is_empty());
         assert_eq!(executor.pending, Some(request));
     }
+    #[test]
+    fn nested_action_stream_values_retain_pending_request() {
+        let (active, function, pair, _) = version_two_server_stream_active();
+        let key = ClientResourceKey::new(
+            InvocationTarget::new(function, pair),
+            PrincipalId::from_bytes([0x7d; 16]),
+            ClientResourceKey::canonical_arguments_digest(&active, &[]).unwrap(),
+            Sha256Digest::from_bytes([0xc9; 32]),
+        );
+        let mut resource =
+            ClientResource::new_stream(key, ResolvedType::Value(orna_standard::BOOLEAN_TYPE_ID));
+        let request = resource.begin_stream_request(&active, vec![]).unwrap();
+
+        let mut execute_executor = RecordingActionExecutor::new(None).with_execute_stream_values();
+        let mut nested = super::ClientActionNestedExecutor {
+            inner: &mut execute_executor,
+            pending_request: None,
+        };
+        assert_eq!(
+            nested.execute(request.clone()),
+            request
+                .clone()
+                .stream_values(vec![RuntimeValue::Boolean(true)]),
+        );
+        assert_eq!(
+            nested.pending_request_identity(),
+            Some((request.request_id(), request.key(), request.generation(),))
+        );
+        drop(nested);
+        assert_eq!(execute_executor.pending, Some(request.clone()));
+
+        let mut cancel_executor = RecordingActionExecutor::new(None).with_cancel_stream_values();
+        cancel_executor.pending = Some(request.clone());
+        let mut nested = super::ClientActionNestedExecutor {
+            inner: &mut cancel_executor,
+            pending_request: None,
+        };
+        assert_eq!(
+            nested.cancel(request.clone()),
+            request
+                .clone()
+                .stream_values(vec![RuntimeValue::Boolean(true)]),
+        );
+        assert_eq!(
+            nested.pending_request_identity(),
+            Some((request.request_id(), request.key(), request.generation(),))
+        );
+        drop(nested);
+        assert_eq!(cancel_executor.pending, Some(request));
+    }
+
     #[test]
     fn nested_executor_rejects_mismatched_completion_identity() {
         let (active, function, pair, _) = version_one_active(true);
@@ -19132,6 +21199,142 @@ CREATE CLIENT FUNCTION app.owner() RETURNS INTEGER IS
                 .expect("pending child remains cached")
                 .status(),
             ClientResourceStatus::Loading,
+        );
+    }
+
+    #[test]
+    fn nested_action_pending_poll_applies_exact_child_and_rejects_wrong_identity() {
+        let (active, parent_function, target, pair, revision, parameter) =
+            version_six_client_action_provenance_active();
+        let auth = authorise(pair, parent_function);
+        let parent = ClientExecutionContext {
+            pair,
+            function: parent_function,
+            function_revision: revision,
+            parent_invocation_id: InvocationId::from_bytes([0xfc; 16]),
+            observer_lineage: None,
+        };
+        let argument =
+            FunctionArgument::new(parameter, RuntimeValue::Text("/tmp/action".to_owned())).unwrap();
+        let action = action_value(
+            &active,
+            ActionTargetDomain::Client,
+            target,
+            pair,
+            CallSiteId::from_bytes([0xe7; 16]),
+            vec![argument],
+            orna_standard::CHARACTER_LARGE_OBJECT_TYPE_ID,
+        );
+        let mut state = ClientStateStore::default();
+        let grants = capability::LocalCapabilityGrantSet::from_grants([
+            capability::LocalCapabilityGrant::new(
+                capability::LocalCapabilityName::StdFsRead,
+                capability::LocalCapabilityScope::path("/tmp/action").unwrap(),
+            )
+            .unwrap(),
+        ])
+        .unwrap();
+        let mut action_state = ClientActionState::default();
+        let mut executor = PollingTestExecutor::default();
+
+        let error = trigger_client_action(
+            &active,
+            &action,
+            &auth,
+            &parent,
+            &mut action_state,
+            &[],
+            &grants,
+            &mut state,
+            &mut executor,
+        )
+        .expect_err("pending nested child must be handed back to the caller");
+        let (request_id, child_key, generation) = match error {
+            ClientActionError::ExecutorPending {
+                request_id,
+                key,
+                generation,
+                ..
+            } => (request_id, key, generation),
+            other => panic!("unexpected nested pending error: {other:?}"),
+        };
+        assert_eq!(action_state.status(), ClientResourceStatus::Idle);
+        assert_eq!(action_state.invocation_id(), None);
+        assert_eq!(action_state.generation(), None);
+        let pending = executor
+            .pending
+            .clone()
+            .expect("the executor retains the exact child request");
+        assert_eq!(pending.request_id(), request_id);
+        assert_eq!(pending.key(), child_key);
+        assert_eq!(pending.generation(), generation);
+        assert_eq!(
+            state
+                .resource(child_key)
+                .expect("pending child remains cached")
+                .status(),
+            ClientResourceStatus::Loading,
+        );
+
+        let completion = executor.poll().expect("the retained child can be polled");
+        assert_eq!(
+            completion,
+            ClientResourceCompletion::Ready {
+                request_id,
+                key: child_key,
+                generation,
+                value: RuntimeValue::Text("polled".to_owned()),
+            }
+        );
+        state
+            .resource_mut(child_key)
+            .expect("retained child remains addressable")
+            .apply_completion(&active, completion)
+            .expect("the exact child completion publishes Ready");
+        assert_eq!(
+            state
+                .resource(child_key)
+                .expect("completed child remains cached")
+                .status(),
+            ClientResourceStatus::Ready,
+        );
+        assert_eq!(
+            state
+                .resource(child_key)
+                .expect("completed child remains cached")
+                .value(),
+            Some(&RuntimeValue::Text("polled".to_owned())),
+        );
+
+        let before_wrong_completion = state
+            .resource(child_key)
+            .expect("completed child remains cached")
+            .clone();
+        let wrong_request_id = InvocationId::from_bytes([0xff; 16]);
+        assert_eq!(
+            state
+                .resource_mut(child_key)
+                .expect("completed child remains mutable")
+                .apply_completion(
+                    &active,
+                    ClientResourceCompletion::Ready {
+                        request_id: wrong_request_id,
+                        key: child_key,
+                        generation,
+                        value: RuntimeValue::Boolean(false),
+                    },
+                ),
+            Err(super::ClientResourceError::RequestIdMismatch {
+                expected: request_id,
+                actual: wrong_request_id,
+            }),
+        );
+        assert_eq!(
+            state
+                .resource(child_key)
+                .expect("completed child remains cached")
+                .clone(),
+            before_wrong_completion,
         );
     }
 
@@ -20349,6 +22552,7 @@ mod runtime_abi {
 #[cfg(test)]
 mod runtime_conformance {
     use super::runtime_abi::*;
+    use orna_core::value::MAX_RUNTIME_VALUE_NODES;
     use std::{
         collections::{BTreeMap, HashMap, HashSet, VecDeque},
         ffi::{c_char, c_void},
@@ -21764,76 +23968,96 @@ mod runtime_conformance {
     }
 
     fn valid_ui_value(value: &serde_json::Value) -> bool {
-        let Some(value) = value.as_object() else {
-            return false;
-        };
-        match value.get("kind").and_then(serde_json::Value::as_str) {
-            Some("empty") => value.len() == 1,
-            Some("fragment") => {
-                value.len() == 2
-                    && value
-                        .get("children")
-                        .and_then(serde_json::Value::as_array)
-                        .is_some_and(|children| children.iter().all(valid_ui_value))
+        // Keep this test-only fixture validator in parity with the public
+        // orna-core UI codec: count UI nodes and walk them iteratively so a
+        // deeply nested canonical value cannot overflow the call stack.
+        let mut pending = vec![value];
+        let mut node_count = 0usize;
+        while let Some(value) = pending.pop() {
+            node_count = match node_count.checked_add(1) {
+                Some(node_count) if node_count <= MAX_RUNTIME_VALUE_NODES => node_count,
+                _ => return false,
+            };
+
+            let Some(value) = value.as_object() else {
+                return false;
+            };
+            match value.get("kind").and_then(serde_json::Value::as_str) {
+                Some("empty") if value.len() == 1 => {}
+                Some("fragment") => {
+                    let Some(children) =
+                        value.get("children").and_then(serde_json::Value::as_array)
+                    else {
+                        return false;
+                    };
+                    if value.len() != 2 {
+                        return false;
+                    }
+                    pending.extend(children.iter());
+                }
+                Some("node") => {
+                    if value.len() < 5 || value.len() > 9 {
+                        return false;
+                    }
+                    if value.keys().any(|key| {
+                        !matches!(
+                            key.as_str(),
+                            "kind"
+                                | "contract"
+                                | "call_site_id"
+                                | "function_instance_id"
+                                | "key"
+                                | "properties"
+                                | "slots"
+                                | "actions"
+                                | "source_origin"
+                        )
+                    }) {
+                        return false;
+                    }
+                    if !value.get("contract").is_some_and(valid_contract)
+                        || !value
+                            .get("call_site_id")
+                            .is_none_or(|id| id.is_null() || id.is_string())
+                        || !value
+                            .get("function_instance_id")
+                            .is_none_or(|id| id.is_null() || id.is_string())
+                    {
+                        return false;
+                    }
+                    let Some(properties) = value
+                        .get("properties")
+                        .and_then(serde_json::Value::as_object)
+                    else {
+                        return false;
+                    };
+                    if !properties.values().all(valid_typed_value) {
+                        return false;
+                    }
+                    let Some(slots) = value.get("slots").and_then(serde_json::Value::as_object)
+                    else {
+                        return false;
+                    };
+                    for children in slots.values() {
+                        let Some(children) = children.as_array() else {
+                            return false;
+                        };
+                        pending.extend(children.iter());
+                    }
+                    let Some(actions) = value.get("actions").and_then(serde_json::Value::as_object)
+                    else {
+                        return false;
+                    };
+                    if !actions.values().all(valid_action)
+                        || !value.get("source_origin").is_none_or(valid_source_origin)
+                    {
+                        return false;
+                    }
+                }
+                _ => return false,
             }
-            Some("node") => {
-                if value.len() < 5 || value.len() > 9 {
-                    return false;
-                }
-                if value.keys().any(|key| {
-                    !matches!(
-                        key.as_str(),
-                        "kind"
-                            | "contract"
-                            | "call_site_id"
-                            | "function_instance_id"
-                            | "key"
-                            | "properties"
-                            | "slots"
-                            | "actions"
-                            | "source_origin"
-                    )
-                }) {
-                    return false;
-                }
-                if !value.get("contract").is_some_and(valid_contract)
-                    || !value
-                        .get("call_site_id")
-                        .is_none_or(|id| id.is_null() || id.is_string())
-                    || !value
-                        .get("function_instance_id")
-                        .is_none_or(|id| id.is_null() || id.is_string())
-                {
-                    return false;
-                }
-                let Some(properties) = value
-                    .get("properties")
-                    .and_then(serde_json::Value::as_object)
-                else {
-                    return false;
-                };
-                if !properties.values().all(valid_typed_value) {
-                    return false;
-                }
-                let Some(slots) = value.get("slots").and_then(serde_json::Value::as_object) else {
-                    return false;
-                };
-                if !slots.values().all(|children| {
-                    children
-                        .as_array()
-                        .is_some_and(|children| children.iter().all(valid_ui_value))
-                }) {
-                    return false;
-                }
-                let Some(actions) = value.get("actions").and_then(serde_json::Value::as_object)
-                else {
-                    return false;
-                };
-                actions.values().all(valid_action)
-                    && value.get("source_origin").is_none_or(valid_source_origin)
-            }
-            _ => false,
         }
+        true
     }
 
     fn valid_canonical_frame(frame: &[u8]) -> bool {
@@ -24840,6 +27064,156 @@ mod runtime_conformance {
                 .expect("cross-thread probe should join");
         assert_eq!(cross_thread, StatusCode::Busy);
     }
+
+    #[test]
+    fn zero_runtime_and_object_handles_return_canonical_invalid_argument() {
+        let session = FixtureSession::new();
+        let surface = session.create_surface(b"Zero handles");
+
+        assert_eq!(
+            unsafe { (FIXTURE_API.start_event_loop)(0) }.code,
+            StatusCode::InvalidArgument
+        );
+        assert_eq!(
+            unsafe { (FIXTURE_API.destroy_surface)(session.runtime, 0) }.code,
+            StatusCode::InvalidArgument
+        );
+
+        assert_eq!(
+            session.apply(surface, &batch(1, &[mount(0, 0, view(b"root"))])),
+            StatusCode::InvalidArgument
+        );
+        let node_token = next_unreserved_alias_handle();
+        assert_eq!(
+            session.apply(surface, &batch(1, &[mount(node_token, 0, view(b"root"))])),
+            StatusCode::Ok
+        );
+        assert_eq!(
+            session.apply(
+                surface,
+                &batch(
+                    2,
+                    &[bind_action(node_token, view(b"activate"), 0, view(b"bool"),)],
+                ),
+            ),
+            StatusCode::InvalidArgument
+        );
+
+        let (model, request) = session.start_model_request(surface);
+        assert_eq!(session.apply_model_rows(0), StatusCode::InvalidArgument);
+        assert_eq!(session.cancel_request(0), StatusCode::InvalidArgument);
+        assert_eq!(
+            session.queue_event(RuntimeEvent {
+                kind: EventKind::ModelRangeRequest,
+                as_: RuntimeEventArgs {
+                    range_request: ModelRangeRequest {
+                        request,
+                        model: 0,
+                        start: 0,
+                        count: 1,
+                        sort_filter_token: view(b"fixture"),
+                    },
+                },
+            }),
+            StatusCode::InvalidArgument
+        );
+        assert_eq!(
+            session.queue_event(RuntimeEvent {
+                kind: EventKind::ModelRangeRequest,
+                as_: RuntimeEventArgs {
+                    range_request: ModelRangeRequest {
+                        request: 0,
+                        model,
+                        start: 0,
+                        count: 1,
+                        sort_filter_token: view(b"fixture"),
+                    },
+                },
+            }),
+            StatusCode::InvalidArgument
+        );
+    }
+
+    #[test]
+    fn generated_handles_are_nonzero_and_monotonic_within_one_runtime() {
+        let session = FixtureSession::new();
+        assert_ne!(session.runtime, 0);
+
+        let first_surface = session.create_surface(b"First surface");
+        let second_surface = session.create_surface(b"Second surface");
+        assert_ne!(first_surface, 0);
+        assert_ne!(second_surface, 0);
+        assert!(first_surface < second_surface);
+
+        let first_node_token = next_unreserved_alias_handle();
+        assert_eq!(
+            session.apply(
+                first_surface,
+                &batch(1, &[mount(first_node_token, 0, view(b"root"))]),
+            ),
+            StatusCode::Ok
+        );
+        let first_action_token = next_unreserved_alias_handle();
+        assert_eq!(
+            session.apply(
+                first_surface,
+                &batch(
+                    2,
+                    &[bind_action(
+                        first_node_token,
+                        view(b"activate"),
+                        first_action_token,
+                        view(b"bool"),
+                    )],
+                ),
+            ),
+            StatusCode::Ok
+        );
+        let (first_node, first_action) = session.node_and_action(first_surface);
+
+        let second_node_token = next_unreserved_alias_handle();
+        assert_eq!(
+            session.apply(
+                second_surface,
+                &batch(1, &[mount(second_node_token, 0, view(b"root"))]),
+            ),
+            StatusCode::Ok
+        );
+        let second_action_token = next_unreserved_alias_handle();
+        assert_eq!(
+            session.apply(
+                second_surface,
+                &batch(
+                    2,
+                    &[bind_action(
+                        second_node_token,
+                        view(b"activate"),
+                        second_action_token,
+                        view(b"bool"),
+                    )],
+                ),
+            ),
+            StatusCode::Ok
+        );
+        let (second_node, second_action) = session.node_and_action(second_surface);
+
+        assert_ne!(first_node, 0);
+        assert_ne!(second_node, 0);
+        assert!(first_node < second_node);
+        assert_ne!(first_action, 0);
+        assert_ne!(second_action, 0);
+        assert!(first_action < second_action);
+
+        let (first_model, first_request) = session.start_model_request(first_surface);
+        let (second_model, second_request) = session.start_model_request(second_surface);
+        assert_ne!(first_model, 0);
+        assert_ne!(second_model, 0);
+        assert!(first_model < second_model);
+        assert_ne!(first_request, 0);
+        assert_ne!(second_request, 0);
+        assert!(first_request < second_request);
+    }
+
     #[test]
     fn caller_tokens_remain_provenant_across_surfaces_and_lifetimes() {
         let session = FixtureSession::new();
@@ -25185,6 +27559,41 @@ mod runtime_conformance {
             br#"{"actions":{"activate":{"action_id":"action","debug_kind":null,"input_type":"bool","label":"Activate"}},"call_site_id":"call-site","contract":{"id":"std.ui.UI","name":"std.ui.UI","version":"1.0"},"function_instance_id":null,"key":null,"kind":"node","properties":{},"slots":{},"source_origin":{"source_unit_id":"unit"}}"#,
         );
         assert!(valid_canonical_frame(&with_optional));
+    }
+
+    #[test]
+    fn canonical_frame_validation_rejects_ui_value_over_node_bound() {
+        let mut body = Vec::from(br#"{"children":["#.as_slice());
+        for index in 0..MAX_RUNTIME_VALUE_NODES {
+            if index != 0 {
+                body.push(b',');
+            }
+            body.extend_from_slice(br#"{"kind":"empty"}"#);
+        }
+        body.extend_from_slice(br#"],"kind":"fragment"}"#);
+
+        let mut frame = Vec::from(b"ORNA-UI/1 ".as_slice());
+        frame.extend_from_slice(&(body.len() as u32).to_be_bytes());
+        frame.extend_from_slice(&body);
+        assert!(!valid_canonical_frame(&frame));
+    }
+
+    #[test]
+    fn canonical_frame_validation_rejects_deeply_nested_invalid_ui_value() {
+        const NESTING: usize = 60;
+        let mut body = Vec::new();
+        for _ in 0..NESTING {
+            body.extend_from_slice(br#"{"children":["#);
+        }
+        body.extend_from_slice(br#"{"kind":"not-a-ui-kind"}"#);
+        for _ in 0..NESTING {
+            body.extend_from_slice(br#"],"kind":"fragment"}"#);
+        }
+
+        let mut frame = Vec::from(b"ORNA-UI/1 ".as_slice());
+        frame.extend_from_slice(&(body.len() as u32).to_be_bytes());
+        frame.extend_from_slice(&body);
+        assert!(!valid_canonical_frame(&frame));
     }
 
     #[test]

@@ -31,7 +31,10 @@ GENERATED_ARTEFACTS = (
     "src/tree_sitter/parser.h",
 )
 ACCEPTED_CORPUS_MANIFEST_NAME = "test/accepted-corpus.txt"
+DEFERRED_CORPUS_MANIFEST_NAME = "test/deferred-corpus.txt"
 CORPUS_CASE_DELIMITER = "=" * 20
+ORDER_BY_HIGHLIGHT_FIXTURE_NAME = "accepted_resources_streams.orna"
+ORDER_BY_DIRECTION_TEXTS = ("ASC", "DESC")
 
 
 
@@ -86,7 +89,9 @@ def read_corpus_case_names(corpus_directory: Path, repository: Path) -> list[str
     """Read exact tree-sitter corpus case names, failing closed on malformed headers."""
     case_names: list[str] = []
     seen_case_names: set[str] = set()
-    for corpus_path in sorted(corpus_directory.glob("*.txt"), key=lambda path: path.as_posix()):
+    for corpus_path in sorted(corpus_directory.rglob("*.txt"), key=lambda path: path.as_posix()):
+        if not corpus_path.is_file():
+            continue
         try:
             lines = corpus_path.read_text(encoding="utf-8").splitlines()
         except (OSError, UnicodeDecodeError) as exc:
@@ -120,65 +125,104 @@ def read_corpus_case_names(corpus_directory: Path, repository: Path) -> list[str
             index += 3
 
     if not case_names:
-        log("accepted corpus check found no corpus cases", error=True)
+        log("corpus check found no corpus cases", error=True)
         return None
     return case_names
 
 
-def check_accepted_corpus_manifest(
+def read_corpus_manifest(
     manifest_path: Path,
-    corpus_directory: Path,
     repository: Path,
-) -> tuple[list[str], int] | None:
-    """Validate the accepted corpus manifest and return names plus total corpus count."""
+    *,
+    label: str,
+) -> list[str] | None:
+    """Read one strict corpus classification manifest."""
     try:
         manifest_lines = manifest_path.read_text(encoding="utf-8").splitlines()
     except (OSError, UnicodeDecodeError) as exc:
         log(
-            f"could not read accepted corpus manifest {display_path(manifest_path, repository)}: {exc}",
+            f"could not read {label} corpus manifest {display_path(manifest_path, repository)}: {exc}",
             error=True,
         )
         return None
 
     if not manifest_lines:
         log(
-            f"accepted corpus manifest is empty: {display_path(manifest_path, repository)}",
+            f"{label} corpus manifest is empty: {display_path(manifest_path, repository)}",
             error=True,
         )
         return None
 
-    accepted_names: list[str] = []
+    names: list[str] = []
     seen: set[str] = set()
     for line_number, name in enumerate(manifest_lines, start=1):
         if not name or name != name.strip():
             log(
-                f"malformed accepted corpus manifest entry at line {line_number}: {name!r}",
+                f"malformed {label} corpus manifest entry at line {line_number}: {name!r}",
                 error=True,
             )
             return None
         if name in seen:
-            log(f"duplicate accepted corpus manifest entry: {name!r}", error=True)
+            log(f"duplicate {label} corpus manifest entry: {name!r}", error=True)
             return None
         seen.add(name)
-        accepted_names.append(name)
+        names.append(name)
+    return names
 
-    corpus_names = read_corpus_case_names(corpus_directory, repository)
-    if corpus_names is None:
+
+def check_corpus_manifests(
+    accepted_manifest_path: Path,
+    deferred_manifest_path: Path,
+    corpus_directory: Path,
+    repository: Path,
+) -> tuple[list[str], list[str], int] | None:
+    """Require accepted/deferred manifests to classify every discovered corpus case exactly once."""
+    accepted_names = read_corpus_manifest(
+        accepted_manifest_path, repository, label="accepted"
+    )
+    deferred_names = read_corpus_manifest(
+        deferred_manifest_path, repository, label="deferred"
+    )
+    if accepted_names is None or deferred_names is None:
         return None
-    missing = [name for name in accepted_names if name not in corpus_names]
-    if missing:
+
+    overlap = sorted(set(accepted_names) & set(deferred_names))
+    if overlap:
         log(
-            "accepted corpus manifest names are missing from the corpus: "
-            + ", ".join(repr(name) for name in missing),
+            "accepted and deferred corpus manifests overlap: "
+            + ", ".join(repr(name) for name in overlap),
             error=True,
         )
         return None
 
+    corpus_names = read_corpus_case_names(corpus_directory, repository)
+    if corpus_names is None:
+        return None
+    manifest_names = accepted_names + deferred_names
+    corpus_name_set = set(corpus_names)
+    manifest_name_set = set(manifest_names)
+    missing = [name for name in corpus_names if name not in manifest_name_set]
+    extra = [name for name in manifest_names if name not in corpus_name_set]
+    if missing or extra:
+        if missing:
+            log(
+                "corpus cases missing from accepted/deferred manifests: "
+                + ", ".join(repr(name) for name in missing),
+                error=True,
+            )
+        if extra:
+            log(
+                "accepted/deferred manifest names missing from corpus: "
+                + ", ".join(repr(name) for name in extra),
+                error=True,
+            )
+        return None
+
     log(
-        f"accepted corpus manifest validated: {len(accepted_names)} cases "
-        "(accepted-contract evidence)"
+        f"corpus manifests validated: {len(accepted_names)} accepted + "
+        f"{len(deferred_names)} deferred = {len(corpus_names)} discovered cases"
     )
-    return accepted_names, len(corpus_names)
+    return accepted_names, deferred_names, len(corpus_names)
 
 
 
@@ -435,12 +479,73 @@ def check_highlight_fixture(
     return True
 
 
+def check_zed_order_by_highlights(
+    tree_sitter: str,
+    zed_directory: Path,
+    tree_sitter_directory: Path,
+    repository: Path,
+) -> bool:
+    """Execute Zed highlights against the accepted ORDER BY fixture's direction nodes."""
+    highlights_path = zed_directory / "languages" / "orna" / "highlights.scm"
+    fixture_path = tree_sitter_directory / "test" / "highlight" / ORDER_BY_HIGHLIGHT_FIXTURE_NAME
+    for path in (highlights_path, fixture_path):
+        if not path.is_file():
+            log(
+                f"required Zed ORDER BY highlight input is missing: {display_path(path, repository)}",
+                error=True,
+            )
+            return False
+
+    log(f"checking Zed ORDER BY captures in {ORDER_BY_HIGHLIGHT_FIXTURE_NAME}")
+    result = run_command(
+        [
+            tree_sitter,
+            "query",
+            "--grammar-path",
+            str(tree_sitter_directory),
+            "--captures",
+            str(highlights_path),
+            str(fixture_path),
+        ],
+        cwd=tree_sitter_directory,
+        label="tree-sitter Zed ORDER BY highlight query",
+    )
+    if result is None or result.returncode != 0:
+        status = "could not start" if result is None else f"exited with status {result.returncode}"
+        log(f"Zed ORDER BY highlight query failed ({status})", error=True)
+        return False
+
+    capture_line = re.compile(
+        r"capture:\s+\d+\s+-\s+(?P<name>[^,]+),.*text: `(?P<text>[^`]*)`"
+    )
+    direction_captures = [
+        match.group("text")
+        for line in result.stdout.splitlines()
+        if (match := capture_line.search(line)) is not None
+        and match.group("name") == "keyword"
+        and match.group("text") in ORDER_BY_DIRECTION_TEXTS
+    ]
+    if direction_captures != list(ORDER_BY_DIRECTION_TEXTS):
+        log(
+            "Zed ORDER BY highlight query did not capture the accepted direction nodes as "
+            f"keyword in order {ORDER_BY_DIRECTION_TEXTS!r}: observed {direction_captures!r}",
+            error=True,
+        )
+        return False
+
+    log(
+        "Zed ORDER BY highlight query captured accepted direction nodes: "
+        + ", ".join(ORDER_BY_DIRECTION_TEXTS)
+    )
+    return True
+
+
 def check_alter_rename_highlights(
     tree_sitter: str,
     tree_sitter_directory: Path,
     repository: Path,
 ) -> bool:
-    """Run accepted ALTER and CLIENT action/Inspector highlight fixtures."""
+    """Run accepted ALTER, CLIENT action/Inspector, and resource/stream highlight fixtures."""
     return (
         check_highlight_fixture(
             tree_sitter,
@@ -455,6 +560,13 @@ def check_alter_rename_highlights(
             repository,
             "accepted_actions_inspector.orna",
             15,
+        )
+        and check_highlight_fixture(
+            tree_sitter,
+            tree_sitter_directory,
+            repository,
+            "accepted_resources_streams.orna",
+            12,
         )
     )
 
@@ -1096,13 +1208,45 @@ def check_emacs_integration(
 
 
 def check_zed_highlights(zed_directory: Path, repository: Path) -> bool:
-    """Require Zed's conventional highlights path and accepted ALTER captures."""
+    """Require Zed highlights to retain canonical directions and accepted ALTER captures."""
     highlights_path = zed_directory / "languages" / "orna" / "highlights.scm"
     try:
         highlights = highlights_path.read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError) as exc:
         log(
             f"could not read Zed highlights {display_path(highlights_path, repository)}: {exc}",
+            error=True,
+        )
+        return False
+
+    canonical_highlights_path = repository / "editors" / "tree-sitter-orna" / "queries" / "highlights.scm"
+    try:
+        canonical_highlights = canonical_highlights_path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        log(
+            f"could not read canonical tree-sitter highlights {display_path(canonical_highlights_path, repository)}: {exc}",
+            error=True,
+        )
+        return False
+
+    required_direction_captures = ("(kw_asc)", "(kw_desc)")
+    missing_canonical = [
+        capture for capture in required_direction_captures if capture not in canonical_highlights
+    ]
+    if missing_canonical:
+        log(
+            "canonical tree-sitter highlights are missing accepted ORDER BY direction captures: "
+            + ", ".join(repr(capture) for capture in missing_canonical),
+            error=True,
+        )
+        return False
+    missing_direction_captures = [
+        capture for capture in required_direction_captures if capture not in highlights
+    ]
+    if missing_direction_captures:
+        log(
+            "Zed highlights are missing accepted ORDER BY direction captures: "
+            + ", ".join(repr(capture) for capture in missing_direction_captures),
             error=True,
         )
         return False
@@ -1141,7 +1285,7 @@ def check_zed_extension(
 
     log("checking editors/zed with cargo check")
     result = run_command(
-        [cargo, "check", "--manifest-path", str(manifest)],
+        [cargo, "check", "--locked", "--manifest-path", str(manifest)],
         cwd=repository,
         label="zed cargo check",
     )
@@ -1239,6 +1383,10 @@ def main() -> int:
 
     if not check_zed_highlights(zed_directory, repository):
         return 1
+    if not check_zed_order_by_highlights(
+        tree_sitter, zed_directory, tree_sitter_directory, repository
+    ):
+        return 1
     if not check_zed_extension(cargo, zed_directory, repository):
         return 1
     if not check_lsp_protocol(cargo, repository):
@@ -1261,15 +1409,18 @@ def main() -> int:
             )
             return 1
 
-    manifest_path = tree_sitter_directory / ACCEPTED_CORPUS_MANIFEST_NAME
-    manifest_result = check_accepted_corpus_manifest(
-        manifest_path,
-        tree_sitter_directory / "test" / "corpus",
+    accepted_manifest_path = tree_sitter_directory / ACCEPTED_CORPUS_MANIFEST_NAME
+    deferred_manifest_path = tree_sitter_directory / DEFERRED_CORPUS_MANIFEST_NAME
+    corpus_directory = tree_sitter_directory / "test" / "corpus"
+    manifest_result = check_corpus_manifests(
+        accepted_manifest_path,
+        deferred_manifest_path,
+        corpus_directory,
         repository,
     )
     if manifest_result is None:
         return 1
-    accepted_case_names, corpus_case_count = manifest_result
+    accepted_case_names, deferred_case_names, corpus_case_count = manifest_result
     accepted_regex = "^(?:" + "|".join(re.escape(name) for name in accepted_case_names) + ")$"
     log(f"running tree-sitter accepted corpus ({len(accepted_case_names)} cases)")
     corpus_result = run_command(
@@ -1297,7 +1448,7 @@ def main() -> int:
         tree_sitter, tree_sitter_directory, repository
     ):
         return 1
-    remaining_corpus_cases = corpus_case_count - len(accepted_case_names)
+    remaining_corpus_cases = len(deferred_case_names)
     log(
         f"remaining corpus cases: {remaining_corpus_cases} proposal/deferred grammar coverage; "
         "not accepted-contract evidence"

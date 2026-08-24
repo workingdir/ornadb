@@ -418,9 +418,15 @@ fn map_host_error(source: EmbeddedHostError) -> InstalledSourceApplyError {
 
 fn map_recovery_error(source: PostgresKernelError) -> InstalledSourceApplyError {
     match source {
-        source @ (PostgresKernelError::Configuration(_)
-        | PostgresKernelError::Database(_)
-        | PostgresKernelError::DriverTask(_)) => InstalledSourceApplyError::Attach { source },
+        source @ (PostgresKernelError::Configuration(_) | PostgresKernelError::Database(_)) => {
+            InstalledSourceApplyError::Attach { source }
+        }
+        source @ (PostgresKernelError::DriverTask(_) | PostgresKernelError::SessionClose(_)) => {
+            InstalledSourceApplyError::SessionClose { source }
+        }
+        source @ PostgresKernelError::RecoveryDatabase(_) => {
+            InstalledSourceApplyError::Recovery { source }
+        }
         source => InstalledSourceApplyError::Recovery { source },
     }
 }
@@ -430,7 +436,7 @@ fn map_apply_error(source: PostgresKernelError) -> InstalledSourceApplyError {
         PostgresKernelError::ExpectedBaseMismatch { expected, active } => {
             InstalledSourceApplyError::ExpectedBaseMismatch { expected, active }
         }
-        source @ PostgresKernelError::DriverTask(_) => {
+        source @ (PostgresKernelError::DriverTask(_) | PostgresKernelError::SessionClose(_)) => {
             InstalledSourceApplyError::SessionClose { source }
         }
         PostgresKernelError::CatalogueInvariant(
@@ -790,6 +796,61 @@ mod tests {
         ));
 
         assert!(matches!(error, InstalledSourceApplyError::RecoveryMismatch));
+    }
+
+    #[test]
+    fn recovery_database_maps_to_recovery_stage() {
+        let source = "port=invalid"
+            .parse::<tokio_postgres::Config>()
+            .expect_err("invalid port must produce a PostgreSQL error");
+        let error = map_recovery_error(PostgresKernelError::RecoveryDatabase(source));
+
+        assert!(matches!(&error, &InstalledSourceApplyError::Recovery { .. }));
+        assert_eq!(
+            error.to_string(),
+            "orna: source apply could not recover the active revision"
+        );
+    }
+
+    #[test]
+    fn initial_recovery_driver_task_maps_to_session_close() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime must build");
+        let task = runtime.spawn(async {});
+        task.abort();
+        let source = runtime
+            .block_on(task)
+            .expect_err("aborted task must produce a JoinError");
+        let error = map_recovery_error(PostgresKernelError::DriverTask(source));
+
+        assert!(matches!(
+            &error,
+            &InstalledSourceApplyError::SessionClose { .. }
+        ));
+        assert_eq!(
+            error.to_string(),
+            "orna: source apply database session did not close cleanly"
+        );
+    }
+
+    #[test]
+    fn shutdown_database_failures_map_to_session_close_stage() {
+        let recovery_source = "port=invalid"
+            .parse::<tokio_postgres::Config>()
+            .expect_err("invalid port must produce a PostgreSQL error");
+        let recovery = map_recovery_error(PostgresKernelError::SessionClose(recovery_source));
+        assert!(matches!(
+            recovery,
+            InstalledSourceApplyError::SessionClose { .. }
+        ));
+
+        let apply_source = "port=invalid"
+            .parse::<tokio_postgres::Config>()
+            .expect_err("invalid port must produce a PostgreSQL error");
+        let apply = map_apply_error(PostgresKernelError::SessionClose(apply_source));
+        assert!(matches!(apply, InstalledSourceApplyError::SessionClose { .. }));
     }
 
     #[test]

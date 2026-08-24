@@ -33,6 +33,36 @@ const VALID_SOURCE: &str = concat!(
     "AS SELECT probe.stored FROM product_test.probe probe;\n",
 );
 
+/// The accepted identity-preserving object-field rename shape. The LSP
+/// process has no user catalogue base, so its compiler diagnostics report the
+/// missing historical object while syntax and source navigation still expose
+/// the final field declaration and use.
+const FIELD_RENAME_SOURCE: &str = concat!(
+    "CREATE SCHEMA people;\n",
+    "CREATE TYPE people.person AS OBJECT (\n",
+    "    primary_email TEXT NOT NULL\n",
+    ");\n",
+    "ALTER TYPE people.person\n",
+    "    RENAME FIELD email TO primary_email;\n",
+    "CREATE SERVER FUNCTION people.list_emails()\n",
+    "RETURNS ROWS (email TEXT)\n",
+    "AS\n",
+    "    SELECT person.primary_email\n",
+    "    FROM people.person person;\n",
+);
+
+/// Accepted ORDER BY source used to pin ASC/DESC keyword highlighting.
+const ORDER_BY_SOURCE: &str = concat!(
+    "CREATE SCHEMA ordering;\n",
+    "CREATE TYPE ordering.item AS OBJECT (\n",
+    "    title TEXT NOT NULL\n",
+    ");\n",
+    "CREATE SERVER FUNCTION ordering.list_items()\n",
+    "RETURNS ROWS (title TEXT)\n",
+    "AS\n",
+    "/* 😀 */ SELECT item.title FROM ordering.item item ORDER BY item.title ASC, item.title DESC;\n",
+);
+
 /// The accepted CLIENT source fixture shared with the syntax parser test.
 const ACCEPTED_CLIENT_SOURCE: &str =
     include_str!("../../orna-syntax/testdata/accepted-client.orna");
@@ -48,27 +78,13 @@ const INSPECTOR_SOURCE: &str =
     include_str!("../../orna-server/tests/fixtures/client_inspector_dogfood.orna");
 const EXPRESSION_CLIENT_SOURCE: &str =
     include_str!("../../orna-server/tests/fixtures/expression_client_dogfood.orna");
+const SERVER_FUNCTION_SOURCE: &str =
+    include_str!("../../orna-server/tests/fixtures/server_function_dogfood.orna");
+const CLIENT_LOCAL_ASSIGNMENT_SOURCE: &str =
+    include_str!("../../orna-server/tests/fixtures/client_local_assignment_dogfood.orna");
 
-/// The accepted action fixture is currently assembled inline by the server
-/// checks, so keep the same source here until it has a canonical fixture file.
-const ACTION_SOURCE: &str = concat!(
-    "CREATE SCHEMA action_fixture;\n",
-    "\n",
-    "CREATE CLIENT FUNCTION action_fixture.call(p_value INTEGER)\n",
-    "RETURNS std.Action\n",
-    "AS std.action.call(\n",
-    "  target => std.invoke.echo,\n",
-    "  arguments => std.call.args(p_value => p_value)\n",
-    ");\n",
-    "CREATE CLIENT FUNCTION action_fixture.local(p_value INTEGER)\n",
-    "RETURNS INTEGER AS p_value;\n",
-    "CREATE CLIENT FUNCTION action_fixture.call_local(p_value INTEGER)\n",
-    "RETURNS std.Action\n",
-    "AS std.action.call(\n",
-    "  target => action_fixture.local,\n",
-    "  arguments => std.call.args(p_value => p_value)\n",
-    ");\n",
-);
+/// The accepted action fixture shared with server offline checks.
+const ACTION_SOURCE: &str = include_str!("../../orna-server/tests/fixtures/action_dogfood.orna");
 
 /// The broken source used for negative diagnostics tests.
 const BROKEN_SOURCE: &str = "CREATE SCHEMA broken_test;\n\
@@ -186,6 +202,10 @@ fn initialize(client: &mut Client) {
     assert!(
         result["capabilities"]["semanticTokensProvider"].is_object(),
         "semantic tokens capability: {result}"
+    );
+    assert_eq!(
+        result["capabilities"]["positionEncoding"], "utf-16",
+        "LSP positions use UTF-16 code units: {result}"
     );
     assert!(
         result["capabilities"]["diagnosticProvider"].is_object(),
@@ -332,6 +352,42 @@ fn assert_semantic_tokens_present(client: &mut Client, uri: &str) {
     assert_eq!(data.len() % 5, 0, "tokens are delta quintuples");
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct DecodedSemanticToken {
+    line: u64,
+    character: u64,
+    length: u64,
+    token_type: u64,
+    modifiers: u64,
+}
+
+fn decode_semantic_tokens(result: &Value) -> Vec<DecodedSemanticToken> {
+    let data = result["data"].as_array().expect("semantic token data");
+    assert_eq!(data.len() % 5, 0, "tokens are delta quintuples");
+
+    let mut line = 0;
+    let mut character = 0;
+    data.chunks_exact(5)
+        .map(|token| {
+            let delta_line = token[0].as_u64().expect("delta line");
+            let delta_start = token[1].as_u64().expect("delta start");
+            if delta_line == 0 {
+                character += delta_start;
+            } else {
+                line += delta_line;
+                character = delta_start;
+            }
+            DecodedSemanticToken {
+                line,
+                character,
+                length: token[2].as_u64().expect("token length"),
+                token_type: token[3].as_u64().expect("token type"),
+                modifiers: token[4].as_u64().expect("token modifiers"),
+            }
+        })
+        .collect()
+}
+
 #[test]
 fn serves_diagnostics_for_valid_and_broken_documents() {
     let mut client = Client::spawn();
@@ -400,6 +456,206 @@ fn serves_accepted_client_fixture_without_diagnostics_and_with_symbols() {
                 && matches!(symbol["name"].as_str(), Some("enabled" | "stateful"))
         }),
         "accepted CLIENT function symbol present: {symbols:?}"
+    );
+
+    client.shutdown();
+}
+
+#[test]
+fn serves_accepted_client_semantic_tokens_with_utf16_and_nested_ranges() {
+    let mut client = Client::spawn();
+    initialize(&mut client);
+    let uri = "file:///test/accepted-client-semantic.orna";
+    // Keep the canonical fixture intact while exercising a UTF-16 offset before CREATE.
+    let source = format!("/* 😀 */ {ACCEPTED_CLIENT_SOURCE}");
+
+    open_document(&mut client, uri, &source, 1);
+    let diagnostics = client.read_notification("textDocument/publishDiagnostics");
+    assert_eq!(
+        diagnostics["diagnostics"],
+        json!([]),
+        "accepted source clean"
+    );
+
+    let tokens = decode_semantic_tokens(&client.request(
+        "textDocument/semanticTokens/full",
+        json!({ "textDocument": { "uri": uri } }),
+    ));
+    assert!(tokens.len() >= 3, "accepted fixture semantic tokens");
+    let expected_prefix = vec![
+        DecodedSemanticToken {
+            line: 0,
+            character: 0,
+            length: 8,
+            token_type: 8,
+            modifiers: 0,
+        },
+        DecodedSemanticToken {
+            line: 0,
+            character: 9,
+            length: 6,
+            token_type: 0,
+            modifiers: 0,
+        },
+        DecodedSemanticToken {
+            line: 0,
+            character: 16,
+            length: 6,
+            token_type: 0,
+            modifiers: 0,
+        },
+    ];
+    assert_eq!(
+        &tokens[..3],
+        expected_prefix.as_slice(),
+        "accepted fixture prefix tokens in source order"
+    );
+
+    let function_line: Vec<_> = tokens
+        .iter()
+        .filter(|token| token.line == 6)
+        .cloned()
+        .collect();
+    let expected_function_line = vec![
+        DecodedSemanticToken {
+            line: 6,
+            character: 0,
+            length: 6,
+            token_type: 0,
+            modifiers: 0,
+        },
+        DecodedSemanticToken {
+            line: 6,
+            character: 7,
+            length: 6,
+            token_type: 0,
+            modifiers: 0,
+        },
+        DecodedSemanticToken {
+            line: 6,
+            character: 14,
+            length: 8,
+            token_type: 0,
+            modifiers: 0,
+        },
+        DecodedSemanticToken {
+            line: 6,
+            character: 23,
+            length: 15,
+            token_type: 4,
+            modifiers: 0,
+        },
+        DecodedSemanticToken {
+            line: 6,
+            character: 39,
+            length: 8,
+            token_type: 2,
+            modifiers: 0,
+        },
+    ];
+    assert_eq!(
+        function_line, expected_function_line,
+        "accepted CLIENT declaration tokens in source order"
+    );
+
+    let state_line: Vec<_> = tokens
+        .iter()
+        .filter(|token| token.line == 9)
+        .cloned()
+        .collect();
+    let expected_state_line = vec![
+        DecodedSemanticToken {
+            line: 9,
+            character: 4,
+            length: 5,
+            token_type: 0,
+            modifiers: 0,
+        },
+        DecodedSemanticToken {
+            line: 9,
+            character: 10,
+            length: 5,
+            token_type: 3,
+            modifiers: 0,
+        },
+        DecodedSemanticToken {
+            line: 9,
+            character: 16,
+            length: 7,
+            token_type: 1,
+            modifiers: 0,
+        },
+        DecodedSemanticToken {
+            line: 9,
+            character: 24,
+            length: 5,
+            token_type: 0,
+            modifiers: 0,
+        },
+        DecodedSemanticToken {
+            line: 9,
+            character: 30,
+            length: 5,
+            token_type: 0,
+            modifiers: 0,
+        },
+        DecodedSemanticToken {
+            line: 9,
+            character: 36,
+            length: 7,
+            token_type: 0,
+            modifiers: 0,
+        },
+        DecodedSemanticToken {
+            line: 9,
+            character: 44,
+            length: 4,
+            token_type: 0,
+            modifiers: 0,
+        },
+    ];
+    assert_eq!(
+        state_line, expected_state_line,
+        "nested CLIENT state tokens in source order"
+    );
+
+    client.shutdown();
+}
+
+#[test]
+fn serves_accepted_order_by_semantic_tokens_with_utf16_positions() {
+    let mut client = Client::spawn();
+    initialize(&mut client);
+    let uri = "file:///test/accepted-order-by-semantic.orna";
+    open_document(&mut client, uri, ORDER_BY_SOURCE, 1);
+    let diagnostics = client.read_notification("textDocument/publishDiagnostics");
+    assert_eq!(diagnostics["diagnostics"], json!([]), "accepted ORDER BY source clean");
+
+    let tokens = decode_semantic_tokens(&client.request(
+        "textDocument/semanticTokens/full",
+        json!({ "textDocument": { "uri": uri } }),
+    ));
+    assert_eq!(
+        tokens.iter().find(|token| token.line == 7 && token.character == 71),
+        Some(&DecodedSemanticToken {
+            line: 7,
+            character: 71,
+            length: 3,
+            token_type: 0,
+            modifiers: 0,
+        }),
+        "ASC is a keyword at its UTF-16 position"
+    );
+    assert_eq!(
+        tokens.iter().find(|token| token.line == 7 && token.character == 87),
+        Some(&DecodedSemanticToken {
+            line: 7,
+            character: 87,
+            length: 4,
+            token_type: 0,
+            modifiers: 0,
+        }),
+        "DESC is a keyword at its UTF-16 position"
     );
 
     client.shutdown();
@@ -511,6 +767,34 @@ fn serves_accepted_action_fixture_without_diagnostics_and_with_symbols() {
 }
 
 #[test]
+fn serves_canonical_accepted_dogfood_fixtures_without_diagnostics() {
+    let fixtures = [
+        (
+            "client_function_dogfood.orna",
+            include_str!("../../orna-server/tests/fixtures/client_function_dogfood.orna"),
+        ),
+        ("scalar_resource_dogfood.orna", SCALAR_RESOURCE_SOURCE),
+        ("stream_resource_dogfood.orna", STREAM_RESOURCE_SOURCE),
+        ("action_dogfood.orna", ACTION_SOURCE),
+        ("client_inspector_dogfood.orna", INSPECTOR_SOURCE),
+        ("expression_client_dogfood.orna", EXPRESSION_CLIENT_SOURCE),
+        ("server_function_dogfood.orna", SERVER_FUNCTION_SOURCE),
+        (
+            "client_local_assignment_dogfood.orna",
+            CLIENT_LOCAL_ASSIGNMENT_SOURCE,
+        ),
+    ];
+
+    let mut client = Client::spawn();
+    initialize(&mut client);
+    for (name, source) in fixtures {
+        let uri = format!("file:///test/{name}");
+        open_clean_document(&mut client, &uri, source);
+    }
+    client.shutdown();
+}
+
+#[test]
 fn serves_accepted_inspector_fixture_without_diagnostics_and_with_symbols() {
     let mut client = Client::spawn();
     initialize(&mut client);
@@ -557,9 +841,62 @@ fn serves_accepted_expression_client_fixture_without_diagnostics_and_with_symbol
     assert_symbols_contain(
         &mut client,
         uri,
-        &["expr", "literal", "composed", "external"],
+        &[
+            "expr",
+            "literal",
+            "composed",
+            "item",
+            "ref_composed",
+            "external",
+        ],
     );
     assert_semantic_tokens_present(&mut client, uri);
+    let tokens = decode_semantic_tokens(&client.request(
+        "textDocument/semanticTokens/full",
+        json!({ "textDocument": { "uri": uri } }),
+    ));
+    let assert_token = |prefix: &str, token: &str, token_type: u64| {
+        let position = position_inside(EXPRESSION_CLIENT_SOURCE, prefix, token);
+        let line = position["line"].as_u64().expect("token line");
+        let character = position["character"].as_u64().expect("token character")
+            - token
+                .chars()
+                .next()
+                .expect("token first character")
+                .len_utf16() as u64;
+        assert!(
+            tokens.iter().any(|semantic_token| {
+                semantic_token.line == line
+                    && semantic_token.character == character
+                    && semantic_token.length == token.len() as u64
+                    && semantic_token.token_type == token_type
+            }),
+            "missing semantic token {token:?} at {line}:{character} type {token_type}: {tokens:?}"
+        );
+    };
+    assert_token("AS p_item.", "title", 5);
+    assert_token("AS p_item.title ", "||", 9);
+    assert!(
+        tokens.iter().any(|semantic_token| {
+            semantic_token.line == 14
+                && semantic_token.character == 19
+                && semantic_token.length == 3
+                && semantic_token.token_type == 6
+        }),
+        "missing concatenation string token: {tokens:?}"
+    );
+    assert_hover_contains(
+        &mut client,
+        uri,
+        position_inside(EXPRESSION_CLIENT_SOURCE, "AS p_item.", "title"),
+        "field",
+    );
+    assert_definition_starts_on(
+        &mut client,
+        uri,
+        position_inside(EXPRESSION_CLIENT_SOURCE, "AS p_item.", "title"),
+        10,
+    );
     assert_hover_contains(
         &mut client,
         uri,
@@ -1001,6 +1338,183 @@ fn serves_hover_definition_and_references() {
             "missing reference without declaration {expected:?}: {references_without_declaration:?}"
         );
     }
+
+    client.shutdown();
+}
+
+#[test]
+fn serves_final_field_name_through_accepted_rename_transition() {
+    let mut client = Client::spawn();
+    initialize(&mut client);
+    let uri = "file:///test/field-rename.orna";
+
+    open_document(&mut client, uri, FIELD_RENAME_SOURCE, 1);
+    let diagnostics = client.read_notification("textDocument/publishDiagnostics");
+    assert_eq!(diagnostics["uri"], uri);
+    let items = diagnostics["diagnostics"].as_array().expect("diagnostics");
+    assert_eq!(
+        items.len(),
+        1,
+        "rename transition has one base-catalogue diagnostic"
+    );
+    assert_eq!(items[0]["code"], "ORNA0101");
+    assert_eq!(
+        items[0]["message"],
+        "field rename requires existing object type people.person"
+    );
+    assert_eq!(
+        items[0]["range"],
+        json!({
+            "start": { "line": 4, "character": 11 },
+            "end": { "line": 4, "character": 24 },
+        })
+    );
+
+    let symbols = client.request(
+        "textDocument/documentSymbol",
+        json!({ "textDocument": { "uri": uri } }),
+    );
+    let symbols = symbols.as_array().expect("document symbols");
+    let person = symbols
+        .iter()
+        .find(|symbol| symbol["name"] == "person")
+        .expect("person object symbol");
+    let fields = person["children"].as_array().expect("object fields");
+    assert!(
+        fields.iter().any(|field| field["name"] == "primary_email"),
+        "final field symbol present: {fields:?}"
+    );
+    assert!(
+        fields.iter().all(|field| field["name"] != "email"),
+        "transition-only old field is not a document symbol: {fields:?}"
+    );
+
+    let final_use = position_inside(FIELD_RENAME_SOURCE, "SELECT person.", "primary_email");
+    assert_hover_contains(&mut client, uri, final_use.clone(), "**field**");
+    assert_hover_contains(&mut client, uri, final_use.clone(), "TEXT");
+    assert_definition_starts_on(&mut client, uri, final_use.clone(), 2);
+
+    let renamed_name = position_inside(
+        FIELD_RENAME_SOURCE,
+        "RENAME FIELD email TO ",
+        "primary_email",
+    );
+    assert_hover_contains(&mut client, uri, renamed_name.clone(), "**field**");
+    assert_definition_starts_on(&mut client, uri, renamed_name.clone(), 2);
+
+    let references = client.request(
+        "textDocument/references",
+        json!({
+            "textDocument": { "uri": uri },
+            "position": renamed_name,
+            "context": { "includeDeclaration": true },
+        }),
+    );
+    let reference_locations: Vec<(u64, u64, u64, u64)> = references
+        .as_array()
+        .expect("final field references")
+        .iter()
+        .map(|reference| {
+            (
+                reference["range"]["start"]["line"]
+                    .as_u64()
+                    .expect("start line"),
+                reference["range"]["start"]["character"]
+                    .as_u64()
+                    .expect("start character"),
+                reference["range"]["end"]["line"]
+                    .as_u64()
+                    .expect("end line"),
+                reference["range"]["end"]["character"]
+                    .as_u64()
+                    .expect("end character"),
+            )
+        })
+        .collect();
+    let expected_references = [(2, 4, 2, 17), (5, 26, 5, 39), (9, 18, 9, 31)];
+    assert_eq!(
+        reference_locations.len(),
+        expected_references.len(),
+        "final field reference count: {references}"
+    );
+    for expected in expected_references {
+        assert!(
+            reference_locations.contains(&expected),
+            "missing final field reference {expected:?}: {references}"
+        );
+    }
+
+    let references_without_declaration = client.request(
+        "textDocument/references",
+        json!({
+            "textDocument": { "uri": uri },
+            "position": final_use,
+            "context": { "includeDeclaration": false },
+        }),
+    );
+    let references_without_declaration = references_without_declaration
+        .as_array()
+        .expect("final field references without declaration");
+    let expected_without_declaration = [(5, 26, 5, 39), (9, 18, 9, 31)];
+    assert_eq!(
+        references_without_declaration.len(),
+        expected_without_declaration.len(),
+        "final field references without declaration: {references_without_declaration:?}"
+    );
+    for expected in expected_without_declaration {
+        assert!(
+            references_without_declaration.iter().any(|reference| {
+                (
+                    reference["range"]["start"]["line"]
+                        .as_u64()
+                        .expect("start line"),
+                    reference["range"]["start"]["character"]
+                        .as_u64()
+                        .expect("start character"),
+                    reference["range"]["end"]["line"]
+                        .as_u64()
+                        .expect("end line"),
+                    reference["range"]["end"]["character"]
+                        .as_u64()
+                        .expect("end character"),
+                ) == expected
+            }),
+            "missing final field reference without declaration {expected:?}: {references_without_declaration:?}"
+        );
+    }
+
+    let old_name = position_inside(FIELD_RENAME_SOURCE, "RENAME FIELD ", "email");
+    assert!(
+        client
+            .request(
+                "textDocument/hover",
+                json!({ "textDocument": { "uri": uri }, "position": old_name.clone() }),
+            )
+            .is_null(),
+        "old rename spelling is transition-only"
+    );
+    assert!(
+        client
+            .request(
+                "textDocument/definition",
+                json!({ "textDocument": { "uri": uri }, "position": old_name.clone() }),
+            )
+            .is_null(),
+        "old rename spelling has no definition"
+    );
+    let old_references = client.request(
+        "textDocument/references",
+        json!({
+            "textDocument": { "uri": uri },
+            "position": old_name,
+            "context": { "includeDeclaration": true },
+        }),
+    );
+    assert_eq!(
+        old_references,
+        json!([]),
+        "old rename spelling has no references"
+    );
 
     client.shutdown();
 }

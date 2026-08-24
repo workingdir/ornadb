@@ -2039,6 +2039,13 @@ impl SecuritySnapshot {
     /// snapshot revision and executable function revision recorded by this
     /// snapshot; a current, different, or unverified standard snapshot is
     /// denied before any grant is considered.
+    ///
+    /// Both legacy function grants and durable `PrivilegeGrant::Execute`
+    /// grants may authorise the target. Durable grants apply when class-wide
+    /// or object-scoped to the target function. Selection is deterministic:
+    /// the direct session principal is preferred, then the lowest active role;
+    /// either grant model is sufficient for the selected principal, and the
+    /// selected principal is retained as the authorising evidence.
     pub fn authorise_execute(
         &self,
         session: &AuthenticatedSession,
@@ -2060,17 +2067,22 @@ impl SecuritySnapshot {
         {
             return ExecuteDecision::Denied(ExecuteDenial::UnknownFunction);
         }
-        let direct_grant = ExecuteGrant::new(session.principal, target.function);
-        let authorising_principal = if self.grants.contains(&direct_grant) {
+        let has_execute_grant = |grantee| {
+            self.grants
+                .contains(&ExecuteGrant::new(grantee, target.function))
+                || self.privilege_grants.iter().any(|grant| {
+                    grant.grantee() == grantee
+                        && grant.class() == PrivilegeClass::Execute
+                        && (grant.is_class_wide() || grant.object() == Some(target.function))
+                })
+        };
+        let authorising_principal = if has_execute_grant(session.principal) {
             session.principal
         } else if let Some(role) = session
             .active_roles
             .iter()
             .copied()
-            .filter(|role| {
-                self.grants
-                    .contains(&ExecuteGrant::new(*role, target.function))
-            })
+            .filter(|role| has_execute_grant(*role))
             .min()
         {
             role
@@ -2272,6 +2284,91 @@ mod tests {
         assert_eq!(session.active_roles(), &[role]);
         assert_eq!(evidence.active_roles(), &[role]);
         assert_eq!(evidence.authorising_principal(), role);
+    }
+
+    #[test]
+    fn durable_class_wide_execute_grant_authorises_direct_session_principal() {
+        let grant = PrivilegeGrant::new(USER, PrivilegeClass::Execute, None)
+            .expect("a class-wide execute grant is valid");
+        let snapshot =
+            SecuritySnapshot::new_with_function_targets_local_peer_credentials_and_privilege_grants(
+                REVISION,
+                vec![SecurityFunctionTarget::application(FUNCTION)],
+                vec![active(USER, PrincipalKind::User)],
+                vec![],
+                vec![],
+                vec![],
+                vec![grant],
+            )
+            .expect("valid durable direct-grant snapshot");
+        let session = snapshot
+            .bind_authenticated_session(USER, vec![])
+            .expect("active user session should bind");
+
+        let ExecuteDecision::Allowed(evidence) =
+            snapshot.authorise_execute(&session, InvocationTarget::new(FUNCTION, REVISION))
+        else {
+            panic!("durable direct grant should allow execution");
+        };
+        assert_eq!(evidence.authorising_principal(), USER);
+    }
+
+    #[test]
+    fn durable_object_scoped_execute_grant_authorises_selected_active_role() {
+        let grant = PrivilegeGrant::new(ROLE, PrivilegeClass::Execute, Some(FUNCTION))
+            .expect("an object-scoped execute grant is valid");
+        let snapshot =
+            SecuritySnapshot::new_with_function_targets_local_peer_credentials_and_privilege_grants(
+                REVISION,
+                vec![SecurityFunctionTarget::application(FUNCTION)],
+                vec![
+                    active(USER, PrincipalKind::User),
+                    active(ROLE, PrincipalKind::Role),
+                ],
+                vec![RoleMembership::new(ROLE, USER)],
+                vec![],
+                vec![],
+                vec![grant],
+            )
+            .expect("valid durable role-grant snapshot");
+        let session = snapshot
+            .bind_authenticated_session(USER, vec![ROLE])
+            .expect("reachable active role should bind");
+
+        let ExecuteDecision::Allowed(evidence) =
+            snapshot.authorise_execute(&session, InvocationTarget::new(FUNCTION, REVISION))
+        else {
+            panic!("durable role grant should allow execution");
+        };
+        assert_eq!(evidence.authorising_principal(), ROLE);
+    }
+
+    #[test]
+    fn durable_object_scoped_execute_grant_denies_an_unrelated_function() {
+        let grant = PrivilegeGrant::new(USER, PrivilegeClass::Execute, Some(OTHER_FUNCTION))
+            .expect("an object-scoped execute grant is valid");
+        let snapshot =
+            SecuritySnapshot::new_with_function_targets_local_peer_credentials_and_privilege_grants(
+                REVISION,
+                vec![
+                    SecurityFunctionTarget::application(FUNCTION),
+                    SecurityFunctionTarget::application(OTHER_FUNCTION),
+                ],
+                vec![active(USER, PrincipalKind::User)],
+                vec![],
+                vec![],
+                vec![],
+                vec![grant],
+            )
+            .expect("valid durable unrelated-object snapshot");
+        let session = snapshot
+            .bind_authenticated_session(USER, vec![])
+            .expect("active user session should bind");
+
+        assert_eq!(
+            snapshot.authorise_execute(&session, InvocationTarget::new(FUNCTION, REVISION)),
+            ExecuteDecision::Denied(ExecuteDenial::MissingExecuteGrant)
+        );
     }
 
     #[test]

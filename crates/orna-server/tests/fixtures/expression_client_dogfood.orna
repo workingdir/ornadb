@@ -8,6 +8,12 @@ CREATE CLIENT FUNCTION expr.composed()
 RETURNS TEXT
 AS expr.literal() || ' world';
 
+CREATE TYPE expr.item AS OBJECT (title TEXT);
+
+CREATE CLIENT FUNCTION expr.ref_composed(p_item REF expr.item)
+RETURNS TEXT
+AS p_item.title || '!' || '?';
+
 CREATE EXTERNAL CLIENT FUNCTION expr.external()
 RETURNS TEXT
 RUNTIME CONTRACT 'expr.runtime@1';

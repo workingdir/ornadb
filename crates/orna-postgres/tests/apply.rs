@@ -229,6 +229,7 @@ enum FailurePoint {
     StatusSweep,
     ActivePointer,
     PostPointerRecovery,
+    AuditAppend,
 }
 
 impl FailurePoint {
@@ -291,7 +292,7 @@ async fn applies_source_apply_and_records_one_protected_audit_event() -> TestRes
             .filter(|event| event.decision().kind() == SecurityAuditKind::SourceApply)
             .collect::<Vec<_>>();
         require(
-            source_apply_events.len() == 1,
+            events.len() == 1 && source_apply_events.len() == 1,
             "source apply did not record exactly one protected SourceApply event",
         )?;
         let decision = source_apply_events[0].decision();
@@ -737,6 +738,39 @@ async fn source_apply_failure_rolls_back_candidate_and_audit_event() -> TestResu
             "failed source apply left a protected SourceApply audit event",
         )?;
         require_no_candidate_residue(&database, &candidate, &base).await
+    })
+    .await
+}
+
+#[tokio::test]
+#[ignore = "requires the Compose PostgreSQL development service"]
+async fn source_apply_audit_append_failure_rolls_back_candidate_and_audit_event() -> TestResult<()>
+{
+    with_test_database(|database| async move {
+        let kernel = kernel(&database)?;
+        kernel.bootstrap().await?;
+        let base = kernel.recover().await?;
+        let candidate = candidate(BASIC_SOURCE, &base)?;
+        let baseline = baseline(&database, &base).await?;
+        let audit_count = kernel.recover_security_audit_events().await?.len();
+        install_failure_point(&database, FailurePoint::AuditAppend, &candidate).await?;
+
+        let error = kernel
+            .apply_source_apply(&candidate)
+            .await
+            .expect_err("source apply must fail while appending its protected audit event");
+        assert_failure_shape(FailurePoint::AuditAppend, &error)?;
+
+        require_baseline(&database, &baseline, &kernel).await?;
+        require_no_candidate_residue(&database, &candidate, &base).await?;
+        let events = kernel.recover_security_audit_events().await?;
+        require(
+            events.len() == audit_count
+                && events
+                    .iter()
+                    .all(|event| event.decision().kind() != SecurityAuditKind::SourceApply),
+            "failed source-apply audit append left partial protected audit history",
+        )
     })
     .await
 }
@@ -3474,6 +3508,19 @@ async fn install_failure_point(
             END $$;
             CREATE TRIGGER tamper_after_active_pointer AFTER UPDATE
             ON _orna_kernel.active_revision FOR EACH ROW EXECUTE FUNCTION _orna_kernel.test_apply_tamper_source();".into(),
+        // The production audit schema accepts a valid SourceApply row, so its
+        // append cannot be isolated through an existing constraint. This
+        // trigger exists only in the Compose test database and fails the
+        // append itself, after physical/catalogue changes and before commit.
+        FailurePoint::AuditAppend => "
+            CREATE FUNCTION _orna_kernel.test_apply_fail() RETURNS trigger LANGUAGE plpgsql AS $$
+            BEGIN
+              RAISE EXCEPTION 'source apply audit append' USING ERRCODE = 'P0001';
+            END $$;
+            CREATE TRIGGER before_source_apply_audit
+            BEFORE INSERT ON _orna_kernel.security_audit_events
+            FOR EACH ROW WHEN (NEW.event_kind = 'source_apply')
+            EXECUTE FUNCTION _orna_kernel.test_apply_fail();".into(),
     };
     session.client().batch_execute(&statement).await?;
     session.shutdown().await
@@ -3778,6 +3825,7 @@ fn trigger_marker(point: FailurePoint) -> Option<&'static str> {
         FailurePoint::DeferredReference => Some("deferred definition reference"),
         FailurePoint::ActivePointer => Some("before active pointer"),
         FailurePoint::StatusSweep | FailurePoint::PostPointerRecovery => None,
+        FailurePoint::AuditAppend => Some("source apply audit append"),
     }
 }
 
@@ -4894,6 +4942,15 @@ async fn require_no_candidate_residue(
         )
         .await?
         .try_get(0)?;
+    let authority_rows: i64 = session
+        .client()
+        .query_one(
+            "SELECT count(*) FROM _orna_kernel.invocation_target_authorities
+             WHERE catalogue_revision_id = $1",
+            &[&catalogue],
+        )
+        .await?
+        .try_get(0)?;
     let mut immutable_rows = 0_i64;
     for revision in candidate.new_function_revisions() {
         let revision_id = revision.id().to_bytes().to_vec();
@@ -4932,6 +4989,10 @@ async fn require_no_candidate_residue(
         .await?
         .try_get(0)?;
     session.shutdown().await?;
+    require(
+        authority_rows == 0,
+        "losing apply left invocation_target_authorities candidate residue",
+    )?;
     require(
         source_bundle_rows == 0
             && source_unit_rows == 0

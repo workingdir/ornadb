@@ -1,0 +1,39 @@
+CREATE CLIENT FUNCTION resource_fixture.scalar(p_id INTEGER)
+RETURNS TEXT
+IS
+    LET pending std.data.Resource<TEXT> :=
+        std.data.resource(
+--      ^^^^^^^^^^^^^^^^^ function
+            target => tasks.overdue,
+--                           ^^^^^^^ property
+            arguments => std.call.args(p_id => p_id)
+--                       ^^^^^^^^^^^^^ function
+        );
+BEGIN
+    RETURN AWAIT pending;
+--           ^^^^^ keyword
+END;
+
+CREATE CLIENT FUNCTION resource_fixture.stream(p_limit INTEGER)
+RETURNS STREAM<Event>
+--      ^^^^^^ keyword
+--             ^^^^^ type
+IS
+    LET batches std.data.StreamResource<Event> :=
+        std.data.stream_resource(
+--      ^^^^^^^^^^^^^^^^^^^^^^^^ function
+            target => studio.execute_sql,
+--                              ^^^^^^^^^^ property
+            arguments => std.call.args(p_limit => p_limit)
+--                       ^^^^^^^^^^^^^ function
+        );
+BEGIN
+    RETURN AWAIT batches;
+--           ^^^^^ keyword
+END;
+
+CREATE SERVER FUNCTION order_fixture.rows()
+RETURNS ROWS (value INTEGER)
+AS SELECT t.value FROM order_fixture.row t ORDER BY t.value ASC, t.value DESC;
+--                                                       ^^^ keyword
+--                                                                  ^^^^ keyword

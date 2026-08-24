@@ -480,6 +480,79 @@ mod tests {
     }
 
     #[test]
+    fn public_projection_factory_binds_each_accepted_projection_to_snapshot_target() {
+        let current = binding(1);
+        let mut session = ClientInspectLifecycleSession::new(current);
+        let projections = [
+            crate::InspectProjection::InvocationNodes,
+            crate::InspectProjection::Calls,
+            crate::InspectProjection::Resources,
+            crate::InspectProjection::StateCells,
+            crate::InspectProjection::UiNodes,
+            crate::InspectProjection::PresentationCandidates,
+            crate::InspectProjection::RuntimeBindings,
+            crate::InspectProjection::SecurityDecisions,
+        ];
+
+        for projection in projections {
+            let request = ClientInspectRequest::projection(
+                context(),
+                projection,
+                RuntimeValue::Boolean(true),
+                current.target_invocation_id(),
+            )
+            .expect("public projection factory accepts a checked target");
+            assert_eq!(request.context(), context());
+            assert_eq!(
+                request.target_invocation_id(),
+                Some(current.target_invocation_id())
+            );
+            let operation = session
+                .begin_request(request, current)
+                .expect("matching projection request is admitted");
+            assert_eq!(operation.operation().projection(), Some(projection));
+            assert_eq!(
+                session.publish_completion(operation.ready(RuntimeValue::Boolean(true))),
+                Ok(RuntimeValue::Boolean(true))
+            );
+        }
+    }
+
+    #[test]
+    fn public_projection_factory_rejects_absent_target_identity() {
+        assert_eq!(
+            ClientInspectRequest::projection(
+                context(),
+                crate::InspectProjection::Calls,
+                RuntimeValue::Boolean(true),
+                InvocationId::from_bytes([0; 16]),
+            ),
+            Err(ClientInspectError::InvalidTarget)
+        );
+    }
+
+    #[test]
+    fn public_projection_factory_target_mismatch_fails_before_pending() {
+        let current = binding(1);
+        let mut session = ClientInspectLifecycleSession::new(current);
+        let request = ClientInspectRequest::projection(
+            context(),
+            crate::InspectProjection::Calls,
+            RuntimeValue::Boolean(true),
+            invocation_id(8),
+        )
+        .expect("nonzero projection target is constructible");
+
+        assert_eq!(
+            session.begin_request(request, current),
+            Err(ClientInspectError::Failed(
+                "inspect.epoch_mismatch".to_owned(),
+            ))
+        );
+        assert_eq!(session.pending_request_id, None);
+    }
+
+    #[test]
     fn malformed_and_targetless_requests_are_rejected_before_pending() {
         let current = binding(1);
         let mut session = ClientInspectLifecycleSession::new(current);

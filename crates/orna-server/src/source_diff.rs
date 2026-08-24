@@ -820,6 +820,9 @@ fn map_recovery_error(source: PostgresKernelError) -> InstalledSourceDiffError {
         source @ (PostgresKernelError::Configuration(_)
         | PostgresKernelError::Database(_)
         | PostgresKernelError::DriverTask(_)) => InstalledSourceDiffError::Attach { source },
+        source @ PostgresKernelError::RecoveryDatabase(_) => {
+            InstalledSourceDiffError::Recovery { source }
+        }
         source => InstalledSourceDiffError::Recovery { source },
     }
 }
@@ -828,9 +831,10 @@ fn map_recovery_error(source: PostgresKernelError) -> InstalledSourceDiffError {
 mod tests {
     use super::{
         FunctionRevisionChange, InstalledSourceDiffError, changed_function_revisions, digest_hex,
-        read_source_bundle, render_change, render_function_revision_change,
+        map_recovery_error, read_source_bundle, render_change, render_function_revision_change,
         run_installed_source_diff,
     };
+    use orna_postgres::PostgresKernelError;
     use orna_core::{
         CatalogueRevisionId, FieldId, FunctionId, FunctionRevisionId, SchemaId, SourceUnitId,
         TypeId,
@@ -1287,6 +1291,18 @@ mod tests {
         ];
         assert_eq!(rendered, expected);
     }
+
+    #[test]
+    fn recovery_database_maps_to_recovery_stage_not_attach() {
+        let source = "port=invalid"
+            .parse::<tokio_postgres::Config>()
+            .expect_err("invalid port must produce a PostgreSQL error");
+        let error = map_recovery_error(PostgresKernelError::RecoveryDatabase(source));
+
+        assert!(matches!(&error, &InstalledSourceDiffError::Recovery { .. }));
+        assert!(!matches!(&error, &InstalledSourceDiffError::Attach { .. }));
+    }
+
     #[test]
     fn escapes_diagnostic_scalars_like_source_check() {
         assert_eq!(

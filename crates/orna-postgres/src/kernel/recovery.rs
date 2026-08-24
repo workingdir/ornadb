@@ -273,8 +273,11 @@ impl PostgresKernel {
     /// prove complete.
     pub async fn recover(&self) -> Result<ActiveDatabaseRevision, PostgresKernelError> {
         let mut session = self.open().await?;
-        let recovery_result = recover_client(&mut session.client).await;
-        let shutdown_result = session.shutdown().await;
+        let recovery_result =
+            recover_client(&mut session.client)
+                .await
+                .map_err(super::map_recovery_client_error);
+        let shutdown_result = session.shutdown_for_source_apply().await;
 
         match (recovery_result, shutdown_result) {
             (Ok(active), Ok(())) => Ok(active),

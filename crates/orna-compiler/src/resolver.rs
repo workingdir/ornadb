@@ -20590,9 +20590,21 @@ mod tests {
         else {
             panic!("expected a checked CLIENT expression body");
         };
-        let super::CheckedClientExpression::Await { expression, .. } = return_expression else {
+        let super::CheckedClientExpression::Await {
+            expression,
+            location: await_location,
+        } = return_expression
+        else {
             panic!("expected AWAIT expression");
         };
+        let await_text =
+            "AWAIT std.data.stream_resource(target => tasks.events, arguments => std.call.args())";
+        let await_start = source
+            .find(await_text)
+            .expect("await expression is present");
+        assert_eq!(await_location.logical_path(), "stream-resource.orna");
+        assert_eq!(await_location.span().start(), await_start);
+        assert_eq!(await_location.span().end(), await_start + await_text.len());
         let super::CheckedClientExpression::Resource { operation } = expression.as_ref() else {
             panic!("expected stream resource expression");
         };
@@ -20603,6 +20615,17 @@ mod tests {
         assert_eq!(
             operation.result_type(),
             SemanticType::scalar(StandardScalar::CharacterLargeObject)
+        );
+        let resource_text =
+            "std.data.stream_resource(target => tasks.events, arguments => std.call.args())";
+        let resource_start = source
+            .find(resource_text)
+            .expect("resource constructor is present");
+        assert_eq!(operation.location().logical_path(), "stream-resource.orna");
+        assert_eq!(operation.location().span().start(), resource_start);
+        assert_eq!(
+            operation.location().span().end(),
+            resource_start + resource_text.len()
         );
     }
 
@@ -21273,17 +21296,191 @@ mod tests {
             )
         );
         assert_eq!(statements.len(), 1);
-        assert!(matches!(
-            &statements[0],
-            super::CheckedClientStatement::Let { local: 0, expression: super::CheckedClientExpression::Resource { operation } }
-                if operation.kind() == orna_artifact::client_plan::ResourceKind::Scalar
-                    && operation.target() == super::CheckedFunctionId::Existing(FunctionId::from_bytes([0x43; 16]))
-        ));
-        assert!(matches!(
-            return_expression,
-            super::CheckedClientExpression::Await { expression, .. }
-                if matches!(expression.as_ref(), super::CheckedClientExpression::LocalRead { local: 0, .. })
-        ));
+        let super::CheckedClientStatement::Let {
+            local: 0,
+            expression: resource_expression,
+        } = &statements[0]
+        else {
+            panic!("resource local must be initialized by a LET");
+        };
+        let super::CheckedClientExpression::Resource { operation } = resource_expression else {
+            panic!("resource local initializer must be a resource constructor");
+        };
+        assert_eq!(
+            operation.kind(),
+            orna_artifact::client_plan::ResourceKind::Scalar
+        );
+        assert_eq!(
+            operation.target(),
+            super::CheckedFunctionId::Existing(FunctionId::from_bytes([0x43; 16]))
+        );
+        let resource_text =
+            "std.data.resource(target => tasks.find, arguments => std.call.args(p_name => p_name))";
+        let resource_start = source
+            .find(resource_text)
+            .expect("resource constructor is present");
+        assert_eq!(operation.location().logical_path(), "resource.orna");
+        assert_eq!(operation.location().span().start(), resource_start);
+        assert_eq!(
+            operation.location().span().end(),
+            resource_start + resource_text.len()
+        );
+        let argument_location = match &operation.arguments()[0].1 {
+            super::CheckedClientExpression::ParameterRead { location, .. } => location,
+            _ => panic!("resource argument must retain its parameter-read span"),
+        };
+        let argument_start = source
+            .rfind("p_name")
+            .expect("argument parameter read is present");
+        assert_eq!(argument_location.logical_path(), "resource.orna");
+        assert_eq!(argument_location.span().start(), argument_start);
+        assert_eq!(
+            argument_location.span().end(),
+            argument_start + "p_name".len()
+        );
+
+        let super::CheckedClientExpression::Await {
+            expression: awaited_expression,
+            location: await_location,
+        } = return_expression
+        else {
+            panic!("procedural return must await the resource local");
+        };
+        let super::CheckedClientExpression::LocalRead {
+            local: 0,
+            location: local_location,
+        } = awaited_expression.as_ref()
+        else {
+            panic!("await operand must read the resource local");
+        };
+        let await_text = "AWAIT rows";
+        let await_start = source
+            .find(await_text)
+            .expect("await expression is present");
+        assert_eq!(await_location.logical_path(), "resource.orna");
+        assert_eq!(await_location.span().start(), await_start);
+        assert_eq!(await_location.span().end(), await_start + await_text.len());
+        let local_start = source.rfind("rows").expect("await local read is present");
+        assert_eq!(local_location.logical_path(), "resource.orna");
+        assert_eq!(local_location.span().start(), local_start);
+        assert_eq!(local_location.span().end(), local_start + "rows".len());
+    }
+
+    #[test]
+    fn accepts_scalar_resource_assignment_await_with_exact_spans_and_call_provenance() {
+        let target_id = FunctionId::from_bytes([0x43; 16]);
+        let base = catalogue(
+            vec![schema(0x42, &["tasks"])],
+            Vec::new(),
+            vec![FunctionDefinition::new(
+                target_id,
+                QualifiedSemanticName::new(["tasks", "find"]).unwrap(),
+                FunctionDomain::Server,
+                vec![parameter(
+                    0x44,
+                    "p_name",
+                    0,
+                    ResolvedType::Scalar(StandardScalar::CharacterLargeObject),
+                )],
+                FunctionReturn::Single(ResolvedType::Scalar(StandardScalar::CharacterLargeObject)),
+                FunctionRevisionId::from_bytes([0x45; 16]),
+                FunctionSecurity::Invoker,
+                Some(FunctionTransaction::ReadOnly),
+                FunctionVolatility::Stable,
+            )],
+        );
+        let source = "CREATE SCHEMA ui; CREATE CLIENT FUNCTION ui.find(p_name TEXT) RETURNS TEXT IS \
+            LET value TEXT := 'initial'; \
+            BEGIN value := AWAIT std.data.resource(target => tasks.find, arguments => std.call.args(p_name => p_name)); RETURN value; END;";
+        let report = check(&bundle([("resource-assignment.orna", source)]), &base);
+        assert!(
+            report.diagnostics().is_empty(),
+            "{:#?}",
+            report.diagnostics()
+        );
+        let function = &report
+            .checked_bundle()
+            .expect("resource assignment source checks")
+            .client_functions()[0];
+        let CheckedClientFunctionBody::Procedural { statements, .. } = function.body() else {
+            panic!("expected a checked procedural CLIENT body");
+        };
+        assert_eq!(statements.len(), 2);
+        let super::CheckedClientStatement::Assignment {
+            local: 0,
+            expression: assignment_expression,
+        } = &statements[1]
+        else {
+            panic!("second procedural statement must assign the existing local");
+        };
+        let CheckedClientExpression::Await {
+            expression: awaited_expression,
+            location: await_location,
+        } = assignment_expression
+        else {
+            panic!("assignment RHS must retain its AWAIT expression");
+        };
+        let await_text = "AWAIT std.data.resource(target => tasks.find, arguments => std.call.args(p_name => p_name))";
+        let await_start = source
+            .find(await_text)
+            .expect("assignment AWAIT is present");
+        assert_eq!(await_location.logical_path(), "resource-assignment.orna");
+        assert_eq!(await_location.span().start(), await_start);
+        assert_eq!(await_location.span().end(), await_start + await_text.len());
+
+        let CheckedClientExpression::Resource { operation } = awaited_expression.as_ref() else {
+            panic!("assignment AWAIT operand must retain its resource operation");
+        };
+        let resource_text =
+            "std.data.resource(target => tasks.find, arguments => std.call.args(p_name => p_name))";
+        let resource_start = source
+            .find(resource_text)
+            .expect("resource constructor is present");
+        assert_eq!(
+            operation.location().logical_path(),
+            "resource-assignment.orna"
+        );
+        assert_eq!(operation.location().span().start(), resource_start);
+        assert_eq!(
+            operation.location().span().end(),
+            resource_start + resource_text.len()
+        );
+        let argument_location = match &operation.arguments()[0].1 {
+            CheckedClientExpression::ParameterRead { location, .. } => location,
+            _ => panic!("resource argument must retain its parameter-read span"),
+        };
+        let argument_start = source
+            .rfind("p_name")
+            .expect("argument parameter read is present");
+        assert_eq!(argument_location.logical_path(), "resource-assignment.orna");
+        assert_eq!(argument_location.span().start(), argument_start);
+        assert_eq!(
+            argument_location.span().end(),
+            argument_start + "p_name".len()
+        );
+
+        let call_references = function
+            .references()
+            .iter()
+            .filter(|reference| reference.kind() == DefinitionReferenceKind::FunctionCall)
+            .collect::<Vec<_>>();
+        assert_eq!(call_references.len(), 1);
+        let call_reference = call_references[0];
+        assert_eq!(
+            call_reference.target(),
+            CheckedDefinitionReferenceTarget::Function(super::CheckedFunctionId::Existing(
+                target_id,
+            ))
+        );
+        assert_eq!(
+            call_reference.location().logical_path(),
+            "resource-assignment.orna"
+        );
+        assert_eq!(call_reference.location().span().start(), resource_start);
+        assert_eq!(
+            call_reference.location().span().end(),
+            resource_start + resource_text.len()
+        );
     }
 
     #[test]
@@ -27013,9 +27210,20 @@ mod tests {
         let CheckedClientFunctionBody::Expression { expression } = function.body() else {
             panic!("resource body must be an expression");
         };
-        let super::CheckedClientExpression::Await { expression, .. } = expression else {
+        let super::CheckedClientExpression::Await {
+            expression,
+            location: await_location,
+        } = expression
+        else {
             panic!("resource body must await the resource");
         };
+        let await_text = "AWAIT std.data.resource(target => tasks.find, arguments => std.call.args(p_name => p_name))";
+        let await_start = source
+            .find(await_text)
+            .expect("await expression is present");
+        assert_eq!(await_location.logical_path(), "resource.orna");
+        assert_eq!(await_location.span().start(), await_start);
+        assert_eq!(await_location.span().end(), await_start + await_text.len());
         let super::CheckedClientExpression::Resource { operation } = expression.as_ref() else {
             panic!("await operand must be a resource");
         };
@@ -27027,6 +27235,30 @@ mod tests {
         assert_eq!(
             operation.target(),
             super::CheckedFunctionId::Existing(FunctionId::from_bytes([0x43; 16]))
+        );
+        let resource_text =
+            "std.data.resource(target => tasks.find, arguments => std.call.args(p_name => p_name))";
+        let resource_start = source
+            .find(resource_text)
+            .expect("resource constructor is present");
+        assert_eq!(operation.location().logical_path(), "resource.orna");
+        assert_eq!(operation.location().span().start(), resource_start);
+        assert_eq!(
+            operation.location().span().end(),
+            resource_start + resource_text.len()
+        );
+        let argument_location = match &operation.arguments()[0].1 {
+            super::CheckedClientExpression::ParameterRead { location, .. } => location,
+            _ => panic!("resource argument must retain its parameter-read span"),
+        };
+        let argument_start = source
+            .rfind("p_name")
+            .expect("argument parameter read is present");
+        assert_eq!(argument_location.logical_path(), "resource.orna");
+        assert_eq!(argument_location.span().start(), argument_start);
+        assert_eq!(
+            argument_location.span().end(),
+            argument_start + "p_name".len()
         );
     }
 
@@ -27143,13 +27375,29 @@ mod tests {
             )],
         )
         .unwrap();
-        let source = "CREATE SCHEMA ui; CREATE CLIENT FUNCTION ui.find(p_name TEXT) RETURNS TEXT AS \
-            std.concat(AWAIT std.data.resource(target => tasks.find, arguments => std.call.args(p_name => p_name)), 'x');";
+        let source = "CREATE SCHEMA ui; \
+            CREATE CLIENT FUNCTION ui.wrap(p_value TEXT) RETURNS TEXT AS p_value; \
+            CREATE CLIENT FUNCTION ui.find(p_name TEXT) RETURNS TEXT AS \
+            ui.wrap(AWAIT std.data.resource(target => tasks.find, arguments => std.call.args(p_name => p_name))) || 'x';";
         let report = check(&bundle([("resource.orna", source)]), &base);
-        assert!(report.diagnostics().iter().any(|diagnostic| {
-            diagnostic.code() == DiagnosticCode::DomainIncompatible
-                && diagnostic.message().contains("AWAIT is only valid")
-        }));
+        assert_eq!(report.diagnostics().len(), 1, "{:?}", report.diagnostics());
+        let diagnostic = &report.diagnostics()[0];
+        assert_eq!(diagnostic.code(), DiagnosticCode::DomainIncompatible);
+        assert_eq!(
+            diagnostic.message(),
+            "AWAIT is only valid as the CLIENT body return expression"
+        );
+        assert_eq!(diagnostic.location().logical_path(), "resource.orna");
+        let await_text = "AWAIT std.data.resource(target => tasks.find, arguments => std.call.args(p_name => p_name))";
+        let await_start = source
+            .find(await_text)
+            .expect("await expression is present");
+        assert_eq!(diagnostic.location().span().start(), await_start);
+        assert_eq!(
+            diagnostic.location().span().end(),
+            await_start + await_text.len()
+        );
+        assert_no_checked_bundle(&report);
     }
 
     #[test]
@@ -27226,4 +27474,118 @@ mod tests {
             "wrong ui mutability and persistence",
         );
     }
+
+    #[test]
+    fn accepts_resource_constructor_arguments_in_reverse_named_order_and_derives_result_type() {
+        let integer = ResolvedType::Scalar(StandardScalar::Integer);
+        let server_target_id = FunctionId::from_bytes([0x81; 16]);
+        let base = catalogue(
+            vec![schema(0x82, &["tasks"])],
+            Vec::new(),
+            vec![FunctionDefinition::new(
+                server_target_id,
+                QualifiedSemanticName::new(["tasks", "find"]).unwrap(),
+                FunctionDomain::Server,
+                Vec::new(),
+                FunctionReturn::Single(integer),
+                FunctionRevisionId::from_bytes([0x83; 16]),
+                FunctionSecurity::Invoker,
+                Some(FunctionTransaction::ReadOnly),
+                FunctionVolatility::Stable,
+            )],
+        );
+        let source = "CREATE SCHEMA ui; CREATE CLIENT FUNCTION ui.find() RETURNS INTEGER IS \
+            BEGIN RETURN AWAIT std.data.resource(arguments => std.call.args(), target => tasks.find); END;";
+        let report = check(&bundle([("resource-order.orna", source)]), &base);
+        assert!(
+            report.diagnostics().is_empty(),
+            "{:#?}",
+            report.diagnostics()
+        );
+
+        let function = &report.checked_bundle().unwrap().client_functions()[0];
+        let CheckedClientFunctionBody::Expression { expression } = function.body() else {
+            panic!("resource body must be a checked expression");
+        };
+        let CheckedClientExpression::Await { expression, .. } = expression else {
+            panic!("resource body must await the constructor");
+        };
+        let CheckedClientExpression::Resource { operation } = expression.as_ref() else {
+            panic!("await operand must be a resource constructor");
+        };
+        assert_eq!(operation.kind(), orna_artifact::client_plan::ResourceKind::Scalar);
+        assert_eq!(operation.target(), super::CheckedFunctionId::Existing(server_target_id));
+        assert_eq!(operation.result_type(), SemanticType::Scalar(StandardScalar::Integer));
+        assert_eq!(function.return_type(), SemanticType::Scalar(StandardScalar::Integer));
+    }
+
+    #[test]
+    fn rejects_resource_constructor_duplicate_missing_and_client_targets() {
+        let integer = ResolvedType::Scalar(StandardScalar::Integer);
+        let server_target_id = FunctionId::from_bytes([0x84; 16]);
+        let client_target_id = FunctionId::from_bytes([0x85; 16]);
+        let base = catalogue(
+            vec![schema(0x86, &["tasks"])],
+            Vec::new(),
+            vec![
+                FunctionDefinition::new(
+                    server_target_id,
+                    QualifiedSemanticName::new(["tasks", "find"]).unwrap(),
+                    FunctionDomain::Server,
+                    Vec::new(),
+                    FunctionReturn::Single(integer),
+                    FunctionRevisionId::from_bytes([0x87; 16]),
+                    FunctionSecurity::Invoker,
+                    Some(FunctionTransaction::ReadOnly),
+                    FunctionVolatility::Stable,
+                ),
+                FunctionDefinition::new(
+                    client_target_id,
+                    QualifiedSemanticName::new(["tasks", "client_find"]).unwrap(),
+                    FunctionDomain::Client,
+                    Vec::new(),
+                    FunctionReturn::Single(integer),
+                    FunctionRevisionId::from_bytes([0x88; 16]),
+                    FunctionSecurity::Invoker,
+                    None,
+                    FunctionVolatility::Immutable,
+                ),
+            ],
+        );
+        let cases = [
+            (
+                "duplicate constructor argument",
+                "std.data.resource(target => tasks.find, target => tasks.find)",
+                DiagnosticCode::DuplicateDefinition,
+                "duplicate resource constructor argument",
+            ),
+            (
+                "missing constructor argument",
+                "std.data.resource(target => tasks.find)",
+                DiagnosticCode::TypeMismatch,
+                "resource constructor requires exactly one target and one arguments value",
+            ),
+            (
+                "CLIENT resource target",
+                "std.data.resource(target => tasks.client_find, arguments => std.call.args())",
+                DiagnosticCode::DomainIncompatible,
+                "resource target tasks.client_find must be a SERVER function",
+            ),
+        ];
+
+        for (label, constructor, code, message) in cases {
+            let source = format!(
+                "CREATE SCHEMA ui; CREATE CLIENT FUNCTION ui.find() RETURNS INTEGER IS BEGIN RETURN AWAIT {constructor}; END;"
+            );
+            let report = check(
+                &SourceBundle::new([SourceUnit::new("resource-rejections.orna", source)]).unwrap(),
+                &base,
+            );
+            assert_eq!(report.diagnostics().len(), 1, "{label}: {:?}", report.diagnostics());
+            assert_eq!(report.diagnostics()[0].code(), code, "{label}");
+            assert_eq!(report.diagnostics()[0].message(), message, "{label}");
+            assert_no_checked_bundle(&report);
+        }
+    }
+
 }

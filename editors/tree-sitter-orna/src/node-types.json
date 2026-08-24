@@ -87,6 +87,10 @@
             "named": true
           },
           {
+            "type": "kw_asc",
+            "named": true
+          },
+          {
             "type": "kw_atomic",
             "named": true
           },
@@ -180,6 +184,10 @@
           },
           {
             "type": "kw_delete",
+            "named": true
+          },
+          {
+            "type": "kw_desc",
             "named": true
           },
           {
@@ -658,6 +666,10 @@
             "named": true
           },
           {
+            "type": "kw_asc",
+            "named": true
+          },
+          {
             "type": "kw_atomic",
             "named": true
           },
@@ -751,6 +763,10 @@
           },
           {
             "type": "kw_delete",
+            "named": true
+          },
+          {
+            "type": "kw_desc",
             "named": true
           },
           {
@@ -1172,6 +1188,10 @@
             "named": true
           },
           {
+            "type": "kw_asc",
+            "named": true
+          },
+          {
             "type": "kw_atomic",
             "named": true
           },
@@ -1265,6 +1285,10 @@
           },
           {
             "type": "kw_delete",
+            "named": true
+          },
+          {
+            "type": "kw_desc",
             "named": true
           },
           {
@@ -1682,6 +1706,10 @@
             "named": true
           },
           {
+            "type": "kw_asc",
+            "named": true
+          },
+          {
             "type": "kw_atomic",
             "named": true
           },
@@ -1775,6 +1803,10 @@
           },
           {
             "type": "kw_delete",
+            "named": true
+          },
+          {
+            "type": "kw_desc",
             "named": true
           },
           {
@@ -2236,6 +2268,10 @@
             "named": true
           },
           {
+            "type": "kw_asc",
+            "named": true
+          },
+          {
             "type": "kw_atomic",
             "named": true
           },
@@ -2329,6 +2365,10 @@
           },
           {
             "type": "kw_delete",
+            "named": true
+          },
+          {
+            "type": "kw_desc",
             "named": true
           },
           {
@@ -3063,6 +3103,10 @@
             "named": true
           },
           {
+            "type": "kw_asc",
+            "named": true
+          },
+          {
             "type": "kw_atomic",
             "named": true
           },
@@ -3156,6 +3200,10 @@
           },
           {
             "type": "kw_delete",
+            "named": true
+          },
+          {
+            "type": "kw_desc",
             "named": true
           },
           {
@@ -3618,6 +3666,10 @@
             "named": true
           },
           {
+            "type": "kw_asc",
+            "named": true
+          },
+          {
             "type": "kw_atomic",
             "named": true
           },
@@ -3711,6 +3763,10 @@
           },
           {
             "type": "kw_delete",
+            "named": true
+          },
+          {
+            "type": "kw_desc",
             "named": true
           },
           {
@@ -4192,6 +4248,10 @@
           "named": true
         },
         {
+          "type": "kw_asc",
+          "named": true
+        },
+        {
           "type": "kw_atomic",
           "named": true
         },
@@ -4285,6 +4345,10 @@
         },
         {
           "type": "kw_delete",
+          "named": true
+        },
+        {
+          "type": "kw_desc",
           "named": true
         },
         {
@@ -4790,6 +4854,10 @@
             "named": true
           },
           {
+            "type": "kw_asc",
+            "named": true
+          },
+          {
             "type": "kw_atomic",
             "named": true
           },
@@ -4883,6 +4951,10 @@
           },
           {
             "type": "kw_delete",
+            "named": true
+          },
+          {
+            "type": "kw_desc",
             "named": true
           },
           {
@@ -5338,6 +5410,10 @@
             "named": true
           },
           {
+            "type": "kw_asc",
+            "named": true
+          },
+          {
             "type": "kw_atomic",
             "named": true
           },
@@ -5431,6 +5507,10 @@
           },
           {
             "type": "kw_delete",
+            "named": true
+          },
+          {
+            "type": "kw_desc",
             "named": true
           },
           {
@@ -5896,6 +5976,10 @@
             "named": true
           },
           {
+            "type": "kw_asc",
+            "named": true
+          },
+          {
             "type": "kw_atomic",
             "named": true
           },
@@ -5989,6 +6073,10 @@
           },
           {
             "type": "kw_delete",
+            "named": true
+          },
+          {
+            "type": "kw_desc",
             "named": true
           },
           {
@@ -6698,6 +6786,10 @@
             "named": true
           },
           {
+            "type": "kw_asc",
+            "named": true
+          },
+          {
             "type": "kw_atomic",
             "named": true
           },
@@ -6791,6 +6883,10 @@
           },
           {
             "type": "kw_delete",
+            "named": true
+          },
+          {
+            "type": "kw_desc",
             "named": true
           },
           {
@@ -7359,6 +7455,10 @@
             "named": true
           },
           {
+            "type": "kw_asc",
+            "named": true
+          },
+          {
             "type": "kw_atomic",
             "named": true
           },
@@ -7452,6 +7552,10 @@
           },
           {
             "type": "kw_delete",
+            "named": true
+          },
+          {
+            "type": "kw_desc",
             "named": true
           },
           {
@@ -8207,6 +8311,10 @@
             "named": true
           },
           {
+            "type": "kw_asc",
+            "named": true
+          },
+          {
             "type": "kw_atomic",
             "named": true
           },
@@ -8300,6 +8408,10 @@
           },
           {
             "type": "kw_delete",
+            "named": true
+          },
+          {
+            "type": "kw_desc",
             "named": true
           },
           {
@@ -8886,6 +8998,10 @@
             "named": true
           },
           {
+            "type": "kw_asc",
+            "named": true
+          },
+          {
             "type": "kw_atomic",
             "named": true
           },
@@ -8979,6 +9095,10 @@
           },
           {
             "type": "kw_delete",
+            "named": true
+          },
+          {
+            "type": "kw_desc",
             "named": true
           },
           {
@@ -9827,6 +9947,10 @@
             "named": true
           },
           {
+            "type": "kw_asc",
+            "named": true
+          },
+          {
             "type": "kw_atomic",
             "named": true
           },
@@ -9920,6 +10044,10 @@
           },
           {
             "type": "kw_delete",
+            "named": true
+          },
+          {
+            "type": "kw_desc",
             "named": true
           },
           {
@@ -10429,6 +10557,10 @@
             "named": true
           },
           {
+            "type": "kw_asc",
+            "named": true
+          },
+          {
             "type": "kw_atomic",
             "named": true
           },
@@ -10522,6 +10654,10 @@
           },
           {
             "type": "kw_delete",
+            "named": true
+          },
+          {
+            "type": "kw_desc",
             "named": true
           },
           {
@@ -11211,6 +11347,10 @@
           "named": true
         },
         {
+          "type": "kw_asc",
+          "named": true
+        },
+        {
           "type": "kw_atomic",
           "named": true
         },
@@ -11304,6 +11444,10 @@
         },
         {
           "type": "kw_delete",
+          "named": true
+        },
+        {
+          "type": "kw_desc",
           "named": true
         },
         {
@@ -11804,6 +11948,10 @@
             "named": true
           },
           {
+            "type": "kw_asc",
+            "named": true
+          },
+          {
             "type": "kw_atomic",
             "named": true
           },
@@ -11897,6 +12045,10 @@
           },
           {
             "type": "kw_delete",
+            "named": true
+          },
+          {
+            "type": "kw_desc",
             "named": true
           },
           {
@@ -12358,6 +12510,10 @@
             "named": true
           },
           {
+            "type": "kw_asc",
+            "named": true
+          },
+          {
             "type": "kw_atomic",
             "named": true
           },
@@ -12451,6 +12607,10 @@
           },
           {
             "type": "kw_delete",
+            "named": true
+          },
+          {
+            "type": "kw_desc",
             "named": true
           },
           {
@@ -13078,6 +13238,36 @@
     }
   },
   {
+    "type": "ordering_expression",
+    "named": true,
+    "fields": {
+      "expression": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "expression",
+            "named": true
+          }
+        ]
+      }
+    },
+    "children": {
+      "multiple": false,
+      "required": false,
+      "types": [
+        {
+          "type": "kw_asc",
+          "named": true
+        },
+        {
+          "type": "kw_desc",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
     "type": "parameter_definition",
     "named": true,
     "fields": {
@@ -13113,6 +13303,10 @@
           },
           {
             "type": "kw_as",
+            "named": true
+          },
+          {
+            "type": "kw_asc",
             "named": true
           },
           {
@@ -13209,6 +13403,10 @@
           },
           {
             "type": "kw_delete",
+            "named": true
+          },
+          {
+            "type": "kw_desc",
             "named": true
           },
           {
@@ -13691,6 +13889,10 @@
           "named": true
         },
         {
+          "type": "kw_asc",
+          "named": true
+        },
+        {
           "type": "kw_atomic",
           "named": true
         },
@@ -13784,6 +13986,10 @@
         },
         {
           "type": "kw_delete",
+          "named": true
+        },
+        {
+          "type": "kw_desc",
           "named": true
         },
         {
@@ -14226,6 +14432,10 @@
           "named": true
         },
         {
+          "type": "kw_asc",
+          "named": true
+        },
+        {
           "type": "kw_atomic",
           "named": true
         },
@@ -14319,6 +14529,10 @@
         },
         {
           "type": "kw_delete",
+          "named": true
+        },
+        {
+          "type": "kw_desc",
           "named": true
         },
         {
@@ -14945,6 +15159,10 @@
           "named": true
         },
         {
+          "type": "kw_asc",
+          "named": true
+        },
+        {
           "type": "kw_atomic",
           "named": true
         },
@@ -15038,6 +15256,10 @@
         },
         {
           "type": "kw_delete",
+          "named": true
+        },
+        {
+          "type": "kw_desc",
           "named": true
         },
         {
@@ -15464,6 +15686,10 @@
             "named": true
           },
           {
+            "type": "kw_asc",
+            "named": true
+          },
+          {
             "type": "kw_atomic",
             "named": true
           },
@@ -15557,6 +15783,10 @@
           },
           {
             "type": "kw_delete",
+            "named": true
+          },
+          {
+            "type": "kw_desc",
             "named": true
           },
           {
@@ -16319,6 +16549,10 @@
         {
           "type": "kw_where",
           "named": true
+        },
+        {
+          "type": "ordering_expression",
+          "named": true
         }
       ]
     }
@@ -16457,6 +16691,10 @@
             "named": true
           },
           {
+            "type": "kw_asc",
+            "named": true
+          },
+          {
             "type": "kw_atomic",
             "named": true
           },
@@ -16550,6 +16788,10 @@
           },
           {
             "type": "kw_delete",
+            "named": true
+          },
+          {
+            "type": "kw_desc",
             "named": true
           },
           {
@@ -17017,6 +17259,10 @@
             "named": true
           },
           {
+            "type": "kw_asc",
+            "named": true
+          },
+          {
             "type": "kw_atomic",
             "named": true
           },
@@ -17110,6 +17356,10 @@
           },
           {
             "type": "kw_delete",
+            "named": true
+          },
+          {
+            "type": "kw_desc",
             "named": true
           },
           {
@@ -17699,6 +17949,10 @@
             "named": true
           },
           {
+            "type": "kw_asc",
+            "named": true
+          },
+          {
             "type": "kw_atomic",
             "named": true
           },
@@ -17792,6 +18046,10 @@
           },
           {
             "type": "kw_delete",
+            "named": true
+          },
+          {
+            "type": "kw_desc",
             "named": true
           },
           {
@@ -18385,6 +18643,10 @@
     "named": true
   },
   {
+    "type": "kw_asc",
+    "named": true
+  },
+  {
     "type": "kw_atomic",
     "named": true
   },
@@ -18478,6 +18740,10 @@
   },
   {
     "type": "kw_delete",
+    "named": true
+  },
+  {
+    "type": "kw_desc",
     "named": true
   },
   {

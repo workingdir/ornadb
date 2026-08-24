@@ -48,7 +48,7 @@ use orna_core::inspect::{
     RuntimeBindingRow, SecurityDecisionRow, StateCellRow, UiNodeRow,
 };
 use orna_core::inspect_carrier::{
-    InspectCarrierEnvelope, InspectCarrierKind, InspectCarrierProvenance,
+    InspectCarrierEnvelope, InspectCarrierError, InspectCarrierKind, InspectCarrierProvenance,
 };
 use orna_core::{
     CatalogueRevisionId, FunctionId, FunctionRevisionId, InspectEpochId, InvocationId,
@@ -66,7 +66,7 @@ use orna_core::{
         InvokeRequestInput,
     },
     invocation_binding::{CliArgumentInput, bind_cli_arguments},
-    revision::{ActiveDatabaseRevision, VerifiedStandardLibrarySnapshot},
+    revision::{ActiveDatabaseRevision, ExecutableArtifactKind, VerifiedStandardLibrarySnapshot},
     security::AuthenticatedSession,
     system::{
         SYS_INSPECT_INVOCATION_TYPE_ID, SYS_INSPECT_SNAPSHOT_TYPE_ID, SYS_INVOKE_FUNCTION_ID,
@@ -1067,6 +1067,76 @@ const INSPECT_SNAPSHOT_ROW_TAG: u8 = 1;
 const INSPECT_REDACTED_FIELD_TAG: u8 = 2;
 const INSPECT_REDACTED_TEXT_LENGTH: u32 = u32::MAX;
 
+/// The canonical client-plan header used by installed CLIENT artifacts.
+///
+/// The server depends on orna-client for execution, but this callback is a
+/// separate trust boundary. Keep the narrow root decoder local so the callback
+/// can authenticate the installed artifact body without widening the client
+/// validator's public API.
+const CLIENT_PLAN_MAGIC: &[u8; 8] = b"ORNACP\0\0";
+const CLIENT_PLAN_EXPRESSION_VERSION: u32 = 3;
+const CLIENT_PLAN_CAPABILITY_VERSION: u32 = 5;
+const CLIENT_PLAN_EXPRESSION_OPERATION: u8 = 3;
+const CLIENT_PLAN_EXTERNAL_CONTRACT_NODE: u8 = 8;
+const CLIENT_PLAN_CAPABILITY_OPERATION: u8 = 5;
+
+fn inspect_render_artifact_is_external(
+    revision: &orna_core::revision::FunctionRevisionRecord,
+) -> bool {
+    let artifact = revision.artifact();
+    if artifact.kind() != ExecutableArtifactKind::Client || artifact.format() != "orna.client-plan"
+    {
+        return false;
+    }
+
+    match artifact.version() {
+        CLIENT_PLAN_EXPRESSION_VERSION => {
+            client_expression_artifact_is_external(artifact.payload())
+        }
+        CLIENT_PLAN_CAPABILITY_VERSION => {
+            let Some((inner_version, inner_payload)) =
+                client_capability_inner_artifact(artifact.payload())
+            else {
+                return false;
+            };
+            inner_version == CLIENT_PLAN_EXPRESSION_VERSION
+                && client_expression_artifact_is_external(inner_payload)
+        }
+        _ => false,
+    }
+}
+
+fn client_expression_artifact_is_external(payload: &[u8]) -> bool {
+    if payload.len() < 18
+        || payload.get(..8) != Some(CLIENT_PLAN_MAGIC.as_slice())
+        || u32::from_be_bytes(payload[8..12].try_into().expect("checked header width"))
+            != CLIENT_PLAN_EXPRESSION_VERSION
+        || payload[12] != CLIENT_PLAN_EXPRESSION_OPERATION
+        || payload[13] != CLIENT_PLAN_EXTERNAL_CONTRACT_NODE
+    {
+        return false;
+    }
+    let identity_length =
+        u32::from_be_bytes(payload[14..18].try_into().expect("checked identity width")) as usize;
+    let identity_end = 18usize.saturating_add(identity_length);
+    identity_end == payload.len()
+        && &payload[18..identity_end] == INSPECT_RENDER_CONTRACT.as_bytes()
+}
+
+fn client_capability_inner_artifact(payload: &[u8]) -> Option<(u32, &[u8])> {
+    if payload.len() < 21
+        || payload.get(..8) != Some(CLIENT_PLAN_MAGIC.as_slice())
+        || u32::from_be_bytes(payload[8..12].try_into().ok()?) != CLIENT_PLAN_CAPABILITY_VERSION
+        || payload[12] != CLIENT_PLAN_CAPABILITY_OPERATION
+    {
+        return None;
+    }
+    let inner_version = u32::from_be_bytes(payload[13..17].try_into().ok()?);
+    let inner_length = u32::from_be_bytes(payload[17..21].try_into().ok()?) as usize;
+    let inner_end = 21usize.checked_add(inner_length)?;
+    (inner_end == payload.len()).then(|| (inner_version, &payload[21..inner_end]))
+}
+
 /// Evaluates the installed standard Inspector render contract without selecting a
 /// graphical runtime or reading mutable state. The carrier envelope does not
 /// encode its owning principal, so the full epoch is authenticated through the
@@ -1089,12 +1159,19 @@ async fn run_installed_external_contract(
     else {
         return Err("inspect.malformed_carrier".to_owned());
     };
+    let Some(revision) = active.function_revisions().iter().find(|revision| {
+        revision.function() == request.context().function()
+            && revision.id() == request.context().function_revision()
+    }) else {
+        return Err("inspect.malformed_carrier".to_owned());
+    };
     if request.context().function_revision() != definition.current_revision()
         || definition.domain() != FunctionDomain::Client
         || !matches!(
             definition.return_type(),
             FunctionReturn::Single(ResolvedType::Value(type_id)) if *type_id == STD_UI_TYPE_ID
         )
+        || !inspect_render_artifact_is_external(revision)
     {
         return Err("inspect.malformed_carrier".to_owned());
     }
@@ -1133,11 +1210,11 @@ async fn run_installed_external_contract(
         if value.opaque_type() != expected_type {
             return Err("inspect.unknown_carrier".to_owned());
         }
-        let value =
-            OpaqueValue::new_inspect_carrier(active, expected_type, value.canonical_payload())
-                .map_err(map_inspect_carrier_error)?;
         let envelope = InspectCarrierEnvelope::decode(value.canonical_payload())
-            .map_err(|_| "inspect.malformed_carrier".to_owned())?;
+            .map_err(map_inspect_carrier_error)?;
+        let _validated =
+            OpaqueValue::new_inspect_carrier(active, expected_type, value.canonical_payload())
+                .map_err(map_inspect_opaque_value_error)?;
         if envelope.carrier_kind() != expected_kind {
             return Err("inspect.malformed_carrier".to_owned());
         }
@@ -1287,6 +1364,7 @@ async fn run_installed_external_contract(
         .map_err(|_| "inspect.projection_failed".to_owned())
 }
 
+#[cfg(test)]
 async fn reject_recursive_inspect_target<F, Fut>(
     target: InvocationId,
     observer_root: InvocationId,
@@ -1340,7 +1418,21 @@ where
     Ok(authorized)
 }
 
-fn map_inspect_carrier_error(error: OpaqueValueError) -> String {
+fn map_inspect_carrier_error(error: InspectCarrierError) -> String {
+    match error {
+        InspectCarrierError::EnvelopeTooLarge { .. }
+        | InspectCarrierError::RowCountExceeded { .. }
+        | InspectCarrierError::RowTooLarge { .. }
+        | InspectCarrierError::InvalidRow(
+            orna_core::inspect_carrier::InspectRowError::PayloadTooLarge { .. },
+        ) => "inspect.limit".to_owned(),
+        InspectCarrierError::InvalidTargetInvocation => "inspect.invalid_target".to_owned(),
+        InspectCarrierError::TargetInvocationMismatch { .. } => "inspect.epoch_mismatch".to_owned(),
+        _ => "inspect.malformed_carrier".to_owned(),
+    }
+}
+
+fn map_inspect_opaque_value_error(error: OpaqueValueError) -> String {
     match error {
         OpaqueValueError::UnregisteredType { .. } => "inspect.unknown_carrier".to_owned(),
         OpaqueValueError::InspectCarrierRevisionMismatch { .. } => {
@@ -1432,7 +1524,7 @@ async fn run_installed_inspect(
                 _ => return Err("inspect.malformed_carrier".to_owned()),
             };
             let envelope = InspectCarrierEnvelope::decode(snapshot.canonical_payload())
-                .map_err(|_| "inspect.malformed_carrier".to_owned())?;
+                .map_err(map_inspect_carrier_error)?;
             if envelope.carrier_kind() != InspectCarrierKind::Snapshot {
                 return Err("inspect.malformed_carrier".to_owned());
             }
@@ -3438,16 +3530,52 @@ where
             }
             return Err(ResourceTransportFailure::Shape);
         };
-        let keep =
-            handle_shared_resource_frame(&mut state, decoded, stream, active, registry).await?;
-        if keep {
-            resources.insert(stream_id, state);
-        } else {
-            remember_broker_resource_terminal(
-                resource_tombstones,
-                stream_id,
-                state.request.request_id,
-            );
+        match handle_shared_resource_frame_classified(&mut state, decoded, stream, active, registry)
+            .await
+        {
+            Ok(true) => {
+                resources.insert(stream_id, state);
+            }
+            Ok(false) => {
+                remember_broker_resource_terminal(
+                    resource_tombstones,
+                    stream_id,
+                    state.request.request_id,
+                );
+            }
+            Err(
+                SharedResourceFrameError::Protocol | SharedResourceFrameError::RequestLocalShape,
+            ) => {
+                let _ = send_shared_resource_completion(
+                    &mut state,
+                    Err(ResourceTransportFailure::Shape),
+                    stream,
+                    active,
+                    registry,
+                )
+                .await?;
+                if !state.cancellation_requested {
+                    let cancel = ResourceClientFrame::Cancel(ResourceCancel {
+                        stream_id: state.request.stream_id,
+                        request_id: state.request.request_id,
+                        reason: ResourceCancellationCode::RuntimeShutdown,
+                    });
+                    state
+                        .protocol
+                        .receive(cancel.clone())
+                        .map_err(|_| ResourceTransportFailure::Shape)?;
+                    let encoded = encode_resource_client_frame(active, registry, &cancel)
+                        .map_err(|_| ResourceTransportFailure::Shape)?;
+                    write_shared_broker_frame(stream, &encoded).await?;
+                    state.cancellation_requested = true;
+                }
+                remember_broker_resource_terminal(
+                    resource_tombstones,
+                    stream_id,
+                    state.request.request_id,
+                );
+            }
+            Err(SharedResourceFrameError::Transport(error)) => return Err(error),
         }
         return Ok(());
     }
@@ -3687,6 +3815,20 @@ where
     Ok(true)
 }
 
+#[derive(Debug)]
+enum SharedResourceFrameError {
+    Protocol,
+    RequestLocalShape,
+    Transport(ResourceTransportFailure),
+}
+
+impl From<ResourceTransportFailure> for SharedResourceFrameError {
+    fn from(error: ResourceTransportFailure) -> Self {
+        Self::Transport(error)
+    }
+}
+
+#[cfg(test)]
 async fn handle_shared_resource_frame<W>(
     state: &mut BrokerResourceState,
     frame: ResourceServerFrame,
@@ -3697,23 +3839,42 @@ async fn handle_shared_resource_frame<W>(
 where
     W: AsyncWrite + Unpin,
 {
+    match handle_shared_resource_frame_classified(state, frame, stream, active, registry).await {
+        Ok(keep) => Ok(keep),
+        Err(SharedResourceFrameError::Protocol | SharedResourceFrameError::RequestLocalShape) => {
+            Err(ResourceTransportFailure::Shape)
+        }
+        Err(SharedResourceFrameError::Transport(error)) => Err(error),
+    }
+}
+
+async fn handle_shared_resource_frame_classified<W>(
+    state: &mut BrokerResourceState,
+    frame: ResourceServerFrame,
+    stream: &mut W,
+    active: &ActiveDatabaseRevision,
+    registry: &OpaqueCodecRegistry,
+) -> Result<bool, SharedResourceFrameError>
+where
+    W: AsyncWrite + Unpin,
+{
+    // Validate against a candidate so a request-local error cannot consume the
+    // live stream credit or state before the broker publishes its terminal.
+    let mut protocol = state.protocol.clone();
     let disposition = if state.cancellation_requested {
         if let ResourceServerFrame::Cancelled(cancelled) = &frame {
-            state
-                .protocol
+            protocol
                 .apply_cancelled_after_client_cancel(*cancelled)
-                .map_err(|_| ResourceTransportFailure::Shape)?
+                .map_err(|_| SharedResourceFrameError::Protocol)?
         } else {
-            state
-                .protocol
+            protocol
                 .apply_constructed(active, registry, frame.clone())
-                .map_err(|_| ResourceTransportFailure::Shape)?
+                .map_err(|_| SharedResourceFrameError::Protocol)?
         }
     } else {
-        state
-            .protocol
+        protocol
             .apply_constructed(active, registry, frame.clone())
-            .map_err(|_| ResourceTransportFailure::Shape)?
+            .map_err(|_| SharedResourceFrameError::Protocol)?
     };
     // A terminal frame marked DroppedLate can still be the committed server
     // result: cancellation closed the client-side protocol before that result
@@ -3737,7 +3898,7 @@ where
                 || value.resource_kind != state.resource_kind
                 || !valid_resource_invocation_id(value.nested_invocation_id)
             {
-                return Err(ResourceTransportFailure::Shape);
+                return Err(SharedResourceFrameError::RequestLocalShape);
             }
             if state.cancellation_requested
                 && matches!(
@@ -3747,6 +3908,7 @@ where
             {
                 return Ok(true);
             }
+            state.protocol = protocol;
             state.accepted = true;
             state.accepted_nested_invocation_id = Some(value.nested_invocation_id);
         }
@@ -3763,7 +3925,7 @@ where
                     .iter()
                     .any(|item| !runtime_value_matches_type(active, item, state.expected_type))
             {
-                return Err(ResourceTransportFailure::Shape);
+                return Err(SharedResourceFrameError::RequestLocalShape);
             }
             if state.cancellation_requested {
                 if matches!(
@@ -3777,9 +3939,11 @@ where
             }
             match state.resource_kind {
                 ProtocolResourceKind::Single => {
+                    state.protocol = protocol;
                     state.scalar_value = value.values.into_iter().next()
                 }
                 ProtocolResourceKind::Stream => {
+                    state.protocol = protocol;
                     state.stream_values_seen = true;
                     if !send_shared_resource_completion(
                         state,
@@ -3817,7 +3981,7 @@ where
         }
         ResourceServerFrame::Completed(value) => {
             if value.request_id != state.request.request_id {
-                return Err(ResourceTransportFailure::Shape);
+                return Err(SharedResourceFrameError::RequestLocalShape);
             }
             if !state.accepted {
                 if late_terminal {
@@ -3831,7 +3995,7 @@ where
                     .await?;
                     return Ok(false);
                 }
-                return Err(ResourceTransportFailure::Shape);
+                return Err(SharedResourceFrameError::RequestLocalShape);
             }
             let outcome = match state.resource_kind {
                 ProtocolResourceKind::Single => {
@@ -3847,7 +4011,7 @@ where
                             .await?;
                             return Ok(false);
                         }
-                        return Err(ResourceTransportFailure::Shape);
+                        return Err(SharedResourceFrameError::RequestLocalShape);
                     };
                     ResourceTransportOutcome::Ready {
                         value,
@@ -3862,13 +4026,14 @@ where
                         .ok_or(ResourceTransportFailure::Shape)?,
                 },
             };
+            state.protocol = protocol;
             let _ = send_shared_resource_completion(state, Ok(outcome), stream, active, registry)
                 .await?;
             return Ok(false);
         }
         ResourceServerFrame::Failed(value) => {
             if value.request_id != state.request.request_id {
-                return Err(ResourceTransportFailure::Shape);
+                return Err(SharedResourceFrameError::RequestLocalShape);
             }
             if state.scalar_value.is_some() {
                 if late_terminal {
@@ -3882,8 +4047,9 @@ where
                     .await?;
                     return Ok(false);
                 }
-                return Err(ResourceTransportFailure::Shape);
+                return Err(SharedResourceFrameError::RequestLocalShape);
             }
+            state.protocol = protocol;
             let _ = send_shared_resource_completion(
                 state,
                 Ok(ResourceTransportOutcome::Failed {
@@ -3899,8 +4065,9 @@ where
         }
         ResourceServerFrame::Cancelled(value) => {
             if value.request_id != state.request.request_id {
-                return Err(ResourceTransportFailure::Shape);
+                return Err(SharedResourceFrameError::RequestLocalShape);
             }
+            state.protocol = protocol;
             let _ = send_shared_resource_completion(
                 state,
                 Ok(ResourceTransportOutcome::Cancelled {
@@ -4031,6 +4198,17 @@ fn resource_transport_cancellation_action(
     }
 }
 
+/// Converts the decoded request's initial receive windows into the first
+/// producer pull credit. The protocol decoder already enforces the wire
+/// bounds; keeping the checked conversion here makes the authenticated
+/// boundary fail closed if it is ever called with an unvalidated request.
+fn initial_authenticated_resource_credit(
+    request: &ResourceRequest,
+) -> Result<ResourceCredit, ResourceTransportFailure> {
+    ResourceCredit::new(request.item_window, request.byte_window)
+        .ok_or(ResourceTransportFailure::Shape)
+}
+
 /// Decides what a server frame means after the client has requested cancel.
 ///
 /// The local connection stays live after sending `RESOURCE_CANCEL`: an
@@ -4137,7 +4315,8 @@ async fn run_authenticated_resource_transport(
     let mut next_batch_sequence = 0_u64;
     let mut total_items = 0_u64;
     let mut total_bytes = 0_u64;
-    let mut byte_credit = MAX_RESOURCE_WINDOW;
+    let initial_credit = initial_authenticated_resource_credit(&request)?;
+    let mut byte_credit = initial_credit.byte_count;
     loop {
         // A scalar value is followed by a zero-credit terminal probe. The
         // producer accepts that probe only after the row has been delivered;
@@ -4149,7 +4328,8 @@ async fn run_authenticated_resource_transport(
                     byte_count: 0,
                 }
             } else {
-                ResourceCredit::new(1, byte_credit).ok_or(ResourceTransportFailure::Shape)?
+                ResourceCredit::new(initial_credit.item_count, byte_credit)
+                    .ok_or(ResourceTransportFailure::Shape)?
             };
         let pull = producer.pull(credit);
         tokio::pin!(pull);
@@ -6225,6 +6405,107 @@ mod tests {
             .await,
             Err(ResourceTransportFailure::Shape)
         ));
+    }
+
+    #[tokio::test]
+    async fn shared_broker_local_resource_protocol_failure_preserves_other_streams() {
+        let (active, registry) = transport_test_context();
+        let request_a = transport_test_request(active.pair(), 1);
+        let request_b = transport_test_request(active.pair(), 2);
+        let make_state = |request: ResourceRequest,
+                          completion: Sender<
+            Result<ResourceTransportOutcome, ResourceTransportFailure>,
+        >| {
+            let mut protocol = ResourceProtocolConnection::new();
+            protocol
+                .open(request.clone())
+                .expect("resource request opens");
+            BrokerResourceState {
+                request,
+                expected_type: ResolvedType::Scalar(StandardScalar::Integer),
+                resource_kind: ProtocolResourceKind::Single,
+                protocol,
+                completion,
+                accepted: false,
+                accepted_nested_invocation_id: None,
+                scalar_value: None,
+                cancellation_requested: false,
+                stream_values_seen: false,
+            }
+        };
+        let (completion_a, mut completions_a) = mpsc::channel(2);
+        let (completion_b, mut completions_b) = mpsc::channel(2);
+        let mut resources = BTreeMap::from([
+            (
+                request_a.stream_id,
+                make_state(request_a.clone(), completion_a),
+            ),
+            (
+                request_b.stream_id,
+                make_state(request_b.clone(), completion_b),
+            ),
+        ]);
+        let (root_response, _root_receiver) = tokio::sync::oneshot::channel();
+        let mut root = Some(BrokerRootState {
+            invocation: Some(InvocationId::from_bytes([0x55; 16])),
+            records: Vec::new(),
+            response: root_response,
+        });
+        let mut tombstones = BrokerResourceTombstones::new();
+        let (_reader, mut writer) = tokio::io::duplex(256);
+        let wrong_revision = RevisionPair::new(
+            SourceRevisionId::from_bytes([0x91; 16]),
+            CatalogueRevisionId::from_bytes([0x92; 16]),
+        );
+        let bytes = encode_resource_server_frame(
+            &active,
+            &registry,
+            &ResourceServerFrame::Accepted(ResourceAccepted {
+                stream_id: request_a.stream_id,
+                request_id: request_a.request_id,
+                nested_invocation_id: InvocationId::from_bytes([0x40; 16]),
+                target_revision: wrong_revision,
+                resource_kind: request_a.resource_kind,
+            }),
+        )
+        .expect("encoded mismatched resource acceptance");
+
+        handle_shared_broker_frame(
+            BrokerWireFrame {
+                resource: true,
+                bytes,
+            },
+            &mut writer,
+            &active,
+            &registry,
+            &mut root,
+            &mut resources,
+            Some(request_b.stream_id),
+            &mut tombstones,
+        )
+        .await
+        .expect("request-local resource failure keeps broker alive");
+
+        assert!(!resources.contains_key(&request_a.stream_id));
+        assert!(resources.contains_key(&request_b.stream_id));
+        assert!(root.is_some());
+        assert_eq!(
+            tombstones.get(&request_a.stream_id),
+            Some(&request_a.request_id)
+        );
+        assert!(matches!(
+            completions_a.recv().await,
+            Some(Err(ResourceTransportFailure::Shape))
+        ));
+        assert!(completions_b.try_recv().is_err());
+        let credit = resources
+            .get(&request_b.stream_id)
+            .expect("unaffected resource remains")
+            .protocol
+            .resource_credit(request_b.stream_id, request_b.request_id)
+            .expect("unaffected resource credit remains available");
+        assert_eq!(credit.item_available, request_b.item_window);
+        assert_eq!(credit.byte_available, request_b.byte_window);
     }
 
     #[test]
@@ -8721,6 +9002,62 @@ mod tests {
     }
 
     #[test]
+    fn inspector_carrier_errors_map_to_stable_codes() {
+        assert_eq!(
+            map_inspect_carrier_error(InspectCarrierError::EnvelopeTooLarge {
+                actual: 17,
+                maximum: 16,
+            }),
+            "inspect.limit"
+        );
+        assert_eq!(
+            map_inspect_carrier_error(InspectCarrierError::RowCountExceeded {
+                actual: 2,
+                maximum: 1,
+            }),
+            "inspect.limit"
+        );
+        assert_eq!(
+            map_inspect_carrier_error(InspectCarrierError::RowTooLarge {
+                actual: 17,
+                maximum: 16,
+            }),
+            "inspect.limit"
+        );
+        assert_eq!(
+            map_inspect_carrier_error(InspectCarrierError::InvalidMagic),
+            "inspect.malformed_carrier"
+        );
+        assert_eq!(
+            map_inspect_carrier_error(InspectCarrierError::UnknownProjectionTag(0xff)),
+            "inspect.malformed_carrier"
+        );
+        assert_eq!(
+            map_inspect_carrier_error(InspectCarrierError::InvalidTargetInvocation),
+            "inspect.invalid_target"
+        );
+        assert_eq!(
+            map_inspect_carrier_error(InspectCarrierError::TargetInvocationMismatch {
+                expected: InvocationId::from_bytes([0x11; 16]),
+                actual: InvocationId::from_bytes([0x22; 16]),
+            }),
+            "inspect.epoch_mismatch"
+        );
+        assert_eq!(
+            map_inspect_opaque_value_error(OpaqueValueError::UnregisteredType {
+                opaque_type: TypeId::from_bytes([0x33; 16]),
+            }),
+            "inspect.unknown_carrier"
+        );
+        assert_eq!(
+            map_inspect_opaque_value_error(OpaqueValueError::InspectCarrierRevisionMismatch {
+                opaque_type: TypeId::from_bytes([0x44; 16]),
+            },),
+            "inspect.epoch_mismatch"
+        );
+    }
+
+    #[test]
     fn inspector_snapshot_target_rejects_zero_object_bytes() {
         let target = RuntimeValue::Reference {
             target: SYS_INSPECT_INVOCATION_TYPE_ID,
@@ -9243,6 +9580,52 @@ mod tests {
         }
     }
 
+    #[test]
+    fn authenticated_resource_credit_respects_small_request_windows() {
+        let (active, _) = transport_test_context();
+        let mut request = transport_test_request(active.pair(), 1);
+        request.item_window = 2;
+        request.byte_window = 3;
+
+        let credit = initial_authenticated_resource_credit(&request)
+            .expect("small request windows produce bounded credit");
+        assert_eq!(credit.item_count, request.item_window);
+        assert_eq!(credit.byte_count, request.byte_window);
+        assert_ne!(credit.item_count, MAX_RESOURCE_WINDOW);
+        assert_ne!(credit.byte_count, MAX_RESOURCE_WINDOW);
+    }
+
+    #[test]
+    fn authenticated_resource_credit_accepts_sufficient_request_windows() {
+        let (active, _) = transport_test_context();
+        let mut request = transport_test_request(active.pair(), 1);
+        request.item_window = MAX_RESOURCE_WINDOW;
+        request.byte_window = MAX_RESOURCE_WINDOW;
+
+        let credit = initial_authenticated_resource_credit(&request)
+            .expect("sufficient request windows produce bounded credit");
+        assert_eq!(credit.item_count, MAX_RESOURCE_WINDOW);
+        assert_eq!(credit.byte_count, MAX_RESOURCE_WINDOW);
+    }
+
+    #[test]
+    fn authenticated_resource_credit_rejects_invalid_request_windows() {
+        let (active, _) = transport_test_context();
+        let mut request = transport_test_request(active.pair(), 1);
+        request.item_window = 0;
+        assert!(matches!(
+            initial_authenticated_resource_credit(&request),
+            Err(ResourceTransportFailure::Shape)
+        ));
+
+        request.item_window = 1;
+        request.byte_window = MAX_RESOURCE_WINDOW + 1;
+        assert!(matches!(
+            initial_authenticated_resource_credit(&request),
+            Err(ResourceTransportFailure::Shape)
+        ));
+    }
+
     fn installed_client_test_request(
         active: &ActiveDatabaseRevision,
         state: &mut ClientStateStore,
@@ -9517,6 +9900,81 @@ mod tests {
             } if actual == nested_invocation_id
         ));
         peer_thread.join().expect("resource peer");
+    }
+
+    #[test]
+    fn installed_executor_drop_shuts_down_pending_raw_and_abandons_pending_broker() {
+        let (active, _registry) = transport_test_context();
+        let mut state = ClientStateStore::new();
+        let raw_request = installed_client_test_request(&active, &mut state, 0xe1);
+        let broker_request = installed_client_test_request(&active, &mut state, 0xe2);
+        let (raw_control, mut raw_controls) = mpsc::unbounded_channel();
+        let (worker_done_sender, worker_done_receiver) = std::sync::mpsc::sync_channel(0);
+        let worker = thread::spawn(move || {
+            let received_shutdown = matches!(
+                raw_controls.blocking_recv(),
+                Some(ResourceTransportControl::Shutdown)
+            );
+            worker_done_sender
+                .send(received_shutdown)
+                .expect("worker completion signal");
+        });
+        let (_raw_sender, raw_receiver) = mpsc::channel(1);
+        let (_broker_sender, broker_receiver) = mpsc::channel(1);
+        let (broker, mut commands) = SharedInvokeBroker::pending();
+        let executor = InstalledClientResourceExecutor {
+            active,
+            inspect_kernel: None,
+            inspect_session: None,
+            next_stream_id: 1,
+            broker: Some(broker.clone()),
+            raw_resource_authorizer: None,
+            transport: None,
+            pending: Some(PendingResourceTransport {
+                request: raw_request,
+                stream_id: 1,
+                receiver: raw_receiver,
+                control: raw_control,
+                transport_return: std::sync::Arc::new(std::sync::Mutex::new(None)),
+                worker,
+                cancel_requested: false,
+            }),
+            broker_pending: Some(PendingBrokerResource {
+                request: broker_request.clone(),
+                receiver: broker_receiver,
+                control: broker,
+                stream_id: 2,
+                cancel_requested: false,
+            }),
+            detached: Vec::new(),
+            detached_broker: None,
+            cancellation: ResourceCancellation::new(),
+        };
+
+        drop(executor);
+
+        assert!(
+            worker_done_receiver
+                .recv()
+                .expect("raw worker completion signal"),
+            "dropping the executor must send raw transport shutdown",
+        );
+        assert!(matches!(
+            commands.try_recv(),
+            Ok(BrokerCommand::CancelResource {
+                stream_id: 2,
+                request_id,
+                reason: ResourceCancellationCode::RuntimeShutdown,
+            }) if request_id == broker_request.request_id()
+        ));
+        assert!(matches!(
+            commands.try_recv(),
+            Ok(BrokerCommand::AbandonResource {
+                stream_id: 2,
+                request_id,
+                reason: ResourceCancellationCode::RuntimeShutdown,
+            }) if request_id == broker_request.request_id()
+        ));
     }
 
     #[test]

@@ -1973,7 +1973,8 @@ async fn persists_recovers_revokes_and_disables_execute_authority_inner() -> Tes
 
 #[tokio::test]
 #[ignore = "requires the Compose PostgreSQL development service"]
-async fn recovers_closed_security_audit_history_and_rejects_tamper() -> TestResult<()> {
+async fn recovers_closed_security_audit_history_under_hostile_search_path_and_rejects_tamper()
+-> TestResult<()> {
     const USER: PrincipalId = PrincipalId::from_bytes([0x31; 16]);
     const EFFECTIVE: PrincipalId = PrincipalId::from_bytes([0x32; 16]);
     const AUTHORISING: PrincipalId = PrincipalId::from_bytes([0x33; 16]);
@@ -1985,7 +1986,8 @@ async fn recovers_closed_security_audit_history_and_rejects_tamper() -> TestResu
 
     with_test_database(|database| async move {
         let kernel = kernel(&database)?;
-        kernel.bootstrap().await?;
+        let active = kernel.bootstrap().await?;
+        let active_pair = RevisionPair::new(active.source(), active.catalogue());
         let session = database.open().await?;
         let insertion = session
             .client()
@@ -2042,6 +2044,37 @@ async fn recovers_closed_security_audit_history_and_rejects_tamper() -> TestResu
             "security audit fixture insertion",
         )?;
 
+        run_batch(
+            &database,
+            "CREATE TABLE public.active_revision AS
+                 SELECT * FROM _orna_kernel.active_revision WITH NO DATA;
+             INSERT INTO public.active_revision
+                 (singleton, source_revision_id, catalogue_revision_id)
+             VALUES
+                 (true, decode(repeat('d1', 16), 'hex'),
+                        decode(repeat('d2', 16), 'hex'));
+
+             CREATE TABLE public.security_audit_events AS
+                 SELECT * FROM _orna_kernel.security_audit_events WITH NO DATA;
+             INSERT INTO public.security_audit_events
+                 (sequence, event_id, recorded_at, event_kind, outcome,
+                  denial_reason)
+             VALUES
+                 (1, decode(repeat('b1', 16), 'hex'),
+                  TIMESTAMP '1970-01-01 00:00:00', 'authentication', 'denied',
+                  'authentication_unknown_uid');",
+        )
+        .await?;
+
+        let mut hostile_config = database.config()?;
+        hostile_config.options("-c search_path=public,pg_catalog");
+        let hostile_kernel = PostgresKernel::new(hostile_config);
+        let recovered_active = hostile_kernel.recover().await?;
+        require(
+            recovered_active.pair() == active_pair,
+            "hostile search_path redirected active revision recovery",
+        )?;
+
         let target = InvocationTarget::new(FUNCTION, PAIR);
         let expected = vec![
             SecurityAuditEvent::new(
@@ -2081,9 +2114,7 @@ async fn recovers_closed_security_audit_history_and_rejects_tamper() -> TestResu
                 ),
             ),
         ];
-        let recovered = PostgresKernel::new(database.config()?)
-            .recover_security_audit_events()
-            .await?;
+        let recovered = hostile_kernel.recover_security_audit_events().await?;
         require(
             recovered == expected,
             "security audit recovery changed order, time, identity, or decision evidence",
@@ -2103,7 +2134,23 @@ async fn recovers_closed_security_audit_history_and_rejects_tamper() -> TestResu
             )
             .await?;
 
-        let error = kernel
+        let error = hostile_kernel
+            .recover()
+            .await
+            .expect_err("malformed durable security audit data must fail full recovery");
+        require(
+            matches!(
+                error,
+                PostgresKernelError::DurableInvariant {
+                    relation: "_orna_kernel.security_audit_events",
+                    ref record,
+                    rule: "audit event shape is not recognised",
+                } if record == "1"
+            ),
+            "full recovery returned the wrong malformed security audit invariant",
+        )?;
+
+        let error = hostile_kernel
             .recover_security_audit_events()
             .await
             .expect_err("invalid durable security audit shape must fail recovery");
@@ -2145,7 +2192,7 @@ async fn recovers_closed_security_audit_history_and_rejects_tamper() -> TestResu
                  WHERE sequence = 4;",
             )
             .await?;
-        let error = kernel
+        let error = hostile_kernel
             .recover_security_audit_events()
             .await
             .expect_err("incomplete durable security audit pair must fail recovery");
@@ -2184,7 +2231,7 @@ async fn recovers_closed_security_audit_history_and_rejects_tamper() -> TestResu
                  WHERE sequence = 4;",
             )
             .await?;
-        let error = kernel
+        let error = hostile_kernel
             .recover_security_audit_events()
             .await
             .expect_err("unknown durable security audit denial must fail recovery");

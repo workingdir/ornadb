@@ -29,6 +29,7 @@
     (kw_bigint) (kw_float) (kw_decimal) (kw_character) (kw_large) (kw_text)
     (kw_binary) (kw_bytes) (kw_uuid) (kw_date) (kw_time)
     (kw_timestamp) (kw_duration) (kw_void) (kw_distinct) (kw_order) (kw_by)
+    (kw_asc) (kw_desc)
     (kw_values) (kw_returning) (kw_into) (kw_where)
 ] @keyword
 
