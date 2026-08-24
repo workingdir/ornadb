@@ -1,8 +1,8 @@
 //! Local evaluation for closed CLIENT functions.
 
 use orna_protocol::{
-    ClientFrame, decode_active_value, decode_constructed_value, encode_active_client_frame,
-    encode_active_value, MAX_RESOURCE_BATCH_ITEMS, MAX_RESOURCE_TOTAL_ITEMS,
+    ClientFrame, MAX_RESOURCE_BATCH_ITEMS, MAX_RESOURCE_TOTAL_ITEMS, decode_active_value,
+    decode_constructed_value, encode_active_client_frame, encode_active_value,
 };
 use sha2::{Digest, Sha256};
 use std::{
@@ -13,25 +13,17 @@ use std::{
 };
 
 use orna_artifact::client_plan::{
-    CAPABILITY_FORMAT_VERSION, CapabilityArgumentSource, CapabilityClientPlan,
-    ClientExpressionNode, ClientLocal, ClientLocalKind, ClientPlan, ClientPlanError, EXPRESSION_FORMAT_VERSION,
-    InspectOperationNode, InspectProjection,
-    ExpressionClientPlan, FORMAT_IDENTITY, FORMAT_VERSION, InnerClientPlan,
-    LANGUAGE_VERSION_IDENTITY, OPAQUE_FORMAT_VERSION, OpaqueClientPlan, RESOURCE_FORMAT_VERSION, PROCEDURAL_FORMAT_VERSION,
-    ActionClientPlan, ActionTargetDomain, ProceduralClientPlan, ResourceClientPlan, ResourceKind,
-    ResourceOperationNode, STATE_FORMAT_VERSION, StateClientPlan,
-    StateDefault, StateScope,
+    ActionClientPlan, ActionTargetDomain, CAPABILITY_FORMAT_VERSION, CapabilityArgumentSource,
+    CapabilityClientPlan, ClientExpressionNode, ClientLocal, ClientLocalKind, ClientPlan,
+    ClientPlanError, EXPRESSION_FORMAT_VERSION, ExpressionClientPlan, FORMAT_IDENTITY,
+    FORMAT_VERSION, InnerClientPlan, InspectOperationNode, InspectProjection,
+    LANGUAGE_VERSION_IDENTITY, OPAQUE_FORMAT_VERSION, OpaqueClientPlan, PROCEDURAL_FORMAT_VERSION,
+    ProceduralClientPlan, RESOURCE_FORMAT_VERSION, ResourceClientPlan, ResourceKind,
+    ResourceOperationNode, STATE_FORMAT_VERSION, StateClientPlan, StateDefault, StateScope,
 };
 use orna_core::{
-    CallSiteId, FunctionId, FunctionRevisionId, InvocationId, LocalId, ParameterId, PrincipalId, StateSlotId,
-    TypeId,
-    system::{
-        SYS_INSPECT_INVOCATION_NODES_TYPE_ID, SYS_INSPECT_CALLS_TYPE_ID,
-        SYS_INSPECT_RESOURCES_TYPE_ID, SYS_INSPECT_STATE_CELLS_TYPE_ID,
-        SYS_INSPECT_UI_NODES_TYPE_ID, SYS_INSPECT_PRESENTATION_CANDIDATES_TYPE_ID,
-        SYS_INSPECT_RUNTIME_BINDINGS_TYPE_ID, SYS_INSPECT_SECURITY_DECISIONS_TYPE_ID,
-        SYS_INSPECT_SNAPSHOT_TYPE_ID, SYS_INSPECT_SNAPSHOT_OPTIONS_TYPE_ID, SYS_INSPECT_INVOCATION_TYPE_ID,
-    },
+    CallSiteId, FunctionId, FunctionRevisionId, InvocationId, LocalId, ParameterId, PrincipalId,
+    StateSlotId, TypeId,
     canonical_hash::{CanonicalHashError, artifact_payload_digest, catalogue_digest_with_context},
     catalogue::{
         FunctionDefinition, FunctionDomain, FunctionReturn, FunctionSecurity, FunctionVolatility,
@@ -40,16 +32,24 @@ use orna_core::{
     inspect::{
         INSPECT_RENDER_CARRIER_SIGNATURE, INSPECT_RENDER_CONTRACT, stable_inspect_error_code,
     },
+    inspect_carrier::{InspectCarrierEnvelope, InspectCarrierKind},
     revision::{
         ActiveDatabaseRevision, DefinitionReferenceKind, DefinitionReferenceTarget,
         ExecutableArtifactKind, FunctionSemanticHashVersion, RevisionPair, Sha256Digest,
         VerifiedStandardLibrarySnapshot,
     },
-    inspect_carrier::{InspectCarrierEnvelope, InspectCarrierKind},
     security::{AuthorisedInvocation, InvocationTarget, TargetClass},
     state::{
         UserStateCell, UserStateChange, UserStateKeyWithoutPrincipal, UserStateWriteOutcome,
         UserStateWriteResult,
+    },
+    system::{
+        SYS_INSPECT_CALLS_TYPE_ID, SYS_INSPECT_INVOCATION_NODES_TYPE_ID,
+        SYS_INSPECT_INVOCATION_TYPE_ID, SYS_INSPECT_PRESENTATION_CANDIDATES_TYPE_ID,
+        SYS_INSPECT_RESOURCES_TYPE_ID, SYS_INSPECT_RUNTIME_BINDINGS_TYPE_ID,
+        SYS_INSPECT_SECURITY_DECISIONS_TYPE_ID, SYS_INSPECT_SNAPSHOT_OPTIONS_TYPE_ID,
+        SYS_INSPECT_SNAPSHOT_TYPE_ID, SYS_INSPECT_STATE_CELLS_TYPE_ID,
+        SYS_INSPECT_UI_NODES_TYPE_ID,
     },
     types::{ResolvedType, StandardScalar, TypeDescriptor, TypeDescriptorKind},
     value::{ConstructedValueKind, FunctionArgument, OpaqueValue, OpaqueValueError, RuntimeValue},
@@ -73,8 +73,7 @@ pub use inspect_lifecycle::{
     InspectLifecycleError, InspectProjectionVersions,
 };
 pub use inspect_session::{
-    ClientInspectLifecycleCompletion, ClientInspectLifecycleRequest,
-    ClientInspectLifecycleSession,
+    ClientInspectLifecycleCompletion, ClientInspectLifecycleRequest, ClientInspectLifecycleSession,
 };
 
 /// The active revision, function revision, and root invocation selected for
@@ -103,10 +102,8 @@ struct ObserverLineage {
 
 impl ObserverLineage {
     fn top_level(invocation: InvocationId) -> Self {
-        let mut ancestors = [
-            InvocationId::from_bytes([0; 16]);
-            orna_artifact::client_plan::MAX_EXPRESSION_DEPTH + 1
-        ];
+        let mut ancestors = [InvocationId::from_bytes([0; 16]);
+            orna_artifact::client_plan::MAX_EXPRESSION_DEPTH + 1];
         ancestors[0] = invocation;
         Self {
             root: invocation,
@@ -255,7 +252,6 @@ impl ClientExecutionResult {
     }
 }
 
-
 /// Authority-free call descriptor carried by a transient std.action.Action.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ClientActionDescriptor {
@@ -351,16 +347,24 @@ impl ClientActionState {
         self.resource.as_ref().map(ClientResource::generation)
     }
     /// Returns the fresh identity assigned to the currently staged action.
-    pub fn invocation_id(&self) -> Option<InvocationId> { self.invocation_id }
-    fn resource_mut(&mut self) -> Option<&mut ClientResource> { self.resource.as_mut() }
+    pub fn invocation_id(&self) -> Option<InvocationId> {
+        self.invocation_id
+    }
+    fn resource_mut(&mut self) -> Option<&mut ClientResource> {
+        self.resource.as_mut()
+    }
     fn set_resource(&mut self, resource: ClientResource) {
-        if resource.generation().value() > self.tombstone.value() { self.tombstone = resource.generation(); }
+        if resource.generation().value() > self.tombstone.value() {
+            self.tombstone = resource.generation();
+        }
         self.resource = Some(resource);
     }
     fn stage_request(&mut self, request: ClientResourceRequest) {
         self.request = Some(request);
     }
-    fn stage_invocation(&mut self, invocation_id: InvocationId) { self.invocation_id = Some(invocation_id); }
+    fn stage_invocation(&mut self, invocation_id: InvocationId) {
+        self.invocation_id = Some(invocation_id);
+    }
     fn clear(&mut self) {
         if let Some(resource) = self.resource.take() {
             if resource.generation().value() > self.tombstone.value() {
@@ -370,10 +374,14 @@ impl ClientActionState {
         self.request = None;
         self.invocation_id = None;
     }
-    fn is_stale(&self, generation: ClientResourceGeneration) -> bool { generation.value() <= self.tombstone.value() }
+    fn is_stale(&self, generation: ClientResourceGeneration) -> bool {
+        generation.value() <= self.tombstone.value()
+    }
 }
 fn redacted_action_failure() -> ClientActionOutcome {
-    ClientActionOutcome::Failed { code: ACTION_FAILURE_CODE.to_owned() }
+    ClientActionOutcome::Failed {
+        code: ACTION_FAILURE_CODE.to_owned(),
+    }
 }
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ClientActionError {
@@ -675,11 +683,8 @@ impl fmt::Display for ClientResourceError {
             Self::TypeMismatch => {
                 formatter.write_str("CLIENT resource result does not match its type")
             }
-            Self::InvalidInvocationContext => {
-                formatter.write_str(
-                    "CLIENT resource invocation context must be valid NUL-free text",
-                )
-            }
+            Self::InvalidInvocationContext => formatter
+                .write_str("CLIENT resource invocation context must be valid NUL-free text"),
         }
     }
 }
@@ -888,7 +893,6 @@ impl ClientResourceRequest {
             generation: self.generation,
         }
     }
-
 }
 
 /// One result returned by a CLIENT resource executor.
@@ -954,7 +958,6 @@ pub enum ClientResourceCompletion {
         /// The request generation.
         generation: ClientResourceGeneration,
     },
-
 }
 impl ClientResourceCompletion {
     /// Returns the request identity that produced this completion.
@@ -1050,7 +1053,13 @@ impl ClientInspectRequest {
     /// Creates a request bound to one CLIENT execution context.
     pub fn new(context: ClientExecutionContext, operation: ClientInspectOperation) -> Self {
         let target_invocation_id = operation.target().and_then(inspect_invocation_target);
-        Self::with_provenance(context, operation, target_invocation_id, None, ObserverLineage::compatibility(context))
+        Self::with_provenance(
+            context,
+            operation,
+            target_invocation_id,
+            None,
+            ObserverLineage::compatibility(context),
+        )
     }
 
     /// Creates a request with a target identity recovered from canonical snapshot evidence.
@@ -1060,7 +1069,13 @@ impl ClientInspectRequest {
         target_invocation_id: InvocationId,
         lineage: ObserverLineage,
     ) -> Self {
-        Self::with_provenance(context, operation, Some(target_invocation_id), None, lineage)
+        Self::with_provenance(
+            context,
+            operation,
+            Some(target_invocation_id),
+            None,
+            lineage,
+        )
     }
 
     /// Creates a request carrying the checked snapshot-options value.
@@ -1240,7 +1255,10 @@ pub enum ClientInspectError {
     /// Nested Inspector operations exceeded the closed expression depth bound.
     RecursionLimit,
     /// The request context did not match the active revision.
-    RevisionMismatch { expected: RevisionPair, actual: RevisionPair },
+    RevisionMismatch {
+        expected: RevisionPair,
+        actual: RevisionPair,
+    },
 }
 
 impl fmt::Display for ClientInspectError {
@@ -1249,9 +1267,14 @@ impl fmt::Display for ClientInspectError {
             Self::Failed(code) => write!(formatter, "CLIENT Inspector failed: {code}"),
             Self::InvalidTarget => formatter.write_str("CLIENT Inspector target is invalid"),
             Self::InvalidSnapshot => formatter.write_str("CLIENT Inspector snapshot is invalid"),
-            Self::TypeMismatch => formatter.write_str("CLIENT Inspector provider returned the wrong type"),
-            Self::RecursionLimit => formatter.write_str("CLIENT Inspector recursion limit was exceeded"),
-            Self::RevisionMismatch { .. } => formatter.write_str("CLIENT Inspector request revision does not match the active revision"),
+            Self::TypeMismatch => {
+                formatter.write_str("CLIENT Inspector provider returned the wrong type")
+            }
+            Self::RecursionLimit => {
+                formatter.write_str("CLIENT Inspector recursion limit was exceeded")
+            }
+            Self::RevisionMismatch { .. } => formatter
+                .write_str("CLIENT Inspector request revision does not match the active revision"),
         }
     }
 }
@@ -1367,7 +1390,6 @@ where
         }
     }
 }
-
 
 /// Request metadata retained by the runtime solely for executor cancellation.
 ///
@@ -1584,7 +1606,6 @@ impl ClientResource {
         Ok(request)
     }
 
-
     /// Applies one executor completion through the resource invariants.
     pub fn apply_completion(
         &mut self,
@@ -1617,19 +1638,31 @@ impl ClientResource {
                 self.require_key(key)?;
                 self.append_stream_values(active, generation, values)
             }
-            ClientResourceCompletion::StreamCompleted { request_id, key, generation } => {
+            ClientResourceCompletion::StreamCompleted {
+                request_id,
+                key,
+                generation,
+            } => {
                 self.require_generation(generation)?;
                 self.require_request_id(request_id)?;
                 self.require_key(key)?;
                 self.complete_stream(active, generation)
             }
-            ClientResourceCompletion::Cancelled { request_id, key, generation } => {
+            ClientResourceCompletion::Cancelled {
+                request_id,
+                key,
+                generation,
+            } => {
                 self.require_generation(generation)?;
                 self.require_request_id(request_id)?;
                 self.require_key(key)?;
                 self.cancel(generation)
             }
-            ClientResourceCompletion::Pending { request_id, key, generation } => {
+            ClientResourceCompletion::Pending {
+                request_id,
+                key,
+                generation,
+            } => {
                 self.require_generation(generation)?;
                 self.require_request_id(request_id)?;
                 self.require_key(key)?;
@@ -1671,7 +1704,12 @@ impl ClientResource {
                 expected: self.key.target(),
             });
         }
-        if !active_resource_result_type_matches(active, self.key.target(), self.kind, self.expected_type) {
+        if !active_resource_result_type_matches(
+            active,
+            self.key.target(),
+            self.kind,
+            self.expected_type,
+        ) {
             return Err(ClientResourceError::TypeMismatch);
         }
         if !runtime_value_matches(active, &value, self.expected_type) {
@@ -1749,7 +1787,12 @@ impl ClientResource {
             });
         }
         if !active_supports_invocation_target(active, self.key.target())
-            || !active_resource_result_type_matches(active, self.key.target(), self.kind, self.expected_type)
+            || !active_resource_result_type_matches(
+                active,
+                self.key.target(),
+                self.kind,
+                self.expected_type,
+            )
         {
             return Err(ClientResourceError::TypeMismatch);
         }
@@ -1769,11 +1812,12 @@ impl ClientResource {
             return Err(ClientResourceError::TypeMismatch);
         }
         self.validate_stream_item_type(active)?;
-        let Some(item_descriptor) = supported_stream_item_descriptor(active, self.expected_type) else {
+        let Some(item_descriptor) = supported_stream_item_descriptor(active, self.expected_type)
+        else {
             return Err(ClientResourceError::TypeMismatch);
         };
-        let list_descriptor = TypeDescriptor::list(item_descriptor)
-            .map_err(|_| ClientResourceError::TypeMismatch)?;
+        let list_descriptor =
+            TypeDescriptor::list(item_descriptor).map_err(|_| ClientResourceError::TypeMismatch)?;
         let option_descriptor = TypeDescriptor::option(list_descriptor.clone())
             .map_err(|_| ClientResourceError::TypeMismatch)?;
         if let Some(values) = self.stream_batches.front() {
@@ -1781,7 +1825,10 @@ impl ClientResource {
                 .stream_queued_items
                 .checked_sub(values.len() as u64)
                 .ok_or(ClientResourceError::TypeMismatch)?;
-            let values = self.stream_batches.pop_front().expect("stream batch was checked");
+            let values = self
+                .stream_batches
+                .pop_front()
+                .expect("stream batch was checked");
             self.stream_queued_items = queued_items;
             let list = RuntimeValue::list(active, list_descriptor, values)
                 .map_err(|_| ClientResourceError::TypeMismatch)?;
@@ -1888,7 +1935,10 @@ impl ClientResource {
         Ok(self.generation)
     }
 
-    fn require_generation(&self, generation: ClientResourceGeneration) -> Result<(), ClientResourceError> {
+    fn require_generation(
+        &self,
+        generation: ClientResourceGeneration,
+    ) -> Result<(), ClientResourceError> {
         if generation != self.generation {
             return Err(ClientResourceError::StaleGeneration {
                 expected: self.generation,
@@ -1973,10 +2023,9 @@ fn supported_stream_item_descriptor(
     let descriptor = stream_item_descriptor(expected)?;
     match expected {
         ResolvedType::Scalar(_) => Some(descriptor),
-        ResolvedType::Named(type_id) => {
-            (active_has_enum_type(active, type_id) || active_has_record_type(active, type_id))
-                .then_some(descriptor)
-        }
+        ResolvedType::Named(type_id) => (active_has_enum_type(active, type_id)
+            || active_has_record_type(active, type_id))
+        .then_some(descriptor),
         ResolvedType::Value(type_id) => {
             let definition = active
                 .catalogue_hash_context()
@@ -2595,7 +2644,9 @@ impl ClientStateStore {
     ) -> &mut ClientResource {
         match self.resources.entry(key) {
             Entry::Occupied(entry) => entry.into_mut(),
-            Entry::Vacant(entry) => entry.insert(ClientResource::new_with_kind(key, kind, expected_type)),
+            Entry::Vacant(entry) => {
+                entry.insert(ClientResource::new_with_kind(key, kind, expected_type))
+            }
         }
     }
 
@@ -3140,7 +3191,10 @@ impl Error for ClientResourceExecutionError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::Invalid(source) => Some(source),
-            Self::ExecutorUnavailable | Self::Pending { .. } | Self::Failed(_) | Self::Cancelled => None,
+            Self::ExecutorUnavailable
+            | Self::Pending { .. }
+            | Self::Failed(_)
+            | Self::Cancelled => None,
         }
     }
 }
@@ -3745,13 +3799,13 @@ fn evaluate_client_function_in_state_context_with_executor(
                         .resources
                         .iter()
                         .filter_map(|(candidate_key, resource)| {
-                            let replacement_cancelled = state.resources.get(candidate_key).is_some_and(
-                                |previous| {
+                            let replacement_cancelled =
+                                state.resources.get(candidate_key).is_some_and(|previous| {
                                     previous.status() == ClientResourceStatus::Loading
                                         && resource.status() == ClientResourceStatus::Idle
-                                        && resource.generation().value() > previous.generation().value()
-                                },
-                            );
+                                        && resource.generation().value()
+                                            > previous.generation().value()
+                                });
                             let pending_resource = resource.key() == *key
                                 && resource.generation() == *generation
                                 && resource.status() == ClientResourceStatus::Loading;
@@ -3764,7 +3818,8 @@ fn evaluate_client_function_in_state_context_with_executor(
                     }
                 }
                 ClientExecutionError::ResourceEvaluation {
-                    source: ClientResourceExecutionError::Failed(_)
+                    source:
+                        ClientResourceExecutionError::Failed(_)
                         | ClientResourceExecutionError::Cancelled,
                     ..
                 } => {
@@ -3772,17 +3827,17 @@ fn evaluate_client_function_in_state_context_with_executor(
                     // fails. The caller can inspect the redacted failure or
                     // cancellation and decide whether to retry or invalidate.
                     for (key, resource) in &staged.resources {
-                        let replacement_cancelled = state.resources.get(key).is_some_and(
-                            |previous| {
+                        let replacement_cancelled =
+                            state.resources.get(key).is_some_and(|previous| {
                                 previous.status() == ClientResourceStatus::Loading
                                     && resource.status() == ClientResourceStatus::Idle
                                     && resource.generation().value() > previous.generation().value()
-                            },
-                        );
+                            });
                         if matches!(
                             resource.status(),
                             ClientResourceStatus::Failed | ClientResourceStatus::Cancelled
-                        ) || replacement_cancelled {
+                        ) || replacement_cancelled
+                        {
                             state.resources.insert(*key, resource.clone());
                         }
                     }
@@ -3797,13 +3852,12 @@ fn evaluate_client_function_in_state_context_with_executor(
                     // malformed, retain the changed Loading resource so the
                     // executor-owned request is not stranded in the staged clone.
                     for (key, resource) in &staged.resources {
-                        let replacement_cancelled = state.resources.get(key).is_some_and(
-                            |previous| {
+                        let replacement_cancelled =
+                            state.resources.get(key).is_some_and(|previous| {
                                 previous.status() == ClientResourceStatus::Loading
                                     && resource.status() == ClientResourceStatus::Idle
                                     && resource.generation().value() > previous.generation().value()
-                            },
-                        );
+                            });
                         let changed_identity = state.resources.get(key).is_none_or(|previous| {
                             previous.status() != resource.status()
                                 || previous.generation() != resource.generation()
@@ -3813,8 +3867,8 @@ fn evaluate_client_function_in_state_context_with_executor(
                             resource.status(),
                             ClientResourceStatus::Failed | ClientResourceStatus::Cancelled
                         ) && changed_identity;
-                        let loading_owned = resource.status() == ClientResourceStatus::Loading
-                            && changed_identity;
+                        let loading_owned =
+                            resource.status() == ClientResourceStatus::Loading && changed_identity;
                         if terminal_changed || loading_owned || replacement_cancelled {
                             state.resources.insert(*key, resource.clone());
                         }
@@ -3829,7 +3883,6 @@ fn evaluate_client_function_in_state_context_with_executor(
     let (context, value) = result;
     Ok(ClientExecutionResult { context, value })
 }
-
 
 fn evaluate_function(
     active: &ActiveDatabaseRevision,
@@ -3894,8 +3947,8 @@ fn evaluate_function(
                 let name =
                     capability::LocalCapabilityName::parse(requirement.name()).map_err(|_| {
                         ClientExecutionError::CapabilityDenied {
-                        context,
-                        capability: requirement.name().to_owned(),
+                            context,
+                            capability: requirement.name().to_owned(),
                         }
                     })?;
                 let declaration = capability::LocalCapabilityDeclaration::new(
@@ -4143,8 +4196,19 @@ fn evaluate_plan(
                 .map_err(|source| ClientExecutionError::InvalidArtifact { context, source })?;
             preflight_client_state_calls(active, &plan, context)?;
             evaluate_stream_state_plan(
-                active, &plan, context, lineage, expected, arguments, declarations, grants, state, depth,
-                principal, executor, local_environment,
+                active,
+                &plan,
+                context,
+                lineage,
+                expected,
+                arguments,
+                declarations,
+                grants,
+                state,
+                depth,
+                principal,
+                executor,
+                local_environment,
             )
         }
         ClientReturnShape::State(expected) => {
@@ -4172,8 +4236,20 @@ fn evaluate_plan(
                 .map_err(|source| ClientExecutionError::InvalidArtifact { context, source })?;
             preflight_client_procedural_calls(active, &plan, context)?;
             evaluate_procedural_plan(
-                active, &plan, context, lineage, expected, true, arguments, declarations, grants, state,
-                depth, principal, executor, local_environment,
+                active,
+                &plan,
+                context,
+                lineage,
+                expected,
+                true,
+                arguments,
+                declarations,
+                grants,
+                state,
+                depth,
+                principal,
+                executor,
+                local_environment,
             )
         }
         ClientReturnShape::Procedural(expected) => {
@@ -4201,15 +4277,39 @@ fn evaluate_plan(
             let plan = ActionClientPlan::decode(payload)
                 .map_err(|source| ClientExecutionError::InvalidArtifact { context, source })?;
             preflight_client_action_calls(active, plan.operation(), context)?;
-            evaluate_action_operation(active, plan.operation(), context, lineage, arguments, declarations, grants, state, depth, principal, executor, local_environment)
+            evaluate_action_operation(
+                active,
+                plan.operation(),
+                context,
+                lineage,
+                arguments,
+                declarations,
+                grants,
+                state,
+                depth,
+                principal,
+                executor,
+                local_environment,
+            )
         }
         ClientReturnShape::StreamResource(expected) => {
             let plan = ResourceClientPlan::decode(payload)
                 .map_err(|source| ClientExecutionError::InvalidArtifact { context, source })?;
             preflight_client_expression_calls(active, plan.expression(), context)?;
             evaluate_stream_resource_plan(
-                active, &plan, context, lineage, expected, arguments, declarations, grants, state, depth,
-                principal, executor, local_environment,
+                active,
+                &plan,
+                context,
+                lineage,
+                expected,
+                arguments,
+                declarations,
+                grants,
+                state,
+                depth,
+                principal,
+                executor,
+                local_environment,
             )
         }
         ClientReturnShape::Resource(expected) => {
@@ -4308,7 +4408,10 @@ fn evaluate_stream_expression_plan(
         );
     }
     if !expression_returns_stream(active, expression, local_environment) {
-        return Err(expression_error(context, ClientExpressionError::TypeMismatch));
+        return Err(expression_error(
+            context,
+            ClientExpressionError::TypeMismatch,
+        ));
     }
     evaluate_expression_plan(
         active,
@@ -4383,12 +4486,33 @@ fn evaluate_stream_state_plan(
     local_environment: &mut ClientLocalEnvironment,
 ) -> Result<RuntimeValue, ClientExecutionError> {
     initialize_client_state(
-        active, plan, context, lineage, arguments, declarations, grants, state, depth, principal, executor,
+        active,
+        plan,
+        context,
+        lineage,
+        arguments,
+        declarations,
+        grants,
+        state,
+        depth,
+        principal,
+        executor,
         local_environment,
     )?;
     evaluate_stream_expression_plan(
-        active, plan.expression(), context, lineage, expected, arguments, declarations, grants, state, depth,
-        principal, executor, local_environment,
+        active,
+        plan.expression(),
+        context,
+        lineage,
+        expected,
+        arguments,
+        declarations,
+        grants,
+        state,
+        depth,
+        principal,
+        executor,
+        local_environment,
     )
 }
 
@@ -4455,8 +4579,19 @@ fn evaluate_stream_resource_plan(
     local_environment: &mut ClientLocalEnvironment,
 ) -> Result<RuntimeValue, ClientExecutionError> {
     evaluate_stream_expression_plan(
-        active, plan.expression(), context, lineage, expected, arguments, declarations, grants, state, depth,
-        principal, executor, local_environment,
+        active,
+        plan.expression(),
+        context,
+        lineage,
+        expected,
+        arguments,
+        declarations,
+        grants,
+        state,
+        depth,
+        principal,
+        executor,
+        local_environment,
     )
 }
 
@@ -4517,35 +4652,80 @@ fn evaluate_procedural_plan(
 ) -> Result<RuntimeValue, ClientExecutionError> {
     for statement in plan.statements() {
         let local_id = statement.local();
-        let Some(local) = plan.locals().iter().find(|candidate| candidate.local_id() == local_id) else {
-            return Err(expression_error(context, ClientExpressionError::ParameterNotBound));
+        let Some(local) = plan
+            .locals()
+            .iter()
+            .find(|candidate| candidate.local_id() == local_id)
+        else {
+            return Err(expression_error(
+                context,
+                ClientExpressionError::ParameterNotBound,
+            ));
         };
         match statement {
             orna_artifact::client_plan::ClientStatement::Let { expression, .. } => {
                 if local_environment.contains_key(&local_id) {
-                    return Err(expression_error(context, ClientExpressionError::InvalidCall));
+                    return Err(expression_error(
+                        context,
+                        ClientExpressionError::InvalidCall,
+                    ));
                 }
                 let binding = evaluate_procedural_local(
-                    active, local, expression, context, lineage, arguments, declarations, grants, state,
-                    depth, principal, executor, local_environment,
+                    active,
+                    local,
+                    expression,
+                    context,
+                    lineage,
+                    arguments,
+                    declarations,
+                    grants,
+                    state,
+                    depth,
+                    principal,
+                    executor,
+                    local_environment,
                 )?;
                 local_environment.insert(local_id, binding);
             }
             orna_artifact::client_plan::ClientStatement::Assignment { expression, .. } => {
                 if !local_environment.contains_key(&local_id) {
-                    return Err(expression_error(context, ClientExpressionError::ParameterNotBound));
+                    return Err(expression_error(
+                        context,
+                        ClientExpressionError::ParameterNotBound,
+                    ));
                 }
                 let binding = evaluate_procedural_local(
-                    active, local, expression, context, lineage, arguments, declarations, grants, state,
-                    depth, principal, executor, local_environment,
+                    active,
+                    local,
+                    expression,
+                    context,
+                    lineage,
+                    arguments,
+                    declarations,
+                    grants,
+                    state,
+                    depth,
+                    principal,
+                    executor,
+                    local_environment,
                 )?;
                 local_environment.insert(local_id, binding);
             }
         }
     }
     let value = evaluate_expression(
-        active, plan.return_expression(), context, lineage, arguments, declarations, grants, state, depth,
-        principal, executor, local_environment,
+        active,
+        plan.return_expression(),
+        context,
+        lineage,
+        arguments,
+        declarations,
+        grants,
+        state,
+        depth,
+        principal,
+        executor,
+        local_environment,
     )?;
     let result_matches = if stream_result {
         expression_returns_stream(active, plan.return_expression(), local_environment)
@@ -4562,7 +4742,10 @@ fn evaluate_procedural_plan(
     if result_matches {
         Ok(value)
     } else {
-        Err(expression_error(context, ClientExpressionError::TypeMismatch))
+        Err(expression_error(
+            context,
+            ClientExpressionError::TypeMismatch,
+        ))
     }
 }
 
@@ -4584,14 +4767,28 @@ fn evaluate_procedural_local(
     match local.kind() {
         ClientLocalKind::Value => {
             if procedural_resource_kind_for_runtime(expression, local_environment).is_some() {
-                return Err(expression_error(context, ClientExpressionError::TypeMismatch));
+                return Err(expression_error(
+                    context,
+                    ClientExpressionError::TypeMismatch,
+                ));
             }
             let expected = resolve_client_local_type(active, local.type_id())
                 .ok_or_else(|| expression_error(context, ClientExpressionError::TypeMismatch))?;
             let stream_await = expression_returns_stream(active, expression, local_environment);
             let value = evaluate_expression_plan(
-                active, expression, context, lineage, expected, arguments, declarations, grants, state, depth,
-                principal, executor, local_environment,
+                active,
+                expression,
+                context,
+                lineage,
+                expected,
+                arguments,
+                declarations,
+                grants,
+                state,
+                depth,
+                principal,
+                executor,
+                local_environment,
             )?;
             if stream_await {
                 Ok(ClientLocalBinding::StreamValue(value))
@@ -4602,10 +4799,17 @@ fn evaluate_procedural_local(
         ClientLocalKind::Resource(kind) => {
             let ClientExpressionNode::Resource { operation } = expression else {
                 let ClientExpressionNode::LocalRead { local: source } = expression else {
-                    return Err(expression_error(context, ClientExpressionError::TypeMismatch));
+                    return Err(expression_error(
+                        context,
+                        ClientExpressionError::TypeMismatch,
+                    ));
                 };
-                let Some(ClientLocalBinding::Resource(operation)) = local_environment.get(source) else {
-                    return Err(expression_error(context, ClientExpressionError::ParameterNotBound));
+                let Some(ClientLocalBinding::Resource(operation)) = local_environment.get(source)
+                else {
+                    return Err(expression_error(
+                        context,
+                        ClientExpressionError::ParameterNotBound,
+                    ));
                 };
                 validate_procedural_resource_binding(active, local, kind, operation, context)?;
                 return Ok(ClientLocalBinding::Resource(operation.clone()));
@@ -4639,11 +4843,17 @@ fn validate_procedural_resource_binding(
     context: ClientExecutionContext,
 ) -> Result<(), ClientExecutionError> {
     if operation.kind() != kind {
-        return Err(expression_error(context, ClientExpressionError::TypeMismatch));
+        return Err(expression_error(
+            context,
+            ClientExpressionError::TypeMismatch,
+        ));
     }
     let resolved = resource_operation_result_type(active, operation, context)?;
     if !resource_type_matches_id(active, resolved, local.type_id()) {
-        return Err(expression_error(context, ClientExpressionError::TypeMismatch));
+        return Err(expression_error(
+            context,
+            ClientExpressionError::TypeMismatch,
+        ));
     }
     Ok(())
 }
@@ -4691,7 +4901,9 @@ fn evaluate_capability_plan(
                     local_environment,
                 );
             }
-            let (ClientReturnShape::Expression(expected) | ClientReturnShape::Inspect(expected)) = return_shape else {
+            let (ClientReturnShape::Expression(expected) | ClientReturnShape::Inspect(expected)) =
+                return_shape
+            else {
                 unreachable!("function shape was validated against the inner plan version");
             };
             evaluate_expression_plan(
@@ -4713,8 +4925,19 @@ fn evaluate_capability_plan(
         InnerClientPlan::State(inner) => {
             if let ClientReturnShape::StreamState(expected) = return_shape {
                 return evaluate_stream_state_plan(
-                    active, inner, context, lineage, expected, arguments, declarations, grants, state, depth,
-                    principal, executor, local_environment,
+                    active,
+                    inner,
+                    context,
+                    lineage,
+                    expected,
+                    arguments,
+                    declarations,
+                    grants,
+                    state,
+                    depth,
+                    principal,
+                    executor,
+                    local_environment,
                 );
             }
             let ClientReturnShape::State(expected) = return_shape else {
@@ -4739,27 +4962,77 @@ fn evaluate_capability_plan(
         InnerClientPlan::Procedural(inner) => {
             if let ClientReturnShape::StreamProcedural(expected) = return_shape {
                 return evaluate_procedural_plan(
-                    active, inner, context, lineage, expected, true, arguments, declarations, grants, state, depth,
-                    principal, executor, local_environment,
+                    active,
+                    inner,
+                    context,
+                    lineage,
+                    expected,
+                    true,
+                    arguments,
+                    declarations,
+                    grants,
+                    state,
+                    depth,
+                    principal,
+                    executor,
+                    local_environment,
                 );
             }
             let ClientReturnShape::Procedural(expected) = return_shape else {
                 unreachable!("function shape was validated against the inner plan version");
             };
             evaluate_procedural_plan(
-                active, inner, context, lineage, expected, false, arguments, declarations, grants, state, depth, principal,
-                executor, local_environment,
+                active,
+                inner,
+                context,
+                lineage,
+                expected,
+                false,
+                arguments,
+                declarations,
+                grants,
+                state,
+                depth,
+                principal,
+                executor,
+                local_environment,
             )
         }
         InnerClientPlan::Action(inner) => {
-            let ClientReturnShape::Action(_expected) = return_shape else { unreachable!("function shape was validated against the inner plan version"); };
-            evaluate_action_operation(active, inner.operation(), context, lineage, arguments, declarations, grants, state, depth, principal, executor, local_environment)
+            let ClientReturnShape::Action(_expected) = return_shape else {
+                unreachable!("function shape was validated against the inner plan version");
+            };
+            evaluate_action_operation(
+                active,
+                inner.operation(),
+                context,
+                lineage,
+                arguments,
+                declarations,
+                grants,
+                state,
+                depth,
+                principal,
+                executor,
+                local_environment,
+            )
         }
         InnerClientPlan::Resource(inner) => {
             if let ClientReturnShape::StreamResource(expected) = return_shape {
                 return evaluate_stream_resource_plan(
-                    active, inner, context, lineage, expected, arguments, declarations, grants, state, depth,
-                    principal, executor, local_environment,
+                    active,
+                    inner,
+                    context,
+                    lineage,
+                    expected,
+                    arguments,
+                    declarations,
+                    grants,
+                    state,
+                    depth,
+                    principal,
+                    executor,
+                    local_environment,
                 );
             }
             let ClientReturnShape::Resource(expected) = return_shape else {
@@ -4844,14 +5117,16 @@ fn resource_operation_result_type(
     operation: &ResourceOperationNode,
     context: ClientExecutionContext,
 ) -> Result<ResolvedType, ClientExecutionError> {
-    let raw_target = InvocationTarget::new(operation.target_function(), operation.target_revision());
-    let invalid = ||
+    let raw_target =
+        InvocationTarget::new(operation.target_function(), operation.target_revision());
+    let invalid = || {
         evaluate_resource_error(
             context,
             ClientResourceExecutionError::Invalid(ClientResourceError::TargetMismatch {
                 expected: raw_target,
             }),
-        );
+        )
+    };
     let Some(resolved) = resolve_resource_operation_target(active, operation) else {
         return Err(invalid());
     };
@@ -4859,12 +5134,8 @@ fn resource_operation_result_type(
         return Err(invalid());
     }
     let (expected_kind, expected) = match (operation.kind(), resolved.definition.return_type()) {
-        (ResourceKind::Scalar, FunctionReturn::Single(result)) => {
-            (ResourceKind::Scalar, *result)
-        }
-        (ResourceKind::Stream, FunctionReturn::Stream(item)) => {
-            (ResourceKind::Stream, *item)
-        }
+        (ResourceKind::Scalar, FunctionReturn::Single(result)) => (ResourceKind::Scalar, *result),
+        (ResourceKind::Stream, FunctionReturn::Stream(item)) => (ResourceKind::Stream, *item),
         _ => {
             return Err(evaluate_resource_error(
                 context,
@@ -4897,7 +5168,8 @@ fn evaluate_resource_expression(
     executor: &mut Option<&mut dyn ClientResourceExecutor>,
     local_environment: &mut ClientLocalEnvironment,
 ) -> Result<RuntimeValue, ClientExecutionError> {
-    let raw_target = InvocationTarget::new(operation.target_function(), operation.target_revision());
+    let raw_target =
+        InvocationTarget::new(operation.target_function(), operation.target_revision());
     let Some(resolved_target) = resolve_resource_operation_target(active, operation) else {
         return Err(evaluate_resource_error(
             context,
@@ -4911,7 +5183,10 @@ fn evaluate_resource_expression(
     let target_definition = resolved_target.definition;
     let mut evaluated = Vec::with_capacity(operation.arguments().len());
     for (parameter, expression) in operation.arguments() {
-        if evaluated.iter().any(|candidate: &FunctionArgument| candidate.parameter() == *parameter) {
+        if evaluated
+            .iter()
+            .any(|candidate: &FunctionArgument| candidate.parameter() == *parameter)
+        {
             return Err(evaluate_resource_error(
                 context,
                 ClientResourceExecutionError::Invalid(ClientResourceError::DuplicateArgument {
@@ -4959,12 +5234,13 @@ fn evaluate_resource_expression(
         })?;
         evaluated.push(argument);
     }
-    let evaluated = validate_resource_arguments(active, target, &evaluated)
-    .map_err(|source| {
+    let evaluated = validate_resource_arguments(active, target, &evaluated).map_err(|source| {
         evaluate_resource_error(context, ClientResourceExecutionError::Invalid(source))
     })?;
-    let digest = ClientResourceKey::canonical_arguments_digest(active, &evaluated)
-        .map_err(|source| evaluate_resource_error(context, ClientResourceExecutionError::Invalid(source)))?;
+    let digest =
+        ClientResourceKey::canonical_arguments_digest(active, &evaluated).map_err(|source| {
+            evaluate_resource_error(context, ClientResourceExecutionError::Invalid(source))
+        })?;
     let key = ClientResourceKey::new(
         target,
         principal,
@@ -5061,19 +5337,33 @@ fn evaluate_resource_expression(
             ),
             evaluated,
         )
-        .map_err(|source| evaluate_resource_error(context, ClientResourceExecutionError::Invalid(source)))?;
+        .map_err(|source| {
+            evaluate_resource_error(context, ClientResourceExecutionError::Invalid(source))
+        })?;
     let completion = executor.execute(request.clone());
     let completion_request_id = completion.request_id();
     let (completion_key, completion_generation) = match &completion {
-        ClientResourceCompletion::Ready { key, generation, .. }
-        | ClientResourceCompletion::StreamValues { key, generation, .. }
-        | ClientResourceCompletion::StreamCompleted { key, generation, .. }
-        | ClientResourceCompletion::Pending { key, generation, .. }
-        | ClientResourceCompletion::Failed { key, generation, .. }
-        | ClientResourceCompletion::Cancelled { key, generation, .. } => (*key, *generation),
+        ClientResourceCompletion::Ready {
+            key, generation, ..
+        }
+        | ClientResourceCompletion::StreamValues {
+            key, generation, ..
+        }
+        | ClientResourceCompletion::StreamCompleted {
+            key, generation, ..
+        }
+        | ClientResourceCompletion::Pending {
+            key, generation, ..
+        }
+        | ClientResourceCompletion::Failed {
+            key, generation, ..
+        }
+        | ClientResourceCompletion::Cancelled {
+            key, generation, ..
+        } => (*key, *generation),
     };
-    let same_generation = completion_key == request.key()
-        && completion_generation == request.generation();
+    let same_generation =
+        completion_key == request.key() && completion_generation == request.generation();
     let same_request = completion_request_id == request.request_id();
     if let Err(source) = resource.apply_completion(active, completion) {
         if same_generation && same_request {
@@ -5152,7 +5442,9 @@ fn evaluate_resource_expression(
         )),
         status => Err(evaluate_resource_error(
             context,
-            ClientResourceExecutionError::Invalid(ClientResourceError::InvalidTransition { status }),
+            ClientResourceExecutionError::Invalid(ClientResourceError::InvalidTransition {
+                status,
+            }),
         )),
     }
 }
@@ -5183,11 +5475,9 @@ fn read_stream_resource_value(
             ClientResourceStatus::Idle => {
                 return Err(evaluate_resource_error(
                     context,
-                    ClientResourceExecutionError::Invalid(
-                        ClientResourceError::InvalidTransition {
-                            status: ClientResourceStatus::Idle,
-                        },
-                    ),
+                    ClientResourceExecutionError::Invalid(ClientResourceError::InvalidTransition {
+                        status: ClientResourceStatus::Idle,
+                    }),
                 ));
             }
             ClientResourceStatus::Loading | ClientResourceStatus::Ready => {}
@@ -5301,7 +5591,8 @@ pub fn encode_action_payload(
         return Err(action_payload_error("action payload is too large"));
     }
     let mut payload = Vec::new();
-    payload.try_reserve(payload_len)
+    payload
+        .try_reserve(payload_len)
         .map_err(|_| action_payload_error("action payload allocation failed"))?;
     payload.extend_from_slice(ACTION_MAGIC.as_bytes());
     payload.extend_from_slice(&length.to_be_bytes());
@@ -5410,7 +5701,7 @@ fn action_target_result_type(
     let resolved = match resolved_target.definition.return_type() {
         FunctionReturn::Single(resolved) => *resolved,
         FunctionReturn::Stream(_) | FunctionReturn::Rows(_) => {
-            return Err(ClientActionError::ResultTypeMismatch)
+            return Err(ClientActionError::ResultTypeMismatch);
         }
     };
     let kind = ResourceKind::Scalar;
@@ -5539,12 +5830,24 @@ fn complete_client_action_inner(
 ) -> Result<ClientActionOutcome, ClientActionError> {
     let completion_request_id = completion.request_id();
     let (completion_key, completion_generation) = match &completion {
-        ClientResourceCompletion::Ready { key, generation, .. }
-        | ClientResourceCompletion::StreamValues { key, generation, .. }
-        | ClientResourceCompletion::StreamCompleted { key, generation, .. }
-        | ClientResourceCompletion::Pending { key, generation, .. }
-        | ClientResourceCompletion::Failed { key, generation, .. }
-        | ClientResourceCompletion::Cancelled { key, generation, .. } => (*key, *generation),
+        ClientResourceCompletion::Ready {
+            key, generation, ..
+        }
+        | ClientResourceCompletion::StreamValues {
+            key, generation, ..
+        }
+        | ClientResourceCompletion::StreamCompleted {
+            key, generation, ..
+        }
+        | ClientResourceCompletion::Pending {
+            key, generation, ..
+        }
+        | ClientResourceCompletion::Failed {
+            key, generation, ..
+        }
+        | ClientResourceCompletion::Cancelled {
+            key, generation, ..
+        } => (*key, *generation),
     };
     let Some(resource) = action_state.resource.as_ref() else {
         return if action_state.is_stale(completion_generation) {
@@ -5595,7 +5898,9 @@ fn complete_client_action_inner(
                             ClientResourceStatus::Ready => ClientActionOutcome::Completed,
                             ClientResourceStatus::Failed => redacted_action_failure(),
                             ClientResourceStatus::Cancelled => ClientActionOutcome::Cancelled,
-                            ClientResourceStatus::Idle | ClientResourceStatus::Loading => unreachable!(),
+                            ClientResourceStatus::Idle | ClientResourceStatus::Loading => {
+                                unreachable!()
+                            }
                         };
                         action_state.clear();
                         return Ok(outcome);
@@ -5614,7 +5919,9 @@ fn complete_client_action_inner(
         .as_ref()
         .expect("action resource remains after completion")
         .status();
-    if status == ClientResourceStatus::Loading { return Err(ClientActionError::Pending); }
+    if status == ClientResourceStatus::Loading {
+        return Err(ClientActionError::Pending);
+    }
     let outcome = match status {
         ClientResourceStatus::Ready => ClientActionOutcome::Completed,
         ClientResourceStatus::Failed => redacted_action_failure(),
@@ -5659,8 +5966,16 @@ pub fn trigger_client_action(
     executor: &mut dyn ClientResourceExecutor,
 ) -> Result<ClientActionOutcome, ClientActionError> {
     trigger_client_action_with_lineage(
-        active, action, authorisation, parent, action_state, declarations, grants, state,
-        parent.observer_lineage(), executor,
+        active,
+        action,
+        authorisation,
+        parent,
+        action_state,
+        declarations,
+        grants,
+        state,
+        parent.observer_lineage(),
+        executor,
     )
 }
 
@@ -5686,20 +6001,18 @@ fn client_action_target_is_provenance_safe(
 
 /// Adapts nested CLIENT resource execution to the terminal action contract.
 ///
-/// A nested resource has no continuation surface in action v1. If its executor reports
-/// `Pending`, cancel that request before publishing one redacted terminal action
-/// failure; otherwise the staged resource would keep a live request after the action has ended.
+/// A nested resource has no independent action completion surface. If its
+/// executor reports `Pending`, cancel the request and return that terminal
+/// cancellation rather than retaining a pending outer action.
 struct ClientActionNestedExecutor<'a> {
     inner: &'a mut dyn ClientResourceExecutor,
 }
 
 impl ClientResourceExecutor for ClientActionNestedExecutor<'_> {
     fn execute(&mut self, request: ClientResourceRequest) -> ClientResourceCompletion {
-        let failure_request = request.clone();
-        let completion = self.inner.execute(request);
+        let completion = self.inner.execute(request.clone());
         if matches!(completion, ClientResourceCompletion::Pending { .. }) {
-            let _ = self.inner.cancel(failure_request.clone());
-            return failure_request.failed(ACTION_FAILURE_CODE.to_owned());
+            return self.inner.cancel(request);
         }
         completion
     }
@@ -5763,7 +6076,9 @@ fn trigger_client_action_with_lineage(
             );
             if let Some(resource) = action_state.resource_mut() {
                 if resource.status() == ClientResourceStatus::Loading {
-                    if resource.key() != key { return Err(ClientActionError::Executor(ACTION_FAILURE_CODE.to_owned())); }
+                    if resource.key() != key {
+                        return Err(ClientActionError::Executor(ACTION_FAILURE_CODE.to_owned()));
+                    }
                     return Err(ClientActionError::Pending);
                 }
                 action_state.clear();
@@ -5804,7 +6119,9 @@ fn trigger_client_action_with_lineage(
             );
             if let Some(resource) = action_state.resource_mut() {
                 if resource.status() == ClientResourceStatus::Loading {
-                    if resource.key() != key { return Err(ClientActionError::Executor(ACTION_FAILURE_CODE.to_owned())); }
+                    if resource.key() != key {
+                        return Err(ClientActionError::Executor(ACTION_FAILURE_CODE.to_owned()));
+                    }
                     return Err(ClientActionError::Pending);
                 }
                 action_state.clear();
@@ -5858,7 +6175,8 @@ fn trigger_client_action_with_lineage(
                 }) => request.cancelled(),
                 Err(_) => request.failed(ACTION_FAILURE_CODE.to_owned()),
             };
-            let outcome = complete_client_action(active, action_state, completion, &mut nested_executor)?;
+            let outcome =
+                complete_client_action(active, action_state, completion, &mut nested_executor)?;
             if outcome == ClientActionOutcome::Completed {
                 *state = staged;
             }
@@ -5890,21 +6208,19 @@ fn evaluate_external_contract(
             identity: identity.to_owned(),
         });
     };
-    let request = ClientExternalContractRequest::with_lineage(
-        context,
-        identity,
-        arguments.to_vec(),
-        lineage,
-    );
+    let request =
+        ClientExternalContractRequest::with_lineage(context, identity, arguments.to_vec(), lineage);
     executor.external_contract(request).map_err(|code| {
         if identity == INSPECT_RENDER_CONTRACT {
             ClientExecutionError::Inspect {
                 context,
-                source: ClientInspectError::Failed(if code == EXTERNAL_CONTRACT_RUNTIME_UNAVAILABLE {
-                    "inspect.runtime_unavailable".to_owned()
-                } else {
-                    stable_inspect_provider_error(&code)
-                }),
+                source: ClientInspectError::Failed(
+                    if code == EXTERNAL_CONTRACT_RUNTIME_UNAVAILABLE {
+                        "inspect.runtime_unavailable".to_owned()
+                    } else {
+                        stable_inspect_provider_error(&code)
+                    },
+                ),
             }
         } else {
             ClientExecutionError::ExternalContract {
@@ -5915,10 +6231,7 @@ fn evaluate_external_contract(
     })
 }
 
-
-fn inspect_render_contract_error(
-    context: ClientExecutionContext,
-) -> ClientExecutionError {
+fn inspect_render_contract_error(context: ClientExecutionContext) -> ClientExecutionError {
     ClientExecutionError::Inspect {
         context,
         source: inspect_carrier_error("inspect.malformed_carrier"),
@@ -5943,7 +6256,9 @@ fn inspect_render_artifact_is_external(
         CAPABILITY_FORMAT_VERSION => CapabilityClientPlan::decode(revision.artifact().payload())
             .ok()
             .and_then(|plan| match plan.inner_plan() {
-                InnerClientPlan::Expression(expression) => Some(is_external(expression.expression())),
+                InnerClientPlan::Expression(expression) => {
+                    Some(is_external(expression.expression()))
+                }
                 _ => None,
             })
             .unwrap_or(false),
@@ -5980,8 +6295,10 @@ fn validate_inspect_render_contract(
     {
         return Err(inspect_render_contract_error(context));
     }
-    for (index, ((parameter_id, value), (expected_name, expected_type, _))) in
-        arguments.iter().zip(INSPECT_RENDER_CARRIER_SIGNATURE).enumerate()
+    for (index, ((parameter_id, value), (expected_name, expected_type, _))) in arguments
+        .iter()
+        .zip(INSPECT_RENDER_CARRIER_SIGNATURE)
+        .enumerate()
     {
         let parameter = &definition.parameters()[index];
         if parameter.id() != *parameter_id
@@ -6007,9 +6324,8 @@ fn validate_inspect_render_contract(
     // envelope; projection rows retain that fact in memory when populated.
     // Empty projections remain valid, but then there is no carrier-local target
     // evidence to compare (the opaque API exposes no generic target metadata).
-    for ((_, value), (_, expected_type, expected_kind)) in arguments
-        .iter()
-        .zip(INSPECT_RENDER_CARRIER_SIGNATURE)
+    for ((_, value), (_, expected_type, expected_kind)) in
+        arguments.iter().zip(INSPECT_RENDER_CARRIER_SIGNATURE)
     {
         let carrier = decode_inspect_carrier(active, value, expected_type)
             .map_err(|_| inspect_render_contract_error(context))?;
@@ -6025,10 +6341,7 @@ fn validate_inspect_render_contract(
     Ok(())
 }
 
-fn inspect_render_ui_value_matches(
-    active: &ActiveDatabaseRevision,
-    value: &RuntimeValue,
-) -> bool {
+fn inspect_render_ui_value_matches(active: &ActiveDatabaseRevision, value: &RuntimeValue) -> bool {
     let RuntimeValue::Opaque(opaque) = value else {
         return false;
     };
@@ -6041,13 +6354,18 @@ fn inspect_render_ui_value_matches(
     let Ok(registry) = registered_opaque_codecs(standard) else {
         return false;
     };
-    OpaqueValue::new(active, &registry, STD_UI_TYPE_ID, opaque.canonical_payload()).is_ok()
+    OpaqueValue::new(
+        active,
+        &registry,
+        STD_UI_TYPE_ID,
+        opaque.canonical_payload(),
+    )
+    .is_ok()
 }
 
 fn inspect_carrier_error(code: &'static str) -> ClientInspectError {
     ClientInspectError::Failed(code.to_owned())
 }
-
 
 fn decode_inspect_carrier_payload(
     active: &ActiveDatabaseRevision,
@@ -6151,11 +6469,8 @@ fn inspect_projection_target_from_envelope(
         if payload[89] != 1 || payload[90] > 4 {
             return Err(inspect_carrier_error("inspect.malformed_carrier"));
         }
-        let row_target = InvocationId::from_bytes(
-            payload[25..41]
-                .try_into()
-                .expect("projection target width"),
-        );
+        let row_target =
+            InvocationId::from_bytes(payload[25..41].try_into().expect("projection target width"));
         if row_target.to_bytes() == [0; 16] {
             return Err(inspect_carrier_error("inspect.invalid_target"));
         }
@@ -6215,10 +6530,7 @@ fn inspect_projection_result_type(projection: InspectProjection) -> TypeId {
 }
 
 #[cfg(test)]
-fn inspect_target_is_observer(
-    context: ClientExecutionContext,
-    target: InvocationId,
-) -> bool {
+fn inspect_target_is_observer(context: ClientExecutionContext, target: InvocationId) -> bool {
     inspect_target_is_observer_with_lineage(ObserverLineage::compatibility(context), target)
 }
 
@@ -6253,12 +6565,16 @@ fn decode_inspect_snapshot_target_row(
         return Err(inspect_carrier_error("inspect.invalid_target"));
     }
     let mut offset = 57;
-    let outcome = *row.get(offset).ok_or_else(|| inspect_carrier_error("inspect.malformed_carrier"))?;
+    let outcome = *row
+        .get(offset)
+        .ok_or_else(|| inspect_carrier_error("inspect.malformed_carrier"))?;
     if !(1..=4).contains(&outcome) {
         return Err(inspect_carrier_error("inspect.malformed_carrier"));
     }
     offset += 1 + 8;
-    let result = *row.get(offset).ok_or_else(|| inspect_carrier_error("inspect.malformed_carrier"))?;
+    let result = *row
+        .get(offset)
+        .ok_or_else(|| inspect_carrier_error("inspect.malformed_carrier"))?;
     offset += 1;
     match result {
         0 => {}
@@ -6273,10 +6589,12 @@ fn decode_inspect_snapshot_target_row(
                 return Err(inspect_carrier_error("inspect.malformed_carrier"));
             }
             offset += 8;
-        },
+        }
         _ => return Err(inspect_carrier_error("inspect.malformed_carrier")),
     }
-    let duration = *row.get(offset).ok_or_else(|| inspect_carrier_error("inspect.malformed_carrier"))?;
+    let duration = *row
+        .get(offset)
+        .ok_or_else(|| inspect_carrier_error("inspect.malformed_carrier"))?;
     offset += 1;
     match duration {
         0 => {}
@@ -6373,8 +6691,18 @@ fn evaluate_inspect_expression(
                 });
             }
             let target = evaluate_expression(
-                active, target, context, lineage, arguments, declarations, grants, state, depth + 1,
-                principal, executor, local_environment,
+                active,
+                target,
+                context,
+                lineage,
+                arguments,
+                declarations,
+                grants,
+                state,
+                depth + 1,
+                principal,
+                executor,
+                local_environment,
             )?;
             let Some(invocation) = inspect_invocation_target(&target) else {
                 return Err(ClientExecutionError::Inspect {
@@ -6382,8 +6710,7 @@ fn evaluate_inspect_expression(
                     source: ClientInspectError::InvalidTarget,
                 });
             };
-            if inspect_target_is_observer_with_lineage(lineage, invocation)
-            {
+            if inspect_target_is_observer_with_lineage(lineage, invocation) {
                 return Err(ClientExecutionError::Inspect {
                     context,
                     source: inspect_carrier_error("inspect.recursion"),
@@ -6391,8 +6718,18 @@ fn evaluate_inspect_expression(
             }
             if let Some(options) = options {
                 let options = evaluate_expression(
-                    active, options, context, lineage, arguments, declarations, grants, state, depth + 1,
-                    principal, executor, local_environment,
+                    active,
+                    options,
+                    context,
+                    lineage,
+                    arguments,
+                    declarations,
+                    grants,
+                    state,
+                    depth + 1,
+                    principal,
+                    executor,
+                    local_environment,
                 )?;
                 if !runtime_value_matches(
                     active,
@@ -6409,21 +6746,31 @@ fn evaluate_inspect_expression(
             target_invocation_id = Some(invocation);
             ClientInspectOperation::Snapshot { target }
         }
-        InspectOperationNode::Projection { projection, snapshot } => {
+        InspectOperationNode::Projection {
+            projection,
+            snapshot,
+        } => {
             let snapshot = evaluate_expression(
-                active, snapshot, context, lineage, arguments, declarations, grants, state, depth + 1,
-                principal, executor, local_environment,
-            )?;
-            let snapshot_envelope = match decode_inspect_carrier(
                 active,
-                &snapshot,
-                SYS_INSPECT_SNAPSHOT_TYPE_ID,
-            ) {
-                Ok(envelope) => envelope,
-                Err(source) => {
-                    return Err(ClientExecutionError::Inspect { context, source });
-                }
-            };
+                snapshot,
+                context,
+                lineage,
+                arguments,
+                declarations,
+                grants,
+                state,
+                depth + 1,
+                principal,
+                executor,
+                local_environment,
+            )?;
+            let snapshot_envelope =
+                match decode_inspect_carrier(active, &snapshot, SYS_INSPECT_SNAPSHOT_TYPE_ID) {
+                    Ok(envelope) => envelope,
+                    Err(source) => {
+                        return Err(ClientExecutionError::Inspect { context, source });
+                    }
+                };
             let invocation = inspect_snapshot_target_from_envelope(active, &snapshot_envelope)
                 .map_err(|source| ClientExecutionError::Inspect { context, source })?;
             if inspect_target_is_observer_with_lineage(lineage, invocation) {
@@ -6461,19 +6808,17 @@ fn evaluate_inspect_expression(
             target,
             lineage,
         ),
-        (None, None) => ClientInspectRequest::with_provenance(
-            context,
-            operation.clone(),
-            None,
-            None,
-            lineage,
-        ),
+        (None, None) => {
+            ClientInspectRequest::with_provenance(context, operation.clone(), None, None, lineage)
+        }
         (None, Some(_)) => unreachable!("snapshot options require a target"),
     };
-    let value = executor.inspect(request).map_err(|code| ClientExecutionError::Inspect {
-        context,
-        source: ClientInspectError::Failed(stable_inspect_provider_error(&code)),
-    })?;
+    let value = executor
+        .inspect(request)
+        .map_err(|code| ClientExecutionError::Inspect {
+            context,
+            source: ClientInspectError::Failed(stable_inspect_provider_error(&code)),
+        })?;
     let expected = match operation {
         ClientInspectOperation::Snapshot { .. } => SYS_INSPECT_SNAPSHOT_TYPE_ID,
         ClientInspectOperation::Projection { projection, .. } => {
@@ -6540,32 +6885,89 @@ fn evaluate_expression(
     match expression {
         ClientExpressionNode::Await { expression } => match expression.as_ref() {
             ClientExpressionNode::Resource { operation } => evaluate_resource_expression(
-                active, operation, context, lineage, arguments, declarations, grants, state, depth, principal,
-                executor, local_environment,
+                active,
+                operation,
+                context,
+                lineage,
+                arguments,
+                declarations,
+                grants,
+                state,
+                depth,
+                principal,
+                executor,
+                local_environment,
             ),
             ClientExpressionNode::LocalRead { local } => {
-                let Some(ClientLocalBinding::Resource(operation)) = local_environment.get(local) else {
-                    return Err(expression_error(context, ClientExpressionError::ParameterNotBound));
+                let Some(ClientLocalBinding::Resource(operation)) = local_environment.get(local)
+                else {
+                    return Err(expression_error(
+                        context,
+                        ClientExpressionError::ParameterNotBound,
+                    ));
                 };
                 let operation = operation.clone();
                 evaluate_resource_expression(
-                    active, &operation, context, lineage, arguments, declarations, grants, state, depth, principal,
-                    executor, local_environment,
+                    active,
+                    &operation,
+                    context,
+                    lineage,
+                    arguments,
+                    declarations,
+                    grants,
+                    state,
+                    depth,
+                    principal,
+                    executor,
+                    local_environment,
                 )
             }
-            _ => Err(expression_error(context, ClientExpressionError::InvalidCall)),
+            _ => Err(expression_error(
+                context,
+                ClientExpressionError::InvalidCall,
+            )),
         },
         ClientExpressionNode::Resource { operation } => evaluate_resource_expression(
-            active, operation, context, lineage, arguments, declarations, grants, state, depth, principal,
-            executor, local_environment,
+            active,
+            operation,
+            context,
+            lineage,
+            arguments,
+            declarations,
+            grants,
+            state,
+            depth,
+            principal,
+            executor,
+            local_environment,
         ),
         ClientExpressionNode::Action { operation } => evaluate_action_operation(
-            active, operation, context, lineage, arguments, declarations, grants, state, depth, principal,
-            executor, local_environment,
+            active,
+            operation,
+            context,
+            lineage,
+            arguments,
+            declarations,
+            grants,
+            state,
+            depth,
+            principal,
+            executor,
+            local_environment,
         ),
         ClientExpressionNode::Inspect { operation } => evaluate_inspect_expression(
-            active, operation, context, lineage, arguments, declarations, grants, state, depth, principal,
-            executor, local_environment,
+            active,
+            operation,
+            context,
+            lineage,
+            arguments,
+            declarations,
+            grants,
+            state,
+            depth,
+            principal,
+            executor,
+            local_environment,
         ),
         ClientExpressionNode::String { value } => Ok(RuntimeValue::Text(value.clone())),
         ClientExpressionNode::Integer { value } => i32::try_from(*value)
@@ -6581,48 +6983,102 @@ fn evaluate_expression(
             Some(ClientLocalBinding::Value(value) | ClientLocalBinding::StreamValue(value)) => {
                 Ok(value.clone())
             }
-            Some(ClientLocalBinding::Resource(_)) => {
-                Err(expression_error(context, ClientExpressionError::TypeMismatch))
-            }
-            None => Err(expression_error(context, ClientExpressionError::ParameterNotBound)),
+            Some(ClientLocalBinding::Resource(_)) => Err(expression_error(
+                context,
+                ClientExpressionError::TypeMismatch,
+            )),
+            None => Err(expression_error(
+                context,
+                ClientExpressionError::ParameterNotBound,
+            )),
         },
         ClientExpressionNode::FieldPath { root, fields } => {
             let value = arguments
                 .iter()
                 .find(|(candidate, _)| candidate == root)
                 .map(|(_, value)| value)
-                .ok_or_else(|| expression_error(context, ClientExpressionError::ParameterNotBound))?;
+                .ok_or_else(|| {
+                    expression_error(context, ClientExpressionError::ParameterNotBound)
+                })?;
             evaluate_field_path(active, value, fields, context)
         }
         ClientExpressionNode::Concat { left, right } => {
             let left = evaluate_expression(
-                active, left, context, lineage, arguments, declarations, grants, state, depth, principal,
-                executor, local_environment,
+                active,
+                left,
+                context,
+                lineage,
+                arguments,
+                declarations,
+                grants,
+                state,
+                depth,
+                principal,
+                executor,
+                local_environment,
             )?;
             let right = evaluate_expression(
-                active, right, context, lineage, arguments, declarations, grants, state, depth, principal,
-                executor, local_environment,
+                active,
+                right,
+                context,
+                lineage,
+                arguments,
+                declarations,
+                grants,
+                state,
+                depth,
+                principal,
+                executor,
+                local_environment,
             )?;
             let (RuntimeValue::Text(left), RuntimeValue::Text(right)) = (left, right) else {
-                return Err(expression_error(context, ClientExpressionError::TypeMismatch));
+                return Err(expression_error(
+                    context,
+                    ClientExpressionError::TypeMismatch,
+                ));
             };
             Ok(RuntimeValue::Text(format!("{left}{right}")))
         }
-        ClientExpressionNode::Call { function, arguments: bound } => {
+        ClientExpressionNode::Call {
+            function,
+            arguments: bound,
+        } => {
             if depth > orna_artifact::client_plan::MAX_EXPRESSION_DEPTH {
-                return Err(expression_error(context, ClientExpressionError::RecursionLimit));
+                return Err(expression_error(
+                    context,
+                    ClientExpressionError::RecursionLimit,
+                ));
             }
             if !client_call_target_is_referenced(active, context, *function) {
-                return Err(expression_error(context, ClientExpressionError::InvalidCall));
+                return Err(expression_error(
+                    context,
+                    ClientExpressionError::InvalidCall,
+                ));
             }
             let mut evaluated = Vec::with_capacity(bound.len());
             for (parameter, expression) in bound {
-                if evaluated.iter().any(|(candidate, _)| candidate == parameter) {
-                    return Err(expression_error(context, ClientExpressionError::InvalidCall));
+                if evaluated
+                    .iter()
+                    .any(|(candidate, _)| candidate == parameter)
+                {
+                    return Err(expression_error(
+                        context,
+                        ClientExpressionError::InvalidCall,
+                    ));
                 }
                 let value = evaluate_expression(
-                    active, expression, context, lineage, arguments, declarations, grants, state, depth, principal,
-                    executor, local_environment,
+                    active,
+                    expression,
+                    context,
+                    lineage,
+                    arguments,
+                    declarations,
+                    grants,
+                    state,
+                    depth,
+                    principal,
+                    executor,
+                    local_environment,
                 )?;
                 evaluated.push((*parameter, value));
             }
@@ -6643,7 +7099,8 @@ fn evaluate_expression(
         ClientExpressionNode::ExternalContract { identity } => {
             if identity == INSPECT_RENDER_CONTRACT {
                 validate_inspect_render_contract(active, context, identity, arguments)?;
-                let value = evaluate_external_contract(identity, context, lineage, arguments, executor)?;
+                let value =
+                    evaluate_external_contract(identity, context, lineage, arguments, executor)?;
                 if !inspect_render_ui_value_matches(active, &value) {
                     return Err(ClientExecutionError::Inspect {
                         context,
@@ -6655,7 +7112,7 @@ fn evaluate_expression(
                 evaluate_external_contract(identity, context, lineage, arguments, executor)
             }
         }
-}
+    }
 }
 
 fn evaluate_field_path(
@@ -6848,14 +7305,14 @@ fn runtime_value_matches(
                 return inspect_carrier_value_matches(active, value, type_id);
             }
             match value {
-            RuntimeValue::Record(record) => {
-                record.record_type() == type_id && active_has_record_type(active, type_id)
-            }
-            RuntimeValue::Enum(enum_value) => {
-                enum_value.enum_type() == type_id
-                    && active_enum_label_is_valid(active, type_id, enum_value.label())
-            }
-            _ => false,
+                RuntimeValue::Record(record) => {
+                    record.record_type() == type_id && active_has_record_type(active, type_id)
+                }
+                RuntimeValue::Enum(enum_value) => {
+                    enum_value.enum_type() == type_id
+                        && active_enum_label_is_valid(active, type_id, enum_value.label())
+                }
+                _ => false,
             }
         }
         ResolvedType::Reference { target } => {
@@ -7216,7 +7673,12 @@ fn classify_client_return(
 ) -> ClientReturnShape {
     let expression_eligible = matches!(
         artifact_version,
-        EXPRESSION_FORMAT_VERSION | STATE_FORMAT_VERSION | RESOURCE_FORMAT_VERSION | PROCEDURAL_FORMAT_VERSION | orna_artifact::client_plan::ACTION_FORMAT_VERSION | orna_artifact::client_plan::INSPECT_FORMAT_VERSION
+        EXPRESSION_FORMAT_VERSION
+            | STATE_FORMAT_VERSION
+            | RESOURCE_FORMAT_VERSION
+            | PROCEDURAL_FORMAT_VERSION
+            | orna_artifact::client_plan::ACTION_FORMAT_VERSION
+            | orna_artifact::client_plan::INSPECT_FORMAT_VERSION
     );
     let stream_expression_eligible = artifact_version == EXPRESSION_FORMAT_VERSION;
     let expression_shape = |resolved_type: ResolvedType| {
@@ -7272,7 +7734,9 @@ fn classify_client_return(
         return ClientReturnShape::Unsupported;
     }
     if let Some(type_id) = resolved_type.value_type() {
-        if artifact_version == orna_artifact::client_plan::ACTION_FORMAT_VERSION && type_id == STD_ACTION_TYPE_ID {
+        if artifact_version == orna_artifact::client_plan::ACTION_FORMAT_VERSION
+            && type_id == STD_ACTION_TYPE_ID
+        {
             return ClientReturnShape::Action(type_id);
         }
         if artifact_version == orna_artifact::client_plan::INSPECT_FORMAT_VERSION
@@ -7328,7 +7792,12 @@ fn validate_function_shape(
     }
     if !matches!(
         artifact_version,
-        EXPRESSION_FORMAT_VERSION | STATE_FORMAT_VERSION | RESOURCE_FORMAT_VERSION | PROCEDURAL_FORMAT_VERSION | orna_artifact::client_plan::ACTION_FORMAT_VERSION | orna_artifact::client_plan::INSPECT_FORMAT_VERSION
+        EXPRESSION_FORMAT_VERSION
+            | STATE_FORMAT_VERSION
+            | RESOURCE_FORMAT_VERSION
+            | PROCEDURAL_FORMAT_VERSION
+            | orna_artifact::client_plan::ACTION_FORMAT_VERSION
+            | orna_artifact::client_plan::INSPECT_FORMAT_VERSION
     ) && !definition.parameters().is_empty()
     {
         return Err(invalid_function(context, ClientExecutionRule::Parameters));
@@ -7361,9 +7830,10 @@ fn is_expression_reference_allowed(
                 return false;
             };
             function.is_some_and(|definition| {
-                definition.parameters().iter().any(|parameter| {
-                    parameter.resolved_type().reference_target() == Some(target)
-                })
+                definition
+                    .parameters()
+                    .iter()
+                    .any(|parameter| parameter.resolved_type().reference_target() == Some(target))
             })
         }
         _ => false,
@@ -7402,15 +7872,15 @@ fn validate_selected_references(
             if matches!(
                 return_shape,
                 ClientReturnShape::Expression(_)
-                | ClientReturnShape::StreamExpression(_)
-                | ClientReturnShape::State(_)
-                | ClientReturnShape::StreamState(_)
-                | ClientReturnShape::Resource(_)
-                | ClientReturnShape::StreamResource(_)
-                | ClientReturnShape::Procedural(_)
-                | ClientReturnShape::StreamProcedural(_)
-                | ClientReturnShape::Action(_)
-                | ClientReturnShape::Inspect(_)
+                    | ClientReturnShape::StreamExpression(_)
+                    | ClientReturnShape::State(_)
+                    | ClientReturnShape::StreamState(_)
+                    | ClientReturnShape::Resource(_)
+                    | ClientReturnShape::StreamResource(_)
+                    | ClientReturnShape::Procedural(_)
+                    | ClientReturnShape::StreamProcedural(_)
+                    | ClientReturnShape::Action(_)
+                    | ClientReturnShape::Inspect(_)
             ) {
                 if selected
                     .iter()
@@ -7446,8 +7916,10 @@ fn validate_selected_references(
                                         .is_some_and(|value| value.kind() == ValueTypeKind::Opaque)
                             }
                             ClientReturnShape::Action(return_type) => {
-                                return_type == type_id && type_id == STD_ACTION_TYPE_ID
-                                    && definition.is_some_and(|value| value.kind() == ValueTypeKind::Opaque)
+                                return_type == type_id
+                                    && type_id == STD_ACTION_TYPE_ID
+                                    && definition
+                                        .is_some_and(|value| value.kind() == ValueTypeKind::Opaque)
                             }
                             ClientReturnShape::Expression(_)
                             | ClientReturnShape::StreamExpression(_)
@@ -7536,7 +8008,10 @@ fn preflight_client_call_targets(
                 reference.target() != DefinitionReferenceTarget::Function(target)
             })
     {
-        return Err(expression_error(context, ClientExpressionError::InvalidCall));
+        return Err(expression_error(
+            context,
+            ClientExpressionError::InvalidCall,
+        ));
     }
     Ok(())
 }
@@ -7549,10 +8024,20 @@ fn preflight_client_state_calls(
     let mut decoded_targets = Vec::new();
     for slot in plan.slots() {
         if let StateDefault::Expression(expression) = slot.default() {
-            collect_client_expression_call_targets(active, expression, context, &mut decoded_targets)?;
+            collect_client_expression_call_targets(
+                active,
+                expression,
+                context,
+                &mut decoded_targets,
+            )?;
         }
     }
-    collect_client_expression_call_targets(active, plan.expression(), context, &mut decoded_targets)?;
+    collect_client_expression_call_targets(
+        active,
+        plan.expression(),
+        context,
+        &mut decoded_targets,
+    )?;
     preflight_client_call_targets(active, context, decoded_targets)
 }
 
@@ -7563,9 +8048,19 @@ fn preflight_client_procedural_calls(
 ) -> Result<(), ClientExecutionError> {
     let mut decoded_targets = Vec::new();
     for statement in plan.statements() {
-        collect_client_expression_call_targets(active, statement.expression(), context, &mut decoded_targets)?;
+        collect_client_expression_call_targets(
+            active,
+            statement.expression(),
+            context,
+            &mut decoded_targets,
+        )?;
     }
-    collect_client_expression_call_targets(active, plan.return_expression(), context, &mut decoded_targets)?;
+    collect_client_expression_call_targets(
+        active,
+        plan.return_expression(),
+        context,
+        &mut decoded_targets,
+    )?;
     preflight_client_call_targets(active, context, decoded_targets)
 }
 
@@ -7597,8 +8092,12 @@ fn preflight_client_inner_plan_calls(
         InnerClientPlan::Resource(inner) => {
             preflight_client_expression_calls(active, inner.expression(), context)
         }
-        InnerClientPlan::Procedural(inner) => preflight_client_procedural_calls(active, inner, context),
-        InnerClientPlan::Action(inner) => preflight_client_action_calls(active, inner.operation(), context),
+        InnerClientPlan::Procedural(inner) => {
+            preflight_client_procedural_calls(active, inner, context)
+        }
+        InnerClientPlan::Action(inner) => {
+            preflight_client_action_calls(active, inner.operation(), context)
+        }
     }
 }
 
@@ -7627,20 +8126,34 @@ fn validate_client_resource_operation(
     operation: &ResourceOperationNode,
 ) -> Result<(), ClientExecutionError> {
     let Some(resolved) = resolve_resource_operation_target(active, operation) else {
-        return Err(expression_error(context, ClientExpressionError::InvalidCall));
+        return Err(expression_error(
+            context,
+            ClientExpressionError::InvalidCall,
+        ));
     };
     if resolved.definition.domain() != FunctionDomain::Server
         || !operation_arguments_match_definition(resolved.definition, operation.arguments())
     {
-        return Err(expression_error(context, ClientExpressionError::InvalidCall));
+        return Err(expression_error(
+            context,
+            ClientExpressionError::InvalidCall,
+        ));
     }
     let expected = match (operation.kind(), resolved.definition.return_type()) {
         (ResourceKind::Scalar, FunctionReturn::Single(result)) => *result,
         (ResourceKind::Stream, FunctionReturn::Stream(result)) => *result,
-        _ => return Err(expression_error(context, ClientExpressionError::InvalidCall)),
+        _ => {
+            return Err(expression_error(
+                context,
+                ClientExpressionError::InvalidCall,
+            ));
+        }
     };
     if !resource_type_matches_id(active, expected, operation.declared_result_type()) {
-        return Err(expression_error(context, ClientExpressionError::InvalidCall));
+        return Err(expression_error(
+            context,
+            ClientExpressionError::InvalidCall,
+        ));
     }
     Ok(())
 }
@@ -7650,9 +8163,13 @@ fn validate_client_action_operation(
     operation: &orna_artifact::client_plan::ActionOperationNode,
     context: ClientExecutionContext,
 ) -> Result<(), ClientExecutionError> {
-    let raw_target = InvocationTarget::new(operation.target_function(), operation.target_revision());
+    let raw_target =
+        InvocationTarget::new(operation.target_function(), operation.target_revision());
     let Some(resolved) = resolve_unclassified_target(active, raw_target) else {
-        return Err(expression_error(context, ClientExpressionError::InvalidCall));
+        return Err(expression_error(
+            context,
+            ClientExpressionError::InvalidCall,
+        ));
     };
     let expected_domain = match operation.domain() {
         ActionTargetDomain::Client => FunctionDomain::Client,
@@ -7661,14 +8178,23 @@ fn validate_client_action_operation(
     if resolved.definition.domain() != expected_domain
         || !operation_arguments_match_definition(resolved.definition, operation.arguments())
     {
-        return Err(expression_error(context, ClientExpressionError::InvalidCall));
+        return Err(expression_error(
+            context,
+            ClientExpressionError::InvalidCall,
+        ));
     }
     let FunctionReturn::Single(expected) = resolved.definition.return_type() else {
-        return Err(expression_error(context, ClientExpressionError::InvalidCall));
+        return Err(expression_error(
+            context,
+            ClientExpressionError::InvalidCall,
+        ));
     };
     let expected = *expected;
     if !resource_type_matches_id(active, expected, operation.declared_result_type()) {
-        return Err(expression_error(context, ClientExpressionError::InvalidCall));
+        return Err(expression_error(
+            context,
+            ClientExpressionError::InvalidCall,
+        ));
     }
     Ok(())
 }
@@ -7686,31 +8212,62 @@ fn collect_client_expression_call_targets(
         ClientExpressionNode::Resource { operation } => {
             validate_client_resource_operation(active, context, operation)?;
             for (_, expression) in operation.arguments() {
-                collect_client_expression_call_targets(active, expression, context, decoded_targets)?;
+                collect_client_expression_call_targets(
+                    active,
+                    expression,
+                    context,
+                    decoded_targets,
+                )?;
             }
             decoded_targets.push(operation.target_function());
         }
         ClientExpressionNode::Action { operation } => {
             validate_client_action_operation(active, operation, context)?;
             for (_, expression) in operation.arguments() {
-                collect_client_expression_call_targets(active, expression, context, decoded_targets)?;
+                collect_client_expression_call_targets(
+                    active,
+                    expression,
+                    context,
+                    decoded_targets,
+                )?;
             }
             decoded_targets.push(operation.target_function());
         }
         ClientExpressionNode::Inspect { operation } => {
             if let Some(expression) = operation.target() {
-                collect_client_expression_call_targets(active, expression, context, decoded_targets)?;
+                collect_client_expression_call_targets(
+                    active,
+                    expression,
+                    context,
+                    decoded_targets,
+                )?;
             }
             if let Some(expression) = operation.options() {
-                collect_client_expression_call_targets(active, expression, context, decoded_targets)?;
+                collect_client_expression_call_targets(
+                    active,
+                    expression,
+                    context,
+                    decoded_targets,
+                )?;
             }
             if let Some(expression) = operation.snapshot_expression() {
-                collect_client_expression_call_targets(active, expression, context, decoded_targets)?;
+                collect_client_expression_call_targets(
+                    active,
+                    expression,
+                    context,
+                    decoded_targets,
+                )?;
             }
         }
-        ClientExpressionNode::Call { function, arguments } => {
+        ClientExpressionNode::Call {
+            function,
+            arguments,
+        } => {
             let Some(definition) = active.catalogue().function_by_id(*function) else {
-                return Err(expression_error(context, ClientExpressionError::InvalidCall));
+                return Err(expression_error(
+                    context,
+                    ClientExpressionError::InvalidCall,
+                ));
             };
             if arguments.len() != definition.parameters().len()
                 || definition.parameters().iter().any(|parameter| {
@@ -7727,10 +8284,18 @@ fn collect_client_expression_call_targets(
                         .all(|candidate| candidate.id() != *parameter)
                 })
             {
-                return Err(expression_error(context, ClientExpressionError::InvalidCall));
+                return Err(expression_error(
+                    context,
+                    ClientExpressionError::InvalidCall,
+                ));
             }
             for (_, expression) in arguments {
-                collect_client_expression_call_targets(active, expression, context, decoded_targets)?;
+                collect_client_expression_call_targets(
+                    active,
+                    expression,
+                    context,
+                    decoded_targets,
+                )?;
             }
             decoded_targets.push(*function);
         }
@@ -7810,8 +8375,8 @@ fn validate_artifact_identity(
     if artifact.kind() != ExecutableArtifactKind::Client {
         return Err(invalid_artifact(context));
     }
-    let digest = artifact_payload_digest(artifact.payload())
-        .map_err(|_| invalid_artifact(context))?;
+    let digest =
+        artifact_payload_digest(artifact.payload()).map_err(|_| invalid_artifact(context))?;
     if digest != artifact.content_hash() {
         return Err(invalid_artifact(context));
     }
@@ -7835,19 +8400,20 @@ fn invalid_function(
 #[cfg(test)]
 mod tests {
     use super::{
-        capability, complete_client_action, decode_action_payload, encode_action_payload,
-        trigger_client_action, action_target_result_type, ClientActionDescriptor, ClientActionError, ClientActionOutcome,
+        ACTION_FAILURE_CODE, ClientActionDescriptor, ClientActionError, ClientActionOutcome,
         ClientActionState, ClientExecutionContext, ClientResource, ClientResourceCompletion,
-        ClientResourceKey, ClientResourceRequest, ClientResourceStatus, ClientStateStore,
-        ClientResourceExecutor, DeterministicClientResourceExecutor, ResourceKind,
-        ACTION_FAILURE_CODE,
+        ClientResourceExecutor, ClientResourceKey, ClientResourceRequest, ClientResourceStatus,
+        ClientStateStore, DeterministicClientResourceExecutor, ResourceKind,
+        action_target_result_type, capability, complete_client_action, decode_action_payload,
+        encode_action_payload, trigger_client_action,
     };
     use orna_artifact::client_plan::{ActionTargetDomain, InspectProjection};
     use std::{cell::Cell, rc::Rc, time::SystemTime};
 
     use orna_core::{
-        CallSiteId, CatalogueRevisionId, FunctionId, FunctionRevisionId, InvocationId, LocalId, ParameterId, PrincipalId, SchemaId,
-        SourceBundleId, SourceRevisionId, SourceUnitId, StateSlotId, TypeId,
+        CallSiteId, CatalogueRevisionId, FunctionId, FunctionRevisionId, InvocationId, LocalId,
+        ParameterId, PrincipalId, SchemaId, SourceBundleId, SourceRevisionId, SourceUnitId,
+        StateSlotId, TypeId,
         canonical_hash::{
             artifact_payload_digest, catalogue_digest, catalogue_digest_with_context,
             function_declaration_digest, function_semantic_digest,
@@ -7856,16 +8422,16 @@ mod tests {
         },
         catalogue::{
             CatalogueSnapshot, FunctionDefinition, FunctionDomain, FunctionReturn,
-            FunctionReturnColumnDefinition, FunctionSecurity, FunctionVolatility, ParameterDefinition,
-            QualifiedSemanticName, SchemaDefinition, ValueTypeDefinition,
+            FunctionReturnColumnDefinition, FunctionSecurity, FunctionVolatility,
+            ParameterDefinition, QualifiedSemanticName, SchemaDefinition, ValueTypeDefinition,
         },
         revision::{
             ActiveDatabaseRevision, ActiveDatabaseRevisionInput, ActiveRevisionContent,
             DefinitionIdentity, DefinitionOrigin, DefinitionReference, DefinitionReferenceKind,
             DefinitionReferenceTarget, DeployableRevision, ExecutableArtifact,
             ExecutableArtifactKind, FunctionRevisionRecord, FunctionSemanticHashVersion,
-            RevisionInvariantError, RevisionPair, Sha256Digest, SourceOrigin,
-            StoredSourceRevision, StoredSourceUnit, VerifiedStandardLibrarySnapshot,
+            RevisionInvariantError, RevisionPair, Sha256Digest, SourceOrigin, StoredSourceRevision,
+            StoredSourceUnit, VerifiedStandardLibrarySnapshot,
         },
         security::{
             AuthorisedInvocation, ExecuteDecision, ExecuteGrant, InvocationTarget, Principal,
@@ -7888,7 +8454,10 @@ mod tests {
 
     impl RecordingActionExecutor {
         fn new(result: Option<RuntimeValue>) -> Self {
-            Self { result, ..Self::default() }
+            Self {
+                result,
+                ..Self::default()
+            }
         }
 
         fn with_cancel_pending(mut self) -> Self {
@@ -7985,7 +8554,9 @@ mod tests {
         }
 
         fn poll(&mut self) -> Option<ClientResourceCompletion> {
-            self.pending.take().map(|request| request.ready(RuntimeValue::Boolean(true)))
+            self.pending
+                .take()
+                .map(|request| request.ready(RuntimeValue::Boolean(true)))
         }
     }
 
@@ -8026,9 +8597,10 @@ mod tests {
             target: RuntimeValue::Boolean(true),
         };
         let request = super::ClientInspectRequest::new(context, operation);
-        let mut executor = super::DeterministicClientResourceExecutor::new(|_: &super::ClientResourceRequest| {
-            Ok::<_, String>(RuntimeValue::Boolean(false))
-        });
+        let mut executor =
+            super::DeterministicClientResourceExecutor::new(|_: &super::ClientResourceRequest| {
+                Ok::<_, String>(RuntimeValue::Boolean(false))
+            });
         assert_eq!(
             executor.inspect(request),
             Err("inspect.runtime_unavailable".to_owned())
@@ -8047,32 +8619,32 @@ mod tests {
             observer_lineage: None,
         };
         let parameter = ParameterId::from_bytes([0x76; 16]);
-        let mut executor = super::DeterministicClientResourceExecutor::new(
-            |_: &super::ClientResourceRequest| Ok::<_, String>(RuntimeValue::Boolean(false)),
-        )
-        .with_external_contract(move |request| {
-            assert_eq!(request.identity(), super::INSPECT_RENDER_CONTRACT);
-            assert_eq!(request.context(), context);
-            assert_eq!(
-                request.arguments(),
-                &[(parameter, RuntimeValue::Boolean(true))],
-            );
-            Ok(RuntimeValue::Text("ui".to_owned()))
-        });
+        let mut executor =
+            super::DeterministicClientResourceExecutor::new(|_: &super::ClientResourceRequest| {
+                Ok::<_, String>(RuntimeValue::Boolean(false))
+            })
+            .with_external_contract(move |request| {
+                assert_eq!(request.identity(), super::INSPECT_RENDER_CONTRACT);
+                assert_eq!(request.context(), context);
+                assert_eq!(
+                    request.arguments(),
+                    &[(parameter, RuntimeValue::Boolean(true))],
+                );
+                Ok(RuntimeValue::Text("ui".to_owned()))
+            });
         let mut optional: Option<&mut dyn super::ClientResourceExecutor> = Some(&mut executor);
         assert_eq!(
             super::evaluate_external_contract(
                 super::INSPECT_RENDER_CONTRACT,
                 context,
-            super::ObserverLineage::compatibility(context),
-            &[(parameter, RuntimeValue::Boolean(true))],
+                super::ObserverLineage::compatibility(context),
+                &[(parameter, RuntimeValue::Boolean(true))],
                 &mut optional,
             )
             .unwrap(),
             RuntimeValue::Text("ui".to_owned()),
         );
     }
-
 
     #[test]
     fn generic_external_contracts_forward_and_fail_closed_without_executor() {
@@ -8087,29 +8659,34 @@ mod tests {
             observer_lineage: None,
         };
         let parameter = ParameterId::from_bytes([0x86; 16]);
-        let mut executor = super::DeterministicClientResourceExecutor::new(
-            |_: &super::ClientResourceRequest| Ok::<_, String>(RuntimeValue::Boolean(false)),
-        )
-        .with_external_contract(move |request| {
-            assert_eq!(request.identity(), "app.other@1");
-            assert_eq!(request.arguments(), &[(parameter, RuntimeValue::Boolean(true))]);
-            Ok(RuntimeValue::Boolean(false))
-        });
+        let mut executor =
+            super::DeterministicClientResourceExecutor::new(|_: &super::ClientResourceRequest| {
+                Ok::<_, String>(RuntimeValue::Boolean(false))
+            })
+            .with_external_contract(move |request| {
+                assert_eq!(request.identity(), "app.other@1");
+                assert_eq!(
+                    request.arguments(),
+                    &[(parameter, RuntimeValue::Boolean(true))]
+                );
+                Ok(RuntimeValue::Boolean(false))
+            });
         let mut optional: Option<&mut dyn super::ClientResourceExecutor> = Some(&mut executor);
         assert_eq!(
             super::evaluate_external_contract(
                 "app.other@1",
                 context,
-            super::ObserverLineage::compatibility(context),
-            &[(parameter, RuntimeValue::Boolean(true))],
+                super::ObserverLineage::compatibility(context),
+                &[(parameter, RuntimeValue::Boolean(true))],
                 &mut optional,
             ),
             Ok(RuntimeValue::Boolean(false)),
         );
-        let mut failing = super::DeterministicClientResourceExecutor::new(
-            |_: &super::ClientResourceRequest| Ok::<_, String>(RuntimeValue::Boolean(false)),
-        )
-        .with_external_contract(|_| Err("inspect.denied".to_owned()));
+        let mut failing =
+            super::DeterministicClientResourceExecutor::new(|_: &super::ClientResourceRequest| {
+                Ok::<_, String>(RuntimeValue::Boolean(false))
+            })
+            .with_external_contract(|_| Err("inspect.denied".to_owned()));
         let mut failing_slot: Option<&mut dyn super::ClientResourceExecutor> = Some(&mut failing);
         assert!(matches!(
             super::evaluate_external_contract(
@@ -8122,23 +8699,23 @@ mod tests {
             Err(super::ClientExecutionError::ExternalContract { identity, .. })
                 if identity == "app.other@1"
         ));
-        let mut default_executor = super::DeterministicClientResourceExecutor::new(
-            |_: &super::ClientResourceRequest| Ok::<_, String>(RuntimeValue::Boolean(false)),
-        );
-        let mut default_slot: Option<&mut dyn super::ClientResourceExecutor> = Some(&mut default_executor);
+        let mut default_executor =
+            super::DeterministicClientResourceExecutor::new(|_: &super::ClientResourceRequest| {
+                Ok::<_, String>(RuntimeValue::Boolean(false))
+            });
+        let mut default_slot: Option<&mut dyn super::ClientResourceExecutor> =
+            Some(&mut default_executor);
         assert_eq!(
             super::evaluate_external_contract(
                 super::INSPECT_RENDER_CONTRACT,
                 context,
-            super::ObserverLineage::compatibility(context),
-            &[],
+                super::ObserverLineage::compatibility(context),
+                &[],
                 &mut default_slot,
             ),
             Err(super::ClientExecutionError::Inspect {
                 context,
-                source: super::ClientInspectError::Failed(
-                    "inspect.runtime_unavailable".to_owned(),
-                ),
+                source: super::ClientInspectError::Failed("inspect.runtime_unavailable".to_owned(),),
             }),
         );
         let mut absent: Option<&mut dyn super::ClientResourceExecutor> = None;
@@ -8157,15 +8734,13 @@ mod tests {
             super::evaluate_external_contract(
                 super::INSPECT_RENDER_CONTRACT,
                 context,
-            super::ObserverLineage::compatibility(context),
-            &[],
+                super::ObserverLineage::compatibility(context),
+                &[],
                 &mut absent,
             ),
             Err(super::ClientExecutionError::Inspect {
                 context,
-                source: super::ClientInspectError::Failed(
-                    "inspect.runtime_unavailable".to_owned(),
-                ),
+                source: super::ClientInspectError::Failed("inspect.runtime_unavailable".to_owned(),),
             }),
         );
     }
@@ -8218,10 +8793,19 @@ mod tests {
                 },
             },
         );
-        assert_eq!(request.observer_root_invocation_id(), context.parent_invocation_id());
-        assert_eq!(request.observer_parent_invocation_id(), context.parent_invocation_id());
+        assert_eq!(
+            request.observer_root_invocation_id(),
+            context.parent_invocation_id()
+        );
+        assert_eq!(
+            request.observer_parent_invocation_id(),
+            context.parent_invocation_id()
+        );
         assert_eq!(request.observer_purpose(), "inspect");
-        assert_eq!(request.target_invocation_id(), Some(super::InvocationId::from_bytes([0x06; 16])));
+        assert_eq!(
+            request.target_invocation_id(),
+            Some(super::InvocationId::from_bytes([0x06; 16]))
+        );
     }
 
     #[test]
@@ -8267,30 +8851,36 @@ mod tests {
         };
         let compatibility_request = super::ClientInspectRequest::new(context, operation.clone());
         assert_eq!(compatibility_request.observer_root_invocation_id(), root);
-        assert_eq!(compatibility_request.observer_parent_invocation_id(), nested.current);
-        assert_eq!(compatibility_request.observer_lineage(), &[root, nested.current]);
-        let external_request = super::ClientExternalContractRequest::new(
-            context,
-            "app.test@1",
-            Vec::new(),
+        assert_eq!(
+            compatibility_request.observer_parent_invocation_id(),
+            nested.current
         );
+        assert_eq!(
+            compatibility_request.observer_lineage(),
+            &[root, nested.current]
+        );
+        let external_request =
+            super::ClientExternalContractRequest::new(context, "app.test@1", Vec::new());
         assert_eq!(external_request.observer_root_invocation_id(), root);
-        assert_eq!(external_request.observer_parent_invocation_id(), nested.current);
-        let request = super::ClientInspectRequest::with_provenance(
-            context, operation, None, None, nested,
+        assert_eq!(
+            external_request.observer_parent_invocation_id(),
+            nested.current
         );
+        let request =
+            super::ClientInspectRequest::with_provenance(context, operation, None, None, nested);
         assert_eq!(request.observer_root_invocation_id(), root);
         assert_eq!(request.observer_parent_invocation_id(), nested.current);
         assert_eq!(request.observer_lineage(), &[root, nested.current]);
 
-        let mut executor = super::DeterministicClientResourceExecutor::new(
-            |_: &super::ClientResourceRequest| Ok::<_, String>(RuntimeValue::Boolean(false)),
-        )
-        .with_external_contract(move |request| {
-            assert_eq!(request.observer_root_invocation_id(), root);
-            assert_eq!(request.observer_parent_invocation_id(), child.current);
-            Ok(RuntimeValue::Text("ui".to_owned()))
-        });
+        let mut executor =
+            super::DeterministicClientResourceExecutor::new(|_: &super::ClientResourceRequest| {
+                Ok::<_, String>(RuntimeValue::Boolean(false))
+            })
+            .with_external_contract(move |request| {
+                assert_eq!(request.observer_root_invocation_id(), root);
+                assert_eq!(request.observer_parent_invocation_id(), child.current);
+                Ok(RuntimeValue::Text("ui".to_owned()))
+            });
         let mut executor_slot: Option<&mut dyn super::ClientResourceExecutor> = Some(&mut executor);
         let value = super::evaluate_external_contract(
             super::INSPECT_RENDER_CONTRACT,
@@ -8333,15 +8923,22 @@ mod tests {
         row.extend_from_slice(&0_u64.to_be_bytes());
         row.push(0);
         row.push(0);
-        assert_eq!(super::decode_inspect_snapshot_target_row(&row, 7), Ok(target));
+        assert_eq!(
+            super::decode_inspect_snapshot_target_row(&row, 7),
+            Ok(target)
+        );
         assert_eq!(
             super::decode_inspect_snapshot_target_row(&row, 8),
-            Err(super::ClientInspectError::Failed("inspect.epoch_mismatch".to_owned()))
+            Err(super::ClientInspectError::Failed(
+                "inspect.epoch_mismatch".to_owned()
+            ))
         );
         row.extend_from_slice(&[0x19; 16]);
         assert_eq!(
             super::decode_inspect_snapshot_target_row(&row, 7),
-            Err(super::ClientInspectError::Failed("inspect.malformed_carrier".to_owned()))
+            Err(super::ClientInspectError::Failed(
+                "inspect.malformed_carrier".to_owned()
+            ))
         );
     }
 
@@ -8366,7 +8963,10 @@ mod tests {
             ))
         );
         row[67..75].copy_from_slice(&1_u64.to_be_bytes());
-        assert_eq!(super::decode_inspect_snapshot_target_row(&row, 7), Ok(target));
+        assert_eq!(
+            super::decode_inspect_snapshot_target_row(&row, 7),
+            Ok(target)
+        );
         row.push(0x19);
         assert_eq!(
             super::decode_inspect_snapshot_target_row(&row, 7),
@@ -8433,7 +9033,8 @@ mod tests {
                 vec![super::RuntimeValue::Bytes(payload)],
             )
             .expect("row value");
-            orna_protocol::encode_constructed_value(&active, &registry, &value).expect("encoded row")
+            orna_protocol::encode_constructed_value(&active, &registry, &value)
+                .expect("encoded row")
         };
 
         let mut epoch_bytes = [0x96; 16];
@@ -8495,20 +9096,21 @@ mod tests {
         let expression = orna_artifact::client_plan::ClientExpressionNode::Inspect {
             operation: orna_artifact::client_plan::InspectOperationNode::Projection {
                 projection: InspectProjection::Calls,
-                snapshot: Box::new(orna_artifact::client_plan::ClientExpressionNode::ParameterRead {
-                    parameter,
-                }),
+                snapshot: Box::new(
+                    orna_artifact::client_plan::ClientExpressionNode::ParameterRead { parameter },
+                ),
             },
         };
         let provider_calls = Rc::new(Cell::new(0_u8));
         let provider_calls_for_executor = Rc::clone(&provider_calls);
-        let mut executor = super::DeterministicClientResourceExecutor::new(
-            |_: &super::ClientResourceRequest| Ok::<_, String>(super::RuntimeValue::Boolean(false)),
-        )
-        .with_inspect(move |_| {
-            provider_calls_for_executor.set(provider_calls_for_executor.get() + 1);
-            Ok(mixed.clone())
-        });
+        let mut executor =
+            super::DeterministicClientResourceExecutor::new(|_: &super::ClientResourceRequest| {
+                Ok::<_, String>(super::RuntimeValue::Boolean(false))
+            })
+            .with_inspect(move |_| {
+                provider_calls_for_executor.set(provider_calls_for_executor.get() + 1);
+                Ok(mixed.clone())
+            });
         let mut executor_slot: Option<&mut dyn super::ClientResourceExecutor> = Some(&mut executor);
         let mut state = super::ClientStateStore::new();
         let mut locals = std::collections::HashMap::new();
@@ -8536,7 +9138,11 @@ mod tests {
                 ..
             }) if code == "inspect.epoch_mismatch"
         ));
-        assert_eq!(provider_calls.get(), 1, "the mixed carrier came from the custom provider");
+        assert_eq!(
+            provider_calls.get(),
+            1,
+            "the mixed carrier came from the custom provider"
+        );
     }
 
     #[test]
@@ -8693,20 +9299,24 @@ mod tests {
             snapshot: RuntimeValue::Boolean(true),
         };
         let request = super::ClientInspectRequest::new(context, operation);
-        let mut executor = super::DeterministicClientResourceExecutor::new(|_: &super::ClientResourceRequest| {
-            Ok::<_, String>(RuntimeValue::Boolean(false))
-        })
-        .with_inspect(move |request| {
-            assert_eq!(request.context(), context);
-            assert_eq!(request.operation().projection(), Some(InspectProjection::Calls));
-            assert_eq!(request.operation().projection_carrier_tag(), Some(3));
-            assert!(matches!(request.operation().snapshot(), Some(RuntimeValue::Boolean(true))));
-            Ok(RuntimeValue::Boolean(false))
-        });
-        assert_eq!(
-            executor.inspect(request),
-            Ok(RuntimeValue::Boolean(false))
-        );
+        let mut executor =
+            super::DeterministicClientResourceExecutor::new(|_: &super::ClientResourceRequest| {
+                Ok::<_, String>(RuntimeValue::Boolean(false))
+            })
+            .with_inspect(move |request| {
+                assert_eq!(request.context(), context);
+                assert_eq!(
+                    request.operation().projection(),
+                    Some(InspectProjection::Calls)
+                );
+                assert_eq!(request.operation().projection_carrier_tag(), Some(3));
+                assert!(matches!(
+                    request.operation().snapshot(),
+                    Some(RuntimeValue::Boolean(true))
+                ));
+                Ok(RuntimeValue::Boolean(false))
+            });
+        assert_eq!(executor.inspect(request), Ok(RuntimeValue::Boolean(false)));
     }
 
     #[test]
@@ -8715,8 +9325,8 @@ mod tests {
         let root = InvocationId::from_bytes([0x91; 16]);
         let parent = InvocationId::from_bytes([0x92; 16]);
         let current = InvocationId::from_bytes([0x93; 16]);
-        let explicit_lineage = super::ObserverLineage::top_level(root)
-            .with_parent_and_current(parent, current);
+        let explicit_lineage =
+            super::ObserverLineage::top_level(root).with_parent_and_current(parent, current);
         let top_level = super::ObserverLineage::top_level(root);
         let nested = top_level.nested();
         let child = nested.nested();
@@ -8808,9 +9418,11 @@ mod tests {
         let options = super::ParameterId::from_bytes([0xa9; 16]);
         let expression = orna_artifact::client_plan::ClientExpressionNode::Inspect {
             operation: orna_artifact::client_plan::InspectOperationNode::Snapshot {
-                target: Box::new(orna_artifact::client_plan::ClientExpressionNode::ParameterRead {
-                    parameter: target,
-                }),
+                target: Box::new(
+                    orna_artifact::client_plan::ClientExpressionNode::ParameterRead {
+                        parameter: target,
+                    },
+                ),
                 options: Some(Box::new(
                     orna_artifact::client_plan::ClientExpressionNode::ParameterRead {
                         parameter: options,
@@ -8880,7 +9492,11 @@ mod tests {
         let session_principal = PrincipalId::from_bytes([0x7a; 16]);
         let role = PrincipalId::from_bytes([0x7b; 16]);
         let principals = vec![
-            Principal::new(session_principal, PrincipalKind::User, PrincipalStatus::Active),
+            Principal::new(
+                session_principal,
+                PrincipalKind::User,
+                PrincipalStatus::Active,
+            ),
             Principal::new(role, PrincipalKind::Role, PrincipalStatus::Active),
         ];
         let direct_snapshot = SecuritySnapshot::new(
@@ -8905,16 +9521,14 @@ mod tests {
         let role_session = role_snapshot
             .bind_authenticated_session(session_principal, vec![role])
             .expect("role session should bind");
-        let ExecuteDecision::Allowed(direct) = direct_snapshot.authorise_execute(
-            &direct_session,
-            InvocationTarget::new(function, pair),
-        ) else {
+        let ExecuteDecision::Allowed(direct) = direct_snapshot
+            .authorise_execute(&direct_session, InvocationTarget::new(function, pair))
+        else {
             panic!("direct grant should allow the function");
         };
-        let ExecuteDecision::Allowed(role_authorisation) = role_snapshot.authorise_execute(
-            &role_session,
-            InvocationTarget::new(function, pair),
-        ) else {
+        let ExecuteDecision::Allowed(role_authorisation) =
+            role_snapshot.authorise_execute(&role_session, InvocationTarget::new(function, pair))
+        else {
             panic!("role grant should allow the function");
         };
         (direct, role_authorisation)
@@ -9353,19 +9967,35 @@ mod tests {
             Sha256Digest::from_bytes([0x22; 32]),
         );
 
-        let mut pending_resource = super::ClientResource::new(key, ResolvedType::Scalar(StandardScalar::Boolean));
+        let mut pending_resource =
+            super::ClientResource::new(key, ResolvedType::Scalar(StandardScalar::Boolean));
         let pending_request = pending_resource.begin_request(&active, vec![]).unwrap();
         let pending_request_id = pending_request.request_id();
         let expected_pending = pending_request.clone().pending();
         let mut polling = PollingTestExecutor::default();
         assert_eq!(polling.execute(pending_request), expected_pending);
-        assert_eq!(polling.poll(), Some(ClientResourceCompletion::Ready { request_id: pending_request_id, key, generation: pending_resource.generation(), value: RuntimeValue::Boolean(true) }));
+        assert_eq!(
+            polling.poll(),
+            Some(ClientResourceCompletion::Ready {
+                request_id: pending_request_id,
+                key,
+                generation: pending_resource.generation(),
+                value: RuntimeValue::Boolean(true)
+            })
+        );
         assert_eq!(polling.poll(), None);
 
-        let mut immediate_resource = super::ClientResource::new(key, ResolvedType::Scalar(StandardScalar::Boolean));
+        let mut immediate_resource =
+            super::ClientResource::new(key, ResolvedType::Scalar(StandardScalar::Boolean));
         let immediate_request = immediate_resource.begin_request(&active, vec![]).unwrap();
-        let mut immediate = DeterministicClientResourceExecutor::new(|_: &ClientResourceRequest| Ok(RuntimeValue::Boolean(true)));
-        assert!(matches!(immediate.execute(immediate_request), ClientResourceCompletion::Ready { .. }));
+        let mut immediate =
+            DeterministicClientResourceExecutor::new(|_: &ClientResourceRequest| {
+                Ok(RuntimeValue::Boolean(true))
+            });
+        assert!(matches!(
+            immediate.execute(immediate_request),
+            ClientResourceCompletion::Ready { .. }
+        ));
         assert_eq!(immediate.poll(), None);
     }
 
@@ -9398,285 +10028,277 @@ mod tests {
         assert_eq!(resource.failure(), None);
     }
 
-
     #[test]
     fn client_stream_request_preserves_batch_order_and_returns_terminal_option() {
-    let (active, function, pair, _) = version_two_server_stream_active();
-    let key = super::ClientResourceKey::new(
-        InvocationTarget::new(function, pair),
-        PrincipalId::from_bytes([0x7a; 16]),
-        ClientResourceKey::canonical_arguments_digest(&active, &[]).unwrap(),
-        Sha256Digest::from_bytes([0x22; 32]),
-    );
-    let mut resource = ClientResource::new_stream(
-        key,
-        ResolvedType::Value(orna_standard::BOOLEAN_TYPE_ID),
-    );
-    let request = resource.begin_stream_request(&active, Vec::new()).unwrap();
-    assert_eq!(request.kind(), ResourceKind::Stream);
+        let (active, function, pair, _) = version_two_server_stream_active();
+        let key = super::ClientResourceKey::new(
+            InvocationTarget::new(function, pair),
+            PrincipalId::from_bytes([0x7a; 16]),
+            ClientResourceKey::canonical_arguments_digest(&active, &[]).unwrap(),
+            Sha256Digest::from_bytes([0x22; 32]),
+        );
+        let mut resource =
+            ClientResource::new_stream(key, ResolvedType::Value(orna_standard::BOOLEAN_TYPE_ID));
+        let request = resource.begin_stream_request(&active, Vec::new()).unwrap();
+        assert_eq!(request.kind(), ResourceKind::Stream);
 
-    resource
-        .apply_completion(
-            &active,
-            request
-                .clone()
-                .stream_values(vec![RuntimeValue::Boolean(true), RuntimeValue::Boolean(false)]),
-        )
-        .unwrap();
-    resource
-        .apply_completion(
-            &active,
-            request
-                .clone()
-                .stream_values(vec![RuntimeValue::Boolean(false), RuntimeValue::Boolean(true)]),
-        )
-        .unwrap();
-    resource
-        .apply_completion(&active, request.stream_completed())
-        .unwrap();
-
-    let first = resource.take_stream_value(&active).unwrap().unwrap();
-    assert_boolean_stream_batch(first, &[true, false]);
-    let second = resource.take_stream_value(&active).unwrap().unwrap();
-    assert_boolean_stream_batch(second, &[false, true]);
-    let terminal = resource.take_stream_value(&active).unwrap().unwrap();
-    assert_boolean_stream_terminal(terminal);
-}
-
-#[test]
-fn client_stream_rejects_scalar_ready_completion() {
-    let (active, function, pair, _) = version_two_server_stream_active();
-    let key = super::ClientResourceKey::new(
-        InvocationTarget::new(function, pair),
-        PrincipalId::from_bytes([0x7a; 16]),
-        ClientResourceKey::canonical_arguments_digest(&active, &[]).unwrap(),
-        Sha256Digest::from_bytes([0x23; 32]),
-    );
-    let mut resource = ClientResource::new_stream(
-        key,
-        ResolvedType::Value(orna_standard::BOOLEAN_TYPE_ID),
-    );
-    let request = resource.begin_stream_request(&active, Vec::new()).unwrap();
-
-    assert_eq!(
-        resource.publish_ready(&active, request.generation(), RuntimeValue::Boolean(true)),
-        Err(super::ClientResourceError::TypeMismatch),
-    );
-    assert_eq!(resource.status(), super::ClientResourceStatus::Loading);
-    assert_eq!(resource.value(), None);
-    assert!(!resource.stream_complete());
-}
-
-#[test]
-fn client_stream_rejects_oversized_batches_and_totals_before_queueing() {
-    let (active, function, pair, _) = version_two_server_stream_active();
-    let key = super::ClientResourceKey::new(
-        InvocationTarget::new(function, pair),
-        PrincipalId::from_bytes([0x7a; 16]),
-        ClientResourceKey::canonical_arguments_digest(&active, &[]).unwrap(),
-        Sha256Digest::from_bytes([0x23; 32]),
-    );
-    let mut resource = ClientResource::new_stream(
-        key,
-        ResolvedType::Value(orna_standard::BOOLEAN_TYPE_ID),
-    );
-    let request = resource.begin_stream_request(&active, Vec::new()).unwrap();
-
-    let oversized_batch = vec![
-        RuntimeValue::Boolean(true);
-        super::MAX_RESOURCE_BATCH_ITEMS + 1
-    ];
-    assert_eq!(
-        resource.apply_completion(
-            &active,
-            request.clone().stream_values(oversized_batch),
-        ),
-        Err(super::ClientResourceError::TypeMismatch),
-    );
-    assert!(resource.stream_batches.is_empty());
-    assert_eq!(resource.stream_total_items, 0);
-
-    resource.stream_total_items = super::MAX_RESOURCE_TOTAL_ITEMS;
-    assert_eq!(
-        resource.apply_completion(
-            &active,
-            request.stream_values(vec![RuntimeValue::Boolean(true)]),
-        ),
-        Err(super::ClientResourceError::TypeMismatch),
-    );
-    assert!(resource.stream_batches.is_empty());
-    assert_eq!(resource.status(), super::ClientResourceStatus::Loading);
-}
-
-#[test]
-fn client_stream_queue_overflow_preserves_existing_batches() {
-    let (active, function, pair, _) = version_two_server_stream_active();
-    let key = super::ClientResourceKey::new(
-        InvocationTarget::new(function, pair),
-        PrincipalId::from_bytes([0x7a; 16]),
-        ClientResourceKey::canonical_arguments_digest(&active, &[]).unwrap(),
-        Sha256Digest::from_bytes([0x24; 32]),
-    );
-    let mut resource = ClientResource::new_stream(
-        key,
-        ResolvedType::Value(orna_standard::BOOLEAN_TYPE_ID),
-    );
-    let request = resource.begin_stream_request(&active, Vec::new()).unwrap();
-    let batch = vec![RuntimeValue::Boolean(true); super::MAX_RESOURCE_BATCH_ITEMS];
-    resource
-        .apply_completion(&active, request.clone().stream_values(batch))
-        .unwrap();
-    let before = resource.clone();
-
-    assert_eq!(
-        resource.apply_completion(
-            &active,
-            request.stream_values(vec![RuntimeValue::Boolean(false)]),
-        ),
-        Err(super::ClientResourceError::TypeMismatch),
-    );
-    assert_eq!(resource, before);
-}
-
-#[test]
-fn client_stream_queue_dequeue_releases_capacity() {
-    let (active, function, pair, _) = version_two_server_stream_active();
-    let key = super::ClientResourceKey::new(
-        InvocationTarget::new(function, pair),
-        PrincipalId::from_bytes([0x7a; 16]),
-        ClientResourceKey::canonical_arguments_digest(&active, &[]).unwrap(),
-        Sha256Digest::from_bytes([0x25; 32]),
-    );
-    let mut resource = ClientResource::new_stream(
-        key,
-        ResolvedType::Value(orna_standard::BOOLEAN_TYPE_ID),
-    );
-    let request = resource.begin_stream_request(&active, Vec::new()).unwrap();
-    for _ in 0..super::MAX_RESOURCE_BATCH_ITEMS {
         resource
             .apply_completion(
                 &active,
-                request.clone().stream_values(vec![RuntimeValue::Boolean(true)]),
+                request.clone().stream_values(vec![
+                    RuntimeValue::Boolean(true),
+                    RuntimeValue::Boolean(false),
+                ]),
             )
             .unwrap();
+        resource
+            .apply_completion(
+                &active,
+                request.clone().stream_values(vec![
+                    RuntimeValue::Boolean(false),
+                    RuntimeValue::Boolean(true),
+                ]),
+            )
+            .unwrap();
+        resource
+            .apply_completion(&active, request.stream_completed())
+            .unwrap();
+
+        let first = resource.take_stream_value(&active).unwrap().unwrap();
+        assert_boolean_stream_batch(first, &[true, false]);
+        let second = resource.take_stream_value(&active).unwrap().unwrap();
+        assert_boolean_stream_batch(second, &[false, true]);
+        let terminal = resource.take_stream_value(&active).unwrap().unwrap();
+        assert_boolean_stream_terminal(terminal);
     }
-    assert_eq!(resource.stream_queued_items, super::MAX_RESOURCE_QUEUED_ITEMS);
-    resource.take_stream_value(&active).unwrap().unwrap();
-    assert_eq!(resource.stream_queued_items, super::MAX_RESOURCE_QUEUED_ITEMS - 1);
 
-    resource
-        .apply_completion(
-            &active,
-            request.stream_values(vec![RuntimeValue::Boolean(false)]),
-        )
-        .unwrap();
-    assert_eq!(resource.stream_queued_items, super::MAX_RESOURCE_QUEUED_ITEMS);
-}
+    #[test]
+    fn client_stream_rejects_scalar_ready_completion() {
+        let (active, function, pair, _) = version_two_server_stream_active();
+        let key = super::ClientResourceKey::new(
+            InvocationTarget::new(function, pair),
+            PrincipalId::from_bytes([0x7a; 16]),
+            ClientResourceKey::canonical_arguments_digest(&active, &[]).unwrap(),
+            Sha256Digest::from_bytes([0x23; 32]),
+        );
+        let mut resource =
+            ClientResource::new_stream(key, ResolvedType::Value(orna_standard::BOOLEAN_TYPE_ID));
+        let request = resource.begin_stream_request(&active, Vec::new()).unwrap();
 
-#[test]
-fn client_stream_failure_drains_queued_batches_before_evaluator_reports_failure() {
-    let (active, function, pair, function_revision) = version_two_server_stream_active();
-    let key = super::ClientResourceKey::new(
-        InvocationTarget::new(function, pair),
-        PrincipalId::from_bytes([0x7a; 16]),
-        ClientResourceKey::canonical_arguments_digest(&active, &[]).unwrap(),
-        Sha256Digest::from_bytes([0x22; 32]),
-    );
-    let mut resource = ClientResource::new_stream(
-        key,
-        ResolvedType::Value(orna_standard::BOOLEAN_TYPE_ID),
-    );
-    let request = resource.begin_stream_request(&active, Vec::new()).unwrap();
-    resource
-        .apply_completion(
-            &active,
-            request
-                .clone()
-                .stream_values(vec![RuntimeValue::Boolean(true)]),
-        )
-        .unwrap();
-    resource
-        .apply_completion(
-            &active,
-            request
-                .clone()
-                .stream_values(vec![RuntimeValue::Boolean(false)]),
-        )
-        .unwrap();
-    resource
-        .apply_completion(&active, request.failed("stream.failed".to_owned()))
-        .unwrap();
+        assert_eq!(
+            resource.publish_ready(&active, request.generation(), RuntimeValue::Boolean(true)),
+            Err(super::ClientResourceError::TypeMismatch),
+        );
+        assert_eq!(resource.status(), super::ClientResourceStatus::Loading);
+        assert_eq!(resource.value(), None);
+        assert!(!resource.stream_complete());
+    }
 
-    let context = ClientExecutionContext {
-        pair,
-        function,
-        function_revision,
-        parent_invocation_id: InvocationId::from_bytes([0xf6; 16]),
-        observer_lineage: None,
-    };
-    let first = super::read_stream_resource_value(&active, &mut resource, context).unwrap();
-    assert_boolean_stream_batch(first, &[true]);
-    let second = super::read_stream_resource_value(&active, &mut resource, context).unwrap();
-    assert_boolean_stream_batch(second, &[false]);
-    assert!(matches!(
-        super::read_stream_resource_value(&active, &mut resource, context),
-        Err(super::ClientExecutionError::ResourceEvaluation {
-            source: super::ClientResourceExecutionError::Failed(code),
-            ..
-        }) if code == "stream.failed"
-    ));
-}
+    #[test]
+    fn client_stream_rejects_oversized_batches_and_totals_before_queueing() {
+        let (active, function, pair, _) = version_two_server_stream_active();
+        let key = super::ClientResourceKey::new(
+            InvocationTarget::new(function, pair),
+            PrincipalId::from_bytes([0x7a; 16]),
+            ClientResourceKey::canonical_arguments_digest(&active, &[]).unwrap(),
+            Sha256Digest::from_bytes([0x23; 32]),
+        );
+        let mut resource =
+            ClientResource::new_stream(key, ResolvedType::Value(orna_standard::BOOLEAN_TYPE_ID));
+        let request = resource.begin_stream_request(&active, Vec::new()).unwrap();
 
-#[test]
-fn client_stream_cancellation_clears_batches_and_rejects_stale_completions() {
-    let (active, function, pair, _) = version_two_server_stream_active();
-    let key = super::ClientResourceKey::new(
-        InvocationTarget::new(function, pair),
-        PrincipalId::from_bytes([0x7a; 16]),
-        ClientResourceKey::canonical_arguments_digest(&active, &[]).unwrap(),
-        Sha256Digest::from_bytes([0x22; 32]),
-    );
-    let mut resource = ClientResource::new_stream(
-        key,
-        ResolvedType::Value(orna_standard::BOOLEAN_TYPE_ID),
-    );
-    let first = resource.begin_stream_request(&active, Vec::new()).unwrap();
-    let second = resource.begin_stream_request(&active, Vec::new()).unwrap();
-    resource
-        .apply_completion(
-            &active,
-            second
-                .clone()
-                .stream_values(vec![RuntimeValue::Boolean(true)]),
-        )
-        .unwrap();
-    resource
-        .apply_completion(&active, second.clone().cancelled())
-        .unwrap();
+        let oversized_batch =
+            vec![RuntimeValue::Boolean(true); super::MAX_RESOURCE_BATCH_ITEMS + 1];
+        assert_eq!(
+            resource.apply_completion(&active, request.clone().stream_values(oversized_batch),),
+            Err(super::ClientResourceError::TypeMismatch),
+        );
+        assert!(resource.stream_batches.is_empty());
+        assert_eq!(resource.stream_total_items, 0);
 
-    assert_eq!(
-        resource.take_stream_value(&active),
-        Err(super::ClientResourceError::InvalidTransition {
-            status: super::ClientResourceStatus::Cancelled,
-        })
-    );
-    assert_eq!(resource.status(), super::ClientResourceStatus::Cancelled);
-    assert_eq!(resource.failure(), None);
-    assert!(matches!(
-        resource.apply_completion(
-            &active,
-            first.stream_values(vec![RuntimeValue::Boolean(false)]),
-        ),
-        Err(super::ClientResourceError::StaleGeneration { .. })
-    ));
-    assert_eq!(
-        resource.apply_completion(&active, second.stream_completed()),
-        Err(super::ClientResourceError::InvalidTransition {
-            status: super::ClientResourceStatus::Cancelled,
-        })
-    );
-}
+        resource.stream_total_items = super::MAX_RESOURCE_TOTAL_ITEMS;
+        assert_eq!(
+            resource.apply_completion(
+                &active,
+                request.stream_values(vec![RuntimeValue::Boolean(true)]),
+            ),
+            Err(super::ClientResourceError::TypeMismatch),
+        );
+        assert!(resource.stream_batches.is_empty());
+        assert_eq!(resource.status(), super::ClientResourceStatus::Loading);
+    }
 
+    #[test]
+    fn client_stream_queue_overflow_preserves_existing_batches() {
+        let (active, function, pair, _) = version_two_server_stream_active();
+        let key = super::ClientResourceKey::new(
+            InvocationTarget::new(function, pair),
+            PrincipalId::from_bytes([0x7a; 16]),
+            ClientResourceKey::canonical_arguments_digest(&active, &[]).unwrap(),
+            Sha256Digest::from_bytes([0x24; 32]),
+        );
+        let mut resource =
+            ClientResource::new_stream(key, ResolvedType::Value(orna_standard::BOOLEAN_TYPE_ID));
+        let request = resource.begin_stream_request(&active, Vec::new()).unwrap();
+        let batch = vec![RuntimeValue::Boolean(true); super::MAX_RESOURCE_BATCH_ITEMS];
+        resource
+            .apply_completion(&active, request.clone().stream_values(batch))
+            .unwrap();
+        let before = resource.clone();
+
+        assert_eq!(
+            resource.apply_completion(
+                &active,
+                request.stream_values(vec![RuntimeValue::Boolean(false)]),
+            ),
+            Err(super::ClientResourceError::TypeMismatch),
+        );
+        assert_eq!(resource, before);
+    }
+
+    #[test]
+    fn client_stream_queue_dequeue_releases_capacity() {
+        let (active, function, pair, _) = version_two_server_stream_active();
+        let key = super::ClientResourceKey::new(
+            InvocationTarget::new(function, pair),
+            PrincipalId::from_bytes([0x7a; 16]),
+            ClientResourceKey::canonical_arguments_digest(&active, &[]).unwrap(),
+            Sha256Digest::from_bytes([0x25; 32]),
+        );
+        let mut resource =
+            ClientResource::new_stream(key, ResolvedType::Value(orna_standard::BOOLEAN_TYPE_ID));
+        let request = resource.begin_stream_request(&active, Vec::new()).unwrap();
+        for _ in 0..super::MAX_RESOURCE_BATCH_ITEMS {
+            resource
+                .apply_completion(
+                    &active,
+                    request
+                        .clone()
+                        .stream_values(vec![RuntimeValue::Boolean(true)]),
+                )
+                .unwrap();
+        }
+        assert_eq!(
+            resource.stream_queued_items,
+            super::MAX_RESOURCE_QUEUED_ITEMS
+        );
+        resource.take_stream_value(&active).unwrap().unwrap();
+        assert_eq!(
+            resource.stream_queued_items,
+            super::MAX_RESOURCE_QUEUED_ITEMS - 1
+        );
+
+        resource
+            .apply_completion(
+                &active,
+                request.stream_values(vec![RuntimeValue::Boolean(false)]),
+            )
+            .unwrap();
+        assert_eq!(
+            resource.stream_queued_items,
+            super::MAX_RESOURCE_QUEUED_ITEMS
+        );
+    }
+
+    #[test]
+    fn client_stream_failure_drains_queued_batches_before_evaluator_reports_failure() {
+        let (active, function, pair, function_revision) = version_two_server_stream_active();
+        let key = super::ClientResourceKey::new(
+            InvocationTarget::new(function, pair),
+            PrincipalId::from_bytes([0x7a; 16]),
+            ClientResourceKey::canonical_arguments_digest(&active, &[]).unwrap(),
+            Sha256Digest::from_bytes([0x22; 32]),
+        );
+        let mut resource =
+            ClientResource::new_stream(key, ResolvedType::Value(orna_standard::BOOLEAN_TYPE_ID));
+        let request = resource.begin_stream_request(&active, Vec::new()).unwrap();
+        resource
+            .apply_completion(
+                &active,
+                request
+                    .clone()
+                    .stream_values(vec![RuntimeValue::Boolean(true)]),
+            )
+            .unwrap();
+        resource
+            .apply_completion(
+                &active,
+                request
+                    .clone()
+                    .stream_values(vec![RuntimeValue::Boolean(false)]),
+            )
+            .unwrap();
+        resource
+            .apply_completion(&active, request.failed("stream.failed".to_owned()))
+            .unwrap();
+
+        let context = ClientExecutionContext {
+            pair,
+            function,
+            function_revision,
+            parent_invocation_id: InvocationId::from_bytes([0xf6; 16]),
+            observer_lineage: None,
+        };
+        let first = super::read_stream_resource_value(&active, &mut resource, context).unwrap();
+        assert_boolean_stream_batch(first, &[true]);
+        let second = super::read_stream_resource_value(&active, &mut resource, context).unwrap();
+        assert_boolean_stream_batch(second, &[false]);
+        assert!(matches!(
+            super::read_stream_resource_value(&active, &mut resource, context),
+            Err(super::ClientExecutionError::ResourceEvaluation {
+                source: super::ClientResourceExecutionError::Failed(code),
+                ..
+            }) if code == "stream.failed"
+        ));
+    }
+
+    #[test]
+    fn client_stream_cancellation_clears_batches_and_rejects_stale_completions() {
+        let (active, function, pair, _) = version_two_server_stream_active();
+        let key = super::ClientResourceKey::new(
+            InvocationTarget::new(function, pair),
+            PrincipalId::from_bytes([0x7a; 16]),
+            ClientResourceKey::canonical_arguments_digest(&active, &[]).unwrap(),
+            Sha256Digest::from_bytes([0x22; 32]),
+        );
+        let mut resource =
+            ClientResource::new_stream(key, ResolvedType::Value(orna_standard::BOOLEAN_TYPE_ID));
+        let first = resource.begin_stream_request(&active, Vec::new()).unwrap();
+        let second = resource.begin_stream_request(&active, Vec::new()).unwrap();
+        resource
+            .apply_completion(
+                &active,
+                second
+                    .clone()
+                    .stream_values(vec![RuntimeValue::Boolean(true)]),
+            )
+            .unwrap();
+        resource
+            .apply_completion(&active, second.clone().cancelled())
+            .unwrap();
+
+        assert_eq!(
+            resource.take_stream_value(&active),
+            Err(super::ClientResourceError::InvalidTransition {
+                status: super::ClientResourceStatus::Cancelled,
+            })
+        );
+        assert_eq!(resource.status(), super::ClientResourceStatus::Cancelled);
+        assert_eq!(resource.failure(), None);
+        assert!(matches!(
+            resource.apply_completion(
+                &active,
+                first.stream_values(vec![RuntimeValue::Boolean(false)]),
+            ),
+            Err(super::ClientResourceError::StaleGeneration { .. })
+        ));
+        assert_eq!(
+            resource.apply_completion(&active, second.stream_completed()),
+            Err(super::ClientResourceError::InvalidTransition {
+                status: super::ClientResourceStatus::Cancelled,
+            })
+        );
+    }
 
     fn assert_boolean_stream_batch(value: RuntimeValue, expected: &[bool]) {
         let RuntimeValue::Constructed(option) = value else {
@@ -9781,7 +10403,9 @@ fn client_stream_cancellation_clears_batches_and_rejects_stale_completions() {
             vec![
                 orna_artifact::client_plan::ClientStatement::let_(
                     local,
-                    orna_artifact::client_plan::ClientExpressionNode::Resource { operation: operation.clone() },
+                    orna_artifact::client_plan::ClientExpressionNode::Resource {
+                        operation: operation.clone(),
+                    },
                 ),
                 orna_artifact::client_plan::ClientStatement::assignment(
                     local,
@@ -9789,7 +10413,9 @@ fn client_stream_cancellation_clears_batches_and_rejects_stale_completions() {
                 ),
             ],
             orna_artifact::client_plan::ClientExpressionNode::Await {
-                expression: Box::new(orna_artifact::client_plan::ClientExpressionNode::LocalRead { local }),
+                expression: Box::new(
+                    orna_artifact::client_plan::ClientExpressionNode::LocalRead { local },
+                ),
             },
         );
         let mut state = ClientStateStore::new();
@@ -9847,7 +10473,9 @@ fn client_stream_cancellation_clears_batches_and_rejects_stale_completions() {
                 ),
                 orna_artifact::client_plan::ClientStatement::assignment(
                     copy_local,
-                    orna_artifact::client_plan::ClientExpressionNode::LocalRead { local: value_local },
+                    orna_artifact::client_plan::ClientExpressionNode::LocalRead {
+                        local: value_local,
+                    },
                 ),
             ],
             orna_artifact::client_plan::ClientExpressionNode::LocalRead { local: copy_local },
@@ -9919,7 +10547,6 @@ fn client_stream_cancellation_clears_batches_and_rejects_stale_completions() {
         assert_eq!(resource.status(), super::ClientResourceStatus::Ready);
         assert_eq!(resource.value(), Some(&RuntimeValue::Boolean(true)));
     }
-
 
     #[test]
     fn client_resource_executor_rejects_digest_duplicates_stale_and_cancelled() {
@@ -10119,28 +10746,26 @@ fn client_stream_cancellation_clears_batches_and_rejects_stale_completions() {
             standard.revision(),
             orna_standard::STD_INVOKE_ECHO_FUNCTION_REVISION_ID,
         );
-        let digest = ClientResourceKey::canonical_arguments_digest(
-            &active,
-            std::slice::from_ref(&argument),
-        )
-        .unwrap();
+        let digest =
+            ClientResourceKey::canonical_arguments_digest(&active, std::slice::from_ref(&argument))
+                .unwrap();
         let key = ClientResourceKey::new(
             target,
             PrincipalId::from_bytes([0x7a; 16]),
             digest,
             active.catalogue_hash(),
         );
-        let mut resource = ClientResource::new(
-            key,
-            ResolvedType::Scalar(StandardScalar::Integer),
-        );
+        let mut resource = ClientResource::new(key, ResolvedType::Scalar(StandardScalar::Integer));
 
         let request = resource
             .begin_request(&active, vec![argument])
             .expect("the pinned standard resource target should validate");
 
         assert_eq!(request.target(), target);
-        assert_eq!(request.expected_type(), ResolvedType::Scalar(StandardScalar::Integer));
+        assert_eq!(
+            request.expected_type(),
+            ResolvedType::Scalar(StandardScalar::Integer)
+        );
     }
 
     #[test]
@@ -10261,10 +10886,10 @@ fn client_stream_cancellation_clears_batches_and_rejects_stale_completions() {
         assert_eq!(resource.failure(), None);
         assert_eq!(
             state.invalidate_resource(super::ClientResourceKey::new(
-            InvocationTarget::new(function, pair),
-            PrincipalId::from_bytes([0x7b; 16]),
-            Sha256Digest::from_bytes([0xc1; 32]),
-            Sha256Digest::from_bytes([0xc2; 32]),
+                InvocationTarget::new(function, pair),
+                PrincipalId::from_bytes([0x7b; 16]),
+                Sha256Digest::from_bytes([0xc1; 32]),
+                Sha256Digest::from_bytes([0xc2; 32]),
             )),
             Ok(false)
         );
@@ -10288,11 +10913,9 @@ fn client_stream_cancellation_clears_batches_and_rejects_stale_completions() {
             RuntimeValue::Integer(42),
         )
         .unwrap();
-        let digest = ClientResourceKey::canonical_arguments_digest(
-            &active,
-            std::slice::from_ref(&argument),
-        )
-        .unwrap();
+        let digest =
+            ClientResourceKey::canonical_arguments_digest(&active, std::slice::from_ref(&argument))
+                .unwrap();
         let key = ClientResourceKey::new(
             target,
             PrincipalId::from_bytes([0x7a; 16]),
@@ -10349,11 +10972,9 @@ fn client_stream_cancellation_clears_batches_and_rejects_stale_completions() {
             RuntimeValue::Integer(42),
         )
         .unwrap();
-        let digest = ClientResourceKey::canonical_arguments_digest(
-            &active,
-            std::slice::from_ref(&argument),
-        )
-        .unwrap();
+        let digest =
+            ClientResourceKey::canonical_arguments_digest(&active, std::slice::from_ref(&argument))
+                .unwrap();
         let key_a = ClientResourceKey::new(
             target,
             PrincipalId::from_bytes([0x7a; 16]),
@@ -10549,7 +11170,10 @@ fn client_stream_cancellation_clears_batches_and_rejects_stale_completions() {
     fn state_context_data_invalidation_token_preserves_existing_defaults() {
         let function = FunctionId::from_bytes([0x61; 16]);
         let mut context = super::ClientStateContext::default_for(function);
-        assert_eq!(context.data_invalidation_token(), Sha256Digest::from_bytes([0; 32]));
+        assert_eq!(
+            context.data_invalidation_token(),
+            Sha256Digest::from_bytes([0; 32])
+        );
         assert_eq!(
             super::ClientStateContext::new(function, "profile".to_owned(), "instance".to_owned())
                 .unwrap()
@@ -10920,7 +11544,8 @@ fn client_stream_cancellation_clears_batches_and_rejects_stale_completions() {
     }
 
     #[test]
-    fn client_user_state_write_results_leave_all_cells_unchanged_when_a_later_revision_is_invalid() {
+    fn client_user_state_write_results_leave_all_cells_unchanged_when_a_later_revision_is_invalid()
+    {
         let root_function = FunctionId::from_bytes([0x41; 16]);
         let function = FunctionId::from_bytes([0x42; 16]);
         let value_type = orna_standard::CHARACTER_LARGE_OBJECT_TYPE_ID;
@@ -10952,7 +11577,8 @@ fn client_stream_cancellation_clears_batches_and_rejects_stale_completions() {
         )
         .unwrap();
         let first_client_key = super::ClientStateKey::from_context(&context, function, first_slot);
-        let second_client_key = super::ClientStateKey::from_context(&context, function, second_slot);
+        let second_client_key =
+            super::ClientStateKey::from_context(&context, function, second_slot);
         let mut state = super::ClientStateStore::new();
         state.set_context(context);
         state
@@ -11005,7 +11631,10 @@ fn client_stream_cancellation_clears_batches_and_rejects_stale_completions() {
             .apply_user_state_write_results(&changes, &results)
             .unwrap_err();
 
-        assert!(matches!(error, super::ClientUserStateError::InvalidRevision(_)));
+        assert!(matches!(
+            error,
+            super::ClientUserStateError::InvalidRevision(_)
+        ));
         assert_eq!(state.user(), &before);
 
         let mixed_results = vec![
@@ -11144,7 +11773,9 @@ fn client_stream_cancellation_clears_batches_and_rejects_stale_completions() {
 
             assert_eq!(result.value(), &RuntimeValue::Boolean(true));
             assert_eq!(
-                state.local().get(&super::ClientStateKey::new(function, slot_id)),
+                state
+                    .local()
+                    .get(&super::ClientStateKey::new(function, slot_id)),
                 Some(
                     &RuntimeValue::null(ResolvedType::value(type_id))
                         .expect("supported scalar null constructs"),
@@ -11253,22 +11884,56 @@ fn client_stream_cancellation_clears_batches_and_rejects_stale_completions() {
         let local = LocalId::from_bytes([0xc1; 16]);
         let text_type = orna_standard::CHARACTER_LARGE_OBJECT_TYPE_ID;
         let plan = orna_artifact::client_plan::ProceduralClientPlan::new(
-            vec![orna_artifact::client_plan::ClientLocal::new(local, text_type, orna_artifact::client_plan::ClientLocalKind::Value)],
+            vec![orna_artifact::client_plan::ClientLocal::new(
+                local,
+                text_type,
+                orna_artifact::client_plan::ClientLocalKind::Value,
+            )],
             vec![
-                orna_artifact::client_plan::ClientStatement::let_(local, orna_artifact::client_plan::ClientExpressionNode::String { value: "first".to_owned() }),
-                orna_artifact::client_plan::ClientStatement::assignment(local, orna_artifact::client_plan::ClientExpressionNode::String { value: "second".to_owned() }),
+                orna_artifact::client_plan::ClientStatement::let_(
+                    local,
+                    orna_artifact::client_plan::ClientExpressionNode::String {
+                        value: "first".to_owned(),
+                    },
+                ),
+                orna_artifact::client_plan::ClientStatement::assignment(
+                    local,
+                    orna_artifact::client_plan::ClientExpressionNode::String {
+                        value: "second".to_owned(),
+                    },
+                ),
             ],
             orna_artifact::client_plan::ClientExpressionNode::LocalRead { local },
         );
         let payload = orna_artifact::client_plan::CapabilityClientPlan::new(
             orna_artifact::client_plan::InnerClientPlan::Procedural(plan),
-            vec![orna_artifact::client_plan::CapabilityRequirement::new("std.fs.read", orna_artifact::client_plan::CapabilityArgumentSource::Text("/tmp".to_owned()))],
-        ).encode().unwrap();
+            vec![orna_artifact::client_plan::CapabilityRequirement::new(
+                "std.fs.read",
+                orna_artifact::client_plan::CapabilityArgumentSource::Text("/tmp".to_owned()),
+            )],
+        )
+        .encode()
+        .unwrap();
         let (active, function, pair, _, _) = version_five_expression_active_with_parameter(payload);
-        let grant = super::capability::LocalCapabilityGrant::new(super::capability::LocalCapabilityName::StdFsRead, super::capability::LocalCapabilityScope::path("/tmp").unwrap()).unwrap();
+        let grant = super::capability::LocalCapabilityGrant::new(
+            super::capability::LocalCapabilityName::StdFsRead,
+            super::capability::LocalCapabilityScope::path("/tmp").unwrap(),
+        )
+        .unwrap();
         let grants = super::capability::LocalCapabilityGrantSet::from_grants([grant]).unwrap();
-        let argument = FunctionArgument::new(ParameterId::from_bytes([0xb1; 16]), RuntimeValue::Text("/tmp".to_owned())).unwrap();
-        let result = super::evaluate_client_function_with_grants_and_arguments(&active, &authorise(pair, function), &[argument], &[], &grants).unwrap();
+        let argument = FunctionArgument::new(
+            ParameterId::from_bytes([0xb1; 16]),
+            RuntimeValue::Text("/tmp".to_owned()),
+        )
+        .unwrap();
+        let result = super::evaluate_client_function_with_grants_and_arguments(
+            &active,
+            &authorise(pair, function),
+            &[argument],
+            &[],
+            &grants,
+        )
+        .unwrap();
         assert_eq!(result.value(), &RuntimeValue::Text("second".to_owned()));
     }
 
@@ -11298,10 +11963,7 @@ fn client_stream_cancellation_clears_batches_and_rejects_stale_completions() {
             digest,
             active.catalogue_hash(),
         );
-        let mut resource = super::ClientResource::new(
-            key,
-            ResolvedType::Value(text_type),
-        );
+        let mut resource = super::ClientResource::new(key, ResolvedType::Value(text_type));
 
         let error = resource.begin_request(&active, Vec::new()).unwrap_err();
 
@@ -11332,19 +11994,52 @@ fn client_stream_cancellation_clears_batches_and_rejects_stale_completions() {
             )],
             text_type,
         );
-        let plan = orna_artifact::client_plan::ProceduralClientPlan::new(Vec::new(), Vec::new(), orna_artifact::client_plan::ClientExpressionNode::Await { expression: Box::new(orna_artifact::client_plan::ClientExpressionNode::Resource { operation }) });
+        let plan = orna_artifact::client_plan::ProceduralClientPlan::new(
+            Vec::new(),
+            Vec::new(),
+            orna_artifact::client_plan::ClientExpressionNode::Await {
+                expression: Box::new(orna_artifact::client_plan::ClientExpressionNode::Resource {
+                    operation,
+                }),
+            },
+        );
         let payload = orna_artifact::client_plan::CapabilityClientPlan::new(
             orna_artifact::client_plan::InnerClientPlan::Procedural(plan),
-            vec![orna_artifact::client_plan::CapabilityRequirement::new("std.fs.read", orna_artifact::client_plan::CapabilityArgumentSource::Text("/tmp".to_owned()))],
-        ).encode().unwrap();
+            vec![orna_artifact::client_plan::CapabilityRequirement::new(
+                "std.fs.read",
+                orna_artifact::client_plan::CapabilityArgumentSource::Text("/tmp".to_owned()),
+            )],
+        )
+        .encode()
+        .unwrap();
         let (active, function, pair, _, _) = version_five_expression_active_with_parameter(payload);
-        let grant = super::capability::LocalCapabilityGrant::new(super::capability::LocalCapabilityName::StdFsRead, super::capability::LocalCapabilityScope::path("/tmp").unwrap()).unwrap();
+        let grant = super::capability::LocalCapabilityGrant::new(
+            super::capability::LocalCapabilityName::StdFsRead,
+            super::capability::LocalCapabilityScope::path("/tmp").unwrap(),
+        )
+        .unwrap();
         let grants = super::capability::LocalCapabilityGrantSet::from_grants([grant]).unwrap();
-        let argument = FunctionArgument::new(ParameterId::from_bytes([0xb1; 16]), RuntimeValue::Text("/tmp".to_owned())).unwrap();
-        let error = super::evaluate_client_function_with_grants_and_arguments(&active, &authorise(pair, function), &[argument], &[], &grants).unwrap_err();
-        assert!(matches!(error, super::ClientExecutionError::ResourceEvaluation { source: super::ClientResourceExecutionError::ExecutorUnavailable, .. }));
+        let argument = FunctionArgument::new(
+            ParameterId::from_bytes([0xb1; 16]),
+            RuntimeValue::Text("/tmp".to_owned()),
+        )
+        .unwrap();
+        let error = super::evaluate_client_function_with_grants_and_arguments(
+            &active,
+            &authorise(pair, function),
+            &[argument],
+            &[],
+            &grants,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            super::ClientExecutionError::ResourceEvaluation {
+                source: super::ClientResourceExecutionError::ExecutorUnavailable,
+                ..
+            }
+        ));
     }
-
 
     #[test]
     fn procedural_scalar_resource_local_awaits_through_assignment_with_executor_value() {
@@ -11381,7 +12076,9 @@ fn client_stream_cancellation_clears_batches_and_rejects_stale_completions() {
             vec![
                 orna_artifact::client_plan::ClientStatement::let_(
                     local,
-                    orna_artifact::client_plan::ClientExpressionNode::Resource { operation: operation.clone() },
+                    orna_artifact::client_plan::ClientExpressionNode::Resource {
+                        operation: operation.clone(),
+                    },
                 ),
                 orna_artifact::client_plan::ClientStatement::assignment(
                     local,
@@ -11389,7 +12086,9 @@ fn client_stream_cancellation_clears_batches_and_rejects_stale_completions() {
                 ),
             ],
             orna_artifact::client_plan::ClientExpressionNode::Await {
-                expression: Box::new(orna_artifact::client_plan::ClientExpressionNode::LocalRead { local }),
+                expression: Box::new(
+                    orna_artifact::client_plan::ClientExpressionNode::LocalRead { local },
+                ),
             },
         );
         let payload = orna_artifact::client_plan::CapabilityClientPlan::new(
@@ -11401,14 +12100,16 @@ fn client_stream_cancellation_clears_batches_and_rejects_stale_completions() {
         )
         .encode()
         .unwrap();
-        let (active, function, pair, _, parameter) = version_five_expression_active_with_parameter(payload);
+        let (active, function, pair, _, parameter) =
+            version_five_expression_active_with_parameter(payload);
         let grant = super::capability::LocalCapabilityGrant::new(
             super::capability::LocalCapabilityName::StdFsRead,
             super::capability::LocalCapabilityScope::path("/tmp").unwrap(),
         )
         .unwrap();
         let grants = super::capability::LocalCapabilityGrantSet::from_grants([grant]).unwrap();
-        let argument = FunctionArgument::new(parameter, RuntimeValue::Text("/tmp".to_owned())).unwrap();
+        let argument =
+            FunctionArgument::new(parameter, RuntimeValue::Text("/tmp".to_owned())).unwrap();
         let state_context = super::ClientStateContext::new(
             function,
             "profile-a".to_owned(),
@@ -11455,7 +12156,10 @@ fn client_stream_cancellation_clears_batches_and_rejects_stale_completions() {
         )
         .unwrap();
 
-        assert_eq!(result.value(), &RuntimeValue::Text("executor-value".to_owned()));
+        assert_eq!(
+            result.value(),
+            &RuntimeValue::Text("executor-value".to_owned())
+        );
     }
 
     #[test]
@@ -11469,11 +12173,9 @@ fn client_stream_cancellation_clears_batches_and_rejects_stale_completions() {
             .unwrap(),
         ])
         .unwrap();
-        let argument = FunctionArgument::new(
-            parameter,
-            RuntimeValue::Text("/tmp/data-token".to_owned()),
-        )
-        .unwrap();
+        let argument =
+            FunctionArgument::new(parameter, RuntimeValue::Text("/tmp/data-token".to_owned()))
+                .unwrap();
         let context_a = super::ClientStateContext::new_with_data_invalidation_token(
             function,
             "profile".to_owned(),
@@ -11526,10 +12228,23 @@ fn client_stream_cancellation_clears_batches_and_rejects_stale_completions() {
             .unwrap_err(),
         );
 
-        assert_ne!(key_a, key_b, "host data invalidation must select a new local key");
-        assert_eq!(executor.cancelled.len(), 1, "the old loading generation is cancelled");
-        assert_eq!(state.resource(key_a).map(ClientResource::status), Some(ClientResourceStatus::Idle));
-        assert_eq!(state.resource(key_b).map(ClientResource::status), Some(ClientResourceStatus::Loading));
+        assert_ne!(
+            key_a, key_b,
+            "host data invalidation must select a new local key"
+        );
+        assert_eq!(
+            executor.cancelled.len(),
+            1,
+            "the old loading generation is cancelled"
+        );
+        assert_eq!(
+            state.resource(key_a).map(ClientResource::status),
+            Some(ClientResourceStatus::Idle)
+        );
+        assert_eq!(
+            state.resource(key_b).map(ClientResource::status),
+            Some(ClientResourceStatus::Loading)
+        );
         assert_eq!(key_a.target(), key_b.target());
         assert_eq!(key_a.arguments_digest(), key_b.arguments_digest());
     }
@@ -11537,7 +12252,8 @@ fn client_stream_cancellation_clears_batches_and_rejects_stale_completions() {
     #[test]
     fn evaluator_resource_key_includes_authorised_security_context() {
         let (active, function, pair, _, parameter) = version_six_client_resource_action_active();
-        let (direct_authorisation, role_authorisation) = authorise_with_role_context(pair, function);
+        let (direct_authorisation, role_authorisation) =
+            authorise_with_role_context(pair, function);
         let grants = capability::LocalCapabilityGrantSet::from_grants([
             capability::LocalCapabilityGrant::new(
                 capability::LocalCapabilityName::StdFsRead,
@@ -11561,9 +12277,8 @@ fn client_stream_cancellation_clears_batches_and_rejects_stale_completions() {
 
         // A changed security context cannot reuse a READY value.
         let mut ready_state = ClientStateStore::new();
-        let mut ready_executor = RecordingActionExecutor::new(Some(RuntimeValue::Text(
-            "direct".to_owned(),
-        )));
+        let mut ready_executor =
+            RecordingActionExecutor::new(Some(RuntimeValue::Text("direct".to_owned())));
         let direct_result = super::evaluate_client_function_in_state_context_with_grants_and_arguments_and_executor_with_parent_invocation(
             &active,
             &direct_authorisation,
@@ -11577,12 +12292,17 @@ fn client_stream_cancellation_clears_batches_and_rejects_stale_completions() {
         )
         .unwrap();
         let key_a = ready_executor.executed[0].key();
-        assert_eq!(direct_result.value(), &RuntimeValue::Text("direct".to_owned()));
-        assert_eq!(ready_state.resource(key_a).map(ClientResource::status), Some(ClientResourceStatus::Ready));
+        assert_eq!(
+            direct_result.value(),
+            &RuntimeValue::Text("direct".to_owned())
+        );
+        assert_eq!(
+            ready_state.resource(key_a).map(ClientResource::status),
+            Some(ClientResourceStatus::Ready)
+        );
 
-        let mut role_executor = RecordingActionExecutor::new(Some(RuntimeValue::Text(
-            "role".to_owned(),
-        )));
+        let mut role_executor =
+            RecordingActionExecutor::new(Some(RuntimeValue::Text("role".to_owned())));
         let role_result = super::evaluate_client_function_in_state_context_with_grants_and_arguments_and_executor_with_parent_invocation(
             &active,
             &role_authorisation,
@@ -11598,8 +12318,14 @@ fn client_stream_cancellation_clears_batches_and_rejects_stale_completions() {
         let key_b = role_executor.executed[0].key();
         assert_ne!(key_a, key_b, "security context must select a new local key");
         assert_eq!(role_result.value(), &RuntimeValue::Text("role".to_owned()));
-        assert_eq!(ready_state.resource(key_a).map(ClientResource::status), Some(ClientResourceStatus::Ready));
-        assert_eq!(ready_state.resource(key_b).map(ClientResource::status), Some(ClientResourceStatus::Ready));
+        assert_eq!(
+            ready_state.resource(key_a).map(ClientResource::status),
+            Some(ClientResourceStatus::Ready)
+        );
+        assert_eq!(
+            ready_state.resource(key_b).map(ClientResource::status),
+            Some(ClientResourceStatus::Ready)
+        );
         assert_eq!(key_a.target(), key_b.target());
         assert_eq!(key_a.arguments_digest(), key_b.arguments_digest());
         assert_ne!(key_a.invalidation_token(), key_b.invalidation_token());
@@ -11648,8 +12374,18 @@ fn client_stream_cancellation_clears_batches_and_rejects_stale_completions() {
         };
         assert_ne!(loading_key_a, loading_key_b);
         assert_eq!(loading_executor.cancelled.len(), 1);
-        assert_eq!(loading_state.resource(loading_key_a).map(ClientResource::status), Some(ClientResourceStatus::Idle));
-        assert_eq!(loading_state.resource(loading_key_b).map(ClientResource::status), Some(ClientResourceStatus::Loading));
+        assert_eq!(
+            loading_state
+                .resource(loading_key_a)
+                .map(ClientResource::status),
+            Some(ClientResourceStatus::Idle)
+        );
+        assert_eq!(
+            loading_state
+                .resource(loading_key_b)
+                .map(ClientResource::status),
+            Some(ClientResourceStatus::Loading)
+        );
     }
 
     #[test]
@@ -11683,14 +12419,12 @@ fn client_stream_cancellation_clears_batches_and_rejects_stale_completions() {
         .unwrap();
         let mut state = ClientStateStore::new();
         state.set_context(state_context.clone());
-        state.local_mut().insert(
-            local_key,
-            RuntimeValue::Text("local".to_owned()),
-        );
-        state.session_mut().insert(
-            session_key,
-            RuntimeValue::Text("session".to_owned()),
-        );
+        state
+            .local_mut()
+            .insert(local_key, RuntimeValue::Text("local".to_owned()));
+        state
+            .session_mut()
+            .insert(session_key, RuntimeValue::Text("session".to_owned()));
         state
             .load_user_state(&[UserStateCell::new(
                 user_key,
@@ -11710,11 +12444,9 @@ fn client_stream_cancellation_clears_batches_and_rejects_stale_completions() {
         )
         .unwrap();
         let grants = capability::LocalCapabilityGrantSet::from_grants([grant]).unwrap();
-        let argument = FunctionArgument::new(
-            parameter,
-            RuntimeValue::Text("/tmp/pending".to_owned()),
-        )
-        .unwrap();
+        let argument =
+            FunctionArgument::new(parameter, RuntimeValue::Text("/tmp/pending".to_owned()))
+                .unwrap();
         let mut executor = RecordingActionExecutor::new(None);
 
         let error = super::evaluate_client_function_with_state_and_grants_and_arguments_and_executor_with_parent_invocation(
@@ -11740,8 +12472,12 @@ fn client_stream_cancellation_clears_batches_and_rejects_stale_completions() {
         assert_eq!(state.local(), &prior_local);
         assert_eq!(state.session(), &prior_session);
         assert_eq!(state.user(), &prior_user);
-        let resource = state.resource(key).expect("pending resource remains in caller state");
-        let request_id = resource.request_id().expect("pending resource has request identity");
+        let resource = state
+            .resource(key)
+            .expect("pending resource remains in caller state");
+        let request_id = resource
+            .request_id()
+            .expect("pending resource has request identity");
         assert_eq!(resource.key(), key);
         assert_eq!(resource.generation(), generation);
         assert_eq!(resource.status(), ClientResourceStatus::Loading);
@@ -11774,11 +12510,9 @@ fn client_stream_cancellation_clears_batches_and_rejects_stale_completions() {
         )
         .unwrap();
         let grants = capability::LocalCapabilityGrantSet::from_grants([grant]).unwrap();
-        let argument = FunctionArgument::new(
-            parameter,
-            RuntimeValue::Text("/tmp/resource".to_owned()),
-        )
-        .unwrap();
+        let argument =
+            FunctionArgument::new(parameter, RuntimeValue::Text("/tmp/resource".to_owned()))
+                .unwrap();
 
         let mut failed_state = ClientStateStore::new();
         let mut failing_executor = FailingActionExecutor::default();
@@ -11816,7 +12550,9 @@ fn client_stream_cancellation_clears_batches_and_rejects_stale_completions() {
         );
         assert_eq!(failed_resource.status(), ClientResourceStatus::Failed);
         assert_eq!(
-            failed_resource.failure().map(super::ClientResourceFailure::code),
+            failed_resource
+                .failure()
+                .map(super::ClientResourceFailure::code),
             Some("secret.executor.detail"),
         );
 
@@ -11849,7 +12585,10 @@ fn client_stream_cancellation_clears_batches_and_rejects_stale_completions() {
             .resource(cancelled_request.key())
             .expect("cancelled resource remains at the evaluated request key");
         assert_eq!(cancelled_resource.key(), cancelled_request.key());
-        assert_eq!(cancelled_resource.generation(), cancelled_request.generation());
+        assert_eq!(
+            cancelled_resource.generation(),
+            cancelled_request.generation()
+        );
         assert_eq!(
             cancelled_resource.request_id(),
             Some(cancelled_request.request_id()),
@@ -11857,8 +12596,6 @@ fn client_stream_cancellation_clears_batches_and_rejects_stale_completions() {
         assert_eq!(cancelled_resource.status(), ClientResourceStatus::Cancelled);
         assert_eq!(cancelled_resource.failure(), None);
     }
-
-
 
     #[test]
     fn malformed_resource_completion_cancels_executor_and_persists_terminal_state() {
@@ -11869,11 +12606,9 @@ fn client_stream_cancellation_clears_batches_and_rejects_stale_completions() {
         )
         .unwrap();
         let grants = capability::LocalCapabilityGrantSet::from_grants([grant]).unwrap();
-        let argument = FunctionArgument::new(
-            parameter,
-            RuntimeValue::Text("/tmp/malformed".to_owned()),
-        )
-        .unwrap();
+        let argument =
+            FunctionArgument::new(parameter, RuntimeValue::Text("/tmp/malformed".to_owned()))
+                .unwrap();
         let mut state = ClientStateStore::new();
         let mut executor = MalformedResourceExecutor::default();
 
@@ -12000,13 +12735,19 @@ fn client_stream_cancellation_clears_batches_and_rejects_stale_completions() {
             &mut executor,
         )
         .expect("valid terminal cancellation completion wins over malformed execute result");
-        assert_eq!(result.value(), &RuntimeValue::Text("cancelled-ready".to_owned()));
+        assert_eq!(
+            result.value(),
+            &RuntimeValue::Text("cancelled-ready".to_owned())
+        );
         let request = executor
             .executed
             .clone()
             .expect("malformed executor received a resource request");
         assert_eq!(executor.cancelled, vec![request.clone()]);
-        assert_eq!(state.resource(request.key()).map(ClientResource::status), Some(ClientResourceStatus::Ready));
+        assert_eq!(
+            state.resource(request.key()).map(ClientResource::status),
+            Some(ClientResourceStatus::Ready)
+        );
     }
 
     #[test]
@@ -12043,7 +12784,9 @@ fn client_stream_cancellation_clears_batches_and_rejects_stale_completions() {
                 orna_artifact::client_plan::ClientExpressionNode::Resource { operation },
             )],
             orna_artifact::client_plan::ClientExpressionNode::Await {
-                expression: Box::new(orna_artifact::client_plan::ClientExpressionNode::LocalRead { local }),
+                expression: Box::new(
+                    orna_artifact::client_plan::ClientExpressionNode::LocalRead { local },
+                ),
             },
         );
         let payload = orna_artifact::client_plan::CapabilityClientPlan::new(
@@ -12055,14 +12798,16 @@ fn client_stream_cancellation_clears_batches_and_rejects_stale_completions() {
         )
         .encode()
         .unwrap();
-        let (active, function, pair, _, parameter) = version_five_expression_active_with_parameter(payload);
+        let (active, function, pair, _, parameter) =
+            version_five_expression_active_with_parameter(payload);
         let grant = super::capability::LocalCapabilityGrant::new(
             super::capability::LocalCapabilityName::StdFsRead,
             super::capability::LocalCapabilityScope::path("/tmp").unwrap(),
         )
         .unwrap();
         let grants = super::capability::LocalCapabilityGrantSet::from_grants([grant]).unwrap();
-        let argument = FunctionArgument::new(parameter, RuntimeValue::Text("/tmp".to_owned())).unwrap();
+        let argument =
+            FunctionArgument::new(parameter, RuntimeValue::Text("/tmp".to_owned())).unwrap();
 
         let error = super::evaluate_client_function_with_grants_and_arguments(
             &active,
@@ -12261,20 +13006,20 @@ fn client_stream_cancellation_clears_batches_and_rejects_stale_completions() {
             super::capability::LocalCapabilityName::ALL
                 .into_iter()
                 .map(|name| {
-                let scope = match name {
-                    super::capability::LocalCapabilityName::StdFsRead
-                    | super::capability::LocalCapabilityName::StdFsWrite => {
-                        super::capability::LocalCapabilityScope::path("/home/bob").unwrap()
-                    }
-                    super::capability::LocalCapabilityName::StdNetConnect => {
-                        super::capability::LocalCapabilityScope::host("example.com").unwrap()
-                    }
-                    super::capability::LocalCapabilityName::StdSecretUse => {
-                        super::capability::LocalCapabilityScope::secret("secret-1").unwrap()
-                    }
-                };
-                super::capability::LocalCapabilityGrant::new(name, scope).unwrap()
-            }),
+                    let scope = match name {
+                        super::capability::LocalCapabilityName::StdFsRead
+                        | super::capability::LocalCapabilityName::StdFsWrite => {
+                            super::capability::LocalCapabilityScope::path("/home/bob").unwrap()
+                        }
+                        super::capability::LocalCapabilityName::StdNetConnect => {
+                            super::capability::LocalCapabilityScope::host("example.com").unwrap()
+                        }
+                        super::capability::LocalCapabilityName::StdSecretUse => {
+                            super::capability::LocalCapabilityScope::secret("secret-1").unwrap()
+                        }
+                    };
+                    super::capability::LocalCapabilityGrant::new(name, scope).unwrap()
+                }),
         )
         .unwrap();
 
@@ -12726,7 +13471,8 @@ fn client_stream_cancellation_clears_batches_and_rejects_stale_completions() {
             capability::LocalCapabilityScope::path("/tmp").unwrap(),
         )
         .unwrap();
-        let mismatched_grants = capability::LocalCapabilityGrantSet::from_grants([mismatched_grant]).unwrap();
+        let mismatched_grants =
+            capability::LocalCapabilityGrantSet::from_grants([mismatched_grant]).unwrap();
         let error = super::evaluate_client_function_with_grants_and_arguments(
             &active,
             &authorise(active.pair(), caller.id()),
@@ -12793,7 +13539,8 @@ fn client_stream_cancellation_clears_batches_and_rejects_stale_completions() {
 
     fn assert_reordered_client_plan_rejects_before_executor(source: &str, function_name: &str) {
         let prepared = prepared_client_source_v6(source);
-        let (active, function) = active_with_reordered_client_call_references(&prepared, function_name);
+        let (active, function) =
+            active_with_reordered_client_call_references(&prepared, function_name);
         let mut executor = RecordingActionExecutor::new(Some(RuntimeValue::Integer(1)));
         let error = super::evaluate_client_function_with_executor(
             &active,
@@ -13338,7 +14085,10 @@ CREATE CLIENT FUNCTION app.owner() RETURNS INTEGER IS
             super::ClientExecutionError::InvalidArtifact { context: actual, .. }
                 if actual == context
         ));
-        assert_eq!(error.to_string(), "the saved CLIENT function cannot be evaluated");
+        assert_eq!(
+            error.to_string(),
+            "the saved CLIENT function cannot be evaluated"
+        );
     }
 
     #[test]
@@ -13797,26 +14547,28 @@ CREATE CLIENT FUNCTION app.owner() RETURNS INTEGER IS
                         orna_artifact::client_plan::StateDefault::Unset,
                     )],
                 )
-                    .encode()
-                    .expect("the state plan encodes"),
+                .encode()
+                .expect("the state plan encodes"),
             ),
             (
                 orna_artifact::client_plan::RESOURCE_FORMAT_VERSION,
                 orna_artifact::client_plan::ResourceClientPlan::new(
                     orna_artifact::client_plan::ClientExpressionNode::Await {
-                        expression: Box::new(orna_artifact::client_plan::ClientExpressionNode::Resource {
-                            operation: orna_artifact::client_plan::ResourceOperationNode::new(
-                                orna_artifact::client_plan::ResourceKind::Scalar,
-                                FunctionId::from_bytes([6; 16]),
-                                RevisionPair::new(
-                                    SourceRevisionId::from_bytes([1; 16]),
-                                    CatalogueRevisionId::from_bytes([2; 16]),
+                        expression: Box::new(
+                            orna_artifact::client_plan::ClientExpressionNode::Resource {
+                                operation: orna_artifact::client_plan::ResourceOperationNode::new(
+                                    orna_artifact::client_plan::ResourceKind::Scalar,
+                                    FunctionId::from_bytes([6; 16]),
+                                    RevisionPair::new(
+                                        SourceRevisionId::from_bytes([1; 16]),
+                                        CatalogueRevisionId::from_bytes([2; 16]),
+                                    ),
+                                    CallSiteId::from_bytes([0xe1; 16]),
+                                    Vec::new(),
+                                    orna_standard::BOOLEAN_TYPE_ID,
                                 ),
-                                CallSiteId::from_bytes([0xe1; 16]),
-                                Vec::new(),
-                                orna_standard::BOOLEAN_TYPE_ID,
-                            ),
-                        }),
+                            },
+                        ),
                     },
                 )
                 .encode()
@@ -14308,8 +15060,8 @@ CREATE CLIENT FUNCTION app.owner() RETURNS INTEGER IS
                 candidate.source_origin(),
             )
         });
-        let error = active_from_prepared_with_references_result(&prepared, wrong_ordinal)
-            .unwrap_err();
+        let error =
+            active_from_prepared_with_references_result(&prepared, wrong_ordinal).unwrap_err();
         assert!(matches!(
             error.downcast_ref::<RevisionInvariantError>(),
             Some(RevisionInvariantError::ReferenceOrdinalOutOfSequence {
@@ -14391,8 +15143,7 @@ CREATE CLIENT FUNCTION app.owner() RETURNS INTEGER IS
             None,
             FunctionVolatility::Immutable,
         );
-        let source_origin =
-            SourceOrigin::new(SourceUnitId::from_bytes([0xd5; 16]), 0, 0).unwrap();
+        let source_origin = SourceOrigin::new(SourceUnitId::from_bytes([0xd5; 16]), 0, 0).unwrap();
         let reference = |kind, target| {
             DefinitionReference::new(
                 function_id,
@@ -14865,7 +15616,10 @@ CREATE CLIENT FUNCTION app.owner() RETURNS INTEGER IS
             .map(|(index, reference)| (index, reference.ordinal()))
             .collect::<Vec<_>>();
         call_indices.sort_unstable_by_key(|(_, ordinal)| *ordinal);
-        assert!(call_indices.len() >= 2, "the fixture must contain two calls");
+        assert!(
+            call_indices.len() >= 2,
+            "the fixture must contain two calls"
+        );
         let first = references[call_indices[0].0].clone();
         let second = references[call_indices[1].0].clone();
         references[call_indices[0].0] = DefinitionReference::new(
@@ -14884,7 +15638,10 @@ CREATE CLIENT FUNCTION app.owner() RETURNS INTEGER IS
             second.kind(),
             second.source_origin(),
         );
-        (active_from_prepared_with_references(prepared, references), function)
+        (
+            active_from_prepared_with_references(prepared, references),
+            function,
+        )
     }
 
     fn prepared_client_source(source: &str) -> DeployableRevision {
@@ -15238,7 +15995,6 @@ CREATE CLIENT FUNCTION app.owner() RETURNS INTEGER IS
         )
         .unwrap()
     }
-
 
     fn version_two_value_active(
         return_type: TypeId,
@@ -15676,15 +16432,14 @@ CREATE CLIENT FUNCTION app.owner() RETURNS INTEGER IS
         RevisionPair,
         FunctionRevisionId,
     ) {
-        let (initial, function_id, pair, function_revision_id) =
-            version_two_active_with_artifact(
-                standard_v6(),
-                orna_standard::BOOLEAN_TYPE_ID,
-                DefinitionReferenceTarget::ValueType(orna_standard::BOOLEAN_TYPE_ID),
-                DefinitionReferenceKind::NamedType,
-                1,
-                b"ORNACP\0\0\0\0\0\x01\x01\x01".to_vec(),
-            );
+        let (initial, function_id, pair, function_revision_id) = version_two_active_with_artifact(
+            standard_v6(),
+            orna_standard::BOOLEAN_TYPE_ID,
+            DefinitionReferenceTarget::ValueType(orna_standard::BOOLEAN_TYPE_ID),
+            DefinitionReferenceKind::NamedType,
+            1,
+            b"ORNACP\0\0\0\0\0\x01\x01\x01".to_vec(),
+        );
         let prior_function = initial.catalogue().function_by_id(function_id).unwrap();
         let function = FunctionDefinition::new(
             function_id,
@@ -16118,7 +16873,10 @@ CREATE CLIENT FUNCTION app.owner() RETURNS INTEGER IS
                     collect_fixture_expression_call_targets(expression, targets);
                 }
             }
-            ClientExpressionNode::Call { function, arguments } => {
+            ClientExpressionNode::Call {
+                function,
+                arguments,
+            } => {
                 for (_, expression) in arguments {
                     collect_fixture_expression_call_targets(expression, targets);
                 }
@@ -16155,7 +16913,9 @@ CREATE CLIENT FUNCTION app.owner() RETURNS INTEGER IS
             }
             orna_artifact::client_plan::InnerClientPlan::State(inner) => {
                 for slot in inner.slots() {
-                    if let orna_artifact::client_plan::StateDefault::Expression(expression) = slot.default() {
+                    if let orna_artifact::client_plan::StateDefault::Expression(expression) =
+                        slot.default()
+                    {
                         collect_fixture_expression_call_targets(expression, &mut targets);
                     }
                 }
@@ -16377,7 +17137,6 @@ CREATE CLIENT FUNCTION app.owner() RETURNS INTEGER IS
         )
     }
 
-
     fn version_six_client_resource_action_active() -> (
         ActiveDatabaseRevision,
         FunctionId,
@@ -16407,9 +17166,11 @@ CREATE CLIENT FUNCTION app.owner() RETURNS INTEGER IS
             orna_artifact::client_plan::InnerClientPlan::Resource(
                 orna_artifact::client_plan::ResourceClientPlan::new(
                     orna_artifact::client_plan::ClientExpressionNode::Await {
-                        expression: Box::new(orna_artifact::client_plan::ClientExpressionNode::Resource {
-                            operation,
-                        }),
+                        expression: Box::new(
+                            orna_artifact::client_plan::ClientExpressionNode::Resource {
+                                operation,
+                            },
+                        ),
                     },
                 ),
             ),
@@ -16664,14 +17425,12 @@ CREATE CLIENT FUNCTION app.owner() RETURNS INTEGER IS
         arguments: Vec<FunctionArgument>,
         result_type: TypeId,
     ) -> RuntimeValue {
-        let descriptor = ClientActionDescriptor::new(
-            domain, target, pair, call_site, arguments, result_type,
-        );
+        let descriptor =
+            ClientActionDescriptor::new(domain, target, pair, call_site, arguments, result_type);
         let payload = encode_action_payload(active, &descriptor).unwrap();
-        let registry = super::registered_opaque_codecs(
-            active.catalogue_hash_context().standard().unwrap(),
-        )
-        .unwrap();
+        let registry =
+            super::registered_opaque_codecs(active.catalogue_hash_context().standard().unwrap())
+                .unwrap();
         RuntimeValue::Opaque(
             OpaqueValue::new(active, &registry, super::STD_ACTION_TYPE_ID, payload).unwrap(),
         )
@@ -16804,11 +17563,8 @@ CREATE CLIENT FUNCTION app.owner() RETURNS INTEGER IS
             parent_invocation_id: InvocationId::from_bytes([0xf6; 16]),
             observer_lineage: None,
         };
-        let argument = FunctionArgument::new(
-            parameter,
-            RuntimeValue::Text("/tmp/action".to_owned()),
-        )
-        .unwrap();
+        let argument =
+            FunctionArgument::new(parameter, RuntimeValue::Text("/tmp/action".to_owned())).unwrap();
         let mut state = ClientStateStore::default();
         let mut action_state = ClientActionState::default();
         let mut executor = RecordingActionExecutor::new(None);
@@ -16837,10 +17593,8 @@ CREATE CLIENT FUNCTION app.owner() RETURNS INTEGER IS
             Err(ClientActionError::TargetMismatch),
         );
 
-        let stale_pair = RevisionPair::new(
-            SourceRevisionId::from_bytes([0xf8; 16]),
-            pair.catalogue(),
-        );
+        let stale_pair =
+            RevisionPair::new(SourceRevisionId::from_bytes([0xf8; 16]), pair.catalogue());
         let stale_target_revision = action_value(
             &active,
             ActionTargetDomain::Server,
@@ -16879,11 +17633,8 @@ CREATE CLIENT FUNCTION app.owner() RETURNS INTEGER IS
             parent_invocation_id: InvocationId::from_bytes([0xfa; 16]),
             observer_lineage: None,
         };
-        let argument = FunctionArgument::new(
-            parameter,
-            RuntimeValue::Text("/tmp/action".to_owned()),
-        )
-        .unwrap();
+        let argument =
+            FunctionArgument::new(parameter, RuntimeValue::Text("/tmp/action".to_owned())).unwrap();
         let wrong_type = action_value(
             &active,
             ActionTargetDomain::Server,
@@ -17000,7 +17751,6 @@ CREATE CLIENT FUNCTION app.owner() RETURNS INTEGER IS
         );
     }
 
-
     #[test]
     fn action_payload_rejects_malformed_and_noncanonical_frames() {
         let (active, target, pair, _) = version_two_value_active(
@@ -17032,8 +17782,7 @@ CREATE CLIENT FUNCTION app.owner() RETURNS INTEGER IS
         truncated.pop();
 
         let mut invalid_count = payload.clone();
-        invalid_count[count_offset..count_offset + 4]
-            .copy_from_slice(&u32::MAX.to_be_bytes());
+        invalid_count[count_offset..count_offset + 4].copy_from_slice(&u32::MAX.to_be_bytes());
 
         let two_argument_descriptor = ClientActionDescriptor::new(
             ActionTargetDomain::Client,
@@ -17041,41 +17790,31 @@ CREATE CLIENT FUNCTION app.owner() RETURNS INTEGER IS
             pair,
             CallSiteId::from_bytes([0x73; 16]),
             vec![
-                FunctionArgument::new(
-                    ParameterId::from_bytes([1; 16]),
-                    RuntimeValue::Integer(1),
-                )
-                .unwrap(),
-                FunctionArgument::new(
-                    ParameterId::from_bytes([2; 16]),
-                    RuntimeValue::Integer(2),
-                )
-                .unwrap(),
+                FunctionArgument::new(ParameterId::from_bytes([1; 16]), RuntimeValue::Integer(1))
+                    .unwrap(),
+                FunctionArgument::new(ParameterId::from_bytes([2; 16]), RuntimeValue::Integer(2))
+                    .unwrap(),
             ],
             orna_standard::INTEGER_TYPE_ID,
         );
-        let two_argument_payload = encode_action_payload(&active, &two_argument_descriptor).unwrap();
+        let two_argument_payload =
+            encode_action_payload(&active, &two_argument_descriptor).unwrap();
         let first_two_argument_offset = first_parameter_offset;
         let first_frame_length = u32::from_be_bytes(
             two_argument_payload[first_two_argument_offset + 16..first_two_argument_offset + 20]
                 .try_into()
                 .unwrap(),
         ) as usize;
-        let second_parameter_offset =
-            first_two_argument_offset + 16 + 4 + first_frame_length;
+        let second_parameter_offset = first_two_argument_offset + 16 + 4 + first_frame_length;
         let mut invalid_order = two_argument_payload;
         invalid_order[second_parameter_offset..second_parameter_offset + 16]
             .copy_from_slice(&[0; 16]);
 
         let mut trailing = payload.clone();
         trailing.push(0xaa);
-        let body_length = u32::from_be_bytes(
-            trailing[magic_length..magic_length + 4]
-                .try_into()
-                .unwrap(),
-        );
-        trailing[magic_length..magic_length + 4]
-            .copy_from_slice(&(body_length + 1).to_be_bytes());
+        let body_length =
+            u32::from_be_bytes(trailing[magic_length..magic_length + 4].try_into().unwrap());
+        trailing[magic_length..magic_length + 4].copy_from_slice(&(body_length + 1).to_be_bytes());
 
         let mut invalid_orv3_frame = payload;
         invalid_orv3_frame[frame_offset..frame_offset + 4].copy_from_slice(b"ORV2");
@@ -17107,16 +17846,10 @@ CREATE CLIENT FUNCTION app.owner() RETURNS INTEGER IS
             pair,
             CallSiteId::from_bytes([0x74; 16]),
             vec![
-                FunctionArgument::new(
-                    ParameterId::from_bytes([1; 16]),
-                    RuntimeValue::Integer(11),
-                )
-                .unwrap(),
-                FunctionArgument::new(
-                    ParameterId::from_bytes([2; 16]),
-                    RuntimeValue::Integer(22),
-                )
-                .unwrap(),
+                FunctionArgument::new(ParameterId::from_bytes([1; 16]), RuntimeValue::Integer(11))
+                    .unwrap(),
+                FunctionArgument::new(ParameterId::from_bytes([2; 16]), RuntimeValue::Integer(22))
+                    .unwrap(),
             ],
             orna_standard::INTEGER_TYPE_ID,
         );
@@ -17129,8 +17862,14 @@ CREATE CLIENT FUNCTION app.owner() RETURNS INTEGER IS
                 .unwrap(),
         ) as usize;
         let second_parameter_offset = first_parameter_offset + 16 + 4 + first_frame_length;
-        assert_eq!(&payload[first_parameter_offset..first_parameter_offset + 16], &[1; 16]);
-        assert_eq!(&payload[second_parameter_offset..second_parameter_offset + 16], &[2; 16]);
+        assert_eq!(
+            &payload[first_parameter_offset..first_parameter_offset + 16],
+            &[1; 16]
+        );
+        assert_eq!(
+            &payload[second_parameter_offset..second_parameter_offset + 16],
+            &[2; 16]
+        );
 
         let decoded = decode_action_payload(&active, &payload).unwrap();
         assert_eq!(decoded, descriptor);
@@ -17215,7 +17954,10 @@ CREATE CLIENT FUNCTION app.owner() RETURNS INTEGER IS
             Err(ClientActionError::Pending),
         );
         assert_eq!(executor.executed.len(), 1);
-        assert_eq!(action_state.invocation_id(), Some(first_request.request_id()));
+        assert_eq!(
+            action_state.invocation_id(),
+            Some(first_request.request_id())
+        );
         assert_eq!(action_state.generation(), Some(first_request.generation()));
         assert_eq!(action_state.status(), ClientResourceStatus::Loading);
     }
@@ -17249,9 +17991,8 @@ CREATE CLIENT FUNCTION app.owner() RETURNS INTEGER IS
         );
         let mut state = ClientStateStore::default();
         let mut action_state = ClientActionState::default();
-        let mut executor = RecordingActionExecutor::new(Some(RuntimeValue::Text(
-            "completed".to_owned(),
-        )));
+        let mut executor =
+            RecordingActionExecutor::new(Some(RuntimeValue::Text("completed".to_owned())));
 
         assert_eq!(
             trigger_client_action(
@@ -17369,10 +18110,7 @@ CREATE CLIENT FUNCTION app.owner() RETURNS INTEGER IS
         let stale_descriptor = ClientActionDescriptor::new(
             ActionTargetDomain::Client,
             target,
-            RevisionPair::new(
-                SourceRevisionId::from_bytes([0x73; 16]),
-                pair.catalogue(),
-            ),
+            RevisionPair::new(SourceRevisionId::from_bytes([0x73; 16]), pair.catalogue()),
             CallSiteId::from_bytes([0x74; 16]),
             vec![FunctionArgument::new(parameter, RuntimeValue::Integer(7)).unwrap()],
             orna_standard::INTEGER_TYPE_ID,
@@ -17402,10 +18140,23 @@ CREATE CLIENT FUNCTION app.owner() RETURNS INTEGER IS
         let mut action_state = ClientActionState::default();
         action_state.set_resource(resource);
         let mut executor = RecordingActionExecutor::new(None);
-        assert_eq!(complete_client_action(&active, &mut action_state, request.pending(), &mut executor), Err(ClientActionError::Pending));
+        assert_eq!(
+            complete_client_action(&active, &mut action_state, request.pending(), &mut executor),
+            Err(ClientActionError::Pending)
+        );
         assert_eq!(action_state.generation(), Some(generation));
-        let failed = ClientResourceCompletion::Failed { request_id, key, generation, code: "secret.internal.detail".to_owned() };
-        assert_eq!(complete_client_action(&active, &mut action_state, failed, &mut executor), Ok(ClientActionOutcome::Failed { code: ACTION_FAILURE_CODE.to_owned() }));
+        let failed = ClientResourceCompletion::Failed {
+            request_id,
+            key,
+            generation,
+            code: "secret.internal.detail".to_owned(),
+        };
+        assert_eq!(
+            complete_client_action(&active, &mut action_state, failed, &mut executor),
+            Ok(ClientActionOutcome::Failed {
+                code: ACTION_FAILURE_CODE.to_owned()
+            })
+        );
         assert_eq!(action_state.status(), ClientResourceStatus::Idle);
     }
 
@@ -17427,21 +18178,22 @@ CREATE CLIENT FUNCTION app.owner() RETURNS INTEGER IS
         action_state.stage_invocation(request.request_id());
         action_state.stage_request(request.clone());
         assert_eq!(action_state.invocation_id(), Some(request.request_id()));
-        let mut executor = DeterministicClientResourceExecutor::new(
-            |_: &ClientResourceRequest| Ok(RuntimeValue::Boolean(true)),
-        );
+        let mut executor = DeterministicClientResourceExecutor::new(|_: &ClientResourceRequest| {
+            Ok(RuntimeValue::Boolean(true))
+        });
 
         assert_eq!(
-            super::cancel_client_action_with_executor(
-                &active,
-                &mut action_state,
-                &mut executor,
-            ),
+            super::cancel_client_action_with_executor(&active, &mut action_state, &mut executor,),
             Ok(ClientActionOutcome::Cancelled),
         );
         assert_eq!(action_state.status(), ClientResourceStatus::Idle);
         assert_eq!(
-            complete_client_action(&active, &mut action_state, request.ready(RuntimeValue::Boolean(true)), &mut executor),
+            complete_client_action(
+                &active,
+                &mut action_state,
+                request.ready(RuntimeValue::Boolean(true)),
+                &mut executor
+            ),
             Err(ClientActionError::StaleCompletion),
         );
         assert_eq!(action_state.generation(), None);
@@ -17479,7 +18231,8 @@ CREATE CLIENT FUNCTION app.owner() RETURNS INTEGER IS
         );
     }
     #[test]
-    fn action_current_generation_mismatched_request_is_stale_but_same_request_malformed_completion_cancels() {
+    fn action_current_generation_mismatched_request_is_stale_but_same_request_malformed_completion_cancels()
+     {
         let (active, function, pair, _) = version_one_active(true);
         let principal = PrincipalId::from_bytes([0x7a; 16]);
         let digest = ClientResourceKey::canonical_arguments_digest(&active, &[]).unwrap();
@@ -17536,7 +18289,8 @@ CREATE CLIENT FUNCTION app.owner() RETURNS INTEGER IS
         assert_eq!(stale_executor.cancelled, vec![request]);
 
         for malformed_kind in [0_u8, 1_u8] {
-            let mut resource = ClientResource::new(key, ResolvedType::Scalar(StandardScalar::Boolean));
+            let mut resource =
+                ClientResource::new(key, ResolvedType::Scalar(StandardScalar::Boolean));
             let request = resource.begin_request(&active, vec![]).unwrap();
             assert_eq!(request.generation(), generation);
             let completion = if malformed_kind == 0 {
@@ -17580,7 +18334,8 @@ CREATE CLIENT FUNCTION app.owner() RETURNS INTEGER IS
         );
 
         for malformed_cancel in [false, true] {
-            let mut resource = ClientResource::new(key, ResolvedType::Scalar(StandardScalar::Boolean));
+            let mut resource =
+                ClientResource::new(key, ResolvedType::Scalar(StandardScalar::Boolean));
             let request = resource.begin_request(&active, vec![]).unwrap();
             let generation = request.generation();
             let mut action_state = ClientActionState::default();
@@ -17604,7 +18359,7 @@ CREATE CLIENT FUNCTION app.owner() RETURNS INTEGER IS
     }
 
     #[test]
-    fn action_local_resource_pending_is_cancelled_and_fails_redacted_with_fresh_parent() {
+    fn action_local_resource_pending_is_cancelled_and_reports_cancelled_with_fresh_parent() {
         let (active, parent_function, target, pair, revision, parameter) =
             version_six_client_action_provenance_active();
         let auth = authorise(pair, parent_function);
@@ -17616,11 +18371,8 @@ CREATE CLIENT FUNCTION app.owner() RETURNS INTEGER IS
             parent_invocation_id: enclosing_parent,
             observer_lineage: None,
         };
-        let argument = FunctionArgument::new(
-            parameter,
-            RuntimeValue::Text("/tmp/action".to_owned()),
-        )
-        .unwrap();
+        let argument =
+            FunctionArgument::new(parameter, RuntimeValue::Text("/tmp/action".to_owned())).unwrap();
         let action = action_value(
             &active,
             ActionTargetDomain::Client,
@@ -17653,9 +18405,7 @@ CREATE CLIENT FUNCTION app.owner() RETURNS INTEGER IS
                     &mut state,
                     &mut executor,
                 ),
-                Ok(ClientActionOutcome::Failed {
-                    code: ACTION_FAILURE_CODE.to_owned(),
-                }),
+                Ok(ClientActionOutcome::Cancelled),
             );
             assert_eq!(action_state.status(), ClientResourceStatus::Idle);
             assert_eq!(executor.cancelled.len(), executor.executed.len());
@@ -17744,7 +18494,10 @@ CREATE CLIENT FUNCTION app.owner() RETURNS INTEGER IS
             )
         );
         assert_eq!(request.arguments(), &[argument]);
-        assert_eq!(request.expected_type(), ResolvedType::Scalar(StandardScalar::Integer));
+        assert_eq!(
+            request.expected_type(),
+            ResolvedType::Scalar(StandardScalar::Integer)
+        );
         assert_ne!(
             request
                 .invocation_context()
@@ -17782,18 +18535,13 @@ CREATE CLIENT FUNCTION app.owner() RETURNS INTEGER IS
                 .expect("action test fixture has a standard snapshot"),
         )
         .unwrap();
-        let action = OpaqueValue::new(
-            &active,
-            &registry,
-            super::STD_ACTION_TYPE_ID,
-            payload,
-        )
-        .unwrap();
+        let action =
+            OpaqueValue::new(&active, &registry, super::STD_ACTION_TYPE_ID, payload).unwrap();
         let mut state = ClientStateStore::default();
         let mut action_state = ClientActionState::default();
-        let mut executor = DeterministicClientResourceExecutor::new(
-            |_: &ClientResourceRequest| Ok(RuntimeValue::Boolean(false)),
-        );
+        let mut executor = DeterministicClientResourceExecutor::new(|_: &ClientResourceRequest| {
+            Ok(RuntimeValue::Boolean(false))
+        });
 
         assert_eq!(
             trigger_client_action(
@@ -17811,7 +18559,6 @@ CREATE CLIENT FUNCTION app.owner() RETURNS INTEGER IS
         );
         assert_eq!(action_state.status(), ClientResourceStatus::Idle);
     }
-
 
     #[test]
     fn action_trigger_does_not_forward_forged_call_site_metadata() {
@@ -17864,7 +18611,10 @@ CREATE CLIENT FUNCTION app.owner() RETURNS INTEGER IS
             .invocation_context()
             .expect("server action carries invocation provenance");
         assert_ne!(context.call_site_id(), forged_call_site);
-        assert_eq!(context.parent_invocation_id(), parent.parent_invocation_id());
+        assert_eq!(
+            context.parent_invocation_id(),
+            parent.parent_invocation_id()
+        );
         assert_eq!(request.target().function(), target);
     }
 
@@ -17920,13 +18670,8 @@ CREATE CLIENT FUNCTION app.owner() RETURNS INTEGER IS
                 .expect("action test fixture has a standard snapshot"),
         )
         .unwrap();
-        let action = OpaqueValue::new(
-            &active,
-            &registry,
-            super::STD_ACTION_TYPE_ID,
-            payload,
-        )
-        .unwrap();
+        let action =
+            OpaqueValue::new(&active, &registry, super::STD_ACTION_TYPE_ID, payload).unwrap();
         let auth = authorise(pair, target);
         let parent = ClientExecutionContext {
             pair,
@@ -17937,9 +18682,9 @@ CREATE CLIENT FUNCTION app.owner() RETURNS INTEGER IS
         };
         let mut state = ClientStateStore::default();
         let mut action_state = ClientActionState::default();
-        let mut executor = DeterministicClientResourceExecutor::new(
-            |_: &ClientResourceRequest| Ok(RuntimeValue::Integer(1)),
-        );
+        let mut executor = DeterministicClientResourceExecutor::new(|_: &ClientResourceRequest| {
+            Ok(RuntimeValue::Integer(1))
+        });
 
         assert_eq!(
             trigger_client_action(
@@ -22161,10 +22906,7 @@ mod runtime_conformance {
             }
         }
 
-        fn create_surface_result(
-            &self,
-            title: &'static [u8],
-        ) -> Result<SurfaceHandle, StatusCode> {
+        fn create_surface_result(&self, title: &'static [u8]) -> Result<SurfaceHandle, StatusCode> {
             let options = SurfaceCreateOptions {
                 surface_kind: view(b"window"),
                 title: view(title),
@@ -22175,9 +22917,8 @@ mod runtime_conformance {
                 },
             };
             let mut surface = 0;
-            let result = unsafe {
-                (FIXTURE_API.create_surface)(self.runtime, &options, &mut surface)
-            };
+            let result =
+                unsafe { (FIXTURE_API.create_surface)(self.runtime, &options, &mut surface) };
             if result.code == StatusCode::Ok {
                 Ok(surface)
             } else {
@@ -22242,9 +22983,8 @@ mod runtime_conformance {
                 owner: ptr::null_mut(),
                 release: release_owned,
             };
-            let result = unsafe {
-                (FIXTURE_API.capture_semantic_state)(self.runtime, surface, &mut output)
-            };
+            let result =
+                unsafe { (FIXTURE_API.capture_semantic_state)(self.runtime, surface, &mut output) };
             if result.code != StatusCode::Ok {
                 return Err(result.code);
             }
@@ -22450,7 +23190,10 @@ mod runtime_conformance {
                 .ok_or_else(|| status_error(StatusCode::InvalidArgument))?;
             let had_node = state.node.is_some();
             let node = state.node.unwrap_or_else(next_unreserved_alias_handle);
-            let mut operations = [mount(node, 0, view(b"root")), set_property(node, view(b"payload"))];
+            let mut operations = [
+                mount(node, 0, view(b"root")),
+                set_property(node, view(b"payload")),
+            ];
             operations[1].as_.set_property.value = ValueRef {
                 handle: 0,
                 type_name: view(b"std.ui.UI"),
@@ -22471,9 +23214,7 @@ mod runtime_conformance {
             }
             state.node = Some(node);
             state.revision = revision;
-            self.fixture
-                .capture_result(surface)
-                .map_err(status_error)
+            self.fixture.capture_result(surface).map_err(status_error)
         }
 
         fn destroy_surface(&self, surface: u64) -> Result<(), String> {
@@ -22501,7 +23242,10 @@ mod runtime_conformance {
 
         fn is_terminal(&self) -> bool {
             let guard = global().lock().unwrap_or_else(|error| error.into_inner());
-            guard.runtime.as_ref().is_some_and(|runtime| runtime.terminal)
+            guard
+                .runtime
+                .as_ref()
+                .is_some_and(|runtime| runtime.terminal)
         }
 
         fn last_callback_is_terminal(&self) -> bool {
@@ -22671,7 +23415,10 @@ mod runtime_conformance {
         unsafe { (FIXTURE_API.destroy)(runtime) };
 
         let guard = global().lock().unwrap_or_else(|error| error.into_inner());
-        assert_eq!(guard.runtime.as_ref().map(|state| state.handle), Some(runtime));
+        assert_eq!(
+            guard.runtime.as_ref().map(|state| state.handle),
+            Some(runtime)
+        );
         assert_eq!(session.client.runtime.load(Ordering::SeqCst), runtime);
     }
 
@@ -22685,7 +23432,10 @@ mod runtime_conformance {
             .expect("non-owner destroy call should join");
 
         let guard = global().lock().unwrap_or_else(|error| error.into_inner());
-        assert_eq!(guard.runtime.as_ref().map(|state| state.handle), Some(runtime));
+        assert_eq!(
+            guard.runtime.as_ref().map(|state| state.handle),
+            Some(runtime)
+        );
         assert_eq!(session.client.runtime.load(Ordering::SeqCst), runtime);
     }
 
@@ -23410,9 +24160,7 @@ mod runtime_conformance {
             .create_surface()
             .expect("headless fixture surface should be created");
         assert!(
-            session
-                .apply_ui_payload(b"not an ORNA-UI frame")
-                .is_err(),
+            session.apply_ui_payload(b"not an ORNA-UI frame").is_err(),
             "headless fixture must reject invalid UI frames"
         );
 
@@ -23463,7 +24211,6 @@ mod runtime_conformance {
         assert!(session.is_terminal());
         assert!(session.last_callback_is_terminal());
     }
-
 
     #[test]
     fn capture_rejects_a_corrupted_canonical_frame() {
@@ -23940,7 +24687,11 @@ mod runtime_conformance {
         let terminal = session.callback_log();
         assert_eq!(terminal.failures, vec![(request, StatusCode::Cancelled)]);
         assert_eq!(
-            terminal.failures.iter().filter(|(id, _)| *id == request).count(),
+            terminal
+                .failures
+                .iter()
+                .filter(|(id, _)| *id == request)
+                .count(),
             1
         );
         assert!(terminal.terminal);
