@@ -378,15 +378,29 @@ fn token_at(text: &str, parse: &Parse, byte: usize) -> Option<(String, Highlight
             )
         })
 }
+/// Compares two source identifier spellings using Orna's quoted-name rules.
+///
+/// Unquoted identifiers are case-insensitive. Quoted identifiers preserve
+/// exact spelling and do not match an unquoted identifier.
+fn identifier_spelling_matches(candidate: &str, query: &str) -> bool {
+    let candidate_quoted = candidate.starts_with('"') && candidate.ends_with('"');
+    let query_quoted = query.starts_with('"') && query.ends_with('"');
+    match (candidate_quoted, query_quoted) {
+        (true, true) => candidate == query,
+        (false, false) => candidate.eq_ignore_ascii_case(query),
+        _ => false,
+    }
+}
 
-/// Returns a case-insensitive declaration lookup for one simple name.
+/// Returns a case-aware declaration lookup for one simple name.
 pub fn declaration_at<'a>(parse: &'a Parse, name: &str) -> Option<DeclarationRef<'a>> {
     let matches = |candidate: &QualifiedName| {
         candidate
             .parts
             .last()
-            .is_some_and(|part| part.text.eq_ignore_ascii_case(name))
+            .is_some_and(|part| identifier_spelling_matches(&part.text, name))
     };
+
     if let Some(declaration) = parse
         .schemas()
         .iter()
@@ -760,11 +774,14 @@ pub fn definition(
 }
 
 /// Returns every occurrence of the identifier at one position.
+///
+/// When `include_declaration` is false, the matching declaration is omitted.
 pub fn references(
     document: &Document,
     parse: &Parse,
     position: Position,
     mapper: &PositionMapper<'_>,
+    include_declaration: bool,
 ) -> Vec<Location> {
     let byte = mapper.byte_offset(position);
     let Some((name, kind, _)) = token_at(&document.text, parse, byte) else {
@@ -773,6 +790,17 @@ pub fn references(
     if kind == HighlightKind::Keyword {
         return Vec::new();
     }
+    let declaration_span = if include_declaration {
+        None
+    } else {
+        declaration_at(parse, &name).and_then(|declaration| {
+            declaration
+                .name()
+                .parts
+                .last()
+                .map(|part| part.span.clone())
+        })
+    };
     parse
         .highlight()
         .into_iter()
@@ -787,7 +815,12 @@ pub fn references(
                     | HighlightKind::QuotedIdentifier
             )
         })
-        .filter(|token| document.text[token.range.clone()].eq_ignore_ascii_case(&name))
+        .filter(|token| identifier_spelling_matches(&document.text[token.range.clone()], &name))
+        .filter(|token| {
+            declaration_span.as_ref().map_or(true, |span| {
+                span.start != token.range.start || span.end != token.range.end
+            })
+        })
         .map(|token| Location {
             uri: document.uri.clone(),
             range: mapper.range(&SourceSpan {
@@ -899,7 +932,9 @@ pub fn completion(parse: &Parse, standard: Option<&StandardLibrary>) -> Vec<Comp
 
 #[cfg(test)]
 mod tests {
-    use super::completion;
+    use super::{completion, declaration_at, references};
+    use crate::documents::{Document, PositionMapper};
+    use lsp_types::Position;
 
     #[test]
     fn completion_includes_canonical_scalar_type_spellings() {
@@ -917,5 +952,58 @@ mod tests {
         ] {
             assert!(labels.iter().any(|label| label == expected), "missing {expected}");
         }
+    }
+
+    #[test]
+    fn declaration_lookup_folds_unquoted_identifier_case_but_preserves_quotes() {
+        let parse = orna_syntax::parse("CREATE SCHEMA foo;");
+
+        assert!(declaration_at(&parse, "foo").is_some());
+        assert!(declaration_at(&parse, "Foo").is_some());
+
+        let quoted = orna_syntax::parse("CREATE SCHEMA \"Foo\";");
+        assert!(declaration_at(&quoted, "\"Foo\"").is_some());
+        assert!(declaration_at(&quoted, "\"foo\"").is_none());
+        assert!(declaration_at(&quoted, "foo").is_none());
+    }
+
+    #[test]
+    fn references_fold_unquoted_case_and_exclude_qualified_declaration_component() {
+        let text = "CREATE SCHEMA foo;\nCREATE SERVER FUNCTION bar() RETURNS BOOLEAN AS SELECT Foo;\n";
+        let document = Document::new("file:///test.orna".parse().unwrap(), text.to_owned(), 1);
+        let parse = orna_syntax::parse(text);
+        let mapper = PositionMapper::new(text);
+
+        let foo_references = references(&document, &parse, Position::new(0, 14), &mapper, true);
+        assert_eq!(foo_references.len(), 2);
+        assert_eq!(foo_references[0].range.start, Position::new(0, 14));
+        assert_eq!(foo_references[1].range.start, Position::new(1, 55));
+        let without_declaration = references(&document, &parse, Position::new(0, 14), &mapper, false);
+        assert_eq!(without_declaration.len(), 1);
+        assert_eq!(without_declaration[0].range.start, Position::new(1, 55));
+
+        let qualified_text =
+            "CREATE SCHEMA product_test;\nCREATE TYPE product_test.probe AS OBJECT (value BOOLEAN);\n";
+        let qualified_document =
+            Document::new("file:///qualified.orna".parse().unwrap(), qualified_text.to_owned(), 1);
+        let qualified_parse = orna_syntax::parse(qualified_text);
+        let qualified_mapper = PositionMapper::new(qualified_text);
+        let probe_without_declaration = references(
+            &qualified_document,
+            &qualified_parse,
+            Position::new(1, 25),
+            &qualified_mapper,
+            false,
+        );
+        assert!(probe_without_declaration.is_empty());
+        let namespace_without_declaration = references(
+            &qualified_document,
+            &qualified_parse,
+            Position::new(1, 12),
+            &qualified_mapper,
+            false,
+        );
+        assert_eq!(namespace_without_declaration.len(), 1);
+        assert_eq!(namespace_without_declaration[0].range.start, Position::new(1, 12));
     }
 }
