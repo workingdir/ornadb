@@ -8266,6 +8266,7 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use orna_artifact::{
+        client_plan::ActionTargetDomain,
         constant_expression::ConstantExpression,
         server_mutation_plan::{
             MutationExpressionKind as DurableMutationExpressionKind, ServerDeletePlan,
@@ -8901,6 +8902,116 @@ EXPORT TYPE std.CHARACTER_LARGE_OBJECT TO PRELUDE AS TEXT;
                 provisional.digest_version(),
                 source,
                 provisional.language_version(),
+                catalogue,
+                origins,
+                digest,
+            )
+            .unwrap(),
+        )
+        .unwrap()
+    }
+
+    fn action_standard() -> VerifiedStandardLibrarySnapshot {
+        let base = resource_standard();
+        const action_schema_statement: &str = "CREATE SCHEMA std.action;";
+        const action_type_statement: &str = "CREATE TYPE std.action.Action AS VALUE OPAQUE KERNEL CONTRACT 'orna.std.value.action@1' IMMUTABLE TRANSIENT;";
+        const action_binding_statement: &str = "EXPORT TYPE std.action.Action AS std.Action;";
+        let mut source_content = base.source().units()[0].content().to_owned();
+        source_content.push_str(action_schema_statement);
+        source_content.push('\n');
+        source_content.push_str(action_type_statement);
+        source_content.push('\n');
+        source_content.push_str(action_binding_statement);
+        source_content.push('\n');
+
+        let unit_id = base.source().units()[0].id();
+        let unit = StoredSourceUnit::new(
+            unit_id,
+            0,
+            "std/types.orna",
+            &source_content,
+            source_unit_content_digest(&source_content).unwrap(),
+        )
+        .unwrap();
+        let bundle_hash = source_bundle_digest(std::slice::from_ref(&unit)).unwrap();
+        let source = StoredSourceRevision::new(
+            base.source().bundle(),
+            base.source().id(),
+            None,
+            vec![unit],
+            bundle_hash,
+            source_revision_record_digest(base.source().bundle(), None, bundle_hash).unwrap(),
+        )
+        .unwrap();
+
+        let action_schema_id = SchemaId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 9]);
+        let action_type_id = TypeId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 20]);
+        let action_binding =
+            TypeBinding::qualified(semantic_name(&["std", "action"]), action_type_id).unwrap();
+        let action_type = ValueTypeDefinition::opaque(
+            action_type_id,
+            semantic_name(&["std", "action", "action"]),
+            "orna.std.value.action@1",
+        );
+        let mut schemas = base.catalogue().schemas().to_vec();
+        schemas.push(SchemaDefinition::new(
+            action_schema_id,
+            semantic_name(&["std", "action"]),
+        ));
+        let mut value_types = base.catalogue().value_types().to_vec();
+        value_types.push(action_type);
+        let mut type_bindings = base.catalogue().type_bindings().to_vec();
+        type_bindings.push(action_binding.clone());
+        let catalogue = CatalogueSnapshot::new_with_types(
+            base.catalogue().revision(),
+            schemas,
+            base.catalogue().object_types().to_vec(),
+            value_types,
+            type_bindings,
+        )
+        .unwrap();
+        let origin = |identity, statement: &str| {
+            let start = source_content.find(statement).unwrap();
+            DefinitionOrigin::new(
+                identity,
+                SourceOrigin::new(
+                    unit_id,
+                    u32::try_from(start).unwrap(),
+                    u32::try_from(start + statement.len()).unwrap(),
+                )
+                .unwrap(),
+            )
+        };
+        let mut origins = base.origins().to_vec();
+        origins.push(origin(
+            DefinitionIdentity::Schema(action_schema_id),
+            action_schema_statement,
+        ));
+        origins.push(origin(
+            DefinitionIdentity::ValueType(action_type_id),
+            action_type_statement,
+        ));
+        origins.push(origin(
+            DefinitionIdentity::TypeBinding(action_binding.id()),
+            action_binding_statement,
+        ));
+        let provisional = StandardLibrarySnapshot::new(
+            base.revision(),
+            base.digest_version(),
+            source.clone(),
+            base.language_version(),
+            catalogue.clone(),
+            origins.clone(),
+            Sha256Digest::from_bytes([0; 32]),
+        )
+        .unwrap();
+        let digest = calculate_standard_library_digest(&provisional).unwrap();
+        verify_standard_library_snapshot(
+            StandardLibrarySnapshot::new(
+                base.revision(),
+                base.digest_version(),
+                source,
+                base.language_version(),
                 catalogue,
                 origins,
                 digest,
@@ -13879,6 +13990,102 @@ EXPORT TYPE std.CHARACTER_LARGE_OBJECT TO PRELUDE AS TEXT;
             plan.expression(),
             &ClientExpressionNode::Boolean { value: true },
         );
+    }
+
+    #[test]
+    fn accepted_client_action_preparation_preserves_durable_operation_identity_and_arguments() {
+        let verified = action_standard();
+        let standard = check_standard_library_source(&verified).unwrap();
+        let active = empty_standard_application_active(&verified);
+        let context =
+            StandardApplicationCheckContext::try_new(active.catalogue(), &standard).unwrap();
+        let source = r#"CREATE SCHEMA action_fixture;
+
+CREATE CLIENT FUNCTION action_fixture.local(p_first TEXT, p_second TEXT)
+    RETURNS TEXT AS p_first;
+
+CREATE CLIENT FUNCTION action_fixture.call_local(p_first TEXT, p_second TEXT)
+    RETURNS std.Action AS std.action.call(
+        target => action_fixture.local,
+        arguments => std.call.args(p_second => p_second, p_first => p_first)
+    );"#;
+        let bundle = SourceBundle::new([SourceUnit::new("action.orna", source)]).unwrap();
+        let report = check_standard_application(&bundle, &context);
+        assert!(
+            report.diagnostics().is_empty(),
+            "accepted action source did not check: {:?}",
+            report.diagnostics()
+        );
+
+        let checked_call_site = {
+            let checked = report.preparation_view().unwrap().checked();
+            let caller = checked
+                .client_functions()
+                .iter()
+                .find(|function| function.name().parts() == ["action_fixture", "call_local"])
+                .unwrap();
+            let CheckedClientFunctionBody::Expression { expression } = caller.body() else {
+                panic!("action client must use an expression body");
+            };
+            let CheckedClientExpression::Action { operation } = expression else {
+                panic!("action client must retain its action operation");
+            };
+            operation.call_site()
+        };
+
+        let prepared = prepare_standard_application(&report, active.pair(), &active).unwrap();
+        let target = prepared
+            .candidate()
+            .functions()
+            .iter()
+            .find(|function| function.name().parts() == ["action_fixture", "local"])
+            .unwrap();
+        let caller = prepared
+            .candidate()
+            .functions()
+            .iter()
+            .find(|function| function.name().parts() == ["action_fixture", "call_local"])
+            .unwrap();
+        let revision = prepared
+            .new_function_revisions()
+            .iter()
+            .find(|revision| revision.function() == caller.id())
+            .unwrap();
+        assert_eq!(revision.artifact().version(), CLIENT_PLAN_ACTION_VERSION);
+
+        let plan = ActionClientPlan::decode(revision.artifact().payload()).unwrap();
+        let operation = plan.operation();
+        assert_eq!(operation.domain(), ActionTargetDomain::Client);
+        assert_eq!(operation.target(), target.id());
+        assert_eq!(operation.target_revision(), prepared.candidate_pair());
+        assert_eq!(operation.call_site(), checked_call_site);
+        assert_ne!(operation.call_site().to_bytes(), [0; 16]);
+        let text_type_id = verified
+            .catalogue()
+            .value_type_by_name(&semantic_name(&["std", "types", "character_large_object"]))
+            .unwrap()
+            .id();
+        assert_eq!(operation.result_type(), text_type_id);
+
+        let mut expected_arguments: Vec<_> = target
+            .parameters()
+            .iter()
+            .map(|target_parameter| {
+                let caller_parameter = caller
+                    .parameters()
+                    .iter()
+                    .find(|parameter| parameter.name() == target_parameter.name())
+                    .unwrap();
+                (
+                    target_parameter.id(),
+                    ClientExpressionNode::ParameterRead {
+                        parameter: caller_parameter.id(),
+                    },
+                )
+            })
+            .collect();
+        expected_arguments.sort_by_key(|(parameter, _)| *parameter);
+        assert_eq!(operation.arguments(), expected_arguments.as_slice());
     }
 
     #[test]
