@@ -236,6 +236,7 @@ impl InspectCarrierProvenance {
         self,
         target_invocation_id: InvocationId,
     ) -> Result<Self, InspectCarrierError> {
+        validate_target_invocation_id(target_invocation_id)?;
         if let Some(expected) = self.target_invocation_id
             && expected != target_invocation_id
         {
@@ -292,6 +293,9 @@ impl InspectCarrierEnvelope {
         provenance: InspectCarrierProvenance,
         rows: Vec<Vec<u8>>,
     ) -> Result<Self, InspectCarrierError> {
+        if let Some(target) = provenance.target_invocation_id() {
+            validate_target_invocation_id(target)?;
+        }
         let value = Self {
             kind: kind.into(),
             provenance,
@@ -849,6 +853,15 @@ impl<'a> Reader<'a> {
     }
 }
 
+fn validate_target_invocation_id(
+    target_invocation_id: InvocationId,
+) -> Result<(), InspectCarrierError> {
+    if target_invocation_id.to_bytes() == [0; 16] {
+        return Err(InspectCarrierError::InvalidTargetInvocation);
+    }
+    Ok(())
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum InspectCarrierError {
     InvalidMagic,
@@ -861,6 +874,7 @@ pub enum InspectCarrierError {
     NonCanonicalRowOrder,
     InvalidRow(InspectRowError),
     EnvelopeTooLarge { actual: usize, maximum: usize },
+    InvalidTargetInvocation,
     TargetInvocationMismatch {
         expected: InvocationId,
         actual: InvocationId,
@@ -950,6 +964,9 @@ impl fmt::Display for InspectCarrierError {
                 formatter,
                 "inspect carrier envelope length {actual} exceeds maximum {maximum}"
             ),
+            Self::InvalidTargetInvocation => {
+                formatter.write_str("inspect carrier target invocation must be non-zero")
+            }
             Self::TargetInvocationMismatch { expected, actual } => write!(
                 formatter,
                 "inspect carrier target invocation {actual} does not match provenance target {expected}"
@@ -1305,5 +1322,39 @@ mod tests {
         assert_eq!(decoded.source_revision_id(), carrier.source_revision_id());
         assert_eq!(decoded.catalogue_revision_id(), carrier.catalogue_revision_id());
         assert_eq!(decoded.target_invocation_id(), None);
+    }
+
+    #[test]
+    fn zero_target_invocation_is_rejected_before_carrier_construction() {
+        let zero = InvocationId::from_bytes([0; 16]);
+        let provenance = InspectCarrierProvenance::trusted(9, source(), catalogue());
+        assert_eq!(
+            provenance.bind_target(zero),
+            Err(InspectCarrierError::InvalidTargetInvocation)
+        );
+        assert_eq!(
+            InspectCarrierEnvelope::new_with_target(
+                InspectCarrierKind::Snapshot,
+                zero,
+                provenance,
+                vec![],
+            ),
+            Err(InspectCarrierError::InvalidTargetInvocation)
+        );
+
+        let bound_zero = InspectCarrierProvenance::trusted_for_target(
+            9,
+            zero,
+            source(),
+            catalogue(),
+        );
+        assert_eq!(
+            InspectCarrierEnvelope::new_with_provenance(
+                InspectCarrierKind::Snapshot,
+                bound_zero,
+                vec![],
+            ),
+            Err(InspectCarrierError::InvalidTargetInvocation)
+        );
     }
 }
