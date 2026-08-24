@@ -6059,7 +6059,18 @@ fn decode_inspect_snapshot_target_row(
     offset += 1;
     match result {
         0 => {}
-        1 => offset += 8,
+        1 => {
+            let value_count = row
+                .get(offset..)
+                .and_then(|bytes| bytes.get(..8))
+                .and_then(|bytes| bytes.try_into().ok())
+                .map(u64::from_be_bytes)
+                .ok_or_else(|| inspect_carrier_error("inspect.malformed_carrier"))?;
+            if value_count == 0 {
+                return Err(inspect_carrier_error("inspect.malformed_carrier"));
+            }
+            offset += 8;
+        },
         _ => return Err(inspect_carrier_error("inspect.malformed_carrier")),
     }
     let duration = *row.get(offset).ok_or_else(|| inspect_carrier_error("inspect.malformed_carrier"))?;
@@ -8077,6 +8088,37 @@ mod tests {
         assert_eq!(
             super::decode_inspect_snapshot_target_row(&row, 7),
             Err(super::ClientInspectError::Failed("inspect.malformed_carrier".to_owned()))
+        );
+    }
+
+    #[test]
+    fn inspect_snapshot_row_rejects_zero_value_batch_count() {
+        let target = super::InvocationId::from_bytes([0x17; 16]);
+        let mut row = vec![1, 0, 0, 0, 0, 0, 0, 0, 0];
+        row.extend_from_slice(&[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 7]);
+        row.extend_from_slice(&target.to_bytes());
+        row.extend_from_slice(&[0x18; 16]);
+        row.push(1);
+        row.extend_from_slice(&0_u64.to_be_bytes());
+        row.push(1);
+        row.extend_from_slice(&0_u64.to_be_bytes());
+        row.push(0);
+
+        assert_eq!(row.len(), 76);
+        assert_eq!(
+            super::decode_inspect_snapshot_target_row(&row, 7),
+            Err(super::ClientInspectError::Failed(
+                "inspect.malformed_carrier".to_owned()
+            ))
+        );
+        row[67..75].copy_from_slice(&1_u64.to_be_bytes());
+        assert_eq!(super::decode_inspect_snapshot_target_row(&row, 7), Ok(target));
+        row.push(0x19);
+        assert_eq!(
+            super::decode_inspect_snapshot_target_row(&row, 7),
+            Err(super::ClientInspectError::Failed(
+                "inspect.malformed_carrier".to_owned()
+            ))
         );
     }
 
