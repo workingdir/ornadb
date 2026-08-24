@@ -1,0 +1,9 @@
+ALTER TYPE product_test.probe
+    RENAME FIELD stored TO retained;
+--               ^^^^^^ property
+--                         ^^^^^^^^ property
+
+ALTER TYPE product_test.probe
+    RENAME FIELD SELECT TO WHERE;
+--               ^^^^^^ property
+--                         ^^^^^ property

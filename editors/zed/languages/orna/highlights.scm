@@ -74,6 +74,9 @@
 (table_column_definition name: (identifier) @property)
 (record_field name: (identifier) @property)
 (update_statement column: (identifier) @property)
+(alter_type_statement
+    old_name: (_) @property
+    new_name: (_) @property)
 
 (let_declaration name: (identifier) @variable)
 (let_statement name: (identifier) @variable)

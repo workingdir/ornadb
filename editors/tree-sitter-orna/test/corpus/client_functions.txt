@@ -72,6 +72,69 @@ AS
     (semicolon)))
 
 ====================
+external client function with runtime contract
+====================
+
+CREATE EXTERNAL CLIENT FUNCTION std.ui.window (
+    title TEXT,
+    content std.ui.UI
+)
+RETURNS std.ui.UI
+RUNTIME CONTRACT 'std.ui.window@1';
+
+---
+
+(source_file
+  (create_external_client_function_statement
+    (kw_create)
+    (kw_external)
+    (kw_client)
+    (kw_function)
+    name: (qualified_name
+      (qualified_name
+        (qualified_name
+          (identifier))
+        (dot)
+        (identifier))
+      (dot)
+      (identifier))
+    parameters: (parameter_list
+      (lparen)
+      (parameter_definition
+        name: (identifier)
+        type: (type_spec
+          (scalar_type
+            (kw_text))))
+      (comma)
+      (parameter_definition
+        name: (identifier)
+        type: (type_spec
+          (qualified_name
+            (qualified_name
+              (qualified_name
+                (identifier))
+              (dot)
+              (identifier))
+            (dot)
+            (identifier))))
+      (rparen))
+    (kw_returns)
+    returns: (return_type_spec
+      (type_spec
+        (qualified_name
+          (qualified_name
+            (qualified_name
+              (identifier))
+            (dot)
+            (identifier))
+          (dot)
+          (identifier))))
+    (kw_runtime)
+    (kw_contract)
+    (string_literal)
+    (semicolon)))
+
+====================
 client function with procedural body
 ====================
 
