@@ -162,9 +162,27 @@ mod tests {
         assert_eq!(
             mapper.segments(&span),
             vec![
-                (Position { line: 0, character: 0 }, 8),
-                (Position { line: 1, character: 0 }, 9),
-                (Position { line: 2, character: 0 }, 8),
+                (
+                    Position {
+                        line: 0,
+                        character: 0
+                    },
+                    8
+                ),
+                (
+                    Position {
+                        line: 1,
+                        character: 0
+                    },
+                    9
+                ),
+                (
+                    Position {
+                        line: 2,
+                        character: 0
+                    },
+                    8
+                ),
             ]
         );
     }
@@ -181,8 +199,20 @@ mod tests {
         assert_eq!(
             mapper.segments(&span),
             vec![
-                (Position { line: 0, character: 0 }, 5),
-                (Position { line: 1, character: 0 }, 6),
+                (
+                    Position {
+                        line: 0,
+                        character: 0
+                    },
+                    5
+                ),
+                (
+                    Position {
+                        line: 1,
+                        character: 0
+                    },
+                    6
+                ),
             ]
         );
     }
