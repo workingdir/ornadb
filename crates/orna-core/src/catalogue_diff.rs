@@ -149,7 +149,7 @@ pub enum SemanticChange {
         id: FieldId,
         name: String,
     },
-    /// A retained record value field changed its declaration ordinal.
+    /// A retained object or record value field changed its declaration ordinal.
     FieldOrdinalChanged {
         owner: TypeId,
         id: FieldId,
@@ -569,6 +569,13 @@ fn diff_field_payload(
     let name = candidate.name().to_owned();
     if base.resolved_type() != candidate.resolved_type() {
         diff.push(SemanticChange::FieldTypeChanged {
+            owner,
+            id,
+            name: name.clone(),
+        });
+    }
+    if base.ordinal() != candidate.ordinal() {
+        diff.push(SemanticChange::FieldOrdinalChanged {
             owner,
             id,
             name: name.clone(),
@@ -1537,6 +1544,49 @@ mod tests {
                     owner: TypeId::from_bytes([2; 16]),
                     id: FieldId::from_bytes([3; 16]),
                     name: "count".to_owned(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn retained_object_fields_report_ordinal_changes_when_reordered() {
+        let base = full_snapshot(
+            vec![schema(1, &["app"])],
+            vec![object(
+                2,
+                &["app", "widget"],
+                vec![field(3, "first", 0), field(4, "second", 1)],
+            )],
+            vec![],
+            vec![],
+        );
+        let candidate = full_snapshot(
+            vec![schema(1, &["app"])],
+            vec![object(
+                2,
+                &["app", "widget"],
+                vec![field(4, "second", 0), field(3, "first", 1)],
+            )],
+            vec![],
+            vec![],
+        );
+
+        let diff = catalogue_diff(&base, &candidate);
+
+        assert_eq!(diff.changes().len(), 2);
+        assert_eq!(
+            diff.changes(),
+            &[
+                SemanticChange::FieldOrdinalChanged {
+                    owner: TypeId::from_bytes([2; 16]),
+                    id: FieldId::from_bytes([4; 16]),
+                    name: "second".to_owned(),
+                },
+                SemanticChange::FieldOrdinalChanged {
+                    owner: TypeId::from_bytes([2; 16]),
+                    id: FieldId::from_bytes([3; 16]),
+                    name: "first".to_owned(),
                 },
             ]
         );
