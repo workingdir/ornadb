@@ -53,8 +53,10 @@ plan is the current implementation projection. Accepted ADRs and
 - **Current validated focused evidence:** the `work/` checkout records the
   protocol, sealed-server, LSP UTF-16, no-`STATE` dogfood, resource-span,
   buffered-preflight, V3/V5 upgrade, same-revision replacement, selected-package
-  check, formatter, workspace, and editor-tooling commands listed below; each
-  returned success. Compose/Docker and clean-host gates remain pending.
+  check, formatter, headless workspace unit, and editor-tooling commands listed
+  below; each returned success. Installed evaluator/Inspector-recursion,
+  Compose/Docker, clean-host, Neovim/Vim, live REF, same-major PostgreSQL,
+  and accepted contract gates remain pending.
 
 ## Current validated focused evidence (`work/` checkout)
 
@@ -71,16 +73,19 @@ plan is the current implementation projection. Accepted ADRs and
 - `cargo test -p orna-client same_revision_terminal_replacement_persists_when_later_expression_fails` — 1 test returned success.
 - `cargo check -p orna-client -p orna-compiler -p orna-lsp -p orna-postgres -p orna-protocol -p orna-server -p orna-standard -p orna-syntax` — returned success with existing dead-code warnings.
 - `cargo fmt --all -- --check` — returned success.
-- `cargo test --workspace --all-targets` — 2518 tests passed, 0 failed, 233 ignored across 40 suites, after correcting a private `InspectPrivilege` import exposed by the initial compile.
+- `cargo test --workspace --all-targets` — 2545 tests passed, 0 failed, 235 ignored across 40 suites; this is headless workspace unit coverage only, not installed evaluator/Inspector-recursion or broader environment-gated proof.
 - `just editor-tooling-check` — all subchecks returned success, including 14 LSP protocol tests and the 31-case tree-sitter corpus.
+- `cargo test -p orna-lsp --test lsp_e2e serves_final_field_name_through_accepted_rename_transition` — 1 final-field rename navigation test returned success; this focused proof is current. Zed ORDER BY highlight parity remains pending.
 
 The initial LSP expectation mismatch, CLIENT fixture compile mismatch, and
 workspace private-import compile failure were development corrections, not gate
-failures. Compose/Docker and clean-host results remain pending.
+failures. Installed evaluator/Inspector-recursion, Compose/Docker, clean-host, Neovim/Vim runtime, live REF, same-major PostgreSQL, and contract results remain pending.
 - **Implementation present, proof pending:** remaining nested source work includes
   cancellation identity/ownership, the companion raw-preflight ordering check,
   SecurityAdmin privilege filtering, raw sealed-invocation terminal/cancellation
   handling, ordinary CLIENT compiler fixtures, and Compose/clean-host proof.
+  Installed evaluator/Inspector-recursion, Neovim/Vim, live REF, same-major
+  PostgreSQL, and accepted contract gates remain pending.
   The focused, workspace, and editor-tooling results listed above are current.
 - **Historical evidence (not current validation):** the post-audit reports and
   nested commit IDs below are retained for provenance only. The outer checkout
@@ -146,7 +151,8 @@ contract:
 - the lifecycle verifier accepts only the exact normal or SIGQUIT-escalated
   stop sequence and derives the escalation report flag from that sequence;
 - the Zed integration now registers the real grammar and the existing
-  `orna-lsp` stdio binary;
+  `orna-lsp` stdio binary; this static registration does not establish accepted
+  ORDER BY highlight parity, which remains pending;
 - direct resource revision pinning was audited against the accepted locks and
   needs no source change.
 - bare `has_privilege` checks now fail closed for inactive principals and reject
@@ -229,8 +235,9 @@ implementation should start without the contract gate below.
 ### Current implementation present, proof pending
 
 The current nested source contains the following proof work. Focused,
-workspace, and editor-tooling results recorded above are current; Compose/Docker
-and clean-host gates remain pending:
+headless workspace unit, and editor-tooling results recorded above are current;
+installed evaluator/Inspector-recursion, Compose/Docker, clean-host,
+Neovim/Vim, live REF, same-major PostgreSQL, and contract gates remain pending:
 
 - same-revision terminal replacement retention across staged CLIENT evaluator
   errors (same_revision_terminal_replacement_persists_when_new_evaluation_fails
@@ -251,7 +258,7 @@ and clean-host gates remain pending:
   `crates/orna-server/tests/fixtures/client_local_assignment_dogfood.orna`
   with the offline check
   `checks_and_evaluates_accepted_client_local_assignment_fixture_offline`;
-  its focused offline check and workspace validation are current; installed/Compose proof remains pending;
+  its focused offline check and headless workspace unit validation are current; installed evaluator/Inspector-recursion and Compose proof remain pending;
 - LSP UTF-16 position and semantic-token coverage, including
   `orna-lsp/tests/lsp_e2e.rs::serves_accepted_client_semantic_tokens_with_utf16_and_nested_ranges`;
   its focused check is current; the editor-tooling result is recorded above;
@@ -268,11 +275,13 @@ and clean-host gates remain pending:
   implementation is present, but the direct recovery proof remains
   Compose-gated and pending;
 - ordinary CLIENT call/REF-field compiler fixtures plus accepted resource,
-  action, and LSP/editor fixtures; resource and LSP/editor-tooling checks are
-  current, while ordinary-call compiler proof remains pending.
+  action, and LSP/editor fixtures; resource and LSP/editor-tooling checks are current; ordinary-call and
+  final-field rename focused proofs are current, while installed evaluator/
+  Inspector-recursion and Neovim/Vim runtime proof remain pending.
 
-Run the remaining lifecycle, raw-preflight, compiler, Compose/Docker, and
-clean-host checks before extending the current validated result.
+Run the remaining lifecycle, raw-preflight, compiler, Compose/Docker, clean-host,
+Neovim/Vim, live REF, same-major PostgreSQL, and accepted contract checks
+before extending the current validated result.
 
 ### Historical 2026-08-24 report (not current validation)
 
