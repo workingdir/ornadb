@@ -1,10 +1,11 @@
 //! Backend-independent runtime values, typed function arguments, and ordered
 //! SERVER results.
 //!
-//! This module defines the initial runtime subset only. It does not define a
-//! canonical or wire encoding. A later protocol slice must define that format.
+//! This module defines the initial runtime subset only. General runtime-value
+//! wire encoding remains a protocol concern; registered opaque contracts may
+//! still enforce their own bounded, authority-free payload framing.
 
-use std::{cmp::Ordering, error::Error, fmt};
+use std::{cmp::Ordering, collections::HashSet, error::Error, fmt};
 
 use crate::{
     FieldId, ObjectId, ParameterId, TypeId,
@@ -37,6 +38,20 @@ use crate::{
 };
 
 const MAX_OPAQUE_CODEC_PAYLOAD_LENGTH: usize = 16 * 1024 * 1024;
+
+/// The largest number of argument frames accepted by the generic action
+/// descriptor codec. The semantic target and parameter checks remain in the
+/// CLIENT action decoder.
+pub const MAX_OPAQUE_CODEC_ACTION_ARGUMENTS: usize = 64;
+
+const ACTION_DOMAIN_CLIENT: u8 = 1;
+const ACTION_DOMAIN_SERVER: u8 = 2;
+const ACTION_IDENTITY_BYTES: usize = 16;
+const ACTION_IDENTITY_FIELDS: usize = 5;
+const ACTION_BODY_PREFIX_BYTES: usize =
+    1 + (ACTION_IDENTITY_FIELDS * ACTION_IDENTITY_BYTES) + 4;
+const ORV3_HEADER_BYTES: usize = 25;
+const ORV3_MARKER: &[u8; 4] = b"ORV3";
 
 /// The largest accepted framed-codec magic prefix length in bytes.
 const MAX_OPAQUE_CODEC_MAGIC_LENGTH: usize = 64;
@@ -1227,6 +1242,13 @@ enum OpaquePayloadContract {
         /// The exact ASCII magic prefix, including any separating space.
         magic: String,
     },
+    /// `MAGIC <len:u32 be> <canonical ORNA-ACTION/1 descriptor>`: a fixed
+    /// ASCII magic prefix, an exact body length, and one structurally valid
+    /// action descriptor. Target and catalogue semantics remain client-owned.
+    Action {
+        /// The exact ASCII magic prefix, including any separating space.
+        magic: String,
+    },
     /// `MAGIC <len:u32 be> <canonical JSON UTF-8 bytes>`: a fixed ASCII magic
     /// prefix, then a big-endian `u32` body length, then exactly that many
     /// canonical JSON UTF-8 bytes and no trailing bytes.
@@ -1331,6 +1353,27 @@ impl OpaqueCodecRegistration {
             semantic_name,
             representation_contract: representation_contract.into(),
             contract: OpaquePayloadContract::LengthPrefixedBytes { magic },
+        })
+    }
+
+    /// Declares a structurally checked `ORNA-ACTION/1` descriptor codec.
+    ///
+    /// This validates only the authority-free descriptor shape and canonical
+    /// active-value frame structure. Target resolution, revision pinning, and
+    /// result/argument type compatibility remain the CLIENT boundary contract.
+    pub fn length_prefixed_action(
+        opaque_type: TypeId,
+        semantic_name: QualifiedSemanticName,
+        representation_contract: impl Into<String>,
+        magic: impl Into<String>,
+    ) -> Result<Self, OpaqueCodecRegistryError> {
+        let magic = magic.into();
+        validate_codec_magic(opaque_type, &magic)?;
+        Ok(Self {
+            opaque_type,
+            semantic_name,
+            representation_contract: representation_contract.into(),
+            contract: OpaquePayloadContract::Action { magic },
         })
     }
 
@@ -1532,6 +1575,9 @@ fn validate_opaque_payload(
         }
         OpaquePayloadContract::LengthPrefixedBytes { magic } => {
             validate_length_prefixed_bytes(opaque_type, magic.as_bytes(), payload)
+        }
+        OpaquePayloadContract::Action { magic } => {
+            validate_action_frame(opaque_type, magic.as_bytes(), payload)
         }
         OpaquePayloadContract::LengthPrefixedCanonicalJson { magic } => {
             validate_length_prefixed_canonical_json(opaque_type, magic.as_bytes(), payload)
@@ -1848,6 +1894,192 @@ fn validate_length_prefixed_utf8(
     let body = &payload[prefix_length..];
     if std::str::from_utf8(body).is_err() {
         return Err(OpaqueValueError::InvalidUtf8Body { opaque_type });
+    }
+    Ok(())
+}
+
+/// Validates the canonical action descriptor framing without resolving any
+/// target or catalogue identity.
+fn validate_action_frame(
+    opaque_type: TypeId,
+    magic: &[u8],
+    payload: &[u8],
+) -> Result<(), OpaqueValueError> {
+    let prefix_length = magic
+        .len()
+        .checked_add(4)
+        .ok_or(OpaqueValueError::InvalidFrameLength { opaque_type })?;
+    if payload.len() < prefix_length || !payload.starts_with(magic) {
+        return Err(if payload.starts_with(magic) {
+            OpaqueValueError::InvalidFrameLength { opaque_type }
+        } else {
+            OpaqueValueError::InvalidMagic { opaque_type }
+        });
+    }
+    let body_length = u32::from_be_bytes(
+        payload[magic.len()..prefix_length]
+            .try_into()
+            .expect("the length prefix is exactly four bytes"),
+    ) as usize;
+    let body_end = prefix_length
+        .checked_add(body_length)
+        .ok_or(OpaqueValueError::InvalidFrameLength { opaque_type })?;
+    if body_length > MAX_OPAQUE_CODEC_PAYLOAD_LENGTH
+        || payload.len() > MAX_OPAQUE_CODEC_PAYLOAD_LENGTH
+        || payload.len() != body_end
+    {
+        return Err(OpaqueValueError::InvalidFrameLength { opaque_type });
+    }
+
+    let body = &payload[prefix_length..body_end];
+    if body.len() < ACTION_BODY_PREFIX_BYTES {
+        return Err(OpaqueValueError::InvalidActionFrame { opaque_type });
+    }
+    if !matches!(body[0], ACTION_DOMAIN_CLIENT | ACTION_DOMAIN_SERVER) {
+        return Err(OpaqueValueError::InvalidActionFrame { opaque_type });
+    }
+
+    let mut offset = ACTION_BODY_PREFIX_BYTES;
+    let argument_count = u32::from_be_bytes(
+        body[offset - 4..offset]
+            .try_into()
+            .expect("the action argument count is exactly four bytes"),
+    ) as usize;
+    if argument_count > MAX_OPAQUE_CODEC_ACTION_ARGUMENTS {
+        return Err(OpaqueValueError::InvalidActionFrame { opaque_type });
+    }
+
+    let mut previous_parameter: Option<&[u8]> = None;
+    for _ in 0..argument_count {
+        let parameter_end = offset
+            .checked_add(ACTION_IDENTITY_BYTES)
+            .ok_or(OpaqueValueError::InvalidActionFrame { opaque_type })?;
+        let frame_length_end = parameter_end
+            .checked_add(4)
+            .ok_or(OpaqueValueError::InvalidActionFrame { opaque_type })?;
+        if frame_length_end > body.len() {
+            return Err(OpaqueValueError::InvalidActionFrame { opaque_type });
+        }
+        let parameter = &body[offset..parameter_end];
+        if previous_parameter.is_some_and(|previous| previous >= parameter) {
+            return Err(OpaqueValueError::InvalidActionFrame { opaque_type });
+        }
+        previous_parameter = Some(parameter);
+
+        let frame_length = u32::from_be_bytes(
+            body[parameter_end..frame_length_end]
+                .try_into()
+                .expect("the action argument frame length is exactly four bytes"),
+        ) as usize;
+        let frame_start = frame_length_end;
+        let frame_end = frame_start
+            .checked_add(frame_length)
+            .ok_or(OpaqueValueError::InvalidActionFrame { opaque_type })?;
+        if frame_end > body.len()
+            || validate_orv3_frame(&body[frame_start..frame_end]).is_err()
+        {
+            return Err(OpaqueValueError::InvalidActionFrame { opaque_type });
+        }
+        offset = frame_end;
+    }
+    if offset != body.len() {
+        return Err(OpaqueValueError::InvalidActionFrame { opaque_type });
+    }
+    Ok(())
+}
+
+/// Validates one complete canonical ORV3 active-value frame without resolving
+/// its type identity against a catalogue. Duplicate field identities are rejected
+/// structurally; declaration order and semantic field/type checks stay in the
+/// protocol/client decoder, while this keeps malformed bytes out of an opaque
+/// value before trigger.
+fn validate_orv3_frame(encoded: &[u8]) -> Result<(), ()> {
+    let mut pending = vec![encoded];
+    let mut node_count = 0usize;
+    while let Some(frame) = pending.pop() {
+        if frame.len() < ORV3_HEADER_BYTES || !frame.starts_with(ORV3_MARKER) {
+            return Err(());
+        }
+        let declared = u32::from_be_bytes(
+            frame[21..25]
+                .try_into()
+                .expect("the ORV3 header is exactly twenty-five bytes"),
+        ) as usize;
+        let frame_end = ORV3_HEADER_BYTES.checked_add(declared).ok_or(())?;
+        if declared > MAX_OPAQUE_CODEC_PAYLOAD_LENGTH || frame.len() != frame_end {
+            return Err(());
+        }
+        node_count = node_count.checked_add(1).ok_or(())?;
+        if node_count > MAX_RUNTIME_VALUE_NODES {
+            return Err(());
+        }
+        let tag = frame[4];
+        let body = &frame[ORV3_HEADER_BYTES..];
+        match tag {
+            0x00 | 0x01 | 0x09 if body.is_empty() => {}
+            0x02 if body.len() == 1 && matches!(body[0], 0 | 1) => {}
+            0x03 if body.len() == 4 => {}
+            0x04 if body.len() == 8 => {}
+            0x05 if body.len() == 8 => {
+                let bits = u64::from_be_bytes(body.try_into().expect("float payload is eight bytes"));
+                let value = f64::from_bits(bits);
+                if bits == (-0.0_f64).to_bits() || !value.is_finite() {
+                    return Err(());
+                }
+            }
+            0x06 | 0x0a if std::str::from_utf8(body).is_ok() => {}
+            0x07 => {}
+            0x08 if body.len() == ACTION_IDENTITY_BYTES => {}
+            0x0b => {
+                if body.len() < 4 {
+                    return Err(());
+                }
+                let field_count = u32::from_be_bytes(
+                    body[..4]
+                        .try_into()
+                        .expect("the record field count is exactly four bytes"),
+                ) as usize;
+                let minimum = field_count
+                    .checked_mul(ACTION_IDENTITY_BYTES + 4 + ORV3_HEADER_BYTES)
+                    .and_then(|length| 4usize.checked_add(length))
+                    .ok_or(())?;
+                if minimum > body.len() {
+                    return Err(());
+                }
+                let mut cursor = 4usize;
+                let mut field_identities: HashSet<[u8; ACTION_IDENTITY_BYTES]> = HashSet::new();
+                for _ in 0..field_count {
+                    let length_start = cursor
+                        .checked_add(ACTION_IDENTITY_BYTES)
+                        .ok_or(())?;
+                    let field_identity: [u8; ACTION_IDENTITY_BYTES] = body[cursor..length_start]
+                        .try_into()
+                        .expect("the record field identity is sixteen bytes");
+                    if !field_identities.insert(field_identity) {
+                        return Err(());
+                    }
+                    let frame_start = length_start.checked_add(4).ok_or(())?;
+                    if frame_start > body.len() {
+                        return Err(());
+                    }
+                    let length = u32::from_be_bytes(
+                        body[length_start..frame_start]
+                            .try_into()
+                            .expect("the record field frame length is exactly four bytes"),
+                    ) as usize;
+                    let frame_end = frame_start.checked_add(length).ok_or(())?;
+                    if length < ORV3_HEADER_BYTES || frame_end > body.len() {
+                        return Err(());
+                    }
+                    pending.push(&body[frame_start..frame_end]);
+                    cursor = frame_end;
+                }
+                if cursor != body.len() {
+                    return Err(());
+                }
+            }
+            _ => return Err(()),
+        }
     }
     Ok(())
 }
@@ -2210,6 +2442,11 @@ pub enum OpaqueValueError {
         /// The opaque type whose payload was rejected.
         opaque_type: TypeId,
     },
+    /// An action descriptor has malformed or non-canonical structure.
+    InvalidActionFrame {
+        /// The opaque type whose payload was rejected.
+        opaque_type: TypeId,
+    },
     /// A length-prefixed UTF-8 payload body is not valid UTF-8.
     InvalidUtf8Body {
         /// The opaque type whose payload was rejected.
@@ -2265,6 +2502,9 @@ impl fmt::Display for OpaqueValueError {
             }
             Self::InvalidFrameLength { .. } => {
                 formatter.write_str("opaque value payload has an inconsistent frame length")
+            }
+            Self::InvalidActionFrame { .. } => {
+                formatter.write_str("opaque value action frame is malformed or non-canonical")
             }
             Self::InvalidUtf8Body { .. } => {
                 formatter.write_str("opaque value payload body is not valid UTF-8")
