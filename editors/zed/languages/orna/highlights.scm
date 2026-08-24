@@ -5,6 +5,7 @@
 (comment) @comment
 (string_literal) @string
 (number) @number
+(client_integer_literal) @number
 (date_literal) @constant
 (timestamp_literal) @constant
 (bytes_literal) @string
@@ -65,6 +66,7 @@
 (update_statement table: (qualified_name) @type)
 (delete_statement table: (qualified_name) @type)
 (call_statement callee: (invocation name: (qualified_name) @function))
+(client_call_expression callee: (client_call_callee) @function)
 
 ; Names and fields
 (parameter_definition name: (identifier) @parameter)
@@ -77,6 +79,15 @@
 (let_statement name: (identifier) @variable)
 (const_declaration name: (identifier) @variable)
 (state_declaration name: (identifier) @variable)
+(client_local_declaration name: (_) @variable)
+(client_let_statement name: (_) @variable)
+(client_assignment_statement target: (_) @variable)
+(client_state_declaration name: (_) @variable)
 (for_statement name: (identifier) @variable)
 (create_user_statement name: (identifier) @variable)
 (create_role_statement name: (identifier) @variable)
+
+; CLIENT parameter and field reads
+(client_parameter_read) @parameter
+(client_field_path parameter: (_) @parameter)
+(client_field_path field: (_) @property)
