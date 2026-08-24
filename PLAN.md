@@ -110,8 +110,10 @@ contract:
   enforcement boundaries.
 - applied migration SQL remains append-only; commit `a4d6ff0` restored the
   exact version-23, version-29, and version-30 bytes after the live bootstrap
-  gate detected a checksum mismatch, and the focused bootstrap proof,
-  `cargo test --workspace --all-targets`, and `just kernel-test` now pass.
+  gate detected a checksum mismatch. The focused bootstrap proof and the
+  historical local/default command `cargo test --workspace --all-targets`
+  passed; `just kernel-test` is Docker Compose/ignored PostgreSQL evidence,
+  not current clean Debian-host proof.
 - the installed source-apply path now records one fixed-principal protected
   `SourceApply` event, and audit recovery checks both the principal and the
   historical source/catalogue pair;
