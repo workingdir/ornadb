@@ -20,6 +20,8 @@
 use std::fmt;
 use std::io::Write;
 
+use orna_core::value::MAX_OPAQUE_CODEC_PAYLOAD_LENGTH;
+
 /// The tty runtime family name (spec `docs/15-runtime-architecture.md`).
 ///
 /// The client names this family in its `sys.invoke` runtime offer (ADR
@@ -71,15 +73,12 @@ impl Sink {
 /// Validates the `ORNA-TERMINAL-DOCUMENT/1` framing: the exact magic, a
 /// `u32 be` body length matching the remaining bytes exactly, a UTF-8 body,
 /// and no control codes (`\n` line separators are the only control
-/// characters the layout permits). The body is written verbatim, and a
-/// final newline is appended when the body does not already end with one.
+/// characters the layout permits), and requires a non-empty body ending
+/// in a final newline. The body is written verbatim.
 /// On rejection nothing is written to `writer`.
 pub fn render_document(payload: &[u8], writer: &mut impl Write) -> Result<(), RuntimeTtyError> {
     let body = decode_document(payload)?;
     writer.write_all(body).map_err(RuntimeTtyError::Io)?;
-    if !body.ends_with(b"\n") {
-        writer.write_all(b"\n").map_err(RuntimeTtyError::Io)?;
-    }
     Ok(())
 }
 
@@ -106,6 +105,8 @@ pub enum RuntimeTtyError {
     InvalidUtf8,
     /// A document body carries a character the plain-text layout forbids.
     ControlCharacter,
+    /// A document body is empty or does not end with a final newline.
+    InvalidDocumentBody,
     /// A byte-stream payload declares an empty media type.
     InvalidMediaType,
     /// Writing the rendered output to the sink failed.
@@ -122,6 +123,9 @@ impl fmt::Display for RuntimeTtyError {
             Self::InvalidUtf8 => formatter.write_str("document payload is not valid UTF-8"),
             Self::ControlCharacter => {
                 formatter.write_str("document payload contains a control character")
+            }
+            Self::InvalidDocumentBody => {
+                formatter.write_str("document payload body is empty or lacks a final newline")
             }
             Self::InvalidMediaType => {
                 formatter.write_str("byte-stream payload has an empty media type")
@@ -158,6 +162,9 @@ fn decode_document(payload: &[u8]) -> Result<&[u8], RuntimeTtyError> {
             .try_into()
             .expect("the length prefix is exactly four bytes"),
     ) as usize;
+    if body_len > MAX_OPAQUE_CODEC_PAYLOAD_LENGTH {
+        return Err(RuntimeTtyError::InvalidFrameLength);
+    }
     let body = payload
         .get(prefix_len..)
         .ok_or(RuntimeTtyError::InvalidFrameLength)?;
@@ -167,6 +174,9 @@ fn decode_document(payload: &[u8]) -> Result<&[u8], RuntimeTtyError> {
     let text = std::str::from_utf8(body).map_err(|_| RuntimeTtyError::InvalidUtf8)?;
     if text.chars().any(is_control) {
         return Err(RuntimeTtyError::ControlCharacter);
+    }
+    if body.is_empty() || !body.ends_with(b"\n") {
+        return Err(RuntimeTtyError::InvalidDocumentBody);
     }
     Ok(body)
 }
@@ -206,6 +216,9 @@ fn decode_byte_stream(payload: &[u8]) -> Result<&[u8], RuntimeTtyError> {
             .try_into()
             .expect("the length prefix is exactly four bytes"),
     ) as usize;
+    if body_len > MAX_OPAQUE_CODEC_PAYLOAD_LENGTH {
+        return Err(RuntimeTtyError::InvalidFrameLength);
+    }
     if body.len() != body_len {
         return Err(RuntimeTtyError::InvalidFrameLength);
     }
@@ -294,15 +307,16 @@ mod tests {
     }
 
     #[test]
-    fn appends_final_newline_when_missing() {
-        let output = render_document_to_vec(&document_frame(b"hello\nworld")).unwrap();
-        assert_eq!(output, b"hello\nworld\n");
+    fn rejects_document_without_final_newline() {
+        assert_document_rejects(
+            &document_frame(b"hello\nworld"),
+            RuntimeTtyError::InvalidDocumentBody,
+        );
     }
 
     #[test]
-    fn empty_document_renders_as_single_newline() {
-        let output = render_document_to_vec(&document_frame(b"")).unwrap();
-        assert_eq!(output, b"\n");
+    fn rejects_empty_document() {
+        assert_document_rejects(&document_frame(b""), RuntimeTtyError::InvalidDocumentBody);
     }
 
     #[test]
@@ -337,6 +351,13 @@ mod tests {
         let mut frame = document_frame(b"hello\nworld\n");
         frame.truncate(frame.len() - 4);
         assert_document_rejects(&frame, RuntimeTtyError::InvalidFrameLength);
+    }
+
+    #[test]
+    fn rejects_document_body_over_opaque_payload_limit() {
+        let mut body = vec![b'a'; MAX_OPAQUE_CODEC_PAYLOAD_LENGTH];
+        body.push(b'\n');
+        assert_document_rejects(&document_frame(&body), RuntimeTtyError::InvalidFrameLength);
     }
 
     #[test]
@@ -438,6 +459,15 @@ mod tests {
         let mut frame = byte_stream_frame(b"text/plain", b"hello world");
         frame.truncate(frame.len() - 3);
         assert_byte_stream_rejects(&frame, RuntimeTtyError::InvalidFrameLength);
+    }
+
+    #[test]
+    fn rejects_byte_stream_body_over_opaque_payload_limit() {
+        let body = vec![0xa5; MAX_OPAQUE_CODEC_PAYLOAD_LENGTH + 1];
+        assert_byte_stream_rejects(
+            &byte_stream_frame(b"application/octet-stream", &body),
+            RuntimeTtyError::InvalidFrameLength,
+        );
     }
 
     #[test]
