@@ -100,26 +100,21 @@ pub fn is_sealed_inspect_runtime_value(value: &RuntimeValue) -> bool {
         | RuntimeType::Flat(ResolvedType::Reference { target: type_id })
         | RuntimeType::Flat(ResolvedType::Value(type_id)) => is_sealed_inspect_type_id(type_id),
         RuntimeType::Flat(ResolvedType::Scalar(_)) => false,
-        RuntimeType::Constructed(descriptor) => {
-            descriptor_contains_sealed_inspect_type(descriptor)
-        }
+        RuntimeType::Constructed(descriptor) => descriptor_contains_sealed_inspect_type(descriptor),
     };
     if type_is_sealed {
         return true;
     }
 
     match value {
-        RuntimeValue::Record(record) => record
-            .fields()
-            .iter()
-            .any(is_sealed_inspect_runtime_value),
+        RuntimeValue::Record(record) => record.fields().iter().any(is_sealed_inspect_runtime_value),
         RuntimeValue::Constructed(constructed) => match constructed.kind() {
             ConstructedValueKind::Option(value) => {
                 value.is_some_and(is_sealed_inspect_runtime_value)
             }
-            ConstructedValueKind::List(values) | ConstructedValueKind::Set(values) => values
-                .iter()
-                .any(is_sealed_inspect_runtime_value),
+            ConstructedValueKind::List(values) | ConstructedValueKind::Set(values) => {
+                values.iter().any(is_sealed_inspect_runtime_value)
+            }
             ConstructedValueKind::Map(entries) => entries.iter().any(|(key, value)| {
                 is_sealed_inspect_runtime_value(key) || is_sealed_inspect_runtime_value(value)
             }),
@@ -1172,7 +1167,6 @@ mod tests {
         assert!(matches!(error, UserStateError::InvalidChange { .. }));
     }
 
-
     #[test]
     fn change_rejects_a_sealed_inspector_reference_nested_in_an_invoke_request_argument() {
         let argument = InvocationArgument::new(
@@ -1241,14 +1235,9 @@ mod tests {
             .expect("a valid list descriptor"),
         )
         .expect("a valid option descriptor");
-        let sink_offer = InvocationSinkOffer::new(
-            descriptor,
-            ["application/octet-stream"],
-            false,
-            0,
-            None,
-        )
-        .expect("a valid sink offer");
+        let sink_offer =
+            InvocationSinkOffer::new(descriptor, ["application/octet-stream"], false, 0, None)
+                .expect("a valid sink offer");
 
         assert_rejected_sealed_offer_value(
             invoke_request_with_offers(vec![sink_offer], vec![]),
@@ -1266,16 +1255,9 @@ mod tests {
             .expect("a valid option descriptor"),
         )
         .expect("a valid map descriptor");
-        let runtime_offer = InvocationRuntimeOffer::new(
-            "runtime",
-            "1",
-            [descriptor],
-            [],
-            0,
-            false,
-            None,
-        )
-        .expect("a valid runtime offer");
+        let runtime_offer =
+            InvocationRuntimeOffer::new("runtime", "1", [descriptor], [], 0, false, None)
+                .expect("a valid runtime offer");
 
         assert_rejected_sealed_offer_value(
             invoke_request_with_offers(vec![], vec![runtime_offer]),
@@ -1304,16 +1286,9 @@ mod tests {
                 .expect("a valid option descriptor"),
         )
         .expect("a valid map descriptor");
-        let runtime_offer = InvocationRuntimeOffer::new(
-            "runtime",
-            "1",
-            [runtime_descriptor],
-            [],
-            0,
-            false,
-            None,
-        )
-        .expect("a valid runtime offer");
+        let runtime_offer =
+            InvocationRuntimeOffer::new("runtime", "1", [runtime_descriptor], [], 0, false, None)
+                .expect("a valid runtime offer");
 
         UserStateChange::new(
             function_id(ROOT),
@@ -1332,13 +1307,11 @@ mod tests {
     fn change_rejects_a_sealed_inspector_reference_nested_in_an_invoke_event_value_batch() {
         let body = InvocationEventBody::value_batch(
             None,
-            [
-                InvokeValue::new(RuntimeValue::Reference {
-                    target: crate::system::SYS_INSPECT_INVOCATION_TYPE_ID,
-                    object: crate::ObjectId::from_bytes([0x93; 16]),
-                })
-                .expect("a valid event value"),
-            ],
+            [InvokeValue::new(RuntimeValue::Reference {
+                target: crate::system::SYS_INSPECT_INVOCATION_TYPE_ID,
+                object: crate::ObjectId::from_bytes([0x93; 16]),
+            })
+            .expect("a valid event value")],
         )
         .expect("a non-empty value batch");
         let event = InvokeEvent::new(crate::InvocationId::from_bytes([0x94; 16]), 0, body)

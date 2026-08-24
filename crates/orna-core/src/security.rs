@@ -659,6 +659,8 @@ pub enum PrivilegeGrantError {
     EmptyGrantee,
     /// The object names the empty function identity.
     EmptyObject,
+    /// A `SecurityAdmin` grant is object-scoped instead of class-wide.
+    SecurityAdminObject,
 }
 
 impl fmt::Display for PrivilegeGrantError {
@@ -666,6 +668,7 @@ impl fmt::Display for PrivilegeGrantError {
         formatter.write_str(match self {
             Self::EmptyGrantee => "privilege grant has an empty grantee identity",
             Self::EmptyObject => "privilege grant has an empty object identity",
+            Self::SecurityAdminObject => "security_admin privilege grant must be class-wide",
         })
     }
 }
@@ -688,7 +691,8 @@ impl PrivilegeGrant {
     /// Creates a privilege grant with the closed invariants checked.
     ///
     /// The grantee must not be the empty identity, and an object-scoped
-    /// grant must name a non-empty function identity.
+    /// grant must name a non-empty function identity. `SecurityAdmin` grants
+    /// are class-wide and therefore cannot name an object.
     pub fn new(
         grantee: PrincipalId,
         class: PrivilegeClass,
@@ -701,6 +705,9 @@ impl PrivilegeGrant {
             && function == FunctionId::from_bytes([0; 16])
         {
             return Err(PrivilegeGrantError::EmptyObject);
+        }
+        if matches!(class, PrivilegeClass::SecurityAdmin) && object.is_some() {
+            return Err(PrivilegeGrantError::SecurityAdminObject);
         }
         Ok(Self {
             grantee,
@@ -774,8 +781,9 @@ pub enum PrivilegeDecision {
 /// being decided and is retained as decision evidence; the decision itself
 /// is closed over the granted set.
 ///
-/// `Execute` and `SecurityAdmin` are class-membership decisions. `Inspect`
-/// applies the closed INSPECT ladder: a granted higher rung reaches a
+/// `Execute` is object-capable and `SecurityAdmin` is class-wide: a
+/// `SecurityAdmin` request naming an object is denied even when the class is
+/// granted. `Inspect` applies the closed INSPECT ladder: a granted higher rung reaches a
 /// requested lower rung, and a requested content classifier must itself be
 /// granted. The decision fails closed: a request the granted set does not
 /// cover is denied with [`PrivilegeDenial::MissingPrivilege`] without
@@ -787,7 +795,8 @@ pub fn authorise_privilege(
     granted: &[PrivilegeClass],
 ) -> PrivilegeDecision {
     let covered = match requested {
-        PrivilegeClass::Execute | PrivilegeClass::SecurityAdmin => granted.contains(&requested),
+        PrivilegeClass::Execute => granted.contains(&requested),
+        PrivilegeClass::SecurityAdmin => object.is_none() && granted.contains(&requested),
         PrivilegeClass::Inspect(requested_privilege) => {
             let required_rung = requested_privilege.ladder_rank().unwrap_or(0);
             let granted_rung = granted
@@ -3926,6 +3935,10 @@ mod tests {
             ),
             Err(PrivilegeGrantError::EmptyObject)
         ));
+        assert!(matches!(
+            PrivilegeGrant::new(USER, PrivilegeClass::SecurityAdmin, Some(FUNCTION)),
+            Err(PrivilegeGrantError::SecurityAdminObject)
+        ));
     }
 
     #[test]
@@ -4025,6 +4038,17 @@ mod tests {
             ),
             PrivilegeDecision::Denied(PrivilegeDenial::MissingPrivilege { .. })
         ));
+        assert_eq!(
+            authorise_privilege(
+                USER,
+                PrivilegeClass::SecurityAdmin,
+                Some(FUNCTION),
+                &[PrivilegeClass::SecurityAdmin],
+            ),
+            PrivilegeDecision::Denied(PrivilegeDenial::MissingPrivilege {
+                requested: PrivilegeClass::SecurityAdmin,
+            })
+        );
     }
 
     #[test]

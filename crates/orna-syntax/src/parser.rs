@@ -1,10 +1,9 @@
 use rowan::{GreenNode, GreenNodeBuilder, Language};
 
 use crate::{
-    CapabilitySpecification, ClientCallArgument, ClientExpression, ClientFunctionBody,
-    ClientFunctionDeclaration, ClientLocalBinding, ClientProceduralStatement,
-    ClientAssignmentStatement, ClientLetStatement, ClientStateBlockBody,
-    DeleteStatement, Diagnostic,
+    CapabilitySpecification, ClientAssignmentStatement, ClientCallArgument, ClientExpression,
+    ClientFunctionBody, ClientFunctionDeclaration, ClientLetStatement, ClientLocalBinding,
+    ClientProceduralStatement, ClientStateBlockBody, DeleteStatement, Diagnostic,
     EnumLabelDeclaration, EnumTypeDeclaration, FieldRenameDeclaration, FunctionReturnType,
     FunctionSecurity, FunctionTransaction, FunctionVolatility, InsertStatement, MutationValue,
     NamePart, NoInputParameterSelectBody, NullOrdering, ObjectFieldDeclaration, ObjectSource,
@@ -1283,8 +1282,10 @@ impl<'source> Parser<'source> {
                     };
                     if token.is_word("LET") {
                         let mut statement = self.parse_client_let_statement()?;
-                        statement.expression =
-                            rewrite_client_local_name_references(statement.expression, &local_names);
+                        statement.expression = rewrite_client_local_name_references(
+                            statement.expression,
+                            &local_names,
+                        );
                         local_names.push(statement.name.clone());
                         statements.push(ClientProceduralStatement::Let(statement));
                         continue;
@@ -1295,8 +1296,10 @@ impl<'source> Parser<'source> {
                             .is_some_and(|next| next.text == ":")
                     {
                         let mut statement = self.parse_client_assignment_statement()?;
-                        statement.expression =
-                            rewrite_client_local_name_references(statement.expression, &local_names);
+                        statement.expression = rewrite_client_local_name_references(
+                            statement.expression,
+                            &local_names,
+                        );
                         statements.push(ClientProceduralStatement::Assignment(statement));
                         continue;
                     }
@@ -1358,7 +1361,10 @@ impl<'source> Parser<'source> {
                 .current()
                 .is_some_and(|token| !(token.kind == TokenKind::Other && token.text == ":"))
             {
-                if self.current().is_some_and(|token| token.kind == TokenKind::Semicolon) {
+                if self
+                    .current()
+                    .is_some_and(|token| token.kind == TokenKind::Semicolon)
+                {
                     self.error_current(
                         "ORNA0001",
                         "expected ':=' before the CLIENT local initializer",
@@ -1437,7 +1443,10 @@ impl<'source> Parser<'source> {
                     .current()
                     .is_some_and(|token| !(token.kind == TokenKind::Other && token.text == ":"))
                 {
-                    if self.current().is_some_and(|token| token.kind == TokenKind::Semicolon) {
+                    if self
+                        .current()
+                        .is_some_and(|token| token.kind == TokenKind::Semicolon)
+                    {
                         self.error_current(
                             "ORNA0001",
                             "expected ':=' before the CLIENT local initializer",
@@ -1621,17 +1630,19 @@ impl<'source> Parser<'source> {
         let result = (|| {
             self.bump(); // RETURN
             self.skip_trivia();
-            if self.current().is_some_and(|token| token.kind == TokenKind::Semicolon) {
+            if self
+                .current()
+                .is_some_and(|token| token.kind == TokenKind::Semicolon)
+            {
                 self.bump();
                 return Some(None);
             }
             let expression = self.parse_client_expression()?;
             self.skip_trivia();
-            self
-                .expect_kind(
-                    TokenKind::Semicolon,
-                    "expected ';' after the CLIENT state block RETURN statement",
-                )?;
+            self.expect_kind(
+                TokenKind::Semicolon,
+                "expected ';' after the CLIENT state block RETURN statement",
+            )?;
             Some(Some(expression))
         })();
         self.builder.finish_node();
@@ -1784,12 +1795,8 @@ impl<'source> Parser<'source> {
     }
 
     fn parse_stream_return_type(&mut self, type_message: &str) -> Option<FunctionReturnType> {
-        let (element, span) = self.parse_stream_type_parts(
-            type_message,
-            0,
-            32,
-            SyntaxKind::StreamReturnType,
-        )?;
+        let (element, span) =
+            self.parse_stream_type_parts(type_message, 0, 32, SyntaxKind::StreamReturnType)?;
         Some(FunctionReturnType::Stream {
             element: *element,
             span,
