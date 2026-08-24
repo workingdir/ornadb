@@ -359,6 +359,129 @@ def check_textmate_grammar(grammar_path: Path, repository: Path) -> bool:
     return True
 
 
+
+def tree_sitter_keywords(grammar_path: Path, repository: Path) -> set[str] | None:
+    """Read the canonical tree-sitter keyword list from grammar.js."""
+    try:
+        source = grammar_path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        log(f"could not read tree-sitter grammar {display_path(grammar_path, repository)}: {exc}", error=True)
+        return None
+    match = re.search(r"const\s+KEYWORDS\s*=\s*\[(?P<body>.*?)\];", source, re.DOTALL)
+    if match is None:
+        log(f"tree-sitter grammar {display_path(grammar_path, repository)} has no KEYWORDS list", error=True)
+        return None
+    keywords = {word.upper() for word in re.findall(r"['\"]([A-Za-z][A-Za-z0-9_]*)['\"]", match.group("body"))}
+    if not keywords:
+        log(f"tree-sitter grammar {display_path(grammar_path, repository)} has an empty KEYWORDS list", error=True)
+        return None
+    return keywords
+
+
+def editor_words_from_regex_values(values: Sequence[str]) -> set[str]:
+    """Extract words from an editor's keyword/type regex values."""
+    return {word.upper() for value in values for word in re.findall(r"[A-Za-z][A-Za-z0-9_]*", value)}
+
+
+def textmate_surface_words(grammar_path: Path, repository: Path) -> set[str] | None:
+    """Read keyword and scalar-type regexes from a TextMate grammar."""
+    try:
+        grammar = json.loads(grammar_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        log(f"invalid TextMate grammar {display_path(grammar_path, repository)}: {exc}", error=True)
+        return None
+    entries = grammar.get("repository") if isinstance(grammar, dict) else None
+    if not isinstance(entries, dict):
+        log(f"TextMate grammar {display_path(grammar_path, repository)} has no repository for keyword parity", error=True)
+        return None
+    values: list[str] = []
+    def collect(value: object) -> None:
+        if isinstance(value, dict):
+            match = value.get("match")
+            if isinstance(match, str):
+                values.append(match)
+            for child in value.values():
+                collect(child)
+        elif isinstance(value, list):
+            for child in value:
+                collect(child)
+    # Scalar/type entries count as coverage although they use a non-keyword face.
+    for category in ("keywords", "scalar-types"):
+        collect(entries.get(category))
+    return editor_words_from_regex_values(values)
+
+
+def vim_surface_words(syntax_path: Path, repository: Path) -> set[str] | None:
+    """Read Vim keyword and type declarations, including continuation lines."""
+    try:
+        lines = syntax_path.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeDecodeError) as exc:
+        log(f"could not read Vim syntax {display_path(syntax_path, repository)}: {exc}", error=True)
+        return None
+    values: list[str] = []
+    collecting = False
+    for line in lines:
+        stripped = line.strip()
+        declaration = re.match(r"syntax\s+(?:keyword\s+orna(?:Statement|Boolean|Type)|match\s+ornaType)\s+(.+)", stripped)
+        if declaration is not None:
+            collecting = True
+            values.append(declaration.group(1))
+        elif collecting and stripped.startswith("\\"):
+            values.append(stripped[1:])
+        else:
+            collecting = False
+    return editor_words_from_regex_values(values)
+
+
+def emacs_surface_words(integration_path: Path, repository: Path) -> set[str] | None:
+    """Read the Emacs keyword and scalar-type variables."""
+    try:
+        source = integration_path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        log(f"could not read Emacs integration {display_path(integration_path, repository)}: {exc}", error=True)
+        return None
+    values: list[str] = []
+    for variable in ("orna-keywords", "orna-types"):
+        match = re.search(rf"\(defvar\s+{re.escape(variable)}\s+'\((?P<body>.*?)\)\)", source, re.DOTALL)
+        if match is None:
+            log(f"Emacs integration {display_path(integration_path, repository)} has no {variable} list", error=True)
+            return None
+        values.extend(re.findall(r'"([^"]+)"', match.group("body")))
+    return editor_words_from_regex_values(values)
+
+
+def check_fallback_keyword_parity(
+    tree_sitter_grammar: Path,
+    textmate_grammars: Sequence[Path],
+    vim_syntax: Path,
+    emacs_integration: Path,
+    repository: Path,
+) -> bool:
+    """Require every tree-sitter keyword on each accepted fallback surface.
+
+    Fallback editors may expose documented supersets; scalar/type sections
+    count as coverage even though they use a non-keyword face.
+    """
+    keywords = tree_sitter_keywords(tree_sitter_grammar, repository)
+    if keywords is None:
+        return False
+    surfaces: list[tuple[str, Path, set[str] | None]] = [
+        ("TextMate", path, textmate_surface_words(path, repository)) for path in textmate_grammars
+    ]
+    surfaces.extend([
+        ("Vim", vim_syntax, vim_surface_words(vim_syntax, repository)),
+        ("Emacs", emacs_integration, emacs_surface_words(emacs_integration, repository)),
+    ])
+    for label, path, words in surfaces:
+        if words is None:
+            return False
+        missing = sorted(keywords - words)
+        if missing:
+            log(f"{label} fallback {display_path(path, repository)} is missing tree-sitter keywords: {', '.join(missing)}", error=True)
+            return False
+        log(f"validated {label} fallback keyword parity {display_path(path, repository)} ({len(keywords)} tree-sitter keywords; editor supersets allowed)")
+    return True
+
 def check_helix_configuration(configuration_path: Path, repository: Path) -> bool:
     """Validate the checked-in Helix language, server, and grammar entries."""
     if tomllib is None:
@@ -540,6 +663,7 @@ def main() -> int:
     spec_examples = repository.parent / "spec" / "examples"
     helix_configuration = repository / "editors" / "helix" / "languages.toml"
     emacs_integration = repository / "editors" / "emacs" / "orna-eglot.el"
+    vim_syntax = repository / "editors" / "vim" / "syntax" / "orna.vim"
 
 
     tree_sitter = shutil.which("tree-sitter")
@@ -709,6 +833,14 @@ def main() -> int:
     for grammar_path in textmate_grammars:
         if not check_textmate_grammar(grammar_path, repository):
             return 1
+    if not check_fallback_keyword_parity(
+        tree_sitter_directory / "grammar.js",
+        textmate_grammars,
+        vim_syntax,
+        emacs_integration,
+        repository,
+    ):
+        return 1
 
     extension = repository / "editors" / "vscode" / "extension.js"
     if not extension.is_file():
