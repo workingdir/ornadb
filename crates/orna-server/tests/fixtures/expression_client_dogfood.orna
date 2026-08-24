@@ -1,0 +1,13 @@
+CREATE SCHEMA expr;
+
+CREATE CLIENT FUNCTION expr.literal()
+RETURNS TEXT
+AS 'hello';
+
+CREATE CLIENT FUNCTION expr.composed()
+RETURNS TEXT
+AS expr.literal() || ' world';
+
+CREATE EXTERNAL CLIENT FUNCTION expr.external()
+RETURNS TEXT
+RUNTIME CONTRACT 'expr.runtime@1';
