@@ -42,10 +42,11 @@ use orna_compiler::{
 use orna_core::revision::Sha256Digest;
 use orna_core::{
     CallSiteId, CatalogueRevisionId, FunctionId, FunctionRevisionId, InvocationId, ObjectId,
-    ParameterId, PrincipalId, SourceBundleId, SourceRevisionId, TypeId,
+    ParameterId, PrincipalId, SourceBundleId, SourceRevisionId, SourceUnitId, TypeId,
     canonical_hash::{
         artifact_payload_digest, catalogue_digest_with_context,
         function_semantic_digest_with_version, source_bundle_digest, source_revision_record_digest,
+        source_unit_content_digest,
     },
     catalogue::{
         CatalogueSnapshot, FunctionDefinition, FunctionDomain, FunctionReturn, FunctionSecurity,
@@ -59,11 +60,11 @@ use orna_core::{
     },
     invocation_binding::CliArgumentInput,
     revision::{
-        ActiveDatabaseRevision, CatalogueHashContext, DefinitionIdentity, DefinitionReference,
+        ActiveDatabaseRevision, ActiveDatabaseRevisionInput, ActiveRevisionContent, CatalogueHashContext, DefinitionIdentity, DefinitionReference,
         DefinitionReferenceKind, DefinitionReferenceTarget, DeployableRevision,
         DeployableRevisionContent, DeployableRevisionInput, ExecutableArtifact,
         ExecutableArtifactKind, FunctionRevisionRecord, FunctionSemanticHashVersion, RevisionPair,
-        StoredSourceRevision, VerifiedStandardLibrarySnapshot,
+        StoredSourceRevision, StoredSourceUnit, VerifiedStandardLibrarySnapshot,
     },
     security::{
         AuthenticatedSession, ExecuteDecision, ExecuteDenial, ExecuteGrant, InvocationTarget,
@@ -290,11 +291,7 @@ const RAW_CLIENT_FUNCTION_SOURCE: &str = "CREATE SCHEMA app;\n\
     SECURITY INVOKER TRANSACTION READ ONLY VOLATILITY STABLE\n\
     AS SELECT assignment.marker FROM app.assignment assignment;\n\
     CREATE CLIENT FUNCTION app.enabled() RETURNS BOOLEAN RETURN TRUE;\n";
-const RAW_EXPRESSION_CLIENT_FUNCTION_SOURCE: &str = "CREATE SCHEMA expr;\n\
-    CREATE CLIENT FUNCTION expr.literal() RETURNS TEXT AS 'hello';\n\
-    CREATE CLIENT FUNCTION expr.composed() RETURNS TEXT AS expr.literal() || ' world';\n\
-    CREATE EXTERNAL CLIENT FUNCTION expr.external() RETURNS TEXT\n\
-    RUNTIME CONTRACT 'expr.runtime@1';\n";
+const RAW_EXPRESSION_CLIENT_FUNCTION_SOURCE: &str = include_str!("fixtures/expression_client_dogfood.orna");
 const RAW_ACTION_SERVER_SOURCE: &str = "CREATE SCHEMA action_fixture;\n";
 const RAW_ACTION_CLIENT_SOURCE: &str = "CREATE CLIENT FUNCTION action_fixture.call(p_value INTEGER)\n\
     RETURNS std.Action\n\
@@ -13407,6 +13404,82 @@ fn require(condition: bool, message: &'static str) -> TestResult<()> {
     }
 }
 
+fn offline_empty_version_two_active(
+    standard: &VerifiedStandardLibrarySnapshot,
+) -> TestResult<ActiveDatabaseRevision> {
+    let source_unit = StoredSourceUnit::new(
+        SourceUnitId::from_bytes([0x41; 16]),
+        0,
+        "active.orna",
+        "",
+        source_unit_content_digest("")?,
+    )?;
+    let bundle_hash = source_bundle_digest(std::slice::from_ref(&source_unit))?;
+    let source = StoredSourceRevision::new(
+        SourceBundleId::from_bytes([0x42; 16]),
+        SourceRevisionId::from_bytes([0x43; 16]),
+        None,
+        vec![source_unit],
+        bundle_hash,
+        source_revision_record_digest(
+            SourceBundleId::from_bytes([0x42; 16]),
+            None,
+            bundle_hash,
+        )?,
+    )?;
+    let catalogue = CatalogueSnapshot::new_with_types(
+        CatalogueRevisionId::from_bytes([0x44; 16]),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+    )?;
+    let context = CatalogueHashContext::version_two(standard.clone());
+    let catalogue_hash = catalogue_digest_with_context(
+        &context,
+        &catalogue,
+        &[],
+        &[],
+        &[],
+        &[],
+    )?;
+    Ok(ActiveDatabaseRevision::new_with_catalogue_hash_context(
+        ActiveDatabaseRevisionInput::new(
+            RevisionPair::new(source.id(), catalogue.revision()),
+            source,
+            catalogue,
+            catalogue_hash,
+            ActiveRevisionContent::new(Vec::new(), Vec::new(), Vec::new(), Vec::new()),
+        ),
+        context,
+    )?)
+}
+
+fn offline_active_from_prepared(
+    prepared: &DeployableRevision,
+) -> TestResult<ActiveDatabaseRevision> {
+    let current_function_revisions = prepared
+        .current_function_revisions()
+        .ok_or_else(|| failure("offline prepared expression fixture has no current revisions"))?
+        .to_vec();
+    let context = prepared.catalogue_hash_context().clone();
+    Ok(ActiveDatabaseRevision::new_with_catalogue_hash_context(
+        ActiveDatabaseRevisionInput::new(
+            prepared.candidate_pair(),
+            prepared.source().clone(),
+            prepared.candidate().clone(),
+            prepared.catalogue_hash(),
+            ActiveRevisionContent::new(
+                prepared.expressions().to_vec(),
+                current_function_revisions,
+                prepared.origins().to_vec(),
+                prepared.references().to_vec(),
+            ),
+        ),
+        context,
+    )?)
+}
+
 #[test]
 fn checks_accepted_scalar_resource_fixture_offline() -> TestResult<()> {
     let snapshot = verify_standard_library_v2_snapshot(retained_standard_library_v2_snapshot()?)?;
@@ -13466,6 +13539,160 @@ fn checks_accepted_stream_resource_fixture_offline() -> TestResult<()> {
         "accepted stream resource fixture is missing stream_fixture.read",
     )
 }
+#[test]
+fn checks_accepted_expression_client_fixture_offline() -> TestResult<()> {
+    let snapshot = verify_standard_library_v2_snapshot(retained_standard_library_v2_snapshot()?)?;
+    let standard = check_standard_library_source(&snapshot)?;
+    let base = offline_empty_version_two_active(standard.verified_snapshot())?;
+    let context = StandardApplicationCheckContext::try_new(base.catalogue(), &standard)?;
+    let source = SourceBundle::new([SourceUnit::new(
+        "fixtures/expression_client_dogfood.orna",
+        include_str!("fixtures/expression_client_dogfood.orna"),
+    )])?;
+    let report = check_standard_application(&source, &context);
+    if !report.diagnostics().is_empty() {
+        return Err(failure(format!(
+            "accepted expression CLIENT fixture did not check: {:?}",
+            report.diagnostics(),
+        )));
+    }
+    let prepared = prepare_standard_application(&report, base.pair(), &base)?;
+    let active = offline_active_from_prepared(&prepared)?;
+    let checked = report
+        .checked_bundle()
+        .ok_or_else(|| failure("accepted expression CLIENT fixture produced no checked bundle"))?;
+    for name in ["literal", "composed", "external"] {
+        require(
+            checked
+                .client_functions()
+                .any(|function| function.name().parts() == ["expr", name]),
+            "accepted expression CLIENT fixture is missing a declared function",
+        )?;
+    }
+    let composed = checked
+        .client_functions()
+        .find(|function| function.name().parts() == ["expr", "composed"])
+        .ok_or_else(|| failure("accepted expression CLIENT fixture is missing expr.composed"))?;
+    require(
+        composed
+            .references()
+            .iter()
+            .any(|reference| reference.kind() == DefinitionReferenceKind::FunctionCall),
+        "accepted expression CLIENT fixture did not retain expr.literal as a function call reference",
+    )?;
+    let external = checked
+        .client_functions()
+        .find(|function| function.name().parts() == ["expr", "external"])
+        .ok_or_else(|| failure("accepted expression CLIENT fixture is missing expr.external"))?;
+    require(
+        external.references().is_empty(),
+        "accepted external CLIENT contract unexpectedly retained executable references",
+    )?;
+
+    let literal_id = active
+        .catalogue()
+        .functions()
+        .iter()
+        .find(|function| function.name().parts() == ["expr", "literal"])
+        .ok_or_else(|| failure("prepared expression CLIENT fixture is missing expr.literal"))?
+        .id();
+    let composed_id = active
+        .catalogue()
+        .functions()
+        .iter()
+        .find(|function| function.name().parts() == ["expr", "composed"])
+        .ok_or_else(|| failure("prepared expression CLIENT fixture is missing expr.composed"))?
+        .id();
+    let external_id = active
+        .catalogue()
+        .functions()
+        .iter()
+        .find(|function| function.name().parts() == ["expr", "external"])
+        .ok_or_else(|| failure("prepared expression CLIENT fixture is missing expr.external"))?
+        .id();
+    let functions = active
+        .catalogue()
+        .functions()
+        .iter()
+        .map(FunctionDefinition::id)
+        .collect::<Vec<_>>();
+    let security = SecuritySnapshot::new(
+        active.pair(),
+        functions,
+        vec![Principal::new(
+            RAW_CLIENT_USER,
+            PrincipalKind::User,
+            PrincipalStatus::Active,
+        )],
+        vec![],
+        vec![
+            ExecuteGrant::new(RAW_CLIENT_USER, literal_id),
+            ExecuteGrant::new(RAW_CLIENT_USER, composed_id),
+            ExecuteGrant::new(RAW_CLIENT_USER, external_id),
+        ],
+    )?;
+    let session = security.bind_authenticated_session(RAW_CLIENT_USER, vec![])?;
+    let composed_authorisation = match security.authorise_execute(
+        &session,
+        InvocationTarget::new(composed_id, active.pair()),
+    ) {
+        ExecuteDecision::Allowed(authorisation) => authorisation,
+        ExecuteDecision::Denied(reason) => {
+            return Err(failure(format!(
+                "offline expression CLIENT composed authorisation was denied: {reason:?}"
+            )))
+        }
+    };
+    let composed_result = evaluate_client_function(&active, &composed_authorisation)?;
+    require(
+        composed_result.value() == &RuntimeValue::Text("hello world".to_owned()),
+        "offline expression CLIENT composed evaluation returned the wrong value",
+    )?;
+    let literal_authorisation = match security.authorise_execute(
+        &session,
+        InvocationTarget::new(literal_id, active.pair()),
+    ) {
+        ExecuteDecision::Allowed(authorisation) => authorisation,
+        ExecuteDecision::Denied(reason) => {
+            return Err(failure(format!(
+                "offline expression CLIENT literal authorisation was denied: {reason:?}"
+            )))
+        }
+    };
+    let literal_result = evaluate_client_function(&active, &literal_authorisation)?;
+    require(
+        literal_result.value() == &RuntimeValue::Text("hello".to_owned()),
+        "offline expression CLIENT literal evaluation returned the wrong value",
+    )?;
+    require(
+        literal_result.context().function() == literal_id
+            && literal_result.context().pair() == active.pair(),
+        "offline expression CLIENT literal result retained the wrong invocation context",
+    )?;
+    let external_authorisation = match security.authorise_execute(
+        &session,
+        InvocationTarget::new(external_id, active.pair()),
+    ) {
+        ExecuteDecision::Allowed(authorisation) => authorisation,
+        ExecuteDecision::Denied(reason) => {
+            return Err(failure(format!(
+                "offline external CLIENT authorisation was denied: {reason:?}"
+            )))
+        }
+    };
+    let external_error = evaluate_client_function(&active, &external_authorisation)
+        .expect_err("offline external CLIENT evaluation unexpectedly completed");
+    require(
+        matches!(
+            external_error,
+            ClientExecutionError::ExternalContract { identity, .. }
+                if identity == "expr.runtime@1"
+        ),
+        "offline external CLIENT evaluation did not fail closed on expr.runtime@1",
+    )
+}
+
+
 #[test]
 fn checks_accepted_action_fixture_offline() -> TestResult<()> {
     let snapshot = verify_standard_library_v6_snapshot(retained_standard_library_v6_snapshot()?)?;
