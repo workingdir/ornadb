@@ -1832,6 +1832,10 @@ impl ResourceProtocolConnection {
     ///
     pub fn open(&mut self, request: ResourceRequest) -> Result<ResourceFrameDisposition, ResourceConnectionError> {
         require_resource_stream(request.stream_id).map_err(|source| ResourceConnectionError::InvalidFrame { source })?;
+        require_resource_invocation_id(request.request_id)
+            .map_err(|source| ResourceConnectionError::InvalidFrame { source })?;
+        require_resource_generation(request.generation)
+            .map_err(|source| ResourceConnectionError::InvalidFrame { source })?;
         require_resource_kind_windows(request.resource_kind, request.item_window, request.byte_window)
             .map_err(|source| ResourceConnectionError::InvalidFrame { source })?;
         validate_resource_arguments(&request.arguments)
@@ -2975,6 +2979,8 @@ pub fn encode_resource_request(
     request: &ResourceRequest,
 ) -> Result<Vec<u8>, FrameCodecError> {
     require_resource_stream(request.stream_id)?;
+    require_resource_invocation_id(request.request_id)?;
+    require_resource_generation(request.generation)?;
     require_resource_kind_windows(request.resource_kind, request.item_window, request.byte_window)?;
     validate_resource_arguments(&request.arguments)?;
     let mut payload = Vec::new();
@@ -3022,6 +3028,7 @@ pub fn decode_resource_request(
     let stream_id = resource_u64(payload, &mut cursor)?;
     require_resource_stream(stream_id)?;
     let request_id = resource_id(payload, &mut cursor, InvocationId::from_bytes)?;
+    require_resource_invocation_id(request_id)?;
     let parent_invocation_id = resource_id(payload, &mut cursor, InvocationId::from_bytes)?;
     let call_site_id = resource_id(payload, &mut cursor, CallSiteId::from_bytes)?;
     let state_profile = resource_text(payload, &mut cursor)?;
@@ -3029,6 +3036,7 @@ pub fn decode_resource_request(
     let target_function_id = resource_id(payload, &mut cursor, FunctionId::from_bytes)?;
     let target_revision = parse_revision_pair(payload, &mut cursor)?;
     let generation = resource_u64(payload, &mut cursor)?;
+    require_resource_generation(generation)?;
     let resource_kind = resource_kind_from_wire(resource_u8(payload, &mut cursor)?)?;
     let argument_count = resource_u32(payload, &mut cursor)? as usize;
     if argument_count > MAX_RESOURCE_ARGUMENTS {
@@ -3543,6 +3551,14 @@ fn require_resource_stream(stream_id: u64) -> Result<(), FrameCodecError> {
 
 fn require_resource_invocation_id(id: InvocationId) -> Result<(), FrameCodecError> {
     if id.to_bytes() == [0; 16] {
+        Err(FrameCodecError::ResourceMalformedPayload)
+    } else {
+        Ok(())
+    }
+}
+
+fn require_resource_generation(generation: u64) -> Result<(), FrameCodecError> {
+    if generation == 0 {
         Err(FrameCodecError::ResourceMalformedPayload)
     } else {
         Ok(())
@@ -6827,6 +6843,97 @@ mod tests {
             item_window: 10,
             byte_window: 11,
         }
+    }
+
+    #[test]
+    fn resource_request_rejects_zero_generation_at_connection_open() {
+        let mut request = resource_request_fixture();
+        request.generation = 0;
+        let mut connection = ResourceProtocolConnection::new();
+        let before = connection.clone();
+
+        assert_eq!(
+            connection.open(request),
+            Err(ResourceConnectionError::InvalidFrame {
+                source: FrameCodecError::ResourceMalformedPayload,
+            }),
+        );
+        assert_eq!(connection, before);
+    }
+
+    #[test]
+    fn resource_request_rejects_zero_generation_at_encode() {
+        let active = empty_active_revision();
+        let registry = test_registry();
+        let mut request = resource_request_fixture();
+        request.generation = 0;
+
+        assert_eq!(
+            encode_resource_request(&active, &registry, &request),
+            Err(FrameCodecError::ResourceMalformedPayload),
+        );
+    }
+
+    #[test]
+    fn resource_request_rejects_zero_generation_at_decode() {
+        let active = empty_active_revision();
+        let registry = test_registry();
+        let mut encoded = encode_resource_request(&active, &registry, &resource_request_fixture())
+            .expect("non-zero fixture request encodes");
+        let generation_start = RESOURCE_HEADER_LENGTH + 8 + 16 + 16 + 16 + 4 + 4 + 16 + 16 + 16;
+        encoded[generation_start..generation_start + 8].copy_from_slice(&0_u64.to_be_bytes());
+
+        assert_eq!(
+            decode_resource_request(&active, &registry, &encoded),
+            Err(FrameCodecError::ResourceMalformedPayload),
+        );
+    }
+
+    #[test]
+    fn resource_request_generation_one_round_trips() {
+        let active = empty_active_revision();
+        let registry = test_registry();
+        let mut request = resource_request_fixture();
+        request.generation = 1;
+        let encoded = encode_resource_request(&active, &registry, &request)
+            .expect("generation one request encodes");
+
+        let decoded = decode_resource_request(&active, &registry, &encoded)
+            .expect("generation one request decodes");
+        assert_eq!(decoded, request);
+        assert_eq!(encode_resource_request(&active, &registry, &decoded), Ok(encoded));
+    }
+
+    #[test]
+    fn resource_request_rejects_zero_request_identity() {
+        let active = empty_active_revision();
+        let registry = test_registry();
+        let mut request = resource_request_fixture();
+        request.request_id = InvocationId::from_bytes([0; 16]);
+
+        assert_eq!(
+            encode_resource_request(&active, &registry, &request),
+            Err(FrameCodecError::ResourceMalformedPayload),
+        );
+
+        let mut encoded = encode_resource_request(&active, &registry, &resource_request_fixture())
+            .expect("non-zero fixture request encodes");
+        let request_id_start = RESOURCE_HEADER_LENGTH + 8;
+        encoded[request_id_start..request_id_start + 16].fill(0);
+        assert_eq!(
+            decode_resource_request(&active, &registry, &encoded),
+            Err(FrameCodecError::ResourceMalformedPayload),
+        );
+
+        let mut connection = ResourceProtocolConnection::new();
+        let before = connection.clone();
+        assert_eq!(
+            connection.open(request),
+            Err(ResourceConnectionError::InvalidFrame {
+                source: FrameCodecError::ResourceMalformedPayload,
+            }),
+        );
+        assert_eq!(connection, before);
     }
 
     #[test]
