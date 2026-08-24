@@ -34,7 +34,8 @@ const VALID_SOURCE: &str = concat!(
 );
 
 /// The accepted CLIENT source fixture shared with the syntax parser test.
-const ACCEPTED_CLIENT_SOURCE: &str = include_str!("../../orna-syntax/testdata/accepted-client.orna");
+const ACCEPTED_CLIENT_SOURCE: &str =
+    include_str!("../../orna-syntax/testdata/accepted-client.orna");
 
 /// The broken source used for negative diagnostics tests.
 const BROKEN_SOURCE: &str = "CREATE SCHEMA broken_test;\n\
@@ -160,6 +161,34 @@ fn initialize(client: &mut Client) {
     client.notify("initialized", json!({}));
 }
 
+fn position_inside(source: &str, prefix: &str, token: &str) -> Value {
+    let prefix_start = source
+        .find(prefix)
+        .unwrap_or_else(|| panic!("missing position prefix {prefix:?}"));
+    let token_start = prefix_start
+        + prefix.len()
+        + source[prefix_start + prefix.len()..]
+            .find(token)
+            .unwrap_or_else(|| panic!("missing token {token:?} after prefix {prefix:?}"));
+    let first_character = token
+        .chars()
+        .next()
+        .expect("cursor token must not be empty")
+        .len_utf8();
+    let byte = token_start + first_character;
+    let mut line = 0u64;
+    let mut character = 0u64;
+    for source_character in source[..byte].chars() {
+        if source_character == '\n' {
+            line += 1;
+            character = 0;
+        } else {
+            character += source_character.len_utf16() as u64;
+        }
+    }
+    json!({ "line": line, "character": character })
+}
+
 fn open_document(client: &mut Client, uri: &str, text: &str, version: i64) {
     client.notify(
         "textDocument/didOpen",
@@ -225,7 +254,11 @@ fn serves_accepted_client_fixture_without_diagnostics_and_with_symbols() {
     open_document(&mut client, uri, ACCEPTED_CLIENT_SOURCE, 1);
     let diagnostics = client.read_notification("textDocument/publishDiagnostics");
     assert_eq!(diagnostics["uri"], uri);
-    assert_eq!(diagnostics["diagnostics"], json!([]), "accepted CLIENT source clean");
+    assert_eq!(
+        diagnostics["diagnostics"],
+        json!([]),
+        "accepted CLIENT source clean"
+    );
 
     let symbols = client.request(
         "textDocument/documentSymbol",
@@ -386,10 +419,10 @@ fn serves_rich_hover_content() {
     let echo_uri = format!("file://{}/../../echo.orna", env!("CARGO_MANIFEST_DIR"));
     let echo_source = concat!(
         "CREATE SCHEMA echo_test;\n",
-        "CREATE SERVER FUNCTION echo_test.echo_value(p_value BOOLEAN DOCUMENTATION 'the value to echo')\n",
+        "CREATE SERVER FUNCTION echo_test.echo_value(p_stored BOOLEAN DOCUMENTATION 'the value to echo')\n",
         "RETURNS BOOLEAN\n",
         "SECURITY INVOKER TRANSACTION READ ONLY VOLATILITY STABLE\n",
-        "AS SELECT p_value;\n",
+        "AS SELECT p_stored;\n",
     );
     open_document(&mut client, &echo_uri, echo_source, 1);
     let _ = client.read_notification("textDocument/publishDiagnostics");
@@ -428,7 +461,7 @@ fn serves_rich_hover_content() {
         value.contains("**Parameters**"),
         "parameters section: {value}"
     );
-    assert!(value.contains("p_value"), "parameter listing: {value}");
+    assert!(value.contains("p_stored"), "parameter listing: {value}");
     assert!(
         value.contains("the value to echo"),
         "parameter documentation: {value}"
@@ -563,14 +596,9 @@ fn serves_hover_definition_and_references() {
             )
         })
         .collect();
-    // The initial navigation implementation reports every highlighted
-    // same-spelling occurrence, including the return-column spelling.
-    let expected_references = [
-        (3, 4, 3, 10),
-        (9, 43, 9, 49),
-        (13, 14, 13, 20),
-        (15, 16, 15, 22),
-    ];
+    // Field references stay within the selected object field; same-spelled
+    // ROWS return columns are not field references.
+    let expected_references = [(3, 4, 3, 10), (9, 43, 9, 49), (15, 16, 15, 22)];
     assert_eq!(
         reference_locations.len(),
         expected_references.len(),
@@ -583,24 +611,389 @@ fn serves_hover_definition_and_references() {
         );
     }
 
-    // Use the schema declaration for the includeDeclaration check because
-    // declaration lookup covers top-level declarations.
+    // Select the field declaration so the false flag exercises a non-top-level symbol.
     let references_without_declaration = client.request(
         "textDocument/references",
         json!({
             "textDocument": { "uri": uri },
-            "position": { "line": 0, "character": 15 },
+            "position": { "line": 3, "character": 4 },
             "context": { "includeDeclaration": false },
         }),
     );
     let references_without_declaration = references_without_declaration
         .as_array()
         .expect("references without declaration");
+    let expected_without_declaration = [(9, 43, 9, 49), (15, 16, 15, 22)];
+    let actual_without_declaration: Vec<_> = references_without_declaration
+        .iter()
+        .map(|reference| {
+            (
+                reference["range"]["start"]["line"]
+                    .as_u64()
+                    .expect("start line"),
+                reference["range"]["start"]["character"]
+                    .as_u64()
+                    .expect("start character"),
+                reference["range"]["end"]["line"]
+                    .as_u64()
+                    .expect("end line"),
+                reference["range"]["end"]["character"]
+                    .as_u64()
+                    .expect("end character"),
+            )
+        })
+        .collect();
+    assert_eq!(
+        actual_without_declaration.len(),
+        expected_without_declaration.len(),
+        "references without declaration: {references_without_declaration:?}"
+    );
+    for expected in expected_without_declaration {
+        assert!(
+            actual_without_declaration.contains(&expected),
+            "missing reference without declaration {expected:?}: {references_without_declaration:?}"
+        );
+    }
+
+    client.shutdown();
+}
+
+#[test]
+fn scoped_navigation_resolves_owner_paths_and_fails_closed() {
+    let mut client = Client::spawn();
+    initialize(&mut client);
+    let uri = "file:///test/scoped-navigation.orna";
+    let source = concat!(
+        "CREATE SCHEMA owners;\n",
+        "CREATE TYPE owners.first_obj AS OBJECT (stored BOOLEAN);\n",
+        "CREATE TYPE owners.second_obj AS OBJECT (stored BOOLEAN);\n",
+        "CREATE TYPE owners.quoted_obj AS OBJECT (\"display_name\" BOOLEAN);\n",
+        "CREATE TYPE owners.client_obj AS OBJECT (\"display_name\" BOOLEAN);\n",
+        "CREATE SCHEMA unicode_nav;\n",
+        "CREATE TYPE unicode_nav.café AS OBJECT (résumé BOOLEAN);\n",
+        "CREATE SERVER FUNCTION read_first() RETURNS ROWS (stored BOOLEAN) AS\n",
+        "SELECT first_alias.stored FROM owners.first_obj first_alias;\n",
+        "CREATE SERVER FUNCTION read_second() RETURNS ROWS (stored BOOLEAN) AS\n",
+        "SELECT second_alias.stored FROM owners.second_obj second_alias;\n",
+        "CREATE SERVER FUNCTION read_quoted() RETURNS ROWS (\"display_name\" BOOLEAN) AS\n",
+        "SELECT quoted_alias.\"display_name\" FROM owners.quoted_obj quoted_alias;\n",
+        "CREATE SERVER FUNCTION read_unicode() RETURNS ROWS (résumé BOOLEAN) AS\n",
+        "SELECT unicode_alias.RÉSUMÉ FROM unicode_nav.CAFÉ unicode_alias;\n",
+        "CREATE SERVER FUNCTION unresolved_property() RETURNS BOOLEAN AS\n",
+        "SELECT unknown_alias.missing FROM owners.first_obj unknown_alias;\n",
+        "CREATE CLIENT FUNCTION client_read(entry REF owners.client_obj) RETURNS BOOLEAN AS\n",
+        "entry.\"display_name\";\n",
+        "CREATE CLIENT FUNCTION client_field_shadow(entry REF owners.client_obj) RETURNS BOOLEAN IS\n",
+        "    STATE entry BOOLEAN SCOPE LOCAL DEFAULT TRUE;\n",
+        "BEGIN\n",
+        "    RETURN entry.\"display_name\";\n",
+        "END;\n",
+        "CREATE CLIENT FUNCTION client_call(entry BOOLEAN) RETURNS BOOLEAN AS entry;\n",
+        "CREATE CLIENT FUNCTION client_caller() RETURNS BOOLEAN AS\n",
+        "owners.client_call(entry => TRUE);\n",
+        "CREATE TYPE owners.child_obj AS OBJECT (stored BOOLEAN);\n",
+        "CREATE TYPE owners.parent_obj AS OBJECT (child REF owners.child_obj);\n",
+        "CREATE SERVER FUNCTION read_nested() RETURNS ROWS (stored BOOLEAN) AS\n",
+        "SELECT nested_alias.child.stored FROM owners.parent_obj nested_alias;\n",
+        "CREATE SERVER FUNCTION invalid_alias() RETURNS ROWS (stored BOOLEAN) AS\n",
+        "SELECT wrong_alias.stored FROM owners.first_obj real_alias;\n",
+        "CREATE SERVER FUNCTION unknown_insert(p_stored BOOLEAN) RETURNS ROWS (created REF owners.first_obj) AS\n",
+        "INSERT INTO owners.first_obj AS made (\"missing\") VALUES (p_stored) RETURNING REF(made);\n",
+        "CREATE SERVER FUNCTION unknown_update(p_stored BOOLEAN, p_key REF owners.first_obj) RETURNS ROWS (changed REF owners.first_obj) AS\n",
+        "UPDATE owners.first_obj AS changed SET \"missing\" = p_stored WHERE REF(changed) = p_key RETURNING REF(changed);\n",
+        "CREATE CLIENT FUNCTION shadow(entry BOOLEAN) RETURNS BOOLEAN IS\n",
+        "    STATE entry BOOLEAN SCOPE LOCAL DEFAULT TRUE;\n",
+        "BEGIN\n",
+        "    RETURN entry;\n",
+        "END;\n",
+        "CREATE CLIENT FUNCTION future() RETURNS BOOLEAN IS\n",
+        "    STATE first BOOLEAN SCOPE LOCAL DEFAULT later;\n",
+        "    STATE later BOOLEAN SCOPE LOCAL DEFAULT TRUE;\n",
+        "BEGIN\n",
+        "    RETURN first;\n",
+        "END;\n",
+    );
+    open_document(&mut client, uri, source, 1);
+    let _ = client.read_notification("textDocument/publishDiagnostics");
+
+    let first_use = position_inside(source, "SELECT first_alias.", "stored");
+    let first_definition = client.request(
+        "textDocument/definition",
+        json!({ "textDocument": { "uri": uri }, "position": first_use }),
+    );
+    assert_eq!(
+        first_definition["range"]["start"]["line"], 1,
+        "first owner field definition: {first_definition}"
+    );
+    let first_references = client.request(
+        "textDocument/references",
+        json!({
+            "textDocument": { "uri": uri },
+            "position": first_use,
+            "context": { "includeDeclaration": false },
+        }),
+    );
+    assert_eq!(
+        first_references
+            .as_array()
+            .expect("first field references")
+            .len(),
+        1,
+        "same-spelled second-owner field leaked: {first_references}"
+    );
+
+    let second_use = position_inside(source, "SELECT second_alias.", "stored");
+    let second_definition = client.request(
+        "textDocument/definition",
+        json!({ "textDocument": { "uri": uri }, "position": second_use }),
+    );
+    assert_eq!(
+        second_definition["range"]["start"]["line"], 2,
+        "second owner field definition: {second_definition}"
+    );
+
+    let quoted_use = position_inside(source, "SELECT quoted_alias.", "\"display_name\"");
+    let quoted_definition = client.request(
+        "textDocument/definition",
+        json!({ "textDocument": { "uri": uri }, "position": quoted_use }),
+    );
+    assert_eq!(
+        quoted_definition["range"]["start"]["line"], 3,
+        "quoted SQL field definition: {quoted_definition}"
+    );
+
+    let unicode_use = position_inside(source, "SELECT unicode_alias.", "RÉSUMÉ");
+    let unicode_definition = client.request(
+        "textDocument/definition",
+        json!({ "textDocument": { "uri": uri }, "position": unicode_use }),
+    );
+    assert_eq!(
+        unicode_definition["range"]["start"]["line"], 6,
+        "Unicode-cased owner/field definition: {unicode_definition}"
+    );
+
+    let client_use = position_inside(source, "entry.", "\"display_name\"");
+    let client_definition = client.request(
+        "textDocument/definition",
+        json!({ "textDocument": { "uri": uri }, "position": client_use }),
+    );
+    assert_eq!(
+        client_definition["range"]["start"]["line"], 4,
+        "quoted CLIENT field definition: {client_definition}"
+    );
+    let client_shadow_use = position_inside(source, "RETURN entry.", "\"display_name\"");
+    let client_shadow_definition = client.request(
+        "textDocument/definition",
+        json!({ "textDocument": { "uri": uri }, "position": client_shadow_use }),
+    );
+    assert_eq!(
+        client_shadow_definition["range"]["start"]["line"], 4,
+        "CLIENT field root prefers parameter over same-named state: {client_shadow_definition}"
+    );
+
+    let client_references = client.request(
+        "textDocument/references",
+        json!({
+            "textDocument": { "uri": uri },
+            "position": client_use,
+            "context": { "includeDeclaration": false },
+        }),
+    );
+    assert_eq!(
+        client_references
+            .as_array()
+            .expect("CLIENT field references")
+            .len(),
+        2,
+        "CLIENT field references missed a same-owner use or escaped its owner: {client_references}"
+    );
+
+    let unresolved_use = position_inside(source, "SELECT unknown_alias.", "missing");
+    let unresolved_definition = client.request(
+        "textDocument/definition",
+        json!({ "textDocument": { "uri": uri }, "position": unresolved_use }),
+    );
     assert!(
-        references_without_declaration
-            .iter()
-            .all(|reference| reference["range"]["start"]["line"] != 0),
-        "schema declaration was not omitted: {references_without_declaration:?}"
+        unresolved_definition.is_null(),
+        "unresolved property acquired a definition: {unresolved_definition}"
+    );
+    let mutation_insert_use = position_inside(
+        source,
+        "INSERT INTO owners.first_obj AS made (",
+        "\"missing\"",
+    );
+    let mutation_insert_definition = client.request(
+        "textDocument/definition",
+        json!({ "textDocument": { "uri": uri }, "position": mutation_insert_use }),
+    );
+    assert!(
+        mutation_insert_definition.is_null(),
+        "unknown quoted INSERT field acquired a definition: {mutation_insert_definition}"
+    );
+    let mutation_insert_references = client.request(
+        "textDocument/references",
+        json!({
+            "textDocument": { "uri": uri },
+            "position": mutation_insert_use,
+            "context": { "includeDeclaration": true },
+        }),
+    );
+    assert_eq!(
+        mutation_insert_references
+            .as_array()
+            .expect("unknown INSERT references")
+            .len(),
+        0,
+        "unknown quoted INSERT field leaked references: {mutation_insert_references}"
+    );
+
+    let mutation_update_use = position_inside(
+        source,
+        "UPDATE owners.first_obj AS changed SET ",
+        "\"missing\"",
+    );
+    let mutation_update_definition = client.request(
+        "textDocument/definition",
+        json!({ "textDocument": { "uri": uri }, "position": mutation_update_use }),
+    );
+    assert!(
+        mutation_update_definition.is_null(),
+        "unknown quoted UPDATE field acquired a definition: {mutation_update_definition}"
+    );
+    let mutation_update_references = client.request(
+        "textDocument/references",
+        json!({
+            "textDocument": { "uri": uri },
+            "position": mutation_update_use,
+            "context": { "includeDeclaration": true },
+        }),
+    );
+    assert_eq!(
+        mutation_update_references
+            .as_array()
+            .expect("unknown UPDATE references")
+            .len(),
+        0,
+        "unknown quoted UPDATE field leaked references: {mutation_update_references}"
+    );
+
+    let unresolved_references = client.request(
+        "textDocument/references",
+        json!({
+            "textDocument": { "uri": uri },
+            "position": unresolved_use,
+            "context": { "includeDeclaration": true },
+        }),
+    );
+    assert_eq!(
+        unresolved_references
+            .as_array()
+            .expect("unresolved references")
+            .len(),
+        0,
+        "unresolved property leaked references: {unresolved_references}"
+    );
+
+    let argument_label = position_inside(source, "owners.client_call(", "entry");
+    let label_definition = client.request(
+        "textDocument/definition",
+        json!({ "textDocument": { "uri": uri }, "position": argument_label }),
+    );
+    assert!(
+        label_definition.is_null(),
+        "named-call argument label acquired a definition: {label_definition}"
+    );
+    let label_references = client.request(
+        "textDocument/references",
+        json!({
+            "textDocument": { "uri": uri },
+            "position": argument_label,
+            "context": { "includeDeclaration": true },
+        }),
+    );
+    assert_eq!(
+        label_references
+            .as_array()
+            .expect("argument label references")
+            .len(),
+        0,
+        "named-call argument label leaked variable references: {label_references}"
+    );
+
+    let nested_use = position_inside(source, "SELECT nested_alias.child.", "stored");
+    let nested_definition = client.request(
+        "textDocument/definition",
+        json!({ "textDocument": { "uri": uri }, "position": nested_use }),
+    );
+    assert_eq!(
+        nested_definition["range"]["start"]["line"], 27,
+        "nested SQL member resolves through child owner: {nested_definition}"
+    );
+
+    let invalid_alias_use = position_inside(source, "SELECT wrong_alias.", "stored");
+    let invalid_alias_definition = client.request(
+        "textDocument/definition",
+        json!({ "textDocument": { "uri": uri }, "position": invalid_alias_use }),
+    );
+    assert!(
+        invalid_alias_definition.is_null(),
+        "invalid SQL alias acquired a definition: {invalid_alias_definition}"
+    );
+    let invalid_alias_references = client.request(
+        "textDocument/references",
+        json!({
+            "textDocument": { "uri": uri },
+            "position": invalid_alias_use,
+            "context": { "includeDeclaration": true },
+        }),
+    );
+    assert_eq!(
+        invalid_alias_references
+            .as_array()
+            .expect("invalid alias references")
+            .len(),
+        0,
+        "invalid SQL alias leaked references: {invalid_alias_references}"
+    );
+
+    let shadow_use = position_inside(
+        source,
+        "CREATE CLIENT FUNCTION shadow(entry BOOLEAN) RETURNS BOOLEAN IS\n    STATE entry BOOLEAN SCOPE LOCAL DEFAULT TRUE;\nBEGIN\n    RETURN ",
+        "entry",
+    );
+    let shadow_definition = client.request(
+        "textDocument/definition",
+        json!({ "textDocument": { "uri": uri }, "position": shadow_use }),
+    );
+    assert_eq!(
+        shadow_definition["range"]["start"]["line"], 37,
+        "CLIENT parameter shadows same-named state: {shadow_definition}"
+    );
+
+    let future_use = position_inside(source, "STATE first BOOLEAN SCOPE LOCAL DEFAULT ", "later");
+    let future_definition = client.request(
+        "textDocument/definition",
+        json!({ "textDocument": { "uri": uri }, "position": future_use }),
+    );
+    assert!(
+        future_definition.is_null(),
+        "future local acquired a definition: {future_definition}"
+    );
+    let future_references = client.request(
+        "textDocument/references",
+        json!({
+            "textDocument": { "uri": uri },
+            "position": future_use,
+            "context": { "includeDeclaration": true },
+        }),
+    );
+    assert_eq!(
+        future_references
+            .as_array()
+            .expect("future local references")
+            .len(),
+        0,
+        "future local leaked references: {future_references}"
     );
 
     client.shutdown();
@@ -632,7 +1025,11 @@ fn semantic_token_range_includes_intersecting_multiline_comment_segments() {
         "only the multiline comment segment intersecting the range is returned: {data:?}"
     );
     assert_eq!(data[0], json!(1), "segment starts on the requested line");
-    assert_eq!(data[1], json!(0), "segment starts at the requested line start");
+    assert_eq!(
+        data[1],
+        json!(0),
+        "segment starts at the requested line start"
+    );
     assert_eq!(data[2], json!(11), "segment covers the ASCII line contents");
     assert_eq!(data[3], json!(8), "segment is a comment token");
     assert_eq!(data[4], json!(0), "comment has no modifiers");
