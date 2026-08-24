@@ -37,6 +37,39 @@ const VALID_SOURCE: &str = concat!(
 const ACCEPTED_CLIENT_SOURCE: &str =
     include_str!("../../orna-syntax/testdata/accepted-client.orna");
 
+/// Accepted CLIENT resource fixtures shared with the server's offline checks.
+const SCALAR_RESOURCE_SOURCE: &str =
+    include_str!("../../orna-server/tests/fixtures/scalar_resource_dogfood.orna");
+const STREAM_RESOURCE_SOURCE: &str =
+    include_str!("../../orna-server/tests/fixtures/stream_resource_dogfood.orna");
+
+/// Accepted Inspector and expression CLIENT fixtures shared with offline checks.
+const INSPECTOR_SOURCE: &str =
+    include_str!("../../orna-server/tests/fixtures/client_inspector_dogfood.orna");
+const EXPRESSION_CLIENT_SOURCE: &str =
+    include_str!("../../orna-server/tests/fixtures/expression_client_dogfood.orna");
+
+/// The accepted action fixture is currently assembled inline by the server
+/// checks, so keep the same source here until it has a canonical fixture file.
+const ACTION_SOURCE: &str = concat!(
+    "CREATE SCHEMA action_fixture;\n",
+    "\n",
+    "CREATE CLIENT FUNCTION action_fixture.call(p_value INTEGER)\n",
+    "RETURNS std.Action\n",
+    "AS std.action.call(\n",
+    "  target => std.invoke.echo,\n",
+    "  arguments => std.call.args(p_value => p_value)\n",
+    ");\n",
+    "CREATE CLIENT FUNCTION action_fixture.local(p_value INTEGER)\n",
+    "RETURNS INTEGER AS p_value;\n",
+    "CREATE CLIENT FUNCTION action_fixture.call_local(p_value INTEGER)\n",
+    "RETURNS std.Action\n",
+    "AS std.action.call(\n",
+    "  target => action_fixture.local,\n",
+    "  arguments => std.call.args(p_value => p_value)\n",
+    ");\n",
+);
+
 /// The broken source used for negative diagnostics tests.
 const BROKEN_SOURCE: &str = "CREATE SCHEMA broken_test;\n\
 CREATE SERVER FUNCTION broken_test.f()\n\
@@ -175,7 +208,18 @@ fn position_inside(source: &str, prefix: &str, token: &str) -> Value {
         .next()
         .expect("cursor token must not be empty")
         .len_utf8();
-    let byte = token_start + first_character;
+    position_at_byte(source, token_start + first_character)
+}
+
+fn position_after(source: &str, prefix: &str) -> Value {
+    let prefix_end = source
+        .find(prefix)
+        .unwrap_or_else(|| panic!("missing position prefix {prefix:?}"))
+        + prefix.len();
+    position_at_byte(source, prefix_end)
+}
+
+fn position_at_byte(source: &str, byte: usize) -> Value {
     let mut line = 0u64;
     let mut character = 0u64;
     for source_character in source[..byte].chars() {
@@ -201,6 +245,91 @@ fn open_document(client: &mut Client, uri: &str, text: &str, version: i64) {
             }
         }),
     );
+}
+
+fn open_clean_document(client: &mut Client, uri: &str, source: &str) {
+    open_document(client, uri, source, 1);
+    let diagnostics = client.read_notification("textDocument/publishDiagnostics");
+    assert_eq!(diagnostics["uri"], uri);
+    assert_eq!(
+        diagnostics["diagnostics"],
+        json!([]),
+        "accepted source clean"
+    );
+
+    let pull = client.request(
+        "textDocument/diagnostic",
+        json!({ "textDocument": { "uri": uri } }),
+    );
+    assert_eq!(pull["kind"], "full");
+    assert_eq!(
+        pull["items"],
+        json!([]),
+        "accepted source pull diagnostics clean"
+    );
+}
+
+fn assert_symbols_contain(client: &mut Client, uri: &str, expected: &[&str]) {
+    let symbols = client.request(
+        "textDocument/documentSymbol",
+        json!({ "textDocument": { "uri": uri } }),
+    );
+    let symbols = symbols.as_array().expect("document symbols");
+    for name in expected {
+        assert!(
+            symbols
+                .iter()
+                .any(|symbol| symbol["name"].as_str() == Some(*name)),
+            "document symbols missing {name:?}: {symbols:?}"
+        );
+    }
+}
+
+fn assert_hover_contains(client: &mut Client, uri: &str, position: Value, expected: &str) {
+    let hover = client.request(
+        "textDocument/hover",
+        json!({
+            "textDocument": { "uri": uri },
+            "position": position,
+        }),
+    );
+    let value = hover["contents"]["value"]
+        .as_str()
+        .unwrap_or_else(|| panic!("hover missing markdown contents: {hover}"));
+    assert!(
+        value.contains(expected),
+        "hover missing {expected:?}: {value}"
+    );
+}
+
+fn assert_definition_starts_on(
+    client: &mut Client,
+    uri: &str,
+    position: Value,
+    expected_line: u64,
+) {
+    let definition = client.request(
+        "textDocument/definition",
+        json!({
+            "textDocument": { "uri": uri },
+            "position": position,
+        }),
+    );
+    assert_eq!(definition["uri"], uri, "definition URI: {definition}");
+    assert_eq!(
+        definition["range"]["start"]["line"], expected_line,
+        "definition line: {definition}"
+    );
+}
+
+fn assert_semantic_tokens_present(client: &mut Client, uri: &str) {
+    let tokens = client.request(
+        "textDocument/semanticTokens/full",
+        json!({ "textDocument": { "uri": uri } }),
+    );
+    let data = tokens["data"].as_array().expect("semantic token data");
+    assert!(!data.is_empty(), "semantic tokens present");
+    assert_eq!(data.len() % 5, 0, "tokens are delta quintuples");
 }
 
 #[test]
@@ -271,6 +400,177 @@ fn serves_accepted_client_fixture_without_diagnostics_and_with_symbols() {
                 && matches!(symbol["name"].as_str(), Some("enabled" | "stateful"))
         }),
         "accepted CLIENT function symbol present: {symbols:?}"
+    );
+
+    client.shutdown();
+}
+
+#[test]
+fn serves_accepted_resource_fixtures_without_diagnostics_and_with_symbols() {
+    let mut client = Client::spawn();
+    initialize(&mut client);
+
+    let scalar_uri = "file:///test/scalar-resource-dogfood.orna";
+    open_clean_document(&mut client, scalar_uri, SCALAR_RESOURCE_SOURCE);
+    assert_symbols_contain(&mut client, scalar_uri, &["scalar_fixture", "call"]);
+    assert_semantic_tokens_present(&mut client, scalar_uri);
+    assert_hover_contains(
+        &mut client,
+        scalar_uri,
+        position_inside(
+            SCALAR_RESOURCE_SOURCE,
+            "CREATE CLIENT FUNCTION scalar_fixture.",
+            "call",
+        ),
+        "client function",
+    );
+    assert_definition_starts_on(
+        &mut client,
+        scalar_uri,
+        position_inside(
+            SCALAR_RESOURCE_SOURCE,
+            "CREATE CLIENT FUNCTION scalar_fixture.",
+            "call",
+        ),
+        1,
+    );
+
+    let stream_uri = "file:///test/stream-resource-dogfood.orna";
+    open_clean_document(&mut client, stream_uri, STREAM_RESOURCE_SOURCE);
+    assert_symbols_contain(
+        &mut client,
+        stream_uri,
+        &["stream_fixture", "events", "read"],
+    );
+    assert_semantic_tokens_present(&mut client, stream_uri);
+    assert_hover_contains(
+        &mut client,
+        stream_uri,
+        position_inside(
+            STREAM_RESOURCE_SOURCE,
+            "CREATE SERVER FUNCTION stream_fixture.",
+            "events",
+        ),
+        "server function",
+    );
+    assert_definition_starts_on(
+        &mut client,
+        stream_uri,
+        position_inside(
+            STREAM_RESOURCE_SOURCE,
+            "CREATE SERVER FUNCTION stream_fixture.",
+            "events",
+        ),
+        6,
+    );
+
+    client.shutdown();
+}
+
+#[test]
+fn serves_accepted_action_fixture_without_diagnostics_and_with_symbols() {
+    let mut client = Client::spawn();
+    initialize(&mut client);
+    let uri = "file:///test/action-dogfood.orna";
+
+    open_clean_document(&mut client, uri, ACTION_SOURCE);
+    assert_symbols_contain(
+        &mut client,
+        uri,
+        &["action_fixture", "call", "local", "call_local"],
+    );
+    assert_semantic_tokens_present(&mut client, uri);
+    assert_hover_contains(
+        &mut client,
+        uri,
+        position_inside(ACTION_SOURCE, "RETURNS std.", "Action"),
+        "standard opaque value type",
+    );
+    assert_hover_contains(
+        &mut client,
+        uri,
+        position_inside(
+            ACTION_SOURCE,
+            "CREATE CLIENT FUNCTION action_fixture.",
+            "local",
+        ),
+        "client function",
+    );
+    assert_definition_starts_on(
+        &mut client,
+        uri,
+        position_inside(
+            ACTION_SOURCE,
+            "CREATE CLIENT FUNCTION action_fixture.",
+            "local",
+        ),
+        8,
+    );
+
+    client.shutdown();
+}
+
+#[test]
+fn serves_accepted_inspector_fixture_without_diagnostics_and_with_symbols() {
+    let mut client = Client::spawn();
+    initialize(&mut client);
+    let uri = "file:///test/client-inspector-dogfood.orna";
+
+    open_clean_document(&mut client, uri, INSPECTOR_SOURCE);
+    assert_symbols_contain(
+        &mut client,
+        uri,
+        &["inspector_app", "inspector_renderer", "inspector"],
+    );
+    assert_semantic_tokens_present(&mut client, uri);
+    assert_hover_contains(
+        &mut client,
+        uri,
+        position_inside(
+            INSPECTOR_SOURCE,
+            "CREATE EXTERNAL CLIENT FUNCTION inspector_app.",
+            "inspector_renderer",
+        ),
+        "client function",
+    );
+    assert_definition_starts_on(
+        &mut client,
+        uri,
+        position_inside(
+            INSPECTOR_SOURCE,
+            "sys.inspect.invocation_nodes(p_snapshot => ",
+            "snapshot",
+        ),
+        17,
+    );
+
+    client.shutdown();
+}
+
+#[test]
+fn serves_accepted_expression_client_fixture_without_diagnostics_and_with_symbols() {
+    let mut client = Client::spawn();
+    initialize(&mut client);
+    let uri = "file:///test/expression-client-dogfood.orna";
+
+    open_clean_document(&mut client, uri, EXPRESSION_CLIENT_SOURCE);
+    assert_symbols_contain(
+        &mut client,
+        uri,
+        &["expr", "literal", "composed", "external"],
+    );
+    assert_semantic_tokens_present(&mut client, uri);
+    assert_hover_contains(
+        &mut client,
+        uri,
+        position_inside(EXPRESSION_CLIENT_SOURCE, "AS expr.", "literal"),
+        "client function",
+    );
+    assert_definition_starts_on(
+        &mut client,
+        uri,
+        position_inside(EXPRESSION_CLIENT_SOURCE, "AS expr.", "literal"),
+        2,
     );
 
     client.shutdown();
@@ -522,6 +822,53 @@ fn serves_rich_hover_content() {
     assert!(
         value.contains("orna.std.value.opaque-token@1"),
         "std type contract: {value}"
+    );
+
+    let collision_uri = "file:///test/hover-collision.orna";
+    let collision_source = concat!(
+        "CREATE SCHEMA status;\n",
+        "CREATE SCHEMA product_test;\n",
+        "CREATE TYPE product_test.probe AS OBJECT (status BOOLEAN DOCUMENTATION 'field status docs');\n",
+        "CREATE SERVER FUNCTION read_status() RETURNS ROWS (status BOOLEAN) AS\n",
+        "SELECT p.status FROM product_test.probe p;\n",
+    );
+    open_document(&mut client, collision_uri, collision_source, 1);
+    let _ = client.read_notification("textDocument/publishDiagnostics");
+    let sql_status_hover = client.request(
+        "textDocument/hover",
+        json!({
+            "textDocument": { "uri": collision_uri },
+            "position": position_after(collision_source, "SELECT p."),
+        }),
+    );
+    let sql_status_value = sql_status_hover["contents"]["value"]
+        .as_str()
+        .expect("SQL status hover value");
+    assert!(
+        sql_status_value.starts_with("**field**"),
+        "SQL field beats schema hover: {sql_status_value}"
+    );
+    assert!(
+        sql_status_value.contains("BOOLEAN"),
+        "SQL field type: {sql_status_value}"
+    );
+    assert!(
+        sql_status_value.contains("field status docs"),
+        "SQL field docs: {sql_status_value}"
+    );
+    let schema_status_hover = client.request(
+        "textDocument/hover",
+        json!({
+            "textDocument": { "uri": collision_uri },
+            "position": position_after(collision_source, "CREATE SCHEMA "),
+        }),
+    );
+    let schema_status_value = schema_status_hover["contents"]["value"]
+        .as_str()
+        .expect("schema status hover value");
+    assert!(
+        schema_status_value.starts_with("**schema**"),
+        "schema declaration remains schema hover: {schema_status_value}"
     );
 
     client.shutdown();
@@ -956,11 +1303,69 @@ fn scoped_navigation_resolves_owner_paths_and_fails_closed() {
         "invalid SQL alias leaked references: {invalid_alias_references}"
     );
 
+    let return_parameter_use = position_inside(
+        source,
+        "CREATE CLIENT FUNCTION client_call(entry BOOLEAN) RETURNS BOOLEAN AS ",
+        "entry",
+    );
+    let return_parameter_hover = client.request(
+        "textDocument/hover",
+        json!({ "textDocument": { "uri": uri }, "position": return_parameter_use }),
+    );
+    let return_parameter_value = return_parameter_hover["contents"]["value"]
+        .as_str()
+        .expect("CLIENT return parameter hover");
+    assert!(
+        return_parameter_value.starts_with("**parameter**"),
+        "CLIENT return parameter hover: {return_parameter_value}"
+    );
+    assert!(
+        return_parameter_value.contains("BOOLEAN"),
+        "CLIENT return parameter type: {return_parameter_value}"
+    );
+
+    let client_field_use = position_inside(
+        source,
+        "CREATE CLIENT FUNCTION client_field_shadow(entry REF owners.client_obj) RETURNS BOOLEAN IS\n    STATE entry BOOLEAN SCOPE LOCAL DEFAULT TRUE;\nBEGIN\n    RETURN entry.",
+        "\"display_name\"",
+    );
+    let client_field_hover = client.request(
+        "textDocument/hover",
+        json!({ "textDocument": { "uri": uri }, "position": client_field_use }),
+    );
+    let client_field_value = client_field_hover["contents"]["value"]
+        .as_str()
+        .expect("CLIENT field hover");
+    assert!(
+        client_field_value.starts_with("**field**"),
+        "CLIENT field use hover: {client_field_value}"
+    );
+    assert!(
+        client_field_value.contains("BOOLEAN"),
+        "CLIENT field use type: {client_field_value}"
+    );
+
     let shadow_use = position_inside(
         source,
         "CREATE CLIENT FUNCTION shadow(entry BOOLEAN) RETURNS BOOLEAN IS\n    STATE entry BOOLEAN SCOPE LOCAL DEFAULT TRUE;\nBEGIN\n    RETURN ",
         "entry",
     );
+    let state_hover = client.request(
+        "textDocument/hover",
+        json!({ "textDocument": { "uri": uri }, "position": shadow_use }),
+    );
+    let state_value = state_hover["contents"]["value"]
+        .as_str()
+        .expect("CLIENT state hover");
+    assert!(
+        state_value.starts_with("**parameter**"),
+        "CLIENT state use hover: {state_value}"
+    );
+    assert!(
+        state_value.contains("BOOLEAN"),
+        "CLIENT state use type: {state_value}"
+    );
+
     let shadow_definition = client.request(
         "textDocument/definition",
         json!({ "textDocument": { "uri": uri }, "position": shadow_use }),
@@ -1033,6 +1438,92 @@ fn semantic_token_range_includes_intersecting_multiline_comment_segments() {
     assert_eq!(data[2], json!(11), "segment covers the ASCII line contents");
     assert_eq!(data[3], json!(8), "segment is a comment token");
     assert_eq!(data[4], json!(0), "comment has no modifiers");
+
+    client.shutdown();
+}
+
+#[test]
+fn did_save_republishes_diagnostics_and_did_close_clears_document_state() {
+    let mut client = Client::spawn();
+    initialize(&mut client);
+    let uri = "file:///test/save-close.orna";
+
+    open_document(&mut client, uri, BROKEN_SOURCE, 1);
+    let opened = client.read_notification("textDocument/publishDiagnostics");
+    assert_eq!(opened["uri"], uri);
+    let opened_items = opened["diagnostics"]
+        .as_array()
+        .expect("didOpen diagnostics");
+    assert!(
+        !opened_items.is_empty(),
+        "broken source reports diagnostics"
+    );
+    assert_eq!(opened["version"], 1);
+
+    client.notify(
+        "textDocument/didSave",
+        json!({
+            "textDocument": { "uri": uri },
+        }),
+    );
+    let saved = client.read_notification("textDocument/publishDiagnostics");
+    assert_eq!(saved["uri"], uri);
+    assert_eq!(saved["diagnostics"], opened["diagnostics"]);
+    assert_eq!(saved["version"], 1);
+
+    client.notify(
+        "textDocument/didClose",
+        json!({
+            "textDocument": { "uri": uri },
+        }),
+    );
+    let closed = client.read_notification("textDocument/publishDiagnostics");
+    assert_eq!(closed["uri"], uri);
+    assert_eq!(closed["diagnostics"], json!([]));
+    assert!(closed.get("version").is_none());
+
+    let pull = client.request(
+        "textDocument/diagnostic",
+        json!({ "textDocument": { "uri": uri } }),
+    );
+    assert_eq!(pull["kind"], "full");
+    assert_eq!(pull["items"], json!([]));
+
+    client.shutdown();
+}
+
+#[test]
+fn serves_semantic_compiler_diagnostics_for_unknown_schema_in_push_and_pull() {
+    let mut client = Client::spawn();
+    initialize(&mut client);
+    let uri = "file:///test/semantic-invalid.orna";
+    let source = "CREATE TYPE app.task AS OBJECT (done BOOLEAN);\n";
+
+    open_document(&mut client, uri, source, 1);
+    let pushed = client.read_notification("textDocument/publishDiagnostics");
+    assert_eq!(pushed["uri"], uri);
+    let pushed_items = pushed["diagnostics"].as_array().expect("diagnostic items");
+    assert_eq!(pushed_items.len(), 1, "semantic diagnostic: {pushed}");
+    let expected_range = json!({
+        "start": { "line": 0, "character": 12 },
+        "end": { "line": 0, "character": 20 },
+    });
+    let pushed_diagnostic = &pushed_items[0];
+    assert_eq!(pushed_diagnostic["range"], expected_range);
+    assert_eq!(pushed_diagnostic["severity"], 1);
+    assert_eq!(pushed_diagnostic["code"], "ORNA0101");
+    assert_eq!(pushed_diagnostic["source"], "orna");
+    assert_eq!(
+        pushed_diagnostic["message"],
+        "unknown schema app for object type app.task"
+    );
+
+    let pull = client.request(
+        "textDocument/diagnostic",
+        json!({ "textDocument": { "uri": uri } }),
+    );
+    assert_eq!(pull["kind"], "full");
+    assert_eq!(pull["items"], pushed["diagnostics"]);
 
     client.shutdown();
 }

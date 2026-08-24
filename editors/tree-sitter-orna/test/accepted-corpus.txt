@@ -1,8 +1,11 @@
 accepted client fixture stays in the editor grammar contract
+accepted CLIENT action call
+accepted CLIENT Inspector fixture
 alter type rename field
 client function with expression body
 client function with procedural body
 client function with no-STATE procedural locals and assignments
+external client function with runtime contract
 CLIENT short RETURN body accepts AWAIT
 CLIENT state blocks reject pre-BEGIN LET locals
 CLIENT state blocks reject AWAIT in returns

@@ -100,9 +100,27 @@ const KEYWORD_REFERENCES: &[KeywordReference] = &[
         example: "CREATE TYPE std.types.INTEGER AS VALUE PRIMITIVE KERNEL CONTRACT 'int@1' IMMUTABLE PERSISTABLE;",
     },
     KeywordReference {
+        keyword: "PERSISTABLE",
+        summary: "Marks a primitive or record value type as durable.",
+        context: "Trailing modifier after IMMUTABLE in primitive and record value declarations.",
+        example: "CREATE TYPE std.types.INTEGER AS VALUE PRIMITIVE KERNEL CONTRACT 'int@1' IMMUTABLE PERSISTABLE;",
+    },
+    KeywordReference {
+        keyword: "TRANSIENT",
+        summary: "Marks a primitive or opaque value type as non-durable.",
+        context: "Trailing modifier after IMMUTABLE in primitive and opaque value declarations.",
+        example: "CREATE TYPE std.io.ByteStream AS VALUE OPAQUE KERNEL CONTRACT 'stream@1' IMMUTABLE TRANSIENT;",
+    },
+    KeywordReference {
         keyword: "FINAL",
         summary: "Marks an object type as closed to future fields.",
         context: "Trailing modifier of CREATE TYPE ... AS OBJECT.",
+        example: "CREATE TYPE tasks.task AS OBJECT (title TEXT) FINAL;",
+    },
+    KeywordReference {
+        keyword: "SEALED",
+        summary: "Reserved for a future sealed declaration form.",
+        context: "Classifier keyword only; no accepted grammar production currently consumes SEALED.",
         example: "CREATE TYPE tasks.task AS OBJECT (title TEXT) FINAL;",
     },
     KeywordReference {
@@ -564,6 +582,24 @@ const KEYWORD_REFERENCES: &[KeywordReference] = &[
         example: "WHERE t.title ILIKE '%task%'",
     },
     KeywordReference {
+        keyword: "ALL",
+        summary: "Requests duplicate-preserving query results (the default).",
+        context: "SELECT ALL is rejected; omit ALL because duplicate rows are already preserved.",
+        example: "SELECT t.title FROM tasks.task t;",
+    },
+    KeywordReference {
+        keyword: "BETWEEN",
+        summary: "Tests whether a value lies within an inclusive range.",
+        context: "Classifier keyword; BETWEEN expressions are outside the accepted query grammar.",
+        example: "WHERE t.due_at < p_before",
+    },
+    KeywordReference {
+        keyword: "EXISTS",
+        summary: "Tests whether a subquery returns a row.",
+        context: "Classifier keyword; subqueries and EXISTS are outside the accepted query grammar.",
+        example: "WHERE t.completed = FALSE",
+    },
+    KeywordReference {
         keyword: "DEFAULT",
         summary: "Gives a field or parameter its implicit value.",
         context: "Field modifier; parameter default; STATE DEFAULT.",
@@ -613,6 +649,78 @@ const KEYWORD_REFERENCES: &[KeywordReference] = &[
         example: "DELETE FROM tasks.task t WHERE REF(t) = p_task;",
     },
     KeywordReference {
+        keyword: "CROSS",
+        summary: "Joins every row from two sources.",
+        context: "CROSS JOIN is outside the accepted query grammar.",
+        example: "SELECT t.title FROM tasks.task t;",
+    },
+    KeywordReference {
+        keyword: "FULL",
+        summary: "Keeps unmatched rows from both join sources.",
+        context: "FULL JOIN is outside the accepted query grammar.",
+        example: "SELECT t.title FROM tasks.task t;",
+    },
+    KeywordReference {
+        keyword: "GROUP",
+        summary: "Begins grouping rows for an aggregate query.",
+        context: "GROUP BY is outside the accepted query grammar.",
+        example: "SELECT t.title FROM tasks.task t;",
+    },
+    KeywordReference {
+        keyword: "HAVING",
+        summary: "Filters grouped query results.",
+        context: "HAVING is outside the accepted query grammar.",
+        example: "SELECT t.title FROM tasks.task t;",
+    },
+    KeywordReference {
+        keyword: "INNER",
+        summary: "Keeps only rows matching both join sources.",
+        context: "INNER JOIN is outside the accepted query grammar.",
+        example: "SELECT t.title FROM tasks.task t;",
+    },
+    KeywordReference {
+        keyword: "JOIN",
+        summary: "Combines rows from multiple sources.",
+        context: "JOIN clauses are outside the accepted query grammar.",
+        example: "SELECT t.title FROM tasks.task t;",
+    },
+    KeywordReference {
+        keyword: "LEFT",
+        summary: "Keeps every row from the left join source.",
+        context: "LEFT JOIN is outside the accepted query grammar.",
+        example: "SELECT t.title FROM tasks.task t;",
+    },
+    KeywordReference {
+        keyword: "LIMIT",
+        summary: "Caps the number of query rows.",
+        context: "LIMIT is outside the accepted query grammar.",
+        example: "SELECT t.title FROM tasks.task t;",
+    },
+    KeywordReference {
+        keyword: "OFFSET",
+        summary: "Skips rows before returning query results.",
+        context: "OFFSET is outside the accepted query grammar.",
+        example: "SELECT t.title FROM tasks.task t;",
+    },
+    KeywordReference {
+        keyword: "OUTER",
+        summary: "Includes unmatched rows in an outer join.",
+        context: "OUTER JOIN is outside the accepted query grammar.",
+        example: "SELECT t.title FROM tasks.task t;",
+    },
+    KeywordReference {
+        keyword: "RIGHT",
+        summary: "Keeps every row from the right join source.",
+        context: "RIGHT JOIN is outside the accepted query grammar.",
+        example: "SELECT t.title FROM tasks.task t;",
+    },
+    KeywordReference {
+        keyword: "UNION",
+        summary: "Combines the rows returned by multiple queries.",
+        context: "UNION query bodies are outside the accepted query grammar.",
+        example: "SELECT t.title FROM tasks.task t;",
+    },
+    KeywordReference {
         keyword: "VALUES",
         summary: "Supplies the rows of an INSERT.",
         context: "INSERT ... VALUES ( expression, ... ).",
@@ -659,6 +767,24 @@ const KEYWORD_REFERENCES: &[KeywordReference] = &[
         summary: "Descending order.",
         context: "ORDER BY ... DESC.",
         example: "ORDER BY t.due_at DESC",
+    },
+    KeywordReference {
+        keyword: "FIRST",
+        summary: "Places NULL values before non-NULL values.",
+        context: "NULLS FIRST ordering is not supported by the accepted query grammar.",
+        example: "ORDER BY t.due_at ASC",
+    },
+    KeywordReference {
+        keyword: "LAST",
+        summary: "Places NULL values after non-NULL values.",
+        context: "NULLS LAST ordering is not supported by the accepted query grammar.",
+        example: "ORDER BY t.due_at DESC",
+    },
+    KeywordReference {
+        keyword: "NULLS",
+        summary: "Controls NULL placement in an ordering clause.",
+        context: "NULLS FIRST/LAST ordering is not supported by the accepted query grammar.",
+        example: "ORDER BY t.due_at ASC",
     },
     // Types
     KeywordReference {
@@ -781,3 +907,23 @@ const SCALAR_REFERENCES: &[ScalarReference] = &[
         example: "RETURNS VOID",
     },
 ];
+
+#[cfg(test)]
+mod tests {
+    use super::keyword_reference;
+
+    #[test]
+    fn reference_covers_every_classifier_keyword_including_rejected_sql() {
+        // KEYWORDS is the classifier authority. It includes SQL words that the
+        // accepted parser deliberately rejects or reserves; those words still
+        // need hover references that explain the current grammar boundary.
+        for keyword in orna_syntax::KEYWORDS {
+            let entry = keyword_reference(keyword)
+                .unwrap_or_else(|| panic!("missing keyword reference for {keyword}"));
+            assert_eq!(entry.keyword, *keyword);
+            assert!(!entry.summary.is_empty(), "empty summary for {keyword}");
+            assert!(!entry.context.is_empty(), "empty context for {keyword}");
+            assert!(!entry.example.is_empty(), "empty example for {keyword}");
+        }
+    }
+}
