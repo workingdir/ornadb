@@ -20724,6 +20724,96 @@ CREATE CLIENT FUNCTION app.owner() RETURNS INTEGER IS
     }
 
     #[test]
+    fn action_completed_terminal_rejects_later_same_generation_failed_completion() {
+        let (active, function, pair, _) = version_one_active(true);
+        let principal = PrincipalId::from_bytes([0x7a; 16]);
+        let digest = ClientResourceKey::canonical_arguments_digest(&active, &[]).unwrap();
+        let key = ClientResourceKey::new(
+            InvocationTarget::new(function, pair),
+            principal,
+            digest,
+            active.catalogue_hash(),
+        );
+        let mut resource = ClientResource::new(key, ResolvedType::Scalar(StandardScalar::Boolean));
+        let request = resource.begin_request(&active, vec![]).unwrap();
+        let mut action_state = ClientActionState::default();
+        action_state.set_resource(resource);
+        let mut executor = RecordingActionExecutor::new(None);
+
+        assert_eq!(
+            complete_client_action(
+                &active,
+                &mut action_state,
+                request.clone().ready(RuntimeValue::Boolean(true)),
+                &mut executor,
+            ),
+            Ok(ClientActionOutcome::Completed)
+        );
+        assert_eq!(action_state.status(), ClientResourceStatus::Idle);
+        let terminal_state = action_state.clone();
+        let terminal_executor = executor.cancelled.clone();
+
+        assert_eq!(
+            complete_client_action(
+                &active,
+                &mut action_state,
+                request.clone().failed("late.failure".to_owned()),
+                &mut executor,
+            ),
+            Err(ClientActionError::StaleCompletion)
+        );
+        assert_eq!(action_state, terminal_state);
+        assert_eq!(executor.cancelled, terminal_executor);
+        assert!(executor.cancelled.is_empty());
+    }
+
+    #[test]
+    fn action_failed_terminal_rejects_later_same_generation_completed_completion() {
+        let (active, function, pair, _) = version_one_active(true);
+        let principal = PrincipalId::from_bytes([0x7a; 16]);
+        let digest = ClientResourceKey::canonical_arguments_digest(&active, &[]).unwrap();
+        let key = ClientResourceKey::new(
+            InvocationTarget::new(function, pair),
+            principal,
+            digest,
+            active.catalogue_hash(),
+        );
+        let mut resource = ClientResource::new(key, ResolvedType::Scalar(StandardScalar::Boolean));
+        let request = resource.begin_request(&active, vec![]).unwrap();
+        let mut action_state = ClientActionState::default();
+        action_state.set_resource(resource);
+        let mut executor = RecordingActionExecutor::new(None);
+
+        assert_eq!(
+            complete_client_action(
+                &active,
+                &mut action_state,
+                request.clone().failed("first.failure".to_owned()),
+                &mut executor,
+            ),
+            Ok(ClientActionOutcome::Failed {
+                code: ACTION_FAILURE_CODE.to_owned(),
+            })
+        );
+        assert_eq!(action_state.status(), ClientResourceStatus::Idle);
+        let terminal_state = action_state.clone();
+        let terminal_executor = executor.cancelled.clone();
+
+        assert_eq!(
+            complete_client_action(
+                &active,
+                &mut action_state,
+                request.clone().ready(RuntimeValue::Boolean(true)),
+                &mut executor,
+            ),
+            Err(ClientActionError::StaleCompletion)
+        );
+        assert_eq!(action_state, terminal_state);
+        assert_eq!(executor.cancelled, terminal_executor);
+        assert!(executor.cancelled.is_empty());
+    }
+
+    #[test]
     fn action_cancellation_uses_executor_and_rejects_late_completion() {
         let (active, function, pair, _) = version_one_active(true);
         let principal = PrincipalId::from_bytes([0x7a; 16]);
