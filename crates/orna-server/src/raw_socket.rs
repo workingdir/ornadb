@@ -29,7 +29,7 @@ use orna_core::{
     catalogue::CatalogueSnapshot,
     invocation::{
         InvocationEventBody, InvocationEventKind, InvocationFailure, InvocationFailurePhase,
-        InvocationRetryability, InvokeEvent,
+        InvocationRetryability, InvokeEvent, InvokeValue,
     },
     revision::{ActiveDatabaseRevision, RevisionPair},
     security::AuthenticatedSession,
@@ -93,10 +93,18 @@ const CONNECTION_LIMIT: usize = 64;
 // and the scheduler permits at most one completion in flight per live stream.
 const RESOURCE_COMPLETION_CHANNEL_CAPACITY: usize = CONNECTION_LIMIT;
 const RESOURCE_PRODUCER_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
+const FRAME_CHANNEL_CAPACITY: usize = 64;
+const PREFLIGHT_FRAME_FAIRNESS_BUDGET: usize = 8;
+const PENDING_FLUSH_FAIRNESS_BUDGET: usize = 8;
 /// Gives cancelled dispatches a bounded cooperative drain window before
 /// started workers are joined to completion during connection shutdown.
 const DISPATCH_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 const SOCKET_NAME: &str = "orna.sock";
+type SealedPullTaskResult = (
+    u64,
+    AuthenticatedServerResourceProducer,
+    Result<AuthenticatedServerResourceEvent, PostgresKernelError>,
+);
 const SEALED_CONNECTION_PROTOCOL_MAJOR: u16 = 5;
 
 #[derive(Clone, Default)]
@@ -1034,12 +1042,36 @@ struct DispatchCompletion {
     actions: VecDeque<ServerAction>,
     cancellation: ServerAction,
     cancellation_token: Option<ResourceCancellation>,
+    sealed_producer: Option<AuthenticatedServerResourceProducer>,
+    /// Root CALL_ACCEPTED identity shared by every sealed invocation event.
+    sealed_invocation: Option<InvocationId>,
+    sealed_next_event_sequence: u64,
+    sealed_next_outer_sequence: u64,
     start_gate: Option<oneshot::Sender<()>>,
     start_delivered: bool,
     terminal_delivered: bool,
     terminal_claimed: bool,
     worker_completed: bool,
     _guards: Option<DispatchGuards>,
+}
+
+impl DispatchCompletion {
+    /// The bounded pending action queue owns every produced result once the
+    /// protected worker has returned, including any terminal action. Release
+    /// the request payload budget at that boundary; a sealed producer still
+    /// owns a live transaction, so retain only its operation permit until the
+    /// producer reaches a terminal state.
+    fn release_guards_after_worker_completion(&mut self) {
+        if !self.worker_completed {
+            return;
+        }
+        if let Some(guards) = self._guards.as_mut() {
+            guards._payload.clear();
+        }
+        if self.sealed_producer.is_none() {
+            self._guards = None;
+        }
+    }
 }
 
 fn cancellation_actions(stream: u64, cancellation: ServerAction) -> VecDeque<ServerAction> {
@@ -1052,7 +1084,18 @@ fn cancellation_actions(stream: u64, cancellation: ServerAction) -> VecDeque<Ser
     }
 }
 
+fn should_cancel_on_disconnect(completion: &DispatchCompletion) -> bool {
+    !completion.terminal_delivered
+        && !completion
+            .cancellation_token
+            .as_ref()
+            .is_some_and(ResourceCancellation::is_requested)
+        && (completion.sealed_invocation.is_none() || !completion.start_delivered)
+}
+
 fn queue_cancellation_actions(completion: &mut DispatchCompletion, stream: u64) {
+    completion.sealed_producer.take();
+    completion.release_guards_after_worker_completion();
     let cancellation = cancellation_actions(stream, completion.cancellation.clone());
     if completion.start_gate.is_some() && !completion.start_delivered {
         completion.actions.truncate(1);
@@ -1099,6 +1142,26 @@ fn dispatch_completion_has_claimed_terminal(completion: &DispatchCompletion) -> 
     terminal
 }
 
+fn transfer_sealed_completion_state(
+    existing: &mut DispatchCompletion,
+    completion: &mut DispatchCompletion,
+) {
+    if let Some(producer) = completion.sealed_producer.take() {
+        existing.sealed_producer = Some(producer);
+        if existing._guards.is_none() {
+            existing._guards = completion._guards.take();
+        }
+    }
+    if completion.cancellation_token.is_some() {
+        existing.cancellation_token = completion.cancellation_token.take();
+    }
+    if let Some(invocation) = completion.sealed_invocation {
+        existing.sealed_invocation = Some(invocation);
+        existing.sealed_next_event_sequence = completion.sealed_next_event_sequence;
+        existing.sealed_next_outer_sequence = completion.sealed_next_outer_sequence;
+    }
+}
+
 fn merge_dispatch_completion(
     stream_id: u64,
     mut completion: DispatchCompletion,
@@ -1107,6 +1170,7 @@ fn merge_dispatch_completion(
     cancelled_pending: &mut BTreeSet<u64>,
 ) {
     completion.worker_completed = true;
+    completion.release_guards_after_worker_completion();
     completion.terminal_claimed = dispatch_completion_has_claimed_terminal(&completion);
     let cancellation_requested = completion
         .cancellation_token
@@ -1118,7 +1182,9 @@ fn merge_dispatch_completion(
     // terminal frames unless the worker has already claimed a terminal result.
     if cancelled_pending.remove(&stream_id) {
         if let Some(existing) = pending.get_mut(&stream_id) {
+            transfer_sealed_completion_state(existing, &mut completion);
             existing.worker_completed = true;
+            existing.release_guards_after_worker_completion();
             if completion.terminal_claimed && !existing.terminal_delivered {
                 existing.terminal_claimed = true;
                 let started = existing
@@ -1132,39 +1198,48 @@ fn merge_dispatch_completion(
                 }
                 existing.actions.extend(completion.actions);
                 existing.cancellation = completion.cancellation;
-                if existing._guards.is_none() {
-                    existing._guards = completion._guards;
-                }
             }
+        } else if completion.sealed_producer.is_some() {
+            // The cancellation terminal may have flushed and removed the
+            // pending entry before the worker returned. Keep a raced sealed
+            // producer owned until the connection loop can schedule cleanup.
+            pending.insert(stream_id, completion);
         }
         return;
     }
 
     if let Some(existing) = pending.get_mut(&stream_id) {
+        // Retain a late sealed producer even when its raw terminal frame has
+        // already been delivered; shutdown still owns bounded producer cleanup.
         // Never append a worker result after any terminal frame was delivered.
         if existing.terminal_delivered {
+            transfer_sealed_completion_state(existing, &mut completion);
+            existing.release_guards_after_worker_completion();
             return;
         }
         existing.worker_completed = true;
         existing.terminal_claimed |= completion.terminal_claimed;
         let cancelled_before_completion = cancelled.remove(&stream_id);
-        if !completion.terminal_claimed
-            && (cancellation_requested || cancelled_before_completion)
-        {
+        if !completion.terminal_claimed && (cancellation_requested || cancelled_before_completion) {
+            // Queue cancellation before transferring a raced producer: the
+            // queue helper intentionally removes producers from result state,
+            // while the cleanup owner below must retain it for bounded drain.
             queue_cancellation_actions(existing, stream_id);
+            transfer_sealed_completion_state(existing, &mut completion);
+            existing.release_guards_after_worker_completion();
             return;
         }
+        transfer_sealed_completion_state(existing, &mut completion);
+        existing.release_guards_after_worker_completion();
         existing.actions.extend(completion.actions);
         existing.cancellation = completion.cancellation;
-        if existing._guards.is_none() {
-            existing._guards = completion._guards;
-        }
         return;
     }
 
     if cancellation_requested {
-        // A sealed invocation has a pending entry before its worker can run.
-        // If it is gone, its cancellation terminal has already been sent.
+        // Keep a raced completion owned until its bounded producer cleanup can
+        // be scheduled by the connection loop instead of dropping it here.
+        pending.insert(stream_id, completion);
         return;
     }
     if cancelled.remove(&stream_id) && !completion.terminal_claimed {
@@ -1221,11 +1296,27 @@ fn redacted_invoke_failure(
     message: &'static str,
     retryability: InvocationRetryability,
 ) -> InvocationEventBatch {
+    redacted_invoke_failure_at(invocation, 1, 2, phase, code, message, retryability)
+}
+
+fn redacted_invoke_failure_at(
+    invocation: InvocationId,
+    event_sequence: u64,
+    outer_sequence: u64,
+    phase: InvocationFailurePhase,
+    code: &'static str,
+    message: &'static str,
+    retryability: InvocationRetryability,
+) -> InvocationEventBatch {
     let failure = InvocationFailure::new(phase, code, message, None, retryability)
         .expect("checked redacted invocation failure");
-    let failed = InvokeEvent::new(invocation, 1, InvocationEventBody::Failed(failure))
-        .expect("checked invocation failed event");
-    InvocationEventBatch::new(vec![InvocationEventRecord::new(2, failed)])
+    let failed = InvokeEvent::new(
+        invocation,
+        event_sequence,
+        InvocationEventBody::Failed(failure),
+    )
+    .expect("checked invocation failed event");
+    InvocationEventBatch::new(vec![InvocationEventRecord::new(outer_sequence, failed)])
         .expect("checked invocation failure batch")
 }
 
@@ -1268,6 +1359,10 @@ trait DispatchService: Clone + Send + Sync + 'static {
             start_gate: None,
             future: Box::pin(async move {
                 DispatchCompletion {
+                    sealed_producer: None,
+                    sealed_invocation: None,
+                    sealed_next_event_sequence: 1,
+                    sealed_next_outer_sequence: 2,
                     actions: VecDeque::from([ServerAction::Completed { stream }]),
                     cancellation: ServerAction::InvokeCancelled { stream },
                     cancellation_token: None,
@@ -1304,6 +1399,13 @@ trait DispatchService: Clone + Send + Sync + 'static {
     fn cancelled(&self, _stream: u64) {}
 }
 
+fn sealed_result_cancellation_won(
+    cancellation: &ResourceCancellation,
+    execution: &Result<SealedInvocationExecution, PostgresKernelError>,
+) -> bool {
+    cancellation.is_requested() && matches!(execution, Ok(SealedInvocationExecution::Result(_)))
+}
+
 impl DispatchService for RawDispatchService {
     fn cancelled(&self, stream: u64) {
         if let Some(cancellation) = self
@@ -1326,6 +1428,10 @@ impl DispatchService for RawDispatchService {
                 report_private_dispatch_source(source);
             }
             DispatchCompletion {
+                sealed_producer: None,
+                sealed_invocation: None,
+                sealed_next_event_sequence: 1,
+                sealed_next_outer_sequence: 2,
                 actions: result.into_actions().into(),
                 cancellation,
                 cancellation_token: None,
@@ -1403,6 +1509,10 @@ impl DispatchService for RawDispatchService {
                         .expect("invocation cancellation lock")
                         .remove(&stream);
                     return DispatchCompletion {
+                        sealed_producer: None,
+                        sealed_invocation: Some(invocation),
+                        sealed_next_event_sequence: 1,
+                        sealed_next_outer_sequence: 2,
                         actions: VecDeque::from([
                             ServerAction::InvokeEvents {
                                 stream,
@@ -1479,7 +1589,16 @@ impl DispatchService for RawDispatchService {
                 rule: "sealed invocation worker must not panic",
             })
             .and_then(|result| result);
-            let actions = match execution {
+            let cancellation_won_after_execution =
+                sealed_result_cancellation_won(&cancellation_for_task, &execution);
+            let (actions, sealed_producer) = match execution {
+                Ok(SealedInvocationExecution::ServerStream(producer)) => {
+                    (VecDeque::new(), Some(producer))
+                }
+                Ok(SealedInvocationExecution::Result(_)) if cancellation_won_after_execution => (
+                    cancellation_actions(stream, ServerAction::InvokeCancelled { stream }),
+                    None,
+                ),
                 Ok(SealedInvocationExecution::Result(SealedInvocationResult::Completed {
                     events,
                     ..
@@ -1487,61 +1606,74 @@ impl DispatchService for RawDispatchService {
                 | Ok(SealedInvocationExecution::Result(SealedInvocationResult::Failed {
                     events,
                     ..
-                })) => VecDeque::from([
-                    ServerAction::InvokeEvents {
-                        stream,
-                        events: without_started_event(events),
-                    },
-                    ServerAction::Completed { stream },
-                ]),
+                })) => (
+                    VecDeque::from([
+                        ServerAction::InvokeEvents {
+                            stream,
+                            events: without_started_event(events),
+                        },
+                        ServerAction::Completed { stream },
+                    ]),
+                    None,
+                ),
                 Ok(SealedInvocationExecution::Result(SealedInvocationResult::Denied {
-                    invocation,
-                })) => VecDeque::from([
-                    ServerAction::InvokeEvents {
-                        stream,
-                        events: redacted_invoke_failure(
-                            invocation,
-                            InvocationFailurePhase::Authorise,
-                            "INVOKE_DENIED",
-                            "invocation was not permitted",
-                            InvocationRetryability::No,
-                        ),
-                    },
-                    ServerAction::Completed { stream },
-                ]),
+                    ..
+                })) => (
+                    VecDeque::from([
+                        ServerAction::InvokeEvents {
+                            stream,
+                            events: redacted_invoke_failure(
+                                invocation,
+                                InvocationFailurePhase::Authorise,
+                                "INVOKE_DENIED",
+                                "invocation was not permitted",
+                                InvocationRetryability::No,
+                            ),
+                        },
+                        ServerAction::Completed { stream },
+                    ]),
+                    None,
+                ),
                 Ok(SealedInvocationExecution::Result(
-                    SealedInvocationResult::PresentationFailed { invocation },
-                )) => VecDeque::from([
-                    ServerAction::InvokeEvents {
-                        stream,
-                        events: redacted_invoke_failure(
-                            invocation,
-                            InvocationFailurePhase::Internal,
-                            "INVOKE_PRESENTATION_FAILURE",
-                            "invocation output could not be presented",
-                            InvocationRetryability::No,
-                        ),
-                    },
-                    ServerAction::Completed { stream },
-                ]),
-                Ok(SealedInvocationExecution::Cancelled { .. }) => {
-                    cancellation_actions(stream, ServerAction::InvokeCancelled { stream })
-                }
-                Err(source) => {
-                    report_private_dispatch_source(&source);
+                    SealedInvocationResult::PresentationFailed { .. },
+                )) => (
                     VecDeque::from([
                         ServerAction::InvokeEvents {
                             stream,
                             events: redacted_invoke_failure(
                                 invocation,
                                 InvocationFailurePhase::Internal,
-                                "INVOKE_INTERNAL_FAILURE",
-                                "invocation could not complete",
-                                InvocationRetryability::Unknown,
+                                "INVOKE_PRESENTATION_FAILURE",
+                                "invocation output could not be presented",
+                                InvocationRetryability::No,
                             ),
                         },
                         ServerAction::Completed { stream },
-                    ])
+                    ]),
+                    None,
+                ),
+                Ok(SealedInvocationExecution::Cancelled { .. }) => (
+                    cancellation_actions(stream, ServerAction::InvokeCancelled { stream }),
+                    None,
+                ),
+                Err(source) => {
+                    report_private_dispatch_source(&source);
+                    (
+                        VecDeque::from([
+                            ServerAction::InvokeEvents {
+                                stream,
+                                events: redacted_invoke_failure(
+                                    invocation,
+                                    InvocationFailurePhase::Internal,
+                                    "INVOKE_INTERNAL_FAILURE",
+                                    "invocation could not complete",
+                                    InvocationRetryability::Unknown,
+                                ),
+                            },
+                            ServerAction::Completed { stream },
+                        ]),
+                        None,
+                    )
                 }
             };
             cancellations
@@ -1552,6 +1684,10 @@ impl DispatchService for RawDispatchService {
                 actions,
                 cancellation: ServerAction::InvokeCancelled { stream },
                 cancellation_token: Some(cancellation_for_task),
+                sealed_producer,
+                sealed_invocation: Some(invocation),
+                sealed_next_event_sequence: 1,
+                sealed_next_outer_sequence: 2,
                 start_gate: None,
                 start_delivered: false,
                 terminal_delivered: false,
@@ -1724,11 +1860,41 @@ async fn shutdown_resource_producer(producer: AuthenticatedServerResourceProduce
     .await;
 }
 
+/// Completes a started sealed producer after peer loss without retaining any
+/// undeliverable Event. Each pull admits one bounded value and immediately
+/// discards it; the producer owns the durable terminal commit.
+async fn drain_sealed_producer(producer: AuthenticatedServerResourceProducer) {
+    let mut byte_credit = 1024 * 1024 * 1024;
+    loop {
+        let Some(credit) = ResourceCredit::new(1, byte_credit) else {
+            return;
+        };
+        match producer.pull(credit).await {
+            Ok(AuthenticatedServerResourceEvent::Values { .. }) => {}
+            Ok(AuthenticatedServerResourceEvent::Waiting { required_bytes }) => {
+                byte_credit = required_bytes.min(1024 * 1024 * 1024).max(1);
+            }
+            Ok(
+                AuthenticatedServerResourceEvent::Completed { .. }
+                | AuthenticatedServerResourceEvent::Failed { .. }
+                | AuthenticatedServerResourceEvent::Cancelled,
+            )
+            | Err(_) => return,
+        }
+    }
+}
+
 fn schedule_shutdown_task<F>(shutdown_tasks: &mut JoinSet<()>, shutdown: F)
 where
     F: Future<Output = ()> + Send + 'static,
 {
     shutdown_tasks.spawn(shutdown);
+}
+
+async fn retain_shutdown_tasks_until_terminal(mut shutdown_tasks: JoinSet<()>) {
+    while let Some(joined) = shutdown_tasks.join_next().await {
+        let _ = joined;
+    }
 }
 
 fn schedule_resource_producer_shutdown(
@@ -1738,6 +1904,59 @@ fn schedule_resource_producer_shutdown(
 ) {
     schedule_shutdown_task(shutdown_tasks, async move {
         shutdown_resource_producer(producer).await;
+        drop(guards);
+    });
+}
+
+fn schedule_pending_sealed_cleanups(
+    pending: &mut BTreeMap<u64, DispatchCompletion>,
+    shutdown_tasks: &mut JoinSet<()>,
+) {
+    for completion in pending.values_mut() {
+        let cancellation_requested = completion
+            .cancellation_token
+            .as_ref()
+            .is_some_and(ResourceCancellation::is_requested);
+        if cancellation_requested {
+            schedule_sealed_completion_shutdown(completion, shutdown_tasks);
+        }
+    }
+}
+
+fn schedule_sealed_completion_shutdown(
+    completion: &mut DispatchCompletion,
+    shutdown_tasks: &mut JoinSet<()>,
+) {
+    let Some(producer) = completion.sealed_producer.take() else {
+        return;
+    };
+    let guards = completion._guards.take();
+    schedule_shutdown_task(shutdown_tasks, async move {
+        shutdown_resource_producer(producer).await;
+        drop(guards);
+    });
+}
+
+fn should_drain_sealed_on_disconnect(completion: &DispatchCompletion) -> bool {
+    completion.sealed_invocation.is_some()
+        && completion.sealed_producer.is_some()
+        && completion.start_delivered
+        && !completion
+            .cancellation_token
+            .as_ref()
+            .is_some_and(ResourceCancellation::is_requested)
+}
+
+fn schedule_sealed_completion_drain(
+    completion: &mut DispatchCompletion,
+    shutdown_tasks: &mut JoinSet<()>,
+) {
+    let Some(producer) = completion.sealed_producer.take() else {
+        return;
+    };
+    let guards = completion._guards.take();
+    schedule_shutdown_task(shutdown_tasks, async move {
+        drain_sealed_producer(producer).await;
         drop(guards);
     });
 }
@@ -2006,6 +2225,13 @@ struct UnstartedDispatch {
     defer_once: bool,
 }
 
+struct InvokePreflightCompletion {
+    result: Result<InvokePreflight, PostgresKernelError>,
+    session: AuthenticatedSession,
+    request: orna_protocol::RetainedInvokeRequest,
+    guards: DispatchGuards,
+}
+
 #[cfg(test)]
 async fn drive_authenticated_stream<D: DispatchService>(
     dispatcher: D,
@@ -2055,7 +2281,7 @@ async fn drive_versioned_authenticated_stream_until_shutdown<D: DispatchService>
     mut shutdown: watch::Receiver<bool>,
 ) -> Result<(), LocalRawSocketError> {
     let (reader, mut writer) = stream.into_split();
-    let (frame_sender, mut frame_receiver) = mpsc::channel(64);
+    let (frame_sender, mut frame_receiver) = mpsc::channel(FRAME_CHANNEL_CAPACITY);
     let resource_read_state = ResourceReadState::default();
     let reader_task = spawn_frame_reader(
         reader,
@@ -2071,6 +2297,8 @@ async fn drive_versioned_authenticated_stream_until_shutdown<D: DispatchService>
     let mut retained_payload = BTreeMap::<u64, Vec<PayloadReservation>>::new();
     let mut cancelled = BTreeSet::<u64>::new();
     let mut cancelled_pending = BTreeSet::<u64>::new();
+    let mut preflight_pending = BTreeSet::<u64>::new();
+    let mut preflight_cancelled = BTreeSet::<u64>::new();
     let mut pending = BTreeMap::<u64, DispatchCompletion>::new();
     let mut resource_cancelled =
         BTreeMap::<u64, (orna_protocol::ResourceCancel, RevisionPair)>::new();
@@ -2078,17 +2306,40 @@ async fn drive_versioned_authenticated_stream_until_shutdown<D: DispatchService>
     let mut resource_tasks = BTreeMap::<u64, ResourceTask>::new();
     let mut resource_requests = BTreeMap::<u64, ResourceRequest>::new();
     let mut tasks = JoinSet::<(u64, DispatchCompletion)>::new();
+    let mut preflight_tasks = JoinSet::<(u64, InvokePreflightCompletion)>::new();
+    let mut buffered_frames = VecDeque::<Result<Option<IncomingFrame>, LocalRawSocketError>>::new();
+    let mut preflight_frame_streak = 0_usize;
     // Cancellation owns producer shutdown work on this connection set; the event
     // loop never awaits it inline.
     let mut producer_shutdown = JoinSet::<()>::new();
+    let mut sealed_pull_tasks = JoinSet::<SealedPullTaskResult>::new();
+    let mut sealed_pull_in_flight = BTreeSet::<u64>::new();
+    let mut sealed_pull_waiting_bytes = BTreeMap::<u64, u64>::new();
     let mut unstarted = VecDeque::<UnstartedDispatch>::new();
     let result = loop {
+        let mut producer_shutdown_error = None;
+        for _ in 0..CONNECTION_LIMIT {
+            match producer_shutdown.try_join_next() {
+                Some(Ok(())) => {}
+                Some(Err(source)) => {
+                    producer_shutdown_error = Some(source);
+                    break;
+                }
+                None => break,
+            }
+        }
+        if let Some(source) = producer_shutdown_error {
+            break Err(LocalRawSocketError::DispatchTask { source });
+        }
+        schedule_pending_sealed_cleanups(&mut pending, &mut producer_shutdown);
+
         match flush_resource_pending(
             &version,
             &mut resource_connection,
             &mut resource_pending,
             &mut resource_requests,
             &mut resource_tasks,
+            &mut producer_shutdown,
             &mut writer,
             &mut shutdown,
         )
@@ -2105,12 +2356,18 @@ async fn drive_versioned_authenticated_stream_until_shutdown<D: DispatchService>
             &mut resource_tasks,
             &resource_completion_sender,
         );
-        match flush_pending(
+        let mut pending_flush_fairness_yielded = false;
+        match flush_pending_with_fairness_boundary(
             &version,
             &mut connection,
             &mut pending,
+            &mut sealed_pull_tasks,
+            &mut sealed_pull_in_flight,
+            &mut sealed_pull_waiting_bytes,
+            &mut producer_shutdown,
             &mut writer,
             &mut shutdown,
+            &mut pending_flush_fairness_yielded,
         )
         .await
         {
@@ -2122,7 +2379,9 @@ async fn drive_versioned_authenticated_stream_until_shutdown<D: DispatchService>
         enum Next {
             Frame(Result<Option<IncomingFrame>, LocalRawSocketError>),
             Completion(Option<Result<(u64, DispatchCompletion), JoinError>>),
+            Preflight(Option<Result<(u64, InvokePreflightCompletion), JoinError>>),
             ResourceCompletion(Option<(u64, ResourceDispatchCompletion)>),
+            SealedPull(Option<Result<SealedPullTaskResult, JoinError>>),
             Shutdown,
             Start,
         }
@@ -2130,24 +2389,119 @@ async fn drive_versioned_authenticated_stream_until_shutdown<D: DispatchService>
         if *shutdown.borrow() {
             break Ok(());
         }
-        let next = if let Some(dispatch) = unstarted.front_mut() {
-            if dispatch.defer_once {
-                dispatch.defer_once = false;
+        let preflight_cancel_queued = if preflight_tasks.is_empty() {
+            false
+        } else {
+            // Snapshot a bounded reader queue before allowing a ready preflight
+            // to win a fairness turn. This preserves FIFO cancellation precedence
+            // for every CALL_CANCEL already decoded by the frame reader.
+            for _ in buffered_frames.len()..FRAME_CHANNEL_CAPACITY {
+                match frame_receiver.try_recv() {
+                    Ok(frame) => buffered_frames.push_back(frame),
+                    Err(mpsc::error::TryRecvError::Empty)
+                    | Err(mpsc::error::TryRecvError::Disconnected) => break,
+                }
+            }
+            buffered_frames.iter().any(|frame| match frame {
+                Ok(Some(IncomingFrame::Raw(raw))) => match &raw.frame {
+                    ClientFrame::CallCancel { stream } => preflight_pending.contains(stream),
+                    _ => false,
+                },
+                _ => false,
+            })
+        };
+        let fairness_turn = !preflight_tasks.is_empty()
+            && preflight_frame_streak >= PREFLIGHT_FRAME_FAIRNESS_BUDGET
+            && !preflight_cancel_queued;
+        let next = if pending_flush_fairness_yielded {
+            if let Some(frame) = buffered_frames.pop_front() {
+                Next::Frame(frame)
+            } else {
                 tokio::select! {
                     biased;
                     _ = wait_for_shutdown(&mut shutdown) => Next::Shutdown,
                     frame = frame_receiver.recv() => Next::Frame(frame.unwrap_or(Ok(None))),
+                    preflight = preflight_tasks.join_next(), if !preflight_tasks.is_empty() => {
+                        Next::Preflight(preflight)
+                    }
+                    completion = tasks.join_next(), if !tasks.is_empty() => {
+                        Next::Completion(completion)
+                    }
                     resource = resource_completion_receiver.recv() => Next::ResourceCompletion(resource),
-                    () = tokio::task::yield_now() => Next::Start,
+                    sealed = sealed_pull_tasks.join_next(), if !sealed_pull_tasks.is_empty() => {
+                        Next::SealedPull(sealed)
+                    }
+                    () = tokio::task::yield_now(), if !unstarted.is_empty() => Next::Start,
+                }
+            }
+        } else if let Some(dispatch) = unstarted.front_mut() {
+            if dispatch.defer_once {
+                dispatch.defer_once = false;
+                if let Some(frame) = buffered_frames.pop_front() {
+                    Next::Frame(frame)
+                } else {
+                    tokio::select! {
+                        biased;
+                        _ = wait_for_shutdown(&mut shutdown) => Next::Shutdown,
+                        frame = frame_receiver.recv() => Next::Frame(frame.unwrap_or(Ok(None))),
+                        preflight = preflight_tasks.join_next(), if !preflight_tasks.is_empty() => {
+                            Next::Preflight(preflight)
+                        }
+                        resource = resource_completion_receiver.recv() => Next::ResourceCompletion(resource),
+                        sealed = sealed_pull_tasks.join_next(), if !sealed_pull_tasks.is_empty() => {
+                            Next::SealedPull(sealed)
+                        }
+                        () = tokio::task::yield_now() => Next::Start,
+                    }
                 }
             } else {
                 Next::Start
             }
-        } else if tasks.is_empty() {
+        } else if fairness_turn {
+            // Once a bounded burst of ordinary frames has been serviced, a
+            // preflight completion gets a turn. The queue snapshot above ensures
+            // an already-decoded cancellation still takes the frame path first.
+            tokio::select! {
+                biased;
+                _ = wait_for_shutdown(&mut shutdown) => Next::Shutdown,
+                preflight = preflight_tasks.join_next() => Next::Preflight(preflight),
+                completion = tasks.join_next(), if !tasks.is_empty() => {
+                    Next::Completion(completion)
+                }
+                frame = frame_receiver.recv() => Next::Frame(frame.unwrap_or(Ok(None))),
+                resource = resource_completion_receiver.recv() => Next::ResourceCompletion(resource),
+                sealed = sealed_pull_tasks.join_next(), if !sealed_pull_tasks.is_empty() => {
+                    Next::SealedPull(sealed)
+                }
+            }
+        } else if let Some(frame) = buffered_frames.pop_front() {
+            Next::Frame(frame)
+        } else if tasks.is_empty() && preflight_tasks.is_empty() {
             tokio::select! {
                 _ = wait_for_shutdown(&mut shutdown) => Next::Shutdown,
                 frame = frame_receiver.recv() => Next::Frame(frame.unwrap_or(Ok(None))),
                 resource = resource_completion_receiver.recv() => Next::ResourceCompletion(resource),
+                sealed = sealed_pull_tasks.join_next(), if !sealed_pull_tasks.is_empty() => {
+                    Next::SealedPull(sealed)
+                }
+            }
+        } else if !preflight_tasks.is_empty() {
+            tokio::select! {
+                biased;
+                _ = wait_for_shutdown(&mut shutdown) => Next::Shutdown,
+                // A cancellation already decoded by the reader wins over a
+                // preflight that became ready in the same scheduler turn.
+                frame = frame_receiver.recv() => {
+                    Next::Frame(frame.unwrap_or(Ok(None)))
+                }
+                preflight = preflight_tasks.join_next() => Next::Preflight(preflight),
+                completion = tasks.join_next(), if !tasks.is_empty() => {
+                    Next::Completion(completion)
+                }
+                resource = resource_completion_receiver.recv() => Next::ResourceCompletion(resource),
+                sealed = sealed_pull_tasks.join_next(), if !sealed_pull_tasks.is_empty() => {
+                    Next::SealedPull(sealed)
+                }
             }
         } else {
             tokio::select! {
@@ -2160,11 +2514,19 @@ async fn drive_versioned_authenticated_stream_until_shutdown<D: DispatchService>
                     Next::Frame(frame.unwrap_or(Ok(None)))
                 }
                 resource = resource_completion_receiver.recv() => Next::ResourceCompletion(resource),
+                sealed = sealed_pull_tasks.join_next(), if !sealed_pull_tasks.is_empty() => {
+                    Next::SealedPull(sealed)
+                }
             }
         };
 
         match next {
             Next::Frame(Ok(Some(incoming))) => {
+                if preflight_tasks.is_empty() {
+                    preflight_frame_streak = 0;
+                } else {
+                    preflight_frame_streak = preflight_frame_streak.saturating_add(1);
+                }
                 let result = match incoming {
                     IncomingFrame::Raw(incoming) => {
                         handle_client_frame(
@@ -2177,6 +2539,10 @@ async fn drive_versioned_authenticated_stream_until_shutdown<D: DispatchService>
                             &mut retained_payload,
                             &mut cancelled,
                             &mut cancelled_pending,
+                            &mut preflight_pending,
+                            &mut preflight_cancelled,
+                            &mut preflight_tasks,
+                            &mut producer_shutdown,
                             &mut pending,
                             &mut unstarted,
                             &mut writer,
@@ -2214,6 +2580,35 @@ async fn drive_versioned_authenticated_stream_until_shutdown<D: DispatchService>
             }
             Next::Frame(Ok(None)) => break Ok(()),
             Next::Frame(Err(error)) => break Err(error),
+            Next::Preflight(Some(Ok((stream_id, completion)))) => {
+                preflight_frame_streak = 0;
+                preflight_pending.remove(&stream_id);
+                let cancelled_before_accept = preflight_cancelled.remove(&stream_id);
+                match finish_invoke_preflight(
+                    stream_id,
+                    completion,
+                    cancelled_before_accept,
+                    &dispatcher,
+                    &mut pending,
+                    &mut unstarted,
+                    &mut connection,
+                    &version,
+                    &mut writer,
+                    &mut shutdown,
+                )
+                .await
+                {
+                    Ok(true) => {}
+                    Ok(false) => break Ok(()),
+                    Err(error) => break Err(error),
+                }
+            }
+            Next::Preflight(Some(Err(source))) => {
+                break Err(LocalRawSocketError::DispatchTask { source });
+            }
+            Next::Preflight(None) => {
+                preflight_frame_streak = 0;
+            }
             Next::Completion(Some(Ok((stream_id, completion)))) => {
                 merge_dispatch_completion(
                     stream_id,
@@ -2239,6 +2634,18 @@ async fn drive_versioned_authenticated_stream_until_shutdown<D: DispatchService>
                 );
             }
             Next::ResourceCompletion(None) => {}
+            Next::SealedPull(Some(result)) => {
+                if let Err(error) = merge_sealed_pull_result(
+                    result,
+                    &mut pending,
+                    &mut sealed_pull_in_flight,
+                    &mut sealed_pull_waiting_bytes,
+                    &mut producer_shutdown,
+                ) {
+                    break Err(error);
+                }
+            }
+            Next::SealedPull(None) => {}
             Next::Shutdown => break Ok(()),
             Next::Start => {
                 start_one_dispatch(&mut unstarted, &mut tasks);
@@ -2253,17 +2660,41 @@ async fn drive_versioned_authenticated_stream_until_shutdown<D: DispatchService>
     // not remain open while its completion boundary is drained below.
     let _ = writer.shutdown().await;
     drop(writer);
-    // Disconnect is a cancellation boundary for every invocation that has not
-    // reached a terminal frame. This also wakes pending/unstarted dispatches;
-    // their futures check the token before entering kernel work.
+    // Disconnect is an implicit cancellation boundary only before a sealed
+    // invocation start Event is delivered. Started sealed workers stay owned
+    // by this connection until their durable terminal result is produced.
+    let unstarted_streams: BTreeSet<_> = unstarted.iter().map(|dispatch| dispatch.stream).collect();
     for dispatch in &unstarted {
         dispatcher.cancelled(dispatch.stream);
     }
-    for stream_id in pending.keys().copied().collect::<Vec<_>>() {
+    for (stream_id, completion) in &pending {
+        if !unstarted_streams.contains(stream_id) && should_cancel_on_disconnect(completion) {
+            dispatcher.cancelled(*stream_id);
+        }
+    }
+    for stream_id in preflight_pending.iter().copied() {
         dispatcher.cancelled(stream_id);
     }
     while !unstarted.is_empty() {
         start_one_dispatch(&mut unstarted, &mut tasks);
+    }
+    let mut drain_failure = None;
+    let preflight_shutdown_completed = timeout(DISPATCH_SHUTDOWN_TIMEOUT, async {
+        while let Some(completion) = preflight_tasks.join_next().await {
+            if let Err(source) = completion {
+                drain_failure.get_or_insert(LocalRawSocketError::DispatchTask { source });
+            }
+        }
+    })
+    .await
+    .is_ok();
+    if !preflight_shutdown_completed {
+        preflight_tasks.abort_all();
+        while let Some(completion) = preflight_tasks.join_next().await {
+            if let Err(source) = completion {
+                drain_failure.get_or_insert(LocalRawSocketError::DispatchTask { source });
+            }
+        }
     }
     for task in resource_tasks.values() {
         task.cancellation.request_cancel();
@@ -2359,11 +2790,19 @@ async fn drive_versioned_authenticated_stream_until_shutdown<D: DispatchService>
     }
     resource_pending.clear();
     drop(resource_guards);
-    let mut drain_failure = None;
     let dispatch_shutdown_completed = timeout(DISPATCH_SHUTDOWN_TIMEOUT, async {
         while let Some(completion) = tasks.join_next().await {
-            if let Err(source) = completion {
-                drain_failure.get_or_insert(LocalRawSocketError::DispatchTask { source });
+            match completion {
+                Ok((stream_id, completion)) => merge_dispatch_completion(
+                    stream_id,
+                    completion,
+                    &mut pending,
+                    &mut cancelled,
+                    &mut cancelled_pending,
+                ),
+                Err(source) => {
+                    drain_failure.get_or_insert(LocalRawSocketError::DispatchTask { source });
+                }
             }
         }
     })
@@ -2374,10 +2813,63 @@ async fn drive_versioned_authenticated_stream_until_shutdown<D: DispatchService>
         // dispatch task would detach the worker while it may still execute
         // kernel work. Keep owning the JoinSet and drain it to completion.
         while let Some(completion) = tasks.join_next().await {
-            if let Err(source) = completion {
-                drain_failure.get_or_insert(LocalRawSocketError::DispatchTask { source });
+            match completion {
+                Ok((stream_id, completion)) => merge_dispatch_completion(
+                    stream_id,
+                    completion,
+                    &mut pending,
+                    &mut cancelled,
+                    &mut cancelled_pending,
+                ),
+                Err(source) => {
+                    drain_failure.get_or_insert(LocalRawSocketError::DispatchTask { source });
+                }
             }
         }
+    }
+    let sealed_pull_shutdown_completed = timeout(RESOURCE_PRODUCER_SHUTDOWN_TIMEOUT, async {
+        while let Some(result) = sealed_pull_tasks.join_next().await {
+            if let Err(error) = merge_sealed_pull_result(
+                result,
+                &mut pending,
+                &mut sealed_pull_in_flight,
+                &mut sealed_pull_waiting_bytes,
+                &mut producer_shutdown,
+            ) {
+                drain_failure.get_or_insert(error);
+            }
+        }
+    })
+    .await
+    .is_ok();
+    if !sealed_pull_shutdown_completed {
+        // A sealed pull task only owns an abortable producer handle; aborting
+        // it requests producer cancellation through Drop. Drain the JoinSet so
+        // no in-flight task is detached before the producer cleanup pass.
+        sealed_pull_tasks.abort_all();
+        while let Some(result) = sealed_pull_tasks.join_next().await {
+            let _ = result;
+        }
+    }
+    for completion in pending.values_mut() {
+        if should_drain_sealed_on_disconnect(completion) {
+            schedule_sealed_completion_drain(completion, &mut producer_shutdown);
+        } else {
+            schedule_sealed_completion_shutdown(completion, &mut producer_shutdown);
+        }
+    }
+    let sealed_producer_shutdown_completed = timeout(RESOURCE_PRODUCER_SHUTDOWN_TIMEOUT, async {
+        while let Some(joined) = producer_shutdown.join_next().await {
+            let _ = joined;
+        }
+    })
+    .await
+    .is_ok();
+    if !sealed_producer_shutdown_completed {
+        // A started sealed producer owns the durable terminal commit. Keep the
+        // cleanup JoinSet alive after the connection deadline rather than
+        // aborting its drain task and dropping that producer.
+        retain_shutdown_tasks_until_terminal(producer_shutdown).await;
     }
     match (result, drain_failure) {
         (Err(error), _) => Err(error),
@@ -2722,6 +3214,7 @@ async fn flush_resource_pending(
     pending: &mut BTreeMap<u64, ResourceDispatchCompletion>,
     requests: &mut BTreeMap<u64, ResourceRequest>,
     tasks: &mut BTreeMap<u64, ResourceTask>,
+    producer_shutdown: &mut JoinSet<()>,
     stream: &mut OwnedWriteHalf,
     shutdown: &mut watch::Receiver<bool>,
 ) -> Result<bool, LocalRawSocketError> {
@@ -2772,14 +3265,17 @@ async fn flush_resource_pending(
                         .pop_front();
                     if terminal {
                         requests.remove(&stream_id);
-                        let task_active = tasks.get_mut(&stream_id).map(|task| {
-                            if task.active {
-                                task.cancellation.request_cancel();
-                                true
-                            } else {
-                                false
-                            }
-                        });
+                        let (task_active, task_guards) = tasks
+                            .get_mut(&stream_id)
+                            .map(|task| {
+                                if task.active {
+                                    task.cancellation.request_cancel();
+                                    (Some(true), None)
+                                } else {
+                                    (Some(false), task.guards.take())
+                                }
+                            })
+                            .unwrap_or((None, None));
                         if task_active == Some(false) {
                             tasks.remove(&stream_id);
                         }
@@ -2787,7 +3283,11 @@ async fn flush_resource_pending(
                             .get_mut(&stream_id)
                             .and_then(|completion| completion.producer.take());
                         if let Some(producer) = producer {
-                            shutdown_resource_producer(producer).await;
+                            schedule_resource_producer_shutdown(
+                                producer,
+                                producer_shutdown,
+                                task_guards,
+                            );
                         }
                     }
                     continue;
@@ -2808,14 +3308,17 @@ async fn flush_resource_pending(
                 .pop_front();
             if terminal {
                 requests.remove(&stream_id);
-                let task_active = tasks.get_mut(&stream_id).map(|task| {
-                    if task.active {
-                        task.cancellation.request_cancel();
-                        true
-                    } else {
-                        false
-                    }
-                });
+                let (task_active, task_guards) = tasks
+                    .get_mut(&stream_id)
+                    .map(|task| {
+                        if task.active {
+                            task.cancellation.request_cancel();
+                            (Some(true), None)
+                        } else {
+                            (Some(false), task.guards.take())
+                        }
+                    })
+                    .unwrap_or((None, None));
                 if task_active == Some(false) {
                     tasks.remove(&stream_id);
                 }
@@ -2823,7 +3326,7 @@ async fn flush_resource_pending(
                     .get_mut(&stream_id)
                     .and_then(|completion| completion.producer.take());
                 if let Some(producer) = producer {
-                    shutdown_resource_producer(producer).await;
+                    schedule_resource_producer_shutdown(producer, producer_shutdown, task_guards);
                 }
             }
         }
@@ -2857,6 +3360,10 @@ async fn handle_client_frame<D: DispatchService>(
     retained_payload: &mut BTreeMap<u64, Vec<PayloadReservation>>,
     cancelled: &mut BTreeSet<u64>,
     cancelled_pending: &mut BTreeSet<u64>,
+    preflight_pending: &mut BTreeSet<u64>,
+    preflight_cancelled: &mut BTreeSet<u64>,
+    preflight_tasks: &mut JoinSet<(u64, InvokePreflightCompletion)>,
+    producer_shutdown: &mut JoinSet<()>,
 
     pending: &mut BTreeMap<u64, DispatchCompletion>,
     unstarted: &mut VecDeque<UnstartedDispatch>,
@@ -2909,41 +3416,106 @@ async fn handle_client_frame<D: DispatchService>(
             }
         }
         Some(ClientAction::InvokeDispatch { stream, request }) => {
-            let preflight = match dispatcher
-                .preflight_invoke(session.clone(), request.clone(), version.clone())
-                .await
-            {
-                Ok(preflight) => preflight,
-                Err(source) => {
-                    report_private_dispatch_source(&source);
-                    InvokePreflight::Rejected(CallFailure::InternalFailure)
-                }
+            let preflight_session = session.clone();
+            let preflight_request = request.clone();
+            let preflight =
+                dispatcher.preflight_invoke(preflight_session.clone(), request, version.clone());
+            let guards = DispatchGuards {
+                _operation: dispatch_permit.expect("dispatch action requires reserved permit"),
+                _payload: retained_payload.remove(&stream).unwrap_or_default(),
             };
-            let continuation = match preflight {
-                InvokePreflight::Rejected(failure) => {
-                    drop(dispatch_permit);
-                    retained_payload.remove(&stream);
-                    let frame = version
-                        .apply(connection, ServerAction::Failed { stream, failure })
-                        .map_err(|source| LocalRawSocketError::Connection { source })?;
-                    return write_server_frame(version, socket, &frame, shutdown).await;
+            preflight_pending.insert(stream);
+            preflight_tasks.spawn(async move {
+                let completion = InvokePreflightCompletion {
+                    result: preflight.await,
+                    session: preflight_session,
+                    request: preflight_request,
+                    guards,
+                };
+                (stream, completion)
+            });
+        }
+        Some(ClientAction::Cancel { stream, .. }) => {
+            // Accepted dispatches transfer their bytes into guards; any remaining
+            // reservation is receiving-side state for this stream.
+            retained_payload.remove(&stream);
+            if let Some(completion) = pending.get_mut(&stream) {
+                if !completion.terminal_delivered && !completion.terminal_claimed {
+                    dispatcher.cancelled(stream);
+                    schedule_sealed_completion_shutdown(completion, producer_shutdown);
+                    queue_cancellation_actions(completion, stream);
+                    if !completion.worker_completed {
+                        cancelled_pending.insert(stream);
+                    }
                 }
-                InvokePreflight::Accepted(continuation) => continuation,
-            };
+            } else if preflight_pending.contains(&stream) {
+                dispatcher.cancelled(stream);
+                preflight_cancelled.insert(stream);
+            } else {
+                dispatcher.cancelled(stream);
+                cancelled.insert(stream);
+            }
+        }
+        Some(ClientAction::Send(frame)) => {
+            retained_payload.remove(&stream_id);
+            if !write_server_frame(version, socket, &frame, shutdown).await? {
+                return Ok(false);
+            }
+        }
+        None => {}
+    }
+    Ok(true)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn finish_invoke_preflight<D: DispatchService>(
+    stream: u64,
+    completion: InvokePreflightCompletion,
+    cancelled_before_accept: bool,
+    dispatcher: &D,
+    pending: &mut BTreeMap<u64, DispatchCompletion>,
+    unstarted: &mut VecDeque<UnstartedDispatch>,
+    connection: &mut ProtocolConnection,
+    version: &RawProtocolVersion,
+    socket: &mut OwnedWriteHalf,
+    shutdown: &mut watch::Receiver<bool>,
+) -> Result<bool, LocalRawSocketError> {
+    let InvokePreflightCompletion {
+        result,
+        session,
+        request,
+        guards,
+    } = completion;
+
+    let preflight_failure = match result {
+        Ok(InvokePreflight::Rejected(failure)) => Some(failure),
+        Err(source) => {
+            report_private_dispatch_source(&source);
+            Some(CallFailure::InternalFailure)
+        }
+        Ok(InvokePreflight::Accepted(continuation)) if cancelled_before_accept => {
+            drop(continuation);
+            None
+        }
+        Ok(InvokePreflight::Accepted(continuation)) => {
             let StartedDispatch {
                 accepted,
                 started,
                 start_gate,
                 future,
-            } = dispatcher.start_invoke(session.clone(), stream, request, version, continuation);
-            let guards = DispatchGuards {
-                _operation: dispatch_permit.expect("dispatch action requires reserved permit"),
-                _payload: retained_payload.remove(&stream).unwrap_or_default(),
-            };
+            } = dispatcher.start_invoke(session, stream, request, version, continuation);
             let started = started.expect("sealed invocation start event");
+            let sealed_invocation = match &accepted {
+                ServerAction::Accepted { invocation, .. } => *invocation,
+                _ => unreachable!("sealed invocation dispatch must be accepted"),
+            };
             pending.insert(
                 stream,
                 DispatchCompletion {
+                    sealed_producer: None,
+                    sealed_invocation: Some(sealed_invocation),
+                    sealed_next_event_sequence: 1,
+                    sealed_next_outer_sequence: 2,
                     actions: VecDeque::from([started]),
                     cancellation: ServerAction::InvokeCancelled { stream },
                     cancellation_token: None,
@@ -2964,32 +3536,43 @@ async fn handle_client_frame<D: DispatchService>(
             let frame = version
                 .apply(connection, accepted)
                 .map_err(|source| LocalRawSocketError::Connection { source })?;
-            if !write_server_frame(version, socket, &frame, shutdown).await? {
-                return Ok(false);
-            }
+            return write_server_frame(version, socket, &frame, shutdown).await;
         }
-        Some(ClientAction::Cancel { stream, .. }) => {
-            if let Some(completion) = pending.get_mut(&stream) {
-                if !completion.terminal_delivered && !completion.terminal_claimed {
-                    dispatcher.cancelled(stream);
-                    queue_cancellation_actions(completion, stream);
-                    if !completion.worker_completed {
-                        cancelled_pending.insert(stream);
-                    }
-                }
-            } else {
-                dispatcher.cancelled(stream);
-                cancelled.insert(stream);
-            }
+    };
+
+    let action = if cancelled_before_accept {
+        ServerAction::Cancelled { stream }
+    } else {
+        ServerAction::Failed {
+            stream,
+            failure: preflight_failure.unwrap_or(CallFailure::InternalFailure),
         }
-        Some(ClientAction::Send(frame)) => {
-            retained_payload.remove(&stream_id);
-            if !write_server_frame(version, socket, &frame, shutdown).await? {
-                return Ok(false);
-            }
+    };
+    let terminal_claimed = matches!(
+        &action,
+        ServerAction::Failed {
+            failure: CallFailure::InternalFailure,
+            ..
         }
-        None => {}
-    }
+    );
+    pending.insert(
+        stream,
+        DispatchCompletion {
+            sealed_producer: None,
+            sealed_invocation: None,
+            sealed_next_event_sequence: 1,
+            sealed_next_outer_sequence: 2,
+            actions: VecDeque::from([action]),
+            cancellation: ServerAction::Cancelled { stream },
+            cancellation_token: None,
+            start_gate: None,
+            start_delivered: false,
+            terminal_delivered: false,
+            terminal_claimed,
+            worker_completed: true,
+            _guards: Some(guards),
+        },
+    );
     Ok(true)
 }
 
@@ -3005,24 +3588,365 @@ fn start_one_dispatch(
     });
 }
 
+fn queue_sealed_terminal_failure(
+    stream: u64,
+    completion: &mut DispatchCompletion,
+    invocation: InvocationId,
+    phase: InvocationFailurePhase,
+    code: &'static str,
+    message: &'static str,
+    retryability: InvocationRetryability,
+) {
+    let events = redacted_invoke_failure_at(
+        invocation,
+        completion.sealed_next_event_sequence,
+        completion.sealed_next_outer_sequence,
+        phase,
+        code,
+        message,
+        retryability,
+    );
+    completion.sealed_next_event_sequence += 1;
+    completion.sealed_next_outer_sequence += 1;
+    completion.actions.extend([
+        ServerAction::InvokeEvents { stream, events },
+        ServerAction::Completed { stream },
+    ]);
+    completion.terminal_claimed = true;
+}
+
+// One value pull is wrapped in one ORV5 Event carrier. The producer reports
+// the encoded value bytes, so reserve the fixed channel, record, carrier, and
+// InvokeValue envelope bytes before granting value credit.
+const SEALED_EVENT_FRAME_OVERHEAD: u64 = 1 + 2 // channel and record count
+    + 8 + 1 + 4 // outer sequence, value kind, and content length
+    + 25 // ORV5 Event carrier envelope
+    + 1 + 1 + 16 + 8 // Event version, kind, invocation id, and sequence
+    + 1 // ValueBatch body kind
+    + 1 + 4 // absent schema marker and value count
+    + 4 // embedded InvokeValue length
+    + 25 // ORV5 InvokeValue envelope
+    + 1 + 4; // InvokeValue version and inner value length
+const SEALED_MAX_VALUE_BYTES: u64 =
+    (MAX_FRAME_PAYLOAD_LENGTH as u64).saturating_sub(SEALED_EVENT_FRAME_OVERHEAD);
+
+fn sealed_pull_credit(result_credit: u64, waiting_bytes: Option<u64>) -> Option<ResourceCredit> {
+    let byte_credit = result_credit.min(SEALED_MAX_VALUE_BYTES);
+    if waiting_bytes.is_some_and(|required| required > byte_credit) {
+        return None;
+    }
+    ResourceCredit::new(1, byte_credit)
+}
+
+fn handle_sealed_producer_event(
+    stream: u64,
+    completion: &mut DispatchCompletion,
+    waiting_bytes: &mut BTreeMap<u64, u64>,
+    event: Result<AuthenticatedServerResourceEvent, PostgresKernelError>,
+) {
+    let invocation = completion
+        .sealed_invocation
+        .expect("sealed producer retains root invocation identity");
+    let cancellation_requested = completion
+        .cancellation_token
+        .as_ref()
+        .is_some_and(ResourceCancellation::is_requested)
+        && !completion.terminal_claimed;
+    match event {
+        Ok(AuthenticatedServerResourceEvent::Values { values, .. }) => {
+            waiting_bytes.remove(&stream);
+            if cancellation_requested {
+                return;
+            }
+            let [value] = match values.try_into() {
+                Ok(values) => values,
+                Err(_) => {
+                    queue_sealed_terminal_failure(
+                        stream,
+                        completion,
+                        invocation,
+                        InvocationFailurePhase::Internal,
+                        "INVOKE_INTERNAL_FAILURE",
+                        "invocation could not complete",
+                        InvocationRetryability::Unknown,
+                    );
+                    return;
+                }
+            };
+            let value = match InvokeValue::new(value) {
+                Ok(value) => value,
+                Err(source) => {
+                    report_private_dispatch_source(&PostgresKernelError::InvocationCarrier(source));
+                    queue_sealed_terminal_failure(
+                        stream,
+                        completion,
+                        invocation,
+                        InvocationFailurePhase::Internal,
+                        "INVOKE_INTERNAL_FAILURE",
+                        "invocation could not complete",
+                        InvocationRetryability::Unknown,
+                    );
+                    return;
+                }
+            };
+            let event = match InvokeEvent::new(
+                invocation,
+                completion.sealed_next_event_sequence,
+                InvocationEventBody::ValueBatch {
+                    schema: None,
+                    values: vec![value],
+                },
+            ) {
+                Ok(event) => event,
+                Err(source) => {
+                    report_private_dispatch_source(&PostgresKernelError::InvocationCarrier(source));
+                    queue_sealed_terminal_failure(
+                        stream,
+                        completion,
+                        invocation,
+                        InvocationFailurePhase::Internal,
+                        "INVOKE_INTERNAL_FAILURE",
+                        "invocation could not complete",
+                        InvocationRetryability::Unknown,
+                    );
+                    return;
+                }
+            };
+            completion.sealed_next_event_sequence += 1;
+            let events = InvocationEventBatch::new(vec![InvocationEventRecord::new(
+                completion.sealed_next_outer_sequence,
+                event,
+            )])
+            .expect("bounded sealed ValueBatch event");
+            completion.sealed_next_outer_sequence += 1;
+            completion
+                .actions
+                .push_back(ServerAction::InvokeEvents { stream, events });
+        }
+        Ok(AuthenticatedServerResourceEvent::Completed { .. }) => {
+            waiting_bytes.remove(&stream);
+            completion.sealed_producer.take();
+            if cancellation_requested {
+                completion.actions.clear();
+            }
+            let event = InvokeEvent::new(
+                invocation,
+                completion.sealed_next_event_sequence,
+                InvocationEventBody::Completed {
+                    duration_nanoseconds: 0,
+                },
+            )
+            .expect("bounded sealed completion event");
+            let events = InvocationEventBatch::new(vec![InvocationEventRecord::new(
+                completion.sealed_next_outer_sequence,
+                event,
+            )])
+            .expect("bounded sealed completion batch");
+            completion.sealed_next_event_sequence += 1;
+            completion.sealed_next_outer_sequence += 1;
+            completion.terminal_claimed = true;
+            completion.actions.extend([
+                ServerAction::InvokeEvents { stream, events },
+                ServerAction::Completed { stream },
+            ]);
+        }
+        Ok(AuthenticatedServerResourceEvent::Failed { failure }) => {
+            waiting_bytes.remove(&stream);
+            if cancellation_requested {
+                completion.actions.clear();
+            }
+            let (phase, code, message, retryability) = match failure {
+                CallFailure::TargetUnavailable => (
+                    InvocationFailurePhase::Target,
+                    "INVOKE_TARGET_FAILED",
+                    "invocation target failed",
+                    InvocationRetryability::Unknown,
+                ),
+                _ => (
+                    InvocationFailurePhase::Internal,
+                    "INVOKE_INTERNAL_FAILURE",
+                    "invocation could not complete",
+                    InvocationRetryability::Unknown,
+                ),
+            };
+            queue_sealed_terminal_failure(
+                stream,
+                completion,
+                invocation,
+                phase,
+                code,
+                message,
+                retryability,
+            );
+        }
+        Ok(AuthenticatedServerResourceEvent::Cancelled) => {
+            waiting_bytes.remove(&stream);
+            completion.sealed_producer.take();
+            completion.actions = cancellation_actions(stream, completion.cancellation.clone());
+        }
+        Ok(AuthenticatedServerResourceEvent::Waiting { required_bytes }) => {
+            waiting_bytes.insert(stream, required_bytes);
+        }
+        Err(source) => {
+            waiting_bytes.remove(&stream);
+            report_private_dispatch_source(&source);
+            if cancellation_requested {
+                completion.actions.clear();
+            }
+            queue_sealed_terminal_failure(
+                stream,
+                completion,
+                invocation,
+                InvocationFailurePhase::Internal,
+                "INVOKE_INTERNAL_FAILURE",
+                "invocation could not complete",
+                InvocationRetryability::Unknown,
+            );
+        }
+    }
+}
+
+fn merge_sealed_pull_result(
+    result: Result<SealedPullTaskResult, JoinError>,
+    pending: &mut BTreeMap<u64, DispatchCompletion>,
+    sealed_pull_in_flight: &mut BTreeSet<u64>,
+    sealed_pull_waiting_bytes: &mut BTreeMap<u64, u64>,
+    producer_shutdown: &mut JoinSet<()>,
+) -> Result<(), LocalRawSocketError> {
+    let (stream, producer, event) =
+        result.map_err(|source| LocalRawSocketError::DispatchTask { source })?;
+    sealed_pull_in_flight.remove(&stream);
+    if let Some(completion) = pending.get_mut(&stream) {
+        completion.sealed_producer = Some(producer);
+        handle_sealed_producer_event(stream, completion, sealed_pull_waiting_bytes, event);
+    } else {
+        // CALL_CANCEL or terminal delivery may have removed the completion while
+        // this pull was in flight. The returned producer still owns a live
+        // transaction; retain it in the bounded shutdown set instead of dropping
+        // it at the merge boundary.
+        schedule_shutdown_task(producer_shutdown, async move {
+            shutdown_resource_producer(producer).await;
+        });
+    }
+    Ok(())
+}
+
+#[cfg(test)]
 async fn flush_pending(
     version: &RawProtocolVersion,
     connection: &mut ProtocolConnection,
     pending: &mut BTreeMap<u64, DispatchCompletion>,
+    sealed_pull_tasks: &mut JoinSet<SealedPullTaskResult>,
+    sealed_pull_in_flight: &mut BTreeSet<u64>,
+    sealed_pull_waiting_bytes: &mut BTreeMap<u64, u64>,
+    producer_shutdown: &mut JoinSet<()>,
     stream: &mut OwnedWriteHalf,
     shutdown: &mut watch::Receiver<bool>,
 ) -> Result<bool, LocalRawSocketError> {
+    let mut fairness_yielded = false;
+    flush_pending_with_fairness_boundary(
+        version,
+        connection,
+        pending,
+        sealed_pull_tasks,
+        sealed_pull_in_flight,
+        sealed_pull_waiting_bytes,
+        producer_shutdown,
+        stream,
+        shutdown,
+        &mut fairness_yielded,
+    )
+    .await
+}
+
+async fn flush_pending_with_fairness_boundary(
+    version: &RawProtocolVersion,
+    connection: &mut ProtocolConnection,
+    pending: &mut BTreeMap<u64, DispatchCompletion>,
+    sealed_pull_tasks: &mut JoinSet<SealedPullTaskResult>,
+    sealed_pull_in_flight: &mut BTreeSet<u64>,
+    sealed_pull_waiting_bytes: &mut BTreeMap<u64, u64>,
+    producer_shutdown: &mut JoinSet<()>,
+    stream: &mut OwnedWriteHalf,
+    shutdown: &mut watch::Receiver<bool>,
+    fairness_yielded: &mut bool,
+) -> Result<bool, LocalRawSocketError> {
+    *fairness_yielded = false;
+    let mut flushed_actions = 0_usize;
     let stream_ids: Vec<_> = pending.keys().copied().collect();
     for stream_id in stream_ids {
         loop {
+            if pending
+                .get(&stream_id)
+                .is_some_and(|completion| completion.worker_completed)
+            {
+                pending
+                    .get_mut(&stream_id)
+                    .expect("pending completion exists")
+                    .release_guards_after_worker_completion();
+            }
             let Some(action) = pending
                 .get(&stream_id)
                 .and_then(|completion| completion.actions.front())
                 .cloned()
             else {
+                if sealed_pull_waiting_bytes
+                    .get(&stream_id)
+                    .is_some_and(|required| *required > SEALED_MAX_VALUE_BYTES)
+                {
+                    let completion = pending
+                        .get_mut(&stream_id)
+                        .expect("pending completion exists");
+                    let invocation = completion
+                        .sealed_invocation
+                        .expect("sealed producer retains root invocation identity");
+                    sealed_pull_waiting_bytes.remove(&stream_id);
+                    queue_sealed_terminal_failure(
+                        stream_id,
+                        completion,
+                        invocation,
+                        InvocationFailurePhase::Internal,
+                        "INVOKE_INTERNAL_FAILURE",
+                        "invocation could not complete",
+                        InvocationRetryability::Unknown,
+                    );
+                    continue;
+                }
+                let should_pull = pending.get(&stream_id).is_some_and(|completion| {
+                    completion.start_delivered
+                        && completion.sealed_producer.is_some()
+                        && !sealed_pull_in_flight.contains(&stream_id)
+                });
+                if should_pull {
+                    let result_credit = connection
+                        .result_credit(stream_id)
+                        .map_err(|source| LocalRawSocketError::Connection { source })?;
+                    let Some(credit) = sealed_pull_credit(
+                        result_credit,
+                        sealed_pull_waiting_bytes.get(&stream_id).copied(),
+                    ) else {
+                        break;
+                    };
+                    let producer = pending
+                        .get_mut(&stream_id)
+                        .expect("pending completion exists")
+                        .sealed_producer
+                        .take()
+                        .expect("sealed producer exists");
+                    // Admit one value per scheduler turn. The connection select
+                    // runs before another pull, so a queued CALL_CANCEL or
+                    // shutdown signal cannot be hidden behind a producer drain.
+                    sealed_pull_in_flight.insert(stream_id);
+                    sealed_pull_tasks.spawn(async move {
+                        let event = producer.pull(credit).await;
+                        (stream_id, producer, event)
+                    });
+                    break;
+                }
                 let keep_waiting = pending.get(&stream_id).is_some_and(|completion| {
                     completion.start_gate.is_some()
                         || (!completion.terminal_delivered && completion.start_delivered)
+                        || sealed_pull_in_flight.contains(&stream_id)
                 });
                 if !keep_waiting {
                     pending.remove(&stream_id);
@@ -3051,7 +3975,8 @@ async fn flush_pending(
             let worker_completed = pending
                 .get(&stream_id)
                 .is_some_and(|completion| completion.worker_completed);
-            if terminal_action && !worker_completed {
+            if terminal_action && (!worker_completed || sealed_pull_in_flight.contains(&stream_id))
+            {
                 break;
             }
             let frame = match version.apply(connection, action) {
@@ -3075,6 +4000,12 @@ async fn flush_pending(
             }
             if terminal_action {
                 completion.terminal_delivered = true;
+                schedule_sealed_completion_shutdown(completion, producer_shutdown);
+            }
+            flushed_actions += 1;
+            if flushed_actions >= PENDING_FLUSH_FAIRNESS_BUDGET {
+                *fairness_yielded = true;
+                return Ok(true);
             }
         }
     }
@@ -3371,12 +4302,17 @@ mod tests {
         task::Poll,
     };
 
+    use orna_core::system::SYS_INVOKE_FUNCTION_ID;
     use orna_core::{
         CatalogueRevisionId, FunctionId, InvocationId, PrincipalId, SchemaId, SourceBundleId,
         SourceRevisionId, TypeId,
         canonical_hash::{catalogue_digest, source_bundle_digest, source_revision_record_digest},
         catalogue::{
             CatalogueSnapshot, EnumTypeDefinition, QualifiedSemanticName, SchemaDefinition,
+        },
+        invocation::{
+            InvocationCallerContext, InvocationCallerKind, InvocationClientOffer, InvocationTarget,
+            InvocationTracePolicy, InvokeRequest, InvokeRequestInput,
         },
         revision::{ActiveDatabaseRevision, RevisionPair, StoredSourceRevision},
         security::{
@@ -3388,8 +4324,9 @@ mod tests {
         Channel, ClientFrame, Event, MAX_RESOURCE_WINDOW, ResourceCancel, ResourceCancellationCode,
         ResourceClientFrame, ResourceKind, ResourceRequest, ResourceServerFrame,
         ResourceWindowUpdate, ServerFrame, decode_catalogue_server_frame,
-        decode_resource_server_frame, decode_server_frame, encode_catalogue_client_frame,
-        encode_client_frame, encode_resource_client_frame,
+        decode_constructed_server_frame, decode_resource_server_frame, decode_server_frame,
+        encode_catalogue_client_frame, encode_client_frame, encode_constructed_client_frame,
+        encode_invoke_request, encode_resource_client_frame,
     };
     use orna_standard::{
         registered_opaque_codecs, retained_standard_library_snapshot,
@@ -3999,6 +4936,10 @@ mod tests {
                 })
                 .await;
                 DispatchCompletion {
+                    sealed_producer: None,
+                    sealed_invocation: None,
+                    sealed_next_event_sequence: 1,
+                    sealed_next_outer_sequence: 2,
                     actions: actions.iter().cloned().collect(),
                     cancellation: ServerAction::Cancelled { stream },
                     cancellation_token: None,
@@ -4061,6 +5002,10 @@ mod tests {
                     polled.store(true, Ordering::SeqCst);
                     release.notified().await;
                     DispatchCompletion {
+                        sealed_producer: None,
+                        sealed_invocation: None,
+                        sealed_next_event_sequence: 1,
+                        sealed_next_outer_sequence: 2,
                         actions: VecDeque::from([ServerAction::Completed { stream }]),
                         cancellation: ServerAction::Cancelled { stream },
                         cancellation_token: None,
@@ -4073,6 +5018,111 @@ mod tests {
                     }
                 }),
             }
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    enum GatedPreflightOutcome {
+        Accepted,
+        RejectedInternalFailure,
+        Error,
+    }
+
+    #[derive(Clone)]
+    struct GatedInvokePreflightDispatch {
+        outcome: GatedPreflightOutcome,
+        preflight_started: Arc<Notify>,
+        preflight_release: Arc<Notify>,
+        cancellation_seen: Arc<Notify>,
+        start_invoked: Arc<AtomicBool>,
+    }
+
+    impl GatedInvokePreflightDispatch {
+        fn new(outcome: GatedPreflightOutcome) -> Self {
+            Self {
+                outcome,
+                preflight_started: Arc::new(Notify::new()),
+                preflight_release: Arc::new(Notify::new()),
+                cancellation_seen: Arc::new(Notify::new()),
+                start_invoked: Arc::new(AtomicBool::new(false)),
+            }
+        }
+    }
+
+    impl DispatchService for GatedInvokePreflightDispatch {
+        fn start(
+            &self,
+            _session: AuthenticatedSession,
+            _stream: u64,
+            _call: RawCall,
+        ) -> StartedDispatch {
+            panic!("sealed preflight test does not issue an ordinary raw call")
+        }
+
+        fn preflight_invoke(
+            &self,
+            _session: AuthenticatedSession,
+            _request: orna_protocol::RetainedInvokeRequest,
+            _version: RawProtocolVersion,
+        ) -> InvokePreflightFuture {
+            let outcome = self.outcome;
+            let started = Arc::clone(&self.preflight_started);
+            let release = Arc::clone(&self.preflight_release);
+            Box::pin(async move {
+                started.notify_one();
+                release.notified().await;
+                match outcome {
+                    GatedPreflightOutcome::Accepted => Ok(InvokePreflight::Accepted(None)),
+                    GatedPreflightOutcome::RejectedInternalFailure => {
+                        Ok(InvokePreflight::Rejected(CallFailure::InternalFailure))
+                    }
+                    GatedPreflightOutcome::Error => Err(PostgresKernelError::DurableInvariant {
+                        relation: "test",
+                        record: "gated preflight".to_string(),
+                        rule: "forced error",
+                    }),
+                }
+            })
+        }
+
+        fn start_invoke(
+            &self,
+            _session: AuthenticatedSession,
+            stream: u64,
+            _request: orna_protocol::RetainedInvokeRequest,
+            _version: &RawProtocolVersion,
+            _continuation: Option<SealedInvocationContinuation>,
+        ) -> StartedDispatch {
+            self.start_invoked.store(true, Ordering::SeqCst);
+            StartedDispatch {
+                accepted: ServerAction::Accepted {
+                    stream,
+                    invocation: InvocationId::from_bytes([0x61; 16]),
+                },
+                started: None,
+                start_gate: None,
+                future: Box::pin(async move {
+                    DispatchCompletion {
+                        sealed_producer: None,
+                        sealed_invocation: None,
+                        sealed_next_event_sequence: 1,
+                        sealed_next_outer_sequence: 2,
+                        actions: VecDeque::from([ServerAction::Completed { stream }]),
+                        cancellation: ServerAction::InvokeCancelled { stream },
+                        cancellation_token: None,
+                        start_gate: None,
+                        start_delivered: false,
+                        terminal_delivered: false,
+                        terminal_claimed: false,
+                        worker_completed: false,
+                        _guards: None,
+                    }
+                }),
+            }
+        }
+
+        fn cancelled(&self, _stream: u64) {
+            self.cancellation_seen.notify_one();
         }
     }
 
@@ -4313,6 +5363,7 @@ mod tests {
                 &mut pending,
                 &mut requests,
                 &mut tasks,
+                &mut producer_shutdown,
                 &mut writer,
                 &mut shutdown,
             )
@@ -4406,8 +5457,8 @@ mod tests {
         )
         .unwrap();
         let resources = LocalRawSocketResources::new();
+        let (_shutdown_sender, mut shutdown) = watch::channel(false);
         let (server, mut client) = UnixStream::pair().unwrap();
-        let (_shutdown_sender, shutdown) = watch::channel(false);
         let server_task = tokio::spawn(drive_versioned_authenticated_stream_until_shutdown(
             ResourceDispatch,
             test_session(),
@@ -4527,6 +5578,7 @@ mod tests {
                 &mut pending,
                 &mut requests,
                 &mut tasks,
+                &mut producer_shutdown,
                 &mut writer,
                 &mut shutdown,
             )
@@ -5048,6 +6100,7 @@ mod tests {
                 &mut pending,
                 &mut requests,
                 &mut tasks,
+                &mut producer_shutdown,
                 &mut writer,
                 &mut shutdown,
             )
@@ -5167,6 +6220,7 @@ mod tests {
                 &mut pending,
                 &mut requests,
                 &mut tasks,
+                &mut producer_shutdown,
                 &mut writer,
                 &mut shutdown,
             )
@@ -5412,6 +6466,186 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn buffered_sealed_cancel_prevents_acceptance_for_all_preflight_outcomes() {
+        for outcome in [
+            GatedPreflightOutcome::Accepted,
+            GatedPreflightOutcome::RejectedInternalFailure,
+            GatedPreflightOutcome::Error,
+        ] {
+            let (version, _) = constructed_test_version();
+            let (active, registry) = match &version {
+                RawProtocolVersion::Constructed(active, registry) => {
+                    (active.clone(), registry.clone())
+                }
+                _ => unreachable!("constructed test version"),
+            };
+            let request = test_invoke_request(&active, &registry);
+            let dispatcher = GatedInvokePreflightDispatch::new(outcome);
+            let preflight_started = Arc::clone(&dispatcher.preflight_started);
+            let cancellation_seen = Arc::clone(&dispatcher.cancellation_seen);
+            let preflight_release = Arc::clone(&dispatcher.preflight_release);
+            let start_invoked = Arc::clone(&dispatcher.start_invoked);
+            let resources = LocalRawSocketResources::new();
+            let (server, mut client) = UnixStream::pair().expect("Unix stream pair");
+            let (_shutdown_sender, shutdown) = watch::channel(false);
+            let server_task = tokio::spawn(drive_versioned_authenticated_stream_until_shutdown(
+                dispatcher,
+                test_session(),
+                version,
+                server,
+                resources.clone(),
+                shutdown,
+            ));
+
+            for frame in [
+                ClientFrame::CallRawStart {
+                    stream: 1,
+                    function: SYS_INVOKE_FUNCTION_ID,
+                },
+                ClientFrame::CallInvokeRequest {
+                    stream: 1,
+                    request: request.clone(),
+                },
+                ClientFrame::CallArgumentsComplete { stream: 1 },
+            ] {
+                client
+                    .write_all(
+                        &encode_constructed_client_frame(&active, &registry, &frame)
+                            .expect("invoke frame encodes"),
+                    )
+                    .await
+                    .expect("invoke frame writes");
+            }
+            timeout(Duration::from_secs(1), preflight_started.notified())
+                .await
+                .expect("sealed preflight starts");
+
+            let cancel = ClientFrame::CallCancel { stream: 1 };
+            client
+                .write_all(
+                    &encode_constructed_client_frame(&active, &registry, &cancel)
+                        .expect("cancel frame encodes"),
+                )
+                .await
+                .expect("cancel frame writes");
+            timeout(Duration::from_secs(1), cancellation_seen.notified())
+                .await
+                .expect("buffered cancellation reaches dispatching state");
+            preflight_release.notify_one();
+
+            assert_eq!(
+                read_constructed_server_frame(&mut client, &active, &registry).await,
+                ServerFrame::CallCancelled { stream: 1 }
+            );
+            assert!(
+                timeout(
+                    Duration::from_millis(25),
+                    read_constructed_server_frame(&mut client, &active, &registry),
+                )
+                .await
+                .is_err(),
+                "pre-accept cancellation must not leak failed, accepted, or invocation output"
+            );
+            assert!(!start_invoked.load(Ordering::SeqCst));
+
+            client.shutdown().await.expect("client shutdown");
+            server_task
+                .await
+                .expect("server task joins")
+                .expect("server stream drains preflight");
+            assert_eq!(resources.payload.available_permits(), SHARED_PAYLOAD_BYTES);
+            assert_eq!(
+                resources.kernel_operations.available_permits(),
+                KERNEL_OPERATION_LIMIT
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn receiving_cancel_releases_retained_payload_before_connection_close() {
+        let dispatcher = TestDispatch::new(Vec::new());
+        let resources = LocalRawSocketResources::new();
+        let (server, mut client) = UnixStream::pair().expect("Unix stream pair");
+        let server_task = tokio::spawn(drive_authenticated_stream(
+            dispatcher,
+            test_session(),
+            server,
+            resources.clone(),
+        ));
+
+        let start = ClientFrame::CallRawStart {
+            stream: 1,
+            function: FUNCTION,
+        };
+        let retained = encode_client_frame(&start)
+            .expect("start frame encodes")
+            .len()
+            - FRAME_HEADER_LENGTH;
+        send_client_frame(&mut client, &start).await;
+        timeout(Duration::from_secs(1), async {
+            loop {
+                if resources.payload.available_permits() == SHARED_PAYLOAD_BYTES - retained {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("start payload reservation is retained");
+
+        let second_start = ClientFrame::CallRawStart {
+            stream: 2,
+            function: FUNCTION,
+        };
+        let second_retained = encode_client_frame(&second_start)
+            .expect("second start frame encodes")
+            .len()
+            - FRAME_HEADER_LENGTH;
+        send_client_frame(&mut client, &second_start).await;
+        timeout(Duration::from_secs(1), async {
+            loop {
+                if resources.payload.available_permits()
+                    == SHARED_PAYLOAD_BYTES - retained - second_retained
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("both stream payload reservations are retained");
+
+        send_client_frame(&mut client, &ClientFrame::CallCancel { stream: 1 }).await;
+        assert_eq!(
+            read_server_frame(&mut client).await,
+            ServerFrame::CallCancelled { stream: 1 }
+        );
+        assert_eq!(
+            resources.payload.available_permits(),
+            SHARED_PAYLOAD_BYTES - second_retained
+        );
+
+        send_client_frame(&mut client, &ClientFrame::CallCancel { stream: 2 }).await;
+        assert_eq!(
+            read_server_frame(&mut client).await,
+            ServerFrame::CallCancelled { stream: 2 }
+        );
+        assert_eq!(resources.payload.available_permits(), SHARED_PAYLOAD_BYTES);
+
+        send_client_frame(&mut client, &ClientFrame::Ping { token: [4; 8] }).await;
+        assert_eq!(
+            read_server_frame(&mut client).await,
+            ServerFrame::Pong { token: [4; 8] }
+        );
+
+        client.shutdown().await.expect("client shutdown");
+        server_task
+            .await
+            .expect("connection task")
+            .expect("clean EOF");
+    }
+
+    #[tokio::test]
     async fn buffered_cancel_precedes_first_finish_poll_but_finish_still_runs() {
         let dispatcher = TestDispatch::new(vec![ServerAction::Completed { stream: 1 }]);
         let resources = LocalRawSocketResources::new();
@@ -5491,6 +6725,351 @@ mod tests {
         assert!(polled.load(Ordering::SeqCst));
     }
 
+    #[test]
+    fn sealed_pull_credit_is_bounded_by_result_window_and_frame_capacity() {
+        let credit =
+            sealed_pull_credit(1, None).expect("one byte of live credit creates one bounded pull");
+        assert_eq!(credit.item_count, 1);
+        assert_eq!(credit.byte_count, 1);
+
+        let credit = sealed_pull_credit(u64::MAX, None).expect("bounded frame credit");
+        assert_eq!(credit.item_count, 1);
+        assert_eq!(
+            credit.byte_count,
+            (MAX_FRAME_PAYLOAD_LENGTH as u64).saturating_sub(SEALED_EVENT_FRAME_OVERHEAD),
+        );
+    }
+
+    #[test]
+    fn sealed_event_overhead_matches_constructed_frame_layout() {
+        let (version, _revision) = constructed_test_version();
+        let (active, registry) = match &version {
+            RawProtocolVersion::Constructed(active, registry) => (active, registry),
+            _ => unreachable!("constructed test version"),
+        };
+        let value = RuntimeValue::Boolean(true);
+        let encoded_value = encode_constructed_value(active, registry, &value)
+            .expect("bounded constructed value encodes");
+        let invocation = InvocationId::from_bytes([0x75; 16]);
+        let event = InvokeEvent::new(
+            invocation,
+            1,
+            InvocationEventBody::ValueBatch {
+                schema: None,
+                values: vec![InvokeValue::new(value).expect("invoke value")],
+            },
+        )
+        .expect("value event");
+        let encoded = version
+            .encode_server_frame(&ServerFrame::EventBatch {
+                stream: 1,
+                channel: Channel::ResultValues,
+                events: vec![orna_protocol::EventRecord {
+                    sequence: 1,
+                    event: Event::Value(RuntimeValue::InvokeEvent(event)),
+                }],
+            })
+            .expect("constructed event frame encodes");
+        assert_eq!(
+            encoded.len() - FRAME_HEADER_LENGTH - encoded_value.len(),
+            SEALED_EVENT_FRAME_OVERHEAD as usize,
+        );
+        assert_eq!(
+            SEALED_MAX_VALUE_BYTES,
+            (MAX_FRAME_PAYLOAD_LENGTH as u64) - SEALED_EVENT_FRAME_OVERHEAD,
+        );
+    }
+
+    #[tokio::test]
+    async fn flush_pending_yields_after_a_bounded_output_burst() {
+        let version = RawProtocolVersion::One;
+        let mut connection = ProtocolConnection::new();
+        version
+            .receive(
+                &mut connection,
+                ClientFrame::CallRawStart {
+                    stream: 1,
+                    function: FUNCTION,
+                },
+            )
+            .expect("raw call starts");
+        version
+            .receive(
+                &mut connection,
+                ClientFrame::WindowUpdate {
+                    stream: 1,
+                    channel: Channel::ResultValues,
+                    credit: 4096,
+                },
+            )
+            .expect("result credit applies");
+        version
+            .receive(
+                &mut connection,
+                ClientFrame::CallArgumentsComplete { stream: 1 },
+            )
+            .expect("raw call dispatches");
+        version
+            .apply(
+                &mut connection,
+                ServerAction::Accepted {
+                    stream: 1,
+                    invocation: InvocationId::from_bytes([0x76; 16]),
+                },
+            )
+            .expect("raw call accepts");
+
+        let actions = (0..=PENDING_FLUSH_FAIRNESS_BUDGET)
+            .map(|_| ServerAction::Events {
+                stream: 1,
+                events: vec![Event::Value(RuntimeValue::Boolean(true))],
+            })
+            .chain(std::iter::once(ServerAction::Completed { stream: 1 }))
+            .collect();
+        let mut pending = BTreeMap::from([(
+            1,
+            DispatchCompletion {
+                sealed_producer: None,
+                sealed_invocation: None,
+                sealed_next_event_sequence: 1,
+                sealed_next_outer_sequence: 2,
+                actions,
+                cancellation: ServerAction::Cancelled { stream: 1 },
+                cancellation_token: None,
+                start_gate: None,
+                start_delivered: true,
+                terminal_delivered: false,
+                terminal_claimed: false,
+                worker_completed: true,
+                _guards: None,
+            },
+        )]);
+        let (server, mut client) = UnixStream::pair().expect("socket pair");
+        let (_reader, mut writer) = server.into_split();
+        let (_shutdown_sender, mut shutdown) = watch::channel(false);
+        let mut sealed_pull_tasks = JoinSet::new();
+        let mut sealed_pull_in_flight = BTreeSet::new();
+        let mut sealed_pull_waiting_bytes = BTreeMap::new();
+        let mut producer_shutdown = JoinSet::new();
+        let mut fairness_yielded = false;
+
+        assert!(
+            flush_pending_with_fairness_boundary(
+                &version,
+                &mut connection,
+                &mut pending,
+                &mut sealed_pull_tasks,
+                &mut sealed_pull_in_flight,
+                &mut sealed_pull_waiting_bytes,
+                &mut producer_shutdown,
+                &mut writer,
+                &mut shutdown,
+                &mut fairness_yielded,
+            )
+            .await
+            .expect("first bounded flush succeeds")
+        );
+        assert!(fairness_yielded);
+        assert_eq!(
+            pending
+                .get(&1)
+                .expect("pending completion remains")
+                .actions
+                .len(),
+            2,
+        );
+        for _ in 0..PENDING_FLUSH_FAIRNESS_BUDGET {
+            let _ = read_server_frame(&mut client).await;
+        }
+
+        assert!(
+            flush_pending_with_fairness_boundary(
+                &version,
+                &mut connection,
+                &mut pending,
+                &mut sealed_pull_tasks,
+                &mut sealed_pull_in_flight,
+                &mut sealed_pull_waiting_bytes,
+                &mut producer_shutdown,
+                &mut writer,
+                &mut shutdown,
+                &mut fairness_yielded,
+            )
+            .await
+            .expect("second bounded flush succeeds")
+        );
+        assert!(!fairness_yielded);
+        assert!(pending.is_empty());
+        let _ = read_server_frame(&mut client).await;
+        assert_eq!(
+            read_server_frame(&mut client).await,
+            ServerFrame::CallCompleted { stream: 1 }
+        );
+    }
+
+    #[test]
+    fn sealed_pull_credit_waits_for_the_pending_value_size() {
+        assert!(sealed_pull_credit(8, Some(9)).is_none());
+        assert_eq!(
+            sealed_pull_credit(9, Some(9))
+                .expect("required value credit")
+                .byte_count,
+            9
+        );
+    }
+
+    #[test]
+    fn sealed_result_cancellation_wins_after_execution_returns() {
+        let invocation = InvocationId::from_bytes([0x73; 16]);
+        let event = InvokeEvent::new(
+            invocation,
+            0,
+            InvocationEventBody::Completed {
+                duration_nanoseconds: 0,
+            },
+        )
+        .expect("completed event");
+        let events = InvocationEventBatch::new(vec![InvocationEventRecord::new(1, event)])
+            .expect("completed event batch");
+        let execution = Ok(SealedInvocationExecution::Result(
+            SealedInvocationResult::Completed { invocation, events },
+        ));
+        let cancellation = ResourceCancellation::new();
+        assert!(!sealed_result_cancellation_won(&cancellation, &execution));
+        assert!(cancellation.request_cancel());
+        assert!(sealed_result_cancellation_won(&cancellation, &execution));
+    }
+
+    #[tokio::test]
+    async fn oversized_sealed_pull_waiting_value_fails_closed() {
+        let (version, _revision) = constructed_test_version();
+        let (active, registry) = match &version {
+            RawProtocolVersion::Constructed(active, registry) => {
+                (active.as_ref(), registry.as_ref())
+            }
+            _ => unreachable!("constructed test version"),
+        };
+        let mut connection = ProtocolConnection::new();
+        let request = test_invoke_request(active, registry);
+        version
+            .receive(
+                &mut connection,
+                ClientFrame::CallRawStart {
+                    stream: 1,
+                    function: SYS_INVOKE_FUNCTION_ID,
+                },
+            )
+            .expect("sealed call starts");
+        version
+            .receive(
+                &mut connection,
+                ClientFrame::CallInvokeRequest { stream: 1, request },
+            )
+            .expect("sealed request applies");
+        version
+            .receive(
+                &mut connection,
+                ClientFrame::CallArgumentsComplete { stream: 1 },
+            )
+            .expect("sealed call dispatches");
+        version
+            .receive(
+                &mut connection,
+                ClientFrame::WindowUpdate {
+                    stream: 1,
+                    channel: Channel::ResultValues,
+                    credit: MAX_FRAME_PAYLOAD_LENGTH as u64,
+                },
+            )
+            .expect("sealed call receives result credit");
+        let invocation = InvocationId::from_bytes([0x74; 16]);
+        version
+            .apply(
+                &mut connection,
+                ServerAction::Accepted {
+                    stream: 1,
+                    invocation,
+                },
+            )
+            .expect("sealed call accepts");
+        let started = InvokeEvent::new(
+            invocation,
+            0,
+            InvocationEventBody::Started {
+                visible_principal: None,
+            },
+        )
+        .expect("started event");
+        let started_events =
+            InvocationEventBatch::new(vec![InvocationEventRecord::new(1, started)])
+                .expect("started event batch");
+        version
+            .apply(
+                &mut connection,
+                ServerAction::InvokeEvents {
+                    stream: 1,
+                    events: started_events,
+                },
+            )
+            .expect("started event applies");
+
+        let (server, mut client) = UnixStream::pair().expect("socket pair");
+        let (_reader, mut writer) = server.into_split();
+        let (_shutdown_sender, mut shutdown) = watch::channel(false);
+        let mut pending = BTreeMap::from([(
+            1,
+            DispatchCompletion {
+                sealed_producer: None,
+                sealed_invocation: Some(invocation),
+                sealed_next_event_sequence: 1,
+                sealed_next_outer_sequence: 2,
+                actions: VecDeque::new(),
+                cancellation: ServerAction::InvokeCancelled { stream: 1 },
+                cancellation_token: None,
+                start_gate: None,
+                start_delivered: true,
+                terminal_delivered: false,
+                terminal_claimed: false,
+                worker_completed: true,
+                _guards: None,
+            },
+        )]);
+        let mut sealed_pull_tasks = JoinSet::new();
+        let mut sealed_pull_in_flight = BTreeSet::new();
+        let mut sealed_pull_waiting_bytes =
+            BTreeMap::from([(1, SEALED_MAX_VALUE_BYTES.saturating_add(1))]);
+        let mut producer_shutdown = JoinSet::new();
+
+        assert!(
+            flush_pending(
+                &version,
+                &mut connection,
+                &mut pending,
+                &mut sealed_pull_tasks,
+                &mut sealed_pull_in_flight,
+                &mut sealed_pull_waiting_bytes,
+                &mut producer_shutdown,
+                &mut writer,
+                &mut shutdown,
+            )
+            .await
+            .expect("oversized sealed value fails closed")
+        );
+        assert!(matches!(
+            orna_protocol::decode_constructed_invocation_event_frame(
+                active,
+                registry,
+                &read_encoded_server_frame(&mut client, "sealed invocation event frame").await,
+            )
+            .expect("constructed invocation event frame decodes"),
+            ServerFrame::EventBatch { stream: 1, .. }
+        ));
+        assert_eq!(
+            read_constructed_server_frame(&mut client, active, registry).await,
+            ServerFrame::CallCompleted { stream: 1 }
+        );
+    }
+
     #[tokio::test]
     async fn queued_value_and_completion_are_replaced_by_cancel_without_credit() {
         let dispatcher = TestDispatch::new(vec![
@@ -5538,6 +7117,10 @@ mod tests {
         let mut pending = BTreeMap::from([(
             1,
             DispatchCompletion {
+                sealed_producer: None,
+                sealed_invocation: None,
+                sealed_next_event_sequence: 1,
+                sealed_next_outer_sequence: 2,
                 actions: VecDeque::new(),
                 cancellation: ServerAction::Cancelled { stream: 1 },
                 cancellation_token: None,
@@ -5552,6 +7135,10 @@ mod tests {
         merge_dispatch_completion(
             1,
             DispatchCompletion {
+                sealed_producer: None,
+                sealed_invocation: None,
+                sealed_next_event_sequence: 1,
+                sealed_next_outer_sequence: 2,
                 actions: VecDeque::from([
                     ServerAction::Events {
                         stream: 1,
@@ -5576,9 +7163,16 @@ mod tests {
         let mut retained_payload = BTreeMap::new();
         let mut cancelled = BTreeSet::new();
         let mut cancelled_pending = BTreeSet::new();
+        let mut preflight_pending = BTreeSet::new();
+        let mut preflight_cancelled = BTreeSet::new();
+        let mut preflight_tasks = JoinSet::new();
+        let mut producer_shutdown = JoinSet::new();
         let mut unstarted = VecDeque::new();
         let resources = LocalRawSocketResources::new();
         let (_shutdown_sender, mut shutdown) = watch::channel(false);
+        let mut sealed_pull_tasks = JoinSet::new();
+        let mut sealed_pull_in_flight = BTreeSet::new();
+        let mut sealed_pull_waiting_bytes = BTreeMap::new();
 
         assert!(
             handle_client_frame(
@@ -5594,6 +7188,10 @@ mod tests {
                 &mut retained_payload,
                 &mut cancelled,
                 &mut cancelled_pending,
+                &mut preflight_pending,
+                &mut preflight_cancelled,
+                &mut preflight_tasks,
+                &mut producer_shutdown,
                 &mut pending,
                 &mut unstarted,
                 &mut writer,
@@ -5613,6 +7211,10 @@ mod tests {
                 &version,
                 &mut connection,
                 &mut pending,
+                &mut sealed_pull_tasks,
+                &mut sealed_pull_in_flight,
+                &mut sealed_pull_waiting_bytes,
+                &mut producer_shutdown,
                 &mut writer,
                 &mut shutdown,
             )
@@ -5631,6 +7233,107 @@ mod tests {
         );
     }
     #[test]
+    fn sealed_failure_after_value_preserves_contiguous_sequences() {
+        let invocation = InvocationId::from_bytes([0x71; 16]);
+        let value = InvokeValue::new(RuntimeValue::Integer(7)).expect("invoke value");
+        let value_event = InvokeEvent::new(
+            invocation,
+            1,
+            InvocationEventBody::ValueBatch {
+                schema: None,
+                values: vec![value],
+            },
+        )
+        .expect("value event");
+        let value_events =
+            InvocationEventBatch::new(vec![InvocationEventRecord::new(2, value_event)])
+                .expect("value event batch");
+        let mut completion = DispatchCompletion {
+            sealed_producer: None,
+            sealed_invocation: Some(invocation),
+            sealed_next_event_sequence: 2,
+            sealed_next_outer_sequence: 3,
+            actions: VecDeque::from([ServerAction::InvokeEvents {
+                stream: 1,
+                events: value_events,
+            }]),
+            cancellation: ServerAction::InvokeCancelled { stream: 1 },
+            cancellation_token: None,
+            start_gate: None,
+            start_delivered: true,
+            terminal_delivered: false,
+            terminal_claimed: false,
+            worker_completed: true,
+            _guards: None,
+        };
+
+        queue_sealed_terminal_failure(
+            1,
+            &mut completion,
+            invocation,
+            InvocationFailurePhase::Internal,
+            "INVOKE_INTERNAL_FAILURE",
+            "invocation could not complete",
+            InvocationRetryability::Unknown,
+        );
+
+        assert_eq!(completion.sealed_next_event_sequence, 3);
+        assert_eq!(completion.sealed_next_outer_sequence, 4);
+        assert_eq!(completion.actions.len(), 3);
+        let Some(ServerAction::InvokeEvents { events, .. }) = completion.actions.get(1) else {
+            panic!("failure event follows prior value event");
+        };
+        let failure = &events.records()[0];
+        assert_eq!(failure.outer_sequence(), 3);
+        assert_eq!(failure.event().sequence(), 2);
+        assert_eq!(failure.event().invocation_id(), invocation);
+        assert_eq!(
+            failure.event().kind(),
+            InvocationEventKind::InvocationFailed
+        );
+    }
+
+    #[test]
+    fn disconnect_cancellation_only_targets_unstarted_sealed_work() {
+        let invocation = InvocationId::from_bytes([0x52; 16]);
+        let mut completion = DispatchCompletion {
+            sealed_producer: None,
+            sealed_invocation: Some(invocation),
+            sealed_next_event_sequence: 1,
+            sealed_next_outer_sequence: 2,
+            actions: VecDeque::new(),
+            cancellation: ServerAction::InvokeCancelled { stream: 1 },
+            cancellation_token: None,
+            start_gate: None,
+            start_delivered: true,
+            terminal_delivered: false,
+            terminal_claimed: false,
+            worker_completed: false,
+            _guards: None,
+        };
+
+        assert!(!should_cancel_on_disconnect(&completion));
+        assert!(!should_drain_sealed_on_disconnect(&completion));
+        completion.start_delivered = false;
+        assert!(should_cancel_on_disconnect(&completion));
+        assert!(!should_drain_sealed_on_disconnect(&completion));
+        completion.sealed_invocation = None;
+        completion.start_delivered = true;
+        assert!(should_cancel_on_disconnect(&completion));
+        completion.sealed_invocation = Some(invocation);
+        let cancellation = ResourceCancellation::new();
+        cancellation.request_cancel();
+        completion.cancellation_token = Some(cancellation);
+        assert!(!should_cancel_on_disconnect(&completion));
+        assert!(!should_drain_sealed_on_disconnect(&completion));
+        completion.start_delivered = false;
+        assert!(!should_cancel_on_disconnect(&completion));
+        completion.terminal_delivered = true;
+        assert!(!should_cancel_on_disconnect(&completion));
+        assert!(!should_drain_sealed_on_disconnect(&completion));
+    }
+
+    #[test]
     fn pre_start_internal_failure_wins_over_cancel_marker() {
         let mut pending = BTreeMap::new();
         let mut cancelled = BTreeSet::from([1]);
@@ -5638,6 +7341,10 @@ mod tests {
         merge_dispatch_completion(
             1,
             DispatchCompletion {
+                sealed_producer: None,
+                sealed_invocation: None,
+                sealed_next_event_sequence: 1,
+                sealed_next_outer_sequence: 2,
                 actions: VecDeque::from([ServerAction::Failed {
                     stream: 1,
                     failure: CallFailure::InternalFailure,
@@ -5679,10 +7386,9 @@ mod tests {
             },
         )
         .expect("started invocation event");
-        let started_events = InvocationEventBatch::new(vec![InvocationEventRecord::new(
-            1, started,
-        )])
-        .expect("started invocation event batch");
+        let started_events =
+            InvocationEventBatch::new(vec![InvocationEventRecord::new(1, started)])
+                .expect("started invocation event batch");
         let terminal = InvokeEvent::new(
             invocation,
             1,
@@ -5691,14 +7397,17 @@ mod tests {
             },
         )
         .expect("terminal invocation event");
-        let terminal_events = InvocationEventBatch::new(vec![InvocationEventRecord::new(
-            1, terminal,
-        )])
-        .expect("terminal invocation event batch");
+        let terminal_events =
+            InvocationEventBatch::new(vec![InvocationEventRecord::new(1, terminal)])
+                .expect("terminal invocation event batch");
         let (start_gate, _start_receiver) = oneshot::channel();
         let mut pending = BTreeMap::from([(
             1,
             DispatchCompletion {
+                sealed_producer: None,
+                sealed_invocation: Some(invocation),
+                sealed_next_event_sequence: 1,
+                sealed_next_outer_sequence: 2,
                 actions: VecDeque::from([ServerAction::InvokeEvents {
                     stream: 1,
                     events: started_events,
@@ -5719,6 +7428,10 @@ mod tests {
         merge_dispatch_completion(
             1,
             DispatchCompletion {
+                sealed_producer: None,
+                sealed_invocation: Some(invocation),
+                sealed_next_event_sequence: 1,
+                sealed_next_outer_sequence: 2,
                 actions: VecDeque::from([
                     ServerAction::InvokeEvents {
                         stream: 1,
@@ -5741,6 +7454,7 @@ mod tests {
         );
 
         let completion = pending.get(&1).expect("pending invocation remains");
+        assert_eq!(completion.sealed_invocation, Some(invocation));
         assert_eq!(completion.actions.len(), 3);
         assert!(matches!(
             completion.actions.front(),
@@ -5767,6 +7481,10 @@ mod tests {
         let mut pending = BTreeMap::from([(
             1,
             DispatchCompletion {
+                sealed_producer: None,
+                sealed_invocation: None,
+                sealed_next_event_sequence: 1,
+                sealed_next_outer_sequence: 2,
                 actions: VecDeque::from([ServerAction::InvokeCancelled { stream: 1 }]),
                 cancellation: ServerAction::InvokeCancelled { stream: 1 },
                 cancellation_token: None,
@@ -5781,12 +7499,20 @@ mod tests {
         let (server, _client) = UnixStream::pair().expect("socket pair");
         let (_reader, mut writer) = server.into_split();
         let (_shutdown_sender, mut shutdown) = watch::channel(false);
+        let mut sealed_pull_tasks = JoinSet::new();
+        let mut sealed_pull_in_flight = BTreeSet::new();
+        let mut sealed_pull_waiting_bytes = BTreeMap::new();
+        let mut producer_shutdown = JoinSet::new();
 
         assert!(
             flush_pending(
                 &version,
                 &mut connection,
                 &mut pending,
+                &mut sealed_pull_tasks,
+                &mut sealed_pull_in_flight,
+                &mut sealed_pull_waiting_bytes,
+                &mut producer_shutdown,
                 &mut writer,
                 &mut shutdown,
             )
@@ -5808,6 +7534,10 @@ mod tests {
         let mut pending = BTreeMap::from([(
             1,
             DispatchCompletion {
+                sealed_producer: None,
+                sealed_invocation: None,
+                sealed_next_event_sequence: 1,
+                sealed_next_outer_sequence: 2,
                 actions: VecDeque::new(),
                 cancellation: ServerAction::Cancelled { stream: 1 },
                 cancellation_token: None,
@@ -5825,6 +7555,10 @@ mod tests {
         merge_dispatch_completion(
             1,
             DispatchCompletion {
+                sealed_producer: None,
+                sealed_invocation: None,
+                sealed_next_event_sequence: 1,
+                sealed_next_outer_sequence: 2,
                 actions: VecDeque::from([ServerAction::Failed {
                     stream: 1,
                     failure: CallFailure::InternalFailure,
@@ -5871,6 +7605,10 @@ mod tests {
         let mut pending = BTreeMap::from([(
             1,
             DispatchCompletion {
+                sealed_producer: None,
+                sealed_invocation: None,
+                sealed_next_event_sequence: 1,
+                sealed_next_outer_sequence: 2,
                 actions: VecDeque::new(),
                 cancellation: ServerAction::InvokeCancelled { stream: 1 },
                 cancellation_token: None,
@@ -5888,6 +7626,10 @@ mod tests {
         merge_dispatch_completion(
             1,
             DispatchCompletion {
+                sealed_producer: None,
+                sealed_invocation: None,
+                sealed_next_event_sequence: 1,
+                sealed_next_outer_sequence: 2,
                 actions: VecDeque::from([
                     ServerAction::InvokeEvents { stream: 1, events },
                     ServerAction::Completed { stream: 1 },
@@ -6160,8 +7902,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn completed_dispatch_retains_guards_until_flow_control_delivers_it() {
+    async fn completed_dispatch_releases_guards_before_flow_control_delivers_it() {
         let resources = LocalRawSocketResources::new();
+        let held: Vec<_> = (1..KERNEL_OPERATION_LIMIT)
+            .map(|_| {
+                resources
+                    .reserve_kernel_operation()
+                    .expect("operation permit")
+            })
+            .collect();
         let dispatcher = TestDispatch::new(vec![
             ServerAction::Events {
                 stream: 1,
@@ -6169,7 +7918,6 @@ mod tests {
             },
             ServerAction::Completed { stream: 1 },
         ]);
-        let witness = dispatcher.clone();
         let (server, mut client) = UnixStream::pair().expect("Unix stream pair");
         let server_task = tokio::spawn(drive_authenticated_stream(
             dispatcher,
@@ -6182,17 +7930,25 @@ mod tests {
             read_server_frame(&mut client).await,
             ServerFrame::CallAccepted { stream: 1, .. }
         ));
-        while !witness.polled.load(Ordering::SeqCst) {
-            tokio::task::yield_now().await;
-        }
-        for _ in 0..16 {
-            tokio::task::yield_now().await;
-        }
+
+        let released = timeout(
+            Duration::from_secs(1),
+            resources.kernel_operations.clone().acquire_owned(),
+        )
+        .await
+        .expect("completed dispatch releases its operation permit before credit")
+        .expect("operation semaphore remains open");
+        drop(released);
         assert_eq!(
             resources.kernel_operations.available_permits(),
-            KERNEL_OPERATION_LIMIT - 1
+            1,
+            "the probe permit is returned while the other permits remain held"
         );
-        assert!(resources.payload.available_permits() < SHARED_PAYLOAD_BYTES);
+        assert_eq!(
+            resources.payload.available_permits(),
+            SHARED_PAYLOAD_BYTES,
+            "completed action queue owns the produced terminal bytes"
+        );
 
         send_client_frame(
             &mut client,
@@ -6211,23 +7967,18 @@ mod tests {
             read_server_frame(&mut client).await,
             ServerFrame::CallCompleted { stream: 1 }
         );
-        for _ in 0..16 {
-            if resources.kernel_operations.available_permits() == KERNEL_OPERATION_LIMIT {
-                break;
-            }
-            tokio::task::yield_now().await;
-        }
-        assert_eq!(
-            resources.kernel_operations.available_permits(),
-            KERNEL_OPERATION_LIMIT
-        );
-        assert_eq!(resources.payload.available_permits(), SHARED_PAYLOAD_BYTES);
 
         client.shutdown().await.expect("client shutdown");
         server_task
             .await
             .expect("connection task")
             .expect("connection closes");
+        drop(held);
+        assert_eq!(
+            resources.kernel_operations.available_permits(),
+            KERNEL_OPERATION_LIMIT
+        );
+        assert_eq!(resources.payload.available_permits(), SHARED_PAYLOAD_BYTES);
     }
 
     #[tokio::test]
@@ -6404,6 +8155,47 @@ mod tests {
         drop(reservation);
     }
 
+    fn test_invoke_request(
+        active: &ActiveDatabaseRevision,
+        registry: &orna_core::value::OpaqueCodecRegistry,
+    ) -> orna_protocol::RetainedInvokeRequest {
+        let request = InvokeRequest::new(InvokeRequestInput {
+            target: InvocationTarget::function_id(FunctionId::from_bytes([0x11; 16])),
+            arguments: Vec::new(),
+            caller_context: InvocationCallerContext::new(
+                InvocationCallerKind::Browser,
+                false,
+                false,
+                None,
+                None,
+                "en-GB",
+                "UTC",
+                None,
+            )
+            .expect("caller context"),
+            client_offer: InvocationClientOffer::new(
+                5,
+                "en-GB",
+                "UTC",
+                Vec::new(),
+                Vec::new(),
+                1_024,
+                0,
+                None,
+                None,
+            )
+            .expect("client offer"),
+            output_requirement: None,
+            state_profile: None,
+            trace_policy: InvocationTracePolicy::Off,
+            idempotency_key: None,
+            parent_invocation_id: None,
+            observer_context: None,
+        })
+        .expect("invoke request");
+        encode_invoke_request(active, registry, &request).expect("invoke request encodes")
+    }
+
     fn test_session() -> AuthenticatedSession {
         let principal = PrincipalId::from_bytes([4; 16]);
         SecuritySnapshot::new(
@@ -6464,6 +8256,16 @@ mod tests {
     ) -> ServerFrame {
         let encoded = read_encoded_server_frame(stream, "catalogue server frame").await;
         decode_catalogue_server_frame(catalogue, &encoded).expect("catalogue server frame decodes")
+    }
+
+    async fn read_constructed_server_frame(
+        stream: &mut UnixStream,
+        active: &ActiveDatabaseRevision,
+        registry: &orna_core::value::OpaqueCodecRegistry,
+    ) -> ServerFrame {
+        let encoded = read_encoded_server_frame(stream, "constructed server frame").await;
+        decode_constructed_server_frame(active, registry, &encoded)
+            .expect("constructed server frame decodes")
     }
 
     async fn read_encoded_server_frame(stream: &mut UnixStream, name: &str) -> Vec<u8> {
