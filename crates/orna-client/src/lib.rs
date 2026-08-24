@@ -6787,7 +6787,14 @@ fn initialize_client_state(
             StateScope::Session => state.session.get(&key),
             StateScope::User => state.user.get(&key).map(|value| &value.value),
         };
-        if stored_value.is_some_and(|value| !runtime_value_matches(active, value, resolved)) {
+        let stored_user_type_mismatch = matches!(slot.scope(), StateScope::User)
+            && state
+                .user
+                .get(&key)
+                .is_some_and(|value| value.value_type() != slot.type_id());
+        if stored_user_type_mismatch
+            || stored_value.is_some_and(|value| !runtime_value_matches(active, value, resolved))
+        {
             return Err(state_error(
                 context,
                 ClientStateError::StoredTypeMismatch {
@@ -10253,6 +10260,116 @@ fn client_stream_cancellation_clears_batches_and_rejects_stale_completions() {
             } if context.function() == function
                 && *slot == StateSlotId::from_bytes([0x12; 16])
         ));
+    }
+
+    #[test]
+    fn version_four_user_state_with_matching_persisted_type_is_accepted() {
+        let slot = StateSlotId::from_bytes([0x20; 16]);
+        let plan = orna_artifact::client_plan::StateClientPlan::new(
+            orna_artifact::client_plan::ClientExpressionNode::Boolean { value: true },
+            vec![orna_artifact::client_plan::StateSlot::new(
+                slot,
+                orna_standard::BOOLEAN_TYPE_ID,
+                orna_artifact::client_plan::StateScope::User,
+                orna_artifact::client_plan::StateDefault::Unset,
+            )],
+        );
+        let (active, function, _, _) = version_four_state_active(
+            orna_standard::BOOLEAN_TYPE_ID,
+            plan.encode().expect("the state plan encodes"),
+        );
+        let mut state = super::ClientStateStore::new();
+        let durable_key = UserStateKey::new(
+            PrincipalId::from_bytes([0x20; 16]),
+            function,
+            String::new(),
+            function,
+            String::new(),
+            slot,
+        )
+        .unwrap();
+        state
+            .load_user_state(&[UserStateCell::new(
+                durable_key,
+                RuntimeValue::Boolean(true),
+                orna_standard::BOOLEAN_TYPE_ID,
+                1,
+                SystemTime::UNIX_EPOCH,
+            )])
+            .unwrap();
+
+        let result = super::evaluate_client_function_with_state(
+            &active,
+            &authorise(active.pair(), function),
+            &mut state,
+        )
+        .unwrap();
+
+        assert_eq!(result.value(), &RuntimeValue::Boolean(true));
+        assert_eq!(state.user().len(), 1);
+        assert_eq!(
+            state
+                .user()
+                .values()
+                .next()
+                .expect("the matching USER state remains loaded")
+                .value_type(),
+            orna_standard::BOOLEAN_TYPE_ID,
+        );
+    }
+
+    #[test]
+    fn version_four_user_state_rejects_wrong_persisted_type_without_mutating_state() {
+        let slot = StateSlotId::from_bytes([0x22; 16]);
+        let plan = orna_artifact::client_plan::StateClientPlan::new(
+            orna_artifact::client_plan::ClientExpressionNode::Boolean { value: true },
+            vec![orna_artifact::client_plan::StateSlot::new(
+                slot,
+                orna_standard::BOOLEAN_TYPE_ID,
+                orna_artifact::client_plan::StateScope::User,
+                orna_artifact::client_plan::StateDefault::Unset,
+            )],
+        );
+        let (active, function, _, _) = version_four_state_active(
+            orna_standard::BOOLEAN_TYPE_ID,
+            plan.encode().expect("the state plan encodes"),
+        );
+        let mut state = super::ClientStateStore::new();
+        let durable_key = UserStateKey::new(
+            PrincipalId::from_bytes([0x22; 16]),
+            function,
+            String::new(),
+            function,
+            String::new(),
+            slot,
+        )
+        .unwrap();
+        state
+            .load_user_state(&[UserStateCell::new(
+                durable_key,
+                RuntimeValue::Boolean(true),
+                orna_standard::CHARACTER_LARGE_OBJECT_TYPE_ID,
+                1,
+                SystemTime::UNIX_EPOCH,
+            )])
+            .unwrap();
+        let before = state.clone();
+
+        let error = super::evaluate_client_function_with_state(
+            &active,
+            &authorise(active.pair(), function),
+            &mut state,
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            error,
+            super::ClientExecutionError::StateEvaluation {
+                context,
+                source: super::ClientStateError::StoredTypeMismatch { slot: actual_slot },
+            } if context.function() == function && actual_slot == slot
+        ));
+        assert_eq!(state, before);
     }
 
     #[test]
