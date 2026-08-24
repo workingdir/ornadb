@@ -102,8 +102,8 @@ is.
   completion, and clean shutdown.
 - `tree-sitter test` runs the accepted corpus cases named by
   `test/accepted-corpus.txt`; the tooling gate also runs `tree-sitter parse`
-  over executable `.orna` fixtures under `work/crates/` and `work/stdlib/`.
-  Canonical `spec/examples/` files are proposal/deferred material and are
+  over executable `.orna` fixtures under `crates/` and `stdlib/`.
+  Canonical `../spec/examples/` files are proposal/deferred material and are
   explicitly excluded from accepted-contract parse evidence.
 - All JSON grammar files are validated with `python3 -m json.tool`; the
   VS Code extension passes `node --check`.
