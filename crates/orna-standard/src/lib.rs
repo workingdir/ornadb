@@ -32,7 +32,7 @@ use orna_core::{
     },
     types::{ResolvedType, StandardScalar},
     value::{
-        InspectCarrierCodecRegistration, INSPECT_CARRIER_CODEC_REGISTRATIONS,
+        INSPECT_CARRIER_CODEC_REGISTRATIONS, InspectCarrierCodecRegistration,
         OpaqueCodecRegistration, OpaqueCodecRegistry, OpaqueCodecRegistryError,
     },
 };
@@ -44,9 +44,9 @@ pub use orna_core::inspect::INSPECT_RENDER_CONTRACT;
 pub use orna_compiler::{
     STD_INTEGER_TYPE_ID, STD_INVOKE_ECHO_FUNCTION_ID, STD_INVOKE_ECHO_FUNCTION_REVISION_ID,
     STD_INVOKE_ECHO_PARAMETER_ID, STD_INVOKE_ECHO_REVISION_NUMBER, STD_INVOKE_SCHEMA_ID,
-    STD_INVOKE_SOURCE_UNIT_ID, STD_TYPES_SOURCE_UNIT_ID,
-    STD_JSON_ENCODE_FUNCTION_ID, STD_JSON_ENCODE_FUNCTION_REVISION_ID,
+    STD_INVOKE_SOURCE_UNIT_ID, STD_JSON_ENCODE_FUNCTION_ID, STD_JSON_ENCODE_FUNCTION_REVISION_ID,
     STD_JSON_ENCODE_PARAMETER_ID, STD_JSON_SCHEMA_ID, STD_JSON_VALUE_TYPE_ID,
+    STD_TYPES_SOURCE_UNIT_ID,
 };
 
 /// The standard-library version represented by this manifest.
@@ -1248,12 +1248,13 @@ pub fn standard_library_v5_manifest()
     let mut type_bindings = version_four.catalogue().type_bindings().to_vec();
     let json_name = semantic_name("std.jsonvalue", ["std", "jsonvalue"])?;
     let json_lookup = TypeLookupName::qualified(json_name.clone());
-    let json_binding = TypeBinding::qualified(json_name, STD_JSON_VALUE_TYPE_ID).map_err(|source| {
-        StandardLibraryManifestError::TypeBinding {
-            name: json_lookup,
-            source,
-        }
-    })?;
+    let json_binding =
+        TypeBinding::qualified(json_name, STD_JSON_VALUE_TYPE_ID).map_err(|source| {
+            StandardLibraryManifestError::TypeBinding {
+                name: json_lookup,
+                source,
+            }
+        })?;
     type_bindings.push(json_binding);
     let json_encode = FunctionDefinition::new(
         STD_JSON_ENCODE_FUNCTION_ID,
@@ -1368,12 +1369,13 @@ pub fn standard_library_v6_manifest()
     let mut type_bindings = version_five.catalogue().type_bindings().to_vec();
     let action_name = semantic_name("std.action", ["std", "action"])?;
     let action_lookup = TypeLookupName::qualified(action_name.clone());
-    let action_binding = TypeBinding::qualified(action_name, STD_ACTION_TYPE_ID).map_err(|source| {
-        StandardLibraryManifestError::TypeBinding {
-            name: action_lookup,
-            source,
-        }
-    })?;
+    let action_binding =
+        TypeBinding::qualified(action_name, STD_ACTION_TYPE_ID).map_err(|source| {
+            StandardLibraryManifestError::TypeBinding {
+                name: action_lookup,
+                source,
+            }
+        })?;
     type_bindings.push(action_binding);
     let catalogue = CatalogueSnapshot::new_with_functions_and_types(
         STANDARD_CATALOGUE_V6_REVISION_ID,
@@ -2658,10 +2660,10 @@ fn reconcile_retained_action_source(
         return Err(StandardLibraryError::RetainedSourceMismatch);
     }
     let origin = |span: &orna_syntax::SourceSpan| -> Result<SourceOrigin, StandardLibraryError> {
-        let start = u32::try_from(span.start)
-            .map_err(|_| StandardLibraryError::RetainedSourceMismatch)?;
-        let end = u32::try_from(span.end)
-            .map_err(|_| StandardLibraryError::RetainedSourceMismatch)?;
+        let start =
+            u32::try_from(span.start).map_err(|_| StandardLibraryError::RetainedSourceMismatch)?;
+        let end =
+            u32::try_from(span.end).map_err(|_| StandardLibraryError::RetainedSourceMismatch)?;
         SourceOrigin::new(STD_ACTION_SOURCE_UNIT_ID, start, end)
             .map_err(|source| StandardLibraryError::Revision { source })
     };
@@ -2748,7 +2750,12 @@ fn reconcile_retained_json_source(
         return Err(StandardLibraryError::RetainedSourceMismatch);
     }
     let function = &parsed.server_functions()[0];
-    if function.name.parts.iter().map(|part| part.text.as_str()).collect::<Vec<_>>()
+    if function
+        .name
+        .parts
+        .iter()
+        .map(|part| part.text.as_str())
+        .collect::<Vec<_>>()
         != ["std", "json", "encode"]
     {
         return Err(StandardLibraryError::RetainedSourceMismatch);
@@ -2762,10 +2769,15 @@ fn reconcile_retained_json_source(
     {
         return Err(StandardLibraryError::RetainedSourceMismatch);
     }
-    let parameter = function.parameters.first().ok_or(StandardLibraryError::RetainedSourceMismatch)?;
+    let parameter = function
+        .parameters
+        .first()
+        .ok_or(StandardLibraryError::RetainedSourceMismatch)?;
     let origin = |span: &orna_syntax::SourceSpan, identity| {
-        let start = u32::try_from(span.start).map_err(|_| StandardLibraryError::RetainedSourceMismatch)?;
-        let end = u32::try_from(span.end).map_err(|_| StandardLibraryError::RetainedSourceMismatch)?;
+        let start =
+            u32::try_from(span.start).map_err(|_| StandardLibraryError::RetainedSourceMismatch)?;
+        let end =
+            u32::try_from(span.end).map_err(|_| StandardLibraryError::RetainedSourceMismatch)?;
         Ok(DefinitionOrigin::new(
             identity,
             SourceOrigin::new(STD_JSON_SOURCE_UNIT_ID, start, end)
@@ -2773,10 +2785,22 @@ fn reconcile_retained_json_source(
         ))
     };
     let mut declarations = vec![
-        origin(&parsed.schemas()[0].span, DefinitionIdentity::Schema(STD_JSON_SCHEMA_ID))?,
-        origin(&parsed.opaque_value_types()[0].span, DefinitionIdentity::ValueType(STD_JSON_VALUE_TYPE_ID))?,
-        origin(&parsed.type_exports()[0].span, DefinitionIdentity::TypeBinding(binding.id()))?,
-        origin(&function.span, DefinitionIdentity::Function(STD_JSON_ENCODE_FUNCTION_ID))?,
+        origin(
+            &parsed.schemas()[0].span,
+            DefinitionIdentity::Schema(STD_JSON_SCHEMA_ID),
+        )?,
+        origin(
+            &parsed.opaque_value_types()[0].span,
+            DefinitionIdentity::ValueType(STD_JSON_VALUE_TYPE_ID),
+        )?,
+        origin(
+            &parsed.type_exports()[0].span,
+            DefinitionIdentity::TypeBinding(binding.id()),
+        )?,
+        origin(
+            &function.span,
+            DefinitionIdentity::Function(STD_JSON_ENCODE_FUNCTION_ID),
+        )?,
         origin(
             &parameter.span,
             DefinitionIdentity::Parameter {
@@ -4059,14 +4083,15 @@ mod tests {
     };
     use orna_core::revision::DefinitionIdentity;
     use orna_core::system::{
-        SYS_INSPECT_SNAPSHOT_REPRESENTATION_CONTRACT, SYS_INSPECT_SNAPSHOT_TYPE_ID,
         SYS_INSPECT_CALLS_REPRESENTATION_CONTRACT, SYS_INSPECT_CALLS_TYPE_ID,
         SYS_INSPECT_INVOCATION_NODES_REPRESENTATION_CONTRACT, SYS_INSPECT_INVOCATION_NODES_TYPE_ID,
         SYS_INSPECT_PRESENTATION_CANDIDATES_REPRESENTATION_CONTRACT,
         SYS_INSPECT_PRESENTATION_CANDIDATES_TYPE_ID, SYS_INSPECT_RESOURCES_REPRESENTATION_CONTRACT,
         SYS_INSPECT_RESOURCES_TYPE_ID, SYS_INSPECT_RUNTIME_BINDINGS_REPRESENTATION_CONTRACT,
-        SYS_INSPECT_RUNTIME_BINDINGS_TYPE_ID, SYS_INSPECT_SECURITY_DECISIONS_REPRESENTATION_CONTRACT,
-        SYS_INSPECT_SECURITY_DECISIONS_TYPE_ID, SYS_INSPECT_STATE_CELLS_REPRESENTATION_CONTRACT,
+        SYS_INSPECT_RUNTIME_BINDINGS_TYPE_ID,
+        SYS_INSPECT_SECURITY_DECISIONS_REPRESENTATION_CONTRACT,
+        SYS_INSPECT_SECURITY_DECISIONS_TYPE_ID, SYS_INSPECT_SNAPSHOT_REPRESENTATION_CONTRACT,
+        SYS_INSPECT_SNAPSHOT_TYPE_ID, SYS_INSPECT_STATE_CELLS_REPRESENTATION_CONTRACT,
         SYS_INSPECT_STATE_CELLS_TYPE_ID, SYS_INSPECT_UI_NODES_REPRESENTATION_CONTRACT,
         SYS_INSPECT_UI_NODES_TYPE_ID,
     };
@@ -4087,54 +4112,52 @@ mod tests {
             StoredSourceUnit,
         },
         value::{
-            MAX_OPAQUE_CODEC_ACTION_ARGUMENTS, OpaqueValue, OpaqueValueError,
+            MAX_OPAQUE_CODEC_ACTION_ARGUMENTS, MAX_RUNTIME_VALUE_NODES, OpaqueValue,
+            OpaqueValueError,
         },
     };
 
     use super::{
-        BIGINT_TYPE_ID, BINARY_LARGE_OBJECT_TYPE_ID, BOOLEAN_TYPE_ID, BYTE_STREAM_MAGIC,
-        CHARACTER_LARGE_OBJECT_TYPE_ID, DATE_TYPE_ID, DECIMAL_TYPE_ID, DURATION_TYPE_ID,
-        EXPECTED_TYPE_BINDING_IDS, FLOAT_TYPE_ID, INTEGER_TYPE_ID, LANGUAGE_VERSION_IDENTITY,
-        OPAQUE_TOKEN_TYPE_ID, SOURCE_LOGICAL_PATH, STANDARD_CATALOGUE_REVISION_ID,
-        STANDARD_CATALOGUE_V2_REVISION_ID, STANDARD_CATALOGUE_V3_REVISION_ID,
-        STANDARD_CATALOGUE_V4_REVISION_ID, STANDARD_LIBRARY_REVISION_ID,
-        STANDARD_LIBRARY_V2_REVISION_ID, STANDARD_LIBRARY_V2_VERSION_IDENTITY,
-        STANDARD_LIBRARY_V3_REVISION_ID, STANDARD_LIBRARY_V3_VERSION_IDENTITY,
-        STANDARD_LIBRARY_V4_REVISION_ID, STANDARD_LIBRARY_V4_VERSION_IDENTITY,
-        STANDARD_LIBRARY_V5_REVISION_ID, STANDARD_LIBRARY_V5_VERSION_IDENTITY,
-        STANDARD_LIBRARY_V6_REVISION_ID, STANDARD_LIBRARY_V6_VERSION_IDENTITY,
-        STANDARD_LIBRARY_VERSION_IDENTITY, STANDARD_SOURCE_BUNDLE_ID,
-        STANDARD_SOURCE_REVISION_ID, STANDARD_SOURCE_UNIT_ID, STANDARD_SOURCE_V2_BUNDLE_ID,
-        STANDARD_SOURCE_V2_REVISION_ID, STANDARD_SOURCE_V3_BUNDLE_ID,
+        ACTION_MAGIC, BIGINT_TYPE_ID, BINARY_LARGE_OBJECT_TYPE_ID, BOOLEAN_TYPE_ID,
+        BYTE_STREAM_MAGIC, CHARACTER_LARGE_OBJECT_TYPE_ID, DATE_TYPE_ID, DECIMAL_TYPE_ID,
+        DURATION_TYPE_ID, EXPECTED_TYPE_BINDING_IDS, FLOAT_TYPE_ID, INTEGER_TYPE_ID, JSON_MAGIC,
+        LANGUAGE_VERSION_IDENTITY, OPAQUE_TOKEN_TYPE_ID, SOURCE_LOGICAL_PATH,
+        STANDARD_CATALOGUE_REVISION_ID, STANDARD_CATALOGUE_V2_REVISION_ID,
+        STANDARD_CATALOGUE_V3_REVISION_ID, STANDARD_CATALOGUE_V4_REVISION_ID,
+        STANDARD_CATALOGUE_V5_REVISION_ID, STANDARD_CATALOGUE_V6_REVISION_ID,
+        STANDARD_LIBRARY_REVISION_ID, STANDARD_LIBRARY_V2_REVISION_ID,
+        STANDARD_LIBRARY_V2_VERSION_IDENTITY, STANDARD_LIBRARY_V3_REVISION_ID,
+        STANDARD_LIBRARY_V3_VERSION_IDENTITY, STANDARD_LIBRARY_V4_REVISION_ID,
+        STANDARD_LIBRARY_V4_VERSION_IDENTITY, STANDARD_LIBRARY_V5_REVISION_ID,
+        STANDARD_LIBRARY_V5_VERSION_IDENTITY, STANDARD_LIBRARY_V6_REVISION_ID,
+        STANDARD_LIBRARY_V6_VERSION_IDENTITY, STANDARD_LIBRARY_VERSION_IDENTITY,
+        STANDARD_SOURCE_BUNDLE_ID, STANDARD_SOURCE_REVISION_ID, STANDARD_SOURCE_UNIT_ID,
+        STANDARD_SOURCE_V2_BUNDLE_ID, STANDARD_SOURCE_V2_REVISION_ID, STANDARD_SOURCE_V3_BUNDLE_ID,
         STANDARD_SOURCE_V3_REVISION_ID, STANDARD_SOURCE_V4_BUNDLE_ID,
         STANDARD_SOURCE_V4_REVISION_ID, STANDARD_SOURCE_V5_BUNDLE_ID,
         STANDARD_SOURCE_V5_REVISION_ID, STANDARD_SOURCE_V6_BUNDLE_ID,
-        STANDARD_SOURCE_V6_REVISION_ID, STANDARD_TYPE_IDS, STD_INTEGER_TYPE_ID,
-        STANDARD_CATALOGUE_V5_REVISION_ID, STANDARD_CATALOGUE_V6_REVISION_ID,
-        ACTION_MAGIC, JSON_MAGIC, STD_ACTION_CONTRACT, STD_ACTION_SCHEMA_ID,
-        STD_ACTION_SOURCE_LOGICAL_PATH, STD_ACTION_SOURCE_UNIT_ID, STD_ACTION_TYPE_ID,
-        STD_INVOKE_ECHO_FUNCTION_ID, STD_INVOKE_ECHO_FUNCTION_REVISION_ID,
-        STD_INVOKE_ECHO_PARAMETER_ID, STD_INVOKE_ECHO_REVISION_NUMBER, STD_INVOKE_SCHEMA_ID,
-        STD_INVOKE_SOURCE_LOGICAL_PATH, STD_INVOKE_SOURCE_UNIT_ID, STD_IO_BYTE_STREAM_CONTRACT,
-        STD_IO_BYTE_STREAM_TYPE_ID, STD_IO_SCHEMA_ID, STD_JSON_CONTRACT,
-        STD_JSON_ENCODE_FUNCTION_ID, STD_JSON_SCHEMA_ID, STD_JSON_SOURCE_LOGICAL_PATH,
-        STD_JSON_SOURCE_UNIT_ID, STD_JSON_VALUE_TYPE_ID, STD_OUTPUT_SOURCE_LOGICAL_PATH,
-        STD_OUTPUT_SOURCE_UNIT_ID, STD_SCHEMA_ID, STD_TERMINAL_DOCUMENT_CONTRACT,
-        STD_TERMINAL_DOCUMENT_TYPE_ID, STD_TERMINAL_SCHEMA_ID, STD_TYPES_SCHEMA_ID,
-        STD_TYPES_SOURCE_UNIT_ID, STD_UI_CONTRACT, STD_UI_SCHEMA_ID, STD_UI_SOURCE_LOGICAL_PATH,
-        STD_UI_SOURCE_UNIT_ID, STD_UI_TYPE_ID, StandardLibraryError, StandardLibraryManifestError,
-        StandardUpgradeError, TERMINAL_DOCUMENT_MAGIC, TIME_TYPE_ID, TIMESTAMP_TYPE_ID, UI_MAGIC,
-        UUID_TYPE_ID, VOID_TYPE_ID, build_type_bindings, prepare_standard_upgrade,
+        STANDARD_SOURCE_V6_REVISION_ID, STANDARD_TYPE_IDS, STD_ACTION_CONTRACT,
+        STD_ACTION_SCHEMA_ID, STD_ACTION_SOURCE_LOGICAL_PATH, STD_ACTION_SOURCE_UNIT_ID,
+        STD_ACTION_TYPE_ID, STD_INTEGER_TYPE_ID, STD_INVOKE_ECHO_FUNCTION_ID,
+        STD_INVOKE_ECHO_FUNCTION_REVISION_ID, STD_INVOKE_ECHO_PARAMETER_ID,
+        STD_INVOKE_ECHO_REVISION_NUMBER, STD_INVOKE_SCHEMA_ID, STD_INVOKE_SOURCE_LOGICAL_PATH,
+        STD_INVOKE_SOURCE_UNIT_ID, STD_IO_BYTE_STREAM_CONTRACT, STD_IO_BYTE_STREAM_TYPE_ID,
+        STD_IO_SCHEMA_ID, STD_JSON_CONTRACT, STD_JSON_ENCODE_FUNCTION_ID, STD_JSON_SCHEMA_ID,
+        STD_JSON_SOURCE_LOGICAL_PATH, STD_JSON_SOURCE_UNIT_ID, STD_JSON_VALUE_TYPE_ID,
+        STD_OUTPUT_SOURCE_LOGICAL_PATH, STD_OUTPUT_SOURCE_UNIT_ID, STD_SCHEMA_ID,
+        STD_TERMINAL_DOCUMENT_CONTRACT, STD_TERMINAL_DOCUMENT_TYPE_ID, STD_TERMINAL_SCHEMA_ID,
+        STD_TYPES_SCHEMA_ID, STD_TYPES_SOURCE_UNIT_ID, STD_UI_CONTRACT, STD_UI_SCHEMA_ID,
+        STD_UI_SOURCE_LOGICAL_PATH, STD_UI_SOURCE_UNIT_ID, STD_UI_TYPE_ID, StandardLibraryError,
+        StandardLibraryManifestError, StandardUpgradeError, TERMINAL_DOCUMENT_MAGIC, TIME_TYPE_ID,
+        TIMESTAMP_TYPE_ID, UI_MAGIC, UUID_TYPE_ID, VOID_TYPE_ID, build_type_bindings,
+        is_registered_inspect_carrier_type, prepare_standard_upgrade,
         prepare_standard_upgrade_v1_to_v2, prepare_standard_upgrade_v2_to_v3,
-        prepare_standard_upgrade_with,
-        is_registered_inspect_carrier_type, registered_inspect_carrier_codecs,
-        registered_opaque_codecs,
+        prepare_standard_upgrade_with, registered_inspect_carrier_codecs, registered_opaque_codecs,
         retained_standard_library_snapshot, retained_standard_library_snapshot_from_source,
         retained_standard_library_v2_snapshot, retained_standard_library_v2_snapshot_from_source,
         retained_standard_library_v3_snapshot, retained_standard_library_v4_snapshot,
         standard_library_manifest, standard_library_v2_manifest, standard_library_v3_manifest,
-        standard_library_v4_manifest,
-        verify_standard_library_snapshot,
+        standard_library_v4_manifest, verify_standard_library_snapshot,
         verify_standard_library_v2_snapshot, verify_standard_library_v3_snapshot,
         verify_standard_library_v4_snapshot,
     };
@@ -7553,10 +7576,7 @@ EXPORT TYPE std.ui.UI AS std.UI;
         let type_start = ui
             .find("CREATE TYPE std.ui.UI")
             .expect("the ui type is retained");
-        let type_end = ui
-            .find("TRANSIENT;")
-            .expect("the ui type is retained")
-            + "TRANSIENT;".len();
+        let type_end = ui.find("TRANSIENT;").expect("the ui type is retained") + "TRANSIENT;".len();
         assert_eq!(type_origin.byte_start(), type_start as u32);
         assert_eq!(type_origin.byte_end(), type_end as u32);
 
@@ -7754,7 +7774,7 @@ EXPORT TYPE std.ui.UI AS std.UI;
         ));
     }
 
-#[test]
+    #[test]
     fn v3_registered_opaque_codecs_construct_the_output_payloads() {
         let verified = verify_standard_library_v3_snapshot(
             retained_standard_library_v3_snapshot()
@@ -7877,16 +7897,10 @@ EXPORT TYPE std.ui.UI AS std.UI;
 
         let noncanonical_body = br#"{ "kind":"empty"}"#;
         let mut noncanonical_payload = Vec::from(UI_MAGIC.as_bytes());
-        noncanonical_payload
-            .extend_from_slice(&(noncanonical_body.len() as u32).to_be_bytes());
+        noncanonical_payload.extend_from_slice(&(noncanonical_body.len() as u32).to_be_bytes());
         noncanonical_payload.extend_from_slice(noncanonical_body);
         assert_eq!(
-            OpaqueValue::new(
-                &active,
-                &registry,
-                STD_UI_TYPE_ID,
-                &noncanonical_payload,
-            ),
+            OpaqueValue::new(&active, &registry, STD_UI_TYPE_ID, &noncanonical_payload,),
             Err(OpaqueValueError::InvalidJsonBody {
                 opaque_type: STD_UI_TYPE_ID,
             })
@@ -7907,12 +7921,7 @@ EXPORT TYPE std.ui.UI AS std.UI;
         wrong_length_payload[UI_MAGIC.len()..UI_MAGIC.len() + 4]
             .copy_from_slice(&((body.len() as u32) - 1).to_be_bytes());
         assert_eq!(
-            OpaqueValue::new(
-                &active,
-                &registry,
-                STD_UI_TYPE_ID,
-                &wrong_length_payload,
-            ),
+            OpaqueValue::new(&active, &registry, STD_UI_TYPE_ID, &wrong_length_payload,),
             Err(OpaqueValueError::InvalidFrameLength {
                 opaque_type: STD_UI_TYPE_ID,
             })
@@ -7991,7 +8000,12 @@ EXPORT TYPE std.ui.UI AS std.UI;
             registered_opaque_codecs(&version_three).expect("the V3 opaque codecs register");
         let active_three = empty_version_two_active_revision(&version_three);
         assert_eq!(
-            OpaqueValue::new(&active_three, &version_three_registry, STD_UI_TYPE_ID, &ui_payload),
+            OpaqueValue::new(
+                &active_three,
+                &version_three_registry,
+                STD_UI_TYPE_ID,
+                &ui_payload
+            ),
             Err(OpaqueValueError::UnregisteredType {
                 opaque_type: STD_UI_TYPE_ID,
             })
@@ -8298,9 +8312,18 @@ EXPORT TYPE std.ui.UI AS std.UI;
         let snapshot = super::retained_standard_library_v6_snapshot()
             .expect("the retained V6 action source is valid");
         assert_eq!(snapshot.source().units().len(), 6);
-        assert_eq!(snapshot.source().parent(), Some(super::STANDARD_SOURCE_V5_REVISION_ID));
-        assert_eq!(snapshot.source().units()[5].id(), super::STD_ACTION_SOURCE_UNIT_ID);
-        assert_eq!(snapshot.source().units()[5].logical_path(), super::STD_ACTION_SOURCE_LOGICAL_PATH);
+        assert_eq!(
+            snapshot.source().parent(),
+            Some(super::STANDARD_SOURCE_V5_REVISION_ID)
+        );
+        assert_eq!(
+            snapshot.source().units()[5].id(),
+            super::STD_ACTION_SOURCE_UNIT_ID
+        );
+        assert_eq!(
+            snapshot.source().units()[5].logical_path(),
+            super::STD_ACTION_SOURCE_LOGICAL_PATH
+        );
         assert_eq!(snapshot.executables().len(), 2);
         assert_eq!(
             snapshot
@@ -8323,8 +8346,8 @@ EXPORT TYPE std.ui.UI AS std.UI;
                 .expect("the retained V6 action source is valid"),
         )
         .expect("the retained V6 action source verifies");
-        let registry = super::registered_opaque_codecs(&verified)
-            .expect("the V6 opaque codecs register");
+        let registry =
+            super::registered_opaque_codecs(&verified).expect("the V6 opaque codecs register");
         let active = empty_version_two_active_revision(&verified);
 
         let frame = |tag: u8, value: &[u8]| {
@@ -8369,12 +8392,11 @@ EXPORT TYPE std.ui.UI AS std.UI;
         invalid_domain[super::ACTION_MAGIC.len() + 4] = 0;
         let mut oversized_count = valid.clone();
         let count_offset = super::ACTION_MAGIC.len() + 4 + 1 + (16 * 5);
-        oversized_count[count_offset..count_offset + 4]
-            .copy_from_slice(
-                &u32::try_from(MAX_OPAQUE_CODEC_ACTION_ARGUMENTS + 1)
-                    .expect("the action argument limit fits in u32")
-                    .to_be_bytes(),
-            );
+        oversized_count[count_offset..count_offset + 4].copy_from_slice(
+            &u32::try_from(MAX_OPAQUE_CODEC_ACTION_ARGUMENTS + 1)
+                .expect("the action argument limit fits in u32")
+                .to_be_bytes(),
+        );
         let mut bad_marker = valid.clone();
         let frame_offset = count_offset + 4 + 16 + 4;
         bad_marker[frame_offset..frame_offset + 4].copy_from_slice(b"ORV2");
@@ -8398,16 +8420,33 @@ EXPORT TYPE std.ui.UI AS std.UI;
             1,
             &vec![([1; 16], integer.clone()), ([1; 16], integer.clone())],
         );
+        let max_field_count_record_body = u32::try_from(MAX_RUNTIME_VALUE_NODES)
+            .expect("the runtime node limit fits in u32")
+            .to_be_bytes()
+            .to_vec();
+        let max_field_count_record = descriptor_payload(
+            1,
+            &vec![([1; 16], frame(0x0b, &max_field_count_record_body))],
+        );
+
+        let first_child = frame(0x07, &[0; 45]);
+        let mut truncated_identity_record_body = 2_u32.to_be_bytes().to_vec();
+        truncated_identity_record_body.extend_from_slice(&[0x44; 16]);
+        truncated_identity_record_body.extend_from_slice(&(first_child.len() as u32).to_be_bytes());
+        truncated_identity_record_body.extend_from_slice(&first_child);
+        let truncated_identity_record = descriptor_payload(
+            1,
+            &vec![([1; 16], frame(0x0b, &truncated_identity_record_body))],
+        );
+
         let mut duplicate_record_body = 2_u32.to_be_bytes().to_vec();
         for _ in 0..2 {
             duplicate_record_body.extend_from_slice(&[0x44; 16]);
             duplicate_record_body.extend_from_slice(&(integer.len() as u32).to_be_bytes());
             duplicate_record_body.extend_from_slice(&integer);
         }
-        let duplicate_record = descriptor_payload(
-            1,
-            &vec![([1; 16], frame(0x0b, &duplicate_record_body))],
-        );
+        let duplicate_record =
+            descriptor_payload(1, &vec![([1; 16], frame(0x0b, &duplicate_record_body))]);
         for malformed in [
             invalid_domain,
             oversized_count,
@@ -8417,6 +8456,8 @@ EXPORT TYPE std.ui.UI AS std.UI;
             unsorted,
             repeated,
             duplicate_record,
+            max_field_count_record,
+            truncated_identity_record,
         ] {
             assert!(matches!(
                 OpaqueValue::new(&active, &registry, super::STD_ACTION_TYPE_ID, malformed),
@@ -8429,7 +8470,10 @@ EXPORT TYPE std.ui.UI AS std.UI;
     fn v6_manifest_appends_action_without_changing_v5_catalogue_content() {
         let v5 = super::standard_library_v5_manifest().expect("the V5 manifest is valid");
         let v6 = super::standard_library_v6_manifest().expect("the V6 manifest is valid");
-        assert_eq!(v6.catalogue().schemas().len(), v5.catalogue().schemas().len() + 1);
+        assert_eq!(
+            v6.catalogue().schemas().len(),
+            v5.catalogue().schemas().len() + 1
+        );
         assert_eq!(
             v6.catalogue().value_types().len(),
             v5.catalogue().value_types().len() + 1
@@ -8440,10 +8484,11 @@ EXPORT TYPE std.ui.UI AS std.UI;
         );
         assert_eq!(v6.catalogue().functions(), v5.catalogue().functions());
         assert_eq!(v6.action_source_unit(), super::STD_ACTION_SOURCE_UNIT_ID);
-        assert_eq!(v6.action_source_logical_path(), super::STD_ACTION_SOURCE_LOGICAL_PATH);
+        assert_eq!(
+            v6.action_source_logical_path(),
+            super::STD_ACTION_SOURCE_LOGICAL_PATH
+        );
     }
-
-
 
     #[test]
     fn v5_and_v6_retain_the_locked_sources_and_catalogue_identities() {
@@ -8473,7 +8518,10 @@ EXPORT TYPE std.ui.UI AS std.UI;
             v5.source().units()[4].logical_path(),
             STD_JSON_SOURCE_LOGICAL_PATH
         );
-        assert_eq!(v5.source().units()[4].content(), super::RETAINED_STANDARD_JSON_SOURCE);
+        assert_eq!(
+            v5.source().units()[4].content(),
+            super::RETAINED_STANDARD_JSON_SOURCE
+        );
         assert_eq!(v5.catalogue().schemas().len(), 7);
         assert_eq!(v5.catalogue().value_types().len(), 18);
         assert_eq!(v5.catalogue().type_bindings().len(), 35);
@@ -8503,10 +8551,11 @@ EXPORT TYPE std.ui.UI AS std.UI;
                 .to_string(),
             "std.jsonvalue"
         );
-        assert!(v5
-            .catalogue()
-            .function_by_id(STD_JSON_ENCODE_FUNCTION_ID)
-            .is_some());
+        assert!(
+            v5.catalogue()
+                .function_by_id(STD_JSON_ENCODE_FUNCTION_ID)
+                .is_some()
+        );
 
         assert_eq!(
             super::standard_library_v6_manifest()
@@ -8663,21 +8712,36 @@ EXPORT TYPE std.ui.UI AS std.UI;
         json_payload.extend_from_slice(&7_u32.to_be_bytes());
         json_payload.extend_from_slice(br#"{"a":1}"#);
         assert_eq!(
-            OpaqueValue::new(&v4_active, &v4_registry, STD_JSON_VALUE_TYPE_ID, &json_payload),
+            OpaqueValue::new(
+                &v4_active,
+                &v4_registry,
+                STD_JSON_VALUE_TYPE_ID,
+                &json_payload
+            ),
             Err(OpaqueValueError::UnregisteredType {
                 opaque_type: STD_JSON_VALUE_TYPE_ID
             })
         );
         assert_eq!(
-            OpaqueValue::new(&v5_active, &v5_registry, STD_JSON_VALUE_TYPE_ID, &json_payload)
-                .expect("the V5 JSON codec is registered")
-                .canonical_payload(),
+            OpaqueValue::new(
+                &v5_active,
+                &v5_registry,
+                STD_JSON_VALUE_TYPE_ID,
+                &json_payload
+            )
+            .expect("the V5 JSON codec is registered")
+            .canonical_payload(),
             json_payload.as_slice()
         );
         assert_eq!(
-            OpaqueValue::new(&v6_active, &v6_registry, STD_JSON_VALUE_TYPE_ID, &json_payload)
-                .expect("the V6 retained JSON codec is registered")
-                .canonical_payload(),
+            OpaqueValue::new(
+                &v6_active,
+                &v6_registry,
+                STD_JSON_VALUE_TYPE_ID,
+                &json_payload
+            )
+            .expect("the V6 retained JSON codec is registered")
+            .canonical_payload(),
             json_payload.as_slice()
         );
 
@@ -8685,13 +8749,23 @@ EXPORT TYPE std.ui.UI AS std.UI;
         action_payload.extend_from_slice(&3_u32.to_be_bytes());
         action_payload.extend_from_slice(&[0xa5, 0x00, 0xff]);
         assert_eq!(
-            OpaqueValue::new(&v5_active, &v5_registry, STD_ACTION_TYPE_ID, &action_payload),
+            OpaqueValue::new(
+                &v5_active,
+                &v5_registry,
+                STD_ACTION_TYPE_ID,
+                &action_payload
+            ),
             Err(OpaqueValueError::UnregisteredType {
                 opaque_type: STD_ACTION_TYPE_ID
             })
         );
         assert_eq!(
-            OpaqueValue::new(&v6_active, &v6_registry, STD_ACTION_TYPE_ID, &action_payload),
+            OpaqueValue::new(
+                &v6_active,
+                &v6_registry,
+                STD_ACTION_TYPE_ID,
+                &action_payload
+            ),
             Err(OpaqueValueError::InvalidActionFrame {
                 opaque_type: STD_ACTION_TYPE_ID,
             })
@@ -8701,15 +8775,30 @@ EXPORT TYPE std.ui.UI AS std.UI;
     #[test]
     fn inspect_carrier_registry_is_fixed_and_deterministic() {
         let expected = [
-            (SYS_INSPECT_SNAPSHOT_TYPE_ID, SYS_INSPECT_SNAPSHOT_REPRESENTATION_CONTRACT),
+            (
+                SYS_INSPECT_SNAPSHOT_TYPE_ID,
+                SYS_INSPECT_SNAPSHOT_REPRESENTATION_CONTRACT,
+            ),
             (
                 SYS_INSPECT_INVOCATION_NODES_TYPE_ID,
                 SYS_INSPECT_INVOCATION_NODES_REPRESENTATION_CONTRACT,
             ),
-            (SYS_INSPECT_CALLS_TYPE_ID, SYS_INSPECT_CALLS_REPRESENTATION_CONTRACT),
-            (SYS_INSPECT_RESOURCES_TYPE_ID, SYS_INSPECT_RESOURCES_REPRESENTATION_CONTRACT),
-            (SYS_INSPECT_STATE_CELLS_TYPE_ID, SYS_INSPECT_STATE_CELLS_REPRESENTATION_CONTRACT),
-            (SYS_INSPECT_UI_NODES_TYPE_ID, SYS_INSPECT_UI_NODES_REPRESENTATION_CONTRACT),
+            (
+                SYS_INSPECT_CALLS_TYPE_ID,
+                SYS_INSPECT_CALLS_REPRESENTATION_CONTRACT,
+            ),
+            (
+                SYS_INSPECT_RESOURCES_TYPE_ID,
+                SYS_INSPECT_RESOURCES_REPRESENTATION_CONTRACT,
+            ),
+            (
+                SYS_INSPECT_STATE_CELLS_TYPE_ID,
+                SYS_INSPECT_STATE_CELLS_REPRESENTATION_CONTRACT,
+            ),
+            (
+                SYS_INSPECT_UI_NODES_TYPE_ID,
+                SYS_INSPECT_UI_NODES_REPRESENTATION_CONTRACT,
+            ),
             (
                 SYS_INSPECT_PRESENTATION_CANDIDATES_TYPE_ID,
                 SYS_INSPECT_PRESENTATION_CANDIDATES_REPRESENTATION_CONTRACT,
@@ -8730,7 +8819,8 @@ EXPORT TYPE std.ui.UI AS std.UI;
             assert_eq!(registration.representation_contract(), contract);
             assert!(is_registered_inspect_carrier_type(opaque_type));
         }
-        assert!(!is_registered_inspect_carrier_type(TypeId::from_bytes([0xaa; 16])));
+        assert!(!is_registered_inspect_carrier_type(TypeId::from_bytes(
+            [0xaa; 16]
+        )));
     }
-
 }
