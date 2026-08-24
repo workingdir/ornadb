@@ -8119,6 +8119,149 @@ async fn proves_sealed_security_identity_invocation_and_audit() -> TestResult<()
         // identifies the admitted sealed system target. Restoring the binding
         // must return the same durable history to an accepted recovery path.
         kernel.recover().await?;
+
+        // Exercise historical audit recovery without letting the active loader
+        // reject the same collision first: point the active marker at the
+        // already-valid V2 pair while the V3 invocation evidence remains
+        // historical audit data.
+        let collision_function = SYS_SECURITY_SESSION_PRINCIPAL_FUNCTION_ID.to_bytes().to_vec();
+        let collision_revision = vec![0xfa; 16];
+        let collision_hash = vec![0xfb; 32];
+        let collision_catalogue = pair.catalogue().to_bytes().to_vec();
+        let schema_session = database.open().await?;
+        let schema_row = schema_session
+            .client()
+            .query_one(
+                "SELECT schema_id, source_unit_id
+                 FROM _orna_kernel.catalogue_schemas
+                 WHERE catalogue_revision_id = $1 AND source_unit_id IS NOT NULL
+                 LIMIT 1",
+                &[&collision_catalogue],
+            )
+            .await?;
+        let schema_id: Vec<u8> = schema_row.try_get("schema_id")?;
+        let source_unit_id: Vec<u8> = schema_row.try_get("source_unit_id")?;
+        let revision_number: i64 = schema_session
+            .client()
+            .query_one(
+                "SELECT COALESCE(MAX(revision_number), 0) + 1
+                 FROM _orna_kernel.function_revisions
+                 WHERE function_id = $1",
+                &[&collision_function],
+            )
+            .await?
+            .try_get(0)?;
+        schema_session.client().batch_execute("BEGIN").await?;
+        schema_session
+            .client()
+            .execute(
+                "INSERT INTO _orna_kernel.function_revisions
+                    (id, introduced_catalogue_revision_id, function_id, revision_number,
+                     content_hash, semantic_ir_hash, hash_algorithm, language_version, status)
+                 VALUES ($1, $2, $3, $4, $5, $5, 'sha256', 'orna.language/1', 'active')",
+                &[
+                    &collision_revision,
+                    &collision_catalogue,
+                    &collision_function,
+                    &revision_number,
+                    &collision_hash,
+                ],
+            )
+            .await?;
+        schema_session
+            .client()
+            .execute(
+                "INSERT INTO _orna_kernel.catalogue_functions
+                    (catalogue_revision_id, function_id, schema_id, name_parts, domain,
+                     security_mode, transaction_mode, volatility, return_shape,
+                     return_type_kind, return_scalar_type, return_target_type_id,
+                     current_function_revision_id, source_unit_id, source_start, source_end)
+                 VALUES ($1, $2, $3, ARRAY['app', 'sealed_collision'], 'server', 'invoker',
+                         'read_only', 'stable', 'rows', NULL, NULL, NULL, $4, $5, 0, 1)",
+                &[
+                    &collision_catalogue,
+                    &collision_function,
+                    &schema_id,
+                    &collision_revision,
+                    &source_unit_id,
+                ],
+            )
+            .await?;
+        schema_session.client().batch_execute("COMMIT").await?;
+        schema_session.shutdown().await?;
+
+        let v2_source = chain.version_two.pair().source().to_bytes().to_vec();
+        let v2_catalogue = chain.version_two.pair().catalogue().to_bytes().to_vec();
+        let database_session = database.open().await?;
+        let changed = database_session
+            .client()
+            .execute(
+                "UPDATE _orna_kernel.active_revision
+                 SET source_revision_id = $1, catalogue_revision_id = $2",
+                &[&v2_source, &v2_catalogue],
+            )
+            .await?;
+        require(
+            changed == 1,
+            "historical collision active marker update changed the wrong row count",
+        )?;
+        database_session.shutdown().await?;
+
+        let error = recovery_error(&database).await?;
+        require(
+            matches!(
+                error,
+                PostgresKernelError::DurableInvariant {
+                    relation: "_orna_kernel.invocation_audit_events",
+                    rule: "target function and pinned revision must exist together",
+                    ..
+                }
+            ),
+            "sealed system catalogue collision did not fail historical recovery with the exact durable invariant",
+        )?;
+
+        let cleanup_session = database.open().await?;
+        cleanup_session.client().batch_execute("BEGIN").await?;
+        let deleted_revision = cleanup_session
+            .client()
+            .execute(
+                "DELETE FROM _orna_kernel.function_revisions WHERE id = $1",
+                &[&collision_revision],
+            )
+            .await?;
+        let deleted_function = cleanup_session
+            .client()
+            .execute(
+                "DELETE FROM _orna_kernel.catalogue_functions
+                 WHERE catalogue_revision_id = $1 AND function_id = $2",
+                &[&collision_catalogue, &collision_function],
+            )
+            .await?;
+        require(
+            deleted_revision == 1 && deleted_function == 1,
+            "sealed system catalogue collision cleanup changed the wrong row count",
+        )?;
+        cleanup_session.client().batch_execute("COMMIT").await?;
+        cleanup_session.shutdown().await?;
+
+        let database_session = database.open().await?;
+        let changed = database_session
+            .client()
+            .execute(
+                "UPDATE _orna_kernel.active_revision
+                 SET source_revision_id = $1, catalogue_revision_id = $2",
+                &[
+                    &pair.source().to_bytes().to_vec(),
+                    &collision_catalogue,
+                ],
+            )
+            .await?;
+        require(
+            changed == 1,
+            "historical collision active marker restore changed the wrong row count",
+        )?;
+        database_session.shutdown().await?;
+        kernel.recover().await?;
         let database_session = database.open().await?;
         let changed = database_session
             .client()

@@ -2576,14 +2576,20 @@ impl PostgresKernel {
                                                     | ClientResourceCompletion::Cancelled { key, generation, .. } => (*key, *generation),
                                                 };
                                                 if completion_key != key || completion_generation != generation {
+                                                    continue;
+                                                }
+                                                let Some(resource) = state.resource(key) else {
                                                     return Err(PostgresKernelError::ClientExecution(
                                                         ClientExecutionError::ResourceEvaluation {
                                                             context,
                                                             source: ClientResourceExecutionError::Failed(
-                                                                "resource.executor.invalid_completion".to_owned(),
+                                                                "resource.executor.invalid_state".to_owned(),
                                                             ),
                                                         },
                                                     ));
+                                                };
+                                                if resource.request_id() != Some(completion.request_id()) {
+                                                    continue;
                                                 }
                                                 if matches!(completion, ClientResourceCompletion::Pending { .. }) {
                                                     return Err(PostgresKernelError::ClientExecution(
@@ -7728,8 +7734,18 @@ async fn require_invocation_audit_target(
             })?;
     match class.as_str() {
         "system" => {
-            let admitted = system_function_by_id(target.function())
-                .is_some_and(is_admitted_security_identity);
+            let catalogue_current: Option<Vec<u8>> = row
+                .try_get("catalogue_current_function_revision_id")
+                .map_err(|source| {
+                    row_decode(
+                        relation,
+                        record.to_owned(),
+                        "catalogue_current_function_revision_id",
+                        source,
+                    )
+                })?;
+            let admitted =
+                system_function_by_id(target.function()).is_some_and(is_admitted_security_identity);
             let standard_revision: Option<Vec<u8>> = row
                 .try_get("pinned_standard_library_revision_id")
                 .map_err(|source| {
@@ -7740,7 +7756,8 @@ async fn require_invocation_audit_target(
                         source,
                     )
                 })?;
-            if !admitted
+            if catalogue_current.is_some()
+                || !admitted
                 || pinned_revision != function
                 || standard_revision.is_some()
             {
@@ -10344,5 +10361,4 @@ mod tests {
             },
         );
     }
-
 }
