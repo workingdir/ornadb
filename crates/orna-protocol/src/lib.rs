@@ -4,37 +4,33 @@ mod frame;
 
 pub use frame::{
     CallArgument, CallFailure, Channel, ClientAction, ClientFrame, ConnectionError, Event,
-    ResourceAccepted, ResourceAcceptedFrame, ResourceArgument, ResourceCancel, ResourceCancelFrame,
-    ResourceCancelReason,
-    ResourceCancellationCode, ResourceClientFrame, ResourceCompleted, ResourceCompletedFrame,
-    ResourceCancelled, ResourceConnectionError, ResourceCredit,
-    ResourceFrameDisposition, ResourceProtocolConnection,
-    ResourceFailed, ResourceFailedFrame,
-    ResourceKind, ResourceRequest, ResourceRequestFrame, ResourceServerFrame, ResourceValues,
-    ResourceValuesFrame, ResourceWindowUpdate, ResourceWindowUpdateFrame, ResourceCancelledFrame,
-    EventRecord, FrameCodecError, InvocationEventBatch, InvocationEventRecord,
-    MAX_CHANNEL_WINDOW, MAX_RESOURCE_ARGUMENTS, MAX_RESOURCE_BATCH_ITEMS,
-    MAX_RESOURCE_TOTAL_ITEMS, MAX_RESOURCE_WINDOW,
-    MAX_FRAME_PAYLOAD_LENGTH, ProtocolConnection, RawCall, RawCallClient, RawCallClientError,
-    RawCallClientResponse, RetainedInvokeRequest, ServerAction, ServerFrame,
-    decode_active_client_frame, decode_active_server_frame, decode_catalogue_client_frame,
-    decode_catalogue_server_frame, decode_client_frame, decode_constructed_client_frame,
+    EventRecord, FrameCodecError, InvocationEventBatch, InvocationEventRecord, MAX_CHANNEL_WINDOW,
+    MAX_FRAME_PAYLOAD_LENGTH, MAX_RESOURCE_ARGUMENTS, MAX_RESOURCE_BATCH_ITEMS,
+    MAX_RESOURCE_TOTAL_ITEMS, MAX_RESOURCE_WINDOW, ProtocolConnection, RawCall, RawCallClient,
+    RawCallClientError, RawCallClientResponse, ResourceAccepted, ResourceAcceptedFrame,
+    ResourceArgument, ResourceCancel, ResourceCancelFrame, ResourceCancelReason,
+    ResourceCancellationCode, ResourceCancelled, ResourceCancelledFrame, ResourceClientFrame,
+    ResourceCompleted, ResourceCompletedFrame, ResourceConnectionError, ResourceCredit,
+    ResourceFailed, ResourceFailedFrame, ResourceFrameDisposition, ResourceKind,
+    ResourceProtocolConnection, ResourceRequest, ResourceRequestFrame, ResourceServerFrame,
+    ResourceValues, ResourceValuesFrame, ResourceWindowUpdate, ResourceWindowUpdateFrame,
+    RetainedInvokeRequest, ServerAction, ServerFrame, decode_active_client_frame,
+    decode_active_server_frame, decode_catalogue_client_frame, decode_catalogue_server_frame,
+    decode_client_frame, decode_constructed_client_frame,
     decode_constructed_invocation_event_frame, decode_constructed_server_frame,
-    decode_invocation_event_batch, decode_invoke_request,
-    decode_registered_client_frame, decode_registered_server_frame, decode_retained_invoke_request,
-    decode_resource_accepted, decode_resource_cancel, decode_resource_cancelled,
-    decode_resource_client_frame, decode_resource_completed, decode_resource_failed,
-    decode_resource_request, decode_resource_server_frame, decode_resource_values,
-    decode_resource_window_update,
+    decode_invocation_event_batch, decode_invoke_request, decode_registered_client_frame,
+    decode_registered_server_frame, decode_resource_accepted, decode_resource_cancel,
+    decode_resource_cancelled, decode_resource_client_frame, decode_resource_completed,
+    decode_resource_failed, decode_resource_request, decode_resource_server_frame,
+    decode_resource_values, decode_resource_window_update, decode_retained_invoke_request,
     decode_server_frame, encode_active_client_frame, encode_active_server_frame,
     encode_catalogue_client_frame, encode_catalogue_server_frame, encode_client_frame,
     encode_constructed_client_frame, encode_constructed_server_frame,
     encode_invocation_event_batch, encode_invoke_request, encode_registered_client_frame,
-    encode_resource_accepted, encode_resource_cancel, encode_resource_cancelled,
-    encode_resource_client_frame, encode_resource_completed, encode_resource_failed,
-    encode_resource_request, encode_resource_server_frame, encode_resource_values,
-    encode_resource_window_update,
-    encode_registered_server_frame, encode_server_frame,
+    encode_registered_server_frame, encode_resource_accepted, encode_resource_cancel,
+    encode_resource_cancelled, encode_resource_client_frame, encode_resource_completed,
+    encode_resource_failed, encode_resource_request, encode_resource_server_frame,
+    encode_resource_values, encode_resource_window_update, encode_server_frame,
 };
 
 use std::{cmp::Ordering, collections::BTreeMap, error::Error, fmt};
@@ -1063,8 +1059,7 @@ pub fn decode_constructed_value(
         return Err(ValueCodecError::ConstructedTypeIdentityNotZero { identity: type_id });
     }
     if tag == CONSTRUCTED_TAG {
-        let (descriptor, body) =
-            decode_constructed_descriptor_with_set(payload, is_set_version)?;
+        let (descriptor, body) = decode_constructed_descriptor_with_set(payload, is_set_version)?;
         preflight_constructed_descriptor(active, &descriptor)?;
         let mut budget = NodeBudget::runtime();
         preflight_orv5_tree(
