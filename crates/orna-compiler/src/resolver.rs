@@ -26082,22 +26082,81 @@ mod tests {
     }
 
     #[test]
-    fn rejects_v5_when_a_retained_v4_unit_path_or_ordinal_is_tampered() {
+    fn rejects_v5_when_a_retained_v4_unit_identity_order_path_or_ordinal_is_tampered() {
         let (units, catalogue, origins, executables) = standard_v5_parts();
+        assert!(
+            check_v5_parts(units.clone(), &catalogue, &origins, &executables).is_ok(),
+            "canonical V5 fixture must be accepted before tamper checks",
+        );
         for (label, replacement) in [
-            ("path", stored_v2_unit(STD_OUTPUT_SOURCE_UNIT_ID, 2, "std/other.orna", STANDARD_V3_OUTPUT_SOURCE)),
-            ("ordinal", stored_v2_unit(STD_OUTPUT_SOURCE_UNIT_ID, 9, "std/output.orna", STANDARD_V3_OUTPUT_SOURCE)),
+            (
+                "identity",
+                stored_v2_unit(
+                    SourceUnitId::from_bytes([0x9c; 16]),
+                    2,
+                    "std/output.orna",
+                    STANDARD_V3_OUTPUT_SOURCE,
+                ),
+            ),
+            (
+                "path",
+                stored_v2_unit(
+                    STD_OUTPUT_SOURCE_UNIT_ID,
+                    2,
+                    "std/other.orna",
+                    STANDARD_V3_OUTPUT_SOURCE,
+                ),
+            ),
+            (
+                "ordinal",
+                stored_v2_unit(
+                    STD_OUTPUT_SOURCE_UNIT_ID,
+                    9,
+                    "std/output.orna",
+                    STANDARD_V3_OUTPUT_SOURCE,
+                ),
+            ),
         ] {
             let mut tampered = units.clone();
             tampered[2] = replacement;
             let error = check_v5_parts(tampered, &catalogue, &origins, &executables).unwrap_err();
-            assert!(matches!(error, StandardLibraryCheckError::SourceMismatch), "{label}: {error}");
+            assert!(
+                matches!(error, StandardLibraryCheckError::SourceMismatch),
+                "{label}: {error}"
+            );
         }
+
+        assert!(
+            check_v5_parts(units.clone(), &catalogue, &origins, &executables).is_ok(),
+            "canonical V5 fixture must be accepted before order tamper",
+        );
+        let mut tampered = units;
+        tampered[2] = stored_v2_unit(
+            STD_UI_SOURCE_UNIT_ID,
+            2,
+            "std/ui.orna",
+            STANDARD_V4_UI_SOURCE,
+        );
+        tampered[3] = stored_v2_unit(
+            STD_OUTPUT_SOURCE_UNIT_ID,
+            3,
+            "std/output.orna",
+            STANDARD_V3_OUTPUT_SOURCE,
+        );
+        let error = check_v5_parts(tampered, &catalogue, &origins, &executables).unwrap_err();
+        assert!(
+            matches!(error, StandardLibraryCheckError::SourceMismatch),
+            "swapped retained V4 units: {error}"
+        );
     }
 
     #[test]
     fn rejects_v5_when_the_json_unit_declaration_or_identity_is_tampered() {
         let (units, catalogue, origins, executables) = standard_v5_parts();
+        assert!(
+            check_v5_parts(units.clone(), &catalogue, &origins, &executables).is_ok(),
+            "canonical V5 fixture must be accepted before tamper checks",
+        );
         let rejects_source = |source: &str, label: &str| {
             let mut tampered = units.clone();
             tampered[4] = stored_v2_unit(
@@ -26186,22 +26245,81 @@ mod tests {
     }
 
     #[test]
-    fn rejects_v6_when_a_retained_v4_unit_path_or_ordinal_is_tampered() {
+    fn rejects_v6_when_a_retained_v4_unit_identity_order_path_or_ordinal_is_tampered() {
         let (units, catalogue, origins, executables) = standard_v6_parts();
+        assert!(
+            check_v6_parts(units.clone(), &catalogue, &origins, &executables).is_ok(),
+            "canonical V6 fixture must be accepted before tamper checks",
+        );
         for (label, replacement) in [
-            ("path", stored_v2_unit(STD_OUTPUT_SOURCE_UNIT_ID, 2, "std/other.orna", STANDARD_V3_OUTPUT_SOURCE)),
-            ("ordinal", stored_v2_unit(STD_OUTPUT_SOURCE_UNIT_ID, 9, "std/output.orna", STANDARD_V3_OUTPUT_SOURCE)),
+            (
+                "identity",
+                stored_v2_unit(
+                    SourceUnitId::from_bytes([0x9d; 16]),
+                    2,
+                    "std/output.orna",
+                    STANDARD_V3_OUTPUT_SOURCE,
+                ),
+            ),
+            (
+                "path",
+                stored_v2_unit(
+                    STD_OUTPUT_SOURCE_UNIT_ID,
+                    2,
+                    "std/other.orna",
+                    STANDARD_V3_OUTPUT_SOURCE,
+                ),
+            ),
+            (
+                "ordinal",
+                stored_v2_unit(
+                    STD_OUTPUT_SOURCE_UNIT_ID,
+                    9,
+                    "std/output.orna",
+                    STANDARD_V3_OUTPUT_SOURCE,
+                ),
+            ),
         ] {
             let mut tampered = units.clone();
             tampered[2] = replacement;
             let error = check_v6_parts(tampered, &catalogue, &origins, &executables).unwrap_err();
-            assert!(matches!(error, StandardLibraryCheckError::SourceMismatch), "{label}: {error}");
+            assert!(
+                matches!(error, StandardLibraryCheckError::SourceMismatch),
+                "{label}: {error}"
+            );
         }
+
+        assert!(
+            check_v6_parts(units.clone(), &catalogue, &origins, &executables).is_ok(),
+            "canonical V6 fixture must be accepted before order tamper",
+        );
+        let mut tampered = units;
+        tampered[2] = stored_v2_unit(
+            STD_UI_SOURCE_UNIT_ID,
+            2,
+            "std/ui.orna",
+            STANDARD_V4_UI_SOURCE,
+        );
+        tampered[3] = stored_v2_unit(
+            STD_OUTPUT_SOURCE_UNIT_ID,
+            3,
+            "std/output.orna",
+            STANDARD_V3_OUTPUT_SOURCE,
+        );
+        let error = check_v6_parts(tampered, &catalogue, &origins, &executables).unwrap_err();
+        assert!(
+            matches!(error, StandardLibraryCheckError::SourceMismatch),
+            "swapped retained V4 units: {error}"
+        );
     }
 
     #[test]
     fn rejects_v6_when_the_action_unit_declaration_or_identity_is_tampered() {
         let (units, catalogue, origins, executables) = standard_v6_parts();
+        assert!(
+            check_v6_parts(units.clone(), &catalogue, &origins, &executables).is_ok(),
+            "canonical V6 fixture must be accepted before tamper checks",
+        );
         let rejects_source = |source: &str, label: &str| {
             let mut tampered = units.clone();
             tampered[5] = stored_v2_unit(
