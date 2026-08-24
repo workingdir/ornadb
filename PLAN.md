@@ -120,6 +120,31 @@ contract:
 - retained revision-pair listing now validates all decoded ancestry in memory,
   including parent parity, cycles, identity uniqueness, and the single active
   marker, without per-entry database round trips;
+- commit `6e61996` now enforces retained V1 source identity before checking the
+  source: the canonical source-unit ID, `std/types.orna` logical path, and
+  ordinal are required. Local evidence is
+  `crates/orna-compiler/src/resolver.rs::tests::rejects_v1_source_unit_identity_mutations`.
+- commit `c58869d` now orders checked resource and action arguments by their
+  canonical `CheckedParameterId`, independent of source named-argument order.
+  Local evidence is
+  `crates/orna-compiler/src/resolver.rs::tests::sorts_resource_and_action_arguments_by_checked_parameter_id`.
+- commit `ba20fda` now proves private headless runtime teardown retires owned
+  node, action, and operation handles, cancels owned requests once, and rejects
+  stale work. Local evidence is
+  `crates/orna-client/src/lib.rs::runtime_conformance::destroying_a_surface_retires_all_owned_handles_and_suppresses_stale_work`
+  (the focused runtime-conformance run passed 39 tests); this is not production
+  runtime-ABI evidence.
+- commit `1aeef47` now proves the accepted SERVER dogfood fixture checks and
+  prepares offline, including its four functions and candidate revision pair.
+  Local evidence is
+  `crates/orna-server/tests/standard_database.rs::checks_and_prepares_server_function_dogfood_fixture_offline`;
+  PostgreSQL installation and invocation remain Compose-gated.
+- commit `8af410c` adds a focused source-apply recovery-mismatch mapping
+  regression; local source-apply fail-closed coverage now includes the exact
+  post-apply candidate-hash reproduction guard.
+- commit `64d9603` covers both retained legacy Inspector public error-code
+  aliases; the accepted Inspector boundary still has no populated projection
+  or graphical-runtime claim.
 
 The accepted slices have focused proof in the repository. The resource,
 transport, action, and Inspector slices have local parser/compiler/codec/
@@ -129,6 +154,9 @@ development service. No local Compose result is claimed. The source-apply
 audit, rollback, tamper, and retained-listing integration tests are likewise
 present but Compose-gated. Local evidence covers compilation, migration
 registry checks, codec checks, and focused in-memory validators only.
+The four commits above add local compiler, private-fixture, and offline
+SERVER-dogfood evidence only; they do not upgrade any Compose or host-gated
+proof, or broaden the accepted boundary.
 The fresh network-disabled Debian 12 host proof and the same-major PostgreSQL
 predecessor transition remain separate blockers. No proposal-level
 implementation should start without the contract gate below.
@@ -493,6 +521,15 @@ effort:
   redaction, and lifecycle details are not executable.
 - Work ADR 0019 requires a clean Debian 12 amd64, network-disabled host proof,
   which is not available on the current Fedora host.
+- Installed PostgreSQL checks remain Compose-gated `#[ignore]` evidence; no
+  local Compose result is claimed for source apply, Inspector, resource,
+  action, security-admin, or invocation proofs.
+- Offline editor tooling is accepted, but the Neovim/Vim editor-runtime checks
+  remain blocked when those binaries are unavailable; no editor-runtime proof
+  is claimed.
+- Studio remains pending behind the production runtime ABI and populated
+  Inspector projection contracts; no Studio source/apply/revision path is
+  accepted yet.
 - The checked-in `debian-clean-machine.sh` scenario currently runs its proof
   inside Docker (`crates/orna-system-tests/scenarios/debian-clean-machine.sh:22-27`).
   That is useful isolation evidence but does not satisfy the accepted host
@@ -505,5 +542,5 @@ effort:
 
 Until these blockers change status, maintain the accepted implementation
 baseline, improve its evidence, and prepare the next contract. Do not
-implement a graphical runtime, populated Inspector projections, or a
-JSON-RPC/MCP gateway from proposal text alone.
+implement a graphical runtime, populated Inspector projections, Studio, or
+JSON-RPC/MCP gateways from proposal text alone.
