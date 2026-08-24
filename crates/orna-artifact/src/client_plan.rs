@@ -6840,6 +6840,27 @@ mod tests {
     }
 
     #[test]
+    fn action_plan_round_trips_client_target_domain() {
+        let source_plan = action_plan();
+        let operation = source_plan.operation();
+        let plan = ActionClientPlan::new(ActionOperationNode::new(
+            ActionTargetDomain::Client,
+            operation.target(),
+            operation.target_revision(),
+            operation.call_site(),
+            operation.arguments().to_vec(),
+            operation.result_type(),
+        ));
+
+        let bytes = plan.encode().expect("the client action plan encodes");
+        assert_eq!(bytes[13], ActionTargetDomain::Client.tag());
+
+        let decoded = ActionClientPlan::decode(&bytes).expect("the client action plan decodes");
+        assert_eq!(decoded, plan);
+        assert_eq!(decoded.operation().domain(), ActionTargetDomain::Client);
+    }
+
+    #[test]
     fn action_plan_encode_rejects_zero_identity_fields() {
         let make = |target, source, catalogue, call_site, result_type, parameter| {
             ActionClientPlan::new(ActionOperationNode::new(
