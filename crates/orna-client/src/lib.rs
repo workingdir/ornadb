@@ -2056,6 +2056,9 @@ fn resolve_unclassified_target<'a>(
     active: &'a ActiveDatabaseRevision,
     raw_target: InvocationTarget,
 ) -> Option<ResolvedResourceTarget<'a>> {
+    if raw_target.revision() != active.pair() {
+        return None;
+    }
     let application = active.catalogue().function_by_id(raw_target.function());
     let standard = active.catalogue_hash_context().standard();
     let standard_definition =
@@ -4053,6 +4056,7 @@ fn evaluate_plan(
         ClientReturnShape::StreamState(expected) => {
             let plan = StateClientPlan::decode(payload)
                 .map_err(|source| ClientExecutionError::InvalidArtifact { context, source })?;
+            preflight_client_state_calls(active, &plan, context)?;
             evaluate_stream_state_plan(
                 active, &plan, context, lineage, expected, arguments, declarations, grants, state, depth,
                 principal, executor, local_environment,
@@ -4061,6 +4065,7 @@ fn evaluate_plan(
         ClientReturnShape::State(expected) => {
             let plan = StateClientPlan::decode(payload)
                 .map_err(|source| ClientExecutionError::InvalidArtifact { context, source })?;
+            preflight_client_state_calls(active, &plan, context)?;
             evaluate_state_plan(
                 active,
                 &plan,
@@ -4080,6 +4085,7 @@ fn evaluate_plan(
         ClientReturnShape::StreamProcedural(expected) => {
             let plan = ProceduralClientPlan::decode(payload)
                 .map_err(|source| ClientExecutionError::InvalidArtifact { context, source })?;
+            preflight_client_procedural_calls(active, &plan, context)?;
             evaluate_procedural_plan(
                 active, &plan, context, lineage, expected, true, arguments, declarations, grants, state,
                 depth, principal, executor, local_environment,
@@ -4088,6 +4094,7 @@ fn evaluate_plan(
         ClientReturnShape::Procedural(expected) => {
             let plan = ProceduralClientPlan::decode(payload)
                 .map_err(|source| ClientExecutionError::InvalidArtifact { context, source })?;
+            preflight_client_procedural_calls(active, &plan, context)?;
             evaluate_procedural_plan(
                 active,
                 &plan,
@@ -4108,11 +4115,13 @@ fn evaluate_plan(
         ClientReturnShape::Action(_expected) => {
             let plan = ActionClientPlan::decode(payload)
                 .map_err(|source| ClientExecutionError::InvalidArtifact { context, source })?;
+            preflight_client_action_calls(active, plan.operation(), context)?;
             evaluate_action_operation(active, plan.operation(), context, lineage, arguments, declarations, grants, state, depth, principal, executor, local_environment)
         }
         ClientReturnShape::StreamResource(expected) => {
             let plan = ResourceClientPlan::decode(payload)
                 .map_err(|source| ClientExecutionError::InvalidArtifact { context, source })?;
+            preflight_client_expression_calls(active, plan.expression(), context)?;
             evaluate_stream_resource_plan(
                 active, &plan, context, lineage, expected, arguments, declarations, grants, state, depth,
                 principal, executor, local_environment,
@@ -4121,6 +4130,7 @@ fn evaluate_plan(
         ClientReturnShape::Resource(expected) => {
             let plan = ResourceClientPlan::decode(payload)
                 .map_err(|source| ClientExecutionError::InvalidArtifact { context, source })?;
+            preflight_client_expression_calls(active, plan.expression(), context)?;
             evaluate_resource_plan(
                 active,
                 &plan,
@@ -4568,6 +4578,8 @@ fn evaluate_capability_plan(
     executor: &mut Option<&mut dyn ClientResourceExecutor>,
     local_environment: &mut ClientLocalEnvironment,
 ) -> Result<RuntimeValue, ClientExecutionError> {
+    preflight_client_inner_plan_calls(active, plan.inner_plan(), context)?;
+
     match plan.inner_plan() {
         InnerClientPlan::Boolean(inner) => Ok(RuntimeValue::Boolean(inner.returned_boolean())),
         InnerClientPlan::Opaque(inner) => {
@@ -4577,7 +4589,6 @@ fn evaluate_capability_plan(
             evaluate_opaque_plan(active, inner, context, expected)
         }
         InnerClientPlan::Expression(inner) => {
-            preflight_client_expression_calls(active, inner.expression(), context)?;
             if let ClientReturnShape::StreamExpression(expected) = return_shape {
                 return evaluate_stream_expression_plan(
                     active,
@@ -5258,11 +5269,13 @@ fn action_target_result_type(
     descriptor: &ClientActionDescriptor,
 ) -> Result<(ResourceKind, ResolvedType), ClientActionError> {
     let resolved_target = resolve_action_target(active, descriptor)?;
-    let (kind, resolved) = match resolved_target.definition.return_type() {
-        FunctionReturn::Single(resolved) => (ResourceKind::Scalar, *resolved),
-        FunctionReturn::Stream(resolved) => (ResourceKind::Stream, *resolved),
-        FunctionReturn::Rows(_) => return Err(ClientActionError::ResultTypeMismatch),
+    let resolved = match resolved_target.definition.return_type() {
+        FunctionReturn::Single(resolved) => *resolved,
+        FunctionReturn::Stream(_) | FunctionReturn::Rows(_) => {
+            return Err(ClientActionError::ResultTypeMismatch)
+        }
     };
+    let kind = ResourceKind::Scalar;
     if !resource_type_matches_id(active, resolved, descriptor.result_type) {
         return Err(ClientActionError::ResultTypeMismatch);
     }
@@ -7275,6 +7288,14 @@ fn preflight_client_expression_calls(
     let mut decoded_targets = Vec::new();
     collect_client_expression_call_targets(active, expression, context, &mut decoded_targets)?;
 
+    preflight_client_call_targets(active, context, decoded_targets)
+}
+
+fn preflight_client_call_targets(
+    active: &ActiveDatabaseRevision,
+    context: ClientExecutionContext,
+    decoded_targets: Vec<FunctionId>,
+) -> Result<(), ClientExecutionError> {
     let mut durable_references = active
         .references()
         .iter()
@@ -7299,6 +7320,138 @@ fn preflight_client_expression_calls(
     Ok(())
 }
 
+fn preflight_client_state_calls(
+    active: &ActiveDatabaseRevision,
+    plan: &StateClientPlan,
+    context: ClientExecutionContext,
+) -> Result<(), ClientExecutionError> {
+    let mut decoded_targets = Vec::new();
+    for slot in plan.slots() {
+        if let StateDefault::Expression(expression) = slot.default() {
+            collect_client_expression_call_targets(active, expression, context, &mut decoded_targets)?;
+        }
+    }
+    collect_client_expression_call_targets(active, plan.expression(), context, &mut decoded_targets)?;
+    preflight_client_call_targets(active, context, decoded_targets)
+}
+
+fn preflight_client_procedural_calls(
+    active: &ActiveDatabaseRevision,
+    plan: &ProceduralClientPlan,
+    context: ClientExecutionContext,
+) -> Result<(), ClientExecutionError> {
+    let mut decoded_targets = Vec::new();
+    for statement in plan.statements() {
+        collect_client_expression_call_targets(active, statement.expression(), context, &mut decoded_targets)?;
+    }
+    collect_client_expression_call_targets(active, plan.return_expression(), context, &mut decoded_targets)?;
+    preflight_client_call_targets(active, context, decoded_targets)
+}
+
+fn preflight_client_action_calls(
+    active: &ActiveDatabaseRevision,
+    operation: &orna_artifact::client_plan::ActionOperationNode,
+    context: ClientExecutionContext,
+) -> Result<(), ClientExecutionError> {
+    validate_client_action_operation(active, operation, context)?;
+    let mut decoded_targets = Vec::new();
+    for (_, expression) in operation.arguments() {
+        collect_client_expression_call_targets(active, expression, context, &mut decoded_targets)?;
+    }
+    decoded_targets.push(operation.target_function());
+    preflight_client_call_targets(active, context, decoded_targets)
+}
+
+fn preflight_client_inner_plan_calls(
+    active: &ActiveDatabaseRevision,
+    plan: &InnerClientPlan,
+    context: ClientExecutionContext,
+) -> Result<(), ClientExecutionError> {
+    match plan {
+        InnerClientPlan::Boolean(_) | InnerClientPlan::Opaque(_) => Ok(()),
+        InnerClientPlan::Expression(inner) => {
+            preflight_client_expression_calls(active, inner.expression(), context)
+        }
+        InnerClientPlan::State(inner) => preflight_client_state_calls(active, inner, context),
+        InnerClientPlan::Resource(inner) => {
+            preflight_client_expression_calls(active, inner.expression(), context)
+        }
+        InnerClientPlan::Procedural(inner) => preflight_client_procedural_calls(active, inner, context),
+        InnerClientPlan::Action(inner) => preflight_client_action_calls(active, inner.operation(), context),
+    }
+}
+
+fn operation_arguments_match_definition(
+    definition: &FunctionDefinition,
+    arguments: &[(ParameterId, ClientExpressionNode)],
+) -> bool {
+    if arguments.len() != definition.parameters().len() {
+        return false;
+    }
+    let mut expected = definition
+        .parameters()
+        .iter()
+        .map(|parameter| parameter.id())
+        .collect::<Vec<_>>();
+    expected.sort_unstable();
+    arguments
+        .iter()
+        .map(|(parameter, _)| *parameter)
+        .eq(expected)
+}
+
+fn validate_client_resource_operation(
+    active: &ActiveDatabaseRevision,
+    context: ClientExecutionContext,
+    operation: &ResourceOperationNode,
+) -> Result<(), ClientExecutionError> {
+    let Some(resolved) = resolve_resource_operation_target(active, operation) else {
+        return Err(expression_error(context, ClientExpressionError::InvalidCall));
+    };
+    if resolved.definition.domain() != FunctionDomain::Server
+        || !operation_arguments_match_definition(resolved.definition, operation.arguments())
+    {
+        return Err(expression_error(context, ClientExpressionError::InvalidCall));
+    }
+    let expected = match (operation.kind(), resolved.definition.return_type()) {
+        (ResourceKind::Scalar, FunctionReturn::Single(result)) => *result,
+        (ResourceKind::Stream, FunctionReturn::Stream(result)) => *result,
+        _ => return Err(expression_error(context, ClientExpressionError::InvalidCall)),
+    };
+    if !resource_type_matches_id(active, expected, operation.declared_result_type()) {
+        return Err(expression_error(context, ClientExpressionError::InvalidCall));
+    }
+    Ok(())
+}
+
+fn validate_client_action_operation(
+    active: &ActiveDatabaseRevision,
+    operation: &orna_artifact::client_plan::ActionOperationNode,
+    context: ClientExecutionContext,
+) -> Result<(), ClientExecutionError> {
+    let raw_target = InvocationTarget::new(operation.target_function(), operation.target_revision());
+    let Some(resolved) = resolve_unclassified_target(active, raw_target) else {
+        return Err(expression_error(context, ClientExpressionError::InvalidCall));
+    };
+    let expected_domain = match operation.domain() {
+        ActionTargetDomain::Client => FunctionDomain::Client,
+        ActionTargetDomain::Server => FunctionDomain::Server,
+    };
+    if resolved.definition.domain() != expected_domain
+        || !operation_arguments_match_definition(resolved.definition, operation.arguments())
+    {
+        return Err(expression_error(context, ClientExpressionError::InvalidCall));
+    }
+    let FunctionReturn::Single(expected) = resolved.definition.return_type() else {
+        return Err(expression_error(context, ClientExpressionError::InvalidCall));
+    };
+    let expected = *expected;
+    if !resource_type_matches_id(active, expected, operation.declared_result_type()) {
+        return Err(expression_error(context, ClientExpressionError::InvalidCall));
+    }
+    Ok(())
+}
+
 fn collect_client_expression_call_targets(
     active: &ActiveDatabaseRevision,
     expression: &ClientExpressionNode,
@@ -7310,14 +7463,18 @@ fn collect_client_expression_call_targets(
             collect_client_expression_call_targets(active, expression, context, decoded_targets)?;
         }
         ClientExpressionNode::Resource { operation } => {
+            validate_client_resource_operation(active, context, operation)?;
             for (_, expression) in operation.arguments() {
                 collect_client_expression_call_targets(active, expression, context, decoded_targets)?;
             }
+            decoded_targets.push(operation.target_function());
         }
         ClientExpressionNode::Action { operation } => {
+            validate_client_action_operation(active, operation, context)?;
             for (_, expression) in operation.arguments() {
                 collect_client_expression_call_targets(active, expression, context, decoded_targets)?;
             }
+            decoded_targets.push(operation.target_function());
         }
         ClientExpressionNode::Inspect { operation } => {
             if let Some(expression) = operation.target() {
@@ -11942,6 +12099,118 @@ fn client_stream_cancellation_clears_batches_and_rejects_stale_completions() {
         ));
     }
 
+    fn assert_reordered_client_plan_rejects_before_executor(source: &str, function_name: &str) {
+        let prepared = prepared_client_source_v6(source);
+        let (active, function) = active_with_reordered_client_call_references(&prepared, function_name);
+        let mut executor = RecordingActionExecutor::new(Some(RuntimeValue::Integer(1)));
+        let error = super::evaluate_client_function_with_executor(
+            &active,
+            &authorise(active.pair(), function),
+            &mut executor,
+        )
+        .expect_err("the durable call sequence must be checked before execution");
+
+        assert!(matches!(
+            error,
+            super::ClientExecutionError::ExpressionEvaluation {
+                context,
+                source: super::ClientExpressionError::InvalidCall,
+            } if context.function() == function
+        ));
+        assert!(executor.executed.is_empty());
+    }
+
+    #[test]
+    fn state_plan_preflights_defaults_before_return_expression() {
+        assert_reordered_client_plan_rejects_before_executor(
+            r#"CREATE SCHEMA app;
+CREATE CLIENT FUNCTION app.first() RETURNS INTEGER RETURN 1;
+CREATE CLIENT FUNCTION app.second() RETURNS INTEGER RETURN 2;
+CREATE CLIENT FUNCTION app.owner() RETURNS INTEGER IS
+  STATE value INTEGER DEFAULT app.first();
+  BEGIN RETURN app.second(); END;"#,
+            "app.owner",
+        );
+    }
+
+    #[test]
+    fn procedural_plan_preflights_statements_before_return_expression() {
+        assert_reordered_client_plan_rejects_before_executor(
+            r#"CREATE SCHEMA app;
+CREATE CLIENT FUNCTION app.first() RETURNS INTEGER RETURN 1;
+CREATE CLIENT FUNCTION app.second() RETURNS INTEGER RETURN 2;
+CREATE CLIENT FUNCTION app.owner() RETURNS INTEGER IS
+  BEGIN
+    LET value INTEGER := app.first();
+    value := app.second();
+    RETURN value;
+  END;"#,
+            "app.owner",
+        );
+    }
+
+    #[test]
+    fn action_plan_preflights_arguments_before_operation_target() {
+        assert_reordered_client_plan_rejects_before_executor(
+            r#"CREATE SCHEMA app;
+CREATE CLIENT FUNCTION app.first() RETURNS INTEGER RETURN 1;
+CREATE CLIENT FUNCTION app.owner() RETURNS std.Action AS
+  std.action.call(
+    target => std.invoke.echo,
+    arguments => std.call.args(p_value => app.first())
+  );"#,
+            "app.owner",
+        );
+    }
+
+    #[test]
+    fn action_plan_accepts_untampered_call_reference_order_and_builds_action() {
+        let prepared = prepared_client_source_v6(
+            r#"CREATE SCHEMA app;
+CREATE CLIENT FUNCTION app.first() RETURNS INTEGER RETURN 1;
+CREATE CLIENT FUNCTION app.owner() RETURNS std.Action AS
+  std.action.call(
+    target => std.invoke.echo,
+    arguments => std.call.args(p_value => app.first())
+  );"#,
+        );
+        let active = active_from_prepared_candidate(&prepared);
+        let function = active
+            .catalogue()
+            .functions()
+            .iter()
+            .find(|candidate| candidate.name().to_string() == "app.owner")
+            .expect("the action owner is present")
+            .id();
+        let mut executor = RecordingActionExecutor::new(Some(RuntimeValue::Integer(7)));
+
+        let result = super::evaluate_client_function_with_executor(
+            &active,
+            &authorise(active.pair(), function),
+            &mut executor,
+        )
+        .expect("an untampered action plan evaluates successfully");
+
+        assert!(matches!(result.value(), RuntimeValue::Opaque(_)));
+        assert!(executor.executed.is_empty());
+    }
+
+    #[test]
+    fn resource_plan_preflights_arguments_before_operation_target() {
+        assert_reordered_client_plan_rejects_before_executor(
+            r#"CREATE SCHEMA app;
+CREATE CLIENT FUNCTION app.first() RETURNS INTEGER RETURN 1;
+CREATE CLIENT FUNCTION app.owner() RETURNS INTEGER IS
+  BEGIN
+    RETURN AWAIT std.data.resource(
+      target => std.invoke.echo,
+      arguments => std.call.args(p_value => app.first())
+    );
+  END;"#,
+            "app.owner",
+        );
+    }
+
     #[test]
     fn capability_expression_calls_reject_reference_sequence_mismatch() {
         let function = FunctionId::from_bytes([6; 16]);
@@ -12881,13 +13150,23 @@ fn client_stream_cancellation_clears_batches_and_rejects_stale_completions() {
                 payload,
             );
             let error = evaluate_client_function(&active, function).unwrap_err();
-            assert!(matches!(
-                error,
-                super::ClientExecutionError::ExpressionEvaluation {
-                    source: super::ClientExpressionError::TypeMismatch,
-                    ..
-                }
-            ));
+            if artifact_version == orna_artifact::client_plan::RESOURCE_FORMAT_VERSION {
+                assert!(matches!(
+                    error,
+                    super::ClientExecutionError::ExpressionEvaluation {
+                        source: super::ClientExpressionError::InvalidCall,
+                        ..
+                    }
+                ));
+            } else {
+                assert!(matches!(
+                    error,
+                    super::ClientExecutionError::ExpressionEvaluation {
+                        source: super::ClientExpressionError::TypeMismatch,
+                        ..
+                    }
+                ));
+            }
         }
     }
 
@@ -13852,6 +14131,65 @@ fn client_stream_cancellation_clears_batches_and_rejects_stale_completions() {
         prepared_client_source(&format!(
             "CREATE SCHEMA app; CREATE CLIENT FUNCTION app.enabled() RETURNS BOOLEAN RETURN {literal};"
         ))
+    }
+
+    fn prepared_client_source_v6(source: &str) -> DeployableRevision {
+        let snapshot = orna_standard::retained_standard_library_v6_snapshot().unwrap();
+        let verified = orna_standard::verify_standard_library_v6_snapshot(snapshot).unwrap();
+        let standard = orna_compiler::check_standard_library_source(&verified).unwrap();
+        let active = empty_version_two_active(&verified);
+        let context =
+            orna_compiler::StandardApplicationCheckContext::try_new(active.catalogue(), &standard)
+                .unwrap();
+        let bundle = SourceBundle::new([SourceUnit::new("application.orna", source)]).unwrap();
+        let report = orna_compiler::check_standard_application(&bundle, &context);
+        assert_eq!(report.diagnostics(), &[]);
+
+        orna_compiler::prepare_standard_application(&report, active.pair(), &active).unwrap()
+    }
+
+    fn active_with_reordered_client_call_references(
+        prepared: &DeployableRevision,
+        function_name: &str,
+    ) -> (ActiveDatabaseRevision, FunctionId) {
+        let function = prepared
+            .candidate()
+            .functions()
+            .iter()
+            .find(|candidate| candidate.name().to_string() == function_name)
+            .expect("the reordered-call owner is present")
+            .id();
+        let mut references = prepared.references().to_vec();
+        let mut call_indices = references
+            .iter()
+            .enumerate()
+            .filter(|(_, reference)| {
+                reference.source_function() == function
+                    && reference.kind() == DefinitionReferenceKind::FunctionCall
+            })
+            .map(|(index, reference)| (index, reference.ordinal()))
+            .collect::<Vec<_>>();
+        call_indices.sort_unstable_by_key(|(_, ordinal)| *ordinal);
+        assert!(call_indices.len() >= 2, "the fixture must contain two calls");
+        let first = references[call_indices[0].0].clone();
+        let second = references[call_indices[1].0].clone();
+        references[call_indices[0].0] = DefinitionReference::new(
+            first.source_function(),
+            first.source_revision(),
+            first.ordinal(),
+            second.target(),
+            first.kind(),
+            first.source_origin(),
+        );
+        references[call_indices[1].0] = DefinitionReference::new(
+            second.source_function(),
+            second.source_revision(),
+            second.ordinal(),
+            first.target(),
+            second.kind(),
+            second.source_origin(),
+        );
+        (active_from_prepared_with_references(prepared, references), function)
     }
 
     fn prepared_client_source(source: &str) -> DeployableRevision {
@@ -15046,6 +15384,114 @@ fn client_stream_cancellation_clears_batches_and_rejects_stale_completions() {
         version_one_active_with_artifact(artifact, "orna.language/1")
     }
 
+    fn collect_fixture_expression_call_targets(
+        expression: &orna_artifact::client_plan::ClientExpressionNode,
+        targets: &mut Vec<FunctionId>,
+    ) {
+        use orna_artifact::client_plan::ClientExpressionNode;
+
+        match expression {
+            ClientExpressionNode::Await { expression } => {
+                collect_fixture_expression_call_targets(expression, targets);
+            }
+            ClientExpressionNode::Resource { operation } => {
+                for (_, expression) in operation.arguments() {
+                    collect_fixture_expression_call_targets(expression, targets);
+                }
+                targets.push(operation.target_function());
+            }
+            ClientExpressionNode::Action { operation } => {
+                for (_, expression) in operation.arguments() {
+                    collect_fixture_expression_call_targets(expression, targets);
+                }
+                targets.push(operation.target_function());
+            }
+            ClientExpressionNode::Inspect { operation } => {
+                if let Some(expression) = operation.target() {
+                    collect_fixture_expression_call_targets(expression, targets);
+                }
+                if let Some(expression) = operation.options() {
+                    collect_fixture_expression_call_targets(expression, targets);
+                }
+                if let Some(expression) = operation.snapshot_expression() {
+                    collect_fixture_expression_call_targets(expression, targets);
+                }
+            }
+            ClientExpressionNode::Call { function, arguments } => {
+                for (_, expression) in arguments {
+                    collect_fixture_expression_call_targets(expression, targets);
+                }
+                targets.push(*function);
+            }
+            ClientExpressionNode::Concat { left, right } => {
+                collect_fixture_expression_call_targets(left, targets);
+                collect_fixture_expression_call_targets(right, targets);
+            }
+            ClientExpressionNode::String { .. }
+            | ClientExpressionNode::Integer { .. }
+            | ClientExpressionNode::Boolean { .. }
+            | ClientExpressionNode::ParameterRead { .. }
+            | ClientExpressionNode::LocalRead { .. }
+            | ClientExpressionNode::FieldPath { .. }
+            | ClientExpressionNode::ExternalContract { .. } => {}
+        }
+    }
+
+    fn fixture_client_call_references(
+        function: FunctionId,
+        revision: FunctionRevisionId,
+        origin: SourceOrigin,
+        payload: &[u8],
+    ) -> Vec<DefinitionReference> {
+        let plan = orna_artifact::client_plan::CapabilityClientPlan::decode(payload)
+            .expect("the capability fixture payload decodes");
+        let mut targets = Vec::new();
+        match plan.inner_plan() {
+            orna_artifact::client_plan::InnerClientPlan::Boolean(_)
+            | orna_artifact::client_plan::InnerClientPlan::Opaque(_) => {}
+            orna_artifact::client_plan::InnerClientPlan::Expression(inner) => {
+                collect_fixture_expression_call_targets(inner.expression(), &mut targets);
+            }
+            orna_artifact::client_plan::InnerClientPlan::State(inner) => {
+                for slot in inner.slots() {
+                    if let orna_artifact::client_plan::StateDefault::Expression(expression) = slot.default() {
+                        collect_fixture_expression_call_targets(expression, &mut targets);
+                    }
+                }
+                collect_fixture_expression_call_targets(inner.expression(), &mut targets);
+            }
+            orna_artifact::client_plan::InnerClientPlan::Procedural(inner) => {
+                for statement in inner.statements() {
+                    collect_fixture_expression_call_targets(statement.expression(), &mut targets);
+                }
+                collect_fixture_expression_call_targets(inner.return_expression(), &mut targets);
+            }
+            orna_artifact::client_plan::InnerClientPlan::Action(inner) => {
+                for (_, expression) in inner.operation().arguments() {
+                    collect_fixture_expression_call_targets(expression, &mut targets);
+                }
+                targets.push(inner.operation().target_function());
+            }
+            orna_artifact::client_plan::InnerClientPlan::Resource(inner) => {
+                collect_fixture_expression_call_targets(inner.expression(), &mut targets);
+            }
+        }
+        targets
+            .into_iter()
+            .enumerate()
+            .map(|(ordinal, target)| {
+                DefinitionReference::new(
+                    function,
+                    revision,
+                    u32::try_from(ordinal).expect("fixture call ordinal fits"),
+                    DefinitionReferenceTarget::Function(target),
+                    DefinitionReferenceKind::FunctionCall,
+                    origin.clone(),
+                )
+            })
+            .collect()
+    }
+
     fn version_five_expression_active_with_parameter(
         payload: Vec<u8>,
     ) -> (
@@ -15109,6 +15555,13 @@ fn client_stream_cancellation_clears_batches_and_rejects_stale_completions() {
         )
         .unwrap();
         let prior_revision = &version_one.function_revisions()[0];
+        let origin = prior_revision.declaration_origin();
+        let references = fixture_client_call_references(
+            function_id,
+            function_revision_id,
+            origin.clone(),
+            &payload,
+        );
         let resource_payload = vec![0x53];
         let resource_artifact = ExecutableArtifact::new(
             ExecutableArtifactKind::Server,
@@ -15152,7 +15605,7 @@ fn client_stream_cancellation_clears_batches_and_rejects_stale_completions() {
             prior_revision.language_version(),
             &artifact,
             version_one.expressions(),
-            &[],
+            &references,
         )
         .unwrap();
         let revision = FunctionRevisionRecord::new(
@@ -15173,18 +15626,18 @@ fn client_stream_cancellation_clears_batches_and_rejects_stale_completions() {
                 owner: function_id,
                 parameter: parameter.id(),
             },
-            prior_revision.declaration_origin(),
+            origin.clone(),
         ));
         origins.push(DefinitionOrigin::new(
             DefinitionIdentity::Function(resource_target.id()),
-            prior_revision.declaration_origin(),
+            origin.clone(),
         ));
         origins.push(DefinitionOrigin::new(
             DefinitionIdentity::Parameter {
                 owner: resource_target.id(),
                 parameter: resource_parameter.id(),
             },
-            prior_revision.declaration_origin(),
+            origin.clone(),
         ));
         let revisions = vec![revision, resource_revision];
         let context = orna_core::revision::CatalogueHashContext::version_two(standard);
@@ -15194,7 +15647,7 @@ fn client_stream_cancellation_clears_batches_and_rejects_stale_completions() {
             &revisions,
             version_one.expressions(),
             &origins,
-            &[],
+            &references,
         )
         .unwrap();
         let active = ActiveDatabaseRevision::new_with_catalogue_hash_context(
@@ -15207,7 +15660,7 @@ fn client_stream_cancellation_clears_batches_and_rejects_stale_completions() {
                     version_one.expressions().to_vec(),
                     revisions,
                     origins,
-                    Vec::new(),
+                    references.clone(),
                 ),
             ),
             context,
@@ -15224,8 +15677,7 @@ fn client_stream_cancellation_clears_batches_and_rejects_stale_completions() {
     }
 
 
-    fn version_six_client_resource_action_active(
-    ) -> (
+    fn version_six_client_resource_action_active() -> (
         ActiveDatabaseRevision,
         FunctionId,
         RevisionPair,
@@ -15272,24 +15724,15 @@ fn client_stream_cancellation_clears_batches_and_rejects_stale_completions() {
         let (base, function, pair, revision, parameter) =
             version_five_expression_active_with_parameter(payload);
         let origin = base.function_revisions()[0].declaration_origin();
-        let references = vec![
-            DefinitionReference::new(
-                function,
-                revision,
-                0,
-                DefinitionReferenceTarget::Function(function),
-                DefinitionReferenceKind::FunctionCall,
-                origin,
-            ),
-            DefinitionReference::new(
-                function,
-                revision,
-                1,
-                DefinitionReferenceTarget::Function(target),
-                DefinitionReferenceKind::FunctionCall,
-                origin,
-            ),
-        ];
+        let mut references = Vec::new();
+        references.push(DefinitionReference::new(
+            function,
+            revision,
+            0,
+            DefinitionReferenceTarget::Function(target),
+            DefinitionReferenceKind::FunctionCall,
+            origin,
+        ));
         let mut revisions = base.function_revisions().to_vec();
         let client_revision = revisions
             .iter()
@@ -15350,6 +15793,165 @@ fn client_stream_cancellation_clears_batches_and_rejects_stale_completions() {
         )
         .unwrap();
         (active, function, pair, revision, parameter)
+    }
+
+    fn version_six_client_action_provenance_active() -> (
+        ActiveDatabaseRevision,
+        FunctionId,
+        FunctionId,
+        RevisionPair,
+        FunctionRevisionId,
+        ParameterId,
+    ) {
+        let (base, child_id, pair, _child_revision_id, parameter) =
+            version_six_client_resource_action_active();
+        let previous_revision = base
+            .function_revisions()
+            .iter()
+            .find(|revision| revision.function() == child_id)
+            .expect("resource child revision is present");
+        let parent_id = FunctionId::from_bytes([0xc4; 16]);
+        let parent_revision_id = FunctionRevisionId::from_bytes([0xc5; 16]);
+        let parent_parameter = ParameterDefinition::new(
+            ParameterId::from_bytes([0xc6; 16]),
+            "p_path",
+            0,
+            ResolvedType::Value(orna_standard::CHARACTER_LARGE_OBJECT_TYPE_ID),
+            None,
+        );
+        let parent = FunctionDefinition::new(
+            parent_id,
+            QualifiedSemanticName::new(["app", "action_parent"]).unwrap(),
+            FunctionDomain::Client,
+            vec![parent_parameter.clone()],
+            FunctionReturn::Single(ResolvedType::Value(
+                orna_standard::CHARACTER_LARGE_OBJECT_TYPE_ID,
+            )),
+            parent_revision_id,
+            FunctionSecurity::Invoker,
+            None,
+            FunctionVolatility::Immutable,
+        );
+        let mut functions = base.catalogue().functions().to_vec();
+        functions.push(parent.clone());
+        let catalogue = CatalogueSnapshot::new_with_functions(
+            base.catalogue().revision(),
+            base.catalogue().schemas().to_vec(),
+            base.catalogue().object_types().to_vec(),
+            functions,
+        )
+        .unwrap();
+        let parent_payload = orna_artifact::client_plan::ExpressionClientPlan::new(
+            orna_artifact::client_plan::ClientExpressionNode::Call {
+                function: child_id,
+                arguments: vec![(
+                    ParameterId::from_bytes([0xb1; 16]),
+                    orna_artifact::client_plan::ClientExpressionNode::ParameterRead {
+                        parameter: parent_parameter.id(),
+                    },
+                )],
+            },
+        )
+        .encode()
+        .unwrap();
+        let parent_artifact = ExecutableArtifact::new(
+            ExecutableArtifactKind::Client,
+            "orna.client-plan",
+            orna_artifact::client_plan::EXPRESSION_FORMAT_VERSION,
+            parent_payload.clone(),
+            artifact_payload_digest(&parent_payload).unwrap(),
+        )
+        .unwrap();
+        let parent_parameter_reference = DefinitionReference::new(
+            parent_id,
+            parent_revision_id,
+            0,
+            DefinitionReferenceTarget::Parameter {
+                owner: parent_id,
+                parameter: parent_parameter.id(),
+            },
+            DefinitionReferenceKind::ParameterRead,
+            previous_revision.declaration_origin(),
+        );
+        let parent_reference = DefinitionReference::new(
+            parent_id,
+            parent_revision_id,
+            1,
+            DefinitionReferenceTarget::Function(child_id),
+            DefinitionReferenceKind::FunctionCall,
+            previous_revision.declaration_origin(),
+        );
+        let parent_references = vec![parent_parameter_reference, parent_reference.clone()];
+        let parent_semantic_hash = function_semantic_digest_with_version(
+            FunctionSemanticHashVersion::Version2,
+            &parent,
+            previous_revision.language_version(),
+            &parent_artifact,
+            base.expressions(),
+            &parent_references,
+        )
+        .unwrap();
+        let parent_revision = FunctionRevisionRecord::new(
+            parent_id,
+            parent_revision_id,
+            previous_revision.revision_number(),
+            previous_revision.declaration_origin(),
+            previous_revision.declaration_content_hash(),
+            parent_semantic_hash,
+            previous_revision.language_version(),
+            parent_artifact,
+        )
+        .unwrap()
+        .with_semantic_hash_version(FunctionSemanticHashVersion::Version2);
+        let mut revisions = base.function_revisions().to_vec();
+        revisions.push(parent_revision);
+        let mut origins = base.origins().to_vec();
+        origins.push(DefinitionOrigin::new(
+            DefinitionIdentity::Function(parent_id),
+            previous_revision.declaration_origin(),
+        ));
+        origins.push(DefinitionOrigin::new(
+            DefinitionIdentity::Parameter {
+                owner: parent_id,
+                parameter: parent_parameter.id(),
+            },
+            previous_revision.declaration_origin(),
+        ));
+        let mut references = base.references().to_vec();
+        references.extend(parent_references);
+        let catalogue_hash = catalogue_digest_with_context(
+            base.catalogue_hash_context(),
+            &catalogue,
+            &revisions,
+            base.expressions(),
+            &origins,
+            &references,
+        )
+        .unwrap();
+        let active = ActiveDatabaseRevision::new_with_catalogue_hash_context(
+            ActiveDatabaseRevisionInput::new(
+                pair,
+                base.source().clone(),
+                catalogue,
+                catalogue_hash,
+                ActiveRevisionContent::new(
+                    base.expressions().to_vec(),
+                    revisions,
+                    origins,
+                    references,
+                ),
+            ),
+            base.catalogue_hash_context().clone(),
+        )
+        .unwrap();
+        (
+            active,
+            parent_id,
+            child_id,
+            pair,
+            parent_revision_id,
+            parameter,
+        )
     }
 
     fn action_value(
@@ -15673,6 +16275,30 @@ fn client_stream_cancellation_clears_batches_and_rejects_stale_completions() {
             Err(ClientActionError::ResultTypeMismatch)
         );
     }
+    #[test]
+    fn action_target_result_type_rejects_stream_targets() {
+        let (active, function, pair, _) = version_one_active_with_shape(
+            FunctionDomain::Server,
+            Vec::new(),
+            FunctionReturn::Stream(ResolvedType::Scalar(StandardScalar::Integer)),
+            FunctionSecurity::Invoker,
+            FunctionVolatility::Immutable,
+        );
+        let descriptor = ClientActionDescriptor::new(
+            ActionTargetDomain::Server,
+            function,
+            pair,
+            CallSiteId::from_bytes([0x70; 16]),
+            Vec::new(),
+            orna_standard::INTEGER_TYPE_ID,
+        );
+
+        assert_eq!(
+            action_target_result_type(&active, &descriptor),
+            Err(ClientActionError::ResultTypeMismatch)
+        );
+    }
+
 
     #[test]
     fn action_payload_rejects_malformed_and_noncanonical_frames() {
@@ -16148,12 +16774,13 @@ fn client_stream_cancellation_clears_batches_and_rejects_stale_completions() {
 
     #[test]
     fn action_local_resource_pending_is_cancelled_and_fails_redacted_with_fresh_parent() {
-        let (active, function, pair, revision, parameter) = version_six_client_resource_action_active();
-        let auth = authorise(pair, function);
+        let (active, parent_function, target, pair, revision, parameter) =
+            version_six_client_action_provenance_active();
+        let auth = authorise(pair, parent_function);
         let enclosing_parent = InvocationId::from_bytes([0xf5; 16]);
         let parent = ClientExecutionContext {
             pair,
-            function,
+            function: parent_function,
             function_revision: revision,
             parent_invocation_id: enclosing_parent,
             observer_lineage: None,
@@ -16166,7 +16793,7 @@ fn client_stream_cancellation_clears_batches_and_rejects_stale_completions() {
         let action = action_value(
             &active,
             ActionTargetDomain::Client,
-            function,
+            target,
             pair,
             CallSiteId::from_bytes([0xe2; 16]),
             vec![argument],
