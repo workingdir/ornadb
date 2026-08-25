@@ -397,6 +397,13 @@ impl SecurityAdminMutation {
     fn validate(self, snapshot: &SecuritySnapshot) -> Result<Self, PostgresKernelError> {
         match self {
             Self::CreatePrincipal { principal, kind } => {
+                if principal == PrincipalId::from_bytes([0; 16]) {
+                    return Err(admin_invariant(
+                        "_orna_kernel.security_principals",
+                        "create_principal",
+                        "the principal identity must not be the empty identity",
+                    ));
+                }
                 if kind == PrincipalKind::Role {
                     return Err(admin_invariant(
                         "_orna_kernel.security_principals",
@@ -414,6 +421,13 @@ impl SecurityAdminMutation {
                 Ok(self)
             }
             Self::CreateRole { role } => {
+                if role == PrincipalId::from_bytes([0; 16]) {
+                    return Err(admin_invariant(
+                        "_orna_kernel.security_principals",
+                        "create_role",
+                        "the principal identity must not be the empty identity",
+                    ));
+                }
                 if role == CATALOGUE_HEALTH_SERVICE_PRINCIPAL_ID {
                     return Err(admin_invariant(
                         "_orna_kernel.security_principals",
@@ -544,7 +558,10 @@ impl SecurityAdminMutation {
         match self {
             Self::CreatePrincipal { principal, kind } => {
                 let mut principals = current.principals().collect::<Vec<_>>();
-                principals.push(Principal::new(principal, kind, PrincipalStatus::Active));
+                principals.push(
+                    Principal::try_new(principal, kind, PrincipalStatus::Active)
+                        .map_err(PostgresKernelError::SecuritySnapshot)?,
+                );
                 let candidate = rebuild_candidate(
                     current,
                     principals,
@@ -595,11 +612,10 @@ impl SecurityAdminMutation {
             }
             Self::CreateRole { role } => {
                 let mut principals = current.principals().collect::<Vec<_>>();
-                principals.push(Principal::new(
-                    role,
-                    PrincipalKind::Role,
-                    PrincipalStatus::Active,
-                ));
+                principals.push(
+                    Principal::try_new(role, PrincipalKind::Role, PrincipalStatus::Active)
+                        .map_err(PostgresKernelError::SecuritySnapshot)?,
+                );
                 let candidate = rebuild_candidate(
                     current,
                     principals,
@@ -1019,6 +1035,7 @@ mod tests {
         security::{
             CATALOGUE_HEALTH_SERVICE_PRINCIPAL_ID, Principal, PrincipalKind, PrincipalStatus,
             PrivilegeClass, PrivilegeGrant, RoleMembership, SecuritySnapshot,
+            SecuritySnapshotError,
         },
         system::{
             SYS_INSPECT_SECURITY_DECISIONS_FUNCTION_ID, SYS_SECURITY_GRANT_PRIVILEGE_FUNCTION_ID,
@@ -1029,6 +1046,10 @@ mod tests {
 
     const USER: PrincipalId = PrincipalId::from_bytes([0x91; 16]);
     const ROLE: PrincipalId = PrincipalId::from_bytes([0x95; 16]);
+    const OTHER_ROLE: PrincipalId = PrincipalId::from_bytes([0x96; 16]);
+    const MEMBER: PrincipalId = PrincipalId::from_bytes([0x97; 16]);
+    const UNKNOWN_ROLE: PrincipalId = PrincipalId::from_bytes([0x98; 16]);
+    const UNKNOWN_MEMBER: PrincipalId = PrincipalId::from_bytes([0x99; 16]);
     const UNKNOWN_OBJECT: FunctionId = FunctionId::from_bytes([0x92; 16]);
     const REVISION: RevisionPair = RevisionPair::new(
         SourceRevisionId::from_bytes([0x93; 16]),
@@ -1083,6 +1104,28 @@ mod tests {
             grants,
         )
         .expect("the candidate privilege grants should rebuild")
+    }
+
+    fn grant_role_candidate_error(
+        current: &SecuritySnapshot,
+        role: PrincipalId,
+        member: PrincipalId,
+    ) -> PostgresKernelError {
+        let mutation = SecurityAdminMutation::GrantRole { role, member }
+            .validate(current)
+            .expect("candidate-only GrantRole invariants should pass input validation");
+        let SecurityAdminMutation::GrantRole { role, member } = mutation else {
+            unreachable!("GrantRole validation must preserve the mutation kind")
+        };
+        let mut memberships = current.memberships().collect::<Vec<_>>();
+        memberships.push(RoleMembership::new(role, member));
+        rebuild_candidate(
+            current,
+            current.principals().collect(),
+            memberships,
+            current.privilege_grants().collect(),
+        )
+        .expect_err("malformed GrantRole input must fail candidate snapshot rebuild")
     }
 
     #[test]
@@ -1257,6 +1300,184 @@ mod tests {
                 record,
                 rule: "the reserved catalogue health service identity cannot become a role member",
             }) if record == "grant_role"
+        ));
+    }
+
+    #[test]
+    fn create_principal_rejects_empty_identity_before_candidate_mutation() {
+        let current = snapshot();
+        let result = SecurityAdminMutation::CreatePrincipal {
+            principal: PrincipalId::from_bytes([0; 16]),
+            kind: PrincipalKind::User,
+        }
+        .validate(&current);
+        assert!(matches!(
+            result,
+            Err(PostgresKernelError::DurableInvariant {
+                relation: "_orna_kernel.security_principals",
+                record,
+                rule: "the principal identity must not be the empty identity",
+            }) if record == "create_principal"
+        ));
+        assert!(
+            !current
+                .principals()
+                .any(|principal| principal.id() == PrincipalId::from_bytes([0; 16]))
+        );
+    }
+
+    #[test]
+    fn recovered_candidate_rejects_empty_principal_before_persistence() {
+        let current = snapshot();
+        let mut principals = current.principals().collect::<Vec<_>>();
+        principals.push(Principal::new(
+            PrincipalId::from_bytes([0; 16]),
+            PrincipalKind::User,
+            PrincipalStatus::Active,
+        ));
+
+        assert!(matches!(
+            rebuild_candidate(
+                &current,
+                principals,
+                current.memberships().collect(),
+                current.privilege_grants().collect(),
+            ),
+            Err(PostgresKernelError::SecuritySnapshot(
+                SecuritySnapshotError::EmptyPrincipal
+            ))
+        ));
+    }
+
+    #[test]
+    fn create_role_rejects_empty_identity_before_candidate_mutation() {
+        let current = snapshot();
+        let result = SecurityAdminMutation::CreateRole {
+            role: PrincipalId::from_bytes([0; 16]),
+        }
+        .validate(&current);
+        assert!(matches!(
+            result,
+            Err(PostgresKernelError::DurableInvariant {
+                relation: "_orna_kernel.security_principals",
+                record,
+                rule: "the principal identity must not be the empty identity",
+            }) if record == "create_role"
+        ));
+        assert!(
+            !current
+                .principals()
+                .any(|principal| principal.id() == PrincipalId::from_bytes([0; 16]))
+        );
+    }
+
+    #[test]
+    fn non_reserved_service_principal_validates_and_persists_active_candidate() {
+        let current = snapshot();
+        let service = PrincipalId::from_bytes([0x9a; 16]);
+        assert_ne!(service, CATALOGUE_HEALTH_SERVICE_PRINCIPAL_ID);
+
+        let mutation = SecurityAdminMutation::CreatePrincipal {
+            principal: service,
+            kind: PrincipalKind::Service,
+        }
+        .validate(&current)
+        .expect("a non-reserved service principal should pass admin validation");
+        let SecurityAdminMutation::CreatePrincipal { principal, kind } = mutation else {
+            unreachable!("CreatePrincipal validation must preserve the mutation kind")
+        };
+
+        let mut principals = current.principals().collect::<Vec<_>>();
+        principals.push(Principal::new(principal, kind, PrincipalStatus::Active));
+        let candidate = rebuild_candidate(
+            &current,
+            principals,
+            current.memberships().collect(),
+            current.privilege_grants().collect(),
+        )
+        .expect("the service principal candidate should rebuild");
+
+        assert!(
+            !current
+                .principals()
+                .any(|candidate| candidate.id() == service)
+        );
+        let persisted = candidate
+            .principals()
+            .find(|candidate| candidate.id() == service)
+            .expect("the rebuilt candidate should persist the service principal");
+        assert_eq!(persisted.kind(), PrincipalKind::Service);
+        assert_eq!(persisted.status(), PrincipalStatus::Active);
+    }
+
+    #[test]
+    fn malformed_grant_role_inputs_fail_at_candidate_validation_boundary() {
+        let unknown_role = grant_role_candidate_error(&snapshot(), UNKNOWN_ROLE, USER);
+        assert!(matches!(
+            unknown_role,
+            PostgresKernelError::SecuritySnapshot(SecuritySnapshotError::UnknownMembershipRole)
+        ));
+
+        let known_user_as_role = grant_role_candidate_error(
+            &SecuritySnapshot::new_with_function_targets_local_peer_credentials_and_privilege_grants(
+                REVISION, vec![],
+                vec![
+                    Principal::new(USER, PrincipalKind::User, PrincipalStatus::Active),
+                    Principal::new(MEMBER, PrincipalKind::User, PrincipalStatus::Active),
+                ],
+                vec![], vec![], vec![], vec![],
+            ).expect("known-user role-target fixture should be valid"),
+            USER, MEMBER,
+        );
+        assert!(matches!(
+            known_user_as_role,
+            PostgresKernelError::SecuritySnapshot(SecuritySnapshotError::MembershipTargetIsNotRole)
+        ));
+
+        let unknown_member = grant_role_candidate_error(
+            &SecuritySnapshot::new_with_function_targets_local_peer_credentials_and_privilege_grants(
+                REVISION, vec![],
+                vec![
+                    Principal::new(USER, PrincipalKind::User, PrincipalStatus::Active),
+                    Principal::new(ROLE, PrincipalKind::Role, PrincipalStatus::Active),
+                ],
+                vec![], vec![], vec![], vec![],
+            ).expect("unknown-member fixture should be valid"),
+            ROLE, UNKNOWN_MEMBER,
+        );
+        assert!(matches!(
+            unknown_member,
+            PostgresKernelError::SecuritySnapshot(SecuritySnapshotError::UnknownMembershipMember)
+        ));
+
+        let self_membership = grant_role_candidate_error(
+            &SecuritySnapshot::new_with_function_targets_local_peer_credentials_and_privilege_grants(
+                REVISION, vec![],
+                vec![Principal::new(ROLE, PrincipalKind::Role, PrincipalStatus::Active)],
+                vec![], vec![], vec![], vec![],
+            ).expect("self-membership fixture should be valid"),
+            ROLE, ROLE,
+        );
+        assert!(matches!(
+            self_membership,
+            PostgresKernelError::SecuritySnapshot(SecuritySnapshotError::SelfMembership)
+        ));
+
+        let indirect_cycle = grant_role_candidate_error(
+            &SecuritySnapshot::new_with_function_targets_local_peer_credentials_and_privilege_grants(
+                REVISION, vec![],
+                vec![
+                    Principal::new(ROLE, PrincipalKind::Role, PrincipalStatus::Active),
+                    Principal::new(OTHER_ROLE, PrincipalKind::Role, PrincipalStatus::Active),
+                ],
+                vec![RoleMembership::new(ROLE, OTHER_ROLE)],
+                vec![], vec![], vec![],
+            ).expect("indirect-cycle fixture should be valid"),
+            OTHER_ROLE, ROLE,
+        );
+        assert!(matches!(
+            indirect_cycle,
+            PostgresKernelError::SecuritySnapshot(SecuritySnapshotError::CyclicRoleMembership)
         ));
     }
 }
