@@ -30,7 +30,13 @@ use std::{
     time::{Duration, Instant},
 };
 
-use orna_core::FunctionId;
+use orna_client::{ClientStateContext, ClientStateKey, ClientStateStore, ClientUserStateError};
+use orna_core::{
+    FunctionId, PrincipalId, StateSlotId,
+    state::{UserStateCell, UserStateKey},
+    value::RuntimeValue,
+};
+use orna_server::AuthenticatedClientStateAdapter;
 
 const PROCESS_TIMEOUT: Duration = Duration::from_secs(5);
 static NEXT_DIRECTORY: AtomicU64 = AtomicU64::new(0);
@@ -260,5 +266,128 @@ fn valid_state_shapes_reach_the_service_account_boundary() {
         set.stderr,
         b"orna state: the installed Orna instance is not available: Orna service identity is invalid\n",
         "service-account failure must print the exact public diagnostic"
+    );
+}
+
+/// The authenticated adapter stages a complete multi-instance response before
+/// replacing the caller-owned store: valid cells load together, while a
+/// foreign context or duplicate identity leaves the prior context and values
+/// untouched.
+#[test]
+fn authenticated_state_load_preserves_context_until_response_is_valid() {
+    let principal = PrincipalId::from_bytes([0x71; 16]);
+    let original_context = ClientStateContext::new(
+        FunctionId::from_bytes([0x72; 16]),
+        "original-profile".to_owned(),
+        "original-instance".to_owned(),
+    )
+    .expect("original context must validate");
+    let requested_context = ClientStateContext::new(
+        FunctionId::from_bytes([0x73; 16]),
+        "requested-profile".to_owned(),
+        "root-instance".to_owned(),
+    )
+    .expect("requested context must validate");
+    let function_a = FunctionId::from_bytes([0x74; 16]);
+    let function_b = FunctionId::from_bytes([0x75; 16]);
+    let slot_a = StateSlotId::from_bytes([0x76; 16]);
+    let slot_b = StateSlotId::from_bytes([0x77; 16]);
+    let value_type = orna_standard::CHARACTER_LARGE_OBJECT_TYPE_ID;
+    let requested = vec![
+        (function_a, "row-a".to_owned()),
+        (function_b, "row-b".to_owned()),
+    ];
+    let cell = |function: FunctionId, instance_key: &str, slot: StateSlotId, value: &str| {
+        UserStateCell::new(
+            UserStateKey::new(
+                principal,
+                requested_context.root_function(),
+                requested_context.state_profile().to_owned(),
+                function,
+                instance_key.to_owned(),
+                slot,
+            )
+            .expect("state cell key must validate"),
+            RuntimeValue::Text(value.to_owned()),
+            value_type,
+            1,
+            std::time::SystemTime::UNIX_EPOCH,
+        )
+    };
+    let valid_cells = vec![
+        cell(function_a, "row-a", slot_a, "a"),
+        cell(function_b, "row-b", slot_b, "b"),
+    ];
+    let mut store = ClientStateStore::new();
+    store.set_context(original_context.clone());
+    let existing_key = ClientStateKey::from_context(&original_context, function_a, slot_a);
+    store
+        .set_user_state(
+            existing_key.clone(),
+            RuntimeValue::Text("caller-owned".to_owned()),
+            value_type,
+        )
+        .expect("caller-owned state must validate");
+    let before = store.clone();
+
+    let staged = AuthenticatedClientStateAdapter::<'static>::stage_authenticated_user_state_load(
+        &store,
+        &requested_context,
+        &valid_cells,
+        &requested,
+    )
+    .expect("a complete multi-instance response must stage");
+    assert_eq!(staged.context(), &requested_context);
+    assert_eq!(staged.user().len(), 3);
+    assert_eq!(staged.user().get(&existing_key), before.user().get(&existing_key));
+    assert_eq!(store, before, "staging must not mutate the caller-owned store");
+
+    let foreign_cell = UserStateCell::new(
+        UserStateKey::new(
+            principal,
+            FunctionId::from_bytes([0x78; 16]),
+            "foreign-profile".to_owned(),
+            function_a,
+            "row-a".to_owned(),
+            slot_a,
+        )
+        .expect("foreign state cell key must validate"),
+        RuntimeValue::Text("foreign".to_owned()),
+        value_type,
+        2,
+        std::time::SystemTime::UNIX_EPOCH,
+    );
+    let foreign_error =
+        AuthenticatedClientStateAdapter::<'static>::stage_authenticated_user_state_load(
+        &store,
+        &requested_context,
+        &[valid_cells[0].clone(), foreign_cell],
+        &requested,
+    )
+    .expect_err("a foreign root/profile must be rejected");
+    assert!(matches!(
+        foreign_error,
+        ClientUserStateError::ContextMismatch(_)
+    ));
+    assert_eq!(store, before, "foreign response must be rejected atomically");
+
+    let duplicate_error =
+        AuthenticatedClientStateAdapter::<'static>::stage_authenticated_user_state_load(
+        &store,
+        &requested_context,
+        &[valid_cells[0].clone(), valid_cells[0].clone()],
+        &requested,
+    )
+    .expect_err("duplicate identities must be rejected");
+    assert!(matches!(
+        duplicate_error,
+        ClientUserStateError::DuplicateKey(_)
+    ));
+    assert_eq!(store, before, "duplicate response must be rejected atomically");
+
+    let loaded_key = ClientStateKey::from_user_cell(&valid_cells[0]);
+    assert_eq!(
+        staged.user().get(&loaded_key).map(|value| value.value()),
+        Some(&RuntimeValue::Text("a".to_owned()))
     );
 }

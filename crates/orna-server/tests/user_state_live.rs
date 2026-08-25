@@ -580,3 +580,115 @@ async fn proves_authenticated_client_state_adapter_lifecycle() -> TestResult<()>
     })
     .await
 }
+
+/// A caller-owned USER store remains bound to its original authenticated session when a
+/// different authenticated session is presented to the adapter. Neither a
+/// flush nor a load may silently rebind (and thereby discard) that state.
+#[tokio::test]
+#[ignore = "requires the Compose PostgreSQL development service"]
+async fn rejects_authenticated_client_state_session_mismatch() -> TestResult<()> {
+    with_test_database(|database| async move {
+        let (state_function, state_slot) = install_standard(&database).await?;
+        map_peer(&database, PRINCIPAL_A).await?;
+
+        let kernel = kernel(&database);
+        let session_a = kernel
+            .authenticate_local_peer(nix::unistd::geteuid().as_raw())
+            .await?;
+        let context =
+            ClientStateContext::new(state_function, "adapter-profile".to_owned(), String::new())
+                .map_err(|error| failure(error.to_string()))?;
+        let expected_types = BTreeMap::from([((state_function, state_slot), INTEGER_TYPE_ID)]);
+        let initial_change = UserStateChange::new(
+            state_function,
+            "adapter-profile".to_owned(),
+            state_function,
+            String::new(),
+            state_slot,
+            None,
+            RuntimeValue::Integer(7),
+            INTEGER_TYPE_ID,
+        )?;
+        kernel
+            .write_user_state(&session_a, &[initial_change])
+            .await?;
+
+        let adapter_a = AuthenticatedClientStateAdapter::new(&kernel, &session_a);
+        let mut state = ClientStateStore::new();
+        adapter_a
+            .load(&context, &[], &expected_types, &mut state)
+            .await
+            .map_err(|error| failure(error.to_string()))?;
+        let key = ClientStateKey::from_context(&context, state_function, state_slot);
+        state.set_user_state(key.clone(), RuntimeValue::Integer(8), INTEGER_TYPE_ID)?;
+        let before_mismatch = state.clone();
+
+        map_peer(&database, PRINCIPAL_B).await?;
+        let session_b = kernel
+            .authenticate_local_peer(nix::unistd::geteuid().as_raw())
+            .await?;
+        let principal_b_change = UserStateChange::new(
+            state_function,
+            "adapter-profile".to_owned(),
+            state_function,
+            String::new(),
+            state_slot,
+            None,
+            RuntimeValue::Integer(70),
+            INTEGER_TYPE_ID,
+        )?;
+        kernel
+            .write_user_state(&session_b, &[principal_b_change])
+            .await?;
+        let adapter_b = AuthenticatedClientStateAdapter::new(&kernel, &session_b);
+
+        let flush = adapter_b.flush(&mut state).await;
+        require(
+            matches!(
+                flush,
+                Err(orna_server::AuthenticatedClientStateError::Client(
+                    ClientUserStateError::SessionMismatch
+                ))
+            ),
+            "flushing through another authenticated session must return a typed mismatch",
+        )?;
+        require(
+            state == before_mismatch,
+            "a rejected flush must preserve the original session's dirty state",
+        )?;
+
+        let load = adapter_b
+            .load(&context, &[], &expected_types, &mut state)
+            .await;
+        require(
+            matches!(
+                load,
+                Err(orna_server::AuthenticatedClientStateError::Client(
+                    ClientUserStateError::SessionMismatch
+                ))
+            ),
+            "loading through another authenticated session must return a typed mismatch",
+        )?;
+        require(
+            state == before_mismatch,
+            "a rejected load must preserve the original session's dirty state",
+        )?;
+
+        let principal_b_cells = kernel
+            .load_user_state(
+                &session_b,
+                context.root_function(),
+                context.state_profile(),
+                &[],
+                &expected_types,
+            )
+            .await?;
+        require(
+            principal_b_cells.len() == 1
+                && principal_b_cells[0].value() == &RuntimeValue::Integer(70)
+                && principal_b_cells[0].revision() == 1,
+            "a rejected flush must not alter the other session's existing cell",
+        )
+    })
+    .await
+}
