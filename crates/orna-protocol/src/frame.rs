@@ -5,7 +5,10 @@ use std::{collections::BTreeMap, error::Error, fmt};
 use orna_core::{
     CallSiteId, FunctionId, InvocationId, ParameterId, TypeId,
     catalogue::CatalogueSnapshot,
-    invocation::{InvocationEventKind, InvokeEvent, InvokeRequest, invocation_carrier_type_id},
+    invocation::{
+        InvocationEventBody, InvocationEventKind, InvocationFailurePhase, InvokeEvent,
+        InvokeRequest, invocation_carrier_type_id,
+    },
     revision::{ActiveDatabaseRevision, RevisionPair},
     system::{
         SYS_INVOKE_EVENT_TYPE_ID, SYS_INVOKE_FUNCTION_ID, SYS_INVOKE_PARAMETER_ID,
@@ -1592,6 +1595,16 @@ impl ProtocolConnection {
         stream: u64,
         batch: InvocationEventBatch,
     ) -> Result<ServerFrame, ConnectionError> {
+        self.invoke_events_with_options(version, stream, batch, false)
+    }
+
+    fn invoke_events_with_options(
+        &mut self,
+        version: FrameVersion<'_>,
+        stream: u64,
+        batch: InvocationEventBatch,
+        allow_cancellation_terminal: bool,
+    ) -> Result<ServerFrame, ConnectionError> {
         if !version.is_constructed() {
             return Err(ConnectionError::InvalidFrame {
                 source: FrameCodecError::InvocationCarrierNotAccepted {
@@ -1609,6 +1622,17 @@ impl ProtocolConnection {
             _ => return Err(ConnectionError::WrongState { stream }),
         };
         if !state.is_invocation || state.invocation_terminal {
+            return Err(ConnectionError::WrongState { stream });
+        }
+        let operational_failure_during_cancellation = batch.records().iter().all(|record| {
+            matches!(
+                record.event().body(),
+                InvocationEventBody::Failed(failure)
+                    if failure.phase() == InvocationFailurePhase::Internal
+            )
+        });
+        if is_cancelling && !allow_cancellation_terminal && !operational_failure_during_cancellation
+        {
             return Err(ConnectionError::WrongState { stream });
         }
         validate_invocation_event_records(batch.records())
@@ -1655,7 +1679,9 @@ impl ProtocolConnection {
         let mut terminal = state.invocation_terminal;
         for (index, record) in records.iter().enumerate() {
             let kind = record.event().kind();
-            if index > 0 && kind == InvocationEventKind::InvocationStarted {
+            if kind == InvocationEventKind::InvocationStarted
+                && (index > 0 || state.last_invocation_event_sequence.is_some())
+            {
                 return Err(ConnectionError::InvalidFrame {
                     source: FrameCodecError::InvalidInvocationEventSequence,
                 });
@@ -1779,11 +1805,12 @@ impl ProtocolConnection {
             ],
             None => vec![InvocationEventRecord::new(outer, cancelled)],
         };
-        self.invoke_events(
+        self.invoke_events_with_options(
             version,
             stream,
             InvocationEventBatch::new(records)
                 .map_err(|source| ConnectionError::InvalidFrame { source })?,
+            true,
         )
     }
 
@@ -1856,6 +1883,13 @@ enum ResourcePhase {
     Live,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ResourceTerminalKind {
+    Completed,
+    Failed,
+    Cancelled,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 struct ResourceState {
     request_id: InvocationId,
@@ -1879,7 +1913,7 @@ pub struct ResourceProtocolConnection {
     /// Terminal stream tombstones are retained up to
     /// [`MAX_REQUEST_ID_HISTORY`], not [`MAX_LIVE_STREAMS`]. This keeps repeated
     /// late controls idempotent while allowing old identities to be evicted.
-    terminal: BTreeMap<u64, (InvocationId, RevisionPair)>,
+    terminal: BTreeMap<u64, (InvocationId, RevisionPair, ResourceTerminalKind)>,
 }
 
 impl ResourceProtocolConnection {
@@ -1968,6 +2002,10 @@ impl ResourceProtocolConnection {
             .map_err(|source| ResourceConnectionError::InvalidFrame { source })?;
         require_resource_invocation_id(request.request_id)
             .map_err(|source| ResourceConnectionError::InvalidFrame { source })?;
+        require_resource_invocation_id(request.parent_invocation_id)
+            .map_err(|source| ResourceConnectionError::InvalidFrame { source })?;
+        require_resource_call_site_id(request.call_site_id)
+            .map_err(|source| ResourceConnectionError::InvalidFrame { source })?;
         require_resource_generation(request.generation)
             .map_err(|source| ResourceConnectionError::InvalidFrame { source })?;
         require_resource_text(&request.state_profile)
@@ -2053,12 +2091,22 @@ impl ResourceProtocolConnection {
             ResourceServerFrame::Failed(frame) => {
                 require_resource_invocation_id(frame.request_id)
                     .map_err(|source| ResourceConnectionError::InvalidFrame { source })?;
-                self.terminal_frame(frame.stream_id, frame.request_id, frame.target_revision)
+                self.terminal_frame(
+                    frame.stream_id,
+                    frame.request_id,
+                    frame.target_revision,
+                    ResourceTerminalKind::Failed,
+                )
             }
             ResourceServerFrame::Cancelled(frame) => {
                 require_resource_invocation_id(frame.request_id)
                     .map_err(|source| ResourceConnectionError::InvalidFrame { source })?;
-                self.terminal_frame(frame.stream_id, frame.request_id, frame.target_revision)
+                self.terminal_frame(
+                    frame.stream_id,
+                    frame.request_id,
+                    frame.target_revision,
+                    ResourceTerminalKind::Cancelled,
+                )
             }
         }
     }
@@ -2113,17 +2161,29 @@ impl ResourceProtocolConnection {
     ) -> Result<ResourceFrameDisposition, ResourceConnectionError> {
         require_resource_invocation_id(frame.request_id)
             .map_err(|source| ResourceConnectionError::InvalidFrame { source })?;
-        match self.check_terminal(
-            frame.stream_id,
-            frame.request_id,
-            Some(frame.target_revision),
-        )? {
-            Some(ResourceFrameDisposition::DroppedLate) => Ok(ResourceFrameDisposition::Applied),
-            Some(ResourceFrameDisposition::Applied) => Ok(ResourceFrameDisposition::Applied),
-            None => Err(ResourceConnectionError::UnknownStream {
+        let Some((expected_request_id, expected_revision, terminal_kind)) =
+            self.terminal.get(&frame.stream_id)
+        else {
+            return Err(ResourceConnectionError::UnknownStream {
                 stream_id: frame.stream_id,
-            }),
+            });
+        };
+        if *expected_request_id != frame.request_id {
+            return Err(ResourceConnectionError::MismatchedRequest {
+                stream_id: frame.stream_id,
+            });
         }
+        if *expected_revision != frame.target_revision {
+            return Err(ResourceConnectionError::ResourceRevisionMismatch {
+                stream_id: frame.stream_id,
+            });
+        }
+        Ok(match terminal_kind {
+            ResourceTerminalKind::Cancelled => ResourceFrameDisposition::Applied,
+            ResourceTerminalKind::Completed | ResourceTerminalKind::Failed => {
+                ResourceFrameDisposition::DroppedLate
+            }
+        })
     }
 
     fn check_terminal(
@@ -2132,7 +2192,7 @@ impl ResourceProtocolConnection {
         request_id: InvocationId,
         target_revision: Option<RevisionPair>,
     ) -> Result<Option<ResourceFrameDisposition>, ResourceConnectionError> {
-        if let Some((expected_request_id, expected_revision)) = self.terminal.get(&stream_id) {
+        if let Some((expected_request_id, expected_revision, _)) = self.terminal.get(&stream_id) {
             if *expected_request_id != request_id {
                 return Err(ResourceConnectionError::MismatchedRequest { stream_id });
             }
@@ -2281,6 +2341,11 @@ impl ResourceProtocolConnection {
                 actual: frame.batch_sequence,
             });
         }
+        if state.last_batch_sequence == Some(u64::MAX) {
+            return Err(ResourceConnectionError::SequenceExhausted {
+                stream_id: frame.stream_id,
+            });
+        }
         let required_items = u64::from(frame.item_count);
         let required_bytes = u64::from(frame.byte_count);
         if required_items > state.item_window || required_bytes > state.byte_window {
@@ -2301,11 +2366,17 @@ impl ResourceProtocolConnection {
         )?;
         require_resource_total_items(total_items)
             .map_err(|source| ResourceConnectionError::InvalidFrame { source })?;
-        let next_sequence = state.next_batch_sequence.checked_add(1).ok_or(
-            ResourceConnectionError::SequenceExhausted {
-                stream_id: frame.stream_id,
-            },
-        )?;
+        // `u64::MAX` is a valid final sequence; retain it as the exhausted
+        // sentinel so the following batch is rejected without wrapping.
+        let next_sequence = if frame.batch_sequence == u64::MAX {
+            u64::MAX
+        } else {
+            state.next_batch_sequence.checked_add(1).ok_or(
+                ResourceConnectionError::SequenceExhausted {
+                    stream_id: frame.stream_id,
+                },
+            )?
+        };
         let state = self
             .streams
             .get_mut(&frame.stream_id)
@@ -2362,7 +2433,12 @@ impl ResourceProtocolConnection {
                 actual: frame.total_items,
             });
         }
-        self.finish(frame.stream_id, frame.request_id, frame.target_revision);
+        self.finish(
+            frame.stream_id,
+            frame.request_id,
+            frame.target_revision,
+            ResourceTerminalKind::Completed,
+        );
         Ok(ResourceFrameDisposition::Applied)
     }
 
@@ -2371,6 +2447,7 @@ impl ResourceProtocolConnection {
         stream_id: u64,
         request_id: InvocationId,
         target_revision: RevisionPair,
+        terminal_kind: ResourceTerminalKind,
     ) -> Result<ResourceFrameDisposition, ResourceConnectionError> {
         if let Some(disposition) =
             self.check_terminal(stream_id, request_id, Some(target_revision))?
@@ -2386,7 +2463,7 @@ impl ResourceProtocolConnection {
         {
             return Err(ResourceConnectionError::WrongState { stream_id });
         }
-        self.finish(stream_id, request_id, target_revision);
+        self.finish(stream_id, request_id, target_revision, terminal_kind);
         Ok(ResourceFrameDisposition::Applied)
     }
 
@@ -2439,7 +2516,12 @@ impl ResourceProtocolConnection {
         }
         let state = self.state_for(cancel.stream_id, cancel.request_id)?;
         if matches!(state.phase, ResourcePhase::Requested | ResourcePhase::Live) {
-            self.finish(cancel.stream_id, cancel.request_id, state.target_revision);
+            self.finish(
+                cancel.stream_id,
+                cancel.request_id,
+                state.target_revision,
+                ResourceTerminalKind::Cancelled,
+            );
             return Ok(ResourceFrameDisposition::Applied);
         }
         Err(ResourceConnectionError::WrongState {
@@ -2454,13 +2536,19 @@ impl ResourceProtocolConnection {
             || self
                 .terminal
                 .values()
-                .any(|(retained_request_id, _)| *retained_request_id == request_id)
+                .any(|(retained_request_id, _, _)| *retained_request_id == request_id)
     }
 
-    fn finish(&mut self, stream_id: u64, request_id: InvocationId, target_revision: RevisionPair) {
+    fn finish(
+        &mut self,
+        stream_id: u64,
+        request_id: InvocationId,
+        target_revision: RevisionPair,
+        terminal_kind: ResourceTerminalKind,
+    ) {
         self.streams.remove(&stream_id);
         self.terminal
-            .insert(stream_id, (request_id, target_revision));
+            .insert(stream_id, (request_id, target_revision, terminal_kind));
         self.retain_terminal_history();
     }
 
@@ -2479,7 +2567,16 @@ impl ResourceProtocolConnection {
         let streams: Vec<_> = self
             .streams
             .iter()
-            .map(|(stream, state)| (*stream, (state.request_id, state.target_revision)))
+            .map(|(stream, state)| {
+                (
+                    *stream,
+                    (
+                        state.request_id,
+                        state.target_revision,
+                        ResourceTerminalKind::Cancelled,
+                    ),
+                )
+            })
             .collect();
         self.streams.clear();
         for (stream, identity) in streams {
@@ -2685,7 +2782,9 @@ impl RawCallClient {
             ServerFrame::CallAccepted { invocation, .. } => {
                 require_non_zero_invocation_id(invocation)
                     .map_err(|source| RawCallClientError::Frame { source })?;
-                if self.phase != RawCallClientPhase::AwaitingAcceptance {
+                if self.phase != RawCallClientPhase::AwaitingAcceptance
+                    || self.cancellation_requested
+                {
                     return Err(RawCallClientError::WrongState);
                 }
                 self.phase = RawCallClientPhase::Running;
@@ -2723,7 +2822,9 @@ impl RawCallClient {
                 Ok(RawCallClientResponse::Completed)
             }
             ServerFrame::CallFailed { failure, .. }
-                if self.phase == RawCallClientPhase::Running =>
+                if self.phase == RawCallClientPhase::Running
+                    || (self.phase == RawCallClientPhase::AwaitingAcceptance
+                        && !self.cancellation_requested) =>
             {
                 self.phase = RawCallClientPhase::Terminal;
                 Ok(RawCallClientResponse::Failed(failure))
@@ -3365,6 +3466,8 @@ pub fn encode_resource_request(
 ) -> Result<Vec<u8>, FrameCodecError> {
     require_resource_stream(request.stream_id)?;
     require_resource_invocation_id(request.request_id)?;
+    require_resource_invocation_id(request.parent_invocation_id)?;
+    require_resource_call_site_id(request.call_site_id)?;
     require_resource_generation(request.generation)?;
     require_resource_kind_windows(
         request.resource_kind,
@@ -3419,7 +3522,9 @@ pub fn decode_resource_request(
     let request_id = resource_id(payload, &mut cursor, InvocationId::from_bytes)?;
     require_resource_invocation_id(request_id)?;
     let parent_invocation_id = resource_id(payload, &mut cursor, InvocationId::from_bytes)?;
+    require_resource_invocation_id(parent_invocation_id)?;
     let call_site_id = resource_id(payload, &mut cursor, CallSiteId::from_bytes)?;
+    require_resource_call_site_id(call_site_id)?;
     let state_profile = resource_text(payload, &mut cursor)?;
     let function_instance_key = resource_text(payload, &mut cursor)?;
     let target_function_id = resource_id(payload, &mut cursor, FunctionId::from_bytes)?;
@@ -3995,6 +4100,14 @@ fn require_resource_stream(stream_id: u64) -> Result<(), FrameCodecError> {
 }
 
 fn require_resource_invocation_id(id: InvocationId) -> Result<(), FrameCodecError> {
+    if id.to_bytes() == [0; 16] {
+        Err(FrameCodecError::ResourceMalformedPayload)
+    } else {
+        Ok(())
+    }
+}
+
+fn require_resource_call_site_id(id: CallSiteId) -> Result<(), FrameCodecError> {
     if id.to_bytes() == [0; 16] {
         Err(FrameCodecError::ResourceMalformedPayload)
     } else {
@@ -5042,8 +5155,8 @@ mod tests {
         },
         invocation::{
             InvocationCallerContext, InvocationCallerKind, InvocationClientOffer,
-            InvocationEventBody, InvocationTarget, InvocationTracePolicy, InvokeRequestInput,
-            InvokeValue,
+            InvocationEventBody, InvocationFailure, InvocationFailurePhase, InvocationRetryability,
+            InvocationTarget, InvocationTracePolicy, InvokeRequestInput, InvokeValue,
         },
         revision::{ActiveDatabaseRevision, RevisionPair, StoredSourceRevision},
         value::EnumValue,
@@ -5643,6 +5756,551 @@ mod tests {
         );
         assert_eq!(
             cancellation_connection.apply(ServerAction::Completed { stream: 1 }),
+            Ok(ServerFrame::CallCompleted { stream: 1 })
+        );
+    }
+
+    #[test]
+    fn running_cancelling_discards_stale_invoke_events_before_cancellation_terminal() {
+        let active = empty_active_revision();
+        let registry = test_registry();
+        let request = encode_invoke_request(&active, &registry, &minimal_request(None)).unwrap();
+        let invocation = InvocationId::from_bytes([0x75; 16]);
+        let started = InvokeEvent::new(
+            invocation,
+            0,
+            InvocationEventBody::Started {
+                visible_principal: None,
+            },
+        )
+        .unwrap();
+        let value = InvokeEvent::new(
+            invocation,
+            1,
+            InvocationEventBody::ValueBatch {
+                schema: None,
+                values: vec![InvokeValue::new(RuntimeValue::Integer(7)).unwrap()],
+            },
+        )
+        .unwrap();
+        let completed = InvokeEvent::new(
+            invocation,
+            2,
+            InvocationEventBody::Completed {
+                duration_nanoseconds: 11,
+            },
+        )
+        .unwrap();
+        let stale = InvocationEventBatch::new(vec![
+            InvocationEventRecord::new(2, value),
+            InvocationEventRecord::new(3, completed),
+        ])
+        .unwrap();
+
+        let mut connection = ProtocolConnection::new();
+        connection
+            .receive_constructed(
+                &active,
+                &registry,
+                ClientFrame::CallRawStart {
+                    stream: 1,
+                    function: SYS_INVOKE_FUNCTION_ID,
+                },
+            )
+            .unwrap();
+        connection
+            .receive_constructed(
+                &active,
+                &registry,
+                ClientFrame::CallInvokeRequest { stream: 1, request },
+            )
+            .unwrap();
+        assert!(matches!(
+            connection
+                .receive_constructed(
+                    &active,
+                    &registry,
+                    ClientFrame::CallArgumentsComplete { stream: 1 },
+                )
+                .unwrap(),
+            Some(ClientAction::InvokeDispatch { .. })
+        ));
+        assert_eq!(
+            connection.apply_constructed(
+                &active,
+                &registry,
+                ServerAction::Accepted {
+                    stream: 1,
+                    invocation,
+                },
+            ),
+            Ok(ServerFrame::CallAccepted {
+                stream: 1,
+                invocation,
+            })
+        );
+        connection
+            .receive(ClientFrame::WindowUpdate {
+                stream: 1,
+                channel: Channel::ResultValues,
+                credit: MAX_CHANNEL_WINDOW,
+            })
+            .unwrap();
+        connection
+            .apply_constructed(
+                &active,
+                &registry,
+                ServerAction::InvokeEvents {
+                    stream: 1,
+                    events: InvocationEventBatch::new(vec![InvocationEventRecord::new(1, started)])
+                        .unwrap(),
+                },
+            )
+            .unwrap();
+        assert!(matches!(
+            connection.receive(ClientFrame::CallCancel { stream: 1 }),
+            Ok(Some(ClientAction::Cancel {
+                stream: 1,
+                invocation: Some(_),
+            }))
+        ));
+
+        let before_stale = connection.clone();
+        assert_eq!(
+            connection.apply_constructed(
+                &active,
+                &registry,
+                ServerAction::InvokeEvents {
+                    stream: 1,
+                    events: stale,
+                },
+            ),
+            Err(ConnectionError::WrongState { stream: 1 })
+        );
+        assert_eq!(connection, before_stale);
+
+        let operational_failure = InvocationFailure::new(
+            InvocationFailurePhase::Target,
+            "INVOKE_TARGET_FAILED",
+            "invocation target failed",
+            None,
+            InvocationRetryability::Unknown,
+        )
+        .unwrap();
+        let operational_failure = InvokeEvent::new(
+            invocation,
+            1,
+            InvocationEventBody::Failed(operational_failure),
+        )
+        .unwrap();
+        let before_operational_failure = connection.clone();
+        let before_operational_credit = connection.result_credit(1).unwrap();
+        assert_eq!(
+            connection.apply_constructed(
+                &active,
+                &registry,
+                ServerAction::InvokeEvents {
+                    stream: 1,
+                    events: InvocationEventBatch::new(vec![InvocationEventRecord::new(
+                        2,
+                        operational_failure,
+                    )])
+                    .unwrap(),
+                },
+            ),
+            Err(ConnectionError::WrongState { stream: 1 })
+        );
+        assert_eq!(connection.result_credit(1), Ok(before_operational_credit));
+        let state = connection.streams.get(&1).expect("live stream");
+        assert_eq!(state.phase, Phase::RunningCancelling { invocation });
+        assert_eq!(state.last_sequence, 1);
+        assert_eq!(state.last_invocation_outer_sequence, 1);
+        assert_eq!(state.last_invocation_event_sequence, Some(0));
+        assert!(!state.invocation_terminal);
+        assert_eq!(connection, before_operational_failure);
+
+        let failure = InvocationFailure::new(
+            InvocationFailurePhase::Internal,
+            "INVOKE_INTERNAL_FAILURE",
+            "invocation could not complete",
+            None,
+            InvocationRetryability::Unknown,
+        )
+        .unwrap();
+        let failed = InvokeEvent::new(invocation, 1, InvocationEventBody::Failed(failure)).unwrap();
+        let mut failure_connection = connection.clone();
+        let failure_frame = failure_connection
+            .apply_constructed(
+                &active,
+                &registry,
+                ServerAction::InvokeEvents {
+                    stream: 1,
+                    events: InvocationEventBatch::new(vec![InvocationEventRecord::new(2, failed)])
+                        .unwrap(),
+                },
+            )
+            .unwrap();
+        assert!(matches!(
+            &failure_frame,
+            ServerFrame::EventBatch { events, .. }
+                if events.len() == 1
+                    && matches!(&events[0].event, Event::Value(RuntimeValue::InvokeEvent(event)) if event.kind() == InvocationEventKind::InvocationFailed)
+        ));
+        assert_eq!(
+            failure_connection.apply(ServerAction::Completed { stream: 1 }),
+            Ok(ServerFrame::CallCompleted { stream: 1 })
+        );
+
+        let cancelled = connection
+            .apply_constructed(
+                &active,
+                &registry,
+                ServerAction::InvokeCancelled { stream: 1 },
+            )
+            .unwrap();
+        assert!(matches!(
+            &cancelled,
+            ServerFrame::EventBatch { events, .. }
+                if events.len() == 1
+                    && matches!(&events[0].event, Event::Value(RuntimeValue::InvokeEvent(event)) if event.kind() == InvocationEventKind::InvocationCancelled)
+        ));
+        assert_eq!(
+            connection.apply(ServerAction::Completed { stream: 1 }),
+            Ok(ServerFrame::CallCompleted { stream: 1 })
+        );
+    }
+
+    #[test]
+    fn accepted_invoke_event_batches_enforce_cross_batch_sequences_credit_and_state() {
+        let active = empty_active_revision();
+        let registry = test_registry();
+        let request = encode_invoke_request(&active, &registry, &minimal_request(None)).unwrap();
+        let invocation = InvocationId::from_bytes([0x74; 16]);
+        let started = InvokeEvent::new(
+            invocation,
+            0,
+            InvocationEventBody::Started {
+                visible_principal: None,
+            },
+        )
+        .unwrap();
+        let value = InvokeEvent::new(
+            invocation,
+            1,
+            InvocationEventBody::ValueBatch {
+                schema: None,
+                values: vec![InvokeValue::new(RuntimeValue::Integer(7)).unwrap()],
+            },
+        )
+        .unwrap();
+        let completed = InvokeEvent::new(
+            invocation,
+            2,
+            InvocationEventBody::Completed {
+                duration_nanoseconds: 11,
+            },
+        )
+        .unwrap();
+        let mut connection = ProtocolConnection::new();
+        connection
+            .receive_constructed(
+                &active,
+                &registry,
+                ClientFrame::CallRawStart {
+                    stream: 1,
+                    function: SYS_INVOKE_FUNCTION_ID,
+                },
+            )
+            .unwrap();
+        connection
+            .receive_constructed(
+                &active,
+                &registry,
+                ClientFrame::CallInvokeRequest { stream: 1, request },
+            )
+            .unwrap();
+        assert!(matches!(
+            connection
+                .receive_constructed(
+                    &active,
+                    &registry,
+                    ClientFrame::CallArgumentsComplete { stream: 1 },
+                )
+                .unwrap(),
+            Some(ClientAction::InvokeDispatch { .. })
+        ));
+        assert_eq!(
+            connection.apply_constructed(
+                &active,
+                &registry,
+                ServerAction::Accepted {
+                    stream: 1,
+                    invocation,
+                },
+            ),
+            Ok(ServerFrame::CallAccepted {
+                stream: 1,
+                invocation,
+            })
+        );
+
+        let apply_with_exact_credit =
+            |connection: &mut ProtocolConnection, events: InvocationEventBatch| {
+                let expected_frame = ServerFrame::EventBatch {
+                    stream: 1,
+                    channel: Channel::ResultValues,
+                    events: events
+                        .records()
+                        .iter()
+                        .map(|record| EventRecord {
+                            sequence: record.outer_sequence(),
+                            event: Event::Value(RuntimeValue::InvokeEvent(record.event().clone())),
+                        })
+                        .collect(),
+                };
+                let expected_credit =
+                    encode_constructed_server_frame(&active, &registry, &expected_frame)
+                        .unwrap()
+                        .len()
+                        .checked_sub(HEADER_LENGTH)
+                        .expect("encoded event frame includes its header")
+                        as u64;
+                let before_insufficient_credit = connection.clone();
+                let required = match connection.apply_constructed(
+                    &active,
+                    &registry,
+                    ServerAction::InvokeEvents {
+                        stream: 1,
+                        events: events.clone(),
+                    },
+                ) {
+                    Err(ConnectionError::InsufficientCredit {
+                        stream: 1,
+                        channel: Channel::ResultValues,
+                        available: 0,
+                        required,
+                    }) if required > 0 => required,
+                    result => panic!("event batch should require exact credit: {result:?}"),
+                };
+                assert_eq!(&*connection, &before_insufficient_credit);
+                assert_eq!(required, expected_credit);
+                connection
+                    .receive_constructed(
+                        &active,
+                        &registry,
+                        ClientFrame::WindowUpdate {
+                            stream: 1,
+                            channel: Channel::ResultValues,
+                            credit: required,
+                        },
+                    )
+                    .unwrap();
+                let frame = connection
+                    .apply_constructed(
+                        &active,
+                        &registry,
+                        ServerAction::InvokeEvents { stream: 1, events },
+                    )
+                    .unwrap();
+                assert_eq!(connection.result_credit(1), Ok(0));
+                frame
+            };
+
+        let started_frame = apply_with_exact_credit(
+            &mut connection,
+            InvocationEventBatch::new(vec![InvocationEventRecord::new(1, started)]).unwrap(),
+        );
+        assert!(matches!(
+            &started_frame,
+            ServerFrame::EventBatch {
+                stream: 1,
+                channel: Channel::ResultValues,
+                events,
+            } if events.len() == 1
+                && events[0].sequence == 1
+                && matches!(&events[0].event, Event::Value(RuntimeValue::InvokeEvent(event)) if event.kind() == InvocationEventKind::InvocationStarted && event.sequence() == 0)
+        ));
+
+        let repeated_started = InvokeEvent::new(
+            invocation,
+            1,
+            InvocationEventBody::Started {
+                visible_principal: None,
+            },
+        )
+        .unwrap();
+        let before_repeated_started = connection.clone();
+        assert_eq!(
+            connection.apply_constructed(
+                &active,
+                &registry,
+                ServerAction::InvokeEvents {
+                    stream: 1,
+                    events: InvocationEventBatch::new(vec![InvocationEventRecord::new(
+                        2,
+                        repeated_started,
+                    )])
+                    .unwrap(),
+                },
+            ),
+            Err(ConnectionError::InvalidFrame {
+                source: FrameCodecError::InvalidInvocationEventSequence,
+            })
+        );
+        assert_eq!(connection, before_repeated_started);
+
+        let skipped = InvokeEvent::new(
+            invocation,
+            2,
+            InvocationEventBody::ValueBatch {
+                schema: None,
+                values: vec![InvokeValue::new(RuntimeValue::Integer(8)).unwrap()],
+            },
+        )
+        .unwrap();
+        let before_skipped = connection.clone();
+        assert_eq!(
+            connection.apply_constructed(
+                &active,
+                &registry,
+                ServerAction::InvokeEvents {
+                    stream: 1,
+                    events: InvocationEventBatch::new(vec![
+                        InvocationEventRecord::new(2, skipped,)
+                    ])
+                    .unwrap(),
+                },
+            ),
+            Err(ConnectionError::InvalidFrame {
+                source: FrameCodecError::InvalidInvocationEventSequence,
+            })
+        );
+        assert_eq!(connection, before_skipped);
+
+        let replayed = InvokeEvent::new(
+            invocation,
+            1,
+            InvocationEventBody::ValueBatch {
+                schema: None,
+                values: vec![InvokeValue::new(RuntimeValue::Integer(9)).unwrap()],
+            },
+        )
+        .unwrap();
+        let before_replayed = connection.clone();
+        assert_eq!(
+            connection.apply_constructed(
+                &active,
+                &registry,
+                ServerAction::InvokeEvents {
+                    stream: 1,
+                    events: InvocationEventBatch::new(vec![InvocationEventRecord::new(
+                        1, replayed,
+                    )])
+                    .unwrap(),
+                },
+            ),
+            Err(ConnectionError::InvalidFrame {
+                source: FrameCodecError::InvalidInvocationEventSequence,
+            })
+        );
+        assert_eq!(connection, before_replayed);
+
+        let value_frame = apply_with_exact_credit(
+            &mut connection,
+            InvocationEventBatch::new(vec![InvocationEventRecord::new(2, value)]).unwrap(),
+        );
+        assert!(matches!(
+            &value_frame,
+            ServerFrame::EventBatch { events, .. }
+                if events.len() == 1
+                    && events[0].sequence == 2
+                    && matches!(&events[0].event, Event::Value(RuntimeValue::InvokeEvent(event)) if event.kind() == InvocationEventKind::ValueBatch && event.sequence() == 1)
+        ));
+
+        let after_terminal = InvokeEvent::new(
+            invocation,
+            3,
+            InvocationEventBody::ValueBatch {
+                schema: None,
+                values: vec![InvokeValue::new(RuntimeValue::Integer(10)).unwrap()],
+            },
+        )
+        .unwrap();
+        let terminal_before_nonterminal = InvocationEventBatch::new(vec![
+            InvocationEventRecord::new(3, completed.clone()),
+            InvocationEventRecord::new(4, after_terminal.clone()),
+        ])
+        .unwrap();
+        let before_terminal_before_nonterminal = connection.clone();
+        assert_eq!(
+            connection.apply_constructed(
+                &active,
+                &registry,
+                ServerAction::InvokeEvents {
+                    stream: 1,
+                    events: terminal_before_nonterminal,
+                },
+            ),
+            Err(ConnectionError::InvalidFrame {
+                source: FrameCodecError::InvalidInvocationEventSequence,
+            })
+        );
+        assert_eq!(connection, before_terminal_before_nonterminal);
+
+        let wrong_terminal = InvokeEvent::new(
+            invocation,
+            2,
+            InvocationEventBody::Cancelled { reason: None },
+        )
+        .unwrap();
+        let before_wrong_terminal = connection.clone();
+        assert_eq!(
+            connection.apply_constructed(
+                &active,
+                &registry,
+                ServerAction::InvokeEvents {
+                    stream: 1,
+                    events: InvocationEventBatch::new(vec![InvocationEventRecord::new(
+                        3,
+                        wrong_terminal,
+                    )])
+                    .unwrap(),
+                },
+            ),
+            Err(ConnectionError::WrongState { stream: 1 })
+        );
+        assert_eq!(connection, before_wrong_terminal);
+
+        let completed_frame = apply_with_exact_credit(
+            &mut connection,
+            InvocationEventBatch::new(vec![InvocationEventRecord::new(3, completed)]).unwrap(),
+        );
+        assert!(matches!(
+            &completed_frame,
+            ServerFrame::EventBatch { events, .. }
+                if events.len() == 1
+                    && events[0].sequence == 3
+                    && matches!(&events[0].event, Event::Value(RuntimeValue::InvokeEvent(event)) if event.kind() == InvocationEventKind::InvocationCompleted && event.sequence() == 2)
+        ));
+        let before_post_terminal = connection.clone();
+        assert_eq!(
+            connection.apply_constructed(
+                &active,
+                &registry,
+                ServerAction::InvokeEvents {
+                    stream: 1,
+                    events: InvocationEventBatch::new(vec![InvocationEventRecord::new(
+                        4,
+                        after_terminal,
+                    )])
+                    .unwrap(),
+                },
+            ),
+            Err(ConnectionError::WrongState { stream: 1 })
+        );
+        assert_eq!(connection, before_post_terminal);
+        assert_eq!(
+            connection.apply(ServerAction::Completed { stream: 1 }),
             Ok(ServerFrame::CallCompleted { stream: 1 })
         );
     }
@@ -6736,6 +7394,7 @@ mod tests {
         );
 
         let (mut cancelled, _) = RawCallClient::start(function);
+        cancelled.receive_encoded(&accepted).unwrap();
         assert_eq!(
             cancelled.request_cancellation().unwrap(),
             ClientFrame::CallCancel { stream: 1 }
@@ -6755,7 +7414,6 @@ mod tests {
             cancelled.request_cancellation(),
             Err(RawCallClientError::WrongState)
         );
-        cancelled.receive_encoded(&accepted).unwrap();
         assert_eq!(
             cancelled
                 .receive_encoded(
@@ -6764,6 +7422,62 @@ mod tests {
                 .unwrap(),
             RawCallClientResponse::Cancelled
         );
+    }
+
+    #[test]
+    fn raw_call_client_accepts_pre_acceptance_failure_as_terminal_without_state_change() {
+        let function = FunctionId::from_bytes([0x11; 16]);
+        let failure = encode_server_frame(&ServerFrame::CallFailed {
+            stream: 1,
+            failure: CallFailure::TargetUnavailable,
+        })
+        .unwrap();
+        let (mut client, _) = RawCallClient::start(function);
+
+        assert_eq!(
+            client.receive_encoded(&failure).unwrap(),
+            RawCallClientResponse::Failed(CallFailure::TargetUnavailable)
+        );
+        assert_eq!(
+            client.request_cancellation(),
+            Err(RawCallClientError::WrongState)
+        );
+
+        let terminal = client.clone();
+        assert_eq!(
+            client.receive_encoded(&failure),
+            Err(RawCallClientError::WrongState)
+        );
+        assert_eq!(client, terminal);
+
+        let (mut cancelled, _) = RawCallClient::start(function);
+        cancelled.request_cancellation().unwrap();
+        let before_cancelled_failure = cancelled.clone();
+        assert_eq!(
+            cancelled.receive_encoded(&failure),
+            Err(RawCallClientError::WrongState)
+        );
+        assert_eq!(cancelled, before_cancelled_failure);
+    }
+
+    #[test]
+    fn raw_call_client_rejects_late_acceptance_after_cancellation_without_state_change() {
+        let function = FunctionId::from_bytes([0x11; 16]);
+        let invocation = InvocationId::from_bytes([0x22; 16]);
+        let accepted = encode_server_frame(&ServerFrame::CallAccepted {
+            stream: 1,
+            invocation,
+        })
+        .unwrap();
+        let (mut client, _) = RawCallClient::start(function);
+        client.request_cancellation().unwrap();
+        let before = client.clone();
+
+        assert_eq!(
+            client.receive_encoded(&accepted),
+            Err(RawCallClientError::WrongState)
+        );
+        assert_eq!(client, before);
     }
 
     #[test]
@@ -7465,6 +8179,70 @@ mod tests {
             .expect("non-zero fixture request encodes");
         let request_id_start = RESOURCE_HEADER_LENGTH + 8;
         encoded[request_id_start..request_id_start + 16].fill(0);
+        assert_eq!(
+            decode_resource_request(&active, &registry, &encoded),
+            Err(FrameCodecError::ResourceMalformedPayload),
+        );
+
+        let mut connection = ResourceProtocolConnection::new();
+        let before = connection.clone();
+        assert_eq!(
+            connection.open(request),
+            Err(ResourceConnectionError::InvalidFrame {
+                source: FrameCodecError::ResourceMalformedPayload,
+            }),
+        );
+        assert_eq!(connection, before);
+    }
+
+    #[test]
+    fn resource_request_rejects_zero_parent_invocation_id_at_encode_decode_and_open() {
+        let active = empty_active_revision();
+        let registry = test_registry();
+        let mut request = resource_request_fixture();
+        request.parent_invocation_id = InvocationId::from_bytes([0; 16]);
+
+        assert_eq!(
+            encode_resource_request(&active, &registry, &request),
+            Err(FrameCodecError::ResourceMalformedPayload),
+        );
+
+        let mut encoded = encode_resource_request(&active, &registry, &resource_request_fixture())
+            .expect("non-zero fixture request encodes");
+        let parent_invocation_id_start = RESOURCE_HEADER_LENGTH + 8 + 16;
+        encoded[parent_invocation_id_start..parent_invocation_id_start + 16].fill(0);
+        assert_eq!(
+            decode_resource_request(&active, &registry, &encoded),
+            Err(FrameCodecError::ResourceMalformedPayload),
+        );
+
+        let mut connection = ResourceProtocolConnection::new();
+        let before = connection.clone();
+        assert_eq!(
+            connection.open(request),
+            Err(ResourceConnectionError::InvalidFrame {
+                source: FrameCodecError::ResourceMalformedPayload,
+            }),
+        );
+        assert_eq!(connection, before);
+    }
+
+    #[test]
+    fn resource_request_rejects_zero_call_site_id_at_encode_decode_and_open() {
+        let active = empty_active_revision();
+        let registry = test_registry();
+        let mut request = resource_request_fixture();
+        request.call_site_id = CallSiteId::from_bytes([0; 16]);
+
+        assert_eq!(
+            encode_resource_request(&active, &registry, &request),
+            Err(FrameCodecError::ResourceMalformedPayload),
+        );
+
+        let mut encoded = encode_resource_request(&active, &registry, &resource_request_fixture())
+            .expect("non-zero fixture request encodes");
+        let call_site_id_start = RESOURCE_HEADER_LENGTH + 8 + 16 + 16;
+        encoded[call_site_id_start..call_site_id_start + 16].fill(0);
         assert_eq!(
             decode_resource_request(&active, &registry, &encoded),
             Err(FrameCodecError::ResourceMalformedPayload),
@@ -9623,6 +10401,46 @@ mod tests {
     }
 
     #[test]
+    fn resource_connection_enforces_max_live_streams_with_state_preservation() {
+        let mut connection = ResourceProtocolConnection::new();
+        for stream_id in 1..=MAX_LIVE_STREAMS as u64 {
+            let mut request = resource_request_fixture();
+            request.stream_id = stream_id;
+            request.request_id = InvocationId::from_bytes([stream_id as u8; 16]);
+            assert_eq!(
+                connection.open(request),
+                Ok(ResourceFrameDisposition::Applied)
+            );
+        }
+
+        let before_rejected_open = connection.clone();
+        let mut rejected_request = resource_request_fixture();
+        rejected_request.stream_id = MAX_LIVE_STREAMS as u64 + 1;
+        rejected_request.request_id = InvocationId::from_bytes([(MAX_LIVE_STREAMS as u8) + 1; 16]);
+        assert_eq!(
+            connection.open(rejected_request.clone()),
+            Err(ResourceConnectionError::TooManyLiveResources)
+        );
+        assert_eq!(connection, before_rejected_open);
+
+        assert_eq!(
+            connection.apply(ResourceServerFrame::Failed(ResourceFailed {
+                stream_id: 1,
+                request_id: InvocationId::from_bytes([1; 16]),
+                target_revision: resource_revision_fixture(),
+                failure: CallFailure::InternalFailure,
+            })),
+            Ok(ResourceFrameDisposition::Applied)
+        );
+        assert_eq!(connection.live_resources(), MAX_LIVE_STREAMS - 1);
+        assert_eq!(
+            connection.open(rejected_request),
+            Ok(ResourceFrameDisposition::Applied)
+        );
+        assert_eq!(connection.live_resources(), MAX_LIVE_STREAMS);
+    }
+
+    #[test]
     fn resource_terminal_tombstones_evict_oldest_late_frames() {
         let mut connection = ResourceProtocolConnection::new();
         for stream_id in 1..=(MAX_LIVE_STREAMS + 1) as u64 {
@@ -9703,7 +10521,7 @@ mod tests {
             connection
                 .terminal
                 .get(&1)
-                .map(|(request_id, _)| request_id),
+                .map(|(request_id, _, _)| request_id),
             Some(&oldest_request_id)
         );
 
@@ -9928,6 +10746,63 @@ mod tests {
     }
 
     #[test]
+    fn resource_connection_drops_cancel_confirmation_after_committed_completion() {
+        let mut request = resource_request_fixture();
+        request.resource_kind = ResourceKind::Stream;
+        let request_id = request.request_id;
+        let stream_id = request.stream_id;
+        let target_revision = request.target_revision;
+        let mut connection = ResourceProtocolConnection::new();
+
+        assert_eq!(
+            connection.open(request.clone()),
+            Ok(ResourceFrameDisposition::Applied)
+        );
+        assert_eq!(
+            connection.apply(ResourceServerFrame::Accepted(ResourceAccepted {
+                stream_id,
+                request_id,
+                nested_invocation_id: InvocationId::from_bytes([0x77; 16]),
+                target_revision,
+                resource_kind: ResourceKind::Stream,
+            })),
+            Ok(ResourceFrameDisposition::Applied)
+        );
+        assert_eq!(
+            connection.apply(ResourceServerFrame::Completed(ResourceCompleted {
+                stream_id,
+                request_id,
+                target_revision,
+                final_batch_sequence: 0,
+                total_items: 0,
+            })),
+            Ok(ResourceFrameDisposition::Applied)
+        );
+
+        let before_late_cancel = connection.clone();
+        let before_credit = connection.resource_credit(stream_id, request_id);
+        assert_eq!(
+            before_credit,
+            Err(ResourceConnectionError::UnknownStream { stream_id })
+        );
+        assert_eq!(
+            connection.apply_cancelled_after_client_cancel(ResourceCancelled {
+                stream_id,
+                request_id,
+                target_revision,
+                reason: ResourceCancellationCode::ClientRequested,
+            }),
+            Ok(ResourceFrameDisposition::DroppedLate)
+        );
+        assert_eq!(connection, before_late_cancel);
+        assert_eq!(connection.live_resources(), 0);
+        assert_eq!(
+            connection.resource_credit(stream_id, request_id),
+            before_credit
+        );
+    }
+
+    #[test]
     fn resource_connection_rejects_request_id_reuse_across_streams_and_after_cleanup() {
         let mut first = resource_request_fixture();
         first.stream_id = 1;
@@ -10064,7 +10939,7 @@ mod tests {
             connection
                 .terminal
                 .get(&2)
-                .map(|(request_id, _)| request_id),
+                .map(|(request_id, _, _)| request_id),
             Some(&InvocationId::from_bytes([2; 16])),
         );
 
@@ -10107,6 +10982,374 @@ mod tests {
             }),
         );
         assert_eq!(connection, before_active_duplicate);
+    }
+
+    #[test]
+    fn resource_connection_rejects_duplicate_batch_sequence_without_mutating_state() {
+        let mut request = resource_request_fixture();
+        request.resource_kind = ResourceKind::Stream;
+        request.item_window = 2;
+        request.byte_window = 2;
+        let request_id = request.request_id;
+        let stream_id = request.stream_id;
+        let target_revision = request.target_revision;
+        let mut connection = ResourceProtocolConnection::new();
+        connection.open(request).unwrap();
+        connection
+            .apply(ResourceServerFrame::Accepted(ResourceAccepted {
+                stream_id,
+                request_id,
+                nested_invocation_id: InvocationId::from_bytes([0x91; 16]),
+                target_revision,
+                resource_kind: ResourceKind::Stream,
+            }))
+            .unwrap();
+        connection
+            .apply(ResourceServerFrame::Values(ResourceValues {
+                stream_id,
+                request_id,
+                target_revision,
+                batch_sequence: 0,
+                item_count: 1,
+                byte_count: 1,
+                values: vec![RuntimeValue::Integer(7)],
+            }))
+            .unwrap();
+        let before = connection.clone();
+        let credit_before = connection.resource_credit(stream_id, request_id).unwrap();
+
+        assert_eq!(
+            connection.apply(ResourceServerFrame::Values(ResourceValues {
+                stream_id,
+                request_id,
+                target_revision,
+                batch_sequence: 0,
+                item_count: 1,
+                byte_count: 1,
+                values: vec![RuntimeValue::Integer(8)],
+            })),
+            Err(ResourceConnectionError::BatchSequenceMismatch {
+                stream_id,
+                expected: 1,
+                actual: 0,
+            })
+        );
+        assert_eq!(connection, before);
+        assert_eq!(
+            connection.resource_credit(stream_id, request_id),
+            Ok(credit_before)
+        );
+    }
+
+    #[test]
+    fn resource_connection_rejects_skipped_batch_sequence_without_mutating_state() {
+        let mut request = resource_request_fixture();
+        request.resource_kind = ResourceKind::Stream;
+        request.item_window = 2;
+        request.byte_window = 2;
+        let request_id = request.request_id;
+        let stream_id = request.stream_id;
+        let target_revision = request.target_revision;
+        let mut connection = ResourceProtocolConnection::new();
+        connection.open(request).unwrap();
+        connection
+            .apply(ResourceServerFrame::Accepted(ResourceAccepted {
+                stream_id,
+                request_id,
+                nested_invocation_id: InvocationId::from_bytes([0x92; 16]),
+                target_revision,
+                resource_kind: ResourceKind::Stream,
+            }))
+            .unwrap();
+        connection
+            .apply(ResourceServerFrame::Values(ResourceValues {
+                stream_id,
+                request_id,
+                target_revision,
+                batch_sequence: 0,
+                item_count: 1,
+                byte_count: 1,
+                values: vec![RuntimeValue::Integer(7)],
+            }))
+            .unwrap();
+        let before = connection.clone();
+        let credit_before = connection.resource_credit(stream_id, request_id).unwrap();
+
+        assert_eq!(
+            connection.apply(ResourceServerFrame::Values(ResourceValues {
+                stream_id,
+                request_id,
+                target_revision,
+                batch_sequence: 2,
+                item_count: 1,
+                byte_count: 1,
+                values: vec![RuntimeValue::Integer(8)],
+            })),
+            Err(ResourceConnectionError::BatchSequenceMismatch {
+                stream_id,
+                expected: 1,
+                actual: 2,
+            })
+        );
+        assert_eq!(connection, before);
+        assert_eq!(
+            connection.resource_credit(stream_id, request_id),
+            Ok(credit_before)
+        );
+    }
+
+    #[test]
+    fn resource_connection_accepts_max_batch_sequence_once_and_completes() {
+        let mut request = resource_request_fixture();
+        request.resource_kind = ResourceKind::Stream;
+        request.item_window = 2;
+        request.byte_window = 2;
+        let request_id = request.request_id;
+        let stream_id = request.stream_id;
+        let target_revision = request.target_revision;
+        let mut connection = ResourceProtocolConnection::new();
+        connection.open(request).unwrap();
+        connection
+            .apply(ResourceServerFrame::Accepted(ResourceAccepted {
+                stream_id,
+                request_id,
+                nested_invocation_id: InvocationId::from_bytes([0x95; 16]),
+                target_revision,
+                resource_kind: ResourceKind::Stream,
+            }))
+            .unwrap();
+        connection
+            .streams
+            .get_mut(&stream_id)
+            .expect("accepted resource state")
+            .next_batch_sequence = u64::MAX;
+
+        assert_eq!(
+            connection.apply(ResourceServerFrame::Values(ResourceValues {
+                stream_id,
+                request_id,
+                target_revision,
+                batch_sequence: u64::MAX,
+                item_count: 1,
+                byte_count: 1,
+                values: vec![RuntimeValue::Integer(7)],
+            })),
+            Ok(ResourceFrameDisposition::Applied)
+        );
+        let state = connection
+            .streams
+            .get(&stream_id)
+            .expect("max-sequence resource remains live");
+        assert_eq!(state.next_batch_sequence, u64::MAX);
+        assert_eq!(state.last_batch_sequence, Some(u64::MAX));
+        assert_eq!(state.total_items, 1);
+        assert_eq!(
+            connection.resource_credit(stream_id, request_id),
+            Ok(ResourceCredit {
+                item_available: 1,
+                byte_available: 1,
+            })
+        );
+
+        assert_eq!(
+            connection.apply(ResourceServerFrame::Completed(ResourceCompleted {
+                stream_id,
+                request_id,
+                target_revision,
+                final_batch_sequence: u64::MAX,
+                total_items: 1,
+            })),
+            Ok(ResourceFrameDisposition::Applied)
+        );
+        assert_eq!(connection.live_resources(), 0);
+    }
+
+    #[test]
+    fn resource_connection_rejects_batch_after_max_and_terminal_mismatch_without_mutating_state() {
+        let mut request = resource_request_fixture();
+        request.resource_kind = ResourceKind::Stream;
+        request.item_window = 2;
+        request.byte_window = 2;
+        let request_id = request.request_id;
+        let stream_id = request.stream_id;
+        let target_revision = request.target_revision;
+        let mut connection = ResourceProtocolConnection::new();
+        connection.open(request).unwrap();
+        connection
+            .apply(ResourceServerFrame::Accepted(ResourceAccepted {
+                stream_id,
+                request_id,
+                nested_invocation_id: InvocationId::from_bytes([0x96; 16]),
+                target_revision,
+                resource_kind: ResourceKind::Stream,
+            }))
+            .unwrap();
+        connection
+            .streams
+            .get_mut(&stream_id)
+            .expect("accepted resource state")
+            .next_batch_sequence = u64::MAX;
+        connection
+            .apply(ResourceServerFrame::Values(ResourceValues {
+                stream_id,
+                request_id,
+                target_revision,
+                batch_sequence: u64::MAX,
+                item_count: 1,
+                byte_count: 1,
+                values: vec![RuntimeValue::Integer(7)],
+            }))
+            .unwrap();
+
+        let before = connection.clone();
+        let credit_before = connection.resource_credit(stream_id, request_id).unwrap();
+        assert_eq!(
+            connection.apply(ResourceServerFrame::Values(ResourceValues {
+                stream_id,
+                request_id,
+                target_revision,
+                batch_sequence: u64::MAX,
+                item_count: 1,
+                byte_count: 1,
+                values: vec![RuntimeValue::Integer(8)],
+            })),
+            Err(ResourceConnectionError::SequenceExhausted { stream_id })
+        );
+        assert_eq!(connection, before);
+        assert_eq!(
+            connection.resource_credit(stream_id, request_id),
+            Ok(credit_before)
+        );
+
+        assert_eq!(
+            connection.apply(ResourceServerFrame::Completed(ResourceCompleted {
+                stream_id,
+                request_id,
+                target_revision,
+                final_batch_sequence: u64::MAX - 1,
+                total_items: 1,
+            })),
+            Err(ResourceConnectionError::BatchSequenceMismatch {
+                stream_id,
+                expected: u64::MAX,
+                actual: u64::MAX - 1,
+            })
+        );
+        assert_eq!(connection, before);
+        assert_eq!(
+            connection.resource_credit(stream_id, request_id),
+            Ok(credit_before)
+        );
+    }
+
+    #[test]
+    fn resource_connection_rejects_terminal_sequence_mismatch_without_mutating_state() {
+        let mut request = resource_request_fixture();
+        request.resource_kind = ResourceKind::Stream;
+        request.item_window = 2;
+        request.byte_window = 2;
+        let request_id = request.request_id;
+        let stream_id = request.stream_id;
+        let target_revision = request.target_revision;
+        let mut connection = ResourceProtocolConnection::new();
+        connection.open(request).unwrap();
+        connection
+            .apply(ResourceServerFrame::Accepted(ResourceAccepted {
+                stream_id,
+                request_id,
+                nested_invocation_id: InvocationId::from_bytes([0x93; 16]),
+                target_revision,
+                resource_kind: ResourceKind::Stream,
+            }))
+            .unwrap();
+        connection
+            .apply(ResourceServerFrame::Values(ResourceValues {
+                stream_id,
+                request_id,
+                target_revision,
+                batch_sequence: 0,
+                item_count: 1,
+                byte_count: 1,
+                values: vec![RuntimeValue::Integer(7)],
+            }))
+            .unwrap();
+        let before = connection.clone();
+        let credit_before = connection.resource_credit(stream_id, request_id).unwrap();
+
+        assert_eq!(
+            connection.apply(ResourceServerFrame::Completed(ResourceCompleted {
+                stream_id,
+                request_id,
+                target_revision,
+                final_batch_sequence: 1,
+                total_items: 1,
+            })),
+            Err(ResourceConnectionError::BatchSequenceMismatch {
+                stream_id,
+                expected: 0,
+                actual: 1,
+            })
+        );
+        assert_eq!(connection, before);
+        assert_eq!(
+            connection.resource_credit(stream_id, request_id),
+            Ok(credit_before)
+        );
+    }
+
+    #[test]
+    fn resource_connection_rejects_terminal_total_mismatch_without_mutating_state() {
+        let mut request = resource_request_fixture();
+        request.resource_kind = ResourceKind::Stream;
+        request.item_window = 2;
+        request.byte_window = 2;
+        let request_id = request.request_id;
+        let stream_id = request.stream_id;
+        let target_revision = request.target_revision;
+        let mut connection = ResourceProtocolConnection::new();
+        connection.open(request).unwrap();
+        connection
+            .apply(ResourceServerFrame::Accepted(ResourceAccepted {
+                stream_id,
+                request_id,
+                nested_invocation_id: InvocationId::from_bytes([0x94; 16]),
+                target_revision,
+                resource_kind: ResourceKind::Stream,
+            }))
+            .unwrap();
+        connection
+            .apply(ResourceServerFrame::Values(ResourceValues {
+                stream_id,
+                request_id,
+                target_revision,
+                batch_sequence: 0,
+                item_count: 1,
+                byte_count: 1,
+                values: vec![RuntimeValue::Integer(7)],
+            }))
+            .unwrap();
+        let before = connection.clone();
+        let credit_before = connection.resource_credit(stream_id, request_id).unwrap();
+
+        assert_eq!(
+            connection.apply(ResourceServerFrame::Completed(ResourceCompleted {
+                stream_id,
+                request_id,
+                target_revision,
+                final_batch_sequence: 0,
+                total_items: 2,
+            })),
+            Err(ResourceConnectionError::ResourceTotalMismatch {
+                stream_id,
+                expected: 1,
+                actual: 2,
+            })
+        );
+        assert_eq!(connection, before);
+        assert_eq!(
+            connection.resource_credit(stream_id, request_id),
+            Ok(credit_before)
+        );
     }
 
     #[test]

@@ -68,7 +68,7 @@ use tokio::{
 
 #[cfg(feature = "test-hooks")]
 use crate::invoke::RawResourceRequestAuthorizer;
-use crate::invoke::SharedInvokeBroker;
+use crate::invoke::{ResourceTerminalProvenance, SharedInvokeBroker};
 use crate::{InstalledClientResourceExecutor, RawClientDispatch, authenticate_local_stream};
 
 const CLIENT_HELLO: [u8; 12] = *b"ORNA\x01\x00\x00\x01\x00\x00\x00\x00";
@@ -1267,6 +1267,7 @@ struct ResourceDispatchCompletion {
     actions: VecDeque<ResourceServerFrame>,
     producer: Option<AuthenticatedServerResourceProducer>,
     producer_waiting_bytes: Option<u64>,
+    terminal_provenance: ResourceTerminalProvenance,
 }
 
 struct StartedResourceDispatch {
@@ -1396,6 +1397,14 @@ trait DispatchService: Clone + Send + Sync + 'static {
         true
     }
 
+    fn record_resource_terminal_provenance(
+        &self,
+        _stream_id: u64,
+        _request_id: InvocationId,
+        _provenance: ResourceTerminalProvenance,
+    ) {
+    }
+
     fn cancelled(&self, _stream: u64) {}
 }
 
@@ -1403,7 +1412,13 @@ fn sealed_result_cancellation_won(
     cancellation: &ResourceCancellation,
     execution: &Result<SealedInvocationExecution, PostgresKernelError>,
 ) -> bool {
-    cancellation.is_requested() && matches!(execution, Ok(SealedInvocationExecution::Result(_)))
+    cancellation.is_requested()
+        && matches!(
+            execution,
+            Ok(SealedInvocationExecution::Result(
+                SealedInvocationResult::Completed { .. }
+            ))
+        )
 }
 
 impl DispatchService for RawDispatchService {
@@ -1710,6 +1725,17 @@ impl DispatchService for RawDispatchService {
             .is_some_and(|broker| broker.take_expected_resource_request(request))
     }
 
+    fn record_resource_terminal_provenance(
+        &self,
+        stream_id: u64,
+        request_id: InvocationId,
+        provenance: ResourceTerminalProvenance,
+    ) {
+        if let Some(broker) = self.resource_broker.as_ref() {
+            broker.record_resource_terminal_provenance(stream_id, request_id, provenance);
+        }
+    }
+
     fn start_resource(
         &self,
         session: AuthenticatedSession,
@@ -1735,6 +1761,7 @@ impl DispatchService for RawDispatchService {
                         actions: VecDeque::from([resource_accepted_frame(accepted)]),
                         producer: Some(producer),
                         producer_waiting_bytes: None,
+                        terminal_provenance: ResourceTerminalProvenance::Uncommitted,
                     }
                 }
                 Ok(AuthenticatedServerResourceStart::Failed {
@@ -1752,6 +1779,7 @@ impl DispatchService for RawDispatchService {
                     )]),
                     producer: None,
                     producer_waiting_bytes: None,
+                    terminal_provenance: ResourceTerminalProvenance::Uncommitted,
                 },
                 Err(error) => {
                     report_private_dispatch_source(&error);
@@ -1759,6 +1787,7 @@ impl DispatchService for RawDispatchService {
                         actions: resource_internal_failure(&request),
                         producer: None,
                         producer_waiting_bytes: None,
+                        terminal_provenance: ResourceTerminalProvenance::Uncommitted,
                     }
                 }
             }
@@ -1988,6 +2017,7 @@ fn resource_event_completion(
         })]),
         producer: Some(producer),
         producer_waiting_bytes: None,
+        terminal_provenance: ResourceTerminalProvenance::Uncommitted,
     };
     match event {
         Ok(AuthenticatedServerResourceEvent::Values {
@@ -2019,6 +2049,7 @@ fn resource_event_completion(
                 )]),
                 producer: Some(producer),
                 producer_waiting_bytes: None,
+                terminal_provenance: ResourceTerminalProvenance::Uncommitted,
             }
         }
         Ok(AuthenticatedServerResourceEvent::Completed {
@@ -2037,6 +2068,7 @@ fn resource_event_completion(
             )]),
             producer: None,
             producer_waiting_bytes: None,
+            terminal_provenance: ResourceTerminalProvenance::Authenticated,
         },
         Ok(AuthenticatedServerResourceEvent::Failed { failure: reason }) => {
             ResourceDispatchCompletion {
@@ -2050,6 +2082,7 @@ fn resource_event_completion(
                 )]),
                 producer: None,
                 producer_waiting_bytes: None,
+                terminal_provenance: ResourceTerminalProvenance::Authenticated,
             }
         }
         Ok(AuthenticatedServerResourceEvent::Cancelled) => ResourceDispatchCompletion {
@@ -2063,12 +2096,14 @@ fn resource_event_completion(
             )]),
             producer: None,
             producer_waiting_bytes: None,
+            terminal_provenance: ResourceTerminalProvenance::Authenticated,
         },
         Ok(AuthenticatedServerResourceEvent::Waiting { required_bytes }) => {
             ResourceDispatchCompletion {
                 actions: VecDeque::new(),
                 producer: Some(producer),
                 producer_waiting_bytes: Some(required_bytes),
+                terminal_provenance: ResourceTerminalProvenance::Uncommitted,
             }
         }
         Err(error) => {
@@ -2137,6 +2172,7 @@ fn schedule_resource_pulls(
                     actions: VecDeque::new(),
                     producer: None,
                     producer_waiting_bytes: None,
+                    terminal_provenance: ResourceTerminalProvenance::Uncommitted,
                 };
             }
             let _ = sender.send((stream_id, completion)).await;
@@ -2652,6 +2688,14 @@ async fn drive_versioned_authenticated_stream_until_shutdown<D: DispatchService>
                 if let Some(task) = resource_tasks.get_mut(&stream_id) {
                     task.active = false;
                 }
+                if let Some(request_id) = completion.actions.front().map(resource_action_request_id)
+                {
+                    dispatcher.record_resource_terminal_provenance(
+                        stream_id,
+                        request_id,
+                        completion.terminal_provenance,
+                    );
+                }
                 store_resource_completion(
                     stream_id,
                     completion,
@@ -2782,6 +2826,7 @@ async fn drive_versioned_authenticated_stream_until_shutdown<D: DispatchService>
         .await;
     }
     drain_resource_completions(
+        &dispatcher,
         &mut resource_completion_receiver,
         &mut resource_pending,
         &mut resource_cancelled,
@@ -2903,7 +2948,8 @@ async fn drive_versioned_authenticated_stream_until_shutdown<D: DispatchService>
         (Ok(()), None) => Ok(()),
     }
 }
-fn drain_resource_completions(
+fn drain_resource_completions<D: DispatchService>(
+    dispatcher: &D,
     completion_receiver: &mut mpsc::Receiver<(u64, ResourceDispatchCompletion)>,
     pending: &mut BTreeMap<u64, ResourceDispatchCompletion>,
     cancelled: &mut BTreeMap<u64, (orna_protocol::ResourceCancel, RevisionPair)>,
@@ -2911,6 +2957,13 @@ fn drain_resource_completions(
 ) -> BTreeSet<u64> {
     let mut completed = BTreeSet::new();
     while let Ok((stream_id, completion)) = completion_receiver.try_recv() {
+        if let Some(request_id) = completion.actions.front().map(resource_action_request_id) {
+            dispatcher.record_resource_terminal_provenance(
+                stream_id,
+                request_id,
+                completion.terminal_provenance,
+            );
+        }
         if let Some(task) = tasks.get_mut(&stream_id) {
             task.active = false;
         }
@@ -2928,23 +2981,44 @@ fn store_resource_completion(
     cancelled: &mut BTreeMap<u64, (orna_protocol::ResourceCancel, RevisionPair)>,
 ) -> bool {
     let mut producer = completion.producer.take();
+    let completion_request_id = completion.actions.front().map(resource_action_request_id);
     if let Some((cancel, target_revision)) = cancelled.remove(&stream_id) {
-        let pending_is_terminal = pending
-            .get(&stream_id)
-            .is_some_and(|completion| completion.actions.iter().any(resource_action_is_terminal));
-        if !pending_is_terminal {
+        let completion_committed = completion_request_id.is_some_and(|request_id| {
+            resource_completion_is_committed_for(&completion, request_id)
+        });
+        let pending_committed = pending.get(&stream_id).is_some_and(|existing| {
+            resource_completion_is_committed_for(existing, cancel.request_id)
+        });
+        if completion_committed && !pending_committed {
+            completion.producer = producer;
+            pending.insert(stream_id, completion);
+            return true;
+        }
+        if !pending_committed {
             pending.insert(
                 stream_id,
                 cancelled_resource_completion(cancel, target_revision, producer.take()),
             );
             return true;
         }
-    }
-    completion.producer = producer;
-    if pending.contains_key(&stream_id) {
         return false;
     }
-    let is_terminal = completion.actions.iter().any(resource_action_is_terminal);
+    completion.producer = producer;
+    if let Some(existing) = pending.get(&stream_id) {
+        let completion_committed = completion_request_id.is_some_and(|request_id| {
+            resource_completion_is_committed_for(&completion, request_id)
+        });
+        if completion_committed
+            && !resource_completion_is_committed_for(existing, completion_request_id.unwrap())
+        {
+            pending.insert(stream_id, completion);
+            return true;
+        }
+        return false;
+    }
+    let is_terminal = completion_request_id
+        .is_some_and(|request_id| resource_completion_is_committed_for(&completion, request_id))
+        || completion.actions.iter().any(resource_action_is_terminal);
     pending.insert(stream_id, completion);
     is_terminal
 }
@@ -2965,6 +3039,7 @@ fn cancelled_resource_completion(
         )]),
         producer,
         producer_waiting_bytes: None,
+        terminal_provenance: ResourceTerminalProvenance::Uncommitted,
     }
 }
 fn resource_action_is_terminal(action: &ResourceServerFrame) -> bool {
@@ -2975,11 +3050,30 @@ fn resource_action_is_terminal(action: &ResourceServerFrame) -> bool {
             | ResourceServerFrame::Cancelled(_)
     )
 }
+
+/// Applies the shared terminal-provenance rule to the direct resource socket.
+///
+/// Cancellation closes the local protocol state before a raced producer result
+/// may be flushed. A syntactically valid late `Completed`/`Failed` frame still
+/// wins only when the authenticated producer marked its terminal commit. Late
+/// values and acceptance frames are drained, while an uncommitted terminal is
+/// left to the cancellation path.
+fn direct_resource_terminal_wins_after_cancel(
+    disposition: ResourceFrameDisposition,
+    action: &ResourceServerFrame,
+    provenance: ResourceTerminalProvenance,
+) -> bool {
+    matches!(disposition, ResourceFrameDisposition::DroppedLate)
+        && provenance.is_committed()
+        && matches!(action, ResourceServerFrame::Completed(_) | ResourceServerFrame::Failed(_))
+}
+
 fn resource_completion_is_committed_for(
     completion: &ResourceDispatchCompletion,
     request_id: orna_core::InvocationId,
 ) -> bool {
-    !completion.actions.is_empty()
+    completion.terminal_provenance.is_committed()
+        && !completion.actions.is_empty()
         && completion
             .actions
             .iter()
@@ -3021,7 +3115,7 @@ async fn handle_resource_frame<D: DispatchService>(
     });
     let mut cancellation_won = false;
     if let Some(cancel) = cancellation.filter(|_| !committed_completion) {
-        drain_resource_completions(completion_receiver, pending, cancelled, tasks);
+        drain_resource_completions(dispatcher, completion_receiver, pending, cancelled, tasks);
         committed_completion = pending.get(&cancel.stream_id).is_some_and(|completion| {
             resource_completion_is_committed_for(completion, cancel.request_id)
         });
@@ -3126,6 +3220,7 @@ async fn handle_resource_frame<D: DispatchService>(
                         actions: resource_internal_failure(&request),
                         producer: None,
                         producer_waiting_bytes: None,
+                        terminal_provenance: ResourceTerminalProvenance::Uncommitted,
                     },
                 );
                 ResourceFrameDisposition::Applied
@@ -3177,6 +3272,7 @@ async fn handle_resource_frame<D: DispatchService>(
                     actions: resource_internal_failure(&request),
                     producer: None,
                     producer_waiting_bytes: None,
+                    terminal_provenance: ResourceTerminalProvenance::Uncommitted,
                 },
             );
             return Ok(true);
@@ -3204,6 +3300,7 @@ async fn handle_resource_frame<D: DispatchService>(
                         actions: VecDeque::new(),
                         producer: None,
                         producer_waiting_bytes: None,
+                        terminal_provenance: ResourceTerminalProvenance::Uncommitted,
                     };
                 }
                 let _ = sender.send((stream_id, completion)).await;
@@ -3228,6 +3325,7 @@ async fn handle_resource_frame<D: DispatchService>(
                     actions: resource_internal_failure(&request),
                     producer: None,
                     producer_waiting_bytes: None,
+                    terminal_provenance: ResourceTerminalProvenance::Uncommitted,
                 },
             );
         }
@@ -3291,8 +3389,17 @@ async fn flush_resource_pending(
                     continue;
                 }
             };
+            let publish_committed_late_terminal = pending
+                .get(&stream_id)
+                .is_some_and(|completion| {
+                    direct_resource_terminal_wins_after_cancel(
+                        disposition,
+                        &action,
+                        completion.terminal_provenance,
+                    )
+                });
             match disposition {
-                ResourceFrameDisposition::DroppedLate => {
+                ResourceFrameDisposition::DroppedLate if !publish_committed_late_terminal => {
                     let terminal = resource_action_is_terminal(&action);
                     pending
                         .get_mut(&stream_id)
@@ -3328,7 +3435,8 @@ async fn flush_resource_pending(
                     }
                     continue;
                 }
-                ResourceFrameDisposition::Applied => {}
+                ResourceFrameDisposition::Applied
+                | ResourceFrameDisposition::DroppedLate => {}
             }
             let encoded = version
                 .encode_resource_server_frame(&action)
@@ -4637,6 +4745,120 @@ mod tests {
         );
     }
 
+    #[test]
+    fn resource_terminal_provenance_controls_cancellation_synthesis_and_late_frame_precedence() {
+        let (version, revision) = constructed_test_version();
+        let request = resource_request(revision);
+        let cancel = ResourceCancel {
+            stream_id: request.stream_id,
+            request_id: request.request_id,
+            reason: ResourceCancellationCode::ClientRequested,
+        };
+        let mut pending = BTreeMap::new();
+        let mut cancelled = BTreeMap::new();
+        cancelled.insert(request.stream_id, (cancel, request.target_revision));
+
+        let late_values = ResourceDispatchCompletion {
+            actions: VecDeque::from([
+                ResourceServerFrame::Accepted(orna_protocol::ResourceAccepted {
+                    stream_id: request.stream_id,
+                    request_id: request.request_id,
+                    nested_invocation_id: InvocationId::from_bytes([0x21; 16]),
+                    target_revision: request.target_revision,
+                    resource_kind: request.resource_kind,
+                }),
+                ResourceServerFrame::Values(orna_protocol::ResourceValues {
+                    stream_id: request.stream_id,
+                    request_id: request.request_id,
+                    target_revision: request.target_revision,
+                    batch_sequence: 0,
+                    item_count: 1,
+                    byte_count: 1,
+                    values: vec![RuntimeValue::Integer(7)],
+                }),
+            ]),
+            producer: None,
+            producer_waiting_bytes: None,
+            terminal_provenance: ResourceTerminalProvenance::Uncommitted,
+        };
+        assert!(store_resource_completion(
+            request.stream_id,
+            late_values,
+            &mut pending,
+            &mut cancelled,
+        ));
+        assert!(matches!(
+            pending
+                .get(&request.stream_id)
+                .and_then(|completion| completion.actions.front()),
+            Some(ResourceServerFrame::Cancelled(frame))
+                if frame.request_id == request.request_id
+                    && frame.reason == ResourceCancellationCode::ClientRequested
+        ));
+        assert!(cancelled.is_empty());
+
+        let mut committed_request = request.clone();
+        committed_request.stream_id = 2;
+        committed_request.request_id = InvocationId::from_bytes([0x22; 16]);
+        let committed_cancel = ResourceCancel {
+            stream_id: committed_request.stream_id,
+            request_id: committed_request.request_id,
+            reason: ResourceCancellationCode::ClientRequested,
+        };
+        cancelled.insert(
+            committed_request.stream_id,
+            (committed_cancel, committed_request.target_revision),
+        );
+        let committed = ResourceDispatchCompletion {
+            actions: resource_actions(&version, &committed_request, vec![RuntimeValue::Integer(8)]),
+            producer: None,
+            producer_waiting_bytes: None,
+            terminal_provenance: ResourceTerminalProvenance::Authenticated,
+        };
+        assert!(store_resource_completion(
+            committed_request.stream_id,
+            committed,
+            &mut pending,
+            &mut cancelled,
+        ));
+        assert_eq!(
+            pending
+                .get(&committed_request.stream_id)
+                .expect("authenticated terminal is retained")
+                .terminal_provenance,
+            ResourceTerminalProvenance::Authenticated,
+        );
+
+        let late_non_terminal = ResourceDispatchCompletion {
+            actions: VecDeque::from([ResourceServerFrame::Values(orna_protocol::ResourceValues {
+                stream_id: committed_request.stream_id,
+                request_id: committed_request.request_id,
+                target_revision: committed_request.target_revision,
+                batch_sequence: 1,
+                item_count: 1,
+                byte_count: 1,
+                values: vec![RuntimeValue::Integer(9)],
+            })]),
+            producer: None,
+            producer_waiting_bytes: None,
+            terminal_provenance: ResourceTerminalProvenance::Uncommitted,
+        };
+        assert!(!store_resource_completion(
+            committed_request.stream_id,
+            late_non_terminal,
+            &mut pending,
+            &mut cancelled,
+        ));
+        assert!(matches!(
+            pending
+                .get(&committed_request.stream_id)
+                .and_then(|completion| completion.actions.back()),
+            Some(ResourceServerFrame::Completed(frame))
+                if frame.request_id == committed_request.request_id
+        ));
+        assert!(cancelled.is_empty());
+    }
+
     async fn read_resource_server_frame(
         stream: &mut UnixStream,
         active: &orna_core::revision::ActiveDatabaseRevision,
@@ -4722,6 +4944,7 @@ mod tests {
                         actions,
                         producer: None,
                         producer_waiting_bytes: None,
+                        terminal_provenance: ResourceTerminalProvenance::Authenticated,
                     }
                 }),
                 cancellation: ResourceCancellation::new(),
@@ -4736,10 +4959,35 @@ mod tests {
         fn start(
             &self,
             _session: AuthenticatedSession,
-            _stream: u64,
+            stream: u64,
             _call: RawCall,
         ) -> StartedDispatch {
-            panic!("resource transport test does not issue a raw call")
+            let future = Box::pin(async move {
+                DispatchCompletion {
+                    sealed_producer: None,
+                    sealed_invocation: None,
+                    sealed_next_event_sequence: 1,
+                    sealed_next_outer_sequence: 2,
+                    actions: VecDeque::from([ServerAction::Completed { stream }]),
+                    cancellation: ServerAction::Cancelled { stream },
+                    cancellation_token: None,
+                    start_gate: None,
+                    start_delivered: false,
+                    terminal_delivered: false,
+                    terminal_claimed: false,
+                    worker_completed: false,
+                    _guards: None,
+                }
+            });
+            StartedDispatch {
+                accepted: ServerAction::Accepted {
+                    stream,
+                    invocation: InvocationId::from_bytes([0x31; 16]),
+                },
+                started: None,
+                start_gate: None,
+                future,
+            }
         }
 
         fn start_resource(
@@ -4762,6 +5010,7 @@ mod tests {
                         actions,
                         producer: None,
                         producer_waiting_bytes: None,
+                        terminal_provenance: ResourceTerminalProvenance::Uncommitted,
                     }
                 }),
                 cancellation: ResourceCancellation::new(),
@@ -4800,6 +5049,7 @@ mod tests {
                         actions,
                         producer: None,
                         producer_waiting_bytes: None,
+                        terminal_provenance: ResourceTerminalProvenance::Authenticated,
                     }
                 }),
                 cancellation: ResourceCancellation::new(),
@@ -4838,16 +5088,17 @@ mod tests {
                 future: Box::pin(async move {
                     started.notify_one();
                     tokio::select! {
-                                    _ = operation_cancellation.cancelled() => {
-                                        cancelled.store(true, Ordering::SeqCst);
-                                        ResourceDispatchCompletion {
-                                            actions: VecDeque::new(),
-                                            producer: None,
-                    producer_waiting_bytes: None,
-                                        }
-                                    }
-                                    completion = std::future::pending::<ResourceDispatchCompletion>() => completion,
-                                }
+                                                    _ = operation_cancellation.cancelled() => {
+                                                        cancelled.store(true, Ordering::SeqCst);
+                                                        ResourceDispatchCompletion {
+                                                            actions: VecDeque::new(),
+                                                            producer: None,
+                                    producer_waiting_bytes: None,
+                    terminal_provenance: ResourceTerminalProvenance::Uncommitted,
+                                                        }
+                                                    }
+                                                    completion = std::future::pending::<ResourceDispatchCompletion>() => completion,
+                                                }
                 }),
                 cancellation,
             })
@@ -4884,15 +5135,16 @@ mod tests {
                     future: Box::pin(async move {
                         started.notify_one();
                         tokio::select! {
-                                            _ = operation_cancellation.cancelled() => {
-                                                ResourceDispatchCompletion {
-                                                    actions: VecDeque::new(),
-                                                    producer: None,
-                        producer_waiting_bytes: None,
-                                                }
-                                            }
-                                            completion = std::future::pending::<ResourceDispatchCompletion>() => completion,
-                                        }
+                                                                _ = operation_cancellation.cancelled() => {
+                                                                    ResourceDispatchCompletion {
+                                                                        actions: VecDeque::new(),
+                                                                        producer: None,
+                                            producer_waiting_bytes: None,
+                        terminal_provenance: ResourceTerminalProvenance::Uncommitted,
+                                                                    }
+                                                                }
+                                                                completion = std::future::pending::<ResourceDispatchCompletion>() => completion,
+                                                            }
                     }),
                     cancellation,
                 });
@@ -4908,6 +5160,7 @@ mod tests {
                         actions,
                         producer: None,
                         producer_waiting_bytes: None,
+                        terminal_provenance: ResourceTerminalProvenance::Authenticated,
                     }
                 }),
                 cancellation: ResourceCancellation::new(),
@@ -4957,16 +5210,17 @@ mod tests {
                     let _drop_signal = DropSignal(dropped);
                     started.notify_one();
                     tokio::select! {
-                                    _ = operation_cancellation.cancelled() => {
-                                        cancelled.store(true, Ordering::SeqCst);
-                                        ResourceDispatchCompletion {
-                                            actions: VecDeque::new(),
-                                            producer: None,
-                    producer_waiting_bytes: None,
-                                        }
-                                    }
-                                    completion = std::future::pending::<ResourceDispatchCompletion>() => completion,
-                                }
+                                                    _ = operation_cancellation.cancelled() => {
+                                                        cancelled.store(true, Ordering::SeqCst);
+                                                        ResourceDispatchCompletion {
+                                                            actions: VecDeque::new(),
+                                                            producer: None,
+                                    producer_waiting_bytes: None,
+                    terminal_provenance: ResourceTerminalProvenance::Uncommitted,
+                                                        }
+                                                    }
+                                                    completion = std::future::pending::<ResourceDispatchCompletion>() => completion,
+                                                }
                 }),
                 cancellation,
             })
@@ -5251,6 +5505,7 @@ mod tests {
                         actions: VecDeque::new(),
                         producer: None,
                         producer_waiting_bytes: None,
+                        terminal_provenance: ResourceTerminalProvenance::Uncommitted,
                     },
                 ))
                 .expect("one completion fits per live resource");
@@ -5263,6 +5518,7 @@ mod tests {
                     actions: VecDeque::new(),
                     producer: None,
                     producer_waiting_bytes: None,
+                    terminal_provenance: ResourceTerminalProvenance::Uncommitted,
                 },
             )),
             Err(mpsc::error::TrySendError::Full(_))
@@ -5426,6 +5682,7 @@ mod tests {
                 actions: resource_actions(&version, &request, Vec::new()),
                 producer: None,
                 producer_waiting_bytes: None,
+                terminal_provenance: ResourceTerminalProvenance::Uncommitted,
             },
         )]);
         let mut cancelled = BTreeMap::new();
@@ -5629,6 +5886,48 @@ mod tests {
                     && frame.failure == CallFailure::InternalFailure
         ));
 
+        let cancel = encode_resource_client_frame(
+            &active,
+            &registry,
+            &ResourceClientFrame::Cancel(ResourceCancel {
+                stream_id: 1,
+                request_id,
+                reason: ResourceCancellationCode::ClientRequested,
+            }),
+        )
+        .unwrap();
+        client.write_all(&cancel).await.unwrap();
+        assert!(
+            timeout(
+                Duration::from_millis(50),
+                read_resource_server_frame(&mut client, &active, &registry),
+            )
+            .await
+            .is_err(),
+            "malformed resource request has one terminal frame and no late replacement"
+        );
+
+        for frame in [
+            ClientFrame::CallRawStart {
+                stream: 1,
+                function: FUNCTION,
+            },
+            ClientFrame::CallArgumentsComplete { stream: 1 },
+        ] {
+            client
+                .write_all(&encode_constructed_client_frame(&active, &registry, &frame).unwrap())
+                .await
+                .unwrap();
+        }
+        assert!(matches!(
+            read_constructed_server_frame(&mut client, &active, &registry).await,
+            ServerFrame::CallAccepted { stream: 1, .. }
+        ));
+        assert_eq!(
+            read_constructed_server_frame(&mut client, &active, &registry).await,
+            ServerFrame::CallCompleted { stream: 1 }
+        );
+
         let mut unrelated = resource_request(revision);
         unrelated.stream_id = 2;
         unrelated.request_id = InvocationId::from_bytes([0x22; 16]);
@@ -5687,6 +5986,7 @@ mod tests {
                 actions: resource_actions(&version, &request, vec![RuntimeValue::Integer(7)]),
                 producer: None,
                 producer_waiting_bytes: None,
+            terminal_provenance: ResourceTerminalProvenance::Authenticated,
             },
         )]);
         let mut cancelled = BTreeMap::new();
@@ -6213,6 +6513,7 @@ mod tests {
                     actions: resource_actions(&version, &request, vec![RuntimeValue::Integer(7)]),
                     producer: None,
                     producer_waiting_bytes: None,
+                    terminal_provenance: ResourceTerminalProvenance::Authenticated,
                 },
             ))
             .await
@@ -6358,12 +6659,14 @@ mod tests {
                     actions: resource_actions(&version, &request, vec![RuntimeValue::Integer(7)]),
                     producer: None,
                     producer_waiting_bytes: None,
+                    terminal_provenance: ResourceTerminalProvenance::Uncommitted,
                 },
             ))
             .await
             .unwrap();
         assert!(
             drain_resource_completions(
+                &dispatcher,
                 &mut completion_receiver,
                 &mut pending,
                 &mut cancelled,
@@ -6410,6 +6713,153 @@ mod tests {
                 if frame.stream_id == request.stream_id
                     && frame.request_id == request.request_id
                     && frame.total_items == 1
+        ));
+    }
+
+    #[tokio::test]
+    async fn direct_committed_completion_wins_after_cancel() {
+        let (version, revision) = constructed_test_version();
+        let (active, registry) = match &version {
+            RawProtocolVersion::Constructed(active, registry) => (active.clone(), registry.clone()),
+            _ => unreachable!("constructed test version"),
+        };
+        let request = resource_request(revision);
+        let (server, mut client) = UnixStream::pair().unwrap();
+        let (_reader, mut writer) = server.into_split();
+        let mut connection = ResourceProtocolConnection::new();
+        connection
+            .receive(ResourceClientFrame::Request(request.clone()))
+            .expect("resource request opens");
+        connection
+            .apply(ResourceServerFrame::Accepted(orna_protocol::ResourceAccepted {
+                stream_id: request.stream_id,
+                request_id: request.request_id,
+                nested_invocation_id: InvocationId::from_bytes([0x21; 16]),
+                target_revision: request.target_revision,
+                resource_kind: request.resource_kind,
+            }))
+            .expect("resource request accepts");
+        connection
+            .receive(ResourceClientFrame::Cancel(ResourceCancel {
+                stream_id: request.stream_id,
+                request_id: request.request_id,
+                reason: ResourceCancellationCode::ClientRequested,
+            }))
+            .expect("cancellation closes the protocol state");
+
+        let mut actions = resource_actions(&version, &request, vec![RuntimeValue::Integer(7)]);
+        assert!(matches!(actions.pop_front(), Some(ResourceServerFrame::Accepted(_))));
+        let mut pending = BTreeMap::from([(
+            request.stream_id,
+            ResourceDispatchCompletion {
+                actions,
+                producer: None,
+                producer_waiting_bytes: None,
+                terminal_provenance: ResourceTerminalProvenance::Authenticated,
+            },
+        )]);
+        let mut requests = BTreeMap::from([(request.stream_id, request.clone())]);
+        let mut tasks = BTreeMap::new();
+        let mut producer_shutdown = JoinSet::new();
+        let (_shutdown_sender, mut shutdown) = watch::channel(false);
+
+        assert!(
+            flush_resource_pending(
+                &version,
+                &mut connection,
+                &mut pending,
+                &mut requests,
+                &mut tasks,
+                &mut producer_shutdown,
+                &mut writer,
+                &mut shutdown,
+            )
+            .await
+            .expect("direct committed completion flushes")
+        );
+        assert!(pending.is_empty());
+        assert!(matches!(
+            read_resource_server_frame(&mut client, &active, &registry).await,
+            ResourceServerFrame::Completed(frame)
+                if frame.stream_id == request.stream_id
+                    && frame.request_id == request.request_id
+                    && frame.total_items == 1
+        ));
+    }
+
+    #[tokio::test]
+    async fn direct_committed_failure_wins_after_cancel() {
+        let (version, revision) = constructed_test_version();
+        let (active, registry) = match &version {
+            RawProtocolVersion::Constructed(active, registry) => (active.clone(), registry.clone()),
+            _ => unreachable!("constructed test version"),
+        };
+        let request = resource_request(revision);
+        let (server, mut client) = UnixStream::pair().unwrap();
+        let (_reader, mut writer) = server.into_split();
+        let mut connection = ResourceProtocolConnection::new();
+        connection
+            .receive(ResourceClientFrame::Request(request.clone()))
+            .expect("resource request opens");
+        connection
+            .apply(ResourceServerFrame::Accepted(orna_protocol::ResourceAccepted {
+                stream_id: request.stream_id,
+                request_id: request.request_id,
+                nested_invocation_id: InvocationId::from_bytes([0x21; 16]),
+                target_revision: request.target_revision,
+                resource_kind: request.resource_kind,
+            }))
+            .expect("resource request accepts");
+        connection
+            .receive(ResourceClientFrame::Cancel(ResourceCancel {
+                stream_id: request.stream_id,
+                request_id: request.request_id,
+                reason: ResourceCancellationCode::ClientRequested,
+            }))
+            .expect("cancellation closes the protocol state");
+
+        let mut pending = BTreeMap::from([(
+            request.stream_id,
+            ResourceDispatchCompletion {
+                actions: VecDeque::from([ResourceServerFrame::Failed(
+                    orna_protocol::ResourceFailed {
+                        stream_id: request.stream_id,
+                        request_id: request.request_id,
+                        target_revision: request.target_revision,
+                        failure: CallFailure::InternalFailure,
+                    },
+                )]),
+                producer: None,
+                producer_waiting_bytes: None,
+                terminal_provenance: ResourceTerminalProvenance::Authenticated,
+            },
+        )]);
+        let mut requests = BTreeMap::from([(request.stream_id, request.clone())]);
+        let mut tasks = BTreeMap::new();
+        let mut producer_shutdown = JoinSet::new();
+        let (_shutdown_sender, mut shutdown) = watch::channel(false);
+
+        assert!(
+            flush_resource_pending(
+                &version,
+                &mut connection,
+                &mut pending,
+                &mut requests,
+                &mut tasks,
+                &mut producer_shutdown,
+                &mut writer,
+                &mut shutdown,
+            )
+            .await
+            .expect("direct committed failure flushes")
+        );
+        assert!(pending.is_empty());
+        assert!(matches!(
+            read_resource_server_frame(&mut client, &active, &registry).await,
+            ResourceServerFrame::Failed(frame)
+                if frame.stream_id == request.stream_id
+                    && frame.request_id == request.request_id
+                    && frame.failure == CallFailure::InternalFailure
         ));
     }
 
@@ -7108,6 +7558,36 @@ mod tests {
         assert!(!sealed_result_cancellation_won(&cancellation, &execution));
         assert!(cancellation.request_cancel());
         assert!(sealed_result_cancellation_won(&cancellation, &execution));
+    }
+
+    #[test]
+    fn sealed_failed_result_emits_failure_after_cancellation_requested() {
+        let invocation = InvocationId::from_bytes([0x75; 16]);
+        let events = redacted_invoke_failure(
+            invocation,
+            InvocationFailurePhase::Internal,
+            "INVOKE_INTERNAL_FAILURE",
+            "invocation could not complete",
+            InvocationRetryability::Unknown,
+        );
+        let execution = Ok(SealedInvocationExecution::Result(
+            SealedInvocationResult::Failed { invocation, events },
+        ));
+        let cancellation = ResourceCancellation::new();
+
+        assert!(cancellation.request_cancel());
+        assert!(!sealed_result_cancellation_won(&cancellation, &execution));
+        let Ok(SealedInvocationExecution::Result(SealedInvocationResult::Failed {
+            events, ..
+        })) = execution
+        else {
+            panic!("post-start failure result changed into cancellation");
+        };
+        assert_eq!(events.records().len(), 1);
+        assert_eq!(
+            events.records()[0].event().kind(),
+            InvocationEventKind::InvocationFailed
+        );
     }
 
     #[tokio::test]
