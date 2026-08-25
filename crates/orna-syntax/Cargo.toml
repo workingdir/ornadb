@@ -7,3 +7,6 @@ license.workspace = true
 
 [dependencies]
 rowan.workspace = true
+
+[dev-dependencies]
+proptest = { version = "1.11.0", default-features = false, features = ["std"] }

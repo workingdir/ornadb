@@ -29,3 +29,8 @@ create enum type
 create object type with field modifiers
 canonical scalar type spellings and alias boundaries
 unicode unquoted identifiers
+normal whitespace remains extras
+leading BOM is an error
+interior BOM is an error
+leading word joiner is an error
+interior word joiner is an error
