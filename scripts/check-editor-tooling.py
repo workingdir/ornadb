@@ -35,6 +35,13 @@ DEFERRED_CORPUS_MANIFEST_NAME = "test/deferred-corpus.txt"
 CORPUS_CASE_DELIMITER = "=" * 20
 ORDER_BY_HIGHLIGHT_FIXTURE_NAME = "accepted_resources_streams.orna"
 ORDER_BY_DIRECTION_TEXTS = ("ASC", "DESC")
+TARGET_HIGHLIGHT_EXPECTATIONS = (
+    ("accepted_resources_streams.orna", {"function": ("overdue", "execute_sql"), "property": ("payload",)}),
+    ("accepted_actions_inspector.orna", {"function": ("echo",), "property": ("invoke",)}),
+)
+TEXTMATE_PARITY_COMPARABLE_KEYS = ("scopeName", "patterns", "repository")
+# Only editor metadata may differ; every other root and nested grammar rule is compared.
+TEXTMATE_PARITY_ALLOWED_ROOT_KEYS = frozenset({"$schema", "name"})
 
 
 
@@ -540,6 +547,75 @@ def check_zed_order_by_highlights(
     return True
 
 
+def check_target_path_highlights(
+    tree_sitter: str,
+    zed_directory: Path,
+    tree_sitter_directory: Path,
+    repository: Path,
+) -> bool:
+    """Check target-final function and intermediate/ordinary property captures.
+
+    This invokes only the tree-sitter query CLI. It deliberately does not launch
+    Zed or any GUI/editor runtime.
+    """
+    query_paths = (
+        ("tree-sitter", tree_sitter_directory / "queries" / "highlights.scm"),
+        ("Zed", zed_directory / "languages" / "orna" / "highlights.scm"),
+    )
+    capture_line = re.compile(
+        r"capture:\s+\d+\s+-\s+(?P<name>[^,]+),.*text: `(?P<text>[^`]*)`"
+    )
+    for fixture_name, expected in TARGET_HIGHLIGHT_EXPECTATIONS:
+        fixture_path = tree_sitter_directory / "test" / "highlight" / fixture_name
+        if not fixture_path.is_file():
+            log(
+                f"required target highlight fixture is missing: {display_path(fixture_path, repository)}",
+                error=True,
+            )
+            return False
+        for label, query_path in query_paths:
+            if not query_path.is_file():
+                log(
+                    f"required {label} highlight query is missing: {display_path(query_path, repository)}",
+                    error=True,
+                )
+                return False
+            log(f"checking {label} target captures in {fixture_name}")
+            result = run_command(
+                [
+                    tree_sitter,
+                    "query",
+                    "--grammar-path",
+                    str(tree_sitter_directory),
+                    "--captures",
+                    str(query_path),
+                    str(fixture_path),
+                ],
+                cwd=tree_sitter_directory,
+                label=f"tree-sitter {label} target highlight query",
+            )
+            if result is None or result.returncode != 0:
+                status = "could not start" if result is None else f"exited with status {result.returncode}"
+                log(f"{label} target highlight query failed for {fixture_name} ({status})", error=True)
+                return False
+            captures = [
+                (match.group("name"), match.group("text"))
+                for line in result.stdout.splitlines()
+                if (match := capture_line.search(line)) is not None
+            ]
+            for capture_name, expected_texts in expected.items():
+                observed = [text for name, text in captures if name == capture_name and text in expected_texts]
+                if observed != list(expected_texts):
+                    log(
+                        f"{label} target highlight query for {fixture_name} did not capture "
+                        f"{capture_name} texts {expected_texts!r}: observed {observed!r}",
+                        error=True,
+                    )
+                    return False
+            log(f"{label} target captures passed for {fixture_name}")
+    return True
+
+
 def check_alter_rename_highlights(
     tree_sitter: str,
     tree_sitter_directory: Path,
@@ -566,7 +642,7 @@ def check_alter_rename_highlights(
             tree_sitter_directory,
             repository,
             "accepted_resources_streams.orna",
-            13,
+            14,
         )
     )
 
@@ -653,6 +729,112 @@ def check_textmate_grammar(grammar_path: Path, repository: Path) -> bool:
         return False
 
     log(f"validated TextMate grammar {display_path(grammar_path, repository)}")
+    return True
+
+
+def _normalize_textmate_value(value: object, *, root: bool = False) -> object:
+    """Normalize JSON ordering while preserving pattern and capture order."""
+    if isinstance(value, dict):
+        return {
+            key: _normalize_textmate_value(child)
+            for key, child in sorted(value.items())
+            if not (root and key in TEXTMATE_PARITY_ALLOWED_ROOT_KEYS)
+        }
+    if isinstance(value, list):
+        return [_normalize_textmate_value(child) for child in value]
+    return value
+
+
+def _textmate_parity_mismatches(
+    expected: object,
+    actual: object,
+    path: str = "$",
+    *,
+    limit: int = 12,
+) -> list[str]:
+    """Return deterministic, bounded paths for normalized grammar mismatches."""
+    mismatches: list[str] = []
+
+    def visit(left: object, right: object, current_path: str) -> None:
+        if len(mismatches) >= limit:
+            return
+        if isinstance(left, dict) and isinstance(right, dict):
+            for key in sorted(set(left) | set(right)):
+                child_path = f"{current_path}.{key}"
+                if key not in left:
+                    mismatches.append(f"{child_path}: missing from canonical grammar")
+                elif key not in right:
+                    mismatches.append(f"{child_path}: missing from VS Code grammar")
+                else:
+                    visit(left[key], right[key], child_path)
+                if len(mismatches) >= limit:
+                    return
+            return
+        if isinstance(left, list) and isinstance(right, list):
+            if len(left) != len(right):
+                mismatches.append(f"{current_path}: expected {len(left)} entries, found {len(right)}")
+                return
+            for index, (left_item, right_item) in enumerate(zip(left, right)):
+                visit(left_item, right_item, f"{current_path}[{index}]")
+                if len(mismatches) >= limit:
+                    return
+            return
+        if type(left) is not type(right) or left != right:
+            mismatches.append(f"{current_path}: expected {left!r}, found {right!r}")
+
+    visit(expected, actual, path)
+    return mismatches
+
+
+def check_textmate_grammar_parity(
+    canonical_path: Path,
+    vscode_path: Path,
+    repository: Path,
+) -> bool:
+    """Compare the stable TextMate subset shared by the canonical and VS Code grammars."""
+    grammars: list[object] = []
+    for path in (canonical_path, vscode_path):
+        try:
+            grammars.append(json.loads(path.read_text(encoding="utf-8")))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            log(f"could not read TextMate grammar {display_path(path, repository)}: {exc}", error=True)
+            return False
+
+    for label, grammar in zip(("canonical", "VS Code"), grammars):
+        grammar_path = canonical_path if label == "canonical" else vscode_path
+        if not isinstance(grammar, dict):
+            log(
+                f"TextMate parity has no stable comparable subset: {label} grammar "
+                f"{display_path(grammar_path, repository)} is not a JSON object",
+                error=True,
+            )
+            return False
+        missing = [key for key in TEXTMATE_PARITY_COMPARABLE_KEYS if key not in grammar]
+        if missing:
+            log(
+                f"TextMate parity has no stable comparable subset: {label} grammar is missing "
+                + ", ".join(missing),
+                error=True,
+            )
+            return False
+
+    normalized = [_normalize_textmate_value(grammar, root=True) for grammar in grammars]
+    mismatches = _textmate_parity_mismatches(normalized[0], normalized[1])
+    if mismatches:
+        log(
+            "TextMate grammar parity mismatch after deterministic normalization "
+            f"({display_path(canonical_path, repository)} -> {display_path(vscode_path, repository)}): "
+            + "; ".join(mismatches),
+            error=True,
+        )
+        return False
+
+    allowed = ", ".join(sorted(TEXTMATE_PARITY_ALLOWED_ROOT_KEYS))
+    comparable = ", ".join(TEXTMATE_PARITY_COMPARABLE_KEYS)
+    log(
+        "validated normalized TextMate parity "
+        f"({comparable}; allowed root metadata differences: {allowed})"
+    )
     return True
 
 
@@ -1143,6 +1325,62 @@ def check_helix_configuration(configuration_path: Path, repository: Path) -> boo
     return True
 
 
+def check_zed_extension_metadata(extension_path: Path, repository: Path) -> bool:
+    """Validate the accepted static Zed extension metadata contract."""
+    if tomllib is None:
+        log(
+            "Zed extension metadata check unavailable: Python 3.11+ is required; "
+            "checked-in Zed TOML was not validated",
+            error=True,
+        )
+        return False
+    try:
+        with extension_path.open("rb") as stream:
+            extension = tomllib.load(stream)
+    except (OSError, tomllib.TOMLDecodeError) as exc:
+        log(f"invalid Zed extension metadata: {exc}", error=True)
+        return False
+
+    if (
+        extension.get("id") != "orna"
+        or type(extension.get("schema_version")) is not int
+        or extension.get("schema_version") != 1
+    ):
+        log("Zed extension metadata has an invalid id or schema_version", error=True)
+        return False
+
+    language_servers = extension.get("language_servers")
+    orna_lsp = language_servers.get("orna-lsp") if isinstance(language_servers, dict) else None
+    if not isinstance(orna_lsp, dict):
+        log("Zed extension metadata does not define language_servers.orna-lsp", error=True)
+        return False
+    if (
+        orna_lsp.get("languages") != ["Orna"]
+        or orna_lsp.get("language_ids") != {"Orna": "orna"}
+    ):
+        log("Zed orna-lsp metadata has invalid languages or language_ids", error=True)
+        return False
+
+    grammars = extension.get("grammars")
+    orna_grammar = grammars.get("orna") if isinstance(grammars, dict) else None
+    if not isinstance(orna_grammar, dict):
+        log("Zed extension metadata does not define grammars.orna", error=True)
+        return False
+    if (
+        orna_grammar.get("repository") != "https://github.com/workingdir/ornadb"
+        or orna_grammar.get("path") != "editors/tree-sitter-orna"
+    ):
+        log("Zed orna grammar metadata has an invalid repository or path", error=True)
+        return False
+    revision = orna_grammar.get("rev")
+    if not isinstance(revision, str) or re.fullmatch(r"[0-9a-f]{40}", revision) is None:
+        log("Zed orna grammar metadata has an invalid pinned revision", error=True)
+        return False
+
+    log(f"validated Zed extension metadata {display_path(extension_path, repository)}")
+    return True
+
+
 def check_emacs_integration(
     emacs: str | None,
     integration_path: Path,
@@ -1325,8 +1563,13 @@ def main() -> int:
     vim_ftdetect = repository / "editors" / "vim" / "ftdetect" / "orna.vim"
     vscode_package = repository / "editors" / "vscode" / "package.json"
     vscode_extension = repository / "editors" / "vscode" / "extension.js"
+    zed_extension_metadata = zed_directory / "extension.toml"
 
 
+    log(
+        "static editor tooling gate does not install editor runtimes; requires CLI prerequisites "
+        "Python 3.11+, tree-sitter CLI, node, and cargo"
+    )
     tree_sitter = shutil.which("tree-sitter")
     if tree_sitter is None:
         log(
@@ -1341,7 +1584,7 @@ def main() -> int:
         log("missing prerequisite: node was not found on PATH", error=True)
         return 2
     if tomllib is None:
-        log("missing prerequisite: Python 3.11+ is required for Helix TOML validation", error=True)
+        log("missing prerequisite: Python 3.11+ is required for Helix and Zed TOML validation", error=True)
         return 2
 
     cargo = shutil.which("cargo")
@@ -1381,9 +1624,15 @@ def main() -> int:
         return 1
 
 
+    if not check_zed_extension_metadata(zed_extension_metadata, repository):
+        return 1
     if not check_zed_highlights(zed_directory, repository):
         return 1
     if not check_zed_order_by_highlights(
+        tree_sitter, zed_directory, tree_sitter_directory, repository
+    ):
+        return 1
+    if not check_target_path_highlights(
         tree_sitter, zed_directory, tree_sitter_directory, repository
     ):
         return 1
@@ -1518,19 +1767,8 @@ def main() -> int:
             log(f"invalid JSON in {relative_path}: {exc}", error=True)
             return 1
     log(f"validated {len(json_files)} editor JSON files")
-    if not filecmp.cmp(*textmate_grammars, shallow=False):
-        log(
-            "TextMate grammar differs between "
-            f"{display_path(textmate_grammars[0], repository)} and "
-            f"{display_path(textmate_grammars[1], repository)}",
-            error=True,
-        )
+    if not check_textmate_grammar_parity(*textmate_grammars, repository):
         return 1
-    log(
-        "canonical TextMate grammar matches VS Code bundle: "
-        f"{display_path(textmate_grammars[0], repository)} == "
-        f"{display_path(textmate_grammars[1], repository)}"
-    )
 
     for grammar_path in textmate_grammars:
         if not check_textmate_grammar(grammar_path, repository):
@@ -1574,7 +1812,11 @@ def main() -> int:
         log("editor tooling gate completed; optional Emacs runtime check was unavailable")
     else:
         log("editor tooling gate passed")
-    log("Neovim/Vim runtime checks unavailable in this dependency-light gate; static integration contracts were validated")
+    log(
+        "Neovim/Vim runtime checks were not exercised by this static gate and are unavailable "
+        "when the nvim/vim binaries are absent; static integration contracts were validated"
+    )
+    log("Zed GUI/VSIX runtime launch was not exercised by this static gate")
     return 0
 
 
