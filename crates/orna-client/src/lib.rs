@@ -3262,7 +3262,9 @@ impl Error for ClientUserStateError {
 }
 
 impl ClientStateStore {
-    /// Loads one complete authenticated USER state batch.
+    /// Loads one complete authenticated USER state batch for the selected root
+    /// context. Existing cells in that context are replaced; cells for other
+    /// contexts remain available to the caller-owned store.
     pub fn load_user_state(&mut self, cells: &[UserStateCell]) -> Result<(), ClientUserStateError> {
         let mut loaded = HashMap::with_capacity(cells.len());
         for cell in cells {
@@ -3274,6 +3276,12 @@ impl ClientStateStore {
                 return Err(ClientUserStateError::DuplicateKey(key));
             }
         }
+        let context = &self.context;
+        self.user.retain(|key, _| {
+            key.root_function() != context.root_function()
+                || key.state_profile() != context.state_profile()
+                || key.instance_key() != context.instance_key()
+        });
         self.user.extend(loaded);
         Ok(())
     }
@@ -13367,6 +13375,79 @@ mod tests {
         assert_eq!(stored.revision(), Some(8));
         assert!(!stored.is_dirty());
         assert!(state.pending_user_state_changes().unwrap().is_empty());
+    }
+
+    #[test]
+    fn client_user_state_load_replaces_prior_context_cells() {
+        let root_function = FunctionId::from_bytes([0x61; 16]);
+        let function = FunctionId::from_bytes([0x62; 16]);
+        let slot = StateSlotId::from_bytes([0x63; 16]);
+        let other_root_function = FunctionId::from_bytes([0x64; 16]);
+        let other_function = FunctionId::from_bytes([0x65; 16]);
+        let other_slot = StateSlotId::from_bytes([0x66; 16]);
+        let principal = PrincipalId::from_bytes([0x67; 16]);
+        let value_type = orna_standard::CHARACTER_LARGE_OBJECT_TYPE_ID;
+        let context = super::ClientStateContext::new(
+            root_function,
+            "profile".to_owned(),
+            "root-instance".to_owned(),
+        )
+        .unwrap();
+        let other_context = super::ClientStateContext::new(
+            other_root_function,
+            "other-profile".to_owned(),
+            "other-instance".to_owned(),
+        )
+        .unwrap();
+        let current_client_key = super::ClientStateKey::from_context(&context, function, slot);
+        let other_client_key =
+            super::ClientStateKey::from_context(&other_context, other_function, other_slot);
+        let current_durable_key = UserStateKey::new(
+            principal,
+            root_function,
+            "profile".to_owned(),
+            function,
+            "root-instance".to_owned(),
+            slot,
+        )
+        .unwrap();
+        let other_durable_key = UserStateKey::new(
+            principal,
+            other_root_function,
+            "other-profile".to_owned(),
+            other_function,
+            "other-instance".to_owned(),
+            other_slot,
+        )
+        .unwrap();
+        let mut state = super::ClientStateStore::new();
+
+        state.set_context(context.clone());
+        state
+            .load_user_state(&[UserStateCell::new(
+                current_durable_key,
+                RuntimeValue::Text("principal-a".to_owned()),
+                value_type,
+                1,
+                SystemTime::UNIX_EPOCH,
+            )])
+            .unwrap();
+        state.set_context(other_context);
+        state
+            .load_user_state(&[UserStateCell::new(
+                other_durable_key,
+                RuntimeValue::Text("other-context".to_owned()),
+                value_type,
+                2,
+                SystemTime::UNIX_EPOCH,
+            )])
+            .unwrap();
+
+        state.set_context(context);
+        state.load_user_state(&[]).unwrap();
+
+        assert!(!state.user().contains_key(&current_client_key));
+        assert!(state.user().contains_key(&other_client_key));
     }
 
     #[test]
