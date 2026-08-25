@@ -253,6 +253,30 @@ const MIGRATIONS: &[Migration] = &[
         sql: include_str!("../../migrations/0038_source_apply_principal.sql"),
         data_step: None,
     },
+    Migration {
+        version: 39,
+        name: "sealed invocation SECURITY DEFINER denial audit",
+        sql: include_str!("../../migrations/0039_security_definer_audit_reason.sql"),
+        data_step: None,
+    },
+    Migration {
+        version: 40,
+        name: "security admin class-wide grant boundary",
+        sql: include_str!("../../migrations/0040_security_admin_class_wide.sql"),
+        data_step: None,
+    },
+    Migration {
+        version: 41,
+        name: "nullable resource audit nested invocation",
+        sql: include_str!("../../migrations/0041_nullable_resource_audit_nested_invocation.sql"),
+        data_step: None,
+    },
+    Migration {
+        version: 42,
+        name: "non-empty security principal identities",
+        sql: include_str!("../../migrations/0042_security_principal_non_empty.sql"),
+        data_step: None,
+    },
 ];
 const MIGRATION_DATA_STEP_SEPARATOR: &[u8] = b"\0orna.kernel.migration-step\0";
 const CANONICAL_HASH_V1_EMPTY_SEED_STEP: &[u8] = b"canonical-hash-v1-empty-seed/v1";
@@ -957,7 +981,7 @@ mod tests {
             validated_migration_registry()
                 .expect("registry is valid")
                 .len(),
-            38
+            42
         );
         assert_eq!(MIGRATIONS[0].version, 1);
         assert_eq!(MIGRATIONS[1].version, 2);
@@ -997,11 +1021,31 @@ mod tests {
         assert_eq!(MIGRATIONS[35].version, 36);
         assert_eq!(MIGRATIONS[36].version, 37);
         assert_eq!(MIGRATIONS[37].version, 38);
+        assert_eq!(MIGRATIONS[38].version, 39);
+        assert_eq!(MIGRATIONS[39].version, 40);
+        assert_eq!(MIGRATIONS[40].version, 41);
+        assert_eq!(MIGRATIONS[41].version, 42);
         assert_eq!(MIGRATIONS[33].name, "resource request identity history");
         assert_eq!(MIGRATIONS[34].name, "resource audit target authorities");
         assert_eq!(MIGRATIONS[35].name, "sealed Inspector value types");
         assert_eq!(MIGRATIONS[36].name, "source apply audit");
         assert_eq!(MIGRATIONS[37].name, "source apply principal binding");
+        assert_eq!(
+            MIGRATIONS[38].name,
+            "sealed invocation SECURITY DEFINER denial audit"
+        );
+        assert_eq!(
+            MIGRATIONS[39].name,
+            "security admin class-wide grant boundary"
+        );
+        assert_eq!(
+            MIGRATIONS[40].name,
+            "nullable resource audit nested invocation"
+        );
+        assert_eq!(
+            MIGRATIONS[41].name,
+            "non-empty security principal identities"
+        );
         assert_eq!(MIGRATIONS[5].name, "definition reference write evidence");
         assert_eq!(MIGRATIONS[6].name, "standard catalogue type storage");
         assert_eq!(MIGRATIONS[7].name, "resolved value type storage");
@@ -1063,6 +1107,72 @@ mod tests {
         assert!(MIGRATIONS[34].data_step.is_none());
         assert!(MIGRATIONS[35].data_step.is_none());
         assert!(MIGRATIONS[36].data_step.is_none());
+        assert!(MIGRATIONS[39].data_step.is_none());
+        assert!(MIGRATIONS[40].data_step.is_none());
+        assert!(MIGRATIONS[41].data_step.is_none());
+    }
+
+    #[test]
+    fn non_empty_security_principal_identity_is_the_registered_version_forty_two() {
+        let migration = &MIGRATIONS[41];
+
+        assert_eq!(migration.version, 42);
+        assert_eq!(migration.name, "non-empty security principal identities");
+        assert!(migration.data_step.is_none());
+        assert!(migration.sql.contains("security_principals_id_not_empty"));
+        assert!(
+            migration
+                .sql
+                .contains("decode('00000000000000000000000000000000', 'hex')")
+        );
+    }
+
+    #[test]
+    fn nullable_resource_audit_nested_invocation_is_the_registered_version_forty_one() {
+        let migration = &MIGRATIONS[40];
+
+        assert_eq!(migration.version, 41);
+        assert_eq!(migration.name, "nullable resource audit nested invocation");
+        assert!(migration.data_step.is_none());
+        assert!(
+            migration
+                .sql
+                .contains("ALTER COLUMN nested_invocation_id DROP NOT NULL")
+        );
+        assert!(
+            migration.sql.contains(
+                "nested_invocation_id IS NULL OR octet_length(nested_invocation_id) = 16"
+            )
+        );
+        assert!(
+            migration
+                .sql
+                .contains("resource_audit_events_nested_invocation_presence_check")
+        );
+        assert!(
+            migration
+                .sql
+                .contains("terminal_outcome IN ('failed', 'cancelled')")
+        );
+    }
+
+    #[test]
+    fn security_admin_class_wide_grant_boundary_is_the_registered_version_forty() {
+        let migration = &MIGRATIONS[39];
+
+        assert_eq!(migration.version, 40);
+        assert_eq!(migration.name, "security admin class-wide grant boundary");
+        assert!(migration.data_step.is_none());
+        assert!(
+            migration
+                .sql
+                .contains("security_privilege_grants_security_admin_class_wide_check")
+        );
+        assert!(
+            migration
+                .sql
+                .contains("CHECK (privilege_class <> 'security_admin' OR object_id = '')")
+        );
     }
 
     #[test]

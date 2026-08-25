@@ -15,12 +15,10 @@ use orna_core::{
         QualifiedSemanticName,
     },
     revision::{
-        ActiveDatabaseRevision, ActiveDatabaseRevisionInput, ActiveRevisionContent,
         CatalogueHashContext, CatalogueHashVersion, DefinitionIdentity, DefinitionOrigin,
         DefinitionReference, DefinitionReferenceKind, DefinitionReferenceTarget,
         ExecutableArtifact, ExecutableArtifactKind, FunctionRevisionRecord,
-        FunctionSemanticHashVersion, RevisionPair, Sha256Digest, SourceOrigin,
-        StoredSourceRevision,
+        FunctionSemanticHashVersion, Sha256Digest, SourceOrigin, StoredSourceRevision,
     },
     types::ResolvedType,
 };
@@ -150,16 +148,6 @@ pub(super) async fn load_function_state(
     let (active_revisions, historical_revisions, introductions) =
         finish_revisions(transaction, &functions, pending, active_ancestry).await?;
 
-    verify_historical_introductions(
-        transaction,
-        catalogue,
-        &active_revisions,
-        &historical_revisions,
-        &introductions,
-        catalogue_hash_context,
-    )
-    .await?;
-
     let references = load_references(
         transaction,
         catalogue,
@@ -180,7 +168,122 @@ pub(super) async fn load_function_state(
     })
 }
 
-async fn load_catalogue_functions(
+/// Loads the immutable revisions named by one catalogue's current function
+/// rows without applying the active catalogue's global status classification.
+///
+/// Historical digest recovery resolves the identities stored in that catalogue
+/// directly: a revision may be retired today, or may have been active when the
+/// historical catalogue was committed.
+pub(super) async fn load_catalogue_current_revisions(
+    transaction: &Transaction<'_>,
+    catalogue: CatalogueRevisionId,
+) -> Result<BTreeMap<FunctionRevisionId, FunctionRevisionRecord>, PostgresKernelError> {
+    let rows = transaction
+        .query(
+            "SELECT revision.id, revision.function_id, revision.revision_number,
+                    revision.content_hash, revision.semantic_ir_hash,
+                    revision.semantic_hash_version,
+                    revision.hash_algorithm, revision.hash_contract_version,
+                    revision.language_version, revision.status,
+                    revision.introduced_catalogue_revision_id,
+                    introduced_function.current_function_revision_id AS introduced_current_revision_id,
+                    introduced_function.domain AS introduced_domain,
+                    introduced_function.source_unit_id,
+                    introduced_function.source_start,
+                    introduced_function.source_end,
+                    introduced_catalogue.source_revision_id,
+                    introduced_catalogue.content_hash AS catalogue_hash,
+                    introduced_catalogue.hash_algorithm AS catalogue_algorithm,
+                    introduced_catalogue.hash_contract_version AS catalogue_contract_version,
+                    introduced_catalogue.canonical_hash_version AS catalogue_canonical_hash_version,
+                    introduced_catalogue.standard_library_revision_id AS catalogue_standard_library_revision_id,
+                    source.parent_source_revision_id,
+                    source.bundle_id,
+                    source.content_hash AS source_hash,
+                    source.hash_algorithm AS source_algorithm,
+                    source.hash_contract_version AS source_contract_version,
+                    bundle.content_hash AS bundle_hash,
+                    bundle.hash_algorithm AS bundle_algorithm,
+                    bundle.hash_contract_version AS bundle_contract_version
+             FROM _orna_kernel.catalogue_functions AS current_function
+             JOIN _orna_kernel.function_revisions AS revision
+               ON revision.id = current_function.current_function_revision_id
+             LEFT JOIN _orna_kernel.catalogue_revisions AS introduced_catalogue
+               ON introduced_catalogue.id = revision.introduced_catalogue_revision_id
+             LEFT JOIN _orna_kernel.catalogue_functions AS introduced_function
+               ON introduced_function.catalogue_revision_id = revision.introduced_catalogue_revision_id
+              AND introduced_function.function_id = revision.function_id
+             LEFT JOIN _orna_kernel.source_revisions AS source
+               ON source.id = introduced_catalogue.source_revision_id
+             LEFT JOIN _orna_kernel.source_bundles AS bundle
+               ON bundle.id = source.bundle_id
+             WHERE current_function.catalogue_revision_id = $1
+             ORDER BY current_function.function_id, revision.id",
+            &[&catalogue.to_bytes().to_vec()],
+        )
+        .await
+        .map_err(PostgresKernelError::Database)?;
+
+    let mut revisions = BTreeMap::new();
+    for (index, row) in rows.iter().enumerate() {
+        let row_record = DurableRecord::new(
+            REVISION_RELATION,
+            format!("catalogue={};row={index}", catalogue.canonical()),
+        );
+        let id = FunctionRevisionId::from_bytes(identity_bytes(
+            row_record.column(row, "id", "function revision identity must be 16 bytes")?,
+            &row_record,
+            "function revision identity must be 16 bytes",
+        )?);
+        let artifact_rows = transaction
+            .query(
+                "SELECT function_revision_id, artifact_kind, format,
+                        format_version::bigint AS format_version, payload, content_hash,
+                        hash_algorithm, hash_contract_version
+                 FROM _orna_kernel.function_artifacts
+                 WHERE function_revision_id = $1
+                 ORDER BY artifact_kind",
+                &[&id.to_bytes().to_vec()],
+            )
+            .await
+            .map_err(PostgresKernelError::Database)?;
+        let mut artifacts = BTreeMap::<FunctionRevisionId, Vec<ExecutableArtifact>>::new();
+        for (artifact_index, artifact_row) in artifact_rows.iter().enumerate() {
+            let (artifact_id, artifact) = decode_artifact(artifact_row, artifact_index)?;
+            artifacts.entry(artifact_id).or_default().push(artifact);
+        }
+        let pending = decode_revision(row, index, &mut artifacts)?;
+        if let Some((orphan, _)) = artifacts.first_key_value() {
+            return Err(
+                DurableRecord::new(ARTIFACT_RELATION, orphan.canonical()).invariant(
+                    "every catalogue current revision artifact must belong to that revision",
+                ),
+            );
+        }
+        let record = FunctionRevisionRecord::new(
+            pending.function,
+            pending.id,
+            pending.revision_number,
+            pending.declaration_origin,
+            pending.declaration_hash,
+            pending.semantic_hash,
+            pending.language_version,
+            pending.artifact,
+        )
+        .map_err(PostgresKernelError::RevisionInvariant)?
+        .with_semantic_hash_version(pending.semantic_hash_version);
+        if revisions.insert(record.id(), record).is_some() {
+            return Err(
+                DurableRecord::new(REVISION_RELATION, id.canonical()).invariant(
+                    "each catalogue function must resolve one distinct immutable current revision",
+                ),
+            );
+        }
+    }
+    Ok(revisions)
+}
+
+pub(super) async fn load_catalogue_functions(
     transaction: &Transaction<'_>,
     catalogue: CatalogueRevisionId,
     catalogue_hash_context: &CatalogueHashContext,
@@ -1428,111 +1531,6 @@ async fn finish_revisions(
     Ok((active, historical, introductions))
 }
 
-async fn verify_historical_introductions(
-    transaction: &Transaction<'_>,
-    active_catalogue: CatalogueRevisionId,
-    active_revisions: &[FunctionRevisionRecord],
-    historical_revisions: &[FunctionRevisionRecord],
-    introductions: &BTreeMap<CatalogueRevisionId, RecoveredIntroduction>,
-    active_catalogue_hash_context: &CatalogueHashContext,
-) -> Result<(), PostgresKernelError> {
-    let revisions = active_revisions
-        .iter()
-        .chain(historical_revisions)
-        .map(|revision| (revision.id(), revision))
-        .collect::<BTreeMap<_, _>>();
-
-    for (catalogue_id, introduction) in introductions {
-        if *catalogue_id == active_catalogue {
-            continue;
-        }
-
-        let catalogue_record =
-            DurableRecord::new("_orna_kernel.catalogue_revisions", catalogue_id.canonical());
-        let catalogue_hash_context = catalogue_hash_context_for(
-            introduction.catalogue_hash_version,
-            introduction.standard_library_revision,
-            active_catalogue_hash_context.standard(),
-            &catalogue_record,
-        )?;
-
-        let (functions, function_origins) =
-            load_catalogue_functions(transaction, *catalogue_id, &catalogue_hash_context).await?;
-        let references = load_references(
-            transaction,
-            *catalogue_id,
-            catalogue_hash_context
-                .standard()
-                .map(|standard| standard.revision()),
-        )
-        .await?;
-        validate_reference_sources(&functions, &references)?;
-        let semantics = load_catalogue_semantics(
-            transaction,
-            *catalogue_id,
-            functions,
-            function_origins,
-            &catalogue_hash_context,
-        )
-        .await?;
-        let mut current_revisions = Vec::with_capacity(semantics.catalogue.functions().len());
-        for function in semantics.catalogue.functions() {
-            let revision = revisions
-                .get(&function.current_revision())
-                .ok_or_else(|| {
-                    DurableRecord::new(REVISION_RELATION, function.current_revision().canonical())
-                        .invariant(
-                            "every introducing catalogue function must resolve its immutable current revision",
-                        )
-                })?;
-            if revision.function() != function.id() {
-                return Err(
-                    DurableRecord::new(REVISION_RELATION, revision.id().canonical()).invariant(
-                        "introducing catalogue current revision must belong to its exact function",
-                    ),
-                );
-            }
-            current_revisions.push((*revision).clone());
-        }
-
-        let recovered = ActiveDatabaseRevision::new_with_catalogue_hash_context(
-            ActiveDatabaseRevisionInput::new(
-                RevisionPair::new(introduction.source.id(), *catalogue_id),
-                introduction.source.clone(),
-                semantics.catalogue,
-                introduction.catalogue_hash,
-                ActiveRevisionContent::new(
-                    semantics.expressions,
-                    current_revisions,
-                    semantics.origins,
-                    references,
-                ),
-            ),
-            catalogue_hash_context,
-        )
-        .map_err(PostgresKernelError::RevisionInvariant)?;
-        let computed = orna_core::canonical_hash::catalogue_digest_with_context(
-            recovered.catalogue_hash_context(),
-            recovered.catalogue(),
-            recovered.function_revisions(),
-            recovered.expressions(),
-            recovered.origins(),
-            recovered.references(),
-        )
-        .map_err(PostgresKernelError::CanonicalHash)?;
-        if computed != introduction.catalogue_hash {
-            return Err(DurableRecord::new(
-                "_orna_kernel.catalogue_revisions",
-                catalogue_id.canonical(),
-            )
-            .invariant(
-                "introducing catalogue digest must match its complete recovered semantic catalogue",
-            ));
-        }
-    }
-    Ok(())
-}
-
 fn same_introduction(left: &IntroductionHeader, right: &IntroductionHeader) -> bool {
     left.catalogue == right.catalogue
         && left.catalogue_hash == right.catalogue_hash
@@ -1588,7 +1586,7 @@ fn validate_declaration(
     Ok(())
 }
 
-async fn load_references(
+pub(super) async fn load_references(
     transaction: &Transaction<'_>,
     catalogue: CatalogueRevisionId,
     expected_standard_library_revision: Option<StandardLibraryRevisionId>,
@@ -1937,7 +1935,7 @@ const fn reference_kind_matches_target(
     )
 }
 
-fn validate_reference_sources(
+pub(super) fn validate_reference_sources(
     functions: &[RecoveredFunction],
     references: &[DefinitionReference],
 ) -> Result<(), PostgresKernelError> {

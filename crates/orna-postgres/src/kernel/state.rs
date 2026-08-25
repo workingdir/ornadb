@@ -24,14 +24,20 @@ use orna_artifact::client_plan::{
 };
 use orna_core::{
     FunctionId, PrincipalId, StateSlotId, TypeId,
-    catalogue::FunctionDomain,
-    revision::{ActiveDatabaseRevision, ExecutableArtifactKind, FunctionRevisionRecord},
-    security::{AuthenticatedSession, SecurityAuditDecision, UserStateAuditOperation},
+    catalogue::{FunctionDefinition, FunctionDomain},
+    revision::{
+        ActiveDatabaseRevision, ExecutableArtifactKind, FunctionRevisionRecord, RevisionPair,
+    },
+    security::{
+        AuthenticatedSession, ExecuteDenial, SecurityAuditDecision, SecuritySnapshot,
+        UserStateAuditOperation,
+    },
     state::{
         UserStateCell, UserStateChange, UserStateError, UserStateKey, UserStateKeyWithoutPrincipal,
         UserStateWriteOutcome, UserStateWriteResult, apply_change, cell_type_matches,
         is_sealed_inspect_runtime_value,
     },
+    system::{SYS_STATE_LOAD_USER_STATE_FUNCTION_ID, SYS_STATE_WRITE_USER_STATE_FUNCTION_ID},
     value::OpaqueCodecRegistry,
 };
 use orna_protocol::{decode_constructed_value, encode_constructed_value};
@@ -96,6 +102,83 @@ fn state_instance_is_requested(
     }
 }
 
+/// Rebinds a retained session to the active security snapshot before USER-state access.
+///
+/// The returned session is local to this operation; the caller-owned binding
+/// remains opaque and is never replaced or exposed. A disabled principal or
+/// revoked selected role fails before any state query, write, or audit append.
+fn revalidate_authenticated_session(
+    security: &SecuritySnapshot,
+    authenticated_session: &AuthenticatedSession,
+    active_pair: RevisionPair,
+    function: FunctionId,
+) -> Result<AuthenticatedSession, PostgresKernelError> {
+    security
+        .bind_authenticated_session(
+            authenticated_session.principal(),
+            authenticated_session.active_roles().to_vec(),
+        )
+        .map_err(|_| PostgresKernelError::StateExecuteDenied {
+            pair: active_pair,
+            function,
+            reason: ExecuteDenial::InvalidSession,
+        })
+}
+
+/// Rejects a caller-supplied root that is not an active CLIENT identity.
+///
+/// USER-state storage is keyed by the root function, so the root must be
+/// resolved against the same active catalogue snapshot as its state slots.
+/// This guard deliberately runs before any state query, write, or allowed
+/// USER-state audit append.
+fn validate_active_user_state_root(
+    active: &ActiveDatabaseRevision,
+    root_function: FunctionId,
+) -> Result<(), PostgresKernelError> {
+    let definition = validate_user_state_root_definition(
+        root_function,
+        active.catalogue().function_by_id(root_function),
+    )?;
+    let revision = active
+        .function_revisions()
+        .iter()
+        .find(|revision| {
+            revision.function() == root_function && revision.id() == definition.current_revision()
+        })
+        .ok_or_else(|| PostgresKernelError::DurableInvariant {
+            relation: STATE_RELATION,
+            record: format!("{root_function:?}"),
+            rule: "USER state root must have its active CLIENT function revision",
+        })?;
+    if revision.artifact().kind() != ExecutableArtifactKind::Client {
+        return Err(PostgresKernelError::DurableInvariant {
+            relation: STATE_RELATION,
+            record: format!("{root_function:?}"),
+            rule: "USER state root must carry an active CLIENT function artifact",
+        });
+    }
+    Ok(())
+}
+
+fn validate_user_state_root_definition(
+    root_function: FunctionId,
+    definition: Option<&FunctionDefinition>,
+) -> Result<&FunctionDefinition, PostgresKernelError> {
+    let definition = definition.ok_or_else(|| PostgresKernelError::DurableInvariant {
+        relation: STATE_RELATION,
+        record: format!("{root_function:?}"),
+        rule: "USER state root must identify an active CLIENT function",
+    })?;
+    if definition.domain() != FunctionDomain::Client {
+        return Err(PostgresKernelError::DurableInvariant {
+            relation: STATE_RELATION,
+            record: format!("{root_function:?}"),
+            rule: "USER state root must be a CLIENT function",
+        });
+    }
+    Ok(definition)
+}
+
 /// Loads authenticated USER state cells from an already-pinned snapshot.
 ///
 /// The caller owns the transaction's active revision and codec registry. This
@@ -113,6 +196,7 @@ pub(crate) async fn load_user_state_in_transaction(
     expected_types: &BTreeMap<(FunctionId, StateSlotId), TypeId>,
 ) -> Result<Vec<UserStateCell>, PostgresKernelError> {
     validate_state_profile(state_profile)?;
+    validate_active_user_state_root(active, root_function)?;
     let requested_instances = requested_state_instances(instances);
     let principal = authenticated_session.principal();
     for ((function, state_slot), expected_type) in expected_types {
@@ -197,11 +281,17 @@ impl PostgresKernel {
                 .map_err(PostgresKernelError::Database)?;
             require_current_migrations(&transaction).await?;
             let active = configure_and_recover(&transaction).await?;
-            let _security = recover_security_snapshot_for_active(&transaction, &active).await?;
+            let security = recover_security_snapshot_for_active(&transaction, &active).await?;
+            let bound_session = revalidate_authenticated_session(
+                &security,
+                authenticated_session,
+                active.pair(),
+                SYS_STATE_LOAD_USER_STATE_FUNCTION_ID,
+            )?;
             let registry = state_value_registry(&active)?;
             let cells = load_user_state_in_transaction(
                 &transaction,
-                authenticated_session,
+                &bound_session,
                 &active,
                 &registry,
                 root_function,
@@ -230,7 +320,7 @@ impl PostgresKernel {
             append_security_audit_event(
                 &audit_transaction,
                 SecurityAuditDecision::user_state_allowed(
-                    authenticated_session,
+                    &bound_session,
                     UserStateAuditOperation::Load,
                     root_function,
                     cells.len() as u64,
@@ -278,7 +368,6 @@ impl PostgresKernel {
             });
         }
         reject_duplicate_user_state_keys(changes)?;
-        let principal = authenticated_session.principal();
         let mut database_session = self.open().await?;
         let operation = async {
             let transaction = database_session
@@ -291,7 +380,15 @@ impl PostgresKernel {
                 .map_err(PostgresKernelError::Database)?;
             require_current_migrations(&transaction).await?;
             let active = configure_and_recover(&transaction).await?;
-            let _security = recover_security_snapshot_for_active(&transaction, &active).await?;
+            let security = recover_security_snapshot_for_active(&transaction, &active).await?;
+            let bound_session = revalidate_authenticated_session(
+                &security,
+                authenticated_session,
+                active.pair(),
+                SYS_STATE_WRITE_USER_STATE_FUNCTION_ID,
+            )?;
+            validate_active_user_state_root(&active, root_function)?;
+            let principal = bound_session.principal();
             let registry = state_value_registry(&active)?;
             for change in changes {
                 let declared_type =
@@ -331,7 +428,7 @@ impl PostgresKernel {
             append_security_audit_event(
                 &transaction,
                 SecurityAuditDecision::user_state_allowed(
-                    authenticated_session,
+                    &bound_session,
                     UserStateAuditOperation::Write,
                     root_function,
                     changes.len() as u64,
@@ -882,7 +979,17 @@ fn finish_state_session<T>(
 mod tests {
     use super::*;
     use orna_artifact::client_plan::{ClientExpressionNode, StateDefault, StateSlot};
-    use orna_core::{PrincipalId, TypeId, value::RuntimeValue};
+    use orna_core::{
+        CatalogueRevisionId, FunctionRevisionId, PrincipalId, SourceRevisionId, TypeId,
+        catalogue::{
+            FunctionDefinition, FunctionReturn, FunctionSecurity, FunctionTransaction,
+            FunctionVolatility, QualifiedSemanticName,
+        },
+        revision::RevisionPair,
+        security::{Principal, PrincipalKind, PrincipalStatus, RoleMembership},
+        types::{ResolvedType, StandardScalar},
+        value::RuntimeValue,
+    };
 
     const PRINCIPAL: orna_core::PrincipalId = PrincipalId::from_bytes([0x11; 16]);
     const OTHER_PRINCIPAL: orna_core::PrincipalId = PrincipalId::from_bytes([0x22; 16]);
@@ -941,6 +1048,172 @@ mod tests {
             ClientExpressionNode::Boolean { value: true },
             vec![StateSlot::new(SLOT, value_type, scope, StateDefault::Unset)],
         )
+    }
+
+    fn root_definition(domain: FunctionDomain) -> FunctionDefinition {
+        FunctionDefinition::new(
+            ROOT,
+            QualifiedSemanticName::new(["test", "root"]).expect("test root name"),
+            domain,
+            Vec::new(),
+            FunctionReturn::Single(ResolvedType::scalar(StandardScalar::Boolean)),
+            FunctionRevisionId::from_bytes([0x38; 16]),
+            FunctionSecurity::Invoker,
+            (domain == FunctionDomain::Server).then_some(FunctionTransaction::ReadOnly),
+            if domain == FunctionDomain::Client {
+                FunctionVolatility::Immutable
+            } else {
+                FunctionVolatility::Stable
+            },
+        )
+    }
+
+    #[test]
+    fn unknown_user_state_root_is_rejected() {
+        let error = validate_user_state_root_definition(FUNCTION, None)
+            .expect_err("an unknown USER-state root must fail closed");
+        assert!(matches!(
+            error,
+            PostgresKernelError::DurableInvariant {
+                rule: "USER state root must identify an active CLIENT function",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn inactive_user_state_root_is_rejected() {
+        let error = validate_user_state_root_definition(OTHER_FUNCTION, None)
+            .expect_err("an inactive USER-state root must fail closed");
+        assert!(matches!(
+            error,
+            PostgresKernelError::DurableInvariant {
+                rule: "USER state root must identify an active CLIENT function",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn server_user_state_root_is_rejected() {
+        let definition = root_definition(FunctionDomain::Server);
+        let error = validate_user_state_root_definition(ROOT, Some(&definition))
+            .expect_err("a SERVER USER-state root must fail closed");
+        assert!(matches!(
+            error,
+            PostgresKernelError::DurableInvariant {
+                rule: "USER state root must be a CLIENT function",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn active_client_user_state_root_is_accepted() {
+        let definition = root_definition(FunctionDomain::Client);
+        assert!(validate_user_state_root_definition(ROOT, Some(&definition)).is_ok());
+    }
+
+    #[test]
+    fn retained_session_rebinds_or_denies_before_state_access() {
+        let pair = RevisionPair::new(
+            SourceRevisionId::from_bytes([0x41; 16]),
+            CatalogueRevisionId::from_bytes([0x42; 16]),
+        );
+        let active = SecuritySnapshot::new(
+            pair,
+            vec![],
+            vec![Principal::new(
+                PRINCIPAL,
+                PrincipalKind::User,
+                PrincipalStatus::Active,
+            )],
+            vec![],
+            vec![],
+        )
+        .expect("active state security snapshot must validate");
+        let session = active
+            .bind_authenticated_session(PRINCIPAL, vec![])
+            .expect("active state session must bind");
+        let rebound = revalidate_authenticated_session(
+            &active,
+            &session,
+            pair,
+            SYS_STATE_LOAD_USER_STATE_FUNCTION_ID,
+        )
+        .expect("active retained state session must rebind");
+        assert_eq!(rebound.principal(), PRINCIPAL);
+
+        let disabled = SecuritySnapshot::new(
+            pair,
+            vec![],
+            vec![Principal::new(
+                PRINCIPAL,
+                PrincipalKind::User,
+                PrincipalStatus::Disabled,
+            )],
+            vec![],
+            vec![],
+        )
+        .expect("disabled state security snapshot must validate");
+        let error = revalidate_authenticated_session(
+            &disabled,
+            &session,
+            pair,
+            SYS_STATE_LOAD_USER_STATE_FUNCTION_ID,
+        )
+        .expect_err("disabled retained state session must be rejected");
+        assert!(matches!(
+            error,
+            PostgresKernelError::StateExecuteDenied {
+                function: SYS_STATE_LOAD_USER_STATE_FUNCTION_ID,
+                reason: ExecuteDenial::InvalidSession,
+                ..
+            }
+        ));
+
+        let role = PrincipalId::from_bytes([0x43; 16]);
+        let role_active = SecuritySnapshot::new(
+            pair,
+            vec![],
+            vec![
+                Principal::new(PRINCIPAL, PrincipalKind::User, PrincipalStatus::Active),
+                Principal::new(role, PrincipalKind::Role, PrincipalStatus::Active),
+            ],
+            vec![RoleMembership::new(role, PRINCIPAL)],
+            vec![],
+        )
+        .expect("role-bound state security snapshot must validate");
+        let role_session = role_active
+            .bind_authenticated_session(PRINCIPAL, vec![role])
+            .expect("selected role state session must bind");
+        let revoked = SecuritySnapshot::new(
+            pair,
+            vec![],
+            vec![Principal::new(
+                PRINCIPAL,
+                PrincipalKind::User,
+                PrincipalStatus::Active,
+            )],
+            vec![],
+            vec![],
+        )
+        .expect("revoked-role state security snapshot must validate");
+        let error = revalidate_authenticated_session(
+            &revoked,
+            &role_session,
+            pair,
+            SYS_STATE_WRITE_USER_STATE_FUNCTION_ID,
+        )
+        .expect_err("revoked selected role must invalidate retained state session");
+        assert!(matches!(
+            error,
+            PostgresKernelError::StateExecuteDenied {
+                function: SYS_STATE_WRITE_USER_STATE_FUNCTION_ID,
+                reason: ExecuteDenial::InvalidSession,
+                ..
+            }
+        ));
     }
 
     #[test]

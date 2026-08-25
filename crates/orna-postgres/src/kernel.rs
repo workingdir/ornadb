@@ -255,6 +255,19 @@ pub enum PostgresKernelError {
         /// The fail-closed reason for denying execution.
         reason: ExecuteDenial,
     },
+    /// The active security snapshot denied a protected USER-state operation.
+    ///
+    /// USER state is a sealed system-function class, not a CLIENT, SERVER, or
+    /// raw invocation. This boundary is used when a retained authenticated
+    /// session no longer binds to the active security snapshot.
+    StateExecuteDenied {
+        /// The active revision pair used for the decision.
+        pair: RevisionPair,
+        /// The sealed USER-state function identity.
+        function: FunctionId,
+        /// The fail-closed reason for denying execution.
+        reason: ExecuteDenial,
+    },
     /// The active security snapshot denied a SERVER SELECT invocation.
     ServerExecuteDenied {
         /// The active revision pair used for the decision.
@@ -428,6 +441,9 @@ impl fmt::Display for PostgresKernelError {
             Self::ClientExecuteDenied { .. } => {
                 formatter.write_str("CLIENT function execution was denied")
             }
+            Self::StateExecuteDenied { .. } => {
+                formatter.write_str("USER state execution was denied")
+            }
             Self::ServerExecuteDenied { .. } => {
                 formatter.write_str("SERVER SELECT execution was denied")
             }
@@ -538,9 +554,7 @@ impl Error for PostgresKernelError {
             Self::Configuration(error)
             | Self::Database(error)
             | Self::RecoveryDatabase(error)
-            | Self::SessionClose(error) => {
-                Some(error)
-            },
+            | Self::SessionClose(error) => Some(error),
             Self::DriverTask(error) => Some(error),
             Self::CanonicalHash(error) => Some(error),
             Self::RevisionInvariant(error) => Some(error),
@@ -571,6 +585,7 @@ impl Error for PostgresKernelError {
             | Self::SecurityRevisionMismatch { .. }
             | Self::SecurityFunctionSetMismatch
             | Self::ClientExecuteDenied { .. }
+            | Self::StateExecuteDenied { .. }
             | Self::ServerExecuteDenied { .. }
             | Self::RawExecuteDenied { .. }
             | Self::RawCallTargetUnavailable { .. }

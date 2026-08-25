@@ -4280,8 +4280,10 @@ mod tests {
     };
     use orna_core::{
         CatalogueRevisionId, ExpressionId, FieldId, SchemaId, SourceBundleId, SourceRevisionId,
+        SourceUnitId,
         canonical_hash::{
             catalogue_digest_with_context, source_bundle_digest, source_revision_record_digest,
+            source_unit_content_digest,
         },
         catalogue::{
             EnumTypeDefinition, FieldDefinition, FunctionReturnColumnDefinition,
@@ -4289,8 +4291,9 @@ mod tests {
             RecordValueTypeDefinition, SchemaDefinition,
         },
         revision::{
-            ActiveDatabaseRevisionInput, ActiveRevisionContent, CatalogueHashContext, RevisionPair,
-            StoredSourceRevision,
+            ActiveDatabaseRevisionInput, ActiveRevisionContent, CatalogueHashContext,
+            DefinitionIdentity, DefinitionOrigin, RevisionPair, SourceOrigin, StoredSourceRevision,
+            StoredSourceUnit,
         },
         types::{StandardScalar, TypeDescriptor},
         value::{RuntimeFloat, RuntimeValue},
@@ -4689,26 +4692,80 @@ mod tests {
 
     fn raw_pair_active_with_catalogue(catalogue: CatalogueSnapshot) -> ActiveDatabaseRevision {
         let bundle = SourceBundleId::from_bytes([0x73; 16]);
-        let bundle_hash = source_bundle_digest(&[]).unwrap();
+        let source_unit = SourceUnitId::from_bytes([0x75; 16]);
+        let content = "server mutation test source";
+        let unit = StoredSourceUnit::new(
+            source_unit,
+            0,
+            "mutation.orna",
+            content,
+            source_unit_content_digest(content).unwrap(),
+        )
+        .unwrap();
+        let units = vec![unit];
+        let bundle_hash = source_bundle_digest(&units).unwrap();
         let source = StoredSourceRevision::new(
             bundle,
             SourceRevisionId::from_bytes([0x74; 16]),
             None,
-            Vec::new(),
+            units,
             bundle_hash,
             source_revision_record_digest(bundle, None, bundle_hash).unwrap(),
         )
         .unwrap();
-        let context = CatalogueHashContext::version_one();
+        let (context, origins) = if catalogue.record_value_types().is_empty() {
+            (CatalogueHashContext::version_one(), Vec::new())
+        } else {
+            let origin =
+                SourceOrigin::new(source_unit, 0, u32::try_from(content.len()).unwrap()).unwrap();
+            let mut origins = Vec::new();
+            for schema in catalogue.schemas() {
+                origins.push(DefinitionOrigin::new(
+                    DefinitionIdentity::Schema(schema.id()),
+                    origin,
+                ));
+            }
+            for object in catalogue.object_types() {
+                origins.push(DefinitionOrigin::new(
+                    DefinitionIdentity::ObjectType(object.id()),
+                    origin,
+                ));
+                origins.extend(object.fields().iter().map(|field| {
+                    DefinitionOrigin::new(
+                        DefinitionIdentity::Field {
+                            owner: object.id(),
+                            field: field.id(),
+                        },
+                        origin,
+                    )
+                }));
+            }
+            for record in catalogue.record_value_types() {
+                origins.push(DefinitionOrigin::new(
+                    DefinitionIdentity::ValueType(record.id()),
+                    origin,
+                ));
+                origins.extend(record.fields().iter().map(|field| {
+                    DefinitionOrigin::new(
+                        DefinitionIdentity::Field {
+                            owner: record.id(),
+                            field: field.id(),
+                        },
+                        origin,
+                    )
+                }));
+            }
+            (retained_standard_context(), origins)
+        };
         let catalogue_hash =
-            catalogue_digest_with_context(&context, &catalogue, &[], &[], &[], &[]).unwrap();
+            catalogue_digest_with_context(&context, &catalogue, &[], &[], &origins, &[]).unwrap();
         ActiveDatabaseRevision::new_with_catalogue_hash_context(
             ActiveDatabaseRevisionInput::new(
                 RevisionPair::new(source.id(), catalogue.revision()),
                 source,
                 catalogue,
                 catalogue_hash,
-                ActiveRevisionContent::new(Vec::new(), Vec::new(), Vec::new(), Vec::new()),
+                ActiveRevisionContent::new(Vec::new(), Vec::new(), origins, Vec::new()),
             ),
             context,
         )
