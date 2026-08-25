@@ -1570,15 +1570,30 @@ mod tests {
 
     #[test]
     fn renders_qualified_parts_without_ambiguity_or_control_lines() {
-        let name =
-            QualifiedSemanticName::new(["app", "metric.value", "quoted\"part", "line\nbreak"])
-                .unwrap();
+        let name = QualifiedSemanticName::new([
+            "app",
+            "metric.value",
+            "quoted\"part",
+            "slash\\part",
+            "line\nbreak",
+        ])
+        .unwrap();
 
         assert_eq!(
             qualified(&name),
-            r#"app."metric.value"."quoted""part"."line\nbreak""#
+            r#"app."metric.value"."quoted""part"."slash\\part"."line\nbreak""#
         );
         assert_eq!(render_identifier_part("field.name"), r#""field.name""#);
+        let escaped_controls =
+            render_identifier_part("controls\0\r\t\u{000b}\u{001b}\u{007f}\u{2028}\u{2029}");
+        assert_eq!(
+            escaped_controls,
+            r#""controls\u{0000}\r\t\u{000B}\u{001B}\u{007F}\u{2028}\u{2029}""#
+        );
+        assert!(
+            !escaped_controls.contains('\n') && !escaped_controls.contains('\r'),
+            "escaped name parts must not contain physical report line breaks: {escaped_controls:?}"
+        );
         assert_eq!(
             render_identifier_part("line\nbreak\u{001b}"),
             r#""line\nbreak\u{001B}""#,
@@ -1620,6 +1635,27 @@ mod tests {
                 "+ field app.point.\"quoted\"\"field\" [{}]",
                 field_id.canonical()
             )
+        );
+
+        let rendered = render_change(
+            &SemanticChange::FieldAdded {
+                owner: record_id,
+                id: field_id,
+                name: "slash\\field\nbreak\0".to_owned(),
+            },
+            &candidate,
+        );
+        assert_eq!(
+            rendered,
+            format!(
+                "+ field app.point.{} [{}]",
+                r#""slash\\field\nbreak\u{0000}""#,
+                field_id.canonical()
+            )
+        );
+        assert!(
+            !rendered.contains('\n') && !rendered.contains('\r'),
+            "escaped member names must not inject report lines: {rendered:?}"
         );
     }
 
