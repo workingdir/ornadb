@@ -6,6 +6,9 @@
 use std::io::{BufRead, BufReader, Read, Write};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 
+use orna_compiler::{check_new_application, check_standard_library_source};
+use orna_core::source::{SourceBundle, SourceUnit};
+use orna_standard::{retained_standard_library_snapshot, verify_standard_library_snapshot};
 use serde_json::{Value, json};
 
 /// The valid application source used for positive tests.
@@ -31,6 +34,30 @@ const VALID_SOURCE: &str = concat!(
     "RETURNS ROWS (stored BOOLEAN)\n",
     "SECURITY INVOKER TRANSACTION READ ONLY VOLATILITY STABLE\n",
     "AS SELECT probe.stored FROM product_test.probe probe;\n",
+);
+
+/// Accepted SERVER UPDATE and DELETE mutations with declarations for every
+/// referenced schema, object type, field, alias, and parameter.
+const MUTATION_SOURCE: &str = concat!(
+    "CREATE SCHEMA mutation_test;\n",
+    "CREATE TYPE mutation_test.item AS OBJECT (\n",
+    "    stored BOOLEAN NOT NULL\n",
+    ");\n",
+    "CREATE SERVER FUNCTION mutation_test.update_item(\n",
+    "    p_item REF mutation_test.item, p_stored BOOLEAN\n",
+    ")\n",
+    "RETURNS ROWS (updated REF mutation_test.item)\n",
+    "SECURITY INVOKER TRANSACTION ATOMIC VOLATILITY VOLATILE\n",
+    "AS UPDATE mutation_test.item AS updated\n",
+    "SET stored = p_stored\n",
+    "WHERE REF(updated) = p_item\n",
+    "RETURNING REF(updated);\n",
+    "CREATE SERVER FUNCTION mutation_test.delete_item(p_item REF mutation_test.item)\n",
+    "RETURNS ROWS (deleted BOOLEAN)\n",
+    "SECURITY INVOKER TRANSACTION ATOMIC VOLATILITY VOLATILE\n",
+    "AS DELETE FROM mutation_test.item AS deleted\n",
+    "WHERE REF(deleted) = p_item\n",
+    "RETURNING TRUE;\n",
 );
 
 /// The accepted identity-preserving object-field rename shape. The LSP
@@ -82,6 +109,8 @@ const SERVER_FUNCTION_SOURCE: &str =
     include_str!("../../orna-server/tests/fixtures/server_function_dogfood.orna");
 const CLIENT_LOCAL_ASSIGNMENT_SOURCE: &str =
     include_str!("../../orna-server/tests/fixtures/client_local_assignment_dogfood.orna");
+const CLIENT_STATE_SOURCE: &str =
+    include_str!("../../orna-server/tests/fixtures/client_state_dogfood.orna");
 
 /// The accepted action fixture shared with server offline checks.
 const ACTION_SOURCE: &str = include_str!("../../orna-server/tests/fixtures/action_dogfood.orna");
@@ -91,6 +120,19 @@ const BROKEN_SOURCE: &str = "CREATE SCHEMA broken_test;\n\
 CREATE SERVER FUNCTION broken_test.f()\n\
 RETURNS BOOLEAN\n\
 AS SELECT THIS IS NOT SQL;\n";
+
+/// One invalid source unit shared by the canonical source check and the LSP
+/// parity matrix. The multibyte and combining scalars keep the compiler's
+/// UTF-8 byte span distinct from the LSP's UTF-16 line/character range.
+const SOURCE_CHECK_PARITY_ASCII_SOURCE: &str = concat!(
+    "CREATE SCHEMA parity;\n",
+    "CREATE TYPE app.task AS OBJECT (done BOOLEAN);\n",
+);
+
+const SOURCE_CHECK_PARITY_SOURCE: &str = concat!(
+    "CREATE SCHEMA parity;\n",
+    "/* 😀 ée\u{0301} */ CREATE TYPE app.task AS OBJECT (done BOOLEAN);\n",
+);
 
 /// A framed JSON-RPC client attached to a spawned server.
 struct Client {
@@ -146,6 +188,24 @@ impl Client {
         message["result"].clone()
     }
 
+    fn request_error(&mut self, method: &str, params: Value) -> Value {
+        let id = self.next_id;
+        self.next_id += 1;
+        self.send(json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": method,
+            "params": params,
+        }));
+        let message = self.read_message();
+        assert_eq!(message["id"], id, "response id for {method}");
+        assert!(
+            message.get("error").is_some(),
+            "no error for {method}: {message}"
+        );
+        message["error"].clone()
+    }
+
     fn notify(&mut self, method: &str, params: Value) {
         self.send(json!({
             "jsonrpc": "2.0",
@@ -199,19 +259,103 @@ fn initialize(client: &mut Client) {
             "capabilities": {}
         }),
     );
+    let capabilities = &result["capabilities"];
     assert!(
-        result["capabilities"]["semanticTokensProvider"].is_object(),
+        capabilities["semanticTokensProvider"].is_object(),
         "semantic tokens capability: {result}"
     );
     assert_eq!(
-        result["capabilities"]["positionEncoding"], "utf-16",
+        capabilities["positionEncoding"], "utf-16",
         "LSP positions use UTF-16 code units: {result}"
     );
     assert!(
-        result["capabilities"]["diagnosticProvider"].is_object(),
+        capabilities["diagnosticProvider"].is_object(),
         "diagnostic capability: {result}"
     );
+    assert_eq!(
+        capabilities["textDocumentSync"]["openClose"], true,
+        "the server must advertise open/close synchronisation: {result}"
+    );
+    assert_eq!(
+        capabilities["textDocumentSync"]["change"], 1,
+        "the server must advertise full document synchronisation: {result}"
+    );
+    assert_eq!(
+        capabilities["textDocumentSync"]["save"], true,
+        "the server must advertise save synchronisation: {result}"
+    );
+    assert_eq!(
+        capabilities["hoverProvider"], true,
+        "the server must advertise hover support: {result}"
+    );
+    assert_eq!(
+        capabilities["definitionProvider"], true,
+        "the server must advertise definition support: {result}"
+    );
+    assert_eq!(
+        capabilities["referencesProvider"], true,
+        "the server must advertise reference support: {result}"
+    );
+    assert_eq!(
+        capabilities["documentSymbolProvider"], true,
+        "the server must advertise document-symbol support: {result}"
+    );
+    assert_eq!(
+        capabilities["completionProvider"]["triggerCharacters"],
+        json!([".", ":"]),
+        "the server must advertise completion trigger characters: {result}"
+    );
+    assert_eq!(
+        capabilities["semanticTokensProvider"]["range"], true,
+        "the server must advertise semantic-token range requests: {result}"
+    );
+    assert_eq!(
+        capabilities["semanticTokensProvider"]["full"], true,
+        "the server must advertise full semantic-token requests: {result}"
+    );
+    assert_eq!(
+        capabilities["diagnosticProvider"]["interFileDependencies"], false,
+        "the server must keep diagnostics local to one document: {result}"
+    );
+    assert_eq!(
+        capabilities["diagnosticProvider"]["workspaceDiagnostics"], false,
+        "the server must not advertise workspace diagnostics: {result}"
+    );
     client.notify("initialized", json!({}));
+}
+
+#[test]
+fn rejects_initialize_when_client_offers_only_non_utf16_position_encoding() {
+    let mut client = Client::spawn();
+    let error = client.request_error(
+        "initialize",
+        json!({
+            "processId": null,
+            "rootUri": null,
+            "capabilities": {
+                "general": {
+                    "positionEncodings": ["utf-8"]
+                }
+            }
+        }),
+    );
+
+    assert_eq!(error["code"], -32602);
+    let message = error["message"].as_str().expect("error message");
+    assert!(
+        message.contains("unsupported position encoding"),
+        "initialize error should identify the unsupported encoding: {error}"
+    );
+    assert!(
+        message.contains("UTF-16"),
+        "initialize error should identify the supported encoding: {error}"
+    );
+
+    let status = client.child.wait().expect("wait for server exit");
+    assert!(
+        !status.success(),
+        "unsupported negotiation must fail: {status}"
+    );
 }
 
 fn position_inside(source: &str, prefix: &str, token: &str) -> Value {
@@ -240,17 +384,192 @@ fn position_after(source: &str, prefix: &str) -> Value {
 }
 
 fn position_at_byte(source: &str, byte: usize) -> Value {
-    let mut line = 0u64;
-    let mut character = 0u64;
-    for source_character in source[..byte].chars() {
+    let byte = byte.min(source.len());
+    assert!(
+        source.is_char_boundary(byte),
+        "position byte must be a boundary"
+    );
+    let starts = line_starts(source);
+    let line = starts
+        .partition_point(|&start| start <= byte)
+        .saturating_sub(1);
+    let line_start = starts[line];
+    let line_end = line_end_byte(source, &starts, line);
+    let character = source[line_start..byte.min(line_end)]
+        .chars()
+        .map(|source_character| source_character.len_utf16() as u64)
+        .sum::<u64>();
+    json!({ "line": line as u64, "character": character })
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct DiagnosticProjection {
+    code: String,
+    start_byte: usize,
+    end_byte: usize,
+    message: String,
+}
+
+/// Runs the same compiler-backed source check used by the offline source
+/// checker, retaining its public diagnostic code, UTF-8 byte span, and text.
+fn canonical_source_check_diagnostics(
+    source: &str,
+    logical_path: &str,
+) -> Vec<DiagnosticProjection> {
+    let snapshot = retained_standard_library_snapshot().expect("retained standard snapshot");
+    let verified = verify_standard_library_snapshot(snapshot).expect("verified standard snapshot");
+    let standard = check_standard_library_source(&verified).expect("checked standard source");
+    let bundle = SourceBundle::new([SourceUnit::new(logical_path, source)])
+        .expect("one nonempty logical source unit");
+    let report = check_new_application(&bundle, &standard).expect("canonical source check");
+
+    report
+        .diagnostics()
+        .iter()
+        .map(|diagnostic| DiagnosticProjection {
+            code: diagnostic.code().as_str().to_owned(),
+            start_byte: diagnostic.location().span().start(),
+            end_byte: diagnostic.location().span().end(),
+            message: diagnostic.message().to_owned(),
+        })
+        .collect()
+}
+
+fn line_starts(source: &str) -> Vec<usize> {
+    let mut starts = vec![0usize];
+    for (index, source_character) in source.char_indices() {
         if source_character == '\n' {
-            line += 1;
-            character = 0;
-        } else {
-            character += source_character.len_utf16() as u64;
+            starts.push(index + 1);
         }
     }
-    json!({ "line": line, "character": character })
+    starts
+}
+
+/// Returns the line end used by `PositionMapper`: LF is the line boundary,
+/// and a CR immediately before that LF is part of the terminator rather than
+/// the preceding line's text.
+fn line_end_byte(source: &str, line_starts: &[usize], line: usize) -> usize {
+    match line_starts.get(line + 1) {
+        Some(&next_start) => {
+            let line_end = next_start.saturating_sub(1);
+            if source.as_bytes().get(line_end.saturating_sub(1)) == Some(&b'\r') {
+                line_end.saturating_sub(1)
+            } else {
+                line_end
+            }
+        }
+        None => source.len(),
+    }
+}
+
+/// Converts an LSP line/UTF-16 position back to the source check's byte
+/// coordinate. This intentionally mirrors `PositionMapper`: lines are split
+/// on LF, CRLF's two terminator bytes share the preceding line-end position,
+/// non-ASCII scalars contribute their UTF-16 width, and returned offsets stay
+/// on UTF-8 character boundaries.
+fn byte_offset_from_lsp_position(source: &str, position: &Value) -> usize {
+    let target_line = position["line"].as_u64().expect("LSP diagnostic line");
+    let target_character = position["character"]
+        .as_u64()
+        .expect("LSP diagnostic UTF-16 character");
+    let starts = line_starts(source);
+    let target_line = target_line as usize;
+    let line_start = *starts.get(target_line).expect("diagnostic line must exist");
+    let line_end = line_end_byte(source, &starts, target_line);
+    let mut character = target_character as usize;
+
+    for (index, source_character) in source[line_start..line_end].char_indices() {
+        if character == 0 {
+            return line_start + index;
+        }
+        let width = source_character.len_utf16();
+        if character <= width {
+            return line_start + index + source_character.len_utf8();
+        }
+        character -= width;
+    }
+
+    assert_eq!(character, 0, "diagnostic character must exist");
+    line_end
+}
+
+fn lsp_diagnostic_ranges(source: &str, diagnostics: &[DiagnosticProjection]) -> Vec<Value> {
+    diagnostics
+        .iter()
+        .map(|diagnostic| {
+            json!({
+                "start": position_at_byte(source, diagnostic.start_byte),
+                "end": position_at_byte(source, diagnostic.end_byte),
+            })
+        })
+        .collect()
+}
+
+fn source_check_parity_cases() -> Vec<(&'static str, String)> {
+    let escaped_name = "a\\b\n\r\t\u{001b}\u{2028}\u{2029}é";
+    vec![
+        ("lf", SOURCE_CHECK_PARITY_ASCII_SOURCE.to_owned()),
+        (
+            "crlf",
+            SOURCE_CHECK_PARITY_ASCII_SOURCE.replace('\n', "\r\n"),
+        ),
+        (
+            "no-final-lf",
+            SOURCE_CHECK_PARITY_ASCII_SOURCE
+                .strip_suffix('\n')
+                .expect("parity fixture final LF")
+                .to_owned(),
+        ),
+        ("bom", format!("\u{FEFF}{SOURCE_CHECK_PARITY_ASCII_SOURCE}")),
+        (
+            "bom-interior",
+            "CREATE\u{FEFF} SCHEMA bom_interior;\n".to_owned(),
+        ),
+        (
+            "word-joiner-leading",
+            "\u{2060}CREATE SCHEMA word_joiner_leading;\n".to_owned(),
+        ),
+        (
+            "word-joiner-interior",
+            "CREATE\u{2060} SCHEMA word_joiner_interior;\n".to_owned(),
+        ),
+        ("unicode", SOURCE_CHECK_PARITY_SOURCE.to_owned()),
+        (
+            "multiple",
+            concat!(
+                "CREATE TYPE first.task AS OBJECT (done BOOLEAN);\n",
+                "CREATE TYPE second.task AS OBJECT (done BOOLEAN);\n",
+            )
+            .to_owned(),
+        ),
+        (
+            "escaped-controls",
+            format!("CREATE SCHEMA \"{escaped_name}\";\nCREATE SCHEMA \"{escaped_name}\";"),
+        ),
+    ]
+}
+
+fn lsp_diagnostic_projections(source: &str, diagnostics: &Value) -> Vec<DiagnosticProjection> {
+    diagnostics
+        .as_array()
+        .expect("LSP diagnostic array")
+        .iter()
+        .map(|diagnostic| {
+            let range = &diagnostic["range"];
+            DiagnosticProjection {
+                code: diagnostic["code"]
+                    .as_str()
+                    .expect("LSP diagnostic code")
+                    .to_owned(),
+                start_byte: byte_offset_from_lsp_position(source, &range["start"]),
+                end_byte: byte_offset_from_lsp_position(source, &range["end"]),
+                message: diagnostic["message"]
+                    .as_str()
+                    .expect("LSP diagnostic message")
+                    .to_owned(),
+            }
+        })
+        .collect()
 }
 
 fn open_document(client: &mut Client, uri: &str, text: &str, version: i64) {
@@ -629,14 +948,20 @@ fn serves_accepted_order_by_semantic_tokens_with_utf16_positions() {
     let uri = "file:///test/accepted-order-by-semantic.orna";
     open_document(&mut client, uri, ORDER_BY_SOURCE, 1);
     let diagnostics = client.read_notification("textDocument/publishDiagnostics");
-    assert_eq!(diagnostics["diagnostics"], json!([]), "accepted ORDER BY source clean");
+    assert_eq!(
+        diagnostics["diagnostics"],
+        json!([]),
+        "accepted ORDER BY source clean"
+    );
 
     let tokens = decode_semantic_tokens(&client.request(
         "textDocument/semanticTokens/full",
         json!({ "textDocument": { "uri": uri } }),
     ));
     assert_eq!(
-        tokens.iter().find(|token| token.line == 7 && token.character == 71),
+        tokens
+            .iter()
+            .find(|token| token.line == 7 && token.character == 71),
         Some(&DecodedSemanticToken {
             line: 7,
             character: 71,
@@ -647,7 +972,9 @@ fn serves_accepted_order_by_semantic_tokens_with_utf16_positions() {
         "ASC is a keyword at its UTF-16 position"
     );
     assert_eq!(
-        tokens.iter().find(|token| token.line == 7 && token.character == 87),
+        tokens
+            .iter()
+            .find(|token| token.line == 7 && token.character == 87),
         Some(&DecodedSemanticToken {
             line: 7,
             character: 87,
@@ -656,6 +983,52 @@ fn serves_accepted_order_by_semantic_tokens_with_utf16_positions() {
             modifiers: 0,
         }),
         "DESC is a keyword at its UTF-16 position"
+    );
+
+    client.shutdown();
+}
+
+#[test]
+fn serves_valid_update_delete_mutations() {
+    let mut client = Client::spawn();
+    initialize(&mut client);
+    let uri = "file:///test/valid-mutations.orna";
+
+    open_clean_document(&mut client, uri, MUTATION_SOURCE);
+
+    let update_field = position_inside(
+        MUTATION_SOURCE,
+        "AS UPDATE mutation_test.item AS updated\nSET ",
+        "stored",
+    );
+    assert_hover_contains(&mut client, uri, update_field.clone(), "**field**");
+    assert_definition_starts_on(&mut client, uri, update_field, 2);
+
+    let delete_start = MUTATION_SOURCE
+        .find("AS DELETE FROM mutation_test.item AS deleted")
+        .expect("DELETE statement")
+        + "AS ".len();
+    let delete_position = position_at_byte(MUTATION_SOURCE, delete_start);
+    let delete_line = delete_position["line"].as_u64().expect("DELETE line");
+    let delete_character = delete_position["character"]
+        .as_u64()
+        .expect("DELETE character");
+    let tokens = decode_semantic_tokens(&client.request(
+        "textDocument/semanticTokens/full",
+        json!({ "textDocument": { "uri": uri } }),
+    ));
+    assert_eq!(
+        tokens
+            .iter()
+            .find(|token| { token.line == delete_line && token.character == delete_character }),
+        Some(&DecodedSemanticToken {
+            line: delete_line,
+            character: delete_character,
+            length: 6,
+            token_type: 0,
+            modifiers: 0,
+        }),
+        "DELETE is tokenized as a keyword at its source position"
     );
 
     client.shutdown();
@@ -767,6 +1140,233 @@ fn serves_accepted_action_fixture_without_diagnostics_and_with_symbols() {
 }
 
 #[test]
+fn serves_ambiguous_target_references_fail_closed() {
+    let mut client = Client::spawn();
+    initialize(&mut client);
+
+    let uri = "file:///test/ambiguous-action-target.orna";
+    let source = format!(
+        "{}\nCREATE SCHEMA target_fixture;\nCREATE TYPE target_fixture.row AS OBJECT (value INTEGER NOT NULL);\nCREATE SERVER FUNCTION action_fixture.local(p_value INTEGER)\nRETURNS INTEGER\nAS SELECT t.value FROM target_fixture.row t;\n",
+        ACTION_SOURCE
+    );
+    open_document(&mut client, uri, &source, 1);
+    let _ = client.read_notification("textDocument/publishDiagnostics");
+
+    let target = position_inside(&source, "target => action_fixture.", "local");
+    let references = client.request(
+        "textDocument/references",
+        json!({
+            "textDocument": { "uri": uri },
+            "position": target,
+            "context": { "includeDeclaration": true },
+        }),
+    );
+    assert_eq!(
+        references,
+        json!([]),
+        "ambiguous target references: {references}"
+    );
+
+    client.shutdown();
+}
+
+#[test]
+fn serves_target_function_navigation_and_semantic_kind_only_for_accepted_calls() {
+    let mut client = Client::spawn();
+    initialize(&mut client);
+
+    let stream_uri = "file:///test/stream-resource-target-navigation.orna";
+    open_clean_document(&mut client, stream_uri, STREAM_RESOURCE_SOURCE);
+    let stream_target = position_inside(
+        STREAM_RESOURCE_SOURCE,
+        "target => stream_fixture.",
+        "events",
+    );
+    assert_hover_contains(
+        &mut client,
+        stream_uri,
+        stream_target.clone(),
+        "server function",
+    );
+    assert_definition_starts_on(&mut client, stream_uri, stream_target.clone(), 6);
+    let stream_target_position = stream_target.as_object().expect("stream target position");
+    let stream_target_line = stream_target_position["line"]
+        .as_u64()
+        .expect("stream target line");
+    let stream_target_character = stream_target_position["character"]
+        .as_u64()
+        .expect("stream target character")
+        - 1;
+    let stream_tokens = decode_semantic_tokens(&client.request(
+        "textDocument/semanticTokens/full",
+        json!({ "textDocument": { "uri": stream_uri } }),
+    ));
+    assert!(
+        stream_tokens.iter().any(|token| {
+            token.line == stream_target_line
+                && token.character == stream_target_character
+                && token.length == "events".len() as u64
+                && token.token_type == 2
+        }),
+        "target function must use the function semantic token: {stream_tokens:?}"
+    );
+
+    let stream_declaration = position_inside(
+        STREAM_RESOURCE_SOURCE,
+        "CREATE SERVER FUNCTION stream_fixture.",
+        "events",
+    );
+    let stream_declaration_references = client.request(
+        "textDocument/references",
+        json!({
+            "textDocument": { "uri": stream_uri },
+            "position": stream_declaration,
+            "context": { "includeDeclaration": true },
+        }),
+    );
+    assert_eq!(
+        stream_declaration_references,
+        json!([
+            {
+                "uri": stream_uri,
+                "range": {
+                    "start": { "line": 6, "character": 38 },
+                    "end": { "line": 6, "character": 44 },
+                },
+            },
+            {
+                "uri": stream_uri,
+                "range": {
+                    "start": { "line": 17, "character": 33 },
+                    "end": { "line": 17, "character": 39 },
+                },
+            },
+        ]),
+        "stream target declaration references: {stream_declaration_references}"
+    );
+
+    let action_uri = "file:///test/action-target-navigation.orna";
+    open_clean_document(&mut client, action_uri, ACTION_SOURCE);
+    let action_target = position_inside(ACTION_SOURCE, "target => action_fixture.", "local");
+    assert_hover_contains(
+        &mut client,
+        action_uri,
+        action_target.clone(),
+        "client function",
+    );
+    assert_definition_starts_on(&mut client, action_uri, action_target.clone(), 8);
+    let action_target_position = action_target.as_object().expect("action target position");
+    let action_target_line = action_target_position["line"]
+        .as_u64()
+        .expect("action target line");
+    let action_target_character = action_target_position["character"]
+        .as_u64()
+        .expect("action target character")
+        - 1;
+    let action_tokens = decode_semantic_tokens(&client.request(
+        "textDocument/semanticTokens/full",
+        json!({ "textDocument": { "uri": action_uri } }),
+    ));
+    assert!(
+        action_tokens.iter().any(|token| {
+            token.line == action_target_line
+                && token.character == action_target_character
+                && token.length == "local".len() as u64
+                && token.token_type == 2
+        }),
+        "action target must use the function semantic token: {action_tokens:?}"
+    );
+    let action_references = client.request(
+        "textDocument/references",
+        json!({
+            "textDocument": { "uri": action_uri },
+            "position": action_target,
+            "context": { "includeDeclaration": true },
+        }),
+    );
+    let action_reference_lines: Vec<u64> = action_references
+        .as_array()
+        .expect("action target references")
+        .iter()
+        .map(|reference| {
+            reference["range"]["start"]["line"]
+                .as_u64()
+                .expect("reference line")
+        })
+        .collect();
+    assert_eq!(
+        action_reference_lines,
+        vec![8, 13],
+        "target references: {action_references}"
+    );
+
+    let action_declaration = position_inside(
+        ACTION_SOURCE,
+        "CREATE CLIENT FUNCTION action_fixture.",
+        "local",
+    );
+    let action_declaration_references = client.request(
+        "textDocument/references",
+        json!({
+            "textDocument": { "uri": action_uri },
+            "position": action_declaration,
+            "context": { "includeDeclaration": true },
+        }),
+    );
+    assert_eq!(
+        action_declaration_references,
+        json!([
+            {
+                "uri": action_uri,
+                "range": {
+                    "start": { "line": 8, "character": 42 },
+                    "end": { "line": 8, "character": 47 },
+                },
+            },
+            {
+                "uri": action_uri,
+                "range": {
+                    "start": { "line": 13, "character": 31 },
+                    "end": { "line": 13, "character": 36 },
+                },
+            },
+        ]),
+        "action target declaration references: {action_declaration_references}"
+    );
+
+    let expression_uri = "file:///test/non-target-field-path.orna";
+    open_clean_document(&mut client, expression_uri, EXPRESSION_CLIENT_SOURCE);
+    let field_position = position_inside(EXPRESSION_CLIENT_SOURCE, "AS p_item.", "title");
+    let field_position = field_position.as_object().expect("field position");
+    let field_line = field_position["line"].as_u64().expect("field line");
+    let field_character = field_position["character"]
+        .as_u64()
+        .expect("field character")
+        - 1;
+    let field_tokens = decode_semantic_tokens(&client.request(
+        "textDocument/semanticTokens/full",
+        json!({ "textDocument": { "uri": expression_uri } }),
+    ));
+    assert!(
+        field_tokens.iter().any(|token| {
+            token.line == field_line
+                && token.character == field_character
+                && token.length == "title".len() as u64
+                && token.token_type == 5
+        }),
+        "ordinary field paths must remain properties: {field_tokens:?}"
+    );
+    assert!(!field_tokens.iter().any(|token| {
+        token.line == field_line
+            && token.character == field_character
+            && token.length == "title".len() as u64
+            && token.token_type == 2
+    }));
+
+    client.shutdown();
+}
+
+#[test]
 fn serves_canonical_accepted_dogfood_fixtures_without_diagnostics() {
     let fixtures = [
         (
@@ -783,6 +1383,7 @@ fn serves_canonical_accepted_dogfood_fixtures_without_diagnostics() {
             "client_local_assignment_dogfood.orna",
             CLIENT_LOCAL_ASSIGNMENT_SOURCE,
         ),
+        ("client_state_dogfood.orna", CLIENT_STATE_SOURCE),
     ];
 
     let mut client = Client::spawn();
@@ -884,6 +1485,38 @@ fn serves_accepted_expression_client_fixture_without_diagnostics_and_with_symbol
                 && semantic_token.token_type == 6
         }),
         "missing concatenation string token: {tokens:?}"
+    );
+    let completion = client.request(
+        "textDocument/completion",
+        json!({
+            "textDocument": { "uri": uri },
+            "position": position_after(EXPRESSION_CLIENT_SOURCE, "AS p_item."),
+            "context": { "triggerKind": 2, "triggerCharacter": "." },
+        }),
+    );
+    let labels: Vec<&str> = completion
+        .as_array()
+        .expect("completion items")
+        .iter()
+        .map(|item| item["label"].as_str().expect("completion label"))
+        .collect();
+    assert!(
+        labels.contains(&"title"),
+        "dotted CLIENT field completion: {labels:?}"
+    );
+    assert!(
+        completion
+            .as_array()
+            .expect("completion items")
+            .iter()
+            .all(|item| !item["detail"]
+                .as_str()
+                .is_some_and(|detail| detail.contains("function target"))),
+        "ordinary field paths must not receive target completion details: {completion}"
+    );
+    assert!(
+        labels.contains(&"CREATE"),
+        "global completion preserved: {labels:?}"
     );
     assert_hover_contains(
         &mut client,
@@ -2089,6 +2722,667 @@ fn serves_semantic_compiler_diagnostics_for_unknown_schema_in_push_and_pull() {
     );
     assert_eq!(pull["kind"], "full");
     assert_eq!(pull["items"], pushed["diagnostics"]);
+
+    client.shutdown();
+}
+
+#[test]
+fn serves_source_check_diagnostic_matrix_with_lsp_byte_span_parity() {
+    // Keep the test-side conversion honest about the accepted CRLF policy:
+    // both terminator bytes map to the previous line's end, while the next
+    // byte starts the next LSP line. The inverse position is the CR byte,
+    // exactly as PositionMapper::byte_offset defines it.
+    let crlf = "first\r\nsecond\r\n";
+    assert_eq!(
+        position_at_byte(crlf, 5),
+        json!({ "line": 0, "character": 5 })
+    );
+    assert_eq!(
+        position_at_byte(crlf, 6),
+        json!({ "line": 0, "character": 5 })
+    );
+    assert_eq!(
+        position_at_byte(crlf, 7),
+        json!({ "line": 1, "character": 0 })
+    );
+    assert_eq!(
+        byte_offset_from_lsp_position(crlf, &json!({ "line": 0, "character": 5 })),
+        5
+    );
+
+    let cases = source_check_parity_cases();
+    let mut client = Client::spawn();
+    initialize(&mut client);
+
+    for (version, (label, source)) in cases.iter().enumerate() {
+        let uri = format!("file:///test/source-check-parity-{label}.orna");
+        let canonical = canonical_source_check_diagnostics(source.as_str(), &uri);
+        assert!(
+            !canonical.is_empty(),
+            "{label} canonical source check is clean"
+        );
+
+        match *label {
+            "lf" | "crlf" | "no-final-lf" => {
+                let start_byte = source.find("app.task").expect("unknown object type name");
+                assert_eq!(
+                    canonical,
+                    vec![DiagnosticProjection {
+                        code: "ORNA0101".to_owned(),
+                        start_byte,
+                        end_byte: start_byte + "app.task".len(),
+                        message: "unknown schema app for object type app.task".to_owned(),
+                    }],
+                    "{label} canonical diagnostic"
+                );
+            }
+            "bom" => assert_eq!(
+                canonical,
+                vec![DiagnosticProjection {
+                    code: "ORNA0001".to_owned(),
+                    start_byte: 0,
+                    end_byte: "\u{FEFF}".len(),
+                    message: "expected a CREATE, ALTER, or EXPORT declaration".to_owned(),
+                }],
+                "BOM must remain in the canonical source-check span"
+            ),
+            "bom-interior" | "word-joiner-interior" => {
+                let unexpected = if *label == "bom-interior" {
+                    '\u{FEFF}'
+                } else {
+                    '\u{2060}'
+                };
+                let start_byte = source
+                    .find(unexpected)
+                    .expect("interior invisible character");
+                assert_eq!(
+                    canonical,
+                    vec![DiagnosticProjection {
+                        code: "ORNA0001".to_owned(),
+                        start_byte,
+                        end_byte: start_byte + unexpected.len_utf8(),
+                        message: "expected keyword SCHEMA".to_owned(),
+                    }],
+                    "{label} must retain the interior invisible-character span"
+                );
+            }
+            "word-joiner-leading" => assert_eq!(
+                canonical,
+                vec![DiagnosticProjection {
+                    code: "ORNA0001".to_owned(),
+                    start_byte: 0,
+                    end_byte: '\u{2060}'.len_utf8(),
+                    message: "expected a CREATE, ALTER, or EXPORT declaration".to_owned(),
+                }],
+                "leading word joiner must remain in the canonical source-check span"
+            ),
+            "unicode" => {
+                let start_byte = source.find("app.task").expect("unknown object type name");
+                assert_eq!(
+                    canonical,
+                    vec![DiagnosticProjection {
+                        code: "ORNA0101".to_owned(),
+                        start_byte,
+                        end_byte: start_byte + "app.task".len(),
+                        message: "unknown schema app for object type app.task".to_owned(),
+                    }],
+                    "multibyte and combining canonical diagnostic"
+                );
+            }
+            "multiple" => {
+                let first_start = source.find("first.task").expect("first type name");
+                let second_start = source.find("second.task").expect("second type name");
+                assert_eq!(
+                    canonical,
+                    vec![
+                        DiagnosticProjection {
+                            code: "ORNA0101".to_owned(),
+                            start_byte: first_start,
+                            end_byte: first_start + "first.task".len(),
+                            message: "unknown schema first for object type first.task".to_owned(),
+                        },
+                        DiagnosticProjection {
+                            code: "ORNA0101".to_owned(),
+                            start_byte: second_start,
+                            end_byte: second_start + "second.task".len(),
+                            message: "unknown schema second for object type second.task".to_owned(),
+                        },
+                    ],
+                    "multiple canonical diagnostics must stay in source order"
+                );
+            }
+            "escaped-controls" => {
+                let escaped_name = "a\\b\n\r\t\u{001b}\u{2028}\u{2029}é";
+                let first = format!("CREATE SCHEMA \"{escaped_name}\";\n");
+                let start_byte = first.len() + "CREATE SCHEMA ".len();
+                assert_eq!(
+                    canonical,
+                    vec![DiagnosticProjection {
+                        code: "ORNA0103".to_owned(),
+                        start_byte,
+                        end_byte: start_byte + escaped_name.len() + 2,
+                        message: format!("duplicate schema definition {escaped_name}"),
+                    }],
+                    "compiler diagnostic escaping must remain exact"
+                );
+            }
+            other => panic!("unknown source-check parity case {other}"),
+        }
+
+        open_document(&mut client, &uri, source, (version + 1) as i64);
+        let pushed = client.read_notification("textDocument/publishDiagnostics");
+        assert_eq!(pushed["uri"], uri);
+        let pushed_diagnostics = pushed["diagnostics"]
+            .as_array()
+            .expect("pushed diagnostic array");
+        assert_eq!(
+            pushed_diagnostics
+                .iter()
+                .map(|diagnostic| diagnostic["range"].clone())
+                .collect::<Vec<_>>(),
+            lsp_diagnostic_ranges(source, &canonical),
+            "{label} push ranges must use the canonical byte spans"
+        );
+        assert_eq!(
+            lsp_diagnostic_projections(source, &pushed["diagnostics"]),
+            canonical,
+            "{label} LSP push diagnostics must retain source-check code, byte span, and message"
+        );
+
+        let pull = client.request(
+            "textDocument/diagnostic",
+            json!({ "textDocument": { "uri": uri } }),
+        );
+        assert_eq!(pull["kind"], "full");
+        assert_eq!(
+            pull["items"], pushed["diagnostics"],
+            "{label} push/pull parity"
+        );
+        assert_eq!(
+            lsp_diagnostic_projections(source, &pull["items"]),
+            canonical,
+            "{label} LSP pull diagnostics must retain source-check code, byte span, and message"
+        );
+    }
+
+    client.shutdown();
+}
+
+#[test]
+fn serves_syntax_diagnostic_for_malformed_schema_in_push_and_pull() {
+    let mut client = Client::spawn();
+    initialize(&mut client);
+    let uri = "file:///test/syntax-invalid.orna";
+    // The parser reports the semicolon at byte span 29..30. The emoji prefix
+    // makes the corresponding LSP range use UTF-16 characters 27..28.
+    let source = "/* 😀 */ CREATE SCHEMA crm.;";
+
+    open_document(&mut client, uri, source, 1);
+    let pushed = client.read_notification("textDocument/publishDiagnostics");
+    assert_eq!(pushed["uri"], uri);
+    let pushed_items = pushed["diagnostics"].as_array().expect("diagnostic items");
+    assert_eq!(pushed_items.len(), 1, "syntax diagnostic: {pushed}");
+    let pushed_diagnostic = &pushed_items[0];
+    assert_eq!(
+        pushed_diagnostic["range"],
+        json!({
+            "start": { "line": 0, "character": 27 },
+            "end": { "line": 0, "character": 28 },
+        })
+    );
+    assert_eq!(pushed_diagnostic["severity"], 1);
+    assert_eq!(pushed_diagnostic["code"], "ORNA0001");
+    assert_eq!(pushed_diagnostic["source"], "orna");
+    assert_eq!(pushed_diagnostic["message"], "expected a name after '.'");
+
+    let pull = client.request(
+        "textDocument/diagnostic",
+        json!({ "textDocument": { "uri": uri } }),
+    );
+    assert_eq!(pull["kind"], "full");
+    assert_eq!(pull["items"], pushed["diagnostics"]);
+
+    client.shutdown();
+}
+
+#[test]
+fn serves_client_resource_target_diagnostic_identically_in_push_and_pull() {
+    let mut client = Client::spawn();
+    initialize(&mut client);
+    let uri = "file:///test/client-resource-target.orna";
+    let source = SCALAR_RESOURCE_SOURCE.replace("std.invoke.echo", "scalar_fixture.call");
+
+    open_document(&mut client, uri, &source, 1);
+    let pushed = client.read_notification("textDocument/publishDiagnostics");
+    assert_eq!(pushed["uri"], uri);
+    let pushed_items = pushed["diagnostics"].as_array().expect("diagnostic items");
+    assert_eq!(
+        pushed_items.len(),
+        1,
+        "client resource target diagnostic: {pushed}"
+    );
+    let pushed_diagnostic = &pushed_items[0];
+    assert_eq!(
+        pushed_diagnostic["range"],
+        json!({
+            "start": { "line": 3, "character": 49 },
+            "end": { "line": 3, "character": 68 },
+        })
+    );
+    assert_eq!(pushed_diagnostic["severity"], 1);
+    assert_eq!(pushed_diagnostic["code"], "ORNA0303");
+    assert_eq!(pushed_diagnostic["source"], "orna");
+    assert_eq!(
+        pushed_diagnostic["message"],
+        "resource target scalar_fixture.call must be a SERVER function"
+    );
+
+    let pull = client.request(
+        "textDocument/diagnostic",
+        json!({ "textDocument": { "uri": uri } }),
+    );
+    assert_eq!(pull["kind"], "full");
+    assert_eq!(pull["items"], pushed["diagnostics"]);
+
+    client.shutdown();
+}
+
+#[test]
+fn qualified_name_navigation_keeps_same_final_names_in_their_namespace() {
+    let mut client = Client::spawn();
+    initialize(&mut client);
+    let uri = "file:///test/qualified-navigation.orna";
+    let source = concat!(
+        "CREATE SCHEMA alpha;\n",
+        "CREATE SCHEMA beta;\n",
+        "CREATE TYPE alpha.item AS OBJECT (value BOOLEAN);\n",
+        "CREATE TYPE beta.item AS OBJECT (value BOOLEAN);\n",
+        "CREATE TYPE alpha.stage AS ENUM ('open');\n",
+        "CREATE TYPE beta.stage AS ENUM ('closed');\n",
+        "CREATE TYPE alpha.record AS VALUE (stage alpha.stage) IMMUTABLE PERSISTABLE;\n",
+        "CREATE TYPE beta.record AS VALUE (stage beta.stage) IMMUTABLE PERSISTABLE;\n",
+        "CREATE TYPE alpha.scalar AS VALUE PRIMITIVE KERNEL CONTRACT 'alpha.scalar@1' IMMUTABLE PERSISTABLE;\n",
+        "CREATE TYPE beta.scalar AS VALUE PRIMITIVE KERNEL CONTRACT 'beta.scalar@1' IMMUTABLE PERSISTABLE;\n",
+        "CREATE TYPE alpha.opaque AS VALUE OPAQUE KERNEL CONTRACT 'alpha.opaque@1' IMMUTABLE TRANSIENT;\n",
+        "CREATE TYPE beta.opaque AS VALUE OPAQUE KERNEL CONTRACT 'beta.opaque@1' IMMUTABLE TRANSIENT;\n",
+        "CREATE TYPE alpha.holder AS OBJECT (item alpha.item, stage alpha.stage, record alpha.record, scalar alpha.scalar, opaque alpha.opaque);\n",
+        "CREATE TYPE beta.holder AS OBJECT (item beta.item, stage beta.stage, record beta.record, scalar beta.scalar, opaque beta.opaque);\n",
+        "CREATE SERVER FUNCTION alpha.run() RETURNS BOOLEAN AS SELECT TRUE FROM alpha.holder t;\n",
+        "CREATE SERVER FUNCTION beta.run() RETURNS BOOLEAN AS SELECT TRUE FROM beta.holder t;\n",
+        "CREATE CLIENT FUNCTION alpha.client() RETURNS BOOLEAN AS TRUE;\n",
+        "CREATE CLIENT FUNCTION beta.client() RETURNS BOOLEAN AS TRUE;\n",
+        "CREATE CLIENT FUNCTION alpha.use() RETURNS BOOLEAN IS\n",
+        "BEGIN\n",
+        "    RETURN AWAIT std.data.resource(target => alpha.run, arguments => std.call.args());\n",
+        "END;\n",
+        "CREATE CLIENT FUNCTION beta.use() RETURNS BOOLEAN IS\n",
+        "BEGIN\n",
+        "    RETURN AWAIT std.data.resource(target => beta.run, arguments => std.call.args());\n",
+        "END;\n",
+    );
+    open_document(&mut client, uri, source, 1);
+    let _ = client.read_notification("textDocument/publishDiagnostics");
+
+    let beta_schema = position_inside(source, "CREATE SCHEMA ", "beta");
+    assert_hover_contains(&mut client, uri, beta_schema.clone(), "**schema**");
+    assert_definition_starts_on(&mut client, uri, beta_schema, 1);
+
+    let categories = [
+        (
+            "CREATE TYPE beta.holder AS OBJECT (item beta.",
+            "item",
+            "beta.item",
+        ),
+        (
+            "CREATE TYPE beta.holder AS OBJECT (item beta.item, stage beta.",
+            "stage",
+            "beta.stage",
+        ),
+        (
+            "CREATE TYPE beta.holder AS OBJECT (item beta.item, stage beta.stage, record beta.",
+            "record",
+            "beta.record",
+        ),
+        (
+            "CREATE TYPE beta.holder AS OBJECT (item beta.item, stage beta.stage, record beta.record, scalar beta.",
+            "scalar",
+            "beta.scalar",
+        ),
+        (
+            "CREATE TYPE beta.holder AS OBJECT (item beta.item, stage beta.stage, record beta.record, scalar beta.scalar, opaque beta.",
+            "opaque",
+            "beta.opaque",
+        ),
+    ];
+    for (prefix, token, expected) in categories {
+        let position = position_inside(source, prefix, token);
+        assert_hover_contains(&mut client, uri, position.clone(), expected);
+        let hover = client.request(
+            "textDocument/hover",
+            json!({ "textDocument": { "uri": uri }, "position": position }),
+        );
+        assert!(
+            hover["contents"]["value"]
+                .as_str()
+                .is_some_and(|value| value.contains(expected)),
+            "qualified type hover {expected}: {hover}"
+        );
+    }
+
+    let beta_item_use = position_inside(
+        source,
+        "CREATE TYPE beta.holder AS OBJECT (item beta.",
+        "item",
+    );
+    let beta_item_decl_line = source
+        .lines()
+        .position(|line| line.contains("CREATE TYPE beta.item"))
+        .expect("beta item declaration") as u64;
+    let beta_holder_line = source
+        .lines()
+        .position(|line| line.contains("CREATE TYPE beta.holder"))
+        .expect("beta holder declaration") as u64;
+    assert_definition_starts_on(&mut client, uri, beta_item_use.clone(), beta_item_decl_line);
+    let beta_item_references = client.request(
+        "textDocument/references",
+        json!({
+            "textDocument": { "uri": uri },
+            "position": beta_item_use,
+            "context": { "includeDeclaration": true },
+        }),
+    );
+    let beta_item_lines: Vec<_> = beta_item_references
+        .as_array()
+        .expect("beta item references")
+        .iter()
+        .map(|reference| {
+            reference["range"]["start"]["line"]
+                .as_u64()
+                .expect("reference line")
+        })
+        .collect();
+    assert_eq!(
+        beta_item_lines.len(),
+        2,
+        "beta item references: {beta_item_references}"
+    );
+    assert!(
+        beta_item_lines
+            .iter()
+            .all(|line| *line == beta_item_decl_line || *line == beta_holder_line),
+        "alpha item reference leaked into beta item references: {beta_item_references}"
+    );
+
+    let beta_run = position_inside(source, "CREATE SERVER FUNCTION beta.", "run");
+    let beta_run_decl_line = source
+        .lines()
+        .position(|line| line.contains("CREATE SERVER FUNCTION beta.run"))
+        .expect("beta server function declaration") as u64;
+    let beta_run_use_line = source
+        .lines()
+        .position(|line| line.contains("target => beta.run"))
+        .expect("beta target function use") as u64;
+    assert_hover_contains(&mut client, uri, beta_run.clone(), "beta.run");
+    assert_definition_starts_on(&mut client, uri, beta_run.clone(), beta_run_decl_line);
+    let beta_run_references = client.request(
+        "textDocument/references",
+        json!({
+            "textDocument": { "uri": uri },
+            "position": beta_run,
+            "context": { "includeDeclaration": true },
+        }),
+    );
+    let beta_run_lines: Vec<_> = beta_run_references
+        .as_array()
+        .expect("beta function references")
+        .iter()
+        .map(|reference| {
+            reference["range"]["start"]["line"]
+                .as_u64()
+                .expect("reference line")
+        })
+        .collect();
+    assert_eq!(
+        beta_run_lines.len(),
+        2,
+        "beta function references: {beta_run_references}"
+    );
+    assert!(
+        beta_run_lines
+            .iter()
+            .all(|line| *line == beta_run_decl_line || *line == beta_run_use_line),
+        "alpha function reference leaked into beta function references: {beta_run_references}"
+    );
+
+    let beta_client = position_inside(source, "CREATE CLIENT FUNCTION beta.", "client");
+    let beta_client_decl_line = source
+        .lines()
+        .position(|line| line.contains("CREATE CLIENT FUNCTION beta.client"))
+        .expect("beta client function declaration") as u64;
+    assert_hover_contains(&mut client, uri, beta_client.clone(), "beta.client");
+    assert_definition_starts_on(&mut client, uri, beta_client, beta_client_decl_line);
+
+    client.shutdown();
+}
+
+/// Incomplete CLIENT member expressions are outside the accepted grammar. The
+/// editor contract is to avoid inventing field or proposal-only completion
+/// labels until the user has supplied a complete dotted path.
+#[test]
+fn incomplete_client_member_cursor_has_no_field_or_proposal_completion() {
+    let mut client = Client::spawn();
+    initialize(&mut client);
+    let uri = "file:///test/incomplete-client-member.orna";
+    let source = EXPRESSION_CLIENT_SOURCE.replace("AS p_item.title", "AS p_item.");
+
+    open_document(&mut client, uri, &source, 1);
+    let diagnostics = client.read_notification("textDocument/publishDiagnostics");
+    assert!(
+        !diagnostics["diagnostics"]
+            .as_array()
+            .expect("diagnostic items")
+            .is_empty(),
+        "the parser must retain its incomplete-member diagnostic: {diagnostics}"
+    );
+
+    let completion = client.request(
+        "textDocument/completion",
+        json!({
+            "textDocument": { "uri": uri },
+            "position": position_after(&source, "AS p_item."),
+            "context": { "triggerKind": 2, "triggerCharacter": "." },
+        }),
+    );
+    let labels: Vec<&str> = completion
+        .as_array()
+        .expect("completion items")
+        .iter()
+        .map(|item| item["label"].as_str().expect("completion label"))
+        .collect();
+    assert!(
+        labels
+            .iter()
+            .all(|label| *label != "title" && !label.contains('.')),
+        "incomplete CLIENT member must not leak field or proposal labels: {labels:?}"
+    );
+
+    client.shutdown();
+}
+
+#[test]
+fn serves_same_document_target_function_completion_for_accepted_constructors() {
+    let mut client = Client::spawn();
+    initialize(&mut client);
+    let uri = "file:///test/target-completion.orna";
+    let resource_source =
+        SCALAR_RESOURCE_SOURCE.replace("std.invoke.echo", "target_fixture.resource_server");
+    let source = format!(
+        "CREATE SCHEMA target_fixture;\n\
+         CREATE TYPE target_fixture.row AS OBJECT (value INTEGER NOT NULL);\n\
+         CREATE SERVER FUNCTION target_fixture.resource_server() RETURNS INTEGER\n\
+         AS SELECT t.value FROM target_fixture.row t;\n\
+         {resource_source}\n{STREAM_RESOURCE_SOURCE}\n{ACTION_SOURCE}\n\
+         CREATE CLIENT FUNCTION action_fixture.invalid(p_item REF target_fixture.row)\n\
+         RETURNS std.Action AS std.action.call(\n\
+             target => p_item.value,\n\
+             arguments => std.call.args()\n\
+         );\n\
+         CREATE SCHEMA shadow_item;\n\
+         CREATE SERVER FUNCTION shadow_item.read() RETURNS INTEGER\n\
+         AS SELECT t.value FROM target_fixture.row t;\n\
+         CREATE CLIENT FUNCTION action_fixture.shadowed(shadow_item INTEGER)\n\
+         RETURNS std.Action AS std.action.call(\n\
+             target => shadow_item.read,\n\
+             arguments => std.call.args()\n\
+         );\n\
+         CREATE EXTERNAL CLIENT FUNCTION action_fixture.transient_target()\n\
+         RETURNS std.ui.UI\n\
+         RUNTIME CONTRACT 'test.transient@1';\n\
+         CREATE CLIENT FUNCTION action_fixture.call_transient()\n\
+         RETURNS std.Action AS std.action.call(\n\
+             target => action_fixture.transient_target,\n\
+             arguments => std.call.args()\n\
+         );"
+    );
+
+    open_document(&mut client, uri, &source, 1);
+    let _ = client.read_notification("textDocument/publishDiagnostics");
+
+    let assert_target_items = |client: &mut Client, prefix: &str, expected: &[(&str, &str)]| {
+        let completion = client.request(
+            "textDocument/completion",
+            json!({
+                "textDocument": { "uri": uri },
+                "position": position_after(&source, prefix),
+                "context": { "triggerKind": 2, "triggerCharacter": "." },
+            }),
+        );
+        let items = completion.as_array().expect("completion items");
+        for (label, detail) in expected {
+            let item = items
+                .iter()
+                .find(|item| item["label"] == *label)
+                .unwrap_or_else(|| panic!("missing target completion {label}: {completion}"));
+            assert_eq!(
+                item["kind"].as_u64(),
+                Some(3),
+                "target completion kind: {item}"
+            );
+            assert!(
+                item["detail"]
+                    .as_str()
+                    .is_some_and(|value| value == *detail),
+                "target completion detail for {label}: {item}"
+            );
+        }
+    };
+
+    assert_target_items(
+        &mut client,
+        "target => target_fixture.",
+        &[
+            ("resource_server", "server function target"),
+            ("events", "server function"),
+            ("local", "client function"),
+        ],
+    );
+    assert_target_items(
+        &mut client,
+        "target => stream_fixture.",
+        &[
+            ("events", "server function target"),
+            ("resource_server", "server function"),
+            ("local", "client function"),
+        ],
+    );
+    assert_target_items(
+        &mut client,
+        "target => action_fixture.",
+        &[
+            ("local", "client function target"),
+            ("resource_server", "server function target"),
+            ("events", "server function"),
+            ("transient_target", "client function"),
+        ],
+    );
+    assert_target_items(
+        &mut client,
+        "target => shadow_item.",
+        &[("read", "server function target")],
+    );
+    let shadow_target = position_inside(&source, "target => shadow_item.", "read");
+    assert_hover_contains(&mut client, uri, shadow_target.clone(), "server function");
+    let shadow_declaration_line = source
+        .lines()
+        .position(|line| line.contains("CREATE SERVER FUNCTION shadow_item.read"))
+        .expect("shadowed target declaration") as u64;
+    assert_definition_starts_on(
+        &mut client,
+        uri,
+        shadow_target.clone(),
+        shadow_declaration_line,
+    );
+    let shadow_references = client.request(
+        "textDocument/references",
+        json!({
+            "textDocument": { "uri": uri },
+            "position": shadow_target,
+            "context": { "includeDeclaration": true },
+        }),
+    );
+    assert_eq!(
+        shadow_references.as_array().map(|values| values.len()),
+        Some(2),
+        "shadowed target references: {shadow_references}"
+    );
+
+    assert_target_items(
+        &mut client,
+        "target => p_item.",
+        &[
+            ("local", "client function"),
+            ("resource_server", "server function"),
+        ],
+    );
+    client.shutdown();
+}
+
+#[test]
+fn external_client_hover_preserves_runtime_and_capability_metadata() {
+    let mut client = Client::spawn();
+    initialize(&mut client);
+    let uri = "file:///test/external-hover.orna";
+    let source = concat!(
+        "CREATE EXTERNAL CLIENT FUNCTION inspector.render(p_snapshot sys.inspect.snapshot)\n",
+        "RETURNS std.ui.UI\n",
+        "RUNTIME CONTRACT 'std.inspect.render@1'\n",
+        "REQUIRES CAPABILITY sys.inspect.render('snapshot');\n",
+    );
+    open_document(&mut client, uri, source, 1);
+    let _ = client.read_notification("textDocument/publishDiagnostics");
+
+    let hover = client.request(
+        "textDocument/hover",
+        json!({
+            "textDocument": { "uri": uri },
+            "position": position_inside(source, "CREATE EXTERNAL CLIENT FUNCTION inspector.", "render"),
+        }),
+    );
+    let value = hover["contents"]["value"]
+        .as_str()
+        .expect("external CLIENT hover value");
+    assert!(
+        value.contains("CREATE EXTERNAL CLIENT FUNCTION inspector.render"),
+        "external CLIENT signature: {value}"
+    );
+    assert!(
+        value.contains("RUNTIME CONTRACT 'std.inspect.render@1'"),
+        "runtime contract metadata: {value}"
+    );
+    assert!(
+        value.contains("REQUIRES CAPABILITY sys.inspect.render('snapshot')"),
+        "capability metadata: {value}"
+    );
 
     client.shutdown();
 }

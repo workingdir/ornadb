@@ -236,12 +236,27 @@ pub fn declaration_hover(
             hover(value)
         }
         DeclarationRef::ClientFunction(declaration) => {
-            let mut value = format!(
-                "**client function**\n\n```orna\nCREATE CLIENT FUNCTION {}({})\nRETURNS {}\n```",
-                qualified(&declaration.name),
-                parameters(declaration, text),
-                return_text(&declaration.return_type, text)
-            );
+            let mut value = if declaration.external {
+                format!(
+                    "**client function**\n\n```orna\nCREATE EXTERNAL CLIENT FUNCTION {}({})\nRETURNS {}{}{}\n```",
+                    qualified(&declaration.name),
+                    parameters(declaration, text),
+                    return_text(&declaration.return_type, text),
+                    declaration
+                        .runtime_contract
+                        .as_ref()
+                        .map(|contract| format!("\nRUNTIME CONTRACT {}", contract.text))
+                        .unwrap_or_default(),
+                    capability_clause_text(&declaration.capabilities),
+                )
+            } else {
+                format!(
+                    "**client function**\n\n```orna\nCREATE CLIENT FUNCTION {}({})\nRETURNS {}\n```",
+                    qualified(&declaration.name),
+                    parameters(declaration, text),
+                    return_text(&declaration.return_type, text)
+                )
+            };
             append_parameters(&mut value, declaration, text);
             append_example(
                 &mut value,
@@ -378,6 +393,31 @@ impl Parameterized for orna_syntax::ClientFunctionDeclaration {
     fn parameters(&self) -> &[orna_syntax::ClientFunctionParameter] {
         &self.parameters
     }
+}
+
+/// Renders the accepted capability requirements of an external CLIENT function.
+///
+/// Capability names and arguments are retained from their parsed source slices so
+/// hover text does not reinterpret or manufacture runtime metadata.
+fn capability_clause_text(capabilities: &[orna_syntax::CapabilitySpecification]) -> String {
+    if capabilities.is_empty() {
+        return String::new();
+    }
+
+    let requirements = capabilities
+        .iter()
+        .map(|capability| {
+            let mut value = qualified(&capability.name);
+            if let Some(arguments) = &capability.arguments {
+                value.push('(');
+                value.push_str(&arguments.text);
+                value.push(')');
+            }
+            value
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("\nREQUIRES CAPABILITY {requirements}")
 }
 
 /// Renders the parameter list of a function from source slices.

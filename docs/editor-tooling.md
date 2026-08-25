@@ -38,6 +38,31 @@ Highlighting degrades gracefully. LSP clients that support semantic
 tokens get the best result; tree-sitter editors use the grammar;
 everything else can fall back to the TextMate grammar.
 
+## Grammar and evidence boundary
+
+The canonical EBNF (`spec/spec/orna.ebnf`) and the grammar/AST discussion
+in `spec/docs/28-ebnf-ast.md` are **current proposal** text.
+`spec/docs/25-source-compiler-ir.md` and `spec/docs/39-testing.md` combine
+locked requirements with current proposal material. Together, these sources
+describe intended language shape and testing strategy; they do not establish
+editor, compiler, or runtime parity for every form shown there. In particular,
+broader SQL/TABLE forms that appear only in proposal or deferred grammar are
+not proof of an accepted surface.
+
+Keep the evidence classes separate:
+
+- **Static editor evidence** is the explicit accepted corpus named by
+  `editors/tree-sitter-orna/test/accepted-corpus.txt`. The companion
+  `test/deferred-corpus.txt`, the full corpus, and canonical `spec/examples/`
+  files are proposal/deferred material, not accepted-contract evidence. A
+  full-corpus `tree-sitter test` pass therefore does not prove full EBNF
+  parity; this includes `RETURNS TABLE` or other broader SQL examples unless
+  the accepted manifest names them.
+- **Runtime/contract evidence** is limited to the accepted Rust parser/compiler
+  and `orna-lsp` contracts and their Rust tests. This is offline implementation
+  evidence, not host-editor launch evidence or proof of graphical/runtime ABI
+  behavior.
+
 ## Building the language server
 
 ```bash
@@ -219,5 +244,7 @@ captured by the lossless parser; they never change runtime behaviour.
 - Keywords and type names are case-insensitive.
 - The authoritative keyword and scalar-type lists live in
   `crates/orna-syntax/src/highlight.rs` (`KEYWORDS`, `SCALAR_TYPES`).
-- The grammar source of truth is `spec/spec/orna.ebnf`; the tree-sitter
-  grammar and the semantic classifier both follow it.
+- `spec/spec/orna.ebnf` is the current proposal grammar; do not infer
+  accepted parity from it. For accepted editor evidence, use
+  `editors/tree-sitter-orna/test/accepted-corpus.txt` and the Rust parser/LSP
+  contracts described above.
