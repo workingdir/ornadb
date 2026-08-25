@@ -16,9 +16,9 @@
 //! result is rendered to `stdout` as one JSON record per line, with typed
 //! values in their canonical ORV5 hex form.
 
-use std::{collections::BTreeMap, fmt, io, io::Write};
+use std::{collections::{BTreeMap, BTreeSet}, fmt, io, io::Write};
 
-use orna_client::{ClientStateContext, ClientStateStore, ClientUserStateError};
+use orna_client::{ClientStateContext, ClientStateKey, ClientStateStore, ClientUserStateError};
 use orna_core::{
     FunctionId, StateSlotId, TypeId,
     security::AuthenticatedSession,
@@ -59,9 +59,9 @@ pub enum InstalledUserStateOperation {
     ///
     /// The load is scoped to the root function and state profile. `instances`
     /// is an optional `(function, instance_key)` filter: the empty list
-    /// returns every cell for the root function and profile. `expected_types`
-    /// carries the load-time declared slot types and arms the ORNA0901
-    /// check; a cell whose persisted type no longer matches fails closed.
+    /// selects the default instance for each expected USER-state function.
+    /// `expected_types` carries the load-time declared slot types and arms
+    /// the ORNA0901 check; a cell whose persisted type no longer matches fails closed.
     Load {
         /// The root function whose invocation owns the cells.
         root_function: FunctionId,
@@ -253,8 +253,9 @@ pub async fn run_user_state_with_kernel(
 /// An authenticated CLIENT state transport backed by the protected USER state
 /// service.
 ///
-/// The authenticated session is supplied when the adapter is created. The
-/// client state model never supplies a principal.
+/// The authenticated session is supplied when the adapter is created and
+/// binds the caller-owned USER store before loading. The transport key remains
+/// principal-free; the adapter/session is the trusted principal source.
 pub struct AuthenticatedClientStateAdapter<'a> {
     kernel: &'a PostgresKernel,
     session: &'a AuthenticatedSession,
@@ -274,6 +275,11 @@ impl<'a> AuthenticatedClientStateAdapter<'a> {
         expected_types: &BTreeMap<(FunctionId, StateSlotId), TypeId>,
         store: &mut ClientStateStore,
     ) -> Result<(), AuthenticatedClientStateError> {
+        let mut staged = store.clone();
+        staged
+            .bind_authenticated_session(self.session.binding())
+            .map_err(AuthenticatedClientStateError::Client)?;
+        staged.set_context(context.clone());
         let cells = self
             .kernel
             .load_user_state(
@@ -285,10 +291,68 @@ impl<'a> AuthenticatedClientStateAdapter<'a> {
             )
             .await
             .map_err(AuthenticatedClientStateError::Kernel)?;
-        store.set_context(context.clone());
-        store
-            .load_user_state(&cells)
-            .map_err(AuthenticatedClientStateError::Client)
+        let requested_instances: Vec<_> = if instances.is_empty() {
+            let expected_functions: BTreeSet<_> =
+                expected_types.keys().map(|(function, _)| *function).collect();
+            let cell_functions: BTreeSet<_> =
+                cells.iter().map(|cell| cell.key().function()).collect();
+            let existing_functions: BTreeSet<_> = staged
+                .user()
+                .keys()
+                .filter(|key| {
+                    key.root_function() == context.root_function()
+                        && key.state_profile() == context.state_profile()
+                        && key.instance_key().is_empty()
+                })
+                .map(|key| key.function())
+                .collect();
+            default_instance_requests(
+                expected_functions,
+                cell_functions,
+                existing_functions,
+            )
+        } else {
+            instances
+                .iter()
+                .map(|instance| (instance.function(), instance.instance_key().to_owned()))
+                .collect()
+        };
+        if !requested_instances.is_empty() {
+            staged = Self::stage_authenticated_user_state_load(
+                &staged,
+                context,
+                &cells,
+                &requested_instances,
+            )
+            .map_err(AuthenticatedClientStateError::Client)?;
+        } else if !cells.is_empty() {
+            return Err(AuthenticatedClientStateError::Client(
+                ClientUserStateError::ContextMismatch(
+                    ClientStateKey::from_user_cell(&cells[0]),
+                ),
+            ));
+        }
+        *store = staged;
+        Ok(())
+    }
+
+    /// Validates and stages one authenticated USER-state load without mutating the
+    /// caller-owned store until every returned cell passes validation.
+    ///
+    /// The adapter binds the staged store to the authenticated session before
+    /// calling this helper. The helper then applies the requested root/profile
+    /// context and validates the complete multi-instance response atomically.
+    #[doc(hidden)]
+    pub fn stage_authenticated_user_state_load(
+        store: &ClientStateStore,
+        context: &ClientStateContext,
+        cells: &[UserStateCell],
+        requested_instances: &[(FunctionId, String)],
+    ) -> Result<ClientStateStore, ClientUserStateError> {
+        let mut staged = store.clone();
+        staged.set_context(context.clone());
+        staged.load_user_state_for_instances(cells, requested_instances)?;
+        Ok(staged)
     }
 
     /// Flushes the store's dirty USER values as one bounded authenticated
@@ -297,6 +361,9 @@ impl<'a> AuthenticatedClientStateAdapter<'a> {
         &self,
         store: &mut ClientStateStore,
     ) -> Result<(), AuthenticatedClientStateError> {
+        store
+            .bind_authenticated_session(self.session.binding())
+            .map_err(AuthenticatedClientStateError::Client)?;
         let changes = store
             .pending_user_state_changes()
             .map_err(AuthenticatedClientStateError::Client)?;
@@ -441,12 +508,30 @@ async fn execute_user_state(
     }
 }
 
+/// Builds default-instance requests from expected functions, returned cells, and
+/// existing default entries. The union preserves absent returned cells so the
+/// client can remove server-deleted defaults.
+fn default_instance_requests(
+    expected_functions: BTreeSet<FunctionId>,
+    cell_functions: BTreeSet<FunctionId>,
+    existing_functions: BTreeSet<FunctionId>,
+) -> Vec<(FunctionId, String)> {
+    expected_functions
+        .into_iter()
+        .chain(cell_functions)
+        .chain(existing_functions)
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .map(|function| (function, String::new()))
+        .collect()
+}
+
 /// Plans the instance filter for one installed load.
 ///
-/// An empty list plans the empty filter: every cell for the root function
-/// and profile. Each admitted request validates its instance key through the
-/// core durable-key model, so a NUL-bearing request fails closed as a state
-/// error before any kernel call.
+/// An empty list selects the default instance; the kernel applies this
+/// default-instance semantics for each USER-state function. Each admitted
+/// request validates its instance key through the core durable-key model, so a
+/// NUL-bearing request fails closed as a state error before any kernel call.
 fn plan_load_instances(
     instances: &[InstalledUserStateInstance],
 ) -> Result<Vec<UserStateInstanceRequest>, InstalledUserStateError> {
@@ -674,9 +759,8 @@ mod tests {
         );
     }
 
-    /// An empty instance list plans the empty filter (every cell for the
-    /// root and profile), and an empty expected-type list plans the empty
-    /// declared-type map.
+    /// An empty instance list plans the default-instance filter. The
+    /// expected-type map remains independent and can be empty.
     #[test]
     fn load_plan_keeps_absent_filters_empty() {
         assert!(
@@ -685,6 +769,25 @@ mod tests {
                 .is_empty()
         );
         assert!(plan_expected_types(&[]).is_empty());
+    }
+
+    /// The default-instance request set includes expected functions even when
+    /// their cells are absent, plus returned and existing functions.
+    #[test]
+    fn default_instance_requests_union_preserves_absent_functions() {
+        let requested = default_instance_requests(
+            BTreeSet::from([function(0x21)]),
+            BTreeSet::from([function(0x22)]),
+            BTreeSet::from([function(0x23), function(0x21)]),
+        );
+        assert_eq!(
+            requested,
+            vec![
+                (function(0x21), String::new()),
+                (function(0x22), String::new()),
+                (function(0x23), String::new()),
+            ],
+        );
     }
 
     /// A repeated expected-type pair plans as its last declared type.
