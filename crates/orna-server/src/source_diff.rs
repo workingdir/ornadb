@@ -761,7 +761,7 @@ fn escape_message(message: &str) -> String {
 fn read_source_bundle(path: &str) -> Result<SourceBundle, InstalledSourceDiffError> {
     let mut file = fs::OpenOptions::new()
         .read(true)
-        .custom_flags(nix::libc::O_NONBLOCK | nix::libc::O_NOFOLLOW)
+        .custom_flags(nix::libc::O_NONBLOCK)
         .open(path)
         .map_err(|source| InstalledSourceDiffError::SourceRead {
             path: path.to_owned(),
@@ -1364,7 +1364,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn rejects_symlink_source_paths_before_reading_target() {
+    fn accepts_regular_symlink_source_paths_and_preserves_logical_path() {
         use std::{fs, os::unix::fs::symlink};
 
         let root = std::env::temp_dir();
@@ -1373,15 +1373,14 @@ mod tests {
         let link = root.join(format!("{stem}-link"));
         let _ = fs::remove_file(&target);
         let _ = fs::remove_file(&link);
-        fs::write(&target, "").unwrap();
+        fs::write(&target, "CREATE SCHEMA app;").unwrap();
         symlink(&target, &link).unwrap();
 
-        let result = read_source_bundle(link.to_str().unwrap());
+        let result = read_source_bundle(link.to_str().unwrap()).unwrap();
+        let unit = &result.units()[0];
+        assert_eq!(unit.logical_path(), link.to_str().unwrap());
+        assert_eq!(unit.content(), "CREATE SCHEMA app;");
 
-        assert!(matches!(
-            result,
-            Err(InstalledSourceDiffError::SourceRead { .. })
-        ));
         fs::remove_file(target).unwrap();
         fs::remove_file(link).unwrap();
     }
