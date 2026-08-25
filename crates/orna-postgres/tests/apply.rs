@@ -213,6 +213,7 @@ const RACE_RIGHT_SOURCE: &str = "CREATE SCHEMA race_right;\n\
 
 const APPLY_TIMEOUT: Duration = Duration::from_secs(5);
 const RACE_LOCK_KEY: i64 = 0x4f52_4e41_4150_504c;
+const USER_STATE_RACE_LOCK_KEY: i64 = 0x5553_4552_5354_4154;
 const EMPTY_STANDARD_SOURCE: &str = "CREATE SCHEMA std.;CREATE SCHEMA ;CREATE SCHEMA std;";
 const EMPTY_STANDARD_DIGEST: [u8; 32] = [
     0x6d, 0x3f, 0xaa, 0x32, 0x82, 0x0e, 0xeb, 0x73, 0x77, 0xc5, 0xbd, 0xfa, 0x3e, 0x8d, 0x6c, 0xaf,
@@ -233,7 +234,7 @@ enum FailurePoint {
 }
 
 impl FailurePoint {
-    const ALL: [Self; 8] = [
+    const ALL: [Self; 9] = [
         Self::SourceBundle,
         Self::CatalogueSchema,
         Self::FunctionArtifact,
@@ -242,6 +243,7 @@ impl FailurePoint {
         Self::StatusSweep,
         Self::ActivePointer,
         Self::PostPointerRecovery,
+        Self::AuditAppend,
     ];
 }
 
@@ -2561,10 +2563,12 @@ async fn every_apply_failure_point_rolls_back_to_the_exact_base() -> TestResult<
             let baseline = baseline(&database, &base).await?;
             install_failure_point(&database, point, &candidate).await?;
 
-            let error = kernel
-                .apply(&candidate)
-                .await
-                .expect_err("triggered apply must fail");
+            let result = if matches!(point, FailurePoint::AuditAppend) {
+                kernel.apply_source_apply(&candidate).await
+            } else {
+                kernel.apply(&candidate).await
+            };
+            let error = result.expect_err("triggered apply must fail");
             assert_failure_shape(point, &error)?;
             require_baseline(&database, &baseline, &kernel).await?;
             require_no_candidate_residue(&database, &candidate, &base).await
@@ -2572,6 +2576,21 @@ async fn every_apply_failure_point_rolls_back_to_the_exact_base() -> TestResult<
         .await?;
     }
     Ok(())
+}
+
+async fn install_user_state_race_pause_trigger(database: &TestDatabase) -> TestResult<()> {
+    let session = database.open().await?;
+    session
+        .client()
+        .batch_execute(&format!(
+            "CREATE FUNCTION _orna_kernel.test_user_state_pause_insert() RETURNS trigger LANGUAGE plpgsql AS $$
+             BEGIN PERFORM pg_advisory_xact_lock({}); RETURN NEW; END $$;
+             CREATE TRIGGER pause_user_state_insert BEFORE INSERT ON _orna_kernel.user_state_cells
+             FOR EACH ROW EXECUTE FUNCTION _orna_kernel.test_user_state_pause_insert();",
+            USER_STATE_RACE_LOCK_KEY,
+        ))
+        .await?;
+    session.shutdown().await
 }
 
 async fn install_race_pause_trigger(database: &TestDatabase) -> TestResult<()> {
@@ -7346,6 +7365,217 @@ async fn proves_public_user_state_profiles_and_atomic_conflict_batch() -> TestRe
                 && named_after[0].revision() == 1
                 && named_after[0].value() == &RuntimeValue::Boolean(false),
             "mixed USER state conflict changed persisted cells",
+        )?;
+        Ok(())
+    })
+    .await
+}
+
+/// Proves the missing-cell optimistic-write race at the PostgreSQL transaction
+/// boundary. Both authenticated writers reach the same test-only INSERT pause
+/// after observing the cell as absent and carrying `expected_revision = None`.
+/// The disposable advisory lock is released only after both writers are waiting;
+/// it does not exist in production code or schema.
+#[tokio::test]
+#[ignore = "requires the Compose PostgreSQL development service"]
+async fn concurrent_missing_user_state_writes_return_one_write_and_one_conflict() -> TestResult<()>
+{
+    with_test_database(|database| async move {
+        let chain = install_v3_standard_chain(&database).await?;
+        let setup_kernel = kernel(&database)?;
+        let application =
+            user_state_plan_candidate(&chain.version_three, &chain.version_three_upgrade)?;
+        let active = setup_kernel.apply(&application).await?;
+        let function = active
+            .catalogue()
+            .function_by_name(&orna_core::catalogue::QualifiedSemanticName::new([
+                "app", "enabled",
+            ])?)
+            .ok_or_else(|| failure("concurrent USER state proof function did not persist"))?
+            .id();
+        let slot = StateSlotId::from_bytes([0xa5; 16]);
+        let value_type = orna_standard::BOOLEAN_TYPE_ID;
+        let expected_types = BTreeMap::from([((function, slot), value_type)]);
+        let recovered_security = setup_kernel.recover_security_snapshot().await?;
+        let security = SecuritySnapshot::new_with_function_targets(
+            active.pair(),
+            recovered_security.function_targets().collect(),
+            vec![Principal::new(
+                V3_PROOF_CLIENT_USER,
+                PrincipalKind::User,
+                PrincipalStatus::Active,
+            )],
+            vec![],
+            vec![],
+        )?;
+        let security = setup_kernel.replace_security_snapshot(&security).await?;
+        let first_session = security.bind_authenticated_session(V3_PROOF_CLIENT_USER, vec![])?;
+        let second_session = security.bind_authenticated_session(V3_PROOF_CLIENT_USER, vec![])?;
+        let first_change = UserStateChange::new(
+            function,
+            String::new(),
+            function,
+            String::new(),
+            slot,
+            None,
+            RuntimeValue::Boolean(true),
+            value_type,
+        )?;
+        let second_change = UserStateChange::new(
+            function,
+            String::new(),
+            function,
+            String::new(),
+            slot,
+            None,
+            RuntimeValue::Boolean(false),
+            value_type,
+        )?;
+        require(
+            first_change.expected_revision().is_none()
+                && second_change.expected_revision().is_none(),
+            "concurrent USER state writers did not carry expected_revision=None",
+        )?;
+        let expected_key = first_change.key_without_principal();
+        require(
+            expected_key == second_change.key_without_principal(),
+            "concurrent USER state writers did not target one missing cell",
+        )?;
+
+        install_user_state_race_pause_trigger(&database).await?;
+        let coordinator = database.open().await?;
+        coordinator.client().batch_execute("BEGIN").await?;
+        coordinator
+            .client()
+            .query_one(
+                "SELECT pg_advisory_xact_lock($1)",
+                &[&USER_STATE_RACE_LOCK_KEY],
+            )
+            .await?;
+
+        let first_kernel = named_kernel(&database, "orna-user-state-race-a")?;
+        let second_kernel = named_kernel(&database, "orna-user-state-race-b")?;
+        let first_task = tokio::spawn(async move {
+            first_kernel
+                .write_user_state(&first_session, std::slice::from_ref(&first_change))
+                .await
+        });
+        let second_task = tokio::spawn(async move {
+            second_kernel
+                .write_user_state(&second_session, std::slice::from_ref(&second_change))
+                .await
+        });
+
+        // The INSERT trigger is reached only after each writer has loaded the
+        // missing cell, so these waits name the exact race boundary rather than
+        // relying on scheduler timing or a sleep.
+        let first_wait = wait_for_advisory_wait(&database, "orna-user-state-race-a").await;
+        let second_wait = wait_for_advisory_wait(&database, "orna-user-state-race-b").await;
+        let release_result = coordinator.client().batch_execute("COMMIT").await;
+        let shutdown_result = coordinator.shutdown().await;
+        first_wait?;
+        second_wait?;
+        release_result?;
+        shutdown_result?;
+
+        let (first_join, second_join) = tokio::time::timeout(
+            APPLY_TIMEOUT,
+            async { tokio::join!(first_task, second_task) },
+        )
+        .await
+        .map_err(|_| failure("timed out waiting for concurrent USER state writers"))?;
+        let first_results = first_join
+            .map_err(|error| failure(format!("first USER state writer task failed: {error}")))??;
+        let second_results = second_join
+            .map_err(|error| failure(format!("second USER state writer task failed: {error}")))??;
+        require(
+            first_results.len() == 1
+                && second_results.len() == 1
+                && first_results[0].key() == &expected_key
+                && second_results[0].key() == &expected_key,
+            "concurrent USER state writes did not return one aligned result per batch",
+        )?;
+        let outcomes = [first_results[0].outcome(), second_results[0].outcome()];
+        require(
+            outcomes
+                .iter()
+                .filter(|outcome| **outcome == UserStateWriteOutcome::Written { revision: 1 })
+                .count()
+                == 1
+                && outcomes
+                    .iter()
+                    .filter(|outcome| {
+                        **outcome == UserStateWriteOutcome::Conflict {
+                            current_revision: 1,
+                        }
+                    })
+                    .count()
+                    == 1,
+            "concurrent USER state writes did not return one Written(1) and one ORNA0902 Conflict(1)",
+        )?;
+
+        let final_kernel = kernel(&database)?;
+        let final_session = security.bind_authenticated_session(V3_PROOF_CLIENT_USER, vec![])?;
+        let final_cells = final_kernel
+            .load_user_state(
+                &final_session,
+                function,
+                "",
+                &[],
+                &expected_types,
+            )
+            .await?;
+        require(
+            final_cells.len() == 1
+                && final_cells[0].key().without_principal() == expected_key
+                && final_cells[0].revision() == 1
+                && matches!(final_cells[0].value(), RuntimeValue::Boolean(_)),
+            "concurrent USER state writes left anything other than one revision-one cell",
+        )?;
+
+        let inspection = database.open().await?;
+        let principal_bytes = V3_PROOF_CLIENT_USER.to_bytes().to_vec();
+        let function_bytes = function.to_bytes().to_vec();
+        let slot_bytes = slot.to_bytes().to_vec();
+        let row = inspection
+            .client()
+            .query_one(
+                "SELECT COUNT(*)::BIGINT, COALESCE(MAX(revision), 0)::BIGINT
+                 FROM _orna_kernel.user_state_cells
+                 WHERE principal_id = $1
+                   AND root_function_id = $2
+                   AND root_state_profile = ''
+                   AND function_id = $2
+                   AND function_instance_key = ''
+                   AND state_slot_id = $3",
+                &[&principal_bytes, &function_bytes, &slot_bytes],
+            )
+            .await?;
+        let row_count: i64 = row.try_get(0)?;
+        let max_revision: i64 = row.try_get(1)?;
+        inspection.shutdown().await?;
+        require(
+            row_count == 1 && max_revision == 1,
+            "concurrent USER state writes left partial or duplicate durable rows",
+        )?;
+
+        let write_audits = final_kernel
+            .recover_security_audit_events()
+            .await?
+            .into_iter()
+            .filter(|event| {
+                let decision = event.decision();
+                decision.kind() == SecurityAuditKind::UserState
+                    && decision.outcome() == SecurityAuditOutcome::Allowed
+                    && decision.session_principal() == Some(V3_PROOF_CLIENT_USER)
+                    && decision.user_state_operation() == Some(UserStateAuditOperation::Write)
+                    && decision.user_state_root_function() == Some(function)
+                    && decision.user_state_cell_count() == Some(1)
+            })
+            .count();
+        require(
+            write_audits == 2,
+            "concurrent USER state writes did not leave two redacted write audits",
         )?;
         Ok(())
     })

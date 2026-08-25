@@ -274,6 +274,11 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         "security admin class-wide grant boundary",
         include_str!("../migrations/0040_security_admin_class_wide.sql"),
     ),
+    (
+        41,
+        "nullable resource audit nested invocation",
+        include_str!("../migrations/0041_nullable_resource_audit_nested_invocation.sql"),
+    ),
 ];
 const MIGRATION_DATA_STEP_SEPARATOR: &[u8] = b"\0orna.kernel.migration-step\0";
 const CANONICAL_HASH_V1_EMPTY_SEED_STEP: &[u8] = b"canonical-hash-v1-empty-seed/v1";
@@ -990,7 +995,7 @@ async fn bootstrap_upgrades_the_registered_v20_empty_catalogue() -> TestResult<(
         let after = snapshot_upgrade_state(&database).await?;
         require(
             after.migrations.len() == MIGRATIONS.len() && after.migrations[..20] == before.migrations[..],
-            format!("v21-v37 changed prior migration records: {:?}", after.migrations),
+            format!("v21-v41 changed prior migration records: {:?}", after.migrations),
         )?;
         require(
             after.migrations[20]
@@ -1145,9 +1150,25 @@ async fn bootstrap_upgrades_the_registered_v20_empty_catalogue() -> TestResult<(
                 ),
             format!("v37 migration record is not exact: {:?}", after.migrations[36]),
         )?;
+        for (index, (version, name)) in [
+            (37, (38, "source apply principal binding")),
+            (38, (39, "sealed invocation SECURITY DEFINER denial audit")),
+            (39, (40, "security admin class-wide grant boundary")),
+            (40, (41, "nullable resource audit nested invocation")),
+        ] {
+            require(
+                after.migrations[index]
+                    == (
+                        version,
+                        name.to_owned(),
+                        expected_migration_checksum(version, MIGRATIONS[index].2),
+                    ),
+                format!("v{version} migration record is not exact: {:?}", after.migrations[index]),
+            )?;
+        }
         require(
             after.active_pair == before.active_pair,
-            "v21-v37 changed the active revision pair",
+            "v21-v41 changed the active revision pair",
         )?;
 
         let recovered = kernel.recover().await?;
@@ -1155,7 +1176,7 @@ async fn bootstrap_upgrades_the_registered_v20_empty_catalogue() -> TestResult<(
         require(
             recovered.pair().source().to_bytes().to_vec() == source_revision_id
                 && recovered.pair().catalogue().to_bytes().to_vec() == catalogue_revision_id,
-            "v21-v37 recovery does not preserve the active revision pair",
+            "v21-v41 recovery does not preserve the active revision pair",
         )?;
         Ok(())
     })
@@ -3287,7 +3308,7 @@ async fn inspect_resource_audit_schema(client: &Client) -> TestResult<()> {
                 None,
             ),
             ("request_id", "bytea", "bytea", "NO", Some("")),
-            ("nested_invocation_id", "bytea", "bytea", "NO", Some("")),
+            ("nested_invocation_id", "bytea", "bytea", "YES", Some("")),
             ("parent_invocation_id", "bytea", "bytea", "NO", Some("")),
             ("call_site_id", "bytea", "bytea", "NO", Some("")),
             ("target_function_id", "bytea", "bytea", "YES", Some("")),
@@ -3323,6 +3344,10 @@ async fn inspect_resource_audit_schema(client: &Client) -> TestResult<()> {
         ),
         (
             "resource_audit_events_identity_lengths",
+            "nested_invocation_id IS NULL",
+        ),
+        (
+            "resource_audit_events_identity_lengths",
             "octet_length(nested_invocation_id) = 16",
         ),
         (
@@ -3348,6 +3373,18 @@ async fn inspect_resource_audit_schema(client: &Client) -> TestResult<()> {
         (
             "resource_audit_events_identity_lengths",
             "octet_length(catalogue_revision_id) = 16",
+        ),
+        (
+            "resource_audit_events_nested_invocation_presence_check",
+            "nested_invocation_id IS NOT NULL",
+        ),
+        (
+            "resource_audit_events_nested_invocation_presence_check",
+            "decision_outcome = 'denied'",
+        ),
+        (
+            "resource_audit_events_nested_invocation_presence_check",
+            "terminal_outcome = ANY",
         ),
         (
             "resource_audit_events_target_pair_check",

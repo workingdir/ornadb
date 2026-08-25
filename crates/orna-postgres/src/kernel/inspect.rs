@@ -47,6 +47,7 @@ use crate::{
     PostgresKernel, PostgresKernelError,
     bootstrap::require_current_migrations,
     is_sealed_inspect_type_id,
+    physical::establish_trusted_search_path,
     security::{append_security_audit_event, recover_security_snapshot_for_active},
     security_admin::inspect_privileges_for_session,
     server_runtime::configure_and_recover,
@@ -479,6 +480,7 @@ impl PostgresKernel {
                 .start()
                 .await
                 .map_err(PostgresKernelError::Database)?;
+            establish_trusted_search_path(&transaction).await?;
             require_current_migrations(&transaction).await?;
             let row = transaction
                 .query_one(

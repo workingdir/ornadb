@@ -28,15 +28,20 @@ use orna_core::{
         ParameterDefinition, QualifiedSemanticName, TypeLookupName, ValueTypeKind,
         ValueTypeMutability, ValueTypePersistence,
     },
-    invocation::InvocationOutputRequirement,
-    presenter::{OutputResolutionError, PresenterEntry, PresenterRegistry},
+    invocation::{
+        InvocationClientOffer, InvocationOutputRequirement, InvocationOutputTypeSelector,
+        InvocationStreamingRequirement,
+    },
+    presenter::{
+        AmbiguousOutputSelector, OutputResolutionError, PresenterEntry, PresenterRegistry,
+    },
     revision::{
         ActiveDatabaseRevision, CatalogueHashContext, DefinitionReferenceKind,
         DefinitionReferenceTarget, ExecutableArtifact, ExecutableArtifactKind,
         FunctionRevisionRecord, RevisionPair, Sha256Digest, SourceOrigin, StandardExecutable,
     },
     security::{AuthorisedInvocation, InvocationTarget},
-    types::{ResolvedType, StandardScalar},
+    types::{ResolvedType, StandardScalar, TypeDescriptor},
     value::{
         ConstructedValueKind, EnumValue, FunctionArgument, OpaqueCodecRegistry, OpaqueValue,
         OpaqueValueError, RecordValue, ResultColumn, ResultRow, ResultRows, ResultRowsError,
@@ -2178,6 +2183,39 @@ pub(crate) fn execute_standard_json_encode(
     active: &ActiveDatabaseRevision,
     registry: &OpaqueCodecRegistry,
 ) -> Result<RuntimeValue, PostgresKernelError> {
+    execute_standard_json_encode_bound(
+        function,
+        revision,
+        StandardJsonEncodeBinding::Arguments(arguments),
+        active,
+        registry,
+    )
+}
+
+/// One validated binding form for the closed JSON presenter.
+///
+/// Ordinary execution receives a [`FunctionArgument`], whose general-purpose
+/// constructor intentionally rejects typed nulls. The sealed presenter route
+/// has already obtained the canonical result and therefore binds that result
+/// directly, after this engine checks the same pinned parameter identity.
+enum StandardJsonEncodeBinding<'a> {
+    Arguments(&'a [FunctionArgument]),
+    Value {
+        parameter: ParameterId,
+        value: &'a RuntimeValue,
+    },
+}
+
+/// Executes the closed JSON presenter after selecting one of its validated
+/// binding seams. All artifact, revision, function-signature, and parameter
+/// checks stay in this common path for both ordinary and sealed execution.
+fn execute_standard_json_encode_bound(
+    function: &FunctionDefinition,
+    revision: &FunctionRevisionRecord,
+    binding: StandardJsonEncodeBinding<'_>,
+    active: &ActiveDatabaseRevision,
+    registry: &OpaqueCodecRegistry,
+) -> Result<RuntimeValue, PostgresKernelError> {
     let artifact = revision.artifact();
     if artifact.kind() != ExecutableArtifactKind::Server {
         return Err(artifact_error(
@@ -2207,7 +2245,23 @@ pub(crate) fn execute_standard_json_encode(
     JsonEncodePlan::decode(artifact.payload(), parameter, STD_JSON_VALUE_TYPE_ID)
         .map_err(ServerSelectError::JsonEncodeDecode)
         .map_err(server_error)?;
-    let value = validate_standard_json_encode_argument(parameter, arguments)?;
+    let value = match binding {
+        StandardJsonEncodeBinding::Arguments(arguments) => {
+            validate_standard_json_encode_argument(parameter, arguments)?
+        }
+        StandardJsonEncodeBinding::Value {
+            parameter: bound_parameter,
+            value,
+        } => {
+            if bound_parameter != parameter {
+                return Err(argument_error(
+                    Some(bound_parameter),
+                    "standard json-encode arguments must bind the pinned parameter identity",
+                ));
+            }
+            value
+        }
+    };
     let json = encode_json_value(active, value)
         .map_err(|rule| ServerSelectError::Presenter { rule })
         .map_err(server_error)?;
@@ -2449,6 +2503,64 @@ fn sealed_presenter_registry() -> &'static PresenterRegistry {
     })
 }
 
+/// Resolves a qualified presenter input type against the active application
+/// catalogue first, then the exact verified standard snapshot pinned by the
+/// active catalogue-hash context.
+///
+/// A name present in both catalogues is deliberately not silently selected.
+/// Only multiple aliases tied at the highest presenter priority are reported
+/// as `Ambiguous`; a collision with zero or one matching presenter aliases is
+/// retained as the closed unresolved type-name error instead of fabricating a
+/// presenter tie.
+fn resolve_sealed_presenter_type_name(
+    name: &QualifiedSemanticName,
+    active: &ActiveDatabaseRevision,
+) -> Result<TypeId, OutputResolutionError> {
+    let lookup = TypeLookupName::qualified(name.clone());
+    let application = active.catalogue().type_id_by_name(&lookup);
+    let standard = active
+        .catalogue_hash_context()
+        .standard()
+        .and_then(|snapshot| snapshot.catalogue().type_id_by_name(&lookup));
+
+    match (application, standard) {
+        (Some(application), Some(standard)) => {
+            let mut matching = sealed_presenter_registry()
+                .entries()
+                .iter()
+                .filter(|entry| entry.input_type() == application || entry.input_type() == standard)
+                .peekable();
+            let Some(first) = matching.next() else {
+                return Err(OutputResolutionError::UnresolvedTypeName {
+                    name: name.to_string(),
+                });
+            };
+            let best_priority = first.priority();
+            let mut aliases = vec![first.alias().to_owned()];
+            for entry in matching {
+                if entry.priority() < best_priority {
+                    break;
+                }
+                aliases.push(entry.alias().to_owned());
+            }
+            if aliases.len() > 1 {
+                Err(OutputResolutionError::Ambiguous {
+                    selector: AmbiguousOutputSelector::TypeName(name.to_string()),
+                    aliases,
+                })
+            } else {
+                Err(OutputResolutionError::UnresolvedTypeName {
+                    name: name.to_string(),
+                })
+            }
+        }
+        (Some(type_id), None) | (None, Some(type_id)) => Ok(type_id),
+        (None, None) => Err(OutputResolutionError::UnresolvedTypeName {
+            name: name.to_string(),
+        }),
+    }
+}
+
 /// Resolves one sealed output requirement and presents the canonical result
 /// through the matched presenter engine (ADR 0057 step 7).
 ///
@@ -2467,29 +2579,82 @@ fn sealed_presenter_registry() -> &'static PresenterRegistry {
 pub(crate) fn present_sealed_standard_output(
     requirement: &InvocationOutputRequirement,
     value: RuntimeValue,
+    client_offer: &InvocationClientOffer,
     active: &ActiveDatabaseRevision,
     registry: &OpaqueCodecRegistry,
 ) -> Result<RuntimeValue, SealedPresentationError> {
-    let entry = sealed_presenter_registry()
-        .resolve_requirement(requirement, |name| {
-            active
-                .catalogue()
-                .type_id_by_name(&TypeLookupName::qualified(name.clone()))
-        })
-        .map_err(SealedPresentationError::OutputResolution)?;
-    match entry.function() {
-        STD_JSON_ENCODE_FUNCTION_ID => {
-            let argument = FunctionArgument::new(STD_JSON_ENCODE_PARAMETER_ID, value)
-                .map_err(|_| SealedPresentationError::NoPath)?;
-            execute_standard_json_encode(
-                &sealed_json_encode_definition(),
-                &sealed_json_encode_revision(),
-                std::slice::from_ref(&argument),
-                active,
-                registry,
-            )
-            .map_err(sealed_presenter_engine_error)
+    let presenter_registry = sealed_presenter_registry();
+    let entry = if requirement.alias().is_none() && requirement.media_type().is_none() {
+        match requirement.type_selector() {
+            Some(InvocationOutputTypeSelector::QualifiedName(name)) => {
+                let type_id = resolve_sealed_presenter_type_name(name, active)
+                    .map_err(SealedPresentationError::OutputResolution)?;
+                presenter_registry
+                    .resolve_input_type(type_id)
+                    .map_err(|error| match error {
+                        OutputResolutionError::UnresolvedTypeName { .. } => {
+                            OutputResolutionError::UnresolvedTypeName {
+                                name: name.to_string(),
+                            }
+                        }
+                        other => other,
+                    })
+                    .map_err(SealedPresentationError::OutputResolution)?
+            }
+            _ => presenter_registry
+                .resolve_requirement(requirement, |_| None)
+                .map_err(SealedPresentationError::OutputResolution)?,
         }
+    } else {
+        presenter_registry
+            .resolve_requirement(requirement, |name| {
+                resolve_sealed_presenter_type_name(name, active).ok()
+            })
+            .map_err(SealedPresentationError::OutputResolution)?
+    };
+    let requirement_matches = match requirement.streaming() {
+        InvocationStreamingRequirement::Unspecified | InvocationStreamingRequirement::Preferred => {
+            true
+        }
+        InvocationStreamingRequirement::Required => entry.streaming(),
+        InvocationStreamingRequirement::Forbidden => !entry.streaming(),
+        _ => false,
+    };
+    if !requirement_matches {
+        return Err(SealedPresentationError::NoPath);
+    }
+    let output_descriptor = TypeDescriptor::named(entry.output_type());
+    let sink_matches = client_offer.sink_offers().iter().any(|offer| {
+        if offer.descriptor() != &output_descriptor {
+            return false;
+        }
+        if entry.streaming() && !offer.streaming() {
+            return false;
+        }
+        match entry.media_type() {
+            Some(media_type) => offer.media_types().iter().any(|offered| {
+                offered == media_type
+                    || (entry.output_type() == orna_standard::STD_IO_BYTE_STREAM_TYPE_ID
+                        && offered == "application/octet-stream")
+            }),
+            None => true,
+        }
+    });
+    if !sink_matches {
+        return Err(SealedPresentationError::NoPath);
+    }
+    match entry.function() {
+        STD_JSON_ENCODE_FUNCTION_ID => execute_standard_json_encode_bound(
+            &sealed_json_encode_definition(),
+            &sealed_json_encode_revision(),
+            StandardJsonEncodeBinding::Value {
+                parameter: STD_JSON_ENCODE_PARAMETER_ID,
+                value: &value,
+            },
+            active,
+            registry,
+        )
+        .map_err(sealed_presenter_engine_error),
         STD_TERMINAL_PRESENT_TABLE_FUNCTION_ID => {
             let rows = sealed_result_rows(value)?;
             execute_standard_terminal_table(
@@ -2876,11 +3041,12 @@ fn is_standard_presenter_type(resolved_type: &ResolvedType, type_id: TypeId) -> 
 
 /// Validates the exact bound argument of one standard json-encode call.
 ///
-/// The engine accepts exactly one argument bound to the pinned parameter. A
-/// typed null cannot cross the [`FunctionArgument`] boundary; the explicit
-/// null arm keeps the closed-engine invariant independent of that boundary.
-/// The returned value is the already bound typed value, whose conversion to
-/// JSON is the presenter's closed lossless rule.
+/// The ordinary engine accepts exactly one argument bound to the pinned
+/// parameter. Its [`FunctionArgument`] boundary rejects typed nulls; the
+/// sealed route uses [`StandardJsonEncodeBinding::Value`] instead, after the
+/// common artifact, signature, and parameter checks. The returned value is the
+/// already bound typed value, whose conversion to JSON is the presenter's
+/// closed lossless rule.
 fn validate_standard_json_encode_argument(
     parameter: ParameterId,
     arguments: &[FunctionArgument],
@@ -5491,8 +5657,8 @@ mod tests {
             RecordValueFieldDefinition, RecordValueTypeDefinition, SchemaDefinition,
         },
         invocation::{
-            InvocationEventBody, InvocationOutputTypeSelector, InvocationStreamingRequirement,
-            InvokeValue,
+            InvocationClientOffer, InvocationEventBody, InvocationOutputTypeSelector,
+            InvocationSinkOffer, InvocationStreamingRequirement, InvokeValue,
         },
         revision::{
             ActiveDatabaseRevisionInput, ActiveRevisionContent, CatalogueHashContext,
@@ -5615,6 +5781,37 @@ mod tests {
         .expect("the retained V5 standard source verifies")
     }
 
+    fn presenter_client_offer() -> InvocationClientOffer {
+        let document = InvocationSinkOffer::new(
+            TypeDescriptor::named(orna_standard::STD_TERMINAL_DOCUMENT_TYPE_ID),
+            ["text/plain"],
+            false,
+            0,
+            None,
+        )
+        .expect("a valid document sink offer");
+        let byte_stream = InvocationSinkOffer::new(
+            TypeDescriptor::named(orna_standard::STD_IO_BYTE_STREAM_TYPE_ID),
+            ["application/octet-stream", "application/json", "text/csv"],
+            false,
+            0,
+            None,
+        )
+        .expect("a valid byte-stream sink offer");
+        InvocationClientOffer::new(
+            5,
+            "en-GB",
+            "Europe/London",
+            [document, byte_stream],
+            [],
+            1_024,
+            0,
+            None,
+            None,
+        )
+        .expect("a valid presenter client offer")
+    }
+
     /// Builds the active revision the presenter tests execute against: an
     /// application catalogue holding one object type, one enum type, and one
     /// record type, pinned to the verified V3 standard snapshot.
@@ -5732,6 +5929,71 @@ mod tests {
             context,
         )
         .expect("the presenter active revision is valid")
+    }
+
+    fn presenter_active_with_application_json_value_type(
+        standard: &VerifiedStandardLibrarySnapshot,
+    ) -> ActiveDatabaseRevision {
+        let base = presenter_active(standard);
+        let application_type = TypeId::from_bytes([0x96; 16]);
+        let schema =
+            SchemaDefinition::new(SchemaId::from_bytes([0x97; 16]), name(&["std", "json"]));
+        let json_name = name(&["std", "json", "value"]);
+        let mut schemas = base.catalogue().schemas().to_vec();
+        schemas.push(schema);
+        let mut object_types = base.catalogue().object_types().to_vec();
+        object_types.push(ObjectTypeDefinition::new(
+            application_type,
+            json_name.clone(),
+            vec![],
+        ));
+        let catalogue = CatalogueSnapshot::new_with_functions_and_record_value_types(
+            base.catalogue().revision(),
+            schemas,
+            object_types,
+            base.catalogue().value_types().to_vec(),
+            base.catalogue().enum_types().to_vec(),
+            base.catalogue().record_value_types().to_vec(),
+            base.catalogue().type_bindings().to_vec(),
+            base.catalogue().functions().to_vec(),
+        )
+        .expect("the collision catalogue is valid");
+        let source_unit = SourceUnitId::from_bytes([0x83; 16]);
+        let mut origins = base.origins().to_vec();
+        origins.push(DefinitionOrigin::new(
+            DefinitionIdentity::Schema(SchemaId::from_bytes([0x97; 16])),
+            SourceOrigin::new(source_unit, 1, 2).expect("the collision schema origin is valid"),
+        ));
+        origins.push(DefinitionOrigin::new(
+            DefinitionIdentity::ObjectType(application_type),
+            SourceOrigin::new(source_unit, 2, 3).expect("the collision type origin is valid"),
+        ));
+        let context = base.catalogue_hash_context().clone();
+        let catalogue_hash = catalogue_digest_with_context(
+            &context,
+            &catalogue,
+            base.function_revisions(),
+            base.expressions(),
+            &origins,
+            base.references(),
+        )
+        .expect("the collision catalogue digests");
+        ActiveDatabaseRevision::new_with_catalogue_hash_context(
+            ActiveDatabaseRevisionInput::new(
+                base.pair(),
+                base.source().clone(),
+                catalogue,
+                catalogue_hash,
+                ActiveRevisionContent::new(
+                    base.expressions().to_vec(),
+                    base.function_revisions().to_vec(),
+                    origins,
+                    base.references().to_vec(),
+                ),
+            ),
+            context,
+        )
+        .expect("the collision active revision is valid")
     }
 
     fn json_encode_parameter(parameter: ParameterId) -> ParameterDefinition {
@@ -9927,6 +10189,7 @@ mod tests {
         let presented = present_sealed_standard_output(
             &requirement,
             RuntimeValue::Integer(42),
+            &presenter_client_offer(),
             &active,
             &registry,
         )
@@ -9986,6 +10249,7 @@ mod tests {
         let presented = present_sealed_standard_output(
             &requirement,
             RuntimeValue::Integer(42),
+            &presenter_client_offer(),
             &active,
             &registry,
         )
@@ -10030,6 +10294,55 @@ mod tests {
     }
 
     #[test]
+    fn sealed_output_json_requirement_preserves_null_and_non_null_json_bytes() {
+        let standard = presenter_standard();
+        let registry = orna_standard::registered_opaque_codecs(&standard)
+            .expect("the V3 opaque codecs register");
+        let active = presenter_active(&standard);
+        let requirement = InvocationOutputRequirement::new(
+            Some(String::from("json")),
+            None,
+            None,
+            InvocationStreamingRequirement::Unspecified,
+        )
+        .expect("the json output requirement is valid");
+        let typed_null = RuntimeValue::null(ResolvedType::scalar(StandardScalar::Integer))
+            .expect("a typed INTEGER null is valid");
+
+        let presented = present_sealed_standard_output(
+            &requirement,
+            typed_null,
+            &presenter_client_offer(),
+            &active,
+            &registry,
+        )
+        .expect("the json presenter must encode the sealed typed null");
+        let RuntimeValue::Opaque(value) = presented else {
+            panic!("the json presenter must return one opaque value");
+        };
+        assert_eq!(
+            value.canonical_payload(),
+            frame_byte_stream(b"application/json", b"null")
+        );
+
+        let presented = present_sealed_standard_output(
+            &requirement,
+            RuntimeValue::Integer(42),
+            &presenter_client_offer(),
+            &active,
+            &registry,
+        )
+        .expect("the json presenter must preserve the sealed non-null result");
+        let RuntimeValue::Opaque(value) = presented else {
+            panic!("the json presenter must return one opaque value");
+        };
+        assert_eq!(
+            value.canonical_payload(),
+            frame_byte_stream(b"application/json", b"42")
+        );
+    }
+
+    #[test]
     fn sealed_output_table_requirement_emits_the_terminal_document_in_the_final_value_batch() {
         let standard = presenter_standard();
         let registry = orna_standard::registered_opaque_codecs(&standard)
@@ -10045,6 +10358,7 @@ mod tests {
         let presented = present_sealed_standard_output(
             &requirement,
             RuntimeValue::Integer(42),
+            &presenter_client_offer(),
             &active,
             &registry,
         )
@@ -10090,6 +10404,137 @@ mod tests {
     }
 
     #[test]
+    fn sealed_output_requires_matching_sink_descriptor_and_media_type() {
+        let standard = presenter_standard();
+        let registry = orna_standard::registered_opaque_codecs(&standard)
+            .expect("the V3 opaque codecs register");
+        let active = presenter_active(&standard);
+        let json = InvocationOutputRequirement::new(
+            Some(String::from("json")),
+            None,
+            None,
+            InvocationStreamingRequirement::Unspecified,
+        )
+        .expect("the json requirement is valid");
+        let table = InvocationOutputRequirement::new(
+            Some(String::from("table")),
+            None,
+            None,
+            InvocationStreamingRequirement::Unspecified,
+        )
+        .expect("the table requirement is valid");
+        let offer = |descriptor: TypeDescriptor, media_types: &[&str]| {
+            let sink =
+                InvocationSinkOffer::new(descriptor, media_types.iter().copied(), false, 0, None)
+                    .expect("the sink offer is valid");
+            InvocationClientOffer::new(
+                5,
+                "en-GB",
+                "Europe/London",
+                [sink],
+                [],
+                1_024,
+                0,
+                None,
+                None,
+            )
+            .expect("the client offer is valid")
+        };
+
+        let empty =
+            InvocationClientOffer::new(5, "en-GB", "Europe/London", [], [], 1_024, 0, None, None)
+                .expect("an empty client offer is valid");
+        assert!(matches!(
+            present_sealed_standard_output(
+                &json,
+                RuntimeValue::Integer(42),
+                &empty,
+                &active,
+                &registry
+            ),
+            Err(SealedPresentationError::NoPath)
+        ));
+
+        let wrong_descriptor = offer(
+            TypeDescriptor::named(orna_standard::STD_TERMINAL_DOCUMENT_TYPE_ID),
+            &["text/plain"],
+        );
+        assert!(matches!(
+            present_sealed_standard_output(
+                &json,
+                RuntimeValue::Integer(42),
+                &wrong_descriptor,
+                &active,
+                &registry,
+            ),
+            Err(SealedPresentationError::NoPath)
+        ));
+
+        let wrong_media = offer(
+            TypeDescriptor::named(orna_standard::STD_IO_BYTE_STREAM_TYPE_ID),
+            &["text/plain"],
+        );
+        assert!(matches!(
+            present_sealed_standard_output(
+                &json,
+                RuntimeValue::Integer(42),
+                &wrong_media,
+                &active,
+                &registry,
+            ),
+            Err(SealedPresentationError::NoPath)
+        ));
+
+        let matching_byte_stream = offer(
+            TypeDescriptor::named(orna_standard::STD_IO_BYTE_STREAM_TYPE_ID),
+            &["application/json"],
+        );
+        assert!(matches!(
+            present_sealed_standard_output(
+                &json,
+                RuntimeValue::Integer(42),
+                &matching_byte_stream,
+                &active,
+                &registry,
+            ),
+            Ok(RuntimeValue::Opaque(value))
+                if value.opaque_type() == orna_standard::STD_IO_BYTE_STREAM_TYPE_ID
+        ));
+
+        let wildcard_byte_stream = offer(
+            TypeDescriptor::named(orna_standard::STD_IO_BYTE_STREAM_TYPE_ID),
+            &["application/octet-stream"],
+        );
+        assert!(matches!(
+            present_sealed_standard_output(
+                &json,
+                RuntimeValue::Integer(42),
+                &wildcard_byte_stream,
+                &active,
+                &registry,
+            ),
+            Ok(RuntimeValue::Opaque(value))
+                if value.opaque_type() == orna_standard::STD_IO_BYTE_STREAM_TYPE_ID
+        ));
+
+        let matching_document = offer(
+            TypeDescriptor::named(orna_standard::STD_TERMINAL_DOCUMENT_TYPE_ID),
+            &["text/plain"],
+        );
+        assert!(matches!(
+            present_sealed_standard_output(
+                &table,
+                RuntimeValue::Integer(42),
+                &matching_document,
+                &active,
+                &registry,
+            ),
+            Ok(RuntimeValue::Opaque(value))
+                if value.opaque_type() == orna_standard::STD_TERMINAL_DOCUMENT_TYPE_ID
+        ));
+    }
+
+    #[test]
     fn sealed_output_media_type_requirement_resolves_to_the_json_presenter() {
         let standard = presenter_standard();
         let registry = orna_standard::registered_opaque_codecs(&standard)
@@ -10105,6 +10550,7 @@ mod tests {
         let presented = present_sealed_standard_output(
             &requirement,
             RuntimeValue::Text("hello".to_owned()),
+            &presenter_client_offer(),
             &active,
             &registry,
         )
@@ -10125,6 +10571,161 @@ mod tests {
     }
 
     #[test]
+    fn sealed_output_qualified_standard_json_resolves_before_presenter_selection() {
+        let standard = presenter_v5_standard();
+        let registry = orna_standard::registered_opaque_codecs(&standard)
+            .expect("the V3 opaque codecs register");
+        let active = presenter_active(&standard);
+        let json_name = QualifiedSemanticName::new(["std", "json", "value"])
+            .expect("the standard JSON value name is qualified");
+
+        assert_eq!(
+            resolve_sealed_presenter_type_name(&json_name, &active),
+            Ok(STD_JSON_VALUE_TYPE_ID)
+        );
+
+        let requirement = InvocationOutputRequirement::new(
+            None,
+            None,
+            Some(
+                InvocationOutputTypeSelector::qualified_name(json_name.clone())
+                    .expect("the JSON selector is valid"),
+            ),
+            InvocationStreamingRequirement::Unspecified,
+        )
+        .expect("the JSON output requirement is valid");
+        assert!(matches!(
+            present_sealed_standard_output(
+                &requirement,
+                RuntimeValue::Integer(1),
+                &presenter_client_offer(),
+                &active,
+                &registry,
+            ),
+            Ok(RuntimeValue::Opaque(value))
+                if value.opaque_type() == orna_standard::STD_IO_BYTE_STREAM_TYPE_ID
+        ));
+    }
+
+    #[test]
+    fn sealed_output_qualified_application_type_without_presenter_preserves_requested_name() {
+        let standard = presenter_standard();
+        let registry = orna_standard::registered_opaque_codecs(&standard)
+            .expect("the V3 opaque codecs register");
+        let active = presenter_active(&standard);
+        let requested = name(&["app", "stage"]);
+        assert_eq!(
+            resolve_sealed_presenter_type_name(&requested, &active),
+            Ok(PRESENTER_ENUM_TYPE)
+        );
+        let requirement = InvocationOutputRequirement::new(
+            None,
+            None,
+            Some(
+                InvocationOutputTypeSelector::qualified_name(requested.clone())
+                    .expect("the application selector is valid"),
+            ),
+            InvocationStreamingRequirement::Unspecified,
+        )
+        .expect("the application type requirement is valid");
+        assert!(matches!(
+            present_sealed_standard_output(
+                &requirement,
+                RuntimeValue::Integer(1),
+                &presenter_client_offer(),
+                &active,
+                &registry,
+            ),
+            Err(SealedPresentationError::OutputResolution(
+                OutputResolutionError::UnresolvedTypeName { name }
+            )) if name == requested.to_string()
+        ));
+    }
+
+    #[test]
+    fn sealed_output_catalogue_collision_without_a_presenter_tie_stays_unresolved() {
+        let standard = presenter_v5_standard();
+        let registry = orna_standard::registered_opaque_codecs(&standard)
+            .expect("the V5 opaque codecs register");
+        let active = presenter_active_with_application_json_value_type(&standard);
+        let requested = name(&["std", "json", "value"]);
+        assert_eq!(
+            resolve_sealed_presenter_type_name(&requested, &active),
+            Err(OutputResolutionError::UnresolvedTypeName {
+                name: requested.to_string(),
+            })
+        );
+        let requirement = InvocationOutputRequirement::new(
+            None,
+            None,
+            Some(
+                InvocationOutputTypeSelector::qualified_name(requested.clone())
+                    .expect("the colliding selector is valid"),
+            ),
+            InvocationStreamingRequirement::Unspecified,
+        )
+        .expect("the colliding type requirement is valid");
+        assert!(matches!(
+            present_sealed_standard_output(
+                &requirement,
+                RuntimeValue::Integer(1),
+                &presenter_client_offer(),
+                &active,
+                &registry,
+            ),
+            Err(SealedPresentationError::OutputResolution(
+                OutputResolutionError::UnresolvedTypeName { name }
+            )) if name == requested.to_string()
+        ));
+    }
+
+    #[test]
+    fn sealed_output_streaming_requirement_respects_non_streaming_presenters() {
+        let standard = presenter_standard();
+        let registry = orna_standard::registered_opaque_codecs(&standard)
+            .expect("the V3 opaque codecs register");
+        let active = presenter_active(&standard);
+        let required = InvocationOutputRequirement::new(
+            Some(String::from("json")),
+            None,
+            None,
+            InvocationStreamingRequirement::Required,
+        )
+        .expect("the required streaming output is valid");
+        assert!(matches!(
+            present_sealed_standard_output(
+                &required,
+                RuntimeValue::Integer(1),
+                &presenter_client_offer(),
+                &active,
+                &registry,
+            ),
+            Err(SealedPresentationError::NoPath)
+        ));
+
+        // The accepted first slice has only non-streaming sealed entries, so
+        // Forbidden is compatible while Required is deliberately closed.
+        let forbidden = InvocationOutputRequirement::new(
+            Some(String::from("json")),
+            None,
+            None,
+            InvocationStreamingRequirement::Forbidden,
+        )
+        .expect("the forbidden streaming output is valid");
+        assert!(matches!(
+            present_sealed_standard_output(
+                &forbidden,
+                RuntimeValue::Integer(1),
+                &presenter_client_offer(),
+                &active,
+                &registry,
+            ),
+            Ok(RuntimeValue::Opaque(value))
+                if value.opaque_type() == orna_standard::STD_IO_BYTE_STREAM_TYPE_ID
+        ));
+    }
+
+    #[test]
     fn sealed_output_unresolved_requirement_failures_are_closed() {
         let standard = presenter_standard();
         let registry = orna_standard::registered_opaque_codecs(&standard)
@@ -10139,7 +10740,7 @@ mod tests {
         )
         .expect("the alias requirement is valid");
         assert!(matches!(
-            present_sealed_standard_output(&alias, RuntimeValue::Integer(1), &active, &registry),
+            present_sealed_standard_output(&alias, RuntimeValue::Integer(1), &presenter_client_offer(), &active, &registry),
             Err(SealedPresentationError::OutputResolution(
                 OutputResolutionError::UnresolvedAlias { alias }
             )) if alias == "xml"
@@ -10153,7 +10754,7 @@ mod tests {
         )
         .expect("the media requirement is valid");
         assert!(matches!(
-            present_sealed_standard_output(&media, RuntimeValue::Integer(1), &active, &registry),
+            present_sealed_standard_output(&media, RuntimeValue::Integer(1), &presenter_client_offer(), &active, &registry),
             Err(SealedPresentationError::OutputResolution(
                 OutputResolutionError::UnresolvedMediaType { media_type }
             )) if media_type == "application/xml"
@@ -10175,6 +10776,7 @@ mod tests {
             present_sealed_standard_output(
                 &type_name,
                 RuntimeValue::Integer(1),
+                &presenter_client_offer(),
                 &active,
                 &registry
             ),
@@ -10183,9 +10785,43 @@ mod tests {
             ))
         ));
 
-        let error =
-            present_sealed_standard_output(&alias, RuntimeValue::Integer(1), &active, &registry)
-                .expect_err("an unresolved alias is a closed output-resolution failure");
+        // The retained V3 snapshot used by this fixture does not yet contain
+        // the proposal-only std.data.Rows type, so the pinned lookup remains
+        // explicitly unresolved rather than consulting an unpinned catalogue.
+        let rows_name = InvocationOutputRequirement::new(
+            None,
+            None,
+            Some(
+                InvocationOutputTypeSelector::qualified_name(
+                    QualifiedSemanticName::new(["std", "data", "rows"])
+                        .expect("a qualified Rows name"),
+                )
+                .expect("the Rows selector is valid"),
+            ),
+            InvocationStreamingRequirement::Unspecified,
+        )
+        .expect("the Rows requirement is valid");
+        assert!(matches!(
+            present_sealed_standard_output(
+                &rows_name,
+                RuntimeValue::Integer(1),
+                &presenter_client_offer(),
+                &active,
+                &registry
+            ),
+            Err(SealedPresentationError::OutputResolution(
+                OutputResolutionError::UnresolvedTypeName { name }
+            )) if name == "std.data.rows"
+        ));
+
+        let error = present_sealed_standard_output(
+            &alias,
+            RuntimeValue::Integer(1),
+            &presenter_client_offer(),
+            &active,
+            &registry,
+        )
+        .expect_err("an unresolved alias is a closed output-resolution failure");
         assert_eq!(error.spec_code(), "ORNA0702");
         assert_eq!(error.exit_code(), 5);
     }
@@ -10216,7 +10852,13 @@ mod tests {
         )
         .expect("the table requirement is valid");
         assert!(matches!(
-            present_sealed_standard_output(&table, opaque, &active, &registry),
+            present_sealed_standard_output(
+                &table,
+                opaque,
+                &presenter_client_offer(),
+                &active,
+                &registry
+            ),
             Err(SealedPresentationError::NoPath)
         ));
 
@@ -10241,7 +10883,13 @@ mod tests {
         )
         .expect("the json requirement is valid");
         assert!(matches!(
-            present_sealed_standard_output(&json, record, &active, &registry),
+            present_sealed_standard_output(
+                &json,
+                record,
+                &presenter_client_offer(),
+                &active,
+                &registry
+            ),
             Err(SealedPresentationError::NoPath)
         ));
 
@@ -10256,6 +10904,7 @@ mod tests {
                 )
                 .expect("the opaque test value is valid"),
             ),
+            &presenter_client_offer(),
             &active,
             &registry,
         )
