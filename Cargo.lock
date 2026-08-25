@@ -461,6 +461,7 @@ dependencies = [
  "orna-artifact",
  "orna-core",
  "orna-syntax",
+ "proptest",
 ]
 
 [[package]]
@@ -557,6 +558,7 @@ dependencies = [
 name = "orna-syntax"
 version = "0.1.0"
 dependencies = [
+ "proptest",
  "rowan",
 ]
 

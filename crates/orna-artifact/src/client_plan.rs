@@ -6112,23 +6112,21 @@ mod tests {
         let resource_local = LocalId::from_bytes([0x79; 16]);
         let value_local = LocalId::from_bytes([0x7a; 16]);
         let result_type = TypeId::from_bytes([0x7b; 16]);
-        let operation = || {
-            ClientExpressionNode::Resource {
-                operation: ResourceOperationNode::new(
-                    ResourceKind::Stream,
-                    FunctionId::from_bytes([0x7c; 16]),
-                    RevisionPair::new(
-                        SourceRevisionId::from_bytes([0x7d; 16]),
-                        CatalogueRevisionId::from_bytes([0x7e; 16]),
-                    ),
-                    CallSiteId::from_bytes([0x7f; 16]),
-                    vec![(
-                        ParameterId::from_bytes([0x80; 16]),
-                        ClientExpressionNode::Boolean { value: true },
-                    )],
-                    result_type,
+        let operation = || ClientExpressionNode::Resource {
+            operation: ResourceOperationNode::new(
+                ResourceKind::Stream,
+                FunctionId::from_bytes([0x7c; 16]),
+                RevisionPair::new(
+                    SourceRevisionId::from_bytes([0x7d; 16]),
+                    CatalogueRevisionId::from_bytes([0x7e; 16]),
                 ),
-            }
+                CallSiteId::from_bytes([0x7f; 16]),
+                vec![(
+                    ParameterId::from_bytes([0x80; 16]),
+                    ClientExpressionNode::Boolean { value: true },
+                )],
+                result_type,
+            ),
         };
         let plan = ProceduralClientPlan::new(
             vec![
@@ -6262,10 +6260,7 @@ mod tests {
                 value_local,
                 ClientExpressionNode::Call {
                     function: FunctionId::from_bytes([0x8d; 16]),
-                    arguments: vec![(
-                        ParameterId::from_bytes([0x8e; 16]),
-                        resource.clone(),
-                    )],
+                    arguments: vec![(ParameterId::from_bytes([0x8e; 16]), resource.clone())],
                 },
             )],
             ClientExpressionNode::Boolean { value: true },
@@ -7120,5 +7115,96 @@ mod tests {
         let decoded = CapabilityClientPlan::decode(&bytes).expect("the capability plan decodes");
         assert_eq!(decoded.inner_plan_version(), ACTION_FORMAT_VERSION);
         assert_eq!(decoded.inner_plan(), &inner);
+    }
+    #[test]
+
+    fn procedural_plan_round_trips_scalar_resource_await_in_assignment() {
+        let resource_local = LocalId::from_bytes([0x91; 16]);
+        let value_local = LocalId::from_bytes([0x92; 16]);
+        let result_type = TypeId::from_bytes([0x93; 16]);
+        let operation = || ClientExpressionNode::Resource {
+            operation: ResourceOperationNode::new(
+                ResourceKind::Scalar,
+                FunctionId::from_bytes([0x94; 16]),
+                RevisionPair::new(
+                    SourceRevisionId::from_bytes([0x95; 16]),
+                    CatalogueRevisionId::from_bytes([0x96; 16]),
+                ),
+                CallSiteId::from_bytes([0x97; 16]),
+                vec![
+                    (
+                        ParameterId::from_bytes([0x98; 16]),
+                        ClientExpressionNode::String {
+                            value: "first".to_owned(),
+                        },
+                    ),
+                    (
+                        ParameterId::from_bytes([0x99; 16]),
+                        ClientExpressionNode::Boolean { value: true },
+                    ),
+                ],
+                result_type,
+            ),
+        };
+        let plan = ProceduralClientPlan::new(
+            vec![
+                ClientLocal::new(
+                    resource_local,
+                    result_type,
+                    ClientLocalKind::Resource(ResourceKind::Scalar),
+                ),
+                ClientLocal::new(value_local, result_type, ClientLocalKind::Value),
+            ],
+            vec![
+                ClientStatement::let_(resource_local, operation()),
+                ClientStatement::let_(
+                    value_local,
+                    ClientExpressionNode::Await {
+                        expression: Box::new(operation()),
+                    },
+                ),
+                ClientStatement::assignment(
+                    value_local,
+                    ClientExpressionNode::Await {
+                        expression: Box::new(operation()),
+                    },
+                ),
+            ],
+            ClientExpressionNode::Await {
+                expression: Box::new(ClientExpressionNode::LocalRead {
+                    local: resource_local,
+                }),
+            },
+        );
+
+        let encoded = plan.encode().expect("scalar procedural plan encodes");
+        let decoded = ProceduralClientPlan::decode(&encoded).expect("scalar plan decodes");
+        assert_eq!(decoded, plan);
+        assert_eq!(decoded.locals()[0].local_id(), resource_local);
+        assert_eq!(decoded.locals()[1].local_id(), value_local);
+        assert_eq!(decoded.statements()[2].local(), value_local);
+        let ClientExpressionNode::Await { expression } = decoded.statements()[2].expression()
+        else {
+            panic!("scalar assignment must retain its AWAIT expression");
+        };
+        let ClientExpressionNode::Resource { operation } = expression.as_ref() else {
+            panic!("scalar assignment AWAIT must retain its resource operation");
+        };
+        assert_eq!(operation.kind(), ResourceKind::Scalar);
+        assert_eq!(
+            operation.arguments(),
+            &[
+                (
+                    ParameterId::from_bytes([0x98; 16]),
+                    ClientExpressionNode::String {
+                        value: "first".to_owned(),
+                    },
+                ),
+                (
+                    ParameterId::from_bytes([0x99; 16]),
+                    ClientExpressionNode::Boolean { value: true },
+                ),
+            ],
+        );
     }
 }

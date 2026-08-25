@@ -46,10 +46,10 @@ use orna_core::{
     ParameterId, SchemaId, SourceBundleId, SourceRevisionId, SourceUnitId,
     StandardLibraryRevisionId, TypeBindingId, TypeId,
     canonical_hash::{
-        CanonicalHashError, artifact_payload_digest, catalogue_digest,
-        catalogue_digest_with_context, function_declaration_digest, function_semantic_digest,
-        function_semantic_digest_with_version, source_bundle_digest, source_revision_record_digest,
-        source_unit_content_digest,
+        CanonicalHashError, artifact_payload_digest, catalogue_digest_with_context,
+        catalogue_digest_with_context_and_parent, function_declaration_digest,
+        function_semantic_digest, function_semantic_digest_with_version, source_bundle_digest,
+        source_revision_record_digest, source_unit_content_digest,
     },
     catalogue::{
         CatalogueSnapshot, CatalogueSnapshotError, EnumTypeDefinition, FieldDefinition,
@@ -2204,11 +2204,13 @@ fn server_mutation_plan(
     })
 }
 
-/// Adapts a STREAM function to the row-shaped view required by the
-/// relational artifact validators. The durable catalogue keeps STREAM.
+/// Adapts scalar and STREAM functions to the row-shaped view required by the
+/// relational artifact validators. The durable catalogue keeps their exact
+/// return shape.
 fn query_planning_function(function: &FunctionDefinition) -> FunctionDefinition {
-    let FunctionReturn::Stream(element) = function.return_type() else {
-        return function.clone();
+    let result_type = match function.return_type() {
+        FunctionReturn::Single(result_type) | FunctionReturn::Stream(result_type) => result_type,
+        FunctionReturn::Rows(_) => return function.clone(),
     };
     FunctionDefinition::new(
         function.id(),
@@ -2216,7 +2218,9 @@ fn query_planning_function(function: &FunctionDefinition) -> FunctionDefinition 
         function.domain(),
         function.parameters().to_vec(),
         FunctionReturn::Rows(vec![FunctionReturnColumnDefinition::new(
-            "value", 0, *element,
+            "value",
+            0,
+            *result_type,
         )]),
         function.current_revision(),
         function.security(),
@@ -5452,13 +5456,14 @@ impl CandidateMaterial {
         {
             return Ok(false);
         }
-        Ok(catalogue_digest_with_context(
+        Ok(catalogue_digest_with_context_and_parent(
             active.catalogue_hash_context(),
             &self.catalogue,
             &self.current_function_revisions,
             &self.expressions,
             &self.origins,
             &self.references,
+            Some(active.catalogue()),
         )? == active.catalogue_hash())
     }
 
@@ -5467,27 +5472,28 @@ impl CandidateMaterial {
         active: &ActiveDatabaseRevision,
         context: CatalogueHashContext,
     ) -> Result<DeployableRevision, PrepareError> {
-        let catalogue_hash = self.catalogue_hash(&context)?;
+        let catalogue_hash = self.catalogue_hash_with_parent(&context, Some(active.catalogue()))?;
         self.into_deployable_with_catalogue_hash(active, context, catalogue_hash)
     }
 
+    #[cfg(test)]
     fn catalogue_hash(&self, context: &CatalogueHashContext) -> Result<Sha256Digest, PrepareError> {
-        if context.standard().is_none() {
-            return Ok(catalogue_digest(
-                &self.catalogue,
-                &self.current_function_revisions,
-                &self.expressions,
-                &self.origins,
-                &self.references,
-            )?);
-        }
-        Ok(catalogue_digest_with_context(
+        self.catalogue_hash_with_parent(context, None)
+    }
+
+    fn catalogue_hash_with_parent(
+        &self,
+        context: &CatalogueHashContext,
+        parent: Option<&CatalogueSnapshot>,
+    ) -> Result<Sha256Digest, PrepareError> {
+        Ok(catalogue_digest_with_context_and_parent(
             context,
             &self.catalogue,
             &self.current_function_revisions,
             &self.expressions,
             &self.origins,
             &self.references,
+            parent,
         )?)
     }
 
@@ -5498,35 +5504,46 @@ impl CandidateMaterial {
         catalogue_hash: Sha256Digest,
     ) -> Result<DeployableRevision, PrepareError> {
         if context.standard().is_none() {
-            return Ok(DeployableRevision::new(
-                active.pair(),
-                self.source,
-                active.pair().catalogue(),
-                self.catalogue,
-                catalogue_hash,
-                self.origins,
-                self.expressions,
-                self.new_function_revisions,
-                self.references,
-            )?);
+            return Ok(
+                DeployableRevision::new_with_catalogue_hash_context_and_parent(
+                    DeployableRevisionInput::new(
+                        active.pair(),
+                        self.source,
+                        active.pair().catalogue(),
+                        self.catalogue,
+                        catalogue_hash,
+                        DeployableRevisionContent::new(
+                            self.origins,
+                            self.expressions,
+                            self.new_function_revisions,
+                            self.references,
+                        ),
+                    ),
+                    context,
+                    Some(active.catalogue()),
+                )?,
+            );
         }
-        Ok(DeployableRevision::new_with_catalogue_hash_context(
-            DeployableRevisionInput::new(
-                active.pair(),
-                self.source,
-                active.pair().catalogue(),
-                self.catalogue,
-                catalogue_hash,
-                DeployableRevisionContent::new(
-                    self.origins,
-                    self.expressions,
-                    self.new_function_revisions,
-                    self.references,
-                )
-                .with_current_function_revisions(self.current_function_revisions),
-            ),
-            context,
-        )?)
+        Ok(
+            DeployableRevision::new_with_catalogue_hash_context_and_parent(
+                DeployableRevisionInput::new(
+                    active.pair(),
+                    self.source,
+                    active.pair().catalogue(),
+                    self.catalogue,
+                    catalogue_hash,
+                    DeployableRevisionContent::new(
+                        self.origins,
+                        self.expressions,
+                        self.new_function_revisions,
+                        self.references,
+                    )
+                    .with_current_function_revisions(self.current_function_revisions),
+                ),
+                context,
+                Some(active.catalogue()),
+            )?,
+        )
     }
 }
 
@@ -7201,7 +7218,7 @@ impl<'a> CandidateBuilder<'a> {
             Some(type_id) => type_id,
             None => match operation.result_type() {
                 SemanticType::Named(type_id) | SemanticType::Reference { target: type_id } => {
-                    self.identities.type_id(type_id)?
+                    self.client_named_type_id(type_id)?
                 }
                 SemanticType::Scalar(_) => {
                     return Err(PrepareError::InvalidCheckedBundle {
@@ -7241,7 +7258,7 @@ impl<'a> CandidateBuilder<'a> {
             Some(type_id) => type_id,
             None => match operation.result_type() {
                 SemanticType::Named(type_id) | SemanticType::Reference { target: type_id } => {
-                    self.identities.type_id(type_id)?
+                    self.client_named_type_id(type_id)?
                 }
                 SemanticType::Scalar(_) => {
                     return Err(PrepareError::InvalidCheckedBundle {
@@ -7776,14 +7793,12 @@ impl<'a> CandidateBuilder<'a> {
             (SemanticType::Named(target), EvidenceTarget::Named(evidence))
                 if target == evidence =>
             {
-                let CheckedTypeId::Existing(type_id) = target else {
-                    return Err(invalid_checked_declaration_type_evidence());
-                };
-                if is_sealed_inspect_type_id(type_id)
-                    || self
-                        .mode
-                        .durable_standard_catalogue()
-                        .is_some_and(|catalogue| catalogue.value_type_by_id(type_id).is_some())
+                if let CheckedTypeId::Existing(type_id) = target
+                    && (is_sealed_inspect_type_id(type_id)
+                        || self
+                            .mode
+                            .durable_standard_catalogue()
+                            .is_some_and(|catalogue| catalogue.value_type_by_id(type_id).is_some()))
                 {
                     Ok(CandidateResolvedType::StandardOpaqueValue(type_id))
                 } else {
@@ -7835,6 +7850,17 @@ impl<'a> CandidateBuilder<'a> {
             })
             .collect::<Result<Vec<_>, PrepareError>>()?;
         let return_type = match checked.return_type() {
+            crate::resolver::CheckedServerFunctionReturn::Single { semantic_type, .. } => {
+                FunctionReturn::Single(self.declaration_type(
+                    *semantic_type,
+                    crate::CheckedTypeUseKind::Return {
+                        owner: checked.id(),
+                        ordinal: 0,
+                    },
+                    consume_evidence,
+                    projection,
+                )?)
+            }
             crate::resolver::CheckedServerFunctionReturn::Rows(columns) => {
                 let return_columns = columns
                     .iter()
@@ -8278,7 +8304,9 @@ mod tests {
         },
     };
     use orna_core::{
-        canonical_hash::{calculate_standard_library_digest, verify_standard_library_snapshot},
+        canonical_hash::{
+            calculate_standard_library_digest, catalogue_digest, verify_standard_library_snapshot,
+        },
         catalogue::{
             CatalogueSnapshot, FieldDefinition, FunctionDefinition, FunctionDomain, FunctionReturn,
             FunctionSecurity, FunctionTransaction, FunctionVolatility, ObjectTypeDefinition,
@@ -8802,11 +8830,9 @@ EXPORT TYPE std.CHARACTER_LARGE_OBJECT TO PRELUDE AS TEXT;
             ValueTypePersistence::Persistable,
             "orna.kernel.value.character-large-object@1",
         );
-        let qualified_text = TypeBinding::qualified(
-            semantic_name(&["std", "character_large_object"]),
-            text_id,
-        )
-        .unwrap();
+        let qualified_text =
+            TypeBinding::qualified(semantic_name(&["std", "character_large_object"]), text_id)
+                .unwrap();
         let prelude_character_large_object = TypeBinding::prelude(
             PreludeTypeName::new(["character", "large", "object"]).unwrap(),
             text_id,
@@ -8944,7 +8970,8 @@ EXPORT TYPE std.CHARACTER_LARGE_OBJECT TO PRELUDE AS TEXT;
         )
         .unwrap();
 
-        let action_schema_id = SchemaId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 9]);
+        let action_schema_id =
+            SchemaId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 9]);
         let action_type_id = TypeId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 20]);
         let action_binding =
             TypeBinding::qualified(semantic_name(&["std", "action"]), action_type_id).unwrap();
@@ -9595,6 +9622,13 @@ EXPORT TYPE std.CHARACTER_LARGE_OBJECT TO PRELUDE AS TEXT;
         AS SELECT REF(t), t.title FROM tasks.task t\n\
         WHERE t.completed = TRUE ORDER BY t.title;\n";
 
+    const SCALAR_SELECT_SOURCE: &str = "CREATE SCHEMA app;\n\
+        CREATE TYPE app.item AS OBJECT (value INTEGER);\n\
+        CREATE SERVER FUNCTION app.scalar()\n\
+        RETURNS INTEGER\n\
+        SECURITY INVOKER TRANSACTION READ ONLY VOLATILITY STABLE\n\
+        AS SELECT i.value FROM app.item i;\n";
+
     const DIRECT_BOOLEAN_SOURCE: &str = "CREATE SCHEMA tasks;\n\
         CREATE TYPE tasks.person AS OBJECT (active BOOL NOT NULL);\n\
         CREATE TYPE tasks.task AS OBJECT (owner REF tasks.person, completed BOOL NOT NULL);\n\
@@ -10079,6 +10113,29 @@ EXPORT TYPE std.CHARACTER_LARGE_OBJECT TO PRELUDE AS TEXT;
         assert_ne!(
             changed_revision.artifact().content_hash(),
             initial_revision.artifact().content_hash()
+        );
+    }
+
+    #[test]
+    fn prepares_scalar_select_as_single_return_and_one_column_server_plan() {
+        let active = empty_active();
+        let report = checked_report(SCALAR_SELECT_SOURCE, active.catalogue());
+        assert_eq!(report.diagnostics(), &[]);
+
+        let prepared = prepare(&report, active.pair(), &active).unwrap();
+        let function = &prepared.candidate().functions()[0];
+        assert_eq!(
+            function.return_type(),
+            &FunctionReturn::Single(ResolvedType::scalar(StandardScalar::Integer))
+        );
+        let revision = &prepared.new_function_revisions()[0];
+        assert_eq!(revision.artifact().format(), SERVER_PLAN_FORMAT);
+        assert_eq!(revision.artifact().version(), SERVER_PLAN_VERSION);
+        let plan = ServerPlan::decode(revision.artifact().payload()).unwrap();
+        assert_eq!(plan.projections.len(), 1);
+        assert_eq!(
+            plan.projections[0].value_type.resolved_type,
+            ResolvedType::scalar(StandardScalar::Integer)
         );
     }
 
@@ -14089,6 +14146,243 @@ CREATE CLIENT FUNCTION action_fixture.call_local(p_first TEXT, p_second TEXT)
     }
 
     #[test]
+    fn named_standard_resource_result_uses_catalogue_value_identity() {
+        let verified = action_standard();
+        let text_type_id = verified
+            .catalogue()
+            .value_type_by_name(&semantic_name(&["std", "types", "character_large_object"]))
+            .unwrap()
+            .id();
+        let action_type_id = verified
+            .catalogue()
+            .value_type_by_name(&semantic_name(&["std", "action", "action"]))
+            .unwrap()
+            .id();
+        let base_active = empty_standard_application_active(&verified);
+        let target_schema_id = SchemaId::from_bytes([0xc0; 16]);
+        let target_id = FunctionId::from_bytes([0xc1; 16]);
+        let target_first_parameter_id = ParameterId::from_bytes([0xc3; 16]);
+        let target_second_parameter_id = ParameterId::from_bytes([0xc2; 16]);
+        let target = FunctionDefinition::new(
+            target_id,
+            semantic_name(&["resource_catalogue", "forward"]),
+            FunctionDomain::Server,
+            vec![
+                ParameterDefinition::new(
+                    target_first_parameter_id,
+                    "p_first",
+                    0,
+                    ResolvedType::Value(text_type_id),
+                    None,
+                ),
+                ParameterDefinition::new(
+                    target_second_parameter_id,
+                    "p_second",
+                    1,
+                    ResolvedType::Value(text_type_id),
+                    None,
+                ),
+            ],
+            FunctionReturn::Single(ResolvedType::Named(action_type_id)),
+            FunctionRevisionId::from_bytes([0xc4; 16]),
+            FunctionSecurity::Invoker,
+            Some(FunctionTransaction::ReadOnly),
+            FunctionVolatility::Stable,
+        );
+        let target_artifact = ExecutableArtifact::new(
+            ExecutableArtifactKind::Server,
+            SERVER_PLAN_FORMAT,
+            SERVER_PLAN_VERSION,
+            vec![0],
+            artifact_payload_digest(&[0]).unwrap(),
+        )
+        .unwrap();
+        let target_semantic_hash = function_semantic_digest_with_version(
+            FunctionSemanticHashVersion::Version1,
+            &target,
+            SERVER_PLAN_LANGUAGE_VERSION,
+            &target_artifact,
+            &[],
+            &[],
+        )
+        .unwrap();
+        let target_source_origin =
+            SourceOrigin::new(base_active.source().units()[0].id(), 0, 0).unwrap();
+        let target_revision = FunctionRevisionRecord::new(
+            target_id,
+            FunctionRevisionId::from_bytes([0xc4; 16]),
+            1,
+            target_source_origin,
+            function_declaration_digest(b"resource_catalogue.forward").unwrap(),
+            target_semantic_hash,
+            SERVER_PLAN_LANGUAGE_VERSION,
+            target_artifact,
+        )
+        .unwrap();
+        let target_origins = vec![
+            DefinitionOrigin::new(
+                DefinitionIdentity::Schema(target_schema_id),
+                target_source_origin,
+            ),
+            DefinitionOrigin::new(
+                DefinitionIdentity::Function(target_id),
+                target_source_origin,
+            ),
+            DefinitionOrigin::new(
+                DefinitionIdentity::Parameter {
+                    owner: target_id,
+                    parameter: target_first_parameter_id,
+                },
+                target_source_origin,
+            ),
+            DefinitionOrigin::new(
+                DefinitionIdentity::Parameter {
+                    owner: target_id,
+                    parameter: target_second_parameter_id,
+                },
+                target_source_origin,
+            ),
+        ];
+        let catalogue = CatalogueSnapshot::new_with_functions_and_types(
+            CatalogueRevisionId::from_bytes([0xc5; 16]),
+            vec![SchemaDefinition::new(
+                target_schema_id,
+                semantic_name(&["resource_catalogue"]),
+            )],
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            vec![target],
+        )
+        .unwrap();
+        let hash_context = CatalogueHashContext::version_two(verified.clone());
+        let catalogue_hash = catalogue_digest_with_context(
+            &hash_context,
+            &catalogue,
+            std::slice::from_ref(&target_revision),
+            &[],
+            &target_origins,
+            &[],
+        )
+        .unwrap();
+        let active = ActiveDatabaseRevision::new_with_catalogue_hash_context(
+            ActiveDatabaseRevisionInput::new(
+                RevisionPair::new(base_active.source().id(), catalogue.revision()),
+                base_active.source().clone(),
+                catalogue,
+                catalogue_hash,
+                ActiveRevisionContent::new(
+                    Vec::new(),
+                    vec![target_revision],
+                    target_origins,
+                    Vec::new(),
+                ),
+            ),
+            hash_context,
+        )
+        .unwrap();
+        let standard = check_standard_library_source(&verified).unwrap();
+        let context =
+            StandardApplicationCheckContext::try_new(active.catalogue(), &standard).unwrap();
+        let source = r#"CREATE SCHEMA resource_fixture;
+
+CREATE CLIENT FUNCTION resource_fixture.call(p_first TEXT, p_second TEXT)
+RETURNS std.Action IS
+BEGIN
+    RETURN AWAIT std.data.resource(
+        target => resource_catalogue.forward,
+        arguments => std.call.args(p_second => p_second, p_first => p_first)
+    );
+END;"#;
+        let bundle = SourceBundle::new([SourceUnit::new("named-resource.orna", source)]).unwrap();
+        let report = check_standard_application(&bundle, &context);
+        assert!(
+            report.diagnostics().is_empty(),
+            "named resource source did not check: {:?}",
+            report.diagnostics()
+        );
+
+        let checked = report.preparation_view().unwrap().checked();
+        let checked_caller = checked
+            .client_functions()
+            .iter()
+            .find(|function| function.name().parts() == ["resource_fixture", "call"])
+            .unwrap();
+        let checked_call_site = {
+            let CheckedClientFunctionBody::Expression { expression } = checked_caller.body() else {
+                panic!("named resource client must use an expression body");
+            };
+            let CheckedClientExpression::Await { expression, .. } = expression else {
+                panic!("named resource client must await its resource");
+            };
+            let CheckedClientExpression::Resource { operation } = expression.as_ref() else {
+                panic!("named resource client must retain its resource operation");
+            };
+            assert_eq!(operation.target(), CheckedFunctionId::Existing(target_id));
+            assert_eq!(operation.standard_result_type(), None);
+            assert_eq!(
+                operation.result_type(),
+                SemanticType::Named(CheckedTypeId::Existing(action_type_id))
+            );
+            operation.call_site()
+        };
+
+        let prepared = prepare_standard_application(&report, active.pair(), &active).unwrap();
+        let caller = prepared
+            .candidate()
+            .functions()
+            .iter()
+            .find(|function| function.name().parts() == ["resource_fixture", "call"])
+            .unwrap();
+        let revision = prepared
+            .new_function_revisions()
+            .iter()
+            .find(|revision| revision.function() == caller.id())
+            .unwrap();
+        assert_eq!(revision.artifact().version(), CLIENT_PLAN_RESOURCE_VERSION);
+        let plan = ResourceClientPlan::decode(revision.artifact().payload()).unwrap();
+        let ClientExpressionNode::Await { expression } = plan.expression() else {
+            panic!("prepared named resource plan must await the resource");
+        };
+        let ClientExpressionNode::Resource { operation } = expression.as_ref() else {
+            panic!("prepared named resource plan must contain a resource operation");
+        };
+        assert_eq!(
+            operation.kind(),
+            orna_artifact::client_plan::ResourceKind::Scalar
+        );
+        assert_eq!(operation.target(), target_id);
+        assert_eq!(operation.target_revision(), prepared.candidate_pair());
+        assert_eq!(operation.result_type(), action_type_id);
+        assert_eq!(operation.call_site(), checked_call_site);
+        assert_ne!(operation.call_site().to_bytes(), [0; 16]);
+        let caller_parameter = |name: &str| {
+            caller
+                .parameters()
+                .iter()
+                .find(|parameter| parameter.name() == name)
+                .unwrap()
+                .id()
+        };
+        let mut expected_arguments = vec![
+            (
+                target_second_parameter_id,
+                ClientExpressionNode::ParameterRead {
+                    parameter: caller_parameter("p_second"),
+                },
+            ),
+            (
+                target_first_parameter_id,
+                ClientExpressionNode::ParameterRead {
+                    parameter: caller_parameter("p_first"),
+                },
+            ),
+        ];
+        expected_arguments.sort_by_key(|(parameter, _)| *parameter);
+        assert_eq!(operation.arguments(), expected_arguments.as_slice());
+    }
+
+    #[test]
     fn standard_stream_resource_preparation_materialises_durable_operation_artifact() {
         let verified = resource_standard();
         let text_type_id = verified
@@ -14138,6 +14432,40 @@ CREATE CLIENT FUNCTION action_fixture.call_local(p_first TEXT, p_second TEXT)
             .iter()
             .find(|function| function.name().parts() == ["stream_fixture", "events"])
             .unwrap();
+        let target_revision = prepared
+            .new_function_revisions()
+            .iter()
+            .find(|revision| revision.function() == target.id())
+            .unwrap();
+        assert_eq!(target.current_revision(), target_revision.id());
+        assert_eq!(
+            target_revision.artifact().kind(),
+            ExecutableArtifactKind::Server
+        );
+        assert_eq!(target_revision.artifact().format(), SERVER_PLAN_FORMAT);
+        assert_eq!(target_revision.artifact().version(), SERVER_PLAN_VERSION);
+        assert_eq!(
+            target.return_type(),
+            &FunctionReturn::Stream(ResolvedType::Value(text_type_id))
+        );
+        let target_plan = ServerPlan::decode(target_revision.artifact().payload()).unwrap();
+        let probe = prepared
+            .candidate()
+            .object_type_by_name(&semantic_name(&["stream_fixture", "probe"]))
+            .unwrap();
+        assert_eq!(target_plan.scan.object_type, probe.id());
+        assert_eq!(target_plan.projections.len(), 1);
+        assert_eq!(
+            target_plan.projections[0].value_type.resolved_type,
+            ResolvedType::scalar(StandardScalar::CharacterLargeObject)
+        );
+        let ExpressionKind::FieldPath { ref steps, .. } = target_plan.projections[0].kind else {
+            panic!("stream SERVER plan projection must be a field path");
+        };
+        assert_eq!(steps.len(), 1);
+        assert_eq!(steps[0].owner, probe.id());
+        assert_eq!(steps[0].field, probe.field_by_name("marker").unwrap().id());
+
         let client = prepared
             .candidate()
             .functions()
@@ -14154,10 +14482,16 @@ CREATE CLIENT FUNCTION action_fixture.call_local(p_first TEXT, p_second TEXT)
         let ClientExpressionNode::Await { expression } = plan.expression() else {
             panic!("prepared stream resource plan must keep AWAIT at the return expression");
         };
-        let ClientExpressionNode::Resource { operation: artifact } = expression.as_ref() else {
+        let ClientExpressionNode::Resource {
+            operation: artifact,
+        } = expression.as_ref()
+        else {
             panic!("prepared stream resource plan must contain a resource operation under AWAIT");
         };
-        assert_eq!(artifact.kind(), orna_artifact::client_plan::ResourceKind::Stream);
+        assert_eq!(
+            artifact.kind(),
+            orna_artifact::client_plan::ResourceKind::Stream
+        );
         assert_eq!(artifact.target(), target.id());
         assert_eq!(artifact.target_revision(), prepared.candidate_pair());
         assert_eq!(artifact.result_type(), text_type_id);
@@ -14166,6 +14500,145 @@ CREATE CLIENT FUNCTION action_fixture.call_local(p_first TEXT, p_second TEXT)
         assert!(artifact.arguments().is_empty());
     }
 
+    #[test]
+    fn procedural_stream_resource_preparation_preserves_local_and_operation_identity() {
+        let verified = resource_standard();
+        let text_type_id = verified
+            .catalogue()
+            .value_type_by_name(&semantic_name(&["std", "types", "character_large_object"]))
+            .unwrap()
+            .id();
+        let standard = check_standard_library_source(&verified).unwrap();
+        let active = empty_standard_application_active(&verified);
+        let context =
+            StandardApplicationCheckContext::try_new(active.catalogue(), &standard).unwrap();
+        let source = r#"CREATE SCHEMA stream_fixture;
+
+CREATE TYPE stream_fixture.probe AS OBJECT (
+    marker TEXT NOT NULL
+);
+
+CREATE SERVER FUNCTION stream_fixture.events()
+RETURNS STREAM<TEXT>
+SECURITY INVOKER
+TRANSACTION READ ONLY
+VOLATILITY STABLE
+AS
+    SELECT probe.marker FROM stream_fixture.probe probe;
+
+CREATE CLIENT FUNCTION stream_fixture.read_local() RETURNS STREAM<TEXT> IS
+    LET events std.data.StreamResource<TEXT> := std.data.stream_resource(
+        target => stream_fixture.events,
+        arguments => std.call.args()
+    );
+BEGIN
+    RETURN AWAIT events;
+END;"#;
+        let bundle = SourceBundle::new([SourceUnit::new(
+            "fixtures/stream_resource_procedural.orna",
+            source,
+        )])
+        .unwrap();
+        let report = check_standard_application(&bundle, &context);
+        assert!(
+            report.diagnostics().is_empty(),
+            "procedural stream resource fixture did not check: {:?}",
+            report.diagnostics()
+        );
+
+        let checked_call_site = {
+            let checked = report.preparation_view().unwrap().checked();
+            let client = checked
+                .client_functions()
+                .iter()
+                .find(|function| function.name().parts() == ["stream_fixture", "read_local"])
+                .unwrap();
+            let CheckedClientFunctionBody::Procedural {
+                locals,
+                statements,
+                return_expression,
+            } = client.body()
+            else {
+                panic!("procedural stream resource client must use its block body");
+            };
+            assert_eq!(locals.len(), 1);
+            assert_eq!(statements.len(), 1);
+            let CheckedClientStatement::Let { expression, .. } = &statements[0] else {
+                panic!("procedural stream resource local must be initialized by LET");
+            };
+            let CheckedClientExpression::Resource { operation } = expression else {
+                panic!("procedural stream resource client must retain its constructor");
+            };
+            assert_eq!(
+                operation.kind(),
+                orna_artifact::client_plan::ResourceKind::Stream
+            );
+            let CheckedClientExpression::Await { expression, .. } = return_expression else {
+                panic!("procedural stream resource client must use its local");
+            };
+            assert!(matches!(
+                expression.as_ref(),
+                CheckedClientExpression::LocalRead { local: 0, .. }
+            ));
+            operation.call_site()
+        };
+
+        let prepared = prepare_standard_application(&report, active.pair(), &active).unwrap();
+        let target = prepared
+            .candidate()
+            .functions()
+            .iter()
+            .find(|function| function.name().parts() == ["stream_fixture", "events"])
+            .unwrap();
+        let client = prepared
+            .candidate()
+            .functions()
+            .iter()
+            .find(|function| function.name().parts() == ["stream_fixture", "read_local"])
+            .unwrap();
+        let revision = prepared
+            .new_function_revisions()
+            .iter()
+            .find(|revision| revision.function() == client.id())
+            .unwrap();
+        assert_eq!(
+            revision.artifact().version(),
+            CLIENT_PLAN_PROCEDURAL_VERSION
+        );
+        let plan = ProceduralClientPlan::decode(revision.artifact().payload()).unwrap();
+        assert_eq!(plan.locals().len(), 1);
+        let local_decl = &plan.locals()[0];
+        assert_eq!(
+            local_decl.local_id(),
+            durable_client_local_id(client.id(), 0)
+        );
+        assert_eq!(local_decl.type_id(), text_type_id);
+        assert_eq!(
+            local_decl.kind(),
+            ClientLocalKind::Resource(orna_artifact::client_plan::ResourceKind::Stream)
+        );
+        assert_eq!(plan.statements().len(), 1);
+        assert_eq!(plan.statements()[0].local(), local_decl.local_id());
+        let ClientExpressionNode::Resource { operation } = plan.statements()[0].expression() else {
+            panic!("procedural plan LET must contain a stream resource operation");
+        };
+        assert_eq!(
+            operation.kind(),
+            orna_artifact::client_plan::ResourceKind::Stream
+        );
+        assert_eq!(operation.target(), target.id());
+        assert_eq!(operation.target_revision(), prepared.candidate_pair());
+        assert_eq!(operation.call_site(), checked_call_site);
+        assert_eq!(operation.result_type(), text_type_id);
+        assert!(operation.arguments().is_empty());
+        let ClientExpressionNode::Await { expression } = plan.return_expression() else {
+            panic!("procedural plan return must await the resource local");
+        };
+        let ClientExpressionNode::LocalRead { local } = expression.as_ref() else {
+            panic!("procedural plan return AWAIT must read the resource local");
+        };
+        assert_eq!(*local, local_decl.local_id());
+    }
     #[test]
     fn rejects_legacy_client_state_plan_without_standard_type_identity() {
         let active = empty_active();
