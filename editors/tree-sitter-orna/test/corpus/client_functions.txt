@@ -272,7 +272,7 @@ RETURNS TEXT
 IS
     LET rows TEXT := std.data.resource();
 BEGIN
-    LET result TEXT := AWAIT rows;
+    LET result := AWAIT rows;
     result := result || '!';
     result := AWAIT rows;
     RETURN AWAIT rows;
@@ -330,9 +330,6 @@ END;
           (client_let_statement
             (kw_let)
             (identifier)
-            (type_spec
-              (scalar_type
-                (kw_text)))
             (assignment_operator)
             (client_await_expression
               (kw_await)

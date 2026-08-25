@@ -80,6 +80,17 @@
 (client_field_path parameter: (_) @parameter)
 (client_field_path field: (_) @property)
 
+; CLIENT resource/action targets are callable paths. Keep intermediate members
+; as properties while promoting only the final member of a named target.
+((client_argument
+    name: (_) @target_name
+    value: (client_expression
+        (client_primary_expression
+            (client_field_path
+                field: (_) @function
+                .))))
+    (#eq? @target_name "target"))
+
 (let_declaration name: (identifier) @variable)
 (let_statement name: (identifier) @variable)
 (const_declaration name: (identifier) @variable)
