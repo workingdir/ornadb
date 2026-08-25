@@ -220,6 +220,14 @@ The accepted request records a nested invocation start and the authorisation
 decision through the existing security audit. The terminal result records one of
 completed, failed, or cancelled and may include item and byte counts.
 
+The persistence invariant is that a request denied or cancelled before
+`RESOURCE_ACCEPTED` stores a resource-audit terminal with
+`nested_invocation_id = NULL` and creates no nested invocation-audit row. An
+accepted request stores exactly one `nested_invocation_id = Some(...)`, linked
+to its invocation-audit evidence. This is an internal persistence invariant,
+not a wire-version change or a new protocol field; resource-audit rows do not
+all carry a nested invocation identity.
+
 Audit identity fields include:
 
 ```text
