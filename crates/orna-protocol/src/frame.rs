@@ -9842,6 +9842,92 @@ mod tests {
     }
 
     #[test]
+    fn resource_connection_completion_wins_over_late_client_cancellation() {
+        let mut request = resource_request_fixture();
+        request.resource_kind = ResourceKind::Stream;
+        let request_id = request.request_id;
+        let stream_id = request.stream_id;
+        let target_revision = request.target_revision;
+        let mut connection = ResourceProtocolConnection::new();
+
+        assert_eq!(
+            connection.open(request.clone()),
+            Ok(ResourceFrameDisposition::Applied)
+        );
+        assert_eq!(
+            connection.apply(ResourceServerFrame::Accepted(ResourceAccepted {
+                stream_id,
+                request_id,
+                nested_invocation_id: InvocationId::from_bytes([0x66; 16]),
+                target_revision,
+                resource_kind: ResourceKind::Stream,
+            })),
+            Ok(ResourceFrameDisposition::Applied)
+        );
+        assert_eq!(
+            connection.apply(ResourceServerFrame::Completed(ResourceCompleted {
+                stream_id,
+                request_id,
+                target_revision,
+                final_batch_sequence: 0,
+                total_items: 0,
+            })),
+            Ok(ResourceFrameDisposition::Applied)
+        );
+        assert_eq!(connection.live_resources(), 0);
+        let tombstone_after_completion = connection.terminal.clone();
+
+        assert_eq!(
+            connection.receive(ResourceClientFrame::Cancel(ResourceCancel {
+                stream_id,
+                request_id,
+                reason: ResourceCancellationCode::ClientRequested,
+            })),
+            Ok(ResourceFrameDisposition::DroppedLate)
+        );
+        assert_eq!(connection.live_resources(), 0);
+        assert_eq!(connection.terminal, tombstone_after_completion);
+
+        for frame in [
+            ResourceServerFrame::Values(ResourceValues {
+                stream_id,
+                request_id,
+                target_revision,
+                batch_sequence: 0,
+                item_count: 1,
+                byte_count: 1,
+                values: vec![RuntimeValue::Integer(1)],
+            }),
+            ResourceServerFrame::Completed(ResourceCompleted {
+                stream_id,
+                request_id,
+                target_revision,
+                final_batch_sequence: 0,
+                total_items: 0,
+            }),
+            ResourceServerFrame::Failed(ResourceFailed {
+                stream_id,
+                request_id,
+                target_revision,
+                failure: CallFailure::InternalFailure,
+            }),
+            ResourceServerFrame::Cancelled(ResourceCancelled {
+                stream_id,
+                request_id,
+                target_revision,
+                reason: ResourceCancellationCode::ClientRequested,
+            }),
+        ] {
+            assert_eq!(
+                connection.apply(frame),
+                Ok(ResourceFrameDisposition::DroppedLate)
+            );
+            assert_eq!(connection.live_resources(), 0);
+            assert_eq!(connection.terminal, tombstone_after_completion);
+        }
+    }
+
+    #[test]
     fn resource_connection_rejects_request_id_reuse_across_streams_and_after_cleanup() {
         let mut first = resource_request_fixture();
         first.stream_id = 1;
