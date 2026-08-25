@@ -1599,11 +1599,20 @@ impl CheckedServerFunctionReturnColumn {
 
 /// The checked return shape of one SERVER function.
 ///
-/// `STREAM<T>` carries one flat element type without manufacturing a
-/// synthetic return column. Legacy `ROWS (...)` declarations retain their
-/// existing ordered column representation.
+/// Scalar `Single` and `STREAM<T>` carry one flat element type without
+/// manufacturing a synthetic return column. Legacy `ROWS (...)` declarations
+/// retain their existing ordered column representation.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum CheckedServerFunctionReturn {
+    /// Exactly one value of the resolved scalar type.
+    Single {
+        /// The resolved scalar return type.
+        semantic_type: SemanticType<CheckedTypeId>,
+        /// The standard value identity when the scalar uses one.
+        standard_value_type: Option<TypeId>,
+        /// The source location of the complete scalar declaration.
+        location: SourceLocation,
+    },
     /// Zero or more named return columns.
     Rows(Vec<CheckedServerFunctionReturnColumn>),
     /// Zero or more values of one resolved element type.
@@ -1741,8 +1750,9 @@ impl CheckedServerFunction {
     /// Returns checked `ROWS` return columns in declaration order.
     pub fn return_columns(&self) -> &[CheckedServerFunctionReturnColumn] {
         match &self.return_type {
+            CheckedServerFunctionReturn::Single { .. }
+            | CheckedServerFunctionReturn::Stream { .. } => &[],
             CheckedServerFunctionReturn::Rows(columns) => columns,
-            CheckedServerFunctionReturn::Stream { .. } => &[],
         }
     }
 
@@ -2135,25 +2145,28 @@ pub const STD_TERMINAL_SCHEMA_ID: SchemaId =
 /// The fixed ADR 0057 `std.io` schema identity: `...05` (ADR 0058).
 pub const STD_IO_SCHEMA_ID: SchemaId =
     SchemaId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x05]);
-/// The fixed ADR 0057 `std.json` schema identity: 15 zero bytes then `0x06`.
+/// The fixed V5/ADR 0075 `std.json` schema identity: 15 zero bytes then `0x06`.
 pub const STD_JSON_SCHEMA_ID: SchemaId =
     SchemaId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x06]);
-/// The fixed ADR 0057 `std.data` schema identity: 15 zero bytes then `0x07`.
+/// The reserved, unregistered `std.data` schema identity: 15 zero bytes then `0x07`.
 pub const STD_DATA_SCHEMA_ID: SchemaId =
     SchemaId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x07]);
-/// The fixed ADR 0057 `std.json.Value` value-type identity: `...17`.
+/// The `std.json.Value` value type introduced by V5/ADR 0075 has identity `...11`.
 pub const STD_JSON_VALUE_TYPE_ID: TypeId =
     TypeId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x11]);
-/// The fixed ADR 0057 `std.data.Rows` value-type identity: `...18`.
+/// The reserved, unregistered `std.data.Rows` value-type identity: `...12`.
 pub const STD_DATA_ROWS_TYPE_ID: TypeId =
     TypeId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x12]);
-/// The fixed ADR 0057 `std.json.encode` function identity: 15 zero bytes then `0x11`.
+/// The fixed ADR 0057 `std.json.encode` function identity retained by V5/ADR 0075:
+/// 15 zero bytes then `0x11`.
 pub const STD_JSON_ENCODE_FUNCTION_ID: FunctionId =
     FunctionId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x11]);
-/// The fixed ADR 0057 `std.json.encode.p_value` parameter identity: `...11`.
+/// The fixed ADR 0057 `std.json.encode.p_value` parameter identity retained by
+/// V5/ADR 0075: `...11`.
 pub const STD_JSON_ENCODE_PARAMETER_ID: ParameterId =
     ParameterId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x11]);
-/// The fixed ADR 0057 `std.json.encode` function-revision identity: `...11`.
+/// The fixed ADR 0057 `std.json.encode` function-revision identity retained by
+/// V5/ADR 0075: `...11`.
 pub const STD_JSON_ENCODE_FUNCTION_REVISION_ID: FunctionRevisionId =
     FunctionRevisionId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x11]);
 /// The fixed ADR 0057 `std.terminal.present_table` function identity: `...12`.
@@ -3735,18 +3748,23 @@ impl StandardApplicationCheckReport {
                 parameter.location = location;
             }
             "server return" => {
-                let Some(column) = bundle
-                    .inner
-                    .server_functions
-                    .first_mut()
-                    .and_then(|function| match &mut function.return_type {
-                        CheckedServerFunctionReturn::Rows(columns) => columns.first_mut(),
-                        CheckedServerFunctionReturn::Stream { .. } => None,
-                    })
-                else {
+                let Some(function) = bundle.inner.server_functions.first_mut() else {
                     return false;
                 };
-                column.location = location;
+                match &mut function.return_type {
+                    CheckedServerFunctionReturn::Single {
+                        location: current, ..
+                    } => {
+                        *current = location;
+                    }
+                    CheckedServerFunctionReturn::Rows(columns) => {
+                        let Some(column) = columns.first_mut() else {
+                            return false;
+                        };
+                        column.location = location;
+                    }
+                    CheckedServerFunctionReturn::Stream { .. } => return false,
+                }
             }
             "server reference" => {
                 let Some(reference) = bundle

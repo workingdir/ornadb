@@ -924,6 +924,24 @@ pub fn encode_active_value(
 ) -> Result<Vec<u8>, ValueCodecError> {
     match value {
         RuntimeValue::Record(value) => encode_record_value(active, value),
+        RuntimeValue::Enum(value) => {
+            validate_active_enum_value(active, value.enum_type(), value.label())?;
+            encode_variable(ENUM_TAG, value.enum_type(), value.label().as_bytes())
+                .map(with_active_marker)
+        }
+        RuntimeValue::Null(value) if value.resolved_type().named_type().is_some() => {
+            let enum_type = value
+                .resolved_type()
+                .named_type()
+                .expect("named type checked");
+            require_active_enum_type_for_revision(active, enum_type)?;
+            Ok(encode_with_marker(
+                ACTIVE_MARKER,
+                NULL_ENUM_TAG,
+                enum_type,
+                &[],
+            ))
+        }
         _ => encode_catalogue_value(active.catalogue(), value).map(with_active_marker),
     }
 }
@@ -1024,7 +1042,7 @@ fn decode_registered_value_with_marker(
         OPAQUE_TAG => OpaqueValue::new(active, registry, type_id, payload)
             .map(RuntimeValue::Opaque)
             .map_err(|source| ValueCodecError::OpaqueValue { source }),
-        _ => decode_active_non_record_value(active, tag, type_id, payload),
+        _ => decode_catalogue_value_parts(active.catalogue(), tag, type_id, payload),
     }
 }
 /// Encodes one complete ORV5/ORV6 runtime value.
@@ -4777,7 +4795,20 @@ fn decode_active_non_record_value(
     type_id: TypeId,
     payload: &[u8],
 ) -> Result<RuntimeValue, ValueCodecError> {
-    decode_catalogue_value_parts(active.catalogue(), tag, type_id, payload)
+    match tag {
+        NULL_ENUM_TAG => {
+            require_empty_payload(tag, payload)?;
+            require_active_enum_type_for_revision(active, type_id)?;
+            RuntimeValue::null(ResolvedType::named(type_id))
+                .map_err(|_| ValueCodecError::UnsupportedValue)
+        }
+        ENUM_TAG => {
+            require_payload_limit(payload.len())?;
+            let label = std::str::from_utf8(payload).map_err(|_| ValueCodecError::InvalidUtf8)?;
+            validate_active_enum_value(active, type_id, label).map(RuntimeValue::Enum)
+        }
+        _ => decode_catalogue_value_parts(active.catalogue(), tag, type_id, payload),
+    }
 }
 
 fn decode_catalogue_value_parts(
@@ -5139,6 +5170,22 @@ fn validate_enum_value(
     })
 }
 
+fn require_active_enum_type_for_revision(
+    active: &ActiveDatabaseRevision,
+    enum_type: TypeId,
+) -> Result<(), ValueCodecError> {
+    if active.catalogue().enum_type_by_id(enum_type).is_some()
+        || active
+            .catalogue_hash_context()
+            .standard()
+            .is_some_and(|standard| standard.catalogue().enum_type_by_id(enum_type).is_some())
+    {
+        Ok(())
+    } else {
+        Err(ValueCodecError::InactiveEnumType { enum_type })
+    }
+}
+
 fn validate_active_enum_value(
     active: &ActiveDatabaseRevision,
     enum_type: TypeId,
@@ -5220,8 +5267,8 @@ mod tests {
         CatalogueRevisionId, FieldId, FunctionId, InvocationId, ObjectId, ParameterId, PrincipalId,
         SchemaId, SourceBundleId, SourceRevisionId, SourceUnitId,
         canonical_hash::{
-            catalogue_digest_with_context, source_bundle_digest, source_revision_record_digest,
-            source_unit_content_digest,
+            calculate_standard_library_digest, catalogue_digest_with_context, source_bundle_digest,
+            source_revision_record_digest, source_unit_content_digest,
             verify_standard_library_snapshot as verify_core_standard_library_snapshot,
         },
         catalogue::{
@@ -5231,17 +5278,18 @@ mod tests {
         },
         revision::{
             ActiveDatabaseRevision, ActiveDatabaseRevisionInput, ActiveRevisionContent,
-            CatalogueHashContext, DefinitionIdentity, DefinitionOrigin, RevisionPair, SourceOrigin,
-            StoredSourceRevision, StoredSourceUnit,
+            CatalogueHashContext, DefinitionIdentity, DefinitionOrigin, RevisionPair, Sha256Digest,
+            SourceOrigin, StandardLibrarySnapshot, StoredSourceRevision, StoredSourceUnit,
         },
         types::{ResolvedType, StandardScalar, TypeDescriptor},
-        value::{EnumValue, OpaqueValue, RecordValue, RuntimeFloat, RuntimeValue},
+        value::{EnumValue, OpaqueValue, RecordValue, ResultRowsError, RuntimeFloat, RuntimeValue},
     };
     use orna_standard::{
         BIGINT_TYPE_ID, BINARY_LARGE_OBJECT_TYPE_ID, BOOLEAN_TYPE_ID,
-        CHARACTER_LARGE_OBJECT_TYPE_ID, FLOAT_TYPE_ID, INTEGER_TYPE_ID, OPAQUE_TOKEN_TYPE_ID,
-        STANDARD_TYPE_IDS, registered_opaque_codecs, retained_standard_library_snapshot,
-        verify_standard_library_snapshot,
+        CHARACTER_LARGE_OBJECT_TYPE_ID, DATE_TYPE_ID, DECIMAL_TYPE_ID, DURATION_TYPE_ID,
+        FLOAT_TYPE_ID, INTEGER_TYPE_ID, OPAQUE_TOKEN_TYPE_ID, STANDARD_TYPE_IDS, TIME_TYPE_ID,
+        TIMESTAMP_TYPE_ID, UUID_TYPE_ID, VOID_TYPE_ID, registered_opaque_codecs,
+        retained_standard_library_snapshot, verify_standard_library_snapshot,
     };
     use proptest::prelude::*;
 
@@ -5346,6 +5394,55 @@ mod tests {
         )
         .unwrap();
         verify_core_standard_library_snapshot(alternate).unwrap()
+    }
+
+    const STANDARD_ENUM_TYPE: TypeId = TypeId::from_bytes([0x90; 16]);
+
+    fn verified_standard_with_enum() -> orna_core::revision::VerifiedStandardLibrarySnapshot {
+        let accepted = retained_standard_library_snapshot().unwrap();
+        let accepted_catalogue = accepted.catalogue();
+        let catalogue = CatalogueSnapshot::new_with_enum_types(
+            accepted_catalogue.revision(),
+            accepted_catalogue.schemas().to_vec(),
+            accepted_catalogue.object_types().to_vec(),
+            accepted_catalogue.value_types().to_vec(),
+            vec![EnumTypeDefinition::new(
+                STANDARD_ENUM_TYPE,
+                QualifiedSemanticName::new(["std", "mode"]).unwrap(),
+                ["safe", "unsafe"],
+            )],
+            accepted_catalogue.type_bindings().to_vec(),
+        )
+        .unwrap();
+        let mut origins = accepted.origins().to_vec();
+        origins.push(DefinitionOrigin::new(
+            DefinitionIdentity::ValueType(STANDARD_ENUM_TYPE),
+            SourceOrigin::new(accepted.source().units()[0].id(), 0, 1).unwrap(),
+        ));
+        let provisional = StandardLibrarySnapshot::new(
+            accepted.revision(),
+            accepted.digest_version(),
+            accepted.source().clone(),
+            accepted.language_version(),
+            catalogue.clone(),
+            origins.clone(),
+            Sha256Digest::from_bytes([0x98; 32]),
+        )
+        .unwrap();
+        let digest = calculate_standard_library_digest(&provisional).unwrap();
+        verify_core_standard_library_snapshot(
+            StandardLibrarySnapshot::new(
+                provisional.revision(),
+                provisional.digest_version(),
+                provisional.source().clone(),
+                provisional.language_version(),
+                catalogue,
+                origins,
+                digest,
+            )
+            .unwrap(),
+        )
+        .unwrap()
     }
 
     fn active_revision_with_standard_named_collision() -> ActiveDatabaseRevision {
@@ -6932,6 +7029,63 @@ mod tests {
     }
 
     #[test]
+    fn active_codec_round_trips_verified_standard_enums_with_application_precedence() {
+        let active = active_record_revision_with_types_and_standard(
+            TypeDescriptor::named(BOOLEAN_TYPE_ID),
+            TypeDescriptor::named(ENUM_TYPE),
+            verified_standard_with_enum(),
+        );
+        let standard = active
+            .catalogue_hash_context()
+            .standard()
+            .expect("the fixture pins a verified standard library");
+        let standard_value = RuntimeValue::Enum(
+            EnumValue::new(standard.catalogue(), STANDARD_ENUM_TYPE, "safe")
+                .expect("the verified standard enum declares safe"),
+        );
+        let encoded_standard = encode_active_value(&active, &standard_value).unwrap();
+        assert_eq!(
+            decode_active_value(&active, &encoded_standard),
+            Ok(standard_value)
+        );
+
+        let standard_null = RuntimeValue::null(ResolvedType::named(STANDARD_ENUM_TYPE)).unwrap();
+        let encoded_standard_null = encode_active_value(&active, &standard_null).unwrap();
+        assert_eq!(
+            decode_active_value(&active, &encoded_standard_null),
+            Ok(standard_null)
+        );
+
+        let application_value = RuntimeValue::Enum(
+            EnumValue::new(active.catalogue(), ENUM_TYPE, "qualified")
+                .expect("the application enum declares qualified"),
+        );
+        let encoded_application = encode_active_value(&active, &application_value).unwrap();
+        assert_eq!(
+            decode_active_value(&active, &encoded_application),
+            Ok(application_value)
+        );
+
+        let mut unknown_type = encoded_value(0x0a, TypeId::from_bytes([0x99; 16]), b"safe");
+        unknown_type[..4].copy_from_slice(b"ORV3");
+        assert_eq!(
+            decode_active_value(&active, &unknown_type),
+            Err(ValueCodecError::InactiveEnumType {
+                enum_type: TypeId::from_bytes([0x99; 16]),
+            })
+        );
+        let mut undeclared_label = encoded_value(0x0a, STANDARD_ENUM_TYPE, b"retired");
+        undeclared_label[..4].copy_from_slice(b"ORV3");
+        assert_eq!(
+            decode_active_value(&active, &undeclared_label),
+            Err(ValueCodecError::UndeclaredEnumLabel {
+                enum_type: STANDARD_ENUM_TYPE,
+                label: String::from("retired"),
+            })
+        );
+    }
+
+    #[test]
     fn active_codec_rejects_record_structure_and_value_corruption() {
         let active = active_record_revision();
         let record = &active.catalogue().record_value_types()[0];
@@ -7363,7 +7517,7 @@ mod tests {
     }
 
     #[test]
-    fn null_scalar_accepts_exactly_the_six_supported_standard_identities() {
+    fn runtime_and_codec_accept_exactly_the_six_supported_standard_scalar_families() {
         let supported = [
             (StandardScalar::Boolean, BOOLEAN_TYPE_ID),
             (StandardScalar::Integer, INTEGER_TYPE_ID),
@@ -7385,11 +7539,23 @@ mod tests {
             assert_eq!(decode_value(&encoded), Ok(value));
         }
 
-        let supported_ids = supported.map(|(_, type_id)| type_id);
-        for unsupported in STANDARD_TYPE_IDS
-            .into_iter()
-            .filter(|candidate| !supported_ids.contains(candidate))
-        {
+        // Keep this list explicit: deriving it by subtracting supported IDs would let
+        // a newly admitted scalar silently widen the contract without changing this proof.
+        let unsupported = [
+            (StandardScalar::Decimal, DECIMAL_TYPE_ID),
+            (StandardScalar::Uuid, UUID_TYPE_ID),
+            (StandardScalar::Date, DATE_TYPE_ID),
+            (StandardScalar::Time, TIME_TYPE_ID),
+            (StandardScalar::Timestamp, TIMESTAMP_TYPE_ID),
+            (StandardScalar::Duration, DURATION_TYPE_ID),
+            (StandardScalar::Void, VOID_TYPE_ID),
+        ];
+        for (scalar, unsupported) in unsupported {
+            let resolved_type = ResolvedType::scalar(scalar);
+            assert_eq!(
+                RuntimeValue::null(resolved_type),
+                Err(ResultRowsError::UnsupportedRuntimeType { resolved_type })
+            );
             let mut encoded = b"ORV1".to_vec();
             encoded.push(0x00);
             encoded.extend_from_slice(&unsupported.to_bytes());
