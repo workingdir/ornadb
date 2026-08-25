@@ -1313,6 +1313,7 @@ impl ActiveDatabaseRevision {
             catalogue_hash_context
                 .standard()
                 .map(VerifiedStandardLibrarySnapshot::catalogue),
+            None,
             &expressions,
             &function_revisions,
             &references,
@@ -1716,6 +1717,17 @@ impl DeployableRevision {
         input: DeployableRevisionInput,
         catalogue_hash_context: CatalogueHashContext,
     ) -> Result<Self, RevisionInvariantError> {
+        Self::new_with_catalogue_hash_context_and_parent(input, catalogue_hash_context, None)
+    }
+
+    /// Creates a deployable revision while allowing references to definitions
+    /// retained in the expected base catalogue. The parent is validation-only
+    /// and is not part of the candidate catalogue or its hash.
+    pub fn new_with_catalogue_hash_context_and_parent(
+        input: DeployableRevisionInput,
+        catalogue_hash_context: CatalogueHashContext,
+        parent: Option<&CatalogueSnapshot>,
+    ) -> Result<Self, RevisionInvariantError> {
         let DeployableRevisionInput {
             expected_base,
             source,
@@ -1753,6 +1765,14 @@ impl DeployableRevision {
             return Err(RevisionInvariantError::DeployableCatalogueParentMismatch {
                 expected: expected_base.catalogue(),
                 actual: parent_catalogue,
+            });
+        }
+        if let Some(parent) = parent
+            && parent.revision() != expected_base.catalogue()
+        {
+            return Err(RevisionInvariantError::DeployableCatalogueParentMismatch {
+                expected: expected_base.catalogue(),
+                actual: parent.revision(),
             });
         }
         if candidate.revision() == parent_catalogue {
@@ -1800,6 +1820,7 @@ impl DeployableRevision {
             catalogue_hash_context
                 .standard()
                 .map(VerifiedStandardLibrarySnapshot::catalogue),
+            parent,
             &expressions,
             revision_evidence,
             &references,
@@ -2946,6 +2967,7 @@ fn validate_references(
     source: &StoredSourceRevision,
     catalogue: &CatalogueSnapshot,
     standard: Option<&CatalogueSnapshot>,
+    parent: Option<&CatalogueSnapshot>,
     expressions: &[ExpressionArtifact],
     revisions: &[FunctionRevisionRecord],
     references: &[DefinitionReference],
@@ -2963,7 +2985,13 @@ fn validate_references(
 
     for reference in references {
         validate_source_origin(source, reference.source_origin)?;
-        if !reference_target_exists(catalogue, standard, &expression_ids, reference.target) {
+        if !reference_target_exists(
+            catalogue,
+            standard,
+            parent,
+            &expression_ids,
+            reference.target,
+        ) {
             return Err(RevisionInvariantError::ReferenceTargetNotInRevision {
                 target: reference.target,
             });
@@ -3120,7 +3148,7 @@ fn validate_standard_executables(
         &revisions,
         FunctionRevisionSet::NewCandidate,
     )?;
-    validate_references(source, catalogue, None, &[], &revisions, &references)
+    validate_references(source, catalogue, None, None, &[], &revisions, &references)
 }
 
 fn validate_source_origin(
@@ -3293,6 +3321,7 @@ fn is_sealed_inspect_type_id(type_id: TypeId) -> bool {
 fn reference_target_exists(
     catalogue: &CatalogueSnapshot,
     standard: Option<&CatalogueSnapshot>,
+    parent: Option<&CatalogueSnapshot>,
     expression_ids: &HashSet<ExpressionId>,
     target: DefinitionReferenceTarget,
 ) -> bool {
@@ -3322,11 +3351,22 @@ fn reference_target_exists(
                         .record_value_type_by_id(owner)
                         .and_then(|record_value_type| record_value_type.field_by_id(field))
                         .is_some()
+            })
+            || parent.is_some_and(|parent| {
+                parent
+                    .object_type_by_id(owner)
+                    .and_then(|object_type| object_type.field_by_id(field))
+                    .is_some()
+                    || parent
+                        .record_value_type_by_id(owner)
+                        .and_then(|record_value_type| record_value_type.field_by_id(field))
+                        .is_some()
             });
     }
     let identity = target.into();
     definition_exists(catalogue, expression_ids, identity)
         || standard.is_some_and(|standard| definition_exists(standard, expression_ids, identity))
+        || parent.is_some_and(|parent| definition_exists(parent, expression_ids, identity))
 }
 
 pub(crate) fn reference_kind_accepts_target(
@@ -5509,11 +5549,13 @@ mod tests {
         assert!(reference_target_exists(
             &catalogue,
             None,
+            None,
             &HashSet::new(),
             target,
         ));
         assert!(!reference_target_exists(
             &catalogue,
+            None,
             None,
             &HashSet::new(),
             DefinitionReferenceTarget::Field {

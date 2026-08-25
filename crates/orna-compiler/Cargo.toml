@@ -9,3 +9,6 @@ license.workspace = true
 orna-artifact = { path = "../orna-artifact" }
 orna-core = { path = "../orna-core" }
 orna-syntax = { path = "../orna-syntax" }
+
+[dev-dependencies]
+proptest = { version = "1.11.0", default-features = false, features = ["std"] }

@@ -2854,6 +2854,7 @@ fn reconcile_retained_ui_source(
     if !matches_qualified_name(&declaration.name, ui_definition.name())
         || decode_sql_string_literal(&declaration.kernel_contract.text).as_deref()
             != Some(ui_definition.representation_contract())
+        || !matches!(ui_definition.mutability(), ValueTypeMutability::Immutable)
         || ui_definition.persistence() != ValueTypePersistence::Transient
     {
         return Err(StandardLibraryError::RetainedSourceMismatch);
@@ -4111,8 +4112,9 @@ mod tests {
         ACTION_MAGIC, BIGINT_TYPE_ID, BINARY_LARGE_OBJECT_TYPE_ID, BOOLEAN_TYPE_ID,
         BYTE_STREAM_MAGIC, CHARACTER_LARGE_OBJECT_TYPE_ID, DATE_TYPE_ID, DECIMAL_TYPE_ID,
         DURATION_TYPE_ID, EXPECTED_TYPE_BINDING_IDS, FLOAT_TYPE_ID, INTEGER_TYPE_ID, JSON_MAGIC,
-        LANGUAGE_VERSION_IDENTITY, OPAQUE_TOKEN_TYPE_ID, SOURCE_LOGICAL_PATH,
-        STANDARD_CATALOGUE_REVISION_ID, STANDARD_CATALOGUE_V2_REVISION_ID,
+        LANGUAGE_VERSION_IDENTITY, OPAQUE_TOKEN_TYPE_ID, RETAINED_STANDARD_INVOKE_SOURCE,
+        RETAINED_STANDARD_OUTPUT_SOURCE, RETAINED_STANDARD_SOURCE, RETAINED_STANDARD_UI_SOURCE,
+        SOURCE_LOGICAL_PATH, STANDARD_CATALOGUE_REVISION_ID, STANDARD_CATALOGUE_V2_REVISION_ID,
         STANDARD_CATALOGUE_V3_REVISION_ID, STANDARD_CATALOGUE_V4_REVISION_ID,
         STANDARD_CATALOGUE_V5_REVISION_ID, STANDARD_CATALOGUE_V6_REVISION_ID,
         STANDARD_LIBRARY_REVISION_ID, STANDARD_LIBRARY_V2_REVISION_ID,
@@ -7474,6 +7476,57 @@ EXPORT TYPE std.action.Action AS std.Action;
     }
 
     #[test]
+    fn retained_v4_ui_reconciliation_rejects_mutable_ui_declaration() {
+        let mutable_ui =
+            RETAINED_STANDARD_UI_SOURCE.replace("\n    IMMUTABLE\n", "\n    MUTABLE\n");
+        let manifest = standard_library_v4_manifest().expect("the V4 manifest is valid");
+
+        assert!(matches!(
+            super::reconcile_retained_ui_source(&mutable_ui, manifest.catalogue()),
+            Err(StandardLibraryError::RetainedSourceMismatch)
+        ));
+    }
+
+    #[test]
+    fn retained_v4_ui_reconciliation_accepts_canonical_immutable_catalogue() {
+        let manifest = standard_library_v4_manifest().expect("the V4 manifest is valid");
+        let ui_definition = manifest
+            .catalogue()
+            .type_definition_by_id(STD_UI_TYPE_ID)
+            .expect("the canonical UI definition is retained")
+            .as_opaque_value()
+            .expect("the canonical UI definition is opaque");
+        assert!(matches!(
+            ui_definition.mutability(),
+            ValueTypeMutability::Immutable
+        ));
+
+        let origins =
+            super::reconcile_retained_ui_source(RETAINED_STANDARD_UI_SOURCE, manifest.catalogue())
+                .expect("the canonical immutable UI source reconciles");
+        assert_eq!(origins.len(), 3);
+        assert_eq!(
+            origins[0].identity(),
+            DefinitionIdentity::Schema(STD_UI_SCHEMA_ID)
+        );
+        assert_eq!(
+            origins[1].identity(),
+            DefinitionIdentity::ValueType(STD_UI_TYPE_ID)
+        );
+        assert_eq!(
+            origins[2].identity(),
+            DefinitionIdentity::TypeBinding(
+                manifest
+                    .catalogue()
+                    .type_bindings()
+                    .get(33)
+                    .expect("the canonical UI binding is retained")
+                    .id(),
+            )
+        );
+    }
+
+    #[test]
     fn retains_the_v4_ui_standard_snapshot() {
         let snapshot = retained_standard_library_v4_snapshot()
             .expect("the retained V4 standard source is valid");
@@ -8369,6 +8422,69 @@ EXPORT TYPE std.action.Action AS std.Action;
         let verified = super::verify_standard_library_v5_snapshot(snapshot)
             .expect("the retained V5 source verifies");
         assert!(super::registered_opaque_codecs(&verified).is_ok());
+    }
+
+    #[test]
+    fn v5_json_origins_match_declaration_identities_and_exact_source_slices() {
+        let snapshot = super::retained_standard_library_v5_snapshot()
+            .expect("the retained V5 source is valid");
+        let source = snapshot.source().units()[4].content();
+        let json_origins = snapshot
+            .origins()
+            .iter()
+            .filter(|origin| origin.source().source_unit() == super::STD_JSON_SOURCE_UNIT_ID)
+            .collect::<Vec<_>>();
+        assert_eq!(json_origins.len(), 5);
+
+        let binding_id = snapshot
+            .catalogue()
+            .type_bindings()
+            .iter()
+            .find(|binding| binding.target() == super::STD_JSON_VALUE_TYPE_ID)
+            .expect("the V5 JSON export is retained")
+            .id();
+        let expected = [
+            (
+                DefinitionIdentity::Schema(super::STD_JSON_SCHEMA_ID),
+                0,
+                23,
+                "CREATE SCHEMA std.json;",
+            ),
+            (
+                DefinitionIdentity::ValueType(super::STD_JSON_VALUE_TYPE_ID),
+                25,
+                144,
+                "CREATE TYPE std.json.Value AS VALUE\n    OPAQUE\n    KERNEL CONTRACT 'orna.std.value.json@1'\n    IMMUTABLE\n    TRANSIENT;",
+            ),
+            (
+                DefinitionIdentity::TypeBinding(binding_id),
+                146,
+                190,
+                "EXPORT TYPE std.json.Value AS std.JsonValue;",
+            ),
+            (
+                DefinitionIdentity::Function(super::STD_JSON_ENCODE_FUNCTION_ID),
+                192,
+                366,
+                "CREATE SERVER FUNCTION std.json.encode(\n    p_value std.json.Value\n)\nRETURNS std.io.ByteStream\nSECURITY INVOKER\nTRANSACTION READ ONLY\nVOLATILITY STABLE\nAS\n    SELECT p_value;",
+            ),
+            (
+                DefinitionIdentity::Parameter {
+                    owner: super::STD_JSON_ENCODE_FUNCTION_ID,
+                    parameter: super::STD_JSON_ENCODE_PARAMETER_ID,
+                },
+                236,
+                258,
+                "p_value std.json.Value",
+            ),
+        ];
+
+        for (origin, (identity, start, end, slice)) in json_origins.iter().zip(expected) {
+            assert_eq!(origin.identity(), identity);
+            assert_eq!(origin.source().byte_start(), start);
+            assert_eq!(origin.source().byte_end(), end);
+            assert_eq!(&source[start as usize..end as usize], slice);
+        }
     }
 
     #[test]
@@ -9502,6 +9618,205 @@ EXPORT TYPE std.action.Action AS std.Action;
             Err(OpaqueValueError::InvalidJsonBody {
                 opaque_type: STD_JSON_VALUE_TYPE_ID,
             })
+        );
+    }
+
+    #[test]
+    fn v5_json_codec_rejects_malformed_and_trailing_frame_bytes() {
+        let verified = super::verify_standard_library_v5_snapshot(
+            super::retained_standard_library_v5_snapshot()
+                .expect("the retained V5 standard source is valid"),
+        )
+        .expect("the retained V5 standard source verifies");
+        let registry =
+            super::registered_opaque_codecs(&verified).expect("the V5 opaque codecs register");
+        let active = empty_version_two_active_revision(&verified);
+
+        let mut truncated_body = Vec::from(JSON_MAGIC.as_bytes());
+        truncated_body.extend_from_slice(&2_u32.to_be_bytes());
+        truncated_body.extend_from_slice(b"{");
+        assert_eq!(
+            OpaqueValue::new(&active, &registry, STD_JSON_VALUE_TYPE_ID, &truncated_body,),
+            Err(OpaqueValueError::InvalidFrameLength {
+                opaque_type: STD_JSON_VALUE_TYPE_ID,
+            })
+        );
+
+        let malformed_json = br#"{"a":}"#;
+        let mut malformed_body = Vec::from(JSON_MAGIC.as_bytes());
+        malformed_body.extend_from_slice(&(malformed_json.len() as u32).to_be_bytes());
+        malformed_body.extend_from_slice(malformed_json);
+        assert_eq!(
+            OpaqueValue::new(&active, &registry, STD_JSON_VALUE_TYPE_ID, &malformed_body,),
+            Err(OpaqueValueError::InvalidJsonBody {
+                opaque_type: STD_JSON_VALUE_TYPE_ID,
+            })
+        );
+
+        let body = br#"{"a":1}"#;
+        let mut trailing = Vec::from(JSON_MAGIC.as_bytes());
+        trailing.extend_from_slice(&(body.len() as u32).to_be_bytes());
+        trailing.extend_from_slice(body);
+        trailing.push(0);
+        assert_eq!(
+            OpaqueValue::new(&active, &registry, STD_JSON_VALUE_TYPE_ID, &trailing),
+            Err(OpaqueValueError::InvalidFrameLength {
+                opaque_type: STD_JSON_VALUE_TYPE_ID,
+            })
+        );
+    }
+
+    #[test]
+    fn v5_json_registry_accepts_canonical_values_and_rejects_wrong_magic_and_noncanonical_frames() {
+        let verified = super::verify_standard_library_v5_snapshot(
+            super::retained_standard_library_v5_snapshot()
+                .expect("the retained V5 standard source is valid"),
+        )
+        .expect("the retained V5 standard source verifies");
+        assert_eq!(verified.revision(), STANDARD_LIBRARY_V5_REVISION_ID);
+        assert_eq!(
+            verified.catalogue().revision(),
+            STANDARD_CATALOGUE_V5_REVISION_ID
+        );
+        assert_eq!(JSON_MAGIC, "ORNA-JSON-VALUE/1 ");
+
+        let registry = super::registered_opaque_codecs(&verified)
+            .expect("the V5 opaque codecs register the JSON codec");
+        let active = empty_version_two_active_revision(&verified);
+        let frame = |magic: &[u8], body: &[u8]| {
+            let mut payload = Vec::from(magic);
+            payload.extend_from_slice(
+                &u32::try_from(body.len())
+                    .expect("the JSON body length fits in the frame")
+                    .to_be_bytes(),
+            );
+            payload.extend_from_slice(body);
+            payload
+        };
+
+        let canonical_body = br#"{"a":1,"nested":[true,null]}"#;
+        let canonical_payload = frame(JSON_MAGIC.as_bytes(), canonical_body);
+        let value = OpaqueValue::new(
+            &active,
+            &registry,
+            STD_JSON_VALUE_TYPE_ID,
+            &canonical_payload,
+        )
+        .expect("the V5 JSON registry accepts canonical JSON");
+        assert_eq!(value.opaque_type(), STD_JSON_VALUE_TYPE_ID);
+        assert_eq!(value.canonical_payload(), canonical_payload.as_slice());
+
+        let wrong_magic = frame(b"WRONG-JSON/1 ", canonical_body);
+        assert_eq!(
+            OpaqueValue::new(&active, &registry, STD_JSON_VALUE_TYPE_ID, &wrong_magic),
+            Err(OpaqueValueError::InvalidMagic {
+                opaque_type: STD_JSON_VALUE_TYPE_ID,
+            })
+        );
+
+        let noncanonical_body = br#"{ "a":1,"nested":[true,null]}"#;
+        let noncanonical_payload = frame(JSON_MAGIC.as_bytes(), noncanonical_body);
+        assert_eq!(
+            OpaqueValue::new(
+                &active,
+                &registry,
+                STD_JSON_VALUE_TYPE_ID,
+                &noncanonical_payload,
+            ),
+            Err(OpaqueValueError::InvalidJsonBody {
+                opaque_type: STD_JSON_VALUE_TYPE_ID,
+            })
+        );
+    }
+
+    #[test]
+    fn v6_json_registry_accepts_canonical_values_and_rejects_wrong_magic_and_noncanonical_frames() {
+        let verified = super::verify_standard_library_v6_snapshot(
+            super::retained_standard_library_v6_snapshot()
+                .expect("the retained V6 standard source is valid"),
+        )
+        .expect("the retained V6 standard source verifies");
+        assert_eq!(verified.revision(), STANDARD_LIBRARY_V6_REVISION_ID);
+        assert_eq!(
+            verified.catalogue().revision(),
+            STANDARD_CATALOGUE_V6_REVISION_ID
+        );
+        assert_eq!(JSON_MAGIC, "ORNA-JSON-VALUE/1 ");
+
+        let registry = super::registered_opaque_codecs(&verified)
+            .expect("the V6 opaque codecs register the JSON codec");
+        let active = empty_version_two_active_revision(&verified);
+        let frame = |magic: &[u8], body: &[u8]| {
+            let mut payload = Vec::from(magic);
+            payload.extend_from_slice(
+                &u32::try_from(body.len())
+                    .expect("the JSON body length fits in the frame")
+                    .to_be_bytes(),
+            );
+            payload.extend_from_slice(body);
+            payload
+        };
+
+        let canonical_body = br#"{"a":1,"nested":[true,null]}"#;
+        let canonical_payload = frame(JSON_MAGIC.as_bytes(), canonical_body);
+        let value = OpaqueValue::new(
+            &active,
+            &registry,
+            STD_JSON_VALUE_TYPE_ID,
+            &canonical_payload,
+        )
+        .expect("the V6 JSON registry accepts canonical JSON");
+        assert_eq!(value.opaque_type(), STD_JSON_VALUE_TYPE_ID);
+        assert_eq!(value.canonical_payload(), canonical_payload.as_slice());
+
+        let wrong_magic = frame(b"WRONG-JSON/1 ", canonical_body);
+        assert_eq!(
+            OpaqueValue::new(&active, &registry, STD_JSON_VALUE_TYPE_ID, &wrong_magic),
+            Err(OpaqueValueError::InvalidMagic {
+                opaque_type: STD_JSON_VALUE_TYPE_ID,
+            })
+        );
+
+        let noncanonical_body = br#"{ "a":1,"nested":[true,null]}"#;
+        let noncanonical_payload = frame(JSON_MAGIC.as_bytes(), noncanonical_body);
+        assert_eq!(
+            OpaqueValue::new(
+                &active,
+                &registry,
+                STD_JSON_VALUE_TYPE_ID,
+                &noncanonical_payload,
+            ),
+            Err(OpaqueValueError::InvalidJsonBody {
+                opaque_type: STD_JSON_VALUE_TYPE_ID,
+            })
+        );
+    }
+
+    #[test]
+    fn v5_append_only_retains_v4_source_units_byte_for_byte() {
+        let v4 = super::retained_standard_library_v4_snapshot()
+            .expect("the retained V4 standard source is valid");
+        let v5 = super::retained_standard_library_v5_snapshot()
+            .expect("the retained V5 standard source is valid");
+
+        assert_eq!(&v5.source().units()[..4], v4.source().units());
+        assert_eq!(v4.source().units()[0].content(), RETAINED_STANDARD_SOURCE);
+        assert_eq!(
+            v4.source().units()[1].content(),
+            RETAINED_STANDARD_INVOKE_SOURCE
+        );
+        assert_eq!(
+            v4.source().units()[2].content(),
+            RETAINED_STANDARD_OUTPUT_SOURCE
+        );
+        assert_eq!(
+            v4.source().units()[3].content(),
+            RETAINED_STANDARD_UI_SOURCE
+        );
+        assert_eq!(v4.digest(), super::ACCEPTED_V4_STANDARD_LIBRARY_DIGEST);
+        assert_eq!(
+            super::standard_library_digest(&v4).expect("the V4 digest recomputes"),
+            super::ACCEPTED_V4_STANDARD_LIBRARY_DIGEST
         );
     }
 

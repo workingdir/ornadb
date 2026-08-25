@@ -2068,7 +2068,7 @@ impl ResourceProtocolConnection {
         Ok(ResourceFrameDisposition::Applied)
     }
 
-    pub fn apply(
+    fn apply(
         &mut self,
         frame: ResourceServerFrame,
     ) -> Result<ResourceFrameDisposition, ResourceConnectionError> {
@@ -2128,20 +2128,18 @@ impl ResourceProtocolConnection {
         frame: ResourceServerFrame,
     ) -> Result<ResourceFrameDisposition, ResourceConnectionError> {
         if let ResourceServerFrame::Values(values) = &frame {
-            if self
-                .check_terminal(
-                    values.stream_id,
-                    values.request_id,
-                    Some(values.target_revision),
-                )?
-                .is_none()
-            {
-                let state = self.state_for(values.stream_id, values.request_id)?;
-                if state.target_revision != values.target_revision {
-                    return Err(ResourceConnectionError::ResourceRevisionMismatch {
-                        stream_id: values.stream_id,
-                    });
-                }
+            if let Some(disposition) = self.check_terminal(
+                values.stream_id,
+                values.request_id,
+                Some(values.target_revision),
+            )? {
+                return Ok(disposition);
+            }
+            let state = self.state_for(values.stream_id, values.request_id)?;
+            if state.target_revision != values.target_revision {
+                return Err(ResourceConnectionError::ResourceRevisionMismatch {
+                    stream_id: values.stream_id,
+                });
             }
             encode_resource_values(active, registry, values)
                 .map_err(|source| ResourceConnectionError::InvalidFrame { source })?;
@@ -5147,23 +5145,32 @@ fn decode_event(
 #[cfg(test)]
 mod tests {
     use orna_core::{
-        CatalogueRevisionId, FunctionId, InvocationId, ParameterId, SchemaId, SourceBundleId,
-        SourceRevisionId, TypeId,
-        canonical_hash::{catalogue_digest, source_bundle_digest, source_revision_record_digest},
+        CatalogueRevisionId, FieldId, FunctionId, InvocationId, ParameterId, SchemaId,
+        SourceBundleId, SourceRevisionId, SourceUnitId, TypeId,
+        canonical_hash::{
+            catalogue_digest, catalogue_digest_with_context, source_bundle_digest,
+            source_revision_record_digest, source_unit_content_digest,
+        },
         catalogue::{
-            CatalogueSnapshot, EnumTypeDefinition, QualifiedSemanticName, SchemaDefinition,
+            CatalogueSnapshot, EnumTypeDefinition, QualifiedSemanticName,
+            RecordValueFieldDefinition, RecordValueTypeDefinition, SchemaDefinition,
         },
         invocation::{
             InvocationCallerContext, InvocationCallerKind, InvocationClientOffer,
             InvocationEventBody, InvocationFailure, InvocationFailurePhase, InvocationRetryability,
             InvocationTarget, InvocationTracePolicy, InvokeRequestInput, InvokeValue,
         },
-        revision::{ActiveDatabaseRevision, RevisionPair, StoredSourceRevision},
-        value::EnumValue,
+        revision::{
+            ActiveDatabaseRevision, ActiveDatabaseRevisionInput, ActiveRevisionContent,
+            CatalogueHashContext, DefinitionIdentity, DefinitionOrigin, RevisionPair, SourceOrigin,
+            StoredSourceRevision, StoredSourceUnit,
+        },
+        types::TypeDescriptor,
+        value::{EnumValue, RecordValue},
     };
     use orna_standard::{
-        registered_opaque_codecs, retained_standard_library_snapshot,
-        verify_standard_library_snapshot,
+        registered_opaque_codecs, retained_standard_library_v2_snapshot,
+        verify_standard_library_v2_snapshot,
     };
     use proptest::prelude::*;
 
@@ -5203,9 +5210,126 @@ mod tests {
         .unwrap()
     }
 
+    fn record_active_revision() -> (ActiveDatabaseRevision, TypeId, TypeId) {
+        const RECORD_TYPE: TypeId = TypeId::from_bytes([0x91; 16]);
+        const OTHER_RECORD_TYPE: TypeId = TypeId::from_bytes([0x98; 16]);
+        const FIELD_ID: FieldId = FieldId::from_bytes([0x92; 16]);
+        const OTHER_FIELD_ID: FieldId = FieldId::from_bytes([0x99; 16]);
+        let standard =
+            verify_standard_library_v2_snapshot(retained_standard_library_v2_snapshot().unwrap())
+                .unwrap();
+        let schema_id = SchemaId::from_bytes([0x93; 16]);
+        let catalogue_revision = CatalogueRevisionId::from_bytes([0x94; 16]);
+        let source_bundle = SourceBundleId::from_bytes([0x95; 16]);
+        let source_revision = SourceRevisionId::from_bytes([0x96; 16]);
+        let source_unit = SourceUnitId::from_bytes([0x97; 16]);
+        let source_content = "record";
+        let unit = StoredSourceUnit::new(
+            source_unit,
+            0,
+            "record.orna",
+            source_content,
+            source_unit_content_digest(source_content).unwrap(),
+        )
+        .unwrap();
+        let bundle_hash = source_bundle_digest(std::slice::from_ref(&unit)).unwrap();
+        let source = StoredSourceRevision::new(
+            source_bundle,
+            source_revision,
+            None,
+            vec![unit],
+            bundle_hash,
+            source_revision_record_digest(source_bundle, None, bundle_hash).unwrap(),
+        )
+        .unwrap();
+        let catalogue = CatalogueSnapshot::new_with_record_value_types(
+            catalogue_revision,
+            vec![SchemaDefinition::new(
+                schema_id,
+                QualifiedSemanticName::new(["crm"]).unwrap(),
+            )],
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            vec![
+                RecordValueTypeDefinition::new(
+                    RECORD_TYPE,
+                    QualifiedSemanticName::new(["crm", "event"]).unwrap(),
+                    vec![
+                        RecordValueFieldDefinition::try_new_descriptor(
+                            FIELD_ID,
+                            "title",
+                            0,
+                            TypeDescriptor::named(orna_standard::BOOLEAN_TYPE_ID),
+                        )
+                        .unwrap(),
+                    ],
+                ),
+                RecordValueTypeDefinition::new(
+                    OTHER_RECORD_TYPE,
+                    QualifiedSemanticName::new(["crm", "other_event"]).unwrap(),
+                    vec![
+                        RecordValueFieldDefinition::try_new_descriptor(
+                            OTHER_FIELD_ID,
+                            "title",
+                            0,
+                            TypeDescriptor::named(orna_standard::BOOLEAN_TYPE_ID),
+                        )
+                        .unwrap(),
+                    ],
+                ),
+            ],
+            Vec::new(),
+        )
+        .unwrap();
+        let origins = vec![
+            DefinitionOrigin::new(
+                DefinitionIdentity::Schema(schema_id),
+                SourceOrigin::new(source_unit, 0, 1).unwrap(),
+            ),
+            DefinitionOrigin::new(
+                DefinitionIdentity::ValueType(RECORD_TYPE),
+                SourceOrigin::new(source_unit, 1, 2).unwrap(),
+            ),
+            DefinitionOrigin::new(
+                DefinitionIdentity::Field {
+                    owner: RECORD_TYPE,
+                    field: FIELD_ID,
+                },
+                SourceOrigin::new(source_unit, 2, 3).unwrap(),
+            ),
+            DefinitionOrigin::new(
+                DefinitionIdentity::ValueType(OTHER_RECORD_TYPE),
+                SourceOrigin::new(source_unit, 3, 4).unwrap(),
+            ),
+            DefinitionOrigin::new(
+                DefinitionIdentity::Field {
+                    owner: OTHER_RECORD_TYPE,
+                    field: OTHER_FIELD_ID,
+                },
+                SourceOrigin::new(source_unit, 4, 5).unwrap(),
+            ),
+        ];
+        let context = CatalogueHashContext::version_two(standard);
+        let catalogue_hash =
+            catalogue_digest_with_context(&context, &catalogue, &[], &[], &origins, &[]).unwrap();
+        let active = ActiveDatabaseRevision::new_with_catalogue_hash_context(
+            ActiveDatabaseRevisionInput::new(
+                RevisionPair::new(source_revision, catalogue_revision),
+                source,
+                catalogue,
+                catalogue_hash,
+                ActiveRevisionContent::new(Vec::new(), Vec::new(), origins, Vec::new()),
+            ),
+            context,
+        )
+        .unwrap();
+        (active, RECORD_TYPE, OTHER_RECORD_TYPE)
+    }
+
     fn test_registry() -> OpaqueCodecRegistry {
         let standard =
-            verify_standard_library_snapshot(retained_standard_library_snapshot().unwrap())
+            verify_standard_library_v2_snapshot(retained_standard_library_v2_snapshot().unwrap())
                 .unwrap();
         registered_opaque_codecs(&standard).unwrap()
     }
@@ -8729,6 +8853,70 @@ mod tests {
     }
 
     #[test]
+    fn resource_values_record_round_trip_preserves_canonical_orv3_identity() {
+        let (active, record_type, other_record_type) = record_active_revision();
+        let registry = test_registry();
+        let record = RuntimeValue::Record(
+            RecordValue::new(
+                &active,
+                record_type,
+                [(String::from("title"), RuntimeValue::Boolean(true))],
+            )
+            .unwrap(),
+        );
+
+        let mut field_value = b"ORV3".to_vec();
+        field_value.push(0x02);
+        field_value.extend_from_slice(&orna_standard::BOOLEAN_TYPE_ID.to_bytes());
+        field_value.extend_from_slice(&1_u32.to_be_bytes());
+        field_value.push(1);
+        let mut record_payload = 1_u32.to_be_bytes().to_vec();
+        record_payload.extend_from_slice(&[0x92; 16]);
+        record_payload.extend_from_slice(&(field_value.len() as u32).to_be_bytes());
+        record_payload.extend_from_slice(&field_value);
+        let mut canonical = b"ORV3".to_vec();
+        canonical.push(0x0b);
+        canonical.extend_from_slice(&record_type.to_bytes());
+        canonical.extend_from_slice(&(record_payload.len() as u32).to_be_bytes());
+        canonical.extend_from_slice(&record_payload);
+        assert_eq!(encode_active_value(&active, &record), Ok(canonical.clone()));
+        let canonical_record = decode_active_value(&active, &canonical).unwrap();
+        assert_eq!(canonical_record, record);
+        assert_ne!(record_type, other_record_type);
+        let other_record = RuntimeValue::Record(
+            RecordValue::new(
+                &active,
+                other_record_type,
+                [(String::from("title"), RuntimeValue::Boolean(true))],
+            )
+            .unwrap(),
+        );
+        assert_ne!(
+            encode_active_value(&active, &other_record),
+            Ok(canonical.clone())
+        );
+
+        let encoded_value =
+            encode_constructed_value(&active, &registry, &canonical_record).unwrap();
+        let frame = ResourceValues {
+            stream_id: 2,
+            request_id: InvocationId::from_bytes([0x12; 16]),
+            target_revision: resource_revision_fixture(),
+            batch_sequence: 0,
+            item_count: 1,
+            byte_count: encoded_value.len() as u32,
+            values: vec![canonical_record],
+        };
+        let encoded = encode_resource_values(&active, &registry, &frame).unwrap();
+        let decoded = decode_resource_values(&active, &registry, &encoded).unwrap();
+        assert_eq!(decoded, frame);
+        assert_eq!(
+            encode_resource_values(&active, &registry, &decoded),
+            Ok(encoded)
+        );
+    }
+
+    #[test]
     fn resource_values_reject_metadata_limits_before_materialising_values() {
         let active = empty_active_revision();
         let registry = test_registry();
@@ -9553,6 +9741,7 @@ mod tests {
                 resource_kind: ResourceKind::Stream,
             }))
             .unwrap();
+        let before = connection.clone();
 
         let forged = ResourceValues {
             stream_id: request.stream_id,
@@ -9576,6 +9765,7 @@ mod tests {
                 },
             }) if actual == value_bytes.len()
         ));
+        assert_eq!(connection, before);
         assert_eq!(connection.live_resources(), 1);
         assert_eq!(
             connection.apply_constructed(
@@ -9592,6 +9782,81 @@ mod tests {
                 }),
             ),
             Ok(ResourceFrameDisposition::Applied)
+        );
+    }
+
+    #[test]
+    fn constructed_resource_application_drops_malformed_or_unsupported_late_values() {
+        let active = empty_active_revision();
+        let registry = test_registry();
+        let mut request = resource_request_fixture();
+        request.resource_kind = ResourceKind::Stream;
+        let stream_id = request.stream_id;
+        let request_id = request.request_id;
+        let target_revision = request.target_revision;
+        let mut connection = ResourceProtocolConnection::new();
+        connection.open(request.clone()).unwrap();
+        connection
+            .apply(ResourceServerFrame::Accepted(ResourceAccepted {
+                stream_id,
+                request_id,
+                nested_invocation_id: InvocationId::from_bytes([0x56; 16]),
+                target_revision,
+                resource_kind: request.resource_kind,
+            }))
+            .unwrap();
+        assert_eq!(
+            connection.apply(ResourceServerFrame::Completed(ResourceCompleted {
+                stream_id,
+                request_id,
+                target_revision,
+                final_batch_sequence: 0,
+                total_items: 0,
+            })),
+            Ok(ResourceFrameDisposition::Applied)
+        );
+        let before = connection.clone();
+        let before_terminal = connection.terminal.clone();
+
+        assert_eq!(
+            connection.apply_constructed(
+                &active,
+                &registry,
+                ResourceServerFrame::Values(ResourceValues {
+                    stream_id,
+                    request_id,
+                    target_revision,
+                    batch_sequence: u64::MAX,
+                    item_count: 0,
+                    byte_count: u32::MAX,
+                    values: Vec::new(),
+                }),
+            ),
+            Ok(ResourceFrameDisposition::DroppedLate)
+        );
+        assert_eq!(connection, before);
+        assert_eq!(
+            connection.apply_constructed(
+                &active,
+                &registry,
+                ResourceServerFrame::Values(ResourceValues {
+                    stream_id,
+                    request_id,
+                    target_revision,
+                    batch_sequence: 1,
+                    item_count: 1,
+                    byte_count: 0,
+                    values: vec![RuntimeValue::InvokeRequest(minimal_request(None))],
+                }),
+            ),
+            Ok(ResourceFrameDisposition::DroppedLate)
+        );
+        assert_eq!(connection, before);
+        assert_eq!(connection.terminal, before_terminal);
+        assert_eq!(connection.live_resources(), 0);
+        assert_eq!(
+            connection.resource_credit(stream_id, request_id),
+            Err(ResourceConnectionError::UnknownStream { stream_id })
         );
     }
 
@@ -10743,6 +11008,64 @@ mod tests {
             assert_eq!(connection.live_resources(), 0);
             assert_eq!(connection.terminal, tombstone_after_completion);
         }
+    }
+
+    #[test]
+    fn resource_connection_rejects_stale_terminal_identity_without_mutating_state() {
+        let request = resource_request_fixture();
+        let stream_id = request.stream_id;
+        let request_id = request.request_id;
+        let target_revision = request.target_revision;
+        let stale_request_id = InvocationId::from_bytes([0xa7; 16]);
+        let mut connection = ResourceProtocolConnection::new();
+
+        connection.open(request).unwrap();
+        connection
+            .apply(ResourceServerFrame::Accepted(ResourceAccepted {
+                stream_id,
+                request_id,
+                nested_invocation_id: InvocationId::from_bytes([0xa8; 16]),
+                target_revision,
+                resource_kind: ResourceKind::Single,
+            }))
+            .unwrap();
+        let before = connection.clone();
+
+        for frame in [
+            ResourceServerFrame::Completed(ResourceCompleted {
+                stream_id,
+                request_id: stale_request_id,
+                target_revision,
+                final_batch_sequence: 0,
+                total_items: 0,
+            }),
+            ResourceServerFrame::Failed(ResourceFailed {
+                stream_id,
+                request_id: stale_request_id,
+                target_revision,
+                failure: CallFailure::InternalFailure,
+            }),
+            ResourceServerFrame::Cancelled(ResourceCancelled {
+                stream_id,
+                request_id: stale_request_id,
+                target_revision,
+                reason: ResourceCancellationCode::ServerRequested,
+            }),
+        ] {
+            assert_eq!(
+                connection.apply(frame),
+                Err(ResourceConnectionError::MismatchedRequest { stream_id })
+            );
+            assert_eq!(connection, before);
+        }
+        assert_eq!(connection.live_resources(), 1);
+        assert_eq!(
+            connection.resource_credit(stream_id, request_id),
+            Ok(ResourceCredit {
+                item_available: 10,
+                byte_available: 11,
+            })
+        );
     }
 
     #[test]

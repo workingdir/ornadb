@@ -744,6 +744,7 @@ fn standard_executable_facts(
     validate_catalogue_references(
         standard.catalogue(),
         None,
+        None,
         &expressions,
         &revisions_by_function,
         &references,
@@ -916,6 +917,29 @@ pub fn catalogue_digest_with_context(
     origins: &[DefinitionOrigin],
     references: &[DefinitionReference],
 ) -> Result<Sha256Digest, CanonicalHashError> {
+    catalogue_digest_with_context_and_parent(
+        context,
+        catalogue,
+        function_revisions,
+        expressions,
+        origins,
+        references,
+        None,
+    )
+}
+
+/// Hashes one catalogue while using an existing parent catalogue only as a
+/// validation view for references. The parent is deliberately not encoded in
+/// the digest, so the candidate hash remains a function of candidate records.
+pub fn catalogue_digest_with_context_and_parent(
+    context: &CatalogueHashContext,
+    catalogue: &CatalogueSnapshot,
+    function_revisions: &[FunctionRevisionRecord],
+    expressions: &[ExpressionArtifact],
+    origins: &[DefinitionOrigin],
+    references: &[DefinitionReference],
+    parent: Option<&CatalogueSnapshot>,
+) -> Result<Sha256Digest, CanonicalHashError> {
     if context.version() == CatalogueHashVersion::Version1 {
         reject_version_one_value_definitions(catalogue)?;
     }
@@ -936,6 +960,7 @@ pub fn catalogue_digest_with_context(
         context
             .standard()
             .map(VerifiedStandardLibrarySnapshot::catalogue),
+        parent,
         &expressions_by_id,
         &revisions_by_function,
         references,
@@ -1835,6 +1860,7 @@ fn current_function_revisions<'a>(
 fn validate_catalogue_references(
     catalogue: &CatalogueSnapshot,
     standard: Option<&CatalogueSnapshot>,
+    parent: Option<&CatalogueSnapshot>,
     expressions: &HashMap<ExpressionId, &ExpressionArtifact>,
     revisions: &HashMap<FunctionId, &FunctionRevisionRecord>,
     references: &[DefinitionReference],
@@ -1862,7 +1888,7 @@ fn validate_catalogue_references(
                 ordinal: reference.ordinal(),
             });
         }
-        if !reference_target_exists(catalogue, standard, expressions, reference.target()) {
+        if !reference_target_exists(catalogue, standard, parent, expressions, reference.target()) {
             return Err(CanonicalHashError::ReferenceTargetNotFound {
                 target: reference.target(),
             });
@@ -1950,6 +1976,7 @@ fn is_sealed_inspect_type_id(type_id: TypeId) -> bool {
 fn reference_target_exists(
     catalogue: &CatalogueSnapshot,
     standard: Option<&CatalogueSnapshot>,
+    parent: Option<&CatalogueSnapshot>,
     expressions: &HashMap<ExpressionId, &ExpressionArtifact>,
     target: DefinitionReferenceTarget,
 ) -> bool {
@@ -1977,12 +2004,23 @@ fn reference_target_exists(
                         .is_some_and(|record_value_type| {
                             record_value_type.field_by_id(field).is_some()
                         })
+            })
+            || parent.is_some_and(|parent| {
+                parent
+                    .object_type_by_id(owner)
+                    .is_some_and(|object_type| object_type.field_by_id(field).is_some())
+                    || parent
+                        .record_value_type_by_id(owner)
+                        .is_some_and(|record_value_type| {
+                            record_value_type.field_by_id(field).is_some()
+                        })
             });
     }
     let identity = target.into();
     definition_identity_exists(catalogue, expressions, identity)
         || standard
             .is_some_and(|standard| definition_identity_exists(standard, expressions, identity))
+        || parent.is_some_and(|parent| definition_identity_exists(parent, expressions, identity))
 }
 
 fn definition_identity_exists(
@@ -5387,6 +5425,7 @@ mod tests {
         assert!(reference_target_exists(
             &catalogue,
             None,
+            None,
             &expressions,
             DefinitionReferenceTarget::Field {
                 owner: TypeId::from_bytes(id::<42>()),
@@ -5395,6 +5434,7 @@ mod tests {
         ));
         assert!(!reference_target_exists(
             &catalogue,
+            None,
             None,
             &expressions,
             DefinitionReferenceTarget::Field {
