@@ -264,6 +264,16 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         "source apply principal binding",
         include_str!("../migrations/0038_source_apply_principal.sql"),
     ),
+    (
+        39,
+        "sealed invocation SECURITY DEFINER denial audit",
+        include_str!("../migrations/0039_security_definer_audit_reason.sql"),
+    ),
+    (
+        40,
+        "security admin class-wide grant boundary",
+        include_str!("../migrations/0040_security_admin_class_wide.sql"),
+    ),
 ];
 const MIGRATION_DATA_STEP_SEPARATOR: &[u8] = b"\0orna.kernel.migration-step\0";
 const CANONICAL_HASH_V1_EMPTY_SEED_STEP: &[u8] = b"canonical-hash-v1-empty-seed/v1";

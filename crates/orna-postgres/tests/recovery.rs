@@ -2413,6 +2413,46 @@ async fn recovers_security_admin_audit_with_exact_redacted_shape() -> TestResult
                 "durable SecurityAdmin audit row contains an unexpected payload",
             )?;
         }
+        for (statement, description) in [
+            (
+                "UPDATE _orna_kernel.security_audit_events
+                 SET denial_reason = 'security_admin:unsupported'
+                 WHERE sequence = 1",
+                "forged security-admin operation detail",
+            ),
+            (
+                "UPDATE _orna_kernel.security_audit_events
+                 SET function_id = decode('00000000000000000000000000000044', 'hex')
+                 WHERE sequence = 1",
+                "mismatched security-admin target",
+            ),
+        ] {
+            let result = session.client().execute(statement, &[]).await;
+            let error = match result {
+                Ok(_) => return Err(failure(format!(
+                    "{description} unexpectedly bypassed the durable audit boundary"
+                ))),
+                Err(error) => error,
+            };
+            let database_error = error.as_db_error().ok_or_else(|| {
+                failure(format!("{description} returned a non-database error"))
+            })?;
+            require(
+                database_error.code().code() == "23514",
+                format!(
+                    "{description} failed with SQLSTATE {} instead of CHECK violation",
+                    database_error.code().code()
+                ),
+            )?;
+            require(
+                database_error.constraint()
+                    == Some("security_audit_events_security_admin_detail_check"),
+                format!(
+                    "{description} failed on unexpected constraint {:?}",
+                    database_error.constraint()
+                ),
+            )?;
+        }
         finish_session(
             Ok(()),
             session.shutdown().await,
