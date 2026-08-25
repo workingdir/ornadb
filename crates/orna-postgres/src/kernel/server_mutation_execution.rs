@@ -3820,19 +3820,19 @@ fn lower_record_constructor(
         .resolved_type()
         .named_type()
         .ok_or_else(|| plan_invariant("validated record constructor must have a named type"))?;
-    let definition = active
+    let record_definition = active
         .catalogue()
         .record_value_type_by_id(record_type)
         .ok_or_else(|| plan_invariant("validated record constructor type must be active"))?;
-    if fields.len() != definition.fields().len() {
+    if fields.len() != record_definition.fields().len() {
         return Err(plan_invariant(
             "validated record constructor field count must remain exact",
         ));
     }
     let values = fields
         .iter()
-        .zip(definition.fields())
-        .map(|(field, definition)| {
+        .zip(record_definition.fields())
+        .map(|(field, declared)| {
             let value = match field.kind() {
                 RecordFieldExpressionKind::Parameter { parameter, .. } => arguments
                     .get(parameter)
@@ -3851,7 +3851,7 @@ fn lower_record_constructor(
                     ));
                 }
             };
-            Ok((definition.name().to_owned(), value))
+            Ok((declared.name().to_owned(), value))
         })
         .collect::<Result<Vec<_>, PostgresKernelError>>()?;
     let record = RecordValue::new(active, record_type, values)
@@ -4285,13 +4285,14 @@ mod tests {
         },
         catalogue::{
             EnumTypeDefinition, FieldDefinition, FunctionReturnColumnDefinition,
-            ParameterDefinition, QualifiedSemanticName, SchemaDefinition,
+            ParameterDefinition, QualifiedSemanticName, RecordValueFieldDefinition,
+            RecordValueTypeDefinition, SchemaDefinition,
         },
         revision::{
             ActiveDatabaseRevisionInput, ActiveRevisionContent, CatalogueHashContext, RevisionPair,
             StoredSourceRevision,
         },
-        types::StandardScalar,
+        types::{StandardScalar, TypeDescriptor},
         value::{RuntimeFloat, RuntimeValue},
     };
 
@@ -4299,6 +4300,7 @@ mod tests {
 
     const TARGET: TypeId = TypeId::from_bytes([0x10; 16]);
     const OTHER: TypeId = TypeId::from_bytes([0x20; 16]);
+    const RECORD: TypeId = TypeId::from_bytes([0x70; 16]);
     const MISSING: TypeId = TypeId::from_bytes([0x21; 16]);
     const FUNCTION: FunctionId = FunctionId::from_bytes([0x30; 16]);
     const OTHER_FUNCTION: FunctionId = FunctionId::from_bytes([0x31; 16]);
@@ -4676,6 +4678,16 @@ mod tests {
     }
 
     fn raw_pair_active() -> ActiveDatabaseRevision {
+        let catalogue = CatalogueSnapshot::new(
+            CatalogueRevisionId::from_bytes([0x75; 16]),
+            Vec::new(),
+            Vec::new(),
+        )
+        .unwrap();
+        raw_pair_active_with_catalogue(catalogue)
+    }
+
+    fn raw_pair_active_with_catalogue(catalogue: CatalogueSnapshot) -> ActiveDatabaseRevision {
         let bundle = SourceBundleId::from_bytes([0x73; 16]);
         let bundle_hash = source_bundle_digest(&[]).unwrap();
         let source = StoredSourceRevision::new(
@@ -4685,12 +4697,6 @@ mod tests {
             Vec::new(),
             bundle_hash,
             source_revision_record_digest(bundle, None, bundle_hash).unwrap(),
-        )
-        .unwrap();
-        let catalogue = CatalogueSnapshot::new(
-            CatalogueRevisionId::from_bytes([0x75; 16]),
-            Vec::new(),
-            Vec::new(),
         )
         .unwrap();
         let context = CatalogueHashContext::version_one();
@@ -6608,6 +6614,89 @@ mod tests {
         }
         assert!(!lowered.sql.contains("f_45454545454545454545454545454545"));
         assert!(lowered.sql.len() < SQL_LIMIT);
+    }
+
+    #[test]
+    fn record_constructor_binding_uses_declared_names_in_declaration_order() {
+        let record = RecordValueTypeDefinition::new(
+            RECORD,
+            name(&["test", "semantic_record"]),
+            vec![
+                RecordValueFieldDefinition::try_new_descriptor(
+                    FIELD_ENABLED,
+                    "enabled",
+                    0,
+                    TypeDescriptor::named(orna_standard::BOOLEAN_TYPE_ID),
+                )
+                .unwrap(),
+                RecordValueFieldDefinition::try_new_descriptor(
+                    FIELD_COUNT,
+                    "count",
+                    1,
+                    TypeDescriptor::named(orna_standard::BOOLEAN_TYPE_ID),
+                )
+                .unwrap(),
+            ],
+        );
+        let catalogue = CatalogueSnapshot::new_with_record_value_types(
+            CatalogueRevisionId::from_bytes([0x76; 16]),
+            vec![SchemaDefinition::new(
+                SchemaId::from_bytes([0x02; 16]),
+                name(&["test"]),
+            )],
+            vec![ObjectTypeDefinition::new(
+                TARGET,
+                name(&["test", "semantic_target"]),
+                vec![field(
+                    FIELD_TITLE,
+                    "record_payload",
+                    0,
+                    ResolvedType::named(RECORD),
+                    false,
+                )],
+            )],
+            Vec::new(),
+            Vec::new(),
+            vec![record],
+            Vec::new(),
+        )
+        .unwrap();
+        let active = raw_pair_active_with_catalogue(catalogue);
+        let expression = MutationExpression::record_constructor(
+            RECORD,
+            [
+                RecordFieldExpression::boolean_literal(RECORD, FIELD_ENABLED, true),
+                RecordFieldExpression::boolean_literal(RECORD, FIELD_COUNT, false),
+            ],
+        )
+        .unwrap();
+        let plan = ServerMutationPlan::new_insert(
+            TARGET,
+            [FieldAssignment::new(TARGET, FIELD_TITLE, expression)],
+            TARGET,
+        )
+        .unwrap();
+
+        let lowered = lower_insert_with_active(&active, &plan, &BTreeMap::new()).unwrap();
+        let expected = RuntimeValue::Record(
+            RecordValue::new(
+                &active,
+                RECORD,
+                [
+                    (String::from("enabled"), RuntimeValue::Boolean(true)),
+                    (String::from("count"), RuntimeValue::Boolean(false)),
+                ],
+            )
+            .unwrap(),
+        );
+        let expected_bytes = encode_active_value(&active, &expected).unwrap();
+
+        assert_eq!(
+            lowered.sql,
+            "INSERT INTO _orna_data.t_10101010101010101010101010101010 (_orna_object_id, f_41414141414141414141414141414141) VALUES ($1, $2) RETURNING _orna_object_id AS c0",
+        );
+        assert_eq!(lowered.bind_types, vec![Type::BYTEA, Type::BYTEA]);
+        assert_eq!(lowered.binds, vec![BindValue::Bytes(expected_bytes)]);
     }
 
     #[test]
