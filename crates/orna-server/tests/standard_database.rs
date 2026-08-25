@@ -8,8 +8,9 @@ use std::{
 #[cfg(feature = "test-hooks")]
 use orna_artifact::client_plan::ActionTargetDomain;
 use orna_artifact::client_plan::{
-    ClientExpressionNode, OPAQUE_FORMAT_VERSION, OpaqueClientPlan, ProceduralClientPlan,
-    ResourceClientPlan,
+    ClientExpressionNode, EXPRESSION_FORMAT_VERSION, ExpressionClientPlan, OPAQUE_FORMAT_VERSION,
+    OpaqueClientPlan, ProceduralClientPlan, ResourceClientPlan, STATE_FORMAT_VERSION,
+    StateClientPlan, StateDefault, StateScope,
 };
 #[cfg(feature = "test-hooks")]
 use orna_client::ClientInspectError;
@@ -29,6 +30,7 @@ use orna_client::{
     },
     evaluate_client_function, evaluate_client_function_with_arguments,
     evaluate_client_function_with_arguments_and_executor, evaluate_client_function_with_grants,
+    evaluate_client_function_with_grants_and_arguments,
 };
 #[cfg(feature = "test-hooks")]
 use orna_client::{ClientResource, ClientResourceInvocationContext, ClientResourceKey};
@@ -38,6 +40,8 @@ use orna_compiler::{
     StandardApplicationCheckContext, check, check_standard_application,
     check_standard_library_source, prepare, prepare_standard_application,
 };
+#[cfg(feature = "test-hooks")]
+use orna_core::inspect::INSPECT_RENDER_CONTRACT;
 #[cfg(feature = "test-hooks")]
 use orna_core::inspect_carrier::{InspectCarrierEnvelope, InspectCarrierKind};
 #[cfg(feature = "test-hooks")]
@@ -65,7 +69,8 @@ use orna_core::{
     },
     invocation::{
         InvocationArgument, InvocationCallerContext, InvocationCallerKind, InvocationClientOffer,
-        InvocationEventBody, InvocationEventKind, InvocationParameterSelector,
+        InvocationEventBody, InvocationEventKind, InvocationOutputRequirement,
+        InvocationParameterSelector, InvocationSinkOffer, InvocationStreamingRequirement,
         InvocationTarget as InvocationRequestTarget, InvocationTracePolicy, InvokeRequest,
         InvokeRequestInput, InvokeValue,
     },
@@ -79,10 +84,11 @@ use orna_core::{
         StoredSourceUnit, VerifiedStandardLibrarySnapshot,
     },
     security::{
-        AuthenticatedSession, ExecuteDecision, ExecuteDenial, ExecuteGrant, InvocationTarget,
-        LocalPeerAuthenticationError, LocalPeerCredential, Principal, PrincipalKind,
-        PrincipalStatus, SecurityAuditDecision, SecurityAuditDenial, SecurityAuditKind,
-        SecurityAuditOutcome, SecurityFunctionTarget, SecuritySnapshot,
+        AuthenticatedSession, CATALOGUE_HEALTH_SERVICE_PRINCIPAL_ID, ExecuteDecision,
+        ExecuteDenial, ExecuteGrant, InvocationTarget, LocalPeerAuthenticationError,
+        LocalPeerCredential, Principal, PrincipalKind, PrincipalStatus, SecurityAuditDecision,
+        SecurityAuditDenial, SecurityAuditKind, SecurityAuditOutcome, SecurityFunctionTarget,
+        SecuritySnapshot,
     },
     source::{SourceBundle, SourceUnit},
     system::SYS_INVOKE_FUNCTION_ID,
@@ -117,8 +123,8 @@ use orna_server::{
 use orna_server::{
     InstalledInvokeError, InstalledInvokeErrorKind, InstalledInvokeOutcome, InstalledInvokeRequest,
     LocalAuthenticationError, LocalRawSocketError, LocalRawSocketResources,
-    OpenStandardDatabaseError, RawClientDispatch, open_standard_database, run_invoke_with_kernel,
-    serve_local_raw_stream,
+    OpenStandardDatabaseError, RawClientDispatch, RuntimeFamily, open_standard_database,
+    run_invoke_with_kernel, serve_local_raw_stream,
 };
 use orna_standard::{
     BOOLEAN_TYPE_ID, BYTE_STREAM_MAGIC, JSON_MAGIC, OPAQUE_TOKEN_TYPE_ID,
@@ -328,6 +334,11 @@ const RAW_STREAM_RESOURCE_CLIENT_SOURCE: &str = "CREATE CLIENT FUNCTION resource
     BEGIN\n\
         RETURN AWAIT std.data.stream_resource(target => resource_fixture.resource,\n\
           arguments => std.call.args(p_marker => p_marker));\n\
+    END;\n\
+    CREATE CLIENT FUNCTION resource_fixture.root() RETURNS BOOLEAN AS TRUE;\n\
+    CREATE CLIENT FUNCTION resource_fixture.call_all() RETURNS STREAM<TEXT> IS\n\
+    BEGIN\n\
+        RETURN AWAIT std.data.stream_resource(target => resource_fixture.all, arguments => std.call.args());\n\
     END;\n";
 const RAW_PROCEDURAL_RESOURCE_SERVER_SOURCE: &str = "CREATE SCHEMA procedural_fixture;\n\
     CREATE TYPE procedural_fixture.probe AS OBJECT (marker TEXT UNIQUE NOT NULL);\n\
@@ -1773,7 +1784,12 @@ async fn proves_standard_invocation_dogfooding_through_sealed_sys_invoke_inner()
 ///   unknown flag, unresolvable target, extra positional) return the exit-2
 ///   usage class without executing any artifact and without appending audit
 ///   evidence;
-/// - `--explain` prints the plan and neither dispatches nor audits;
+/// - `--explain` prints the plan, including the accepted TTY runtime offer
+///   (name, version, consumed sinks, preference, and trust), and neither
+///   dispatches nor audits;
+/// - the default runtime selection and an explicit `tty` selection both carry
+///   the same offer through the sealed dispatch/decode path, while an
+///   unsupported override fails closed before dispatch;
 /// - revoking the EXECUTE grant returns the denied outcome (exit 4) with one
 ///   denied decision appended and one denied invocation-audit row.
 #[tokio::test]
@@ -1889,6 +1905,8 @@ async fn proves_installed_orna_invoke_end_to_end_against_postgres() -> TestResul
             false,
             false,
         );
+        let by_identity =
+            installed_invoke_request_with_runtime(by_identity, Some(RuntimeFamily::Tty));
         let (identity_outcome, identity_stdout, identity_stderr) =
             installed_invoke_run(&database, by_identity).await?;
         require(
@@ -2080,9 +2098,27 @@ async fn proves_installed_orna_invoke_end_to_end_against_postgres() -> TestResul
                 && plan.contains("request:")
                 && plan.contains("caller:")
                 && plan.contains("offer: protocol 5")
+                && plan.contains(
+                    format!("runtimes tty@{}", orna_runtime_tty::RUNTIME_VERSION).as_str()
+                )
                 && plan.contains("trace: Off")
                 && plan.contains("output: none"),
             "the --explain plan did not carry the resolution and sealed request facts",
+        )?;
+        require(
+            plan.contains(
+                format!("selected: tty@{}", orna_runtime_tty::RUNTIME_VERSION).as_str()
+            )
+                && plan.contains(
+                    format!(
+                        "tty@{} (consumes {}, {}; preference rank 0; trusted)",
+                        orna_runtime_tty::RUNTIME_VERSION,
+                        STD_TERMINAL_DOCUMENT_TYPE_ID.canonical(),
+                        STD_IO_BYTE_STREAM_TYPE_ID.canonical(),
+                    )
+                    .as_str(),
+                ),
+            "the --explain plan did not carry the accepted TTY runtime offer contract",
         )?;
         require(
             explain_stderr.is_empty(),
@@ -2093,6 +2129,40 @@ async fn proves_installed_orna_invoke_end_to_end_against_postgres() -> TestResul
                 == security_events_after_invocations.len()
                 && invocation_audit_count(&database).await? == invocation_rows_before + 3,
             "--explain dispatched an artifact or appended audit evidence",
+        )?;
+
+        // A recognised-but-not-installed runtime override fails closed while
+        // the target is otherwise valid. It must not construct, dispatch, or
+        // audit a sealed request.
+        let unsupported_runtime = installed_invoke_request_with_runtime(
+            installed_invoke_request(
+                InvocationRequestTarget::qualified_name(QualifiedSemanticName::new([
+                    "std", "invoke", "echo",
+                ])?)?,
+                vec![CliArgumentInput::Canonical {
+                    parameter: "p_value".to_owned(),
+                    value: "43".to_owned(),
+                }],
+                false,
+                false,
+            ),
+            Some(RuntimeFamily::NotInstalled),
+        );
+        let (unsupported_outcome, unsupported_stdout, unsupported_stderr) =
+            installed_invoke_run(&database, unsupported_runtime).await?;
+        require(
+            matches!(unsupported_outcome, Err(error) if error.kind() == InstalledInvokeErrorKind::Usage),
+            "an unsupported runtime override did not fail closed as usage",
+        )?;
+        require(
+            unsupported_stdout.is_empty() && unsupported_stderr.is_empty(),
+            "an unsupported runtime override wrote to a command channel",
+        )?;
+        require(
+            kernel.recover_security_audit_events().await?.len()
+                == security_events_after_invocations.len()
+                && invocation_audit_count(&database).await? == invocation_rows_before + 3,
+            "an unsupported runtime override dispatched or appended audit evidence",
         )?;
 
         // Revoke the EXECUTE grant: the same command now returns the denied
@@ -2754,6 +2824,501 @@ async fn proves_procedural_client_resource_through_installed_evaluator() -> Test
     .await
 }
 
+#[cfg(feature = "test-hooks")]
+#[tokio::test]
+#[ignore = "requires the Compose PostgreSQL development service"]
+async fn installed_stream_resource_evaluator_consumes_batch_then_returns_terminal_none()
+-> TestResult<()> {
+    with_test_database(|database| async move {
+        let uid = nix::unistd::geteuid().as_raw();
+        let kernel = open_standard_database(kernel(&database)?).await.map_err(|error| {
+            failure(format!("open standard database failed: {error:?}"))
+        })?;
+        let active = kernel.recover().await.map_err(|error| {
+            failure(format!("recover installed standard failed: {error:?}"))
+        })?;
+        let standard_source = active
+            .catalogue_hash_context()
+            .standard()
+            .cloned()
+            .ok_or_else(|| failure("stream evaluator fixture has no checked standard source"))?;
+        let checked_standard = check_standard_library_source(&standard_source).map_err(|error| {
+            failure(format!("installed standard source check failed: {error:?}"))
+        })?;
+        let (active, _client, _target, _parameter, _call_site) =
+            install_stream_resource_client_fixture(&kernel, &active, &checked_standard).await?;
+        let client = active
+            .catalogue()
+            .functions()
+            .iter()
+            .find(|function| function.name().parts() == ["resource_fixture", "call_all"])
+            .ok_or_else(|| failure("stream evaluator fixture is missing resource_fixture.call_all"))?
+            .id();
+        let target = active
+            .catalogue()
+            .functions()
+            .iter()
+            .find(|function| function.name().parts() == ["resource_fixture", "all"])
+            .ok_or_else(|| failure("stream evaluator fixture is missing resource_fixture.all"))?
+            .id();
+        let call_site = {
+            let revision = active
+                .function_revisions()
+                .iter()
+                .find(|revision| revision.function() == client)
+                .ok_or_else(|| failure("stream evaluator call_all revision is missing"))?;
+            let plan = ResourceClientPlan::decode(revision.artifact().payload())?;
+            let ClientExpressionNode::Await { expression } = plan.expression() else {
+                return Err(failure("stream evaluator call_all is not an awaited resource"));
+            };
+            let ClientExpressionNode::Resource { operation } = expression.as_ref() else {
+                return Err(failure("stream evaluator call_all is not a resource operation"));
+            };
+            operation.call_site_id()
+        };
+        let create = active
+            .catalogue()
+            .functions()
+            .iter()
+            .find(|function| function.name().parts() == ["resource_fixture", "create"])
+            .ok_or_else(|| failure("stream evaluator fixture is missing resource_fixture.create"))?
+            .id();
+        let root = active
+            .catalogue()
+            .functions()
+            .iter()
+            .find(|function| function.name().parts() == ["resource_fixture", "root"])
+            .ok_or_else(|| failure("stream evaluator fixture is missing resource_fixture.root"))?
+            .id();
+        let create_definition = active
+            .catalogue()
+            .function_by_id(create)
+            .ok_or_else(|| failure("stream evaluator create disappeared from the catalogue"))?;
+        let create_marker = create_definition
+            .parameter_by_name("p_marker")
+            .ok_or_else(|| failure("stream evaluator create has no p_marker parameter"))?
+            .id();
+        let create_sequence = create_definition
+            .parameter_by_name("p_sequence")
+            .ok_or_else(|| failure("stream evaluator create has no p_sequence parameter"))?
+            .id();
+        kernel
+            .execute_server_insert(
+                create,
+                &[
+                    FunctionArgument::new(
+                        create_marker,
+                        RuntimeValue::Text("evaluator-terminal".to_owned()),
+                    )?,
+                    FunctionArgument::new(create_sequence, RuntimeValue::Integer(1))?,
+                ],
+            )
+            .await
+            .map_err(|error| failure(format!("insert stream evaluator fixture row failed: {error:?}")))?;
+
+        kernel
+            .execute_server_insert(
+                create,
+                &[
+                    FunctionArgument::new(
+                        create_marker,
+                        RuntimeValue::Text("evaluator-terminal-next".to_owned()),
+                    )?,
+                    FunctionArgument::new(create_sequence, RuntimeValue::Integer(2))?,
+                ],
+            )
+            .await
+            .map_err(|error| {
+                failure(format!("insert second stream evaluator fixture row failed: {error:?}"))
+            })?;
+        let functions = active
+            .catalogue()
+            .functions()
+            .iter()
+            .map(FunctionDefinition::id)
+            .collect::<Vec<_>>();
+        let security = SecuritySnapshot::new_with_local_peer_credentials(
+            active.pair(),
+            functions,
+            vec![Principal::new(
+                RAW_CLIENT_USER,
+                PrincipalKind::User,
+                PrincipalStatus::Active,
+            )],
+            vec![],
+            vec![
+                ExecuteGrant::new(RAW_CLIENT_USER, client),
+                ExecuteGrant::new(RAW_CLIENT_USER, target),
+                ExecuteGrant::new(RAW_CLIENT_USER, root),
+            ],
+            vec![LocalPeerCredential::new(uid, RAW_CLIENT_USER)],
+        )?;
+        let security = kernel.replace_security_snapshot(&security).await?;
+        let (root_outcome, _, _) = installed_invoke_run(
+            &database,
+            installed_invoke_request(
+                InvocationRequestTarget::function_id(root),
+                vec![],
+                true,
+                false,
+            ),
+        )
+        .await?;
+        require(
+            root_outcome == Ok(InstalledInvokeOutcome::Completed),
+            "stream evaluator could not create an owned root invocation",
+        )?;
+        let audit_session = database.open().await?;
+        let root_operation = async {
+            let row = audit_session
+                .client()
+                .query_one(
+                    "SELECT invocation_id
+                     FROM _orna_kernel.invocation_audit_events
+                     WHERE function_id = $1
+                       AND session_principal_id = $2
+                     ORDER BY sequence DESC
+                     LIMIT 1",
+                    &[&root.to_bytes().to_vec(), &RAW_CLIENT_USER.to_bytes().to_vec()],
+                )
+                .await?;
+            let bytes: Vec<u8> = row.try_get(0)?;
+            let bytes: [u8; 16] = bytes
+                .try_into()
+                .map_err(|_| failure("root invocation audit identity was not 16 bytes"))?;
+            Ok(InvocationId::from_bytes(bytes))
+        }
+        .await;
+        let parent_invocation = finish_session(
+            root_operation,
+            audit_session.shutdown().await,
+            "root invocation audit lookup",
+        )?;
+        let session = security.bind_authenticated_session(RAW_CLIENT_USER, vec![])?;
+        let authorisation = match security
+            .authorise_execute(&session, InvocationTarget::new(client, active.pair()))
+        {
+            ExecuteDecision::Allowed(authorisation) => authorisation,
+            ExecuteDecision::Denied(denial) => {
+                return Err(failure(format!(
+                    "stream evaluator CLIENT grant was denied: {denial:?}"
+                )))
+            }
+        };
+        let grants = LocalCapabilityGrantSet::new();
+        let mut executor =
+            InstalledClientResourceExecutor::new(kernel.clone(), session, active.clone());
+        let mut state = ClientStateStore::default();
+        let operation = async {
+            let pending = evaluate_client_function_with_state_and_grants_and_arguments_and_executor_with_parent_invocation(
+                &active,
+                &authorisation,
+                &[],
+                &[],
+                &grants,
+                &mut state,
+                parent_invocation,
+                &mut executor,
+            )
+            .expect_err("the first stream AWAIT unexpectedly completed synchronously");
+            let (resource_key, resource_generation) = match pending {
+                ClientExecutionError::ResourceEvaluation {
+                    source: orna_client::ClientResourceExecutionError::Pending { key, generation },
+                    ..
+                } => (key, generation),
+                error => {
+                    return Err(failure(format!(
+                        "the first stream AWAIT returned an unexpected result: {error:?}"
+                    )))
+                }
+            };
+            let first_completion = timeout(Duration::from_secs(5), async {
+                loop {
+                    if let Some(completion) = executor.poll() {
+                        return Ok::<ClientResourceCompletion, Box<dyn Error + Send + Sync>>(completion);
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .map_err(|_| failure("installed stream evaluator first batch timed out"))??;
+            require(
+                matches!(
+                    &first_completion,
+                    ClientResourceCompletion::StreamValues {
+                        key,
+                        generation,
+                        values,
+                        ..
+                    } if *key == resource_key
+                        && *generation == resource_generation
+                        && values.as_slice() == [RuntimeValue::Text("evaluator-terminal".to_owned())]
+                ),
+                "installed evaluator did not receive its exact typed stream batch",
+            )?;
+            state
+                .resource_mut(resource_key)
+                .ok_or_else(|| failure("stream evaluator state lost its pending resource"))?
+                .apply_completion(&active, first_completion)
+                .map_err(|error| failure(format!("apply first stream batch failed: {error:?}")))?;
+            let after_batch = state
+                .resource(resource_key)
+                .ok_or_else(|| failure("stream evaluator state lost its first batch"))?;
+            require(
+                after_batch.status() == ClientResourceStatus::Loading
+                    && !after_batch.stream_complete()
+                    && after_batch.request_id().is_some(),
+                "first stream batch did not retain the loading resource state",
+            )?;
+
+            let list_descriptor = TypeDescriptor::list(TypeDescriptor::named(
+                orna_standard::CHARACTER_LARGE_OBJECT_TYPE_ID,
+            ))?;
+            let list = RuntimeValue::list(
+                &active,
+                list_descriptor.clone(),
+                vec![RuntimeValue::Text("evaluator-terminal".to_owned())],
+            )?;
+            let expected_batch = RuntimeValue::option(
+                &active,
+                TypeDescriptor::option(list_descriptor)?,
+                Some(list),
+            )?;
+            let batch_result = evaluate_client_function_with_state_and_grants_and_arguments_and_executor_with_parent_invocation(
+                &active,
+                &authorisation,
+                &[],
+                &[],
+                &grants,
+                &mut state,
+                parent_invocation,
+                &mut executor,
+            )?;
+            require(
+                batch_result.value() == &expected_batch,
+                "next installed stream AWAIT did not return its typed OPTION<LIST<T>> batch",
+            )?;
+            let second_completion = timeout(Duration::from_secs(5), async {
+                loop {
+                    if let Some(completion) = executor.poll() {
+                        return Ok::<ClientResourceCompletion, Box<dyn Error + Send + Sync>>(
+                            completion,
+                        );
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .map_err(|_| failure("installed stream evaluator second batch timed out"))??;
+            require(
+                matches!(
+                    &second_completion,
+                    ClientResourceCompletion::StreamValues {
+                        key,
+                        generation,
+                        values,
+                        ..
+                    } if *key == resource_key
+                        && *generation == resource_generation
+                        && values.as_slice()
+                            == [RuntimeValue::Text("evaluator-terminal-next".to_owned())]
+                ),
+                "installed evaluator did not receive its second typed stream batch",
+            )?;
+            state
+                .resource_mut(resource_key)
+                .ok_or_else(|| failure("stream evaluator state lost its second batch"))?
+                .apply_completion(&active, second_completion)
+                .map_err(|error| failure(format!("apply second stream batch failed: {error:?}")))?;
+            let second_list_descriptor = TypeDescriptor::list(TypeDescriptor::named(
+                orna_standard::CHARACTER_LARGE_OBJECT_TYPE_ID,
+            ))?;
+            let second_list = RuntimeValue::list(
+                &active,
+                second_list_descriptor.clone(),
+                vec![RuntimeValue::Text("evaluator-terminal-next".to_owned())],
+            )?;
+            let expected_second_batch = RuntimeValue::option(
+                &active,
+                TypeDescriptor::option(second_list_descriptor)?,
+                Some(second_list),
+            )?;
+            let second_batch_result = evaluate_client_function_with_state_and_grants_and_arguments_and_executor_with_parent_invocation(
+                &active,
+                &authorisation,
+                &[],
+                &[],
+                &grants,
+                &mut state,
+                parent_invocation,
+                &mut executor,
+            )?;
+            require(
+                second_batch_result.value() == &expected_second_batch,
+                "installed stream AWAIT did not return its second typed batch",
+            )?;
+
+            let terminal_completion = timeout(Duration::from_secs(5), async {
+                loop {
+                    if let Some(completion) = executor.poll() {
+                        return Ok::<ClientResourceCompletion, Box<dyn Error + Send + Sync>>(completion);
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .map_err(|_| failure("installed stream evaluator terminal completion timed out"))??;
+            require(
+                matches!(
+                    &terminal_completion,
+                    ClientResourceCompletion::StreamCompleted {
+                        key,
+                        generation,
+                        ..
+                    } if *key == resource_key && *generation == resource_generation
+                ),
+                "installed evaluator did not receive successful stream terminal completion",
+            )?;
+            state
+                .resource_mut(resource_key)
+                .ok_or_else(|| failure("stream evaluator state lost its terminal resource"))?
+                .apply_completion(&active, terminal_completion)
+                .map_err(|error| failure(format!("apply stream terminal completion failed: {error:?}")))?;
+            let terminal_state = state
+                .resource(resource_key)
+                .ok_or_else(|| failure("stream evaluator state lost its completed resource"))?
+                .clone();
+            require(
+                terminal_state.status() == ClientResourceStatus::Ready
+                    && terminal_state.stream_complete()
+                    && terminal_state.value().is_none()
+                    && terminal_state.request_id().is_some(),
+                "stream terminal completion did not publish the READY terminal state",
+            )?;
+
+            let request_id = terminal_state
+                .request_id()
+                .ok_or_else(|| failure("completed stream resource lost its request identity"))?;
+            let request_id_bytes = request_id.to_bytes().to_vec();
+            let audit_session = database.open().await?;
+            let audit_operation = async {
+                let row = audit_session
+                    .client()
+                    .query_one(
+                        "SELECT resource.parent_invocation_id,
+                                resource.call_site_id,
+                                resource.nested_invocation_id,
+                                resource.target_function_id,
+                                resource.source_revision_id,
+                                resource.catalogue_revision_id,
+                                resource.session_principal_id,
+                                resource.decision_outcome,
+                                resource.terminal_outcome,
+                                invocation.outcome AS invocation_outcome,
+                                invocation.function_id AS invocation_function_id,
+                                invocation.source_revision_id AS invocation_source_revision_id,
+                                invocation.catalogue_revision_id AS invocation_catalogue_revision_id,
+                                invocation.session_principal_id AS invocation_session_principal_id,
+                                invocation.effective_principal_id AS invocation_effective_principal_id
+                         FROM _orna_kernel.resource_audit_events AS resource
+                         LEFT JOIN _orna_kernel.invocation_audit_events AS invocation
+                           ON invocation.invocation_id = resource.nested_invocation_id
+                         WHERE resource.request_id = $1",
+                        &[&request_id_bytes],
+                    )
+                    .await?;
+                let parent: Vec<u8> = row.try_get("parent_invocation_id")?;
+                let recorded_call_site: Vec<u8> = row.try_get("call_site_id")?;
+                let nested: Option<Vec<u8>> = row.try_get("nested_invocation_id")?;
+                let recorded_target: Option<Vec<u8>> = row.try_get("target_function_id")?;
+                let source_revision: Option<Vec<u8>> = row.try_get("source_revision_id")?;
+                let catalogue_revision: Option<Vec<u8>> =
+                    row.try_get("catalogue_revision_id")?;
+                let principal: Vec<u8> = row.try_get("session_principal_id")?;
+                let decision: String = row.try_get("decision_outcome")?;
+                let terminal: String = row.try_get("terminal_outcome")?;
+                let invocation_outcome: Option<String> = row.try_get("invocation_outcome")?;
+                let invocation_function: Option<Vec<u8>> =
+                    row.try_get("invocation_function_id")?;
+                let invocation_source_revision: Option<Vec<u8>> =
+                    row.try_get("invocation_source_revision_id")?;
+                let invocation_catalogue_revision: Option<Vec<u8>> =
+                    row.try_get("invocation_catalogue_revision_id")?;
+                let invocation_session_principal: Option<Vec<u8>> =
+                    row.try_get("invocation_session_principal_id")?;
+                let invocation_effective_principal: Option<Vec<u8>> =
+                    row.try_get("invocation_effective_principal_id")?;
+                require(
+                    parent == parent_invocation.to_bytes().to_vec()
+                        && recorded_call_site == call_site.to_bytes().to_vec()
+                        && nested.as_ref().is_some_and(|nested| {
+                            nested.len() == 16
+                                && nested.as_slice() != parent_invocation.to_bytes()
+                                && nested.as_slice() != request_id.to_bytes()
+                        }),
+                    "stream resource audit lost parent, call-site, or nested invocation identity",
+                )?;
+                require(
+                    recorded_target == Some(target.to_bytes().to_vec())
+                        && source_revision == Some(active.pair().source().to_bytes().to_vec())
+                        && catalogue_revision
+                            == Some(active.pair().catalogue().to_bytes().to_vec())
+                        && principal == RAW_CLIENT_USER.to_bytes().to_vec()
+                        && decision == "allowed"
+                        && terminal == "completed"
+                        && invocation_outcome.as_deref() == Some("allowed")
+                        && invocation_function == Some(target.to_bytes().to_vec())
+                        && invocation_source_revision
+                            == Some(active.pair().source().to_bytes().to_vec())
+                        && invocation_catalogue_revision
+                            == Some(active.pair().catalogue().to_bytes().to_vec())
+                        && invocation_session_principal == Some(RAW_CLIENT_USER.to_bytes().to_vec())
+                        && invocation_effective_principal
+                            == Some(RAW_CLIENT_USER.to_bytes().to_vec()),
+                    "stream resource audit lost target, revision, principal, or terminal evidence",
+                )
+            }
+            .await;
+            finish_session(
+                audit_operation,
+                audit_session.shutdown().await,
+                "stream resource audit lookup",
+            )?;
+            let terminal_result = evaluate_client_function_with_state_and_grants_and_arguments_and_executor_with_parent_invocation(
+                &active,
+                &authorisation,
+                &[],
+                &[],
+                &grants,
+                &mut state,
+                parent_invocation,
+                &mut executor,
+            )?;
+            let expected_terminal = RuntimeValue::option(
+                &active,
+                TypeDescriptor::option(TypeDescriptor::list(TypeDescriptor::named(
+                    orna_standard::CHARACTER_LARGE_OBJECT_TYPE_ID,
+                ))?)?,
+                None,
+            )?;
+            require(
+                terminal_result.value() == &expected_terminal,
+                "next installed stream AWAIT did not return typed terminal None",
+            )?;
+            require(
+                state.resource(resource_key) == Some(&terminal_state),
+                "terminal None AWAIT mutated the completed stream resource",
+            )?;
+            Ok::<(), Box<dyn Error + Send + Sync>>(())
+        }
+        .await;
+        drop(executor);
+        finish_session(operation, Ok(()), "installed stream evaluator cleanup")?;
+        require_no_database_sessions(&database).await
+    })
+    .await
+}
+
 #[tokio::test]
 #[ignore = "requires the Compose PostgreSQL development service"]
 async fn proves_expression_client_functions_through_installed_invoke() -> TestResult<()> {
@@ -3282,15 +3847,8 @@ async fn proves_server_action_denial_stays_inside_authenticated_resource_trigger
         )?;
         let invocation_rows_after = invocation_audit_rows(&database).await?;
         require(
-            invocation_rows_after.len() == invocation_rows_before.len() + 1
-                && invocation_rows_after.last().is_some_and(|row| {
-                    row.outcome == "denied"
-                        && row.function == target.to_bytes().to_vec()
-                        && row.source == active.pair().source().to_bytes().to_vec()
-                        && row.catalogue == active.pair().catalogue().to_bytes().to_vec()
-                        && row.security_event.is_some()
-                }),
-            "denied SERVER action did not append its linked invocation audit",
+            invocation_rows_after.len() == invocation_rows_before.len(),
+            "denied SERVER action fabricated a nested invocation audit",
         )?;
         let parent_invocation_id = result.context().parent_invocation_id().to_bytes().to_vec();
         let audit_session = database.open().await?;
@@ -3298,10 +3856,14 @@ async fn proves_server_action_denial_stays_inside_authenticated_resource_trigger
             let row = audit_session
                 .client()
                 .query_one(
-                    "SELECT parent_invocation_id, target_function_id, source_revision_id,
-                            catalogue_revision_id, decision_outcome, terminal_outcome,
-                            item_count, byte_count
-                     FROM _orna_kernel.resource_audit_events
+                    "SELECT parent_invocation_id, nested_invocation_id, target_function_id,
+                            source_revision_id, catalogue_revision_id, decision_outcome,
+                            terminal_outcome, item_count, byte_count,
+                            (SELECT count(*)
+                               FROM _orna_kernel.invocation_audit_events AS invocation
+                              WHERE invocation.invocation_id = resource.nested_invocation_id)
+                                AS nested_invocation_count
+                     FROM _orna_kernel.resource_audit_events AS resource
                      WHERE parent_invocation_id = $1
                      ORDER BY sequence DESC
                      LIMIT 1",
@@ -3309,6 +3871,8 @@ async fn proves_server_action_denial_stays_inside_authenticated_resource_trigger
                 )
                 .await?;
             let parent: Vec<u8> = row.try_get("parent_invocation_id")?;
+            let nested_invocation: Option<Vec<u8>> = row.try_get("nested_invocation_id")?;
+            let nested_invocation_count: i64 = row.try_get("nested_invocation_count")?;
             let audited_target: Option<Vec<u8>> = row.try_get("target_function_id")?;
             let source_revision: Option<Vec<u8>> = row.try_get("source_revision_id")?;
             let catalogue_revision: Option<Vec<u8>> = row.try_get("catalogue_revision_id")?;
@@ -3318,6 +3882,8 @@ async fn proves_server_action_denial_stays_inside_authenticated_resource_trigger
             let byte_count: Option<i64> = row.try_get("byte_count")?;
             require(
                 parent == parent_invocation_id
+                    && nested_invocation.is_none()
+                    && nested_invocation_count == 0
                     && audited_target == Some(target.to_bytes().to_vec())
                     && source_revision == Some(active.pair().source().to_bytes().to_vec())
                     && catalogue_revision == Some(active.pair().catalogue().to_bytes().to_vec())
@@ -3479,6 +4045,15 @@ async fn proves_v5_json_value_and_encode_through_installed_sealed_invoke() -> Te
             json_value.canonical_payload() == json_payload.as_slice(),
             "the V5 JSON codec did not retain the canonical value payload",
         )?;
+        let typed_null = RuntimeValue::null(ResolvedType::named(STD_JSON_VALUE_TYPE_ID))?;
+        require(
+            matches!(
+                FunctionArgument::new(STD_JSON_ENCODE_PARAMETER_ID, typed_null),
+                Err(orna_core::value::FunctionArgumentError::NullValue { parameter, .. })
+                    if parameter == STD_JSON_ENCODE_PARAMETER_ID
+            ),
+            "the ordinary JSON presenter argument boundary accepted a typed NULL",
+        )?;
 
         let mut expected_payload = Vec::from(BYTE_STREAM_MAGIC.as_bytes());
         expected_payload.extend_from_slice(&16_u32.to_be_bytes());
@@ -3526,6 +4101,205 @@ async fn proves_v5_json_value_and_encode_through_installed_sealed_invoke() -> Te
             .dispatch_sealed_sys_invoke(&session, 5, &retained)
             .await?;
         require_json_encode_completion(&result, &expected_payload)?;
+
+        // The ordinary FunctionArgument boundary intentionally rejects typed
+        // NULL. Exercise the presenter boundary instead: install one nullable
+        // SERVER result, then request the pinned JSON presenter for that result.
+        let checked_standard = check_standard_library_source(standard)?;
+        let last_ordinal = active
+            .source()
+            .units()
+            .len()
+            .checked_sub(1)
+            .ok_or_else(|| failure("the V5 source has no unit for the nullable fixture"))?;
+        let source = SourceBundle::new(active.source().units().iter().enumerate().map(
+            |(ordinal, unit)| {
+                let content = if ordinal == last_ordinal {
+                    format!(
+                        "{}\n\
+CREATE SCHEMA json_null_fixture;\n\
+CREATE TYPE json_null_fixture.probe AS OBJECT (\n\
+  marker TEXT UNIQUE NOT NULL, linked REF json_null_fixture.probe\n\
+);\n\
+CREATE SERVER FUNCTION json_null_fixture.create(p_marker TEXT)\n\
+RETURNS ROWS (created REF json_null_fixture.probe)\n\
+SECURITY INVOKER TRANSACTION ATOMIC VOLATILITY VOLATILE\n\
+AS INSERT INTO json_null_fixture.probe AS made (marker)\n\
+VALUES (p_marker) RETURNING REF(made);\n\
+CREATE SERVER FUNCTION json_null_fixture.read_links()\n\
+RETURNS ROWS (linked REF json_null_fixture.probe)\n\
+SECURITY INVOKER TRANSACTION READ ONLY VOLATILITY STABLE\n\
+AS SELECT probe.linked FROM json_null_fixture.probe probe;\n",
+                        unit.content()
+                    )
+                } else {
+                    unit.content().to_owned()
+                };
+                SourceUnit::new(unit.logical_path(), content)
+            },
+        ))?;
+        let report = check_standard_application(
+            &source,
+            &StandardApplicationCheckContext::try_new(active.catalogue(), &checked_standard)?,
+        );
+        require(
+            report.diagnostics().is_empty(),
+            "the nullable JSON presenter fixture did not compile",
+        )?;
+        let installed = kernel
+            .apply(&prepare_standard_application(
+                &report,
+                active.pair(),
+                &active,
+            )?)
+            .await?;
+        let create_function = installed
+            .catalogue()
+            .functions()
+            .iter()
+            .find(|function| function.name().parts() == ["json_null_fixture", "create"])
+            .ok_or_else(|| failure("the nullable JSON fixture creator is missing"))?
+            .id();
+        let create_parameter = installed
+            .catalogue()
+            .function_by_id(create_function)
+            .and_then(|function| function.parameter_by_name("p_marker"))
+            .ok_or_else(|| failure("the nullable JSON fixture marker parameter is missing"))?
+            .id();
+        let read_function = installed
+            .catalogue()
+            .functions()
+            .iter()
+            .find(|function| function.name().parts() == ["json_null_fixture", "read_links"])
+            .ok_or_else(|| failure("the nullable JSON fixture reader is missing"))?
+            .id();
+        let security = SecuritySnapshot::new_with_function_targets_and_local_peer_credentials(
+            installed.pair(),
+            vec![
+                SecurityFunctionTarget::verified_standard(
+                    STD_INVOKE_ECHO_FUNCTION_ID,
+                    standard_revision,
+                    STD_INVOKE_ECHO_FUNCTION_REVISION_ID,
+                ),
+                SecurityFunctionTarget::verified_standard(
+                    STD_JSON_ENCODE_FUNCTION_ID,
+                    standard_revision,
+                    STD_JSON_ENCODE_FUNCTION_REVISION_ID,
+                ),
+                SecurityFunctionTarget::application(create_function),
+                SecurityFunctionTarget::application(read_function),
+            ],
+            vec![Principal::new(
+                RAW_CLIENT_USER,
+                PrincipalKind::User,
+                PrincipalStatus::Active,
+            )],
+            vec![],
+            vec![
+                ExecuteGrant::new(RAW_CLIENT_USER, STD_JSON_ENCODE_FUNCTION_ID),
+                ExecuteGrant::new(RAW_CLIENT_USER, create_function),
+                ExecuteGrant::new(RAW_CLIENT_USER, read_function),
+            ],
+            vec![LocalPeerCredential::new(uid, RAW_CLIENT_USER)],
+        )?;
+        kernel.replace_security_snapshot(&security).await?;
+        let session = kernel.authenticate_local_peer(uid).await?;
+        let create_request = InvokeRequest::new(InvokeRequestInput {
+            target: InvocationRequestTarget::function_id(create_function),
+            arguments: vec![InvocationArgument::new(
+                InvocationParameterSelector::parameter_id(create_parameter),
+                InvokeValue::new(RuntimeValue::Text("null-row".to_owned()))?,
+            )],
+            caller_context: InvocationCallerContext::new(
+                InvocationCallerKind::TestRunner,
+                false,
+                false,
+                None,
+                None,
+                "en-GB",
+                "UTC",
+                None,
+            )?,
+            client_offer: InvocationClientOffer::new(
+                5,
+                "en-GB",
+                "UTC",
+                Vec::new(),
+                Vec::new(),
+                1_024,
+                0,
+                None,
+                None,
+            )?,
+            output_requirement: None,
+            state_profile: None,
+            trace_policy: InvocationTracePolicy::Off,
+            idempotency_key: None,
+            parent_invocation_id: None,
+            observer_context: None,
+        })?;
+        let retained = encode_invoke_request(&installed, &registry, &create_request)?;
+        let create_result = kernel
+            .dispatch_sealed_sys_invoke(&session, 5, &retained)
+            .await?;
+        require(
+            matches!(create_result, SealedInvocationResult::Completed { .. }),
+            "the nullable JSON fixture creator did not complete",
+        )?;
+        let json_output = InvocationOutputRequirement::new(
+            Some("json".to_owned()),
+            None,
+            None,
+            InvocationStreamingRequirement::Unspecified,
+        )?;
+        let sink = InvocationSinkOffer::new(
+            TypeDescriptor::named(STD_IO_BYTE_STREAM_TYPE_ID),
+            ["application/json"],
+            false,
+            0,
+            None,
+        )?;
+        let read_request = InvokeRequest::new(InvokeRequestInput {
+            target: InvocationRequestTarget::function_id(read_function),
+            arguments: Vec::new(),
+            caller_context: InvocationCallerContext::new(
+                InvocationCallerKind::TestRunner,
+                false,
+                false,
+                None,
+                None,
+                "en-GB",
+                "UTC",
+                None,
+            )?,
+            client_offer: InvocationClientOffer::new(
+                5,
+                "en-GB",
+                "UTC",
+                vec![sink],
+                Vec::new(),
+                1_024,
+                0,
+                None,
+                None,
+            )?,
+            output_requirement: Some(json_output),
+            state_profile: None,
+            trace_policy: InvocationTracePolicy::Off,
+            idempotency_key: None,
+            parent_invocation_id: None,
+            observer_context: None,
+        })?;
+        let retained = encode_invoke_request(&installed, &registry, &read_request)?;
+        let result = kernel
+            .dispatch_sealed_sys_invoke(&session, 5, &retained)
+            .await?;
+        let mut expected_null_payload = Vec::from(BYTE_STREAM_MAGIC.as_bytes());
+        expected_null_payload.extend_from_slice(&16_u32.to_be_bytes());
+        expected_null_payload.extend_from_slice(b"application/json");
+        expected_null_payload.extend_from_slice(&4_u32.to_be_bytes());
+        expected_null_payload.extend_from_slice(b"null");
+        require_json_encode_completion(&result, &expected_null_payload)?;
         require_no_database_sessions(&database).await
     })
     .await
@@ -3828,6 +4602,18 @@ fn installed_invoke_request(
     explain: bool,
 ) -> InstalledInvokeRequest {
     InstalledInvokeRequest::new(target, arguments, None, None, no_progress, explain, None)
+}
+
+/// Applies an optional installed runtime override to a parser-shaped invoke
+/// request. Keeping the default helper unchanged makes the no-override path
+/// explicit while allowing this proof to exercise `--runtime tty` and the
+/// closed unsupported-family arm with the same request shape.
+fn installed_invoke_request_with_runtime(
+    mut request: InstalledInvokeRequest,
+    runtime: Option<RuntimeFamily>,
+) -> InstalledInvokeRequest {
+    request.runtime = runtime;
+    request
 }
 
 /// Runs one installed `orna invoke` command through the exact host flow
@@ -5965,6 +6751,136 @@ async fn authenticated_stream_resource_dispatches_allowed_and_denied_with_redact
 
 #[tokio::test]
 #[ignore = "requires the Compose PostgreSQL development service"]
+async fn authenticated_direct_resource_post_reservation_failure_is_compensated_once()
+-> TestResult<()> {
+    const RESOURCE_INPUT: &str = "direct-resource-post-reservation-failure";
+    with_test_database(|database| async move {
+        let kernel = kernel(&database)?;
+        let (active, standard_upgrade, _client_function, _server_function) =
+            install_raw_client_fixture(&kernel).await?;
+        let (active, _resource_client, target, parameter, call_site) =
+            install_stream_resource_client_fixture(
+                &kernel,
+                &active,
+                standard_upgrade.checked_standard_library(),
+            )
+            .await
+            .map_err(|error| {
+                failure(format!("install stream resource fixture failed: {error:?}"))
+            })?;
+        let principal = Principal::new(
+            RAW_CLIENT_USER,
+            PrincipalKind::User,
+            PrincipalStatus::Active,
+        );
+        let functions = active
+            .catalogue()
+            .functions()
+            .iter()
+            .map(|function| function.id())
+            .collect::<Vec<_>>();
+        let security = SecuritySnapshot::new_with_function_targets(
+            active.pair(),
+            functions
+                .iter()
+                .copied()
+                .map(SecurityFunctionTarget::application)
+                .collect(),
+            vec![principal],
+            vec![],
+            vec![ExecuteGrant::new(RAW_CLIENT_USER, target)],
+        )?;
+        let allowed = kernel.replace_security_snapshot(&security).await?;
+        let session = allowed.bind_authenticated_session(RAW_CLIENT_USER, vec![])?;
+        let request = ResourceRequest {
+            stream_id: 203,
+            request_id: InvocationId::from_bytes([0xd1; 16]),
+            parent_invocation_id: InvocationId::from_bytes([0xd2; 16]),
+            call_site_id: call_site,
+            state_profile: String::new(),
+            function_instance_key: String::new(),
+            target_function_id: target,
+            target_revision: active.pair(),
+            generation: 1,
+            resource_kind: ResourceKind::Stream,
+            arguments: vec![ResourceArgument {
+                parameter,
+                value: RuntimeValue::Text(RESOURCE_INPUT.into()),
+            }],
+            item_window: 1,
+            byte_window: 1024,
+        };
+
+        let dispatch = kernel
+            .dispatch_authenticated_server_resource_with_forced_post_reservation_failure(
+                &session, &request,
+            )
+            .await;
+        require(
+            matches!(
+                dispatch,
+                Err(PostgresKernelError::Database(source))
+                    if source.as_db_error().is_some_and(|database| {
+                        database.code() == &SqlState::UNDEFINED_COLUMN
+                            && database
+                                .message()
+                                .contains("no_such_direct_resource_post_reservation_column")
+                    })
+            ),
+            "forced direct post-reservation failure did not preserve the injected SQLSTATE",
+        )?;
+        assert_resource_compensation_audit_row(
+            &database,
+            &request,
+            None,
+            "denied",
+            "failed",
+            "denied",
+            RESOURCE_INPUT,
+        )
+        .await?;
+
+        let audit_session = database.open().await?;
+        let audit_operation = async {
+            let row = audit_session
+                .client()
+                .query_one(
+                    "SELECT
+                         (SELECT count(*)
+                            FROM _orna_kernel.resource_request_history
+                           WHERE request_id = $1) AS history_count,
+                         (SELECT count(*)
+                            FROM _orna_kernel.resource_audit_events
+                           WHERE request_id = $1) AS resource_count,
+                         (SELECT count(*)
+                            FROM _orna_kernel.resource_audit_events AS resource
+                            JOIN _orna_kernel.invocation_audit_events AS invocation
+                              ON invocation.invocation_id = resource.nested_invocation_id
+                           WHERE resource.request_id = $1) AS invocation_count",
+                    &[&request.request_id.to_bytes().to_vec()],
+                )
+                .await?;
+            let history_count: i64 = row.try_get("history_count")?;
+            let resource_count: i64 = row.try_get("resource_count")?;
+            let invocation_count: i64 = row.try_get("invocation_count")?;
+            require(
+                history_count == 1 && resource_count == 1 && invocation_count == 0,
+                "direct post-reservation failure fabricated a nested invocation audit",
+            )
+        }
+        .await;
+        finish_session(
+            audit_operation,
+            audit_session.shutdown().await,
+            "direct resource failure compensation count",
+        )?;
+        require_no_database_sessions(&database).await
+    })
+    .await
+}
+
+#[tokio::test]
+#[ignore = "requires the Compose PostgreSQL development service"]
 async fn authenticated_resource_worker_failure_is_compensated_once() -> TestResult<()> {
     const RESOURCE_INPUT: &str = "resource-worker-input";
     with_test_database(|database| async move {
@@ -6062,26 +6978,19 @@ async fn authenticated_resource_worker_failure_is_compensated_once() -> TestResu
                             resource.terminal_outcome,
                             resource.item_count,
                             resource.byte_count,
-                            invocation.outcome AS invocation_outcome,
-                            invocation.session_principal_id AS invocation_session_principal_id,
-                            invocation.effective_principal_id AS invocation_effective_principal_id,
-                            invocation.authorising_principal_id AS invocation_authorising_principal_id,
-                            invocation.function_id AS invocation_function_id,
-                            invocation.source_revision_id AS invocation_source_revision_id,
-                            invocation.catalogue_revision_id AS invocation_catalogue_revision_id,
-                            invocation.security_audit_event_id AS invocation_security_audit_event_id,
-                            row_to_json(resource)::text AS resource_json,
-                            row_to_json(invocation)::text AS invocation_json
+                            (SELECT count(*)
+                               FROM _orna_kernel.invocation_audit_events AS invocation
+                              WHERE invocation.invocation_id = resource.nested_invocation_id)
+                                AS invocation_count,
+                            row_to_json(resource)::text AS resource_json
                      FROM _orna_kernel.resource_audit_events AS resource
-                     JOIN _orna_kernel.invocation_audit_events AS invocation
-                       ON invocation.invocation_id = resource.nested_invocation_id
                      WHERE resource.request_id = $1",
                     &[&request_bytes],
                 )
                 .await?;
             require(rows.len() == 1, "worker failure did not leave exactly one resource audit row")?;
             let row = &rows[0];
-            let nested_invocation_id: Vec<u8> = row.try_get("nested_invocation_id")?;
+            let nested_invocation_id: Option<Vec<u8>> = row.try_get("nested_invocation_id")?;
             let parent_invocation_id: Vec<u8> = row.try_get("parent_invocation_id")?;
             let call_site_id: Vec<u8> = row.try_get("call_site_id")?;
             let target_function_id: Option<Vec<u8>> = row.try_get("target_function_id")?;
@@ -6092,27 +7001,11 @@ async fn authenticated_resource_worker_failure_is_compensated_once() -> TestResu
             let terminal_outcome: String = row.try_get("terminal_outcome")?;
             let item_count: Option<i64> = row.try_get("item_count")?;
             let byte_count: Option<i64> = row.try_get("byte_count")?;
-            let invocation_outcome: String = row.try_get("invocation_outcome")?;
-            let invocation_session_principal_id: Vec<u8> =
-                row.try_get("invocation_session_principal_id")?;
-            let invocation_effective_principal_id: Option<Vec<u8>> =
-                row.try_get("invocation_effective_principal_id")?;
-            let invocation_authorising_principal_id: Option<Vec<u8>> =
-                row.try_get("invocation_authorising_principal_id")?;
-            let invocation_function_id: Option<Vec<u8>> = row.try_get("invocation_function_id")?;
-            let invocation_source_revision_id: Option<Vec<u8>> =
-                row.try_get("invocation_source_revision_id")?;
-            let invocation_catalogue_revision_id: Option<Vec<u8>> =
-                row.try_get("invocation_catalogue_revision_id")?;
-            let invocation_security_audit_event_id: Option<Vec<u8>> =
-                row.try_get("invocation_security_audit_event_id")?;
+            let invocation_count: i64 = row.try_get("invocation_count")?;
             let resource_json: String = row.try_get("resource_json")?;
-            let invocation_json: String = row.try_get("invocation_json")?;
             require(
-                nested_invocation_id.len() == 16
-                    && nested_invocation_id.iter().any(|byte| *byte != 0)
-                    && nested_invocation_id != request.request_id.to_bytes().to_vec()
-                    && parent_invocation_id != nested_invocation_id
+                nested_invocation_id.is_none()
+                    && invocation_count == 0
                     && parent_invocation_id == request.parent_invocation_id.to_bytes().to_vec()
                     && call_site_id == request.call_site_id.to_bytes().to_vec()
                     && target_function_id.is_none()
@@ -6123,17 +7016,8 @@ async fn authenticated_resource_worker_failure_is_compensated_once() -> TestResu
                     && terminal_outcome == "failed"
                     && item_count.is_none()
                     && byte_count.is_none()
-                    && invocation_outcome == "denied"
-                    && invocation_session_principal_id == RAW_CLIENT_USER.to_bytes().to_vec()
-                    && invocation_effective_principal_id.is_none()
-                    && invocation_authorising_principal_id.is_none()
-                    && invocation_function_id.is_none()
-                    && invocation_source_revision_id.is_none()
-                    && invocation_catalogue_revision_id.is_none()
-                    && invocation_security_audit_event_id.is_none()
-                    && !resource_json.contains(RESOURCE_INPUT)
-                    && !invocation_json.contains(RESOURCE_INPUT),
-                "worker compensation exposed target or retained non-redacted audit state",
+                    && !resource_json.contains(RESOURCE_INPUT),
+                "worker compensation fabricated a nested invocation or exposed target state",
             )?;
             Ok::<(), Box<dyn Error + Send + Sync>>(())
         }
@@ -6439,8 +7323,8 @@ async fn authenticated_resource_worker_failure_is_compensated_once() -> TestResu
             let invocation_count: i64 = row.try_get("invocation_count")?;
             let history_count: i64 = row.try_get("history_count")?;
             require(
-                resource_count == 1 && invocation_count == 1 && history_count == 1,
-                "duplicate resource request inserted extra resource, invocation, or history rows",
+                resource_count == 1 && invocation_count == 0 && history_count == 1,
+                "duplicate preaccept resource request inserted an invocation or extra audit row",
             )
         }
         .await;
@@ -6491,7 +7375,7 @@ async fn assert_resource_compensation_audit_row(
                                 row_to_json(resource)::text AS resource_json,
                                 row_to_json(invocation)::text AS invocation_json
                          FROM _orna_kernel.resource_audit_events AS resource
-                         JOIN _orna_kernel.invocation_audit_events AS invocation
+                         LEFT JOIN _orna_kernel.invocation_audit_events AS invocation
                            ON invocation.invocation_id = resource.nested_invocation_id
                          WHERE resource.request_id = $1",
                         &[&request_bytes],
@@ -6505,7 +7389,7 @@ async fn assert_resource_compensation_audit_row(
         })
         .await
         .map_err(|_| failure("resource compensation did not leave its audit row"))??;
-        let nested_invocation_id: Vec<u8> = row.try_get("nested_invocation_id")?;
+        let nested_invocation_id: Option<Vec<u8>> = row.try_get("nested_invocation_id")?;
         let parent_invocation_id: Vec<u8> = row.try_get("parent_invocation_id")?;
         let call_site_id: Vec<u8> = row.try_get("call_site_id")?;
         let target_function_id: Option<Vec<u8>> = row.try_get("target_function_id")?;
@@ -6514,8 +7398,8 @@ async fn assert_resource_compensation_audit_row(
         let session_principal_id: Vec<u8> = row.try_get("session_principal_id")?;
         let decision_outcome: String = row.try_get("decision_outcome")?;
         let terminal_outcome: String = row.try_get("terminal_outcome")?;
-        let invocation_outcome: String = row.try_get("invocation_outcome")?;
-        let invocation_session_principal_id: Vec<u8> =
+        let invocation_outcome: Option<String> = row.try_get("invocation_outcome")?;
+        let invocation_session_principal_id: Option<Vec<u8>> =
             row.try_get("invocation_session_principal_id")?;
         let invocation_effective_principal_id: Option<Vec<u8>> =
             row.try_get("invocation_effective_principal_id")?;
@@ -6529,16 +7413,24 @@ async fn assert_resource_compensation_audit_row(
         let invocation_security_audit_event_id: Option<Vec<u8>> =
             row.try_get("invocation_security_audit_event_id")?;
         let resource_json: String = row.try_get("resource_json")?;
-        let invocation_json: String = row.try_get("invocation_json")?;
+        let invocation_json: Option<String> = row.try_get("invocation_json")?;
         let target_bytes = expected_target.map(|target| target.to_bytes().to_vec());
         let source_bytes = expected_target.map(|_| request.target_revision.source().to_bytes().to_vec());
         let catalogue_bytes =
             expected_target.map(|_| request.target_revision.catalogue().to_bytes().to_vec());
         let principal_bytes = RAW_CLIENT_USER.to_bytes().to_vec();
+        let invocation_expected = expected_target.is_some();
+        let nested_identity_valid = match (&nested_invocation_id, invocation_expected) {
+            (Some(nested), true) => {
+                nested.len() == 16
+                    && nested.as_slice() != request.request_id.to_bytes().as_slice()
+                    && nested.as_slice() != request.parent_invocation_id.to_bytes().as_slice()
+            }
+            (None, false) => true,
+            _ => false,
+        };
         require(
-            nested_invocation_id.len() == 16
-                && nested_invocation_id != request.request_id.to_bytes().to_vec()
-                && parent_invocation_id != nested_invocation_id
+            nested_identity_valid
                 && parent_invocation_id == request.parent_invocation_id.to_bytes().to_vec()
                 && call_site_id == request.call_site_id.to_bytes().to_vec()
                 && target_function_id == target_bytes
@@ -6547,8 +7439,10 @@ async fn assert_resource_compensation_audit_row(
                 && session_principal_id == principal_bytes
                 && decision_outcome == expected_decision
                 && terminal_outcome == expected_terminal
-                && invocation_outcome == expected_invocation_outcome
-                && invocation_session_principal_id == principal_bytes
+                && invocation_outcome.as_deref()
+                    == expected_target.map(|_| expected_invocation_outcome)
+                && invocation_session_principal_id
+                    == expected_target.map(|_| principal_bytes.clone())
                 && invocation_effective_principal_id
                     == expected_target.map(|_| RAW_CLIENT_USER.to_bytes().to_vec())
                 && invocation_authorising_principal_id
@@ -6556,9 +7450,9 @@ async fn assert_resource_compensation_audit_row(
                 && invocation_function_id == target_bytes
                 && invocation_source_revision_id == source_bytes
                 && invocation_catalogue_revision_id == catalogue_bytes
-                && invocation_security_audit_event_id.is_some() == expected_target.is_some()
+                && invocation_security_audit_event_id.is_some() == invocation_expected
                 && !resource_json.contains(raw_marker)
-                && !invocation_json.contains(raw_marker),
+                && invocation_json.as_deref().is_none_or(|json| !json.contains(raw_marker)),
             "resource compensation changed bounded identity, audit, or redaction evidence",
         )?;
         Ok::<(), Box<dyn Error + Send + Sync>>(())
@@ -6927,6 +7821,7 @@ async fn installed_executor_reclaims_transport_after_terminal_cancellation() -> 
                 &ResourceServerFrame::Cancelled(orna_protocol::ResourceCancelled {
                     stream_id: cancel.stream_id,
                     request_id: cancel.request_id,
+                    target_revision: first_wire.target_revision,
                     reason: ResourceCancellationCode::ClientRequested,
                 }),
             )
@@ -6968,6 +7863,7 @@ async fn installed_executor_reclaims_transport_after_terminal_cancellation() -> 
                 &ResourceServerFrame::Completed(orna_protocol::ResourceCompleted {
                     stream_id: replacement_wire.stream_id,
                     request_id: replacement_wire.request_id,
+                    target_revision: replacement_wire.target_revision,
                     final_batch_sequence: 0,
                     total_items: 0,
                 }),
@@ -7146,6 +8042,7 @@ async fn installed_resource_socket_delivers_values_and_enforces_windows_and_gran
             &ResourceServerFrame::Values(orna_protocol::ResourceValues {
                 stream_id: 2,
                 request_id: InvocationId::from_bytes([0x51; 16]),
+                target_revision: active.pair(),
                 batch_sequence: 0,
                 item_count: 1,
                 byte_count: 0,
@@ -8103,7 +9000,7 @@ async fn installed_resource_socket_cancellation_reclaims_and_replaces_request() 
                             resource.item_count, resource.byte_count,
                             invocation.outcome AS invocation_outcome
                      FROM _orna_kernel.resource_audit_events AS resource
-                     JOIN _orna_kernel.invocation_audit_events AS invocation
+                     LEFT JOIN _orna_kernel.invocation_audit_events AS invocation
                        ON invocation.invocation_id = resource.nested_invocation_id
                      ORDER BY resource.sequence",
                     &[],
@@ -8119,7 +9016,7 @@ async fn installed_resource_socket_cancellation_reclaims_and_replaces_request() 
             for (index, row) in rows.iter().enumerate() {
                 let request_id: Vec<u8> = row.try_get("request_id")?;
                 let parent_invocation_id: Vec<u8> = row.try_get("parent_invocation_id")?;
-                let nested_invocation_id: Vec<u8> = row.try_get("nested_invocation_id")?;
+                let nested_invocation_id: Option<Vec<u8>> = row.try_get("nested_invocation_id")?;
                 let call_site_id: Vec<u8> = row.try_get("call_site_id")?;
                 let target_function_id: Option<Vec<u8>> = row.try_get("target_function_id")?;
                 let source_revision_id: Option<Vec<u8>> = row.try_get("source_revision_id")?;
@@ -8129,7 +9026,7 @@ async fn installed_resource_socket_cancellation_reclaims_and_replaces_request() 
                 let terminal_outcome: String = row.try_get("terminal_outcome")?;
                 let item_count: Option<i64> = row.try_get("item_count")?;
                 let byte_count: Option<i64> = row.try_get("byte_count")?;
-                let invocation_outcome: String = row.try_get("invocation_outcome")?;
+                let invocation_outcome: Option<String> = row.try_get("invocation_outcome")?;
                 let (request, parent, decision, terminal, expected_items, target_present) =
                     if index == 0 {
                         (
@@ -8160,10 +9057,15 @@ async fn installed_resource_socket_cancellation_reclaims_and_replaces_request() 
                         && source_revision_id.is_none()
                         && catalogue_revision_id.is_none()
                 };
+                let nested_identity_matches = match (&nested_invocation_id, target_present) {
+                    (Some(nested), true) => nested.len() == 16,
+                    (None, false) => true,
+                    _ => false,
+                };
                 require(
                     request_id == request.request_id.to_bytes()
                         && parent_invocation_id == parent.to_bytes()
-                        && nested_invocation_id.len() == 16
+                        && nested_identity_matches
                         && call_site_id == call_site.to_bytes()
                         && target_matches
                         && session_principal_id == RAW_CLIENT_USER.to_bytes()
@@ -8171,7 +9073,7 @@ async fn installed_resource_socket_cancellation_reclaims_and_replaces_request() 
                         && terminal_outcome == terminal
                         && item_count == expected_items
                         && (expected_items.is_none() || byte_count.is_some_and(|bytes| bytes > 0))
-                        && invocation_outcome == decision,
+                        && invocation_outcome.as_deref() == target_present.then_some(decision),
                     "resource cancellation audit retained stale, unredacted, or mismatched terminal state",
                 )?;
             }
@@ -8193,6 +9095,344 @@ async fn installed_resource_socket_cancellation_reclaims_and_replaces_request() 
             audit_operation,
             audit_session.shutdown().await,
             "resource cancellation audit cleanup",
+        )?;
+        require_no_database_sessions(&database).await
+    })
+    .await
+}
+
+/// Proves that an authenticated accepted SERVER resource producer is cancelled
+/// when its client half-closes while the producer is active. The closed socket
+/// must not receive a late terminal frame, and the cleanup must retain one
+/// allowed terminal audit row linked to the accepted nested invocation.
+#[cfg(feature = "test-hooks")]
+#[tokio::test]
+#[ignore = "requires the Compose PostgreSQL development service"]
+async fn installed_resource_socket_disconnect_cancels_active_producer_and_audits() -> TestResult<()>
+{
+    with_test_database(|database| async move {
+        let kernel = open_standard_database(kernel(&database)?).await.map_err(|error| {
+            failure(format!("open standard database failed: {error:?}"))
+        })?;
+        let active = kernel.recover().await.map_err(|error| {
+            failure(format!("recover installed standard failed: {error:?}"))
+        })?;
+        let standard_source = active
+            .catalogue_hash_context()
+            .standard()
+            .cloned()
+            .ok_or_else(|| failure("resource disconnect fixture has no checked standard source"))?;
+        let checked_standard = check_standard_library_source(&standard_source).map_err(|error| {
+            failure(format!("installed standard source check failed: {error:?}"))
+        })?;
+        let (active, _client_function, target, parameter, call_site) =
+            install_stream_resource_client_fixture(&kernel, &active, &checked_standard).await?;
+        let create = active
+            .catalogue()
+            .functions()
+            .iter()
+            .find(|function| function.name().parts() == ["resource_fixture", "create"])
+            .ok_or_else(|| failure("resource disconnect fixture is missing resource_fixture.create"))?
+            .id();
+        let create_definition = active
+            .catalogue()
+            .function_by_id(create)
+            .ok_or_else(|| failure("resource disconnect fixture create function disappeared"))?;
+        let create_parameter = create_definition
+            .parameter_by_name("p_marker")
+            .ok_or_else(|| failure("resource disconnect fixture marker parameter disappeared"))?
+            .id();
+        let sequence_parameter = create_definition
+            .parameter_by_name("p_sequence")
+            .ok_or_else(|| failure("resource disconnect fixture sequence parameter disappeared"))?
+            .id();
+        kernel
+            .execute_server_insert(
+                create,
+                &[
+                    FunctionArgument::new(
+                        create_parameter,
+                        RuntimeValue::Text("disconnect-active-value".to_owned()),
+                    )?,
+                    FunctionArgument::new(sequence_parameter, RuntimeValue::Integer(1))?,
+                ],
+            )
+            .await
+            .map_err(|error| failure(format!("insert resource disconnect fixture row failed: {error:?}")))?;
+
+        let probe_type = active
+            .catalogue()
+            .object_types()
+            .iter()
+            .find(|object| object.name().parts() == ["resource_fixture", "probe"])
+            .ok_or_else(|| failure("resource disconnect fixture is missing resource_fixture.probe"))?
+            .id();
+        let probe_relation = format!(
+            "_orna_data.t_{:032x}",
+            u128::from_be_bytes(probe_type.to_bytes())
+        );
+        let functions = active
+            .catalogue()
+            .functions()
+            .iter()
+            .map(FunctionDefinition::id)
+            .collect::<Vec<_>>();
+        let uid = nix::unistd::getuid().as_raw();
+        let principal = Principal::new(
+            RAW_CLIENT_USER,
+            PrincipalKind::User,
+            PrincipalStatus::Active,
+        );
+        let security = SecuritySnapshot::new_with_local_peer_credentials(
+            active.pair(),
+            functions,
+            vec![principal],
+            vec![],
+            vec![ExecuteGrant::new(RAW_CLIENT_USER, target)],
+            vec![LocalPeerCredential::new(uid, RAW_CLIENT_USER)],
+        )?;
+        kernel.replace_security_snapshot(&security).await?;
+        let registry = registered_opaque_codecs(&standard_source)?;
+        let request = ResourceRequest {
+            stream_id: 1,
+            request_id: InvocationId::from_bytes([0xc1; 16]),
+            parent_invocation_id: InvocationId::from_bytes([0xc2; 16]),
+            call_site_id: call_site,
+            state_profile: String::new(),
+            function_instance_key: String::new(),
+            target_function_id: target,
+            target_revision: active.pair(),
+            generation: 1,
+            resource_kind: ResourceKind::Stream,
+            arguments: vec![ResourceArgument {
+                parameter,
+                value: RuntimeValue::Text("disconnect-active-value".to_owned()),
+            }],
+            item_window: 1,
+            byte_window: MAX_RESOURCE_WINDOW,
+        };
+        let authorizer = RawResourceRequestAuthorizer::new();
+        require(
+            authorizer.expect(&request),
+            "resource disconnect proof could not register its request",
+        )?;
+
+        let (server, client) = StandardUnixStream::pair()?;
+        client.set_nonblocking(true)?;
+        let mut client = UnixStream::from_std(client)?;
+        let connection = tokio::spawn(serve_local_raw_stream_with_resource_authorizer(
+            kernel.clone(),
+            server,
+            LocalRawSocketResources::new(),
+            authorizer,
+        ));
+        let waiter_session = database.open().await?;
+        let mut locker = Some(database.open().await?);
+        let mut accepted_nested_bytes: Option<Vec<u8>> = None;
+        let mut write_closed = false;
+        let stream_operation = async {
+            client
+                .write_all(b"ORNA\x01\x00\x00\x05\x00\x00\x00\x00")
+                .await?;
+            let mut acknowledgement = [0_u8; 12];
+            client.read_exact(&mut acknowledgement).await?;
+            require(
+                acknowledgement == *b"ORNA\x81\x00\x00\x05\x00\x00\x00\x00",
+                "resource disconnect proof did not complete the constructed handshake",
+            )?;
+            locker
+                .as_ref()
+                .expect("resource disconnect lock session remains before disconnect")
+                .client()
+                .batch_execute(&format!(
+                    "BEGIN; LOCK TABLE {probe_relation} IN ACCESS EXCLUSIVE MODE;"
+                ))
+                .await?;
+
+            send_resource_client_frame_to_socket(
+                &mut client,
+                &active,
+                &registry,
+                &ResourceClientFrame::Request(request.clone()),
+            )
+            .await?;
+            let accepted = timeout(
+                Duration::from_secs(5),
+                read_resource_server_frame_from_socket(&mut client, &active, &registry),
+            )
+            .await
+            .map_err(|_| failure("resource disconnect producer did not reach acceptance"))??;
+            let accepted_nested_invocation_id = match accepted {
+                ResourceServerFrame::Accepted(frame)
+                    if frame.stream_id == request.stream_id
+                        && frame.request_id == request.request_id
+                        && frame.target_revision == request.target_revision
+                        && frame.resource_kind == request.resource_kind => frame.nested_invocation_id,
+                _ => return Err(failure("resource disconnect proof did not observe RESOURCE_ACCEPTED")),
+            };
+            accepted_nested_bytes = Some(accepted_nested_invocation_id.to_bytes().to_vec());
+
+            let lock_waiting = timeout(Duration::from_secs(5), async {
+                loop {
+                    let waiting = waiter_session
+                        .client()
+                        .query_one(
+                            &format!(
+                                "SELECT EXISTS (SELECT 1 FROM pg_locks WHERE relation = '{probe_relation}'::regclass AND NOT granted)"
+                            ),
+                            &[],
+                        )
+                        .await?
+                        .get::<_, bool>(0);
+                    if waiting {
+                        return Ok::<(), tokio_postgres::Error>(());
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .map_err(|_| failure("resource disconnect producer did not reach its active query"))?;
+            lock_waiting?;
+
+            // Keep the relation lock until the server has observed EOF and
+            // entered its producer-cancellation cleanup path. This makes the
+            // active state deterministic and prevents a raced completed result.
+            client.shutdown().await?;
+            write_closed = true;
+            sleep(Duration::from_millis(100)).await;
+            if let Some(locker) = locker.take() {
+                locker.shutdown().await?;
+            }
+            let mut trailing = Vec::new();
+            timeout(Duration::from_secs(5), client.read_to_end(&mut trailing))
+                .await
+                .map_err(|_| failure("resource disconnect socket did not reach EOF"))??;
+            require(
+                trailing.is_empty(),
+                "resource disconnect socket emitted a late terminal frame",
+            )
+        }
+        .await;
+        let lock_cleanup = match locker {
+            Some(locker) => locker.shutdown().await,
+            None => Ok(()),
+        };
+        let shutdown = if write_closed {
+            Ok(())
+        } else {
+            client.shutdown().await.map_err(Into::into)
+        };
+        let connection = connection.await.map_err(Into::into).and_then(|result| {
+            result.map_err(|error| -> Box<dyn Error + Send + Sync> { Box::new(error) })
+        });
+        let waiter_shutdown = waiter_session.shutdown().await;
+        finish_session(
+            stream_operation,
+            finish_session(
+                lock_cleanup,
+                finish_session(shutdown, connection, "resource disconnect socket cleanup"),
+                "resource disconnect lock cleanup",
+            ),
+            "resource disconnect active producer operation",
+        )?;
+        waiter_shutdown?;
+
+        let audit_session = database.open().await?;
+        let audit_operation = async {
+            let rows = audit_session
+                .client()
+                .query(
+                    "SELECT resource.request_id, resource.parent_invocation_id,
+                            resource.nested_invocation_id, resource.call_site_id,
+                            resource.target_function_id, resource.source_revision_id,
+                            resource.catalogue_revision_id, resource.session_principal_id,
+                            resource.decision_outcome, resource.terminal_outcome,
+                            resource.item_count, resource.byte_count,
+                            invocation.invocation_id AS invocation_id,
+                            invocation.outcome AS invocation_outcome,
+                            invocation.session_principal_id AS invocation_principal_id,
+                            invocation.function_id AS invocation_function_id,
+                            invocation.source_revision_id AS invocation_source_revision_id,
+                            invocation.catalogue_revision_id AS invocation_catalogue_revision_id
+                     FROM _orna_kernel.resource_audit_events AS resource
+                     LEFT JOIN _orna_kernel.invocation_audit_events AS invocation
+                       ON invocation.invocation_id = resource.nested_invocation_id
+                     ORDER BY resource.sequence",
+                    &[],
+                )
+                .await?;
+            require(
+                rows.len() == 1,
+                "resource disconnect proof did not retain exactly one terminal audit row",
+            )?;
+            let row = &rows[0];
+            let request_id: Vec<u8> = row.try_get("request_id")?;
+            let parent_invocation_id: Vec<u8> = row.try_get("parent_invocation_id")?;
+            let nested_invocation_id: Option<Vec<u8>> = row.try_get("nested_invocation_id")?;
+            let call_site_id: Vec<u8> = row.try_get("call_site_id")?;
+            let target_function_id: Option<Vec<u8>> = row.try_get("target_function_id")?;
+            let source_revision_id: Option<Vec<u8>> = row.try_get("source_revision_id")?;
+            let catalogue_revision_id: Option<Vec<u8>> = row.try_get("catalogue_revision_id")?;
+            let session_principal_id: Vec<u8> = row.try_get("session_principal_id")?;
+            let decision_outcome: String = row.try_get("decision_outcome")?;
+            let terminal_outcome: String = row.try_get("terminal_outcome")?;
+            let item_count: Option<i64> = row.try_get("item_count")?;
+            let byte_count: Option<i64> = row.try_get("byte_count")?;
+            let invocation_id: Option<Vec<u8>> = row.try_get("invocation_id")?;
+            let invocation_outcome: Option<String> = row.try_get("invocation_outcome")?;
+            let invocation_principal_id: Option<Vec<u8>> =
+                row.try_get("invocation_principal_id")?;
+            let invocation_function_id: Option<Vec<u8>> = row.try_get("invocation_function_id")?;
+            let invocation_source_revision_id: Option<Vec<u8>> =
+                row.try_get("invocation_source_revision_id")?;
+            let invocation_catalogue_revision_id: Option<Vec<u8>> =
+                row.try_get("invocation_catalogue_revision_id")?;
+            let target_bytes = target.to_bytes().to_vec();
+            let source_revision_bytes = active.pair().source().to_bytes().to_vec();
+            let catalogue_revision_bytes = active.pair().catalogue().to_bytes().to_vec();
+            let principal_bytes = RAW_CLIENT_USER.to_bytes().to_vec();
+            require(
+                request_id == request.request_id.to_bytes()
+                    && parent_invocation_id == request.parent_invocation_id.to_bytes()
+                    && nested_invocation_id.as_deref() == accepted_nested_bytes.as_deref()
+                    && nested_invocation_id.as_ref().is_some_and(|id| id.len() == 16)
+                    && nested_invocation_id == invocation_id
+                    && call_site_id == call_site.to_bytes()
+                    && target_function_id.as_deref() == Some(target_bytes.as_slice())
+                    && source_revision_id.as_deref() == Some(source_revision_bytes.as_slice())
+                    && catalogue_revision_id.as_deref() == Some(catalogue_revision_bytes.as_slice())
+                    && session_principal_id.as_slice() == principal_bytes.as_slice()
+                    && decision_outcome == "allowed"
+                    && terminal_outcome == "cancelled"
+                    && item_count.is_none()
+                    && byte_count.is_none()
+                    && invocation_outcome.as_deref() == Some("allowed")
+                    && invocation_principal_id.as_deref() == Some(principal_bytes.as_slice())
+                    && invocation_function_id.as_deref() == Some(target_bytes.as_slice())
+                    && invocation_source_revision_id.as_deref()
+                        == Some(source_revision_bytes.as_slice())
+                    && invocation_catalogue_revision_id.as_deref()
+                        == Some(catalogue_revision_bytes.as_slice()),
+                "resource disconnect audit lost accepted nested identity or terminal state",
+            )?;
+            let history_count: i64 = audit_session
+                .client()
+                .query_one(
+                    "SELECT count(*) FROM _orna_kernel.resource_request_history",
+                    &[],
+                )
+                .await?
+                .try_get(0)?;
+            require(
+                history_count == 1,
+                "resource disconnect cleanup did not retain exactly one request history row",
+            )
+        }
+        .await;
+        finish_session(
+            audit_operation,
+            audit_session.shutdown().await,
+            "resource disconnect audit cleanup",
         )?;
         require_no_database_sessions(&database).await
     })
@@ -12293,7 +13533,7 @@ async fn install_stream_resource_client_fixture(
         .iter()
         .find(|function| function.name().parts() == ["resource_fixture", "resource"])
         .ok_or_else(|| failure("resource fixture is missing resource_fixture.resource"))?;
-    let parameter = target
+    let target_parameter = target
         .parameters()
         .first()
         .ok_or_else(|| failure("resource fixture target is missing p_marker"))?
@@ -12335,11 +13575,22 @@ async fn install_stream_resource_client_fixture(
             && operation.target() == target
             && operation.target_revision() == active.pair()
             && operation.arguments().len() == 1
-            && operation.arguments()[0].0 == parameter,
+            && operation.arguments()[0].0 == target_parameter,
         "stream CLIENT resource plan did not retain canonical target metadata",
     )?;
 
-    Ok((active, client, target, parameter, operation.call_site_id()))
+    let client_parameter = client_definition
+        .parameters()
+        .first()
+        .ok_or_else(|| failure("stream CLIENT resource fixture is missing p_marker"))?
+        .id();
+    Ok((
+        active,
+        client,
+        target,
+        client_parameter,
+        operation.call_site_id(),
+    ))
 }
 
 async fn install_expression_client_fixture(
@@ -12997,7 +14248,7 @@ async fn assert_resource_audit_rows(
                         resource.item_count, resource.byte_count,
                         invocation.outcome AS invocation_outcome
                  FROM _orna_kernel.resource_audit_events AS resource
-                 JOIN _orna_kernel.invocation_audit_events AS invocation
+                 LEFT JOIN _orna_kernel.invocation_audit_events AS invocation
                    ON invocation.invocation_id = resource.nested_invocation_id
                  ORDER BY resource.request_id",
                 &[],
@@ -13020,7 +14271,7 @@ async fn assert_resource_audit_rows(
             let request_id: Vec<u8> = row.try_get("request_id")?;
             let parent_invocation_id: Vec<u8> = row.try_get("parent_invocation_id")?;
             let call_site_id: Vec<u8> = row.try_get("call_site_id")?;
-            let nested_invocation_id: Vec<u8> = row.try_get("nested_invocation_id")?;
+            let nested_invocation_id: Option<Vec<u8>> = row.try_get("nested_invocation_id")?;
             let target_function_id: Option<Vec<u8>> = row.try_get("target_function_id")?;
             let source_revision_id: Option<Vec<u8>> = row.try_get("source_revision_id")?;
             let catalogue_revision_id: Option<Vec<u8>> =
@@ -13030,14 +14281,19 @@ async fn assert_resource_audit_rows(
             let terminal_outcome: String = row.try_get("terminal_outcome")?;
             let item_count: Option<i64> = row.try_get("item_count")?;
             let byte_count: Option<i64> = row.try_get("byte_count")?;
-            let invocation_outcome: String = row.try_get("invocation_outcome")?;
+            let invocation_outcome: Option<String> = row.try_get("invocation_outcome")?;
             let (request, parent, target, decision, terminal, count, bytes) = expected[index];
             let target = target.map(|function| function.to_bytes().to_vec());
+            let nested_identity_matches = match (&nested_invocation_id, target.is_some()) {
+                (Some(nested), true) => nested.len() == 16,
+                (None, false) => true,
+                _ => false,
+            };
             require(
                 request_id == request
                     && parent_invocation_id == parent
                     && call_site_id == call_site.to_bytes().to_vec()
-                    && nested_invocation_id.len() == 16
+                    && nested_identity_matches
                     && target_function_id == target
                     && source_revision_id
                         == target.as_ref().map(|_| active.pair().source().to_bytes().to_vec())
@@ -13050,7 +14306,7 @@ async fn assert_resource_audit_rows(
                     && terminal_outcome == terminal
                     && item_count == count
                     && byte_count == bytes
-                    && invocation_outcome == decision,
+                    && invocation_outcome.as_deref() == target.as_ref().map(|_| decision),
                 "resource audit row did not preserve exact request correlation and terminal outcome",
             )?;
         }
@@ -13713,7 +14969,13 @@ fn checks_accepted_expression_client_fixture_offline() -> TestResult<()> {
     let checked = report
         .checked_bundle()
         .ok_or_else(|| failure("accepted expression CLIENT fixture produced no checked bundle"))?;
-    for name in ["literal", "composed", "external"] {
+    for name in [
+        "literal",
+        "composed",
+        "ref_composed",
+        "param_composed",
+        "external",
+    ] {
         require(
             checked
                 .client_functions()
@@ -13741,6 +15003,78 @@ fn checks_accepted_expression_client_fixture_offline() -> TestResult<()> {
         "accepted external CLIENT contract unexpectedly retained executable references",
     )?;
 
+    let ref_composed = active
+        .catalogue()
+        .functions()
+        .iter()
+        .find(|function| function.name().parts() == ["expr", "ref_composed"])
+        .ok_or_else(|| {
+            failure("prepared expression CLIENT fixture is missing expr.ref_composed")
+        })?;
+    let item_type = active
+        .catalogue()
+        .object_types()
+        .iter()
+        .find(|object| object.name().parts() == ["expr", "item"])
+        .ok_or_else(|| failure("prepared expression CLIENT fixture is missing expr.item"))?;
+    let title_field = item_type
+        .field_by_name("title")
+        .ok_or_else(|| failure("prepared expression CLIENT fixture is missing expr.item.title"))?;
+    let ref_parameter = ref_composed
+        .parameters()
+        .first()
+        .ok_or_else(|| failure("prepared expr.ref_composed is missing p_item"))?;
+    require(
+        ref_parameter.resolved_type() == ResolvedType::reference(item_type.id()),
+        "prepared expr.ref_composed lost its REF expr.item parameter type",
+    )?;
+    require(
+        active.references().iter().any(|reference| {
+            reference.source_function() == ref_composed.id()
+                && reference.kind() == DefinitionReferenceKind::ObjectReference
+                && reference.target() == DefinitionReferenceTarget::ObjectType(item_type.id())
+        }),
+        "prepared expr.ref_composed lost its object-reference metadata",
+    )?;
+    let ref_revision = active
+        .function_revisions()
+        .iter()
+        .find(|revision| revision.function() == ref_composed.id())
+        .ok_or_else(|| failure("prepared expr.ref_composed is missing its function revision"))?;
+    require(
+        ref_revision.artifact().version() == EXPRESSION_FORMAT_VERSION,
+        "prepared expr.ref_composed did not produce a version-three expression plan",
+    )?;
+    let ref_plan = ExpressionClientPlan::decode(ref_revision.artifact().payload())?;
+    let ClientExpressionNode::Concat { left, right } = ref_plan.expression() else {
+        return Err(failure(
+            "expr.ref_composed plan lost its outer concatenation",
+        ));
+    };
+    let ClientExpressionNode::Concat {
+        left: field_path,
+        right: bang,
+    } = left.as_ref()
+    else {
+        return Err(failure(
+            "expr.ref_composed plan lost its left-associative concatenation",
+        ));
+    };
+    let ClientExpressionNode::FieldPath { root, fields } = field_path.as_ref() else {
+        return Err(failure("expr.ref_composed plan lost its REF field path"));
+    };
+    require(
+        *root == ref_parameter.id() && fields.len() == 1 && fields[0] == title_field.id(),
+        "expr.ref_composed plan did not retain p_item.title field identity",
+    )?;
+    require(
+        matches!(bang.as_ref(), ClientExpressionNode::String { value } if value == "!"),
+        "expr.ref_composed plan lost the first suffix",
+    )?;
+    require(
+        matches!(right.as_ref(), ClientExpressionNode::String { value } if value == "?"),
+        "expr.ref_composed plan lost the second suffix",
+    )?;
     let literal_id = active
         .catalogue()
         .functions()
@@ -13754,6 +15088,15 @@ fn checks_accepted_expression_client_fixture_offline() -> TestResult<()> {
         .iter()
         .find(|function| function.name().parts() == ["expr", "composed"])
         .ok_or_else(|| failure("prepared expression CLIENT fixture is missing expr.composed"))?
+        .id();
+    let param_composed_id = active
+        .catalogue()
+        .functions()
+        .iter()
+        .find(|function| function.name().parts() == ["expr", "param_composed"])
+        .ok_or_else(|| {
+            failure("prepared expression CLIENT fixture is missing expr.param_composed")
+        })?
         .id();
     let external_id = active
         .catalogue()
@@ -13780,6 +15123,7 @@ fn checks_accepted_expression_client_fixture_offline() -> TestResult<()> {
         vec![
             ExecuteGrant::new(RAW_CLIENT_USER, literal_id),
             ExecuteGrant::new(RAW_CLIENT_USER, composed_id),
+            ExecuteGrant::new(RAW_CLIENT_USER, param_composed_id),
             ExecuteGrant::new(RAW_CLIENT_USER, external_id),
         ],
     )?;
@@ -13798,6 +15142,40 @@ fn checks_accepted_expression_client_fixture_offline() -> TestResult<()> {
     require(
         composed_result.value() == &RuntimeValue::Text("hello world".to_owned()),
         "offline expression CLIENT composed evaluation returned the wrong value",
+    )?;
+    let param_authorisation = match security.authorise_execute(
+        &session,
+        InvocationTarget::new(param_composed_id, active.pair()),
+    ) {
+        ExecuteDecision::Allowed(authorisation) => authorisation,
+        ExecuteDecision::Denied(reason) => {
+            return Err(failure(format!(
+                "offline expression CLIENT param_composed authorisation was denied: {reason:?}"
+            )));
+        }
+    };
+    let param_function = active
+        .catalogue()
+        .function_by_id(param_composed_id)
+        .ok_or_else(|| failure("prepared expression CLIENT fixture lost expr.param_composed"))?;
+    let param_parameter = param_function
+        .parameters()
+        .first()
+        .ok_or_else(|| failure("prepared expr.param_composed is missing p_suffix"))?;
+    let param_argument = FunctionArgument::new(
+        param_parameter.id(),
+        RuntimeValue::Text(" world".to_owned()),
+    )?;
+    let param_result = evaluate_client_function_with_grants_and_arguments(
+        &active,
+        &param_authorisation,
+        std::slice::from_ref(&param_argument),
+        &[],
+        &LocalCapabilityGrantSet::new(),
+    )?;
+    require(
+        param_result.value() == &RuntimeValue::Text("hello world".to_owned()),
+        "offline parameterized CLIENT evaluation returned the wrong typed result",
     )?;
     let literal_authorisation = match security
         .authorise_execute(&session, InvocationTarget::new(literal_id, active.pair()))
@@ -13839,6 +15217,93 @@ fn checks_accepted_expression_client_fixture_offline() -> TestResult<()> {
         ),
         "offline external CLIENT evaluation did not fail closed on expr.runtime@1",
     )
+}
+
+#[test]
+fn checks_accepted_client_state_fixture_plan_metadata_offline() -> TestResult<()> {
+    let snapshot = verify_standard_library_v2_snapshot(retained_standard_library_v2_snapshot()?)?;
+    let standard = check_standard_library_source(&snapshot)?;
+    let base = offline_empty_version_two_active(standard.verified_snapshot())?;
+    let upgrade_v3 = orna_standard::prepare_standard_upgrade_v2_to_v3(&base)?;
+    let version_three = offline_active_from_prepared(upgrade_v3.application_revision())?;
+    let upgrade_v4 = orna_standard::prepare_standard_upgrade_v3_to_v4(&version_three)?;
+    let version_four = offline_active_from_prepared(upgrade_v4.application_revision())?;
+    let context = StandardApplicationCheckContext::try_new(
+        version_four.catalogue(),
+        upgrade_v4.checked_standard_library(),
+    )?;
+    let source = SourceBundle::new([SourceUnit::new(
+        "fixtures/client_state_dogfood.orna",
+        include_str!("fixtures/client_state_dogfood.orna"),
+    )])?;
+    let report = check_standard_application(&source, &context);
+    if !report.diagnostics().is_empty() {
+        return Err(failure(format!(
+            "accepted CLIENT state fixture did not check: {:?}",
+            report.diagnostics(),
+        )));
+    }
+
+    let prepared = prepare_standard_application(&report, version_four.pair(), &version_four)?;
+    let active = offline_active_from_prepared(&prepared)?;
+    let function = active
+        .catalogue()
+        .functions()
+        .iter()
+        .find(|function| function.name().parts() == ["state_fixture", "scalar"])
+        .ok_or_else(|| failure("prepared CLIENT state fixture is missing state_fixture.scalar"))?;
+    require(
+        function.return_type() == &FunctionReturn::Single(ResolvedType::Value(BOOLEAN_TYPE_ID)),
+        "prepared CLIENT state fixture did not retain its Boolean scalar return",
+    )?;
+    let revision = active
+        .function_revisions()
+        .iter()
+        .find(|revision| revision.function() == function.id())
+        .ok_or_else(|| failure("prepared CLIENT state fixture is missing its function revision"))?;
+    let plan = StateClientPlan::decode(revision.artifact().payload())?;
+    require(
+        plan.format_version() == STATE_FORMAT_VERSION,
+        "CLIENT state fixture did not produce a version-four plan",
+    )?;
+    let slots = plan.slots();
+    require(
+        slots.len() == 3,
+        "CLIENT state fixture plan did not retain three declarations",
+    )?;
+    require(
+        slots.iter().all(|slot| slot.type_id() == BOOLEAN_TYPE_ID),
+        "CLIENT state fixture plan did not retain scalar Boolean slot types",
+    )?;
+    require(
+        slots[0].scope() == StateScope::Local
+            && matches!(
+                slots[0].default(),
+                StateDefault::Expression(ClientExpressionNode::Boolean { value: true })
+            ),
+        "CLIENT state fixture did not retain the LOCAL expression default in order",
+    )?;
+    require(
+        slots[1].scope() == StateScope::Session && slots[1].default() == &StateDefault::Null,
+        "CLIENT state fixture did not retain the SESSION NULL default in order",
+    )?;
+    require(
+        slots[2].scope() == StateScope::User && slots[2].default() == &StateDefault::Unset,
+        "CLIENT state fixture did not retain the USER unset default in order",
+    )?;
+    let slot_ids = slots
+        .iter()
+        .map(|slot| slot.state_slot_id())
+        .collect::<Vec<_>>();
+    require(
+        slot_ids.iter().all(|id| id.to_bytes() != [0; 16])
+            && slot_ids[0] != slot_ids[1]
+            && slot_ids[0] != slot_ids[2]
+            && slot_ids[1] != slot_ids[2],
+        "CLIENT state fixture plan did not retain distinct non-zero state slot IDs",
+    )?;
+
+    Ok(())
 }
 
 #[test]
@@ -14061,11 +15526,10 @@ fn checks_accepted_action_fixture_offline() -> TestResult<()> {
     )
 }
 
-/// Proves one accepted application SERVER function survives the user-facing
-/// source/check/install/grant/invoke path and renders its typed result.
+/// Proves the Compose-gated kernel source-apply candidate, audit, and invoke path for an accepted application SERVER function.
 #[tokio::test]
 #[ignore = "requires the Compose PostgreSQL development service"]
-async fn proves_installed_server_function_dogfood_source_through_orna_invoke() -> TestResult<()> {
+async fn proves_kernel_source_apply_candidate_audit_and_invoke_path() -> TestResult<()> {
     const INPUT: i32 = 73;
 
     with_test_database(|database| async move {
@@ -14094,52 +15558,75 @@ async fn proves_installed_server_function_dogfood_source_through_orna_invoke() -
                 report.diagnostics(),
             )));
         }
-        let active = kernel
-            .apply(&prepare_standard_application(
-                &report,
-                installed_standard.pair(),
-                &installed_standard,
-            )?)
-            .await?;
+        let candidate = prepare_standard_application(
+            &report,
+            installed_standard.pair(),
+            &installed_standard,
+        )?;
+        let expected_candidate_pair = candidate.candidate_pair();
+        let active = kernel.apply_source_apply(&candidate).await?;
+        require(
+            active.pair() == expected_candidate_pair,
+            "kernel-applied SERVER dogfood source apply did not activate the committed candidate",
+        )?;
+        let audit_events = kernel.recover_security_audit_events().await?;
+        let source_apply_events = audit_events
+            .iter()
+            .filter(|event| event.decision().kind() == SecurityAuditKind::SourceApply)
+            .collect::<Vec<_>>();
+        require(
+            audit_events.len() == 1 && source_apply_events.len() == 1,
+            "kernel-applied SERVER dogfood source apply did not record exactly one protected SourceApply event",
+        )?;
+        let source_apply_decision = source_apply_events[0].decision();
+        require(
+            source_apply_decision.outcome() == SecurityAuditOutcome::Allowed
+                && source_apply_decision.session_principal()
+                    == Some(CATALOGUE_HEALTH_SERVICE_PRINCIPAL_ID)
+                && source_apply_decision.source_apply_candidate() == Some(expected_candidate_pair)
+                && source_apply_decision.target().is_none()
+                && source_apply_decision.denial().is_none(),
+            "kernel-applied SERVER dogfood SourceApply audit detail did not match the committed candidate",
+        )?;
         let read_id = active
             .catalogue()
             .functions()
             .iter()
             .find(|function| function.name().parts() == ["dogfood", "read"])
-            .ok_or_else(|| failure("the installed dogfood source is missing dogfood.read"))?
+            .ok_or_else(|| failure("the kernel-applied dogfood source is missing dogfood.read"))?
             .id();
         let distinct_id = active
             .catalogue()
             .functions()
             .iter()
             .find(|function| function.name().parts() == ["dogfood", "distinct_values"])
-            .ok_or_else(|| failure("the installed dogfood source is missing dogfood.distinct_values"))?
+            .ok_or_else(|| failure("the kernel-applied dogfood source is missing dogfood.distinct_values"))?
             .id();
         let read_item = active
             .catalogue()
             .functions()
             .iter()
             .find(|function| function.name().parts() == ["dogfood", "read_item"])
-            .ok_or_else(|| failure("the installed dogfood source is missing dogfood.read_item"))?;
+            .ok_or_else(|| failure("the kernel-applied dogfood source is missing dogfood.read_item"))?;
         let read_item_id = read_item.id();
         let read_item_parameter_id = read_item
             .parameter_by_name("p_item")
-            .ok_or_else(|| failure("the installed dogfood source is missing dogfood.read_item.p_item"))?
+            .ok_or_else(|| failure("the kernel-applied dogfood source is missing dogfood.read_item.p_item"))?
             .id();
         let update = active
             .catalogue()
             .functions()
             .iter()
             .find(|function| function.name().parts() == ["dogfood", "update"])
-            .ok_or_else(|| failure("the installed dogfood source is missing dogfood.update"))?;
+            .ok_or_else(|| failure("the kernel-applied dogfood source is missing dogfood.update"))?;
         let update_id = update.id();
         let update_parameter_id = update
             .parameter_by_name("p_item")
-            .ok_or_else(|| failure("the installed dogfood source is missing dogfood.update.p_item"))?
+            .ok_or_else(|| failure("the kernel-applied dogfood source is missing dogfood.update.p_item"))?
             .id();
         let update_value_parameter_id = update
             .parameter_by_name("p_value")
-            .ok_or_else(|| failure("the installed dogfood source is missing dogfood.update.p_value"))?
+            .ok_or_else(|| failure("the kernel-applied dogfood source is missing dogfood.update.p_value"))?
             .id();
         let mut function_targets = active
             .catalogue()
@@ -14175,12 +15662,12 @@ async fn proves_installed_server_function_dogfood_source_through_orna_invoke() -
             .object_types()
             .iter()
             .find(|object| object.name().parts() == ["dogfood", "item"])
-            .ok_or_else(|| failure("the installed dogfood source is missing dogfood.item"))?;
+            .ok_or_else(|| failure("the kernel-applied dogfood source is missing dogfood.item"))?;
         let field = object
             .fields()
             .iter()
             .find(|field| field.name() == "value")
-            .ok_or_else(|| failure("the installed dogfood source is missing dogfood.item.value"))?;
+            .ok_or_else(|| failure("the kernel-applied dogfood source is missing dogfood.item.value"))?;
         let table = format!("t_{:032x}", u128::from_be_bytes(object.id().to_bytes()));
         let column = format!("f_{:032x}", u128::from_be_bytes(field.id().to_bytes()));
         let object_id = ObjectId::from_bytes([0x91; 16]);
@@ -14224,13 +15711,13 @@ async fn proves_installed_server_function_dogfood_source_through_orna_invoke() -
         .await?;
         if read_outcome != Ok(InstalledInvokeOutcome::Completed) {
             return Err(failure(format!(
-                "the installed SERVER dogfood read invocation did not complete: {:?}, stdout={:?}, stderr={:?}",
+                "the kernel-applied SERVER dogfood read invocation did not complete: {:?}, stdout={:?}, stderr={:?}",
                 read_outcome, read_stdout, read_stderr,
             )));
         }
         require(
             read_stdout == expected,
-            "the installed SERVER dogfood read invocation returned the wrong value",
+            "the kernel-applied SERVER dogfood read invocation returned the wrong value",
         )?;
         require(
             read_stderr.is_empty(),
@@ -14258,11 +15745,11 @@ async fn proves_installed_server_function_dogfood_source_through_orna_invoke() -
         .await?;
         require(
             update_outcome == Ok(InstalledInvokeOutcome::Completed),
-            "the installed SERVER dogfood update invocation did not complete",
+            "the kernel-applied SERVER dogfood update invocation did not complete",
         )?;
         require(
             update_stdout == expected_reference,
-            "the installed SERVER dogfood update invocation returned the wrong reference",
+            "the kernel-applied SERVER dogfood update invocation returned the wrong reference",
         )?;
         require(
             update_stderr.is_empty(),
@@ -14290,11 +15777,11 @@ async fn proves_installed_server_function_dogfood_source_through_orna_invoke() -
         .await?;
         require(
             read_item_outcome == Ok(InstalledInvokeOutcome::Completed),
-            "the installed SERVER dogfood read_item invocation did not complete",
+            "the kernel-applied SERVER dogfood read_item invocation did not complete",
         )?;
         require(
             read_item_stdout == expected_updated,
-            "the installed SERVER dogfood read_item invocation returned the wrong value",
+            "the kernel-applied SERVER dogfood read_item invocation returned the wrong value",
         )?;
         require(
             read_item_stderr.is_empty(),
@@ -14329,11 +15816,11 @@ async fn proves_installed_server_function_dogfood_source_through_orna_invoke() -
         .await?;
         require(
             distinct_outcome == Ok(InstalledInvokeOutcome::Completed),
-            "the installed SERVER dogfood distinct_values invocation did not complete",
+            "the kernel-applied SERVER dogfood distinct_values invocation did not complete",
         )?;
         require(
             distinct_stdout == expected_distinct,
-            "the installed SERVER dogfood distinct_values invocation returned the wrong value",
+            "the kernel-applied SERVER dogfood distinct_values invocation returned the wrong value",
         )?;
         require(
             distinct_stderr.is_empty(),
@@ -14846,6 +16333,15 @@ async fn proves_ordinary_client_inspector_through_installed_evaluator() -> TestR
             ui_server_epoch == shared_server_epoch.to_string(),
             "ordinary Inspector UI server_epoch did not match the shared carrier epoch",
         )?;
+        let ui_client_epoch = properties
+            .get("client_epoch")
+            .and_then(|property| property.get("value"))
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| failure("ordinary Inspector UI client_epoch property was missing"))?;
+        require(
+            ui_client_epoch == result.context().client_epoch_id().invocation_id().to_string(),
+            "ordinary Inspector UI client_epoch did not match the evaluated request context",
+        )?;
         let ui_carrier_rows = properties
             .get("carrier_rows")
             .and_then(|property| property.get("value"))
@@ -14855,6 +16351,10 @@ async fn proves_ordinary_client_inspector_through_installed_evaluator() -> TestR
             ui_carrier_rows == "1,1,1,0,0,0,0,0,2",
             "ordinary Inspector UI carrier_rows did not match the echo fixture",
         )?;
+        // The installed evaluator returns the canonical ORNA-UI/1 value. The
+        // private headless runtime fixture is covered by orna-client's own
+        // `#[cfg(test)]` conformance suite; this installed proof does not
+        // expose that fixture through a normal dependency feature.
 
         let first_carriers = executor.completed_values.clone();
         let forged_arguments = forged_renderer_parameter_ids

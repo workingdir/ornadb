@@ -10,6 +10,7 @@ mod raw_client_dispatch;
 mod raw_socket;
 pub mod security_admin;
 mod source_apply;
+mod source_diagnostics;
 mod source_diff;
 mod upgrade;
 mod user_state;

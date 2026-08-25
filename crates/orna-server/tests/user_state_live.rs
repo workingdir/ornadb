@@ -27,6 +27,7 @@ use orna_compiler::{
 };
 use orna_core::{
     FunctionId, PrincipalId, StateSlotId, TypeId,
+    catalogue::FunctionDomain,
     security::{LocalPeerCredential, Principal, PrincipalKind, PrincipalStatus, SecuritySnapshot},
     source::{SourceBundle, SourceUnit},
     state::{UserStateChange, UserStateWriteOutcome},
@@ -42,6 +43,11 @@ use orna_server::{
 use orna_standard::{INTEGER_TYPE_ID, registered_opaque_codecs};
 use postgres_test_support::{TestDatabase, TestResult, failure, with_test_database};
 
+#[cfg(feature = "test-hooks")]
+use orna_core::security::{ExecuteDenial, RoleMembership, SecurityAuditKind, SecurityAuditOutcome};
+#[cfg(feature = "test-hooks")]
+use orna_postgres::PostgresKernelError;
+
 /// Asserts one live condition, failing the whole test with a typed error.
 fn require(condition: bool, message: impl Into<String>) -> TestResult<()> {
     if condition {
@@ -53,6 +59,8 @@ fn require(condition: bool, message: impl Into<String>) -> TestResult<()> {
 
 const PRINCIPAL_A: PrincipalId = PrincipalId::from_bytes([0xaa; 16]);
 const PRINCIPAL_B: PrincipalId = PrincipalId::from_bytes([0xbb; 16]);
+const UNKNOWN_ROOT: FunctionId = FunctionId::from_bytes([0xe1; 16]);
+const INACTIVE_ROOT: FunctionId = FunctionId::from_bytes([0xe2; 16]);
 const RAW_USER_STATE_SOURCE: &str = "CREATE SCHEMA user_state_fixture;\n\
     CREATE CLIENT FUNCTION user_state_fixture.state() RETURNS BOOLEAN IS\n\
       STATE value INTEGER SCOPE USER DEFAULT 0;\n\
@@ -451,6 +459,126 @@ async fn proves_user_state_end_to_end() -> TestResult<()> {
     .await
 }
 
+/// Invalid USER-state roots fail before the state relation or allowed audit append.
+///
+/// This proof is intentionally ignored with the other Compose-backed USER-state
+/// proofs; it records the live mutation boundary without claiming local evidence.
+#[cfg(feature = "test-hooks")]
+#[tokio::test]
+#[ignore = "requires the Compose PostgreSQL development service"]
+async fn rejects_non_client_roots_before_user_state_or_allowed_audit() -> TestResult<()> {
+    with_test_database(|database| async move {
+        let (state_function, state_slot) = install_standard(&database).await?;
+        map_peer(&database, PRINCIPAL_A).await?;
+        let kernel = kernel(&database);
+        let active = kernel.recover().await?;
+        let server_root = active
+            .catalogue()
+            .functions()
+            .iter()
+            .find(|function| function.domain() == FunctionDomain::Server)
+            .map(|function| function.id())
+            .ok_or_else(|| failure("the USER-state fixture needs an active SERVER function"))?;
+        let inactive_root = active
+            .historical_function_revisions()
+            .iter()
+            .map(|revision| revision.function())
+            .find(|function| active.catalogue().function_by_id(*function).is_none())
+            .unwrap_or(INACTIVE_ROOT);
+        let session = kernel
+            .authenticate_local_peer(nix::unistd::geteuid().as_raw())
+            .await?;
+        let seed = UserStateChange::new(
+            state_function,
+            String::new(),
+            state_function,
+            String::new(),
+            state_slot,
+            None,
+            RuntimeValue::Integer(7),
+            INTEGER_TYPE_ID,
+        )?;
+        let seeded = kernel.write_user_state(&session, &[seed]).await?;
+        require(
+            seeded.first().is_some_and(|result| {
+                matches!(
+                    result.outcome(),
+                    UserStateWriteOutcome::Written { revision: 1 }
+                )
+            }),
+            "the root-admission fixture write must create revision 1",
+        )?;
+        let baseline_allowed =
+            user_state_allowed_audit_count(&kernel.recover_security_audit_events().await?);
+
+        for (label, root, expected_rule) in [
+            (
+                "unknown",
+                UNKNOWN_ROOT,
+                "USER state root must identify an active CLIENT function",
+            ),
+            (
+                "SERVER",
+                server_root,
+                "USER state root must be a CLIENT function",
+            ),
+            (
+                "inactive",
+                inactive_root,
+                "USER state root must identify an active CLIENT function",
+            ),
+        ] {
+            let load = kernel
+                .load_user_state(&session, root, "", &[], &BTreeMap::new())
+                .await;
+            require(
+                matches!(
+                    load,
+                    Err(PostgresKernelError::DurableInvariant { rule, .. })
+                        if rule == expected_rule
+                ),
+                format!("{label} USER-state root load must fail closed before state access"),
+            )?;
+            let change = UserStateChange::new(
+                root,
+                String::new(),
+                state_function,
+                String::new(),
+                state_slot,
+                Some(1),
+                RuntimeValue::Integer(8),
+                INTEGER_TYPE_ID,
+            )?;
+            let write = kernel.write_user_state(&session, &[change]).await;
+            require(
+                matches!(
+                    write,
+                    Err(PostgresKernelError::DurableInvariant { rule, .. })
+                        if rule == expected_rule
+                ),
+                format!("{label} USER-state root write must fail closed before mutation"),
+            )?;
+        }
+
+        let after_rejections =
+            user_state_allowed_audit_count(&kernel.recover_security_audit_events().await?);
+        require(
+            after_rejections == baseline_allowed,
+            "invalid USER-state roots must not append allowed audit evidence",
+        )?;
+        let cells = kernel
+            .load_user_state(&session, state_function, "", &[], &BTreeMap::new())
+            .await?;
+        require(
+            cells.len() == 1
+                && cells[0].value() == &RuntimeValue::Integer(7)
+                && cells[0].revision() == 1,
+            "invalid USER-state roots must not alter the existing cell",
+        )
+    })
+    .await
+}
+
 /// Proves the authenticated CLIENT state adapter lifecycle (ADR 0070).
 ///
 /// The adapter uses the authenticated kernel session for principal selection,
@@ -688,6 +816,242 @@ async fn rejects_authenticated_client_state_session_mismatch() -> TestResult<()>
                 && principal_b_cells[0].value() == &RuntimeValue::Integer(70)
                 && principal_b_cells[0].revision() == 1,
             "a rejected flush must not alter the other session's existing cell",
+        )
+    })
+    .await
+}
+
+#[cfg(feature = "test-hooks")]
+fn state_security_snapshot(
+    active: &orna_core::revision::ActiveDatabaseRevision,
+    principals: Vec<Principal>,
+    memberships: Vec<RoleMembership>,
+    peer_principal: PrincipalId,
+) -> TestResult<SecuritySnapshot> {
+    let mut targets = active
+        .catalogue()
+        .functions()
+        .iter()
+        .map(|function| orna_core::security::SecurityFunctionTarget::application(function.id()))
+        .collect::<Vec<_>>();
+    if let Some(standard) = active.catalogue_hash_context().standard() {
+        for executable in standard.executables() {
+            targets.push(
+                orna_core::security::SecurityFunctionTarget::verified_standard(
+                    executable.function(),
+                    standard.revision(),
+                    executable.revision().id(),
+                ),
+            );
+        }
+    }
+    Ok(
+        SecuritySnapshot::new_with_function_targets_and_local_peer_credentials(
+            active.pair(),
+            targets,
+            principals,
+            memberships,
+            vec![],
+            vec![LocalPeerCredential::new(
+                nix::unistd::geteuid().as_raw(),
+                peer_principal,
+            )],
+        )?,
+    )
+}
+
+#[cfg(feature = "test-hooks")]
+fn user_state_allowed_audit_count(events: &[orna_core::security::SecurityAuditEvent]) -> usize {
+    events
+        .iter()
+        .filter(|event| {
+            event.decision().kind() == SecurityAuditKind::UserState
+                && event.decision().outcome() == SecurityAuditOutcome::Allowed
+        })
+        .count()
+}
+
+#[cfg(feature = "test-hooks")]
+#[tokio::test]
+#[ignore = "requires the Compose PostgreSQL development service"]
+async fn retained_user_state_session_is_denied_after_principal_disable_and_role_revoke()
+-> TestResult<()> {
+    with_test_database(|database| async move {
+        let (state_function, state_slot) = install_standard(&database).await?;
+        let kernel = kernel(&database);
+        let active = kernel.recover().await?;
+        let role = PrincipalId::from_bytes([0xcc; 16]);
+        let initial_security = state_security_snapshot(
+            &active,
+            vec![
+                Principal::new(PRINCIPAL_A, PrincipalKind::User, PrincipalStatus::Active),
+                Principal::new(role, PrincipalKind::Role, PrincipalStatus::Active),
+            ],
+            vec![RoleMembership::new(role, PRINCIPAL_A)],
+            PRINCIPAL_A,
+        )?;
+        kernel.replace_security_snapshot(&initial_security).await?;
+        let retained_session =
+            initial_security.bind_authenticated_session(PRINCIPAL_A, vec![role])?;
+        let seed = UserStateChange::new(
+            state_function,
+            String::new(),
+            state_function,
+            String::new(),
+            state_slot,
+            None,
+            RuntimeValue::Integer(7),
+            INTEGER_TYPE_ID,
+        )?;
+        let seeded = kernel.write_user_state(&retained_session, &[seed]).await?;
+        require(
+            seeded.first().is_some_and(|result| {
+                matches!(
+                    result.outcome(),
+                    UserStateWriteOutcome::Written { revision: 1 }
+                )
+            }),
+            "retained-session fixture write must create revision 1",
+        )?;
+        let baseline_allowed =
+            user_state_allowed_audit_count(&kernel.recover_security_audit_events().await?);
+
+        let disabled_security = state_security_snapshot(
+            &active,
+            vec![
+                Principal::new(PRINCIPAL_A, PrincipalKind::User, PrincipalStatus::Disabled),
+                Principal::new(role, PrincipalKind::Role, PrincipalStatus::Active),
+            ],
+            vec![RoleMembership::new(role, PRINCIPAL_A)],
+            PRINCIPAL_A,
+        )?;
+        kernel.replace_security_snapshot(&disabled_security).await?;
+        let load_denied = kernel
+            .load_user_state(&retained_session, state_function, "", &[], &BTreeMap::new())
+            .await;
+        require(
+            matches!(
+                load_denied,
+                Err(PostgresKernelError::StateExecuteDenied {
+                    function: orna_core::system::SYS_STATE_LOAD_USER_STATE_FUNCTION_ID,
+                    reason: ExecuteDenial::InvalidSession,
+                    ..
+                })
+            ),
+            "a disabled principal must be denied before USER-state load",
+        )?;
+        let denied_write = UserStateChange::new(
+            state_function,
+            String::new(),
+            state_function,
+            String::new(),
+            state_slot,
+            Some(1),
+            RuntimeValue::Integer(8),
+            INTEGER_TYPE_ID,
+        )?;
+        let write_denied = kernel
+            .write_user_state(&retained_session, &[denied_write])
+            .await;
+        require(
+            matches!(
+                write_denied,
+                Err(PostgresKernelError::StateExecuteDenied {
+                    function: orna_core::system::SYS_STATE_WRITE_USER_STATE_FUNCTION_ID,
+                    reason: ExecuteDenial::InvalidSession,
+                    ..
+                })
+            ),
+            "a disabled principal must be denied before USER-state write",
+        )?;
+        let after_disable_allowed =
+            user_state_allowed_audit_count(&kernel.recover_security_audit_events().await?);
+        require(
+            after_disable_allowed == baseline_allowed,
+            "disabled-session denial must not append a USER-state allowed audit",
+        )?;
+
+        kernel.replace_security_snapshot(&initial_security).await?;
+        let valid_session = initial_security.bind_authenticated_session(PRINCIPAL_A, vec![role])?;
+        let restored = kernel
+            .load_user_state(&valid_session, state_function, "", &[], &BTreeMap::new())
+            .await?;
+        require(
+            restored.len() == 1
+                && restored[0].value() == &RuntimeValue::Integer(7)
+                && restored[0].revision() == 1,
+            "disabled-session denial must preserve the existing USER-state cell",
+        )?;
+        let before_revoke_allowed =
+            user_state_allowed_audit_count(&kernel.recover_security_audit_events().await?);
+
+        let revoked_security = state_security_snapshot(
+            &active,
+            vec![
+                Principal::new(PRINCIPAL_A, PrincipalKind::User, PrincipalStatus::Active),
+                Principal::new(role, PrincipalKind::Role, PrincipalStatus::Active),
+            ],
+            vec![],
+            PRINCIPAL_A,
+        )?;
+        kernel.replace_security_snapshot(&revoked_security).await?;
+        let role_load_denied = kernel
+            .load_user_state(&retained_session, state_function, "", &[], &BTreeMap::new())
+            .await;
+        require(
+            matches!(
+                role_load_denied,
+                Err(PostgresKernelError::StateExecuteDenied {
+                    function: orna_core::system::SYS_STATE_LOAD_USER_STATE_FUNCTION_ID,
+                    reason: ExecuteDenial::InvalidSession,
+                    ..
+                })
+            ),
+            "a revoked selected role must be denied before USER-state load",
+        )?;
+        let role_write_denied = kernel
+            .write_user_state(
+                &retained_session,
+                &[UserStateChange::new(
+                    state_function,
+                    String::new(),
+                    state_function,
+                    String::new(),
+                    state_slot,
+                    Some(1),
+                    RuntimeValue::Integer(9),
+                    INTEGER_TYPE_ID,
+                )?],
+            )
+            .await;
+        require(
+            matches!(
+                role_write_denied,
+                Err(PostgresKernelError::StateExecuteDenied {
+                    function: orna_core::system::SYS_STATE_WRITE_USER_STATE_FUNCTION_ID,
+                    reason: ExecuteDenial::InvalidSession,
+                    ..
+                })
+            ),
+            "a revoked selected role must be denied before USER-state write",
+        )?;
+        let after_revoke_allowed =
+            user_state_allowed_audit_count(&kernel.recover_security_audit_events().await?);
+        require(
+            after_revoke_allowed == before_revoke_allowed,
+            "role-revocation denial must not append a USER-state allowed audit",
+        )?;
+
+        kernel.replace_security_snapshot(&initial_security).await?;
+        let final_session = initial_security.bind_authenticated_session(PRINCIPAL_A, vec![role])?;
+        let final_cells = kernel
+            .load_user_state(&final_session, state_function, "", &[], &BTreeMap::new())
+            .await?;
+        require(
+            final_cells.len() == 1
+                && final_cells[0].value() == &RuntimeValue::Integer(7)
+                && final_cells[0].revision() == 1,
+            "role-revocation denial must preserve the existing USER-state cell",
         )
     })
     .await

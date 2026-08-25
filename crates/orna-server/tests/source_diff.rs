@@ -242,42 +242,36 @@ fn source_read_rejections_fail_closed_before_host() {
     symlink(&invalid, &linked_invalid).expect("create regular-file symlink");
     let before = snapshot(directory.path()).expect("snapshot arranged scratch");
 
-    let missing_error = format!(
-        "orna source diff: could not read {missing:?}: No such file or directory (os error 2)\n"
-    );
+    let expected_read_error = b"orna: could not read source file\n";
     assert_read_failure(
         &run_source_diff(directory.path(), &missing).expect("bounded missing source"),
-        missing_error.as_bytes(),
+        expected_read_error,
     );
     assert_snapshot_unchanged(directory.path(), &before);
-    let dangling_error = format!(
-        "orna source diff: could not read {dangling:?}: {}\n",
-        io::Error::from_raw_os_error(nix::libc::ENOENT)
-    );
     assert_read_failure(
         &run_source_diff(directory.path(), &dangling).expect("bounded dangling source"),
-        dangling_error.as_bytes(),
+        expected_read_error,
     );
     assert_snapshot_unchanged(directory.path(), &before);
     assert_read_failure(
         &run_source_diff(directory.path(), &as_directory).expect("bounded directory source"),
-        format!("orna source diff: {as_directory:?} is not a regular file\n").as_bytes(),
+        expected_read_error,
     );
     assert_snapshot_unchanged(directory.path(), &before);
     assert_read_failure(
         &run_source_diff(directory.path(), &fifo).expect("bounded fifo source"),
-        format!("orna source diff: {fifo:?} is not a regular file\n").as_bytes(),
+        expected_read_error,
     );
     assert_snapshot_unchanged(directory.path(), &before);
 
+    let expected_utf8_error = b"orna: source file is not valid UTF-8\n";
     assert_read_failure(
         &run_source_diff(directory.path(), &invalid).expect("bounded invalid UTF-8 source"),
-        format!("orna source diff: {invalid:?} is not valid UTF-8\n").as_bytes(),
+        expected_utf8_error,
     );
     assert_read_failure(
-        &run_source_diff(directory.path(), &linked_invalid)
-            .expect("bounded linked invalid source"),
-        format!("orna source diff: {linked_invalid:?} is not valid UTF-8\n").as_bytes(),
+        &run_source_diff(directory.path(), &linked_invalid).expect("bounded linked invalid source"),
+        expected_utf8_error,
     );
     assert_snapshot_unchanged(directory.path(), &before);
     assert_eq!(
@@ -301,7 +295,7 @@ fn valid_v1_source_reaches_service_account_boundary() {
     assert!(output.stdout.is_empty(), "host failure must emit no stdout");
     assert_eq!(
         output.stderr,
-        b"orna source diff: ServiceAccountRequired: Orna service identity is invalid\n"
+        b"orna: source diff must run as the orna service account\n"
     );
     assert_eq!(
         snapshot(directory.path()).expect("snapshot scratch after host rejection"),
