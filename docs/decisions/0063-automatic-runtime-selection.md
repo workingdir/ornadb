@@ -11,7 +11,7 @@ the runtime deterministically. The wire contract already exists
 and the `canonical_runtime_list` / `append_client_offer` codec); this decision
 makes the client actually populate and respect it.
 
-Todays the only installed runtime is `orna-runtime-tty`, so automatic
+Today, the only installed runtime is `orna-runtime-tty`, so automatic
 selection defaults to `tty` and any override to a non-installed family fails
 closed at the CLI with exit code 2. This slice does not implement platform
 preference defaults, does not add a `std.ui.UI` sink offer, and does not emit
@@ -19,13 +19,11 @@ preference defaults, does not add a `std.ui.UI` sink offer, and does not emit
 
 ## Background
 
-Work ADR 0057 step 9 established that the client offers the terminal sinks
+Work ADR 0057's TTY runtime section established that the client offers the terminal sinks
 and selects `orna-runtime-tty` deterministically. The sealed route carries the
 client offer verbatim; the server never validates runtime offers, so populating
-them cannot break the invoke path. Work ADR 0056 explicitly deferred
-`--runtime` (0056:131-138). The runtime-offer wire model has been complete and
-tested since the sealed `sys.invoke` carriers landed; only the client offer has
-left the list empty (`build_sealed_request`, invoke.rs:397).
+them cannot break the invoke path. Work ADR 0056's deferred `--runtime` section. The runtime-offer wire model has been complete and tested since the sealed `sys.invoke` carriers landed; only the client offer has
+left the list empty (`build_sealed_request` in `crates/orna-server/src/invoke.rs`).
 
 The spec CLI documents the advanced override shape (spec `docs/15-runtime-architecture.md`),
 and the invariant that a database cannot order the client to load an arbitrary
@@ -78,10 +76,27 @@ Platform preference defaults (Linux desktop gtk > qt > imgui) are a current
 proposal in the spec and depend on local configuration; they are a later
 slice and are deliberately not implemented here.
 
+## Precedence and non-terminal stdout
+
+This later decision is authoritative for the boundary between runtime
+selection and sink consumption. It supersedes only the initial
+stdout-is-a-terminal gate in ADR 0057's TTY runtime section: with TTY as the only installed
+runtime, the deterministic default (and an explicit `--runtime tty`) selects
+TTY for both `CliTty` and `CliPipe` caller contexts. Once TTY is selected, its
+sink map is unconditional: `std.terminal.Document` and `std.io.ByteStream`
+values are written to stdout even when stdout is redirected. `CliPipe` remains
+an observation in caller context, not a second output format or a reason to
+emit a typed envelope.
+
+This does not choose a non-TTY runtime, add automatic machine-format
+selection, or define runtime contracts/events. Platform preferences, a second
+runtime, and any different policy for non-terminal output remain deferred to a
+later accepted decision.
+
 ## Renderer seam
 
-`select_runtime_sink` (invoke.rs:686-692) already maps the two standard opaque
-types to `orna_runtime_tty::Sink`. Its mapping is the tty family's sink map;
+`select_runtime_sink` in `crates/orna-server/src/invoke.rs`
+already maps the two standard opaque types to `orna_runtime_tty::Sink`. Its mapping is the tty family's sink map;
 it stays unchanged while tty is the only runtime. When a second family lands,
 the renderer gains the selected-family parameter. A comment marks the seam.
 
@@ -108,5 +123,6 @@ the renderer gains the selected-family parameter. A comment marks the seam.
 - `render_explain` names the selected family instead of printing only a count.
 - The parser change closes the friendly-argument hole where
   `orna invoke ... --runtime qt` silently became a parameter named `runtime`.
-- Integration proof: the existing Compose-Postgres live proof now round-trips
-  the tty offer through the sealed encode/dispatch/decode path.
+- Integration proof path: the existing Compose-Postgres proof is retained as a
+  Compose-gated path to round-trip the tty offer through the sealed
+  encode/dispatch/decode path; it is not a current local or live result.
