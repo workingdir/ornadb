@@ -84,8 +84,8 @@ use orna_postgres::{
 };
 use orna_protocol::{
     CallFailure, Channel, ClientFrame, Event, InvocationEventRecord, MAX_CHANNEL_WINDOW,
-    MAX_FRAME_PAYLOAD_LENGTH, MAX_RESOURCE_WINDOW, ProtocolConnection, ResourceArgument,
-    ResourceCancel, ResourceCancellationCode, ResourceClientFrame,
+    MAX_FRAME_PAYLOAD_LENGTH, MAX_RESOURCE_TOTAL_ITEMS, MAX_RESOURCE_WINDOW, ProtocolConnection,
+    ResourceArgument, ResourceCancel, ResourceCancellationCode, ResourceClientFrame,
     ResourceKind as ProtocolResourceKind, ResourceProtocolConnection, ResourceRequest,
     ResourceServerFrame, ResourceWindowUpdate, ServerFrame,
     decode_constructed_invocation_event_frame, decode_constructed_server_frame,
@@ -528,9 +528,7 @@ impl SharedInvokeBroker {
         request_id: orna_core::InvocationId,
         provenance: ResourceTerminalProvenance,
     ) {
-        if !provenance.is_committed()
-            || stream_id == 0
-            || !valid_resource_invocation_id(request_id)
+        if !provenance.is_committed() || stream_id == 0 || !valid_resource_invocation_id(request_id)
         {
             return;
         }
@@ -1307,6 +1305,7 @@ async fn run_installed_external_contract(
         registered_opaque_codecs(standard).map_err(|_| "inspect.runtime_unavailable".to_owned())?;
     let mut epoch_id = None;
     let mut server_epoch = None;
+    let mut server_root_target = None;
     let mut target_invocation_id = None;
     let mut row_counts = Vec::with_capacity(arguments.len());
     for (index, ((parameter_id, value), (expected_name, expected_type, expected_kind))) in arguments
@@ -1349,16 +1348,20 @@ async fn run_installed_external_contract(
                 .rows()
                 .first()
                 .ok_or_else(|| "inspect.malformed_carrier".to_owned())?;
-            let (carrier_epoch, carrier_target_id) =
+            let (carrier_epoch, carrier_target_id, carrier_root_target) =
                 decode_snapshot_row_epoch(active, &registry, snapshot_row, envelope.epoch_id())?;
             if server_epoch.is_some_and(|known| known != carrier_epoch) {
                 return Err("inspect.epoch_mismatch".to_owned());
             }
             server_epoch = Some(carrier_epoch);
+            if server_root_target.is_some_and(|known| known != carrier_root_target) {
+                return Err("inspect.epoch_mismatch".to_owned());
+            }
+            server_root_target = Some(carrier_root_target);
             carrier_target = Some(carrier_target_id);
         } else {
             for row in envelope.rows() {
-                let (carrier_epoch, target) = decode_enriched_inspect_row_target(
+                let (carrier_epoch, target, root_target) = decode_enriched_inspect_row_target(
                     active,
                     &registry,
                     row,
@@ -1369,6 +1372,10 @@ async fn run_installed_external_contract(
                     return Err("inspect.epoch_mismatch".to_owned());
                 }
                 server_epoch = Some(carrier_epoch);
+                if server_root_target.is_some_and(|known| known != root_target) {
+                    return Err("inspect.epoch_mismatch".to_owned());
+                }
+                server_root_target = Some(root_target);
                 if carrier_target.is_some_and(|known| known != target) {
                     return Err("inspect.epoch_mismatch".to_owned());
                 }
@@ -1406,6 +1413,7 @@ async fn run_installed_external_contract(
     }
     let target_invocation_id =
         target_invocation_id.ok_or_else(|| "inspect.malformed_carrier".to_owned())?;
+    let root_target = server_root_target.ok_or_else(|| "inspect.malformed_carrier".to_owned())?;
     // Carrier target IDs identify the observed invocation only; observer anchors
     // come from the trusted CLIENT execution context. Authenticate and validate
     // the epoch before querying protected lineage: otherwise a denied target
@@ -1424,6 +1432,7 @@ async fn run_installed_external_contract(
                 return Err(INSPECT_DENIED_CODE.to_owned());
             };
             validate_epoch(&snapshot, target_invocation_id, active.pair())?;
+            require_inspect_root_provenance(snapshot.root_target(), root_target)?;
             Ok(())
         },
         target_invocation_id,
@@ -1661,7 +1670,7 @@ async fn run_installed_inspect(
                 .rows()
                 .first()
                 .ok_or_else(|| "inspect.malformed_carrier".to_owned())?;
-            let (epoch_id, target_invocation) =
+            let (epoch_id, target_invocation, root_target) =
                 decode_snapshot_row_epoch(&active, &registry, snapshot_row, envelope.epoch_id())?;
             validate_inspect_projection_binding(
                 request.target_invocation_id(),
@@ -1691,6 +1700,7 @@ async fn run_installed_inspect(
                         return Err(INSPECT_DENIED_CODE.to_owned());
                     };
                     validate_epoch(&loaded_snapshot, target_invocation, authorization_pair)?;
+                    require_inspect_root_provenance(loaded_snapshot.root_target(), root_target)?;
                     Ok(loaded_snapshot)
                 },
                 target_invocation,
@@ -1821,6 +1831,16 @@ fn require_inspect_target_provenance(
         return Err("inspect.malformed_carrier".to_owned());
     };
     if request_target != decoded_target {
+        return Err("inspect.epoch_mismatch".to_owned());
+    }
+    Ok(())
+}
+
+fn require_inspect_root_provenance(
+    snapshot_root: FunctionId,
+    decoded_root: FunctionId,
+) -> Result<(), String> {
+    if snapshot_root != decoded_root {
         return Err("inspect.epoch_mismatch".to_owned());
     }
     Ok(())
@@ -2125,7 +2145,7 @@ fn decode_enriched_inspect_row_target(
     row: &[u8],
     expected_kind: InspectCarrierKind,
     epoch_id: u64,
-) -> Result<(InspectEpochId, InvocationId), String> {
+) -> Result<(InspectEpochId, InvocationId, FunctionId), String> {
     let value = decode_constructed_value(active, registry, row)
         .map_err(|_| "inspect.malformed_carrier".to_owned())?;
     let RuntimeValue::Constructed(constructed) = value else {
@@ -2170,7 +2190,12 @@ fn decode_enriched_inspect_row_target(
     if target.to_bytes() == [0; 16] {
         return Err("inspect.invalid_target".to_owned());
     }
-    Ok((epoch, target))
+    let root_target = FunctionId::from_bytes(
+        payload[41..57]
+            .try_into()
+            .map_err(|_| "inspect.malformed_carrier".to_owned())?,
+    );
+    Ok((epoch, target, root_target))
 }
 
 fn decode_snapshot_row_epoch(
@@ -2178,7 +2203,7 @@ fn decode_snapshot_row_epoch(
     registry: &OpaqueCodecRegistry,
     row: &[u8],
     epoch_id: u64,
-) -> Result<(InspectEpochId, InvocationId), String> {
+) -> Result<(InspectEpochId, InvocationId, FunctionId), String> {
     let value = decode_constructed_value(active, registry, row)
         .map_err(|_| "inspect.malformed_carrier".to_owned())?;
     let RuntimeValue::Constructed(constructed) = value else {
@@ -2202,7 +2227,7 @@ fn decode_snapshot_row_epoch(
 fn decode_snapshot_row_payload(
     row: &[u8],
     epoch_id: u64,
-) -> Result<(InspectEpochId, InvocationId), String> {
+) -> Result<(InspectEpochId, InvocationId, FunctionId), String> {
     if row.len() < 68 || row[0] != INSPECT_SNAPSHOT_ROW_TAG || row[1..9] != [0; 8] {
         return Err("inspect.malformed_carrier".to_owned());
     }
@@ -2221,7 +2246,12 @@ fn decode_snapshot_row_payload(
     if invocation.to_bytes() == [0; 16] {
         return Err("inspect.invalid_target".to_owned());
     }
-    let mut offset = 25 + 16 + 16;
+    let root_target = FunctionId::from_bytes(
+        row[41..57]
+            .try_into()
+            .map_err(|_| "inspect.malformed_carrier".to_owned())?,
+    );
+    let mut offset = 57;
     let outcome = *row
         .get(offset)
         .ok_or_else(|| "inspect.malformed_carrier".to_owned())?;
@@ -2259,7 +2289,7 @@ fn decode_snapshot_row_payload(
     if offset != row.len() {
         return Err("inspect.malformed_carrier".to_owned());
     }
-    Ok((id, invocation))
+    Ok((id, invocation, root_target))
 }
 
 fn encode_invocation_nodes(rows: &[InvocationNodeRow]) -> Result<Vec<Vec<u8>>, String> {
@@ -2601,7 +2631,10 @@ impl ClientResourceExecutor for InstalledClientResourceExecutor {
                     value: argument.value().clone(),
                 })
                 .collect(),
-            item_window: 1,
+            // Direct installed execution has no window-update channel. Grant
+            // the protocol maximum item window so multi-batch streams can
+            // reach terminal completion without a zero-credit pull.
+            item_window: MAX_RESOURCE_WINDOW,
             byte_window: MAX_RESOURCE_WINDOW,
         };
         if let Some(broker) = self.broker.as_ref()
@@ -3678,10 +3711,7 @@ where
             // A tombstone is final for this stream identity. Clear every
             // provenance entry for the stream before either dropping a valid
             // late frame or rejecting a forged request identity.
-            clear_resource_terminal_provenance_for_stream(
-                resource_terminal_provenance,
-                stream_id,
-            );
+            clear_resource_terminal_provenance_for_stream(resource_terminal_provenance, stream_id);
             if *expected_request_id != request_id {
                 return Err(ResourceTransportFailure::Shape);
             }
@@ -3693,10 +3723,7 @@ where
             // No live state can accept this frame. A stream at or below the
             // broker high-water mark is an evicted tombstone, so late frames
             // are drained and cannot revive the old request or its provenance.
-            clear_resource_terminal_provenance_for_stream(
-                resource_terminal_provenance,
-                stream_id,
-            );
+            clear_resource_terminal_provenance_for_stream(resource_terminal_provenance, stream_id);
             if stream_id != 0 && resource_high_water_mark.is_some_and(|high| stream_id <= high) {
                 return Ok(());
             }
@@ -3962,9 +3989,6 @@ fn reconstruct_shared_root_result(
     match last.event().body() {
         InvocationEventBody::Failed(failure) if failure.code() == "INVOKE_DENIED" => {
             Ok(SealedInvocationResult::Denied { invocation })
-        }
-        InvocationEventBody::Failed(failure) if failure.code() == "INVOKE_PRESENTATION_FAILURE" => {
-            Ok(SealedInvocationResult::PresentationFailed { invocation })
         }
         InvocationEventBody::Failed(failure) if failure.code() == "INVOKE_INTERNAL_FAILURE" => {
             Err(ResourceTransportFailure::RootSealedDispatchInternal)
@@ -4466,6 +4490,92 @@ fn initial_authenticated_resource_credit(
         .ok_or(ResourceTransportFailure::Shape)
 }
 
+/// Validates one in-memory producer values event at the same boundary as a
+/// decoded resource values frame. The producer is trusted to execute under
+/// the authenticated session, but its event metadata is still untrusted at
+/// the adapter boundary: publication must consume only the offered credit and
+/// only values whose active canonical encoding matches the declared byte
+/// count.
+fn authenticated_resource_producer_credit(
+    resource_kind: ProtocolResourceKind,
+    scalar_value_present: bool,
+    item_available: u64,
+    byte_available: u64,
+) -> Option<ResourceCredit> {
+    if scalar_value_present {
+        return Some(ResourceCredit {
+            item_count: 0,
+            byte_count: 0,
+        });
+    }
+    if matches!(resource_kind, ProtocolResourceKind::Stream)
+        && (item_available == 0 || byte_available == 0)
+    {
+        return Some(ResourceCredit {
+            item_count: item_available,
+            byte_count: byte_available,
+        });
+    }
+    ResourceCredit::new(item_available, byte_available)
+}
+
+fn validate_authenticated_resource_values(
+    active: &ActiveDatabaseRevision,
+    registry: &orna_core::value::OpaqueCodecRegistry,
+    request: &ResourceRequest,
+    expected_type: ResolvedType,
+    resource_kind: ProtocolResourceKind,
+    next_batch_sequence: u64,
+    scalar_value_present: bool,
+    total_items: u64,
+    total_bytes: u64,
+    offered_credit: ResourceCredit,
+    batch_sequence: u64,
+    item_count: u64,
+    byte_count: u64,
+    values: &[RuntimeValue],
+) -> Result<u64, ResourceTransportFailure> {
+    if values.is_empty()
+        || item_count == 0
+        || item_count != values.len() as u64
+        || item_count > u64::from(u32::MAX)
+        || batch_sequence != next_batch_sequence
+        || byte_count == 0
+        || item_count > offered_credit.item_count
+        || byte_count > offered_credit.byte_count
+        || (matches!(resource_kind, ProtocolResourceKind::Single)
+            && (values.len() != 1 || scalar_value_present))
+    {
+        return Err(ResourceTransportFailure::Shape);
+    }
+    if values
+        .iter()
+        .any(|value| !runtime_value_matches_type(active, value, expected_type))
+    {
+        return Err(ResourceTransportFailure::Shape);
+    }
+
+    let total_items = total_items
+        .checked_add(item_count)
+        .filter(|total| *total <= MAX_RESOURCE_TOTAL_ITEMS)
+        .ok_or(ResourceTransportFailure::Shape)?;
+    total_bytes
+        .checked_add(byte_count)
+        .ok_or(ResourceTransportFailure::Shape)?;
+    let frame = orna_protocol::ResourceValues {
+        stream_id: request.stream_id,
+        request_id: request.request_id,
+        target_revision: request.target_revision,
+        batch_sequence,
+        item_count: u32::try_from(item_count).map_err(|_| ResourceTransportFailure::Shape)?,
+        byte_count: u32::try_from(byte_count).map_err(|_| ResourceTransportFailure::Shape)?,
+        values: values.to_vec(),
+    };
+    orna_protocol::encode_resource_values(active, registry, &frame)
+        .map_err(|_| ResourceTransportFailure::Shape)?;
+    Ok(total_items)
+}
+
 /// Decides what a server frame means after the client has requested cancel.
 ///
 /// The local connection stays live after sending `RESOURCE_CANCEL`: an
@@ -4512,7 +4622,7 @@ async fn run_authenticated_resource_transport(
     kernel: PostgresKernel,
     session: AuthenticatedSession,
     active: ActiveDatabaseRevision,
-    _registry: orna_core::value::OpaqueCodecRegistry,
+    registry: orna_core::value::OpaqueCodecRegistry,
     request: ResourceRequest,
     expected_type: ResolvedType,
     resource_kind: ProtocolResourceKind,
@@ -4585,21 +4695,27 @@ async fn run_authenticated_resource_transport(
     let mut total_items = 0_u64;
     let mut total_bytes = 0_u64;
     let initial_credit = initial_authenticated_resource_credit(&request)?;
-    let mut byte_credit = initial_credit.byte_count;
     loop {
-        // A scalar value is followed by a zero-credit terminal probe. The
-        // producer accepts that probe only after the row has been delivered;
-        // ResourceCredit::new intentionally rejects zero credit for requests.
-        let credit =
-            if matches!(resource_kind, ProtocolResourceKind::Single) && scalar_value.is_some() {
-                ResourceCredit {
-                    item_count: 0,
-                    byte_count: 0,
-                }
-            } else {
-                ResourceCredit::new(initial_credit.item_count, byte_credit)
-                    .ok_or(ResourceTransportFailure::Shape)?
-            };
+        let item_available = initial_credit
+            .item_count
+            .checked_sub(total_items)
+            .ok_or(ResourceTransportFailure::Shape)?;
+        let byte_available = initial_credit
+            .byte_count
+            .checked_sub(total_bytes)
+            .ok_or(ResourceTransportFailure::Shape)?;
+        // A scalar value, or an exhausted stream window, is followed by a
+        // zero-credit terminal probe. The producer accepts that probe only
+        // after the already-granted values have been delivered. Unlike the
+        // socket transport, this direct path has no window-update frames, so
+        // a Waiting event cannot replenish either remaining window.
+        let credit = authenticated_resource_producer_credit(
+            resource_kind,
+            scalar_value.is_some(),
+            item_available,
+            byte_available,
+        )
+        .ok_or(ResourceTransportFailure::Shape)?;
         let pull = producer.pull(credit);
         tokio::pin!(pull);
         let event = tokio::select! {
@@ -4631,27 +4747,32 @@ async fn run_authenticated_resource_transport(
                 byte_count,
                 values,
             } => {
-                if values.is_empty()
-                    || item_count == 0
-                    || item_count as usize != values.len()
-                    || batch_sequence != next_batch_sequence
-                    || byte_count == 0
-                {
-                    producer.cancel();
-                    return Err(ResourceTransportFailure::Shape);
-                }
-                for value in &values {
-                    if !runtime_value_matches_type(&active, value, expected_type) {
+                let validated_total_items = match validate_authenticated_resource_values(
+                    &active,
+                    &registry,
+                    &request,
+                    expected_type,
+                    resource_kind,
+                    next_batch_sequence,
+                    scalar_value.is_some(),
+                    total_items,
+                    total_bytes,
+                    credit,
+                    batch_sequence,
+                    item_count,
+                    byte_count,
+                    &values,
+                ) {
+                    Ok(total_items) => total_items,
+                    Err(error) => {
                         producer.cancel();
-                        return Err(ResourceTransportFailure::Shape);
+                        return Err(error);
                     }
-                }
+                };
                 next_batch_sequence = next_batch_sequence
                     .checked_add(1)
                     .ok_or(ResourceTransportFailure::Shape)?;
-                total_items = total_items
-                    .checked_add(u64::from(item_count))
-                    .ok_or(ResourceTransportFailure::Shape)?;
+                total_items = validated_total_items;
                 total_bytes = total_bytes
                     .checked_add(byte_count)
                     .ok_or(ResourceTransportFailure::Shape)?;
@@ -4743,11 +4864,16 @@ async fn run_authenticated_resource_transport(
                 });
             }
             AuthenticatedServerResourceEvent::Waiting { required_bytes } => {
+                // A direct authenticated producer has no RESOURCE_WINDOW_UPDATE
+                // channel. A pending value therefore cannot be admitted after
+                // either initial window is exhausted; fail closed without
+                // publishing that value or advancing the local totals.
                 if required_bytes == 0 || required_bytes > MAX_RESOURCE_WINDOW {
                     producer.cancel();
                     return Err(ResourceTransportFailure::Shape);
                 }
-                byte_credit = required_bytes;
+                producer.cancel();
+                return Err(ResourceTransportFailure::Shape);
             }
         }
     }
@@ -7715,10 +7841,6 @@ mod tests {
             Ok(SealedInvocationResult::Denied { .. })
         ));
         assert!(matches!(
-            redacted_result("INVOKE_PRESENTATION_FAILURE"),
-            Ok(SealedInvocationResult::PresentationFailed { .. })
-        ));
-        assert!(matches!(
             redacted_result("INVOKE_INTERNAL_FAILURE"),
             Err(ResourceTransportFailure::RootSealedDispatchInternal)
         ));
@@ -8022,7 +8144,10 @@ mod tests {
             .expect("late acceptance is drained")
         );
         assert!(state.accepted);
-        assert_eq!(state.accepted_nested_invocation_id, Some(nested_invocation_id));
+        assert_eq!(
+            state.accepted_nested_invocation_id,
+            Some(nested_invocation_id)
+        );
 
         let malformed_acceptance = ResourceServerFrame::Accepted(ResourceAccepted {
             stream_id: request.stream_id,
@@ -8048,7 +8173,10 @@ mod tests {
         .expect_err("malformed late acceptance is rejected");
         assert!(matches!(error, ResourceTransportFailure::Shape));
         assert!(state.accepted);
-        assert_eq!(state.accepted_nested_invocation_id, Some(nested_invocation_id));
+        assert_eq!(
+            state.accepted_nested_invocation_id,
+            Some(nested_invocation_id)
+        );
 
         let malformed_value = RuntimeValue::Text("late wrong type".to_owned());
         let malformed_byte_count = encode_constructed_value(&active, &registry, &malformed_value)
@@ -8080,7 +8208,10 @@ mod tests {
         .expect_err("malformed late values are rejected");
         assert!(matches!(error, ResourceTransportFailure::Shape));
         assert!(state.accepted);
-        assert_eq!(state.accepted_nested_invocation_id, Some(nested_invocation_id));
+        assert_eq!(
+            state.accepted_nested_invocation_id,
+            Some(nested_invocation_id)
+        );
         assert_eq!(state.scalar_value, None);
         let keep = handle_shared_resource_frame(
             &mut state,
@@ -9557,6 +9688,7 @@ mod tests {
     fn inspector_snapshot_row_rejects_zero_value_batch_count() {
         let target = InvocationId::from_bytes([0x17; 16]);
         let epoch = InspectEpochId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 7]);
+        let root_target = FunctionId::from_bytes([0x18; 16]);
         let mut row = super::row(INSPECT_SNAPSHOT_ROW_TAG, 0);
         row.extend_from_slice(&epoch.to_bytes());
         row.extend_from_slice(&target.to_bytes());
@@ -9574,7 +9706,7 @@ mod tests {
         assert_eq!(no_values.len(), 68);
         assert_eq!(
             super::decode_snapshot_row_payload(&no_values, 7),
-            Ok((epoch, target))
+            Ok((epoch, target, root_target))
         );
         assert_eq!(
             super::decode_snapshot_row_payload(&row, 7),
@@ -9583,12 +9715,93 @@ mod tests {
         row[67..75].copy_from_slice(&1_u64.to_be_bytes());
         assert_eq!(
             super::decode_snapshot_row_payload(&row, 7),
-            Ok((epoch, target))
+            Ok((epoch, target, root_target))
         );
         row.push(0x19);
         assert_eq!(
             super::decode_snapshot_row_payload(&row, 7),
             Err("inspect.malformed_carrier".to_owned())
+        );
+    }
+
+    #[test]
+    fn inspector_snapshot_row_rejects_forged_root_provenance() {
+        let target = InvocationId::from_bytes([0x17; 16]);
+        let epoch = InspectEpochId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 7]);
+        let expected_root = FunctionId::from_bytes([0x18; 16]);
+        let forged_root = FunctionId::from_bytes([0x19; 16]);
+        let mut row = super::row(INSPECT_SNAPSHOT_ROW_TAG, 0);
+        row.extend_from_slice(&epoch.to_bytes());
+        row.extend_from_slice(&target.to_bytes());
+        row.extend_from_slice(&expected_root.to_bytes());
+        row.push(1);
+        row.extend_from_slice(&0_u64.to_be_bytes());
+        row.push(0);
+        row.push(0);
+
+        let (_, _, decoded_root) =
+            super::decode_snapshot_row_payload(&row, 7).expect("valid snapshot row");
+        assert_eq!(
+            require_inspect_root_provenance(expected_root, decoded_root),
+            Ok(())
+        );
+
+        row[41..57].copy_from_slice(&forged_root.to_bytes());
+        let (_, _, decoded_root) =
+            super::decode_snapshot_row_payload(&row, 7).expect("forged root remains well-formed");
+        assert_eq!(
+            require_inspect_root_provenance(expected_root, decoded_root),
+            Err("inspect.epoch_mismatch".to_owned())
+        );
+    }
+
+    #[test]
+    fn inspector_enriched_row_rejects_forged_root_provenance() {
+        let (active, registry) = inspect_test_context();
+        let epoch = InspectEpochId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 7]);
+        let target = InvocationId::from_bytes([0x10; 16]);
+        let expected_root = FunctionId::from_bytes([0x11; 16]);
+        let forged_root = FunctionId::from_bytes([0x12; 16]);
+        let mut payload = super::row(InspectCarrierKind::SecurityDecisions.tag(), 0);
+        super::id(&mut payload, &epoch.to_bytes());
+        super::id(&mut payload, &target.to_bytes());
+        super::id(&mut payload, &expected_root.to_bytes());
+        super::id(&mut payload, &active.pair().source().to_bytes());
+        super::id(&mut payload, &active.pair().catalogue().to_bytes());
+        payload.push(1);
+        payload.push(0);
+        payload.extend_from_slice(&[4, 1, 0, 2]);
+
+        let encoded = super::encode_inspect_row(&active, &registry, payload.clone())
+            .expect("canonical enriched Inspector row");
+        let (_, _, decoded_root) = super::decode_enriched_inspect_row_target(
+            &active,
+            &registry,
+            &encoded,
+            InspectCarrierKind::SecurityDecisions,
+            7,
+        )
+        .expect("valid enriched Inspector row");
+        assert_eq!(
+            require_inspect_root_provenance(expected_root, decoded_root),
+            Ok(())
+        );
+
+        let mut forged_payload = payload;
+        forged_payload[41..57].copy_from_slice(&forged_root.to_bytes());
+        let forged_encoded = super::encode_inspect_row(&active, &registry, forged_payload)
+            .expect("forged root remains well-formed");
+        let (_, _, decoded_root) = super::decode_enriched_inspect_row_target(
+            &active,
+            &registry,
+            &forged_encoded,
+            InspectCarrierKind::SecurityDecisions,
+            7,
+        )
+        .expect("forged root remains structurally valid");
+        assert_eq!(
+            require_inspect_root_provenance(expected_root, decoded_root),
+            Err("inspect.epoch_mismatch".to_owned())
         );
     }
 
@@ -10106,6 +10319,345 @@ mod tests {
         request.byte_window = MAX_RESOURCE_WINDOW + 1;
         assert!(matches!(
             initial_authenticated_resource_credit(&request),
+            Err(ResourceTransportFailure::Shape)
+        ));
+    }
+
+    #[test]
+    fn authenticated_resource_values_accept_canonical_values_with_credit() {
+        let (active, registry) = transport_test_context();
+        let request = transport_test_request(active.pair(), 1);
+        let value = RuntimeValue::Integer(7);
+        let byte_count = encode_constructed_value(&active, &registry, &value)
+            .expect("canonical value encoding")
+            .len() as u64;
+        let total = validate_authenticated_resource_values(
+            &active,
+            &registry,
+            &request,
+            ResolvedType::Scalar(StandardScalar::Integer),
+            ProtocolResourceKind::Stream,
+            0,
+            false,
+            0,
+            0,
+            ResourceCredit::new(1, byte_count).expect("credit"),
+            0,
+            1,
+            byte_count,
+            std::slice::from_ref(&value),
+        )
+        .expect("canonical values fit offered credit");
+        assert_eq!(total, 1);
+    }
+
+    #[tokio::test]
+    async fn broker_rejects_mismatched_resource_value_before_stream_state_mutation() {
+        let (active, registry) = transport_test_context();
+        let mut request = transport_test_request(active.pair(), 1);
+        request.resource_kind = ProtocolResourceKind::Stream;
+        let nested_invocation_id = InvocationId::from_bytes([0x40; 16]);
+        let mut protocol = ResourceProtocolConnection::new();
+        protocol
+            .open(request.clone())
+            .expect("resource request opens");
+        protocol
+            .apply_constructed(
+                &active,
+                &registry,
+                ResourceServerFrame::Accepted(ResourceAccepted {
+                    stream_id: request.stream_id,
+                    request_id: request.request_id,
+                    nested_invocation_id,
+                    target_revision: request.target_revision,
+                    resource_kind: request.resource_kind,
+                }),
+            )
+            .expect("resource acceptance applies");
+        let (completion, mut completions) = mpsc::channel(2);
+        let mut state = BrokerResourceState {
+            request: request.clone(),
+            expected_type: ResolvedType::Scalar(StandardScalar::Integer),
+            resource_kind: ProtocolResourceKind::Stream,
+            protocol,
+            completion,
+            accepted: true,
+            accepted_nested_invocation_id: Some(nested_invocation_id),
+            scalar_value: None,
+            cancellation_requested: false,
+            stream_values_seen: false,
+            terminal_provenance: ResourceTerminalProvenance::Uncommitted,
+            scalar_value_after_cancellation: false,
+        };
+        let protocol_before = state.protocol.clone();
+        let credit_before = state
+            .protocol
+            .resource_credit(request.stream_id, request.request_id)
+            .expect("accepted resource retains credit");
+        let (_reader, mut writer) = tokio::io::duplex(512);
+        let value = RuntimeValue::Text("wrong result type".to_owned());
+        let byte_count = encode_constructed_value(&active, &registry, &value)
+            .expect("encoded mismatched resource value")
+            .len() as u32;
+
+        let error = handle_shared_resource_frame(
+            &mut state,
+            ResourceServerFrame::Values(ResourceValues {
+                stream_id: request.stream_id,
+                request_id: request.request_id,
+                target_revision: request.target_revision,
+                batch_sequence: 0,
+                item_count: 1,
+                byte_count,
+                values: vec![value],
+            }),
+            &mut writer,
+            &active,
+            &registry,
+        )
+        .await
+        .expect_err("mismatched result type fails closed at the broker boundary");
+        assert!(matches!(error, ResourceTransportFailure::Shape));
+        assert_eq!(state.protocol, protocol_before);
+        assert_eq!(state.protocol.live_resources(), 1);
+        assert_eq!(
+            state
+                .protocol
+                .resource_credit(request.stream_id, request.request_id)
+                .expect("resource remains live after rejection"),
+            credit_before
+        );
+        assert_eq!(
+            state
+                .protocol
+                .resource_nested_invocation_id(request.stream_id, request.request_id)
+                .expect("resource lineage remains inspectable"),
+            Some(nested_invocation_id)
+        );
+        assert!(state.accepted);
+        assert!(!state.stream_values_seen);
+        assert!(state.scalar_value.is_none());
+        assert_eq!(
+            state.terminal_provenance,
+            ResourceTerminalProvenance::Uncommitted
+        );
+        assert!(!state.scalar_value_after_cancellation);
+        assert!(completions.try_recv().is_err());
+    }
+
+    #[test]
+    fn authenticated_resource_values_consume_item_window_across_batches() {
+        let (active, registry) = transport_test_context();
+        let request = transport_test_request(active.pair(), 1);
+        let value = RuntimeValue::Integer(7);
+        let byte_count = encode_constructed_value(&active, &registry, &value)
+            .expect("canonical value encoding")
+            .len() as u64;
+        let offered_credit = ResourceCredit::new(1, byte_count * 2).expect("credit");
+        let mut total_items = 0;
+        let mut total_bytes = 0;
+        let mut published_batches = Vec::new();
+
+        let first_total = validate_authenticated_resource_values(
+            &active,
+            &registry,
+            &request,
+            ResolvedType::Scalar(StandardScalar::Integer),
+            ProtocolResourceKind::Stream,
+            0,
+            false,
+            total_items,
+            total_bytes,
+            offered_credit,
+            0,
+            1,
+            byte_count,
+            std::slice::from_ref(&value),
+        )
+        .expect("first batch fits the offered item window");
+        total_items = first_total;
+        total_bytes += byte_count;
+        published_batches.push(value.clone());
+
+        assert_eq!(
+            authenticated_resource_producer_credit(
+                ProtocolResourceKind::Stream,
+                false,
+                offered_credit.item_count - total_items,
+                offered_credit.byte_count - total_bytes,
+            ),
+            Some(ResourceCredit {
+                item_count: 0,
+                byte_count,
+            })
+        );
+        assert!(matches!(
+            validate_authenticated_resource_values(
+                &active,
+                &registry,
+                &request,
+                ResolvedType::Scalar(StandardScalar::Integer),
+                ProtocolResourceKind::Stream,
+                1,
+                false,
+                total_items,
+                total_bytes,
+                authenticated_resource_producer_credit(
+                    ProtocolResourceKind::Stream,
+                    false,
+                    offered_credit.item_count - total_items,
+                    offered_credit.byte_count - total_bytes,
+                )
+                .expect("remaining credit probe"),
+                1,
+                1,
+                byte_count,
+                std::slice::from_ref(&value),
+            ),
+            Err(ResourceTransportFailure::Shape)
+        ));
+        assert_eq!(published_batches, vec![value]);
+        assert_eq!((total_items, total_bytes), (1, byte_count));
+    }
+
+    #[test]
+    fn authenticated_resource_values_reject_item_credit_overrun() {
+        let (active, registry) = transport_test_context();
+        let request = transport_test_request(active.pair(), 1);
+        let values = vec![RuntimeValue::Integer(7), RuntimeValue::Integer(8)];
+        let byte_count = values
+            .iter()
+            .map(|value| {
+                encode_constructed_value(&active, &registry, value)
+                    .expect("encoding")
+                    .len()
+            })
+            .sum::<usize>() as u64;
+        assert!(matches!(
+            validate_authenticated_resource_values(
+                &active,
+                &registry,
+                &request,
+                ResolvedType::Scalar(StandardScalar::Integer),
+                ProtocolResourceKind::Stream,
+                0,
+                false,
+                0,
+                0,
+                ResourceCredit::new(1, byte_count).expect("credit"),
+                0,
+                2,
+                byte_count,
+                &values,
+            ),
+            Err(ResourceTransportFailure::Shape)
+        ));
+    }
+
+    #[test]
+    fn authenticated_resource_values_reject_byte_credit_overrun() {
+        let (active, registry) = transport_test_context();
+        let request = transport_test_request(active.pair(), 1);
+        let value = RuntimeValue::Integer(7);
+        let byte_count = encode_constructed_value(&active, &registry, &value)
+            .expect("canonical value encoding")
+            .len() as u64;
+        assert!(matches!(
+            validate_authenticated_resource_values(
+                &active,
+                &registry,
+                &request,
+                ResolvedType::Scalar(StandardScalar::Integer),
+                ProtocolResourceKind::Stream,
+                0,
+                false,
+                0,
+                0,
+                ResourceCredit::new(1, byte_count - 1).expect("credit"),
+                0,
+                1,
+                byte_count,
+                std::slice::from_ref(&value),
+            ),
+            Err(ResourceTransportFailure::Shape)
+        ));
+    }
+
+    #[test]
+    fn authenticated_resource_values_reject_forged_byte_count() {
+        let (active, registry) = transport_test_context();
+        let request = transport_test_request(active.pair(), 1);
+        let value = RuntimeValue::Integer(7);
+        let byte_count = encode_constructed_value(&active, &registry, &value)
+            .expect("canonical value encoding")
+            .len() as u64;
+        assert!(matches!(
+            validate_authenticated_resource_values(
+                &active,
+                &registry,
+                &request,
+                ResolvedType::Scalar(StandardScalar::Integer),
+                ProtocolResourceKind::Stream,
+                0,
+                false,
+                0,
+                0,
+                ResourceCredit::new(1, byte_count + 1).expect("credit"),
+                0,
+                1,
+                byte_count + 1,
+                std::slice::from_ref(&value),
+            ),
+            Err(ResourceTransportFailure::Shape)
+        ));
+    }
+
+    #[test]
+    fn authenticated_resource_values_enforce_total_item_boundary() {
+        let (active, registry) = transport_test_context();
+        let request = transport_test_request(active.pair(), 1);
+        let value = RuntimeValue::Integer(7);
+        let byte_count = encode_constructed_value(&active, &registry, &value)
+            .expect("canonical value encoding")
+            .len() as u64;
+        let credit = ResourceCredit::new(1, byte_count).expect("credit");
+        assert_eq!(
+            validate_authenticated_resource_values(
+                &active,
+                &registry,
+                &request,
+                ResolvedType::Scalar(StandardScalar::Integer),
+                ProtocolResourceKind::Stream,
+                0,
+                false,
+                MAX_RESOURCE_TOTAL_ITEMS - 1,
+                0,
+                credit,
+                0,
+                1,
+                byte_count,
+                std::slice::from_ref(&value),
+            )
+            .expect("maximum total is accepted"),
+            MAX_RESOURCE_TOTAL_ITEMS
+        );
+        assert!(matches!(
+            validate_authenticated_resource_values(
+                &active,
+                &registry,
+                &request,
+                ResolvedType::Scalar(StandardScalar::Integer),
+                ProtocolResourceKind::Stream,
+                1,
+                false,
+                MAX_RESOURCE_TOTAL_ITEMS,
+                byte_count,
+                credit,
+                1,
+                1,
+                byte_count,
+                std::slice::from_ref(&value),
+            ),
             Err(ResourceTransportFailure::Shape)
         ));
     }

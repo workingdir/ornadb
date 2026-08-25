@@ -14,6 +14,9 @@ CREATE CLIENT FUNCTION expr.ref_composed(p_item REF expr.item)
 RETURNS TEXT
 AS p_item.title || '!' || '?';
 
+CREATE CLIENT FUNCTION expr.param_composed(p_suffix TEXT)
+RETURNS TEXT
+AS expr.literal() || p_suffix;
 CREATE EXTERNAL CLIENT FUNCTION expr.external()
 RETURNS TEXT
 RUNTIME CONTRACT 'expr.runtime@1';

@@ -8,7 +8,7 @@ use std::{
 };
 
 use orna_compiler::{
-    CompilerDiagnostic, PrepareStandardApplicationError, StandardApplicationCheckContext,
+    PrepareStandardApplicationError, StandardApplicationCheckContext,
     StandardApplicationContextError, StandardLibraryCheckError, check_standard_application,
     check_standard_library_source, prepare_standard_application,
 };
@@ -32,7 +32,7 @@ use orna_standard::{
 };
 use serde::Serialize;
 
-use crate::{EmbeddedHostError, inspect_ready_embedded_host};
+use crate::{EmbeddedHostError, inspect_ready_embedded_host, source_diagnostics};
 
 /// The result of checking and applying one installed application source file.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -295,6 +295,7 @@ impl Error for InstalledSourceApplyError {
 pub fn run_installed_source_apply(
     path: &str,
 ) -> Result<InstalledSourceApplyOutcome, InstalledSourceApplyError> {
+    validate_source_path(path)?;
     let bundle = read_source_bundle(path)?;
     let host = inspect_ready_embedded_host().map_err(map_host_error)?;
     let kernel = PostgresKernel::new(host.config().clone());
@@ -333,7 +334,7 @@ async fn apply_source_bundle(
     if !report.diagnostics().is_empty() {
         return Ok(InstalledSourceApplyOutcome::Diagnostics(
             InstalledSourceApplyDiagnostics {
-                bytes: render_diagnostics(report.diagnostics()),
+                bytes: source_diagnostics::render_diagnostics(report.diagnostics()),
             },
         ));
     }
@@ -358,6 +359,7 @@ async fn apply_source_bundle(
 }
 
 fn read_source_bundle(path: &str) -> Result<SourceBundle, InstalledSourceApplyError> {
+    validate_source_path(path)?;
     let mut file = fs::OpenOptions::new()
         .read(true)
         .custom_flags(nix::libc::O_NONBLOCK)
@@ -390,6 +392,21 @@ fn read_source_bundle(path: &str) -> Result<SourceBundle, InstalledSourceApplyEr
     })?;
     SourceBundle::new([SourceUnit::new(path, source)])
         .map_err(|source| InstalledSourceApplyError::SourceBundle { source })
+}
+
+fn validate_source_path(path: &str) -> Result<(), InstalledSourceApplyError> {
+    if path.is_empty()
+        || path.starts_with('-')
+        || path
+            .chars()
+            .any(|character| character.is_control() || matches!(character, '\u{2028}' | '\u{2029}'))
+    {
+        return Err(InstalledSourceApplyError::SourceBundle {
+            source: SourceBundleError::EmptyLogicalPath { index: 0 },
+        });
+    }
+
+    Ok(())
 }
 
 fn map_host_error(source: EmbeddedHostError) -> InstalledSourceApplyError {
@@ -561,46 +578,6 @@ fn build_success_document(
         .map_err(|source| InstalledSourceApplyError::ResultDocument { source })?;
     bytes.push(b'\n');
     Ok(InstalledSourceApplySuccess { bytes })
-}
-
-fn render_diagnostics(diagnostics: &[CompilerDiagnostic]) -> Vec<u8> {
-    let mut output = Vec::new();
-    for diagnostic in diagnostics {
-        let location = diagnostic.location();
-        let span = location.span();
-        let _ = writeln!(
-            output,
-            "{}:{}..{}: {}: {}",
-            location.logical_path(),
-            span.start(),
-            span.end(),
-            diagnostic.code().as_str(),
-            escape_message(diagnostic.message()),
-        );
-    }
-    output
-}
-
-fn escape_message(message: &str) -> String {
-    let mut escaped = String::with_capacity(message.len());
-    for character in message.chars() {
-        match character {
-            '\\' => escaped.push_str("\\\\"),
-            '\n' => escaped.push_str("\\n"),
-            '\r' => escaped.push_str("\\r"),
-            '\t' => escaped.push_str("\\t"),
-            '\u{2028}' | '\u{2029}' => {
-                use fmt::Write as _;
-                let _ = write!(escaped, "\\u{{{:04X}}}", character as u32);
-            }
-            character if character.is_control() => {
-                use fmt::Write as _;
-                let _ = write!(escaped, "\\u{{{:04X}}}", character as u32);
-            }
-            character => escaped.push(character),
-        }
-    }
-    escaped
 }
 
 #[cfg(test)]
@@ -799,13 +776,181 @@ mod tests {
     }
 
     #[test]
+    fn host_error_mapping_uses_closed_public_classes_and_redacts_private_details() {
+        let cases: [(
+            &str,
+            fn() -> EmbeddedHostError,
+            InstalledSourceApplyHostFailure,
+            &str,
+            &str,
+        ); 7] = [
+            (
+                "service identity",
+                || EmbeddedHostError::InvalidServiceIdentity,
+                InstalledSourceApplyHostFailure::ServiceAccountRequired,
+                "orna: source apply must run as the orna service account",
+                "Orna service identity is invalid",
+            ),
+            (
+                "package state",
+                || EmbeddedHostError::InvalidPackageState,
+                InstalledSourceApplyHostFailure::PackageIncomplete,
+                "orna: package maintenance is incomplete",
+                "private package detail",
+            ),
+            (
+                "missing instance",
+                || {
+                    EmbeddedHostError::Io(io::Error::new(
+                        io::ErrorKind::NotFound,
+                        "private instance path",
+                    ))
+                },
+                InstalledSourceApplyHostFailure::InstanceNotInstalled,
+                "orna: the default Orna instance is not installed",
+                "private instance path",
+            ),
+            (
+                "engine manifest",
+                || EmbeddedHostError::InvalidEngineManifest,
+                InstalledSourceApplyHostFailure::EngineInvalid,
+                "orna: the embedded PostgreSQL engine is not valid",
+                "embedded PostgreSQL engine manifest is invalid",
+            ),
+            (
+                "engine adapter",
+                || EmbeddedHostError::Engine(orna_postgres::EngineError::InvalidArgument),
+                InstalledSourceApplyHostFailure::EngineInvalid,
+                "orna: the embedded PostgreSQL engine is not valid",
+                "embedded PostgreSQL argument is not a C string",
+            ),
+            (
+                "distribution manifest",
+                || EmbeddedHostError::InvalidDistributionManifest,
+                InstalledSourceApplyHostFailure::EngineInvalid,
+                "orna: the embedded PostgreSQL engine is not valid",
+                "Orna distribution manifest is invalid",
+            ),
+            (
+                "instance verification",
+                || EmbeddedHostError::Lifecycle {
+                    primary: Box::new(EmbeddedHostError::InvalidInstanceState),
+                    cleanup: Box::new(EmbeddedHostError::SupportMismatch("private host detail")),
+                },
+                InstalledSourceApplyHostFailure::InstanceInvalid,
+                "orna: the default Orna instance is invalid",
+                "private host detail",
+            ),
+        ];
+
+        for (name, build, failure, public, private) in cases {
+            let error = map_host_error(build());
+            assert!(
+                matches!(&error, InstalledSourceApplyError::Host { failure: actual, .. } if *actual == failure),
+                "{name} must map to its closed host class: {error:?}"
+            );
+            assert_eq!(error.to_string(), public, "{name} public error changed");
+            assert!(
+                !error.to_string().contains(private),
+                "{name} leaked private host detail"
+            );
+        }
+    }
+
+    #[test]
+    fn apply_error_mapping_preserves_stale_identity_and_redacts_private_failures() {
+        let expected = RevisionPair::new(
+            SourceRevisionId::from_bytes([0x31; 16]),
+            CatalogueRevisionId::from_bytes([0x32; 16]),
+        );
+        let active = RevisionPair::new(
+            SourceRevisionId::from_bytes([0x41; 16]),
+            CatalogueRevisionId::from_bytes([0x42; 16]),
+        );
+        let stale = map_apply_error(PostgresKernelError::ExpectedBaseMismatch { expected, active });
+        assert!(matches!(
+            &stale,
+            InstalledSourceApplyError::ExpectedBaseMismatch {
+                expected: actual_expected,
+                active: actual_active,
+            } if *actual_expected == expected && *actual_active == active
+        ));
+        assert_eq!(
+            stale.to_string(),
+            format!(
+                "orna: source apply expected {} {} but active is {} {}",
+                expected.source(),
+                expected.catalogue(),
+                active.source(),
+                active.catalogue(),
+            )
+        );
+
+        let cases: [(&str, fn() -> PostgresKernelError, &str, &str); 3] = [
+            (
+                "generic apply",
+                || PostgresKernelError::CatalogueInvariant("private apply detail"),
+                "orna: source apply did not commit",
+                "private apply detail",
+            ),
+            (
+                "session close",
+                || {
+                    let source = "port=invalid"
+                        .parse::<tokio_postgres::Config>()
+                        .expect_err("invalid port must produce a PostgreSQL error");
+                    PostgresKernelError::SessionClose(source)
+                },
+                "orna: source apply database session did not close cleanly",
+                "invalid port",
+            ),
+            (
+                "driver task",
+                || {
+                    let runtime = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .expect("test runtime must build");
+                    let task = runtime.spawn(async {});
+                    task.abort();
+                    let source = runtime
+                        .block_on(task)
+                        .expect_err("aborted task must produce a JoinError");
+                    PostgresKernelError::DriverTask(source)
+                },
+                "orna: source apply database session did not close cleanly",
+                "aborted task",
+            ),
+        ];
+        for (name, build, public, private) in cases {
+            let error = map_apply_error(build());
+            assert!(
+                matches!(
+                    &error,
+                    InstalledSourceApplyError::Apply { .. }
+                        | InstalledSourceApplyError::SessionClose { .. }
+                ),
+                "{name} must map to a closed apply error: {error:?}"
+            );
+            assert_eq!(error.to_string(), public, "{name} public error changed");
+            assert!(
+                !error.to_string().contains(private),
+                "{name} leaked private detail"
+            );
+        }
+    }
+
+    #[test]
     fn recovery_database_maps_to_recovery_stage() {
         let source = "port=invalid"
             .parse::<tokio_postgres::Config>()
             .expect_err("invalid port must produce a PostgreSQL error");
         let error = map_recovery_error(PostgresKernelError::RecoveryDatabase(source));
 
-        assert!(matches!(&error, &InstalledSourceApplyError::Recovery { .. }));
+        assert!(matches!(
+            &error,
+            &InstalledSourceApplyError::Recovery { .. }
+        ));
         assert_eq!(
             error.to_string(),
             "orna: source apply could not recover the active revision"
@@ -850,7 +995,10 @@ mod tests {
             .parse::<tokio_postgres::Config>()
             .expect_err("invalid port must produce a PostgreSQL error");
         let apply = map_apply_error(PostgresKernelError::SessionClose(apply_source));
-        assert!(matches!(apply, InstalledSourceApplyError::SessionClose { .. }));
+        assert!(matches!(
+            apply,
+            InstalledSourceApplyError::SessionClose { .. }
+        ));
     }
 
     #[test]
@@ -904,6 +1052,56 @@ mod tests {
                 .windows(first_revision.canonical().len())
                 .any(|window| window == first_revision.canonical().as_bytes()),
             "the second prefix must not carry the old catalogue revision"
+        );
+    }
+    fn assert_invalid_source_path_fails_before_io(path: &str) {
+        let error = run_installed_source_apply(path)
+            .expect_err("invalid source path must fail before filesystem or host access");
+        assert!(
+            matches!(
+                &error,
+                InstalledSourceApplyError::SourceBundle {
+                    source: SourceBundleError::EmptyLogicalPath { index: 0 }
+                }
+            ),
+            "invalid path {path:?} must use the closed source-bundle boundary: {error:?}"
+        );
+        assert_eq!(
+            error.to_string(),
+            "orna: source apply received an invalid source path"
+        );
+    }
+
+    #[test]
+    fn invalid_source_paths_fail_before_missing_file_or_host_access() {
+        for path in [
+            "",
+            "-leading.orna",
+            "line\nbreak.orna",
+            "line\u{2028}break.orna",
+            "line\u{2029}break.orna",
+        ] {
+            assert_invalid_source_path_fails_before_io(path);
+        }
+    }
+
+    #[test]
+    fn valid_relative_source_path_reaches_file_read_boundary() {
+        let path = format!(
+            "./-orna-source-apply-valid-path-{}-missing.orna",
+            std::process::id()
+        );
+        let error = run_installed_source_apply(&path)
+            .expect_err("the missing valid path must fail at source read before host access");
+        assert!(
+            matches!(
+                &error,
+                InstalledSourceApplyError::SourceRead {
+                    path: submitted,
+                    source: Some(source),
+                } if submitted == &path && source.kind() == io::ErrorKind::NotFound
+            ),
+            "valid path must reach filesystem read: {error:?}"
         );
     }
 }
