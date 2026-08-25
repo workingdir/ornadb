@@ -6,7 +6,7 @@ CREATE SERVER FUNCTION tasks.overdue (
     p_principal REF sys.security.principal,
     p_before TIMESTAMP DEFAULT sys.time.now()
 )
-RETURNS TABLE (
+RETURNS ROWS (
     task    REF tasks.task,
     title   TEXT
 )
@@ -77,26 +77,25 @@ AS
       (rparen))
     (kw_returns)
     returns: (return_type_spec
-      (type_spec
-        (kw_table)
-        (lparen)
-        (table_column_definition
-          name: (identifier)
-          type: (type_spec
-            (kw_ref)
-            (type_spec
+      (kw_rows)
+      (lparen)
+      (table_column_definition
+        name: (identifier)
+        type: (type_spec
+          (kw_ref)
+          (type_spec
+            (qualified_name
               (qualified_name
-                (qualified_name
-                  (identifier))
-                (dot)
-                (identifier)))))
-        (comma)
-        (table_column_definition
-          name: (identifier)
-          type: (type_spec
-            (scalar_type
-              (kw_text))))
-        (rparen)))
+                (identifier))
+              (dot)
+              (identifier)))))
+      (comma)
+      (table_column_definition
+        name: (identifier)
+        type: (type_spec
+          (scalar_type
+            (kw_text))))
+      (rparen))
     (security_clause
       (kw_security)
       (kw_invoker))
