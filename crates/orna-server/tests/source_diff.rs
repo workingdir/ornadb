@@ -238,6 +238,8 @@ fn source_read_rejections_fail_closed_before_host() {
     let fifo = directory.path().join("pipe.orna");
     mkfifo(&fifo, Mode::S_IRUSR | Mode::S_IWUSR).expect("create source fifo");
     let invalid = directory.write("invalid.orna", b"CREATE SCHEMA app;\xff");
+    let linked_invalid = directory.path().join("linked-invalid.orna");
+    symlink(&invalid, &linked_invalid).expect("create regular-file symlink");
     let before = snapshot(directory.path()).expect("snapshot arranged scratch");
 
     let missing_error = format!(
@@ -250,7 +252,7 @@ fn source_read_rejections_fail_closed_before_host() {
     assert_snapshot_unchanged(directory.path(), &before);
     let dangling_error = format!(
         "orna source diff: could not read {dangling:?}: {}\n",
-        io::Error::from_raw_os_error(nix::libc::ELOOP)
+        io::Error::from_raw_os_error(nix::libc::ENOENT)
     );
     assert_read_failure(
         &run_source_diff(directory.path(), &dangling).expect("bounded dangling source"),
@@ -271,6 +273,11 @@ fn source_read_rejections_fail_closed_before_host() {
     assert_read_failure(
         &run_source_diff(directory.path(), &invalid).expect("bounded invalid UTF-8 source"),
         format!("orna source diff: {invalid:?} is not valid UTF-8\n").as_bytes(),
+    );
+    assert_read_failure(
+        &run_source_diff(directory.path(), &linked_invalid)
+            .expect("bounded linked invalid source"),
+        format!("orna source diff: {linked_invalid:?} is not valid UTF-8\n").as_bytes(),
     );
     assert_snapshot_unchanged(directory.path(), &before);
     assert_eq!(
