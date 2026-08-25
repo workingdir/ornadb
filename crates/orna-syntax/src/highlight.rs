@@ -805,6 +805,26 @@ pub const SCALAR_TYPES: &[&str] = &[
 mod tests {
     use super::*;
 
+    const ACCEPTED_STANDARD_SCALAR_SPELLINGS: [&str; 17] = [
+        "BIGINT",
+        "BINARY LARGE OBJECT",
+        "BOOL",
+        "BOOLEAN",
+        "BYTES",
+        "CHARACTER LARGE OBJECT",
+        "DATE",
+        "DECIMAL",
+        "DURATION",
+        "FLOAT",
+        "INT",
+        "INTEGER",
+        "TEXT",
+        "TIME",
+        "TIMESTAMP",
+        "UUID",
+        "VOID",
+    ];
+
     fn kinds(source: &str) -> Vec<(Range<usize>, HighlightKind)> {
         highlight(source)
             .into_iter()
@@ -875,21 +895,18 @@ mod tests {
     }
 
     #[test]
-    fn classifies_canonical_scalar_type_spellings() {
-        let source = "CREATE SERVER FUNCTION files.boolean_value() RETURNS BOOLEAN AS SELECT TRUE;
-            CREATE SERVER FUNCTION files.integer_value() RETURNS INTEGER AS SELECT TRUE;
-            CREATE SERVER FUNCTION files.text_value() RETURNS CHARACTER LARGE OBJECT AS SELECT TRUE;
-            CREATE SERVER FUNCTION files.bytes_value() RETURNS BINARY LARGE OBJECT AS SELECT TRUE;";
-
-        for needle in [
-            "BOOLEAN",
-            "INTEGER",
-            "CHARACTER",
-            "LARGE",
-            "OBJECT",
-            "BINARY",
-        ] {
-            assert_eq!(kind_at(source, needle), HighlightKind::TypeName, "{needle}");
+    fn classifies_every_canonical_scalar_type_spelling() {
+        assert_eq!(SCALAR_TYPES, ACCEPTED_STANDARD_SCALAR_SPELLINGS.as_slice());
+        for spelling in ACCEPTED_STANDARD_SCALAR_SPELLINGS {
+            let source =
+                format!("CREATE SERVER FUNCTION files.value() RETURNS {spelling} AS SELECT TRUE;");
+            for word in spelling.split_ascii_whitespace() {
+                assert_eq!(
+                    kind_at(&source, word),
+                    HighlightKind::TypeName,
+                    "{spelling}: {word}"
+                );
+            }
         }
     }
 

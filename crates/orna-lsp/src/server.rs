@@ -4,6 +4,8 @@
 //! document are fast, so no worker pool is needed for the first version.
 
 use std::collections::HashMap;
+use std::io::{self, BufReader};
+use std::thread::{self, JoinHandle};
 
 use lsp_server::{Connection, ErrorCode, Message, Notification, Request, Response, ResponseError};
 use lsp_types::{
@@ -11,7 +13,7 @@ use lsp_types::{
     DiagnosticServerCapabilities, DocumentDiagnosticParams, DocumentDiagnosticReport,
     DocumentSymbolParams, DocumentSymbolResponse, FullDocumentDiagnosticReport,
     GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverParams, HoverProviderCapability,
-    OneOf, PositionEncodingKind, PublishDiagnosticsParams, ReferenceParams,
+    InitializeParams, OneOf, PositionEncodingKind, PublishDiagnosticsParams, ReferenceParams,
     RelatedFullDocumentDiagnosticReport, SemanticTokens, SemanticTokensFullOptions,
     SemanticTokensLegend, SemanticTokensOptions, SemanticTokensParams, SemanticTokensRangeParams,
     SemanticTokensServerCapabilities, ServerCapabilities, TextDocumentSyncCapability,
@@ -23,7 +25,78 @@ use crate::analysis::{self, StandardLibrary};
 use crate::documents::{Document, PositionMapper};
 use crate::semantic;
 
-/// Shared server state across requests and notifications.
+/// Transport threads for the server's standard input and output streams.
+///
+/// `lsp_server::Connection::stdio` joins its reader before its writer. That
+/// ordering is correct after a normal `exit` notification, but a rejected
+/// initialize has no valid shutdown sequence and can leave the reader blocked
+/// on client input. Keep the handles here so the error path can flush the
+/// writer without waiting for the reader.
+struct StdioIoThreads {
+    reader: JoinHandle<io::Result<()>>,
+    writer: JoinHandle<io::Result<()>>,
+}
+
+impl StdioIoThreads {
+    fn join(self) -> io::Result<()> {
+        join_io_thread(self.reader)?;
+        join_io_thread(self.writer)
+    }
+
+    fn join_writer_after_error(self) -> io::Result<()> {
+        drop(self.reader);
+        join_io_thread(self.writer)
+    }
+}
+
+fn join_io_thread(thread: JoinHandle<io::Result<()>>) -> io::Result<()> {
+    match thread.join() {
+        Ok(result) => result,
+        Err(payload) => std::panic::resume_unwind(payload),
+    }
+}
+
+/// Creates a framed stdio transport with independently joinable reader and
+/// writer threads.
+fn stdio_connection() -> (Connection, StdioIoThreads) {
+    let (connection, transport) = Connection::memory();
+    let reader_sender = transport.sender;
+    let writer_receiver = transport.receiver;
+
+    let reader = thread::Builder::new()
+        .name("OrnaLspReader".to_owned())
+        .spawn(move || {
+            let stdin = io::stdin();
+            let mut stdin = BufReader::new(stdin.lock());
+            while let Some(message) = Message::read(&mut stdin)? {
+                let is_exit = matches!(
+                    &message,
+                    Message::Notification(notification) if notification.method == "exit"
+                );
+                if reader_sender.send(message).is_err() || is_exit {
+                    break;
+                }
+            }
+            Ok(())
+        })
+        .expect("spawn Orna LSP reader");
+
+    let writer = thread::Builder::new()
+        .name("OrnaLspWriter".to_owned())
+        .spawn(move || {
+            let stdout = io::stdout();
+            let mut stdout = stdout.lock();
+            while let Ok(message) = writer_receiver.recv() {
+                message.write(&mut stdout)?;
+            }
+            Ok(())
+        })
+        .expect("spawn Orna LSP writer");
+
+    (connection, StdioIoThreads { reader, writer })
+}
+
+/// Shared state across requests and notifications.
 struct ServerState {
     documents: HashMap<Uri, Document>,
     standard: Option<StandardLibrary>,
@@ -51,9 +124,16 @@ impl ServerState {
 
 /// Runs the server until the client exits.
 pub fn run() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let (connection, io_threads) = Connection::stdio();
+    let (connection, io_threads) = stdio_connection();
     let capabilities = server_capabilities();
-    let _initialize = connection.initialize(serde_json::to_value(capabilities)?)?;
+    if let Err(error) = initialize(&connection, capabilities) {
+        // A failed initialize handshake has no valid LSP shutdown sequence.
+        // Drop the connection, flush the response, and detach the blocked
+        // reader. The process exits after the writer has finished.
+        drop(connection);
+        io_threads.join_writer_after_error()?;
+        return Err(error);
+    }
     let mut state = ServerState::new();
 
     for message in &connection.receiver {
@@ -77,6 +157,51 @@ pub fn run() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // channel sender is gone.
     drop(connection);
     io_threads.join()?;
+    Ok(())
+}
+
+/// Negotiates the position encoding before completing the initialize handshake.
+///
+/// `PositionMapper` only understands UTF-16 positions. The LSP defaults to
+/// UTF-16 when the client omits `general.positionEncodings`, but an explicit
+/// list that excludes UTF-16 cannot be silently accepted.
+fn initialize(
+    connection: &Connection,
+    capabilities: ServerCapabilities,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let (request_id, raw_params) = connection.initialize_start()?;
+    let params: InitializeParams = serde_json::from_value(raw_params)?;
+
+    if let Some(position_encodings) = params
+        .capabilities
+        .general
+        .and_then(|general| general.position_encodings)
+        && !position_encodings
+            .iter()
+            .any(|encoding| encoding == &PositionEncodingKind::UTF16)
+    {
+        let offered = position_encodings
+            .iter()
+            .map(PositionEncodingKind::as_str)
+            .collect::<Vec<_>>()
+            .join(", ");
+        let message = format!(
+            "unsupported position encoding: orna-lsp supports UTF-16 positions, but the client offered only [{offered}]"
+        );
+        let _ = connection.sender.send(Message::Response(Response::new_err(
+            request_id,
+            ErrorCode::InvalidParams as i32,
+            message.clone(),
+        )));
+        return Err(message.into());
+    }
+
+    connection.initialize_finish(
+        request_id,
+        serde_json::json!({
+            "capabilities": capabilities,
+        }),
+    )?;
     Ok(())
 }
 
@@ -367,8 +492,15 @@ fn request_completion(
     let Some(document) = state.document(&uri) else {
         return Ok(serde_json::Value::Null);
     };
-    let (parse, _) = parse_document(document);
-    let items = analysis::completion(&parse, state.standard.as_ref());
+    let (parse, mapper) = parse_document(document);
+    let position = params.text_document_position.position;
+    let byte = mapper.byte_offset(position);
+    let items = analysis::completion_at(
+        &parse,
+        state.standard.as_ref(),
+        Some(byte),
+        params.context.as_ref(),
+    );
     let response = CompletionResponse::Array(items);
     Ok(serde_json::to_value(response)?)
 }

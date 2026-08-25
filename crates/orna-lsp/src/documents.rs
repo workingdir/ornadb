@@ -63,7 +63,8 @@ impl<'text> PositionMapper<'text> {
     }
 
     /// Returns the byte offset of the end of one line, excluding its
-    /// terminator.
+    /// terminator. For CRLF, both bytes are one line terminator, so the
+    /// returned offset points immediately before the carriage return.
     fn line_end_byte(&self, line: usize) -> usize {
         match self.line_starts.get(line + 1) {
             Some(&next_start) => {
@@ -83,7 +84,11 @@ impl<'text> PositionMapper<'text> {
         let byte = byte.min(self.text.len());
         let line = self.line_of(byte);
         let line_start = self.line_starts[line];
-        let character = utf16_len(&self.text[line_start..byte]);
+        // A CRLF terminator has one LSP line boundary. Offsets at the CR and
+        // between CR and LF map to the same line-end character; a standalone
+        // CR remains text.
+        let character_end = byte.min(self.line_end_byte(line));
+        let character = utf16_len(&self.text[line_start..character_end]);
         Position {
             line: line as u32,
             character: character as u32,
@@ -259,12 +264,28 @@ mod tests {
     }
 
     #[test]
-    fn crlf_positions_and_offsets_exclude_carriage_returns() {
+    fn crlf_positions_use_one_line_end_for_both_terminator_bytes() {
         let text = "first\r\nsecond\r\n";
         let mapper = PositionMapper::new(text);
 
+        // CRLF offsets at and within the terminator share the previous line end;
+        // the next byte starts the next LSP line.
+        assert_eq!(
+            mapper.position(4),
+            Position {
+                line: 0,
+                character: 4
+            }
+        );
         assert_eq!(
             mapper.position(5),
+            Position {
+                line: 0,
+                character: 5
+            }
+        );
+        assert_eq!(
+            mapper.position(6),
             Position {
                 line: 0,
                 character: 5
@@ -285,7 +306,14 @@ mod tests {
             }
         );
         assert_eq!(
-            mapper.position(text.len()),
+            mapper.position(14),
+            Position {
+                line: 1,
+                character: 6
+            }
+        );
+        assert_eq!(
+            mapper.position(15),
             Position {
                 line: 2,
                 character: 0
