@@ -6,7 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 
 [features]
-test-hooks = []
+test-hooks = ["orna-client/test-hooks"]
 
 [[bin]]
 name = "orna"

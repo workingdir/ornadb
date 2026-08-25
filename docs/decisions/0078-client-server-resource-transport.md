@@ -45,6 +45,7 @@ and `call_site_id` provide correlation and instance context. `state_profile` and
 length-delimited UTF-8 text. Empty values select the default profile or
 instance. NUL bytes are invalid. `generation` is the monotonic local resource
 generation.
+All-zero `parent_invocation_id` and `call_site_id` values are invalid and rejected before any state mutation.
 
 The request does not contain a principal, role, `run_as` value, capability
 list, credential, retry policy, unchecked result type, or client-supplied
@@ -83,6 +84,7 @@ RESOURCE_VALUES {
     protocol_version
     stream_id
     request_id
+    target_revision
     batch_sequence: u64
     item_count: u32
     byte_count: u32
@@ -93,6 +95,7 @@ RESOURCE_COMPLETED {
     protocol_version
     stream_id
     request_id
+    target_revision
     final_batch_sequence: u64
     total_items: u64
 }
@@ -101,6 +104,7 @@ RESOURCE_FAILED {
     protocol_version
     stream_id
     request_id
+    target_revision
     failure: structured redacted CallFailure
 }
 
@@ -108,10 +112,12 @@ RESOURCE_CANCELLED {
     protocol_version
     stream_id
     request_id
+    target_revision
     reason: structured cancellation code
 }
 ```
 
+ORNA-RESOURCE/1 V1 terminal and result bytes include the 32-byte `RevisionPair` echo; same-major peers must use this exact layout.
 For an accepted request, `RESOURCE_ACCEPTED` appears once and binds the client
 request to the nested server invocation. A scalar request emits one non-empty
 `RESOURCE_VALUES` frame followed by `RESOURCE_COMPLETED`. A stream emits zero
@@ -204,6 +210,7 @@ itself fails validation.
 
 The adapter does not retry a request after a transport, decode, server, or
 cancellation failure. An explicit refresh creates a new request and generation.
+All-zero `parent_invocation_id` and `call_site_id` values are invalid and rejected before any state mutation.
 A root deadline may cancel the request, but the client cannot request an
 unbounded deadline.
 
