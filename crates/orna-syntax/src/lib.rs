@@ -2833,6 +2833,41 @@ mod tests {
     }
 
     #[test]
+    fn rejects_proposal_only_declarations_without_losing_following_schema() {
+        let cases = [
+            "CREATE APPLICATION app; CREATE SCHEMA recovered;",
+            "CREATE COMPONENT app.widget; CREATE SCHEMA recovered;",
+            "CREATE QUERY app.list; CREATE SCHEMA recovered;",
+            "CREATE SCREEN app.home; CREATE SCHEMA recovered;",
+            "CREATE PAGE app.home; CREATE SCHEMA recovered;",
+            "CREATE SERVER FUNCTION tasks.list() RETURNS ROWS (task REF tasks.task) AS SELECT REF(t) FROM tasks.task t RUNS ON SERVER; CREATE SCHEMA recovered;",
+        ];
+
+        for source in cases {
+            let parsed = parse(source);
+
+            assert_eq!(parsed.syntax().text(), source, "{source}");
+            assert_eq!(parsed.diagnostics().len(), 1, "{source}");
+            assert_eq!(parsed.diagnostics()[0].code, "ORNA0001", "{source}");
+            assert!(parsed.object_types().is_empty(), "{source}");
+            assert!(parsed.enum_types().is_empty(), "{source}");
+            assert!(parsed.record_value_types().is_empty(), "{source}");
+            assert!(parsed.primitive_value_types().is_empty(), "{source}");
+            assert!(parsed.opaque_value_types().is_empty(), "{source}");
+            assert!(parsed.type_exports().is_empty(), "{source}");
+            assert!(parsed.field_renames().is_empty(), "{source}");
+            assert!(parsed.server_functions().is_empty(), "{source}");
+            assert!(parsed.client_functions().is_empty(), "{source}");
+            assert_eq!(parsed.schemas().len(), 1, "{source}");
+            assert_eq!(
+                parsed.schemas()[0].name.parts[0].text,
+                "recovered",
+                "{source}"
+            );
+        }
+    }
+
+    #[test]
     fn rejects_nonstandard_trailing_commas_in_server_function_shapes() {
         let parameters = "CREATE SERVER FUNCTION tasks.bad(p_task REF tasks.task,) RETURNS TEXT AS SELECT 'bad';";
         let rows = "CREATE SERVER FUNCTION tasks.bad() RETURNS ROWS (task REF tasks.task,) AS SELECT REF(t) FROM tasks.task t;";
@@ -4976,6 +5011,68 @@ mod tests {
     }
 
     #[test]
+    fn parses_short_client_return_await_with_exact_expression_spans() {
+        let source = "CREATE CLIENT FUNCTION examples.awaited() RETURNS TEXT RETURN AWAIT std.data.resource();";
+        let parsed = parse(source);
+
+        assert!(
+            parsed.diagnostics().is_empty(),
+            "{:?}",
+            parsed.diagnostics()
+        );
+        assert_eq!(parsed.syntax().text(), source);
+        let ClientFunctionBody::ReturnExpression { expression } =
+            &parsed.client_functions()[0].body
+        else {
+            panic!("expected a short RETURN expression body");
+        };
+        let ClientExpression::Await {
+            expression: awaited,
+            span,
+        } = expression
+        else {
+            panic!("expected an AWAIT expression");
+        };
+        let await_start = source.find("AWAIT").expect("AWAIT keyword");
+        let expression_end = source.rfind(");").expect("resource call terminator") + 1;
+        assert_eq!(
+            span,
+            &SourceSpan {
+                start: await_start,
+                end: expression_end,
+            }
+        );
+        assert_eq!(&source[span.start..span.end], "AWAIT std.data.resource()");
+        let ClientExpression::Call {
+            callee,
+            span: resource_span,
+            ..
+        } = awaited.as_ref()
+        else {
+            panic!("expected AWAIT to wrap a resource call expression");
+        };
+        let resource_start = source.find("std.data.resource").expect("resource callee");
+        assert_eq!(
+            resource_span,
+            &SourceSpan {
+                start: resource_start,
+                end: expression_end,
+            }
+        );
+        assert_eq!(
+            &source[resource_span.start..resource_span.end],
+            "std.data.resource()"
+        );
+        assert_eq!(
+            callee.span,
+            SourceSpan {
+                start: resource_start,
+                end: resource_start + "std.data.resource".len(),
+            }
+        );
+    }
+
+    #[test]
     fn parses_canonical_accepted_dogfood_fixtures_losslessly() {
         let fixtures = [
             (
@@ -5553,11 +5650,13 @@ mod tests {
 
     #[test]
     fn parses_client_await_expression_losslessly_with_complete_span() {
-        let source = "CREATE CLIENT FUNCTION examples.awaited(p_value TEXT) RETURNS TEXT AS\n\
-            AWAIT /* preserve */ std.data.resource(\n\
-                target => tasks.get,\n\
-                arguments => std.call.args(p_value => p_value)\n\
-            );";
+        let source = "CREATE CLIENT FUNCTION examples.awaited(p_value TEXT) RETURNS TEXT IS\n\
+            BEGIN\n\
+                RETURN AWAIT /* preserve */ std.data.resource(\n\
+                    target => tasks.get,\n\
+                    arguments => std.call.args(p_value => p_value)\n\
+                );\n\
+            END;";
         let parsed = parse(source);
 
         assert!(
@@ -5575,10 +5674,13 @@ mod tests {
                 .count(),
             1
         );
-        let ClientFunctionBody::Expression { expression } = &parsed.client_functions()[0].body
-        else {
-            panic!("expected an expression body");
+        let ClientFunctionBody::StateBlock(block) = &parsed.client_functions()[0].body else {
+            panic!("expected a procedural body");
         };
+        let expression = block
+            .return_expression
+            .as_ref()
+            .expect("expected a return expression");
         let ClientExpression::Await {
             expression: awaited,
             span,
@@ -5587,7 +5689,11 @@ mod tests {
             panic!("expected an AWAIT expression");
         };
         let expected_start = source.find("AWAIT").expect("AWAIT keyword");
-        let expected_end = source.rfind(';').expect("function terminator");
+        let expected_end = source[expected_start..]
+            .find(");")
+            .expect("resource statement terminator")
+            + expected_start
+            + 1;
         assert_eq!(
             span,
             &SourceSpan {
@@ -5775,46 +5881,24 @@ mod tests {
         );
     }
     #[test]
-    fn parses_nested_client_await_expressions_in_state_positions() {
+    fn rejects_client_await_in_state_declaration_positions() {
         let source = "CREATE CLIENT FUNCTION examples.awaited() RETURNS TEXT IS\n\
-            STATE value TEXT DEFAULT AWAIT AWAIT std.data.resource();\n\
+            STATE value TEXT DEFAULT AWAIT std.data.resource();\n\
         BEGIN\n\
-            RETURN AWAIT value;\n\
+            RETURN value;\n\
         END;";
         let parsed = parse(source);
 
+        assert_eq!(parsed.syntax().text(), source);
+        assert!(parsed.client_functions().is_empty());
         assert!(
-            parsed.diagnostics().is_empty(),
-            "{:?}",
+            parsed
+                .diagnostics()
+                .iter()
+                .any(|diagnostic| diagnostic.code == "ORNA0001"),
+            "expected an ORNA0001 diagnostic, got {:?}",
             parsed.diagnostics()
         );
-        assert_eq!(parsed.syntax().text(), source);
-        assert_eq!(
-            parsed
-                .syntax()
-                .root()
-                .descendants()
-                .filter(|node| node.kind() == SyntaxKind::ClientAwaitExpression)
-                .count(),
-            3
-        );
-        let ClientFunctionBody::StateBlock(block) = &parsed.client_functions()[0].body else {
-            panic!("expected a state block");
-        };
-        let StateDefault::Expression(default) = &block.states[0].default else {
-            panic!("expected a default expression");
-        };
-        let ClientExpression::Await {
-            expression: nested, ..
-        } = default
-        else {
-            panic!("expected an outer AWAIT in the state default");
-        };
-        assert!(matches!(nested.as_ref(), ClientExpression::Await { .. }));
-        assert!(matches!(
-            block.return_expression.as_ref(),
-            Some(ClientExpression::Await { .. })
-        ));
     }
 
     #[test]
@@ -5943,6 +6027,61 @@ mod tests {
         assert_eq!(
             &source[assignment.span.start..assignment.span.end],
             "x := AWAIT std.data.resource();"
+        );
+    }
+
+    #[test]
+    fn parses_untyped_post_begin_await_let_and_local_read_return() {
+        let source = "CREATE CLIENT FUNCTION examples.untyped_procedural() RETURNS INTEGER IS\n\
+            BEGIN\n\
+                LET value := AWAIT std.data.resource();\n\
+                RETURN value;\n\
+            END;";
+        let parsed = parse(source);
+
+        assert!(
+            parsed.diagnostics().is_empty(),
+            "{:?}",
+            parsed.diagnostics()
+        );
+        assert_eq!(parsed.syntax().text(), source);
+        let ClientFunctionBody::StateBlock(block) = &parsed.client_functions()[0].body else {
+            panic!("expected a procedural CLIENT block");
+        };
+        assert_eq!(block.statements.len(), 1);
+        let ClientProceduralStatement::Let(let_statement) = &block.statements[0] else {
+            panic!("expected a procedural LET statement");
+        };
+        assert_eq!(let_statement.name.text, "value");
+        assert!(let_statement.type_source.is_none());
+        assert!(matches!(
+            let_statement.expression,
+            ClientExpression::Await { .. }
+        ));
+        assert!(matches!(
+            &block.return_expression,
+            Some(ClientExpression::LocalRead { local }) if local.text == "value"
+        ));
+    }
+
+    #[test]
+    fn rejects_client_await_in_expression_bodies() {
+        let source = "CREATE CLIENT FUNCTION examples.awaited() RETURNS TEXT AS\n\
+            AWAIT std.data.resource();";
+        let parsed = parse(source);
+
+        assert_eq!(parsed.syntax().text(), source);
+        assert!(parsed.client_functions().is_empty());
+        assert_eq!(parsed.diagnostics().len(), 1, "{:?}", parsed.diagnostics());
+        let diagnostic = &parsed.diagnostics()[0];
+        assert_eq!(diagnostic.code, "ORNA0001");
+        let await_start = source.find("AWAIT").expect("AWAIT keyword");
+        assert_eq!(
+            diagnostic.span,
+            SourceSpan {
+                start: await_start,
+                end: await_start + "AWAIT".len(),
+            }
         );
     }
 
@@ -6412,5 +6551,165 @@ mod tests {
             }
             _ => panic!("type must be a reference"),
         }
+    }
+    #[test]
+    fn cst_snapshot_preserves_schema_tokens_trivia_and_ranges() {
+        let source = "CREATE SCHEMA app.core; -- keep";
+        let parsed = parse(source);
+
+        assert!(parsed.diagnostics().is_empty());
+        assert_eq!(parsed.syntax().text(), source);
+        assert_eq!(
+            dump_cst(parsed.syntax().root()),
+            "\
+node Root [0..31]
+  node CreateSchemaStatement [0..23]
+    token Word \"CREATE\" [0..6]
+    token Whitespace \" \" [6..7]
+    token Word \"SCHEMA\" [7..13]
+    token Whitespace \" \" [13..14]
+    node QualifiedName [14..22]
+      token Word \"app\" [14..17]
+      token Dot \".\" [17..18]
+      token Word \"core\" [18..22]
+    token Semicolon \";\" [22..23]
+  token Whitespace \" \" [23..24]
+  token LineComment \"-- keep\" [24..31]
+"
+        );
+    }
+
+    #[test]
+    fn cst_snapshot_records_nested_client_call_structure() {
+        let source =
+            "CREATE CLIENT FUNCTION app.check(flag BOOL) RETURNS BOOL AS app.is_ready(flag);";
+        let parsed = parse(source);
+
+        assert!(parsed.diagnostics().is_empty());
+        assert_eq!(parsed.syntax().text(), source);
+        assert_eq!(
+            dump_cst(parsed.syntax().root()),
+            "\
+node Root [0..79]
+  node CreateClientFunctionStatement [0..79]
+    token Word \"CREATE\" [0..6]
+    token Whitespace \" \" [6..7]
+    token Word \"CLIENT\" [7..13]
+    token Whitespace \" \" [13..14]
+    token Word \"FUNCTION\" [14..22]
+    token Whitespace \" \" [22..23]
+    node QualifiedName [23..32]
+      token Word \"app\" [23..26]
+      token Dot \".\" [26..27]
+      token Word \"check\" [27..32]
+    token LeftParenthesis \"(\" [32..33]
+    node ClientFunctionParameter [33..42]
+      token Word \"flag\" [33..37]
+      token Whitespace \" \" [37..38]
+      node NamedTypeSpecification [38..42]
+        node QualifiedName [38..42]
+          token Word \"BOOL\" [38..42]
+    token RightParenthesis \")\" [42..43]
+    token Whitespace \" \" [43..44]
+    token Word \"RETURNS\" [44..51]
+    token Whitespace \" \" [51..52]
+    node ClientFunctionReturnType [52..57]
+      node NamedTypeSpecification [52..57]
+        node QualifiedName [52..57]
+          token Word \"BOOL\" [52..56]
+          token Whitespace \" \" [56..57]
+    token Word \"AS\" [57..59]
+    token Whitespace \" \" [59..60]
+    node ClientExpressionBody [60..78]
+      node ClientCallExpression [60..78]
+        node QualifiedName [60..72]
+          token Word \"app\" [60..63]
+          token Dot \".\" [63..64]
+          token Word \"is_ready\" [64..72]
+        token LeftParenthesis \"(\" [72..73]
+        node ClientCallArgument [73..77]
+          token Word \"flag\" [73..77]
+        token RightParenthesis \")\" [77..78]
+    token Semicolon \";\" [78..79]
+"
+        );
+    }
+
+    #[test]
+    fn cst_snapshot_keeps_recovery_tokens_and_later_declaration() {
+        let source = "CREATE SCHEMA app; ? CREATE SCHEMA later;";
+        let parsed = parse(source);
+
+        assert_eq!(parsed.diagnostics().len(), 1);
+        assert_eq!(parsed.syntax().text(), source);
+        assert_eq!(
+            dump_cst(parsed.syntax().root()),
+            "\
+node Root [0..41]
+  node CreateSchemaStatement [0..18]
+    token Word \"CREATE\" [0..6]
+    token Whitespace \" \" [6..7]
+    token Word \"SCHEMA\" [7..13]
+    token Whitespace \" \" [13..14]
+    node QualifiedName [14..17]
+      token Word \"app\" [14..17]
+    token Semicolon \";\" [17..18]
+  token Whitespace \" \" [18..19]
+  token Other \"?\" [19..20]
+  token Whitespace \" \" [20..21]
+  node CreateSchemaStatement [21..41]
+    token Word \"CREATE\" [21..27]
+    token Whitespace \" \" [27..28]
+    token Word \"SCHEMA\" [28..34]
+    token Whitespace \" \" [34..35]
+    node QualifiedName [35..40]
+      token Word \"later\" [35..40]
+    token Semicolon \";\" [40..41]
+"
+        );
+    }
+
+    fn dump_cst(root: &rowan::SyntaxNode<crate::parser::OrnaLanguage>) -> String {
+        use std::fmt::Write as _;
+
+        fn visit(
+            node: &rowan::SyntaxNode<crate::parser::OrnaLanguage>,
+            indent: usize,
+            output: &mut String,
+        ) {
+            let range = node.text_range();
+            writeln!(
+                output,
+                "{}node {:?} [{}..{}]",
+                " ".repeat(indent),
+                node.kind(),
+                u32::from(range.start()),
+                u32::from(range.end()),
+            )
+            .expect("writing CST node snapshot");
+
+            for element in node.children_with_tokens() {
+                match element {
+                    rowan::NodeOrToken::Node(child) => visit(&child, indent + 2, output),
+                    rowan::NodeOrToken::Token(token) => {
+                        let range = token.text_range();
+                        writeln!(
+                            output,
+                            "{}token {:?} {:?} [{}..{}]",
+                            " ".repeat(indent + 2),
+                            token.kind(),
+                            token.text(),
+                            u32::from(range.start()),
+                            u32::from(range.end()),
+                        )
+                        .expect("writing CST token snapshot");
+                    }
+                }
+            }
+        }
+
+        let mut output = String::new();
+        visit(root, 0, &mut output);
+        output
     }
 }

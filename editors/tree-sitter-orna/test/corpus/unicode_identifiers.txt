@@ -46,3 +46,92 @@ CREATE SERVER FUNCTION ͅ_Ⅰ².Ⅰ²ͅ() RETURNS TEXT AS SELECT 1;
                           (literal
                             (number)))))))))))))
     (semicolon)))
+
+====================
+normal whitespace remains extras
+====================
+
+CREATE	SCHEMA
+whitespace_people;
+
+---
+
+(source_file
+  (create_schema_statement
+    (kw_create)
+    (kw_schema)
+    name: (qualified_name
+      (identifier))
+    (semicolon)))
+
+====================
+leading BOM is an error
+====================
+
+﻿CREATE SCHEMA bom_leading;
+
+---
+
+(source_file
+  (ERROR
+    (UNEXPECTED 65279))
+  (create_schema_statement
+    (kw_create)
+    (kw_schema)
+    name: (qualified_name
+      (identifier))
+    (semicolon)))
+
+====================
+interior BOM is an error
+====================
+
+CREATE﻿ SCHEMA bom_interior;
+
+---
+
+(source_file
+  (create_schema_statement
+    (kw_create)
+    (ERROR
+      (UNEXPECTED 65279))
+    (kw_schema)
+    name: (qualified_name
+      (identifier))
+    (semicolon)))
+
+====================
+leading word joiner is an error
+====================
+
+⁠CREATE SCHEMA word_joiner_leading;
+
+---
+
+(source_file
+  (ERROR
+    (UNEXPECTED 8288))
+  (create_schema_statement
+    (kw_create)
+    (kw_schema)
+    name: (qualified_name
+      (identifier))
+    (semicolon)))
+
+====================
+interior word joiner is an error
+====================
+
+CREATE⁠ SCHEMA word_joiner_interior;
+
+---
+
+(source_file
+  (create_schema_statement
+    (kw_create)
+    (ERROR
+      (UNEXPECTED 8288))
+    (kw_schema)
+    name: (qualified_name
+      (identifier))
+    (semicolon)))

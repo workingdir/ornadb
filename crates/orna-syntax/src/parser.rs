@@ -686,7 +686,7 @@ impl<'source> Parser<'source> {
         } else {
             self.skip_trivia();
             let Some(body) = self.parse_client_function_body() else {
-                self.recover_statement();
+                self.recover_client_function_statement();
                 self.builder.finish_node();
                 return;
             };
@@ -840,20 +840,31 @@ impl<'source> Parser<'source> {
                     },
                 });
             }
-            let expression = self.parse_client_expression()?;
+            let expression = self.parse_client_suspending_expression()?;
             Some(ClientFunctionBody::ReturnExpression { expression })
         })();
         self.builder.finish_node();
         result
     }
 
-    /// Parses one closed CLIENT expression (ADR 0068).
+    /// Parses one CLIENT expression in a suspension-capable statement position.
+    ///
+    /// `AWAIT` is accepted only as the leading expression form in the
+    /// procedural LET, assignment, and RETURN positions that call this helper.
+    fn parse_client_suspending_expression(&mut self) -> Option<ClientExpression> {
+        if self.current().is_some_and(|token| token.is_word("AWAIT")) {
+            self.parse_client_await_expression()
+        } else {
+            self.parse_client_expression()
+        }
+    }
+
+    /// Parses the non-suspending closed CLIENT expression surface (ADR 0068).
     ///
     /// The expression surface is a call, a string/integer/Boolean literal, a
-    /// parameter read, a field path from a parameter, `AWAIT` over one nested
-    /// client expression, and left-associative `||` concatenation. This parser
-    /// is deliberately closed: it never accepts arithmetic, comparisons,
-    /// parentheses, or SQL fragments.
+    /// parameter read, a field path from a parameter, and left-associative `||`
+    /// concatenation. `AWAIT` is intentionally excluded; callers that represent
+    /// procedural suspension points use [`Self::parse_client_suspending_expression`].
     fn parse_client_expression(&mut self) -> Option<ClientExpression> {
         let mut left = self.parse_client_primary_expression()?;
         loop {
@@ -883,7 +894,8 @@ impl<'source> Parser<'source> {
             return None;
         };
         if token.is_word("AWAIT") {
-            return self.parse_client_await_expression();
+            self.error_current("ORNA0001", "expected a CLIENT expression");
+            return None;
         }
         if token.kind == TokenKind::StringLiteral {
             self.bump();
@@ -1319,7 +1331,7 @@ impl<'source> Parser<'source> {
                     return None;
                 }
             }
-            let return_expression = self.parse_client_state_return()?;
+            let return_expression = self.parse_client_state_return(states.is_empty())?;
             let return_expression = return_expression
                 .map(|expression| rewrite_client_local_name_references(expression, &local_names));
             self.skip_trivia();
@@ -1397,7 +1409,7 @@ impl<'source> Parser<'source> {
                 return None;
             }
             self.skip_trivia();
-            let expression = self.parse_client_expression()?;
+            let expression = self.parse_client_suspending_expression()?;
             self.skip_trivia();
             let semicolon = self.expect_kind(
                 TokenKind::Semicolon,
@@ -1480,7 +1492,7 @@ impl<'source> Parser<'source> {
                 return None;
             }
             self.skip_trivia();
-            let expression = self.parse_client_expression()?;
+            let expression = self.parse_client_suspending_expression()?;
             self.skip_trivia();
             let semicolon = self.expect_kind(
                 TokenKind::Semicolon,
@@ -1520,7 +1532,7 @@ impl<'source> Parser<'source> {
                 return None;
             }
             self.skip_trivia();
-            let expression = self.parse_client_expression()?;
+            let expression = self.parse_client_suspending_expression()?;
             self.skip_trivia();
             let semicolon = self.expect_kind(
                 TokenKind::Semicolon,
@@ -1624,7 +1636,7 @@ impl<'source> Parser<'source> {
     /// The caller has verified that the current token is `RETURN`. The
     /// result is the parsed return expression, or `None` when the statement
     /// names no expression.
-    fn parse_client_state_return(&mut self) -> Option<Option<ClientExpression>> {
+    fn parse_client_state_return(&mut self, allow_await: bool) -> Option<Option<ClientExpression>> {
         self.builder
             .start_node(SyntaxKind::ClientStateReturnStatement.into());
         let result = (|| {
@@ -1637,7 +1649,11 @@ impl<'source> Parser<'source> {
                 self.bump();
                 return Some(None);
             }
-            let expression = self.parse_client_expression()?;
+            let expression = if allow_await {
+                self.parse_client_suspending_expression()?
+            } else {
+                self.parse_client_expression()?
+            };
             self.skip_trivia();
             self.expect_kind(
                 TokenKind::Semicolon,
@@ -3537,6 +3553,25 @@ impl<'source> Parser<'source> {
 
     fn skip_trivia(&mut self) {
         while self.current().is_some_and(|token| token.kind.is_trivia()) {
+            self.bump();
+        }
+    }
+
+    fn recover_client_function_statement(&mut self) {
+        while let Some(token) = self.current() {
+            if token.is_word("CREATE") || token.is_word("ALTER") || token.is_word("EXPORT") {
+                break;
+            }
+            if token.is_word("END") {
+                self.bump();
+                if self
+                    .current()
+                    .is_some_and(|current| current.kind == TokenKind::Semicolon)
+                {
+                    self.bump();
+                }
+                break;
+            }
             self.bump();
         }
     }

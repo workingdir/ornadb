@@ -35,6 +35,8 @@ DEFERRED_CORPUS_MANIFEST_NAME = "test/deferred-corpus.txt"
 CORPUS_CASE_DELIMITER = "=" * 20
 ORDER_BY_HIGHLIGHT_FIXTURE_NAME = "accepted_resources_streams.orna"
 ORDER_BY_DIRECTION_TEXTS = ("ASC", "DESC")
+# Keep the Zed grammar source reproducible: this is the accepted, reviewed tree-sitter revision.
+ACCEPTED_ZED_GRAMMAR_REVISION = "f5c9007ee2ba8dcd00784e806a9d9b32be6efe08"
 TARGET_HIGHLIGHT_EXPECTATIONS = (
     ("accepted_resources_streams.orna", {"function": ("overdue", "execute_sql"), "property": ("payload",)}),
     ("accepted_actions_inspector.orna", {"function": ("echo",), "property": ("invoke",)}),
@@ -670,6 +672,104 @@ def check_tree_sitter_package(tree_sitter_directory: Path, repository: Path) -> 
             error=True,
         )
         return False
+    return True
+
+
+def check_tree_sitter_metadata(tree_sitter_directory: Path, repository: Path) -> bool:
+    """Validate tree-sitter grammar metadata and its package parity."""
+    metadata_path = tree_sitter_directory / "tree-sitter.json"
+    try:
+        with metadata_path.open(encoding="utf-8") as stream:
+            metadata = json.load(stream)
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        log(f"invalid tree-sitter grammar metadata: {exc}", error=True)
+        return False
+
+    if not isinstance(metadata, dict) or not isinstance(metadata.get("grammars"), list):
+        log(
+            f"{display_path(metadata_path, repository)} must contain a grammars array",
+            error=True,
+        )
+        return False
+    grammars = metadata["grammars"]
+    if len(grammars) != 1 or not isinstance(grammars[0], dict):
+        log(
+            f"{display_path(metadata_path, repository)} must contain exactly one grammar object",
+            error=True,
+        )
+        return False
+
+    grammar = grammars[0]
+    expected_fields = {
+        "name": "orna",
+        "scope": "source.orna",
+        "path": ".",
+        "file-types": ["orna"],
+        "highlights": "queries/highlights.scm",
+    }
+    for field, expected in expected_fields.items():
+        actual = grammar.get(field)
+        if actual != expected:
+            log(
+                f"{display_path(metadata_path, repository)} grammar {field!r} must be "
+                f"{expected!r}; found {actual!r}",
+                error=True,
+            )
+            return False
+
+    grammar_path = tree_sitter_directory / grammar["path"]
+    if not grammar_path.is_dir():
+        log(
+            f"tree-sitter grammar path is missing: {display_path(grammar_path, repository)}",
+            error=True,
+        )
+        return False
+    highlights_path = tree_sitter_directory / grammar["highlights"]
+    if not highlights_path.is_file():
+        log(
+            f"tree-sitter highlights query is missing: {display_path(highlights_path, repository)}",
+            error=True,
+        )
+        return False
+
+    package_path = tree_sitter_directory / "package.json"
+    try:
+        with package_path.open(encoding="utf-8") as stream:
+            package = json.load(stream)
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        log(f"invalid tree-sitter package metadata: {exc}", error=True)
+        return False
+
+    package_tree_sitter = package.get("tree-sitter") if isinstance(package, dict) else None
+    if not isinstance(package_tree_sitter, dict):
+        log(
+            f"{display_path(package_path, repository)} must contain tree-sitter metadata",
+            error=True,
+        )
+        return False
+    expected_package_fields = {
+        "name": "tree-sitter-orna",
+        "tree-sitter.scopes": {"source.orna": "orna"},
+        "tree-sitter.file-types": ["orna"],
+        "tree-sitter.highlights": ["queries/highlights.scm"],
+    }
+    package_fields = {
+        "name": package.get("name"),
+        "tree-sitter.scopes": package_tree_sitter.get("scopes"),
+        "tree-sitter.file-types": package_tree_sitter.get("file-types"),
+        "tree-sitter.highlights": package_tree_sitter.get("highlights"),
+    }
+    for field, expected in expected_package_fields.items():
+        actual = package_fields[field]
+        if actual != expected:
+            log(
+                f"{display_path(package_path, repository)} {field} must be "
+                f"{expected!r} to match the orna grammar; found {actual!r}",
+                error=True,
+            )
+            return False
+
+    log("tree-sitter grammar metadata and package parity passed")
     return True
 
 
@@ -1376,8 +1476,106 @@ def check_zed_extension_metadata(extension_path: Path, repository: Path) -> bool
     if not isinstance(revision, str) or re.fullmatch(r"[0-9a-f]{40}", revision) is None:
         log("Zed orna grammar metadata has an invalid pinned revision", error=True)
         return False
+    if revision != ACCEPTED_ZED_GRAMMAR_REVISION:
+        log(
+            "Zed orna grammar metadata has an unaccepted pinned revision: "
+            f"expected {ACCEPTED_ZED_GRAMMAR_REVISION}, found {revision}",
+            error=True,
+        )
+        return False
 
     log(f"validated Zed extension metadata {display_path(extension_path, repository)}")
+    return True
+
+
+def check_zed_language_configuration(
+    language_path: Path,
+    language_server_path: Path,
+    repository: Path,
+) -> bool:
+    """Validate the checked-in Zed language and language-server TOML contracts."""
+    if tomllib is None:
+        log(
+            "Zed language configuration check unavailable: Python 3.11+ is required; "
+            "checked-in Zed TOML was not validated",
+            error=True,
+        )
+        return False
+
+    configurations: list[tuple[str, Path]] = [
+        ("Zed language configuration", language_path),
+        ("Zed language-server configuration", language_server_path),
+    ]
+    loaded: dict[Path, object] = {}
+    for label, path in configurations:
+        if not path.is_file():
+            log(
+                f"required {label} is missing: {display_path(path, repository)}",
+                error=True,
+            )
+            return False
+        try:
+            with path.open("rb") as stream:
+                loaded[path] = tomllib.load(stream)
+        except (OSError, tomllib.TOMLDecodeError) as exc:
+            log(
+                f"invalid {label.lower()} {display_path(path, repository)}: {exc}",
+                error=True,
+            )
+            return False
+
+    language = loaded[language_path]
+    language_server = loaded[language_server_path]
+    if not isinstance(language, dict):
+        log(
+            f"Zed language configuration {display_path(language_path, repository)} "
+            "must contain a top-level TOML table",
+            error=True,
+        )
+        return False
+    if not isinstance(language_server, dict):
+        log(
+            f"Zed language-server configuration {display_path(language_server_path, repository)} "
+            "must contain a top-level TOML table",
+            error=True,
+        )
+        return False
+
+    language_expectations = (
+        ("name", "Orna"),
+        ("grammar", "orna"),
+        ("path_suffixes", ["orna"]),
+    )
+    for key, expected in language_expectations:
+        actual = language.get(key)
+        if actual != expected:
+            log(
+                f"Zed language configuration {display_path(language_path, repository)} "
+                f"key '{key}' must be {expected!r}; found {actual!r}",
+                error=True,
+            )
+            return False
+
+    language_server_expectations = (
+        ("name", "orna-lsp"),
+        ("language", "Orna"),
+        ("command", "orna-lsp"),
+    )
+    for key, expected in language_server_expectations:
+        actual = language_server.get(key)
+        if actual != expected:
+            log(
+                f"Zed language-server configuration {display_path(language_server_path, repository)} "
+                f"key '{key}' must be {expected!r}; found {actual!r}",
+                error=True,
+            )
+            return False
+
+    log(
+        "validated Zed language configuration "
+        f"{display_path(language_path, repository)} and language-server configuration "
+        f"{display_path(language_server_path, repository)}"
+    )
     return True
 
 
@@ -1564,6 +1762,10 @@ def main() -> int:
     vscode_package = repository / "editors" / "vscode" / "package.json"
     vscode_extension = repository / "editors" / "vscode" / "extension.js"
     zed_extension_metadata = zed_directory / "extension.toml"
+    zed_language_configuration = zed_directory / "languages" / "orna" / "config.toml"
+    zed_language_server_configuration = (
+        zed_directory / "languages" / "orna" / "language_servers" / "orna_lsp" / "config.toml"
+    )
 
 
     log(
@@ -1603,6 +1805,8 @@ def main() -> int:
 
     if not check_tree_sitter_package(tree_sitter_directory, repository):
         return 1
+    if not check_tree_sitter_metadata(tree_sitter_directory, repository):
+        return 1
     if not zed_directory.is_dir():
         log(
             f"required directory is missing: {display_path(zed_directory, repository)}",
@@ -1625,6 +1829,12 @@ def main() -> int:
 
 
     if not check_zed_extension_metadata(zed_extension_metadata, repository):
+        return 1
+    if not check_zed_language_configuration(
+        zed_language_configuration,
+        zed_language_server_configuration,
+        repository,
+    ):
         return 1
     if not check_zed_highlights(zed_directory, repository):
         return 1

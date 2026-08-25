@@ -7,6 +7,16 @@ check: fmt build lint test
 fmt:
     cargo fmt --all -- --check
 
+# Validate the accepted headless runtime C-shaped ABI header against the canonical spec bundle.
+# The canonical header is an external sibling input in this checkout; clean CI hosts without
+# ../spec cannot run this local gate until the packaging/checkout contract is resolved.
+runtime-abi-header-check:
+    gcc -std=c11 -fsyntax-only ../spec/spec/orna_runtime_abi_v1.h
+
+# Compile the Linux x86_64 C assertions against the canonical header and Rust mirror values.
+runtime-abi-parity:
+    gcc -std=c11 -fno-short-enums -Wall -Wextra -Werror -I../spec -fsyntax-only crates/orna-client/tests/runtime_abi_parity.c
+
 # Compile every workspace target.
 build:
     cargo check --workspace --all-targets
@@ -19,7 +29,8 @@ lint:
 test:
     cargo test --workspace --all-targets
 
-# Validate the tree-sitter grammar and editor metadata without installing tools.
+# Validate the tree-sitter grammar and editor metadata without installing editor runtimes.
+# This static gate requires its CLI prerequisites: Python 3.11+, tree-sitter CLI, node, and cargo.
 editor-tooling-check:
     python3 scripts/check-editor-tooling.py
 

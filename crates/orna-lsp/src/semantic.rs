@@ -54,12 +54,21 @@ pub fn semantic_tokens(
     let mut previous_line = 0u32;
     let mut previous_start = 0u32;
     for token in parse.highlight() {
-        let Some(index) = legend_index(token.kind) else {
-            continue;
-        };
         let span = orna_syntax::SourceSpan {
             start: token.range.start,
             end: token.range.end,
+        };
+        let kind = if matches!(
+            token.kind,
+            orna_syntax::HighlightKind::PropertyName | orna_syntax::HighlightKind::QuotedIdentifier
+        ) && crate::analysis::is_client_target_function_span(parse, &span)
+        {
+            orna_syntax::HighlightKind::FunctionName
+        } else {
+            token.kind
+        };
+        let Some(index) = legend_index(kind) else {
+            continue;
         };
         for (position, length) in mapper.segments(&span) {
             if length == 0 {

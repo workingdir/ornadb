@@ -7773,7 +7773,7 @@
     },
     {
       "type": "PATTERN",
-      "value": "[\\s\\uFEFF\\u2060]"
+      "value": "[\\s]"
     }
   ],
   "conflicts": [

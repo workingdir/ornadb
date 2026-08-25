@@ -39,3 +39,11 @@ BEGIN
 --                       ^^^^^^^^^^^^^^^^^^^ function
 --                                                        ^^^^^^^^ parameter
 END;
+
+CREATE EXTERNAL CLIENT FUNCTION inspector_app.type_fixture(
+    p_probe product_test.probe
+--  ^^^^^^^ parameter
+--            ^^^^^^^^^^^^^^^^^^ type
+) RETURNS LIST<product_test.probe>
+--             ^^^^^^^^^^^^^^^^^^ type
+RUNTIME CONTRACT 'std.inspect.type_fixture@1';

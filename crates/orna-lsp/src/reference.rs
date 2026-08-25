@@ -390,8 +390,8 @@ const KEYWORD_REFERENCES: &[KeywordReference] = &[
     // Procedural
     KeywordReference {
         keyword: "IS",
-        summary: "Introduces the declarative body of a function.",
-        context: "IS declarations BEGIN statements END; after RETURNS.",
+        summary: "Introduces the declarative body of a function. Null and identity comparison.",
+        context: "IS declarations BEGIN statements END; after RETURNS. expression IS [NOT] NULL. Null and identity comparison.",
         example: "IS\n  LET v TIMESTAMP := sys.time.now();\nBEGIN\n  RETURN v;\nEND;",
     },
     KeywordReference {
@@ -544,12 +544,6 @@ const KEYWORD_REFERENCES: &[KeywordReference] = &[
         summary: "Logical negation; also the nullable field modifier.",
         context: "NOT expression; field NOT NULL.",
         example: "title TEXT NOT NULL",
-    },
-    KeywordReference {
-        keyword: "IS",
-        summary: "Null and identity comparison.",
-        context: "expression IS [NOT] NULL.",
-        example: "WHERE p_task.assignee IS NULL",
     },
     KeywordReference {
         keyword: "NULL",
@@ -910,7 +904,53 @@ const SCALAR_REFERENCES: &[ScalarReference] = &[
 
 #[cfg(test)]
 mod tests {
-    use super::keyword_reference;
+    use super::{KEYWORD_REFERENCES, keyword_reference, scalar_reference};
+
+    const ACCEPTED_STANDARD_SCALAR_SPELLINGS: [&str; 17] = [
+        "BIGINT",
+        "BINARY LARGE OBJECT",
+        "BOOL",
+        "BOOLEAN",
+        "BYTES",
+        "CHARACTER LARGE OBJECT",
+        "DATE",
+        "DECIMAL",
+        "DURATION",
+        "FLOAT",
+        "INT",
+        "INTEGER",
+        "TEXT",
+        "TIME",
+        "TIMESTAMP",
+        "UUID",
+        "VOID",
+    ];
+
+    #[test]
+    fn keyword_reference_keys_are_unique() {
+        for (index, entry) in KEYWORD_REFERENCES.iter().enumerate() {
+            assert!(
+                !KEYWORD_REFERENCES[..index]
+                    .iter()
+                    .any(|previous| previous.keyword == entry.keyword),
+                "duplicate keyword reference: {}",
+                entry.keyword
+            );
+        }
+    }
+
+    #[test]
+    fn is_reference_retains_procedural_and_comparison_contexts() {
+        let entry = keyword_reference("is").expect("missing IS reference");
+        assert_eq!(entry.keyword, "IS");
+        assert!(
+            entry
+                .context
+                .contains("IS declarations BEGIN statements END; after RETURNS.")
+        );
+        assert!(entry.context.contains("expression IS [NOT] NULL."));
+        assert!(entry.context.contains("Null and identity comparison."));
+    }
 
     #[test]
     fn reference_covers_every_classifier_keyword_including_rejected_sql() {
@@ -924,6 +964,26 @@ mod tests {
             assert!(!entry.summary.is_empty(), "empty summary for {keyword}");
             assert!(!entry.context.is_empty(), "empty context for {keyword}");
             assert!(!entry.example.is_empty(), "empty example for {keyword}");
+        }
+    }
+
+    #[test]
+    fn reference_covers_every_canonical_scalar_spelling() {
+        assert_eq!(
+            orna_syntax::SCALAR_TYPES,
+            ACCEPTED_STANDARD_SCALAR_SPELLINGS.as_slice()
+        );
+        for spelling in ACCEPTED_STANDARD_SCALAR_SPELLINGS {
+            let reference_name = match spelling {
+                "CHARACTER LARGE OBJECT" => "CHARACTER_LARGE_OBJECT",
+                "BINARY LARGE OBJECT" => "BINARY_LARGE_OBJECT",
+                spelling => spelling,
+            };
+            let entry = scalar_reference(reference_name)
+                .unwrap_or_else(|| panic!("missing scalar reference for {spelling}"));
+            assert_eq!(entry.name, reference_name);
+            assert!(!entry.summary.is_empty(), "empty summary for {spelling}");
+            assert!(!entry.example.is_empty(), "empty example for {spelling}");
         }
     }
 }

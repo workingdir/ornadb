@@ -61,7 +61,7 @@ function sep_trailing(rule, separator) {
 module.exports = grammar({
     name: 'orna',
 
-    extras: ($) => [$.comment, /[\s\uFEFF\u2060]/],
+    extras: ($) => [$.comment, /[\s]/],
 
     word: ($) => $._unquoted_identifier,
 
